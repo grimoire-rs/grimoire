@@ -1,0 +1,6 @@
+# Docs-tooling config consumed by the docs-plan and docs-quality checks.
+# Kept separate from the site config: it describes the docs, not the build.
+# product_shape selects the first-steps thresholds (cli | library |
+# hosted-service | framework).
+product_shape = "cli"
+discovery_artifact = ".agents/discovery/use-cases.yaml"

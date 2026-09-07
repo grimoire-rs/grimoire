@@ -21,11 +21,12 @@ Path-scoped rules no fire during plan/research/architecture — no file open. Sk
 
 ### Current Global Rules (no `paths:` frontmatter)
 
-Three rules under `.claude/rules/` no `paths:` frontmatter, load unconditional every session. Also list in `rules.md` "Globals" footer. Any change to set must update both enumeration and `rules.md`.
+Four rules under `.claude/rules/` no `paths:` frontmatter, load unconditional every session. Also list in `rules.md` "Globals" footer. Any change to set must update both enumeration and `rules.md`.
 
 1. `quality-core.md` — universal code quality
 2. `product-tech-strategy.md` — tech golden paths
 3. `workflow-intent.md` — work-type router (must fire at first touch)
+4. `hex-state.md` — vendored (arcana); hex state re-anchored from files before any turn that edits code or config, so scoping it to a path would make it fire too late
 
 Two more always-load files reach Claude by different mechanism, *not* count here because no use path-scope frontmatter layer:
 
@@ -34,7 +35,7 @@ Two more always-load files reach Claude by different mechanism, *not* count here
 
 `meta-ai-config.md` path-scoped to `.claude/**` (not true global); load when AI config files edit.
 
-If strict count drift from 3, `test_global_rule_count_matches` fail.
+If strict count drift from 4, `test_global_rule_count_matches` fail.
 
 ## Core Principle: Context Budget
 
@@ -234,7 +235,7 @@ When edit any `.claude/` artifact:
 - [ ] Cross-refs point to existing files
 - [ ] New rules reference subsystem context rules where relevant
 - [ ] AGENTS.md stay under 280 lines; CLAUDE.md stays a `@AGENTS.md` stub
-- [ ] Global rules total manageable (current 3 — monitor growth; see `### Current Global Rules` above for strict definition)
+- [ ] Global rules total manageable (current 4 — monitor growth; see `### Current Global Rules` above for strict definition)
 - [ ] AI config structural tests pass: `task claude:tests`
 
 ## Structural Validation Tests

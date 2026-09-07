@@ -86,7 +86,7 @@ pub enum Error {
 }
 
 /// Machine-readable failure `reason` subtype for the JSON error envelope
-/// (`docs/src/json-interface.md`).
+/// (`docs/src/content/docs/json-interface.md`).
 ///
 /// Kebab-case via [`std::fmt::Display`] — the wire path (`main.rs`
 /// `error_document`) builds the JSON `reason` string through that
@@ -248,7 +248,7 @@ pub fn classify(err: &anyhow::Error) -> Classification {
 /// grim does not recognise.
 ///
 /// Every grim-owned format parses with `deny_unknown_fields` and closed
-/// enums (`docs/src/stability.md` — the hard-reject stance is deliberate),
+/// enums (`docs/src/content/docs/stability.md` — the hard-reject stance is deliberate),
 /// so serde's bare `unknown field \`x\`` is the one failure a user cannot
 /// act on without knowing that policy. The two real causes — a typo, and a
 /// file written by a newer grim — are indistinguishable from the message
@@ -712,7 +712,7 @@ mod tests {
 
     #[test]
     fn error_reason_slugs_are_locked() {
-        // The slugs are a 1.0-track wire contract (docs/src/json-interface.md
+        // The slugs are a 1.0-track wire contract (docs/src/content/docs/json-interface.md
         // #error-reason): the JSON `reason` field renders through `Display`,
         // so a changed literal here is a breaking change for consumers.
         // `modified` deliberately matches the `grim status` state string.

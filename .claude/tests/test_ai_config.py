@@ -23,6 +23,127 @@ CONTEXT_MD = ROOT / "AGENTS.md"
 CLAUDE_MD = ROOT / "CLAUDE.md"
 
 
+def is_vendored(artifact: Path) -> bool:
+    """True when a rule or `SKILL.md` declares upstream provenance.
+
+    Vendored artifacts are synced into `.claude/` from an upstream bundle
+    (`ocx-sh/grimoire-lore`, `michael-herwig/arcana`) — installed, never
+    authored here. They carry the publishable-artifact metadata `license:`
+    (rules add `repository:`) that no first-party file has, which is the
+    marker used here: it stays correct across syncs, unlike a hand-kept name
+    list.
+
+    Editing one forks it from upstream and the edit is lost on the next sync,
+    so this repo's *authoring* standards — dead-glob detection, catalog
+    authorship, CSO description wording, description budget, body budget,
+    routing triggers — apply to what this repo writes, not to what it
+    installs. Fix the upstream bundle and re-sync instead. Standards about
+    how a vendored artifact *behaves here* still apply: see
+    `_EXPECTED_DISABLE_MODEL_INVOCATION`, which pins every vendored skill's
+    auto-invocation flag so a sync cannot silently flip one.
+
+    `license:` is publishable-artifact metadata, not vendoring metadata — a
+    first-party skill that grew one would exempt itself from five gates. That
+    is why `TestVendoredArtifacts` pins the resulting set by name: the marker
+    stays cheap to evaluate, and widening it stays loud.
+    """
+    text = artifact.read_text()
+    if not text.startswith("---"):
+        return False
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return False  # opens with `---` but never closes it: not frontmatter
+    return any(line.startswith("license:") for line in parts[1].splitlines())
+
+
+def is_vendored_path(md: Path) -> bool:
+    """True when `md` belongs to a vendored artifact.
+
+    Covers the artifact's own file and every support file under it —
+    `skills/<name>/references/*.md`, `rules/<name>/*.md` — none of which carry
+    frontmatter of their own. Their cross-references are written against the
+    upstream repo's layout, so they resolve there and not here.
+    """
+    if md.is_file() and is_vendored(md):
+        return True
+    rel = md.relative_to(CLAUDE_DIR).parts
+    if len(rel) < 2:
+        return False
+    if rel[0] == "skills":
+        owner = CLAUDE_DIR / "skills" / rel[1] / "SKILL.md"
+    elif rel[0] == "rules":
+        owner = CLAUDE_DIR / "rules" / f"{rel[1]}.md"
+    else:
+        return False
+    return owner.is_file() and is_vendored(owner)
+
+
+# Every vendored artifact, by name. `is_vendored` decides membership from
+# frontmatter; this list exists so that a sync which *widens* the set — or a
+# first-party file that quietly grows a `license:` line — fails loudly instead
+# of silently opting out of the authoring gates. Enforced by
+# `TestVendoredArtifacts`; update it in the same commit as the sync.
+VENDORED_RULES = frozenset({
+    "docs-quality.md",
+    "hex-state.md",
+    "python-packaging.md",
+    "python-quality.md",
+    "rust-cargo.md",
+    "rust-quality.md",
+    "typescript-packaging.md",
+    "typescript-quality.md",
+})
+
+VENDORED_SKILLS = frozenset({
+    "docs-instrument",
+    "docs-plan",
+    "hex-architect",
+    "hex-core",
+    "hex-discuss",
+    "hex-execute",
+    "hex-finalize",
+    "hex-init",
+    "hex-plan",
+    "hex-review",
+    "nox-review",
+})
+
+
+class TestVendoredArtifacts:
+    """The vendored set is pinned by name, not just by frontmatter marker."""
+
+    def test_vendored_set_is_exactly_the_declared_artifacts(self) -> None:
+        """`is_vendored` must select exactly `VENDORED_RULES` / `VENDORED_SKILLS`.
+
+        Five gates (dead globs, CSO wording, description budget, body budget,
+        routing triggers) skip whatever this predicate accepts. A first-party
+        artifact acquiring a `license:` line would exempt itself from all five
+        without a word, so the resulting set is asserted by name.
+        """
+        rules = {r.name for r in (CLAUDE_DIR / "rules").glob("*.md") if is_vendored(r)}
+        skills = {
+            s.parent.name
+            for s in (CLAUDE_DIR / "skills").glob("*/SKILL.md")
+            if is_vendored(s)
+        }
+        assert rules == VENDORED_RULES, (
+            f"Vendored rule set drifted. Unexpected: "
+            f"{sorted(rules - VENDORED_RULES)}; missing: "
+            f"{sorted(VENDORED_RULES - rules)}. A rule newly matching "
+            f"`is_vendored` is exempt from this repo's authoring gates — "
+            f"confirm it really is synced from upstream, then update "
+            f"`VENDORED_RULES`."
+        )
+        assert skills == VENDORED_SKILLS, (
+            f"Vendored skill set drifted. Unexpected: "
+            f"{sorted(skills - VENDORED_SKILLS)}; missing: "
+            f"{sorted(VENDORED_SKILLS - skills)}. A skill newly matching "
+            f"`is_vendored` is exempt from this repo's authoring gates — "
+            f"confirm it really is synced from upstream, then update "
+            f"`VENDORED_SKILLS` and `_EXPECTED_DISABLE_MODEL_INVOCATION`."
+        )
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -291,11 +412,16 @@ class TestRuleGlobs:
         dead — it means that file type isn't used here. Dead-glob detection
         still applies to Grimoire-specific rules (subsystem-*.md, architecture-
         principles.md, product-context.md, etc.).
+
+        Vendored rules (`is_vendored`) are exempt for the same reason and one
+        more: their globs are written for every repo the upstream bundle
+        installs into, and nothing here can fix a glob that is dead only in
+        Grimoire.
         """
         shareable_prefixes = ("quality-",)
         dead_globs = []
         for rule in sorted(CLAUDE_DIR.glob("rules/*.md")):
-            if rule.name.startswith(shareable_prefixes):
+            if rule.name.startswith(shareable_prefixes) or is_vendored(rule):
                 continue
             for pattern in self._extract_paths(rule):
                 matches = glob.glob(str(ROOT / pattern), recursive=True)
@@ -514,7 +640,9 @@ class TestRuleCatalog:
         Catches drift after renames: if a rule is renamed but a worker,
         skill, or catalog still points at the old name, that reference
         is effectively dead — the rule will never be discovered from
-        that path. Skips historical artifacts (they preserve old state).
+        that path. Skips historical artifacts (they preserve old state)
+        and vendored trees (`is_vendored_path`), whose references are
+        written against the upstream repo's layout and resolve there.
 
         **Provisional**: this is a regex-based fallback. It only catches
         backticked bare filenames, not real markdown links or anchor
@@ -583,12 +711,20 @@ class TestRuleCatalog:
 
         targets: list[Path] = [CONTEXT_MD, CLAUDE_MD]
         for md in CLAUDE_DIR.rglob("*.md"):
-            if "artifacts" in md.parts or "state" in md.parts:
+            # Match against the path *relative to* `.claude/`. Absolute parts
+            # would make every one of these skips fire on any checkout that
+            # happens to sit under a directory of that name — an agent
+            # worktree at `.agents/worktrees/<topic>` skipped every target and
+            # this test passed vacuously for the whole run.
+            rel = md.relative_to(CLAUDE_DIR).parts
+            if "artifacts" in rel or "state" in rel:
                 continue  # historical/ephemeral — preserves old references
-            if "tests" in md.parts:
+            if "tests" in rel:
                 continue  # test file itself doesn't reference rule files
-            if "worktrees" in md.parts or "node_modules" in md.parts:
+            if "worktrees" in rel or "node_modules" in rel:
                 continue  # nested worktrees + their node_modules are not Grimoire config
+            if is_vendored_path(md):
+                continue  # refs resolve against the upstream repo, not this one
             targets.append(md)
 
         missing: list[tuple[str, str]] = []
@@ -777,11 +913,13 @@ class TestAiConfigOverhaulPhase1:
         """Stated global-rule count in meta-ai-config.md must match actual.
 
         A global rule is any `.claude/rules/*.md` file without a non-empty
-        `paths:` frontmatter entry. Post Phase 1 of the AI config overhaul,
-        the authoritative count is 3 and the list appears in meta-ai-config.md
-        under `### Current Global Rules`. `rules.md` and `AGENTS.md` reach
-        Claude by a different mechanism (`@`-import / root instructions) and
-        are not counted here.
+        `paths:` frontmatter entry. The authoritative count is 4 — the three
+        from Phase 1 of the AI config overhaul plus the vendored
+        `hex-state.md`, which is deliberately unscoped (hex state must be
+        re-anchored before any turn, not on a path match). The list appears in
+        meta-ai-config.md under `### Current Global Rules`. `rules.md` and
+        `AGENTS.md` reach Claude by a different mechanism (`@`-import / root
+        instructions) and are not counted here.
         """
         rules_dir = CLAUDE_DIR / "rules"
         globals_found = []
@@ -789,8 +927,8 @@ class TestAiConfigOverhaulPhase1:
             paths = TestRuleGlobs._extract_paths(rule)
             if not paths:
                 globals_found.append(rule.name)
-        assert len(globals_found) == 3, (
-            f"Expected exactly 3 global rules (no `paths:` frontmatter), "
+        assert len(globals_found) == 4, (
+            f"Expected exactly 4 global rules (no `paths:` frontmatter), "
             f"got {len(globals_found)}: {globals_found}"
         )
         meta_text = (rules_dir / "meta-ai-config.md").read_text()
@@ -882,6 +1020,9 @@ class TestAiConfigOverhaulPhase2:
 
     # Per-skill `disable-model-invocation` intent table. Prevents accidental
     # flips (action skill losing the flag, or pure-advisory skill gaining it).
+    # Vendored skills are listed too — `is_vendored` exempts them from this
+    # repo's *authoring* standards, but not from behaving predictably here: an
+    # upstream sync that flips an auto-invocation flag must fail this gate.
     _EXPECTED_DISABLE_MODEL_INVOCATION = {
         # Action skills with side effects — must disable auto-invocation
         "commit": True,
@@ -890,17 +1031,34 @@ class TestAiConfigOverhaulPhase2:
         # effects — re-flip both this entry and the frontmatter together if
         # the manual-only policy is restored.
         "finalize": False,
-            "meta-maintain-config": True,
-                        # Pure analysis / advisory — auto-invocation safe
-            "bugfix": False,
+        "meta-maintain-config": True,
+        # Pure analysis / advisory — auto-invocation safe
+        "bugfix": False,
         "builder": False,
         "code-check": False,
-            "docs": False,
+        "docs": False,
         "meta-validate-context": False,
         "next": True,
         "qa-engineer": False,
         "security-auditor": False,
-        }
+        # Vendored (arcana / grimoire-lore). Values mirror what upstream
+        # ships today; a sync that changes one is a decision, not a detail.
+        "docs-instrument": False,
+        "docs-plan": False,
+        "hex-architect": False,
+        # Reference library, not a workflow — never auto-invoked; the hex
+        # skills link into it.
+        "hex-core": True,
+        "hex-discuss": False,
+        "hex-execute": False,
+        # Rewrites branch history. Upstream ships it auto-invocable to match
+        # first-party `finalize`; re-flip both together if that changes.
+        "hex-finalize": False,
+        "hex-init": True,
+        "hex-plan": False,
+        "hex-review": False,
+        "nox-review": False,
+    }
 
     @staticmethod
     def _parse_frontmatter(skill_md: Path) -> dict[str, str]:
@@ -931,10 +1089,15 @@ class TestAiConfigOverhaulPhase2:
         descriptions are single-line; multi-line (block-scalar) is disallowed
         because the simple parser above would truncate and the real context
         loader would concatenate — both paths degrade discoverability.
+
+        Vendored skills are exempt — the CSO wording is an authoring rule and
+        their descriptions are upstream's to write (`is_vendored`).
         """
         violations: list[tuple[str, str]] = []
         for skill_md in sorted((CLAUDE_DIR / "skills").glob("*/SKILL.md")):
             name = skill_md.parent.name
+            if is_vendored(skill_md):
+                continue
             fm = self._parse_frontmatter(skill_md)
             desc = fm.get("description", "")
             if not desc:
@@ -954,23 +1117,43 @@ class TestAiConfigOverhaulPhase2:
             f"See `.agents/adr/adr_ai_config_skill_description_csopolicy.md`."
         )
 
-    def test_skill_description_budget_under_cap(self) -> None:
-        """Sum of all skill description chars must stay under the 4000-char
-        cap (buffer below Anthropic's 1% context-window description budget).
+    def test_skill_description_budget_under_cap(self, pytestconfig) -> None:
+        """Sum of the *authored* skill description chars must stay under the
+        4000-char cap (buffer below Anthropic's 1% context-window budget).
 
         Pre-Phase-2 baseline was 5004 chars; Phase 2 target is ≤4000, giving
         ≈20% headroom for future skill growth before hitting the cap.
+
+        Vendored skills are counted but not capped (`is_vendored`): their
+        descriptions do consume the same context, so all three numbers are
+        reported on every run — green included, because a green run against a
+        cap of 4000 while the real load is twice that is exactly the number a
+        human needs to see. Trimming them is upstream's call and a local edit
+        would be reverted by the next sync; installing fewer bundles is the
+        lever here, not editing the ones installed.
         """
         total = 0
+        vendored_total = 0
         per_skill: list[tuple[str, int]] = []
         for skill_md in sorted((CLAUDE_DIR / "skills").glob("*/SKILL.md")):
             fm = self._parse_frontmatter(skill_md)
             desc = fm.get("description", "")
+            if is_vendored(skill_md):
+                vendored_total += len(desc)
+                continue
             total += len(desc)
             per_skill.append((skill_md.parent.name, len(desc)))
+        reporter = pytestconfig.pluginmanager.get_plugin("terminalreporter")
+        if reporter is not None:
+            reporter.write_line(
+                f"skill description budget: authored={total} (cap 4000), "
+                f"vendored={vendored_total} (uncapped), "
+                f"context load={total + vendored_total}"
+            )
         assert total <= 4000, (
-            f"Total skill description budget {total} chars exceeds 4000-char "
-            f"cap. Per-skill lengths: {per_skill}"
+            f"Authored skill description budget {total} chars exceeds the "
+            f"4000-char cap (vendored skills add a further {vendored_total} "
+            f"chars, not capped here). Per-skill lengths: {per_skill}"
         )
 
     def test_skill_disable_model_invocation_intent(self) -> None:
@@ -1079,7 +1262,10 @@ class TestAiConfigOverhaulPhase5:
 
     # Explicit exception list for `test_skill_body_budget`. Every entry needs
     # a docstring comment (in this class) explaining why it is exempt.
-    # Current state: empty. Every SKILL.md is ≤200 lines after Phase 5.
+    # Current state: empty — every *authored* SKILL.md is ≤200 lines after
+    # Phase 5. Vendored skills are exempted by `is_vendored`, not listed here:
+    # they are synced not authored, so progressive disclosure is upstream's
+    # job and a name list would rot on the next sync.
     _SKILL_BODY_BUDGET_EXCEPTIONS: tuple[str, ...] = ()
 
     def test_review_fix_loop_parity(self) -> None:
@@ -1154,7 +1340,7 @@ class TestAiConfigOverhaulPhase5:
         violations: list[tuple[str, int]] = []
         for skill_md in sorted((CLAUDE_DIR / "skills").glob("*/SKILL.md")):
             name = skill_md.parent.name
-            if name in self._SKILL_BODY_BUDGET_EXCEPTIONS:
+            if name in self._SKILL_BODY_BUDGET_EXCEPTIONS or is_vendored(skill_md):
                 continue
             line_count = len(skill_md.read_text().splitlines())
             if line_count > 200:
@@ -1231,8 +1417,23 @@ class TestPromptRoutingTriggers:
 
     @classmethod
     def _user_invocable_skills(cls) -> list[tuple[str, dict]]:
+        """Authored user-invocable skills.
+
+        Vendored skills are excluded (`is_vendored`): `triggers:` is
+        frontmatter upstream owns, so adding one here is reverted by the next
+        sync — which is how this gate went red in the first place. The cost is
+        real and is upstream's to fix: a vendored skill without triggers is
+        reachable by its slash command but never by natural-language routing.
+
+        Known blind spot: the two sibling tests share this helper, so
+        `test_triggers_unique_across_skills` cannot see a first-party trigger
+        colliding with a vendored one. Inert while no vendored skill declares
+        `triggers:` — check that before an upstream sync adds any.
+        """
         out: list[tuple[str, dict]] = []
         for skill_md in sorted((CLAUDE_DIR / "skills").glob("*/SKILL.md")):
+            if is_vendored(skill_md):
+                continue
             fm = cls._parse_frontmatter(skill_md.read_text())
             if fm.get("user-invocable") == "true":
                 out.append((skill_md.parent.name, fm))

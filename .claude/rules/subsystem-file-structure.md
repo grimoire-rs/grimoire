@@ -49,10 +49,12 @@ both. See `arch-principles.md` ADR index → `adr_multifile_rules.md`.
 Codex, Gemini, Zed, Amp, Antigravity, the six skills-only clients, and the
 generic `agents` target all lack an ownable path-scoped instruction surface
 (AGENTS.md / GEMINI.md hierarchies, or a UI-managed surface with no on-disk
-path). The installer warns + skips, writes no file, and records no output.
+path). The installer skips them silently, writes no file, and records no
+output: a declined kind logs at `debug` only (`installer.rs:558`), so nothing
+reaches stderr.
 **Junie is Degraded, not Declined** — `.junie/rules/*.md` is a real
 per-file directory grim can own; what it lacks is a per-file activation
-key, so `paths` is dropped with a warning. **`docs/src/clients.md` is the
+key, so `paths` is dropped with a warning. **`docs/src/content/docs/clients.md` is the
 enforced matrix** — a parity test reads it at test time, so trust it over
 any prose list here. Background: `arch-principles.md` ADR index →
 `adr_codex_vendor.md`.
@@ -159,7 +161,7 @@ config files:
 | **Amp** | `<workspace>/.amp/settings.json` (`amp.mcpServers`, literal dotted key); `${VAR}` refs | `$XDG_CONFIG_HOME`\|`~/.config/amp`/`settings.json` (`amp.mcpServers`) |
 
 Every non-Claude client declines the `ws` transport and the structured
-`oauth` block (skip + warn) — see `docs/src/clients.md` "Known gaps".
+`oauth` block (skip + warn) — see `docs/src/content/docs/clients.md` "Known gaps".
 
 ### Agents {#install-layout-agents}
 
@@ -178,7 +180,8 @@ YAML sequence (upstream types it `string[]`) and nothing lifted — the
 (`kind_support == Declined`): CLI/IDE schema collision (Kiro), EAP-only
 (Junie), ACP/runtime-only (Zed, Amp, Goose, OpenClaw), or no installable
 format at all (Cline, Droid, Warp, Kilo, and the generic `agents` target) —
-installer warns + skips, records no output.
+installer skips silently and records no output, logging at
+`debug` only.
 
 Per-client agent paths:
 
@@ -211,7 +214,7 @@ client's **native** user-level discovery directory rather than under
 | **Claude** | `~/.claude/skills/<name>/` | `~/.claude/rules/<name>.md` | `~/.claude/agents/<name>.md` |
 | **OpenCode** | `$XDG_CONFIG_HOME/opencode/skills/<name>/` | `$GRIM_HOME/.opencode/rules/<name>.md` (absolute glob registered in global `opencode.json`) | `$XDG_CONFIG_HOME/opencode/agents/<name>.md` |
 | **Copilot** | `~/.copilot/skills/<name>/` | `~/.copilot/instructions/<name>.instructions.md` (native; workspace-layout fallback + warn only when no root resolves) | `~/.copilot/agents/<name>.md` |
-| **Codex** | `$HOME/.agents/skills/<name>/` (cross-vendor standard; independent of `$CODEX_HOME`) | **unsupported** — Codex has no path-scoped rule mechanism; grim warns + skips, writes no file | `$CODEX_HOME`\|`~/.codex/agents/<name>.toml` (TOML) |
+| **Codex** | `$HOME/.agents/skills/<name>/` (cross-vendor standard; independent of `$CODEX_HOME`) | **unsupported** — Codex has no path-scoped rule mechanism; grim skips it silently, writes no file | `$CODEX_HOME`\|`~/.codex/agents/<name>.toml` (TOML) |
 | **Cursor** | `~/.cursor/skills/<name>/` | `~/.cursor/rules/<name>.mdc` | `~/.cursor/agents/<name>.md` |
 | **Kiro** | `~/.kiro/skills/<name>/` | `~/.kiro/steering/<name>.md` | declined |
 | **Junie** | `~/.junie/skills/<name>/` | declined | declined |
@@ -576,7 +579,7 @@ survives uninstall (grim removes files, not empty directories). The reverse
 is clean: a Gemini install creates `~/.gemini/agents`, never `config/`.
 Fixing it means narrowing `vendor_gemini`'s marker to a Gemini-CLI-exclusive
 file — a shipped client's detection change under the freeze. Documented in
-`docs/src/clients.md` `{#gap-antigravity}` and watchlisted.
+`docs/src/content/docs/clients.md` `{#gap-antigravity}` and watchlisted.
 
 A client whose only footprint on a machine/workspace is a grim-installed
 MCP entry still counts as detected — its config file lives outside the

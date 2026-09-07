@@ -1,0 +1,185 @@
+---
+title: "Authentication"
+description: "Most public skills and rules pull anonymously, but a private registry needs credentials — how grim resolves and stores them."
+---
+<!-- doc_type: reference -->
+
+Most public skills and rules pull anonymously, but a private registry wants
+to know who you are before it hands anything over. Grimoire does not invent
+its own login system for that — it reads and writes the same credential
+store [Docker][docker-login] and [oras][oras-login] already use, so a single
+`docker login` (or `grim login`) covers every tool on the machine.
+
+This page covers how Grimoire finds credentials when it talks to a registry,
+how [`grim login`](#login) and [`grim logout`](#logout) manage them, and
+where they are stored on disk.
+
+## How credentials are resolved {#resolving}
+
+Every registry request starts the same way: Grimoire looks up a credential
+for the target registry and falls back to anonymous access when it finds
+none. A missing credential is never an error — public artifacts keep
+working with no setup.
+
+The lookup reads `~/.docker/config.json` (or `$DOCKER_CONFIG/config.json`),
+the [Docker config file][docker-login]. If a [credential
+helper][docker-cred-helpers] is configured for the registry, Grimoire asks
+the helper; otherwise it reads the base64 entry under `auths`. The registry
+key is normalized first — the scheme and any `/v2/` API suffix are stripped,
+and `docker.io` is mapped to its canonical `https://index.docker.io/v1/`
+form — so a credential stored by `docker login` resolves the same way under
+`grim`.
+
+Credentials can also come from the environment for `GRIM_INSECURE_REGISTRIES`
+and other CI setups; see [Configuration](./configuration.md#environment-variables).
+
+### Voting uses a separate, narrower ladder {#resolving-rate}
+
+Everything on this page concerns **registry** credentials. [`grim
+rate`][commands-rate] does not use them, and does not reuse the publishing
+or [announce][announcing] token either: a vote talks to a *forge*, not to a
+registry, and needs a far smaller grant than pushing an artifact does. A
+user who exported a publish token must not find it casting public votes.
+
+Its own ladder is `GRIM_RATE_TOKEN`, then a host-matched CI token, then the
+forge CLI's stored credential (`gh auth token` / `glab auth token`), then a
+refusal with exit `80` naming the ladder. A credential can also be piped in
+with `--token-stdin`, which skips the ladder entirely. The full contract,
+including how a caller declares which host its piped credential belongs to,
+is in [`grim rate`][commands-rate] and [Artifact Ratings][ratings].
+
+## grim login {#login}
+
+`grim login [registry]` authenticates to a registry and stores the
+credential so later pulls and pushes reuse it. The `registry` argument
+accepts either a hostname or a configured [`[[registries]]`
+alias][registries-config], which substitutes that entry's URL — the same
+alias resolution `add`/`search` apply to a qualified `alias/repo`
+reference. With no argument, the registry resolves through the same chain
+as `add`/`search`: the `--registry` flag, `GRIM_DEFAULT_REGISTRY`, the
+project/global `[[registries]]` default, then the legacy
+`[options].default_registry` chain. Unlike `add`/`release`, `login` never
+falls back to the built-in default registry — with nothing configured
+anywhere it fails with exit 78, since silently storing a credential for a
+registry you never named would be a silent surprise.
+
+The username comes from `--username`/`-u`, or an interactive prompt when
+omitted on a terminal. The password is read from a hidden terminal prompt,
+or from standard input with `--password-stdin`. There is intentionally **no**
+`--password <value>` flag: a secret on the command line leaks through the
+process list and shell history.
+
+```sh
+# Interactive: prompts for the password without echoing it.
+grim login ghcr.io -u alice
+
+# Non-interactive (CI): read the token from stdin.
+echo "$GITHUB_TOKEN" | grim login ghcr.io -u alice --password-stdin
+```
+
+Where the credential lands depends on what is configured — see [Where
+credentials are stored](#store). When no credential helper is configured,
+Grimoire **refuses** to write a plaintext credential unless you opt in with
+`--allow-insecure-store`, which stores a base64 entry (not encryption) in
+`config.json`. The file is created with owner-only (`0600`) permissions.
+
+### Verification {#login-verify}
+
+A stored-but-wrong credential is a delayed failure: it surfaces on the next
+pull or push, far from the login that caused it. To catch that at login
+time, `grim login` verifies the credential against the registry **before**
+storing it, matching `oras login`: it pings the registry's `/v2/` endpoint
+and answers the returned `WWW-Authenticate` challenge with the credential —
+directly for a `Basic` challenge, via a scope-less token request against
+the challenge's realm for a `Bearer` one. A rejected credential stores
+nothing.
+
+Verification proves the registry's authentication endpoint accepts the
+credential. It does **not** prove push or pull access to any particular
+repository — authorization is still decided per repository on the next pull
+or push.
+
+| Outcome | Exit code | Stored? | Report `verification` |
+|---------|-----------|---------|-----------------------|
+| Credential accepted | 0 | yes | `verified` |
+| Registry requires no authentication | 0 | yes | `no-auth-required` |
+| Credential rejected | 80 | no | — |
+| Registry unreachable / server error | 69 | no | — |
+| Insecure (non-`https`) token endpoint named by an HTTPS registry | 69 | no | — |
+| Skipped (`--no-verify`, or offline) | 0 | yes | `skipped` |
+
+`--no-verify` skips the ping and stores optimistically — the pre-verify
+behavior, matching `docker login` with a credential helper. Offline mode
+(`--offline` / `GRIM_OFFLINE`) skips verification silently with a warning,
+since a stored-but-unverified credential is the useful outcome on an
+air-gapped machine; passing `--verify` explicitly while offline is a policy
+conflict and fails with exit 81.
+
+## grim logout {#logout}
+
+`grim logout [registry]` removes a stored credential. It resolves the
+registry exactly like [`grim login`](#login).
+
+Logout is idempotent: removing a credential that was never stored exits `0`,
+matching [`docker logout`][docker-login] and [`oras logout`][oras-login] so a
+CI cleanup step never fails on a fresh runner.
+
+```sh
+grim logout ghcr.io
+```
+
+## Where credentials are stored {#store}
+
+Grimoire writes to the Docker-compatible config at
+`$DOCKER_CONFIG/config.json`, defaulting to `~/.docker/config.json`. Set
+`DOCKER_CONFIG` to point both Grimoire and Docker at an isolated directory —
+useful for tests and per-job CI credentials.
+
+The destination follows the same precedence [Docker][docker-login] uses,
+highest first:
+
+| Tier | Config key | Storage |
+|------|-----------|---------|
+| Per-registry helper | `credHelpers[registry]` | The named OS keychain helper. |
+| Default helper | `credsStore` | The named OS keychain helper. |
+| Plaintext fallback | `auths[registry]` | base64-encoded, gated by `--allow-insecure-store`. |
+
+A credential helper is a small program named `docker-credential-<name>` on
+your `PATH` that stores secrets in the OS keychain — for example
+`osxkeychain`, `wincred`, or `secretservice`/`pass` on Linux. The
+[docker-credential-helpers][docker-cred-helpers] project ships the common
+ones. When a helper is configured, the secret never touches `config.json`;
+only the helper name does.
+
+Unlike `docker login`, Grimoire does **not** auto-detect and silently enable
+a platform helper on first use. It writes only what is already configured,
+or the explicit plaintext fallback — so a shared machine never gains a
+sticky `credsStore` entry behind your back.
+
+## Credentials in CI {#ci}
+
+A headless runner usually has no terminal and no keychain. Pipe the token in
+and opt into the plaintext store scoped to a per-job `DOCKER_CONFIG`:
+
+```sh
+export DOCKER_CONFIG="$RUNNER_TEMP/docker"
+echo "$REGISTRY_TOKEN" | grim login "$REGISTRY" -u "$REGISTRY_USER" \
+  --password-stdin --allow-insecure-store
+grim release ./code-review "$REGISTRY/acme/code-review:1.2.3"
+grim logout "$REGISTRY"
+```
+
+Because Grimoire shares the Docker config, a prior [`docker login`][docker-login]
+step in the same job is enough on its own — `grim` reuses whatever Docker
+stored.
+
+<!-- internal -->
+[registries-config]: ./configuration.md#multiple-registries
+[commands-rate]: ./commands.md#rate
+[ratings]: ./ratings.md
+[announcing]: ./package-index.md#announcing
+
+<!-- external -->
+[docker-login]: https://docs.docker.com/reference/cli/docker/login/
+[docker-cred-helpers]: https://github.com/docker/docker-credential-helpers
+[oras-login]: https://oras.land/docs/commands/oras_login

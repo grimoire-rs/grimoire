@@ -59,7 +59,7 @@ touching either file.
   the first sentence stands alone.
 - **Never restate scope precedence per key.** Project config overrides
   global config uniformly, for every key — that rule is documented once, in
-  the general configuration docs (`docs/src/configuration.md` /
+  the general configuration docs (`docs/src/content/docs/configuration.md` /
   `concepts.md#scopes`). Don't add a "project overrides global" clause to an
   individual key's description; it would just repeat the same sentence 10
   times over.

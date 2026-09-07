@@ -952,12 +952,13 @@ mod tests {
 
     #[test]
     fn docs_reference_matches_codex_registry() {
-        // Doc/registry parity: `docs/src/vendor-metadata.md` must document
+        // Doc/registry parity: `docs/src/content/docs/vendor-metadata.md` must document
         // exactly the `codex.*` keys the registry knows (CODEX_AGENT_FIELDS
         // — the skill registry is empty, see the module doc comment), so
         // the reference page cannot silently drift from the renderer.
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/vendor-metadata.md");
-        let doc = std::fs::read_to_string(path).expect("docs/src/vendor-metadata.md exists (doc/registry parity)");
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/content/docs/vendor-metadata.md");
+        let doc = std::fs::read_to_string(path)
+            .expect("docs/src/content/docs/vendor-metadata.md exists (doc/registry parity)");
         let mut documented = std::collections::BTreeSet::new();
         for token in doc.split('`').skip(1).step_by(2) {
             if let Some(field) = token.strip_prefix("codex.")

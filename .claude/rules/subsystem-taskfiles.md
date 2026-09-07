@@ -19,8 +19,8 @@ paths:
 | `taskfiles/shell.taskfile.yml` | Shell subsystem | `shell:` -- verify (shellcheck + shfmt, skipped if absent) |
 | `taskfiles/coverage.taskfile.yml` | cross-cutting | `coverage:` |
 | `taskfiles/release.taskfile.yml` | cross-cutting | `release:` |
-| `taskfiles/schema.taskfile.yml` | cross-cutting | `schema:` -- generate JSON Schemas from grim's parse structs into `docs/src/schemas/` (gitignored, regenerated every build) |
-| `taskfiles/docs.taskfile.yml` | docs site | `docs:` -- build/serve mdBook; `docs:build` regenerates schemas first (CI Pages source) |
+| `taskfiles/schema.taskfile.yml` | cross-cutting | `schema:` -- generate JSON Schemas from grim's parse structs into `docs/public/schemas/` (gitignored, regenerated every build) |
+| `taskfiles/docs.taskfile.yml` | docs site | `docs:` -- build/serve the Astro Starlight site; `docs:build` regenerates schemas first (CI Pages source); `docs:check` (alias `docs:verify`) is the docs subsystem gate |
 | `.claude/taskfile.yml` | `.claude/` subsystem | `claude:` |
 | `test/taskfile.yml` | acceptance tests | `test:` |
 | `catalog/taskfile.yml` | first-party catalog packages | `catalog:` -- verify (`grim build` per package), release (publish.toml-driven driver) |

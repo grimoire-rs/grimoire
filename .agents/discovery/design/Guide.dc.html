@@ -1,0 +1,160 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; background: #161826; color: #e9e9ed; font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; font-size: 15px; line-height: 1.55; }
+    a { color: #d2cefd; text-decoration: none; }
+    a:hover { color: #9184d9; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  </style>
+</helmet>
+<div style="width: 1440px; min-height: 1580px; background: #161826; color: #e9e9ed; font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 15px; line-height: 1.55;">
+
+  <div style="border-bottom: 1px solid #3f424d;">
+    <div style="max-width: 1360px; margin: 0 auto; padding: 14px 40px; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 32px;">
+      <div style="display: flex; align-items: center; gap: 8.4px; justify-self: start;">
+        <svg viewBox="0 0 128 128" width="24" height="24" aria-hidden="true" style="display: block; flex: none;"><g transform="matrix(1.0668848,0,0,1.0668848,-4.2806272,4.7878936)"><path fill="#ffb02e" d="M 64,5 Q 68.5,25.5 90,30 68.5,34.5 64,55 59.5,34.5 38,30 59.5,25.5 64,5 Z"></path><path fill="#ffb02e" d="m 99,8 q 1.8,7.2 9,9 -7.2,1.8 -9,9 -1.8,-7.2 -9,-9 7.2,-1.8 9,-9 z"></path><path fill="#ffb02e" d="m 29,16 q 1.2,4.8 6,6 -4.8,1.2 -6,6 -1.2,-4.8 -6,-6 4.8,-1.2 6,-6 z"></path><path fill="#6d52f4" d="M 16,60 C 32,54 50,58 64,68 78,58 96,54 112,60 V 98 C 96,92 78,96 64,106 50,96 32,92 16,98 Z"></path><path fill="#dcd2fc" d="m 24,66 c 12,-4 26,-1 40,8 14,-9 28,-12 40,-8 V 92 C 92,88 78,90 64,98 50,90 36,88 24,92 Z"></path><path d="M 64,78 V 94" stroke="#6d52f4" stroke-width="3.5" stroke-linecap="round" fill="none"></path></g></svg>
+        <span style="font-weight: 500; font-size: 15px; letter-spacing: -0.01em;">grimoire<span style="color: #9184d9;">.rs</span></span>
+        <span class="mono" style="font-size: 12px; color: #84858d;">0.14.1</span>
+      </div>
+      <div class="mono" style="display: flex; align-items: center; gap: 8px; border: 1px solid #3f424d; border-radius: 8px; padding: 6px 12px; font-size: 12.5px; color: #84858d; width: 320px; justify-self: center;">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+        <span style="flex: 1;">search the docs</span>
+        <span style="border: 1px solid #3f424d; border-radius: 4px; padding: 0 5px; font-size: 11px;">/</span>
+      </div>
+      <div class="mono" style="display: flex; align-items: center; gap: 26px; font-size: 13px; justify-self: end;">
+        <a href="#">index</a>
+        <a href="#" style="color: #e9e9ed;">docs</a>
+        <a href="#">vscode</a>
+        <a href="#">source</a>
+      </div>
+    </div>
+  </div>
+
+  <div style="max-width: 1360px; margin: 0 auto; padding: 0 40px; display: grid; grid-template-columns: 250px minmax(0, 1fr) 220px; gap: 48px;">
+
+    <div style="padding: 32px 0; border-right: 1px solid #3f424d; display: flex; flex-direction: column; gap: 26px;">
+      <div style="display: flex; flex-direction: column; gap: 2px;">
+        <span class="mono" style="font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: #9184d9; margin-bottom: 8px;">getting started</span>
+        <a href="#" style="font-size: 13.5px; line-height: 20px; padding: 5px 10px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #babbc1;">Installation</a>
+        <a href="#" style="font-size: 13.5px; line-height: 20px; padding: 5px 10px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #babbc1;">Quick start</a>
+        <a href="#" style="font-size: 13.5px; line-height: 20px; padding: 5px 10px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #babbc1;">Browse the index</a>
+        <a href="#" style="font-size: 13.5px; line-height: 20px; padding: 5px 10px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #babbc1;">Your first skill</a>
+        <a href="#" style="font-size: 13.5px; line-height: 20px; padding: 5px 10px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #babbc1;">Concepts</a>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 2px;">
+        <span class="mono" style="font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: #9184d9; margin-bottom: 8px;">guides</span>
+        <a href="#" style="font-size: 13.5px; line-height: 20px; padding: 5px 10px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #babbc1;">Scopes and clients</a>
+        <a href="#" style="font-size: 13.5px; line-height: 20px; padding: 5px 10px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #d2cefd; background: #2b2741;">Shared skills</a>
+        <a href="#" style="font-size: 13.5px; line-height: 20px; padding: 5px 10px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #babbc1;">Inspect before you install</a>
+        <a href="#" style="font-size: 13.5px; line-height: 20px; padding: 5px 10px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #babbc1;">MCP servers everywhere</a>
+        <a href="#" style="font-size: 13.5px; line-height: 20px; padding: 5px 10px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #babbc1;">Versioning</a>
+        <a href="#" style="font-size: 13.5px; line-height: 20px; padding: 5px 10px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #babbc1;">Install, update, status</a>
+        <a href="#" style="font-size: 13.5px; line-height: 20px; padding: 5px 10px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #babbc1;">Client compatibility</a>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 2px;">
+        <span class="mono" style="font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: #9184d9; margin-bottom: 8px;">teams and automation</span>
+        <a href="#" style="font-size: 13.5px; line-height: 20px; padding: 5px 10px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #babbc1;">Run your own index</a>
+        <a href="#" style="font-size: 13.5px; line-height: 20px; padding: 5px 10px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #babbc1;">Team and CI</a>
+        <a href="#" style="font-size: 13.5px; line-height: 20px; padding: 5px 10px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #babbc1;">Catalog best practices</a>
+        <a href="#" style="font-size: 13.5px; line-height: 20px; padding: 5px 10px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #babbc1;">Company registries</a>
+        <a href="#" style="font-size: 13.5px; line-height: 20px; padding: 5px 10px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #babbc1;">Publishing</a>
+        <a href="#" style="font-size: 13.5px; line-height: 20px; padding: 5px 10px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #babbc1;">Release automation</a>
+        <a href="#" style="font-size: 13.5px; line-height: 20px; padding: 5px 10px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #babbc1;">Self-hosted GitLab</a>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 2px;">
+        <span class="mono" style="font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: #9184d9; margin-bottom: 8px;">reference</span>
+        <a href="#" style="font-size: 13.5px; line-height: 20px; padding: 5px 10px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #babbc1;">Commands</a>
+        <a href="#" style="font-size: 13.5px; line-height: 20px; padding: 5px 10px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #babbc1;">Configuration</a>
+        <a href="#" style="font-size: 13.5px; line-height: 20px; padding: 5px 10px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #babbc1;">Artifact formats</a>
+        <a href="#" style="font-size: 13.5px; line-height: 20px; padding: 5px 10px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #babbc1;">JSON interface</a>
+        <a href="#" style="font-size: 13.5px; line-height: 20px; padding: 5px 10px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #babbc1;">Stability and upgrading</a>
+      </div>
+    </div>
+
+    <div style="padding: 40px 0 56px; display: flex; flex-direction: column; gap: 22px; max-width: 720px;">
+      <div style="display: flex; align-items: center; gap: 10px;">
+        <span class="mono" style="font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: #9184d9;">guide</span>
+        <span class="mono" style="font-size: 11.5px; color: #84858d;">·</span>
+        <span class="mono" style="font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: #84858d;">everyday</span>
+        <span class="mono" style="font-size: 11.5px; color: #84858d;">·</span>
+        <span class="mono" style="font-size: 11.5px; color: #84858d;">8 min</span>
+      </div>
+      <h1 style="font-weight: 500; font-size: 34px; line-height: 1.16; letter-spacing: -0.02em; margin: 0 0 0 -0.03em;">One skill set for every harness</h1>
+      <p style="font-size: 16.5px; line-height: 28px; margin: 0; color: #babbc1;">You use Claude Code and Codex on the same machine and want both to run the same review skill, so one agent can check the other's diff with identical instructions. By the end, both agents load the skill from one declaration, and an edit or an update reaches both at once.</p>
+
+      <div style="display: flex; gap: 14px; padding: 14px 16px; border-radius: 8px; border: 1px solid #3f424d; background: #1b1d2c;">
+        <span class="mono" style="font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: #9184d9; white-space: nowrap; padding-top: 2px;">before you start</span>
+        <span style="font-size: 14px; line-height: 22px; color: #babbc1;">grim is installed and both agents have been run at least once, so their home directories exist. Nothing else.</span>
+      </div>
+
+      <h2 style="font-weight: 500; font-size: 20px; line-height: 1.2; letter-spacing: -0.01em; margin: 14px 0 0; padding-bottom: 10px; border-bottom: 1px solid #595d6c;">1. Declare the skill once, machine-wide</h2>
+      <p style="margin: 0; font-size: 15px; line-height: 26px;">Global scope is the one that follows you into every repository, which is what a review skill needs. The declaration lands in one file that both agents will be served from.</p>
+      <div style="border: 1px solid #3f424d; border-radius: 8px; overflow: hidden;">
+        <pre class="mono" style="margin: 0; padding: 14px 18px; font-size: 13.5px; line-height: 28px; white-space: pre;"><span style="color: #9184d9;">$ </span>grim --global add ghcr.io/acme/skills/code-review
+Kind   Name         Pinned                                           Status
+skill  code-review  ghcr.io/acme/skills/code-review@sha256:3b1a…     added</pre>
+      </div>
+
+      <h2 style="font-weight: 500; font-size: 20px; line-height: 1.2; letter-spacing: -0.01em; margin: 14px 0 0; padding-bottom: 10px; border-bottom: 1px solid #595d6c;">2. Name both agents as targets</h2>
+      <p style="margin: 0; font-size: 15px; line-height: 26px;">Claude Code reads its own skills directory; Codex reads the shared pool. One install writes the same bytes to each place and remembers both as outputs of the one declaration.</p>
+      <div style="border: 1px solid #3f424d; border-radius: 8px; overflow: hidden;">
+        <pre class="mono" style="margin: 0; padding: 14px 18px; font-size: 13.5px; line-height: 28px; white-space: pre;"><span style="color: #9184d9;">$ </span>grim --global install --client claude,codex
+Kind   Name         Target                                Status
+skill  code-review  ~/.claude/skills/code-review          written
+skill  code-review  ~/.agents/skills/code-review          written</pre>
+      </div>
+
+      <h2 style="font-weight: 500; font-size: 20px; line-height: 1.2; letter-spacing: -0.01em; margin: 14px 0 0; padding-bottom: 10px; border-bottom: 1px solid #595d6c;">3. Check that both agents see it</h2>
+      <p style="margin: 0; font-size: 15px; line-height: 26px;">Ask each agent to list its skills, then run the review from one against a diff the other produced. The result on your screen should be a review that cites the skill by name.</p>
+      <p style="margin: 6px 0 0; font-size: 15px; line-height: 26px;">Two things people ask at this point:</p>
+      <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px;">
+        <div style="border: 1px solid #3f424d; border-radius: 8px; padding: 14px 16px; display: flex; flex-direction: column; gap: 6px;">
+          <span class="mono" style="font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: #84858d;">what you commit</span>
+          <span class="mono" style="font-size: 13px; line-height: 22px;">nothing — global scope lives in ~/.grimoire</span>
+        </div>
+        <div style="border: 1px solid #3f424d; border-radius: 8px; padding: 14px 16px; display: flex; flex-direction: column; gap: 6px;">
+          <span class="mono" style="font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: #84858d;">when you update</span>
+          <span class="mono" style="font-size: 13px; line-height: 22px;">grim --global update rewrites both copies</span>
+        </div>
+      </div>
+
+      <div style="display: flex; justify-content: space-between; gap: 14px; margin-top: 22px; padding-top: 22px; border-top: 1px solid #3f424d;">
+        <a href="#" style="display: flex; flex-direction: column; gap: 3px;"><span class="mono" style="font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: #84858d;">← previous</span><span style="font-size: 14px;">Scopes and clients</span></a>
+        <a href="#" style="display: flex; flex-direction: column; gap: 3px; text-align: right;"><span class="mono" style="font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: #84858d;">next →</span><span style="font-size: 14px;">Install, update, status</span></a>
+      </div>
+    </div>
+
+    <div style="padding: 40px 0; display: flex; flex-direction: column; gap: 24px;">
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <span class="mono" style="font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: #9184d9; margin-bottom: 4px;">on this page</span>
+        <a href="#" style="font-size: 13px; line-height: 20px; color: #babbc1;">Declare the skill once</a>
+        <a href="#" style="font-size: 13px; line-height: 20px; color: #babbc1;">Name both agents as targets</a>
+        <a href="#" style="font-size: 13px; line-height: 20px; color: #babbc1;">Check that both agents see it</a>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <span class="mono" style="font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: #9184d9; margin-bottom: 4px;">see it run</span>
+        <div style="border: 1px solid #3f424d; border-radius: 8px; padding: 12px 14px; display: flex; flex-direction: column; gap: 4px;">
+          <span class="mono" style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #e9e9ed;"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M7 5v14l11-7z"></path></svg><span>two agents, one skill</span></span>
+          <span class="mono" style="font-size: 11.5px; color: #84858d;">0:58 · real grim, real registry</span>
+        </div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <span class="mono" style="font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: #9184d9; margin-bottom: 4px;">reference</span>
+        <a href="#" style="font-size: 13px; line-height: 20px; color: #babbc1;">grim install</a>
+        <a href="#" style="font-size: 13px; line-height: 20px; color: #babbc1;">[options.vendors]</a>
+        <a href="#" style="font-size: 13px; line-height: 20px; color: #babbc1;">Shared skills pool</a>
+      </div>
+      <a href="#" class="mono" style="font-size: 12px; color: #84858d;">edit this page →</a>
+    </div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

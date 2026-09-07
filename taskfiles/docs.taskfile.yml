@@ -2,26 +2,81 @@
 
 version: '3'
 
+# GRIM_VERSION is read from Cargo.toml once and exported to every task in
+# this file — docs:build stamps the landing page's version span at build
+# time, docs:serve needs the same value so a local preview never diverges
+# from the deployed page. Injecting it here is what removes the separate
+# post-build stamping step the old generator needed.
+vars:
+  GRIM_VERSION:
+    sh: grep -m1 '^version' {{.ROOT_DIR}}/Cargo.toml | cut -d'"' -f2
+
+env:
+  GRIM_VERSION: '{{.GRIM_VERSION}}'
+
 tasks:
   build:
-    desc: Generate schemas and build the mdBook site to docs/book
+    desc: Generate schemas and build the Astro Starlight site to docs/dist
     summary: |
       Regenerates the JSON Schemas (via :schema:generate) and then builds
-      the mdBook site. The schema step runs first so the published site
-      always carries schemas that match the current parser. Afterwards,
-      docs/seo.py post-processes docs/book: it injects per-page canonical
-      and OG/Twitter meta tags (mdBook's Handlebars context can't compute
-      these itself) and writes sitemap.xml from the pages it just tagged.
-      This is the task CI runs to produce the GitHub Pages artifact.
+      the Astro Starlight site with `npm ci && npm run build`. The schema
+      step runs first so the published site always carries schemas that
+      match the current parser. @astrojs/sitemap has no filename option
+      under build.format: 'file' and emits sitemap-0.xml instead, so this
+      task copies it to the sitemap.xml path robots.txt names. This is the
+      task CI runs to produce the GitHub Pages artifact — raw npm is
+      never used in CI, only through this task.
+    # Task-level `dir:` — a `dir:` on an individual `cmds:` entry is silently
+    # ignored by task (verified on 3.51.1), so `npm ci` ran in the repo root
+    # and failed for want of a package-lock.json. Every other command here
+    # uses an absolute {{.ROOT_DIR}} path, so scoping the whole task is safe.
+    dir: '{{.ROOT_DIR}}/docs'
     deps:
       - :schema:generate
     cmds:
-      - mdbook build {{.ROOT_DIR}}/docs
-      - python3 {{.ROOT_DIR}}/docs/seo.py
+      - npm ci
+      - npm run build
+      - cp -f {{.ROOT_DIR}}/docs/dist/sitemap-0.xml {{.ROOT_DIR}}/docs/dist/sitemap.xml
+      # seo.py used to stamp every built page's version span; it is gone, and
+      # the 34 Astro-routed pages get theirs from the build. These two are
+      # copied verbatim out of docs/public/, so nothing else reaches them. The
+      # span is rewritten whatever it holds, so a re-run over an already-stamped
+      # tree is a no-op.
+      - >-
+        sed -i -E 's/(data-grim-version[^>]*>)[^<]*</\1{{.GRIM_VERSION}}</g'
+        {{.ROOT_DIR}}/docs/dist/start.html {{.ROOT_DIR}}/docs/dist/privacy.html
 
   serve:
-    desc: Generate schemas and serve the mdBook site locally (pass flags after --)
+    desc: Generate schemas and serve the Astro Starlight site locally
+    dir: '{{.ROOT_DIR}}/docs'
     deps:
       - :schema:generate
     cmds:
-      - mdbook serve {{.ROOT_DIR}}/docs {{.CLI_ARGS}}
+      # Unlike docs:build, this is the inner dev loop — a bare `npm ci` wipes
+      # node_modules before every run. Install only when there is nothing to
+      # serve from, so a fresh clone still works and the loop stays fast.
+      - test -d node_modules || npm ci
+      - npm run dev
+
+  check:
+    desc: Build the docs site and run the URL-contract, declaration, and dependency-audit gates
+    summary: |
+      Builds the site (docs:build) then runs the docs subsystem gate:
+      the URL-contract check (every shipped path, schema $id,
+      {#custom-id} anchor, and catalog/README link resolves in the built
+      tree), the docs-quality declaration check, an `npm audit
+      --audit-level=high` gate (nothing else reads docs/package-lock.json),
+      and any test script docs/package.json declares (`npm test
+      --if-present`, so a later test addition needs no second taskfile
+      edit). This is the docs subsystem gate — separate from `task
+      verify`, which stays Node-free.
+    aliases:
+      - verify
+    dir: '{{.ROOT_DIR}}/docs'
+    deps:
+      - build
+    cmds:
+      - python3 {{.ROOT_DIR}}/docs/check_urls.py --root {{.ROOT_DIR}}
+      - python3 {{.ROOT_DIR}}/.claude/rules/docs-quality/checks/doc_declaration.py --root {{.ROOT_DIR}}/docs/src/content/docs
+      - npm audit --audit-level=high
+      - npm test --if-present

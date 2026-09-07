@@ -157,7 +157,7 @@ pub enum ConfirmMode {
 /// # Errors
 ///
 /// A [`RateError`] for every contracted failure — see the exit-code table
-/// in `docs/src/commands.md` — plus a config-tier error (78) when a
+/// in `docs/src/content/docs/commands.md` — plus a config-tier error (78) when a
 /// project config exists and fails to parse.
 pub async fn run(ctx: &Context, args: &RateArgs) -> anyhow::Result<(RateReport, ExitCode)> {
     // Every check that needs neither the catalog nor the network runs

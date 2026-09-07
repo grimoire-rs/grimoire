@@ -57,7 +57,7 @@ pub enum ExitCode {
 
 impl ExitCode {
     /// The stable machine-readable slug for the JSON error document's
-    /// `code` field (see `docs/src/json-interface.md`).
+    /// `code` field (see `docs/src/content/docs/json-interface.md`).
     ///
     /// Exhaustive for totality; `Success` maps to `"success"` but is
     /// never emitted — the error document only renders on the Err path.

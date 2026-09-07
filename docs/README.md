@@ -1,32 +1,45 @@
+<!-- doc_type: readme -->
 # Grimoire Documentation
 
-The user-facing documentation site, built with [mdBook][mdbook].
+The user-facing documentation site, built with [Astro Starlight][starlight].
 
-- Source pages live in [`src/`](./src/); the table of contents is
-  [`src/SUMMARY.md`](./src/SUMMARY.md).
-- Site configuration is [`book.toml`](./book.toml).
-- CI builds the book and publishes it to GitHub Pages on every push to `main`
+- Pages live in [`src/content/docs/`](./src/content/docs/) — the `docs`
+  collection declared in [`src/content.config.ts`](./src/content.config.ts).
+  `title` and `description` frontmatter are both mandatory: a page without a
+  `description` fails the build.
+- The landing page is [`src/pages/index.astro`](./src/pages/index.astro).
+- Site config, sidebar groups and the markdown plugin chain are
+  [`astro.config.mjs`](./astro.config.mjs).
+- [`public/`](./public/) is copied verbatim into the site root: the vendored
+  asciinema player, `demo.cast`, `start.html`, `privacy.html`, the favicons,
+  `og-card.png`, `robots.txt` and the install scripts.
+- Built output lands in `dist/` (gitignored).
+- CI builds the site and publishes it to GitHub Pages on a push to `main` that
+  touches one of the paths it watches — `docs/`, `catalog/`, `src/`, the Cargo
+  manifests and three taskfiles
   (see [`.github/workflows/docs.yml`](../.github/workflows/docs.yml)).
 
 Build and preview locally:
 
 ```sh
-cargo install mdbook --version 0.5.3
-task docs:serve
+task docs:serve    # dev server
+task docs:build    # the CI Pages artifact, into dist/
+task docs:check    # docs subsystem gate (alias: docs:verify)
 ```
 
-The version is pinned here for the same reason it is pinned in CI:
-`theme/index.hbs` vendors mdBook 0.5.3's stock template in its non-landing
-branch. Raising it means re-copying that template from `mdbook init --theme`
-and re-diffing — see the comment on the pin in
-[`.github/workflows/docs.yml`](../.github/workflows/docs.yml).
+These tasks need Node 24 ([`package.json`](./package.json) `engines`); `task
+verify` does not.
 
-Prefer the task over a bare `mdbook` call: it regenerates the JSON Schemas
-under `src/schemas/` from grim's parse structs first, so a preview never
-serves schemas that disagree with the binary. `task docs:build` additionally
-runs [`seo.py`](./seo.py) over the built site; `docs:serve` deliberately does
-not, so a local preview carries no canonical or Open Graph tags.
+Prefer the tasks over a bare `npm` call: each regenerates the JSON Schemas
+under `public/schemas/` from grim's parse structs first, so a preview never
+serves schemas that disagree with the binary. Those schemas are gitignored and
+rebuilt on every run. `docs:check` builds, then runs the URL-contract check,
+the docs-quality declaration check, `npm audit --audit-level=high`, and any
+test script `package.json` declares.
+
+The landing page's terminal cast is [`public/demo.cast`](./public/demo.cast).
+It is committed, and re-recorded by `task test:demo`.
 
 Writing conventions live in `.claude/rules/docs-style.md`.
 
-[mdbook]: https://rust-lang.github.io/mdBook/
+[starlight]: https://starlight.astro.build/

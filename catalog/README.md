@@ -112,7 +112,7 @@ plain pushes to main.
 
 - `task catalog:verify` runs in CI on every PR — the real parser is the
   schema gate.
-- When `docs/src/{artifacts,clients,publishing,vendor-metadata,commands,package-index}.md`
+- When `docs/src/content/docs/{artifacts,clients,publishing,vendor-metadata,commands,package-index}.md`
   or `src/command/**` or `src/mcp/**` change, review `catalog/skills/grim-usage`,
   `catalog/skills/grim-authoring`, and — for `clients.md` and
   `vendor-metadata.md` — `catalog/skills/ai-config-authoring` for drift (each package's

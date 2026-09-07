@@ -32,7 +32,7 @@ use super::tool_args::RenderToolArgs;
 /// JSON format: `{ref, digest, kind, name, vendor, dest_dir, files,
 /// warnings}` — `files` are the absolute paths written. Every field is
 /// always present; `warnings` serializes as `[]` rather than vanishing,
-/// per the always-present rule in `docs/src/stability.md`.
+/// per the always-present rule in `docs/src/content/docs/stability.md`.
 #[derive(Debug, Serialize)]
 pub struct RenderReport {
     /// The fully-qualified resolved reference.

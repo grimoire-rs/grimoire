@@ -1389,7 +1389,7 @@ fn integrity_gate(
 /// 4. hash-match: the on-disk footprint must equal the recorded
 ///    `content_hash` — a user-edited orphan is **preserved and warned
 ///    about**, never deleted, and there is no `--force` override
-///    (`docs/src/stability.md`'s kept-modified promise, which is what makes
+///    (`docs/src/content/docs/stability.md`'s kept-modified promise, which is what makes
 ///    "a layout move is not a compatibility break" legitimate). The warning
 ///    names the old path, the new one, and the client, because under additive
 ///    scanning that client now sees the artifact twice;
@@ -1678,7 +1678,7 @@ fn roots_before_relocation(roots: &AnchorRoots, relocated: &[(&'static str, Path
 /// 3. absent, or unresolvable, at the old root ⇒ nothing to reap;
 /// 4. hash-match: an old footprint that drifted from the recorded hash is a
 ///    user edit — **preserved and warned about, never deleted**. That is the
-///    kept-modified promise at `docs/src/stability.md`, and it has no `--force`
+///    kept-modified promise at `docs/src/content/docs/stability.md`, and it has no `--force`
 ///    override here, exactly as in [`reap_moved_outputs`];
 /// 5. resolved-overlap ([`overlaps_live_footprint`]): an old component that
 ///    canonicalizes onto the new footprint is a symlink alias of the live

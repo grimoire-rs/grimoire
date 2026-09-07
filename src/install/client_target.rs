@@ -739,7 +739,7 @@ mod tests {
         rows
     }
 
-    /// Table-parity: reads `docs/src/clients.md` at TEST RUNTIME (not compile
+    /// Table-parity: reads `docs/src/content/docs/clients.md` at TEST RUNTIME (not compile
     /// time — `std::fs::read_to_string` below), parses the
     /// first markdown table, and asserts for every `(client, kind)` that a
     /// documented `✗` ⇔ `kind_support == Declined` (MCP: `mcp_config_path` is
@@ -748,8 +748,8 @@ mod tests {
     #[test]
     fn docs_matrix_row_set_matches_all_and_cells_track_kind_support() {
         use crate::install::vendor::KindSupport;
-        let md = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/clients.md"))
-            .expect("docs/src/clients.md exists (matrix parity)");
+        let md = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/content/docs/clients.md"))
+            .expect("docs/src/content/docs/clients.md exists (matrix parity)");
         let rows = parse_first_matrix(&md);
 
         let documented: std::collections::BTreeSet<&str> = rows.iter().map(|(n, _)| n.as_str()).collect();
@@ -813,12 +813,12 @@ mod tests {
     }
 
     /// Emit-matrix row-presence: every `ClientTarget` name appears in the
-    /// `docs/src/agents.md` emit-matrix section (catches "added a vendor,
+    /// `docs/src/content/docs/agents.md` emit-matrix section (catches "added a vendor,
     /// forgot the emit matrix" without over-constraining prose).
     #[test]
     fn agents_emit_matrix_lists_every_client() {
-        let md = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/agents.md"))
-            .expect("docs/src/agents.md exists");
+        let md = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/content/docs/agents.md"))
+            .expect("docs/src/content/docs/agents.md exists");
         let section = heading_section(&md, "{#emit-matrix}").to_ascii_lowercase();
         for client in ClientTarget::ALL {
             assert!(
@@ -828,12 +828,15 @@ mod tests {
         }
     }
 
-    /// Emit-matrix row-presence for `docs/src/mcp-servers.md` — same
+    /// Emit-matrix row-presence for `docs/src/content/docs/mcp-servers.md` — same
     /// invariant as [`agents_emit_matrix_lists_every_client`].
     #[test]
     fn mcp_servers_emit_matrix_lists_every_client() {
-        let md = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/mcp-servers.md"))
-            .expect("docs/src/mcp-servers.md exists");
+        let md = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docs/src/content/docs/mcp-servers.md"
+        ))
+        .expect("docs/src/content/docs/mcp-servers.md exists");
         let section = heading_section(&md, "{#emit-matrix}").to_ascii_lowercase();
         for client in ClientTarget::ALL {
             assert!(
@@ -843,15 +846,18 @@ mod tests {
         }
     }
 
-    /// Row-presence for `docs/src/vendor-metadata.md`'s
+    /// Row-presence for `docs/src/content/docs/vendor-metadata.md`'s
     /// `{#discovery-locations}` section (both the project- and
     /// global-scope tables): every `ClientTarget` must appear — skill
     /// discovery is `Native` for all ten, so there is no subset to carve
     /// out (contrast the two tests below, which are Rule/Agent-scoped).
     #[test]
     fn vendor_metadata_discovery_locations_lists_every_client() {
-        let md = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/vendor-metadata.md"))
-            .expect("docs/src/vendor-metadata.md exists");
+        let md = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docs/src/content/docs/vendor-metadata.md"
+        ))
+        .expect("docs/src/content/docs/vendor-metadata.md exists");
         let section = heading_section(&md, "{#discovery-locations}").to_ascii_lowercase();
         for client in ClientTarget::ALL {
             assert!(
@@ -861,7 +867,7 @@ mod tests {
         }
     }
 
-    /// Row-presence for `docs/src/vendor-metadata.md`'s `{#rule-keys}`
+    /// Row-presence for `docs/src/content/docs/vendor-metadata.md`'s `{#rule-keys}`
     /// section, scoped to clients that do **not** decline the Rule kind.
     /// The table documents per-client rule-frontmatter field mapping (or,
     /// for Codex, an explicit unsupported note) — the remaining declined
@@ -872,8 +878,11 @@ mod tests {
     #[test]
     fn vendor_metadata_rule_keys_lists_every_rule_capable_client() {
         use crate::install::vendor::KindSupport;
-        let md = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/vendor-metadata.md"))
-            .expect("docs/src/vendor-metadata.md exists");
+        let md = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docs/src/content/docs/vendor-metadata.md"
+        ))
+        .expect("docs/src/content/docs/vendor-metadata.md exists");
         let section = heading_section(&md, "{#rule-keys}").to_ascii_lowercase();
         for client in ClientTarget::ALL {
             if client.vendor().kind_support(ArtifactKind::Rule) == KindSupport::Declined {
@@ -886,7 +895,7 @@ mod tests {
         }
     }
 
-    /// Row-presence for `docs/src/agents.md`'s `{#locations}` section,
+    /// Row-presence for `docs/src/content/docs/agents.md`'s `{#locations}` section,
     /// scoped to clients that do **not** decline the Agent kind — mirrors
     /// [`vendor_metadata_rule_keys_lists_every_rule_capable_client`]: the
     /// four declined clients (Kiro, Junie, Zed, Amp) have no install path
@@ -895,8 +904,8 @@ mod tests {
     #[test]
     fn agents_locations_lists_every_agent_capable_client() {
         use crate::install::vendor::KindSupport;
-        let md = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/agents.md"))
-            .expect("docs/src/agents.md exists");
+        let md = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/content/docs/agents.md"))
+            .expect("docs/src/content/docs/agents.md exists");
         let section = heading_section(&md, "{#locations}").to_ascii_lowercase();
         for client in ClientTarget::ALL {
             if client.vendor().kind_support(ArtifactKind::Agent) == KindSupport::Declined {
@@ -909,7 +918,7 @@ mod tests {
         }
     }
 
-    /// Row-presence for `docs/src/json-interface.md`'s `options.clients`
+    /// Row-presence for `docs/src/content/docs/json-interface.md`'s `options.clients`
     /// `string-set` values list — the literal JSON array of client names
     /// in its `config list` shape description must list every
     /// `ClientTarget`. The paragraph carries no `{#anchor}` heading, so it
@@ -917,8 +926,11 @@ mod tests {
     /// boundary) instead of [`heading_section`]'s `## ` boundary.
     #[test]
     fn json_interface_options_clients_values_lists_every_client() {
-        let md = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/json-interface.md"))
-            .expect("docs/src/json-interface.md exists");
+        let md = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docs/src/content/docs/json-interface.md"
+        ))
+        .expect("docs/src/content/docs/json-interface.md exists");
         let marker = "`options.clients` is the one `string-set` key";
         let start = md
             .find(marker)

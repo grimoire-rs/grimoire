@@ -351,19 +351,20 @@ mod tests {
 
     /// G4 parity-test shell (adr_client_compat_matrix §3 — the missing fourth
     /// `docs_reference_matches_<vendor>_registry` test). Body filled in the
-    /// Specify phase: assert `docs/src/vendor-metadata.md` documents exactly
+    /// Specify phase: assert `docs/src/content/docs/vendor-metadata.md` documents exactly
     /// the `opencode.*` keys the registry knows (`OPENCODE_AGENT_FIELDS`; the
     /// skill/rule registries are empty), mirroring
     /// `vendor_claude::docs_reference_matches_claude_registry`.
     #[test]
     fn docs_reference_matches_opencode_registry() {
-        // Doc/registry parity: `docs/src/vendor-metadata.md` must document
+        // Doc/registry parity: `docs/src/content/docs/vendor-metadata.md` must document
         // exactly the `opencode.*` keys the registry knows
         // (`OPENCODE_AGENT_FIELDS`; the skill/rule registries are empty), so
         // the reference page cannot silently drift from the renderer. Mirrors
         // vendor_copilot.rs::docs_reference_matches_copilot_registry.
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/vendor-metadata.md");
-        let doc = std::fs::read_to_string(path).expect("docs/src/vendor-metadata.md exists (doc/registry parity)");
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/content/docs/vendor-metadata.md");
+        let doc = std::fs::read_to_string(path)
+            .expect("docs/src/content/docs/vendor-metadata.md exists (doc/registry parity)");
         let mut documented = std::collections::BTreeSet::new();
         for token in doc.split('`').skip(1).step_by(2) {
             if let Some(field) = token.strip_prefix("opencode.")

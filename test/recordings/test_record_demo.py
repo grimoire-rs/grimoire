@@ -41,7 +41,7 @@ from recordings.cast_recorder import CastRecorder, assert_tables_column_aligned
 # "anonymously pullable" was verified.
 _DEMO_REF = "ghcr.io/grimoire-rs/skills/grim-usage"
 
-CAST_OUTPUT = Path(__file__).resolve().parent.parent.parent / "docs" / "src" / "demo.cast"
+CAST_OUTPUT = Path(__file__).resolve().parent.parent.parent / "docs" / "public" / "demo.cast"
 
 # The landing page's own dark palette (docs/theme/index.hbs `:root` vars).
 # asciinema-player reads a cast's embedded `theme` header automatically

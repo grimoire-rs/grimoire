@@ -56,6 +56,7 @@ task --force verify            # bypass caching — run everything
 task rust:verify               # Rust-only gate
 task shell:verify              # shell-only gate (shellcheck + shfmt)
 task claude:tests              # AI config structural tests
+task docs:check                # docs site gate — needs Node 24; task verify does not
 ```
 
 **Cargo commands** (for finer control): `cargo check`, `cargo build

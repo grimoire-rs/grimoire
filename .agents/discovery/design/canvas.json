@@ -1,0 +1,11 @@
+{
+  "artboards": [
+    { "file": "Main.dc.html", "x": 0, "y": 0, "w": 1440, "h": 1960, "title": "Docs landing — use-case router" },
+    { "file": "Guide.dc.html", "x": 1560, "y": 0, "w": 1440, "h": 1580, "title": "Guide page — everyday tier" }
+  ],
+  "annotations": [
+    { "id": "kept-vs-new", "x": 0, "y": -170, "w": 520, "text": "Kept from today's grimoire.rs landing: header, hero, CTAs, footer, the whole token set (#161826 ground, #9184d9 accent, mono kickers, 8px radii).\nNew: the centred search field, the 'start from what you want to do' router (eight cards weighted by the owner's list, the friction logs and web pain points; each card names the complaint), a transcript-style demo frame in the hero, and a four-group footer nav that mirrors the sidebar." },
+    { "id": "guide-note", "x": 1560, "y": -170, "w": 520, "text": "Guide page = every docs page in the landing's own style (replaces mdBook navy).\nLeft: sidebar with the four groups from the discovery plan, current page in accent-900.\nCentre: kicker (type · tier · time), goal before the first step, one result per step.\nRight: on-this-page, a per-guide screencast slot, reference links, edit link.\nCommand refs and timings are sample copy." }
+  ],
+  "launch": { "view": "canvas" }
+}

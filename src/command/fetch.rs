@@ -37,7 +37,7 @@ pub struct FetchArgs {
     /// Print one client's projection instead of the canonical as-authored
     /// document. Accepts any supported client name — the set round-trips
     /// through [`crate::install::client_target::ClientTarget`], so it widens
-    /// automatically as clients are added; see `docs/src/clients.md`.
+    /// automatically as clients are added; see `docs/src/content/docs/clients.md`.
     #[arg(long)]
     pub vendor: Option<String>,
 

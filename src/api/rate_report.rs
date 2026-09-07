@@ -16,7 +16,7 @@
 //! nullable ones render as explicit `null` rather than being omitted, so a
 //! consumer never has to distinguish "absent key" from "no value"
 //! (`skip_serializing_if` is banned in this module — see
-//! `docs/src/json-interface.md`).
+//! `docs/src/content/docs/json-interface.md`).
 
 use std::io::{self, Write};
 

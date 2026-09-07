@@ -350,7 +350,7 @@ pub fn detail_lines(row: Option<&TuiRow>, companion: Option<&CompanionCache>) ->
 /// the browse catalog. They live on the mutable description companion, so a
 /// disk-cached copy could show a contact link that has already moved — which is
 /// exactly why `grim search` and the catalog row do not carry them
-/// (`docs/src/publishing.md#metadata-surfaces`). Fetching them live on the
+/// (`docs/src/content/docs/publishing.md#metadata-surfaces`). Fetching them live on the
 /// keypress that opens the pane is a different mechanism and carries no such
 /// staleness.
 fn support_lines(companion: Option<&CompanionCache>) -> Vec<DetailLine> {

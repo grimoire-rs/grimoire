@@ -79,7 +79,7 @@ where
 
 /// Build a not-found error for a resolved `id` the registry has no tag or
 /// manifest for. Classifies to `NotFound` (79) — the documented fetch
-/// taxonomy (`docs/src/commands.md`: "a missing repository is a not-found
+/// taxonomy (`docs/src/content/docs/commands.md`: "a missing repository is a not-found
 /// failure (parity with grim fetch)") — by routing through the existing
 /// [`ResolveErrorKind::TagNotFound`] classification rather than a bare
 /// `anyhow!` (which would fall through to the generic failure, 1).
@@ -1553,7 +1553,7 @@ mod tests {
         // pre-download oversize reject used to be a bare `anyhow!(...)`,
         // which `classify_error` cannot special-case, so it fell through to
         // `ExitCode::Failure` (1) — contradicting the frozen 1.0 contract
-        // (`docs/src/commands.md`, `docs/src/json-interface.md`, the ADR)
+        // (`docs/src/content/docs/commands.md`, `docs/src/content/docs/json-interface.md`, the ADR)
         // that says a pre-download oversize reject exits 65 (DataError),
         // the same tier as the streamed `OversizeBlob` path and the install
         // `OversizeLayer` path. Pre-fix, this assertion would have failed:

@@ -3,7 +3,7 @@ paths:
   - "src/install/vendor_*.rs"
   - "src/oci/mcp.rs"
   - "src/catalog/rating_provider.rs"
-  - "docs/src/ratings.md"
+  - "docs/src/content/docs/ratings.md"
 ---
 
 # Vendor Capability Watchlist
@@ -25,7 +25,7 @@ regression or a stale doc (it happened: `xhigh` reasoning-effort, Codex
    upstream doc link. Row stale (> ~6 months since `verified` date) →
    re-verify upstream first.
 2. Upstream shipped the capability → patch renderer + docs
-   (`docs/src/vendor-metadata.md` / `docs/src/mcp-servers.md`) + tests in
+   (`docs/src/content/docs/vendor-metadata.md` / `docs/src/content/docs/mcp-servers.md`) + tests in
    **one commit** (parity tests require doc row and registry change
    together), then move/update the row here in the same commit.
 3. Compatibility doctrine applies (AGENTS.md principle 9): additive-only,
@@ -40,7 +40,7 @@ regression or a stale doc (it happened: `xhigh` reasoning-effort, Codex
 `KindSupport` says what a client can host. This says how hard grim works to
 close a gap it cannot. Decision recorded in
 [adr_vendor_support_tiers.md](../../.agents/adr/adr_vendor_support_tiers.md);
-the consumer-facing half is `docs/src/clients.md#compensation`.
+the consumer-facing half is `docs/src/content/docs/clients.md#compensation`.
 
 > **grim renders artifacts. grim does not run at the client's runtime.**
 
@@ -62,7 +62,7 @@ support-directory copy auto-loads as unconditional Claude context.
 `copilot`.** Every other client is Tier 2 — faithful render, gaps declined
 or warned per `KindSupport`, never compensated.
 
-Tier 1 costs a `docs/src/clients.md` matrix row, a dated row below, and
+Tier 1 costs a `docs/src/content/docs/clients.md` matrix row, a dated row below, and
 re-verification when the vendor moves; a client is promoted when someone
 commits to paying that. Tier is a statement about maintainer capacity, not
 about the client — Cursor and Kiro are Tier 2 with `Native` scoped rules,
@@ -133,7 +133,7 @@ landed in the vendor-wave expansion). Sources: `research_vendor_verification_*.m
 | Rules | Antigravity | declined | *verified 2026-07-26.* Workspace `.agents/rules` IS a per-file folder ([antigravity docs](https://antigravity.google/docs/rules-workflows)), but (a) global rules are one shared `~/.gemini/GEMINI.md` that Gemini CLI also writes ([gemini-cli#16058](https://github.com/google-gemini/gemini-cli/issues/16058)) and `kind_support` cannot answer per scope, and (b) no rule-file frontmatter table is published, so `paths` has no on-disk target | enable Rule when a global per-file dir appears, or when a documented scoping key lets grim carry `paths` at workspace scope |
 | Project-scope detection | Antigravity | never detected at project scope | *verified 2026-07-26.* `/docs/projects` documents no product-specific project marker; `.agents/` is a five-client shared marker and must not count | flip `detect` when a product-specific project dir is documented |
 | Global root sharing (IDE variant **or Gemini CLI**) | Antigravity | detects on `~/.gemini/config` | *verified 2026-07-26.* `~/.gemini/config` is 2.0's documented user-config root. **Unresolved on two fronts:** whether the v2.1.x IDE also creates it (one summarizer pass suggested it, no independent confirmation), and whether plain **Gemini CLI** ever creates a `config` subdir under its own `~/.gemini` root — if it does, every Gemini CLI user auto-detects as Antigravity and gets agents + a spliced `mcp_config.json` under a root their client never reads | tighten the marker if 2.0 gains an exclusive dir |
-| Reverse detection leak into Gemini | Antigravity | none — disclosed in `docs/src/clients.md` `{#gap-antigravity}` | *found in review 2026-07-26.* `~/.gemini/config` nests inside `~/.gemini`, so a global Antigravity install creates Gemini CLI's global marker and makes **gemini** detected on the next autodetected command. Narrowing `gemini`'s marker to a Gemini-CLI-exclusive file (`settings.json` / `oauth_creds.json`) would fix it but changes a shipped client's detection under the freeze — owner call | revisit with `vendor_gemini`'s owner |
+| Reverse detection leak into Gemini | Antigravity | none — disclosed in `docs/src/content/docs/clients.md` `{#gap-antigravity}` | *found in review 2026-07-26.* `~/.gemini/config` nests inside `~/.gemini`, so a global Antigravity install creates Gemini CLI's global marker and makes **gemini** detected on the next autodetected command. Narrowing `gemini`'s marker to a Gemini-CLI-exclusive file (`settings.json` / `oauth_creds.json`) would fix it but changes a shipped client's detection under the freeze — owner call | revisit with `vendor_gemini`'s owner |
 | `ws` MCP transport | Antigravity | declined | *verified 2026-07-26, ambiguous.* `/docs/mcp` names websocket alongside sse/http under one `serverUrl` field, but only via a summarizing fetch — the raw page body could not be retrieved, and a merged transport list is a summarizer artifact shape. Declined because decline → support is additive and the reverse is breaking | enable `Ws` in `mcp_entry` once raw page text confirms it |
 | Path-relocating env override | Antigravity | none honored | *verified 2026-07-26.* No override found across nine official pages; `ANTIGRAVITY_API_KEY` / `ANTIGRAVITY_TOKEN` are auth credentials and move nothing. Recorded as "not found in current docs", not "does not exist" | honor once one is documented |
 | `antigravity.*` agent registry | Antigravity | empty — only `name`/`description`/`model`/`tools` projected | *verified 2026-07-26.* Upstream `/docs/subagents` also documents `mainAgent`, `subagent`, `commandExecutionPolicy`, `mcpServers`, `skills`/`plugins` | additive registry candidate — each key is a permanent contract, so add on demand |
@@ -147,9 +147,9 @@ landed in the vendor-wave expansion). Sources: `research_vendor_verification_*.m
 Overlap detection in `test_path_overlaps_declared_or_absent` compares
 `paths:` patterns as **exact strings**. This rule's globs
 (`src/install/vendor_*.rs`, `src/oci/mcp.rs`, `src/catalog/rating_provider.rs`,
-`docs/src/ratings.md`) are unique strings today, so no declared-overlap
+`docs/src/content/docs/ratings.md`) are unique strings today, so no declared-overlap
 group is required — but they *semantically* overlap `src/**`/`**/*.rs`
-(the two `src/` entries) and `docs/**` (`docs/src/ratings.md`, which
+(the two `src/` entries) and `docs/**` (`docs/src/content/docs/ratings.md`, which
 `docs-style.md` and `product-context.md` already glob-match — editing that
 one file loads all three rules). If another rule ever adopts one of these
 exact strings, a declared group in `.claude/rules.md` becomes mandatory.
@@ -180,7 +180,7 @@ not the uniform ones.
 
 ## Ratings forge capability watchlist
 
-Not a `Vendor` renderer decline — `grim rate`/`docs/src/ratings.md` claims
+Not a `Vendor` renderer decline — `grim rate`/`docs/src/content/docs/ratings.md` claims
 about the two forges' own version history (GHES, GitLab). Added here
 per F-5 of `plan_ratings_deferred_findings.md`: this rule is the place a
 vendor-version claim gets re-verified before it ages silently in prose,
@@ -189,13 +189,13 @@ declines.
 
 All rows `verified 2026-08-19`.
 
-| Capability | Vendor | docs/src/ratings.md claim | Upstream status | Action when claim changes |
+| Capability | Vendor | docs/src/content/docs/ratings.md claim | Upstream status | Action when claim changes |
 |---|---|---|---|---|
-| Discussions availability | GitHub Enterprise Server | "GHES has shipped Discussions since 3.6" (`docs/src/ratings.md:247`) | **Confirmed.** GHES 3.6 GA'd 2022-08-16 with GitHub Discussions listed among its headline features ([GHES 3.6 GA changelog](https://github.blog/changelog/2022-08-16-github-enterprise-server-3-6-is-now-generally-available/)) | none — re-verify only if GHES ever drops or re-gates Discussions |
-| Personal/project access token expiry ceiling | GitLab | "Token expiry is mandatory since GitLab 16.0 — at most 365 days, 400 on 17.6 and later" (`docs/src/ratings.md:300`) | **Partially wrong, doc corrected 2026-08-19.** Mandatory-expiry-since-16.0 and the 365-day default both confirmed. The 400-day ceiling from GitLab 17.6 is real but ships behind the `buffered_token_expiration_limit` feature flag, **disabled by default** — an instance stays at 365 days unless an admin turns it on ([GitLab PAT docs](https://docs.gitlab.com/user/profile/personal_access_tokens/), [GitLab account and limit settings](https://docs.gitlab.com/administration/settings/account_and_limit_settings/) — states the 365/400 split and the flag in the present tense, so a re-verifier reads the current truth, not a historical feature request). The doc previously implied 400 applied automatically on 17.6+ | drop the feature-flag caveat once `buffered_token_expiration_limit` defaults to enabled |
-| "Award Emoji" → "Emoji Reactions" rename | GitLab | "(GitLab renamed this feature Award Emoji to Emoji Reactions in 16.0...)" (`docs/src/ratings.md:264-265`) — found while auditing the file for other unverified version claims, not one of the two the plan named | **Confirmed.** Rename shipped in GitLab 16.0 ([GitLab emoji reactions docs, v17.9](https://docs.gitlab.com/17.9/user/emoji_reactions/) — the versioned page still carries the history block; the current unversioned page has since pruned it) | none |
-| `awardEmojiToggle` mutation name | GitLab | "the GraphQL mutation is still spelled `awardEmojiToggle`" (`docs/src/ratings.md:266-267`) — present-tense claim about a live API, not a completed historical event like the row above | **Present and undeprecated**, verified 2026-08-19 against the [GitLab GraphQL API reference](https://docs.gitlab.com/api/graphql/reference/) and the [removed-items log](https://docs.gitlab.com/api/graphql/removed_items/) (no `awardEmojiToggle` entry). Has a code dependency: `src/catalog/rating_provider.rs` hard-codes the mutation name at `:592` (the GraphQL document literal), `:601` (response-key lookup), `:843` (write-mutation guard list), and references the `awardEmoji` widget/field at `:549`, `:580` | **`grim rate --up` against GitLab breaks if this is renamed or deprecated** — re-verify against the removed-items log before any GitLab-version-driven change to `rating_provider.rs` |
-| `grim-ratings` resource group `process_mode` — no UI setting | GitLab | `docs/src/ratings.md` tells the operator to change it under **Settings → CI/CD → Resource groups** (`:311-317`) | **Wrong, doc corrected 2026-08-19.** GitLab's own [resource groups doc](https://docs.gitlab.com/ci/resource_groups/) states process mode changes **must use the API**: `PUT /projects/:id/resource_groups/:key` with `process_mode`. No UI exists. Confirmed by the open UI feature request [gitlab-org/gitlab#436986](https://gitlab.com/gitlab-org/gitlab/-/issues/436986) | flip the doc back to a UI pointer once #436986 ships |
+| Discussions availability | GitHub Enterprise Server | "GHES has shipped Discussions since 3.6" (`docs/src/content/docs/ratings.md:247`) | **Confirmed.** GHES 3.6 GA'd 2022-08-16 with GitHub Discussions listed among its headline features ([GHES 3.6 GA changelog](https://github.blog/changelog/2022-08-16-github-enterprise-server-3-6-is-now-generally-available/)) | none — re-verify only if GHES ever drops or re-gates Discussions |
+| Personal/project access token expiry ceiling | GitLab | "Token expiry is mandatory since GitLab 16.0 — at most 365 days, 400 on 17.6 and later" (`docs/src/content/docs/ratings.md:300`) | **Partially wrong, doc corrected 2026-08-19.** Mandatory-expiry-since-16.0 and the 365-day default both confirmed. The 400-day ceiling from GitLab 17.6 is real but ships behind the `buffered_token_expiration_limit` feature flag, **disabled by default** — an instance stays at 365 days unless an admin turns it on ([GitLab PAT docs](https://docs.gitlab.com/user/profile/personal_access_tokens/), [GitLab account and limit settings](https://docs.gitlab.com/administration/settings/account_and_limit_settings/) — states the 365/400 split and the flag in the present tense, so a re-verifier reads the current truth, not a historical feature request). The doc previously implied 400 applied automatically on 17.6+ | drop the feature-flag caveat once `buffered_token_expiration_limit` defaults to enabled |
+| "Award Emoji" → "Emoji Reactions" rename | GitLab | "(GitLab renamed this feature Award Emoji to Emoji Reactions in 16.0...)" (`docs/src/content/docs/ratings.md:264-265`) — found while auditing the file for other unverified version claims, not one of the two the plan named | **Confirmed.** Rename shipped in GitLab 16.0 ([GitLab emoji reactions docs, v17.9](https://docs.gitlab.com/17.9/user/emoji_reactions/) — the versioned page still carries the history block; the current unversioned page has since pruned it) | none |
+| `awardEmojiToggle` mutation name | GitLab | "the GraphQL mutation is still spelled `awardEmojiToggle`" (`docs/src/content/docs/ratings.md:266-267`) — present-tense claim about a live API, not a completed historical event like the row above | **Present and undeprecated**, verified 2026-08-19 against the [GitLab GraphQL API reference](https://docs.gitlab.com/api/graphql/reference/) and the [removed-items log](https://docs.gitlab.com/api/graphql/removed_items/) (no `awardEmojiToggle` entry). Has a code dependency: `src/catalog/rating_provider.rs` hard-codes the mutation name at `:592` (the GraphQL document literal), `:601` (response-key lookup), `:843` (write-mutation guard list), and references the `awardEmoji` widget/field at `:549`, `:580` | **`grim rate --up` against GitLab breaks if this is renamed or deprecated** — re-verify against the removed-items log before any GitLab-version-driven change to `rating_provider.rs` |
+| `grim-ratings` resource group `process_mode` — no UI setting | GitLab | `docs/src/content/docs/ratings.md` tells the operator to change it under **Settings → CI/CD → Resource groups** (`:311-317`) | **Wrong, doc corrected 2026-08-19.** GitLab's own [resource groups doc](https://docs.gitlab.com/ci/resource_groups/) states process mode changes **must use the API**: `PUT /projects/:id/resource_groups/:key` with `process_mode`. No UI exists. Confirmed by the open UI feature request [gitlab-org/gitlab#436986](https://gitlab.com/gitlab-org/gitlab/-/issues/436986) | flip the doc back to a UI pointer once #436986 ships |
 
 The indexer's `README.md` was checked for the same two claims (the plan
 says they are "echoed" there) — as of `.agents/worktrees/grimoire-index` @

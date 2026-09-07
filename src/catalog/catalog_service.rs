@@ -1592,8 +1592,8 @@ mod tests {
         // agent-facing rule) are caught by the suite going red and by the
         // catalog drift review respectively.
         for page in [
-            concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/configuration.md"),
-            concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/commands.md"),
+            concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/content/docs/configuration.md"),
+            concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/content/docs/commands.md"),
         ] {
             let md = std::fs::read_to_string(page).expect("the documentation page is readable");
             assert!(

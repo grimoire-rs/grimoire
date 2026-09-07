@@ -23,7 +23,7 @@ paths:
 
 > **Status: stabilizing — preparing 1.0.0.** Released surfaces are frozen;
 > breaking changes are prohibited (stability contract:
-> `adr_render_layout_stability.md`, `docs/src/stability.md`). Statements
+> `adr_render_layout_stability.md`, `docs/src/content/docs/stability.md`). Statements
 > below are maintained positioning — flag drift via the Update Protocol
 > at the bottom of this file.
 
@@ -64,7 +64,7 @@ gate — that GitHub or GitLab Pages serves, so a team stands up its own
 discovery surface with no server and no account. The public index at
 `index.grimoire.rs` is the default, not the system. This is the current
 lead adoption story on the landing page and in
-`docs/src/hosting-an-index.md`.
+`docs/src/content/docs/hosting-an-index.md`.
 
 ## Target Users
 
@@ -98,7 +98,7 @@ grim uninstall skill code-review     # Full inverse of install
 
 Global flags: `--offline`, `--global`, `--config <path>`,
 `--registry <ref>`, `--format json`. Full surface:
-`subsystem-cli-commands.md` and `docs/src/commands.md` (18 subcommands).
+`subsystem-cli-commands.md` and `docs/src/content/docs/commands.md` (18 subcommands).
 
 ## Technical Overview
 

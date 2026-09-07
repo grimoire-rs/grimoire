@@ -1,0 +1,203 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; background: #161826; color: #e9e9ed; font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; font-size: 15px; line-height: 1.55; }
+    a { color: #d2cefd; text-decoration: none; }
+    a:hover { color: #9184d9; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  </style>
+</helmet>
+<div style="width: 1440px; min-height: 1960px; background: radial-gradient(1100px 640px at 88% -220px, rgba(43,39,65,0.62), transparent 62%), #161826; color: #e9e9ed; font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 15px; line-height: 1.55;">
+
+  <div style="border-bottom: 1px solid #3f424d;">
+    <div style="max-width: 1160px; margin: 0 auto; padding: 14px 64px; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 32px;">
+      <div style="display: flex; align-items: center; gap: 8.4px; justify-self: start;">
+        <svg viewBox="0 0 128 128" width="24" height="24" aria-hidden="true" style="display: block; flex: none;"><g transform="matrix(1.0668848,0,0,1.0668848,-4.2806272,4.7878936)"><path fill="#ffb02e" d="M 64,5 Q 68.5,25.5 90,30 68.5,34.5 64,55 59.5,34.5 38,30 59.5,25.5 64,5 Z"></path><path fill="#ffb02e" d="m 99,8 q 1.8,7.2 9,9 -7.2,1.8 -9,9 -1.8,-7.2 -9,-9 7.2,-1.8 9,-9 z"></path><path fill="#ffb02e" d="m 29,16 q 1.2,4.8 6,6 -4.8,1.2 -6,6 -1.2,-4.8 -6,-6 4.8,-1.2 6,-6 z"></path><path fill="#6d52f4" d="M 16,60 C 32,54 50,58 64,68 78,58 96,54 112,60 V 98 C 96,92 78,96 64,106 50,96 32,92 16,98 Z"></path><path fill="#dcd2fc" d="m 24,66 c 12,-4 26,-1 40,8 14,-9 28,-12 40,-8 V 92 C 92,88 78,90 64,98 50,90 36,88 24,92 Z"></path><path d="M 64,78 V 94" stroke="#6d52f4" stroke-width="3.5" stroke-linecap="round" fill="none"></path></g></svg>
+        <span style="font-weight: 500; font-size: 15px; letter-spacing: -0.01em;">grimoire<span style="color: #9184d9;">.rs</span></span>
+        <span class="mono" style="font-size: 12px; color: #84858d;">0.14.1</span>
+      </div>
+      <div class="mono" style="display: flex; align-items: center; gap: 8px; border: 1px solid #3f424d; border-radius: 8px; padding: 6px 12px; font-size: 12.5px; color: #84858d; width: 320px; justify-self: center;">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+        <span style="flex: 1;">search the docs</span>
+        <span style="border: 1px solid #3f424d; border-radius: 4px; padding: 0 5px; font-size: 11px;">/</span>
+      </div>
+      <div class="mono" style="display: flex; align-items: center; gap: 26px; font-size: 13px; justify-self: end;">
+        <a href="#">index</a>
+        <a href="#" style="color: #e9e9ed;">docs</a>
+        <a href="#">vscode</a>
+        <a href="#">source</a>
+      </div>
+    </div>
+  </div>
+
+  <div style="max-width: 1160px; margin: 0 auto; padding: 0 64px;">
+
+    <div style="padding: 60px 0 48px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 0.92fr); gap: 72px; align-items: center;">
+      <div>
+        <h1 style="font-weight: 500; font-size: 44px; line-height: 1.14; letter-spacing: -0.02em; margin: 0 0 0 -0.04em;">A lockfile for your AI-agent config.</h1>
+        <p style="font-size: 16.5px; line-height: 28px; margin: 22px 0 0; max-width: 46ch; color: #babbc1;">Skills, rules, agents and MCP servers — declared once, pinned by digest, written into each coding agent in the form it reads.</p>
+        <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 30px;">
+          <a href="#" style="display: inline-flex; align-items: center; gap: 8px; padding: 11px 20px; border-radius: 8px; font-weight: 500; font-size: 14.5px; line-height: 1.2; color: #14121f; background: #9184d9;">Install grim</a>
+          <a href="#" style="display: inline-flex; align-items: center; gap: 8px; padding: 11px 20px; border-radius: 8px; font-weight: 500; font-size: 14.5px; line-height: 1.2; color: #e9e9ed; border: 1px solid #595d6c;">Browse the index</a>
+          <a href="#" style="display: inline-flex; align-items: center; gap: 8px; padding: 11px 20px; border-radius: 8px; font-weight: 500; font-size: 14.5px; line-height: 1.2; color: #e9e9ed; border: 1px solid #595d6c;">Create your own</a>
+        </div>
+      </div>
+      <div style="border: 1px solid #3f424d; border-radius: 8px; overflow: hidden;">
+        <div style="display: flex; align-items: center; gap: 8px; padding: 9px 14px; border-bottom: 1px solid #3f424d; background: #1b1d2c;">
+          <span class="mono" style="font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: #9184d9;">see it run</span>
+          <span style="flex: 1;"></span>
+          <span class="mono" style="font-size: 12px; color: #84858d;">real grim, real registry · 0:42</span>
+        </div>
+        <pre class="mono" style="margin: 0; padding: 16px 18px; font-size: 13px; line-height: 24px; color: #e9e9ed; white-space: pre; overflow: hidden;"><span style="color: #9184d9;">$ </span>grim add ghcr.io/grimoire-rs/skills/grim-usage
+Kind   Name        Pinned                                    Status
+skill  grim-usage  ghcr.io/grimoire-rs/skills/grim-usage@sha256:f97…  added
+<span style="color: #9184d9;">$ </span>grim install --client claude
+Kind   Name        Target                                    Status
+skill  grim-usage  .claude/skills/grim-usage                 written
+<span style="color: #9184d9;">$ </span>grim status
+skill  grim-usage  installed</pre>
+      </div>
+    </div>
+
+    <div style="padding: 0 0 44px;">
+      <div style="display: flex; align-items: baseline; gap: 14px; border-bottom: 1px solid #595d6c; padding-bottom: 11.2px;">
+        <span class="mono" style="font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: #9184d9;">ways in</span>
+        <span style="flex: 1;"></span>
+        <span class="mono" style="font-size: 12px; color: #84858d;">each ends with something your agent shows you</span>
+      </div>
+      <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-auto-rows: 1fr; gap: 14px; padding-top: 18px;">
+        <a href="#" style="display: flex; flex-direction: column; gap: 5px; padding: 15px 16px; border-radius: 8px; border: 1px solid #3f424d; background: #1b1d2c; color: #e9e9ed;">
+          <strong style="font-weight: 500; font-size: 14.5px; line-height: 20px;">Quick start, from the shell</strong>
+          <span style="font-size: 12.5px; line-height: 19px; color: #90919a;">Install grim, add one published skill, watch your agent list it.</span>
+          <span class="mono" style="font-size: 12px; color: #d2cefd; margin-top: auto; padding-top: 8px; align-self: flex-end;">quick start →</span>
+        </a>
+        <a href="#" style="display: flex; flex-direction: column; gap: 5px; padding: 15px 16px; border-radius: 8px; border: 1px solid #3f424d; background: #1b1d2c; color: #e9e9ed;">
+          <strong style="font-weight: 500; font-size: 14.5px; line-height: 20px;">Browse the index</strong>
+          <span style="font-size: 12.5px; line-height: 19px; color: #90919a;">On the website, in the TUI, or from VS Code: pick from the catalog, install it, read the badges. Then narrow what your team sees.</span>
+          <span class="mono" style="font-size: 12px; color: #d2cefd; margin-top: auto; padding-top: 8px; align-self: flex-end;">browse the index →</span>
+        </a>
+                        <a href="#" style="display: flex; flex-direction: column; gap: 5px; padding: 15px 16px; border-radius: 8px; border: 1px solid #3f424d; background: #1b1d2c; color: #e9e9ed;">
+          <strong style="font-weight: 500; font-size: 14.5px; line-height: 20px;">Your first skill</strong>
+          <span style="font-size: 12.5px; line-height: 19px; color: #90919a;">A SKILL.md in a folder of your repo, rendered into every agent that works on it. Then one link to share it.</span>
+          <span class="mono" style="font-size: 12px; color: #d2cefd; margin-top: auto; padding-top: 8px; align-self: flex-end;">first skill →</span>
+        </a>
+      </div>
+    </div>
+
+    <div style="padding: 0 0 52px;">
+      <div style="display: flex; align-items: baseline; gap: 14px; border-bottom: 1px solid #595d6c; padding-bottom: 11.2px;">
+        <span class="mono" style="font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: #9184d9;">start from what you want to do</span>
+        <span style="flex: 1;"></span>
+        <span class="mono" style="font-size: 12px; color: #84858d;">each card names a real complaint · each path ends with a result on your screen</span>
+      </div>
+      <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); grid-auto-rows: 1fr; gap: 14px; padding-top: 18px;">
+                                <a href="#" style="display: flex; flex-direction: column; gap: 6px; padding: 17px 18px; border-radius: 8px; border: 1px solid #3f424d; color: #e9e9ed;">
+          <span class="mono" style="font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: #84858d;">guide · sharing</span>
+          <strong style="font-weight: 500; font-size: 15px; line-height: 21px;">One directory in your repo, every harness reads it</strong>
+          <span style="font-size: 12.5px; line-height: 19px; color: #90919a;">Commit skills, rules, agents and MCP servers once. Claude Code, Codex, Cursor and Copilot each get their native copy, in their own format, from that one source. Same trick machine-wide.</span>
+          <span class="mono" style="font-size: 12px; color: #d2cefd; margin-top: auto; padding-top: 10px; align-self: flex-end;">shared skills →</span>
+        </a>
+        <a href="#" style="display: flex; flex-direction: column; gap: 6px; padding: 17px 18px; border-radius: 8px; border: 1px solid #3f424d; color: #e9e9ed;">
+          <span class="mono" style="font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: #84858d;">guide · scope</span>
+          <strong style="font-weight: 500; font-size: 15px; line-height: 21px;">Same config in every repo, and none leaking where it should not</strong>
+          <span style="font-size: 12.5px; line-height: 19px; color: #90919a;">Project or global, which agents receive it, and how to move a skill later. Your global set as a dotfile for the next machine.</span>
+          <span class="mono" style="font-size: 12px; color: #d2cefd; margin-top: auto; padding-top: 10px; align-self: flex-end;">scopes and clients →</span>
+        </a>
+                <a href="#" style="display: flex; flex-direction: column; gap: 6px; padding: 17px 18px; border-radius: 8px; border: 1px solid #3f424d; color: #e9e9ed;">
+          <span class="mono" style="font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: #84858d;">guide · trust</span>
+          <strong style="font-weight: 500; font-size: 15px; line-height: 21px;">Know what a skill does before it lands in your agent</strong>
+          <span style="font-size: 12.5px; line-height: 19px; color: #90919a;">Read it, see who published it and from which commit, check its rating, pin the digest. From the shell, the TUI or VS Code.</span>
+          <span class="mono" style="font-size: 12px; color: #d2cefd; margin-top: auto; padding-top: 10px; align-self: flex-end;">inspect before you install →</span>
+        </a>
+        <a href="#" style="display: flex; flex-direction: column; gap: 6px; padding: 17px 18px; border-radius: 8px; border: 1px solid #3f424d; color: #e9e9ed;">
+          <span class="mono" style="font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: #84858d;">guide · registries</span>
+          <strong style="font-weight: 500; font-size: 15px; line-height: 21px;">Show your team only your namespace, keep the public index too</strong>
+          <span style="font-size: 12.5px; line-height: 19px; color: #90919a;">Two registries, one filtered to acme/, so nobody installs a look-alike from the wrong source. What the filters change and what they never touch.</span>
+          <span class="mono" style="font-size: 12px; color: #d2cefd; margin-top: auto; padding-top: 10px; align-self: flex-end;">company registries →</span>
+        </a>
+                <a href="#" style="display: flex; flex-direction: column; gap: 6px; padding: 17px 18px; border-radius: 8px; border: 1px solid #3f424d; color: #e9e9ed;">
+          <span class="mono" style="font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: #84858d;">guide · lifecycle</span>
+          <strong style="font-weight: 500; font-size: 15px; line-height: 21px;">Update without losing the file you edited</strong>
+          <span style="font-size: 12.5px; line-height: 19px; color: #90919a;">What install, update and status do to each file, what "modified" means, how to keep an edit on purpose or go back to the published version.</span>
+          <span class="mono" style="font-size: 12px; color: #d2cefd; margin-top: auto; padding-top: 10px; align-self: flex-end;">install, update, status →</span>
+        </a>
+        <a href="#" style="display: flex; flex-direction: column; gap: 6px; padding: 17px 18px; border-radius: 8px; border: 1px solid #3f424d; color: #e9e9ed;">
+          <span class="mono" style="font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: #84858d;">guide · versions</span>
+          <strong style="font-weight: 500; font-size: 15px; line-height: 21px;">Which reference moves on update, and which never does</strong>
+          <span style="font-size: 12.5px; line-height: 19px; color: #90919a;">Floating tags, pinned digests, and the rolling 1, 1.2, 1.2.3 tags a release moves at once.</span>
+          <span class="mono" style="font-size: 12px; color: #d2cefd; margin-top: auto; padding-top: 10px; align-self: flex-end;">versioning →</span>
+        </a>
+        <a href="#" style="display: flex; flex-direction: column; gap: 6px; padding: 17px 18px; border-radius: 8px; border: 1px solid #3f424d; color: #e9e9ed;">
+          <span class="mono" style="font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: #84858d;">teams and automation</span>
+          <strong style="font-weight: 500; font-size: 15px; line-height: 21px;">Prove in CI that the reviewed skills are the ones that shipped</strong>
+          <span style="font-size: 12.5px; line-height: 19px; color: #90919a;">Everyone installs the same digests from one lock, and the build fails the moment someone changes the config without relocking.</span>
+          <span class="mono" style="font-size: 12px; color: #d2cefd; margin-top: auto; padding-top: 10px; align-self: flex-end;">team and CI →</span>
+        </a>
+        <a href="#" style="display: flex; flex-direction: column; gap: 6px; padding: 17px 18px; border-radius: 8px; border: 1px solid #3f424d; color: #e9e9ed;">
+          <span class="mono" style="font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: #84858d;">tutorial</span>
+          <strong style="font-weight: 500; font-size: 15px; line-height: 21px;">Private skills, your own index, nothing to host</strong>
+          <span style="font-size: 12.5px; line-height: 19px; color: #90919a;">From a skill on disk to a colleague's install, under your namespace, on the registry and Pages you already have.</span>
+          <span class="mono" style="font-size: 12px; color: #d2cefd; margin-top: auto; padding-top: 10px; align-self: flex-end;">run your own index →</span>
+        </a>
+      </div>
+    </div>
+
+    <div style="padding: 0 0 52px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 32px;">
+      <div style="display: flex; flex-direction: column; gap: 8px;">
+        <span class="mono" style="font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: #9184d9;">getting started</span>
+        <a href="#" style="font-size: 14px; line-height: 22px; color: #babbc1;">Installation</a>
+        <a href="#" style="font-size: 14px; line-height: 22px; color: #babbc1;">Quick start</a>
+        <a href="#" style="font-size: 14px; line-height: 22px; color: #babbc1;">Browse the index</a>
+        <a href="#" style="font-size: 14px; line-height: 22px; color: #babbc1;">Your first skill</a>
+        <a href="#" style="font-size: 14px; line-height: 22px; color: #babbc1;">Concepts</a>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 8px;">
+        <span class="mono" style="font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: #9184d9;">guides</span>
+        <a href="#" style="font-size: 14px; line-height: 22px; color: #babbc1;">Scopes and clients</a>
+        <a href="#" style="font-size: 14px; line-height: 22px; color: #babbc1;">Shared skills</a>
+        <a href="#" style="font-size: 14px; line-height: 22px; color: #babbc1;">Inspect before you install</a>
+        <a href="#" style="font-size: 14px; line-height: 22px; color: #babbc1;">MCP servers everywhere</a>
+        <a href="#" style="font-size: 14px; line-height: 22px; color: #babbc1;">Versioning</a>
+        <a href="#" style="font-size: 14px; line-height: 22px; color: #babbc1;">Install, update, status</a>
+        <a href="#" style="font-size: 14px; line-height: 22px; color: #babbc1;">Client compatibility</a>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 8px;">
+        <span class="mono" style="font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: #9184d9;">teams and automation</span>
+        <a href="#" style="font-size: 14px; line-height: 22px; color: #babbc1;">Run your own index</a>
+        <a href="#" style="font-size: 14px; line-height: 22px; color: #babbc1;">Team and CI</a>
+        <a href="#" style="font-size: 14px; line-height: 22px; color: #babbc1;">Catalog best practices</a>
+        <a href="#" style="font-size: 14px; line-height: 22px; color: #babbc1;">Company registries</a>
+        <a href="#" style="font-size: 14px; line-height: 22px; color: #babbc1;">Publishing</a>
+        <a href="#" style="font-size: 14px; line-height: 22px; color: #babbc1;">Release automation</a>
+        <a href="#" style="font-size: 14px; line-height: 22px; color: #babbc1;">Self-hosted GitLab</a>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 8px;">
+        <span class="mono" style="font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: #9184d9;">reference</span>
+        <a href="#" style="font-size: 14px; line-height: 22px; color: #babbc1;">Commands</a>
+        <a href="#" style="font-size: 14px; line-height: 22px; color: #babbc1;">Configuration</a>
+        <a href="#" style="font-size: 14px; line-height: 22px; color: #babbc1;">Artifact formats</a>
+        <a href="#" style="font-size: 14px; line-height: 22px; color: #babbc1;">JSON interface</a>
+        <a href="#" style="font-size: 14px; line-height: 22px; color: #babbc1;">Stability and upgrading</a>
+      </div>
+    </div>
+
+    <div class="mono" style="padding: 22px 0 70px; border-top: 1px solid #3f424d; display: flex; flex-wrap: wrap; gap: 12px 32px; align-items: baseline; font-size: 12.5px;">
+      <a href="#">documentation</a>
+      <a href="#">stability</a>
+      <a href="#">privacy</a>
+      <a href="#">Apache-2.0</a>
+      <span style="flex: 1;"></span>
+      <span style="color: #84858d;">artifacts live in your registry, not ours</span>
+    </div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>
