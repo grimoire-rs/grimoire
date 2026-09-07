@@ -22,6 +22,8 @@ Pages][gh-pages] or [GitLab Pages][gl-pages] — and the forge you already
 pay for hosts the result. There is no index server, no database, and no
 account to create.
 
+## Before You Start {#before-you-start}
+
 > **Want it as a checklist?** [Run your own index][wizard] walks the same
 > setup step by step, switched between GitHub and GitLab. This page is the
 > reference behind it. On GitHub you can also skip step one entirely and

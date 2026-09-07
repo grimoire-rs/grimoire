@@ -486,6 +486,32 @@ identical to what the install would write, it is **adopted** into the
 install record and reported `unchanged` — so deleting the state file while
 leaving rendered files intact repairs itself on the next install.
 
+Before any of that, install checks that the lock still describes the config
+it was resolved from. `grimoire.lock` records a `declaration_hash` of the
+declarations it was built from; a hand-edited `grimoire.toml`, or a merge
+that brought in a declaration nobody locked, leaves that hash behind the
+live config. Installing from a stale lock exits **65** having written
+nothing at all — the refusal lands before the first artifact is touched:
+
+```text
+grimoire.lock is stale (declaration_hash sha256:4bbd… does not match current sha256:ce14…); run `grim lock` before installing
+```
+
+Under `--format json` the run emits an
+[error document](./json-interface.md#error-document) and no report.
+
+This is the check to put in CI. [`grim status --check`](#status-check) sees
+the same divergence and prints `stale` on every row, but it is a report,
+not a gate: it exits `0` whatever it found. So the command that actually
+fails a build when the lock and the config disagree is `grim install`, and
+[`grim lock`](#lock) is what makes them agree again.
+
+The neighbouring refusals differ in both code and cure: no lock at all is
+exit **79**, ``no grimoire.lock found at <path>; run `grim lock` first``,
+while a full [`grim update`](#update) re-resolves and rewrites the lock
+rather than refusing it — only a partial `grim update <name>` refuses, at
+exit `65` with its own message.
+
 ```sh
 grim install
 grim install --client claude,copilot
@@ -594,8 +620,11 @@ run it, [`grim status`](#status) surfaces that drift ahead of time as
 
 ## grim status {#status}
 
-Reports each declared artifact's state — installed, outdated, locally modified,
-integrity-missing, or not installed. The `Source` column shows each artifact's
+Reports each declared artifact's state in a `State` column, one of
+`installed`, `outdated`, `modified`, `missing`, or `stale` — the five words
+are defined under [artifact states](#artifact-states), alongside the
+vocabularies the [TUI](#tui) and [`grim search`](#search) print, which
+differ from this one. The `Source` column shows each artifact's
 [provenance](./concepts.md#bundles): `direct` for a registry declaration, the
 bundle it came from, `path: <path>` for a declared [local path
 source](#add-path), or `path: <path> (dev)` for a [dev-installed](#install-dev)
@@ -735,13 +764,95 @@ vanished), and `null` for a row with no lock pin (declared-bundle,
 dev-install, [path source](#add-path)), a bundle-member row (it updates via
 its bundle, not its own tag), or an artifact whose re-resolution failed — a
 completed re-resolve never reports `null`, and a failed one never lies as
-`false`. These per-artifact checks run with bounded concurrency; `status`
-still always exits `0`.
+`false`. These per-artifact checks run with bounded concurrency, and no
+state they find changes the exit code. Only a broken read fails `status`, such
+as a corrupt lock, which exits `78`.
 
 ```sh
 grim status --check
 grim status --check --format json
 ```
+
+## Artifact states {#artifact-states}
+
+One artifact, three renderers, three word lists. [`grim status`](#status)
+reports five states, the [TUI](#tui) seven, and [`grim search`](#search)'s
+install badge five again. The badge's five are a strict subset of the
+TUI's seven. `grim status` is the one that stands apart: it shares only
+`installed`, `outdated` and `modified` with the other two, and its
+`missing` and `stale` appear in neither. This section is where every one
+of those words is defined.
+
+`grim status` derives exactly one state per declared artifact, testing in
+this order and taking the first that matches: `stale`, `missing`,
+`modified`, `outdated`, `installed`.
+
+| State | Meaning | Remedy |
+|---|---|---|
+| `installed` | Locked, an install record exists, every present output matches its recorded hash, and the recorded source content equals the lock's. | — |
+| `outdated` | Recorded, outputs intact, but the installed content differs from the lock pin. | [`grim install`](#install) |
+| `modified` | Recorded, outputs present, at least one drifted from its recorded hash — a hand edit. | Keep the edit, or [`grim install --force`](#install) to overwrite it |
+| `missing` | No lock entry, **or** no install record, **or** a recorded output absent from disk. | [`grim install`](#install) — preceded by [`grim lock`](#lock) when the lock has no entry for it |
+| `stale` | `grimoire.lock`'s `declaration_hash` no longer matches the live config. | [`grim lock`](#lock) |
+
+Two of those rows say less than they appear to. `missing` collapses
+never-installed and installed-then-deleted into a single word; the
+`outputs` array under `--format json`, empty versus populated, is what
+tells the two apart. And `stale` is not a fact about the artifact at all —
+it is tested first, so it lands on **every** row at once and reports only
+that the lock and the config have diverged, saying nothing about any
+individual artifact's footprint. It is the same condition
+[`grim install`](#install) refuses on with exit **65**, while `grim status`
+still exits `0`.
+
+The [TUI](#tui) carries no `stale` — that one describes the scope, not a
+row — and adds four words of its own:
+
+| State | What it adds |
+|---|---|
+| `not-installed` | Not declared, locked, or recorded in this scope. The TUI shows catalog rows `grim status` never lists, so it needs a word for them. |
+| `via-bundle` | A [bundle](./concepts.md#bundles) member that is present and intact but not also declared standalone. `modified`, `outdated` and `integrity-missing` outrank it. |
+| `pending` | Present and intact at the locked pin, but an install would still write an output the record never covered — a client that appeared since the install, or a render-layout move. [`grim install`](#install) clears it. |
+| `integrity-missing` | An install record exists, but one or more client outputs are missing or unreadable, so the integrity record cannot be honoured. |
+
+`installed`, `outdated` and `modified` keep their `grim status` meanings.
+`pending` ranks below every problem state and only ever replaces
+`installed`.
+
+Where several states roll up into one row the worst wins, and the two
+places that happens rank them differently. A **tree group** shows
+
+```text
+integrity-missing > modified > outdated > not-installed > pending > installed
+```
+
+so one not-installed leaf beside a pending one renders `not-installed`,
+and a group with no leaves at all renders `not-installed` too. A **bundle
+row** drops `not-installed` from the ladder and folds an un-materialized
+member into `pending` instead:
+
+```text
+integrity-missing > modified > outdated > pending > installed
+```
+
+Declaration is the gate there — a bundle absent from `[bundles]` reads
+`not-installed` whatever its members look like — so no member can drag
+the row back across the line declaration owns.
+
+[`grim search`](#search)'s install badge is the TUI's list minus two —
+`installed`, `not-installed`, `outdated`, `modified`, `pending` — carrying
+neither `integrity-missing` nor `via-bundle` (and no `stale` either, for
+the reason above), because a catalog row is
+asked one question only: would installing this change anything here. That
+leaves one crossing worth naming. An artifact whose output you deleted
+reads `not-installed` on the search badge and `missing` under
+[`grim status`](#status): the badge answers *is there work to do*, the
+state answers *is the record whole*.
+
+Every other page links this section rather than repeating the words —
+including [the JSON `state` field](./json-interface.md#shapes-items), which
+names the five `grim status` values and defines none of them. There is one
+place to fix when the vocabulary moves.
 
 ## grim context {#context}
 
@@ -892,10 +1003,10 @@ Because a fuzzy query matches many more repositories than a substring one,
 results are **ranked by relevance**, best match first, across every browsed
 registry at once. A hit on the artifact's own name outranks the same word
 found only in a description. Ranking replaces registry-declaration order
-whenever there is a query; every row still names the registry that served it
-in its source column (and in the `source` object under `--format json`). The
-unqueried browse is not ranked and still lists registry by registry, in
-declaration order.
+whenever there is a query. What attributes each row to the registry that
+served it is the `source` object under `--format json`, described below.
+The unqueried browse is not ranked and still lists registry by registry,
+in declaration order.
 `--refresh` forces a catalog rebuild; `--registry <ref>` collapses the
 browse to exactly the registries it names — repeatable and comma-separated
 (`--registry a,b` or `--registry a --registry b`), first value is primary.
@@ -1638,11 +1749,11 @@ spared: its files stay on disk and its lock entry only loses the deleted
 bundle's provenance.
 
 The row's own state folds in the health of its members. Declaration is the
-gate — a bundle absent from `[bundles]` reads `not installed` whatever its
-members look like — but past it the row shows the **worst** member state, at
-the same precedence the tree rollup uses: `integrity-missing` over `modified`
-over `outdated` over `pending` over `installed`. A member that was never
-materialized folds in as `pending`, not `not installed`, so no member can drag
+gate — a bundle absent from `[bundles]` reads `not-installed` whatever its
+members look like — but past it the row shows the **worst** member state,
+on the bundle-row ladder under [artifact states](#artifact-states). A
+member that was never
+materialized folds in as `pending`, not `not-installed`, so no member can drag
 the row back across the line declaration owns. That is what makes the bundle
 actionable as a unit: a flat `installed` would hide the damage *and* refuse
 `i`, leaving nothing to press.

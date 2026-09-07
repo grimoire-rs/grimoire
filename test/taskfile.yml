@@ -50,17 +50,15 @@ tasks:
           CLI_ARGS: '-n auto {{.CLI_ARGS | default "-v"}}'
 
   demo:
-    desc: Record the landing-page demo cast (init/add/status against the real registry)
+    desc: Record every cast declared under test/recordings/casts/ (task test:demo)
     summary: |
-      Runs test/recordings/test_record_demo.py against a real grim binary and
-      the real, published ghcr.io/grimoire-rs/skills/grim-usage package, and
-      overwrites docs/src/demo.cast -- the asset the landing page plays
-      through the vendored asciinema-player (docs/theme/index.hbs "see it
-      run"). Outside `testpaths`, so `task test` never collects it --
-      explicit invocation only. Unlike the schema/GIF assets this replaced,
-      demo.cast is committed: review the diff (`git diff docs/src/demo.cast`)
-      after re-running this and commit it deliberately, the same as any
-      other tracked doc asset.
+      Runs test/recordings/test_record_casts.py, parametrized over
+      test/recordings/casts/*.yaml, against a real grim binary. Each cast
+      declares its own output path and asserts its own output, so a cast is
+      only written when its commands succeeded. The casts are committed
+      assets -- review the diff (`git diff docs/public/`) after re-running
+      and commit deliberately. Outside `testpaths`, so `task test` never
+      collects it.
     cmds:
       - task: build
         vars:

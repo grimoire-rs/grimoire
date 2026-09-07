@@ -9,31 +9,51 @@ Consuming artifacts is only half of Grimoire. The other half is producing them:
 turning a local skill directory or rule file into a versioned OCI artifact that
 others can [`grim add`](./commands.md#add).
 
+## From a skill on disk to a published artifact {#on-disk-to-published}
+
+Seven steps carry a directory on your disk to a package a colleague installs
+by name. Each step links to the section that covers it.
+
+1. Write the artifact: [Author locally](#author-locally).
+2. Validate it without pushing: [Validate before you push](#validate-before-you-push).
+3. Declare it in a manifest: [The publish.toml format](#batch-publish-manifest).
+4. Pick the repository path: [Repository namespace](#batch-publish-namespace).
+5. Sign in to the registry: [Authenticate](#authenticate).
+6. Push the whole set: [Batch publishing with a manifest](#batch-publish).
+7. Add a pointer to an index: [Announcing Packages](./package-index.md#announcing).
+
+For one worked run of all seven, follow
+[Publish a skill to your own index](./tutorials/own-index.md).
+
 ## Author locally
 
-A **skill** is a directory containing a `SKILL.md` and any supporting files; a
-**rule** is a Markdown file, optionally with a
-[sibling support directory](#rule-support-dir); an
-[**agent**](./agents.md) is a Markdown file defining a delegatable assistant;
-an [**MCP server**](./mcp-servers.md) is a `mcp/<name>.toml` file describing
-how to launch or reach a Model Context Protocol server; a
+A **skill** is a directory containing a `SKILL.md` and any supporting files.
+A **rule** is a Markdown file, optionally with a
+[sibling support directory](#rule-support-dir). An
+[**agent**](./agents.md) is a Markdown file defining a delegatable assistant.
+An [**MCP server**](./mcp-servers.md) is a `mcp/<name>.toml` file describing
+how to launch or reach a Model Context Protocol server. A
 [**bundle**](./concepts.md#bundles) is a `.toml` file listing members.
-Grimoire detects which one you mean from the path — a directory packs as a
-skill, a `.md` file as a rule, a `.toml` file as a bundle — and `--kind`
-overrides the guess when you need to. Two kinds **require** the flag because
-their shape collides with another kind's: an agent needs `--kind agent`
-(its `.md` shape is indistinguishable from a rule; see
-[Agent Artifacts](./agents.md#publishing)), and an MCP server needs
-`--kind mcp` (its `.toml` shape is indistinguishable from a bundle; see
-[MCP Server Artifacts](./mcp-servers.md#publishing)). grim never guesses
-either from content — it only nudges with a hint once the file's shape
-(a `[server]` table, a `name`+`description` pair) makes the mismatch obvious.
+
+Grimoire detects which one you mean from the path. A directory packs as a
+skill, a `.md` file as a rule, a `.toml` file as a bundle, and `--kind`
+overrides the guess where that is wrong. Two kinds **require** the flag
+because their shape collides with another kind's. An agent needs
+`--kind agent`, because its `.md` shape is indistinguishable from a rule
+(see [Agent Artifacts](./agents.md#publishing)). An MCP server needs
+`--kind mcp`, because its `.toml` shape is indistinguishable from a bundle
+(see [MCP Server Artifacts](./mcp-servers.md#publishing)).
+
+grim never guesses either from content. It only nudges with a hint once the
+file's shape makes the mismatch obvious, such as a `[server]` table or a
+`name` plus `description` pair.
 
 ### Rules with a support directory {#rule-support-dir}
 
-An index rule often references extra context — examples, a schema, a script —
-that does not belong inside the rule body. Put those in a folder beside the
-rule that shares its stem, and Grimoire packs both into the one artifact:
+An index rule often references extra context that does not belong inside the
+rule body, such as examples, a schema, or a script. Put those in a folder
+beside the rule that shares its stem, and Grimoire packs both into the one
+artifact:
 
 ```
 rules/
@@ -44,7 +64,7 @@ rules/
 ```
 
 You still point [`grim build`](./commands.md#build) and
-[`grim release`](./commands.md#release) at the index `.md` file — the sibling
+[`grim release`](./commands.md#release) at the index `.md` file. The sibling
 directory is discovered automatically when it exists:
 
 ```sh
@@ -54,15 +74,16 @@ grim release ./my-rule.md ghcr.io/acme/my-rule:1.0.0
 Every file under `my-rule/` rides along in the same layer and installs beside
 the index (`.claude/rules/my-rule.md` + `.claude/rules/my-rule/…`), so the
 index's relative links resolve on the consumer. Support files are copied
-verbatim for every [client](./concepts.md#clients) — only the index is ever
-transformed. A rule with no support directory packs to exactly the single
+verbatim for every [client](./concepts.md#clients), and only the index is
+ever transformed. A rule with no support directory packs to exactly the single
 `my-rule.md` it always did.
 
 ### Agents with a README and logo {#agent-companions}
 
 An [agent](./agents.md) is a single `.md`, but it may carry a `README.md` and a
-`logo.png`/`logo.svg` from a sibling directory sharing its stem — the same
-discovery as a rule's support directory, restricted to those well-known files:
+`logo.png`/`logo.svg` from a sibling directory sharing its stem. That is the
+same discovery as a rule's support directory, restricted to those well-known
+files:
 
 ```
 agents/
@@ -81,10 +102,10 @@ same path shape as a skill or rule:
 grim fetch ghcr.io/acme/code-reviewer:1.0.0 --path code-reviewer/README.md
 ```
 
-The companions are **not** installed to a client — an agent installs as its
-lone `.md` file; they exist for `grim fetch` and catalog UIs. An agent with no
-companion directory packs to exactly the single `code-reviewer.md` it always
-did.
+The companions are **not** installed to a client. An agent installs as its
+lone `.md` file, and the companions exist for `grim fetch` and catalog UIs.
+An agent with no companion directory packs to exactly the single
+`code-reviewer.md` it always did.
 
 MCP servers and bundles publish a single JSON layer with no file tree of their
 own, so they carry no *in-tree* README. For a README that works uniformly across
@@ -94,22 +115,25 @@ every kind, publish a [repository description companion](#description-companion)
 
 The in-tree READMEs above ride each artifact's own layer, so they cover the
 tree-backed kinds (skill, rule, agent) but not mcp or bundle. A **description
-companion** is a repository-level channel that works for *every* kind: it is the
-one home for all of a repo's descriptive data — a `README.md`, a `CHANGELOG.md`,
-a logo, and any assets the README references — published to the reserved
-`__grimoire` tag in the same repository as each artifact.
+companion** is a repository-level channel that works for *every* kind. It is
+the one home for all of a repo's descriptive data, meaning a `README.md`, a
+`CHANGELOG.md`, a logo, and any assets the README references. It publishes to
+the reserved `__grimoire` tag in the same repository as each artifact.
 
-The companion is not a separate command — it rides
+The companion is not a separate command. It rides
 [`grim publish`](#batch-publish). After each entry's artifact is pushed, grim
 (re)points that repository's `__grimoire` tag at a deterministic tar of the
-repo's descriptive files. The companion is marked `com.grimoire.kind: desc`; it
-is **not** an artifact kind, so it never installs, resolves, or appears in a
-catalog, and its reserved `__grimoire` tag is hidden from every user-facing tag
-listing (`grim describe` `tags[]`, the TUI version picker, catalog version
-selection). Direct resolution of the tag still works. Because the pack is
-byte-stable, republishing unchanged content produces an identical digest — the
-registry stores nothing new (the tag is always re-pointed, never gated by
-skip-existing).
+repo's descriptive files.
+
+The companion is marked `com.grimoire.kind: desc`. That is **not** an artifact
+kind, so it never installs, resolves, or appears in a catalog. Its reserved
+`__grimoire` tag is hidden from every user-facing tag listing, including
+`grim describe` `tags[]`, the TUI version picker, and catalog version
+selection. Direct resolution of the tag still works.
+
+Because the pack is byte-stable, republishing unchanged content produces an
+identical digest and the registry stores nothing new. The tag is always
+re-pointed, never gated by skip-existing.
 
 ### Conventional layout {#description-probe}
 
@@ -122,16 +146,16 @@ conventional files and publishes a companion when it finds any:
 | `CHANGELOG.md` | `CHANGELOG.md` |
 | `assets/logo.png` / `assets/logo.svg` / `logo.png` / `logo.svg` (first hit) | `logo.png` / `logo.svg` |
 
-Every member is optional — a repo with just a `README.md` publishes a
+Every member is optional, so a repo with just a `README.md` publishes a
 one-file companion. Probe misses are silent: a manifest directory with none of
 these files simply publishes no companion, which is not an error.
 
 ### The `[description]` table {#description-table}
 
-To decouple the companion from your repository layout — or to add extra
-assets — declare a `[description]` table. Its paths are relative to
-`publish.toml`, and the well-known members map their source onto the fixed
-wire name, so your repo can lay files out however it likes:
+Declare a `[description]` table to decouple the companion from your repository
+layout, or to add extra assets. Its paths are relative to `publish.toml`. The
+well-known members map their source onto the fixed wire name, so your repo
+can lay files out however it likes:
 
 ```toml
 [description]                     # optional; fans out to every entry
@@ -143,14 +167,16 @@ include   = ["docs/img/*.png"]    # extra assets — keep their relative path
 ```
 
 `include` globs (`*`/`?` within a segment, `**` across segments) pull in
-README-referenced assets; each hit keeps its manifest-relative path on the
+README-referenced assets, and each hit keeps its manifest-relative path on the
 wire. An explicit `readme`/`logo`/`changelog` path that does not exist is a
-data error (exit 65) — an explicit config must not silently skip. A companion
-path — a well-known member or an `include` hit — that resolves *outside* the
-manifest directory (a `..` segment, an absolute path, or a symlink whose target
-escapes the tree) is likewise a data error (exit 65), checked before any push;
-a leading `./` is accepted (`./README.md` ≡ `README.md`).
-A `[description]` table that resolves to zero files is a data error too;
+data error (exit 65), because an explicit config must not silently skip.
+
+The same applies to a companion path that resolves *outside* the manifest
+directory, whether it is a well-known member or an `include` hit. A `..`
+segment, an absolute path, or a symlink whose target escapes the tree is a
+data error (exit 65), checked before any push. A leading `./` is accepted
+(`./README.md` is the same as `README.md`).
+A `[description]` table that resolves to zero files is a data error too, and
 `publish = false` disables the auto-companion for the whole manifest.
 
 ### Fan-out, override, and opt-out {#description-fanout}
@@ -173,18 +199,19 @@ repository = "grimoire-rs/mcp/grim"
 description = false                  # this repo gets no companion
 ```
 
-A `--dry-run` publish lists the planned companion pushes (`descriptions` in
-the [JSON report](#batch-publish-report), digest `null`) without touching the
-registry, so you can confirm the fan-out before it happens. Validation parity:
-a dry run still containment- and size-checks every companion and packs it into
-its layer, so a bad companion fails the dry run — only the registry push is
-skipped, and either way zero registry mutations occur.
+A `--dry-run` publish lists the planned companion pushes without touching the
+registry, so you can confirm the fan-out before it happens. They appear as
+`descriptions` in the [JSON report](#batch-publish-report), with digest
+`null`. Validation is at
+parity. A dry run still containment-checks and size-checks every companion
+and packs it into its layer, so a bad companion fails the dry run. Only the
+registry push is skipped, and either way zero registry mutations occur.
 
 ### Read it back {#description-read}
 
 Read the companion with
-[`grim fetch --description`](./commands.md#fetch-description) — the
-reserved `__grimoire` tag is a grim-internal implementation detail; the
+[`grim fetch --description`](./commands.md#fetch-description). The
+reserved `__grimoire` tag is a grim-internal implementation detail. The
 flag is the documented way to reach it, so nothing outside grim needs to
 type or know the tag:
 
@@ -195,10 +222,11 @@ grim fetch ghcr.io/acme/mcp/postgres --description --out ./docs                 
 ```
 
 `--format json` reports `kind: "desc"` and every packed file inline in
-`files[]` — README, logo, changelog, and any README-referenced assets — in
-one call, bounded by the same 8 MiB layer gate as any fetch. A repository
-with no companion published returns a clean *not-found* error, so a
-consumer can fall back to an in-tree README. [`grim describe`](./commands.md#describe)'s
+`files[]`, in one call, bounded by the same 8 MiB layer gate as any fetch.
+That covers the README, the logo, the changelog, and any README-referenced
+assets. A repository with no companion published returns a clean *not-found*
+error, so a consumer can fall back to an in-tree README.
+[`grim describe`](./commands.md#describe)'s
 `has_description` field answers "does this repository have one?" without
 a probe fetch at all.
 
@@ -208,22 +236,22 @@ The companion is a separate manifest under the repository's reserved
 `__grimoire` tag, distinct from the artifact's version tags. That distinction
 matters when you replicate a repository between registries.
 
-A **single-tag** copy — [`skopeo copy`][skopeo] or [`oras cp`][oras] naming one
-tag like `:1.2.3` — carries only that tag's manifest and blobs. It does **not**
-follow the `__grimoire` tag, so the mirror ends up with the artifact but no
-description companion; a later `grim fetch --description` against the mirror
-returns *not-found*.
+A **single-tag** copy carries only that tag's manifest and blobs. That is
+[`skopeo copy`][skopeo] or [`oras cp`][oras] naming one tag like `:1.2.3`.
+It does **not** follow the `__grimoire` tag, so the mirror ends up with the
+artifact but no description companion. A later `grim fetch --description`
+against the mirror returns *not-found*.
 
-A **full-repository** sync — every tag, e.g. `skopeo sync` or `oras cp
---recursive` over the whole repository — carries the `__grimoire` tag along
-with the version tags, so the companion survives. Mirror the whole repository
-(or re-run `grim publish` against the destination) when you need the companion
-to travel with the artifact.
+A **full-repository** sync carries the `__grimoire` tag along with the
+version tags, so the companion survives. That is every tag, for example
+`skopeo sync` or `oras cp --recursive` over the whole repository. Mirror the
+whole repository, or re-run `grim publish` against the destination, when you
+need the companion to travel with the artifact.
 
 The `__grimoire` namespace is a **grim-client-side convention**, not a
-registry-enforced reservation. grim refuses to publish a `__grimoire` /
-`__grimoire.<x>` reference itself, but any other OCI tool can still write that
-tag directly — treat the namespace as reserved only within grim's own tooling,
+registry-enforced reservation. A `__grimoire` or `__grimoire.<x>` reference is
+one grim refuses to publish itself. Any other OCI tool can still write that
+tag directly. Treat the namespace as reserved only within grim's own tooling,
 not as a guarantee the registry upholds.
 
 ## Catalog metadata {#metadata}
@@ -251,13 +279,13 @@ A skill's top-level `compatibility` field is published too, as
 downloading the artifact.
 
 `grim search` shows the `summary` in place of the `description`, truncated to
-fit the terminal; the full description stays in `--format json` and in piped
+fit the terminal. The full description stays in `--format json` and in piped
 output. Search matches the repository, summary, description, **and** keywords,
 so a query hits regardless of which one carries the term. Omit `summary` and
 the catalog falls back to the description.
 
 You author this metadata in the source file, so a `grim release` always
-publishes whatever the file currently says — no separate flags to remember.
+publishes whatever the file says, with no separate flags to remember.
 Where it lives differs by kind.
 
 ### In a skill {#metadata-skill}
@@ -280,7 +308,7 @@ metadata:
 
 ### In a rule {#metadata-rule}
 
-A rule has no `description` field — that is derived from the body's first
+A rule has no `description` field. That is derived from the body's first
 heading or paragraph. `summary` and `keywords` sit at the top level of its
 frontmatter:
 
@@ -298,7 +326,7 @@ repository: https://github.com/acme/rust-style
 
 ### In an agent {#metadata-agent}
 
-An agent authors catalog metadata in its `metadata` map, like a skill; the
+An agent authors catalog metadata in its `metadata` map, like a skill. The
 required `description` doubles as the full catalog description:
 
 ```yaml
@@ -315,9 +343,9 @@ metadata:
 
 ### In an MCP server descriptor {#metadata-mcp-server}
 
-An [MCP server descriptor](./mcp-servers.md) authors every metadata field —
-including `description` — as **top-level** TOML keys, the same shape as a
-bundle rather than a skill or agent: there is no nested `metadata` map:
+An [MCP server descriptor](./mcp-servers.md) authors every metadata field as
+**top-level** TOML keys, `description` included. That is the same shape as a
+bundle rather than a skill or agent, and there is no nested `metadata` map:
 
 ```toml
 # mcp/acme-search.toml
@@ -331,15 +359,15 @@ transport = "http"
 url = "https://mcp.acme.internal/search"
 ```
 
-A descriptor accepts the same optional keys as every other kind — `license`,
+A descriptor accepts the same optional keys as every other kind: `license`,
 `authors`, `vendor`, `homepage`, `documentation`, `deprecated`, and
 `replaced-by`.
 
 [`grim build`](./commands.md#build) and [`grim release`](./commands.md#release)
-require `--kind mcp` for an MCP descriptor: its `.toml` shape is
+require `--kind mcp` for an MCP descriptor. Its `.toml` shape is
 bundle-shaped by default, and grim only nudges toward `--kind mcp` once it
-notices a `[server]` table (`grim publish` needs no flag — a manifest
-entry's kind is fixed by which table it sits in). See
+notices a `[server]` table. `grim publish` needs no flag, because a manifest
+entry's kind is fixed by which table it sits in. See
 [MCP Server Artifacts](./mcp-servers.md#publishing) for the full field
 reference and validation rules.
 
@@ -364,27 +392,29 @@ rust-style = "ghcr.io/acme/rust-style:2"
 
 ### Keywords are a string {#metadata-keywords}
 
-`keywords` is always a single comma-separated string — in every kind — because
+`keywords` is always a single comma-separated string, in every kind, because
 an OCI annotation value is itself a string. A YAML or TOML list is **not**
-accepted; write `keywords: rust,lint`, not `keywords: [rust, lint]`.
+accepted. Write `keywords: rust,lint`, not `keywords: [rust, lint]`.
 
 ### Repository URL {#metadata-repository}
 
 `repository` links a published artifact back to the source repository it
-came from. The value must be an `https://` URL (GitHub, GitLab, or any
-forge) — a `git@…` or `http://` value fails the release with exit 65, the
-same hard gate that guards [vendor metadata](./vendor-metadata.md#publish-validation).
-The URL must **not** carry embedded credentials: an authored
+came from. The value must be an `https://` URL, from GitHub, GitLab, or any
+other forge. A `git@…` or `http://` value fails the release with exit 65,
+the same hard gate that guards
+[vendor metadata](./vendor-metadata.md#publish-validation).
+
+The URL must **not** carry embedded credentials. An authored
 `https://token@host/owner/repo` fails the release with exit 65 rather than
-publishing the secret in the manifest. (grim never strips an *authored*
-credential silently — only a git-derived `origin` remote is sanitized.)
+publishing the secret in the manifest. An *authored* credential is never
+stripped silently. Only a git-derived `origin` remote is sanitized.
 
 On the wire it travels as the standard `org.opencontainers.image.source`
 annotation, so registries that honor the key link the package to its
 repository. When no `repository` is authored, grim keeps its previous
 behavior and stamps the tagless release reference there instead. The
 [TUI](./commands.md#tui) shows the URL in the detail pane and opens it
-with the `o` key; `grim search --format json` exposes it as the
+with the `o` key. `grim search --format json` exposes it as the
 `repository` field.
 
 ### Who maintains it, and where to read more {#metadata-descriptive}
@@ -395,8 +425,8 @@ artifacts get sensible values for free:
 
 | Field | Annotation | Derived from, when unset |
 |---|---|---|
-| `authors` | `…image.authors` | the commit author's name — but only under [`--git`](#git-disclosure) |
-| `vendor` | `…image.vendor` | the release repository's namespace: `ghcr.io/acme/skills/tools` → `acme` |
+| `authors` | `…image.authors` | the commit author's name, but only under [`--git`](#git-disclosure) |
+| `vendor` | `…image.vendor` | the release repository's namespace: `ghcr.io/acme/skills/tools` gives `acme` |
 | `homepage` | `…image.url` | the authored `repository` URL |
 | `documentation` | `…image.documentation` | `<repository>#readme` |
 
@@ -410,7 +440,7 @@ metadata:
   documentation: https://docs.acme.example/code-review
 ```
 
-A reference with no namespace (`registry/name`) derives no vendor — publishing
+A reference with no namespace (`registry/name`) derives no vendor. Publishing
 the artifact's own name as its distributor would be worse than leaving the key
 out.
 
@@ -422,25 +452,26 @@ name and never their email address.
 ### Setting metadata without editing every artifact {#metadata-flags}
 
 Every field above has a matching flag on `grim build`, `grim release`, and
-`grim publish` — `--license`, `--repository`, `--authors`, `--vendor`,
-`--url`, `--documentation`:
+`grim publish`: `--license`, `--repository`, `--authors`, `--vendor`,
+`--url`, and `--documentation`.
 
 ```sh
 grim release ./code-review ghcr.io/acme/code-review:1.2.3 \
   --license Apache-2.0 --authors "Platform Team"
 ```
 
-A flag fills a gap; it never overrides the artifact. If `SKILL.md` authors a
-`license`, that value wins and the flag is ignored for that artifact — a value
-written into the file is the more specific statement about it.
+A flag fills a gap, and it never overrides the artifact. If `SKILL.md`
+authors a `license`, that value wins and the flag is ignored for that
+artifact. A value written into the file is the more specific statement
+about it.
 
 For a whole catalog, `publish.toml` carries the same set as a
 [`[metadata]` table](#batch-publish-metadata) so you state it once.
 
 ### Where each field surfaces {#metadata-surfaces}
 
-Metadata is only worth authoring if something reads it back. Three surfaces do,
-and they do not carry the same set — the difference is whether a value is
+Metadata is only worth authoring if something reads it back. Three surfaces
+do, and they do not carry the same set. The difference is whether a value is
 version-scoped and whether the surface is allowed to cache it.
 
 | Field | `grim describe` | `grim search` / [TUI](./commands.md#tui) | Index [`all.json`](./package-index.md) |
@@ -457,30 +488,33 @@ version-scoped and whether the surface is allowed to cache it.
 - **Browse is version-scoped and cached.** `grim search` and the TUI catalog
   read a disk-cached catalog. Everything above the `support` row belongs to the
   manifest being browsed, so caching it is correct. Support channels are
-  repository-level and *mutable* — caching one would show a link that has since
-  moved, which is exactly what putting them on the companion was meant to
-  avoid. An [index-backed](./package-index.md) row is thinner still: the index
-  is a phone book, so it carries `license` and `created` and resolves the rest
-  from the registry at install time.
+  repository-level and *mutable*. Caching one would show a link that has moved
+  since, which is exactly what the companion was meant to avoid.
+
+  An [index-backed](./package-index.md) row is thinner still, because the
+  index is a phone book. It carries `license` and `created` and resolves the
+  rest from the registry at install time.
 - **The TUI detail pane is the exception, because it does not cache them.**
-  The pane is always live for the selected row; once the selection holds still
-  — or immediately on `enter` — grim fetches the companion once per repository
-  per session and shows the channels in its `Overview` panel, alongside
-  `Readme` / `Changelog`. See [detail panels](./commands.md#tui-detail-tabs).
+  The pane is always live for the selected row. grim fetches the companion
+  once per repository per session. The fetch runs when the selection holds
+  still, and `enter` runs it at once. It shows the channels in its `Overview` panel,
+  alongside `Readme` and `Changelog`. See
+  [detail panels](./commands.md#tui-detail-tabs).
+
   A live read triggered by dwell time is a different mechanism from a cached
-  browse row and carries none of its staleness; the browse row itself still
+  browse row and carries none of its staleness. The browse row itself still
   never carries them.
 - **Downstream tooling reads `describe`.** The
-  [`--format json`](./json-interface.md) payload is the integration point — an
+  [`--format json`](./json-interface.md) payload is the integration point. An
   index site or an editor extension runs `grim describe <ref> --format json`
   per package and gets the full set, rather than scraping the browse row.
 
 ### Deprecating a package {#metadata-deprecated}
 
 `deprecated` retires a package without unpublishing it. Author a short
-notice — ideally naming the replacement — and the package keeps resolving
-and installing, but grim flags it at every point a consumer might reach for
-it. The notice is the message; an empty or whitespace-only value means *not*
+notice, ideally naming the replacement. The package keeps resolving and
+installing, but grim flags it at every point a consumer might reach for it.
+The notice is the message, and an empty or whitespace-only value means *not*
 deprecated, so no annotation is emitted.
 
 ```yaml
@@ -511,23 +545,24 @@ manifest, every surface reads it back without unpacking the artifact:
   to the result's `Status` cell (e.g. `installed,deprecated`) and exposes the
   message as a `deprecated` field in `--format json`.
 - The [TUI](./commands.md#tui) appends a yellow `⚠ deprecated` after the
-  install-status label in the `Status` column (explained in the legend) and
+  install-status label in the `Status` column, explained in the legend. It
   shows the full notice in the detail pane.
 - [`grim add`](./commands.md#add) prints the notice on stderr when you
   acquire a deprecated reference (the add still succeeds).
 
-A re-release with the notice removed clears the deprecation — the annotation
-simply stops being emitted.
+A re-release with the notice removed clears the deprecation, because the
+annotation simply stops being emitted.
 
 ### Naming a replacement {#metadata-replaced-by}
 
 `replaced-by` points a consumer at the successor artifact. It is authored
-independently of `deprecated` — a package can name a replacement without
-being deprecated (a rename that keeps working), or be deprecated with no
-single successor — so the two keys are emitted and read separately. The
-value must parse as an artifact reference; `grim build` / `grim release`
-reject an unparseable value with exit 65, the same gate as the repository
-URL. An empty or whitespace-only value emits no annotation.
+independently of `deprecated`, so the two keys are emitted and read
+separately. A package can name a replacement without being deprecated, as a
+rename that keeps working does, or be deprecated with no single successor.
+
+The value must parse as an artifact reference. `grim build` and
+`grim release` reject an unparseable value with exit 65, the same gate as
+the repository URL. An empty or whitespace-only value emits no annotation.
 
 ```yaml
 # code-review/SKILL.md (skill / agent: under the metadata map)
@@ -548,8 +583,8 @@ replaced-by = "ghcr.io/acme/bundles/python-stack-2"
 The reference rides the `com.grimoire.replaced-by` annotation on the
 manifest, so [`grim search`](./commands.md#search) and
 [`grim describe`](./commands.md#describe) expose it as a `replaced_by` field
-in `--format json` (`null` when none). It pairs naturally with `deprecated`:
-deprecate the old package and name its replacement, and a consumer sees both
+in `--format json` (`null` when none). It pairs naturally with `deprecated`.
+Deprecate the old package and name its replacement, and a consumer sees both
 the notice and where to go next.
 
 ## Validate before you push
@@ -576,38 +611,38 @@ grim release ./code-review ghcr.io/acme/code-review:1.2.3
 
 ### Cascade tags
 
-A release does more than push one tag. From a `1.2.3` version it also moves the
-**floating** tags that consumers track — `1`, `1.2`, and `latest` — to the new
-digest. That is what lets a consumer who declared `:1` pick up `1.2.3` with a
-plain [`grim update`](./commands.md#update).
+A release does more than push one tag. From a `1.2.3` version it also moves
+the **floating** tags that consumers track, meaning `1`, `1.2`, and `latest`,
+to the new digest. That is what lets a consumer who declared `:1` pick up
+`1.2.3` with a plain [`grim update`](./commands.md#update).
 
 The cascade fires automatically for a full semver and is skipped for a
 non-version tag (`canary`, `edge`, a partial `1.2`). Two flags make it
-explicit: `--cascade` asserts the cascade and rejects a non-semver tag with
-exit 65 (a typo guard for CI), and `--no-cascade` publishes only the exact
-tag even for a full semver — useful for a one-off version that should not
-move `latest`. A prerelease (`1.2.3-rc.1`) is always exact-only: a release
+explicit. `--cascade` asserts the cascade and rejects a non-semver tag with
+exit 65, which is a typo guard for CI. `--no-cascade` publishes only the
+exact tag even for a full semver, for a one-off version that should not move
+`latest`. A prerelease (`1.2.3-rc.1`) is always exact-only, because a release
 candidate never becomes a floating version.
 
 ### Dry runs and overwrites
 
-Preview the exact push plan — every tag and the digest each will point at —
-without touching the registry:
+Preview the exact push plan without touching the registry. The plan names
+every tag and the digest each one will point at:
 
 ```sh
 grim release ./code-review ghcr.io/acme/code-review:1.2.3 --dry-run
 ```
 
-An exact-version tag is immutable by default: if `1.2.3` already exists and
+An exact-version tag is immutable by default. If `1.2.3` already exists and
 points at different bytes, the release refuses rather than rewrite history.
 Pass `--force` only when you deliberately mean to move it.
 
 ## Build provenance {#git-provenance}
 
 A published artifact rarely records which commit it was built from. Without
-that link, tracing a registry tag back to the source — for an audit, a
-rebuild, or a "why did this change" investigation — means guessing from
-timestamps.
+that link, tracing a registry tag back to the source means guessing from
+timestamps. That cost lands on an audit, a rebuild, or a "why did this
+change" investigation.
 
 grim closes that gap **by default**. `grim build`, `grim release`, and
 `grim publish` read the artifact's git working tree and stamp two standard OCI
@@ -616,14 +651,14 @@ annotations onto the manifest:
 | Annotation | Value |
 |---|---|
 | `org.opencontainers.image.revision` | the `HEAD` commit SHA, suffixed `-dirty` when tracked files differ from `HEAD` |
-| `org.opencontainers.image.created` | the commit date (RFC3339) — the *commit's* date, never a build clock |
+| `org.opencontainers.image.created` | the commit date (RFC3339), the *commit's* date and never a build clock |
 
 Outside a git repository, `created` falls back to
 [`SOURCE_DATE_EPOCH`](https://reproducible-builds.org/docs/source-date-epoch/)
-when that variable is set — the same fixed-timestamp convention container
-builders use — and is omitted otherwise. Nothing here fails a publish: a
-source tarball with no repository and no `SOURCE_DATE_EPOCH` simply carries no
-provenance.
+when that variable is set, and is omitted otherwise. That is the same
+fixed-timestamp convention container builders use. Nothing here fails a
+publish. A source tarball with no repository and no `SOURCE_DATE_EPOCH`
+simply carries no provenance.
 
 ### What stays behind `--git` {#git-disclosure}
 
@@ -631,61 +666,64 @@ Two further values are derived only when you pass `--git`:
 
 | Annotation | Value |
 |---|---|
-| `org.opencontainers.image.source` | the `origin` remote, normalized to an `https://` URL — used only when you did not author a [`repository`](#metadata-repository) value, which always wins |
+| `org.opencontainers.image.source` | the `origin` remote, normalized to an `https://` URL, used only when you did not author a [`repository`](#metadata-repository) value, which always wins |
 | `org.opencontainers.image.authors` | the commit author's **name** (`%an`), never their email address |
 
 They are separated from the two above on purpose. A commit SHA and a commit
 date describe the artifact's *content*. An `origin` remote names the **forge
 host and repository path** your build ran against, and an author name
 identifies a **person**. Publishing either to a registry makes it readable by
-everyone who can pull the artifact, so grim never does it unless you ask:
+everyone who can pull the artifact, so grim never does it unless you ask.
 
 ```sh
 grim release ./code-review ghcr.io/acme/code-review:1.2.3 --git
 ```
 
-`--git` also makes derivation **mandatory**: a path that is not inside a git
-repository, or a host with no `git`, fails with exit 65 rather than silently
+`--git` also makes derivation **mandatory**. A path outside a git repository
+fails with exit 65, and so does a host with no `git`, rather than silently
 dropping the provenance you asked for.
 
 Any credentials embedded in the remote (`https://token@host/...`) are stripped
 before the URL is written, so a token in your `origin` URL never reaches the
-annotation. A repository with **no `origin` remote** — or one whose remote does
-not resolve to an HTTPS URL (an SSH-only host grim cannot rewrite, a `file://`
-remote, a bare local path) — is **not** an error: `revision` and `created` are
-still stamped and `source` falls back to the authored `repository` or the
-tagless release reference.
+annotation.
+
+A repository with **no `origin` remote** is **not** an error, and neither is
+one whose remote does not resolve to an HTTPS URL. That covers an SSH-only
+host grim cannot rewrite, a `file://` remote, and a bare local path. In each
+case `revision` and `created` are still stamped, and `source` falls back to
+the authored `repository` or the tagless release reference.
 
 ### Publishing nothing about the build: `--no-git` {#git-suppress}
 
-`--no-git` suppresses every derived annotation — revision, date, remote, and
-author alike — even inside a repository with a remote configured:
+`--no-git` suppresses every derived annotation, revision, date, remote and
+author alike, even inside a repository with a remote configured:
 
 ```sh
 grim release ./code-review ghcr.io/acme/code-review:1.2.3 --no-git
 ```
 
-Use it when the manifest must say nothing about where it was built: publishing
-an internally-developed artifact to a public registry, or shipping to a
-customer-facing catalog from an internal forge. `--git` and `--no-git`
-override each other, so the last one on the command line wins.
+Use it when the manifest must say nothing about where it was built. Two cases
+are publishing an internally-developed artifact to a public registry, and
+shipping to a customer-facing catalog from an internal forge. `--git` and
+`--no-git` override each other, so the last one on the command line wins.
 
 ### Re-release stays idempotent {#git-idempotent}
 
 A re-release of identical content produces the same manifest digest, so
-re-running a release is a harmless no-op (the
-[overwrite guard](#dry-runs-and-overwrites) recognizes it). That holds with
-provenance on by default because **no derived value is read from the clock**:
+re-running a release is a harmless no-op. The
+[overwrite guard](#dry-runs-and-overwrites) recognizes it. That holds with
+provenance on by default because **no derived value is read from the clock**.
 `created` is the commit's own date, so releasing the same commit twice yields
 byte-identical annotations.
 
-The one consequence to know about: re-releasing the *same version* from a
-**different commit** now changes the digest and is refused unless you pass
-`--force`. That is the correct behavior — the provenance genuinely changed —
-and `--no-git` opts out of it entirely if you need a digest that depends on
+One consequence follows. Re-releasing the *same version* from a
+**different commit** changes the digest and is refused unless you pass
+`--force`. That is the correct behavior, because the provenance genuinely
+changed. `--no-git` opts out of it entirely when you need a digest that
+depends on
 content alone.
 
-Every read surface shows the provenance back: the [TUI](./commands.md#tui)
+Every read surface shows the provenance back. The [TUI](./commands.md#tui)
 detail pane adds `Revision:` and `Created:` rows,
 [`grim search --format json`](./commands.md#search) exposes `revision` and
 `created` fields, and [`grim describe`](./commands.md#describe) reports both
@@ -696,7 +734,7 @@ plus `authors`.
 A [bundle](./concepts.md#bundles) groups skills, rules, and
 [agents](./agents.md) so consumers declare one reference instead of a dozen.
 You author it as a small TOML file whose `[skills]`/`[rules]`/`[agents]`
-tables list the members — the same shape as a `grimoire.toml`:
+tables list the members, the same shape as a `grimoire.toml`:
 
 ```toml
 # python-stack.toml
@@ -712,15 +750,15 @@ code-reviewer = "ghcr.io/acme/code-reviewer:1"
 
 Members published beside the bundle can use
 [deployment-relative references](./artifacts.md#bundle-relative-refs)
-(`./name:tag`, `../skills/name:tag`) instead of fully-qualified ones —
-they resolve at install time against wherever the bundle was pulled from,
-so the bundle survives mirroring and enforced
+(`./name:tag`, `../skills/name:tag`) instead of fully-qualified ones. They
+resolve at install time against wherever the bundle was pulled from, so the
+bundle survives mirroring and enforced
 [`--registry host/prefix`](#batch-publish-namespace) namespaces. A
 relative member that would escape the registry root fails the release
 (exit 65).
 
-[`grim build`](./commands.md#build) validates it (a `.toml` path packs as a
-bundle), and [`grim release`](./commands.md#release) pushes it with the same
+[`grim build`](./commands.md#build) validates it, because a `.toml` path packs
+as a bundle. [`grim release`](./commands.md#release) pushes it with the same
 cascade tags as any other artifact:
 
 ```sh
@@ -730,7 +768,7 @@ grim release ./python-stack.toml ghcr.io/acme/python-stack:1.0.0
 
 ### Floating or pinned members {#pin}
 
-By default the bundle stores its members exactly as written — floating tags stay
+By default the bundle stores its members exactly as written. Floating tags stay
 floating, and each consumer's [`grim lock`](./commands.md#lock) re-resolves them
 fresh. Add `--pin` to resolve every floating member to a digest at release time
 and freeze it into the published bundle:
@@ -739,30 +777,34 @@ and freeze it into the published bundle:
 grim release ./python-stack.toml ghcr.io/acme/python-stack:1.0.0 --pin
 ```
 
-A pinned bundle is reproducible on its own: it always expands to the exact same
+A pinned bundle is reproducible on its own. It always expands to the exact same
 member digests, even on an air-gapped or tunneled network that cannot re-resolve
-a tag. Re-run the release (a cron job tracking `:stable`, say) to roll the
-pinned members forward. A
+a tag. Re-run the release, from a cron job tracking `:stable` for example, to
+roll the pinned members forward. A
 [deployment-relative member](./artifacts.md#bundle-relative-refs) is
-resolved against the release target and then pinned absolute —
+resolved against the release target and then pinned absolute, so
 reproducibility forfeits its late binding.
 
 ## Batch publishing with a manifest {#batch-publish}
 
 When a repository contains more than one package, releasing them one by one
-with `grim release` means maintaining a shell script (or CI job) that
-re-invents version tracking, ordering, and idempotent re-runs. That is a
+with `grim release` means maintaining a shell script or CI job. That script
+re-invents version tracking, ordering, and idempotent re-runs. It is a
 generic capability dressed as project-specific tooling.
 
-`grim publish` is the built-in alternative: it reads a `publish.toml`
+`grim publish` is the built-in alternative. It reads a `publish.toml`
 manifest, validates the whole set before touching the registry, then
 releases each entry in a fixed order.
 
 ### The publish.toml format {#batch-publish-manifest}
 
-A manifest has one required top-level field — `registry` — and up to five
+A manifest has one required top-level field, `registry`, and up to five
 kind tables. Each table entry is a sub-table keyed by name with a
-`version` field:
+`version` field.
+
+`registry` is a bare registry host, such as `ghcr.io` or `localhost:5000`. A
+value carrying a `/` exits `65`. The namespace under the host belongs in
+[`repository_prefix`](#batch-publish-namespace) instead.
 
 ```toml
 #:schema https://grimoire.rs/schemas/grim-publish.schema.json
@@ -789,9 +831,9 @@ pin = true                         # optional, bundle entries only; default fals
 #### One version for the whole catalog {#batch-publish-version}
 
 A catalog whose packages release together shouldn't repeat the same
-version five times — that's five places to forget on the next bump. An
-optional top-level `version` covers every entry that omits its own (or
-sets the literal `${version}`, which resolves to the same value); an
+version five times. That is five places to forget on the next bump. An
+optional top-level `version` covers every entry that omits its own, or that
+sets the literal `${version}`, which resolves to the same value. An
 explicit per-entry `version` always wins:
 
 ```toml
@@ -809,41 +851,43 @@ version = "1.0.0"                  # per-entry override wins
 
 For CI runs that publish from a git tag, `grim publish --version <ref>`
 overrides the manifest's top-level `version` for that run. Every version
-input — the flag, the top-level value, and per-entry values — first has
-the manifest's `version_prefix` (default `"v"`) stripped when present, so
-`--version v1.2.3` (a typical tag ref) publishes tag `1.2.3`. A semver
-`--version` publishes the plain `X.Y.Z` form; a **non-semver** `--version`
-(e.g. `canary`) is instead a movable channel tag applied to every entry — see
-the [Flags](#batch-publish-flags) table. A different tagging convention
-sets its own prefix:
+input first has the manifest's `version_prefix` (default `"v"`) stripped
+when present. That covers the flag, the top-level value, and per-entry
+values, so `--version v1.2.3` (a typical tag ref) publishes tag `1.2.3`.
+
+A semver `--version` publishes the plain `X.Y.Z` form. A **non-semver**
+`--version` such as `canary` is instead a movable channel tag applied to
+every entry, described in the [Flags](#batch-publish-flags) table. A
+different tagging convention sets its own prefix:
 
 ```toml
 version_prefix = "release-"        # release-1.2.3 → 1.2.3
 ```
 
-An entry that ends up with no version anywhere — no per-entry value, no
-top-level `version`, no `--version` — is a data error (exit 65) naming
-the entry.
+An entry that ends up with no version anywhere is a data error (exit 65)
+naming the entry. That means no per-entry value, no top-level `version`, and
+no `--version`.
 
-The `registry` value is a plain host (e.g. `ghcr.io`, `localhost:5000`), not a
-full reference. All entries in the manifest publish to the same registry.
-Only the `--registry` *flag* may carry a repository prefix after the host —
-see [Repository namespace](#batch-publish-namespace).
+The `registry` value is a plain host such as `ghcr.io` or `localhost:5000`,
+not a full reference. All entries in the manifest publish to the same
+registry. Only the `--registry` *flag* may carry a repository prefix after
+the host, described in [Repository namespace](#batch-publish-namespace).
 
 Entry names must start with a character in `[a-z0-9]` and contain only
 `[a-z0-9._-]` in the remainder. Uppercase letters, slashes, and `..`
-components are all rejected at validation time (exit 65) — they would
-produce an invalid OCI repository segment or a path traversal hazard. Unknown
-fields in the manifest or in any entry sub-table are a hard parse error
-(`deny_unknown_fields`): a typo like `versions` instead of `version` exits
-immediately rather than silently using a default.
+components are all rejected at validation time (exit 65). Each would
+produce an invalid OCI repository segment or a path traversal hazard.
 
-The first line above is a [Taplo](https://taplo.tamasfe.dev/) /
+Unknown fields in the manifest or in any entry sub-table are a hard parse
+error (`deny_unknown_fields`). A typo like `versions` instead of `version`
+exits immediately rather than silently using a default.
+
+The first line above is a [Taplo](https://taplo.tamasfe.dev/) and
 [Even Better TOML](https://marketplace.visualstudio.com/items?itemName=tamasfe.even-better-toml)
-`#:schema` directive that binds the manifest to its published [JSON
-Schema](https://grimoire.rs/schemas/grim-publish.schema.json),
-so a supporting editor autocompletes keys and flags a typo before you ever run
-`grim publish`. The schema is generated from grim's own manifest parser — see
+`#:schema` directive. It binds the manifest to its published [JSON
+Schema](https://grimoire.rs/schemas/grim-publish.schema.json). A supporting
+editor then autocompletes keys and flags a typo before you ever run
+`grim publish`. The schema is generated from grim's own manifest parser. See
 [Editor schema support](./configuration.md#editor-schema) for both schema URLs
 and [`grim schema`](./commands.md#schema) to print one locally.
 
@@ -873,7 +917,7 @@ version = "0.9.0"
 authors = "Archive Team"            # license/repository/vendor still inherit
 ```
 
-The table is a **convenience layer only** — it does nothing the
+The table is a **convenience layer only**. It does nothing the
 [flags](#metadata-flags) cannot, and it never overrides what an artifact says
 about itself. The full order, each rung filling only what the one above left
 unset:
@@ -882,15 +926,15 @@ unset:
 artifact frontmatter > --flag > per-entry [metadata] > top-level [metadata] > derived
 ```
 
-Merging is field by field, not wholesale: the `[skills.legacy-helper.metadata]`
+Merging is field by field, not wholesale. The `[skills.legacy-helper.metadata]`
 table above changes only `authors` and still inherits the catalog's license,
 repository, and vendor.
 
 ### Repository support channels {#support-channels}
 
 Who maintains this repository, and where do I reach them? That answer belongs
-to the *repository*, not to any one version — and it changes. A manifest-level
-`[support]` table, sibling of `[metadata]`, publishes it:
+to the *repository*, not to any one version, and it changes over time. A
+manifest-level `[support]` table, sibling of `[metadata]`, publishes it:
 
 ```toml
 registry = "ghcr.io"
@@ -902,25 +946,28 @@ contact  = "ai-platform@example.com"
 security = "https://acme.example/security"
 ```
 
-All four are optional; the field names follow
+All four are optional, and the field names follow
 [CycloneDX's external-reference vocabulary](https://cyclonedx.org/docs/1.5/json/)
 (`issue-tracker`, `chat`, `support`, `security-contact`).
 
 **These ride the [description companion](#description-companion), not the
-artifact manifest, and that is the point.** The companion tag is mutable: move
-your chat channel, change the table, re-run `grim publish`, and *every
+artifact manifest, and that is the point.** The companion tag is mutable.
+Move your chat channel, change the table, re-run `grim publish`, and *every
 already-published version* reports the new link. On a version's manifest the
 old link would be frozen into every tag you ever pushed, fixable only by
 re-releasing history.
 
-The table fans out to **every** companion the run publishes — support describes
+The table fans out to **every** companion the run publishes. Support describes
 the repository, not one entry's files, so a per-entry `[description]` table
-(which replaces the file set [wholesale](#description-fanout)) never disturbs
-it. There is no per-entry `[<kind>.<name>.support]` override and no
-`grim release` flag: support rides the companion, and only `grim publish`
-produces one. An entry that publishes no companion at all — `description =
-false`, or a manifest with nothing to pack — ships no support channels either,
-the same way it ships no README, and grim does not warn about it.
+never disturbs it, even though that table replaces the file set
+[wholesale](#description-fanout).
+
+There is no per-entry `[<kind>.<name>.support]` override and no
+`grim release` flag. Support rides the companion, and only `grim publish`
+produces one. An entry that publishes no companion at all ships no support
+channels either. That is the same way it ships no README, and grim does not
+warn about it. It covers `description = false` and a manifest with nothing
+to pack.
 
 Read them back with [`grim describe`](./commands.md#describe), which reports a
 `support` object with all four fields (`null` where unset). It costs no extra
@@ -932,28 +979,28 @@ anyone who can pull from the repository.
 ### Repository namespace {#batch-publish-namespace}
 
 By default, each entry pushes to `{kind-subdir}/{name}` under the
-manifest's registry — a skill named `hearth` publishes to
+manifest's registry, so a skill named `hearth` publishes to
 `registry/skills/hearth`. Most self-hosted or single-user registries
-work fine with this convention. Multi-tenant SaaS registries — such as
-the [GitLab Container Registry][gitlab-registry] — require every image
-to live under a group-and-project path, making the default layout
+work fine with this convention. Multi-tenant SaaS registries such as
+the [GitLab Container Registry][gitlab-registry] require every image
+to live under a group-and-project path. That makes the default layout
 inaccessible.
 
 Two optional fields let you replace the `{kind-subdir}` segment with an
 arbitrary namespace path, so a publish manifest can target any registry
 layout.
 
-**Manifest-level `repository_prefix`** — a string applied to every entry
+**Manifest-level `repository_prefix`** is a string applied to every entry
 that does not set its own `repository`. The published repository becomes
-`{repository_prefix}/{name}`; the prefix replaces the conventional
-`{kind.subdir()}` segment. Registry-relative, no tag.
+`{repository_prefix}/{name}`, and the prefix replaces the conventional
+`{kind.subdir()}` segment. It is registry-relative and carries no tag.
 
-**Per-entry `repository`** — a string inside a `[skills.<name>]`,
+**Per-entry `repository`** is a string inside a `[skills.<name>]`,
 `[rules.<name>]`, `[agents.<name>]`, or `[bundles.<name>]` sub-table.
-The value is used verbatim as the full repository path; the entry name is
-**not** appended — the same way `grim release` uses the repository portion
-of its positional `registry/repo:version` reference verbatim. Wins over
-`repository_prefix` when both are set.
+The value is used verbatim as the full repository path, and the entry name
+is **not** appended. That matches how `grim release` uses the repository
+portion of its positional `registry/repo:version` reference verbatim. It
+wins over `repository_prefix` when both are set.
 
 Resolution precedence per entry (highest first):
 
@@ -965,18 +1012,21 @@ Resolution precedence per entry (highest first):
 
 Usually not. An artifact's kind travels **in the manifest**, as the
 `com.grimoire.kind` annotation grim reads back through
-[`kind_from_manifest`][kind-read] — never from its repository path. `grim
-describe ghcr.io/michael-herwig/arcana/hex-core` reports `kind=skill` and
-`…/arcana/hex` reports `kind=bundle`, though neither path names a kind.
+[`kind_from_manifest`][kind-read], and never from its repository path.
+Running `grim describe ghcr.io/michael-herwig/arcana/hex-core` reports
+`kind=skill`, and `…/arcana/hex` reports `kind=bundle`, though neither path
+names a kind.
 
 So `{kind-subdir}` is a **namespace partition, not a type tag**. It buys one
-thing: room for the same name to exist as two kinds — a skill `foo` and a
+thing: room for the same name to exist as two kinds, a skill `foo` and a
 bundle `foo` side by side. If your names are unique across kinds, it buys
-nothing and costs a segment in every reference your users type — plus a
-`skills` / `bundles` node in the [TUI tree](./commands.md#tui) that
-restates what the row's kind column already says, doubled into a `skill`
-group holding a `skills` group when
-[`options.tui.group_by_type`](./configuration.md#options-tui) is on.
+nothing and costs a segment in every reference your users type.
+
+It also adds a `skills` or `bundles` node in the
+[TUI tree](./commands.md#tui) that restates what the row's kind column
+already says. That node doubles into a `skill` group holding a `skills`
+group when [`options.tui.group_by_type`](./configuration.md#options-tui)
+is on.
 
 Publish flat by setting `repository_prefix` to your namespace:
 
@@ -988,7 +1038,7 @@ repository_prefix = "acme"
 [bundles.essentials]     # → ghcr.io/acme/essentials
 ```
 
-Bundles work unchanged — a flat bundle names its members with the
+Bundles work unchanged. A flat bundle names its members with the
 same-directory form `./code-review:0` instead of `../skills/code-review:0`
 (see [Deployment-relative members][relative-members]).
 
@@ -999,20 +1049,20 @@ requires `skills/code-review`. Pick the segment when you need the partition,
 not by default.
 
 Choose before your first publish. A repository path is a public reference the
-moment someone pins it in a `grimoire.lock`, so changing the layout later
-means publishing under new names and keeping the old ones alive for everyone
-already on them — grim itself never requires either layout, but your users'
-lockfiles do.
+moment someone pins it in a `grimoire.lock`. Changing the layout later
+means publishing under new names. It also means keeping the old ones alive
+for everyone already on them. grim itself never requires either layout, but
+your users' lockfiles do.
 
 [kind-read]: https://github.com/grimoire-rs/grimoire/blob/main/src/oci/annotations.rs
 [relative-members]: ./artifacts.md#bundle-relative-refs
 
-**CLI-enforced prefix** — a third, outer layer set per run rather than in
+**CLI-enforced prefix** is a third, outer layer set per run rather than in
 the manifest. When the global `--registry` flag value carries a path after
 the host (`--registry registry.gitlab.com/durzn/hearth`), the first `/`
-splits it: the host overrides the manifest `registry`, and the rest becomes
-an enforced namespace prepended to *every* entry's resolved repository —
-whichever branch above produced it, including a verbatim per-entry
+splits it. The host overrides the manifest `registry`, and the rest becomes
+an enforced namespace prepended to *every* entry's resolved repository. That
+holds whichever branch above produced it, including a verbatim per-entry
 `repository`:
 
 ```console
@@ -1025,10 +1075,10 @@ $ grim publish --registry registry.gitlab.com/staging
 #   → registry.gitlab.com/staging/skills/bar
 ```
 
-This lets a CI pipeline force a whole publish run under a namespace (a
-staging area, a GitLab group/project) without editing the manifest. The
-manifest `registry` field itself stays a plain host — a path inside it is
-still rejected (exit 65).
+This lets a CI pipeline force a whole publish run under a namespace without
+editing the manifest. A namespace here is a staging area, or a GitLab group
+and project. The manifest `registry` field itself stays a plain host, and a path inside it
+is still rejected (exit 65).
 
 ```toml
 #:schema https://grimoire.rs/schemas/grim-publish.schema.json
@@ -1045,30 +1095,32 @@ repository = "durzn-technology/hearth/skill/other-skill"
 # per-entry form — identical effect for this entry, wins over repository_prefix
 ```
 
-The reporter's working example: registry `registry.gitlab.com`, prefix
-`durzn-technology/hearth/skill`, skill `hearth` → resolves to
+The reporter's working example uses registry `registry.gitlab.com`, prefix
+`durzn-technology/hearth/skill`, and skill `hearth`. It resolves to
 `registry.gitlab.com/durzn-technology/hearth/skill/hearth`.
 
-**Charset rules** — each `/`-separated segment of both fields (and of the
-`--registry` path portion) must match
-the OCI name grammar: runs of `[a-z0-9]` joined by a single `.` or `_`, a
-double `__`, or a run of `-`, with no leading, trailing, or doubled
-separator. A leading or trailing `/`, empty `//` segments, `.` or `..`
-segments, an embedded `:`, uppercase, and a path longer than 255 characters
-are all rejected at manifest validation time with exit 65 (data error). An
-invalid prefix or repository aborts the whole manifest before any push.
+**Charset rules** apply to each `/`-separated segment of both fields, and of
+the `--registry` path portion. A segment must match the OCI name grammar.
+That is runs of `[a-z0-9]` joined by a single `.` or `_`, a double `__`, or a
+run of `-`, with no leading, trailing, or doubled separator.
 
-A manifest with neither field is unchanged: `ghcr.io/skills/grim-usage`
+Manifest validation rejects several shapes with exit 65 (data error). A
+leading or trailing `/`, empty `//` segments, `.` or `..`
+segments, an embedded `:`, uppercase, and a path longer than 255 characters
+are all refused. An invalid prefix or repository aborts the whole manifest
+before any push.
+
+A manifest with neither field is unchanged. The `ghcr.io/skills/grim-usage`
 style paths are the default and remain fully backward compatible.
 
 ### Push vs pull registries {#batch-publish-push-registry}
 
 Some pipelines push through one endpoint while consumers pull from another
-name — a staging registry that syncs to the public one, an internal push
-URL fronted by a read-only mirror. By default grim uses the manifest's
-`registry` for both roles. The optional `push_registry` field (or the
-`--push-registry <host[/prefix]>` flag, which overrides it — flag >
-manifest) splits them:
+name. Two cases are a staging registry that syncs to the public one, and an
+internal push URL fronted by a read-only mirror. By default grim uses the
+manifest's `registry` for both roles. The optional `push_registry` field
+splits them, as does the `--push-registry <host[/prefix]>` flag, which
+overrides the field:
 
 ```toml
 registry = "ghcr.io"                      # the canonical PULL name
@@ -1078,37 +1130,39 @@ push_registry = "staging.example/mirror"  # where the bytes actually land
 The manifest `registry` stays the **canonical pull name** baked into every
 descriptive surface: the `org.opencontainers.image.source` fallback
 annotation, pinned bundle member ids, [announce](./package-index.md)
-pointer references, and the report `ref`. `push_registry` names only the
-**network push endpoint** — every push, skip-existing lookup, overwrite
-guard, pin digest resolution, description-companion push, and announce
-metadata read-back targets the push-rewritten location instead. An
-optional `/prefix` after the host nests every pushed repository under it
-(the same `host[/prefix]` shape as the [`--registry`
-flag](#batch-publish-namespace)), so `ghcr.io/skills/grim-usage` pushes to
-`staging.example/mirror/skills/grim-usage` in the example above.
+pointer references, and the report `ref`.
 
-The JSON report gains an always-present `pushed_to` field per entry — the
-push-side reference actually used, `null` when the split is inactive
+`push_registry` names only the **network push endpoint**. Every push,
+skip-existing lookup, overwrite guard, pin digest resolution,
+description-companion push, and announce metadata read-back targets the
+push-rewritten location instead. An optional `/prefix` after the host nests
+every pushed repository under it, the same `host[/prefix]` shape as the
+[`--registry` flag](#batch-publish-namespace). So `ghcr.io/skills/grim-usage`
+pushes to `staging.example/mirror/skills/grim-usage` in the example above.
+
+The JSON report gains an always-present `pushed_to` field per entry. It is
+the push-side reference actually used, and `null` when the split is inactive
 ([Report output](#batch-publish-report)). With the knob unset, behavior is
-byte-identical to before the field existed. A malformed value (empty host,
-invalid prefix charset) exits 65 before any push. `grim release` carries
-the same `--push-registry` flag for single-artifact releases.
+byte-identical to before the field existed. A malformed value, meaning an
+empty host or an invalid prefix charset, exits 65 before any push.
+`grim release` carries the same `--push-registry` flag for single-artifact
+releases.
 
 Two trade-offs to know:
 
 - **Pinned bundles verify on the push endpoint.** A `pin = true` bundle
   bakes pull-named `registry/repo@sha256:…` member ids whose digests were
   resolved via the push endpoint. OCI content addressing makes that sound
-  for a true mirror (identical bytes ⇒ identical digests) — but if the
+  for a true mirror, where identical bytes give identical digests. But if the
   pull name does not serve the same content, the pin fails at install.
   Without the split, pins carry the old resolves-where-pushed guarantee.
 - **Adopting the knob changes the baked source annotation once.** If you
   previously redirected pushes with `--registry`, the source fallback used
-  to bake the push name; under the split it bakes the pull name, so the
+  to bake the push name. Under the split it bakes the pull name, so the
   first re-publish produces a different digest and the overwrite guard
   refuses it without `--force`.
 
-The [replication caveat](#description-replication) still applies: the
+The [replication caveat](#description-replication) still applies. The
 description companion lands on the push registry under the `__grimoire`
 tag, and only a full-repository sync carries it to the pull name.
 
@@ -1130,26 +1184,26 @@ elsewhere.
 
 ### Kind ordering {#batch-publish-ordering}
 
-Entries publish in a fixed kind order — skills, then rules, then agents,
-then [MCP servers](./mcp-servers.md), then bundles — alphabetical within
-each kind. Bundle entries land last by design: a bundle holds references
-to already-published members, and consumers resolve those members at lock
-time. Publishing a bundle before its members would produce a bundle that
-references artifacts that do not yet exist.
+Entries publish in a fixed kind order: skills, then rules, then agents,
+then [MCP servers](./mcp-servers.md), then bundles. Ordering is alphabetical
+within each kind. Bundle entries land last by design, because a bundle holds
+references to already-published members, and consumers resolve those members
+at lock time. Publishing a bundle before its members would produce a bundle
+that references artifacts that do not exist.
 
 ### Skip-existing default and --force {#batch-publish-skip-existing}
 
 By default, `grim publish` skips any entry whose exact-version tag already
-exists on the registry — the push is a success no-op and nothing moves. This
-makes the command safe to re-run from the top: only entries whose version was
+exists on the registry. The push is a success no-op and nothing moves. That
+makes the command safe to re-run from the top. Only entries whose version was
 bumped in the manifest since the last run actually push anything.
 
-`--force` replaces the default with the opposite behavior: it moves an
+`--force` replaces the default with the opposite behavior. It moves an
 existing exact-version tag that points at a different digest. The two modes
-are mutually exclusive — `--force` and skip-existing cannot be combined.
+are mutually exclusive, so `--force` and skip-existing cannot be combined.
 
-This rule is now uniform for **every** value, including a channel
-`--version` (see below): a channel like `canary` skips-existing by default
+This rule is uniform for **every** value, including a channel
+`--version` (see below). A channel like `canary` skips-existing by default
 and needs `--force` to move, exactly like a semver release. There is no
 special-cased always-moving tag.
 
@@ -1170,51 +1224,51 @@ special-cased always-moving tag.
 
 ### Validation and fail-fast {#batch-publish-validation}
 
-`grim publish` validates the whole manifest before any push: every resolved
-`version` — after [inheritance and prefix stripping](#batch-publish-version) —
-must be strict `X.Y.Z` semver, every source path must exist, and `pin = true`
-is rejected on non-bundle entries (exit 65 for each). Only after the full
-manifest passes does the first network call happen.
+`grim publish` validates the whole manifest before any push. Every resolved
+`version` must be strict `X.Y.Z` semver, after
+[inheritance and prefix stripping](#batch-publish-version). Every source path
+must exist, and `pin = true` is rejected on non-bundle entries (exit 65 for
+each). Only after the full manifest passes does the first network call happen.
 
-One check runs **before** every shape check below and exits **64** (usage), not
-65: a `--version` channel value in grim's reserved namespace — `__grimoire` or
-`__grimoire.<x>` — is refused up front, so a channel release can never overwrite
-a repository's [description companion](#description-companion) tag. This is the
-lone usage error among the manifest checks; every sibling condition below is a
-data error (65).
+One check runs **before** every shape check below and exits **64** (usage),
+not 65. A `--version` channel value in grim's reserved namespace, `__grimoire`
+or `__grimoire.<x>`, is refused up front. That way a channel release can never
+overwrite a repository's [description companion](#description-companion) tag.
+This is the lone usage error among the manifest checks, and every sibling
+condition below is a data error (65).
 
 Several additional conditions exit 65 at validation time:
 
-- **Empty manifest** — a manifest that declares no entries in any kind table
+- **Empty manifest.** A manifest that declares no entries in any kind table
   exits 65 with "no packages declared in manifest". Grim treats this as a
   likely wrong-file mistake rather than a valid no-op.
-- **Oversized manifest** — a manifest file larger than 8 MiB is rejected
+- **Oversized manifest.** A manifest file larger than 8 MiB is rejected
   before parsing. This is an unconditional limit, not a warning. The same
-  cap applies to `grimoire.toml` and `grimoire.lock`; it is a bound against
+  cap applies to `grimoire.toml` and `grimoire.lock`. It is a bound against
   a degenerate parse, set far above any real manifest.
-- **Prerelease or build-metadata `--version`** — a value like `1.2.3-rc.1`
+- **Prerelease or build-metadata `--version`.** A value like `1.2.3-rc.1`
   or `1.2.3+build` parses as semver but is not strict `X.Y.Z`. The
-  manifest forbids prerelease/build entry versions, so grim rejects the
+  manifest forbids prerelease and build entry versions, so grim rejects the
   value outright instead of silently treating it as a channel tag.
-- **Reserved cascade-float shape** — a `--version` channel value equal to
+- **Reserved cascade-float shape.** A `--version` channel value equal to
   `latest`, a bare major (`1`), or a `major.minor` (`1.2`) is rejected.
-  Those tags are managed automatically by a real semver release
-  (`X.Y.Z` → `X.Y`, `X`, `latest`); a channel aliasing one would collide
+  Those tags are managed automatically by a real semver release, which
+  moves `X.Y`, `X`, and `latest`. A channel aliasing one would collide
   with the machine-owned float namespace.
-- **Illegal OCI tag charset** — a `--version` channel value that does not
-  match `[A-Za-z0-9_][A-Za-z0-9._-]{0,127}` — for example a slash-bearing
-  CI ref like `feature/foo` — is rejected before it ever reaches the
-  registry.
+- **Illegal OCI tag charset.** A `--version` channel value that does not
+  match `[A-Za-z0-9_][A-Za-z0-9._-]{0,127}` is rejected before it ever
+  reaches the registry. A slash-bearing CI ref like `feature/foo` is one
+  example.
 
-During the release run the command is fail-fast: the first failing entry
-stops the batch. The report still renders — completed entries show their
+During the release run the command is fail-fast, so the first failing entry
+stops the batch. The report still renders. Completed entries show their
 status (`pushed`, `skipped`, or `dry-run`), the failed entry shows `failed`,
 and remaining entries are unreported. Because skip-existing is the default,
 re-running from the top after a fix pushes only what is left.
 
 ### Report output {#batch-publish-report}
 
-The plain report is one table (Kind | Ref | Digest | Tags | Status); the
+The plain report is one table (Kind | Ref | Digest | Tags | Status). The
 announce outcome stays human prose on stderr. `--format json` emits a
 wrapper object on stdout:
 
@@ -1250,31 +1304,35 @@ wrapper object on stdout:
 ```
 
 `items` carries one object per manifest entry processed, in publish
-order. `pushed_to` is always present: the push-side reference actually
-used under a [push/pull registry split](#batch-publish-push-registry),
-`null` when the split is inactive (`ref` always stays the pull name).
+order. `pushed_to` is always present. It is the push-side reference actually
+used under a [push/pull registry split](#batch-publish-push-registry), and
+`null` when the split is inactive. The `ref` always stays the pull name.
+
 `descriptions` carries the [description companion](#description-companion)
 pushes this run, one per distinct target repository, in the same
-`{"items": [...]}` envelope as every multi-item report; `items` is empty
+`{"items": [...]}` envelope as every multi-item report. Its `items` is empty
 when no companion was resolved for this run. Each entry's `digest` is
-`null` under `--dry-run` (the preview lists the planned push without
-touching the registry). `announce` carries the completed `--announce`
-outcome: `outcome`
-is `pull-request`, `branch-pushed`, or `up-to-date`; `branch` — the
-deterministic topic branch, pushed to a fork when one was involved and to
-the index repository directly otherwise — is always present; `url` is
-always present and non-null only for `pull-request`. `fork` is `{repo,
-created}` — the fork's full name and whether grim created it or reused an
-existing one — when the branch landed on a fork rather than the index
-repository directly, and `null` otherwise: a direct push succeeded, the
-`[announce] fork` policy resolved to `never`, or the target forge/host
-does not support it. Under the `always` policy it is populated even
-where a direct push would have worked. `announce` is `null` whenever the
-announce step did not complete: `--announce` not passed, a dry run, a
-fail-fast stop, or an announce failure (which still exits 69 with the
-entries rendered). A CI pipeline that needs the pushed branch — for
-example to trigger a downstream index-validation pipeline — reads it
-from here instead of parsing stderr.
+`null` under `--dry-run`, because the preview lists the planned push without
+touching the registry.
+
+`announce` carries the completed `--announce` outcome. Its `outcome`
+is `pull-request`, `branch-pushed`, or `up-to-date`. Its `branch` is always
+present, and names the deterministic topic branch, pushed to a fork when one
+was involved and to the index repository directly otherwise. Its `url` is
+always present and non-null only for `pull-request`.
+
+`fork` is `{repo, created}` when the branch landed on a fork rather than the
+index repository directly. It gives the fork's full name and whether grim
+created it or reused an existing one. It is `null` otherwise, meaning a
+direct push succeeded, the `[announce] fork` policy resolved to `never`, or
+the target forge or host does not support it. Under the `always` policy it
+is populated even where a direct push would have worked.
+
+`announce` is `null` whenever the announce step did not complete. That covers
+`--announce` not passed, a dry run, a fail-fast stop, and an announce failure,
+which still exits 69 with the entries rendered. A CI pipeline that needs the
+pushed branch reads it from here instead of parsing stderr, for example to
+trigger a downstream index-validation pipeline.
 
 ### Example run {#batch-publish-example}
 
@@ -1295,22 +1353,24 @@ grim publish --version canary
 
 ### Manifest vs bundle disambiguation {#batch-publish-disambiguation}
 
-A `publish.toml` and a bundle `.toml` are structurally different: a manifest
-has a top-level `registry` string and per-entry sub-tables with `version`; a
+A `publish.toml` and a bundle `.toml` are structurally different. A manifest
+has a top-level `registry` string and per-entry sub-tables with `version`. A
 bundle has flat `name = "reference"` strings in its kind tables. The schemas
 are disjoint and each parser rejects the other's input.
 
-If you point `grim publish` at a bundle file, the command detects the shape
-and reports: "this looks like a bundle source file; use `grim release --kind
-bundle`". If you point `grim release` at a publish manifest, the bundle
-reader returns the mirror hint. Neither silently misparses the other's format.
+If you point `grim publish` at a bundle file, the command detects the shape.
+It reports that the file looks like a bundle source file rather than a
+publish manifest, and points you at `grim release --kind bundle`. If you
+point `grim release` at a publish manifest, the bundle reader returns the
+mirror hint. Neither silently misparses the other's format.
 
 ## Authenticate {#authenticate}
 
 Grimoire pushes over standard OCI, so it reuses your existing registry
-credentials — the same login your container tooling uses. Authenticate once
-with your registry (for example, `docker login` against [GitHub Container
-Registry][ghcr]) and `grim release` inherits it.
+credentials. Those are the same login your container tooling uses.
+Authenticate once with your registry and `grim release` inherits it, for
+example with `docker login` against
+[GitHub Container Registry][ghcr].
 
 <!-- external -->
 [ghcr]: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry

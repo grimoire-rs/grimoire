@@ -8,6 +8,8 @@ Skills teach an agent a capability and rules constrain it; an **agent
 artifact** defines an agent itself — a named, delegatable assistant with
 its own system prompt, model, and tool access.
 
+## Why one canonical file {#why-canonical}
+
 Every major AI client has grown such a definition format: [Claude Code
 subagents][claude-subagents-docs], [OpenCode agents][opencode-agents-docs],
 [Copilot CLI custom agents][copilot-agents-docs], and [OpenAI Codex

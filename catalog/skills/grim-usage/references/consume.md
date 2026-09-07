@@ -140,6 +140,11 @@ you have modified locally — or any pre-existing same-named file it has
 no record of writing — pass `--force` to overwrite deliberately.
 See [troubleshooting.md](troubleshooting.md) for the integrity gates.
 
+Install also refuses when the lock is stale. If `grimoire.lock`'s
+`declaration_hash` no longer matches `grimoire.toml`, it exits 65 and
+tells you to run `grim lock` first. This check runs before the two gates
+above.
+
 `grim install <path>` — the same local-path form as a positional argument
 — is a different move: a throwaway dev-install. It renders a skill,
 rule, or agent straight from disk into your clients **without** declaring
@@ -228,15 +233,19 @@ pruned — see [Installing](#installing).
 
 ## Inspecting
 
-`grim status` reports each declared artifact's state — installed,
-outdated, locally modified, integrity-missing, or not installed. The
+`grim status` reports each declared artifact's state: `installed`,
+`outdated`, `modified`, `missing`, or `stale`. See [artifact
+states][artifact-states] for what each one means. The
 `Source` column shows provenance: `direct`, the bundle the artifact came
 from, `path: <path>` for a declared local path source, or
 `path: <path> (dev)` for a dev-install. Pair with `--format json` to
 drive automation — its `outputs`
 array lists the per-client paths an artifact was materialized to, and is
 the supported way to script against install locations (the on-disk
-vendor layout itself is not a stable contract). Each item also carries
+vendor layout itself is not a stable contract). `outputs` is filtered to
+the clients grim detects right now, not the clients recorded at install
+time. Drop a client and its still-on-disk output vanishes from the array,
+even though the file has not moved and `state` stays put. Each item also carries
 `clients_missing`/`clients_extra` — the *explicitly configured*
 `[options].clients` diffed against what is actually recorded installed,
 computed locally, no network. Left unset (autodetect), both stay `[]` on
@@ -427,3 +436,4 @@ no registry identity of its own to resolve one against.
 [bundles]: https://grimoire.rs/concepts.html#bundles
 [config-toml]: https://grimoire.rs/configuration.html
 [json-interface]: https://grimoire.rs/json-interface.html
+[artifact-states]: https://grimoire.rs/commands.html#artifact-states

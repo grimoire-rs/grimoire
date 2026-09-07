@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Grimoire Authors
+#
+# One committed directory every agent on the repository reads: two
+# declarations fan out into five files, each in its client's native shape.
+# The supported YAML subset is documented in ../test_record_casts.py.
+output: docs/public/casts/shared-skills.cast
+title: "grim: one directory, every agent"
+columns: 180
+rows: 24
+# Only the source directory. The rule is a single `.md` FILE written by a
+# step, not a directory -- `grim add` on a directory holding one `.md`
+# cannot infer a kind.
+dirs:
+  - agent-config/code-review
+steps:
+  - type: printf -- '---\nname: code-review\ndescription: Review a diff for correctness and risk.\n---\n\nName the correctness risks first.\n' | tee agent-config/code-review/SKILL.md
+    expect: name: code-review\s+description: Review a diff for correctness and risk\.
+  - type: printf -- '---\nname: repo-conventions\ndescription: House rules every agent on this repository follows.\n---\n\nConventional commits.\n' | tee agent-config/repo-conventions.md
+    expect: name: repo-conventions\s+description: House rules every agent on this repository follows\.
+  - type: grim init
+    expect: grimoire\.toml\s+project\s+created
+  - type: grim config set options.clients claude,codex,cursor
+    expect: set\s+options\.clients\s+claude,codex,cursor\s+project\s+false
+  - type: grim add ./agent-config/code-review
+    expect: skill\s+code-review\s+\./agent-config/code-review@sha256:[0-9a-f]{64}\s+added
+  - type: grim add ./agent-config/repo-conventions.md
+    expect: rule\s+repo-conventions\s+\./agent-config/repo-conventions\.md@sha256:[0-9a-f]{64}\s+added
+  # Two declarations, exactly five files, each in its client's native shape
+  # -- and no sixth. S-004 is the shape of this list: three skill copies
+  # (claude, cursor, and the shared pool codex reads) but only two rule
+  # files, because codex takes no rule.
+  - type: find .claude .cursor .agents -type f | sort
+    expect: \.agents/skills/code-review/SKILL\.md\s+\.claude/rules/repo-conventions\.md\s+\.claude/skills/code-review/SKILL\.md\s+\.cursor/rules/repo-conventions\.mdc\s+\.cursor/skills/code-review/SKILL\.md(?![\s\S]*/)
+  - type: grim status
+    expect: skill\s+code-review\s+path: \./agent-config/code-review\s+-\s+installed\s+rule\s+repo-conventions\s+path: \./agent-config/repo-conventions\.md\s+-\s+installed
+  # What travels with the repository is the declaration, not the copies.
+  - type: cat grimoire.lock
+    expect: \[\[skill\]\]\s+name = "code-review"\s+path = "\./agent-config/code-review"\s+hash = "sha256:[0-9a-f]{64}"\s+\[\[rule\]\]\s+name = "repo-conventions"\s+path = "\./agent-config/repo-conventions\.md"

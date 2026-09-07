@@ -11,6 +11,8 @@ and [Docker Hub][dockerhub]. A **package index** fills that gap: a small,
 decentralized directory of package pointers that grim reads instead of
 `_catalog`.
 
+## No Central Service {#decentralized}
+
 Grimoire is decentralized by design. Anyone can host an index (a git
 repository or a folder of static files), and any OCI registry can host
 the packages it points to. The happy path is the default index at

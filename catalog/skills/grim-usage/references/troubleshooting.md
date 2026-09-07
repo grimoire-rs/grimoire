@@ -53,6 +53,12 @@ from the working directory), and `locked` (exit 75 — another grim
 process holds the config-file lock). New reasons are additive — treat an
 unknown one as absent.
 
+`grim install` has its own stale-lock refusal, and it is a different
+case from the `stale-lock` reason above. If `grimoire.lock`'s
+`declaration_hash` no longer matches `grimoire.toml`, install exits 65
+with no `reason` field at all. Run `grim lock` to refresh it. The
+`stale-lock` reason above fires only on a partial `grim update <name>`.
+
 A failure that names a key or value grim does not recognize also carries a
 `hint` string (and prints the same line on stderr): grim's formats reject
 an unknown key rather than dropping it, so the usual causes are a typo or

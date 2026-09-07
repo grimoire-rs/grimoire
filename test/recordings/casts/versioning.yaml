@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Grimoire Authors
+#
+# The cast for docs/src/content/docs/guides/versioning.md: two releases of
+# one artifact, and a `:1` reference that moves to the second one. The
+# supported YAML subset is documented in ../test_record_casts.py.
+#
+# Nothing pre-seeds the registry, so the cast publishes both versions
+# itself. `printf | tee` rather than `printf >`: a step must assert
+# something a command printed, and tee shows what changed between releases.
+# The repo name is `test-writer`, distinct from the other casts': every cast
+# in one `task test:demo` run shares one registry, so two casts pushing
+# different content to one repo:tag would make the second one exit 65.
+output: docs/public/casts/versioning.cast
+title: "grim: how far a reference is allowed to move"
+registry: local
+columns: 180
+rows: 24
+dirs:
+  - .claude
+  - test-writer
+steps:
+  - type: printf -- '---\nname: test-writer\ndescription: Write a regression test\n---\nVersion 1.0.0: write a test for the bug.\n' | tee test-writer/SKILL.md
+    expect: Version 1\.0\.0: write a test for the bug\.
+  - type: grim release ./test-writer {registry}/acme/test-writer:1.0.0
+    expect: acme/test-writer:1\.0\.0\s+sha256:[0-9a-f]{64}\s+1\.0\.0,1\.0,1,latest
+  - type: grim init
+    expect: grimoire\.toml\s+project\s+created
+  # `:1` is the major-rolling rung: it follows every 1.x release.
+  - type: grim add {registry}/acme/test-writer:1
+    expect: skill\s+test-writer\s+\S+@sha256:[0-9a-f]{64}\s+added
+  - type: printf -- '---\nname: test-writer\ndescription: Write a regression test\n---\nVersion 1.1.0: write a test for the bug and the fix.\n' | tee test-writer/SKILL.md
+    expect: Version 1\.1\.0: write a test for the bug and the fix\.
+  # Releasing 1.1.0 moves the `1` and `latest` tags onto the new manifest.
+  - type: grim release ./test-writer {registry}/acme/test-writer:1.1.0
+    expect: acme/test-writer:1\.1\.0\s+sha256:[0-9a-f]{64}\s+1\.1\.0,1\.1,1,latest
+  # Old and New must be *different* digests -- a backreference in a negative
+  # lookahead is what makes this assert movement rather than a printed table.
+  - type: grim update
+    expect: skill\s+test-writer\s+(sha256:[0-9a-f]{12})\s+(?!\1\s)sha256:[0-9a-f]{12}\s+updated
+  # The rolling tag now resolves to the release that was pushed second.
+  - type: grim fetch {registry}/acme/test-writer:1
+    expect: Version 1\.1\.0: write a test for the bug and the fix\.

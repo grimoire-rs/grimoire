@@ -5,17 +5,24 @@ description: "This walkthrough declares a skill, installs it into a project, and
 <!-- doc_type: how-to -->
 <!-- doc_tier: first-steps -->
 
-This walkthrough declares a skill, installs it into a project, and then
-upgrades it. It assumes `grim` is on your `PATH` (see [Installation][install]).
-Nothing else needs configuring: out of the box `grim` browses the public
+This walkthrough declares a skill, installs it into a project, and upgrades
+it. It assumes `grim` is on your `PATH`. See [Installation][install] if it is
+not.
+
+Nothing else needs configuring. Out of the box `grim` browses the public
 [package index][index] and expands short references against
-`ghcr.io/grimoire-rs` — point it at your own registry only when you have one.
+`ghcr.io/grimoire-rs`. Point it at your own registry only when you have one.
 
 A short reference expands to `<default-registry>/<what-you-typed>`, verbatim.
 The first-party packages are published under a kind segment, so the short form
-of `grim-usage` is `skills/grim-usage`, not `grim-usage` — a bare name would
-expand to `ghcr.io/grimoire-rs/grim-usage`, which does not exist. Registries
-that publish flat (no kind segment) resolve from a bare name directly.
+of `grim-usage` is `skills/grim-usage`. A bare name would expand to
+`ghcr.io/grimoire-rs/grim-usage`, which does not exist. Registries that publish
+flat, with no kind segment, resolve from a bare name directly.
+
+## See it run
+
+<div data-cast="/casts/quickstart.cast" data-cast-poster="npt:0:03"></div>
+<noscript><a href="/casts/quickstart.cast">Download the recording</a></noscript>
 
 ## 1. Create a project config
 
@@ -34,50 +41,73 @@ grim init --registry ghcr.io/acme
 
 ## 2. Declare an artifact
 
-`grim add` records a skill or rule in `grimoire.toml`, immediately pins it in
-`grimoire.lock`, and materializes that one entry into the clients it detects.
-The only required argument is the reference to fetch; the kind is inferred
-from the published manifest and the binding name defaults to the reference's
-last path segment:
+`grim add` records a skill or rule in `grimoire.toml` and pins it in
+`grimoire.lock`. It then installs that one entry into the clients it detects,
+if it detects any. The reference to fetch is the only required argument. The
+kind is inferred from the published manifest, and the binding name defaults to
+the last path segment:
 
 ```sh
 grim add ghcr.io/grimoire-rs/skills/grim-usage
 ```
 
-The reference is `registry/repo:tag` (or `registry/repo@sha256:…` to pin an
-exact digest). Without a tag, `:latest` is assumed; a floating tag like `:1`
-tracks the newest `1.x` release, which is what makes
-[`grim update`](#5-upgrade) meaningful later. To find something worth
-declaring, search the index first — `grim search` matches names, summaries,
-and keywords, and [`grim tui`][tui] browses the same catalog interactively:
+The reference is `registry/repo:tag`. Use `registry/repo@sha256:…` to pin an
+exact digest. Without a tag, `:latest` is assumed. A floating tag like `:1`
+tracks each new `1.x` release, which is what makes
+[`grim update`](#5-upgrade) meaningful later.
+
+To find something worth declaring, search the index first. `grim search`
+matches names, summaries, and keywords. [`grim tui`][tui] browses the same
+catalog interactively:
 
 ```sh
 grim search authoring
 ```
 
-## 3. Install into your AI client(s)
+In a project with no client marker directory, `grim add` writes to
+`.agents/skills/`, the shared pool that Claude Code does not read. Detection
+works by marker directory, so a fresh repo with no `.claude` directory gets
+that fallback. Nothing in the command output tells you it happened. Step 3 is
+where you fix it.
 
-Step 2 already installed the entry it declared, so there is nothing left to do
-here yet — `grim install` earns its keep on a `grimoire.toml` you did *not*
-just write: a fresh clone, a hand-edited config, or an `add --no-install`.
+## 3. Install into your AI client(s)
 
 `grim install` materializes every locked artifact into your AI client's
 configuration directory. By default it targets every AI client it detects in
-the workspace ([Claude Code][claude], [opencode][opencode], [GitHub
-Copilot][copilot], [OpenAI Codex][codex]); pass `--client` to pick explicitly,
-with a comma-separated list to install into several at once. Note that
-[Codex][codex] supports skills and agents only — rules are not supported and
-are skipped with a warning:
+the workspace, such as [Claude Code][claude], [opencode][opencode], [GitHub
+Copilot][copilot] and [OpenAI Codex][codex]. Pass `--client` to pick
+explicitly, with a comma-separated list for several at once.
+[Codex][codex] supports skills and agents only. A rule aimed at it is skipped
+without a word on stderr, so check [Clients](./clients.md) before you rely on a
+client hosting a kind.
 
 ```sh
 grim install
 grim install --client claude,copilot
 ```
 
+If step 2 landed in the shared pool, `grim install --client claude` is the
+command that puts the skill where Claude Code looks:
+
+```sh
+grim install --client claude
+```
+
+That writes `.claude/skills/<name>/SKILL.md` and leaves the `.agents/skills/`
+copy on disk. The plain `grim status` table does not tell the two apart. Run
+`grim status --format json` to read every output with its `client` and its
+`path`.
+
+To stop passing the flag on every run, record the client set once.
+`grim config set options.clients claude` writes `clients = ["claude"]` into
+the `[options]` table of `grimoire.toml`. Creating the `.claude/` directory
+before `grim add` works just as well.
+
 ## 4. Check the state
 
-`grim status` reports each declared artifact as installed, outdated, locally
-modified, or missing — the same model the [TUI][tui] paints in colour.
+`grim status` reports one state per declared artifact. Every one of those
+words is defined in [artifact states](./commands.md#artifact-states), and no
+other page repeats them. The [TUI][tui] paints the same model in colour.
 
 ```sh
 grim status
@@ -86,7 +116,7 @@ grim status
 ## 5. Upgrade {#5-upgrade}
 
 When the publisher ships a newer version behind the same floating tag,
-`grim update` re-resolves the tag, rolls the lock forward, and re-materializes
+`grim update` re-resolves it. That rolls the lock forward and re-materializes
 only what changed:
 
 ```sh
@@ -94,12 +124,31 @@ grim update            # everything
 grim update grim-usage # one binding by name
 ```
 
+## What to commit
+
+Commit `grimoire.toml` and `grimoire.lock` together, because the first records
+what you asked for and the second pins what you got.
+
+Leave `.grimoire/` alone. Grim writes a self-managed `.grimoire/.gitignore`
+whose content is `*` the first time it creates that directory. That keeps the
+state file out of version control.
+
+The rendered output directories, `.claude/` and `.agents/`, are regenerated by
+`grim install`. Grim writes no `.gitignore` for them, so a teammate who clones
+the repo gets them back by running `grim install`.
+
+## Does the agent need a reload?
+
+Grim writes the file and stops there. Nothing signals a running agent that a
+new skill appeared, so an open session will not see it. Start a new agent
+session, or restart the one you have, then ask it to use the skill by name.
+
 ## Go global {#global}
 
 Everything above also works user-wide. Pass `--global` and the declaration
-lands in the global config (`$GRIM_HOME/grimoire.toml`, created on demand —
-no `init` needed) while `install` writes into each client's user-level
-directory (e.g. `~/.claude/skills/`), so the artifact follows you across
+lands in the global config at `$GRIM_HOME/grimoire.toml`, created on demand
+with no `init` needed. `install` then writes into each client's user-level
+directory, such as `~/.claude/skills/`, so the artifact follows you across
 projects:
 
 ```sh
@@ -109,17 +158,21 @@ grim install --global
 
 ## Undo
 
-To take an artifact back out completely — files, install record, and config
-entry — use [`grim uninstall`][uninstall]. To browse what the index offers
+[`grim uninstall`][uninstall] takes an artifact back out completely, including
+files, install record, and config entry. To browse what the index offers
 before declaring anything, launch the interactive browser with
 [`grim tui`][tui].
 
-## Next
+## Next steps
 
-Sharing config across a team means publishing it and having somewhere to
-find it. [Host Your Own Index][hosting] scaffolds that second half in one
-command — a catalog site and a contribution gate, served from GitHub or
-GitLab Pages.
+Two short pages carry on from here. [Find and install an artifact][browse]
+covers the three ways in, including the interactive browser and the VS Code
+extension. [Write your first skill][first-skill] takes you the other
+direction, from an empty file to an agent loading it.
+
+When you are ready to share config with a team, [Publish to your own
+index][own-index] walks the whole path. [Host Your Own Index][hosting] is the
+reference behind it.
 
 <!-- external -->
 [claude]: https://docs.anthropic.com/en/docs/claude-code/overview
@@ -130,6 +183,9 @@ GitLab Pages.
 <!-- internal -->
 [index]: ./package-index.md
 [hosting]: ./hosting-an-index.md
+[browse]: ./browse.md
+[first-skill]: ./first-skill.md
+[own-index]: ./tutorials/own-index.md
 [install]: ./installation.md
 [tui]: ./commands.md#tui
 [uninstall]: ./commands.md#uninstall

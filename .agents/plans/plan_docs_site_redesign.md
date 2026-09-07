@@ -161,6 +161,7 @@ the documented verification (D-5).
 | ID | Scope | Expected files | Size | Wave | Depends on | Review | Verify | Status |
 |---|---|---|---|---|---|---|---|---|
 | WP-Z | prerequisite — none (added at execution) | `.claude/rules.md`, `.claude/rules/meta-ai-config.md`, `.claude/tests/test_ai_config.py`, `.claude/taskfile.yml`, `.claude/rules/docs-quality/checks/fixtures/doc_examples/harness-*/*.sh` | M | 1 | — | risk | full | merged |
+| WP-T | prerequisite — none (added at execution) | `docs/src/content/docs/{agents,clients,hosting-an-index,json-interface,mcp-servers,package-index}.md` | S | 5 | — | — | scoped | merged |
 | WP-A | C-010, D-9; S-012, S-013, S-014 | `docs/check_urls.py`, `test/tests/test_check_urls.py`, `.claude/rules/docs-quality/checks/nav_depth.py`, `.claude/rules/docs-quality/checks/fixtures/nav_depth/` | M | 1 | — | | scoped | merged |
 | WP-B | C-008, C-009 (copy), C-012, D-5, D-10, D-12; S-013 | `taskfiles/docs.taskfile.yml`, `taskfiles/schema.taskfile.yml`, `.gitignore` | M | 1 | — | | scoped | merged |
 | WP-C | C-013, C-014; S-014 | `.github/workflows/docs.yml`, `.github/dependabot.yml` | S | 1 | — | | scoped | merged |
@@ -170,16 +171,27 @@ the documented verification (D-5).
 | WP-G | C-016, C-017 (W1), C-018 | `docs/src/pages/index.astro`, `docs/theme/index.hbs` (delete), `docs/seo.py` (delete), `docs/book.toml` (delete), `docs/README.md`, `docs/docs.toml`, `AGENTS.md`, `.claude/rules/docs-style.md`, `.claude/rules/subsystem-taskfiles.md` | L | 3 | F | | full | merged |
 | WP-H | C-029, D-8 | `test/recordings/cast_recorder.py`, `test/recordings/test_record_casts.py`, `test/recordings/test_record_demo.py` (delete), `test/recordings/casts/demo.yaml`, `test/taskfile.yml`, `docs/public/demo.cast` | M | 4 | — | | scoped | merged |
 | WP-I | C-027, C-028 rows 1 3 4 5, D-7 | `content/commands.md`, `content/json-interface.md`, `content/configuration.md` | M | 4 | — | | scoped | merged |
-| WP-J | C-024 (embeds), C-025 (browse, first-skill), C-026 (quickstart), C-028 row 2, C-030 (recorder extension, browse cast, fallback), D-3; S-001, S-002, S-003 | `content/quickstart.md`, `content/browse.md`, `content/first-skill.md`, `test/recordings/cast_recorder.py` (raw-stream mode, `send_keys`), `test/recordings/test_record_casts.py` (`keys:` support), `test/recordings/casts/{quickstart,browse-tui,first-skill}.yaml`, `docs/public/casts/{quickstart,browse-tui,first-skill}.cast`, `docs/public/img/browse-tui.png` (fallback only) | L | 5 | H | risk | scoped | pending |
-| WP-K | C-024 (embeds), C-025 (scopes-and-clients, shared-skills, mcp-everywhere); S-004, S-005 | `content/guides/{scopes-and-clients,shared-skills,mcp-everywhere}.md`, `test/recordings/casts/{scopes,shared-skills}.yaml`, `docs/public/casts/{scopes,shared-skills}.cast` | L | 5 | H | | scoped | pending |
-| WP-L | C-024 (embeds), C-025 (lifecycle, inspect, versioning); S-006, S-008, S-009 | `content/guides/{lifecycle,inspect,versioning}.md`, `test/recordings/casts/{lifecycle,inspect,versioning}.yaml`, `docs/public/casts/{lifecycle,inspect,versioning}.cast` | L | 5 | H | | scoped | pending |
-| WP-M | C-024 (embeds), C-025 (own-index, catalog-best-practices), C-026 (publishing); S-011 | `content/tutorials/own-index.md`, `content/guides/catalog-best-practices.md`, `content/publishing.md`, `test/recordings/casts/own-index.yaml`, `docs/public/casts/own-index.cast` | L | 5 | H | | scoped | pending |
-| WP-N | C-024 (embeds), C-025 (team-ci, registries); S-007, S-010 | `content/guides/{team-ci,registries}.md`, `test/recordings/casts/{team-ci,registries}.yaml`, `docs/public/casts/{team-ci,registries}.cast` | L | 5 | H | | scoped | pending |
-| WP-O | C-003 (12 new entries), C-024 (script, head), C-025 (gate), catalog drift | `docs/astro.config.mjs`, `docs/public/casts.js`, `catalog/**` (drift edits, if any) | M | 6 | I, J, K, L, M, N | | full | pending |
+| WP-J | C-024 (embeds), C-025 (browse, first-skill), C-026 (quickstart), C-028 row 2, C-030 (recorder extension, browse cast, fallback), D-3; S-001, S-002, S-003 | `content/quickstart.md`, `content/browse.md`, `content/first-skill.md`, `test/recordings/cast_recorder.py` (raw-stream mode, `send_keys`), `test/recordings/test_record_casts.py` (`keys:` support), `test/recordings/casts/{quickstart,browse-tui,first-skill}.yaml`, `docs/public/casts/{quickstart,browse-tui,first-skill}.cast`, `docs/public/img/browse-tui.png` (fallback only) | L | 5 | H | risk | scoped | merged |
+| WP-K | C-024 (embeds), C-025 (scopes-and-clients, shared-skills, mcp-everywhere); S-004, S-005 | `content/guides/{scopes-and-clients,shared-skills,mcp-everywhere}.md`, `test/recordings/casts/{scopes,shared-skills}.yaml`, `docs/public/casts/{scopes,shared-skills}.cast` | L | 5 | H | | scoped | merged |
+| WP-L | C-024 (embeds), C-025 (lifecycle, inspect, versioning); S-006, S-008, S-009 | `content/guides/{lifecycle,inspect,versioning}.md`, `test/recordings/casts/{lifecycle,inspect,versioning}.yaml`, `docs/public/casts/{lifecycle,inspect,versioning}.cast` | L | 5 | H | | scoped | merged |
+| WP-M | C-024 (embeds), C-025 (own-index, catalog-best-practices), C-026 (publishing); S-011 | `content/tutorials/own-index.md`, `content/guides/catalog-best-practices.md`, `content/publishing.md`, `test/recordings/casts/own-index.yaml`, `docs/public/casts/own-index.cast` | L | 5 | H | | scoped | merged |
+| WP-N | C-024 (embeds), C-025 (team-ci, registries); S-007, S-010 | `content/guides/{team-ci,registries}.md`, `test/recordings/casts/{team-ci,registries}.yaml`, `docs/public/casts/{team-ci,registries}.cast` | L | 5 | H | | scoped | merged |
+| WP-O | C-003 (12 new entries), C-024 (script, head), C-025 (gate), catalog drift | `docs/astro.config.mjs`, `docs/public/casts.js`, `catalog/**` (drift edits, if any) | M | 6 | I, J, K, L, M, N | | full | merged |
 | WP-P | C-022 | `docs/src/data/landing.ts`, `docs/src/data/landing.test.ts`, `docs/package.json` (`test` script) | M | 7 | — | | scoped | pending |
 | WP-Q | C-019, C-020 (theme, header), C-021 (fold) | `docs/src/styles/theme.css`, `docs/src/components/{ThemeProvider,ThemeSelect,Header}.astro`, `docs/astro.config.mjs`, `docs/public/privacy.html` | M | 7 | — | | scoped | pending |
 | WP-S | C-017 (W2) | `content/introduction.md` | S | 7 | — | | scoped | pending |
 | WP-R | C-020 (footer), C-023, D-4 | `docs/src/pages/index.astro`, `docs/src/components/{WaysIn,PainRouter,FooterNav,Footer}.astro` | L | 8 | P, Q | | full | pending |
+
+**WP-T is unplanned.** `page_type.py --root docs/src/content/docs` exited 1
+at the wave-5 base with seven findings, all predating this plan and none on a page
+any planned work package touches. Six are closed here: five DOC-TYPE-07 preambles
+gain a heading of their own (additive anchors only, nothing renamed or dropped) and
+one DOC-TYPE-04 passage on `json-interface.md` loses its first person. The seventh,
+DOC-TYPE-08 on `upgrading.md`, is left unfixed and deferred to the owner: the fix
+trades it for a DOC-TYPE-09 finding the rule's own type table says should not fire
+on a troubleshooting page (`page-types.md:75` against `page_type.py:240`), and the
+checker is vendored from `ocx-sh/grimoire-lore` where a local edit is reverted on
+the next sync.
 
 **WP-Z is unplanned.** `task verify` was red on `main` from `069bfe3`, which
 vendored ten skills and eight rules into `.claude/` without updating this repo's
@@ -864,6 +876,20 @@ spec § 4: a dead shipped URL is a Principle 9 breach, not a lint finding.
 ## Schedule log
 
 <!-- /hex-execute appends one line per wave gate: date, wave, WPs merged, verify result. WP-I appends "Catalog drift (WP-I)": the catalog files that restate the changed claims. -->
+
+- 2026-09-07T01:38Z · merged WP-O @ 83f12a1 · verify full(PR 2 gate) · ready: WP-Q · blocked: WP-R(WP-Q)
+
+- 2026-09-07T01:33Z · merged WP-J @ dc9052a · verify scoped · ready: WP-O · blocked: —
+
+- 2026-09-07T01:26Z · merged WP-N @ 71288e7 · verify scoped · ready: — · blocked: WP-O(J)
+
+- 2026-09-07T01:22Z · merged WP-K @ cd5d421 · verify scoped · ready: — · blocked: WP-O(J,N)
+
+- 2026-09-07T01:18Z · merged WP-M @ 23c72f2 · verify scoped · ready: — · blocked: WP-O(J,K,N)
+
+- 2026-09-07T01:14Z · merged WP-L @ 2479c71 · verify scoped · ready: — · blocked: WP-O(J,K,M,N)
+
+- 2026-09-07T01:08Z · merged WP-T @ 1561482 · verify scoped · ready: — · blocked: WP-O(J,K,L,M,N)
 
 - 2026-09-07T00:44:13Z · merged WP-I @ 3478e5e · verify scoped · ready: J, K, L, M, N · blocked: O
 

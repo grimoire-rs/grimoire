@@ -117,7 +117,13 @@ class CastRecorder:
         inter_command_delay: float = 1.0,
         output_delay: float = 0.3,
         end_pause: float = 2.0,
+        raw_stream: bool = False,
     ):
+        # In raw-stream mode the recorder emits frames straight from
+        # `read_nonblocking` with wall-clock timestamps and leaves
+        # alternate-screen escape sequences in the cast, because asciicast v2
+        # stores the stream and the player's own terminal emulator paints it
+        # (spec contract C-030, plan decision D-3).
         self.env = env
         self.cwd = cwd
         self.width = width
@@ -127,6 +133,7 @@ class CastRecorder:
         self.inter_command_delay = inter_command_delay
         self.output_delay = output_delay
         self.end_pause = end_pause
+        self.raw_stream = raw_stream
         self._events: list[CastEvent] = []
         self._clock: float = 0.0
         self._shell: pexpect.spawn | None = None
@@ -226,6 +233,126 @@ class CastRecorder:
         self._clock += self.inter_command_delay
         return output
 
+    def _answer_cursor_queries(self, chunk: str) -> None:
+        """Reply to every cursor-position report (``ESC [ 6 n``) in *chunk*.
+
+        crossterm asks the terminal where the cursor is before it enters the
+        alternate screen, and gives up when nothing answers. Under a PTY the
+        *driver* is the terminal, so it has to answer itself: without this,
+        `grim tui` dies with "The cursor position could not be read within a
+        normal duration" and the recording is 200 bytes of nothing (measured
+        before this line existed). The row/column reported is irrelevant --
+        ratatui redraws the whole frame from its own buffer.
+        """
+        assert self._shell is not None
+        for _ in _CURSOR_QUERY_RE.findall(chunk):
+            self._shell.send("\x1b[1;1R")
+
+    def _without_sentinel(self, pending: str, *, final: bool = False) -> tuple[str, str]:
+        """Split *pending* into (text safe to emit now, text held back).
+
+        Complete prompt sentinels are dropped: the prompt is a recording
+        artifact, and `type_command` paints the visible `$ ` itself. A
+        *partial* sentinel at the end is held back, because the rest of it
+        arrives in the next chunk and a half-prompt already emitted cannot
+        be taken back. On the final call there is no next chunk, so nothing
+        is held.
+        """
+        text = pending.replace(self._SENTINEL, "")
+        if final:
+            return text, ""
+        for size in range(min(len(self._SENTINEL) - 1, len(text)), 0, -1):
+            if text.endswith(self._SENTINEL[:size]):
+                return text[:-size], text[-size:]
+        return text, ""
+
+    def _drain(self, seconds: float) -> str:
+        """Read for *seconds*, emitting what arrives as frames at their real
+        elapsed offset, and return the raw text.
+
+        The frame-per-chunk shape is what `raw_stream` means: a full-screen
+        application paints with cursor moves rather than lines, so there is
+        no prompt sentinel to read up to and no line boundary to split on.
+        The sentinel is stripped from what is *emitted* but kept in what is
+        returned, so the caller can still tell the shell came back.
+        """
+        assert self._shell is not None
+        captured: list[str] = []
+        pending = ""
+        wall_start = time.monotonic()
+        clock_base = self._clock
+
+        while True:
+            remaining = seconds - (time.monotonic() - wall_start)
+            if remaining <= 0:
+                break
+            try:
+                chunk = self._shell.read_nonblocking(size=4096, timeout=min(0.05, remaining))
+            except pexpect.TIMEOUT:
+                continue
+            except pexpect.EOF:
+                break
+            if not chunk:
+                continue
+            self._clock = clock_base + (time.monotonic() - wall_start)
+            captured.append(chunk)
+            self._answer_cursor_queries(chunk)
+            emit, pending = self._without_sentinel(pending + chunk)
+            if emit:
+                self._emit(emit)
+
+        emit, _ = self._without_sentinel(pending, final=True)
+        if emit:
+            self._emit(emit)
+        # The viewer sees the whole pause, not just the part output arrived in.
+        self._clock = clock_base + seconds
+        return "".join(captured)
+
+    def send_keys(self, seq: str, wait: float = 0.5) -> str:
+        """Write the raw sequence *seq* to the PTY without a trailing newline,
+        then drain output for *wait* seconds, emitting each chunk as a frame
+        at its real elapsed offset. Returns what was captured.
+
+        For driving a full-screen application (`grim tui`) that never
+        returns to the shell prompt between key presses.
+        """
+        assert self._shell is not None, "call open() before send_keys()"
+        self._shell.send(seq)
+        return self._drain(wait)
+
+    def run_raw(self, cmd: str, keys: "list[tuple[str, float]]", *, timeout: int = 60) -> str:
+        """Type and launch *cmd*, then send each `(seq, wait)` pair in order
+        via `send_keys`, and return the whole captured raw stream once the
+        shell prompt sentinel comes back (the application exited).
+
+        Unlike `run_command` this does not check `$?`, because the last key
+        is the one that quits the application. The caller asserts against
+        `CastRecorder.stripped(...)` of the return value, never against an
+        emulated screen -- `pyte`, the usual Python emulator, has had no
+        release since 2023-11 and mishandles the alternate screen buffer
+        ratatui enters.
+        """
+        assert self._shell is not None, "call open() before run_raw()"
+        if not self.raw_stream:
+            raise AssertionError(
+                "run_raw() needs a recorder opened with raw_stream=True -- "
+                "without it nothing answers crossterm's cursor-position query "
+                "and the application never starts"
+            )
+
+        self.type_command(cmd)
+        self._shell.sendline(cmd)
+        captured = [self._drain(self.output_delay)]
+        for seq, wait in keys:
+            captured.append(self.send_keys(seq, wait))
+        # The last key is the one that quits, so the prompt is usually already
+        # back inside that key's own wait. Reading again would then block until
+        # the timeout on a prompt that will never come a second time.
+        if self._SENTINEL not in "".join(captured):
+            captured.append(self._read_until_prompt(timeout))
+        self._clock += self.inter_command_delay
+        return "".join(captured)
+
     def pause(self, seconds: float) -> None:
         self._clock += seconds
 
@@ -235,6 +362,22 @@ class CastRecorder:
         self._clock += self.end_pause
         events.append(CastEvent(self._clock, "o", ""))
         return CastRecording(width=self.width, height=self.height, title=title, theme=theme, events=events)
+
+    @staticmethod
+    def stripped(text: str) -> str:
+        """Return *text* with terminal escape sequences removed.
+
+        A cast step's `expect` regex asserts against the escape-stripped
+        stream, not the raw captured output -- a step's `run_command` output
+        can carry cursor moves, mode-set/reset sequences and charset-select
+        codes even though grim's own tables carry no color (see the module
+        docstring). Strips CSI sequences (`\\x1b[...<final-byte>]`), G0/G1
+        charset-select sequences (`\\x1b(0`, `\\x1b)B`, ...), and the
+        DECPAM/DECPNM keypad-mode pair (`\\x1b=`, `\\x1b>`) via
+        `r"\\x1b\\[[0-9;?]*[A-Za-z]|\\x1b[()][A-Z0-9]|\\x1b[=>]"` (spec
+        contract C-030).
+        """
+        return _ESCAPE_RE.sub("", text)
 
 
 # A grim table header: 2+ capitalized words separated by print_table's GAP
@@ -246,6 +389,13 @@ class CastRecorder:
 _TABLE_HEADER_RE = re.compile(r"^[A-Z][A-Za-z]*(?:  +[A-Z][A-Za-z]*)+$")
 _TOKEN_RE = re.compile(r"\S+")
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+# Terminal escapes `CastRecorder.stripped` removes before a step's `expect`
+# regex is matched (spec contract C-030): CSI sequences, G0/G1 charset
+# selects, and the DECPAM/DECPNM keypad-mode pair.
+_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b[()][A-Z0-9]|\x1b[=>]")
+# crossterm's cursor-position report request, in both the plain and the
+# private-parameter spelling. `CastRecorder._answer_cursor_queries` replies.
+_CURSOR_QUERY_RE = re.compile(r"\x1b\[\??6n")
 
 
 def assert_tables_column_aligned(cast_path: Path) -> None:
@@ -282,10 +432,10 @@ def assert_tables_column_aligned(cast_path: Path) -> None:
         header_starts = [m.start() for m in _TOKEN_RE.finditer(header)]
         j = i + 1
         while j < len(lines) and lines[j].strip() and not lines[j].startswith("$ ") and not _TABLE_HEADER_RE.match(lines[j]):
-            row_starts = [m.start() for m in _TOKEN_RE.finditer(lines[j])]
-            for col, (h_start, r_start) in enumerate(zip(header_starts, row_starts)):
-                if h_start != r_start:
-                    misaligned.append(f"header {header!r} col {col} starts at {h_start}, row {lines[j]!r} starts at {r_start}")
+            row_starts = {m.start() for m in _TOKEN_RE.finditer(lines[j])}
+            for col, h_start in enumerate(header_starts):
+                if h_start not in row_starts:
+                    misaligned.append(f"header {header!r} col {col} starts at {h_start}, row {lines[j]!r} has no cell there")
             j += 1
         i = j
 

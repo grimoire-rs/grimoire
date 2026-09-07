@@ -123,6 +123,30 @@ selected (Codex has no path-scoped rule mechanism), or an mcp descriptor
 no selected client can register. Nothing was written to disk in that
 case, so there is no path to report; `status` is `skipped`.
 
+`status`'s `state` is one of `installed`, `outdated`, `modified`,
+`missing`, `stale`, defined once at [artifact
+states](./commands.md#artifact-states) and not repeated here. What a
+consumer has to program around is not the vocabulary but three of its
+edges:
+
+- `stale` is not a property of the artifact. It means `grimoire.lock`'s
+  `declaration_hash` no longer matches `grimoire.toml`, and it is tested
+  before anything else, so it appears on **every** item at once and says
+  nothing about any individual one's footprint. Read it as *this whole
+  report is provisional until [`grim lock`](./commands.md#lock) runs* — the
+  same condition [`grim install`](./commands.md#install) refuses on with
+  exit `65`, while `status` still exits `0`.
+- `missing` does not separate never-installed from installed-then-deleted.
+  `outputs`, empty versus populated, is what tells them apart.
+- `outputs` is filtered to the clients grim detects **right now**, not the
+  clients recorded at install time. A client whose marker directory you
+  removed is dropped from `outputs` while its file stays exactly where it
+  is on disk, and `state` does not move. One guard: when that filter would
+  empty the array entirely, every recorded output is reported instead, so a
+  row never reports a state without naming a file. `clients_extra` is the
+  field that does name a recorded client the configured set no longer
+  wants, and only when `[options].clients` is explicitly set.
+
 #### The `search` sources array {#search-sources}
 
 `search`'s `sources` is an always-present sibling of `items` — one object
@@ -347,9 +371,9 @@ was unauthorised. It is populated **only** by
 other invocation reports `null`, including a successful vote.
 
 **Never coerce `null` to `false`.** They are different claims: `false` is
-*the forge told us you have not voted*, `null` is *we do not know*. A
-client that renders unknown as a not-voted affordance tells the user
-something no system observed, which is what
+*the forge reported no upvote from this account*, `null` is *the state is
+unknown*. A client that renders unknown as a not-voted affordance tells
+the user something no system observed, which is what
 [invariant R-3][ratings-guarantees] exists to prevent — and it is why a
 failed query reports `null` and exit `0` rather than `false`, or an error.
 

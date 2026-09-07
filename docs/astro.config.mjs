@@ -113,14 +113,18 @@ export default defineConfig({
           tag: 'link',
           attrs: { rel: 'icon', href: '/favicon.png', type: 'image/png' },
         },
-        // Vendored asciinema player — served from docs/public/.
+        // C-024: vendored asciinema player, served from docs/public/. The
+        // stylesheet loads here so a mounted player is styled on its first
+        // paint; the 181 KB player bundle does NOT — `casts.js` injects it on
+        // the first `[data-cast]` intersection, so a page with no embed pays
+        // nothing for it.
         {
           tag: 'link',
           attrs: { rel: 'stylesheet', href: '/asciinema-player.css' },
         },
         {
           tag: 'script',
-          attrs: { src: '/asciinema-player.min.js', defer: true },
+          attrs: { src: '/casts.js', defer: true },
         },
       ],
       sidebar: [
@@ -130,16 +134,36 @@ export default defineConfig({
             { slug: 'introduction', label: 'Introduction' },
             { slug: 'installation', label: 'Installation' },
             { slug: 'quickstart', label: 'Quick Start' },
+            { slug: 'browse', label: 'Browse the index' },
+            { slug: 'first-skill', label: 'Your first skill' },
             { slug: 'concepts', label: 'Concepts' },
           ],
         },
         {
           label: 'Guides',
-          items: [{ slug: 'clients', label: 'Client Compatibility' }],
+          items: [
+            { slug: 'guides/scopes-and-clients', label: 'Scopes and clients' },
+            { slug: 'guides/shared-skills', label: 'Shared skills' },
+            { slug: 'guides/lifecycle', label: 'Install, update, status' },
+            { slug: 'guides/inspect', label: 'Inspect before you install' },
+            { slug: 'guides/versioning', label: 'Versioning' },
+            {
+              slug: 'guides/mcp-everywhere',
+              label: 'MCP servers everywhere',
+            },
+            { slug: 'clients', label: 'Client Compatibility' },
+          ],
         },
         {
           label: 'Teams and automation',
           items: [
+            { slug: 'tutorials/own-index', label: 'Publish to your own index' },
+            { slug: 'guides/team-ci', label: 'Team and CI' },
+            { slug: 'guides/registries', label: 'Company registries' },
+            {
+              slug: 'guides/catalog-best-practices',
+              label: 'Catalog layout and naming',
+            },
             { slug: 'publishing', label: 'Publishing Skills and Rules' },
             { slug: 'ci', label: 'Release automation' },
             { slug: 'hosting-an-index', label: 'Host Your Own Index' },

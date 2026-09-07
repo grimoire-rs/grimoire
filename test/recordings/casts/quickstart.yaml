@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Grimoire Authors
+#
+# The quick-start page's screencast: init a project against the local
+# registry fixture, add one seeded artifact, and show the client-marker gap
+# the quick-start page exists to explain -- no client detected yet, then a
+# client added and the same artifact installed into it.
+output: docs/public/casts/quickstart.cast
+title: "grim quickstart"
+registry: local
+seed:
+  - grim-docs/hello-world
+# No `dirs:` -- the missing client marker at the start is the whole point.
+steps:
+  - type: grim init
+    expect: grimoire\.toml\s+project\s+created
+  # `\S+` rather than a literal host: the session registry's port is
+  # allocated per run, and `{registry}` is substituted into `type` only.
+  - type: grim add {registry}/grim-docs/hello-world
+    expect: skill\s+hello-world\s+\S+/grim-docs/hello-world@sha256:[0-9a-f]{64}\s+added
+  # No client marker exists, so the render lands in the shared `agents`
+  # pool. The negative lookahead is the assertion the page turns on: nothing
+  # under `.claude/skills` was printed. `find` is quiet about the absent
+  # `.claude`, which is honest -- the reader has not created one yet.
+  - type: find .agents .claude -type f 2>/dev/null | sort
+    expect: \.agents/skills/hello-world/SKILL\.md(?![\s\S]*\.claude/skills)
+  # The fix: a second command naming the client. `grim add` has no
+  # `--client`. Status reads `updated` because the binding is already
+  # installed -- what changed is the client set it renders into.
+  - type: grim install --client claude
+    expect: skill\s+hello-world\s+\S+/\.claude/skills/hello-world\s+updated
+  # Both paths now, and the `.agents/` copy is still there.
+  - type: find .agents .claude -type f 2>/dev/null | sort
+    expect: \.agents/skills/hello-world/SKILL\.md[\s\S]*\.claude/skills/hello-world/SKILL\.md

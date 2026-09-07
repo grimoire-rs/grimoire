@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Grimoire Authors
+#
+# The cast for docs/src/content/docs/guides/inspect.md: read the metadata,
+# read the body, then pin the exact digest you read -- nothing installs
+# before it has been looked at. The supported YAML subset is documented in
+# ../test_record_casts.py.
+#
+# Nothing pre-seeds the registry, so the cast publishes its own artifact
+# first, carrying the `metadata.deprecated` notice `grim describe` reports
+# and `grim add` warns about. The repo name is `pr-review`, not the
+# `code-review` lifecycle.yaml publishes: every cast in one `task test:demo`
+# run shares one registry, so two casts pushing different content to one
+# repo:tag would make the second one exit 65. Editing the content below and
+# re-recording against a *persistent* registry hits the same refusal --
+# `grim release --force` moves the tag when that happens.
+output: docs/public/casts/inspect.cast
+title: "grim: read an artifact before you install it"
+registry: local
+columns: 180
+rows: 24
+dirs:
+  - .claude
+  - pr-review
+steps:
+  - type: printf -- '---\nname: pr-review\ndescription: Review a diff\nmetadata:\n  deprecated: Superseded by code-review\n---\nCheck the diff carefully.\n' | tee pr-review/SKILL.md
+    expect: deprecated: Superseded by code-review
+  - type: grim release ./pr-review {registry}/acme/pr-review:1.0.0
+    expect: acme/pr-review:1\.0\.0\s+sha256:[0-9a-f]{64}\s+1\.0\.0,1\.0,1,latest
+  # Before describe, so it resolves a project scope and prints no
+  # "no scope resolved" warning over the table the page points at.
+  - type: grim init
+    expect: grimoire\.toml\s+project\s+created
+  - type: grim describe {registry}/acme/pr-review:1.0.0
+    expect: digest\s+sha256:[0-9a-f]{64}[\s\S]*deprecated\s+Superseded by code-review
+  - type: grim fetch {registry}/acme/pr-review:1.0.0
+    expect: Check the diff carefully\.
+  - type: DIGEST=$(grim describe {registry}/acme/pr-review:1.0.0 | awk '$1=="digest"{print $2}'); echo "pinning $DIGEST"
+    expect: pinning sha256:[0-9a-f]{64}
+  # The pin is the digest just read, not the tag -- and add still warns
+  # about the deprecation on the way in.
+  - type: grim add {registry}/acme/pr-review@$DIGEST
+    expect: is deprecated: Superseded by code-review[\s\S]*skill\s+pr-review\s+\S+@sha256:[0-9a-f]{64}\s+added

@@ -546,7 +546,7 @@ site with a dead shipped URL is a Principle 9 breach, not a lint finding.
 | Pagefind under `.html` | `Search.astro` sets `data-strip-trailing-slash` under `trailingSlash: 'never'` and strips client-side — confirmed in source at 0.41.11 (§ 9, closed). W1 clicks one result as confirmation |
 | `lastUpdated` | Not enabled (D-11): the mdBook site shows no date, and feeding it needs a full-history clone on every docs build |
 | Dark only | No light palette ships. C-020's `ThemeProvider` forces it; `prefers-color-scheme` is not consulted |
-| `/print.html` | mdBook generated it; `robots.txt` disallows it; Astro emits no such page; the ADR's contract list omits it. Leave the `Disallow` line — editing a shipped file for no gain |
+| `/print.html` | mdBook generated it; Astro emits no such page; the ADR's contract list omits it. The `Disallow` line was dropped from `robots.txt` in review round 1 — a rule against a URL the site cannot serve reads as a page someone is hiding |
 | Canonical tags | Emitted by Starlight and `trailingSlash`-aware since 0.33.0 (§ 9, closed). W1 asserts `rel="canonical"` on `commands.html` |
 
 ## 6. Trade-offs
