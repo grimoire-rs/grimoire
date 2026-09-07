@@ -203,6 +203,16 @@
   border-bottom: 1px solid var(--sl-color-gray-4);
 }
 
+/* `rehypeAutolinkHeadings` runs in `wrap` mode (astro.config.mjs), so every
+   heading's text IS an `<a>` — and Starlight styles content links accent and
+   underlined. On an h2 that stacked a text underline on top of the hairline
+   above: two rules, 10px apart. The heading reads as a heading, not a link;
+   Starlight's own `.sl-anchor-link` icon is what advertises the anchor. */
+.sl-markdown-content :is(h1, h2, h3, h4, h5, h6) > a:not(:where(.not-content *)) {
+  color: inherit;
+  text-decoration: none;
+}
+
 /* Client compatibility matrix (docs/src/content/docs/clients.md, #matrix).
    The table reads left-aligned with the surrounding prose, flush to the
    content column's left edge. Both declarations are stated rather than

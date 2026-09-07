@@ -28,10 +28,10 @@ import FooterNav from './FooterNav.astro';
 
 const links = [
   ['/index.html', 'home'],
-  ['/introduction.html', 'documentation'],
+  ['/introduction.html', 'docs'],
   ['/stability.html', 'stability'],
   ['/privacy.html', 'privacy'],
-  ['https://github.com/grimoire-rs/grimoire/blob/main/LICENSE', 'Apache-2.0'],
+  ['https://github.com/grimoire-rs/grimoire/blob/main/LICENSE', 'license'],
 ];
 ---
 
@@ -40,7 +40,6 @@ const links = [
     <FooterNav />
     <div class="site-links">
       {links.map(([href, label]) => <a href={href}>{label}</a>)}
-      <span class="note">artifacts live in your registry, not ours</span>
     </div>
   </div>
 </footer>
@@ -92,16 +91,5 @@ const links = [
 
   .site-links a:hover {
     color: var(--sl-color-accent);
-  }
-
-  .note {
-    margin-inline-start: auto;
-    color: var(--sl-color-gray-3);
-  }
-
-  @media (max-width: 560px) {
-    .note {
-      margin-inline-start: 0;
-    }
   }
 </style>
