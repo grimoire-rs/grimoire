@@ -240,9 +240,11 @@ flag to remember.
 
 Pass `--offline` to flip to **cache-only**: Grimoire forbids all network access
 and fails rather than touch a registry — useful in sealed CI or an air-gapped
-network. Warm the cache with a normal online `grim lock` (or `grim update`)
-before going offline. `--offline` has an environment-variable equivalent
-described in [Configuration](./configuration.md).
+network. Warm the cache with a normal online `grim install` before
+going offline. `grim lock` resolves references and writes the lockfile without
+downloading content, so an `--offline` run after only a lock exits `81`.
+`--offline` has an environment-variable equivalent described in
+[Configuration](./configuration.md).
 
 <!-- external -->
 [oci]: https://github.com/opencontainers/distribution-spec

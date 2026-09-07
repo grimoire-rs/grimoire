@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Grimoire Authors
+#
+# The own-index tutorial: author -> dev-install -> manifest -> publish plan.
+# The supported YAML subset is documented in ../test_record_casts.py.
+output: docs/public/casts/own-index.cast
+title: "grim: from a skill on disk to a publish plan"
+# The one cast whose refs name the real public registry: the tutorial's
+# manifest publishes to ghcr.io, so a `registry: local` guard would reject it.
+# Nothing here reaches the network -- the run stops at `--dry-run`, before the
+# push, exactly as the tutorial's recorded half does.
+registry: public
+columns: 180
+rows: 24
+dirs:
+  - .claude
+  - skills/hello-review
+steps:
+  - type: grim init
+    expect: grimoire\.toml\s+project\s+created
+  - type: printf '%s\n' '---' 'name: hello-review' 'description: Give a quick review of a short piece of writing or code. Use when someone asks for a fast sanity check.' '---' '' '# Hello Review' '' 'Read what was pasted in. Say one thing that works well, then one' 'concrete thing to change.' > skills/hello-review/SKILL.md && cat skills/hello-review/SKILL.md
+    expect: name:\s+hello-review
+  - type: grim build ./skills/hello-review
+    expect: skill\s+hello-review\s+\./skills/hello-review\s+sha256:[0-9a-f]{64}\s+built
+  - type: grim add ./skills/hello-review
+    expect: skill\s+hello-review\s+\./skills/hello-review@sha256:[0-9a-f]{64}\s+added
+  # The tutorial prints this table too. A path source has no registry pin, so
+  # `Pinned` is a dash and `Source` names the directory.
+  - type: grim status
+    expect: skill\s+hello-review\s+path\S*\s+\./skills/hello-review\s+-\s+installed
+  - type: printf '%s\n' 'registry = "ghcr.io"' 'repository_prefix = "acme/skills"' '' '[skills.hello-review]' 'version = "0.1.0"' > publish.toml && cat publish.toml
+    expect: repository_prefix = "acme/skills"
+  - type: grim publish --dry-run
+    expect: skill\s+ghcr\.io/acme/skills/hello-review:0\.1\.0\s+sha256:[0-9a-f]{12}\s+0\.1\.0,0\.1,0,latest\s+dry-run

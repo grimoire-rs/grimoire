@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Grimoire Authors
+#
+# The "write your first skill" page's screencast: write a minimal SKILL.md
+# by hand, build it, install it from its local path (no registry involved),
+# and show the rendered file landing under an already-present client
+# marker.
+output: docs/public/casts/first-skill.cast
+title: "grim build + add, from a local path"
+registry: local
+dirs:
+  - .claude
+steps:
+  - type: grim init
+    expect: grimoire\.toml\s+project\s+created
+  # One line, because the reader watches it being typed. The `cat` is not
+  # decoration: a step must assert something printed, and a bare redirect
+  # prints nothing.
+  - type: mkdir -p skills/hello-world && printf '%s\n' '---' 'name: hello-world' 'description: Greets the reader so a running agent has something to load.' '---' '# Hello world' > skills/hello-world/SKILL.md && cat skills/hello-world/SKILL.md
+    expect: name: hello-world[\s\S]*description: Greets the reader
+  - type: grim build skills/hello-world
+    expect: skill\s+hello-world\s+skills/hello-world\s+sha256:[0-9a-f]{64}\s+built
+  # A path reference, not a registry one -- the whole point of this page.
+  - type: grim add ./skills/hello-world
+    expect: skill\s+hello-world\s+\./skills/hello-world@sha256:[0-9a-f]{64}\s+added
+  # `.claude` exists (see `dirs:`), so the client is detected and the render
+  # lands in it rather than in the shared `agents` pool.
+  - type: find .claude -type f
+    expect: \.claude/skills/hello-world/SKILL\.md

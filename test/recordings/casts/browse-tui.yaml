@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Grimoire Authors
+#
+# The "browse" page's screencast: launch the interactive TUI against the
+# local registry fixture, search for a seeded artifact, install it, and
+# quit -- recorded in raw-stream mode (spec contract C-030, plan decision
+# D-3) because ratatui's alternate-screen output is not a line-buffered
+# command stream a `run_command` step can assert against.
+output: docs/public/casts/browse-tui.cast
+title: "grim tui"
+registry: local
+# 120x30 rather than the 180x24 default: the TUI paints a fixed frame,
+# so the PTY size *is* the embed's aspect ratio. 180 columns against 24
+# rows letterboxes the player into a strip nobody can read.
+columns: 120
+rows: 30
+seed:
+  - grim-docs/hello-world
+raw: true
+dirs:
+  - .claude
+steps:
+  - type: grim init --registry {registry}
+    expect: grimoire\.toml\s+project\s+created
+  # The raw-stream step. Its `expect` is matched against
+  # `CastRecorder.stripped` of the whole captured stream, so it asserts
+  # three things the schedule below paints, in the order they appear: the
+  # `Search` box, the seeded artifact's catalog row, and the typed filter
+  # text inside the search box. The leading box-drawing bar on that last
+  # one is the box's own border, which the TUI draws hard against the text
+  # -- which is also why no assertion here spans a border with a space in
+  # it.
+  - type: grim tui
+    expect: (?s)Search.*hello-world\s+skill\s+latest.*│hello
+keys:
+  # `/` opens the filter and the text narrows the tree live as it is typed.
+  - send: /
+    wait: 1.0
+  - send: hello
+    wait: 1.0
+  # Commits the query and returns to the list, which is what lets `i` reach
+  # a row instead of being swallowed as typing. Enter does the same thing
+  # (`src/tui/event.rs`, `TuiInput::Enter | TuiInput::Esc => state.back()`),
+  # but a carriage return has no spelling in this YAML's escape table --
+  # only `\e`, `\n` and `\t` -- and `\n` arrives as Ctrl-J, which the search
+  # box takes as the literal character `j`.
+  - send: \e
+    wait: 1.5
+  # Selection lands on the tree *root group* first, so one down arrow is
+  # needed to put the highlight on the leaf row before the install key.
+  - send: \e[B
+    wait: 1.0
+  # The install key gets the long wait: it pulls the layer and renders it.
+  - send: i
+    wait: 4.0
+  - send: q
+    wait: 1.0

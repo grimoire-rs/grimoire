@@ -6,19 +6,25 @@ Checks covered (C-010 items 1-6, plus C-009 item 7):
   2. check_schemas        DOC-URL-02  every published schema's canonical $id matches its dist path
   3. check_fragments      DOC-URL-03  every `{#custom-id}` in the source tree resolves to an
                                       `id=` in the built page
-  4. check_catalog_links  DOC-URL-04  every `https://grimoire.rs/*.html` link in `catalog/**`
-                                      and `README.md` resolves in the built tree
+  4. check_repo_links     DOC-URL-04  every `https://grimoire.rs/*.html` link in `catalog/**`,
+                                      `src/**` and `README.md` resolves in the built tree
   5. check_no_mdx         DOC-URL-05  no stray .mdx source file (the Starlight source tree is
                                       Markdown only)
   6. check_sidebar_coverage
                           DOC-URL-06  every source page sits in exactly one sidebar group
                                       of `docs/astro.config.mjs`, and every sidebar slug
                                       resolves to a page on disk
-  7. check_internal_hrefs DOC-URL-07  every internal `href` in the built tree is the site
-                                      root, a `.html` page, or a known asset extension,
-                                      and a `#frag` on one resolves to an `id=` there
+  7. check_internal_links DOC-URL-07  every internal `href` and `data-cast` in the built tree
+                                      names a file that exists — root-relative or relative to
+                                      the linking page — with a known extension, and a `#frag`
+                                      on a page resolves to an `id=` there
   8. check_sitemap        DOC-URL-08  the sitemap names the site root and both
                                       hand-written pages under docs/public/ (C-009)
+
+Blind spot, deliberately: a *removed* anchor. Item 3 iterates the current
+source, so an `{#custom-id}` deleted together with every link to it leaves
+nothing to compare against — catching that needs a committed anchor baseline,
+which is an open decision and not this gate's.
 
 Usage:
   check_urls.py [--root DIR] [--dist DIR] [--format text|json]
@@ -33,6 +39,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 RULE_PATH = "DOC-URL-01"
 RULE_SCHEMA = "DOC-URL-02"
@@ -84,6 +91,13 @@ STATIC_PATHS = (
     "demo.cast",
     "start.html",
     "privacy.html",
+    # The cast player. `casts.js` is reached by a `src=` attribute and the
+    # bundle only by a JS string constant, so neither is a link this file's
+    # LINK_RE can see. Without these three a rename ships eleven pages whose
+    # recordings never start, and the page itself stays valid.
+    "casts.js",
+    "asciinema-player.min.js",
+    "asciinema-player.css",
 )
 
 # The sitemap entries no Astro route produces: the site root (the landing's
@@ -105,7 +119,9 @@ DOCS_URL_RE = re.compile(
 )
 SIDEBAR_RE = re.compile(r"\bsidebar:\s*\[")
 SLUG_RE = re.compile(r"\bslug:\s*['\"]([^'\"]+)['\"]")
-HREF_RE = re.compile(r'href="([^"]*)"')
+# `data-cast` rides alongside `href` because that attribute is how the eleven
+# recordings mount (`casts.js`), and nothing else in this gate names them.
+LINK_RE = re.compile(r'(?:href|data-cast)="([^"]*)"')
 
 # Every non-page extension the site serves, from `docs/public/` plus what the
 # build emits under `_astro/` and `pagefind/`. Deliberately an allowlist and
@@ -242,12 +258,24 @@ def check_fragments(src: Path, dist: Path) -> list[dict]:
     return out
 
 
-def check_catalog_links(root: Path, dist: Path) -> list[dict]:
-    """C-010 item 4 (DOC-URL-04): every catalog package links to a real docs page."""
+def check_repo_links(root: Path, crate_src: Path, dist: Path) -> list[dict]:
+    """C-010 item 4 (DOC-URL-04): every in-repo docs URL hits a real docs page.
+
+    `src/` is scanned beside `catalog/` because the binary prints deep links of
+    its own (`registry_catalog.rs`'s compatibility URL, `catalog_service.rs`'s
+    browse-filter remedy). Those passed only because a catalog reference file
+    happened to mirror them, so a rename would have shipped a dead link in a
+    user-facing error message with this gate green.
+    """
     # Every file, not only *.md: publish.toml's `documentation = "…"` ships to
-    # the registry as package metadata. The whole tree is text today, and _read
+    # the registry as package metadata. Both trees are text today, and _read
     # replaces undecodable bytes, so no format filter is needed.
-    sources = sorted(p for p in (root / "catalog").rglob("*") if p.is_file())
+    sources = sorted(
+        p
+        for tree in (root / "catalog", crate_src)
+        for p in tree.rglob("*")
+        if p.is_file()
+    )
     sources.append(root / "README.md")  # main() has already proved it exists
 
     out: list[dict] = []
@@ -362,30 +390,44 @@ def check_sidebar_coverage(src: Path, config: Path) -> list[dict]:
     return out
 
 
-def check_internal_hrefs(dist: Path) -> list[dict]:
-    """C-010 item 7 (DOC-URL-07): every internal href resolves to a real file.
+def check_internal_links(dist: Path) -> list[dict]:
+    """C-010 item 7 (DOC-URL-07): every internal link resolves to a real file.
 
     Under `build.format: 'file'` the emitted page is `/page.html`, so an
     internal href of `/page` names nothing on disk. The rewrite plugin
     resolves against Astro's *route* manifest and cannot append the suffix
     itself, so `astro.config.mjs` carries a stage that does — and this is the
     gate proving that stage is still in the chain and still correct.
+
+    A **relative** href is resolved against the linking page rather than
+    skipped: `start.html` and `privacy.html` are copied verbatim out of
+    `docs/public/` and use them throughout, and being no Astro route they are
+    invisible to `starlight-links-validator` as well. `start.html` alone
+    carries six deep links into `hosting-an-index.html`.
+
+    Existence is asserted for every internal target, page or asset. Item 1
+    covers only `STATIC_PATHS` and the 21 chapters, so nothing else asserted
+    that `index.html`, a `guides/` page or a `/casts/*.cast` recording is
+    really there — a rename shipped a dead link or a dead player, green.
     """
     out: list[dict] = []
-    # One read per target page, not per href: 735 hrefs resolve onto 24 pages.
-    targets: dict[Path, str | None] = {}
+    # One read per target page, not per link: 5892 links resolve onto 37 pages.
+    targets: dict[Path, str] = {}
     for page in sorted(dist.rglob("*.html")):
         seen: set[str] = set()
-        for href in HREF_RE.findall(_read(page)):
+        for href in LINK_RE.findall(_read(page)):
             # A scheme (`https:`, `mailto:`), a protocol-relative `//host/x`
-            # and a bare `#frag` are all somebody else's business.
-            if not href.startswith("/") or href.startswith("//"):
+            # and a bare `#frag` or `?q` are all somebody else's business.
+            # `urlsplit` also splits the path off the query and the fragment:
+            # `/commands#v1.2` carries a dot in its fragment, and reading that
+            # as an extension passes a dead link.
+            parts = urlsplit(href)
+            if parts.scheme or parts.netloc or not parts.path:
                 continue
-            # Split on the path only: `/commands#v1.2` carries a dot in its
-            # fragment, and reading that as an extension passes a dead link.
-            path, _, fragment = href.partition("#")
-            path = path.split("?", 1)[0]
-            if path == "/" or path.endswith("/") or href in seen:
+            path, fragment = parts.path, parts.fragment
+            # A directory URL is served by an index this build format never
+            # emits under that name, so there is nothing here to resolve.
+            if path.endswith("/") or href in seen:
                 continue
             seen.add(href)
             suffix = path.rsplit("/", 1)[-1].rpartition(".")[2].lower()
@@ -394,7 +436,21 @@ def check_internal_hrefs(dist: Path) -> list[dict]:
                     _finding(
                         page,
                         RULE_HREF,
-                        f"internal href {href} is neither a .html page nor a known asset",
+                        f"internal link {href} is neither a .html page nor a"
+                        " known asset",
+                    )
+                )
+                continue
+            if path.startswith("/"):
+                target = dist / path.lstrip("/")
+            else:
+                target = page.parent / path
+            if not target.is_file():
+                out.append(
+                    _finding(
+                        page,
+                        RULE_HREF,
+                        f"internal link {href} -> {target} not found",
                     )
                 )
                 continue
@@ -404,18 +460,14 @@ def check_internal_hrefs(dist: Path) -> list[dict]:
             # it keys headings on the route, so an href of `page.html` matches
             # nothing and the hash branch never runs. C-011's build-time
             # guarantee for the 290 `./page.md#frag` links lives here instead.
-            target = dist / path.lstrip("/")
             if target not in targets:
-                targets[target] = _read(target) if target.is_file() else None
-            html = targets[target]
-            # A page this slice does not emit is item 1's finding, not this
-            # one's — 22 pages link `/index.html`, which WP-G ships.
-            if html is not None and not _has_id(html, fragment):
+                targets[target] = _read(target)
+            if not _has_id(targets[target], fragment):
                 out.append(
                     _finding(
                         page,
                         RULE_HREF,
-                        f"internal href {href} has no id=\"{fragment}\" in {target}",
+                        f'internal link {href} has no id="{fragment}" in {target}',
                     )
                 )
     return out
@@ -433,9 +485,10 @@ def main(argv: list[str]) -> int:
 
     src = root / "docs" / "src" / "content" / "docs"
     catalog = root / "catalog"
+    crate_src = root / "src"
     readme = root / "README.md"
     config = root / "docs" / "astro.config.mjs"
-    for path in (src, catalog, dist):
+    for path in (src, catalog, crate_src, dist):
         if not path.is_dir():
             print(f"missing input: {path}", file=sys.stderr)
             return 2
@@ -449,10 +502,10 @@ def main(argv: list[str]) -> int:
     findings += check_sitemap(dist)
     findings += check_schemas(dist)
     findings += check_fragments(src, dist)
-    findings += check_catalog_links(root, dist)
+    findings += check_repo_links(root, crate_src, dist)
     findings += check_no_mdx(src)
     findings += check_sidebar_coverage(src, config)
-    findings += check_internal_hrefs(dist)
+    findings += check_internal_links(dist)
 
     if args.format == "json":
         print(json.dumps(findings, indent=2))

@@ -544,6 +544,13 @@ is treated as a repository path component under the primary registry:
 Short references (no `/`-prefix alias, no explicit registry) still expand
 against the primary registry unchanged.
 
+The `alias/repo` expansion only works for an `oci`-type entry. An
+index-type alias has no single registry host, so the same form fails.
+It exits 65: `invalid identifier '...': repository must match the OCI
+name grammar`. The refusal is intended. Use the fully-qualified
+reference from the index instead. `grim search` prints it in the
+`Repo` column.
+
 ## Scopes
 
 grim works in two scopes. The **project** scope is the `grimoire.toml`

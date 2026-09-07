@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Grimoire Authors
+#
+# Moving one artifact between project and global scope, then adding and
+# dropping a client. The supported YAML subset is documented in
+# ../test_record_casts.py.
+output: docs/public/casts/scopes.cast
+title: "grim: scopes and clients"
+columns: 180
+rows: 24
+# Deliberately NO client marker directory: `grim init` detects nothing, so
+# the reader sees why `options.clients` has to be set explicitly. The skill
+# this cast declares is written by the first step, not created here.
+dirs:
+  - agent-config/code-review
+steps:
+  - type: printf -- '---\nname: code-review\ndescription: Review a diff for correctness and risk.\n---\n\nName the correctness risks first.\n' | tee agent-config/code-review/SKILL.md
+    expect: name: code-review\s+description: Review a diff for correctness and risk\.
+  - type: grim init
+    expect: grimoire\.toml\s+project\s+created
+  # No `[options]` table, because nothing was detected: `[skills]` follows
+  # the schema line directly and `[options]` appears nowhere.
+  - type: cat grimoire.toml
+    expect: '#:schema \S+\s+\[skills\]\s+\[rules\](?![\s\S]*\[options\])'
+  - type: grim config set options.clients claude,codex
+    expect: set\s+options\.clients\s+claude,codex\s+project\s+false
+  - type: grim add ./agent-config/code-review
+    expect: skill\s+code-review\s+\./agent-config/code-review@sha256:[0-9a-f]{64}\s+added
+  # Two copies from one declaration -- claude's own dir and the shared pool
+  # codex reads.
+  - type: find .claude .agents -type f
+    expect: \.claude/skills/code-review/SKILL\.md\s+\.agents/skills/code-review/SKILL\.md
+  - type: grim config set options.clients claude
+    expect: set\s+options\.clients\s+claude\s+project\s+false
+  # S-005: the exact line set after the drop -- the five-column header (no
+  # client column at all), one `installed` row, and nothing on that row
+  # naming the dropped client.
+  - type: grim status
+    expect: Kind\s+Name\s+Source\s+Pinned\s+State\s+skill\s+code-review\s+path: \./agent-config/code-review\s+-\s+installed(?![^\n]*codex)
+  # S-005 continued: the dropped client's output is still on disk.
+  - type: find .agents -type f
+    expect: \.agents/skills/code-review/SKILL\.md
+  # ...until `grim update` reaps it. Only the JSON says so.
+  - type: grim update --format json
+    expect: '"reaped_clients":\s*\[\s*"codex"\s*\]'
+  # The scope move is uninstall-then-add: `grim remove` would leave the
+  # installed files behind.
+  - type: grim uninstall skill code-review
+    expect: skill\s+code-review\s+uninstalled
+  - type: grim add --global $PWD/agent-config/code-review
+    expect: skill\s+code-review\s+\S*/agent-config/code-review@sha256:[0-9a-f]{64}\s+added
+  - type: grim status --global
+    expect: skill\s+code-review\s+path: \S*/agent-config/code-review\s+-\s+installed

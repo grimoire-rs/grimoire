@@ -1,0 +1,73 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Grimoire Authors
+#
+# The cast for docs/src/content/docs/guides/lifecycle.md: the refused-update
+# trap that page is written around. A hand edit survives `grim update`
+# because update refuses to overwrite it (exit 65) -- but the refusal stops
+# the write to the file, not the write to the lock, so the pin has already
+# rolled forward onto the release the file never held. The `diff` of the
+# `pinned` line before and after the refusal is that claim's proof, and
+# `grim install --force` then writes the release the lock names, not the one
+# the reader started from. The supported YAML subset is documented in
+# ../test_record_casts.py.
+#
+# Nothing pre-seeds the registry, so the cast publishes both releases of its
+# own artifact. `printf | tee` rather than `printf >`: a step must assert
+# something a command printed, and tee shows the reader what each release
+# contains. The repo is `acme/code-review`, distinct from team-ci's
+# `acme/skills/code-review`: every cast in one `task test:demo` run shares
+# one registry, so two casts pushing different content to one repo:tag would
+# make the second one exit 65.
+output: docs/public/casts/lifecycle.cast
+title: "grim: a refused update still moved the lock"
+registry: local
+columns: 180
+rows: 24
+# `.claude` is the client marker `grim add` fans out to; `code-review` holds
+# the skill this cast publishes and then installs.
+dirs:
+  - .claude
+  - code-review
+steps:
+  - type: printf -- '---\nname: code-review\ndescription: Review a diff\n---\nCheck the diff for correctness.\n' | tee code-review/SKILL.md
+    expect: Check the diff for correctness\.
+  - type: grim release ./code-review {registry}/acme/code-review:1.0.0
+    expect: acme/code-review:1\.0\.0\s+sha256:[0-9a-f]{64}\s+1\.0\.0,1\.0,1,latest
+  - type: grim init
+    expect: grimoire\.toml\s+project\s+created
+  - type: grim add {registry}/acme/code-review:1
+    expect: skill\s+code-review\s+\S+@sha256:[0-9a-f]{64}\s+added
+  - type: echo 'Also check the tests.' >> .claude/skills/code-review/SKILL.md && tail -2 .claude/skills/code-review/SKILL.md
+    expect: Also check the tests\.
+  - type: grim status
+    expect: skill\s+code-review\s+direct\s+\S+\s+modified
+  # Upstream moves while the hand edit sits on disk. `:1` is the declared
+  # rung, so releasing 1.0.1 is what `grim update` will re-resolve onto.
+  - type: printf -- '---\nname: code-review\ndescription: Review a diff\n---\nCheck the diff for correctness, and read the tests it changes.\n' | tee code-review/SKILL.md
+    expect: and read the tests it changes\.
+  - type: grim release ./code-review {registry}/acme/code-review:1.0.1
+    expect: acme/code-review:1\.0\.1\s+sha256:[0-9a-f]{64}\s+1\.0\.1,1\.0,1,latest
+  # `tee` keeps the pre-update pin for the diff below and shows it on screen.
+  - type: grep pinned grimoire.lock | tee pin.before
+    expect: pinned = "\S+@sha256:[0-9a-f]{64}"
+  # The headline assertion. `run_command` raises on a non-zero exit, so the
+  # refusal has to be trailed by a `printf` that exits 0 -- whose leading
+  # newline also keeps `assert_tables_column_aligned` from reading the exit
+  # line as a row of the report table above it. One regex then
+  # ties the refusal message to the exit code it produced.
+  - type: grim update; printf '\nexit status %s\n' "$?"
+    expect: Update refused a locally modified artifact[\s\S]*exit status 65
+  - type: tail -1 .claude/skills/code-review/SKILL.md
+    expect: Also check the tests\.
+  # The trap: the refused update saved the new lock before it re-materialized
+  # anything. A backreference in a negative lookahead is what makes this
+  # assert movement rather than a printed line, and `diff` exits 1 on a
+  # difference, so the exit code asserts it a second way.
+  - type: grep pinned grimoire.lock | diff pin.before -; printf '\nexit status %s\n' "$?"
+    expect: < pinned = "\S+@sha256:([0-9a-f]{64})"[\s\S]*> pinned = "\S+@sha256:(?!\1)[0-9a-f]{64}"[\s\S]*exit status 1
+  - type: grim install --force
+    expect: skill\s+code-review\s+\S+\s+updated
+  # And what the forced install wrote is 1.0.1, not the release the reader
+  # installed and edited.
+  - type: tail -1 .claude/skills/code-review/SKILL.md
+    expect: and read the tests it changes\.

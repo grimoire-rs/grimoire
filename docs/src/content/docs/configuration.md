@@ -663,6 +663,26 @@ The qualified form uses a slash separator (`alias/repo`), not a colon —
 repository path under the primary registry, exactly as without aliases
 configured.
 
+What `alias/repo` expands is an `oci`-type entry's locator. The match is on
+the alias alone, with no test of the entry's kind, so an index-type alias
+substitutes just the same — and what lands where an OCI reference belongs
+is then a URL, which does not parse. The command exits **65**:
+
+```console
+$ grim add idx/code-review:1.2
+invalid identifier 'https://index.grimoire.rs/code-review:1.2': repository must match the OCI name grammar: lowercase [a-z0-9] runs joined by '.', '_', '__', or '-', with no leading, trailing, or doubled separator
+```
+
+The refusal is intended, and the reason is what an index is: it lists
+artifacts rather than hosting them, and its rows carry their own
+fully-qualified references — one index routinely spans several registry
+hosts, so an index-type alias has no single host to expand to. The message
+is the weak part, naming the substituted string rather than the cause. Use
+the row's fully-qualified reference instead; [`grim search`][grim-search]
+prints it in the `Repo` column. The same reasoning bounds the paragraph
+below: an index source cannot supply the short-reference default either,
+because its locator is not a registry host.
+
 Short references with no alias and no explicit registry still expand
 against the primary (or only) registry, unchanged from the single-registry
 behavior.

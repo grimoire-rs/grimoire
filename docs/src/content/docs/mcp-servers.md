@@ -10,6 +10,8 @@ thing: a running [Model Context Protocol][mcp-spec] server — how to
 launch it, or how to reach it — so every client can connect to the same
 tool without anyone hand-writing its config three times.
 
+## Why one canonical descriptor {#why-canonical}
+
 Adding one MCP server today means editing a different config file by hand
 for every client: [Claude Code][claude-code-mcp-docs]'s `.mcp.json`
 (`mcpServers`, a `command`/`args` pair), [OpenCode][opencode-mcp-docs]'s
@@ -29,6 +31,10 @@ client-native entry in each detected client's own MCP config — spliced
 in without disturbing a single byte outside that entry. Unlike a skill,
 rule, or agent, an MCP descriptor never materializes as a file of its
 own; see [What each client receives](#emit-matrix).
+
+To register one descriptor into every client and read back each client's own
+entry, follow [Register an MCP server everywhere](./guides/mcp-everywhere.md).
+This page is the format reference behind it.
 
 ## The canonical format {#format}
 

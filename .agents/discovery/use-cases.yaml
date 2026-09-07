@@ -731,7 +731,7 @@ tasks:
 # | T02 first skill in a new project | docs/src/quickstart.md | expand (fresh-project fallback, commit list, reload) |
 # | T03 choose and move scope | missing | write guides/scopes-and-clients.md |
 # | T04 one skill set for two harnesses | missing | write guides/shared-skills.md |
-# | T05 browse and act from one screen | docs/src/commands.md | write guides/browse-and-install.md |
+# | T05 browse and act from one screen | docs/src/commands.md | write browse.md |
 # | T06 company index beside the public one | docs/src/configuration.md | write guides/registries.md |
 # | T07 choose and change clients | docs/src/configuration.md | write guides/scopes-and-clients.md |
 # | T08 hand edits, install, update | missing | write guides/lifecycle.md |
@@ -740,12 +740,12 @@ tasks:
 # | T11 registry login | docs/src/authentication.md | keep |
 # | T12 publish from CI | docs/src/ci.md | keep |
 # | T13 remove cleanly | docs/src/commands.md | keep |
-# | T14 vet before install | missing | write guides/browse-and-install.md |
+# | T14 vet before install | missing | write guides/inspect.md |
 # | T15 rate | docs/src/ratings.md | keep |
 # | T16 agent-driven grim | docs/src/commands.md | keep |
 # | T17 stay current | docs/src/commands.md | keep |
 # | T18 bundles | docs/src/concepts.md | keep |
-# | T19 MCP server into every agent | docs/src/mcp-servers.md | keep |
+# | T19 MCP server into every agent | docs/src/mcp-servers.md | write guides/mcp-everywhere.md |
 # | T20 self-hosted GitLab | docs/src/self-hosted-gitlab.md | keep |
 # | T21 local dev of a skill | docs/src/commands.md | keep |
 # | T22 offline | docs/src/concepts.md | keep |
@@ -758,7 +758,7 @@ tasks:
 # | T29 catalog layout | docs/src/publishing.md | write guides/catalog-best-practices.md |
 # | T30 write my first skill | missing | write first-skill.md |
 # | T31 repo-local shared directory | missing | write guides/shared-skills.md |
-# | T32 from VS Code | missing | write vscode.md |
+# | T32 from VS Code | missing | folded into browse.md |
 #
 # Unmapped pages: none. introduction.md (landing, routes T01), artifacts.md
 # (reference for T25/T27), package-index.md (reference for T10/T06) and

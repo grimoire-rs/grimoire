@@ -1,0 +1,84 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Grimoire Authors
+#
+# The registries.md cast (scenario S-007). Three parts:
+#
+#   1. A browse filter, before and after. One source, two namespaces, one
+#      artifact in each. The first `grim search` lists both; the entry is
+#      then narrowed to `engineering/**` and the same search lists one. The
+#      marketing row disappearing is the filter's whole observable effect --
+#      and the `grim add` that follows shows the filter is not access
+#      control, because the hidden row still resolves and installs.
+#   2. Short-reference expansion: a bare name expands to the default
+#      registry followed by exactly what was typed, so `diff-review` reaches
+#      the registry root rather than `engineering/skills/diff-review`.
+#   3. The alias trap: a qualified `alias/repo` reference against an *index*
+#      alias expands to the index URL, which is not a repository name, and
+#      fails the OCI name grammar with exit 65.
+#
+# The aliases and locators here are the ones registries.md prints, so the
+# page's output blocks and this recording are one run. `public` is declared
+# with the real public index, and no step in this cast contacts it:
+# `grim config registry add` is a pure local config write with no async path
+# at all (`run_registry_add`, src/command/config.rs), and the qualified
+# reference below fails the OCI name grammar while parsing, before any
+# resolution -- which is exactly what its exit-65 assertion pins.
+#
+# Why the entry is filtered from the moment it is added, rather than starting
+# unfiltered: every cast in one `task test:demo` run shares ONE session
+# registry (`registry`, test/conftest.py, session-scoped), so an unfiltered
+# `grim search` here lists whatever the casts recorded before this one also
+# published. That made both search tables order-dependent. `engineering/`
+# and `marketing/` are used by no other cast, so filtering to exactly those
+# two makes both tables deterministic while leaving the before/after
+# narrowing the page teaches fully intact.
+#
+# The two skill descriptions are deliberately one word each.
+# `assert_tables_column_aligned` (cast_recorder.py) tokenizes a table row on
+# `\S+`, so a `Summary` cell containing a space reads as a misaligned column
+# and no plain `grim search` table can be recorded with a real sentence in it.
+# The supported YAML subset is documented in ../test_record_casts.py.
+output: docs/public/casts/registries.cast
+title: "grim: one source, two views"
+registry: local
+columns: 180
+rows: 24
+dirs:
+  - .claude
+  - diff-review
+  - brand-voice
+steps:
+  - type: printf '%s\n' '---' 'name: diff-review' 'description: Diff-review.' '---' 'Read the diff, then report findings.' | tee diff-review/SKILL.md
+    expect: description: Diff-review\.
+  - type: printf '%s\n' '---' 'name: brand-voice' 'description: Brand-voice.' '---' 'Write in the brand voice.' | tee brand-voice/SKILL.md
+    expect: description: Brand-voice\.
+  - type: grim release diff-review {registry}/engineering/skills/diff-review:1.0.0
+    expect: /engineering/skills/diff-review:1\.0\.0\s+sha256:[0-9a-f]{64}\s+1\.0\.0,1\.0,1,latest\s+true
+  - type: grim release brand-voice {registry}/marketing/skills/brand-voice:1.0.0
+    expect: /marketing/skills/brand-voice:1\.0\.0\s+sha256:[0-9a-f]{64}\s+1\.0\.0,1\.0,1,latest\s+true
+  - type: grim init
+    expect: grimoire\.toml\s+project\s+created
+  - type: grim config registry add company --oci {registry} --include 'engineering/**' --include 'marketing/**' --default
+    expect: registry-added\s+registry\.company\s+\S+\s+project\s+false
+  # Both namespaces show.
+  - type: grim search --refresh
+    expect: Kind\s+Repo\s+Summary\s+Version\s+Status\s+skill\s+\S+/engineering/skills/diff-review\s+Diff-review\.\s+1\.0\.0\s+not-installed\s+skill\s+\S+/marketing/skills/brand-voice\s+Brand-voice\.\s+1\.0\.0\s+not-installed\s*$
+  # A repeated list flag replaces the whole list, so this drops `marketing/**`.
+  - type: grim config registry set company --include 'engineering/**'
+    expect: registry-set\s+registry\.company\s+include=1\s+project\s+false
+  # Narrowed: the marketing row is gone. Same registry, same artifacts.
+  - type: grim search --refresh
+    expect: Kind\s+Repo\s+Summary\s+Version\s+Status\s+skill\s+\S+/engineering/skills/diff-review\s+Diff-review\.\s+1\.0\.0\s+not-installed\s*$
+  # A browse filter is not access control: the row the search stopped listing
+  # still resolves, locks and installs from a full reference.
+  - type: grim add {registry}/marketing/skills/brand-voice:1
+    expect: skill\s+brand-voice\s+\S+@sha256:[0-9a-f]{64}\s+added
+  # Short-reference expansion: `diff-review` reaches the registry root, two
+  # levels short of where the artifact lives.
+  - type: grim add diff-review; printf '\nexit status %s\n' "$?"
+    expect: could not infer the kind of '\S+/diff-review:latest'[\s\S]*exit status 65
+  - type: grim config registry add public --index https://index.grimoire.rs
+    expect: registry-added\s+registry\.public\s+https://index\.grimoire\.rs\s+project\s+false
+  # The alias trap: `public/...` expands to the index URL and never reaches it.
+  - type: grim add public/skills/diff-review:1; printf '\nexit status %s\n' "$?"
+    expect: invalid identifier 'https://index\.grimoire\.rs/skills/diff-review:1'[\s\S]*exit status 65

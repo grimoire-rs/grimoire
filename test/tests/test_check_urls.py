@@ -75,6 +75,9 @@ _STATIC_PATHS = (
     "demo.cast",
     "start.html",
     "privacy.html",
+    "casts.js",
+    "asciinema-player.min.js",
+    "asciinema-player.css",
 )
 
 # Published schemas; each `$id` is its own canonical URL (C-010 item 2).
@@ -244,6 +247,36 @@ def _clean_tree(root: Path) -> Path:
             _write(dist / name, _SVG_STUB)
         else:
             _write(dist / name, _html(name) if name.endswith(".html") else f"{name}\n")
+
+    # C-010 item 7: three shapes no other fixture line carries, so the branches
+    # that read them are exercised rather than starved — a recording mounted
+    # through `data-cast`, its `<noscript>` href, and the relative links the two
+    # pages copied verbatim out of `docs/public/` use throughout.
+    _write(dist / "casts" / "quickstart.cast", '{"version": 2}\n')
+    _write(
+        dist / "quickstart.html",
+        _html(
+            "quickstart",
+            '<div data-cast="/casts/quickstart.cast" data-cast-poster="npt:0:03"></div>\n'
+            '<noscript><a href="/casts/quickstart.cast">Download the recording</a></noscript>',
+        ),
+    )
+    _write(
+        dist / "start.html",
+        _html(
+            "start",
+            '<a href="introduction.html">relative page link</a>\n'
+            '<a href="configuration.html#registry-compatibility">relative deep link</a>',
+        ),
+    )
+
+    # C-010 item 4: the binary prints docs URLs of its own, so `src/` is a
+    # checked input beside `catalog/`.
+    _write(
+        root / "src" / "catalog" / "registry_catalog.rs",
+        "pub const REGISTRY_COMPAT_DOCS_URL: &str =\n"
+        f'    "{_SITE}/configuration.html#registry-compatibility";\n',
+    )
 
     # C-010 item 7 / C-009: overwrites the placeholder the static-path loop
     # wrote, with the three URLs no Astro route produces.
@@ -706,19 +739,149 @@ def test_dangling_cross_page_fragment_exits_one(clean_root: Path) -> None:
     )
 
 
-def test_fragment_into_absent_page_is_not_a_finding(clean_root: Path) -> None:
-    """C-010 item 7: only a page that exists can dangle.
+def test_link_to_absent_page_exits_one(clean_root: Path) -> None:
+    """C-010 item 7: a linked ``.html`` page must exist, fragment or not.
 
-    22 built pages link ``/index.html``, which this slice does not emit — the
-    landing arrives in a later work package.  Item 1 already owns "a required
-    page is missing"; making item 7 report it too would fail a correct tree.
+    Item 1 covers ``STATIC_PATHS`` plus the 21 chapters only — never
+    ``index.html``, the nine ``guides/`` pages or ``tutorials/own-index.html``
+    — so nothing else asserted the target of a link is on disk.  With a
+    fragment the old shape was worse than silent: the missing page read as
+    "nothing to compare the fragment against" and the link passed.
     """
     page = clean_root / "docs" / "dist" / "concepts.html"
-    _write(page, _html("concepts", '<a href="/index.html#hero">landing</a>'))
+    _write(
+        page,
+        _html(
+            "concepts",
+            '<a href="/guides/renamed-away.html#run">deep link, page gone</a>\n'
+            '<a href="/guides/gone.html">plain link, page gone</a>',
+        ),
+    )
     result = _run(clean_root)
-    assert result.returncode == 0, (
-        f"a fragment into a page this slice does not emit is not item 7's "
-        f"finding, got {result.returncode}\nstdout: {result.stdout}"
+    assert result.returncode == 1, (
+        f"a link to an absent page should exit 1, got {result.returncode}\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert "/guides/renamed-away.html#run" in result.stdout, (
+        f"finding must name the dead deep link, got: {result.stdout}"
+    )
+    assert "/guides/gone.html" in result.stdout, (
+        f"finding must name the dead plain link, got: {result.stdout}"
+    )
+
+
+def test_relative_href_to_absent_page_exits_one(clean_root: Path) -> None:
+    """C-010 item 7: a relative href is resolved, not skipped.
+
+    ``start.html`` and ``privacy.html`` are copied verbatim out of
+    ``docs/public/`` and use relative hrefs throughout.  Being no Astro route
+    they are invisible to ``starlight-links-validator`` too, so a gate that
+    skipped every non-root-relative href left the lead adoption story's own
+    links checked by nothing at all.
+    """
+    # A page that never existed, not a deleted chapter: deleting one would let
+    # item 1 raise the finding and leave item 7 untested.
+    _write(
+        clean_root / "docs" / "dist" / "start.html",
+        _html("start", '<a href="hosting-an-index-old.html">the index guide</a>'),
+    )
+    result = _run(clean_root)
+    assert result.returncode == 1, (
+        f"a relative href to an absent page should exit 1, got {result.returncode}\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert "hosting-an-index-old.html" in result.stdout, (
+        f"finding must name the relative target, got: {result.stdout}"
+    )
+    assert "DOC-URL-07" in result.stdout, (
+        f"the finding must come from item 7, got: {result.stdout}"
+    )
+
+
+def test_relative_href_dangling_fragment_exits_one(clean_root: Path) -> None:
+    """C-010 item 7: a relative deep link resolves its fragment too.
+
+    ``start.html`` carries six fragment links into ``hosting-an-index.html``.
+    Renaming one of those anchors is the break this catches: the page still
+    exists, so an existence-only check would pass it.
+    """
+    _write(
+        clean_root / "docs" / "dist" / "start.html",
+        _html(
+            "start",
+            '<a href="hosting-an-index.html#gate">the contribution gate</a>',
+        ),
+    )
+    result = _run(clean_root)
+    assert result.returncode == 1, (
+        f"a dangling relative fragment should exit 1, got {result.returncode}\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert "#gate" in result.stdout, (
+        f"finding must name the dangling fragment, got: {result.stdout}"
+    )
+
+
+def test_missing_cast_recording_exits_one(clean_root: Path) -> None:
+    """C-010 item 7: a recording mounts through ``data-cast``, not ``href``.
+
+    The eleven recordings are embedded by attribute, so an ``href``-only scan
+    never saw them and no path list named them either.  A rename ships a dead
+    player on eleven pages with the gate green.
+    """
+    (clean_root / "docs" / "dist" / "casts" / "quickstart.cast").unlink()
+    result = _run(clean_root)
+    assert result.returncode == 1, (
+        f"a missing recording should exit 1, got {result.returncode}\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert "/casts/quickstart.cast" in result.stdout, (
+        f"finding must name the missing recording, got: {result.stdout}"
+    )
+
+
+def test_src_link_rot_exits_one(clean_root: Path) -> None:
+    """C-010 item 4: the binary's own printed docs links are link rot too.
+
+    ``registry_catalog.rs`` and ``catalog_service.rs`` each print a
+    ``https://grimoire.rs/configuration.html#…`` deep link in a user-facing
+    error.  A ``catalog/**``-only scan passed them by coincidence, because a
+    catalog reference file happened to mirror the same two anchors.
+    """
+    _write(
+        clean_root / "src" / "catalog" / "registry_catalog.rs",
+        "pub const REGISTRY_COMPAT_DOCS_URL: &str =\n"
+        f'    "{_SITE}/configuration.html#renamed-away";\n',
+    )
+    result = _run(clean_root)
+    assert result.returncode == 1, (
+        f"a dead docs link in src/ should exit 1, got {result.returncode}\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert "registry_catalog.rs" in result.stdout, (
+        f"finding must name the source file, got: {result.stdout}"
+    )
+    assert "renamed-away" in result.stdout, (
+        f"finding must name the dead anchor, got: {result.stdout}"
+    )
+
+
+def test_missing_src_exits_two(clean_root: Path) -> None:
+    """C-010 exit-code contract: partial coverage is never reported as 0.
+
+    ``src/`` is a checked input like ``catalog/`` now that item 4 reads it, so
+    a run pointed at a tree without one must say so rather than quietly drop
+    the coverage.
+    """
+    crate_src = clean_root / "src"
+    shutil.rmtree(crate_src)
+    result = _run(clean_root)
+    assert result.returncode == 2, (
+        f"missing src/ should exit 2, got {result.returncode}\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert str(crate_src) in result.stderr, (
+        f"stderr must name the missing path, got: {result.stderr}"
     )
 
 

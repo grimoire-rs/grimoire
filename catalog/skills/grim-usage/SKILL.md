@@ -131,9 +131,10 @@ to the public package index at `https://index.grimoire.rs` instead — see
 When a config declares `[[registries]]` with aliases, a **qualified
 reference** `alias/repo[:tag]` expands the alias to its configured URL —
 for example `acme/code-review:1` becomes `ghcr.io/acme/code-review:1`
-when `acme` is aliased to `ghcr.io/acme`. Full details and the
-multi-registry browse behavior in
-[references/registries.md](references/registries.md).
+when `acme` is aliased to `ghcr.io/acme`. This only works for an
+`oci`-type alias. An index-type alias fails with exit 65. Full details
+and the multi-registry browse behavior in
+[references/registries.md](references/registries.md#qualified-references).
 
 ## Routing Table
 

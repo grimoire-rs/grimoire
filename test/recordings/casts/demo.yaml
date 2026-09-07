@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Grimoire Authors
+#
+# The landing-page demo: init -> add -> multi-client fan-out -> status.
+# The supported YAML subset is documented in ../test_record_casts.py.
+output: docs/public/demo.cast
+title: "grim: one declaration, many clients"
+# The one public-registry cast: the landing page's story is the real,
+# anonymously-pullable ghcr.io ref its quick start already promises.
+registry: public
+columns: 180
+rows: 24
+# Three client markers so `grim add` (which targets every detected client
+# when nothing narrows it) fans out into all three.
+dirs:
+  - .claude
+  - .cursor
+  - .opencode
+steps:
+  - type: grim init
+    expect: grimoire\.toml\s+project\s+created
+  - type: grim add ghcr.io/grimoire-rs/skills/grim-usage
+    expect: skill\s+grim-usage\s+ghcr\.io/grimoire-rs/skills/grim-usage@sha256:[0-9a-f]{64}\s+added
+  - type: find .claude .cursor .opencode -type f | sort
+    expect: \.opencode/skills/grim-usage/SKILL\.md
+  - type: grim status
+    expect: skill\s+grim-usage\s+direct\s+\S+\s+installed

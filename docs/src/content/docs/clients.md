@@ -9,6 +9,8 @@ client can host every artifact kind. A skill is universal, but a rule needs a
 per-file scoping surface that some clients lack, and an agent needs a shipped
 file format that fewer still provide.
 
+## How to read the matrix {#how-to-read}
+
 Writing a rule into a client that silently drops its path scoping — or an agent
 into one that never reads it — is worse than an honest refusal: the config
 looks installed but does nothing. grim renders only what each client can
