@@ -67,6 +67,11 @@ def find_generator(root: Path) -> tuple[str, Path] | None:
     for rel in VITEPRESS_CONFIGS:
         for cand in sorted((root / rel).glob("config.*")):
             return "vitepress", cand
+    # astro.config.* — a .ts, .mts, .js or .cjs config is as real as the .mjs
+    # one, and a literal name resolved those to "not applicable".
+    for base in (root, root / "docs"):
+        for cand in sorted(base.glob("astro.config.*")):
+            return "starlight", cand
     for rel in ("book.toml", "docs/book.toml"):
         if (root / rel).is_file():
             for summary in ("SUMMARY.md", "src/SUMMARY.md"):
@@ -146,6 +151,34 @@ def vitepress_nav(text: str) -> tuple[int, int, bool]:
     return total, bare_top, expanded
 
 
+def starlight_nav(text: str) -> tuple[int, int, bool]:
+    """Starlight config is JavaScript, so this walks brackets rather than
+    parsing the module. The sidebar's own list is level 1, and each nested
+    items: array adds one more level. Unlike VitePress there is no separate
+    top nav bar to add."""
+    m = re.search(r"\bsidebar:\s*(\{|\[)", text)
+    if not m:
+        return 0, 0, False
+    block = _balanced(text, m.start(1))
+    items_depth, max_items, groups, collapsed, bare_top = 0, 0, 0, 0, 0
+    for tok in re.finditer(
+        r"(items:\s*\[)|(\[)|(\])|(collapsed:\s*true)|((?:slug|link):\s*['\"])", block
+    ):
+        if tok.group(1):
+            groups += 1
+            items_depth += 1
+            max_items = max(max_items, items_depth)
+        elif tok.group(3) and items_depth > 0:
+            items_depth -= 1
+        elif tok.group(4):
+            collapsed += 1
+        elif tok.group(5) and items_depth == 0:
+            bare_top += 1
+    total = 1 + max_items
+    expanded = total >= MAX_NAV_DEPTH and collapsed < groups
+    return total, bare_top, expanded
+
+
 def mdbook_nav(text: str) -> tuple[int, int, bool]:
     indents: list[int] = []
     rows: list[int] = []
@@ -186,6 +219,7 @@ def check_nav(root: Path) -> list[dict]:
     depth, bare_top, expanded = {
         "mkdocs": mkdocs_nav,
         "vitepress": vitepress_nav,
+        "starlight": starlight_nav,
         "mdbook": mdbook_nav,
     }[generator](text)
 
@@ -216,7 +250,8 @@ def check_nav(root: Path) -> list[dict]:
         elif generator == "vitepress":
             has_crumb = bool(re.search(r"(?i)breadcrumb", text))
         else:
-            has_crumb = False  # mdBook ships no breadcrumb and no config for one
+            # mdBook and Starlight both ship no breadcrumb and no config for one
+            has_crumb = False
         if not has_crumb:
             add(
                 "DOC-NAV-04",

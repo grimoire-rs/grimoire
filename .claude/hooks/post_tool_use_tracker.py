@@ -74,30 +74,30 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
         "the catalog Taskfile",
     ),
     (
-        "docs/src/artifacts.md",
+        "docs/src/content/docs/artifacts.md",
         "- catalog/skills/grim-authoring (per-kind spec references)\n- catalog/skills/grim-usage (if command surface changed)",
         "the artifact schema docs — review first-party catalog skills for drift",
     ),
     (
-        "docs/src/commands.md",
+        "docs/src/content/docs/commands.md",
         "- catalog/skills/grim-usage (command map + lifecycle references)",
         "the CLI command docs — review grim-usage skill for drift",
     ),
     (
-        "docs/src/vendor-metadata.md",
+        "docs/src/content/docs/vendor-metadata.md",
         "- catalog/skills/grim-authoring/references/vendor-metadata.md",
         "the vendor-metadata docs — review grim-authoring skill for drift",
     ),
     (
-        "docs/src/publishing.md",
+        "docs/src/content/docs/publishing.md",
         "- catalog/skills/grim-usage/references/publish.md\n- catalog/skills/grim-authoring/references/release-checklist.md",
         "the publishing docs — review catalog skills for drift",
     ),
     (
         "src/install/vendor_*.rs",
         (
-            "- docs/src/clients.md (support matrix — code-mirrored; the table-parity test in client_target.rs fails on drift)\n"
-            "- docs/src/agents.md + docs/src/mcp-servers.md (emit matrices — every ClientTarget must appear)\n"
+            "- docs/src/content/docs/clients.md (support matrix — code-mirrored; the table-parity test in client_target.rs fails on drift)\n"
+            "- docs/src/content/docs/agents.md + docs/src/content/docs/mcp-servers.md (emit matrices — every ClientTarget must appear)\n"
             "- .claude/rules/vendor-capability-watchlist.md (re-check the upstream decline before patching;\n"
             "  classify any gap-compensation as class 1/2/3 and assign a new vendor's support tier)"
         ),
@@ -106,8 +106,8 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
     (
         "src/install/client_target.rs",
         (
-            "- docs/src/clients.md (support matrix — code-mirrored; the table-parity test here fails on drift)\n"
-            "- docs/src/agents.md + docs/src/mcp-servers.md (emit matrices — every ClientTarget must appear)\n"
+            "- docs/src/content/docs/clients.md (support matrix — code-mirrored; the table-parity test here fails on drift)\n"
+            "- docs/src/content/docs/agents.md + docs/src/content/docs/mcp-servers.md (emit matrices — every ClientTarget must appear)\n"
             "- .claude/rules/vendor-capability-watchlist.md (re-check the upstream decline before patching;\n"
             "  classify any gap-compensation as class 1/2/3 and assign a new vendor's support tier)"
         ),

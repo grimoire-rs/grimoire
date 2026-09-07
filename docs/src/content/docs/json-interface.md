@@ -1,0 +1,802 @@
+---
+title: "The JSON Interface"
+description: "Every grim command that reports something offers --format json, forming a stable machine-readable interface."
+---
+<!-- doc_type: reference -->
+
+Every grim command that reports something offers `--format json`. Together
+those payloads form one machine-readable surface — the thing a wrapper
+script, CI job, or editor extension programs against instead of scraping
+tables. This page is the reference for that surface: the envelope rules,
+every report shape, the error document, and how exit codes and JSON
+interact. The shapes below are [frozen at 1.0][stability-frozen]; changes
+are additive only.
+
+## One document per invocation {#one-document}
+
+A `--format json` run writes **exactly one JSON document to stdout** —
+a report on success (and on the [documented non-zero
+reports](#exit-interplay)), or the [error document](#error-document) on
+failure. Nothing else lands on stdout: progress, warnings, and log lines
+ride stderr, so `grim … --format json | jq .` always parses.
+
+One boundary sits **before** the contract: a command line that
+[clap][clap] cannot parse (unknown flag, missing argument) fails before
+grim knows the output format. Those failures print clap's plain-text
+usage message and exit `64` (or `0` for `--help`/`--version`) — no JSON
+document is emitted. Everything after a successful parse honors the
+contract.
+
+Two commands are exempt because stdout *is* their payload: `grim schema`
+prints a JSON Schema document, and `grim mcp` speaks JSON-RPC. `grim tui`
+owns the terminal and emits no report. In plain mode, `grim fetch` prints
+raw artifact content ([payload-plain](#fetch)); its `--format json` is a
+normal report.
+
+## Color and the document {#color}
+
+The [`--color`][commands-color] flag can add ANSI escape codes to a
+`--format json` document, and those codes are not valid JSON syntax —
+inserted between a document's stdout bytes, they make the stream fail a
+strict parser (`serde_json`, Python's `json`, `jq`) even though the
+underlying values are unchanged.
+
+Two conditions add color: `--color always`, unconditionally, and the
+default `auto` mode when stdout happens to be a terminal. Neither holds
+for a pipe, a redirect, or a CI runner, so the byte stream a script
+already parses is unaffected by this flag — piped `--format json` output
+is identical to what earlier releases produced. Never pass `--color
+always` into an automated pipeline that parses the document; it is meant
+for a human watching a colorized JSON document scroll past in a terminal,
+not for scripting.
+
+The [error document](#error-document) is exempt: it is written with
+`serde_json::to_string_pretty` directly, bypassing the color-resolution
+path every other report goes through, so it is never colorized regardless
+of `--color`.
+
+## The items envelope {#items-envelope}
+
+A bare JSON array can never grow: adding any cross-cutting field to a
+top-level `[...]` is a breaking change, so under the [additive-field
+policy][stability-additive] a bare-array report would be frozen forever.
+Every multi-item report therefore wraps its rows in a uniform envelope:
+
+```json
+{
+  "items": [ … ]
+}
+```
+
+`items` is always present (an empty result is `{"items": []}`), and the
+envelope object may gain sibling fields in a minor release — `grim
+publish` carries `announce`, `grim status` carries `checked`, `grim
+search` carries `sources` (see the [status row](#shapes-items) below and
+[the `sources` array](#search-sources)). Commands with enveloped
+reports: `lock`, `install`, `status`, `update`, `search`,
+`config list`, `config registry list`, `config registry fields`, and
+`publish`.
+
+Everything else reports a **single flat object** — those commands concern
+exactly one subject (one config file, one artifact, one credential), so
+there is no row list to wrap.
+
+## Report shapes {#report-shapes}
+
+### Enveloped reports {#shapes-items}
+
+One row object per item inside `{"items": [...]}`:
+
+| Command | Item shape | Enum values |
+|---------|-----------|-------------|
+| `lock` | `{kind, name, pinned, action}` | `action`: `locked`, `unchanged` |
+| `install` | `{kind, name, target, status}` | `status`: `installed`, `updated`, `unchanged`, `refused`, `skipped` |
+| `status` | `{kind, name, source, pinned, state, outputs, outputs_pending, clients_missing, clients_extra, clients_unresolved, deprecated, replaced_by, update_available}` + sibling envelope key `checked` (bool) — `pinned` null until locked; `outputs` is `[{client, path}]`; `outputs_pending` is the same `[{client, path}]` shape naming the outputs `grim install` would write **right now** that the install record does not already account for — **materialization drift** — sorted by client and `[]` when an install would write nothing new. Two causes, both real install work: a client that gained support since the last install (present on the machine, or newly configured), and a render-layout move (reported at the NEW path). A present-but-*drifted* output is deliberately absent from it — that is `state: modified`, a different problem with a different remedy — and so is a recorded output whose file was **deleted**, which surfaces as `state: missing`. Unlike `clients_missing` it is reported under autodetect too, because it asks what an install would do rather than what the user configured, and it is derived from the same seam the installer's own no-op check uses. Remediation is `grim install` — **not** `grim update`, which also re-resolves floating tags and rolls the lock forward. `state` is unaffected (an intact artifact at the locked pin still reads `installed`) and the exit code stays `0`; `clients_missing`/`clients_extra` are sorted client-name arrays diffing the project's configured client target against the artifact's recorded install-state clients (`[]` when they agree, incl. always for a declared-bundle row or a dev-install row); measured only against an *explicitly set* `[options].clients` — when it is unset (autodetect), both stay `[]` on every item rather than being verified against live client detection; `clients_missing` additionally omits any configured client whose vendor cannot host that artifact kind at that scope (a Codex rule, say), since no output was ever going to be recorded for it; `clients_unresolved` is a sorted client-name array naming every active client whose recorded output could not be resolved (anchor root absent here, or refused by the containment guard) and is therefore missing from `outputs` — `[]` normally; `state` stays `missing` and the exit code stays `0`; `deprecated`/`replaced_by`/`update_available` are the [`--check`](./commands.md#status-check) fields — see the [nullability table](#status-check-nullability) below and [grim status][commands-status] | `state`: `installed`, `stale`, `modified`, `missing`, `outdated` |
+| `update` | `{kind, name, old, new, action, reaped_clients, kept_modified_clients, retained, abandoned_entries, refused}` — `old` null for a first lock, `new` null for a pruned row; `reaped_clients`/`kept_modified_clients` are sorted client-name arrays (`[]` when no client left the configured set on this row) naming, respectively, the [dropped clients](./commands.md#update) whose unmodified output was deleted and whose locally-modified output was preserved; reap is only attempted against an *explicitly set* `[options].clients` — when it is unset (autodetect), both stay `[]` on every row rather than being verified against live client detection; `retained` is an always-present array of absolute paths (`[]` normally) naming the on-disk footprint the containment guard refused to delete while the pruned record — or the reaped dropped-client output — was dropped anyway, the same reported-divergence contract as [`uninstall`](#shapes-single)'s `retained`, and distinct from `kept_modified_clients` (a user edit grim preserved and left *recorded*); `abandoned_entries` is `retained`'s counterpart for a managed MCP entry inside a shared, user-owned config file grim never intended to delete — an always-present array of `{path, pointer}` objects (`[]` normally), `path` the config file and `pointer` the two-level JSON pointer of the un-spliced member, sorted and deduplicated; `refused` is an always-present bool, `true` only on a row whose on-disk bytes drifted from the recorded hash so the [integrity gate](./commands.md#update) left it untouched (rerun with `--force`, which on `update` also authorizes its prune and reap deletions). **A refusal does not suppress the report:** every other artifact still reconciles and the report is emitted on stdout as usual, alongside exit `65` — so a refused `grim update` carries a normal report rather than an [error document](#error-document) (see [exit codes and JSON together](#exit-interplay)), and `refused` is what identifies the offending row. Each refusal is also named on stderr; the plain table has no `refused` column | `action`: `updated`, `unchanged`, `removed`, `kept-modified` — the lock diff, unaffected by a refusal (the pin rolled forward; only the materialization was refused) |
+| `search` | `{kind, repo, source, summary, description, version, latest_tag, repository, revision, created, deprecated, replaced_by, rating, oci, status}` — `oci` is the curated `{licenses, authors, url, documentation, vendor, compatibility}` object read off the manifest (the same one the TUI detail pane renders), every field `null` when the manifest carried none and `licenses` the only one an index-backed row can supply; `compatibility` is a skill's authored editor/runtime hint and is `null` for every other kind. Repository-level support channels are **not** here — they live on the mutable description companion and are read live by [`grim describe`](./commands.md#describe), never off the disk-cached browse catalog; `kind` is `null` when the catalog row's manifest declares none; `source` is the `{alias, locator}` attribution of the configured [`[[registries]]`](./configuration.md#multiple-registries) entry the row was browsed from — `alias` is `null` when that entry declares none (also under `--registry` and the legacy single-registry fallback), `locator` is byte-identical to the configured value and is **not** derivable from `repo`, which names the artifact's own registry host; `replaced_by` is the successor reference or `null`; `rating` is the [artifact rating](./ratings.md) object or `null` — see [the `rating` object](#search-rating) below. Sibling envelope key `sources` (always present) names every browsed source and whether its catalog loaded — see [the `sources` array](#search-sources) below; see [grim search][commands-search] | `status`: install badge (`installed`, `not-installed`, `outdated`, `modified`, `pending`) |
+| `config list` | `{key, value, set, type, title, description, default, values, constraints}` — `constraints` is `null` except for keys whose list items carry a shape rule beyond closed-set membership | — |
+| `config registry list` | `{alias, oci, index, include, exclude, default, insecure}` — both locator keys present, exactly one non-null; `include`/`exclude` are the entry's authored [browse-filter](./configuration.md#browse-filters) globs in declaration order, always-present arrays, `[]` when unfiltered; `insecure` is the entry's authored [plain-HTTP](./configuration.md#plain-http-registries) opt-in, not the effective transport (a host reached over HTTP through the loopback default or `GRIM_INSECURE_REGISTRIES` reports `false`) | — |
+| `config registry fields` | `{key, type, title, description}` — `key` is the short field name (`oci`, `index`, `default`, `include`, `exclude`, `insecure`), deliberately diverging from `config list`'s dotted `registry.<alias>.<field>` keys; no `value`/`set`/`default`, since a field pattern (not a resolved alias) has no runtime value | — |
+| `publish` | `{ref, kind, digest, tags, status, pushed_to}` (`ref` is the pull name; `pushed_to` is the push-side reference under a [push/pull registry split](./publishing.md#batch-publish-push-registry), `null` when inactive) + sibling envelope keys `descriptions` (`{"items": [...]}` of published/planned [description companion](./publishing.md#description-companion) pushes, `{ref, repository, digest, files}`, `digest` `null` under `--dry-run`; empty `items` when no companion was resolved) and `announce` (`{outcome, branch, url, fork}` or `null`; `fork` is itself `{repo, created}` or `null` — populated only when the announce branch landed on an automatically created or reused fork rather than the index repository directly) — see [publish report][publishing-report] | `status`: `pushed`, `skipped`, `dry-run`, `failed` |
+
+`kind` is one of `skill`, `rule`, `agent`, `bundle`, `mcp` for every
+enveloped report except `search`: the other reports resolve a locked or
+otherwise real artifact, so their `kind` is always one of those five
+values, while `search` reports a catalog row whose manifest may declare
+no kind at all, in which case `kind` is `null`.
+
+`search`'s `items` carries no signal for *why* it might be short — with
+one exception, the [`sources` array](#search-sources), which names a source
+whose catalog failed to load. Two other causes of a short result are still
+stderr-only. A registry that gates its `_catalog` endpoint and a registry
+whose own [browse filter][browse-filters] admits nothing both render as
+fewer or zero rows, and no report field distinguishes them — the diagnostic
+that does (`registry '<alias>': filter admitted <M> of <N> repositories`)
+is a `tracing::warn!` on stderr, invisible to a consumer that reads just
+the JSON document. Cross-reference [`grim context`][commands-context]'s
+`registries[].include`/`.exclude` to tell a gated registry from a filtered
+one; no field is planned on `search` for those two.
+
+`install`'s `target` is `null` when every selected client declines the
+artifact's kind — e.g. a rule installed with only [Codex][codex-subagents-docs]
+selected (Codex has no path-scoped rule mechanism), or an mcp descriptor
+no selected client can register. Nothing was written to disk in that
+case, so there is no path to report; `status` is `skipped`.
+
+#### The `search` sources array {#search-sources}
+
+`search`'s `sources` is an always-present sibling of `items` — one object
+per browsed source, in the order [`grim context`][commands-context] lists
+`registries[]`, and `[]` only when nothing was browsed:
+
+```json
+{
+  "alias": "acme",
+  "locator": "ghcr.io/acme",
+  "ok": false,
+  "error": "invalid catalog file"
+}
+```
+
+`alias` and `locator` are the same two halves each row's own `source`
+carries, so `items[].source` joins to this array directly. `ok` is the
+field to branch on; `error` is the cause when `ok` is `false` and an
+explicit `null` otherwise — the same text the `catalog for source '<x>'
+unavailable` warning carries on stderr.
+
+The array exists because **the browse never fails**. A source grim cannot
+read degrades to an empty group so the reachable ones still answer, and the
+[exit code stays `0`](#exit-interplay) whether one source failed or all of
+them did. Without `sources`, that left a partial browse and an empty
+catalog producing the same document: a well-formed envelope, exit `0`, and
+a plausible-looking list that silently omitted most of the catalog. A
+consumer reading only stdout can now say "2 of 3 registries unavailable"
+and name them. Reading it is not optional for a UI that renders `items` as
+the catalog — an empty `items` with every source `ok: false` means *nothing
+loaded*, which is a different thing to show the user than *nothing
+published*.
+
+`ok: true` on a source whose rows are absent from `items` is meaningful and
+not a contradiction: that source answered and had nothing to offer, or a
+[browse filter][browse-filters] hid what it did offer.
+
+#### The `search` rating object {#search-rating}
+
+`search`'s `rating` is `{up, url}` when the browsed index published an
+[artifact rating](./ratings.md) for that row, and **explicit `null`**
+otherwise — the [always-present rule](#null-policy) applies to it like
+every other optional field, so it is never an absent key and `null` always
+means *unrated*, never *older grim*.
+
+```json
+{ "up": 42, "url": "https://github.com/acme/index/discussions/117" }
+```
+
+`up` is the upvote count as of the index's last tally; `url` opens the
+forge thread the votes live on. Both halves are things a client can act on.
+
+The vote **target** — the opaque forge node id the mutation addresses — is
+deliberately **not** emitted. It is a forge-internal identifier the ratings
+contract declares opaque, no consumer can do anything with it (a vote goes
+through [`grim rate <ref>`][commands-rate], which resolves the target
+itself), and emitting it would freeze a forge's node-id format into this
+document forever. `null` covers every absence uniformly: the index
+publishes no ratings at all, the source is not an HTTP index, or this
+particular artifact has no votes yet.
+
+#### `status --check` nullability {#status-check-nullability}
+
+`status`'s top-level `checked` gates three per-item fields —
+`deprecated`, `replaced_by`, `update_available` — added by
+[`--check`](./commands.md#status-check). `checked == false` (no `--check`,
+or `--check --offline`) forces all three to `null` on every item.
+
+`deprecated` / `replaced_by` come from the freshly-loaded catalog, matched
+by `(registry, repository)`:
+
+| `checked` | Item condition | `deprecated` / `replaced_by` |
+|-----------|-----------------|-------------------------------|
+| `false` | any | `null` |
+| `true` | no registry pin (declared-bundle row, dev-install row, [path source](./commands.md#add-path)) | `null` |
+| `true` | registry pin (direct or bundle member), no catalog match (dropped repo, or that item's registry degraded) | `null` |
+| `true` | registry pin, catalog match, not deprecated | `null` |
+| `true` | registry pin, catalog match, deprecated | notice / successor (`replaced_by` still `null` if the publisher named none) |
+
+`update_available` is a **fresh per-artifact re-resolution** (issue #43),
+computed independently of the catalog match above: for each
+registry-locked row, grim re-resolves the reference that row declares — tag
+and all — and compares that digest to the lock pin. It answers *would `grim
+update` move this pin?*, the same decision the TUI's `↑ outdated` badge
+uses. A release the declared reference does not point at is therefore
+**not** an available update: an exact-version pin, an unmoved advisory
+float, and a digest pin all report `false` while the repository carries a
+strictly higher tag.
+
+Three row kinds carry a declared reference. A **directly-declared** row
+resolves what `grimoire.toml` names. A **bundle** row resolves the declared
+bundle reference against the `[[bundle]]` snapshot's manifest digest — the
+only signal a bundle that gained or dropped a member ever emits, since the
+members already in the lock keep their own pins. A **bundle member** row
+resolves the member id its bundle listed, which can float independently of
+the bundle (`stack:1.0.0` listing `code-review:stable`).
+
+| `checked` | Item condition | `update_available` |
+|-----------|-----------------|---------------------|
+| `false` | any | `null` |
+| `true` | no lock pin (dev-install row, [path source](./commands.md#add-path), path-sourced bundle) | `null` |
+| `true` | registry pin, re-resolution failed (transport/auth) | `null` |
+| `true` | registry pin, re-resolution completed, the declared reference resolves to a digest that **differs** from the lock pin | `true` |
+| `true` | registry pin, re-resolution completed, the declared reference resolves to the lock pin (or the tag vanished) | `false` |
+
+**The consumer rule: `checked == false` implies every one of the three
+fields is `null` on every item, full stop — never conditional on the
+item.** `checked == true` means the check ran online across the scope's
+registries; it does not guarantee every item resolved. A single
+registry's catalog refresh failing degrades only that registry's rows'
+`deprecated`/`replaced_by` (same as `grim search`); a single artifact's
+re-resolution failing leaves just that row's `update_available` `null`. A
+completed re-resolution that finds nothing newer reports `false` — only a
+failed re-resolution (or an ineligible row) reports `null`, so absence
+never lies as `false`.
+
+`config list`'s `type` field is one of `string`, `boolean`, `integer`,
+`enum`, `string-list`, `string-set`. `string-list` is an ordered, open
+list — any value is accepted (e.g. `options.tui.tree_separators`), and its
+`values` stays `null`. `string-set` is an unordered collection of unique
+values, each drawn from the closed `values` list — the same non-null
+shape `enum` rows carry. `options.clients` is the one `string-set` key
+today, so it is the one non-`enum` row whose `values` is a list
+(`["claude","opencode","copilot","codex","cursor","kiro","junie","gemini","zed","amp","agents","antigravity","cline","droid","goose","warp","openclaw","kilo"]`)
+rather than `null`.
+
+`constraints` is `{item_pattern, item_width}` or `null`, present only on a
+list-valued key whose items carry a shape rule beyond membership in a
+closed set — `options.tui.tree_separators` today is the one row with a
+non-null `constraints`
+(`{"item_pattern":"^[^\\s\\p{C}]$","item_width":1}`); `string-set` keys
+like `options.clients` stay `null` because their closed set is already
+machine-readable via `values`. Read `item_pattern` as **advisory, not
+authoritative**: it is necessary but not sufficient — some item-shape
+rules (here, the required Unicode display width) cannot be expressed as a
+regex, which is exactly what `item_width` covers instead. A value that
+matches `item_pattern` can still be rejected by `grim config set`; grim's
+own validation is the source of truth, `constraints` is a client-side
+pre-check hint to fail fast before round-tripping to the CLI.
+
+`config registry fields` describes the field *pattern*
+(`registry.<alias>.oci`, `.index`, `.default`, `.include`, `.exclude`,
+`.insecure`), not
+any resolved alias's values, so its rows are a slimmer shape than `config
+list`'s `ConfigEntry`: just `key`/`type`/`title`/`description`. It resolves
+no scope and reads no file, so it succeeds identically inside or outside a
+project.
+
+The row set is **append-only**: `oci, index, default, include, exclude,
+insecure` today, and a future field is added at the end. Positional access to the
+existing rows therefore stays valid across releases — `items[2]` is the
+`default` row before and after the two filter fields landed — but read the
+count from `items.length` rather than assuming it, and prefer matching on
+`key` where you can.
+
+The two browse-filter rows carry `"type": "string-list"`, matching the JSON
+shape `config registry list` / `show` report. The CLI **write** path is
+narrower than that type suggests: `grim config set
+registry.<alias>.include` stores exactly one pattern and never splits on a
+comma (a comma is glob alternation syntax), so a multi-pattern list is
+written with repeated `grim config registry add --include` flags or by
+editing `grimoire.toml`. `grim config get` on such a list comma-joins for
+display and is **not** round-trippable — feed that string back to `set` and
+it is stored as one literal glob. Read the true array from `--format json`.
+
+### Single-object reports {#shapes-single}
+
+| Command | Shape | Enum values |
+|---------|-------|-------------|
+| `init` | `{path, scope, status}` | `status`: `created` |
+| `add` | `{kind, name, pinned, status}` | `status`: `added` |
+| `remove` | `{kind, name, status}` | `status`: `removed`, `absent` |
+| `uninstall` | `{kind, name, status, retained, abandoned_entries}` — `retained` is an always-present array of absolute paths (`[]` unless something was deliberately left behind) naming the on-disk footprint grim kept while the install-state record was dropped anyway — either the containment guard refused to delete it, or it is a locally-modified copy stranded at a vendor root a release relocated, which the kept-modified rule preserves; a non-empty array means state and filesystem deliberately diverge and the listed paths must be removed by hand; `abandoned_entries` is `retained`'s counterpart for a managed MCP entry inside a shared, user-owned config file grim never intended to delete — an always-present array of `{path, pointer}` objects (`[]` normally), `path` the config file and `pointer` the two-level JSON pointer of the un-spliced member; a non-empty array means the entry is now unrecorded and grim will never remove it on a later uninstall — the user must splice it out by hand | `status`: `uninstalled`, `kept-by-bundle`, `not-installed` |
+| `build` | `{kind, name, path, layer_digest, annotation_count, status}` | `status`: `built` |
+| `release` | `{ref, manifest_digest, tags, pushed, pushed_to}` — `ref` is the pull name; `pushed_to` is the push-side reference under a [`--push-registry` split](./publishing.md#batch-publish-push-registry), `null` when inactive | `pushed`: bool (`false` = dry run) |
+| `rate` | `{ref, action, up, url, provider, host, host_source, viewer_up}` — every field always present. `up` is the count after the mutation (or the sidecar's count under `--dry-run`), `null` when the forge's payload carries no total; `url` is the forge thread link; `provider` is the value the index published, verbatim, so an unrecognised one is still reported; `host` is the host the vote was or would be sent to, `null` when none resolves — under `--dry-run` that is the "grim cannot vote here" answer, delivered *before* a client picks an auth provider; `host_source` says who chose it — see [the `host_source` field](#rate-host-source); `viewer_up` is **tri-state** — see [the `viewer_up` field](#rate-viewer-up); see [grim rate][commands-rate] | `action`: `up`, `remove` |
+| `login` | `{registry, username, verification}` | `verification`: `verified`, `no-auth-required`, `skipped` |
+| `logout` | `{registry}` | — |
+| `config get` | `{key, value, set, scope}` — see the [config JSON table][commands-config-json] | `scope`: `project`, `global` |
+| `config set` / `unset` / `registry add` / `set` / `rm` / `use` | `{action, key, value, scope, dry_run, fields}` — `dry_run` is `true` only for `config set --dry-run`, `false` for every other write verb (`unset` has no `--dry-run` flag). `value` keeps its per-verb meaning: for `registry set` it is the locator the call **named** — the argument of `--oci`/`--index` — and `null` when neither flag was given (a filter-only or `--default`-only edit reports `null`), which is why the structured `fields` array exists beside it. It echoes the flag and is never compared against the stored entry, so naming an entry's current locator reports that locator, not `null`. `fields` is an always-present array, `[]` on all five other write verbs and one element per field `registry set` wrote — see [the `fields` array](#config-write-fields) | `action`: `set`, `unset`, `registry-added`, `registry-removed`, `registry-default`, `registry-set` |
+| `config registry show` | `{alias, oci, index, include, exclude, default, insecure}` — both locator keys present, exactly one non-null; `include`/`exclude` always-present arrays, `[]` when unfiltered; `insecure` is the authored opt-in, not the effective transport | — |
+| `context` | `{version, scope, workspace, config_path, config_exists, lock_path, lock_exists, lock_error, state_path, grim_home, offline, offline_source, clients, registries, default_registry}`; `registries[]` is `{alias, url, kind, default, authenticated, include, exclude, insecure}` — `include`/`exclude` are that source's authored [browse-filter](./configuration.md#browse-filters) globs in declaration order, always-present arrays, `[]` when unfiltered and `[]` for every entry under `--registry` (a forced browse set carries no filter); `insecure` is that entry's authored [plain-HTTP](./configuration.md#plain-http-registries) opt-in, not the effective transport (a host reached over HTTP through the loopback default or `GRIM_INSECURE_REGISTRIES` reports `false`); see [grim context][commands-context] | `offline_source`: `flag`, `env`, or null; `lock_error`: why an existing lock is unreadable, or null |
+| `describe` | `{ref, digest, kind, name, title, description, has_description, summary, version, license, repository, revision, created, authors, vendor, url, documentation, compatibility, support, keywords, deprecated, replaced_by, tags, annotations}` — every field always present; `kind` is `null` for a foreign manifest; `has_description` is a boolean (whether the repository carries a [description companion](./publishing.md#description-companion), derived from the tag listing at zero extra network cost); `support` is an object `{issues, chat, contact, security}` read from that companion's manifest, every field `null` when the repository publishes none ([support channels](./publishing.md#support-channels)); `compatibility` is skill-only and `null` for every other kind; `keywords`/`tags` are `[]` when none; `annotations` is the verbatim manifest map; see [grim describe][commands-describe] | — |
+| `fetch` | Tri-shaped by flags — content, description bundle, or digest probe — see [the fetch exception](#fetch) | — |
+
+### The `rate` report's `host_source` field {#rate-host-source}
+
+`host_source` says who chose the host in `host`. It is not decoration: it
+is what tells a client whether it has to declare its credential's
+destination, and what lets a consent dialog name a destination the user
+never configured.
+
+| Value | Meaning | Consumer obligation |
+|---|---|---|
+| `"default"` | grim's built-in per-provider host (`api.github.com` / `gitlab.com`) | none |
+| `"index"` | The index declared it in `providers.rating_host` | an injected credential (`--token-stdin` or `GRIM_RATE_TOKEN`) must be accompanied by `--token-host <host>`, or the run exits `80` |
+| `null` | No host resolved, so nothing was chosen | the artifact is not votable through this grim |
+
+`null` appears exactly when `host` is `null` — a consumer never has to
+reconcile the two. The credential grim resolves itself (a CI token, a
+`gh`/`glab` stored credential) is never gated, because it is looked up for
+the host being contacted in the first place. A bare `--dry-run` is never
+gated either: it reads no credential, and it is how a client learns the
+host it would otherwise have to guess.
+
+### The `rate` report's `viewer_up` field {#rate-viewer-up}
+
+`rate`'s `viewer_up` is the one field in the interface where `null` is
+**load-bearing rather than merely absent**, so it is worth stating on its
+own.
+
+| Value | Meaning | Render as |
+|---|---|---|
+| `true` | The forge reports this account as having upvoted | voted |
+| `false` | The forge reports it as not having upvoted | not voted |
+| `null` | Not asked, or not knowable | **neutral / unknown** |
+
+`null` covers three causes a consumer cannot and need not distinguish: no
+credential was piped, no host resolved, or the read-only query failed or
+was unauthorised. It is populated **only** by
+[`grim rate <ref> --dry-run --token-stdin`][commands-rate-viewer]; every
+other invocation reports `null`, including a successful vote.
+
+**Never coerce `null` to `false`.** They are different claims: `false` is
+*the forge told us you have not voted*, `null` is *we do not know*. A
+client that renders unknown as a not-voted affordance tells the user
+something no system observed, which is what
+[invariant R-3][ratings-guarantees] exists to prevent — and it is why a
+failed query reports `null` and exit `0` rather than `false`, or an error.
+
+### The config write `fields` array {#config-write-fields}
+
+Every config write report carries `fields`. It is `[]` on `config set`,
+`config unset`, `registry add`, `registry rm` and `registry use`, and never
+an absent key — the [always-present rule](#null-policy) applies to it like
+any other optional field, so `[]` on an older-shaped verb and `[]` on a
+`registry set` that wrote nothing are the same value, and there is no
+"absent" state to distinguish.
+
+Only `registry set` populates it, with one element per field the call wrote:
+
+```json
+{
+  "action": "registry-set",
+  "key": "registry.acme",
+  "value": "ghcr.io/moved",
+  "scope": "project",
+  "dry_run": false,
+  "fields": [
+    { "field": "oci",     "action": "set",     "value": "ghcr.io/moved" },
+    { "field": "default", "action": "set",     "value": true },
+    { "field": "include", "action": "set",     "value": ["a/**", "b/**"] },
+    { "field": "exclude", "action": "cleared" }
+  ]
+}
+```
+
+- `field` is the short field name — `oci`, `index`, `default`, `include`,
+  `exclude` or `insecure`, the same vocabulary [`config registry
+  fields`](#shapes-items) uses.
+- `action` is `"set"` or `"cleared"`. A `"cleared"` element carries **no**
+  `value` key at all — not `value: null`. `null` already means two things in
+  this object family (`value`'s per-verb "not applicable", and an additive
+  field's "does not apply"), and a cleared row encodes an *event* rather than
+  a state, so it gets its own explicit discriminator instead of a third
+  overload. Discriminate on `action`, never on the presence of `value`.
+- `value` on a `"set"` element takes the field's own JSON type: a string for
+  `oci`/`index`, an array of strings for `include`/`exclude`, a boolean for
+  `default`/`insecure`.
+- Element order follows the frozen `oci, index, default, include, exclude,
+  insecure` sequence, so two calls touching the same fields emit
+  byte-identical arrays.
+
+**It reports the write, not the invocation.** A field named with the value it
+already held still emits its element — presence means "this field was
+written", never "this field changed", and there is no before/after diff to
+read out of it. A `--oci`/`--index` kind swap emits **two** elements, the
+named side `set` and the unnamed side `cleared`, because the command really
+performed both mutations; the unnamed locator side is the one place prior
+state is consulted, emitting `cleared` only when it actually held a value, so
+a locator that was already absent is never reported as cleared. A list side
+is not so conditioned: `--clear-include` on an already-empty list still emits
+its `cleared` element.
+
+**It is scoped to the entry named by `key`.** `--default` also demotes
+whichever sibling entry held the flag, and that write is not reported here —
+no element ever names another alias. A consumer reading `fields` as
+"everything this call did to `grimoire.toml`" would miss it.
+
+**Three CLI surfaces reach the same browse-filter field, and they report
+differently.** Two of them clear a list; both clearing routes are supported
+and neither is deprecated in favour of the other:
+
+| Call | `action` | `fields` | Warns |
+|---|---|---|---|
+| `registry set acme --include 'a/**'` | `registry-set` | `[{"field":"include","action":"set","value":["a/**"]}]` | no |
+| `registry set acme --clear-include` | `registry-set` | `[{"field":"include","action":"cleared"}]` | no |
+| `config set registry.acme.include 'a/**'` | `set` | `[]` | **yes**, on stderr, when the call discards patterns it did not name |
+| `config unset registry.acme.include` | `unset` | `[]` | no |
+
+`config set` writes exactly one pattern and replaces the whole list, so on an
+entry already carrying more than one it warns naming the discarded count
+(exit stays `0`); a clear through either route is silent at every list
+length. The asymmetry is intended — `fields` is scoped to `registry set` —
+but a consumer diffing the routes needs to read it here rather than discover
+it. A cleared list is written as an absent key, so a subsequent `registry
+show` reports `include: []` whichever route did the clearing.
+
+### The fetch exception {#fetch}
+
+`grim fetch` shares its JSON payload with the MCP `grim_fetch` tool. Both
+route every call through the same neutral fetch core, so the report takes
+one of three shapes depending on the `--description` / `--digest-only`
+flags — each an untagged variant, its own flat JSON object. The shape
+predates the [null policy](#null-policy): empty or default fields are
+**omitted**, not null. Treat a missing key as its default.
+
+**Content** (default, `--vendor`, or `--path`) — the resolved artifact
+document: `{ref, digest, kind, name, vendor, path?, content, encoding?,
+truncated?, files?, pointer?, warnings?}`.
+
+```json
+{
+  "ref": "ghcr.io/acme/skills/code-review:1.2.0",
+  "digest": "sha256:…",
+  "kind": "skill",
+  "name": "code-review",
+  "vendor": "canonical",
+  "content": "---\nname: code-review\n…"
+}
+```
+
+`encoding` is present only as `"base64"`, when `content` is the base64 of
+a non-UTF-8 `--path` support file (plain mode decodes it back to the raw
+bytes). Its plain mode is the raw `content` payload (pipe-able, no report
+at all) — the one payload-plain command; see [grim fetch][commands-fetch].
+
+**Description bundle** (`--description`) — the repository's [description
+companion](./publishing.md#description-companion), every member inline:
+`{ref, digest, kind: "desc", files: [{path, size, content, encoding?}],
+warnings?}`.
+
+```json
+{
+  "ref": "ghcr.io/acme/mcp/postgres:__grimoire",
+  "digest": "sha256:…",
+  "kind": "desc",
+  "files": [
+    { "path": "README.md", "size": 812, "content": "…" },
+    { "path": "logo.svg", "size": 4096, "content": "…", "encoding": "base64" }
+  ]
+}
+```
+
+Each `files[]` entry is the familiar GitHub Contents API style — a `path`
+plus inline `content` (base64 for binary members) — so a consumer already
+written against that shape maps onto it directly.
+
+Bounded by the same 8 MiB layer gate as any fetch, with no per-file
+truncation — the whole companion returns in one call. A multi-file bundle
+has no single payload to print, so plain mode requires
+[`--out <dir>`](./commands.md#fetch-description) to unpack the tree to
+disk instead of printing JSON.
+
+**Digest probe** (`--digest-only`, optionally combined with
+`--description`) — a resolve-only cache key, no download: `{ref, digest,
+warnings?}`.
+
+```json
+{ "ref": "ghcr.io/acme/skills/code-review:1.2.0", "digest": "sha256:…" }
+```
+
+The reported digest equals the corresponding full fetch's manifest digest
+— the artifact's, or, combined with `--description`, the companion's — so
+a consumer caches on it and skips an unchanged download entirely. Plain
+mode prints the bare digest, no trailing newline.
+
+## The error document {#error-document}
+
+A failing run under `--format json` previously left stdout empty; a
+consumer had to scrape stderr prose. Since the 1.0 contract, both
+post-parse failure paths emit a structured document on **stdout**:
+
+```json
+{
+  "error": {
+    "code": "not-found",
+    "exit": 79,
+    "message": "/abs/path/grimoire.toml: I/O error: No such file or directory (os error 2)"
+  }
+}
+```
+
+The consumer rule: **parse stdout; a top-level `error` key marks the
+error document.** No report shape has a top-level `error` key, so the
+check is unambiguous. The document rides stdout — not stderr — because
+stderr carries tracing output and the two streams would interleave; the
+human-readable error chain still prints to stderr unchanged.
+
+`message` is the rendered error chain — human-readable text, **not** a
+contract (see [what is not frozen][stability-unstable]). Programmatic
+dispatch uses `code` and `exit`:
+
+| `code` | `exit` | Meaning |
+|--------|--------|---------|
+| `failure` | 1 | Generic failure — no specific class applies |
+| `usage` | 64 | Bad invocation (post-parse): unknown config key, conflicting flags |
+| `data` | 65 | Malformed input data: bad reference, invalid digest, integrity refusal |
+| `unavailable` | 69 | Required resource unreachable: registry down, announce failure |
+| `io` | 74 | Filesystem I/O failure |
+| `temp-fail` | 75 | Transient failure — retry may succeed |
+| `no-permission` | 77 | Insufficient permission: filesystem `EPERM` |
+| `config` | 78 | Config file invalid or unparseable |
+| `not-found` | 79 | Resource not found: missing package, absent explicit config path |
+| `auth` | 80 | Authentication failure: registry 401 or 403, missing credential |
+| `offline-blocked` | 81 | `--offline` (or `GRIM_OFFLINE`) blocked a network operation |
+
+The numeric values follow BSD [`sysexits.h`][sysexits] (64–78) with
+grim-specific codes above 78; the same table governs plain-mode exit
+codes. Clap parse failures (the pre-contract boundary above) and `--help`
+never produce the document.
+
+### The optional `reason` field {#error-reason}
+
+Some failures carry a machine-readable `reason` alongside `code`/`exit` —
+a kebab-case subtype that lets a consumer detect a *specific* refusal
+without scraping the non-frozen `message`:
+
+```json
+{
+  "error": {
+    "code": "data",
+    "exit": 65,
+    "reason": "stale-lock",
+    "message": "skill 'code-review' (…): partial-resolve refused: lock declaration_hash … does not match current …; retry with a full resolve"
+  }
+}
+```
+
+`reason` is **additive and optional**: it appears only when grim has a
+subtype for the failure and is **omitted** otherwise — an absent key, not
+`null` (the [`fetch` omit-empty fields](#fetch) set the precedent; the
+error document is likewise exempt from the [null policy](#null-policy)).
+A consumer must tolerate both its absence and a value it does not
+recognize. The reasons defined so far:
+
+| `reason` | Paired with | Meaning |
+|----------|-------------|---------|
+| `stale-lock` | `data` / 65 | A partial `grim update <name>` was refused because `grimoire.lock` no longer matches the current declaration. Retry with a full `grim update` (no names). |
+| `modified` | `data` / 65 | An install was refused because the installed artifact was modified locally (the same state `grim status` reports as `modified`). Retry the same `grim install` / `grim add` with `--force` to overwrite. |
+| `untracked-destination` | `data` / 65 | An install was refused because the destination already exists on disk with no install record — grim does not clobber files it did not create. Retry with `--force` to overwrite and record it. |
+| `no-config` | `not-found` / 79 | A project-scope command found no `grimoire.toml` by walking up from the working directory. Distinct from an explicit `--config <path>` that does not exist, which also exits 79 but carries no `reason` — that is a wrong path, not "no config anywhere". |
+| `locked` | `temp-fail` / 75 | A config-file write was refused because another `grim` process holds the `<file>.lock` advisory sidecar. Transient — retry the same command. |
+| `anchor-escape` | `data` / 65 | A recorded install path resolves outside the anchor root it was stored against, and its final component is itself a symlink. grim refuses to read or write through it. **Never forceable** — `--force` does not bypass containment. Remediation: `grim uninstall <kind> <name>`, then install again; files may remain on disk and must be removed manually. |
+
+New reasons may appear in any minor release under the [additive-field
+policy][stability-additive]; existing ones never change meaning.
+
+### The optional `retryable` field
+
+Alongside `reason`, the error object may carry `"retryable": true` — a
+hint that the same command is worth retrying unchanged, no `--force` or
+input fix required:
+
+```json
+{
+  "error": {
+    "code": "temp-fail",
+    "exit": 75,
+    "reason": "locked",
+    "retryable": true,
+    "message": "…: another process holds the advisory lock; try again"
+  }
+}
+```
+
+`retryable` is **additive and omit-when-absent**, same rule as `reason`
+itself: present only when `reason` is present *and* that specific reason
+is retryable, otherwise the key is absent entirely — never a bare
+`false`. Today only `locked` sets it; every other documented `reason`
+(including a bare `reason`-less failure) omits the key.
+
+### The optional `forceable` field
+
+The error object may likewise carry `"forceable": true` — the same command
+re-run with `--force` can resolve this refusal:
+
+```json
+{
+  "error": {
+    "code": "data",
+    "exit": 65,
+    "reason": "modified",
+    "forceable": true,
+    "message": "installed artifact was modified locally: recorded sha256:…, found sha256:…; rerun with --force to overwrite"
+  }
+}
+```
+
+`forceable` follows the identical rule to `retryable`: **additive and
+omit-when-absent**, present only when `reason` is present *and* that reason
+is forceable, never a bare `false`. Today `modified` and
+`untracked-destination` set it.
+
+Key on `forceable`, **never on the exit code**: `data` / 65 covers both the
+forceable drift refusals *and* the non-forceable `anchor-escape` containment
+refusal, so an exit-code check would offer an override that cannot work.
+`--force` never bypasses containment.
+
+### The optional `hint` field {#error-hint}
+
+Every grim-owned format parses with `deny_unknown_fields`
+([forward compatibility][stability-forward]), so a file written by a newer
+grim is rejected rather than silently misread. When the rendered chain
+names a key or value this build does not recognize, the document carries a
+`hint` alongside the message, and the same line prints on stderr:
+
+```json
+{
+  "error": {
+    "code": "config",
+    "exit": 78,
+    "message": "/abs/path/grimoire.toml: invalid TOML: unknown field `future_table`",
+    "hint": "hint: grim 0.13.0 does not recognize that key or value — check for a typo, or upgrade grim if the file was written by a newer version"
+  }
+}
+```
+
+Omit-when-absent, exactly like `reason`: an ordinary failure carries no
+`hint` key at all. The text is human guidance and **not** a contract —
+it names both real causes because they are indistinguishable from the
+parse error alone. Programmatic dispatch stays on `code` and `exit`;
+there is deliberately no `reason` slug for this case, since it drives
+no `retryable` / `forceable` semantics.
+
+## Null and additive policy {#null-policy}
+
+Optional report fields are **always present**: a field that does not
+apply serializes as an explicit `null`, never as an absent key (the
+`fetch` payload is the [one documented exception](#fetch)). A consumer
+can therefore distinguish "not applicable" (`null`) from "older grim
+that predates the field" (key missing) without version sniffing.
+
+A **list-valued** field follows the same rule with `[]` in place of
+`null`: `[]` means "this applies and is empty", a missing key means
+"older grim". `config registry list`/`show`'s and `context`'s
+`include`/`exclude` are the current examples — an unfiltered registry
+reports `{"include": [], "exclude": []}`, never an absent pair — alongside
+`update`'s `retained` and `status`'s `clients_missing`.
+
+New fields may appear in any minor release; existing fields never change
+type or meaning and are never removed. Readers must ignore unknown
+fields. The full policy, including the install-state schema it also
+covers, lives on the [stability page][stability-additive].
+
+`config list`'s `value` field became nullable in a shape-compatible way:
+`null` is emitted only for unset rows, which only the new `--all` flag
+surfaces — a consumer that never passes `--all` keeps seeing non-null
+values, so the additive-field policy holds.
+
+## Exit codes and JSON together {#exit-interplay}
+
+A non-zero exit does **not** imply the error document. Three commands ship
+a full report alongside a non-zero code, because the outcome is data, not
+a fault in producing it:
+
+- `config get` of a valid-but-unset key exits `1` and still prints the
+  full `{key, value: null, set: false, scope}` report ([config exit
+  codes][commands-config-exit]).
+- `publish` on a fail-fast stop (exit `65`) or an announce failure after
+  a successful push (exit `69`) still prints the full report — completed
+  entries, the failed entry, `announce: null` ([publish
+  report][publishing-report]).
+- `update` refused by the integrity gate over a locally modified artifact
+  (exit `65`) still prints the full report — every artifact that did roll
+  forward, plus what was pruned, reaped, retained and abandoned before the
+  refusal ([grim update](./commands.md#update)).
+
+The error document appears only when the command could not produce a
+report at all. A robust consumer therefore branches on the top-level
+`error` key first, then on the exit code.
+
+## Broken pipe {#broken-pipe}
+
+`grim status --format json | head` closes its downstream reader as soon
+as `head` has the lines it wants, often while grim is still mid-write.
+That write into a closed pipe surfaces as a `BrokenPipe` I/O error: Rust
+leaves `SIGPIPE` ignored (`SIG_IGN`) from process start, so the kernel
+never kills grim the way it would kill a C program on the same pipe — the
+error instead propagates through grim's own code exactly like any other
+I/O failure.
+
+Unhandled, that propagation is a well-known trap for Rust CLIs.
+[ripgrep's issue tracker documents the same SIGPIPE race][ripgrep-sigpipe],
+and [early Cargo panicked on a plain `cargo install --list | grep`][cargo-broken-pipe]
+until [Cargo scoped EPIPE tolerance to its own `Shell` output
+path][cargo-shell-fix]. grim hit the identical failure mode: `grim
+completions zsh | head` and a `--format json` report whose reader closed
+early both used to panic or print a stray "broken pipe" line to stderr.
+
+grim now follows the convention ripgrep and Cargo converged on: when the
+reader closes grim's own stdout, **grim exits `0` silently**. The
+consumer sees only the bytes that made it through before the pipe
+closed, then a clean exit — the ordinary `| head` contract every
+well-behaved Unix filter already honors. No [error document](#error-document)
+is written on this path; printing one into the same closed pipe is the
+panic this behavior replaces.
+
+This is **not a new exit code**: `0` already means success, and a closed
+pipe now maps onto it instead of falling through to `1` with stderr noise
+or a hard panic. The [documented exit codes][stability-frozen] are
+unchanged, and the [exit-code / JSON interplay](#exit-interplay) above
+still holds — a closed pipe is simply the case where no report,
+successful or otherwise, could be produced at all. The suppression is
+scoped narrowly to grim's own stdout write: a registry connection reset
+mid-push or mid-fetch is an unrelated failure and still exits non-zero
+with its ordinary error handling — only a downstream reader closing
+*grim's own* stdout triggers the silent `0`.
+
+## MCP parity {#mcp-parity}
+
+The [MCP server][commands-mcp] tools return the same payloads:
+`grim_search` and `grim_status` results have the same shape, envelope,
+and field values as `grim search --format json` / `grim status --format
+json` for the same scope — parsed, the two documents compare equal. They
+are **not byte-identical**: the MCP server serializes compact JSON
+(`serde_json::to_string`) while the CLI pretty-prints
+(`to_string_pretty`), so whitespace differs. `grim_fetch` returns the
+same shape as `grim fetch --format json` — except the MCP tool truncates
+`content` at 256 KiB for tool-result budgets, while the CLI never
+truncates a printed payload. Both share the same two download ceilings:
+the manifest's declared layer size is checked against the 8 MiB limit
+before download, and that declared size then bounds the actual streamed
+bytes — a registry serving more than it declared aborts mid-transfer into
+a data error (exit 65) on either interface. The tool's `description` and
+`digest_only` arguments select the same tri-shaped report the CLI flags
+do, with identical composition rules (`digest_only` with `description`
+probes the companion tag) — both interfaces call the same fetch core.
+`grim_describe` returns the same shape as `grim describe --format json`,
+including the `has_description` field.
+
+## No self-identifying reports {#no-discriminator}
+
+Reports carry **no type discriminator** ("this is a status report"). The
+caller knows what it invoked — a wrapper that runs `grim status` does not
+need the payload to repeat it, and every report would spend a reserved
+key on redundancy. This is a deliberate 1.0 decision: if a future
+multiplexing consumer genuinely needs one, adding a field is additive and
+can ship in a minor release.
+
+<!-- internal -->
+[commands-color]: ./commands.md#global-options
+[commands-status]: ./commands.md#status
+[commands-search]: ./commands.md#search
+[commands-rate]: ./commands.md#rate
+[commands-rate-viewer]: ./commands.md#rate-viewer-state
+[ratings-guarantees]: ./ratings.md#workflow-guarantees
+[commands-context]: ./commands.md#context
+[commands-describe]: ./commands.md#describe
+[commands-fetch]: ./commands.md#fetch
+[commands-mcp]: ./commands.md#mcp
+[commands-config-json]: ./commands.md#config-json
+[commands-config-exit]: ./commands.md#config-exit-codes
+[publishing-report]: ./publishing.md#batch-publish-report
+[stability-frozen]: ./stability.md#frozen
+[stability-additive]: ./stability.md#frozen-additive-fields
+[stability-unstable]: ./stability.md#unstable
+[stability-forward]: ./stability.md#limitations-forward-compat
+[browse-filters]: ./configuration.md#browse-filters
+
+<!-- external -->
+[clap]: https://docs.rs/clap/latest/clap/
+[sysexits]: https://man.freebsd.org/cgi/man.cgi?sysexits
+[codex-subagents-docs]: https://developers.openai.com/codex/subagents
+[ripgrep-sigpipe]: https://github.com/BurntSushi/ripgrep/issues/2939
+[cargo-broken-pipe]: https://github.com/rust-lang/cargo/issues/5234
+[cargo-shell-fix]: https://github.com/rust-lang/cargo/pull/8236

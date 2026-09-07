@@ -306,7 +306,7 @@ impl std::fmt::Display for PathAnchor {
     /// OpenCode anchors while serde wrote `open-code-*` — an error pointed at a
     /// tag that appears in no state file. The fix could only go this direction:
     /// the serde tag is on-disk state and can never move, whereas `Display` is
-    /// human-readable error text, which `docs/src/stability.md` puts outside
+    /// human-readable error text, which `docs/src/content/docs/stability.md` puts outside
     /// the compatibility promise. Pinned by
     /// `display_agrees_with_the_serde_tag_for_every_anchor`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1142,7 +1142,7 @@ mod tests {
     /// **This list is an on-disk contract, not an inventory.** A tag may be
     /// APPENDED when a new anchor ships; a tag may never be removed, renamed,
     /// or re-pointed, because a `state.json` written by an older grim must keep
-    /// deserializing forever (Principle 9, `docs/src/stability.md`).
+    /// deserializing forever (Principle 9, `docs/src/content/docs/stability.md`).
     ///
     /// `open-code-*` is not a typo: `rename_all = "kebab-case"` split those two
     /// variant names on their internal capital, and what reached disk is frozen

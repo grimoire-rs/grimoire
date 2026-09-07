@@ -10,7 +10,7 @@ Concise index of `grim` CLI commands. Implementation lives under
 column formats.
 
 Index of shipped `grim` subcommands — keep in sync with `src/command/`
-(one file per subcommand) and `docs/src/commands.md`.
+(one file per subcommand) and `docs/src/content/docs/commands.md`.
 
 ## Command Surface
 

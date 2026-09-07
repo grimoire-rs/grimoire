@@ -33,7 +33,7 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 | Designing a new feature | [arch-principles.md](./rules/arch-principles.md), [workflow-feature.md](./rules/workflow-feature.md), `subsystem-{target}.md`, `/hex-architect` |
 | Fixing a bug | [workflow-bugfix.md](./rules/workflow-bugfix.md) — Reproduce → RCA → Regression Test → Fix → Verify; skill `bugfix` (guided, enforces failing-test-first gate) |
 | Refactoring code | [workflow-refactor.md](./rules/workflow-refactor.md) — Safety Net → Scope → Transform → Verify → Repeat |
-| Documentation work | [docs-style.md](./rules/docs-style.md), skill `docs` |
+| Documentation work | [docs-style.md](./rules/docs-style.md) (Grimoire voice), [docs-quality.md](./rules/docs-quality.md) (vendored — page declarations, the 18 blocking rules, runnable checks under `rules/docs-quality/checks/`), skill `docs` |
 | Security-sensitive change | [adr_artifact_trust_model.md](../.agents/adr/adr_artifact_trust_model.md) **first** — the trust boundary and what is out of scope; then [quality-security.md](./rules/quality-security.md), [subsystem-ci.md](./rules/subsystem-ci.md), skill `security-auditor` |
 | CLI command changes | [subsystem-cli.md](./rules/subsystem-cli.md), [subsystem-cli-api.md](./rules/subsystem-cli-api.md), [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md) |
 | Vendor renderer declines / upstream capability gaps | [vendor-capability-watchlist.md](./rules/vendor-capability-watchlist.md) — re-verify upstream before patching a decline; date-stamped watchlist |
@@ -57,6 +57,13 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 | Rust | [quality-rust.md](./rules/quality-rust.md) | [quality-rust-errors.md](./rules/quality-rust-errors.md), [quality-rust-exit_codes.md](./rules/quality-rust-exit_codes.md), [arch-principles.md](./rules/arch-principles.md), [quality-core.md](./rules/quality-core.md) |
 | Python (acceptance tests) | [quality-python.md](./rules/quality-python.md) | [subsystem-tests.md](./rules/subsystem-tests.md) |
 | Bash (tasks, hooks) | [quality-bash.md](./rules/quality-bash.md) | — |
+| TypeScript | [typescript-quality.md](./rules/typescript-quality.md) (vendored) | [typescript-packaging.md](./rules/typescript-packaging.md) (vendored) — no TypeScript in this repo yet; both fire if that changes |
+
+Vendored language rules co-fire with the first-party ones on the same globs:
+[rust-quality.md](./rules/rust-quality.md) and [rust-cargo.md](./rules/rust-cargo.md) alongside
+`quality-rust*.md`, [python-quality.md](./rules/python-quality.md) and
+[python-packaging.md](./rules/python-packaging.md) alongside `quality-python.md`. See
+"Vendored rules" below — the overlap is real and unresolved.
 
 ## By subsystem
 
@@ -82,16 +89,20 @@ provisional; the coupling is intended (declared below).
 
 | Edit path | Rules that auto-load |
 |---|---|
-| `**/*.rs` | [quality-rust.md](./rules/quality-rust.md), [quality-rust-errors.md](./rules/quality-rust-errors.md), [quality-rust-exit_codes.md](./rules/quality-rust-exit_codes.md) (+ [arch-principles.md](./rules/arch-principles.md) under `src/**`, `external/**`) |
-| `**/Cargo.toml`, `**/Cargo.lock` | [quality-rust.md](./rules/quality-rust.md) |
+| `**/*.rs` | [quality-rust.md](./rules/quality-rust.md), [quality-rust-errors.md](./rules/quality-rust-errors.md), [quality-rust-exit_codes.md](./rules/quality-rust-exit_codes.md) [rust-quality.md](./rules/rust-quality.md) (vendored) (+ [arch-principles.md](./rules/arch-principles.md) under `src/**`, `external/**`) |
+| `**/Cargo.toml`, `**/Cargo.lock` | [quality-rust.md](./rules/quality-rust.md) (+ [rust-cargo.md](./rules/rust-cargo.md) on `**/Cargo.toml`, `**/clippy.toml`, `**/rustfmt.toml`, `**/deny.toml`, `**/rust-toolchain.toml`) |
 | `src/**` | + [subsystem-cli.md](./rules/subsystem-cli.md), [subsystem-cli-api.md](./rules/subsystem-cli-api.md), [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md), [subsystem-file-structure.md](./rules/subsystem-file-structure.md) |
 | `src/install/vendor_*.rs`, `src/oci/mcp.rs`, `src/catalog/rating_provider.rs` | + [vendor-capability-watchlist.md](./rules/vendor-capability-watchlist.md) |
 | `src/command/config_keys.rs`, `src/config/declaration.rs` | + [subsystem-config-keys.md](./rules/subsystem-config-keys.md) |
 | `test/**` | [subsystem-tests.md](./rules/subsystem-tests.md) |
-| `test/**/*.py`, `**/*.py` | + [quality-python.md](./rules/quality-python.md) |
-| `docs/**` | [docs-style.md](./rules/docs-style.md) |
-| `docs/src/ratings.md` | + [vendor-capability-watchlist.md](./rules/vendor-capability-watchlist.md) (carries the ratings feature's own upstream forge-version claims) |
+| `test/**/*.py`, `**/*.py` | + [quality-python.md](./rules/quality-python.md), [python-quality.md](./rules/python-quality.md) (vendored) |
+| `**/pyproject.toml`, `**/uv.lock` | [python-packaging.md](./rules/python-packaging.md) (vendored) |
+| `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `docs/**` and other generators' roots | [docs-quality.md](./rules/docs-quality.md) (vendored) |
+| `docs/**` | + [docs-style.md](./rules/docs-style.md) |
+| `docs/src/content/docs/ratings.md` | + [vendor-capability-watchlist.md](./rules/vendor-capability-watchlist.md) (carries the ratings feature's own upstream forge-version claims) |
 | `**/*.sh`, `**/*.bash` | [quality-bash.md](./rules/quality-bash.md) |
+| `**/*.ts`, `**/*.tsx`, `**/*.mts`, `**/*.cts` | [typescript-quality.md](./rules/typescript-quality.md) (vendored) |
+| `**/package.json`, `**/tsconfig*.json`, `**/eslint.config.*`, `**/biome.json*` | [typescript-packaging.md](./rules/typescript-packaging.md) (vendored) |
 | `.github/workflows/**`, `.github/actions/**`, `.github/dependabot.yml` | [subsystem-ci.md](./rules/subsystem-ci.md), [quality-security.md](./rules/quality-security.md) |
 | `.github/ISSUE_TEMPLATE/**` | [workflow-github.md](./rules/workflow-github.md) |
 | `dist-workspace.toml`, `cliff.toml`, `CHANGELOG.md`, release workflows | [workflow-release.md](./rules/workflow-release.md), [workflow-git.md](./rules/workflow-git.md) |
@@ -100,7 +111,8 @@ provisional; the coupling is intended (declared below).
 | `.claude/**` | [meta-ai-config.md](./rules/meta-ai-config.md) |
 
 Globals (always loaded or imported into `AGENTS.md`): [quality-core.md](./rules/quality-core.md),
-[product-tech-strategy.md](./rules/product-tech-strategy.md), [workflow-intent.md](./rules/workflow-intent.md), this catalog.
+[product-tech-strategy.md](./rules/product-tech-strategy.md), [workflow-intent.md](./rules/workflow-intent.md),
+[hex-state.md](./rules/hex-state.md) (vendored), this catalog. Strict definition of the set: `meta-ai-config.md` › "Current Global Rules".
 
 Scoped workflow rules (loaded by path match, consumed by skills on demand):
 [quality-security.md](./rules/quality-security.md) (`.github/workflows/**`, `.github/actions/**`),
@@ -122,7 +134,23 @@ Exempt from overlap detection (intended broad coupling):
 | `workflow-git.md` + `workflow-release.md` | `CHANGELOG.md`, `cliff.toml`, `dist-workspace.toml` |
 | `product-context.md` + `workflow-feature.md` | `.agents/plans/**`, `.agents/adr/**`, `.agents/specs/**`, `.agents/research/**` |
 | `docs-style.md` + `product-context.md` | `docs/**` |
+| `docs-quality.md` + `docs-style.md` + `product-context.md` | `docs/**` (vendored rule co-fires with both) |
+| `docs-quality.md` + `workflow-git.md` + `workflow-release.md` | `CHANGELOG.md` (vendored rule carries changelog conventions; the other two carry the release process) |
 | `subsystem-cli.md` + `subsystem-cli-api.md` + `subsystem-cli-commands.md` + `subsystem-file-structure.md` | `src/**` (single provisional binary crate) |
+
+## Vendored rules — installed, not authored here
+
+Eight rules under `.claude/rules/` come from upstream bundles: their prose is **not authored here**, and a local edit to it is reverted by the next sync. (The one local edit that exists is mechanical — a shebang on three shell fixtures under `rules/docs-quality/checks/`, which `task shell:verify` requires; it will be lost on sync and re-applied.) They declare provenance in frontmatter (`license:`, `repository:`), which is the marker `.claude/tests/test_ai_config.py::is_vendored` uses to exempt them from this repo's *authoring* standards (dead-glob detection, catalog authorship, skill description and body budgets). Fix upstream, then re-sync. The same holds for the 11 vendored skills under `.claude/skills/` (`docs-instrument`, `docs-plan`, `hex-*`, `nox-review`).
+
+| Rule | Upstream |
+|---|---|
+| [docs-quality.md](./rules/docs-quality.md) (+ `rules/docs-quality/` checks and fixtures) | `ocx-sh/grimoire-lore` |
+| [rust-quality.md](./rules/rust-quality.md), [rust-cargo.md](./rules/rust-cargo.md) | `ocx-sh/grimoire-lore` |
+| [python-quality.md](./rules/python-quality.md), [python-packaging.md](./rules/python-packaging.md) | `ocx-sh/grimoire-lore` |
+| [typescript-quality.md](./rules/typescript-quality.md), [typescript-packaging.md](./rules/typescript-packaging.md) | `ocx-sh/grimoire-lore` |
+| [hex-state.md](./rules/hex-state.md) (global) | `michael-herwig/arcana` |
+
+**Open**: the vendored `rust-quality.md` / `python-quality.md` duplicate the first-party `quality-rust.md` / `quality-python.md` on the same globs — two rule sets now load for the same edit. Which set is authoritative is a decision for the owner, not for a sync.
 
 ## Skills by task topic
 

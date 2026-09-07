@@ -8,8 +8,9 @@ paths:
 Conventions for writing documentation pages. Apply to new doc pages under
 `docs/`.
 
-Docs are an mdBook site: source under `docs/src/`, rendered to
-`docs/book/` (generated — never edit by hand).
+Docs are an Astro Starlight site: pages under `docs/src/content/docs/`,
+landing page at `docs/src/pages/index.astro`, rendered to `docs/dist/`
+(generated — never edit by hand).
 
 ---
 
@@ -79,13 +80,13 @@ so explicitly.
 
 ## Client Compatibility Matrix
 
-`docs/src/clients.md` is **code-mirrored, not free prose**. A table-parity
+`docs/src/content/docs/clients.md` is **code-mirrored, not free prose**. A table-parity
 test in `src/install/client_target.rs` reads its support matrix at build
 time and fails the build if any cell drifts from the `Vendor`
 implementations. So a support/decline change (`✓`/`◐`/`✗`) is never a
 documentation-only edit — the matching `Vendor` change (`kind_support`,
 `mcp_config_path`) must land in the **same commit**, or the build breaks.
-The `docs/src/agents.md` / `docs/src/mcp-servers.md` emit matrices carry the
+The `docs/src/content/docs/agents.md` / `docs/src/content/docs/mcp-servers.md` emit matrices carry the
 same row-presence invariant (every `ClientTarget` must appear).
 hex's `doc-reviewer` worker inherits this duty. Underlying rationale for each
 `◐`/`✗` lives in `.claude/rules/vendor-capability-watchlist.md`.

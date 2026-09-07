@@ -233,7 +233,7 @@ fn parse_cli(color: ColorMode) -> Result<Cli, clap::Error> {
 ///
 /// stdout — not stderr — because stderr carries tracing output and the two
 /// would interleave; a consumer parses stdout and treats a top-level
-/// `error` key as the error document (see `docs/src/json-interface.md`).
+/// `error` key as the error document (see `docs/src/content/docs/json-interface.md`).
 /// Plain mode emits nothing here (the human chain is already on stderr).
 fn emit_error_document(
     format: OutputFormat,

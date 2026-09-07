@@ -6,7 +6,10 @@ preferences, not copies. Team-shared — commit it.
 ## Pointers
 
 - Verification: `AGENTS.md` › "Build & Development Commands" — run
-  `task verify` (full gate) before any merge; `task rust:verify`,
+  `task verify` (full gate) before any merge; for docs-site work also
+  `task docs:check` (URL contract, declarations, npm audit — added by
+  `plan_docs_site_redesign.md` WP-B; needs Node 24, which `task verify`
+  never does); `task rust:verify`,
   `task shell:verify`, `task claude:verify` are the per-subsystem dev-loop
   gates; `task catalog:verify` gates first-party catalog drift.
 - Plan / ADR / spec conventions: `AGENTS.md` › "Workflow" › Planning flow.
@@ -95,7 +98,35 @@ research-axes:
 
 ## Memory
 
-- **Active plan (2026-08-19):** `.agents/plans/plan_ratings_deferred_findings.md`
+- **Active plan (2026-09-06):** `.agents/plans/plan_docs_site_redesign.md`
+  — State `plan-approved`, tier xhigh, on branch `docs/use-case-discovery`
+  (worktree `.agents/worktrees/docs-plan`). mdBook → Astro Starlight with the
+  URL contract frozen (`build.format: 'file'`, 289 fragments, 4 schema `$id`s),
+  twelve use-case pages with eleven casts, then the landing. 19 WPs in 8 waves,
+  three stacked PRs (migration → pages → landing; `docs/starlight-migration`,
+  `docs/use-case-pages`, `docs/landing-redesign`). Design record
+  `.agents/specs/design_docs_site_redesign.md` (C-001…C-030, S-001…S-014, § 8
+  amendments D-1…D-13), ADR `adr_docs_site_starlight.md` (Accepted, changelog
+  row for the amendments), discovery `.agents/discovery/use-cases.yaml` + ten
+  friction logs + `design/` canvas exports, nine `research_docs_*.md`.
+  Round-1 panel: spec 6 Block / 14 Warn / 5 Suggest, architect 3 Block / 12
+  Warn / 6 Suggest, research 3 refuted claims (Starlight 0.42 landed during
+  planning; `pyte` has no alternate screen; C-004's prose was backwards) — all
+  applied. Sharpest: WP-D moves pages that fifteen `#[cfg(test)]` reads and
+  `test/tests/test_docs.py` point at, so "no diff to `src/`" was false as
+  decomposed (path literals only, Principle 9 intact).
+
+- **Adversary note for the next `/hex-init` run:** `nox-review` (skill at
+  `.claude/skills/nox-review/`, `--harness codex --exclude claude`) ran the
+  plan-artifact pass in 53 s, exit 0, `needs-attention` with 3 high / 1 warn,
+  two of them real (the objective over-promised twelve casts; a sequencing
+  sentence was misleading). It reviews an isolated checkout, so an
+  **uncommitted spec is invisible to it** — commit the design record before
+  launching it. This is the first cross-model pass that completed since
+  2026-08-11; `codex:rescue` has failed four distinct ways. Recommend
+  `adversary: nox-review` in Preferences.
+
+- **Prior plan (2026-08-19):** `.agents/plans/plan_ratings_deferred_findings.md`
   — State `review`. Eight WPs closing the nine findings the ratings review
   deferred, landed on the same three feature branches so the one-PR-per-repo
   rule held. Two findings rested on false premises and were recorded as such

@@ -4,11 +4,12 @@ version: '3'
 
 tasks:
   generate:
-    desc: Generate the JSON Schemas for grimoire.toml, publish.toml, and grimoire.lock into docs/src/schemas/
+    desc: Generate the JSON Schemas for grimoire.toml, publish.toml, grimoire.lock, and the MCP descriptor into docs/public/schemas/
     summary: |
       Runs the compiled `grim schema` for each kind and writes the pretty
-      JSON into docs/src/schemas/. mdBook copies those files verbatim into
-      the published site.
+      JSON into docs/public/schemas/. Astro's `public/` passthrough copies
+      that directory verbatim into the published site, so these schemas
+      resolve at their published $id URLs unchanged.
 
       The schemas are generated artifacts, NOT committed: they are
       gitignored and the docs build (`task docs:build`) regenerates them on
@@ -19,11 +20,13 @@ tasks:
     deps:
       - :rust:build
     generates:
-      - '{{.ROOT_DIR}}/docs/src/schemas/grimoire-config.schema.json'
-      - '{{.ROOT_DIR}}/docs/src/schemas/grim-publish.schema.json'
-      - '{{.ROOT_DIR}}/docs/src/schemas/grimoire-lock.schema.json'
+      - '{{.ROOT_DIR}}/docs/public/schemas/grimoire-config.schema.json'
+      - '{{.ROOT_DIR}}/docs/public/schemas/grim-publish.schema.json'
+      - '{{.ROOT_DIR}}/docs/public/schemas/grimoire-lock.schema.json'
+      - '{{.ROOT_DIR}}/docs/public/schemas/grim-mcp.schema.json'
     cmds:
-      - mkdir -p {{.ROOT_DIR}}/docs/src/schemas
-      - '{{.ROOT_DIR}}/target/release/grim schema --kind config > {{.ROOT_DIR}}/docs/src/schemas/grimoire-config.schema.json'
-      - '{{.ROOT_DIR}}/target/release/grim schema --kind publish > {{.ROOT_DIR}}/docs/src/schemas/grim-publish.schema.json'
-      - '{{.ROOT_DIR}}/target/release/grim schema --kind lock > {{.ROOT_DIR}}/docs/src/schemas/grimoire-lock.schema.json'
+      - mkdir -p {{.ROOT_DIR}}/docs/public/schemas
+      - '{{.ROOT_DIR}}/target/release/grim schema --kind config > {{.ROOT_DIR}}/docs/public/schemas/grimoire-config.schema.json'
+      - '{{.ROOT_DIR}}/target/release/grim schema --kind publish > {{.ROOT_DIR}}/docs/public/schemas/grim-publish.schema.json'
+      - '{{.ROOT_DIR}}/target/release/grim schema --kind lock > {{.ROOT_DIR}}/docs/public/schemas/grimoire-lock.schema.json'
+      - '{{.ROOT_DIR}}/target/release/grim schema --kind mcp > {{.ROOT_DIR}}/docs/public/schemas/grim-mcp.schema.json'

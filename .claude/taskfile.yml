@@ -60,10 +60,19 @@ tasks:
           echo "lychee not installed — skipping link check (install: https://github.com/lycheeverse/lychee)"
           exit 0
         fi
+        # Two exclusions carry a reason beyond "it is noisy":
+        #   rules/docs-quality/checks/fixtures — inputs to a link checker, so
+        #     unresolvable links are the point of the fixture, not rot.
+        #   rules/rust-cargo/crates-of-record.md — vendored prose citing a path
+        #     that exists only in its upstream repo. Fix it upstream; a local
+        #     edit is lost on sync. Scoped to the one file so the rest of that
+        #     rule's links stay checked.
         lychee --offline --no-progress --include-verbatim \
           --exclude-path templates/artifacts \
           --exclude-path tests/.venv \
           --exclude-path worktrees \
+          --exclude-path rules/docs-quality/checks/fixtures \
+          --exclude-path rules/rust-cargo/crates-of-record.md \
           --format json --output {{.REPORTS_DIR}}/lint-links.json \
           ../CLAUDE.md ../AGENTS.md .
     sources: *claude-sources

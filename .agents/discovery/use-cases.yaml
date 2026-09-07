@@ -1,0 +1,950 @@
+# Documentation discovery artifact — produced by the docs-plan procedure.
+# One row per shortlisted reader task. Regenerate on feature merges; diff on
+# release tags (DOC-DISC-12). Nothing in this file is documentation prose.
+#
+# Evidence rule: every claim below comes from the repository, its issue tracker,
+# the CHANGELOG, or a run that was actually performed (friction logs beside this
+# file). Nothing was sourced from an existing docs page title.
+
+product_shape: cli
+generator: mdbook                  # docs/book.toml, mdBook 0.5.3, GitHub Pages
+generator_candidate: astro-starlight
+generator_candidate_note: >-
+  Owner raised on 2026-09-06: move the docs site to Astro so it matches the
+  index site (index.grimoire.rs is rendered by the Astro-based indexer).
+  Decision pending. The plan below is generator-neutral: on Starlight the nav
+  moves from docs/src/SUMMARY.md to the astro.config.* sidebar, groups map 1:1,
+  and .mdx pages need the {/* doc_type: ... */} opener instead of an HTML comment.
+signal: friction-log-severity
+signal_note: >-
+  issue-pr-frequency was considered first and rejected as the ranking signal:
+  the tracker holds maintainer-filed defect reports on a single-maintainer,
+  pre-1.0 project, not reader demand. There is no invocation telemetry
+  (issue #83 is open) and no search log. Ten friction logs were run by
+  sandboxed personas with no repository access (2026-09-06); rank 1-10 is
+  measured severity, rank 11-27 is provisional (no log run) and ordered by
+  adjacency to measured pain.
+generated: 2026-09-06
+grim_version: 0.14.1
+surface_sources:
+  - cli-subcommand          # grim --help, 24 subcommands
+  - readme-heading          # README.md: Install, Quick Start, Run Your Own Index, Development, Community, License
+  - issue-title             # gh issue list --state all (110 issues)
+  - pr-title                # gh pr list --state all (112 PRs)
+  - changelog               # CHANGELOG.md ### Added / ### Changed, 0.1.0 .. 0.14.1
+  - maintainer-request      # owner's brief, 2026-09-06 (scope, shared dirs, TUI, filters, clients, re-render, own index)
+  - community-pain-points   # web research 2026-09-06, .agents/research/research_docs_pain_points.md (router weighting only, not the rank signal)
+
+# DOC-DISC-08: every top-level subcommand appears here, mapped to a task or an
+# out-of-scope entry. Diff against `grim --help` on every run.
+surface_map:
+  init: T02
+  add: T02
+  install: T02
+  update: T08
+  status: T08
+  lock: T09
+  context: T03
+  config: T07
+  remove: T13
+  uninstall: T13
+  search: T14
+  describe: T14
+  fetch: T14
+  rate: T15
+  tui: T05
+  mcp: T16
+  login: T11
+  logout: T11
+  build: T27
+  release: T27
+  publish: T27
+  schema: X01
+  completions: X02
+  help: X03
+
+out_of_scope:
+  - id: X01
+    surface: "schema"
+    why: "editor tooling; served by the schema section of the configuration reference, not a reader task on its own"
+  - id: X02
+    surface: "completions"
+    why: "shell integration, not a reader task"
+  - id: X03
+    surface: "help"
+    why: "CLI meta"
+  - id: X04
+    surface: "README: Development"
+    why: "contributor docs live in the repository (AGENTS.md, CONTRIBUTING), not on the user site"
+  - id: X05
+    surface: "README: Community, License"
+    why: "not tasks"
+  - id: X06
+    surface: "hooks (issues #85-#97, PR #98)"
+    why: "unlanded feature; document when it merges"
+  - id: X07
+    surface: "managed context block (issues #52, #53)"
+    why: "unlanded feature"
+  - id: X08
+    surface: "VS Code extension internals (issues #33, #34, #38, #67)"
+    why: "the extension's own reference lives in grimoire-vscode; the entry path from VS Code is in scope (T32)"
+  - id: X09
+    surface: "telemetry (#83), download counts (#89), capability templating (#26)"
+    why: "open proposals, no shipped surface"
+  - id: X10
+    surface: "internal defects (#42, #55, #56, #88, #90, #97)"
+    why: "bug reports, not reader tasks"
+
+tasks:
+  - id: T01
+    task: "get the tool onto a machine that has nothing yet and confirm it runs"
+    source: readme-heading
+    signal: friction-log-severity
+    rank: 10
+    tier: first-steps
+    depends_on: []
+    friction_log: .agents/discovery/friction-logs/T01.md
+    friction_verdict: completed
+    friction_note: "recommended path installs a second package manager first; 'OCI registry' is unglossed on the landing page; installer could not run in the sandbox (curl blocked by policy), binary was pre-placed"
+    user_need:
+      as_a: "a developer with no copy of the tool on this machine"
+      i_need_to: "get a working copy onto my machine and see it answer"
+      so_that: "I can follow the rest of the documentation"
+    solution_shaped: false
+    existing_page: docs/src/installation.md
+    page_word_count: 468
+    page_status: adequate
+    action: keep
+
+  - id: T02
+    task: "get one published skill working inside my AI coding agent in a new project"
+    source: cli-subcommand
+    signal: friction-log-severity
+    rank: 1
+    tier: first-steps
+    depends_on: []
+    friction_log: .agents/discovery/friction-logs/T02.md
+    friction_verdict: completed-with-guessing
+    friction_note: "the quick start's own command, run verbatim in a fresh project, rendered into the vendor-neutral .agents/skills pool (which Claude Code does not read) with no warning, because the fresh project has no client marker; three of ten personas (T02, T03, T08) hit this; which files to commit and whether the agent needs a reload are stated nowhere in one place"
+    user_need:
+      as_a: "a developer who uses one AI coding agent and has just installed the tool"
+      i_need_to: "get one published skill working inside my agent in a new project"
+      so_that: "I see the tool do something useful before investing more time"
+    solution_shaped: false
+    existing_page: docs/src/quickstart.md
+    page_word_count: 511
+    page_status: adequate
+    action: expand
+
+  - id: T03
+    task: "decide which config follows me to every repository and which stays in one, and move one later"
+    source: maintainer-request
+    signal: friction-log-severity
+    rank: 9
+    tier: everyday
+    depends_on: [T02]
+    friction_log: .agents/discovery/friction-logs/T03.md
+    friction_verdict: completed
+    friction_note: "the why of two scopes was found in 15 s (measured) in the concepts page; no page names a procedure for moving a declaration between scopes, it had to be inferred from the separate remove and uninstall definitions"
+    user_need:
+      as_a: "a developer who works across several repositories with the same agents"
+      i_need_to: "decide which of my config should follow me everywhere and which should stay in one repository, and change that later"
+      so_that: "I set things up once instead of once per repository"
+    solution_shaped: false
+    existing_page: missing
+    page_word_count: 0
+    page_status: missing
+    action: write
+    note: "concepts.md 'Scopes' keeps the why; the how-to lands in guides/scopes-and-clients.md together with T07. Web evidence A5: people want their global set on every machine; the guide shows the global config as a dotfile"
+
+  - id: T04
+    task: "give two AI coding agents on one machine the same skills from a single source"
+    source: maintainer-request
+    signal: friction-log-severity
+    rank: 6
+    tier: everyday
+    depends_on: [T02]
+    friction_log: .agents/discovery/friction-logs/T04.md
+    friction_verdict: completed
+    friction_note: "no worked example anywhere across nine pages opened; install printed one result row while writing a second copy for the pool-reading client, and status showed one undifferentiated row; the mechanism (agents client, shared pool, per-vendor shared_skills) is documented only as reference in configuration.md and clients.md"
+    user_need:
+      as_a: "a developer who alternates between two AI coding agents on one machine"
+      i_need_to: "give both agents the same skills from a single source"
+      so_that: "a review one agent runs on the other's work uses the same instructions and the copies never drift"
+    solution_shaped: false
+    existing_page: missing
+    page_word_count: 0
+    page_status: missing
+    action: write
+    note: "flagship use-case walkthrough (adversarial review across two harnesses); lands in guides/shared-skills.md"
+
+  - id: T05
+    task: "browse what is available, see what is installed or outdated, and act on it from one screen"
+    source: cli-subcommand
+    signal: friction-log-severity
+    rank: 8
+    tier: first-steps
+    depends_on: []
+    friction_log: .agents/discovery/friction-logs/T05.md
+    friction_verdict: completed-with-guessing
+    friction_note: "every question was answerable, but the full key map and the badge legend are punted to the in-app ? screen; the base key map has to be reassembled from scattered paragraphs inside the command reference; grim tui --help prints launch flags only"
+    user_need:
+      as_a: "a developer who prefers browsing to typing commands"
+      i_need_to: "browse what is available, see what is installed or outdated, and act on it from one screen"
+      so_that: "I maintain my agent config without memorising the command set"
+    solution_shaped: false
+    existing_page: docs/src/commands.md
+    page_word_count: 13111
+    page_status: adequate
+    action: write
+    note: "content exists inside the command reference; lift it into browse.md under Getting started (one page for the index site, the TUI and VS Code) (an entry path that ends on an installed artifact, key map and badge legend in one table); flags stay in the reference. Owner, 2026-09-06: the TUI is a first-steps path"
+
+  - id: T06
+    task: "show my team only our company namespace from our catalog while keeping the public one visible"
+    source: maintainer-request
+    signal: friction-log-severity
+    rank: 4
+    tier: everyday
+    depends_on: [T02]
+    friction_log: .agents/discovery/friction-logs/T06.md
+    friction_verdict: completed-with-guessing
+    friction_note: "the command reference's search section contradicts itself about a plain-table source column (drift); alias/repo references are documented only with oci-type examples and fail against an index-type alias; short-id expansion against the built-in OCI fallback could not be located; the filter section itself reads as a design document"
+    user_need:
+      as_a: "a platform engineer whose company runs its own catalog next to the public one"
+      i_need_to: "show my team only the company namespace from our catalog while keeping the public one visible"
+      so_that: "nobody installs a look-alike from the wrong source"
+    solution_shaped: false
+    existing_page: docs/src/configuration.md
+    page_word_count: 6005
+    page_status: adequate
+    action: write
+    note: "mechanics stay in configuration.md; the use case lands in guides/registries.md with T11 and gets a router card (owner, 2026-09-06: highlight filters); browse.md closes with a pointer; fix the commands.md search contradiction (drift)"
+
+  - id: T07
+    task: "control which agents receive my config, add one later, and drop one"
+    source: maintainer-request
+    signal: friction-log-severity
+    rank: 5
+    tier: everyday
+    depends_on: [T02]
+    friction_log: .agents/discovery/friction-logs/T07.md
+    friction_verdict: completed
+    friction_note: "what concretely counts as a detected client is stated in no single place; config set on the clients key replaces the whole array; after dropping a client, status JSON silently stopped listing its still-on-disk output (only clients_extra hinted), undocumented in the JSON interface page; the persona never observed a default-detected set"
+    user_need:
+      as_a: "a developer whose set of AI coding agents changes over time"
+      i_need_to: "control which agents receive my config, add one later, and drop one"
+      so_that: "each agent I use sees the config and no stale files linger for the ones I stopped using"
+    solution_shaped: false
+    existing_page: docs/src/configuration.md
+    page_word_count: 6005
+    page_status: adequate
+    action: write
+    note: "the key is documented; the why/when and the detection rule land in guides/scopes-and-clients.md with T03"
+
+  - id: T08
+    task: "find out what an install or update does to a file I edited by hand, keep the edit, or go back"
+    source: maintainer-request
+    signal: friction-log-severity
+    rank: 7
+    tier: everyday
+    depends_on: [T02]
+    friction_log: .agents/discovery/friction-logs/T08.md
+    friction_verdict: completed
+    friction_note: "three pages give three different word lists for the same status state; the JSON state value 'stale' is defined nowhere; the bundle-row vocabulary is a third non-overlapping set; the behaviour itself is explained well but across commands.md, stability.md, upgrading.md and vendor-metadata.md"
+    user_need:
+      as_a: "a developer who edited an installed file by hand"
+      i_need_to: "find out what will happen to that edit on the next install or update, keep it deliberately, or go back to the published version"
+      so_that: "an update never silently destroys work I meant to keep"
+    solution_shaped: false
+    existing_page: missing
+    page_word_count: 0
+    page_status: missing
+    action: write
+    note: "lands in guides/lifecycle.md (install, update, status, uninstall, one state vocabulary); commands.md status section adopts the same vocabulary (expand)"
+
+  - id: T09
+    task: "make every developer and the CI job use the same artifact versions and fail the build when they diverge"
+    source: cli-subcommand
+    signal: friction-log-severity
+    rank: 3
+    tier: integration
+    depends_on: [T02]
+    friction_log: .agents/discovery/friction-logs/T09.md
+    friction_verdict: completed
+    friction_note: "no page is written for this job (ci.md is about publishing from CI); the stale-lock refusal (exit 65, declaration_hash mismatch) that is the CI gate is undocumented under grim install; status --check always exits 0 and cannot gate; commit/ignore list assembled from reference tables"
+    user_need:
+      as_a: "a team lead setting up a shared repository and its CI"
+      i_need_to: "make every developer and the CI job use the same artifact versions and fail the build when they diverge"
+      so_that: "a review passes on the same instructions the author used"
+    solution_shaped: false
+    existing_page: missing
+    page_word_count: 0
+    page_status: missing
+    action: write
+    note: "lands in guides/team-ci.md; commands.md install section documents the stale-lock refusal (expand)"
+
+  - id: T10
+    task: "get a skill from my disk to a place colleagues can discover and install it from, under our own namespace"
+    source: maintainer-request
+    signal: friction-log-severity
+    rank: 2
+    tier: integration
+    depends_on: [T02, T27]
+    friction_log: .agents/discovery/friction-logs/T10.md
+    friction_verdict: completed-with-guessing
+    friction_note: "eight pages stitched for one path; a publish manifest registry written in the host/org shape the quick start primes for consuming fails with exit 65 because the org is a separate repository_prefix field documented several sections later; authoring, publishing, announcing and index hosting are separate pages with the connective step in a fourth"
+    user_need:
+      as_a: "an engineer who wants colleagues to find and install our internal skills"
+      i_need_to: "get a skill from my disk to a place my colleagues can discover and install it from, under our own namespace"
+      so_that: "the team stops copy-pasting config between repositories"
+    solution_shaped: false
+    existing_page: docs/src/hosting-an-index.md
+    page_word_count: 2232
+    page_status: adequate
+    action: write
+    note: "hosting-an-index.md serves the index half and stays; the golden path assembles registry, index and announce (two or more interacting concepts), so it is the one page typed tutorial: tutorials/own-index.md"
+
+  - id: T11
+    task: "authenticate once to a company registry and have every later install reuse it, including in CI"
+    source: cli-subcommand
+    signal: friction-log-severity
+    rank: 17
+    tier: integration
+    depends_on: [T02]
+    friction_log: not-run
+    friction_note: "T06 met an auth error from a short-id guess and could not find where short ids expand"
+    user_need:
+      as_a: "a developer whose company registry needs a login"
+      i_need_to: "authenticate once and have every later install reuse it, including in CI"
+      so_that: "private artifacts install like public ones"
+    solution_shaped: false
+    existing_page: docs/src/authentication.md
+    page_word_count: 931
+    page_status: adequate
+    action: keep
+
+  - id: T12
+    task: "have every tagged release of my skills repository published and announced automatically"
+    source: readme-heading
+    signal: friction-log-severity
+    rank: 22
+    tier: integration
+    depends_on: [T27]
+    friction_log: not-run
+    user_need:
+      as_a: "a maintainer of a skills repository"
+      i_need_to: "have every tagged release published and announced without anyone doing it by hand"
+      so_that: "nobody publishes from a laptop"
+    solution_shaped: false
+    existing_page: docs/src/ci.md
+    page_word_count: 1177
+    page_status: adequate
+    action: keep
+
+  - id: T13
+    task: "remove an artifact from my agents and from the declaration without leaving files behind"
+    source: cli-subcommand
+    signal: friction-log-severity
+    rank: 13
+    tier: everyday
+    depends_on: [T02]
+    friction_log: not-run
+    friction_note: "T03 had to infer the remove-versus-uninstall distinction from two separate reference entries"
+    user_need:
+      as_a: "a developer who no longer wants an installed artifact"
+      i_need_to: "remove it from my agents and from the project declaration without leaving files behind"
+      so_that: "my agents stop loading it"
+    solution_shaped: false
+    existing_page: docs/src/commands.md
+    page_word_count: 13111
+    page_status: adequate
+    action: keep
+    note: "also covered by guides/lifecycle.md"
+
+  - id: T14
+    task: "read what an artifact contains, who published it and whether others found it useful, before it lands in my agent"
+    source: cli-subcommand
+    signal: friction-log-severity
+    rank: 12
+    tier: everyday
+    depends_on: [T02]
+    friction_log: not-run
+    user_need:
+      as_a: "a developer who found an artifact in the catalog"
+      i_need_to: "read what it contains, who published it and whether others found it useful before it lands in my agent"
+      so_that: "I never load instructions I have not seen"
+    solution_shaped: false
+    existing_page: missing
+    page_word_count: 0
+    page_status: missing
+    action: write
+    note: "describe, fetch, ratings and deprecation badges exist as reference entries; the vetting workflow lands in guides/inspect.md (T14, T15). Web evidence: third-party skills run unverified (A7) and often degrade output (A8); the page states what grim checks (digest, provenance, ratings) and what it cannot (content safety), per adr_artifact_trust_model.md"
+
+  - id: T15
+    task: "record whether an artifact was useful"
+    source: cli-subcommand
+    signal: friction-log-severity
+    rank: 27
+    tier: everyday
+    depends_on: [T02]
+    friction_log: not-run
+    user_need:
+      as_a: "a developer who has used an artifact for a while"
+      i_need_to: "record whether it was useful"
+      so_that: "the next person browsing can tell good from bad"
+    solution_shaped: false
+    existing_page: docs/src/ratings.md
+    page_word_count: 2914
+    page_status: adequate
+    action: keep
+
+  - id: T16
+    task: "let my AI agent browse and install artifacts itself under the same scope rules I use"
+    source: cli-subcommand
+    signal: friction-log-severity
+    rank: 19
+    tier: integration
+    depends_on: [T02]
+    friction_log: not-run
+    user_need:
+      as_a: "a developer who lets an AI agent manage its own tooling"
+      i_need_to: "let the agent browse and install artifacts itself under the same scope rules I use"
+      so_that: "I can ask the agent to set itself up"
+    solution_shaped: false
+    existing_page: docs/src/commands.md
+    page_word_count: 13111
+    page_status: adequate
+    action: keep
+
+  - id: T17
+    task: "learn which installed artifacts have a newer version, are deprecated, or were replaced"
+    source: issue-title
+    signal: friction-log-severity
+    rank: 14
+    tier: everyday
+    depends_on: [T02]
+    friction_log: not-run
+    friction_note: "issues #15, #21, #43, #58; T09 found status --check always exits 0"
+    user_need:
+      as_a: "a developer with many artifacts installed"
+      i_need_to: "learn which of them have a newer version, are deprecated, or were replaced"
+      so_that: "I upgrade on my schedule instead of discovering rot by accident"
+    solution_shaped: false
+    existing_page: docs/src/commands.md
+    page_word_count: 13111
+    page_status: adequate
+    action: keep
+    note: "also covered by guides/lifecycle.md"
+
+  - id: T18
+    task: "hand colleagues one thing to install that brings a whole curated set"
+    source: changelog
+    signal: friction-log-severity
+    rank: 16
+    tier: everyday
+    depends_on: [T02]
+    friction_log: not-run
+    user_need:
+      as_a: "a team lead curating a starter set"
+      i_need_to: "hand colleagues one thing to install that brings the whole set"
+      so_that: "onboarding is one step"
+    solution_shaped: false
+    existing_page: docs/src/concepts.md
+    page_word_count: 1742
+    page_status: adequate
+    action: keep
+
+  - id: T19
+    task: "register one MCP server definition into every agent I use"
+    source: changelog
+    signal: friction-log-severity
+    rank: 18
+    tier: everyday
+    depends_on: [T02]
+    friction_log: not-run
+    friction_note: "issues #54, #60"
+    user_need:
+      as_a: "a developer who wants one MCP server wired into several agents"
+      i_need_to: "register one server definition into every agent I use"
+      so_that: "I edit one file, not five agent configs"
+    solution_shaped: false
+    existing_page: docs/src/mcp-servers.md
+    page_word_count: 2227
+    page_status: adequate
+    action: write
+    note: "reference stays; the job (one server definition, every agent's config) gets guides/mcp-everywhere.md, sidebar-only (owner, 2026-09-06: folded into the shared-skills card, one reader task). Web evidence: five sources say each tool has its own MCP config shape (research_docs_pain_points.md A3)"
+
+  - id: T20
+    task: "run the whole distribution chain inside a self-hosted GitLab"
+    source: issue-title
+    signal: friction-log-severity
+    rank: 23
+    tier: integration
+    depends_on: [T10]
+    friction_log: not-run
+    friction_note: "issue #11"
+    user_need:
+      as_a: "an operator inside a self-hosted GitLab"
+      i_need_to: "run the whole distribution chain inside the corporate network"
+      so_that: "artifacts never leave it"
+    solution_shaped: false
+    existing_page: docs/src/self-hosted-gitlab.md
+    page_word_count: 1197
+    page_status: adequate
+    action: keep
+
+  - id: T21
+    task: "try my unpublished skill inside my agent and see edits immediately"
+    source: changelog
+    signal: friction-log-severity
+    rank: 15
+    tier: everyday
+    depends_on: [T02]
+    friction_log: not-run
+    user_need:
+      as_a: "an author iterating on a skill"
+      i_need_to: "try my unpublished skill inside my agent and see edits immediately"
+      so_that: "I publish only what already works"
+    solution_shaped: false
+    existing_page: docs/src/commands.md
+    page_word_count: 13111
+    page_status: adequate
+    action: keep
+    note: "also step one of tutorials/own-index.md"
+
+  - id: T22
+    task: "keep installing and re-rendering from what I already fetched while offline"
+    source: changelog
+    signal: friction-log-severity
+    rank: 25
+    tier: integration
+    depends_on: [T02]
+    friction_log: not-run
+    user_need:
+      as_a: "a developer on a network without registry access"
+      i_need_to: "keep installing and re-rendering from what I already fetched"
+      so_that: "a flight or an air gap does not block work"
+    solution_shaped: false
+    existing_page: docs/src/concepts.md
+    page_word_count: 1742
+    page_status: adequate
+    action: keep
+
+  - id: T23
+    task: "learn what changes on the first run after upgrading the tool and what to do about it"
+    source: changelog
+    signal: friction-log-severity
+    rank: 24
+    tier: everyday
+    depends_on: [T01]
+    friction_log: not-run
+    user_need:
+      as_a: "a developer upgrading the tool"
+      i_need_to: "learn what changes on the first run after the upgrade and what to do about it"
+      so_that: "the upgrade does not break my installs"
+    solution_shaped: false
+    existing_page: docs/src/upgrading.md
+    page_word_count: 2550
+    page_status: adequate
+    action: keep
+
+  - id: T24
+    task: "read every result and error as structured data with stable exit codes from another program"
+    source: changelog
+    signal: friction-log-severity
+    rank: 26
+    tier: integration
+    depends_on: [T02]
+    friction_log: not-run
+    user_need:
+      as_a: "an engineer wiring the tool into another program"
+      i_need_to: "read every result and error as structured data with stable exit codes"
+      so_that: "my integration never scrapes text"
+    solution_shaped: false
+    existing_page: docs/src/json-interface.md
+    page_word_count: 4233
+    page_status: adequate
+    action: keep
+
+  - id: T25
+    task: "write one artifact that each agent renders correctly"
+    source: issue-title
+    signal: friction-log-severity
+    rank: 21
+    tier: integration
+    depends_on: [T27]
+    friction_log: not-run
+    friction_note: "issues #100, #103, #104"
+    user_need:
+      as_a: "an author publishing for many agents"
+      i_need_to: "write one artifact that each agent renders correctly"
+      so_that: "I maintain one source"
+    solution_shaped: false
+    existing_page: docs/src/vendor-metadata.md
+    page_word_count: 2964
+    page_status: adequate
+    action: keep
+
+  - id: T26
+    task: "install one custom agent definition into every tool that supports it"
+    source: changelog
+    signal: friction-log-severity
+    rank: 20
+    tier: everyday
+    depends_on: [T02]
+    friction_log: not-run
+    friction_note: "issue #44"
+    user_need:
+      as_a: "a developer who wants a custom agent persona in my tools"
+      i_need_to: "install one agent definition into every tool that supports it"
+      so_that: "the persona behaves the same everywhere"
+    solution_shaped: false
+    existing_page: docs/src/agents.md
+    page_word_count: 849
+    page_status: adequate
+    action: keep
+
+  - id: T27
+    task: "publish a skill on my disk as a versioned artifact others can install"
+    source: cli-subcommand
+    signal: friction-log-severity
+    rank: 11
+    tier: integration
+    depends_on: [T02]
+    friction_log: not-run
+    friction_note: "T10 hit the manifest registry-versus-repository_prefix trap and could not find the conventional source path stated in one place"
+    user_need:
+      as_a: "an author with a skill on disk"
+      i_need_to: "publish it as a versioned artifact others can install"
+      so_that: "colleagues install a version, not a paste"
+    solution_shaped: false
+    existing_page: docs/src/publishing.md
+    page_word_count: 6241
+    page_status: adequate
+    action: expand
+
+  - id: T28
+    task: "choose between a floating tag and a pinned digest, know which reference moves on update, and cut a release that moves the rolling tags"
+    source: maintainer-request
+    signal: friction-log-severity
+    rank: 28
+    tier: everyday
+    depends_on: [T02]
+    friction_log: not-run
+    friction_note: "owner pick, 2026-09-06, modelled on ocx.sh/docs/in-depth/versioning (tags, cascades, locking); today the consumer half sits in concepts.md 'References' and the publisher half in publishing.md 'Cascade tags', with no page joining them"
+    user_need:
+      as_a: "a developer declaring an artifact for the long run"
+      i_need_to: "decide whether my declaration follows new releases or stays put, and see which one an update will move"
+      so_that: "a rolling reference and a frozen one are each a deliberate choice, not a surprise"
+    solution_shaped: false
+    existing_page: docs/src/concepts.md
+    page_word_count: 1742
+    page_status: adequate
+    action: write
+    note: "lands in guides/versioning.md: tag kinds (exact, rolling major/minor, latest, channel), what update re-resolves, digest pinning, the cascade a release performs, the lock as the record"
+
+  - id: T29
+    task: "lay out a skills repository and its registry namespace so publishing and the index pick everything up"
+    source: maintainer-request
+    signal: friction-log-severity
+    rank: 29
+    tier: integration
+    depends_on: [T27]
+    friction_log: not-run
+    friction_note: "owner pick, 2026-09-06: people nest artifacts under skills/ where a flat layout is expected; T10 could not find the conventional source path stated in one place; the first-party catalog itself publishes under a skills/ repository prefix, so the page must state the rule and reconcile it with that example"
+    user_need:
+      as_a: "an author setting up a repository of artifacts for others"
+      i_need_to: "arrange the files and the registry names so one publish run and the index find every artifact"
+      so_that: "colleagues see a clean catalog and nothing is silently skipped"
+    solution_shaped: false
+    existing_page: docs/src/publishing.md
+    page_word_count: 6241
+    page_status: adequate
+    action: write
+    note: "lands in guides/catalog-best-practices.md and as a step of tutorials/own-index.md; sidebar-only, not a router card (weaker external signal than the MCP job it competes with, see research_docs_pain_points.md C)"
+
+  - id: T30
+    task: "write my first skill and see my own agent load it"
+    source: maintainer-request
+    signal: friction-log-severity
+    rank: 30
+    tier: first-steps
+    depends_on: []
+    friction_log: not-run
+    friction_note: "owner, 2026-09-06: the author entry path is missing; today an author starts at publishing.md (6241 words) or the artifacts reference. T21 (dev-install of a local path) is the mechanism; this is the first verified result for an author"
+    user_need:
+      as_a: "a developer who has ideas for their agent and has never packaged one"
+      i_need_to: "write one small skill on disk and watch my agent pick it up"
+      so_that: "I know the format works before I learn publishing"
+    solution_shaped: false
+    existing_page: missing
+    page_word_count: 0
+    page_status: missing
+    action: write
+    note: "lands in first-skill.md under Getting started ('Your first skill'): a SKILL.md in a local directory, added as a path source, rendered into every harness in that project, ends on the agent's own output; closes with one pointer to sharing (tutorials/own-index.md for a team, publishing.md for the public). Sharing itself is not first-steps: it needs a registry and credentials"
+
+  - id: T31
+    task: "keep a repository's own artifacts in one directory that every harness working on it reads"
+    source: maintainer-request
+    signal: friction-log-severity
+    rank: 31
+    tier: everyday
+    depends_on: [T30]
+    friction_log: not-run
+    friction_note: "owner, 2026-09-06: teams check skills, rules and agents into the repo once and expect Claude Code, Codex, Cursor and Copilot to all read them; today that needs local path sources plus clients, documented only as separate reference entries (commands.md dev-install, configuration.md clients)"
+    user_need:
+      as_a: "a maintainer whose contributors use different coding agents"
+      i_need_to: "commit the repository's skills and rules once, in one directory, and have every contributor's agent read them"
+      so_that: "the repository carries its own agent config without a copy per tool"
+    solution_shaped: false
+    existing_page: missing
+    page_word_count: 0
+    page_status: missing
+    action: write
+    note: "the project-scope half of guides/shared-skills.md (local path sources, committed grimoire.toml and lock, clients); the machine-wide registry half serves T04"
+
+  - id: T32
+    task: "install and manage artifacts from VS Code without touching a terminal"
+    source: maintainer-request
+    signal: friction-log-severity
+    rank: 32
+    tier: first-steps
+    depends_on: []
+    friction_log: not-run
+    friction_note: "owner, 2026-09-06: the extension is the big win in the company rollout (see memory: adopted at a 600 to 900 developer org); today the docs only link the marketplace from the landing cards. The index site already deep-links registries into the extension"
+    user_need:
+      as_a: "a developer who lives in VS Code and has never opened a terminal for this"
+      i_need_to: "find a skill, install it into my agent and see that it is there, from the editor"
+      so_that: "I get the result without learning a CLI first"
+    solution_shaped: false
+    existing_page: missing
+    page_word_count: 0
+    page_status: missing
+    action: write
+    note: "the VS Code surface of browse.md under Getting started: install the extension, add an index, install one artifact, see status; deep reference stays in the extension's repo"
+
+# Coverage table — the same rows for a human reviewer.
+#
+# | Task | Page | Verdict |
+# |---|---|---|
+# | T01 install and confirm | docs/src/installation.md | keep |
+# | T02 first skill in a new project | docs/src/quickstart.md | expand (fresh-project fallback, commit list, reload) |
+# | T03 choose and move scope | missing | write guides/scopes-and-clients.md |
+# | T04 one skill set for two harnesses | missing | write guides/shared-skills.md |
+# | T05 browse and act from one screen | docs/src/commands.md | write guides/browse-and-install.md |
+# | T06 company index beside the public one | docs/src/configuration.md | write guides/registries.md |
+# | T07 choose and change clients | docs/src/configuration.md | write guides/scopes-and-clients.md |
+# | T08 hand edits, install, update | missing | write guides/lifecycle.md |
+# | T09 team + CI pinning | missing | write guides/team-ci.md |
+# | T10 own index golden path | docs/src/hosting-an-index.md | write tutorials/own-index.md |
+# | T11 registry login | docs/src/authentication.md | keep |
+# | T12 publish from CI | docs/src/ci.md | keep |
+# | T13 remove cleanly | docs/src/commands.md | keep |
+# | T14 vet before install | missing | write guides/browse-and-install.md |
+# | T15 rate | docs/src/ratings.md | keep |
+# | T16 agent-driven grim | docs/src/commands.md | keep |
+# | T17 stay current | docs/src/commands.md | keep |
+# | T18 bundles | docs/src/concepts.md | keep |
+# | T19 MCP server into every agent | docs/src/mcp-servers.md | keep |
+# | T20 self-hosted GitLab | docs/src/self-hosted-gitlab.md | keep |
+# | T21 local dev of a skill | docs/src/commands.md | keep |
+# | T22 offline | docs/src/concepts.md | keep |
+# | T23 upgrade the tool | docs/src/upgrading.md | keep |
+# | T24 scripting | docs/src/json-interface.md | keep |
+# | T25 cross-client authoring | docs/src/vendor-metadata.md | keep |
+# | T26 agent personas | docs/src/agents.md | keep |
+# | T27 publish | docs/src/publishing.md | expand (registry vs repository_prefix adjacency, conventional source path) |
+# | T28 floating vs pinned, rolling releases | docs/src/concepts.md | write guides/versioning.md |
+# | T29 catalog layout | docs/src/publishing.md | write guides/catalog-best-practices.md |
+# | T30 write my first skill | missing | write first-skill.md |
+# | T31 repo-local shared directory | missing | write guides/shared-skills.md |
+# | T32 from VS Code | missing | write vscode.md |
+#
+# Unmapped pages: none. introduction.md (landing, routes T01), artifacts.md
+# (reference for T25/T27), package-index.md (reference for T10/T06) and
+# stability.md (explanation for T08/T23) serve needs without being a row's
+# primary page.
+
+# Inventory — every published page. Prose words from checks/strip_prose.py.
+inventory:
+  - {path: docs/src/introduction.md,      prose_words: 296,   doc_type: landing,         type_source: content-read, doc_tier: first-steps, serves: [T01, T02], action: expand, note: "route the 'Where to next' list to the new nav groups"}
+  - {path: docs/src/installation.md,      prose_words: 468,   doc_type: how-to,          type_source: content-read, doc_tier: first-steps, serves: [T01], action: keep}
+  - {path: docs/src/quickstart.md,        prose_words: 511,   doc_type: how-to,          type_source: content-read, doc_tier: first-steps, serves: [T02], action: expand, note: "numbered single path with no second concept, so how-to not tutorial"}
+  - {path: docs/src/concepts.md,          prose_words: 1742,  doc_type: explanation,     type_source: content-read, doc_tier: none, serves: [T03, T18, T22], action: keep}
+  - {path: docs/src/clients.md,           prose_words: 2891,  doc_type: reference,       type_source: content-read, doc_tier: none, serves: [T04, T07, T25], action: keep}
+  - {path: docs/src/commands.md,          prose_words: 13111, doc_type: reference,       type_source: content-read, doc_tier: none, serves: [T05, T09, T13, T16, T17, T21], action: expand, note: "document the stale-lock refusal under install; one status vocabulary; fix the search source-column contradiction"}
+  - {path: docs/src/configuration.md,     prose_words: 6005,  doc_type: reference,       type_source: content-read, doc_tier: none, serves: [T06, T07], action: keep}
+  - {path: docs/src/authentication.md,    prose_words: 931,   doc_type: reference,       type_source: content-read, doc_tier: none, serves: [T11], action: keep}
+  - {path: docs/src/package-index.md,     prose_words: 2170,  doc_type: reference,       type_source: content-read, doc_tier: none, serves: [T10, T06], action: keep}
+  - {path: docs/src/hosting-an-index.md,  prose_words: 2232,  doc_type: how-to,          type_source: content-read, doc_tier: integration, serves: [T10], action: keep}
+  - {path: docs/src/ratings.md,           prose_words: 2914,  doc_type: explanation,     type_source: content-read, doc_tier: none, serves: [T15, T14], action: keep}
+  - {path: docs/src/publishing.md,        prose_words: 6241,  doc_type: how-to,          type_source: content-read, doc_tier: integration, serves: [T27], action: expand}
+  - {path: docs/src/ci.md,                prose_words: 1177,  doc_type: how-to,          type_source: content-read, doc_tier: integration, serves: [T12], action: keep}
+  - {path: docs/src/self-hosted-gitlab.md, prose_words: 1197, doc_type: runbook,         type_source: content-read, doc_tier: none, serves: [T20], action: keep}
+  - {path: docs/src/agents.md,            prose_words: 849,   doc_type: reference,       type_source: content-read, doc_tier: none, serves: [T26], action: keep}
+  - {path: docs/src/mcp-servers.md,       prose_words: 2227,  doc_type: reference,       type_source: content-read, doc_tier: none, serves: [T19], action: keep}
+  - {path: docs/src/artifacts.md,         prose_words: 1893,  doc_type: reference,       type_source: content-read, doc_tier: none, serves: [T25, T27], action: keep}
+  - {path: docs/src/vendor-metadata.md,   prose_words: 2964,  doc_type: reference,       type_source: content-read, doc_tier: none, serves: [T25, T08], action: keep}
+  - {path: docs/src/json-interface.md,    prose_words: 4233,  doc_type: reference,       type_source: content-read, doc_tier: none, serves: [T24, T07], action: keep}
+  - {path: docs/src/stability.md,         prose_words: 3527,  doc_type: explanation,     type_source: content-read, doc_tier: none, serves: [T08, T23], action: keep}
+  - {path: docs/src/upgrading.md,         prose_words: 2550,  doc_type: troubleshooting, type_source: content-read, doc_tier: none, serves: [T23], action: keep, note: "symptom-keyed 'what you will see / what to do' sections"}
+inventory_note: >-
+  The mdBook nav (docs/src/SUMMARY.md) is a flat list with no group labels, so
+  nav seeding proposed nothing (doc_declaration.py --seed printed no rows) and
+  every type comes from a content read. No page carries front matter.
+
+# Delete list — both signals must hold on the same page (DOC-DISC-09/10).
+deletes: []
+delete_note: >-
+  No page qualifies. Every page maps to at least one surviving need (signal 1
+  fails everywhere), and the smallest page (introduction.md, 296 prose words)
+  is above the 150-word stub cut (signal 2 fails everywhere). Nothing to
+  exempt under DOC-DISC-10.
+
+# Drift found by the personas (docs contradict the binary or each other).
+drift:
+  - page: docs/src/commands.md
+    where: "grim search"
+    what: "one paragraph says the plain table names the serving registry in a source column, a later paragraph says source is JSON-only and the table keeps five columns; the binary prints no such column"
+    log: T06
+  - page: docs/src/quickstart.md
+    where: "step 2 / step 3"
+    what: "promises materialisation 'into the clients it detects'; in a fresh project with no client marker the artifact lands in the agents pool, which Claude Code does not read, with no warning printed"
+    log: [T02, T03, T08]
+  - page: docs/src/commands.md
+    where: "grim install"
+    what: "the stale-lock refusal (exit 65, declaration_hash mismatch) is not documented under the command that raises it"
+    log: T09
+  - page: docs/src/json-interface.md
+    where: "status report"
+    what: "state value 'stale' is listed and defined nowhere; the outputs array drops a dropped client's still-on-disk output silently"
+    log: [T08, T07]
+  - page: docs/src/configuration.md
+    where: "Qualified references"
+    what: "alias/repo syntax is shown only for oci-type aliases; against an index-type alias it fails with a parse error and the page does not say whether that is intended"
+    log: T06
+
+# Product observations that are not documentation gaps. For the owner to triage.
+product_observations:
+  - "A fresh project with no client marker silently falls back to the agents client; three personas expected the skill in the Claude Code directory. The quick start's own command reproduces it. Candidate for a printed hint or a quick-start-time prompt (issue-worthy)."
+  - "grim install prints one result row when it writes two outputs (native dir plus shared pool); grim status shows one undifferentiated row (T04, T07)."
+  - "grim status --check always exits 0, so it cannot serve as a CI gate; the gate is grim install's stale-lock refusal (T09)."
+
+# IA plan — nav lives in docs/src/SUMMARY.md (mdBook part titles give the
+# top-level groups; nav_depth.py accepts them). First-steps and everyday are
+# different top-level groups (the nav break). On a Starlight move the same
+# groups become sidebar groups in astro.config.*.
+ia_plan:
+  groups:
+    - label: "Getting started"
+      tier: first-steps
+      pages:
+        - {path: docs/src/introduction.md,  doc_type: landing, doc_tier: first-steps, action: expand, serves: [T01, T02], note: "prefix chapter above the first part title"}
+        - {path: docs/src/installation.md,  doc_type: how-to,  doc_tier: first-steps, action: keep,   serves: [T01]}
+        - {path: docs/src/quickstart.md,    doc_type: how-to,  doc_tier: first-steps, action: expand, serves: [T02]}
+        - {path: docs/src/browse.md,        doc_type: how-to,  doc_tier: first-steps, action: write,  serves: [T05, T32, T06], note: "entry path two: browse the index on the website, in the TUI, and from the VS Code extension; install one artifact from each surface; key map and badges in one table lifted from commands.md; ends with 'narrow what you see' (browse filters) pointing at guides/registries.md"}
+        - {path: docs/src/first-skill.md,   doc_type: how-to,  doc_tier: first-steps, action: write,  serves: [T30], note: "author entry path; one SKILL.md, installed from its path, seen by the agent"}
+        - {path: docs/src/concepts.md,      doc_type: explanation, doc_tier: none,    action: keep,   serves: [T03, T18, T22], note: "moved into Getting started for orientation; explanation, so no tier"}
+    - label: "Guides"
+      tier: everyday
+      pages:
+        - {path: docs/src/guides/scopes-and-clients.md,   doc_type: how-to,      doc_tier: everyday, action: write, serves: [T03, T07], note: "one page: where config lands is decided by scope and client together; includes the detection rule, the move procedure, add/drop a client"}
+        - {path: docs/src/guides/shared-skills.md,        doc_type: how-to,      doc_tier: everyday, action: write, serves: [T31, T04], note: "two halves: the repository's own directory read by every harness (local path sources), then the machine-wide set from a registry; adversarial review as the worked scenario"}
+        - {path: docs/src/guides/lifecycle.md,            doc_type: how-to,      doc_tier: everyday, action: write, serves: [T08, T13, T17], note: "install, update, status, uninstall; hand edits; one state vocabulary; what re-materialise means"}
+        - {path: docs/src/guides/inspect.md,              doc_type: how-to,      doc_tier: everyday, action: write, serves: [T14, T15], note: "read, provenance, rating, deprecation, pin by digest before an artifact lands; what grim checks and what it cannot"}
+        - {path: docs/src/guides/versioning.md,           doc_type: how-to,      doc_tier: everyday, action: write, serves: [T28], note: "tags, cascades, digest pinning, what update moves; shape modelled on ocx.sh/docs/in-depth/versioning"}
+        - {path: docs/src/guides/mcp-everywhere.md,       doc_type: how-to,      doc_tier: everyday, action: write, serves: [T19], note: "one descriptor, every client's config; what each client's entry looks like; hand-edit detection"}
+        - {path: docs/src/clients.md,                     doc_type: reference,   doc_tier: none,     action: keep,  serves: [T04, T07, T25]}
+    - label: "Teams and automation"
+      tier: integration
+      pages:
+        - {path: docs/src/tutorials/own-index.md,   doc_type: tutorial, doc_tier: integration, action: write,  serves: [T10, T21, T27], note: "golden path: skill on disk -> local dev-install -> publish -> announce to own index -> colleague installs; one non-branching path, every step shows a result"}
+        - {path: docs/src/guides/team-ci.md,        doc_type: how-to,   doc_tier: integration, action: write,  serves: [T09], note: "what to commit, the frozen install, the stale-lock gate, exit codes"}
+        - {path: docs/src/guides/registries.md,     doc_type: how-to,   doc_tier: integration, action: write,  serves: [T06, T11], note: "company index beside the public one; filters as a use case; short-id expansion; login pointer"}
+        - {path: docs/src/guides/catalog-best-practices.md, doc_type: how-to, doc_tier: integration, action: write, serves: [T29], note: "flat layout, one manifest, naming, what the index is; reconcile with the first-party skills/ prefix"}
+        - {path: docs/src/publishing.md,            doc_type: how-to,   doc_tier: integration, action: expand, serves: [T27]}
+        - {path: docs/src/ci.md,                    doc_type: how-to,   doc_tier: integration, action: keep,   serves: [T12]}
+        - {path: docs/src/hosting-an-index.md,      doc_type: how-to,   doc_tier: integration, action: keep,   serves: [T10]}
+        - {path: docs/src/self-hosted-gitlab.md,    doc_type: runbook,  doc_tier: none,        action: keep,   serves: [T20]}
+        - {path: docs/src/authentication.md,        doc_type: reference, doc_tier: none,       action: keep,   serves: [T11]}
+        - {path: docs/src/ratings.md,               doc_type: explanation, doc_tier: none,     action: keep,   serves: [T15]}
+    - label: "Reference"
+      tier: none
+      pages:
+        - {path: docs/src/commands.md,        doc_type: reference,       doc_tier: none, action: expand, serves: [T05, T09, T13, T16, T17, T21]}
+        - {path: docs/src/configuration.md,   doc_type: reference,       doc_tier: none, action: keep,   serves: [T06, T07]}
+        - {path: docs/src/artifacts.md,       doc_type: reference,       doc_tier: none, action: keep,   serves: [T25, T27]}
+        - {path: docs/src/agents.md,          doc_type: reference,       doc_tier: none, action: keep,   serves: [T26]}
+        - {path: docs/src/mcp-servers.md,     doc_type: reference,       doc_tier: none, action: keep,   serves: [T19]}
+        - {path: docs/src/vendor-metadata.md, doc_type: reference,       doc_tier: none, action: keep,   serves: [T25]}
+        - {path: docs/src/package-index.md,   doc_type: reference,       doc_tier: none, action: keep,   serves: [T10]}
+        - {path: docs/src/json-interface.md,  doc_type: reference,       doc_tier: none, action: keep,   serves: [T24]}
+        - {path: docs/src/stability.md,       doc_type: explanation,     doc_tier: none, action: keep,   serves: [T08, T23]}
+        - {path: docs/src/upgrading.md,       doc_type: troubleshooting, doc_tier: none, action: keep,   serves: [T23]}
+  deletes: []
+  # Landing router — nine cards, weighted by three sources: the owner's list
+  # (what colleagues said they do not understand), the friction logs, and the
+  # web evidence in research_docs_pain_points.md section C. Everything else
+  # stays sidebar-only. Each card names the pain, not the feature.
+  # Entry paths — a strip above the router; each ends on a first result.
+  entry_paths:
+    - {serves: [T02], page: docs/src/quickstart.md, label: "Quick start (CLI)"}
+    - {serves: [T05, T32], page: docs/src/browse.md, label: "Browse the index"}
+    - {serves: [T30], page: docs/src/first-skill.md, label: "Your first skill"}
+  router:
+    - {serves: [T31, T04, T19], page: docs/src/guides/shared-skills.md, pain: "the same skill, rule or MCP server has to live in .claude, .cursor and .agents and drifts"}
+    - {serves: [T03, T07], page: docs/src/guides/scopes-and-clients.md, pain: "project or global, which agents, and a repo skill leaking everywhere"}
+    - {serves: [T14, T15], page: docs/src/guides/inspect.md, pain: "installing a stranger's skill without knowing what it does"}
+    - {serves: [T06], page: docs/src/guides/registries.md, pain: "the catalog shows everything from every registry; my team should see only ours"}
+    - {serves: [T08, T13, T17], page: docs/src/guides/lifecycle.md, pain: "a sync tool rewrote the file I edited"}
+    - {serves: [T28], page: docs/src/guides/versioning.md, pain: "which reference moves on update and which never does"}
+    - {serves: [T09], page: docs/src/guides/team-ci.md, pain: "CI cannot prove the reviewed skills are the ones that shipped"}
+    - {serves: [T10, T21, T27, T29], page: docs/src/tutorials/own-index.md, pain: "private skills have nowhere to live but per-repo copies"}
+  design_draft: https://claude.ai/code/artifact/4c5ba779-da78-444b-b258-450926724743
+  # Screencasts (owner, 2026-09-06: use more asciinema). One recorded cast per
+  # entry path and per router guide, recorded the way docs/src/demo.cast is
+  # (real grim, real registry, via the test recording harness), embedded in the
+  # page's "see it run" slot; the landing keeps the hero demo. A cast is
+  # re-recorded when the commands on its page change, never hand-edited.
+  screencasts:
+    - {page: docs/src/quickstart.md, cast: quickstart.cast}
+    - {page: docs/src/browse.md, cast: browse-tui.cast, note: "the TUI surface; the VS Code surface gets a short screen recording, not a cast"}
+    - {page: docs/src/first-skill.md, cast: first-skill.cast}
+    - {page: docs/src/guides/shared-skills.md, cast: shared-skills.cast}
+    - {page: docs/src/guides/scopes-and-clients.md, cast: scopes.cast}
+    - {page: docs/src/guides/inspect.md, cast: inspect.cast}
+    - {page: docs/src/guides/registries.md, cast: registries.cast}
+    - {page: docs/src/guides/lifecycle.md, cast: lifecycle.cast}
+    - {page: docs/src/guides/versioning.md, cast: versioning.cast}
+    - {page: docs/src/guides/team-ci.md, cast: team-ci.cast}
+    - {page: docs/src/tutorials/own-index.md, cast: own-index.cast, note: "local half only; the push and Pages deploy are shown as output, not recorded live"}
+  # Sidebar labels settled on the design draft (2026-09-06): short, one line at
+  # 250px; page titles keep the long form. Any label not listed keeps its title.
+  nav_labels:
+    docs/src/concepts.md: "Concepts"
+    docs/src/first-skill.md: "Your first skill"
+    docs/src/guides/shared-skills.md: "Shared skills"
+    docs/src/browse.md: "Browse the index"
+    docs/src/guides/inspect.md: "Inspect before you install"
+    docs/src/guides/versioning.md: "Versioning"
+    docs/src/guides/mcp-everywhere.md: "MCP servers everywhere"
+    docs/src/guides/lifecycle.md: "Install, update, status"
+    docs/src/guides/team-ci.md: "Team and CI"
+    docs/src/guides/registries.md: "Company registries"
+    docs/src/ci.md: "Release automation"
+    docs/src/artifacts.md: "Artifact formats"
+  order_of_work:
+    - "quickstart.md expand (T02, rank 1) — the entry path silently misplaces the first install"
+    - "tutorials/own-index.md write (T10, rank 2)"
+    - "guides/team-ci.md write + commands.md install expand (T09, rank 3)"
+    - "guides/registries.md write + commands.md search drift fix (T06, rank 4)"
+    - "guides/scopes-and-clients.md write (T07 rank 5, T03 rank 9)"
+    - "first-skill.md write (T30, owner: author entry path)"
+    - "guides/shared-skills.md write (T31 repo-local directory + T04 machine-wide, rank 6)"
+    - "guides/lifecycle.md write + status vocabulary unification (T08, rank 7)"
+    - "browse.md write (T05 rank 8, T32, entry path; filters section) and guides/inspect.md write (T14, T15)"
+    - "guides/versioning.md write (T28, owner pick)"
+    - "guides/mcp-everywhere.md write (T19, web evidence A3)"
+    - "guides/catalog-best-practices.md write (T29, owner pick; also a tutorial step)"
+    - "nav regroup into the four groups above (Starlight sidebar after the migration, adr_docs_site_starlight.md); landing router per `router`"
+    - "publishing.md expand (T27)"

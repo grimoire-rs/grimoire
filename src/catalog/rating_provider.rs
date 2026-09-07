@@ -61,7 +61,7 @@ impl VoteAction {
 ///
 /// Every variant maps to exactly one exit code in
 /// [`crate::error::classify`]; the mapping is the contract
-/// (`docs/src/commands.md`), so a new variant must choose one there before
+/// (`docs/src/content/docs/commands.md`), so a new variant must choose one there before
 /// it compiles. No variant ever carries a credential — the token is a
 /// [`SecretString`] that is exposed once, at the `Authorization` header,
 /// and never enters an error, a report, or a panic message.

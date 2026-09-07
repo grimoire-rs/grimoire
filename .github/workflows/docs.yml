@@ -1,6 +1,6 @@
 name: Docs
 
-# Build the mdBook documentation site and publish it to GitHub Pages.
+# Build the Starlight (Astro) documentation site and publish it to GitHub Pages.
 #
 # The JSON Schemas served at /schemas/ are generated from grim's parse
 # structs at build time (never committed), so this workflow must rebuild
@@ -11,6 +11,11 @@ on:
     branches: [main]
     paths:
       - 'docs/**'
+      # C-010's catalog link lint needs a trigger — twenty catalog/** files
+      # plus README.md carry https://grimoire.rs/*.html links that the URL
+      # check validates.
+      - 'catalog/**'
+      - 'README.md'
       - 'src/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -36,6 +41,16 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Narrower than the workflow-level set on purpose. This job runs `npm ci`
+    # and `astro build` over ~485 third-party packages plus esbuild's
+    # postinstall, and nothing in it consumes an OIDC token — `deploy` does.
+    # Without this block a compromised transitive dependency could mint an
+    # OIDC token for this repository against any cloud trust policy the org
+    # has. `deploy` declares no permissions of its own, so it still inherits
+    # the full workflow-level set and the deploy path is unchanged.
+    permissions:
+      contents: read
+      pages: write
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -43,10 +58,11 @@ jobs:
           # `external/docker_credential` is the [patch.crates-io] source; the
           # grim build (needed to generate the schemas) fails without it.
           submodules: recursive
-          # `.gitattributes` tracks `*.png` in LFS, and `docs/src/og-card.png`
+          # `.gitattributes` tracks `*.png` in LFS, and `docs/public/og-card.png`
           # is the social preview every share link renders. Without this the
-          # checkout leaves a pointer file, mdBook copies the pointer text
-          # through, and the card 404s as an image everywhere it is unfurled.
+          # checkout leaves a pointer file, Astro copies `docs/public/` into
+          # `docs/dist/` verbatim — pointer text and all — and the card 404s as
+          # an image everywhere it is unfurled.
           lfs: true
       - name: Configure Pages
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
@@ -60,21 +76,24 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Setup Task
         uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
-      # Pinned to 0.5.3: docs/theme/index.hbs vendors that release's stock
-      # index.hbs byte for byte. Bumping the pin needs a re-copy via
-      # `mdbook init --theme` and a re-diff, or it silently drifts from upstream.
-      - name: Install mdBook
-        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          tool: mdbook@0.5.3
-      # Builds grim, regenerates docs/src/schemas/*.json from the parser,
-      # then builds the book — so the published schemas always match grim.
-      - name: Build the book
+          node-version: 24
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
+      # Builds grim, regenerates docs/public/schemas/*.json from the parser,
+      # then builds the site — so the published schemas always match grim.
+      - name: Build the site
         run: task docs:build
+      # Link, URL, declaration and npm audit checks run here so a failure
+      # fails the build job and the deploy job never runs.
+      - name: Check the docs
+        run: task docs:check
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
-          path: docs/book
+          path: docs/dist
 
   deploy:
     needs: build

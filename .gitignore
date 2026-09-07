@@ -96,16 +96,19 @@ venv/
 .serena/
 
 # =============================================================================
-# mdBook build output (docs site is built in CI and deployed to Pages)
+# Astro Starlight build output (docs site is built in CI and deployed to
+# Pages) and its local dev artifacts.
 # =============================================================================
-docs/book/
+docs/dist/
+docs/node_modules/
+docs/.astro/
 
 # =============================================================================
 # Generated JSON Schemas — produced from grim's parse structs by
 # `task schema:generate` and rebuilt on every `task docs:build`. Deliberately
 # not committed so the published site can never drift from the parser.
 # =============================================================================
-docs/src/schemas/
+docs/public/schemas/
 
 # =============================================================================
 # Agent Worktrees — ephemeral per-issue working copies, and agent scratch.

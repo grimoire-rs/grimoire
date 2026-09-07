@@ -25,7 +25,7 @@
 //! (`status.rs`) and for `update`'s dropped-client reaper (`update.rs`),
 //! both of which stay off under autodetect. A config written by `init`
 //! therefore has both active from the first run — documented under
-//! `grim init` in `docs/src/commands.md`.
+//! `grim init` in `docs/src/content/docs/commands.md`.
 
 use anyhow::Context as _;
 use clap::Args;

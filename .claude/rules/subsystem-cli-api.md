@@ -91,7 +91,7 @@ pub enum RemovedStatus {
   `init_report.rs`, `release_report.rs`).
 - Polymorphic types use `#[serde(untagged)]` to produce different JSON shapes per variant.
 - Consumer contract, error document, and per-command shapes:
-  `docs/src/json-interface.md`.
+  `docs/src/content/docs/json-interface.md`.
 
 ## Adding a New Report Type
 

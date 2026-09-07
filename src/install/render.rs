@@ -58,7 +58,7 @@ use super::vendor::{FieldType, KnownField, Vendor};
 /// Reservation itself is **additive, not a break**: it is the shipped
 /// behaviour every client already follows (`codex` and `antigravity` are the
 /// released precedent), it is documented as policy in
-/// `docs/src/vendor-metadata.md`, and the newly-reserved key is dropped with a
+/// `docs/src/content/docs/vendor-metadata.md`, and the newly-reserved key is dropped with a
 /// **warning that names it**, never silently. Drift is measured by hashing the
 /// installed file against its recorded `content_hash`, never by re-rendering,
 /// and grim only re-renders on force, a pin change, or a newly added client —

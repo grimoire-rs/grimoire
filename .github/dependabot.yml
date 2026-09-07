@@ -24,3 +24,15 @@ updates:
           - "*"
     commit-message:
       prefix: "chore(deps)"
+  # The docs site's Node tree — without this entry, the repo's first npm
+  # lockfile goes unpatched.
+  - package-ecosystem: npm
+    directory: /docs
+    schedule:
+      interval: weekly
+    groups:
+      docs-deps:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "chore(deps)"

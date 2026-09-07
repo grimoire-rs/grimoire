@@ -1,0 +1,34 @@
+---
+// Restores the five site links `docs/seo.py` injected into every chapter page
+// before it was deleted (C-018). They are a Principle 9 surface (C-020), and
+// PR 1 ships on its own — without this override the privacy policy and the
+// licence are unreachable from all 21 chapters until WP-R lands in PR 3.
+//
+// Composed, not replacing: Starlight's own footer carries the Edit-page link
+// and prev/next, which are shipped navigation too.
+//
+// Verbatim from `seo.py`'s FOOTER_LINKS / FOOTER_STYLE apart from two forced
+// substitutions: `{root}X` -> `/X` (the site is flat and C-002 ships
+// root-absolute `.html` URLs), and mdBook's `--table-border-color` -> the
+// Starlight hairline, because the mdBook variable no longer resolves and an
+// unresolvable var kills the whole `border-top` declaration.
+//
+// The four-group nav is C-023 and WP-R's; this is only the surface seo.py had.
+import Default from '@astrojs/starlight/components/Footer.astro';
+
+const links = [
+  ['/index.html', 'home'],
+  ['/introduction.html', 'documentation'],
+  ['/stability.html', 'stability'],
+  ['/privacy.html', 'privacy'],
+  ['https://github.com/grimoire-rs/grimoire/blob/main/LICENSE', 'Apache-2.0'],
+];
+---
+
+<Default />
+<footer
+  style="margin:3rem 0 1rem; padding-top:1.2rem; border-top:1px solid var(--sl-color-hairline); display:flex; flex-wrap:wrap; gap:0.6rem 2rem; align-items:baseline; font-size:0.85em; opacity:0.75"
+>
+  {links.map(([href, label]) => <a href={href}>{label}</a>)}
+  <span>artifacts live in your registry, not ours</span>
+</footer>
