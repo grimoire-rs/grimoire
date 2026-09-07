@@ -1,0 +1,196 @@
+---
+// C-020 header — brand left, search centred, nav right, matching the bar on
+// the landing page and on `Guide.dc.html`.
+//
+// Starlight's own header is title / search / right-group, in that DOM order,
+// with the right group holding social icons, the theme picker and the language
+// picker. None of those three exist here (no `social` config, dark-only, one
+// language), so the right slot carries the four site links instead. The order
+// is unchanged, which is what keeps the tab order sane: brand, search, links.
+import Search from 'virtual:starlight/components/Search';
+
+const { siteTitleHref, hasSidebar } = Astro.locals.starlightRoute;
+
+// Same source as the landing's version span: `taskfiles/docs.taskfile.yml`
+// exports GRIM_VERSION from Cargo.toml for docs:build and docs:serve alike.
+// The fallback keeps a bare `astro dev` from rendering `undefined`.
+const version = import.meta.env.GRIM_VERSION ?? 'dev';
+
+// ponytail: the four links and the mark are duplicated from
+// `src/pages/index.astro`'s header rather than extracted into a shared
+// component. Two call sites, one of which is a `splash` page that styles its
+// own bar — a shared `Brand.astro` would need to be parameterised on almost
+// everything it renders. Extract if a third bar appears.
+const links = [
+  { href: 'https://index.grimoire.rs', label: 'index' },
+  // `hasSidebar` is false on exactly one route, the splash landing, so this
+  // marks the docs section current on the 34 pages that are in it and not on
+  // the one that is not. It was a hardcoded `true`, which told a screen
+  // reader the landing was the docs page.
+  { href: '/introduction.html', label: 'docs', current: hasSidebar },
+  {
+    href: 'https://marketplace.visualstudio.com/items?itemName=grimoire-rs.grimoire-vscode',
+    label: 'vscode',
+  },
+  { href: 'https://github.com/grimoire-rs/grimoire', label: 'source' },
+];
+---
+
+<div class="header">
+  <a href={siteTitleHref} class="site-title" translate="no">
+    <svg viewBox="0 0 128 128" width="24" height="24" aria-hidden="true">
+      <g transform="matrix(1.0668848,0,0,1.0668848,-4.2806272,4.7878936)">
+        <path
+          fill="#ffb02e"
+          d="M 64,5 Q 68.5,25.5 90,30 68.5,34.5 64,55 59.5,34.5 38,30 59.5,25.5 64,5 Z"></path>
+        <path
+          fill="#ffb02e"
+          d="m 99,8 q 1.8,7.2 9,9 -7.2,1.8 -9,9 -1.8,-7.2 -9,-9 7.2,-1.8 9,-9 z"></path>
+        <path
+          fill="#ffb02e"
+          d="m 29,16 q 1.2,4.8 6,6 -4.8,1.2 -6,6 -1.2,-4.8 -6,-6 4.8,-1.2 6,-6 z"></path>
+        <path
+          fill="#6d52f4"
+          d="M 16,60 C 32,54 50,58 64,68 78,58 96,54 112,60 V 98 C 96,92 78,96 64,106 50,96 32,92 16,98 Z"
+        ></path>
+        <path
+          fill="#dcd2fc"
+          d="m 24,66 c 12,-4 26,-1 40,8 14,-9 28,-12 40,-8 V 92 C 92,88 78,90 64,98 50,90 36,88 24,92 Z"
+        ></path>
+        <path
+          d="M 64,78 V 94"
+          stroke="#6d52f4"
+          stroke-width="3.5"
+          stroke-linecap="round"
+          fill="none"></path>
+      </g>
+    </svg>
+    <span class="wordmark">grimoire<span class="tld">.rs</span></span>
+    <span class="version">{version}</span>
+  </a>
+
+  <div class="search-slot print:hidden">
+    <Search />
+  </div>
+
+  <ul class="grim-nav sl-hidden md:sl-flex print:hidden">
+    {
+      links.map((link) => (
+        <li>
+          <a href={link.href} aria-current={link.current ? 'true' : undefined}>
+            {link.label}
+          </a>
+        </li>
+      ))
+    }
+  </ul>
+</div>
+
+<style>
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sl-nav-gap);
+    height: 100%;
+  }
+
+  .site-title {
+    display: flex;
+    align-items: center;
+    gap: 8.4px;
+    min-width: 0;
+    /* Starlight's own title is accent-coloured and 600; the brand reads as
+       ink, with only the TLD in accent. */
+    color: var(--sl-color-white);
+    font-size: 15px;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    text-decoration: none;
+    white-space: nowrap;
+    /* Keeps the focus ring off the clipped edge of the wordmark. */
+    padding: 0.25rem;
+    margin: -0.25rem;
+  }
+
+  .site-title svg {
+    display: block;
+    flex: none;
+  }
+
+  .wordmark {
+    overflow: hidden;
+  }
+
+  .tld {
+    color: var(--sl-color-accent);
+  }
+
+  .version {
+    font-family: var(--sl-font-mono);
+    font-size: 12px;
+    color: var(--sl-color-gray-3);
+  }
+
+  .grim-nav {
+    /* `sl-hidden md:sl-flex` supplies the display; this is everything else. */
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    align-items: center;
+    gap: clamp(14px, 2.2vw, 26px);
+    font-family: var(--sl-font-mono);
+    font-size: 13px;
+  }
+
+  .grim-nav a {
+    color: var(--sl-color-accent-high);
+    text-decoration: none;
+  }
+
+  .grim-nav a:hover {
+    color: var(--sl-color-accent);
+  }
+
+  /* Above the breakpoint Starlight's grid indents the header to line the title
+     up with the sidebar and the search with the content column. The canvas
+     centres the search in the bar instead, so the three slots become
+     brand / search / links with the search column carrying the width.
+
+     THE WIDTH LIVES ON THE TRACK, not on the slot. A middle track of `auto`
+     is content-sized, and a percentage inside the slot's own `width` behaves
+     as `auto` while that track is being sized — so `min(<length>, 100%)` on
+     the slot resolved against the button's own text and the field came out at
+     its content width whatever length was written there. A definite track is
+     what the slot and the button can then both fill.
+
+     The canvas draws a flat 320px, which leaves a short field stranded in a
+     long bar on a wide monitor, so it tracks the viewport up to 480px. The
+     floor is below the canvas's number on purpose: the outer tracks floor at
+     0, so at the 800px where this grid starts the search would otherwise
+     squeeze the brand and the links rather than let them wrap. */
+  @media (min-width: 50rem) {
+    .header {
+      display: grid;
+      grid-template-columns:
+        minmax(0, 1fr)
+        clamp(280px, 26vw, 480px)
+        minmax(0, 1fr);
+      align-content: center;
+    }
+
+    /* Starlight caps its search button at `max-width: 22rem`, which would
+       hold it at 352px inside a wider track. */
+    .search-slot {
+      width: 100%;
+    }
+
+    .search-slot :global(button[data-open-modal]) {
+      max-width: none;
+    }
+
+    .grim-nav {
+      justify-self: end;
+    }
+  }
+</style>

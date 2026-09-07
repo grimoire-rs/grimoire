@@ -93,9 +93,21 @@ export default defineConfig({
       editLink: {
         baseUrl: 'https://github.com/grimoire-rs/grimoire/edit/main/docs/',
       },
-      // C-020: restores the five site links seo.py injected into every chapter
-      // page. Composes with Starlight's own footer rather than replacing it.
-      components: { Footer: './src/components/Footer.astro' },
+      // C-020: `TwoColumnContent` appends `SiteFooter.astro` — the five site
+      // links seo.py injected into every chapter page — as a sibling of
+      // `<main>`, which is the only override slot outside it and therefore the
+      // only place a `contentinfo` landmark can go. That component's own
+      // comment carries the reasoning. The other three make the site dark-only
+      // and rebuild the nav bar: overriding `ThemeProvider` and `ThemeSelect`
+      // is the only supported way to drop the theme picker — Starlight has no
+      // dark-only config flag — and `Header` re-lays the bar as brand / search
+      // / nav.
+      components: {
+        TwoColumnContent: './src/components/TwoColumnContent.astro',
+        Header: './src/components/Header.astro',
+        ThemeProvider: './src/components/ThemeProvider.astro',
+        ThemeSelect: './src/components/ThemeSelect.astro',
+      },
       // C-011
       plugins: [starlightLinksValidator()],
       head: [

@@ -3,15 +3,15 @@
 ## Status
 
 - **Plan:** plan_docs_site_redesign
-- **Active phase:** 2 — Pages and casts (PR 2, waves 4–6)
-- **Step:** /hex-execute → executing
-- **Last update:** 2026-09-07 (PR 1 complete, wave 5 in flight)
-- State:   executing
+- **Active phase:** 3 — Landing and theme (PR 3, wave 7) — complete
+- **Step:** awaiting /finalize
+- **Last update:** 2026-09-07 (review round 1 applied across 6 perspectives and 5 unplanned fix packages; PR 1, PR 2 and PR 3 each green on task --force verify and task docs:check)
+- State:   review
 - Tier:    xhigh
 - Tier-grammar: 5
 - Effective-tier: derived
 - Updated: 2026-09-07
-- Next:    /hex-execute .agents/plans/plan_docs_site_redesign.md
+- Next:    /hex-finalize
 - Branch:  `docs/use-case-discovery` (worktree `.agents/worktrees/docs-plan`);
   WPs land on three stacked PR branches cut from it — see § Branch model.
 
@@ -177,10 +177,10 @@ the documented verification (D-5).
 | WP-M | C-024 (embeds), C-025 (own-index, catalog-best-practices), C-026 (publishing); S-011 | `content/tutorials/own-index.md`, `content/guides/catalog-best-practices.md`, `content/publishing.md`, `test/recordings/casts/own-index.yaml`, `docs/public/casts/own-index.cast` | L | 5 | H | | scoped | merged |
 | WP-N | C-024 (embeds), C-025 (team-ci, registries); S-007, S-010 | `content/guides/{team-ci,registries}.md`, `test/recordings/casts/{team-ci,registries}.yaml`, `docs/public/casts/{team-ci,registries}.cast` | L | 5 | H | | scoped | merged |
 | WP-O | C-003 (12 new entries), C-024 (script, head), C-025 (gate), catalog drift | `docs/astro.config.mjs`, `docs/public/casts.js`, `catalog/**` (drift edits, if any) | M | 6 | I, J, K, L, M, N | | full | merged |
-| WP-P | C-022 | `docs/src/data/landing.ts`, `docs/src/data/landing.test.ts`, `docs/package.json` (`test` script) | M | 7 | — | | scoped | pending |
-| WP-Q | C-019, C-020 (theme, header), C-021 (fold) | `docs/src/styles/theme.css`, `docs/src/components/{ThemeProvider,ThemeSelect,Header}.astro`, `docs/astro.config.mjs`, `docs/public/privacy.html` | M | 7 | — | | scoped | pending |
-| WP-S | C-017 (W2) | `content/introduction.md` | S | 7 | — | | scoped | pending |
-| WP-R | C-020 (footer), C-023, D-4 | `docs/src/pages/index.astro`, `docs/src/components/{WaysIn,PainRouter,FooterNav,Footer}.astro` | L | 8 | P, Q | | full | pending |
+| WP-P | C-022 | `docs/src/data/landing.ts`, `docs/src/data/landing.test.ts`, `docs/package.json` (`test` script) | M | 7 | — | | scoped | merged |
+| WP-Q | C-019, C-020 (theme, header), C-021 (fold) | `docs/src/styles/theme.css`, `docs/src/components/{ThemeProvider,ThemeSelect,Header}.astro`, `docs/astro.config.mjs`, `docs/public/privacy.html` | M | 7 | — | | scoped | merged |
+| WP-S | C-017 (W2) | `content/introduction.md` | S | 7 | — | | scoped | merged |
+| WP-R | C-020 (footer), C-023, D-4 | `docs/src/pages/index.astro`, `docs/src/components/{WaysIn,PainRouter,FooterNav,Footer}.astro` | L | 8 | P, Q | | full | merged |
 
 **WP-T is unplanned.** `page_type.py --root docs/src/content/docs` exited 1
 at the wave-5 base with seven findings, all predating this plan and none on a page
@@ -877,6 +877,10 @@ spec § 4: a dead shipped URL is a Principle 9 breach, not a lint finding.
 
 <!-- /hex-execute appends one line per wave gate: date, wave, WPs merged, verify result. WP-I appends "Catalog drift (WP-I)": the catalog files that restate the changed claims. -->
 
+- 2026-09-07T02:20Z · merged WP-R @ a4556a6 · verify full(PR 3 gate) · ready: — · blocked: —
+
+- 2026-09-07T01:58Z · merged WP-Q @ 067c73f · verify scoped · ready: WP-R · blocked: —
+
 - 2026-09-07T01:38Z · merged WP-O @ 83f12a1 · verify full(PR 2 gate) · ready: WP-Q · blocked: WP-R(WP-Q)
 
 - 2026-09-07T01:33Z · merged WP-J @ dc9052a · verify scoped · ready: WP-O · blocked: —
@@ -890,6 +894,10 @@ spec § 4: a dead shipped URL is a Principle 9 breach, not a lint finding.
 - 2026-09-07T01:14Z · merged WP-L @ 2479c71 · verify scoped · ready: — · blocked: WP-O(J,K,M,N)
 
 - 2026-09-07T01:08Z · merged WP-T @ 1561482 · verify scoped · ready: — · blocked: WP-O(J,K,L,M,N)
+
+- 2026-09-07T00:58Z · merged WP-P @ 6848a59 · verify scoped · ready: — · blocked: WP-Q(WP-O), WP-R(WP-Q)
+
+- 2026-09-07T00:52Z · merged WP-S @ 22862d1 · verify scoped · ready: WP-P · blocked: WP-Q(WP-O), WP-R(WP-P,WP-Q,WP-S)
 
 - 2026-09-07T00:44:13Z · merged WP-I @ 3478e5e · verify scoped · ready: J, K, L, M, N · blocked: O
 

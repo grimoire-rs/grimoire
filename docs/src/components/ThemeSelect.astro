@@ -1,0 +1,13 @@
+---
+// C-020 — no theme picker, because there is no second theme to pick.
+//
+// This override exists to REMOVE Starlight's control, never to reimplement it.
+// Its stock version renders a `<starlight-theme-select>` custom element with a
+// dark/light/auto `<select>`, plus a second inline script that writes
+// `localStorage.setItem('starlight-theme', …)`. Rendering nothing takes out
+// both the control and that write.
+//
+// Starlight mounts this component in two places — the header's right group and
+// the mobile menu footer — so one override empties both. Removing it from the
+// header alone would leave the picker alive on narrow viewports.
+---

@@ -1,0 +1,134 @@
+---
+// C-023 — the eight router cards, four per row. `Main.dc.html`'s
+// "start from what you want to do" band.
+//
+// Each card renders one `routerCards` entry's `pain` string and nothing else.
+// That is the contract, not a shortcut: C-023 says the card wording names the
+// pain rather than the feature, and C-022 says the wording lives in one
+// module. A title, a kicker and a blurb per card would be three more strings
+// no module carries, authored here, free to drift from the page each card
+// points at. `landing_check.py` greps this file for every pain string and
+// requires zero hits — the copy arrives at build time or not at all.
+//
+// The cards are links, not a numbered list: the eight guides have no fixed
+// order, which is GOV.UK's own stated criterion for links over a task list.
+import { routerCards } from '../data/landing.ts';
+---
+
+<section class="pain-router" aria-labelledby="pain-router-title">
+  <div class="band">
+    <h2 class="kicker" id="pain-router-title">start from what you want to do</h2>
+    <span class="note">each card names a real complaint</span>
+  </div>
+  <div class="cards">
+    {
+      routerCards.map((card) => (
+        <a class="router-card" href={card.href}>
+          <span class="pain">{card.pain}</span>
+          <span class="arrow" aria-hidden="true">
+            →
+          </span>
+        </a>
+      ))
+    }
+  </div>
+</section>
+
+<style>
+  .pain-router {
+    padding-bottom: clamp(36px, 4vw, 52px);
+  }
+
+  .band {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    border-bottom: 1px solid var(--sl-color-gray-4);
+    padding-bottom: 11.2px;
+  }
+
+  /* A real `h2`, not the span the canvas draws: the band is a landmark region
+     named by it, and without a heading here the landing exposes nothing
+     between its `h1` and the bottom of the page. Two properties are what the
+     element change costs — Starlight's reset touches neither the weight nor
+     the margin of a heading, so an `h2` would arrive bold and spaced. Every
+     other property was already stated, so the band looks the same. */
+  .kicker {
+    margin: 0;
+    font-weight: 400;
+    font-family: var(--sl-font-mono);
+    font-size: 11.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--sl-color-accent);
+  }
+
+  .note {
+    font-family: var(--sl-font-mono);
+    font-size: 12px;
+    margin-inline-start: auto;
+    text-align: end;
+    color: var(--sl-color-gray-3);
+  }
+
+  /* Equal height across the row: the pain strings differ by a factor of three
+     in length, and a ragged row of eight reads as eight unrelated things. */
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-auto-rows: 1fr;
+    gap: 14px;
+    padding-top: 18px;
+  }
+
+  /* The anchor IS the card — the bounding box, the border, the hover state and
+     the hit area are all this one element, so there is nothing inside it that
+     is "the link" and nothing outside it that looks clickable and is not. */
+  .router-card {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 17px 18px;
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 8px;
+    color: var(--sl-color-white);
+    text-decoration: none;
+    transition:
+      border-color 140ms ease,
+      background-color 140ms ease;
+  }
+
+  .router-card:hover,
+  .router-card:focus-visible {
+    border-color: var(--sl-color-accent);
+    background: var(--sl-color-gray-6);
+    color: var(--sl-color-white);
+  }
+
+  .pain {
+    font-weight: 500;
+    font-size: 15px;
+    line-height: 21px;
+  }
+
+  .arrow {
+    font-family: var(--sl-font-mono);
+    font-size: 13px;
+    color: var(--sl-color-accent-high);
+    margin-top: auto;
+    padding-top: 10px;
+    align-self: flex-end;
+  }
+
+  @media (max-width: 1100px) {
+    .cards {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  @media (max-width: 560px) {
+    .cards {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+</style>

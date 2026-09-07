@@ -1,0 +1,86 @@
+---
+// C-023 — the four-group nav `Main.dc.html` puts above the site links.
+//
+// The groups ARE Starlight's resolved sidebar, not a second table of the same
+// links: the design record's DRY line says the nav is the sidebar config, and
+// a hand-written copy here would be a `SUMMARY.md` by another name — 24 hrefs
+// that go stale the first time `astro.config.mjs` gains a page.
+//
+// `starlightRoute.sidebar` is populated on every route, splash pages included:
+// `utils/starlight-page.js` calls `getSidebar()` before it decides
+// `hasSidebar`, so the landing reads the same four groups a chapter page
+// renders in its rail. The hrefs already carry `.html` (C-002) because the
+// sidebar builds them from the route manifest under `build.format: 'file'`.
+const { sidebar } = Astro.locals.starlightRoute;
+
+// Only top-level groups and only their direct links. This sidebar is two
+// levels deep by construction (`nav_depth.py` gates that), so a nested group
+// would be a config change that has to reach this component deliberately
+// rather than render as an unlabelled orphan.
+const groups = sidebar.flatMap((entry) =>
+  entry.type === 'group'
+    ? [{ label: entry.label, links: entry.entries.filter((e) => e.type === 'link') }]
+    : []
+);
+---
+
+<nav class="footer-nav" aria-label="Documentation">
+  {
+    groups.map((group) => (
+      <div class="group">
+        <span class="kicker">{group.label}</span>
+        {group.links.map((link) => (
+          <a href={link.href}>{link.label}</a>
+        ))}
+      </div>
+    ))
+  }
+</nav>
+
+<style>
+  .footer-nav {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 32px;
+    padding-bottom: 8px;
+  }
+
+  .group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .kicker {
+    font-family: var(--sl-font-mono);
+    font-size: 11.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--sl-color-accent);
+  }
+
+  .group a {
+    font-size: 14px;
+    line-height: 22px;
+    color: var(--sl-color-gray-2);
+    text-decoration: none;
+  }
+
+  .group a:hover {
+    color: var(--sl-color-white);
+  }
+
+  @media (max-width: 940px) {
+    .footer-nav {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 24px 32px;
+    }
+  }
+
+  @media (max-width: 560px) {
+    .footer-nav {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+</style>

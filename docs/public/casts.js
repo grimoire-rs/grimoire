@@ -8,6 +8,15 @@
  * `head` array, so the twenty-one pages that carry no embed never download it.
  * The vendored bundle is a classic script assigning a `AsciinemaPlayer` global,
  * not an ES module, so a script element is the only entry point it has.
+ *
+ * Provenance, because this bundle is outside package-lock.json and Dependabot
+ * cannot see it. When an advisory lands, this is the only record of what we
+ * ship, so keep it current with the file beside it:
+ *
+ *   asciinema-player 3.17.0, Apache-2.0
+ *   https://github.com/asciinema/asciinema-player/releases/tag/v3.17.0
+ *   asciinema-player.min.js  sha256 a13c37632e1b5c49fe9128417b9319a9b5bc64cb457dd5ae52cbba8a3aceb880
+ *   asciinema-player.css     sha256 f619fe17597043564f03b2c6918b3daf890ee8b912fb408542fba11afade4fdb
  */
 (() => {
   const embeds = document.querySelectorAll('[data-cast]');

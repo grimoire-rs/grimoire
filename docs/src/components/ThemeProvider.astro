@@ -1,0 +1,21 @@
+---
+// C-020 — the site is dark only, so this override renders nothing at all.
+//
+// Starlight's own ThemeProvider ships one inline, before-paint script that
+// reads `localStorage.getItem('starlight-theme')`, falls back to
+// `prefers-color-scheme`, and writes the result to
+// `document.documentElement.dataset.theme`. Replacing it with nothing is what
+// makes the site dark-only, and it is enough on its own: Starlight's
+// `Page.astro` already renders `data-theme="dark"` into the served HTML
+// (`htmlDataAttributes` there is a hardcoded literal), so removing the script
+// leaves the attribute standing with nothing able to change it — no flash, no
+// stored preference, no `prefers-color-scheme` read.
+//
+// Re-emitting the attribute here would be the redundant half; dropping the
+// script is the whole change. There is no config flag for dark-only, which is
+// why this is a component override rather than a setting.
+//
+// It also defined `window.StarlightThemeProvider`, whose only callers are in
+// `ThemeSelect.astro` — overridden to render nothing beside this. Nothing else
+// in the package references the global.
+---
