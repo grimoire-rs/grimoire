@@ -882,7 +882,7 @@ ia_plan:
         - {path: docs/src/stability.md,       doc_type: explanation,     doc_tier: none, action: keep,   serves: [T08, T23]}
         - {path: docs/src/upgrading.md,       doc_type: troubleshooting, doc_tier: none, action: keep,   serves: [T23]}
   deletes: []
-  # Landing router — nine cards, weighted by three sources: the owner's list
+  # Landing router — eight cards, weighted by three sources: the owner's list
   # (what colleagues said they do not understand), the friction logs, and the
   # web evidence in research_docs_pain_points.md section C. Everything else
   # stays sidebar-only. Each card names the pain, not the feature.

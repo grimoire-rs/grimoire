@@ -1,10 +1,219 @@
-/* Client compatibility matrix (docs/src/clients.md, #matrix). mdBook's
-   stock theme centers every table (`table { margin: 0 auto }`); this one
-   reads better left-aligned with the surrounding prose. Scoped to the
-   `.matrix-table` wrapper so other doc tables keep the default centering
-   unless a later page makes the same case. */
+/* C-019 — the landing's palette, mapped onto Starlight's variables.
+   `docs/src/pages/index.astro` is the source of these seven colours and two
+   radii; the names on the left are Starlight's, the values on the right are
+   the landing's `--color-*` block verbatim, so the two halves of the site
+   cannot drift to different greys.
+
+   UNLAYERED ON PURPOSE (D-6). Starlight ships its own values inside
+   `@layer starlight.base`, and an unlayered rule beats any layered one
+   regardless of specificity — so a plain `:root` block wins without
+   `!important` and without having to out-specify anything. Wrapping this in a
+   layer of our own would put it back in the fight. The sibling indexer's
+   `Base.astro` uses the same trick.
+
+   Dark only (C-020): Starlight's `[data-theme='light']` block is left
+   untouched because nothing can ever select it — `ThemeProvider.astro` writes
+   the dark attribute and ships no code that could change it. */
+:root {
+  /* Ground and ink. `--sl-color-white` is Starlight's name for the brightest
+     ink in the current theme, not for the colour white. */
+  --sl-color-bg: #161826;
+  --sl-color-black: #161826;
+  --sl-color-white: #e9e9ed;
+  --sl-color-text: #e9e9ed;
+
+  /* Neutral ramp, lightest to darkest, from the canvas: muted prose, dim
+     labels, the rule under a heading, the hairline, the panel fill. */
+  --sl-color-gray-1: #d5d6dc;
+  --sl-color-gray-2: #babbc1;
+  --sl-color-gray-3: #84858d;
+  --sl-color-gray-4: #595d6c;
+  --sl-color-gray-5: #3f424d;
+  --sl-color-gray-6: #1b1d2c;
+
+  --sl-color-accent-low: #2b2741;
+  --sl-color-accent: #9184d9;
+  --sl-color-accent-high: #d2cefd;
+
+  /* The header and sidebar sit on the page ground with a hairline between,
+     not on a raised panel — Starlight's default gives them `gray-6`. */
+  --sl-color-bg-nav: #161826;
+  --sl-color-bg-sidebar: #161826;
+  --sl-color-hairline: #3f424d;
+  --sl-color-hairline-light: #3f424d;
+  --sl-color-hairline-shade: #3f424d;
+
+  --sl-font: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue',
+    Arial, sans-serif;
+  --sl-font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* 15px/1.55 body. Starlight's own default is 16px/1.75. */
+  --sl-text-body: 0.9375rem;
+  --sl-line-height: 1.55;
+  /* The canvas fixes h1 at 34px and h2 at 20px. h3-h5 are set here too, not
+     because the canvas shows them but because leaving them at Starlight's
+     defaults would invert the ramp — its h3 is 24px, which would render
+     LARGER than this h2. Descending, all five. */
+  --sl-text-h1: 2.125rem;
+  --sl-text-h2: 1.25rem;
+  --sl-text-h3: 1.0625rem;
+  --sl-text-h4: 0.96875rem;
+  --sl-text-h5: 0.9375rem;
+
+  /* 250px sidebar / 720px content, as measured off the canvas. */
+  --sl-sidebar-width: 15.625rem;
+  --sl-content-width: 45rem;
+
+  --grim-radius-sm: 4px;
+  --grim-radius-md: 8px;
+
+  /* Expressive Code draws every fenced block. Its frame is a hairline box at
+     the 8px radius, filled with the page ground — the canvas gives code no
+     fill of its own. */
+  --ec-brdCol: #3f424d;
+  --ec-brdRad: var(--grim-radius-md);
+  --ec-codeBg: #161826;
+}
+
+/* Print. Starlight ships a print palette in its own `print.css`, linked with
+   `media="print"` — and in the built page that link comes BEFORE the chunk
+   carrying the `:root` above. Both are unlayered `:root` at equal
+   specificity, so source order decides and the dark palette wins inside
+   `@media print` too. `--sl-color-text` is worse still: `print.css` never
+   sets it at all. Browsers drop backgrounds when printing, so body ink landed
+   at #e9e9ed on white paper — about 1.21:1.
+
+   This block is later in the same file, so it takes those tokens back. The
+   values are Starlight's own print palette, plus `--sl-color-text` and
+   `--sl-color-bg`, which it leaves to the theme. */
+@media print {
+  :root {
+    --sl-color-bg: #fff;
+    --sl-color-black: #fff;
+    --sl-color-white: #17181c;
+    --sl-color-text: #17181c;
+
+    --sl-color-gray-1: #23262f;
+    --sl-color-gray-2: #353841;
+    --sl-color-gray-3: #555962;
+    --sl-color-gray-4: #888c96;
+    --sl-color-gray-5: #c1c3c8;
+    --sl-color-gray-6: #edeef3;
+
+    --sl-color-accent-low: #cfd4fc;
+    --sl-color-accent: #3d50f5;
+    --sl-color-accent-high: #0f1c8a;
+
+    --sl-color-bg-nav: #fff;
+    --sl-color-bg-sidebar: #fff;
+    --sl-color-hairline: #c1c3c8;
+    --sl-color-hairline-light: #edeef3;
+    --sl-color-hairline-shade: #edeef3;
+
+    --ec-brdCol: #c1c3c8;
+    --ec-codeBg: #fff;
+    --ec-codeFg: #403f53;
+  }
+
+  /* Expressive Code ships both themes' colours inline on every token span —
+     `--0` dark, `--1` light — and picks between them with `:root:not([data-theme='dark'])`,
+     which this site's permanent `data-theme="dark"` makes unreachable. So the
+     tokens above fix the frame while the code inside it still prints in
+     night-owl's light-on-dark colours. Restating EC's own light rule here
+     wins on the layer alone: its whole stylesheet sits in
+     `@layer starlight.components`, and an unlayered rule beats any layered
+     one. Same five custom properties, same fallbacks, `--1` instead of `--0`. */
+  .expressive-code .ec-line :where(span[style^='--']:not([class])) {
+    color: var(--1, inherit);
+    background-color: var(--1bg, transparent);
+    font-style: var(--1fs, inherit);
+    font-weight: var(--1fw, inherit);
+    text-decoration: var(--1td, inherit);
+  }
+}
+
+/* The kicker: ui-monospace, 11.5px, uppercase, 0.08em tracking, accent. One
+   treatment, three places — sidebar group labels, "on this page", and the
+   prev/next labels. No `.grim-kicker` class ships: nothing in the corpus
+   writes one, and a class with no callers is dead CSS. */
+#starlight__sidebar .group-label > .large,
+.right-sidebar h2,
+.pagination-links a > span {
+  font-family: var(--sl-font-mono);
+  font-size: 11.5px;
+  font-weight: 400;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--sl-color-accent);
+}
+
+/* Prev/next: the label is the kicker in dim ink, and the page title nested
+   inside it comes back out to body type. Starlight puts both in ONE span —
+   `<span>Previous<br><span class="link-title">…</span></span>` — so the
+   title has to undo what the rule above set, rather than simply not
+   inheriting it. */
+.pagination-links a > span {
+  color: var(--sl-color-gray-3);
+}
+
+.pagination-links a .link-title {
+  font-family: var(--sl-font);
+  font-size: 14px;
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--sl-color-white);
+}
+
+/* Sidebar items: 13.5px rows in muted ink, the current one an accent pill at
+   the small radius. Starlight's default marks the current item with weight
+   and a left border instead. */
+#starlight__sidebar a {
+  font-size: 13.5px;
+  line-height: 20px;
+  padding: 5px 10px;
+  border-radius: var(--grim-radius-sm);
+  color: var(--sl-color-gray-2);
+}
+
+#starlight__sidebar a[aria-current='page'] {
+  color: var(--sl-color-accent-high);
+  background: var(--sl-color-accent-low);
+  font-weight: 400;
+}
+
+/* Headings: 500 weight throughout, and every `##` step sits above a rule —
+   the canvas uses that line to separate one numbered step from the next.
+   `:not(:where(.not-content *))` is Starlight's own opt-out, guarding every
+   rule in its `markdown.css`, and these carry it for the same reason: the
+   landing wraps its whole body in `.not-content` and styles its headings
+   inline. Without the guard the rule below would draw a hairline under the
+   landing's h2, which is a section title and not a step. */
+.sl-markdown-content :is(h1, h2, h3):not(:where(.not-content *)),
+.content-panel h1 {
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+.content-panel h1 {
+  letter-spacing: -0.02em;
+}
+
+.sl-markdown-content h2:not(:where(.not-content *)) {
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--sl-color-gray-4);
+}
+
+/* Client compatibility matrix (docs/src/content/docs/clients.md, #matrix).
+   The table reads left-aligned with the surrounding prose, flush to the
+   content column's left edge. Both declarations are stated rather than
+   inherited: the generator that centred every table is gone, and Starlight
+   aligns cells with `text-align: start` on `th` only — leaving the matrix's
+   alignment resting on a default, in a file whose whole job is to pin this
+   one table's appearance. Scoped to the `.matrix-table` wrapper `clients.md`
+   carries, so no other doc table is affected. */
 .matrix-table table {
   margin: 0;
+  text-align: left;
 }
 
 /* Reused client marks (see the attribution comment above the table). They
@@ -66,4 +275,83 @@
 /* Mark + name are one unit — never break the line between them. */
 .matrix-table td:first-child {
   white-space: nowrap;
+}
+
+/* Centre the whole shell on a wide monitor.
+
+   Starlight pins the sidebar to the viewport's left edge (`.sidebar-pane` is
+   `position: fixed; inset-inline-start: 0`) and then centres the content
+   column in whatever is left over. Past about 1900px that reads as a rail
+   marooned on the far left with a growing empty band between it and the prose.
+
+   One gutter, applied to the three elements that set the shell's inline
+   bounds, moves all three columns inward together. `100vw` on purpose, not a
+   percentage: the header and the sidebar are fixed, so a percentage there
+   resolves against the initial containing block while `.main-frame`'s
+   resolves against `.page`, and the two differ by the scrollbar. One unit for
+   all three keeps their left edges on one line; the shell then ends up
+   `1440px` minus the scrollbar wide, centred on the visible area.
+
+   Below 1440px the gutter is `0px` and every rule here is inert, so the
+   layout under the breakpoints Starlight actually branches on is untouched. */
+:root {
+  --grim-shell: 1440px;
+  --grim-shell-gutter: max(0px, (100vw - var(--grim-shell)) / 2);
+
+  /* The contents rail is the sidebar's width, so the shell is five fixed
+     bands: 250 rail, 110 air, 720 prose, 110 air, 250 rail. */
+  --grim-toc-width: 15.625rem;
+}
+
+/* `.page > .header` — the outer bar, never the inner flex row `Header.astro`
+   also calls `.header`. Padding rather than a width cap, so the bar's ground
+   and its bottom hairline stay full-bleed. */
+[data-has-sidebar] .page > .header {
+  padding-inline: calc(var(--sl-nav-pad-x) + var(--grim-shell-gutter));
+}
+
+[data-has-sidebar] .sidebar-pane {
+  inset-inline-start: var(--grim-shell-gutter);
+}
+
+/* The end padding is what pulls the right-hand "on this page" rail in: its
+   container is an ordinary flex item, and the fixed panel inside it takes its
+   inline start from that container's static position. */
+[data-has-sidebar] .main-frame {
+  padding-inline-start: calc(
+    var(--sl-content-inline-start) + var(--grim-shell-gutter)
+  );
+  padding-inline-end: var(--grim-shell-gutter);
+}
+
+/* Air on both sides of the prose, and a contents rail with an edge.
+
+   Starlight splits the leftover width between the two rails and then sets
+   `--sl-content-margin-inline: auto 0` on the content pane, so every pixel of
+   slack lands to the LEFT of the prose and none to its right: the column runs
+   flush into the contents rail's border. Fixing both rails instead turns that
+   slack into the prose's own margin, equal on each side.
+
+   `.right-sidebar` needs the width restated because it is `position: fixed`:
+   its `width: 100%` resolves against the viewport, not against the container
+   it sits in, so the contents list was a 100vw-wide column with nothing at
+   its far end to line up with. */
+@media (min-width: 72rem) {
+  [data-has-sidebar][data-has-toc] .main-pane {
+    --sl-content-margin-inline: auto;
+    width: calc(100% - var(--grim-toc-width));
+  }
+
+  .right-sidebar-container,
+  .right-sidebar {
+    width: var(--grim-toc-width);
+  }
+
+  /* The rail's last column then ends under the last nav link, because this is
+     the bar's own inline padding. Only the right rail: `--sl-sidebar-pad-x`
+     feeds both, and 24px on the left one costs 16px of a 250px column that
+     several nav labels need to stay on one line. */
+  .right-sidebar-panel {
+    padding-inline: var(--sl-nav-pad-x);
+  }
 }

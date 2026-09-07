@@ -1,0 +1,133 @@
+---
+// C-023 — the three entry paths, as tiles. `Main.dc.html`'s "ways in" band.
+//
+// Every string a reader sees comes from `landing.ts` (C-022, one module one
+// source). The only copy authored here is the band's own kicker and note,
+// which describe the band rather than any one tile.
+//
+// The arrow is a bare glyph, not a repeat of the destination name. The canvas
+// draws a labelled arrow ("quick start →"), but that label is a *second*
+// spelling of each tile's title, and `landing.ts` carries no field for it —
+// adding one would put the same destination in two places for the router to
+// drift apart. The affordance C-023 asks for is the arrow; the name is
+// already the heading directly above it.
+import { entryPaths } from '../data/landing.ts';
+---
+
+<section class="ways-in" aria-labelledby="ways-in-title">
+  <div class="band">
+    <h2 class="kicker" id="ways-in-title">ways in</h2>
+    <span class="note">each ends with something your agent shows you</span>
+  </div>
+  <div class="tiles">
+    {
+      entryPaths.map((path) => (
+        <a class="way-in" href={path.href}>
+          <strong>{path.label}</strong>
+          <span class="blurb">{path.blurb}</span>
+          <span class="arrow" aria-hidden="true">
+            →
+          </span>
+        </a>
+      ))
+    }
+  </div>
+</section>
+
+<style>
+  .ways-in {
+    padding-bottom: clamp(28px, 3vw, 44px);
+  }
+
+  .band {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    border-bottom: 1px solid var(--sl-color-gray-4);
+    padding-bottom: 11.2px;
+  }
+
+  /* A real `h2`, not the span the canvas draws: the band is a landmark region
+     named by it, and without a heading here the landing exposes nothing
+     between its `h1` and the bottom of the page. Two properties are what the
+     element change costs — Starlight's reset touches neither the weight nor
+     the margin of a heading, so an `h2` would arrive bold and spaced. Every
+     other property was already stated, so the band looks the same. */
+  .kicker {
+    margin: 0;
+    font-weight: 400;
+    font-family: var(--sl-font-mono);
+    font-size: 11.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--sl-color-accent);
+  }
+
+  .note {
+    font-family: var(--sl-font-mono);
+    font-size: 12px;
+    margin-inline-start: auto;
+    text-align: end;
+    color: var(--sl-color-gray-3);
+  }
+
+  /* `grid-auto-rows: 1fr` is what makes the tiles equal height whatever the
+     blurb length — the arrow then pins to the bottom of every one of them. */
+  .tiles {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-auto-rows: 1fr;
+    gap: 14px;
+    padding-top: 18px;
+  }
+
+  /* The anchor IS the tile: no inner link, so the whole box is one target. */
+  .way-in {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding: 15px 16px;
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 8px;
+    background: var(--sl-color-gray-6);
+    color: var(--sl-color-white);
+    text-decoration: none;
+    transition:
+      border-color 140ms ease,
+      background-color 140ms ease;
+  }
+
+  .way-in:hover,
+  .way-in:focus-visible {
+    border-color: var(--sl-color-accent);
+    color: var(--sl-color-white);
+  }
+
+  .way-in strong {
+    font-weight: 500;
+    font-size: 14.5px;
+    line-height: 20px;
+  }
+
+  .blurb {
+    font-size: 12.5px;
+    line-height: 19px;
+    color: var(--sl-color-gray-3);
+  }
+
+  .arrow {
+    font-family: var(--sl-font-mono);
+    font-size: 13px;
+    color: var(--sl-color-accent-high);
+    /* `margin-top: auto` against the equal-height row is the whole trick. */
+    margin-top: auto;
+    padding-top: 8px;
+    align-self: flex-end;
+  }
+
+  @media (max-width: 940px) {
+    .tiles {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+</style>

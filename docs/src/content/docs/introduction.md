@@ -5,56 +5,44 @@ description: "Grimoire is a package manager for AI-agent configuration, distribu
 <!-- doc_type: landing -->
 <!-- doc_tier: first-steps -->
 
-Grimoire is a package manager for AI-agent configuration. Its binary, `grim`,
-installs, updates, and publishes the **skills**, **rules**, **agents**, and
-**MCP servers** that steer coding agents — plus **bundles** that group them —
-into every coding agent you use, each in the format that client actually
-reads. Storage is any [OCI registry][oci] — GHCR, Docker Hub, or your own.
-There is no Grimoire service to sign up for.
+Grimoire is a package manager for AI-agent config: the skills, rules, agents,
+and MCP servers you install into every coding agent you use.
 
-## The problem
+## Install your first skill
 
-Reusable agent configuration — skills, rules, prompt templates — is copied by
-hand between repositories today. A useful rule written for one project is
-pasted into the next, then drifts: no version, no provenance, no upgrade path.
-There is no `npm install` for an agent skill.
+With `grim` on your `PATH`, one command declares a skill, pins it, and
+materializes it into every AI client it finds in the project:
 
-## The solution
+```sh
+grim add ghcr.io/grimoire-rs/skills/grim-usage
+```
 
-Grimoire treats a skill or rule as a versioned, content-addressed artifact and
-stores it in a registry you already run. You declare what you want in
-`grimoire.toml`, pin exact digests in `grimoire.lock`, and materialize the
-files into your AI client of choice. Upgrading is `grim update`; sharing is
-`grim release`.
+The files land in each client's own configuration directory, in the format
+that client reads. [Installation](./installation.md) covers getting the
+binary, and [Quick Start](./quickstart.md) walks the whole loop.
 
-Because the transport is plain OCI, you inherit a registry's authentication,
-TLS, and replication for free — there is no bespoke server to operate.
-[GitHub Container Registry][ghcr], [Docker Hub][hub], or a private
-[Distribution][dist] instance all work unchanged.
+## Why it exists
 
-> **Status:** Grimoire is young. The CLI documented here is real and tested,
-> but the surface is still moving toward 1.0 — pin a version when you depend on
-> it.
+A rule written for one project gets pasted into the next, then drifts. It
+carries no version, no provenance, and no upgrade path. Grimoire treats a
+skill or a rule as a versioned, content-addressed artifact. You declare it in
+`grimoire.toml`, pin its digest in `grimoire.lock`, and roll it forward with
+`grim update`.
+
+Storage is any [OCI registry](https://github.com/opencontainers/distribution-spec):
+[GHCR](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry),
+[Docker Hub](https://hub.docker.com), or your own. There is no Grimoire
+service to sign up for. Because the transport is plain OCI, you inherit the
+authentication, TLS, and replication of a registry you already run. A private
+[Distribution](https://distribution.github.io/distribution/) instance works
+unchanged.
+
+> **Status:** the CLI documented here is real and tested, and the surface is
+> stabilizing toward 1.0. Pin a version when you depend on it.
 
 ## Where to next
 
-- [Installation][install] — get the `grim` binary.
-- [Quick Start][quickstart] — install your first skill in five commands.
-- [Concepts][concepts] — skills versus rules, scopes, locks, and clients.
-- [Host Your Own Index][hosting] — one command scaffolds a package index
-  your team browses and publishes into, served from GitHub or GitLab
-  Pages.
-- [Command Reference][commands] — every subcommand and flag.
-
-<!-- external -->
-[oci]: https://github.com/opencontainers/distribution-spec
-[ghcr]: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry
-[hub]: https://hub.docker.com
-[dist]: https://distribution.github.io/distribution/
-
-<!-- internal -->
-[install]: ./installation.md
-[quickstart]: ./quickstart.md
-[concepts]: ./concepts.md
-[hosting]: ./hosting-an-index.md
-[commands]: ./commands.md
+- [Getting started](./quickstart.md): declare a skill, install it, and upgrade it.
+- [Guides](./guides/scopes-and-clients.md): project or global scope, and which clients get the files.
+- [Teams and automation](./publishing.md): publish config your colleagues install.
+- [Reference](./commands.md): every subcommand, flag, and config key.

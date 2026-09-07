@@ -1,11 +1,29 @@
 ---
+// C-023 — the landing, rebuilt from `.agents/discovery/design/Main.dc.html`:
+// header, hero with the cast beside it, the three entry paths, the eight
+// router cards, the four-group nav, the site links.
+//
+// Three things this page no longer carries, and where each went:
+//
+//   * The bar. PR 1 hand-rolled a header here and hid Starlight's with CSS,
+//     which left the mark, the four links and the version span written twice —
+//     `Header.astro` says so in its own comment. The canvas draws one bar with
+//     a search field in it, and `Header.astro` is that bar. So the override is
+//     unhidden and the copy deleted. The version span goes with it: the same
+//     `import.meta.env.GRIM_VERSION` now renders on all 34 pages instead of
+//     one, and the `data-grim-version` attribute retires with the `seo.py`
+//     stamping step that was its only reader.
+//   * The footer. Same story: hidden here, hand-rolled below it, four of the
+//     five links. `Footer.astro` carries all five plus `FooterNav`, on every
+//     page, and `landing_check.py` reads them out of the rendered block.
+//   * The cast. The inline `AsciinemaPlayer.create` call predates `casts.js`
+//     (C-024) and had been broken since: the head array stopped shipping the
+//     player bundle, so the landing called a global nothing defined. The
+//     `[data-cast]` div is the supported embed, it loads the bundle on first
+//     intersection, and it does not autoplay.
 import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
-
-// `docs/seo.py` stamped this span post-build from Cargo.toml. That script is
-// deleted; `taskfiles/docs.taskfile.yml` exports GRIM_VERSION from Cargo.toml
-// at file level, so docs:build and docs:serve both carry it. The fallback keeps
-// a bare `astro dev` started outside the taskfile from rendering `undefined`.
-const version = import.meta.env.GRIM_VERSION ?? 'dev';
+import WaysIn from '../components/WaysIn.astro';
+import PainRouter from '../components/PainRouter.astro';
 
 // `seo.py`'s page_url() special-cased the landing to the bare site root.
 // Starlight derives the canonical and og:url from the route instead, which is
@@ -50,532 +68,270 @@ const home = Astro.site.href;
     on every `svg`. `not-content` is Starlight's own opt-out — every rule in
     that file is guarded with `:not(:where(.not-content *))` — so this one
     wrapper disables all of it at once, and survives a Starlight upgrade in a
-    way a list of counter-rules would not. The landing body below is unchanged.
+    way a list of counter-rules would not.
   */}
   <div class="not-content">
+    <div class="wrap">
+      <section class="hero">
+        <div>
+          <h1>A lockfile for your AI-agent config.</h1>
+          <p class="lede">
+            Skills, rules, agents and MCP servers — declared once, pinned by digest,
+            written into each coding agent in the format it actually reads. Storage is
+            any OCI registry. There is no Grimoire service.
+          </p>
+          <div class="ctas">
+            <a class="cta cta-primary" href="/installation.html">Install grim</a>
+            <a class="cta cta-secondary" href="https://index.grimoire.rs">Open the index</a>
+            <a class="cta cta-secondary" href="/start.html">Create your own</a>
+          </div>
+        </div>
 
-<header style="border-bottom:1px solid var(--color-neutral-800)">
-  <div class="wrap" style="padding-block:14px; display:flex; align-items:center; gap:clamp(16px,3vw,32px)">
-    <span style="display:flex; align-items:center; gap:8.4px; flex:none">
-      <svg viewBox="0 0 128 128" width="24" height="24" aria-hidden="true" style="display:block; flex:none">
-        <g transform="matrix(1.0668848,0,0,1.0668848,-4.2806272,4.7878936)">
-          <path fill="#ffb02e" d="M 64,5 Q 68.5,25.5 90,30 68.5,34.5 64,55 59.5,34.5 38,30 59.5,25.5 64,5 Z"></path>
-          <path fill="#ffb02e" d="m 99,8 q 1.8,7.2 9,9 -7.2,1.8 -9,9 -1.8,-7.2 -9,-9 7.2,-1.8 9,-9 z"></path>
-          <path fill="#ffb02e" d="m 29,16 q 1.2,4.8 6,6 -4.8,1.2 -6,6 -1.2,-4.8 -6,-6 4.8,-1.2 6,-6 z"></path>
-          <path fill="#6d52f4" d="M 16,60 C 32,54 50,58 64,68 78,58 96,54 112,60 V 98 C 96,92 78,96 64,106 50,96 32,92 16,98 Z"></path>
-          <path fill="#dcd2fc" d="m 24,66 c 12,-4 26,-1 40,8 14,-9 28,-12 40,-8 V 92 C 92,88 78,90 64,98 50,90 36,88 24,92 Z"></path>
-          <path d="M 64,78 V 94" stroke="#6d52f4" stroke-width="3.5" stroke-linecap="round" fill="none"></path>
-        </g>
-      </svg>
-      <span style="font-weight:500; font-size:15px; letter-spacing:-0.01em">grimoire<span style="color:var(--color-accent)">.rs</span></span>
-      <span class="mono dim" data-grim-version style="font-size:12px">{version}</span>
-    </span>
-    <span class="spacer"></span>
-    <span data-navlinks class="mono" style="display:flex; align-items:center; gap:clamp(14px,2.2vw,26px); font-size:13px">
-      <a href="https://index.grimoire.rs">index</a>
-      <a href="/introduction.html">docs</a>
-      <a href="https://marketplace.visualstudio.com/items?itemName=grimoire-rs.grimoire-vscode">vscode</a>
-      <a href="https://github.com/grimoire-rs/grimoire">source</a>
-    </span>
-  </div>
-</header>
+        <div class="cast">
+          <div class="cast-bar">
+            <span class="cast-kicker">see it run</span>
+            <span class="cast-note">real grim, real registry</span>
+          </div>
+          <div data-cast="/demo.cast" data-cast-poster="npt:0:03"></div>
+          <noscript>
+            <p class="cast-fallback">
+              This demo needs JavaScript to play. The recording is plain text:{' '}
+              <a href="/demo.cast">demo.cast</a>.
+            </p>
+          </noscript>
+        </div>
+      </section>
 
-<div class="wrap">
-  <section data-hero style="padding:clamp(40px,4.5vw,60px) 0 clamp(36px,3.6vw,48px); display:grid; grid-template-columns:minmax(0,1fr) minmax(0,0.92fr); gap:0 clamp(32px,5vw,72px); align-items:center">
-    <div>
-      <h1 style="font-weight:500; font-size:clamp(32px,3.4vw,44px); line-height:1.14; letter-spacing:-0.02em; margin:0 0 0 -0.04em">A lockfile for your AI-agent config.</h1>
-      <p style="font-size:16.5px; line-height:28px; margin:22px 0 0; max-width:46ch; color:color-mix(in srgb, var(--color-text) 78%, transparent)">Skills, rules, agents and MCP servers — declared once, pinned by digest, written into each coding agent in the format it actually reads. Storage is any OCI registry. There is no Grimoire service.</p>
-      <div style="display:flex; flex-wrap:wrap; align-items:center; gap:12px; margin-top:30px">
-        <a class="cta cta-primary" href="#install">Install grim</a>
-        <a class="cta cta-secondary" href="https://index.grimoire.rs">Browse the index</a>
-        <a class="cta cta-secondary" href="/start.html">Create your own</a>
-      </div>
+      <WaysIn />
+      <PainRouter />
     </div>
-
-    <div>
-      <p class="kicker">installs into</p>
-      <div class="clients">
-        <a class="client" style="--brand:#D97757" href="https://code.claude.com" target="_blank" rel="noopener noreferrer">
-          <svg viewBox="0.00 0.50 24.00 24.00" fill-rule="evenodd" aria-hidden="true"><path d="M20.998 10.949H24v3.102h-3v3.028h-1.487V20H18v-2.921h-1.487V20H15v-2.921H9V20H7.488v-2.921H6V20H4.487v-2.921H3V14.05H0V10.95h3V5h17.998v5.949zM6 10.949h1.488V8.102H6v2.847zm10.51 0H18V8.102h-1.49v2.847z"></path></svg>
-          <span class="name">Claude Code</span>
-        </a>
-        <a class="client" style="--brand:#e9e9ed" href="https://github.com/features/copilot" target="_blank" rel="noopener noreferrer">
-          <svg viewBox="-0.20 -0.20 24.40 24.40" fill-rule="evenodd" aria-hidden="true"><path d="M19.245 5.364c1.322 1.36 1.877 3.216 2.11 5.817.622 0 1.2.135 1.592.654l.73.964c.21.278.323.61.323.955v2.62c0 .339-.173.669-.453.868C20.239 19.602 16.157 21.5 12 21.5c-4.6 0-9.205-2.583-11.547-4.258-.28-.2-.452-.53-.453-.868v-2.62c0-.345.113-.679.321-.956l.73-.963c.392-.517.974-.654 1.593-.654l.029-.297c.25-2.446.81-4.213 2.082-5.52 2.461-2.54 5.71-2.851 7.146-2.864h.198c1.436.013 4.685.323 7.146 2.864zm-7.244 4.328c-.284 0-.613.016-.962.05-.123.447-.305.85-.57 1.108-1.05 1.023-2.316 1.18-2.994 1.18-.638 0-1.306-.13-1.851-.464-.516.165-1.012.403-1.044.996a65.882 65.882 0 00-.063 2.884l-.002.48c-.002.563-.005 1.126-.013 1.69.002.326.204.63.51.765 2.482 1.102 4.83 1.657 6.99 1.657 2.156 0 4.504-.555 6.985-1.657a.854.854 0 00.51-.766c.03-1.682.006-3.372-.076-5.053-.031-.596-.528-.83-1.046-.996-.546.333-1.212.464-1.85.464-.677 0-1.942-.157-2.993-1.18-.266-.258-.447-.661-.57-1.108-.32-.032-.64-.049-.96-.05zm-2.525 4.013c.539 0 .976.426.976.95v1.753c0 .525-.437.95-.976.95a.964.964 0 01-.976-.95v-1.752c0-.525.437-.951.976-.951zm5 0c.539 0 .976.426.976.95v1.753c0 .525-.437.95-.976.95a.964.964 0 01-.976-.95v-1.752c0-.525.437-.951.976-.951zM7.635 5.087c-1.05.102-1.935.438-2.385.906-.975 1.037-.765 3.668-.21 4.224.405.394 1.17.657 1.995.657h.09c.649-.013 1.785-.176 2.73-1.11.435-.41.705-1.433.675-2.47-.03-.834-.27-1.52-.63-1.813-.39-.336-1.275-.482-2.265-.394zm6.465.394c-.36.292-.6.98-.63 1.813-.03 1.037.24 2.06.675 2.47.968.957 2.136 1.104 2.776 1.11h.044c.825 0 1.59-.263 1.995-.657.555-.556.765-3.187-.21-4.224-.45-.468-1.335-.804-2.385-.906-.99-.088-1.875.058-2.265.394zM12 7.615c-.24 0-.525.015-.84.044.03.16.045.336.06.526l-.001.159a2.94 2.94 0 01-.014.25c.225-.022.425-.027.612-.028h.366c.187 0 .387.006.612.028-.015-.146-.015-.277-.015-.409.015-.19.03-.365.06-.526a9.29 9.29 0 00-.84-.044z"></path></svg>
-          <span class="name">Copilot</span>
-        </a>
-        <a class="client" style="--brand:#e9e9ed" href="https://cursor.com" target="_blank" rel="noopener noreferrer">
-          <svg viewBox="-0.84 -0.84 25.69 25.69" fill-rule="evenodd" aria-hidden="true"><path d="M22.106 5.68L12.5.135a.998.998 0 00-.998 0L1.893 5.68a.84.84 0 00-.419.726v11.186c0 .3.16.577.42.727l9.607 5.547a.999.999 0 00.998 0l9.608-5.547a.84.84 0 00.42-.727V6.407a.84.84 0 00-.42-.726zm-.603 1.176L12.228 22.92c-.063.108-.228.064-.228-.061V12.34a.59.59 0 00-.295-.51l-9.11-5.26c-.107-.062-.063-.228.062-.228h18.55c.264 0 .428.286.296.514z"></path></svg>
-          <span class="name">Cursor</span>
-        </a>
-        <a class="client" style="--brand:#e9e9ed" href="https://developers.openai.com/codex" target="_blank" rel="noopener noreferrer">
-          <svg viewBox="-1.71 -1.72 27.43 27.43" fill-rule="evenodd" aria-hidden="true"><path d="M8.086.457a6.105 6.105 0 013.046-.415c1.333.153 2.521.72 3.564 1.7a.117.117 0 00.107.029c1.408-.346 2.762-.224 4.061.366l.063.03.154.076c1.357.703 2.33 1.77 2.918 3.198.278.679.418 1.388.421 2.126a5.655 5.655 0 01-.18 1.631.167.167 0 00.04.155 5.982 5.982 0 011.578 2.891c.385 1.901-.01 3.615-1.183 5.14l-.182.22a6.063 6.063 0 01-2.934 1.851.162.162 0 00-.108.102c-.255.736-.511 1.364-.987 1.992-1.199 1.582-2.962 2.462-4.948 2.451-1.583-.008-2.986-.587-4.21-1.736a.145.145 0 00-.14-.032c-.518.167-1.04.191-1.604.185a5.924 5.924 0 01-2.595-.622 6.058 6.058 0 01-2.146-1.781c-.203-.269-.404-.522-.551-.821a7.74 7.74 0 01-.495-1.283 6.11 6.11 0 01-.017-3.064.166.166 0 00.008-.074.115.115 0 00-.037-.064 5.958 5.958 0 01-1.38-2.202 5.196 5.196 0 01-.333-1.589 6.915 6.915 0 01.188-2.132c.45-1.484 1.309-2.648 2.577-3.493.282-.188.55-.334.802-.438.286-.12.573-.22.861-.304a.129.129 0 00.087-.087A6.016 6.016 0 015.635 2.31C6.315 1.464 7.132.846 8.086.457zm-.804 7.85a.848.848 0 00-1.473.842l1.694 2.965-1.688 2.848a.849.849 0 001.46.864l1.94-3.272a.849.849 0 00.007-.854l-1.94-3.393zm5.446 6.24a.849.849 0 000 1.695h4.848a.849.849 0 000-1.696h-4.848z"></path></svg>
-          <span class="name">Codex</span>
-        </a>
-        <a class="client" style="--brand:#4285F4" href="https://geminicli.com" target="_blank" rel="noopener noreferrer">
-          <svg viewBox="-0.57 -0.57 25.14 25.14" fill-rule="evenodd" aria-hidden="true"><path d="M20.616 10.835a14.147 14.147 0 01-4.45-3.001 14.111 14.111 0 01-3.678-6.452.503.503 0 00-.975 0 14.134 14.134 0 01-3.679 6.452 14.155 14.155 0 01-4.45 3.001c-.65.28-1.318.505-2.002.678a.502.502 0 000 .975c.684.172 1.35.397 2.002.677a14.147 14.147 0 014.45 3.001 14.112 14.112 0 013.679 6.453.502.502 0 00.975 0c.172-.685.397-1.351.677-2.003a14.145 14.145 0 013.001-4.45 14.113 14.113 0 016.453-3.678.503.503 0 000-.975 13.245 13.245 0 01-2.003-.678z"></path></svg>
-          <span class="name">Gemini</span>
-        </a>
-        <a class="client" style="--brand:#5b8cf5" href="https://zed.dev" target="_blank" rel="noopener noreferrer">
-          <svg viewBox="-1.71 -1.71 27.43 27.43" fill-rule="evenodd" aria-hidden="true"><path d="M2.25 1.5a.75.75 0 0 0-.75.75v16.5H0V2.25A2.25 2.25 0 0 1 2.25 0h20.095c1.002 0 1.504 1.212.795 1.92L10.764 14.298h3.486V12.75h1.5v1.922a1.125 1.125 0 0 1-1.125 1.125H9.264l-2.578 2.578h11.689V9h1.5v9.375a1.5 1.5 0 0 1-1.5 1.5H5.185L2.562 22.5H21.75a.75.75 0 0 0 .75-.75V5.25H24v16.5A2.25 2.25 0 0 1 21.75 24H1.655C.653 24 .151 22.788.86 22.08L13.19 9.75H9.75v1.5h-1.5V9.375A1.125 1.125 0 0 1 9.375 8.25h5.314l2.625-2.625H5.625V15h-1.5V5.625a1.5 1.5 0 0 1 1.5-1.5h13.19L21.438 1.5z"/></svg>
-          <span class="name">Zed</span>
-        </a>
-        <a class="client" style="--brand:#F34E3F" href="https://ampcode.com" target="_blank" rel="noopener noreferrer">
-          <svg viewBox="-1.82 -1.71 27.43 27.43" fill-rule="evenodd" aria-hidden="true"><path d="M15.087 23.18L12.03 24l-2.097-7.823-5.738 5.738-2.251-2.251 5.718-5.719-7.769-2.082.82-3.057 11.294 3.08 3.08 11.295z"></path><path d="M19.505 18.762l-3.057.82-2.564-9.573-9.572-2.564.819-3.057 11.295 3.079 3.08 11.295z"></path><path d="M23.893 14.374l-3.057.82-2.565-9.572L8.7 3.057 9.52 0l11.295 3.08 3.079 11.294z"></path></svg>
-          <span class="name">Amp</span>
-        </a>
-        <a class="client" style="--brand:#9046FF" href="https://kiro.dev" target="_blank" rel="noopener noreferrer">
-          <svg viewBox="-0.57 -0.44 24.87 24.87" fill-rule="evenodd" aria-hidden="true"><path d="M4.594 6.677C6.67-2.226 18.746-2.211 21.16 6.632c.353 1.297 1.725 7.582-1.673 13.747-1.545 2.797-5.841 5.49-6.99 1.883C8.6 25.477 3.315 24.1 5.789 18.609l-.318.143c-3.57 1.305-3.863-1.208-3.173-2.513.45-.84.727-1.335.937-1.897.353-.975.458-1.568.593-2.498.27-1.837.277-3.607.765-5.167zm8.37.01a.92.92 0 00-.81.428c-.217.323-.33.825-.33 1.462 0 .705.15 1.89 1.14 1.89h.008c.757 0 1.214-.705 1.214-1.89 0-.622-.127-1.125-.367-1.455a1.014 1.014 0 00-.855-.435zm4.08 0a.92.92 0 00-.81.428c-.217.323-.33.825-.33 1.462 0 .705.15 1.89 1.14 1.89h.008c.757 0 1.215-.705 1.215-1.89 0-.622-.128-1.125-.368-1.455a1.014 1.014 0 00-.855-.435z"></path></svg>
-          <span class="name">Kiro</span>
-        </a>
-        <a class="client" style="--brand:#47E054" href="https://www.jetbrains.com/junie/" target="_blank" rel="noopener noreferrer">
-          <svg viewBox="-1.71 -1.71 27.43 27.43" fill-rule="evenodd" aria-hidden="true"><path d="M24 9.333C24 18.666 20 24 9.333 24H8v-8h1.333C14 16 16 14 16 9.333V8h8v1.333zM8 16H0V8h8v8zM16 8H8V0h8v8z"></path></svg>
-          <span class="name">Junie</span>
-        </a>
-        <a class="client" style="--brand:#e9e9ed" href="https://opencode.ai" target="_blank" rel="noopener noreferrer">
-          <svg viewBox="1.78 1.78 20.44 20.44" fill-rule="evenodd" aria-hidden="true"><path d="M16 6H8v12h8V6zm4 16H4V2h16v20z"></path></svg>
-          <span class="name">opencode</span>
-        </a>
-        <a class="client" style="--brand:#3186FF" href="https://antigravity.google" target="_blank" rel="noopener noreferrer">
-          <svg viewBox="-1.16 -1.11 26.33 26.33" fill-rule="evenodd" aria-hidden="true"><path d="M21.751 22.607c1.34 1.005 3.35.335 1.508-1.508C17.73 15.74 18.904 1 12.037 1 5.17 1 6.342 15.74.815 21.1c-2.01 2.009.167 2.511 1.507 1.506 5.192-3.517 4.857-9.714 9.715-9.714 4.857 0 4.522 6.197 9.714 9.715z"></path></svg>
-          <span class="name">Antigravity</span>
-        </a>
-        <a class="client" style="--brand:#e9e9ed" href="https://cline.bot" target="_blank" rel="noopener noreferrer">
-          <svg viewBox="-1.41 -1.45 26.89 26.89" fill-rule="evenodd" aria-hidden="true"><path d="M17.035 3.991c2.75 0 4.98 2.24 4.98 5.003v1.667l1.45 2.896a1.01 1.01 0 01-.002.909l-1.448 2.864v1.668c0 2.762-2.23 5.002-4.98 5.002H7.074c-2.751 0-4.98-2.24-4.98-5.002V17.33l-1.48-2.855a1.01 1.01 0 01-.003-.927l1.482-2.887V8.994c0-2.763 2.23-5.003 4.98-5.003h9.962zM8.265 9.6a2.274 2.274 0 00-2.274 2.274v4.042a2.274 2.274 0 004.547 0v-4.042A2.274 2.274 0 008.265 9.6zm7.326 0a2.274 2.274 0 00-2.274 2.274v4.042a2.274 2.274 0 104.548 0v-4.042A2.274 2.274 0 0015.59 9.6z"></path><path d="M12.054 5.558a2.779 2.779 0 100-5.558 2.779 2.779 0 000 5.558z"></path></svg>
-          <span class="name">Cline</span>
-        </a>
-        <a class="client" style="--brand:#e9e9ed" href="https://factory.ai" target="_blank" rel="noopener noreferrer">
-          <span class="tile" aria-hidden="true">D</span>
-          <span class="name">Droid</span>
-        </a>
-        <a class="client" style="--brand:#e9e9ed" href="https://block.github.io/goose" target="_blank" rel="noopener noreferrer">
-          <svg viewBox="-1.71 -1.71 27.43 27.43" fill-rule="evenodd" aria-hidden="true"><path d="M21.595 23.61c1.167-.254 2.405-.944 2.405-.944l-2.167-1.784a12.124 12.124 0 01-2.695-3.131 12.127 12.127 0 00-3.97-4.049l-.794-.462a1.115 1.115 0 01-.488-.815.844.844 0 01.154-.575c.413-.582 2.548-3.115 2.94-3.44.503-.416 1.065-.762 1.586-1.159.074-.056.148-.112.221-.17.003-.002.007-.004.009-.007.167-.131.325-.272.45-.438.453-.524.563-.988.59-1.193-.061-.197-.244-.639-.753-1.148.319.02.705.272 1.056.569.235-.376.481-.773.727-1.171.165-.266-.08-.465-.086-.471h-.001V3.22c-.007-.007-.206-.25-.471-.086-.567.35-1.134.702-1.639 1.021 0 0-.597-.012-1.305.599a2.464 2.464 0 00-.438.45l-.007.009c-.058.072-.114.147-.17.221-.397.521-.743 1.083-1.16 1.587-.323.391-2.857 2.526-3.44 2.94a.842.842 0 01-.574.153 1.115 1.115 0 01-.815-.488l-.462-.794a12.123 12.123 0 00-4.049-3.97 12.133 12.133 0 01-3.13-2.695L1.332 0S.643 1.238.39 2.405c.352.428 1.27 1.49 2.34 2.302C1.58 4.167.73 3.75.06 3.4c-.103.765-.063 1.92.043 2.816.726.317 1.961.806 3.219 1.066-1.006.236-2.11.278-2.961.262.15.554.358 1.119.64 1.688.119.263.25.52.39.77.452.125 2.222.383 3.164.171l-2.51.897a27.776 27.776 0 002.544 2.726c2.031-1.092 2.494-1.241 4.018-2.238-2.467 2.008-3.108 2.828-3.8 3.67l-.483.678c-.25.351-.469.725-.65 1.117-.61 1.31-1.47 4.1-1.47 4.1-.154.486.202.842.674.674 0 0 2.79-.861 4.1-1.47.392-.182.766-.4 1.118-.65l.677-.483c.227-.187.453-.37.701-.586 0 0 1.705 2.02 3.458 3.349l.896-2.511c-.211.942.046 2.712.17 3.163.252.142.509.272.772.392.569.28 1.134.49 1.688.64-.016-.853.026-1.956.261-2.962.26 1.258.75 2.493 1.067 3.219.895.106 2.051.146 2.816.043a73.87 73.87 0 01-1.308-2.67c.811 1.07 1.874 1.988 2.302 2.34h-.001z"></path></svg>
-          <span class="name">Goose</span>
-        </a>
-        <a class="client" style="--brand:#e9e9ed" href="https://warp.dev" target="_blank" rel="noopener noreferrer">
-          <svg viewBox="-0.06 -0.06 24.12 24.12" fill-rule="evenodd" aria-hidden="true"><path d="M12.035 2.723h9.253A2.712 2.712 0 0 1 24 5.435v10.529a2.712 2.712 0 0 1-2.712 2.713H8.047Zm-1.681 2.6L6.766 19.677h5.598l-.399 1.6H2.712A2.712 2.712 0 0 1 0 18.565V8.036a2.712 2.712 0 0 1 2.712-2.712Z"></path></svg>
-          <span class="name">Warp</span>
-        </a>
-        <a class="client" style="--brand:#FF4D4D" href="https://github.com/openclaw/openclaw" target="_blank" rel="noopener noreferrer">
-          <svg viewBox="-1.13 -0.45 26.25 26.25" fill-rule="evenodd" aria-hidden="true"><path d="M9.046 7.104a.527.527 0 110 1.055.527.527 0 010-1.055z"></path><path d="M15.376 7.104a.528.528 0 110 1.056.528.528 0 010-1.056z"></path><path clip-rule="evenodd" d="M16.877 1.912c.58-.27 1.14-.323 1.616-.037a.317.317 0 01-.326.542c-.227-.136-.547-.153-1.022.068-.352.165-.765.45-1.234.866 2.683 1.17 4.4 3.5 5.148 5.921a6.421 6.421 0 00-.704.184c-.578.016-1.174.204-1.502.735-.338.55-.268 1.276.072 2.069l.005.012.007.014c.523 1.045 1.318 1.91 2.2 2.284-.912 3.274-3.44 6.144-5.972 6.988v2.109h-2.11v-2.11c-1.043.417-2.086.01-2.11 0v2.11h-2.11v-2.11c-2.531-.843-5.061-3.713-5.973-6.987.882-.373 1.678-1.238 2.2-2.284l.007-.014.006-.012c.34-.793.41-1.518.071-2.069-.327-.531-.923-.719-1.503-.735a6.409 6.409 0 00-.704-.183c.749-2.421 2.466-4.751 5.149-5.922-.47-.416-.88-.701-1.234-.866-.474-.221-.794-.204-1.021-.068a.318.318 0 01-.435-.109.317.317 0 01.109-.433c.476-.286 1.036-.233 1.615.037.49.229 1.031.628 1.621 1.182A9.924 9.924 0 0112 2.568c1.199 0 2.284.19 3.256.526.59-.554 1.13-.953 1.62-1.182zM8.835 6.577a1.266 1.266 0 100 2.532 1.266 1.266 0 000-2.532zm6.33 0a1.267 1.267 0 100 2.533 1.267 1.267 0 000-2.533z"></path><path d="M.395 13.118c-.966-1.932-.163-3.863 2.41-3.365v-.001l.05.01c.084.018.17.038.26.06.033.009.067.017.1.027.084.022.168.048.255.076l.09.027c.528 0 .95.158 1.16.501.212.343.212.87-.105 1.61-.085.17-.178.333-.276.489l-.01.017a4.967 4.967 0 01-.62.791l-.019.02c-1.092 1.117-2.496 1.336-3.295-.262z"></path><path d="M21.193 9.753c2.574-.5 3.378 1.433 2.411 3.365-.58 1.159-1.476 1.361-2.342.96l-.011-.005a2.419 2.419 0 01-.114-.056l-.019-.01a2.751 2.751 0 01-.115-.067l-.023-.014c-.035-.022-.071-.044-.106-.068l-.05-.035c-.55-.388-1.062-1.007-1.44-1.76-.276-.647-.311-1.132-.174-1.472.176-.439.636-.639 1.23-.639.032-.011.066-.02.099-.03.08-.026.16-.05.238-.072l.117-.03a5.502 5.502 0 01.3-.067z"></path></svg>
-          <span class="name">OpenClaw</span>
-        </a>
-        <a class="client" style="--brand:#e9e9ed" href="https://kilo.ai" target="_blank" rel="noopener noreferrer">
-          <svg viewBox="-1.71 -1.71 27.43 27.43" fill-rule="evenodd" aria-hidden="true"><path d="M0 0v24h24V0H0zm22.222 22.222H1.778V1.778h20.444v20.444zm-7.555-4.964h2.222v1.778h-2.794L12.89 17.83v-2.794h1.778v2.222zm4 0h-1.778v-2.222h-2.222v-1.778h2.793l1.207 1.207v2.793zm-7.556-2.591H9.333v-1.778h1.778v1.778zm-5.778-1.778h1.778v4h4v1.778H6.54L5.333 17.46V12.89zm13.334-3.556v1.778h-5.778V9.333h1.987V7.111h-1.987V5.333h2.558l1.206 1.207v2.793h2.014zm-11.556-2h2.222l1.778 1.778v2H9.333v-2H7.111v2H5.333V5.333h1.778v2zm4 0H9.333v-2h1.778v2z"></path></svg>
-          <span class="name">Kilo</span>
-        </a>
-        <a class="client" href="/clients.html#gap-shared-pool">
-          <svg viewBox="2.30 2.30 19.39 19.39" fill-rule="evenodd" aria-hidden="true"><path d="M3 6.5A2.5 2.5 0 0 1 5.5 4h3.4a2 2 0 0 1 1.5.7l1.1 1.3h7A2.5 2.5 0 0 1 21 8.5v9a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5v-11Zm5 6.2a1.3 1.3 0 1 0 0 2.6 1.3 1.3 0 0 0 0-2.6Zm4 0a1.3 1.3 0 1 0 0 2.6 1.3 1.3 0 0 0 0-2.6Zm4 0a1.3 1.3 0 1 0 0 2.6 1.3 1.3 0 0 0 0-2.6Z"></path></svg>
-          <span class="name">agents</span>
-        </a>
-      </div>
-      <p class="mono dim" style="font-size:12px; margin:26px 0 0; text-align:right"><a href="/clients.html">client compatibility matrix →</a></p>
-    </div>
-  </section>
-</div>
-
-<section id="install" style="border-block:1px solid var(--color-neutral-800)">
-  <div class="wrap" data-osblock style="padding-block:clamp(28px,3vw,40px)">
-    <div style="display:flex; align-items:center; gap:14px; padding-bottom:12px">
-      <span class="mono" role="radiogroup" aria-label="Platform" style="display:flex; align-items:baseline; gap:22px; font-size:12.5px; letter-spacing:0.04em">
-        <label data-osopt><input type="radio" name="os" value="unix" checked>macOS / Linux</label>
-        <label data-osopt><input type="radio" name="os" value="win">Windows</label>
-      </span>
-      <span class="spacer"></span>
-      <span class="mono dim" style="font-size:12.5px">the binary is grim</span>
-    </div>
-    <div data-os-row="unix" data-cmd style="align-items:center; gap:11.2px">
-      <pre style="flex:1; min-width:0; font-size:13.5px; line-height:28px"><span style="color:var(--color-accent)">$ </span>curl --proto '=https' --tlsv1.2 -LsSf https://setup.grimoire.rs/sh | sh</pre>
-      <button type="button" class="cmd-copy" data-copy="curl --proto '=https' --tlsv1.2 -LsSf https://setup.grimoire.rs/sh | sh">copy</button>
-    </div>
-    <div data-os-row="win" data-cmd style="align-items:center; gap:11.2px">
-      <pre style="flex:1; min-width:0; font-size:13.5px; line-height:28px"><span style="color:var(--color-accent)">&gt; </span>irm https://setup.grimoire.rs/ps1 | iex</pre>
-      <button type="button" class="cmd-copy" data-copy="irm https://setup.grimoire.rs/ps1 | iex">copy</button>
-    </div>
-    <p class="mono dim" style="font-size:12px; line-height:20px; margin:10px 0 0">The installer verifies a SHA-256 checksum before it writes anything. <a href="/installation.html">Other install methods</a>.</p>
-  </div>
-</section>
-
-<div class="wrap">
-  <section style="padding:clamp(36px,4vw,52px) 0 clamp(28px,3vw,40px)">
-    <div style="display:flex; align-items:baseline; gap:14px; border-bottom:1px solid var(--color-neutral-700); padding-bottom:11.2px">
-      <span class="mono" style="font-size:11.5px; letter-spacing:0.08em; text-transform:uppercase; color:var(--color-accent)">quick start</span>
-      <span class="spacer"></span>
-      <span class="mono dim" style="font-size:12px">copy any line</span>
-    </div>
-    <div style="padding-top:14px">
-      <div data-cmd style="display:flex; align-items:center; gap:11.2px; padding:2px 0">
-        <pre style="flex:1; min-width:0; font-size:13.5px; line-height:30px"><span style="color:var(--color-accent)">$ </span>grim init<span class="dim">                                        # create grimoire.toml</span></pre>
-        <button type="button" class="cmd-copy" data-copy="grim init">copy</button>
-      </div>
-      <div data-cmd style="display:flex; align-items:center; gap:11.2px; padding:2px 0">
-        <pre style="flex:1; min-width:0; font-size:13.5px; line-height:30px"><span style="color:var(--color-accent)">$ </span>grim add ghcr.io/grimoire-rs/skills/grim-usage<span class="dim">   # declare, lock, install</span></pre>
-        <button type="button" class="cmd-copy" data-copy="grim add ghcr.io/grimoire-rs/skills/grim-usage">copy</button>
-      </div>
-      <div data-cmd style="display:flex; align-items:center; gap:11.2px; padding:2px 0">
-        <pre style="flex:1; min-width:0; font-size:13.5px; line-height:30px"><span style="color:var(--color-accent)">$ </span>grim install<span class="dim">                                     # re-materialize after a clone</span></pre>
-        <button type="button" class="cmd-copy" data-copy="grim install">copy</button>
-      </div>
-      <div data-cmd style="display:flex; align-items:center; gap:11.2px; padding:2px 0">
-        <pre style="flex:1; min-width:0; font-size:13.5px; line-height:30px"><span style="color:var(--color-accent)">$ </span>grim update<span class="dim">                                      # roll the pins forward</span></pre>
-        <button type="button" class="cmd-copy" data-copy="grim update">copy</button>
-      </div>
-    </div>
-  </section>
-
-  <section id="index" style="padding:0 0 clamp(36px,4vw,52px); scroll-margin-top:20px">
-    <div style="display:flex; align-items:baseline; gap:14px; border-bottom:1px solid var(--color-neutral-700); padding-bottom:11.2px">
-      <span class="mono" style="font-size:11.5px; letter-spacing:0.08em; text-transform:uppercase; color:var(--color-accent)">your own index</span>
-      <span class="spacer"></span>
-      <span class="mono dim" style="font-size:12px">GitHub or GitLab Pages</span>
-    </div>
-    <div style="padding-top:16px">
-      <p style="font-size:15px; line-height:26px; margin:0; max-width:78ch">A <strong>package index</strong> is the phone book grim searches: pointers into your registries, not another copy of the packages. The public one is the default, not the system — one command scaffolds your own, and your forge's Pages serves it.</p>
-    </div>
-    <div style="padding-top:14px">
-      <div data-cmd style="display:flex; align-items:center; gap:11.2px; padding:2px 0">
-        <pre style="flex:1; min-width:0; font-size:13.5px; line-height:30px"><span style="color:var(--color-accent)">$ </span>npx @grimoire-rs/indexer init<span class="dim">                    # scaffold the index repo</span></pre>
-        <button type="button" class="cmd-copy" data-copy="npx @grimoire-rs/indexer init">copy</button>
-      </div>
-      <div data-cmd style="display:flex; align-items:center; gap:11.2px; padding:2px 0">
-        <pre style="flex:1; min-width:0; font-size:13.5px; line-height:30px"><span style="color:var(--color-accent)">$ </span>git push<span class="dim">                                         # Pages builds and serves it</span></pre>
-        <button type="button" class="cmd-copy" data-copy="git push">copy</button>
-      </div>
-      <div data-cmd style="display:flex; align-items:center; gap:11.2px; padding:2px 0">
-        <pre style="flex:1; min-width:0; font-size:13.5px; line-height:30px"><span style="color:var(--color-accent)">$ </span>grim config registry add acme --index https://acme.github.io/index</pre>
-        <button type="button" class="cmd-copy" data-copy="grim config registry add acme --index https://acme.github.io/index">copy</button>
-      </div>
-    </div>
-    <div class="fanout" style="padding-top:22px; align-items:start">
-      <div>
-        <p class="kicker">what you get</p>
-        <p style="font-size:15px; line-height:26px; margin:0; color:color-mix(in srgb, var(--color-text) 74%, transparent)">A searchable catalog site and the JSON grim resolves against, plus a contribution gate that refuses a pull request writing a namespace its author does not own. Publishers announce into it with <span class="mono">grim publish --announce</span>.</p>
-      </div>
-      <div>
-        <p class="kicker">what you run</p>
-        <p style="font-size:15px; line-height:26px; margin:0; color:color-mix(in srgb, var(--color-text) 74%, transparent)">Nothing. No index server, no database, no account — a repository on the forge you already use, private or public. <a href="/start.html">Walk through it, step by step →</a></p>
-      </div>
-    </div>
-  </section>
-
-  <section style="padding:0 0 clamp(28px,3vw,40px)">
-    <div style="display:flex; align-items:baseline; gap:14px; border-bottom:1px solid var(--color-neutral-700); padding-bottom:11.2px">
-      <span class="mono" style="font-size:11.5px; letter-spacing:0.08em; text-transform:uppercase; color:var(--color-accent)">see it run</span>
-      <span class="spacer"></span>
-      <span class="mono dim" style="font-size:12px">real grim, real registry</span>
-    </div>
-    <div style="padding-top:14px">
-      <div id="demo-player" style="border-radius:var(--radius-md); overflow:hidden; border:1px solid var(--color-neutral-800)"></div>
-      <noscript>
-        <p class="mono dim" style="font-size:12px; margin-top:8px">This demo needs JavaScript to play. The recording is plain text: <a href="/demo.cast">demo.cast</a>.</p>
-      </noscript>
-    </div>
-  </section>
-
-  <section class="fanout" style="padding:clamp(20px,2.4vw,30px) 0 clamp(36px,4vw,52px)">
-    <div>
-      <p class="kicker">one declaration</p>
-      <pre><span class="dim"># grimoire.toml</span>
-[rules]
-rust-style = <span style="color:var(--color-accent-300)">"ghcr.io/acme/rust-style:2"</span>
-
-<span class="dim"># grimoire.lock pins it to a digest
-# ghcr.io/acme/rust-style@sha256:9f2c…</span></pre>
-    </div>
-    <div>
-      <p class="kicker">what grim install writes</p>
-      <pre>.claude/rules/rust-style.md
-.cursor/rules/rust-style.mdc
-.github/instructions/rust-style.instructions.md
-.kiro/steering/rust-style.md
-.opencode/rules/rust-style.md
-<span class="dim">five clients decline rules — reported, not faked</span></pre>
-    </div>
-  </section>
-
-  <section style="padding:0 0 clamp(36px,4vw,52px)">
-    <div style="border-top:1px solid var(--color-neutral-700)">
-      <div data-spec style="display:grid; grid-template-columns:170px minmax(0,1fr); gap:0 clamp(20px,3vw,42px); padding:13px 0; border-bottom:1px solid var(--color-neutral-800)">
-        <div class="mono dim" style="font-size:13px; line-height:26px">artifacts</div>
-        <div style="font-size:15px; line-height:26px">skills · rules · agents · MCP servers · bundles that group them</div>
-      </div>
-      <div data-spec style="display:grid; grid-template-columns:170px minmax(0,1fr); gap:0 clamp(20px,3vw,42px); padding:13px 0; border-bottom:1px solid var(--color-neutral-800)">
-        <div class="mono dim" style="font-size:13px; line-height:26px">storage</div>
-        <div style="font-size:15px; line-height:26px">any OCI registry · publish your own · <a href="/hosting-an-index.html">run the index yourself</a></div>
-      </div>
-      <div data-spec style="display:grid; grid-template-columns:170px minmax(0,1fr); gap:0 clamp(20px,3vw,42px); padding:13px 0; border-bottom:1px solid var(--color-neutral-800)">
-        <div class="mono dim" style="font-size:13px; line-height:26px">interface</div>
-        <div style="font-size:15px; line-height:26px">stabilizing toward 1.0 — <a href="/stability.html">released surfaces are frozen contracts</a>, with JSON output for scripting</div>
-      </div>
-    </div>
-  </section>
-
-  <section style="padding:0 0 clamp(36px,4vw,52px)">
-    <h2 style="font-weight:500; font-size:20px; line-height:1.2; letter-spacing:-0.01em; margin:0 0 6px">Still reading?</h2>
-    <p style="font-size:15px; line-height:24px; margin:0 0 22px; color:color-mix(in srgb, var(--color-text) 66%, transparent)">A solo project heading for 1.0. Questions and issues get read.</p>
-    <div class="cards">
-      <a class="card" href="https://index.grimoire.rs">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3h8v8H3zm10 0h8v8h-8zM3 13h8v8H3zm10 0h8v8h-8z"/></svg>
-        <span><strong>Package index</strong><span>Browse what is published, and open any package straight into your editor.</span></span>
-      </a>
-      <a class="card" href="https://marketplace.visualstudio.com/items?itemName=grimoire-rs.grimoire-vscode">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.5 2A2.5 2.5 0 0 1 13 4.5V6h3.5A1.5 1.5 0 0 1 18 7.5V11h1.5a2.5 2.5 0 0 1 0 5H18v3.5a1.5 1.5 0 0 1-1.5 1.5H13v-1.5a2.5 2.5 0 0 0-5 0V21H4.5A1.5 1.5 0 0 1 3 19.5V16h1.5a2.5 2.5 0 0 0 0-5H3V7.5A1.5 1.5 0 0 1 4.5 6H8V4.5A2.5 2.5 0 0 1 10.5 2Z"/></svg>
-        <span><strong>VS Code extension</strong><span>Search, install and manage artifacts without leaving the editor.</span></span>
-      </a>
-      <a class="card" href="https://github.com/grimoire-rs/grimoire/discussions">
-        <svg viewBox="0 0 24 24" fill-rule="evenodd" aria-hidden="true"><path d="M3 5a3 3 0 0 1 3-3h12a3 3 0 0 1 3 3v8a3 3 0 0 1-3 3H9l-6 5V5Zm5 2.75a1.25 1.25 0 1 0 0 2.5 1.25 1.25 0 0 0 0-2.5Zm4 0a1.25 1.25 0 1 0 0 2.5 1.25 1.25 0 0 0 0-2.5Zm4 0a1.25 1.25 0 1 0 0 2.5 1.25 1.25 0 0 0 0-2.5Z"/></svg>
-        <span><strong>Discussions</strong><span>Ask questions, share what you built, follow where this is going.</span></span>
-      </a>
-      <a class="card" href="https://github.com/grimoire-rs/grimoire">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
-        <span><strong>GitHub</strong><span>Star the repo, file an issue, or send a patch.</span></span>
-      </a>
-    </div>
-  </section>
-
-  <footer class="mono" style="padding:0 0 clamp(40px,5vw,70px); border-top:1px solid var(--color-neutral-800); padding-top:22px; display:flex; flex-wrap:wrap; gap:12px 32px; align-items:baseline; font-size:12.5px; line-height:24px">
-    <a href="/introduction.html">documentation</a>
-    <a href="/stability.html">stability</a>
-    <a href="/privacy.html">privacy</a>
-    <a href="https://github.com/grimoire-rs/grimoire/blob/main/LICENSE">Apache-2.0</a>
-    <span class="spacer"></span>
-    <span class="dim">artifacts live in your registry, not ours</span>
-  </footer>
-</div>
-
-<script is:inline>
-    document.documentElement.classList.add('js');
-    document.addEventListener('click', function (e) {
-        const b = e.target.closest('[data-copy]');
-        if (!b || !navigator.clipboard) return;
-        navigator.clipboard.writeText(b.getAttribute('data-copy'));
-        const prev = b.textContent;
-        b.textContent = 'copied';
-        setTimeout(function () { b.textContent = prev; }, 1400);
-    });
-</script>
-<script is:inline>
-    document.addEventListener('DOMContentLoaded', function () {
-    var demo = document.getElementById('demo-player');
-    var player = AsciinemaPlayer.create('/demo.cast', demo, {
-        // Plays once. A looping terminal in the corner of the eye reads as
-        // motion to dismiss rather than something to watch; the player keeps
-        // its controls, so a second viewing is a click away.
-        loop: false,
-        // Cap dead air. The recorded `grim add` blocked 13.6s on the
-        // recording host's network — over half the cast was a frozen
-        // screen, which reads as "the tool is slow" rather than "the
-        // registry was far away". A local cold add runs in ~1s.
-        idleTimeLimit: 1,
-        // Fetch up front so playback starts the instant it is asked to.
-        preload: true,
-    });
-
-    // Start when the player is actually on screen, not on load. It sits below
-    // the hero and runs ~10s after `idleTimeLimit`, so autoplaying at load
-    // meant a one-shot cast finished before most people scrolled to it — the
-    // looping version only ever hid that. Fires once, then stops observing.
-    if (window.IntersectionObserver) {
-        var seen = new IntersectionObserver(function (entries) {
-            if (!entries.some(function (e) { return e.isIntersecting; })) return;
-            seen.disconnect();
-            player.play();
-        }, { threshold: 0.4 });
-        seen.observe(demo);
-    } else {
-        player.play();
-    }
-    });
-</script>
-
   </div>
 </StarlightPage>
 
 <style is:global>
-:root {
-  --color-bg: #161826;
-  --color-text: #e9e9ed;
-  --color-accent: #9184d9;
-  --color-accent-300: #d2cefd;
-  --color-accent-900: #2b2741;
-  --color-neutral-700: #595d6c;
-  --color-neutral-800: #3f424d;
-  --radius-sm: 4px;
-  --radius-md: 8px;
-  --font-heading: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --font-body: var(--font-heading);
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-}
+  /* The canvas's glow: one accent wash off the top-right corner over the page
+     ground. It is the landing's alone — `theme.css` maps the palette for all
+     34 pages and deliberately leaves the ground flat. */
+  body {
+    background:
+      radial-gradient(
+        1100px 640px at 88% -220px,
+        color-mix(in srgb, var(--sl-color-accent-low) 62%, transparent),
+        transparent 62%
+      ),
+      var(--sl-color-bg);
+  }
 
-*, *::before, *::after { box-sizing: border-box; }
+  /* — the landing's own column —
+     `Main.dc.html` is a 1160px column with 64px gutters. The bar and the
+     footer get the same treatment below so the three line up. */
+  .wrap {
+    max-width: 1160px;
+    margin: 0 auto;
+    padding-inline: clamp(20px, 5vw, 64px);
+  }
 
-body {
-  margin: 0;
-  font-family: var(--font-body);
-  font-size: 15px;
-  line-height: 1.55;
-  color: var(--color-text);
-  text-wrap: pretty;
-  background:
-    radial-gradient(1100px 640px at 88% -220px, color-mix(in srgb, var(--color-accent-900) 62%, transparent), transparent 62%),
-    var(--color-bg);
-}
+  /* — hero — */
+  .hero {
+    padding: clamp(40px, 4.5vw, 60px) 0 clamp(36px, 3.6vw, 48px);
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 0.92fr);
+    gap: 0 clamp(32px, 5vw, 72px);
+    align-items: center;
+  }
 
-a { color: var(--color-accent-300); text-decoration-color: color-mix(in srgb, var(--color-accent) 40%, transparent); text-underline-offset: 3px; }
-a:hover { color: var(--color-accent); }
-:focus { outline: none; }
-:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
-::selection { background: color-mix(in srgb, var(--color-accent) 30%, transparent); }
+  .hero h1 {
+    font-weight: 500;
+    font-size: clamp(32px, 3.4vw, 44px);
+    line-height: 1.14;
+    letter-spacing: -0.02em;
+    /* The negative inline start pulls the cap of the "A" onto the column
+       edge; an optical correction, not a layout offset. */
+    margin: 0 0 0 -0.04em;
+    color: var(--sl-color-white);
+  }
 
-.wrap { max-width: 1160px; margin: 0 auto; padding-inline: clamp(20px, 5vw, 64px); }
-.mono { font-family: var(--font-mono); }
-.kicker { font-family: var(--font-mono); font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; margin: 0 0 12px; color: color-mix(in srgb, var(--color-text) 55%, transparent); }
-.spacer { flex: 1; }
-.dim { color: color-mix(in srgb, var(--color-text) 52%, transparent); }
+  .lede {
+    font-size: 16.5px;
+    line-height: 28px;
+    margin: 22px 0 0;
+    max-width: 46ch;
+    color: var(--sl-color-gray-2);
+  }
 
-pre { margin: 0; overflow-x: auto; font-family: var(--font-mono); }
-pre::-webkit-scrollbar { height: 6px; }
-pre::-webkit-scrollbar-thumb { background: var(--color-neutral-700); border-radius: 6px; }
+  .ctas {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    margin-top: 30px;
+  }
 
-/* — calls to action — */
-.cta {
-  display: inline-flex; align-items: center; gap: 8px;
-  padding: 11px 20px; border-radius: var(--radius-md);
-  font-family: var(--font-heading); font-weight: 500; font-size: 14.5px; line-height: 1.2;
-  text-decoration: none; white-space: nowrap;
-}
-.cta-primary { color: #14121f; background: var(--color-accent); }
-.cta-primary:hover { color: #14121f; background: var(--color-accent-300); }
-.cta-secondary { color: var(--color-text); border: 1px solid var(--color-neutral-700); }
-.cta-secondary:hover { color: var(--color-text); background: color-mix(in srgb, var(--color-text) 7%, transparent); }
+  .cta {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 11px 20px;
+    border-radius: 8px;
+    font-weight: 500;
+    font-size: 14.5px;
+    line-height: 1.2;
+    text-decoration: none;
+    white-space: nowrap;
+  }
 
-/* — invitation cards (shape borrowed from the ocx website's closing row) — */
-.cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
-.card {
-  display: flex; gap: 13px; align-items: flex-start;
-  padding: 17px 18px; border-radius: var(--radius-md);
-  border: 1px solid var(--color-neutral-800);
-  text-decoration: none; color: inherit;
-  transition: border-color 140ms ease, background-color 140ms ease;
-}
-.card:hover, .card:focus-visible {
-  border-color: color-mix(in srgb, var(--color-accent) 60%, transparent);
-  background: color-mix(in srgb, var(--color-accent) 7%, transparent);
-  color: inherit;
-}
-.card svg {
-  display: block; flex: none; width: 21px; height: 21px; margin-top: 1px;
-  fill: color-mix(in srgb, var(--color-text) 52%, transparent);
-  transition: fill 140ms ease;
-}
-.card:hover svg, .card:focus-visible svg { fill: var(--color-accent); }
-.card strong { display: block; font-weight: 500; font-size: 14px; line-height: 20px; margin-bottom: 3px; }
-.card span { display: block; font-size: 12.5px; line-height: 19px; color: color-mix(in srgb, var(--color-text) 58%, transparent); }
+  /* Ink on accent, not a token: this is the one place the palette needs a
+     colour dark enough to read on `--sl-color-accent`, and no `--sl-color-*`
+     is defined for it. */
+  .cta-primary {
+    color: #14121f;
+    background: var(--sl-color-accent);
+  }
 
-/* — client marks — */
-.clients { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 26px 8px; }
-.client {
-  display: flex; flex-direction: column; align-items: center; gap: 9px;
-  text-align: center; text-decoration: none;
-  color: color-mix(in srgb, var(--color-text) 58%, transparent);
-  transition: color 140ms ease;
-}
-.client:hover, .client:focus-visible { color: var(--brand, var(--color-accent)); }
-.client svg { display: block; width: 27px; height: 27px; fill: currentColor; }
-/* Droid's fallback. Its border is its ink, so it matches the ink the marks
-   carry (21 of their 24 units → 23.6px), not their full 27px viewport. */
-.client .tile {
-  width: 23px; height: 23px; display: grid; place-items: center;
-  border: 1px solid currentColor; border-radius: 7px;
-  font-family: var(--font-mono); font-size: 11px; line-height: 1;
-}
-.client .name {
-  font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.01em;
-  color: color-mix(in srgb, var(--color-text) 62%, transparent);
-}
-.client:hover .name, .client:focus-visible .name { color: color-mix(in srgb, var(--color-text) 88%, transparent); }
+  .cta-primary:hover {
+    color: #14121f;
+    background: var(--sl-color-accent-high);
+  }
 
-/* — the fan-out: one declaration, the files each client actually gets.
-     Flat and full width. Splitting it narrower clips
-     `.github/instructions/rust-style.instructions.md`, and a truncated file
-     path reads as a broken page rather than as something you can scroll. */
-.fanout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0 clamp(24px, 4vw, 56px); }
-.fanout pre { font-size: 12.5px; line-height: 24px; }
-.fanout > * + * { border-left: 1px solid var(--color-neutral-800); padding-left: clamp(24px, 4vw, 56px); }
+  .cta-secondary {
+    color: var(--sl-color-white);
+    border: 1px solid var(--sl-color-gray-4);
+  }
 
-/* — copy buttons: inert without JS, so they only appear once wired up — */
-.cmd-copy { display: none; }
-.js .cmd-copy {
-  display: inline-flex; align-items: center; justify-content: center;
-  flex: none; white-space: nowrap; cursor: pointer;
-  font-family: var(--font-heading); font-weight: 500; font-size: 14px; line-height: 1.2;
-  color: var(--color-accent); background: transparent;
-  border: 1px solid transparent; border-radius: var(--radius-md);
-  padding: 5.6px 2.8px;
-  opacity: 0.45; transition: opacity 120ms ease;
-}
-.cmd-copy:hover { background: color-mix(in srgb, var(--color-accent) 10%, transparent); }
-[data-cmd]:hover .cmd-copy, [data-cmd]:focus-within .cmd-copy { opacity: 1; }
+  .cta-secondary:hover {
+    color: var(--sl-color-white);
+    background: var(--sl-color-gray-6);
+  }
 
-/* — OS switch: radio + :has(), no script — */
-[data-os-row] { display: flex; }
-[data-osblock]:has(input[value="win"]:checked) [data-os-row="unix"] { display: none; }
-[data-osblock]:not(:has(input[value="win"]:checked)) [data-os-row="win"] { display: none; }
-[data-osopt] { white-space: nowrap; cursor: pointer; color: color-mix(in srgb, var(--color-text) 45%, transparent); transition: color 120ms ease; }
-[data-osopt]:hover { color: color-mix(in srgb, var(--color-text) 75%, transparent); }
-[data-osopt]:has(input:checked) { color: var(--color-accent); }
-[data-osopt] input { position: absolute; opacity: 0; width: 0; height: 0; pointer-events: none; }
-[data-osopt]:has(input:focus-visible) { outline: 2px solid var(--color-accent); outline-offset: 3px; border-radius: var(--radius-sm); }
+  /* — the cast, in the hero's right column — */
+  .cast {
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 8px;
+    overflow: hidden;
+  }
 
-/* Single-column collapse. `minmax(0, 1fr)`, never bare `1fr` — a bare `fr`
-   track floors at min-content, which a long command or file path pushes wider
-   than the viewport. The zero floor lets each `pre` scroll inside itself. */
-@media (max-width: 940px) {
-  [data-hero] { grid-template-columns: minmax(0, 1fr) !important; gap: 44px 0 !important; }
-  .fanout { grid-template-columns: minmax(0, 1fr); }
-  .fanout > * + * { border-left: 0; padding-left: 0; margin-top: 24px; padding-top: 24px; border-top: 1px solid var(--color-neutral-800); }
-  [data-spec] { grid-template-columns: minmax(0, 1fr) !important; gap: 0 !important; }
-}
-@media (max-width: 940px) { .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 560px) {
-  [data-navlinks] { display: none !important; }
-  .clients { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 22px 8px; }
-  .cards { grid-template-columns: minmax(0, 1fr); }
-}
+  .cast-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--sl-color-gray-5);
+    background: var(--sl-color-gray-6);
+    font-family: var(--sl-font-mono);
+  }
 
-/* — Starlight chrome neutralisation —
-   W1 rehosts the mdBook landing inside Starlight's shell, so the page now sits
-   inside a document frame it was never written for. These rules strip that
-   frame back to nothing, so the landing renders as the standalone, full-bleed
-   document it already is. Nothing here is a design decision: WP-R rebuilds the
-   landing for real and this block goes with it.
+  .cast-kicker {
+    font-size: 11.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--sl-color-accent);
+  }
 
-   Astro emits `is:global` styles unlayered and Starlight's own rules live in
-   `@layer starlight.core`, so unlayered wins without `!important`. The one
-   exception is `main`'s padding, which Starlight sets from an unlayered scoped
-   rule in `Page.astro` — that one is out-specified instead. */
+  .cast-note {
+    margin-inline-start: auto;
+    font-size: 12px;
+    color: var(--sl-color-gray-3);
+  }
 
-/* The fixed site header, and the skip link that targets the page title. */
-.page > .header { display: none; }
-.sl-skip-link { display: none; }
+  .cast-fallback {
+    margin: 0;
+    padding: 12px 14px;
+    font-family: var(--sl-font-mono);
+    font-size: 12px;
+    color: var(--sl-color-gray-3);
+  }
 
-/* The landing carries its own <h1> and its own <footer>. Starlight's footer is
-   a direct child of `.sl-container`; the landing's sits deeper, inside
-   `.sl-markdown-content`, so the child combinators leave it alone. */
-h1#_top { display: none; }
-main > .content-panel > .sl-container > footer { display: none; }
+  /* Single-column collapse. `minmax(0, 1fr)`, never bare `1fr` — a bare `fr`
+     track floors at min-content, which the terminal's widest line pushes
+     wider than the viewport. The zero floor lets the player scroll instead. */
+  @media (max-width: 940px) {
+    .hero {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 44px 0;
+    }
+  }
 
-/* `.main-frame`'s top padding exists only to clear the now-hidden header, and
-   `scroll-padding-top` only to keep an anchor jump clear of it. With the header
-   gone both are dead offsets — leaving the second one makes the "Install grim"
-   button land 5rem short of the `#install` band it points at. */
-.main-frame { padding-top: 0; }
-html { scroll-padding-top: 0; }
+  /* — Starlight chrome, kept or dropped —
+     The landing is a `splash` page rendered full-bleed inside Starlight's
+     shell, so the frame is stripped back to the bar and the footer and the
+     `.wrap` above supplies every gutter.
 
-/* The landing's own `.wrap` supplies the width and the gutters, and its
-   `#install` band is deliberately full-bleed. */
-.page .main-frame main { padding: 0; }
-.content-panel { padding: 0; }
-.content-panel + .content-panel { border-top: 0; }
-.sl-container { max-width: none; margin-inline: 0; }
-.sl-container > * + * { margin-top: 0; }
+     Astro emits `is:global` styles unlayered and Starlight's own rules live in
+     `@layer starlight.core`, so unlayered wins without `!important`. The one
+     exception is `main`'s padding, which Starlight sets from an unlayered
+     scoped rule in `Page.astro` — that one is out-specified instead. */
+
+  /* The bar is Starlight's (C-020 `Header.astro`); the canvas centres it on
+     the same 1160px column the content uses. PageFrame pads the fixed
+     wrapper, so the padding moves inward onto the element that is now
+     width-capped, or the two gutters would add up. */
+  .page > .header {
+    padding-inline: 0;
+  }
+
+  .page > .header > .header {
+    max-width: 1160px;
+    margin-inline: auto;
+    padding-inline: clamp(20px, 5vw, 64px);
+  }
+
+  /* Starlight's own footer is the Edit-page link and prev/next; the landing is
+     in neither the sidebar nor the repo's page tree, so both render empty. The
+     chain matches only that one: `SiteFooter.astro`'s `<footer
+     class="grim-footer">` is a sibling of `<main>`, not inside `.sl-container`,
+     and it stays — that one is the four-group nav and the five site links. */
+  main > .content-panel > .sl-container > footer {
+    display: none;
+  }
+
+  /* Line the footer block up with the bar and the content. `SiteFooter.astro`
+     reads these two, so the landing's wider column is a definition here rather
+     than a rule out-specifying its scoped styles.
+
+     The two numbers are not interchangeable. `.wrap` and the bar cap their
+     OUTER box at 1160px and pad inward, so what a reader sees spans 1160px
+     less both gutters. The footer's cap sits on `.inner`, inside the padding,
+     so the same 1160px there ran the nav and the site links one full gutter
+     wider on each side than everything above them. Subtract both. */
+  .main-pane {
+    --grim-footer-pad: clamp(20px, 5vw, 64px);
+    --grim-footer-width: calc(1160px - 2 * var(--grim-footer-pad));
+  }
+
+  /* The landing carries its own headline, so Starlight's page title is taken
+     out of the layout — but visually, not from the document. `SkipLink.astro`
+     hardcodes `#_top` as its only target, and `display: none` leaves the skip
+     link pointing at nothing focusable: with the bar now rendering here, that
+     would be six header controls a keyboard user has to tab through with no
+     way past them. Clipped instead, so the target stands. */
+  h1#_top {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  /* The landing's own `.wrap` supplies the width and the gutters. */
+  .page .main-frame main {
+    padding: 0;
+  }
+
+  .content-panel {
+    padding: 0;
+  }
+
+  .content-panel + .content-panel {
+    border-top: 0;
+  }
+
+  .sl-container {
+    max-width: none;
+    margin-inline: 0;
+  }
+
+  .sl-container > * + * {
+    margin-top: 0;
+  }
 </style>

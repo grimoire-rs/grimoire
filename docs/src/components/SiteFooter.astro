@@ -1,0 +1,107 @@
+---
+// C-020 site footer — the four-group nav plus the five site links `docs/seo.py`
+// injected into every chapter page before it was deleted (C-018).
+//
+// The five links are a Principle 9 surface: they shipped on all 21 chapter
+// pages, so they must keep shipping.
+//
+// This used to live in a `Footer` component override, which put it inside
+// `<main>` — Starlight's `Page.astro` renders `<Footer />` inside a
+// `<ContentPanel>` inside `<main>`, in both its hero and non-hero branches.
+// A `<footer>` descended from `<main>` is not a `contentinfo` landmark, so
+// `seo.py`'s footer (inserted after `</main>`) was the last one this site had.
+// `TwoColumnContent.astro` renders this one as a sibling of `<main>` instead,
+// which is the nearest override slot outside it.
+//
+// `<footer>`, not the `<div>` the override used. The div existed to keep
+// `index.astro`'s `.sl-container > footer` rule pointed at Starlight's own
+// footer alone; out here nothing is inside `.sl-container`, so the element can
+// be what it is. `landing_check.py` reads the five hrefs out of the
+// `grim-footer` block: grepping the page text would pass on a footer that is
+// present in the HTML and hidden by CSS, which is the state PR 1 left the
+// landing in.
+//
+// Link list verbatim from `seo.py`'s FOOTER_LINKS apart from one forced
+// substitution — `{root}X` -> `/X`, because the site is flat and C-002 ships
+// root-absolute `.html` URLs.
+import FooterNav from './FooterNav.astro';
+
+const links = [
+  ['/index.html', 'home'],
+  ['/introduction.html', 'documentation'],
+  ['/stability.html', 'stability'],
+  ['/privacy.html', 'privacy'],
+  ['https://github.com/grimoire-rs/grimoire/blob/main/LICENSE', 'Apache-2.0'],
+];
+---
+
+<footer class="grim-footer">
+  <div class="inner">
+    <FooterNav />
+    <div class="site-links">
+      {links.map(([href, label]) => <a href={href}>{label}</a>)}
+      <span class="note">artifacts live in your registry, not ours</span>
+    </div>
+  </div>
+</footer>
+
+<style>
+  /* Outside `<main>` there is no `ContentPanel` supplying the content column,
+     so the two numbers that column is made of are restated here: its inline
+     padding on the outer element, its width cap on the inner one. Both read
+     Starlight's own tokens, and `--sl-content-margin-inline` is set by
+     `TwoColumnContent` on `.main-pane`, which is this element's parent — so
+     the footer lands on exactly the column the content above it uses.
+
+     Both are read through a `--grim-footer-*` indirection so the landing,
+     which sits on a wider column of its own, can redefine them on `.main-pane`
+     instead of out-specifying these two rules. */
+  .grim-footer {
+    padding-inline: var(--grim-footer-pad, var(--sl-content-pad-x));
+  }
+
+  .inner {
+    max-width: var(--grim-footer-width, var(--sl-content-width));
+    margin-top: 3rem;
+    padding-top: 2rem;
+    padding-bottom: clamp(40px, 5vw, 70px);
+    border-top: 1px solid var(--sl-color-hairline);
+  }
+
+  @media (min-width: 72rem) {
+    .inner {
+      margin-inline: var(--sl-content-margin-inline, auto);
+    }
+  }
+
+  .site-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 32px;
+    align-items: baseline;
+    margin-top: 22px;
+    font-family: var(--sl-font-mono);
+    font-size: 12.5px;
+    line-height: 24px;
+  }
+
+  .site-links a {
+    color: var(--sl-color-accent-high);
+    text-decoration: none;
+  }
+
+  .site-links a:hover {
+    color: var(--sl-color-accent);
+  }
+
+  .note {
+    margin-inline-start: auto;
+    color: var(--sl-color-gray-3);
+  }
+
+  @media (max-width: 560px) {
+    .note {
+      margin-inline-start: 0;
+    }
+  }
+</style>

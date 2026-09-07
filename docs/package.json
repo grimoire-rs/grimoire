@@ -9,7 +9,8 @@
   "scripts": {
     "build": "astro build",
     "dev": "astro dev",
-    "preview": "astro preview"
+    "preview": "astro preview",
+    "test": "node --test \"src/data/*.test.ts\""
   },
   "dependencies": {
     "@astrojs/markdown-remark": "7.3.0",

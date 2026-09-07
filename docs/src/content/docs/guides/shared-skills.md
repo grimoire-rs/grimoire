@@ -5,7 +5,7 @@ description: "Commit one directory of skills and rules every contributor's agent
 <!-- doc_type: how-to -->
 <!-- doc_tier: everyday -->
 
-This guide keeps a repository's skills and rules in one committed directory every agent reads, plus a machine-wide set installed from a registry. It assumes `grim` is on your `PATH` and a repository you can commit to.
+This guide keeps a repository's skills and rules in one committed directory every agent reads, plus a machine-wide set installed from a registry. An MCP server joins the same declaration, one kind further down. It assumes `grim` is on your `PATH` and a repository you can commit to.
 
 ## The repository's own directory
 
@@ -140,6 +140,18 @@ Project scope does not help here, because the artifact is not tied to one checko
    ```
 
 The result table prints one row and names one target, so step 3 is not optional. There is no single directory both agents read here. What there is instead is one lock entry rendering two byte-identical copies, and one [`grim update --global`](../commands.md#update) rolling both forward together.
+
+## An MCP server in the same list
+
+A server descriptor has the same problem and a different shape. Nothing lands under `skills/` or `rules/`: grim splices an entry into each client's own MCP config, in that client's own format.
+
+```sh
+grim add ghcr.io/grimoire-rs/mcp/grim
+```
+
+One `added` row comes back, and `.mcp.json`, `.cursor/mcp.json` and `.codex/config.toml` each gain one entry. The reference has to come from a registry. Path sources work for skills and rules, not for this kind.
+
+[One MCP server in every agent](./mcp-everywhere.md) walks through each client's config file and what its entry looks like.
 
 ## When a client declines a kind
 

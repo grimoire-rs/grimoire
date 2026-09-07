@@ -1,0 +1,27 @@
+---
+// Exists for one reason: to put the site footer outside `<main>`.
+//
+// Starlight's `Page.astro` renders `<Footer />` inside a `<ContentPanel>`
+// inside `<main>` — both the hero branch and the non-hero one — so a `Footer`
+// override can only ever land there, and a `<footer>` descended from `<main>`
+// is not a `contentinfo` landmark. `role="contentinfo"` would not help: the
+// role is ignored on a descendant of `main`.
+//
+// `TwoColumnContent` is the nearest overridable component whose default slot
+// is a sibling position to `<main>` rather than inside it: it renders
+// `<div class="main-pane"><slot /></div>`, and `Page.astro` passes `<main>` as
+// that slot. Appending after the forwarded slot puts the footer in
+// `.main-pane`, beside `<main>` and inside the same content column.
+//
+// Composed, not replaced — `<Default>` keeps Starlight's own right-sidebar
+// markup and its `.main-pane` sizing rules, which is what the footer inherits
+// `--sl-content-margin-inline` from.
+import Default from '@astrojs/starlight/components/TwoColumnContent.astro';
+import SiteFooter from './SiteFooter.astro';
+---
+
+<Default>
+  <slot name="right-sidebar" slot="right-sidebar" />
+  <slot />
+  <SiteFooter />
+</Default>
