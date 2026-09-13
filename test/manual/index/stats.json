@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-10T09:00:00Z",
+  "providers": {
+    "rating": "github",
+    "rating_host": "api.github.com",
+    "downloads": "artifactory"
+  },
+  "entries": {
+    "localhost:5050/grimoire/skills/code-reviewer": {
+      "rating": {
+        "up": 42,
+        "target": "D_kwDOManualRig01",
+        "url": "https://github.com/grimoire-rs/grimoire/discussions/1"
+      },
+      "downloads": {
+        "total": 1416,
+        "versions": {
+          "1.2.0": 900,
+          "1.1.0": 400,
+          "1.0.0": 100
+        },
+        "as_of": "2026-09-09T23:00:00Z"
+      }
+    },
+    "localhost:5050/grimoire/skills/support-desk": {
+      "downloads": {
+        "total": 250412,
+        "as_of": "2026-09-09T23:00:00Z"
+      }
+    },
+    "localhost:5050/grimoire/skills/hello-world": {
+      "rating": {
+        "up": 3,
+        "target": "D_kwDOManualRig02",
+        "url": "https://github.com/grimoire-rs/grimoire/discussions/2"
+      },
+      "downloads": {
+        "total": 87,
+        "as_of": "2026-09-09T23:00:00Z"
+      }
+    },
+    "localhost:5050/grimoire/skills/commit-helper": {
+      "rating": {
+        "up": 7,
+        "target": "D_kwDOManualRig03",
+        "url": "https://github.com/grimoire-rs/grimoire/discussions/3"
+      }
+    },
+    "localhost:5050/grimoire/skills/old-reviewer": {
+      "rating": {
+        "up": 1,
+        "target": "D_kwDOManualRig04",
+        "url": "https://github.com/grimoire-rs/grimoire/discussions/4"
+      },
+      "downloads": {
+        "total": 0,
+        "as_of": "2026-09-09T23:00:00Z"
+      }
+    },
+    "localhost:5050/grimoire/rules/rust-style": {
+      "downloads": {
+        "total": 12
+      }
+    },
+    "localhost:5050/grimoire/rules/security-baseline": {
+      "rating": {
+        "up": 15,
+        "target": "D_kwDOManualRig05",
+        "url": "https://github.com/grimoire-rs/grimoire/discussions/5"
+      },
+      "downloads": {
+        "total": 640,
+        "as_of": "2026-06-02T04:30:00Z"
+      }
+    },
+    "localhost:5051/tools/skills/commit-helper": {
+      "downloads": {
+        "total": 31,
+        "as_of": "2026-09-09T23:00:00Z"
+      }
+    },
+    "localhost:5050/grimoire/agents/reviewer": {
+      "downloads": {
+        "total": 0,
+        "as_of": "2026-09-09T23:00:00Z"
+      }
+    }
+  }
+}

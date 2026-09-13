@@ -2,7 +2,7 @@
 # Tear down manual-rig state.
 #
 #   test/manual/scripts/teardown.sh              # wipe rig GRIM_HOME + materialized files
-#   test/manual/scripts/teardown.sh --registry   # also stop the compose registry
+#   test/manual/scripts/teardown.sh --registry   # also stop every compose service
 #
 # The committed catalog/ and project/grimoire.toml are never touched.
 set -euo pipefail
@@ -23,7 +23,7 @@ rm -rf \
     "$MANUAL_DIR/project/grimoire.lock"
 
 if [ "${1:-}" = "--registry" ]; then
-    log "stopping compose registry"
+    log "stopping compose services (both registries + the static index)"
     docker compose -f "$MANUAL_DIR/docker-compose.yml" down -v
 fi
 

@@ -7,7 +7,14 @@
 # Two registries exist so the rig can exercise the multi-registry feature
 # (`[[registries]]` aliases, browse-all-declared): 5050 hosts the primary
 # `grimoire` catalog, 5051 hosts a small `tools` subset (see bootstrap.sh
-# and project-multi/). A single `docker compose up -d` starts both.
+# and project-multi/). A single `docker compose up -d` starts all three
+# services.
+#
+# The third is a static file server on 5052 holding an HTTP INDEX — the only
+# transport that carries the `stats.json` sidecar, and therefore the only way
+# ratings and download counts are reviewable at all. An OCI `_catalog` browse
+# has no sidecar to read, so without this service every row in the rig is
+# permanently unrated and uncounted. See index/README.md.
 services:
   registry:
     image: registry:2
@@ -24,6 +31,18 @@ services:
       - "5051:5000"
     volumes:
       - grim-manual-registry-2-data:/var/lib/registry
+
+  # Static HTTP index. Serves the committed fixture in ./index verbatim —
+  # `all.json` (the phone book) and `stats.json` (ratings + download counts).
+  # Read-only bind mount, no build step: edit the JSON and the next `grim
+  # search --refresh` sees it.
+  index:
+    image: nginx:alpine
+    container_name: grim-manual-index
+    ports:
+      - "5052:80"
+    volumes:
+      - ./index:/usr/share/nginx/html:ro
 
 volumes:
   grim-manual-registry-data:
