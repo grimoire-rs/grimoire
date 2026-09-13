@@ -42,13 +42,25 @@ INDEX_URL="http://localhost:5052"
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 
 # 1. Build the binary the pytest harness path expects, if missing/stale.
-if [ ! -x "$REPO_ROOT/test/bin/grim" ] ||
-    [ "$REPO_ROOT/Cargo.toml" -nt "$REPO_ROOT/test/bin/grim" ]; then
+#
+#    Staleness is judged against `src/**/*.rs`, not `Cargo.toml` alone. An
+#    ordinary source edit leaves the manifest untouched, so the old check
+#    silently served a binary from BEFORE the feature under review — and the
+#    VS Code launch configs put this path first on PATH, which makes the stale
+#    binary the one the extension talks to.
+GRIM="$REPO_ROOT/test/bin/grim"
+needs_build=1
+if [ -x "$GRIM" ] &&
+    [ ! "$REPO_ROOT/Cargo.toml" -nt "$GRIM" ] &&
+    [ -z "$(find "$REPO_ROOT/src" -name '*.rs' -newer "$GRIM" -print -quit)" ]; then
+    needs_build=0
+fi
+if [ "$needs_build" -eq 1 ]; then
     log "building release grim"
     (cd "$REPO_ROOT" && cargo build --release --locked)
-    cp "$REPO_ROOT/target/release/grim" "$REPO_ROOT/test/bin/grim"
+    cp "$REPO_ROOT/target/release/grim" "$GRIM"
 fi
-GRIM="$REPO_ROOT/test/bin/grim"
+log "rig grim: $("$GRIM" --version)"
 
 # 2. Ensure both registries are reachable (reuse running ones, else compose).
 #    A single `compose up -d` starts both services; bring it up if EITHER
