@@ -26,15 +26,18 @@ project, and a `teardown.sh`.
 | `catalog/bundles/starter-pack.toml` | Bundle v1 member set (committed) |
 | `catalog/bundles/starter-pack-v2.toml` | Bundle v2 member set — adds + removes members (committed) |
 | `catalog/bundles/review-pack.toml` | Bundle sharing `code-reviewer` with starter-pack + an agent member (committed) |
-| `project/grimoire.toml` | Ready-made single-registry consumer project (floating `:1` tags) |
+| `index/all.json` | Static HTTP index phone book — the same refs the registries serve (committed) |
+| `index/stats.json` | Publisher-statistics sidecar: ratings + download counts (committed) |
+| `index/README.md` | What each fixture row demonstrates, and why the index exists at all |
+| `project/grimoire.toml` | Ready-made consumer project (floating `:1` tags) — the OCI registry plus the static index |
 | `project-multi/grimoire.toml` | Multi-registry consumer project (`[[registries]]` aliases across 5050 + 5051) |
 | `scripts/env.sh` | `source` it to point `grim` at the rig |
-| `scripts/bootstrap.sh` | Build `grim`, start both registries, publish the version matrix + multi-registry subset + deep-fold solo package + the annotation showcase, write the global two-registry config |
+| `scripts/bootstrap.sh` | Build `grim`, start both registries + the static index, publish the version matrix + multi-registry subset + deep-fold solo package + the annotation showcase, write the global registry config |
 | `scripts/release-update.sh` | Publish `code-reviewer` 1.3.0 (post-lock outdated / rolling-release demo) |
 | `scripts/teardown.sh` | Wipe rig state (`--registry` also stops both registries) |
-| `docker-compose.yml` | `registry:2` on `localhost:5050` (primary) and `localhost:5051` (`tools` subset) |
+| `docker-compose.yml` | `registry:2` on `localhost:5050` (primary) and `localhost:5051` (`tools` subset), plus `nginx` on `localhost:5052` serving `index/` |
 | `.grim-home/` | Isolated `GRIM_HOME` (gitignored, ephemeral) |
-| `.grim-home/grimoire.toml` | Global config bootstrap writes via `grim config` — two `[[registries]]` (5050/grimoire default + 5051/tools); browse both from anywhere with `--global` |
+| `.grim-home/grimoire.toml` | Global config bootstrap writes via `grim config` — three `[[registries]]` (5050/grimoire default + 5051/tools + the 5052 index); browse all of them from anywhere with `--global` |
 
 ## Quick start
 
@@ -594,6 +597,38 @@ grim build test/manual/catalog/skills/hello-world --no-git --format json
 `--git` is what opts *in* to publishing the `origin` remote and the commit
 author's name — the two values that name internal infrastructure and a
 person. Neither is ever derived by default.
+
+### 10. Ratings and download counts (the `stats.json` sidecar)
+
+**Only the static index carries these.** Sidecar stats ride the HTTP index
+transport — an OCI `_catalog` browse has no `stats.json` to fetch — so the
+`index` service on port 5052 is the one source in the rig whose rows are rated
+and counted. Both registries are OCI; without it every row is permanently
+unrated and uncounted.
+
+```sh
+grim search --format json | jq '.items[] | select(.rating or .downloads)
+  | {repo, up: .rating.up, pulls: .downloads.total, as_of: .downloads.as_of}'
+grim tui                        # detail pane: `Rating:` and `Downloads:` rows
+```
+
+What to look for, and the absences that matter as much as the figures:
+
+| Row | Check |
+|---|---|
+| `skills/code-reviewer` | Both signals. `Downloads: 1416 (as of 2026-09-09)`. Its `versions` map sums to 1400 — `total` is **not** the sum, the other 16 came through a channel tag naming no release. |
+| `skills/support-desk` | Counted, unrated — 250412, large enough to exercise the extension's compact badge (`250K`). |
+| `skills/commit-helper` | Rated, **uncounted**: `downloads` is `null`, and no `Downloads:` row appears. This is what every GHCR- or GitLab-backed row looks like. |
+| `agents/reviewer` | A measured **zero**. It renders `0` and must not read the same as the row above — `null` is unknown, `0` is "counted, nobody pulled it". |
+| `rules/rust-style` | A count with no `as_of`: the figure shows, the "as of" clause does not. |
+| `rules/security-baseline` | A stamp three months behind the sidecar's `generated_at`, so the date is visibly not today. |
+| `localhost:5051/tools/...` | An index serves rows from arbitrary hosts; the join keys on the full ref. |
+| everything else | Neither signal — the common case, and there should be plenty of it. |
+
+The fixture is served straight off disk, so editing
+[`index/stats.json`](./index/stats.json) needs no restart — just
+`grim search --refresh`. Row-by-row rationale in
+[`index/README.md`](./index/README.md).
 
 ## Teardown
 

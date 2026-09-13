@@ -22,6 +22,24 @@ clients = ["claude"]
 alias = "localhost"
 oci = "localhost:5050"
 
+# The rig's static HTTP index (docker-compose `index` service, port 5052),
+# serving test/manual/index/{all.json,stats.json}.
+#
+# It is here for ONE reason: the `stats.json` sidecar rides the HTTP index
+# transport only. An OCI `_catalog` browse has no sidecar to read, so with the
+# entry above alone every row is permanently unrated and uncounted, and the
+# rating badge / Rating: row / download badge / Downloads: row are unreachable
+# in review.
+#
+# It lists the SAME refs the OCI entry serves, so the browse shows a second
+# tree root carrying the same artifacts — that duplication is real grim
+# behaviour (one repository served by two registries appears once per
+# registry), not a rig artefact. Drop this entry to get the old single-root
+# view back.
+[[registries]]
+alias = "index"
+index = "http://localhost:5052"
+
 [skills]
 hello-world   = "localhost:5050/grimoire/skills/hello-world:1"
 code-reviewer = "localhost:5050/grimoire/skills/code-reviewer:1"

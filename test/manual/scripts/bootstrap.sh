@@ -33,6 +33,11 @@ NS="grimoire"
 # project-multi/grimoire.toml.
 REGISTRY2="localhost:5051"
 NS2="tools"
+# Static HTTP index (docker-compose `index` service) serving the committed
+# fixture in test/manual/index/. Sidecar stats ride the HTTP index transport
+# ONLY, so this is the one source in the rig whose rows carry ratings and
+# download counts.
+INDEX_URL="http://localhost:5052"
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 
@@ -49,8 +54,9 @@ GRIM="$REPO_ROOT/test/bin/grim"
 #    A single `compose up -d` starts both services; bring it up if EITHER
 #    registry is down, then wait for BOTH to answer /v2/.
 if ! curl -fsS "http://$REGISTRY/v2/" >/dev/null 2>&1 ||
-    ! curl -fsS "http://$REGISTRY2/v2/" >/dev/null 2>&1; then
-    log "starting registries via docker compose"
+    ! curl -fsS "http://$REGISTRY2/v2/" >/dev/null 2>&1 ||
+    ! curl -fsS "$INDEX_URL/all.json" >/dev/null 2>&1; then
+    log "starting registries and the static index via docker compose"
     docker compose -f "$MANUAL_DIR/docker-compose.yml" up -d
 fi
 for reg in "$REGISTRY" "$REGISTRY2"; do
@@ -64,6 +70,15 @@ for reg in "$REGISTRY" "$REGISTRY2"; do
             exit 69
         }
 done
+for _ in $(seq 1 60); do
+    curl -fsS "$INDEX_URL/all.json" >/dev/null 2>&1 && break
+    sleep 0.5
+done
+curl -fsS "$INDEX_URL/all.json" >/dev/null 2>&1 ||
+    {
+        echo "static index not reachable at $INDEX_URL" >&2
+        exit 69
+    }
 
 # 3. Isolated GRIM_HOME for the rig.
 export GRIM_HOME="$MANUAL_DIR/.grim-home"
@@ -222,6 +237,10 @@ log "writing global config ($GRIM_HOME/grimoire.toml) with two registries"
 rm -f "$GRIM_HOME/grimoire.toml"
 "$GRIM" config --global registry add primary --oci "$REGISTRY/$NS" --default
 "$GRIM" config --global registry add tools --oci "$REGISTRY2/$NS2"
+# The index entry. Declared globally as well as in project/ so a global-scope
+# browse (`grim search --global`, the extension with no project open) also
+# sees the rows that carry ratings and download counts.
+"$GRIM" config --global registry add index --index "$INDEX_URL"
 
 log "done. Primary catalog at $REGISTRY/$NS/{skills,rules,bundles}/*; annotation showcase at $REGISTRY/$NS/skills/support-desk; multi-registry subset at $REGISTRY2/$NS2/{skills,rules}/*; deep-fold solo package at $REGISTRY/$NS/playbooks/ci/release/cut-release"
 cat >&2 <<EOF
