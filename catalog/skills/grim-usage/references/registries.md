@@ -838,7 +838,9 @@ the *end* rather than as zero votes, zero pulls or epoch 0, and every mode is to
 two runs over the same catalog render identically. Given together with a
 query, `--sort` **replaces** relevance ranking rather than composing with
 it; omitted, ordering is exactly what it was before the flag existed.
-Confirm with `grim search --help`.
+Inside the TUI the `s` key cycles the same orders live and `S` flips the
+direction; the Catalog title names the active one. Confirm with
+`grim search --help`.
 
 `grim rate <ref>` casts a vote. It posts publicly under **your own** forge
 account, so an interactive run confirms first and a non-interactive one

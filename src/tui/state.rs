@@ -296,12 +296,17 @@ pub struct TuiState {
     /// .show_deprecated` (negated) and toggled live by the `h` key; installed
     /// deprecated rows always stay visible.
     pub hide_deprecated: bool,
-    /// The explicit browse ordering from `grim tui --sort`, or `None` for the
-    /// default kind-then-leaf-name grouping. When set it replaces both that
-    /// grouping and the relevance ranking a query would otherwise apply —
-    /// the same override `grim search --sort` performs, off the same
-    /// comparator (C-017).
+    /// The explicit browse ordering from `grim tui --sort` (cycled live by
+    /// the `s` key), or `None` for the default kind-then-leaf-name grouping.
+    /// When set it replaces both that grouping and the relevance ranking a
+    /// query would otherwise apply — the same override `grim search --sort`
+    /// performs, off the same comparator (C-017).
     pub sort: Option<SortMode>,
+    /// Whether the active order runs against its natural direction (the `S`
+    /// key). Applied to the *visible* list, so it flips whatever is on
+    /// screen — the default grouping, an explicit sort, or a query's
+    /// relevance ranking — rather than only the explicit modes.
+    pub sort_reversed: bool,
     /// Current interaction mode.
     pub mode: Mode,
     /// Whether a catalog load is in flight.
@@ -442,6 +447,7 @@ impl Default for TuiState {
             selected: 0,
             detail_scroll: 0,
             sort: None,
+            sort_reversed: false,
             // A sane universal default until the app reports the real
             // size (before the first key event is ever processed).
             term_size: (80, 24),
@@ -961,11 +967,80 @@ impl TuiState {
     }
 
     /// Seed the browse ordering from `--sort`. Called once at startup, before
-    /// the first [`Self::set_rows`] — which is what actually applies it. There
-    /// is no live toggle, so nothing here re-sorts an already-loaded row set;
-    /// add the re-sort along with the keybinding if one ever lands.
+    /// the first [`Self::set_rows`] — which is what actually applies it; the
+    /// live keys go through [`Self::cycle_sort`] and
+    /// [`Self::toggle_sort_direction`], which do re-sort.
     pub fn set_sort(&mut self, sort: Option<SortMode>) {
         self.sort = sort;
+    }
+
+    /// The `s` key: step to the next browse order — default → name → updated
+    /// → rating → downloads → default — and re-sort the loaded rows in place.
+    /// The direction is left alone: a user who flipped it flipped it on
+    /// purpose, and `S` flips it back.
+    pub fn cycle_sort(&mut self) {
+        self.sort = match self.sort {
+            None => Some(SortMode::Name),
+            Some(SortMode::Name) => Some(SortMode::Updated),
+            Some(SortMode::Updated) => Some(SortMode::Rating),
+            Some(SortMode::Rating) => Some(SortMode::Downloads),
+            Some(SortMode::Downloads) => None,
+        };
+        self.resort();
+    }
+
+    /// The `S` key: run the active order the other way.
+    pub fn toggle_sort_direction(&mut self) {
+        self.sort_reversed = !self.sort_reversed;
+        self.resort();
+    }
+
+    /// Re-order the loaded rows under the current `sort` / `sort_reversed`,
+    /// keeping marks and every cache keyed by repo — what a background
+    /// refresh already does, so the merge path is reused rather than a second
+    /// mark restore written beside it. The cursor, unlike a refresh, goes to
+    /// the top: a re-sort is a request to read the list in a new order from
+    /// its head, and a cursor that followed its artifact landed anywhere.
+    fn resort(&mut self) {
+        // A clone, not a `take`: the merge reads `self.rows` to snapshot the
+        // marks by repo before it replaces them.
+        let rows = self.rows.clone();
+        self.merge_catalog_rows(rows);
+        self.move_selection(i64::MIN);
+    }
+
+    /// The tree's leaf order for the active browse order: an explicit sort
+    /// hands the tree pre-ranked rows, the default grouping lets the tree
+    /// order leaves by label as it always has (flipped with the direction).
+    fn leaf_order(&self) -> super::tree::LeafOrder {
+        use super::tree::LeafOrder;
+        match (self.sort, self.sort_reversed) {
+            (Some(_), _) => LeafOrder::Rows,
+            (None, false) => LeafOrder::Label,
+            (None, true) => LeafOrder::LabelReversed,
+        }
+    }
+
+    /// The active order as the Catalog title states it — `sort: rating desc`
+    /// — or empty when the browse is in its default order and direction, so
+    /// the title stays bare until the user changes something.
+    pub fn sort_label(&self) -> String {
+        let (mode, natural_desc) = match self.sort {
+            None => ("default", false),
+            Some(SortMode::Name) => ("name", false),
+            Some(SortMode::Updated) => ("updated", true),
+            Some(SortMode::Rating) => ("rating", true),
+            Some(SortMode::Downloads) => ("downloads", true),
+        };
+        if self.sort.is_none() && !self.sort_reversed {
+            return String::new();
+        }
+        let dir = if natural_desc != self.sort_reversed {
+            "desc"
+        } else {
+            "asc"
+        };
+        format!("sort: {mode} {dir}")
     }
 
     /// Flip the deprecated-hiding filter live (the `h` key). Recomputes the
@@ -1280,6 +1355,7 @@ impl TuiState {
             separators: self.tree_separators.clone(),
             registry_order: self.registry_order.clone(),
             registry_locators: self.registry_locators.clone(),
+            leaf_order: self.leaf_order(),
         };
         let tree = super::tree::build(&self.rows, &self.filtered, &opts);
         self.collapsed = super::tree::default_collapsed(&tree, self.expand_levels);
@@ -1460,6 +1536,7 @@ impl TuiState {
             separators: self.tree_separators.clone(),
             registry_order: self.registry_order.clone(),
             registry_locators: self.registry_locators.clone(),
+            leaf_order: self.leaf_order(),
         };
         let tree = super::tree::build(&self.rows, &self.filtered, &opts);
         // While a query is active, ignore the collapsed set: the tree prunes
@@ -1805,6 +1882,13 @@ impl TuiState {
             scored.sort_by(|(sa, ia), (sb, ib)| sb.cmp(sa).then_with(|| ia.cmp(ib)));
         }
         self.filtered = scored.into_iter().map(|(_, i)| i).collect();
+        // Every order above is total, so flipping the visible list is exactly
+        // the reversed comparator — and it flips the relevance ranking and
+        // the default grouping the same way, which a reverse inside `set_rows`
+        // would not.
+        if self.sort_reversed {
+            self.filtered.reverse();
+        }
     }
 }
 
@@ -2040,6 +2124,159 @@ mod tests {
             "bundle before skill, then leaf name ascending"
         );
         assert!(s.sort.is_none(), "no flag, no sort mode");
+    }
+
+    /// A counted row: `rated()` plus a download total.
+    fn counted(repo: &str, total: Option<u64>) -> TuiRow {
+        let mut r = rated(repo, None, None);
+        r.downloads = total.map(|total| DownloadSummary {
+            total,
+            as_of: None,
+            versions: vec![],
+        });
+        r
+    }
+
+    #[test]
+    fn the_s_key_cycles_every_order_and_re_sorts_the_loaded_rows() {
+        // Each step is asserted on a fixture where every order disagrees, so
+        // a cycle that skipped a mode, or one that changed the mode without
+        // re-sorting, both show. Marks ride along by repo, not by index.
+        let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
+        let mut old_bundle = rated("r/old-bundle", Some(1), Some("2020-01-01T00:00:00Z"));
+        old_bundle.kind = "bundle".to_string();
+        let mut top = counted("r/zed", Some(900));
+        top.rating = Some(9);
+        top.created = Some("2024-01-01T00:00:00Z".to_string());
+        let mut newest = counted("r/mid", Some(5));
+        newest.rating = Some(3);
+        newest.created = Some("2026-01-01T00:00:00Z".to_string());
+        s.set_rows(vec![old_bundle, top, newest]);
+        assert_eq!(
+            visible(&s),
+            vec!["r/old-bundle", "r/mid", "r/zed"],
+            "default: kind, then name"
+        );
+        s.selected = 2; // r/zed
+        s.toggle_mark_selected();
+
+        s.cycle_sort();
+        assert_eq!(s.sort, Some(SortMode::Name));
+        assert_eq!(visible(&s), vec!["r/mid", "r/old-bundle", "r/zed"]);
+        s.cycle_sort();
+        assert_eq!(s.sort, Some(SortMode::Updated));
+        assert_eq!(visible(&s), vec!["r/mid", "r/zed", "r/old-bundle"]);
+        s.cycle_sort();
+        assert_eq!(s.sort, Some(SortMode::Rating));
+        assert_eq!(visible(&s), vec!["r/zed", "r/mid", "r/old-bundle"]);
+        s.cycle_sort();
+        assert_eq!(s.sort, Some(SortMode::Downloads));
+        assert_eq!(visible(&s), vec!["r/zed", "r/mid", "r/old-bundle"]);
+        s.cycle_sort();
+        assert_eq!(s.sort, None, "the cycle wraps back to the default grouping");
+        assert_eq!(visible(&s), vec!["r/old-bundle", "r/mid", "r/zed"]);
+
+        let marked: Vec<&str> = s.marked.iter().map(|&i| s.rows[i].repo.as_str()).collect();
+        assert_eq!(
+            marked,
+            vec!["r/zed"],
+            "a mark follows its artifact through every re-sort"
+        );
+        assert_eq!(s.selected, 0, "the cursor does not: a re-sort reads from the top");
+    }
+
+    #[test]
+    fn the_shift_s_key_flips_the_visible_order_whatever_it_is() {
+        // The reversal is applied to the visible list, so it flips the
+        // default grouping, an explicit sort, AND a query's relevance
+        // ranking alike — and flipping twice is the identity.
+        let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
+        s.set_rows(vec![
+            rated("r/beta", Some(2), None),
+            rated("r/alpha", Some(9), None),
+            rated("r/gamma", None, None),
+        ]);
+        s.toggle_sort_direction();
+        assert_eq!(
+            visible(&s),
+            vec!["r/gamma", "r/beta", "r/alpha"],
+            "default grouping, flipped"
+        );
+        assert_eq!(s.sort_label(), "sort: default desc");
+
+        s.set_sort(Some(SortMode::Rating));
+        s.resort();
+        assert_eq!(
+            visible(&s),
+            vec!["r/gamma", "r/beta", "r/alpha"],
+            "rating ascending puts the unrated bucket FIRST — the exact inverse"
+        );
+        assert_eq!(s.sort_label(), "sort: rating asc");
+
+        s.toggle_sort_direction();
+        assert_eq!(visible(&s), vec!["r/alpha", "r/beta", "r/gamma"]);
+        assert_eq!(s.sort_label(), "sort: rating desc");
+    }
+
+    #[test]
+    fn the_sort_label_is_empty_until_the_order_or_direction_changes() {
+        let mut s = TuiState::new();
+        assert_eq!(s.sort_label(), "", "the bare default paints no label");
+        s.set_sort(Some(SortMode::Name));
+        assert_eq!(
+            s.sort_label(),
+            "sort: name asc",
+            "name's natural direction is ascending"
+        );
+        s.set_sort(Some(SortMode::Downloads));
+        assert_eq!(s.sort_label(), "sort: downloads desc");
+        s.sort_reversed = true;
+        assert_eq!(s.sort_label(), "sort: downloads asc");
+    }
+
+    #[test]
+    fn a_sorted_tree_orders_leaves_by_the_browse_order_not_by_label() {
+        // In tree mode the groups stay label-sorted (a browse order ranks
+        // artifacts, not folders) but the leaves inside one follow it — so
+        // the `s` key visibly does something in the default tree view.
+        let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
+        s.set_rows(vec![
+            rated("r/acme/alpha", Some(1), None),
+            rated("r/acme/beta", Some(9), None),
+            rated("r/acme/gamma", Some(5), None),
+        ]);
+        s.toggle_view_mode();
+        s.apply_default_collapse();
+        s.toggle_collapse_all();
+        let leaves = |s: &TuiState| -> Vec<String> {
+            s.flattened()
+                .iter()
+                .filter_map(|r| match r {
+                    crate::tui::tree::DisplayRow::Leaf { label, .. } => Some(label.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(leaves(&s), vec!["alpha", "beta", "gamma"], "default: by label");
+        s.toggle_sort_direction();
+        assert_eq!(
+            leaves(&s),
+            vec!["gamma", "beta", "alpha"],
+            "default flipped: by label, descending"
+        );
+        s.toggle_sort_direction();
+        s.set_sort(Some(SortMode::Rating));
+        s.resort();
+        assert_eq!(
+            leaves(&s),
+            vec!["beta", "gamma", "alpha"],
+            "rating: the rows' own order"
+        );
+        s.toggle_sort_direction();
+        assert_eq!(leaves(&s), vec!["alpha", "gamma", "beta"], "rating flipped");
     }
 
     #[test]
@@ -3994,6 +4231,7 @@ mod tests {
             separators: vec!["/".to_string()],
             registry_order: Vec::new(),
             registry_locators: Vec::new(),
+            leaf_order: crate::tui::tree::LeafOrder::Label,
         };
         let tree = build(&[], &[], &opts);
         let collapsed: BTreeSet<String> = BTreeSet::new();

@@ -612,6 +612,16 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
             state.toggle_collapse_all();
             TuiAction::None
         }
+        // `s` steps through the browse orders, `S` runs the active one the
+        // other way — both pure state, no I/O, so neither is an action.
+        TuiInput::Char('s') => {
+            state.cycle_sort();
+            TuiAction::None
+        }
+        TuiInput::Char('S') => {
+            state.toggle_sort_direction();
+            TuiAction::None
+        }
         TuiInput::Expand => {
             // Expand a group if selected; for bundle leaves, insert the leaf
             // key into expanded_bundles and trigger a lazy member-list fetch
@@ -1056,6 +1066,30 @@ mod tests {
         handle(&mut s, TuiInput::Char('/'));
         assert_eq!(handle(&mut s, TuiInput::Char('g')), TuiAction::None);
         assert_eq!(s.query, "g");
+    }
+
+    #[test]
+    fn sort_keys_reorder_in_place_and_are_literal_in_search() {
+        let mut s = seeded();
+        let order = |s: &TuiState| -> Vec<String> { s.filtered.iter().map(|&i| s.rows[i].repo.clone()).collect() };
+        assert_eq!(
+            handle(&mut s, TuiInput::Char('s')),
+            TuiAction::None,
+            "pure state, no I/O"
+        );
+        assert_eq!(s.sort, Some(crate::catalog::SortMode::Name));
+        assert_eq!(handle(&mut s, TuiInput::Char('S')), TuiAction::None);
+        assert!(s.sort_reversed);
+        assert_eq!(order(&s), ["r/c", "r/b", "r/a"], "name, flipped");
+        handle(&mut s, TuiInput::Char('/'));
+        assert_eq!(handle(&mut s, TuiInput::Char('s')), TuiAction::None);
+        assert_eq!(handle(&mut s, TuiInput::Char('S')), TuiAction::None);
+        assert_eq!(s.query, "sS", "both are query characters while searching");
+        assert_eq!(
+            s.sort,
+            Some(crate::catalog::SortMode::Name),
+            "and neither touched the order"
+        );
     }
 
     #[test]

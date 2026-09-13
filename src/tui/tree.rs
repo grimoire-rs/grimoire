@@ -56,6 +56,23 @@ pub struct TreeBuildOptions {
     /// no reference can begin `alias:`/`locator:`, so nothing ever matched
     /// through it. A caller must pass every locator here (E-15.1).
     pub registry_locators: Vec<String>,
+    /// How the leaves inside one group are ordered.
+    pub leaf_order: LeafOrder,
+}
+
+/// The order of the leaves inside one group. Groups themselves always sort
+/// by label — a browse order ranks artifacts, not the folders they sit in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LeafOrder {
+    /// By label, ascending — the tree's own order.
+    #[default]
+    Label,
+    /// By label, descending — the tree's own order, flipped.
+    LabelReversed,
+    /// The order `filtered` handed the rows in: an explicit browse sort
+    /// (`--sort`, or the `s` key) already ranked them, and the tree must
+    /// not re-rank what the user asked for.
+    Rows,
 }
 
 /// Aggregate install-state counts over a group's descendant leaves, so a
@@ -409,7 +426,7 @@ impl Trie {
 
     /// Convert this trie level into ordered [`Node`]s, returning the
     /// subtree's aggregate rollup and descendant `rows` for the parent.
-    fn into_nodes(self, parent_key: &str, depth: usize) -> (Vec<Node>, Rollup, Vec<usize>) {
+    fn into_nodes(self, parent_key: &str, depth: usize, leaf_order: LeafOrder) -> (Vec<Node>, Rollup, Vec<usize>) {
         let mut nodes = Vec::new();
         let mut rollup = Rollup::default();
         let mut rows: Vec<usize> = Vec::new();
@@ -437,7 +454,7 @@ impl Trie {
             } else {
                 format!("{parent_key}/{label}")
             };
-            let (children, child_rollup, mut child_rows) = child.into_nodes(&key, depth + 1);
+            let (children, child_rollup, mut child_rows) = child.into_nodes(&key, depth + 1, leaf_order);
             child_rows.sort_unstable();
             rollup.merge(child_rollup);
             rows.extend(child_rows.iter().copied());
@@ -451,9 +468,14 @@ impl Trie {
             }));
         }
 
-        // Then leaves, sorted by label for a stable, deterministic order.
+        // Then leaves. `insert` pushed them in `filtered` order, so `Rows`
+        // is the order they already have.
         let mut leaves = self.leaves;
-        leaves.sort_by(|a, b| a.0.cmp(&b.0));
+        match leaf_order {
+            LeafOrder::Label => leaves.sort_by(|a, b| a.0.cmp(&b.0)),
+            LeafOrder::LabelReversed => leaves.sort_by(|a, b| b.0.cmp(&a.0)),
+            LeafOrder::Rows => {}
+        }
         for (label, row, state) in leaves {
             let key = if parent_key.is_empty() {
                 label.clone()
@@ -573,7 +595,7 @@ pub fn build(rows: &[TuiRow], filtered: &[usize], opts: &TreeBuildOptions) -> Tr
         }
     }
 
-    let (mut roots, _, _) = trie.into_nodes("", 0);
+    let (mut roots, _, _) = trie.into_nodes("", 0, opts.leaf_order);
 
     if multi_registry {
         // F13: reorder the top-level roots into precedence order. A stable sort
@@ -1075,6 +1097,7 @@ mod tests {
             default_registry: default_registry.map(|s| s.to_string()),
             group_by_type: false,
             separators: vec!["/".to_string()],
+            leaf_order: LeafOrder::Label,
             registry_locators: Vec::new(),
             registry_order: Vec::new(),
         }
@@ -1144,6 +1167,7 @@ mod tests {
             default_registry: None,
             group_by_type: false,
             separators: vec!["/".to_string()],
+            leaf_order: LeafOrder::Label,
             registry_locators: Vec::new(),
             registry_order: vec![source_root("https://index.example")],
         };
@@ -1216,6 +1240,7 @@ mod tests {
             // E-15.1: attribution reads `registry_locators` alone now that the
             // `registry_order` fold is gone. The index locator is not an OCI
             // prefix, so only the OCI entry contributes one.
+            leaf_order: LeafOrder::Label,
             registry_locators: vec!["ghcr.io/acme".to_string()],
             registry_order: vec![source_root("https://index.example"), "ghcr.io/acme".to_string()],
         };
@@ -1291,6 +1316,7 @@ mod tests {
             default_registry: Some("reg".to_string()),
             group_by_type: false,
             separators: vec!["/".to_string(), ".".to_string()],
+            leaf_order: LeafOrder::Label,
             registry_locators: Vec::new(),
             registry_order: Vec::new(),
         };
@@ -1313,6 +1339,7 @@ mod tests {
             default_registry: Some("reg".to_string()),
             group_by_type: false,
             separators: vec!["/".to_string(), "-".to_string()],
+            leaf_order: LeafOrder::Label,
             registry_locators: Vec::new(),
             registry_order: Vec::new(),
         };
@@ -1448,6 +1475,7 @@ mod tests {
             default_registry: Some("reg".to_string()),
             group_by_type: false,
             separators: vec![],
+            leaf_order: LeafOrder::Label,
             registry_locators: Vec::new(),
             registry_order: Vec::new(),
         };
@@ -1483,6 +1511,41 @@ mod tests {
                 ("alpha".to_string(), 1, false),
                 ("zeta".to_string(), 1, false),
             ]
+        );
+    }
+
+    // The leaf order is the caller's call: `Rows` keeps the order `filtered`
+    // handed the rows in (a browse sort already ranked them), the two label
+    // orders are the tree's own. Groups sort by label under every one.
+    #[test]
+    fn leaf_order_follows_filtered_for_rows_and_flips_for_label_reversed() {
+        let rows = vec![
+            skill_row("reg/acme/zeta", ArtifactState::Installed),
+            skill_row("reg/acme/group/inner", ArtifactState::NotInstalled),
+            skill_row("reg/acme/alpha", ArtifactState::Installed),
+            skill_row("reg/acme/mid", ArtifactState::Installed),
+        ];
+        let with = |leaf_order: LeafOrder| {
+            let opts = TreeBuildOptions {
+                leaf_order,
+                ..opts_default(Some("reg"))
+            };
+            shape(&build(&rows, &[3, 0, 1, 2], &opts))
+                .into_iter()
+                .map(|(label, _, _)| label)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            with(LeafOrder::Rows),
+            ["acme", "group", "inner", "mid", "zeta", "alpha"]
+        );
+        assert_eq!(
+            with(LeafOrder::LabelReversed),
+            ["acme", "group", "inner", "zeta", "mid", "alpha"]
+        );
+        assert_eq!(
+            with(LeafOrder::Label),
+            ["acme", "group", "inner", "alpha", "mid", "zeta"]
         );
     }
 
@@ -1563,6 +1626,7 @@ mod tests {
             default_registry: None,
             group_by_type: false,
             separators: vec!["/".to_string()],
+            leaf_order: LeafOrder::Label,
             registry_locators: Vec::new(),
             registry_order: vec!["ghcr.io/acme".to_string()],
         };
@@ -1607,6 +1671,7 @@ mod tests {
             group_by_type: false,
             separators: vec!["/".to_string()],
             // E-15.1: attribution reads `registry_locators` alone.
+            leaf_order: LeafOrder::Label,
             registry_locators: vec!["localhost:5050/grimoire".to_string()],
             registry_order: vec!["localhost:5050/grimoire".to_string()],
         };
@@ -1640,6 +1705,7 @@ mod tests {
             group_by_type: false,
             separators: vec!["/".to_string()],
             // E-15.1: attribution reads `registry_locators` alone.
+            leaf_order: LeafOrder::Label,
             registry_locators: vec![
                 "localhost:5050/grimoire".to_string(),
                 "localhost:5051/tools".to_string(),
@@ -1685,6 +1751,7 @@ mod tests {
             group_by_type: false,
             separators: vec!["/".to_string()],
             // One locator, declared twice — the roots are the entry keys.
+            leaf_order: LeafOrder::Label,
             registry_locators: vec!["ghcr.io".to_string(), "ghcr.io".to_string()],
             registry_order: vec![wide_key.root_key(), mine_key.root_key()],
         };
@@ -1720,6 +1787,7 @@ mod tests {
             // E-15.1: attribution reads `registry_locators` alone. The bare
             // `default_registry` used to be folded in here implicitly; a root
             // key can never attribute a row, so the caller supplies the locator.
+            leaf_order: LeafOrder::Label,
             registry_locators: vec!["localhost:5050/grimoire".to_string()],
             registry_order: Vec::new(),
         };
@@ -1739,6 +1807,7 @@ mod tests {
             default_registry: Some("reg".to_string()),
             group_by_type: true,
             separators: vec!["/".to_string()],
+            leaf_order: LeafOrder::Label,
             registry_locators: Vec::new(),
             registry_order: Vec::new(),
         };
@@ -1815,6 +1884,7 @@ mod tests {
             separators: vec!["/".to_string()],
             // E-15.1: attribution reads `registry_locators` alone — both
             // overlapping locators must be here for longest-prefix to choose.
+            leaf_order: LeafOrder::Label,
             registry_locators: vec!["ghcr.io".to_string(), "ghcr.io/acme".to_string()],
             registry_order: vec!["ghcr.io".to_string(), "ghcr.io/acme".to_string()],
         };
@@ -1920,6 +1990,7 @@ mod tests {
             separators: vec!["/".to_string()],
             // Both sources resolved; the second one's filter admitted nothing,
             // so `load_catalog` returned it as an empty group.
+            leaf_order: LeafOrder::Label,
             registry_locators: Vec::new(),
             registry_order: vec!["ghcr.io/acme".to_string(), "registry.corp/team".to_string()],
         };
@@ -1959,6 +2030,7 @@ mod tests {
             default_registry: Some("reg".to_string()),
             group_by_type: true,
             separators: vec!["/".to_string()],
+            leaf_order: LeafOrder::Label,
             registry_locators: Vec::new(),
             registry_order: Vec::new(),
         };
@@ -2019,6 +2091,7 @@ mod tests {
             default_registry: Some("reg".to_string()),
             group_by_type: true,
             separators: vec!["/".to_string(), "-".to_string()],
+            leaf_order: LeafOrder::Label,
             registry_locators: Vec::new(),
             registry_order: Vec::new(),
         };
@@ -2170,6 +2243,7 @@ mod tests {
             default_registry: Some("ghcr.io/acme".to_string()),
             group_by_type: true,
             separators: vec!["/".to_string()],
+            leaf_order: LeafOrder::Label,
             registry_locators: Vec::new(),
             registry_order: Vec::new(),
         };
@@ -2222,6 +2296,7 @@ mod tests {
             default_registry: Some("reg".to_string()),
             group_by_type: true,
             separators: vec!["/".to_string()],
+            leaf_order: LeafOrder::Label,
             registry_locators: Vec::new(),
             registry_order: Vec::new(),
         };
@@ -2607,7 +2682,7 @@ mod p2_member_node_tests {
     use crate::oci::ArtifactKind;
     use crate::tui::bundle_members::{BundleMemberCache, BundleMemberKey, MemberNode};
     use crate::tui::state::{ArtifactState, TuiRow};
-    use crate::tui::tree::{DisplayRow, TreeBuildOptions, build, flatten, flatten_with_members};
+    use crate::tui::tree::{DisplayRow, LeafOrder, TreeBuildOptions, build, flatten, flatten_with_members};
 
     fn tui_row(repo: &str, kind: &str, state: ArtifactState) -> TuiRow {
         let (reg, repo_path) = repo.split_once('/').unwrap_or((repo, ""));
@@ -2647,6 +2722,7 @@ mod p2_member_node_tests {
             default_registry: Some(default_registry.to_string()),
             group_by_type: false,
             separators: vec!["/".to_string()],
+            leaf_order: LeafOrder::Label,
             registry_locators: Vec::new(),
             registry_order: Vec::new(),
         }
@@ -3103,6 +3179,7 @@ mod spec_multi_registry_tree_tests {
             default_registry: Some(default_registry.to_string()),
             group_by_type: false,
             separators: vec!["/".to_string()],
+            leaf_order: LeafOrder::Label,
             registry_locators: Vec::new(),
             registry_order: Vec::new(),
         }
@@ -3113,6 +3190,7 @@ mod spec_multi_registry_tree_tests {
             default_registry: None,
             group_by_type: false,
             separators: vec!["/".to_string()],
+            leaf_order: LeafOrder::Label,
             registry_locators: Vec::new(),
             registry_order: Vec::new(),
         }
@@ -3258,6 +3336,7 @@ mod spec_multi_registry_tree_tests {
             default_registry: None,
             group_by_type: true,
             separators: vec!["/".to_string()],
+            leaf_order: LeafOrder::Label,
             registry_locators: Vec::new(),
             registry_order: Vec::new(),
         };
@@ -3310,6 +3389,7 @@ mod spec_multi_registry_tree_tests {
             default_registry: None,
             group_by_type: false,
             separators: vec!["/".to_string()],
+            leaf_order: LeafOrder::Label,
             registry_locators: Vec::new(),
             registry_order: order.iter().map(|s| s.to_string()).collect(),
         }
