@@ -1044,9 +1044,9 @@ def test_offline_browse_is_unchanged_by_the_sidecar(
 
 
 def _sorted_index(root: Path, project_dir: Path, base: str) -> None:
-    """A four-package index whose ratings, names, and relevance to the query
-    ``tool`` all disagree — so any single ordering the CLI applies is
-    distinguishable from the other two."""
+    """A four-package index whose ratings, download totals, names, and
+    relevance to the query ``tool`` all disagree — so any single ordering the
+    CLI applies is distinguishable from every other."""
     _write_all_json(
         root,
         [
@@ -1064,10 +1064,22 @@ def _sorted_index(root: Path, project_dir: Path, base: str) -> None:
     _write_stats(
         root,
         {
-            "ghcr.io/acme/skills/apex": {"rating": {"up": 7, "target": "t1", "url": "u1"}},
-            "ghcr.io/acme/skills/Zulu": {"rating": {"up": 40, "target": "t2", "url": "u2"}},
-            "ghcr.io/acme/skills/tool-tool": {"rating": {"up": 1, "target": "t3", "url": "u3"}},
-            # `unrated` is deliberately absent from the sidecar.
+            # Download totals run OPPOSITE to the ratings, so a downloads sort
+            # that quietly fell back to the rating comparator would be caught.
+            "ghcr.io/acme/skills/apex": {
+                "rating": {"up": 7, "target": "t1", "url": "u1"},
+                "downloads": {"total": 300, "as_of": "2026-09-10"},
+            },
+            "ghcr.io/acme/skills/Zulu": {
+                "rating": {"up": 40, "target": "t2", "url": "u2"},
+                "downloads": {"total": 12, "as_of": "2026-09-10"},
+            },
+            "ghcr.io/acme/skills/tool-tool": {
+                "rating": {"up": 1, "target": "t3", "url": "u3"},
+                "downloads": {"total": 900, "as_of": "2026-09-10"},
+            },
+            # `unrated` is deliberately absent from the sidecar: unrated AND
+            # uncounted.
         },
     )
     _index_config(project_dir, base)
@@ -1092,6 +1104,23 @@ def test_sort_rating_orders_the_browse_with_unrated_last(
         "apex",  # 7
         "tool-tool",  # 1
         "unrated",  # no rating record at all
+    ]
+
+
+def test_sort_downloads_orders_the_browse_with_uncounted_last(
+    grim_at, project_dir: Path, http_index
+) -> None:
+    """``--sort downloads`` orders by the sidecar's download total descending,
+    with the uncounted artifact in a bucket of its own at the end — never
+    folded to zero pulls. The totals run opposite to the ratings, so this is
+    provably not the rating order."""
+    root, base = http_index
+    _sorted_index(root, project_dir, base)
+    assert _repos(grim_at(project_dir), "--sort", "downloads") == [
+        "tool-tool",  # 900
+        "apex",  # 300
+        "Zulu",  # 12
+        "unrated",  # no download record at all
     ]
 
 

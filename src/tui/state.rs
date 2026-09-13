@@ -539,7 +539,12 @@ impl TuiState {
             // the comparator `grim search --sort` and the index's own catalog
             // page share — a rating browse must read the same in all three.
             Some(mode) => browse_sort::sort_rows(&mut rows, mode, |r| {
-                SortKey::new(r.rating, r.created.as_deref(), &r.repo)
+                SortKey::new(
+                    r.rating,
+                    r.downloads.as_ref().map(|d| d.total),
+                    r.created.as_deref(),
+                    &r.repo,
+                )
             }),
             None => rows.sort_by(|a, b| {
                 a.kind.cmp(&b.kind).then_with(|| {

@@ -3,7 +3,7 @@
 
 //! Browse ordering shared by `grim search --sort` and `grim tui --sort`.
 //!
-//! One comparator, three modes, and a **total** order in every one of them:
+//! One comparator, four modes, and a **total** order in every one of them:
 //! the last tiebreak is always the fully-qualified reference, which is
 //! unique, so no two distinct rows ever compare equal. A browse order that
 //! is not total is a browse order that reshuffles between runs and between
@@ -16,9 +16,10 @@
 //! means.
 //!
 //! **Missing is a bucket, never a value.** An unrated artifact is not zero
-//! upvotes and an undated one is not epoch 0 — folding either into a number
-//! orders those rows against real data by accident and ties them all with
-//! each other. Both sort into a distinct *last* bucket instead.
+//! upvotes, an uncounted one is not zero pulls, and an undated one is not
+//! epoch 0 — folding any of them into a number orders those rows against
+//! real data by accident and ties them all with each other. Each sorts into
+//! a distinct *last* bucket instead.
 
 use std::cmp::Ordering;
 
@@ -31,6 +32,8 @@ pub enum SortMode {
     Updated,
     /// Upvotes descending, then date descending; unrated last.
     Rating,
+    /// Download total descending, then date descending; uncounted last.
+    Downloads,
 }
 
 /// One row's sort keys, projected once per row rather than per comparison
@@ -39,6 +42,10 @@ pub enum SortMode {
 pub struct SortKey {
     /// Upvote count; `None` is *unrated* and sorts last, never as `0`.
     rating: Option<u32>,
+    /// Download total; `None` is *uncounted* and sorts last, never as `0` —
+    /// only an Artifactory-backed index publishes a counter at all, so absence
+    /// is overwhelmingly "nobody measured", not "nobody pulled".
+    downloads: Option<u64>,
     /// `created` as epoch milliseconds; `None` when absent, empty, or not a
     /// date at all — and it sorts last, never as epoch 0.
     updated: Option<i64>,
@@ -51,9 +58,10 @@ pub struct SortKey {
 impl SortKey {
     /// Project a row's keys. `reference` is the fully-qualified
     /// `registry/repository`; the name key is its leaf segment.
-    pub fn new(rating: Option<u32>, created: Option<&str>, reference: &str) -> Self {
+    pub fn new(rating: Option<u32>, downloads: Option<u64>, created: Option<&str>, reference: &str) -> Self {
         Self {
             rating,
+            downloads,
             updated: created.and_then(epoch_millis),
             name: reference.rsplit('/').next().unwrap_or(reference).to_lowercase(),
             reference: reference.to_string(),
@@ -97,6 +105,11 @@ fn by_rating(a: &SortKey, b: &SortKey) -> Ordering {
     descending(a.rating, b.rating).then_with(|| by_updated(a, b))
 }
 
+/// Most pulled first, uncounted last, ties resolved by date then name.
+fn by_downloads(a: &SortKey, b: &SortKey) -> Ordering {
+    descending(a.downloads, b.downloads).then_with(|| by_updated(a, b))
+}
+
 /// Order two rows under `mode`.
 ///
 /// Total in every mode — `Ordering::Equal` is returned only for two keys
@@ -106,6 +119,7 @@ pub fn compare(a: &SortKey, b: &SortKey, mode: SortMode) -> Ordering {
         SortMode::Name => by_name(a, b),
         SortMode::Updated => by_updated(a, b),
         SortMode::Rating => by_rating(a, b),
+        SortMode::Downloads => by_downloads(a, b),
     }
 }
 
@@ -126,7 +140,11 @@ mod tests {
 
     /// A key with everything named, so each test states only what it varies.
     fn key(rating: Option<u32>, created: Option<&str>, reference: &str) -> SortKey {
-        SortKey::new(rating, created, reference)
+        SortKey::new(rating, None, created, reference)
+    }
+
+    fn counted(downloads: Option<u64>, created: Option<&str>, reference: &str) -> SortKey {
+        SortKey::new(None, downloads, created, reference)
     }
 
     /// The order `mode` puts these references in — asserted whole, never as
@@ -179,6 +197,33 @@ mod tests {
                 // Unrated is its own bucket BELOW an explicit zero.
                 "ghcr.io/acme/unrated-a",
                 "ghcr.io/acme/unrated-b",
+            ]
+        );
+    }
+
+    #[test]
+    fn downloads_orders_total_then_date_then_name_with_uncounted_last() {
+        // The index's own catalog page chains downloads → updated → name, and
+        // the uncounted bucket sits BELOW an explicit `total: 0`: a registry
+        // browse is entirely uncounted, so folding absence to 0 would tie the
+        // whole catalog with the one artifact nobody has pulled yet.
+        let rows = vec![
+            counted(None, None, "ghcr.io/acme/uncounted"),
+            counted(Some(0), None, "ghcr.io/acme/zero-pulls"),
+            counted(Some(5), Some("2026-01-01T00:00:00Z"), "ghcr.io/acme/zulu"),
+            counted(Some(5), Some("2026-06-01T00:00:00Z"), "ghcr.io/acme/mid"),
+            counted(Some(9), Some("2020-01-01T00:00:00Z"), "ghcr.io/acme/top"),
+            counted(Some(5), Some("2026-01-01T00:00:00Z"), "ghcr.io/acme/alpha"),
+        ];
+        assert_eq!(
+            order(rows, SortMode::Downloads),
+            vec![
+                "ghcr.io/acme/top",   // 9 pulls, oldest — the total dominates date
+                "ghcr.io/acme/mid",   // 5 pulls, newest of the three
+                "ghcr.io/acme/alpha", // 5 pulls, same date as zulu — name breaks it
+                "ghcr.io/acme/zulu",
+                "ghcr.io/acme/zero-pulls",
+                "ghcr.io/acme/uncounted",
             ]
         );
     }
@@ -308,9 +353,10 @@ mod tests {
     }
 
     #[test]
-    fn the_clap_value_names_are_the_three_documented_ones() {
-        // The flag's surface is a contract: `--sort <name|updated|rating>`.
-        // Renaming a variant would silently rename the accepted value.
+    fn the_clap_value_names_are_the_four_documented_ones() {
+        // The flag's surface is a contract: `--sort
+        // <name|updated|rating|downloads>`. Renaming a variant would silently
+        // rename the accepted value; a value may only ever be added.
         use clap::ValueEnum as _;
         let names: Vec<String> = SortMode::value_variants()
             .iter()
@@ -321,6 +367,6 @@ mod tests {
                     .to_string()
             })
             .collect();
-        assert_eq!(names, ["name", "updated", "rating"]);
+        assert_eq!(names, ["name", "updated", "rating", "downloads"]);
     }
 }
