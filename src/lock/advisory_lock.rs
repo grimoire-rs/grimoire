@@ -17,10 +17,12 @@
 //! lock holder may freely re-read and atomically replace the data file while
 //! holding the lock.
 //!
-//! A symlink planted at the guarded path is rejected outright (a planted
-//! link is an attack signal, not data), and the sidecar is opened with
-//! `O_NOFOLLOW` on Unix so a symlink cannot redirect the lock to an
-//! attacker-chosen file. `O_NOFOLLOW` is applied via
+//! A symlinked guarded path is followed, and the sidecar is created beside
+//! the file it resolves to: a dotfiles-managed `grimoire.toml` is a link by
+//! design (issue #117), and keying the lock on the link would let a writer
+//! reaching the same file by another path run unserialized. The sidecar
+//! itself is opened with `O_NOFOLLOW` on Unix so a symlink cannot redirect
+//! the lock to an attacker-chosen file. `O_NOFOLLOW` is applied via
 //! [`std::os::unix::fs::OpenOptionsExt::custom_flags`] — a **safe** method —
 //! so the crate-wide `forbid(unsafe_code)` is honoured with no `unsafe`
 //! block anywhere on this path. On non-Unix a `symlink_metadata` pre-check
@@ -85,27 +87,16 @@ impl AdvisoryFileLock {
     /// # Errors
     ///
     /// - [`LockErrorKind::Locked`] — another writer holds the lock.
-    /// - [`LockErrorKind::Io`] — the guarded path is a symlink, or the
-    ///   sidecar could not be opened (missing parent directory, permission
-    ///   denied, or a symlink on Unix via `O_NOFOLLOW`).
+    /// - [`LockErrorKind::Io`] — the sidecar could not be opened (missing
+    ///   parent directory, permission denied, or a symlink on Unix via
+    ///   `O_NOFOLLOW`).
     pub fn try_acquire(target_path: &Path) -> Result<Self, LockError> {
-        // Reject a symlinked guarded path outright (defense in depth).
-        if let Ok(meta) = std::fs::symlink_metadata(target_path)
-            && meta.file_type().is_symlink()
-        {
-            return Err(LockError::new(
-                target_path,
-                LockErrorKind::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "guarded path is a symlink",
-                )),
-            ));
-        }
-
-        let sidecar = sidecar_path(target_path);
+        // Key the lock on the real file; errors stay keyed to the path the
+        // user knows about.
+        let sidecar = sidecar_path(&crate::store::atomic_write::resolve_symlink(target_path));
         let mut last_io: Option<std::io::Error> = None;
         for _ in 0..Self::MAX_ATTEMPTS {
-            let file = match open_sidecar(target_path) {
+            let file = match open_sidecar(&sidecar, target_path) {
                 Ok(f) => f,
                 // Windows: a sidecar marked delete-pending by a dropping
                 // holder refuses new opens until the holder's handle closes
@@ -208,12 +199,11 @@ fn sidecar_path(target_path: &Path) -> PathBuf {
     target_path.with_file_name(name)
 }
 
-/// Open (creating when missing) the sidecar lock file for `target_path`
-/// without following a terminal symlink. No `unsafe`: `custom_flags` is a
-/// safe `OpenOptionsExt` method. Errors are keyed to `target_path` — the
-/// path the user knows about.
-fn open_sidecar(target_path: &Path) -> Result<File, LockError> {
-    let sidecar = sidecar_path(target_path);
+/// Open (creating when missing) the `sidecar` lock file without following
+/// a terminal symlink. No `unsafe`: `custom_flags` is a safe
+/// `OpenOptionsExt` method. Errors are keyed to `target_path` — the path
+/// the user knows about.
+fn open_sidecar(sidecar: &Path, target_path: &Path) -> Result<File, LockError> {
     let mut opts = std::fs::OpenOptions::new();
     opts.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]
@@ -222,7 +212,7 @@ fn open_sidecar(target_path: &Path) -> Result<File, LockError> {
         opts.custom_flags(libc::O_NOFOLLOW);
     }
     #[cfg(not(unix))]
-    if let Ok(meta) = std::fs::symlink_metadata(&sidecar)
+    if let Ok(meta) = std::fs::symlink_metadata(sidecar)
         && meta.file_type().is_symlink()
     {
         return Err(LockError::new(
@@ -233,7 +223,7 @@ fn open_sidecar(target_path: &Path) -> Result<File, LockError> {
             )),
         ));
     }
-    opts.open(&sidecar)
+    opts.open(sidecar)
         .map_err(|e| LockError::new(target_path, LockErrorKind::Io(e)))
 }
 
@@ -352,17 +342,34 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn symlink_target_path_rejected() {
+    fn symlinked_target_locks_beside_the_real_file() {
+        // Issue #117: a dotfiles-managed `grimoire.toml` is a symlink. The
+        // lock must accept it and key on the file the link resolves to —
+        // a sidecar beside the *link* would let a writer reaching the same
+        // file by another path run concurrently.
         use std::os::unix::fs::symlink;
 
         let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("sensitive");
+        let dotfiles = dir.path().join("dotfiles");
+        std::fs::create_dir(&dotfiles).unwrap();
+        let real = dotfiles.join("grimoire.toml");
+        std::fs::write(&real, "[skills]\n").unwrap();
         let link = dir.path().join("grimoire.toml");
-        symlink(&target, &link).unwrap();
+        symlink(&real, &link).unwrap();
 
-        let err = AdvisoryFileLock::try_acquire(&link).expect_err("symlink must reject");
-        // O_NOFOLLOW → ELOOP, surfaced as Io (not Locked).
-        assert!(matches!(err.kind, LockErrorKind::Io(_)));
-        assert!(!target.exists(), "symlink target must not be created");
+        let held = AdvisoryFileLock::try_acquire(&link).expect("a symlinked guarded path must lock");
+        assert!(
+            dotfiles.join("grimoire.toml.lock").exists(),
+            "sidecar must sit beside the real file"
+        );
+        assert!(
+            !dir.path().join("grimoire.toml.lock").exists(),
+            "sidecar must not sit beside the link"
+        );
+        let err = AdvisoryFileLock::try_acquire(&real).expect_err("the real path must contend with the link");
+        assert!(matches!(err.kind, LockErrorKind::Locked));
+        drop(held);
+        AdvisoryFileLock::try_acquire(&real).expect("released after the link's guard drops");
+        assert!(link.is_symlink(), "locking must never touch the link itself");
     }
 }

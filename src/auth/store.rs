@@ -13,9 +13,11 @@
 //!    `allow_plaintext_put`, lowest priority)
 //!
 //! Helper store/erase go through the patched `docker_credential` fork.
-//! Plaintext writes reuse the crate-wide [`atomic_write`] primitive (then
-//! tighten the mode to `0600` — a credentials file must never inherit the
-//! `0644` cap `atomic_write` applies to ordinary state files). Concurrent
+//! Plaintext writes reuse the crate-wide [`atomic_write_through_symlink`]
+//! primitive — `~/.docker/config.json` is a dotfiles favourite, so the
+//! write follows a link rather than replacing it — then tighten the mode
+//! to `0600` (a credentials file must never inherit the `0644` cap
+//! `atomic_write` applies to ordinary state files). Concurrent
 //! `grim` writers serialize through [`ConfigFileLock`]; unknown JSON keys
 //! written by `docker` / `oras` round-trip untouched.
 
@@ -34,7 +36,7 @@ use crate::auth::credential::Credential;
 use crate::auth::registry_url::canonicalize_registry;
 use crate::lock::file_lock::ConfigFileLock;
 use crate::lock::lock_error::LockErrorKind;
-use crate::store::atomic_write::atomic_write;
+use crate::store::atomic_write::atomic_write_through_symlink;
 
 /// Knobs controlling [`DockerCredentialStore`] behaviour.
 #[derive(Debug, Default, Clone, Copy)]
@@ -390,13 +392,13 @@ fn read_config(path: &Path) -> Result<DockerConfig, AuthError> {
 
 /// Serialize and atomically replace the docker config, then tighten the
 /// mode to owner-only (`0600`) — credentials must not inherit the `0644`
-/// cap [`atomic_write`] applies to ordinary state files.
+/// cap [`atomic_write_through_symlink`] applies to ordinary state files.
 fn write_config(path: &Path, config: &DockerConfig) -> Result<(), AuthError> {
     let bytes = serde_json::to_vec_pretty(config).map_err(|source| AuthError::MalformedConfig {
         path: path.to_path_buf(),
         source,
     })?;
-    atomic_write(path, &bytes).map_err(|source| AuthError::StoreIo {
+    atomic_write_through_symlink(path, &bytes).map_err(|source| AuthError::StoreIo {
         path: path.to_path_buf(),
         source,
     })?;
