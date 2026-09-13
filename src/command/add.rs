@@ -936,29 +936,42 @@ pub(crate) fn write_config(
         out.push('\n');
     }
     if has_tui_options {
+        // Destructured without `..` on purpose: this hand-rolled emitter has
+        // silently dropped a freshly added field twice (`expand_levels`, then
+        // `sort`), because nothing tied it to the struct. Now a new field
+        // fails to compile here until it is written out or explicitly
+        // discarded.
+        let crate::config::declaration::TuiOptions {
+            default_view,
+            group_by_type,
+            tree_separators,
+            expand_levels,
+            sort,
+            sort_order,
+        } = &options.tui;
         out.push_str("[options.tui]\n");
-        if let Some(dv) = options.tui.default_view {
-            let label = match dv {
-                crate::config::declaration::DefaultView::Flat => "flat",
-                crate::config::declaration::DefaultView::Tree => "tree",
-            };
-            let _ = writeln!(out, "default_view = \"{label}\"");
+        if let Some(dv) = default_view {
+            let _ = writeln!(out, "default_view = \"{}\"", dv.as_str());
         }
-        if options.tui.group_by_type {
+        if *group_by_type {
             let _ = writeln!(out, "group_by_type = true");
         }
-        if !options.tui.tree_separators.is_empty() {
-            let list = options
-                .tui
-                .tree_separators
+        if !tree_separators.is_empty() {
+            let list = tree_separators
                 .iter()
                 .map(|s| toml::Value::String(s.clone()).to_string())
                 .collect::<Vec<_>>()
                 .join(", ");
             let _ = writeln!(out, "tree_separators = [{list}]");
         }
-        if let Some(levels) = options.tui.expand_levels {
+        if let Some(levels) = expand_levels {
             let _ = writeln!(out, "expand_levels = {levels}");
+        }
+        if let Some(sort) = sort {
+            let _ = writeln!(out, "sort = \"{}\"", sort.as_str());
+        }
+        if let Some(order) = sort_order {
+            let _ = writeln!(out, "sort_order = \"{}\"", order.as_str());
         }
         out.push('\n');
     }
@@ -1459,6 +1472,8 @@ mod tests {
                 group_by_type: true,
                 tree_separators: vec!["/".to_string(), "-".to_string()],
                 expand_levels: Some(2),
+                sort: Some(crate::catalog::SortMode::Rating),
+                sort_order: Some(crate::catalog::SortOrder::Asc),
             },
         };
         write_config(&path, &opts, &[], &set).unwrap();
@@ -1482,6 +1497,8 @@ mod tests {
             Some(2),
             "expand_levels must round-trip through the manual serializer (regression: it was dropped on write)"
         );
+        assert_eq!(cfg.options.tui.sort, Some(crate::catalog::SortMode::Rating));
+        assert_eq!(cfg.options.tui.sort_order, Some(crate::catalog::SortOrder::Asc));
     }
 
     #[test]
@@ -1539,6 +1556,8 @@ mod tests {
                 group_by_type: false,
                 tree_separators: vec!["/".to_string()],
                 expand_levels: None,
+                sort: None,
+                sort_order: None,
             },
         };
         write_config(&path, &opts, &registries, &set).unwrap();
@@ -1584,6 +1603,8 @@ mod tests {
                 group_by_type: false,
                 tree_separators: vec!["\\".to_string()],
                 expand_levels: None,
+                sort: None,
+                sort_order: None,
             },
         };
         write_config(&path, &opts, &[], &set).unwrap();

@@ -3,7 +3,7 @@
 
 //! The typed registry of `grim config` dotted keys.
 //!
-//! Single source of truth for the 7 fixed `options.*` keys, the 5
+//! Single source of truth for the 9 fixed `options.*` keys, the 6
 //! per-registry field names, and the per-vendor field
 //! ([`VENDOR_SHARED_SKILLS`]): their [`crate::api::ValueType`] (which
 //! carries the runtime default alongside the type), title, and
@@ -24,6 +24,7 @@
 //! for the description-authoring style rules.
 
 use crate::api::{ValueConstraints, ValueType};
+use crate::catalog::{SortMode, SortOrder};
 use crate::config::declaration::DefaultView;
 use crate::config::defaults;
 use crate::config::project_config::TREE_SEPARATOR_ITEM_PATTERN;
@@ -47,7 +48,7 @@ pub struct KeySpec {
     pub constraints: Option<ValueConstraints>,
 }
 
-/// The 7 fixed `options.*` config keys, in listing order.
+/// The 9 fixed `options.*` config keys, in listing order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigKey {
     DefaultRegistry,
@@ -57,13 +58,16 @@ pub enum ConfigKey {
     TuiGroupByType,
     TuiTreeSeparators,
     TuiExpandLevels,
+    TuiSort,
+    TuiSortOrder,
 }
 
 impl ConfigKey {
     /// Every fixed key, in the order `grim config list` emits them —
     /// pins today's `collect_entries` order: `default_registry`,
-    /// `clients`, `show_deprecated`, then the `tui.*` keys.
-    pub const ALL: [ConfigKey; 7] = [
+    /// `clients`, `show_deprecated`, then the `tui.*` keys — **append
+    /// only**: consumers of `grim config list --all` may index by position.
+    pub const ALL: [ConfigKey; 9] = [
         ConfigKey::DefaultRegistry,
         ConfigKey::Clients,
         ConfigKey::ShowDeprecated,
@@ -71,6 +75,8 @@ impl ConfigKey {
         ConfigKey::TuiGroupByType,
         ConfigKey::TuiTreeSeparators,
         ConfigKey::TuiExpandLevels,
+        ConfigKey::TuiSort,
+        ConfigKey::TuiSortOrder,
     ];
 
     /// This key's static metadata.
@@ -115,7 +121,7 @@ impl ConfigKey {
             key: "options.tui.default_view",
             value_type: ValueType::Enum {
                 values: DefaultView::VALUE_NAMES,
-                default: defaults::DEFAULT_VIEW.as_str(),
+                default: Some(defaults::DEFAULT_VIEW.as_str()),
             },
             title: "Default view",
             description: "Sets the view the browser opens in. Defaults to `tree`, grouping items by \
@@ -158,6 +164,30 @@ impl ConfigKey {
                            Defaults to `1` (registry roots only); `0` expands the tree fully.",
             constraints: None,
         };
+        const TUI_SORT: KeySpec = KeySpec {
+            key: "options.tui.sort",
+            value_type: ValueType::Enum {
+                values: SortMode::VALUE_NAMES,
+                // Unset is the kind-then-name grouping, which no listed
+                // value spells — so there is no default to name here.
+                default: None,
+            },
+            title: "Sort",
+            description: "Sets the order the browser opens in: `name`, `updated`, `rating` or                            `downloads`, the same orders `grim search --sort` applies. Unset, the                            browser groups by kind and then by name. Overridden by the `--sort` flag                            when given.",
+            constraints: None,
+        };
+        const TUI_SORT_ORDER: KeySpec = KeySpec {
+            key: "options.tui.sort_order",
+            value_type: ValueType::Enum {
+                values: SortOrder::VALUE_NAMES,
+                // Unset is "the order's own direction", which depends on
+                // `sort` — not a fixed value.
+                default: None,
+            },
+            title: "Sort order",
+            description: "Sets the direction the opening order runs in, `asc` or `desc`. Unset, each                            order runs its natural way: `name` ascending, every other order and the                            default grouping with the biggest or newest first.",
+            constraints: None,
+        };
         match self {
             Self::DefaultRegistry => &DEFAULT_REGISTRY,
             Self::Clients => &CLIENTS,
@@ -166,6 +196,8 @@ impl ConfigKey {
             Self::TuiGroupByType => &TUI_GROUP_BY_TYPE,
             Self::TuiTreeSeparators => &TUI_TREE_SEPARATORS,
             Self::TuiExpandLevels => &TUI_EXPAND_LEVELS,
+            Self::TuiSort => &TUI_SORT,
+            Self::TuiSortOrder => &TUI_SORT_ORDER,
         }
     }
 
@@ -538,6 +570,8 @@ mod tests {
                 group_by_type: true,
                 tree_separators: vec!["/".to_string()],
                 expand_levels: Some(1),
+                sort: Some(crate::catalog::SortMode::Rating),
+                sort_order: Some(crate::catalog::SortOrder::Desc),
             },
             show_deprecated: true,
             vendors: [("claude".to_string(), VendorOptions { shared_skills: true })]
@@ -793,6 +827,8 @@ mod tests {
                 ConfigKey::TuiGroupByType => &tui_options["properties"]["group_by_type"],
                 ConfigKey::TuiTreeSeparators => &tui_options["properties"]["tree_separators"],
                 ConfigKey::TuiExpandLevels => &tui_options["properties"]["expand_levels"],
+                ConfigKey::TuiSort => &tui_options["properties"]["sort"],
+                ConfigKey::TuiSortOrder => &tui_options["properties"]["sort_order"],
             };
             assert_description_prefix(node, spec.description, spec.key);
             let type_node = unwrap_nullable(&schema, node);

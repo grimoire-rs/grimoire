@@ -69,7 +69,7 @@ the `h` toggle is never written back to the file.
 ### `[options.tui]` {#options-tui}
 
 The optional `[options.tui]` sub-table tunes the interactive catalog browser
-launched by [`grim tui`][grim-tui]. All four fields are opt-in —
+launched by [`grim tui`][grim-tui]. All six fields are opt-in —
 an absent `[options.tui]` leaves the TUI at its built-in defaults.
 
 ```toml
@@ -78,6 +78,8 @@ default_view = "tree"
 group_by_type = true
 tree_separators = ["/", "-"]
 expand_levels = 2
+sort = "rating"
+sort_order = "desc"
 ```
 
 | Field | Type | Default | Description |
@@ -86,6 +88,8 @@ expand_levels = 2
 | `group_by_type` | boolean | `false` | When `true`, inserts an extra type-level group — `skill`, `rule`, `agent`, or `bundle` — between the registry root and the repository path segments in tree view. Has no effect in flat mode. |
 | `tree_separators` | array of single-character strings | (absent or `[]`) | The characters on which a repository path is split into nested tree groups. Omitting the field (or setting it to `[]`) leaves the array empty in the config file; at runtime, an empty array normalizes to `["/"]`. Add `"-"` to split on hyphens as well, so `code-review` becomes `code` → `review`. Each entry must be exactly one character; empty or multi-character entries are a parse error. `grim config list --all --format json` surfaces this rule as a machine-readable `constraints` object on the row (advisory `item_pattern` + `item_width`; grim's own validation is authoritative) — see [the JSON interface](./json-interface.md#shapes-items). |
 | `expand_levels` | non-negative integer | `1` | How many levels of the grouped tree open expanded, so a large catalog does not flood the screen. `1` (the default when absent) shows only the registry roots; `2` also expands their direct children, and so on. `0` opens the tree fully expanded. Every group below the opening depth starts collapsed, so expanding one reveals its children still folded — you drill down one level at a time. The runtime `z` key folds between this depth and fully-expanded; `→`/`←` still expand or collapse a single group. Has no effect in flat mode. |
+| `sort` | `"name"`, `"updated"`, `"rating"` or `"downloads"` | (absent) | The order the browser opens in — the same four orders [`grim search --sort`](./commands.md#search-sort) applies. Absent, the browser groups by kind and then by name. The `--sort` flag overrides it for one run; the runtime `s` key cycles through every order ephemerally and the config is never auto-rewritten. In tree view a sorted browse orders the leaves inside each group; groups stay in name order. |
+| `sort_order` | `"asc"` or `"desc"` | (absent) | The direction the opening order runs in. Absent, each order runs its natural way — `name` and the default grouping A→Z, `updated`/`rating`/`downloads` biggest or newest first — so `sort = "rating"` alone already opens best-rated first. Applies to the `--sort` flag's order too. The runtime `S` key flips it ephemerally. |
 
 Configuration parse errors — including an unrecognised `default_view` value or an invalid `tree_separators` entry — exit 78 (`EX_CONFIG`).
 

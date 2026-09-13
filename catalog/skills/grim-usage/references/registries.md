@@ -710,7 +710,9 @@ grouped collapsible tree view; the tree's opening mode, opening depth, and
 path-splitting characters are configurable via `[options.tui]` in
 `grimoire.toml` (`default_view`, `group_by_type`, `tree_separators`,
 `expand_levels` — how many tree levels open expanded; the `z` key folds
-between that depth and fully-expanded at runtime. Set them with `grim
+between that depth and fully-expanded at runtime — and `sort` /
+`sort_order`, the order and direction the browse opens in; `--sort`
+overrides the order per run, `s`/`S` change both live. Set them with `grim
 config set options.tui.<key>`, see [Managing Config](#managing-config)).
 Declared local path sources and dev-installs have no registry to root
 under — they group under a top-level **Local** tree root, where install/

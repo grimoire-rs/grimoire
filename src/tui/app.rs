@@ -128,12 +128,16 @@ pub struct TuiContext {
     /// once; the live `h` toggle owns it thereafter and persists across a
     /// scope swap (so it is intentionally absent from [`ScopeSwap`]).
     pub show_deprecated: bool,
-    /// The explicit browse ordering from `grim tui --sort`, seeded into the
-    /// state once before the first catalog load. `None` keeps the default
-    /// kind-then-leaf-name grouping. Scope-independent — an ordering is a
-    /// display choice, not a property of the scope — so it is deliberately
-    /// absent from [`ScopeSwap`], like `show_deprecated`.
+    /// The browse ordering the session opens in — `--sort`, else
+    /// `[options.tui].sort` — seeded into the state once before the first
+    /// catalog load. `None` keeps the default kind-then-leaf-name grouping.
+    /// Scope-independent — an ordering is a display choice, not a property
+    /// of the scope — so it is deliberately absent from [`ScopeSwap`], like
+    /// `show_deprecated`.
     pub sort: Option<crate::catalog::SortMode>,
+    /// The direction that ordering opens in — `[options.tui].sort_order`,
+    /// else the mode's own. Seeded once, like `sort`; the `S` key flips it.
+    pub sort_order: crate::catalog::SortOrder,
 }
 
 /// The scope-dependent fields that swap when the user toggles scope.
@@ -259,6 +263,7 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
     // Seed the browse ordering BEFORE the first load: `set_rows` is what
     // applies it, and the load below is the first call.
     state.set_sort(ctx.sort);
+    state.set_sort_order(ctx.sort_order);
 
     // Initial async catalog load: show `loading`, then populate.
     terminal.draw(|f| draw(f, &frame(&state)))?;
@@ -4689,6 +4694,7 @@ mod tests {
             resolved_options: ConfigOptions::default().resolved(),
             show_deprecated: false,
             sort: None,
+            sort_order: crate::catalog::SortOrder::Asc,
         }
     }
 
@@ -5781,6 +5787,7 @@ mod tests {
             resolved_options: ConfigOptions::default().resolved(),
             show_deprecated: false,
             sort: None,
+            sort_order: crate::catalog::SortOrder::Asc,
         }
     }
 
@@ -7217,6 +7224,7 @@ mod tests {
             resolved_options: ConfigOptions::default().resolved(),
             show_deprecated: false,
             sort: None,
+            sort_order: crate::catalog::SortOrder::Asc,
         };
         (tmp, ctx)
     }
@@ -7749,6 +7757,7 @@ mod p2_app_member_node_tests {
             resolved_options: ConfigOptions::default().resolved(),
             show_deprecated: false,
             sort: None,
+            sort_order: crate::catalog::SortOrder::Asc,
         }
     }
 

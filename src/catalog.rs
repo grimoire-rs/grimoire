@@ -24,7 +24,7 @@ pub mod update_availability;
 pub mod vote_store;
 
 #[allow(unused_imports)]
-pub use browse_sort::{SortKey, SortMode};
+pub use browse_sort::{SortKey, SortMode, SortOrder};
 #[allow(unused_imports)]
 pub use catalog_error::{CatalogError, CatalogErrorKind};
 #[allow(unused_imports)]

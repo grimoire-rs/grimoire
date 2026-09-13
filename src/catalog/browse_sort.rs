@@ -23,8 +23,16 @@
 
 use std::cmp::Ordering;
 
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
 /// Which browse ordering to apply.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+///
+/// One value set on three surfaces — the `--sort` flag (clap), the
+/// `[options.tui].sort` config key (serde, schema), and the TUI's `s` key —
+/// so the lowercase name is the same string everywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
 pub enum SortMode {
     /// Leaf name ascending, case-insensitive.
     Name,
@@ -34,6 +42,76 @@ pub enum SortMode {
     Rating,
     /// Download total descending, then date descending; uncounted last.
     Downloads,
+}
+
+impl SortMode {
+    /// Every mode, in the order the TUI's `s` key cycles them.
+    pub const ALL: [SortMode; 4] = [SortMode::Name, SortMode::Updated, SortMode::Rating, SortMode::Downloads];
+
+    /// The stable lowercase identifier of each mode, in [`Self::ALL`] order
+    /// — the list `command::config_keys` presents as the key's allowed
+    /// values.
+    pub const VALUE_NAMES: &'static [&'static str] = &[
+        Self::Name.as_str(),
+        Self::Updated.as_str(),
+        Self::Rating.as_str(),
+        Self::Downloads.as_str(),
+    ];
+
+    /// The stable lowercase identifier (the clap value, the config value).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Updated => "updated",
+            Self::Rating => "rating",
+            Self::Downloads => "downloads",
+        }
+    }
+
+    /// The direction a mode runs in unless told otherwise: names read
+    /// A→Z, everything else puts the biggest or newest first.
+    pub const fn natural_order(mode: Option<SortMode>) -> SortOrder {
+        match mode {
+            None | Some(Self::Name) => SortOrder::Asc,
+            Some(Self::Updated | Self::Rating | Self::Downloads) => SortOrder::Desc,
+        }
+    }
+}
+
+/// Which way a browse order runs — the `[options.tui].sort_order` config
+/// key. Absent, a mode runs in its [`SortMode::natural_order`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum SortOrder {
+    /// Smallest, oldest, or A first.
+    Asc,
+    /// Biggest, newest, or Z first.
+    Desc,
+}
+
+impl SortOrder {
+    /// Both directions, in declaration order.
+    pub const ALL: [SortOrder; 2] = [SortOrder::Asc, SortOrder::Desc];
+
+    /// The stable lowercase identifier of each direction, in [`Self::ALL`]
+    /// order.
+    pub const VALUE_NAMES: &'static [&'static str] = &[Self::Asc.as_str(), Self::Desc.as_str()];
+
+    /// The stable lowercase identifier.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Asc => "asc",
+            Self::Desc => "desc",
+        }
+    }
+
+    /// The other direction.
+    pub const fn flipped(self) -> SortOrder {
+        match self {
+            Self::Asc => Self::Desc,
+            Self::Desc => Self::Asc,
+        }
+    }
 }
 
 /// One row's sort keys, projected once per row rather than per comparison
@@ -350,6 +428,36 @@ mod tests {
         refs.sort_unstable();
         refs.dedup();
         assert_eq!(refs.len(), before, "every row survives exactly once");
+    }
+
+    #[test]
+    fn the_config_value_names_are_the_clap_value_names() {
+        // One value set, three surfaces: what `--sort` accepts is what the
+        // config key accepts and what the schema lists.
+        use clap::ValueEnum as _;
+        for mode in SortMode::ALL {
+            assert_eq!(
+                mode.to_possible_value().expect("selectable").get_name(),
+                mode.as_str(),
+                "clap and config spell {mode:?} the same way"
+            );
+            assert_eq!(
+                serde_json::to_value(mode).unwrap(),
+                serde_json::Value::from(mode.as_str())
+            );
+        }
+        assert_eq!(
+            SortMode::VALUE_NAMES,
+            SortMode::ALL.map(SortMode::as_str),
+            "VALUE_NAMES is ALL in order"
+        );
+        assert_eq!(SortOrder::VALUE_NAMES, SortOrder::ALL.map(SortOrder::as_str));
+        for order in SortOrder::ALL {
+            assert_eq!(
+                serde_json::to_value(order).unwrap(),
+                serde_json::Value::from(order.as_str())
+            );
+        }
     }
 
     #[test]

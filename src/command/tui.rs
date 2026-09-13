@@ -135,6 +135,16 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
         None => None,
     };
 
+    // `--sort` wins over `[options.tui].sort`. A configured direction still
+    // applies to the flag's mode; an unconfigured one follows that mode's
+    // own, not the direction the resolver derived for the configured mode.
+    let resolved_options = scope.options.resolved();
+    let sort = args.sort.or(resolved_options.sort);
+    let sort_order = match (args.sort, scope.options.tui.sort_order) {
+        (Some(_), None) => crate::catalog::SortMode::natural_order(sort),
+        _ => resolved_options.sort_order,
+    };
+
     let tui_ctx = TuiContext {
         primary_registry,
         registries,
@@ -152,13 +162,14 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
         scope_label: scope_label(scope.scope).to_string(),
         alt,
         roots: scope.roots,
-        resolved_options: scope.options.resolved(),
+        resolved_options,
         // Effective initial deprecated visibility: the `--show-deprecated`
         // flag OR the scope's config default. The live `h` toggle persists
         // across a project⇄global swap (a filter preference), so `ScopeSwap`
         // is deliberately not given this field.
         show_deprecated: args.show_deprecated || scope.options.show_deprecated,
-        sort: args.sort,
+        sort,
+        sort_order,
     };
 
     app::run(tui_ctx).await?;

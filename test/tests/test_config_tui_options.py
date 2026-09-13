@@ -85,6 +85,8 @@ def test_tui_options_preserved_through_add_remove_round_trip(
         default_view="tree",
         group_by_type=True,
         tree_separators=["/", "-"],
+        sort="rating",
+        sort_order="asc",
     )
 
     runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
@@ -104,6 +106,9 @@ def test_tui_options_preserved_through_add_remove_round_trip(
     )
     assert '"-"' in cfg_after_add, (
         "tree_separators content must be preserved after grim add"
+    )
+    assert 'sort = "rating"' in cfg_after_add and 'sort_order = "asc"' in cfg_after_add, (
+        "the sort keys must be preserved after grim add"
     )
 
     # `grim remove` also re-writes via write_config — verify again.

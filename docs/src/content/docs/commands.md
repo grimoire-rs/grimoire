@@ -132,6 +132,8 @@ The supported dotted keys are:
 | `options.tui.group_by_type` | `true` or `false` | `false` is the default; setting it to `false` removes the key, so a subsequent `get` exits 1 (consistent with `list`, which omits default values). |
 | `options.tui.tree_separators` | comma-separated single-character strings | Each character must be non-control and non-whitespace; other values exit `65`. |
 | `options.tui.expand_levels` | non-negative integer | How many tree levels open expanded: `1` (default when unset) shows only registry roots, `0` opens fully expanded. Non-integer or negative values exit `65`. Setting it stores the value; a subsequent `get` echoes it (unlike the default-valued keys above, an explicit value is always kept). |
+| `options.tui.sort` | `name`, `updated`, `rating` or `downloads` | The order [`grim tui`](#tui) opens in; other values exit `65`. Unset means the default kind-then-name grouping, which no listed value spells — so `list --all` reports `default: null` for this key, the one enum key with no fixed default. `--sort` overrides it per run. |
+| `options.tui.sort_order` | `asc` or `desc` | The direction that order runs in; other values exit `65`. Unset means the order's own natural direction (which depends on `sort`), so `list --all` reports `default: null` here too. |
 | `options.vendors.<name>.shared_skills` | `true` or `false` | One key per client — `<name>` must be a supported client, else the key itself is unknown and exits `64`. `true` installs that client's skills into the cross-vendor `.agents/skills` pool instead of its own directory, and is accepted only for a client that reads that pool — enabling it elsewhere exits `65`. `false` is the default for every client and removes the entry, so a subsequent `get` exits 1 (consistent with `list`). Flipping the value moves the client's skills on the next `install`/`update`; a hand-edited old copy is kept and warned about, never deleted. See [`[options.vendors]`](./configuration.md#options-vendors). |
 | `registry.<alias>.oci` | string | The registry entry must already exist. Mutually exclusive with `index` (setting it on an index entry exits `65`); unsettable only when `index` is set — else use `grim config registry rm <alias>`. The pre-0.7.0 field name `url` is accepted as an alias. |
 | `registry.<alias>.index` | string | A [package-index](./package-index.md) locator (`http(s)://` base or git repository). Mutually exclusive with `oci` (same rules mirrored); a locator matching neither transport exits `65`. |
@@ -1563,8 +1565,11 @@ default.
 `--sort <name|updated|rating|downloads>` opens the browse in one of the
 [four orders `grim search --sort`](#search-sort) applies, with the same
 semantics — including replacing the relevance ranking the `/` search
-applies. Omitted, the browse opens grouped by kind and then by name as it
-always has; the `s` key cycles through the same orders live, and the
+applies. It overrides [`options.tui.sort`](./configuration.md#options-tui)
+for one run, and [`options.tui.sort_order`](./configuration.md#options-tui)
+picks the direction the order opens in. Omitted and unconfigured, the
+browse opens grouped by kind and then by name as it always has; the `s`
+key cycles through the same orders live, `S` flips the direction, and the
 Catalog title names the active one. When the browse source publishes
 [artifact ratings](./ratings.md), the detail pane gains a `Rating:` row
 below the provenance rows (`42 upvotes`); an unrated artifact simply has no
