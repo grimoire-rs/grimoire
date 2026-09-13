@@ -27,7 +27,7 @@ use serde::Deserialize;
 
 use crate::catalog::catalog_error::CatalogError;
 use crate::catalog::rating_provider;
-use crate::catalog::registry_catalog::{CatalogEntry, RatingSummary};
+use crate::catalog::registry_catalog::{CatalogEntry, DownloadSummary, RatingSummary};
 use crate::config::registry_resolve::SourceKind;
 
 /// HTTP fetch timeout for the compiled index.
@@ -139,9 +139,11 @@ impl IndexPackage {
             // resolved live from the registry at install time.
             latest_tag: None,
             version: None,
-            // `all.json` carries no ratings — those live in the `stats.json`
-            // sidecar and are joined onto the entry by ref afterwards.
+            // `all.json` carries no ratings and no pull counts — both live in
+            // the `stats.json` sidecar and are joined onto the entry by ref
+            // afterwards.
             rating: None,
+            downloads: None,
             fetched_at: fetched_at.to_string(),
         })
     }
@@ -195,12 +197,50 @@ struct WireProviders {
 }
 
 /// One ref's bag of stats. Every signal key is independently absent-first
-/// class: a ref may carry a future `downloads` and no `rating`, or the
-/// reverse.
+/// class: a ref may carry `downloads` and no `rating`, or the reverse.
 #[derive(Debug, Deserialize)]
 struct WireStats {
     #[serde(default)]
     rating: Option<WireRating>,
+    #[serde(default)]
+    downloads: Option<WireDownloads>,
+}
+
+/// The wire form of one artifact's pull count.
+///
+/// Absent means **unknown**, never zero, exactly as `rating` does: most
+/// registries expose no per-artifact counter at all — neither GHCR nor the
+/// GitLab registry publishes one in any API — so for most indexes the key is
+/// on no package.
+///
+/// `total` is **not** the sum of the sidecar's `versions` map: a channel tag
+/// (`canary`) carries real traffic that names no release, so it counts into
+/// the total and appears in no per-release entry. Nothing here should be
+/// derived from the other.
+///
+/// `versions` itself is deliberately **not read**. It is a map per row, in a
+/// browse catalog capped at 500 rows, to serve one detail rail — and the
+/// cache struct is an object precisely so it can gain the key later without
+/// a wire break.
+#[derive(Debug, Deserialize)]
+struct WireDownloads {
+    total: u64,
+    /// The producer's own read time (RFC3339 UTC). Required by the producer
+    /// that writes it, optional here on the file's standing rule that every
+    /// level below the document itself is absent-tolerant.
+    #[serde(default)]
+    as_of: Option<String>,
+}
+
+/// One ref's stats as observed in the sidecar, projected for the join onto
+/// [`CatalogEntry`]. Both halves are independently absent: a ref may be rated
+/// with no pull count, counted with no rating, or carry neither — and a ref
+/// carrying neither is never inserted, so a key in the map always means "the
+/// sidecar said something about this artifact".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct IndexStats {
+    rating: Option<RatingSummary>,
+    downloads: Option<DownloadSummary>,
 }
 
 /// The wire form of one artifact's rating. `target` and `url` are opaque —
@@ -274,8 +314,8 @@ fn index_is_loopback(stats_url: &str) -> bool {
 /// `git_dir` is the per-locator shallow-clone directory (git transport
 /// only); `cache_path` provides error context (the catalog cache file the
 /// build is for). `previous` is the prior cache's entries, keyed by
-/// [`CatalogEntry::repo`]: the ratings a run inherits when the sidecar
-/// could not be observed at all (see [`fetch_ratings`]).
+/// [`CatalogEntry::repo`]: the stats a run inherits when the sidecar
+/// could not be observed at all (see [`fetch_stats`]).
 ///
 /// # Errors
 ///
@@ -294,13 +334,13 @@ pub async fn fetch_index_entries(
         // `Registry` never reaches this module; treat defensively as HTTP.
         SourceKind::IndexHttp | SourceKind::Registry => fetch_http(locator, cache_path).await?,
     };
-    // Ratings ride the HTTP index only: a git-transport index is a tree of
-    // per-package `metadata.json` files with no sidecar to fetch, and an OCI
-    // `_catalog` source never reaches this module at all. Both are completed
-    // observations that the source publishes no ratings — `Some(empty)`, not
-    // an unobserved sidecar to carry ratings forward over.
-    let ratings = match kind {
-        SourceKind::IndexHttp => fetch_ratings(locator).await,
+    // Sidecar stats ride the HTTP index only: a git-transport index is a tree
+    // of per-package `metadata.json` files with no sidecar to fetch, and an
+    // OCI `_catalog` source never reaches this module at all. Both are
+    // completed observations that the source publishes no stats —
+    // `Some(empty)`, not an unobserved sidecar to carry stats forward over.
+    let observed = match kind {
+        SourceKind::IndexHttp => fetch_stats(locator).await,
         SourceKind::IndexGit | SourceKind::Registry => Some(BTreeMap::new()),
     };
     Ok(packages
@@ -315,24 +355,33 @@ pub async fn fetch_index_entries(
             // carry-forward join while the sidecar join kept working.
             let entry = p.into_entry(fetched_at)?;
             let key = entry.repo();
-            let rating = match &ratings {
+            let stats = match &observed {
                 // A completed observation is authoritative even when it
-                // found nothing: a retracted rating has to clear.
-                Some(observed) => observed.get(&key).cloned(),
+                // found nothing: a retracted rating has to clear, and so does
+                // a pull count the producer stopped publishing.
+                Some(observed) => observed.get(&key).cloned().unwrap_or_default(),
                 // Nothing was observed, so nothing is known — keep what the
                 // last build knew rather than publishing "unrated" into the
                 // cache for a full TTL (R-2: no silent emptying). A cold
                 // cache stays unrated, which is honest.
                 None => previous
                     .and_then(|entries| entries.get(&key))
-                    .and_then(|prior| prior.rating.clone()),
+                    .map(|prior| IndexStats {
+                        rating: prior.rating.clone(),
+                        downloads: prior.downloads.clone(),
+                    })
+                    .unwrap_or_default(),
             };
-            Some(CatalogEntry { rating, ..entry })
+            Some(CatalogEntry {
+                rating: stats.rating,
+                downloads: stats.downloads,
+                ..entry
+            })
         })
         .collect())
 }
 
-/// GET the `stats.json` sidecar and project its ratings, keyed by artifact ref.
+/// GET the `stats.json` sidecar and project its stats, keyed by artifact ref.
 ///
 /// **Never fails, and distinguishes two outcomes.** `Some` is a *completed
 /// observation*: a 404 or 410 — absence, the normal case for every index that
@@ -347,7 +396,7 @@ pub async fn fetch_index_entries(
 /// rated" into the cache for a whole TTL. Either way only the `all.json` fetch
 /// decides whether the catalog build succeeded, and nothing is said above
 /// `debug`.
-async fn fetch_ratings(locator: &str) -> Option<BTreeMap<String, RatingSummary>> {
+async fn fetch_stats(locator: &str) -> Option<BTreeMap<String, IndexStats>> {
     let url = stats_url(locator);
     let fetched = async {
         let response = http_client()?.get(&url).send().await?;
@@ -385,7 +434,7 @@ async fn fetch_ratings(locator: &str) -> Option<BTreeMap<String, RatingSummary>>
         return None;
     }
     match response.bytes().await {
-        Ok(bytes) => parse_ratings(&bytes, &url),
+        Ok(bytes) => parse_stats(&bytes, &url),
         Err(e) => {
             tracing::debug!("ratings sidecar at '{url}' was not observed: {e}");
             None
@@ -393,16 +442,17 @@ async fn fetch_ratings(locator: &str) -> Option<BTreeMap<String, RatingSummary>>
     }
 }
 
-/// Project a fetched `stats.json` body into per-ref ratings.
+/// Project a fetched `stats.json` body into per-ref stats.
 ///
-/// Absent is first-class at every level below the file itself: no `entries`
-/// key, a ref with no record, and a record carrying other stats but no
-/// `rating` all yield no rating for that ref and leave every other ref
-/// alone — a `Some` map, because the document was read and that is what it
+/// Absent is first-class at every level below the file itself, and per
+/// signal: no `entries` key, a ref with no record, and a record carrying a
+/// `rating` but no `downloads` (or the reverse) all yield absence for that
+/// one signal and leave every other ref — and the ref's other signal —
+/// alone. A `Some` map, because the document was read and that is what it
 /// said. An unparseable document or a `schema_version` from the future is
 /// `None` instead: nothing was learned, so nothing may be published (see
-/// [`fetch_ratings`]). At `debug`, never a warning and never an error.
-fn parse_ratings(bytes: &[u8], url: &str) -> Option<BTreeMap<String, RatingSummary>> {
+/// [`fetch_stats`]). At `debug`, never a warning and never an error.
+fn parse_stats(bytes: &[u8], url: &str) -> Option<BTreeMap<String, IndexStats>> {
     let stats: StatsFile = match serde_json::from_slice(bytes) {
         Ok(stats) => stats,
         Err(e) => {
@@ -430,8 +480,17 @@ fn parse_ratings(bytes: &[u8], url: &str) -> Option<BTreeMap<String, RatingSumma
         stats
             .entries
             .into_iter()
-            .filter_map(|(r#ref, entry)| {
-                Some((r#ref, entry.rating?.into_summary(provider.as_deref(), host.as_deref())))
+            .filter_map(|(r#ref, row)| {
+                let observed = IndexStats {
+                    rating: row.rating.map(|r| r.into_summary(provider.as_deref(), host.as_deref())),
+                    downloads: row.downloads.map(|d| DownloadSummary {
+                        total: d.total,
+                        as_of: d.as_of,
+                    }),
+                };
+                // A bag holding only signals this grim does not read is the
+                // same as a ref the sidecar never mentioned at all.
+                (observed != IndexStats::default()).then_some((r#ref, observed))
             })
             .collect(),
     )
@@ -692,13 +751,13 @@ mod tests {
     #[test]
     fn the_wire_struct_tolerates_unknown_fields_and_the_cache_struct_does_not() {
         // C-002, the whole point of keeping two structs. The sidecar schema
-        // grows (a follow-up adds download counts and recency as sibling
-        // stats), so the WIRE side must keep reading a newer document —
+        // grows — `downloads` landed as a sibling stat and recency may
+        // follow — so the WIRE side must keep reading a newer document:
         // unknown keys at the top level, inside a ref's stat bag, and inside
-        // `rating` itself. The CACHE side is strict on purpose: that
-        // strictness is what makes an older grim reject a newer cache and
-        // rebuild it (S-015) instead of misreading it.
-        let ratings = parse_ratings(
+        // `rating` and `downloads` themselves. The CACHE side is strict on
+        // purpose: that strictness is what makes an older grim reject a
+        // newer cache and rebuild it (S-015) instead of misreading it.
+        let ratings = parse_stats(
             br#"{
                 "schema_version": 1,
                 "generated_at": "2026-08-18T00:00:00Z",
@@ -706,8 +765,9 @@ mod tests {
                 "tomorrows_top_level_key": {"anything": true},
                 "entries": {
                     "ghcr.io/acme/skills/one": {
-                        "downloads": {"total": 91},
-                        "rating": {"up": 7, "target": "D_kwDO", "url": "https://f/1", "score": 0.9}
+                        "downloads": {"total": 91, "versions": {"1.0.0": 91}, "as_of": "2026-09-10T21:48:47Z"},
+                        "rating": {"up": 7, "target": "D_kwDO", "url": "https://f/1", "score": 0.9},
+                        "tomorrows_signal": {"whatever": true}
                     }
                 }
             }"#,
@@ -715,9 +775,16 @@ mod tests {
         );
         let ratings = ratings.expect("a parsed document is a completed observation");
         let one = ratings.get("ghcr.io/acme/skills/one").expect("rated ref survives");
-        assert_eq!(one.up, 7);
-        assert_eq!(one.target, "D_kwDO");
-        assert_eq!(one.url, "https://f/1");
+        let rating = one.rating.as_ref().expect("the rating survives");
+        assert_eq!(rating.up, 7);
+        assert_eq!(rating.target, "D_kwDO");
+        assert_eq!(rating.url, "https://f/1");
+        // `versions` is a key the wire struct deliberately does not read;
+        // tolerating it is the same contract as tolerating `score`. `as_of`
+        // IS read — it is what makes displaying the count honest.
+        let downloads = one.downloads.as_ref().expect("the pull count survives");
+        assert_eq!(downloads.total, 91);
+        assert_eq!(downloads.as_of.as_deref(), Some("2026-09-10T21:48:47Z"));
 
         let cached = serde_json::from_str::<RatingSummary>(
             r#"{"up": 7, "target": "D_kwDO", "url": "https://f/1", "score": 0.9}"#,
@@ -732,7 +799,7 @@ mod tests {
 
     /// Spawn a throwaway HTTP host answering every request with `response`
     /// (a raw HTTP/1.1 message) and hand back its base URL. The 404-vs-5xx
-    /// split lives in the *status line*, which [`parse_ratings`] never
+    /// split lives in the *status line*, which [`parse_stats`] never
     /// sees, so these two cases can only be proven over a real socket.
     async fn spawn_index_host(response: &'static str) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -757,7 +824,7 @@ mod tests {
         // than degrade into "keep whatever the last build saw".
         let base = spawn_index_host("HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
         assert_eq!(
-            fetch_ratings(&base).await,
+            fetch_stats(&base).await,
             Some(BTreeMap::new()),
             "a 404 is a completed observation of no ratings, not an unobserved sidecar"
         );
@@ -771,13 +838,13 @@ mod tests {
         // ratings the publisher cannot restore by any action.
         let base = spawn_index_host("HTTP/1.1 410 Gone\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
         assert_eq!(
-            fetch_ratings(&base).await,
+            fetch_stats(&base).await,
             Some(BTreeMap::new()),
             "410 reports absence, not a failure to observe"
         );
 
         assert_eq!(
-            fetch_ratings(
+            fetch_stats(
                 &spawn_index_host("HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await
             )
             .await,
@@ -797,7 +864,7 @@ mod tests {
             spawn_index_host("HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
                 .await;
         assert_eq!(
-            fetch_ratings(&base).await,
+            fetch_stats(&base).await,
             None,
             "a 5xx is an unobserved sidecar, never an empty rating map"
         );
@@ -805,7 +872,7 @@ mod tests {
         // Same arm one layer down: a connection that never reaches a
         // server at all (nothing listens on port 1).
         assert_eq!(
-            fetch_ratings("http://127.0.0.1:1").await,
+            fetch_stats("http://127.0.0.1:1").await,
             None,
             "a transport failure is unobserved too"
         );
@@ -819,7 +886,7 @@ mod tests {
         // sidecar it failed to *observe*, not an index that publishes no
         // ratings, and collapsing the two empties every rated row.
         assert_eq!(
-            parse_ratings(b"not json at all", "https://index.example/stats.json"),
+            parse_stats(b"not json at all", "https://index.example/stats.json"),
             None,
             "an unreadable document tells us nothing about what is rated"
         );
@@ -836,27 +903,41 @@ mod tests {
 
         // `entries` key absent: nothing is rated yet. Still a *completed*
         // observation — the document parsed — so `Some`, empty.
-        assert_eq!(parse_ratings(br#"{"schema_version": 1}"#, url), Some(BTreeMap::new()));
+        assert_eq!(parse_stats(br#"{"schema_version": 1}"#, url), Some(BTreeMap::new()));
 
-        // A ref absent from `entries`, and a present ref carrying other
-        // stats but no `rating` — neither disturbs the rated sibling.
-        let ratings = parse_ratings(
+        // A ref absent from `entries`, a ref carrying only `downloads`, and a
+        // ref carrying only `rating` — the two signals are independent and
+        // neither ref disturbs the other.
+        let stats = parse_stats(
             br#"{
                 "schema_version": 1,
                 "entries": {
-                    "ghcr.io/acme/skills/other-stats-only": {"downloads": {"total": 5}},
-                    "ghcr.io/acme/skills/rated": {"rating": {"up": 2, "target": "t", "url": "u"}}
+                    "ghcr.io/acme/skills/counted-only": {"downloads": {"total": 5}},
+                    "ghcr.io/acme/skills/counted-undated": {"downloads": {"total": 9, "as_of": null}},
+                    "ghcr.io/acme/skills/rated": {"rating": {"up": 2, "target": "t", "url": "u"}},
+                    "ghcr.io/acme/skills/nothing-we-read": {"tomorrows_signal": {"x": 1}}
                 }
             }"#,
             url,
         )
         .expect("a parsed document is a completed observation");
-        assert_eq!(
-            ratings.keys().collect::<Vec<_>>(),
-            vec!["ghcr.io/acme/skills/rated"],
-            "only the ref carrying a `rating` is rated; a stats-only ref is unrated, not zero"
+        let counted = &stats["ghcr.io/acme/skills/counted-only"];
+        let count = counted.downloads.as_ref().expect("counted");
+        assert_eq!(count.total, 5);
+        assert_eq!(count.as_of, None, "a stat with no stamp is still a count");
+        assert_eq!(counted.rating, None, "a counted ref is unrated, not zero-rated");
+        // An explicit `null` stamp reads the same as an absent one — the key
+        // is present, so the ref is counted either way.
+        let undated = stats["ghcr.io/acme/skills/counted-undated"].downloads.as_ref();
+        assert_eq!(undated.expect("counted").total, 9);
+        let rated = &stats["ghcr.io/acme/skills/rated"];
+        assert_eq!(rated.rating.as_ref().expect("rated").up, 2);
+        assert_eq!(rated.downloads, None, "a rated ref has an unknown pull count, not zero");
+        assert!(
+            !stats.contains_key("ghcr.io/acme/skills/nothing-we-read"),
+            "a bag holding only unread signals is the same as no entry at all"
         );
-        assert!(!ratings.contains_key("ghcr.io/acme/skills/never-mentioned"));
+        assert!(!stats.contains_key("ghcr.io/acme/skills/never-mentioned"));
     }
 
     #[test]
@@ -868,7 +949,7 @@ mod tests {
         // "this index rates nothing" and would empty every rated row on a
         // schema bump. Unknown, so nothing is published either way.
         assert_eq!(
-            parse_ratings(
+            parse_stats(
                 br#"{
                 "schema_version": 2,
                 "entries": {"ghcr.io/acme/skills/one": {"rating": {"up": 7, "target": "t", "url": "u"}}}
@@ -895,10 +976,13 @@ mod tests {
     }
 
     fn declared_host(body: &str, url: &str) -> Option<String> {
-        parse_ratings(body.as_bytes(), url)
+        parse_stats(body.as_bytes(), url)
             .expect("a parsed document is a completed observation")
             .get("ghcr.io/acme/skills/one")
             .expect("the ref is rated")
+            .rating
+            .as_ref()
+            .expect("the ref carries a rating")
             .host
             .clone()
     }

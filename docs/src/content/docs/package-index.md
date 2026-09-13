@@ -149,7 +149,7 @@ A statically-served index publishes the compiled form:
 |---|---|
 | `/all.json` | Every package, one JSON array. Each element is the `metadata.json` object plus a derived `namespace` field (e.g. `"github.com/grimoire-rs"`). |
 | `/index/<namespace…>/<package>/metadata.json` | Path-addressable copy of each pointer. |
-| `/stats.json` | *Optional.* Per-package publisher statistics — today, [artifact ratings](./ratings.md). Absent on an index that publishes none; see [the ratings sidecar](#spec-stats). |
+| `/stats.json` | *Optional.* Per-package publisher statistics — [artifact ratings](./ratings.md) and download counts. Absent on an index that publishes none; see [the stats sidecar](#spec-stats). |
 
 `all.json` is the only endpoint grim's HTTP transport requires. The
 path-addressable copies allow cheap single-package lookups by any
@@ -158,15 +158,16 @@ consumer without downloading the full set.
 The git transport skips compilation entirely: grim walks the
 `index/**/metadata.json` tree of the clone, so a plain git repository
 with the layout above *is already a fully functional index*. It has no
-`stats.json`, so a git-transport index is always unrated.
+`stats.json`, so a git-transport index is always unrated and uncounted.
 
-### The Ratings Sidecar (`stats.json`) {#spec-stats}
+### The Stats Sidecar (`stats.json`) {#spec-stats}
 
-An index that collects [artifact ratings](./ratings.md) serves a second
-compiled document at `<base>/stats.json`, a sibling of `all.json`. It is a
-**bag of statistics per artifact ref**, not a ratings file: `rating` is the
-first key inside it and a later signal lands beside it additively, without
-a second endpoint and without a version bump for consumers that ignore it.
+An index that collects [artifact ratings](./ratings.md) or download counts
+serves a second compiled document at `<base>/stats.json`, a sibling of
+`all.json`. It is a **bag of statistics per artifact ref**, not a ratings
+file: `rating` and `downloads` sit side by side inside it and a later signal
+lands beside them additively, without a second endpoint and without a
+version bump for consumers that ignore it.
 
 ```jsonc
 {
@@ -177,9 +178,9 @@ a second endpoint and without a version bump for consumers that ignore it.
   "generated_at": "2026-08-18T09:00:00Z",
 
   // Per-STAT provider block. Each statistic names its own producer,
-  // because they are genuinely different: ratings come from a forge, a
-  // future `downloads` would come from the registry. A single top-level
-  // `provider` would have been wrong the moment a second signal landed.
+  // because they are genuinely different: ratings come from a forge,
+  // download counts from the registry. A single top-level `provider`
+  // would have been wrong the moment the second signal landed.
   "providers": {
     // Which write mutation `grim rate` issues. A plain string, NOT a
     // tagged union: `target` and `url` are hoisted onto the entry, so this
@@ -191,7 +192,13 @@ a second endpoint and without a version bump for consumers that ignore it.
     // port significant. Omit it on a SaaS index; declare it and every
     // consumer of a GHES or self-managed instance votes against the right
     // host with no per-machine configuration.
-    "rating_host": "api.github.com"
+    "rating_host": "api.github.com",
+
+    // Which backend the download counts were read from. Absent on an index
+    // that publishes none — which is most of them: no OCI distribution-spec
+    // endpoint exposes a per-artifact download counter, and neither GHCR
+    // nor the GitLab registry offers a vendor one.
+    "downloads": "artifactory"
   },
 
   // Keyed by artifact ref, exactly as it appears in all.json's `ref`.
@@ -207,6 +214,26 @@ a second endpoint and without a version bump for consumers that ignore it.
         "target": "D_kwDOABCDEF4AQtBz",
         // Opaque. The human-facing thread link.
         "url": "https://github.com/grimoire-rs/index/discussions/117"
+      },
+      "downloads": {
+        // Every pull the producer could attribute to the artifact. NOT the
+        // sum of `versions`: a channel tag (`canary`) carries real traffic
+        // that names no release, so it counts here and appears in no
+        // per-release entry. Never derive one from the other.
+        "total": 1416,
+        // Optional. Per-release counts, keyed by the release tag exactly as
+        // `tags` spells it. A floating tag (`latest`, `1.35`) is absent by
+        // design — it aliases a release whose count is already here, and a
+        // number of its own would read as a second, separate figure.
+        "versions": { "1.35.2": 900, "1.35.1": 516 },
+        // Optional. When the producer READ the counters, RFC3339 UTC.
+        // Distinct from the document's `generated_at`: a run that only
+        // recomputes ratings republishes a carried-forward `downloads`
+        // whose stamp is older than the document around it, which is what
+        // makes displaying the count honest. Treat it as optional — the
+        // producer derives it from its own run clock, so any backend can
+        // supply it, but none is obliged to.
+        "as_of": "2026-08-18T09:00:00Z"
       }
     }
   }

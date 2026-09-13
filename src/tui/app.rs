@@ -3872,6 +3872,7 @@ mod tests {
                 latest_tag: Some("1.2.3".to_string()),
                 version: Some("1.2.3".to_string()),
                 rating: None,
+                downloads: None,
                 badge: StatusBadge::NotInstalled,
             }],
         };
@@ -4846,6 +4847,7 @@ mod tests {
                     latest_tag: None,
                     version: None,
                     rating: None,
+                    downloads: None,
                     badge: StatusBadge::NotInstalled,
                 })
                 .collect(),

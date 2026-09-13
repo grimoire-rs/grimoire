@@ -999,6 +999,7 @@ mod tests {
             latest_tag: None,
             version: None,
             rating: None,
+            downloads: None,
             badge: crate::install::status_badge::StatusBadge::NotInstalled,
         }
     }

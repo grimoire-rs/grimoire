@@ -704,10 +704,13 @@ def _write_stats(
     entries: dict,
     schema_version: int = 1,
     rating_host: str | None = None,
+    downloads_provider: str | None = None,
 ) -> None:
     providers: dict = {"rating": "github"}
     if rating_host is not None:
         providers["rating_host"] = rating_host
+    if downloads_provider is not None:
+        providers["downloads"] = downloads_provider
     (root / "stats.json").write_text(
         json.dumps(
             {
@@ -776,6 +779,69 @@ def test_http_index_joins_the_ratings_sidecar_by_ref(
     assert "ghcr.io/acme/skills/ghost" not in cached, (
         "the sidecar joins onto index rows; it never adds one"
     )
+
+
+def test_http_index_joins_the_downloads_sidecar_by_ref(
+    grim_at, grim_home: Path, project_dir: Path, http_index
+) -> None:
+    """`downloads` is the sidecar's second stat and is joined by the same
+    rule as `rating`, independently of it: a ref may be counted and unrated,
+    rated and uncounted, or both."""
+    root, base = http_index
+    _write_all_json(
+        root,
+        [
+            _package("counted", "skill", "ghcr.io/acme/skills/counted", "Counted"),
+            _package("rated", "skill", "ghcr.io/acme/skills/rated", "Rated"),
+            _package("plain", "skill", "ghcr.io/acme/skills/plain", "Plain"),
+        ],
+    )
+    _write_stats(
+        root,
+        {
+            "ghcr.io/acme/skills/counted": {
+                "downloads": {
+                    "total": 1416,
+                    # Published per release, and deliberately NOT read into
+                    # grim's cache — tolerated like any other sidecar key.
+                    "versions": {"1.35.2": 900, "1.35.1": 400},
+                    "as_of": "2026-09-10T21:48:47Z",
+                }
+            },
+            "ghcr.io/acme/skills/rated": {
+                "rating": {"up": 12, "target": "t", "url": "https://f/1"}
+            },
+        },
+        downloads_provider="artifactory",
+    )
+    _index_config(project_dir, base)
+
+    rows = _search_rows(grim_at(project_dir))
+    by_repo = {r["repo"]: r for r in rows}
+    assert len(rows) == 3, f"every pointer still lists; got {rows}"
+
+    counted = by_repo["ghcr.io/acme/skills/counted"]["downloads"]
+    assert counted["total"] == 1416
+    assert counted["as_of"] == "2026-09-10T21:48:47Z"
+    assert set(counted) == {"total", "as_of"}, (
+        f"the per-release breakdown is not carried into the row: {counted}"
+    )
+    assert by_repo["ghcr.io/acme/skills/counted"]["rating"] is None, (
+        "a counted ref is unrated, never zero-rated"
+    )
+    assert by_repo["ghcr.io/acme/skills/rated"]["downloads"] is None, (
+        "a rated ref has an unknown pull count, never zero"
+    )
+    assert by_repo["ghcr.io/acme/skills/plain"]["downloads"] is None, (
+        "a ref absent from the sidecar is uncounted, never a zero-pull record"
+    )
+
+    cached = _cached_entries(grim_home)
+    assert cached["ghcr.io/acme/skills/counted"]["downloads"] == {
+        "total": 1416,
+        "as_of": "2026-09-10T21:48:47Z",
+    }
+    assert "downloads" not in cached["ghcr.io/acme/skills/plain"]
 
 
 def test_a_declared_rating_host_lands_in_the_cache_normalised(

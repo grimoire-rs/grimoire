@@ -12,15 +12,22 @@
 //!
 //! JSON format: `{"items": [...], "sources": [...]}` where each item is a
 //! `{kind, repo, source, summary, description, version, latest_tag,
-//! repository, revision, created, deprecated, replaced_by, rating, status}`
-//! object (uniform `items` envelope, per subsystem-cli-api.md).
+//! repository, revision, created, deprecated, replaced_by, rating,
+//! downloads, status}` object (uniform `items` envelope, per
+//! subsystem-cli-api.md).
 //! The `description` stays full and untruncated; both `version` and the
 //! representative `latest_tag` are kept; `source` is the `{alias, locator}`
 //! attribution of the configured registry entry the row came from;
 //! `repository` is the HTTPS source URL or `null`; `revision`/`created` are
 //! the git provenance (`--git` opt-in) or `null`; `deprecated` is the
 //! deprecation message or `null`; `rating` is the community rating joined
-//! from the index sidecar, or `null` when the artifact is unrated.
+//! from the index sidecar, or `null` when the artifact is unrated;
+//! `downloads` is the total pull count joined from the same sidecar, or
+//! `null` when the browse source publishes no per-artifact counter — which
+//! is every registry but Artifactory, so `null` is the common case and
+//! never means zero; it is an object (`{total, as_of}`), never a bare
+//! number, so the per-release breakdown the sidecar also publishes can be
+//! added later without a break.
 //!
 //! `sources` is the always-present sibling naming every browsed source in
 //! registry-declaration order — `{alias, locator, ok, error}` — so a consumer
@@ -102,6 +109,28 @@ pub struct SearchSourceStatus {
 /// can act on it: a vote goes through `grim rate <ref>`, which resolves the
 /// target itself. `up` is the count; `url` opens the thread. Both halves a
 /// client can use; nothing it cannot.
+/// One row's pull count — the total and when the producer read it.
+///
+/// An object rather than a bare number, and deliberately so: the sidecar
+/// stamps every count with its own read time, and it also publishes a
+/// per-release breakdown this does not carry yet. A scalar `downloads` could
+/// gain neither without a breaking change, which is the same reasoning that
+/// put multi-item reports behind an `items` envelope.
+///
+/// `total` is **not** the sum of any per-release map — a channel tag carries
+/// traffic that names no release — so a consumer must never derive one from
+/// the other.
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchDownloads {
+    /// Every pull the browse source could attribute to the artifact.
+    pub total: u64,
+    /// When the producer read the counters (RFC3339 UTC), or `null` when the
+    /// sidecar published no stamp. Distinct from the sidecar's document-level
+    /// `generated_at`: a rating-only rebuild republishes a carried-forward
+    /// count whose stamp is older than the document around it.
+    pub as_of: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchRating {
     /// Upvote count as of the index sidecar's generation.
@@ -150,6 +179,10 @@ pub struct SearchEntry {
     /// artifact; `None` means *unrated* — never a zero-vote record. JSON-only
     /// — never shown as its own plain-table column.
     pub rating: Option<SearchRating>,
+    /// The pull count, when the browse source published one for this
+    /// artifact; `None` means *unknown* — never zero. JSON-only, and absent
+    /// on every index whose registry exposes no per-artifact counter.
+    pub downloads: Option<SearchDownloads>,
     /// The curated `org.opencontainers.image.*` metadata (licenses, authors,
     /// url, documentation, vendor) the manifest carried. JSON-only — the same
     /// object the TUI detail pane renders. Every field `null` when the
@@ -167,7 +200,7 @@ impl Serialize for SearchEntry {
         // Field count below is asserted by
         // `json_carries_replaced_by_plain_table_does_not` — adding a field
         // here requires bumping both, or the test fails.
-        let mut s = serializer.serialize_struct("SearchEntry", 15)?;
+        let mut s = serializer.serialize_struct("SearchEntry", 16)?;
         s.serialize_field("kind", &self.kind)?;
         s.serialize_field("repo", &self.repo)?;
         s.serialize_field("source", &self.source)?;
@@ -181,6 +214,7 @@ impl Serialize for SearchEntry {
         s.serialize_field("deprecated", &self.deprecated)?;
         s.serialize_field("replaced_by", &self.replaced_by)?;
         s.serialize_field("rating", &self.rating)?;
+        s.serialize_field("downloads", &self.downloads)?;
         s.serialize_field("oci", &self.oci)?;
         s.serialize_field("status", &self.status.to_string())?;
         s.end()
@@ -306,6 +340,7 @@ mod tests {
             deprecated: None,
             replaced_by: None,
             rating: None,
+            downloads: None,
             oci: Default::default(),
             status,
         }
@@ -363,6 +398,7 @@ mod tests {
             deprecated: None,
             replaced_by: None,
             rating: None,
+            downloads: None,
             oci: Default::default(),
             status: StatusBadge::Installed,
         };
@@ -391,6 +427,7 @@ mod tests {
             deprecated: None,
             replaced_by: None,
             rating: None,
+            downloads: None,
             oci: Default::default(),
             status: StatusBadge::NotInstalled,
         };
@@ -416,6 +453,7 @@ mod tests {
             deprecated: None,
             replaced_by: None,
             rating: None,
+            downloads: None,
             oci: Default::default(),
             status: StatusBadge::Installed,
         };
@@ -442,6 +480,7 @@ mod tests {
             deprecated: None,
             replaced_by: None,
             rating: None,
+            downloads: None,
             oci: Default::default(),
             status: StatusBadge::NotInstalled,
         };
@@ -470,6 +509,7 @@ mod tests {
             deprecated: None,
             replaced_by: None,
             rating: None,
+            downloads: None,
             oci: Default::default(),
             status: StatusBadge::Installed,
         };
@@ -496,6 +536,7 @@ mod tests {
             deprecated: None,
             replaced_by: None,
             rating: None,
+            downloads: None,
             oci: Default::default(),
             status: StatusBadge::Installed,
         };
@@ -605,10 +646,10 @@ mod tests {
         SearchReport::new(vec![e.clone()], vec![]).print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         assert_eq!(v["items"][0]["replaced_by"], "ghcr.io/acme/skills/x2");
-        // The full 15-field object still round-trips. This count is linked to
+        // The full 16-field object still round-trips. This count is linked to
         // the manual `Serialize for SearchEntry` impl's serialize_struct count
         // — the two must move together.
-        assert_eq!(v["items"][0].as_object().unwrap().len(), 15);
+        assert_eq!(v["items"][0].as_object().unwrap().len(), 16);
         // Absent ⇒ explicit null, key always present for stable consumers.
         let mut buf = Vec::new();
         SearchReport::new(vec![entry("localhost:5000/acme/y", StatusBadge::Installed)], vec![])
@@ -621,6 +662,51 @@ mod tests {
         SearchReport::new(vec![e], vec![]).print_plain(&mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(!out.contains("x2"), "plain table unchanged");
+    }
+
+    #[test]
+    fn json_carries_downloads_plain_table_does_not() {
+        let mut e = entry("localhost:5000/acme/x", StatusBadge::Installed);
+        e.downloads = Some(SearchDownloads {
+            total: 1416,
+            as_of: Some("2026-09-10T21:48:47Z".to_string()),
+        });
+        let mut buf = Vec::new();
+        SearchReport::new(vec![e.clone()], vec![]).print_json(&mut buf).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["items"][0]["downloads"]["total"], 1416);
+        assert_eq!(v["items"][0]["downloads"]["as_of"], "2026-09-10T21:48:47Z");
+        // An object from the first release, so the sidecar's per-release
+        // `versions` map can land later without breaking a consumer.
+        let downloads = v["items"][0]["downloads"].as_object().expect("downloads is an object");
+        assert_eq!(
+            downloads.len(),
+            2,
+            "downloads carries `total` and `as_of`: {downloads:?}"
+        );
+
+        // Unknown ⇒ explicit null, key always present — and never `0`, which
+        // would read as "counted, nobody pulled it". Every registry but
+        // Artifactory publishes no counter, so this is the common row.
+        let mut buf = Vec::new();
+        SearchReport::new(vec![entry("localhost:5000/acme/y", StatusBadge::Installed)], vec![])
+            .print_json(&mut buf)
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        let item = v["items"][0].as_object().unwrap();
+        assert!(item.contains_key("downloads"), "key present even when uncounted");
+        assert!(item["downloads"].is_null(), "unknown is null, never 0");
+
+        // The plain table stays five columns — no pull count leaks into it.
+        let mut buf = Vec::new();
+        SearchReport::new(vec![e], vec![]).print_plain(&mut buf).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(!out.contains("1416"), "plain table unchanged: {out}");
+        assert_eq!(
+            out.lines().next().unwrap().split_whitespace().count(),
+            5,
+            "header still five columns"
+        );
     }
 
     #[test]
@@ -643,9 +729,9 @@ mod tests {
         let rating = v["items"][0]["rating"].as_object().expect("rating is an object");
         assert_eq!(rating.len(), 2, "rating carries `up` and `url` only: {rating:?}");
         assert!(!rating.contains_key("target"), "the opaque target is not emitted");
-        // The full 15-field object still round-trips (see the count assertion
+        // The full 16-field object still round-trips (see the count assertion
         // in `json_carries_replaced_by_plain_table_does_not`).
-        assert_eq!(v["items"][0].as_object().unwrap().len(), 15);
+        assert_eq!(v["items"][0].as_object().unwrap().len(), 16);
 
         // Unrated ⇒ explicit null, key always present — and never `0`, which
         // would read as "rated, nobody voted".
@@ -765,7 +851,7 @@ mod tests {
         assert_eq!(bad["error"], "invalid catalog file");
 
         // The item shape is untouched — this is a sibling key, not a row field.
-        assert_eq!(v["items"][0].as_object().unwrap().len(), 15);
+        assert_eq!(v["items"][0].as_object().unwrap().len(), 16);
 
         // The plain table stays five columns — no source status leaks into it.
         let mut buf = Vec::new();
