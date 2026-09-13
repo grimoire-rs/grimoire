@@ -390,13 +390,16 @@ fn support_lines(companion: Option<&CompanionCache>) -> Vec<DetailLine> {
         // A failed fetch must say so *here*. Overview is where the channels
         // would have been, and silently omitting the section is
         // indistinguishable from a repository that publishes none — the reader
-        // cannot tell "nobody to contact" from "we could not ask".
-        Some(CompanionCache::Failed(reason)) => {
+        // cannot tell "nobody to contact" from "we could not ask". The section's
+        // presence is the whole signal, so the transport error itself stays
+        // off the Overview: a multi-line registry message under a four-word
+        // section is noise, and the Readme tab still carries the cause.
+        Some(CompanionCache::Failed(_)) => {
             return vec![
                 DetailLine::Blank,
                 DetailLine::SectionLabel("Support:"),
                 DetailLine::Blank,
-                DetailLine::Notice(format!("not available — {reason}")),
+                DetailLine::Notice("not available".to_string()),
             ];
         }
         _ => return Vec::new(),
@@ -871,14 +874,24 @@ mod tests {
         // The one case that must NOT be silent: an omitted section is
         // indistinguishable from a repository that publishes no channels, so
         // the reader cannot tell "nobody to contact" from "we could not ask".
+        // The section's presence is the signal; the cause stays off the
+        // Overview (the Readme tab carries it), so a long registry message
+        // cannot swamp the metadata around it.
         let row = tui_row(None);
-        let lines = detail_lines(Some(&row), Some(&CompanionCache::Failed("offline".to_string())));
+        let lines = detail_lines(
+            Some(&row),
+            Some(&CompanionCache::Failed("offline: a long transport error".to_string())),
+        );
         assert!(lines.contains(&DetailLine::SectionLabel("Support:")));
         assert!(
-            lines
+            lines.contains(&DetailLine::Notice("not available".to_string())),
+            "the section says only that it is unavailable: {lines:?}"
+        );
+        assert!(
+            !lines
                 .iter()
                 .any(|l| matches!(l, DetailLine::Notice(t) if t.contains("offline"))),
-            "the cause must reach the pane: {lines:?}"
+            "the transport error stays off the Overview: {lines:?}"
         );
     }
 
