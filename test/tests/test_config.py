@@ -49,7 +49,9 @@ from src.runner import GrimRunner
 # ---------------------------------------------------------------------------
 
 
-# The 7 fixed option keys ``--all`` must surface unset (I3 frozen spec).
+# The 9 fixed option keys ``--all`` must surface unset (I3 frozen spec;
+# ``sort`` and ``sort_order`` were appended, never inserted — consumers may
+# index positionally).
 FIXED_OPTION_KEYS = [
     "options.default_registry",
     "options.clients",
@@ -58,6 +60,8 @@ FIXED_OPTION_KEYS = [
     "options.tui.group_by_type",
     "options.tui.tree_separators",
     "options.tui.expand_levels",
+    "options.tui.sort",
+    "options.tui.sort_order",
 ]
 
 _ALLOWED_TYPES = {"string", "boolean", "integer", "enum", "string-list", "string-set"}
@@ -310,6 +314,45 @@ def test_get_unknown_key_exits_64(
         f"unknown key must exit 64 (UsageError), got {result.returncode}; "
         f"stderr: {result.stderr.strip()}"
     )
+
+
+def test_tui_sort_keys_round_trip_and_list_as_enums_with_no_default(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """``options.tui.sort`` / ``options.tui.sort_order`` set, get, and
+    list like every other enum key — and ``list --all`` reports them with
+    ``default: null``: unset ``sort`` is the kind-then-name grouping, which
+    no listed value spells, and unset ``sort_order`` is the mode's own
+    direction, which depends on ``sort``. An extension settings UI reads
+    the ``values`` list and must not invent a default for either."""
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    result = runner.run("--format", "json", "config", "list", "--all", check=False)
+    assert result.returncode == 0, result.stderr
+    by_key = {i["key"]: i for i in json.loads(result.stdout)["items"]}
+    sort, order = by_key["options.tui.sort"], by_key["options.tui.sort_order"]
+    assert sort["type"] == "enum" and sort["values"] == ["name", "updated", "rating", "downloads"]
+    assert sort["default"] is None, f"unset sort is the grouping, not a listed value: {sort!r}"
+    assert order["type"] == "enum" and order["values"] == ["asc", "desc"]
+    assert order["default"] is None, f"unset order is the mode's own: {order!r}"
+
+    runner.run("config", "set", "options.tui.sort", "downloads")
+    runner.run("config", "set", "options.tui.sort_order", "asc")
+    assert "downloads" in runner.plain("config", "get", "options.tui.sort").stdout
+    assert "asc" in runner.plain("config", "get", "options.tui.sort_order").stdout
+    assert 'sort = "downloads"' in (project_dir / "grimoire.toml").read_text()
+
+    bad = runner.run("config", "set", "options.tui.sort", "bogus", check=False)
+    assert bad.returncode == 65, f"bad enum value exits 65; got {bad.returncode}: {bad.stderr}"
+    assert "name, updated, rating, downloads" in bad.stderr, bad.stderr
+    bad = runner.run("config", "set", "options.tui.sort_order", "descending", check=False)
+    assert bad.returncode == 65, bad.stderr
+
+    runner.run("config", "unset", "options.tui.sort")
+    gone = runner.run("config", "get", "options.tui.sort", check=False)
+    assert gone.returncode == 1, "an unset key reads as unset"
 
 
 def test_set_invalid_tui_default_view_value_exits_65(
@@ -1053,7 +1096,7 @@ def test_list_all_on_empty_config_lists_every_supported_key_unset(
     grim_at: object,
     project_dir: Path,
 ) -> None:
-    """``config list --all`` on an empty config surfaces all 7 fixed option
+    """``config list --all`` on an empty config surfaces all 9 fixed option
     keys as unset rows, each carrying full metadata.
 
     Traces to I3: fixed keys unset -> row only under ``--all``, with

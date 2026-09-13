@@ -299,7 +299,7 @@ fn flag_pair(on: bool, off: bool) -> Option<bool> {
 /// A parsed dotted config key.
 #[derive(Debug, PartialEq, Eq)]
 enum ParsedKey {
-    /// One of the 7 fixed `options.*` keys — see [`ConfigKey`].
+    /// One of the 9 fixed `options.*` keys — see [`ConfigKey`].
     Fixed(ConfigKey),
     /// `registry.<alias>` — valid only for `unset` (removes the whole entry).
     RegistryAlias { alias: String },
@@ -445,6 +445,8 @@ fn fixed_value(key: ConfigKey, options: &ConfigOptions) -> Option<String> {
             }
         }
         ConfigKey::TuiExpandLevels => options.tui.expand_levels.map(|n| n.to_string()),
+        ConfigKey::TuiSort => options.tui.sort.map(|m| m.as_str().to_string()),
+        ConfigKey::TuiSortOrder => options.tui.sort_order.map(|o| o.as_str().to_string()),
     }
 }
 
@@ -747,6 +749,14 @@ fn apply_set(
                 options.tui.expand_levels = Some(levels);
                 Ok(levels.to_string())
             }
+            ConfigKey::TuiSort => {
+                options.tui.sort = Some(parse_sort(value_str)?);
+                Ok(value_str.to_string())
+            }
+            ConfigKey::TuiSortOrder => {
+                options.tui.sort_order = Some(parse_sort_order(value_str)?);
+                Ok(value_str.to_string())
+            }
         },
         ParsedKey::VendorField { vendor } => {
             let enabled = parse_bool(value_str, &format!("options.vendors.{vendor}.{VENDOR_FIELD_NAME}"))?;
@@ -902,6 +912,8 @@ fn apply_unset(
                 ConfigKey::TuiGroupByType => options.tui.group_by_type = false,
                 ConfigKey::TuiTreeSeparators => options.tui.tree_separators.clear(),
                 ConfigKey::TuiExpandLevels => options.tui.expand_levels = None,
+                ConfigKey::TuiSort => options.tui.sort = None,
+                ConfigKey::TuiSortOrder => options.tui.sort_order = None,
             }
             Ok(())
         }
@@ -1138,6 +1150,26 @@ fn parse_default_view(s: &str) -> anyhow::Result<DefaultView> {
         super::config_value(format!(
             "invalid value for options.tui.default_view: '{s}'; valid values: {}",
             DefaultView::VALUE_NAMES.join(", ")
+        ))
+    })
+}
+
+fn parse_sort(s: &str) -> anyhow::Result<crate::catalog::SortMode> {
+    use crate::catalog::SortMode;
+    SortMode::ALL.into_iter().find(|m| m.as_str() == s).ok_or_else(|| {
+        super::config_value(format!(
+            "invalid value for options.tui.sort: '{s}'; valid values: {}",
+            SortMode::VALUE_NAMES.join(", ")
+        ))
+    })
+}
+
+fn parse_sort_order(s: &str) -> anyhow::Result<crate::catalog::SortOrder> {
+    use crate::catalog::SortOrder;
+    SortOrder::ALL.into_iter().find(|o| o.as_str() == s).ok_or_else(|| {
+        super::config_value(format!(
+            "invalid value for options.tui.sort_order: '{s}'; valid values: {}",
+            SortOrder::VALUE_NAMES.join(", ")
         ))
     })
 }
@@ -2207,6 +2239,21 @@ mod tests {
     }
 
     #[test]
+    fn parse_sort_and_sort_order_valid_and_invalid() {
+        use crate::catalog::{SortMode, SortOrder};
+        assert!(matches!(parse_sort("downloads"), Ok(SortMode::Downloads)));
+        assert!(parse_sort("Rating").is_err(), "case-sensitive, like default_view");
+        let msg = parse_sort("bogus").unwrap_err().to_string();
+        assert!(
+            msg.contains("valid values: name, updated, rating, downloads"),
+            "error must enumerate the valid orders; got: {msg}"
+        );
+        assert!(matches!(parse_sort_order("desc"), Ok(SortOrder::Desc)));
+        let msg = parse_sort_order("descending").unwrap_err().to_string();
+        assert!(msg.contains("valid values: asc, desc"), "got: {msg}");
+    }
+
+    #[test]
     fn parse_default_view_valid_and_invalid() {
         use crate::config::declaration::DefaultView;
         assert!(matches!(parse_default_view("flat"), Ok(DefaultView::Flat)));
@@ -2324,8 +2371,8 @@ mod tests {
         let with_all = collect_entries(true, &options, &registries);
         assert_eq!(
             with_all.len(),
-            7,
-            "--all on empty config must emit exactly the 7 fixed keys"
+            9,
+            "--all on empty config must emit exactly the 9 fixed keys"
         );
         for e in &with_all {
             assert_eq!(

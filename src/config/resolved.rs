@@ -28,6 +28,7 @@
 //! already means something, so they are read straight off [`ConfigOptions`]
 //! by their consumers instead.
 
+use crate::catalog::{SortMode, SortOrder};
 use crate::config::declaration::{ConfigOptions, DefaultView, TuiOptions};
 use crate::config::defaults;
 
@@ -53,6 +54,12 @@ pub struct ResolvedOptions {
     /// [`defaults::EXPAND_LEVELS`] when `[options.tui].expand_levels` is
     /// unset. An explicit `0` is kept (fully expanded), distinct from unset.
     pub expand_levels: u32,
+    /// The browse order the catalog browser opens in; `None` is the default
+    /// kind-then-name grouping — a resolved value, not an unresolved one.
+    pub sort: Option<SortMode>,
+    /// The direction that order runs in; the mode's own
+    /// [`SortMode::natural_order`] when `[options.tui].sort_order` is unset.
+    pub sort_order: SortOrder,
 }
 
 impl ConfigOptions {
@@ -86,6 +93,8 @@ impl ConfigOptions {
             group_by_type,
             tree_separators,
             expand_levels,
+            sort,
+            sort_order,
         } = tui;
 
         ResolvedOptions {
@@ -99,6 +108,8 @@ impl ConfigOptions {
             // An explicit `Some(0)` survives: 0 means "fully expanded", a
             // meaningful value distinct from unset (which defaults to 1).
             expand_levels: (*expand_levels).unwrap_or(defaults::EXPAND_LEVELS),
+            sort: *sort,
+            sort_order: (*sort_order).unwrap_or(SortMode::natural_order(*sort)),
         }
     }
 }
@@ -114,6 +125,26 @@ mod tests {
         assert_eq!(resolved.expand_levels, 1);
         assert_eq!(resolved.tree_separators, vec!["/".to_string()]);
         assert!(!resolved.group_by_type);
+        assert_eq!(
+            resolved.sort, None,
+            "unset sort is the default grouping, itself a resolved value"
+        );
+        assert_eq!(resolved.sort_order, SortOrder::Asc, "and the grouping reads A→Z");
+    }
+
+    #[test]
+    fn sort_order_defaults_to_the_mode_s_natural_direction() {
+        // `sort = "rating"` with no `sort_order` must open biggest-first —
+        // resolving an unset direction to a fixed `asc` would silently invert
+        // every count-based order the moment a user picked one.
+        let mut options = ConfigOptions::default();
+        options.tui.sort = Some(SortMode::Rating);
+        assert_eq!(options.resolved().sort_order, SortOrder::Desc);
+        options.tui.sort = Some(SortMode::Name);
+        assert_eq!(options.resolved().sort_order, SortOrder::Asc);
+        // An explicit direction wins over the natural one.
+        options.tui.sort_order = Some(SortOrder::Desc);
+        assert_eq!(options.resolved().sort_order, SortOrder::Desc);
     }
 
     #[test]
@@ -132,6 +163,8 @@ mod tests {
                 group_by_type: true,
                 tree_separators: vec![".".to_string(), "-".to_string()],
                 expand_levels: Some(3),
+                sort: Some(SortMode::Downloads),
+                sort_order: Some(SortOrder::Asc),
             },
         };
 
@@ -140,6 +173,8 @@ mod tests {
         assert!(resolved.group_by_type);
         assert_eq!(resolved.tree_separators, vec![".".to_string(), "-".to_string()]);
         assert_eq!(resolved.expand_levels, 3);
+        assert_eq!(resolved.sort, Some(SortMode::Downloads));
+        assert_eq!(resolved.sort_order, SortOrder::Asc);
     }
 
     #[test]

@@ -11,7 +11,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::catalog::{DownloadSummary, OciMeta, SearchQuery, SortKey, SortMode, browse_sort};
+use crate::catalog::{DownloadSummary, OciMeta, SearchQuery, SortKey, SortMode, SortOrder, browse_sort};
 use crate::config::registry_resolve::RowSource;
 
 use super::bundle_members::{BundleMemberCache, BundleMemberKey};
@@ -974,6 +974,14 @@ impl TuiState {
         self.sort = sort;
     }
 
+    /// Seed the direction from `[options.tui].sort_order`, **after**
+    /// [`Self::set_sort`]: the state keeps the direction relative to the
+    /// mode's natural one (so `s` steps into each mode's own direction and
+    /// `S` flips whatever is showing), and "relative" needs the mode.
+    pub fn set_sort_order(&mut self, order: SortOrder) {
+        self.sort_reversed = order != SortMode::natural_order(self.sort);
+    }
+
     /// The `s` key: step to the next browse order — default → name → updated
     /// → rating → downloads → default — and re-sort the loaded rows in place.
     /// The direction is left alone: a user who flipped it flipped it on
@@ -1025,22 +1033,13 @@ impl TuiState {
     /// — or empty when the browse is in its default order and direction, so
     /// the title stays bare until the user changes something.
     pub fn sort_label(&self) -> String {
-        let (mode, natural_desc) = match self.sort {
-            None => ("default", false),
-            Some(SortMode::Name) => ("name", false),
-            Some(SortMode::Updated) => ("updated", true),
-            Some(SortMode::Rating) => ("rating", true),
-            Some(SortMode::Downloads) => ("downloads", true),
-        };
         if self.sort.is_none() && !self.sort_reversed {
             return String::new();
         }
-        let dir = if natural_desc != self.sort_reversed {
-            "desc"
-        } else {
-            "asc"
-        };
-        format!("sort: {mode} {dir}")
+        let mode = self.sort.map_or("default", SortMode::as_str);
+        let natural = SortMode::natural_order(self.sort);
+        let order = if self.sort_reversed { natural.flipped() } else { natural };
+        format!("sort: {mode} {}", order.as_str())
     }
 
     /// Flip the deprecated-hiding filter live (the `h` key). Recomputes the
@@ -2218,6 +2217,26 @@ mod tests {
         s.toggle_sort_direction();
         assert_eq!(visible(&s), vec!["r/alpha", "r/beta", "r/gamma"]);
         assert_eq!(s.sort_label(), "sort: rating desc");
+    }
+
+    #[test]
+    fn a_configured_direction_is_kept_relative_to_the_mode_s_own() {
+        // `sort_order = "desc"` on `sort = "rating"` is the natural direction,
+        // so nothing is reversed; the same `desc` on `name` is a reversal.
+        let mut s = TuiState::new();
+        s.set_sort(Some(SortMode::Rating));
+        s.set_sort_order(SortOrder::Desc);
+        assert!(!s.sort_reversed);
+        assert_eq!(s.sort_label(), "sort: rating desc");
+        s.set_sort(Some(SortMode::Name));
+        s.set_sort_order(SortOrder::Desc);
+        assert!(s.sort_reversed);
+        assert_eq!(s.sort_label(), "sort: name desc");
+        // The default grouping reads A→Z, so `asc` on it is not a reversal.
+        s.set_sort(None);
+        s.set_sort_order(SortOrder::Asc);
+        assert!(!s.sort_reversed);
+        assert_eq!(s.sort_label(), "");
     }
 
     #[test]

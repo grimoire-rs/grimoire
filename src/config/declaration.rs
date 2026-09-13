@@ -16,6 +16,7 @@ use std::sync::OnceLock;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::catalog::{SortMode, SortOrder};
 use crate::config::hash;
 use crate::config::path_source::PathSource;
 use crate::oci::Identifier;
@@ -143,6 +144,20 @@ pub struct TuiOptions {
     /// on. Has no effect in flat mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expand_levels: Option<u32>,
+    /// Sets the order the browser opens in: `name`, `updated`, `rating`
+    /// or `downloads`, the same orders `grim search --sort` applies.
+    /// Unset, the browser groups by kind and then by name. Overridden by
+    /// the `--sort` flag when given. The runtime `s` key still cycles the
+    /// order ephemerally — config is never rewritten.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<SortMode>,
+    /// Sets the direction the opening order runs in, `asc` or `desc`.
+    /// Unset, each order runs its natural way: `name` ascending, every
+    /// other order and the default grouping with the biggest or newest
+    /// first. The runtime `S` key still flips it ephemerally — config is
+    /// never rewritten.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort_order: Option<SortOrder>,
 }
 
 impl TuiOptions {

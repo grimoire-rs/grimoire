@@ -418,8 +418,9 @@ pub enum ValueType {
     Enum {
         /// The allowed values.
         values: &'static [&'static str],
-        /// The runtime default.
-        default: &'static str,
+        /// The runtime default, `None` when unset means something no listed
+        /// value spells (the browser's kind-then-name grouping).
+        default: Option<&'static str>,
     },
     /// A comma-joined list of strings. Ordered, open — values need not come
     /// from a closed set. Contrast [`Self::StringSet`].
@@ -455,7 +456,7 @@ impl ValueType {
             Self::String { default } => default.map(String::from),
             Self::Bool { default } => Some(default.to_string()),
             Self::U32 { default } => Some(default.to_string()),
-            Self::Enum { default, .. } => Some(default.to_string()),
+            Self::Enum { default, .. } => default.map(String::from),
             Self::StringList { default } | Self::StringSet { default, .. } => default.map(|values| values.join(",")),
         }
     }
@@ -1399,7 +1400,7 @@ mod tests {
             Some("tree".to_string()),
             ValueType::Enum {
                 values: &["flat", "tree"],
-                default: "tree",
+                default: Some("tree"),
             },
             "Default view",
             "Sets the view the browser opens in. Defaults to `tree`, grouping items by path segments; \
@@ -1518,7 +1519,7 @@ mod tests {
         assert_eq!(
             ValueType::Enum {
                 values: &["flat", "tree"],
-                default: "flat"
+                default: Some("flat")
             }
             .to_string(),
             "enum"
