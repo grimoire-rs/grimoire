@@ -2334,7 +2334,7 @@ async fn install_mcp(
                     {
                         std::fs::create_dir_all(parent).map_err(|e| target_io(parent, e))?;
                     }
-                    crate::store::atomic_write::atomic_write(&plan.config_path, text.as_bytes())
+                    crate::store::atomic_write::atomic_write_through_symlink(&plan.config_path, text.as_bytes())
                         .map_err(|e| target_io(&plan.config_path, e))?;
                 }
                 Ok(Splice::Unchanged) => {}

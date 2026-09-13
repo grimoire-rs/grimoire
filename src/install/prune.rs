@@ -1948,24 +1948,23 @@ mod tests {
         );
     }
 
-    /// Design-record item 11, reap side. `retained` names grim's OWN abandoned
-    /// footprint. An `entry` output is a member inside a shared, user-owned
-    /// config file grim never intended to delete, so reporting it would tell
-    /// the user their `.mcp.json` was left behind by grim. `uninstall` already
-    /// guards this; the reap path must not diverge. Instead the un-spliced
-    /// entry must appear exactly once in `abandoned_entries` — grim dropped
-    /// the record without splicing the member out, so it is now unrecorded
-    /// and grim will never remove it again on a later reap.
+    /// Design-record item 11, reap side, revised for issue #117. A relocated
+    /// `entry` output is the user's own dotfiles layout, and an entry is only
+    /// ever spliced, never deleted — so the reap removes the managed member
+    /// from the config file where it really lives, and neither `retained`
+    /// (grim's own footprint) nor `abandoned_entries` (an entry grim could not
+    /// reach) names the user's `.mcp.json`. `uninstall` draws the same line;
+    /// the reap path must not diverge.
     #[cfg(unix)]
     #[test]
-    fn a_relocated_entry_output_is_reaped_but_never_reported_as_retained() {
+    fn a_relocated_entry_output_is_reaped_by_splicing_the_real_config() {
         use std::os::unix::fs::symlink;
 
         let dir = tempfile::tempdir().unwrap();
         let tmp = dunce::canonicalize(dir.path()).unwrap();
 
-        // The user keeps their MCP config in a synced dir and symlinks it in —
-        // the same relocated-ancestor layout, one level up from the file.
+        // The user keeps their MCP config in a synced dir and symlinks the
+        // file in — the issue #117 per-file layout.
         let ws = tmp.join("ws");
         std::fs::create_dir_all(&ws).unwrap();
         let store = tmp.join("elsewhere");
@@ -1973,13 +1972,15 @@ mod tests {
         let cfg = store.join(".mcp.json");
         std::fs::write(
             &cfg,
-            "{\n  \"mcpServers\": {\n    \"grim\": {\"command\": \"grim\"}\n  }\n}\n",
+            "{\n  \"theme\": \"dark\",\n  \"mcpServers\": {\n    \"grim\": {\"command\": \"grim\"}\n  }\n}\n",
         )
         .unwrap();
         symlink(&cfg, ws.join(".mcp.json")).unwrap();
 
         let mut state = InstallState::empty(&ws.join("state.json"));
-        let mut out = output_ws("copilot", ".mcp.json", Digest::Sha256("b".repeat(64)));
+        let recorded =
+            crate::install::install_state::entry_value_hash(&serde_json::json!({"command": "grim"})).unwrap();
+        let mut out = output_ws("copilot", ".mcp.json", recorded);
         out.entry = Some("/mcpServers/grim".to_string());
         state.record(InstallRecord {
             kind: ArtifactKind::Mcp,
@@ -1990,22 +1991,30 @@ mod tests {
         });
 
         let acted = reap_dropped_clients(&mut state, &[ClientTarget::Claude], &roots(&ws), false)
-            .expect("a relocated ancestor must not turn a reap pass into exit 65");
+            .expect("a relocated entry must not turn a reap pass into exit 65");
         assert_eq!(acted[0].reaped, vec!["copilot".to_string()]);
         assert!(
+            acted[0].kept_modified.is_empty(),
+            "an intact entry is not locally modified"
+        );
+        assert!(
             acted[0].retained.is_empty(),
-            "the user's own config file is not grim's abandoned footprint; got {:?}",
-            acted[0].retained
+            "the user's config file is not grim's footprint"
         );
+        assert!(
+            acted[0].abandoned_entries.is_empty(),
+            "the entry was reached and removed"
+        );
+        let after: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
         assert_eq!(
-            acted[0].abandoned_entries,
-            vec![AbandonedEntry {
-                path: cfg.clone(),
-                pointer: "/mcpServers/grim".to_string(),
-            }],
-            "the un-spliced entry must be named exactly once so the caller knows grim no longer \
-             tracks it and will never remove it on a later reap"
+            after,
+            serde_json::json!({"theme": "dark"}),
+            "spliced out of the real file, rest intact"
         );
-        assert!(cfg.is_file(), "and it is of course untouched");
+        assert!(ws.join(".mcp.json").is_symlink(), "the user's link is untouched");
+        assert!(
+            state.get(ArtifactKind::Mcp, "grim").is_none(),
+            "every output reaped ⇒ the record drops whole"
+        );
     }
 }

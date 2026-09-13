@@ -532,6 +532,19 @@ No consumer joins anchor + relative manually. Every filesystem operation
 (read, hash, delete) receives the result of `resolve()`, never the raw
 `relative` string.
 
+The escape verdict is caller-typed (`Containment`): `Strict` for anything
+that deletes, `AllowRelocatedAncestor` for read-only probes through a
+symlinked ancestor (stow/yadm layouts, Unix only), and
+`AllowRelocatedFile` — chosen by `ClientOutput::resolved_target` for every
+**entry** output regardless of the caller — because a managed MCP member is
+only ever read or spliced in place, never deleted, so a dotfiles-linked
+vendor config (`~/.codex/config.toml → ~/dotfiles/…`) is the user's layout,
+not an escape. The same reasoning is why the three user-authored files
+grim rewrites (`grimoire.toml`, `grimoire.lock`, the docker credential
+config) and every vendor-config splice go through
+`atomic_write_through_symlink`, while grim-owned outputs keep the plain
+rename that clobbers a planted link (issue #117).
+
 See `quality-security.md` for the path-traversal and symlink-escape guard
 principles that this two-layer pattern implements.
 

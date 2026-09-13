@@ -174,10 +174,21 @@ impl ClientOutput {
     /// Resolve + validate this output's anchored target into an absolute
     /// on-disk path, contained per `containment` (see [`Containment`]).
     ///
+    /// An `entry` output is only ever read or spliced in place — never
+    /// deleted — so it resolves with [`Containment::AllowRelocatedFile`]
+    /// whatever the caller asked for: a dotfiles-managed vendor config
+    /// (`~/.codex/config.toml → ~/dotfiles/…`) is the user's layout, not an
+    /// escape, and the splice must land on the real file.
+    ///
     /// # Errors
     ///
     /// [`AnchorError`] from the two-layer containment guard.
     pub fn resolved_target(&self, roots: &AnchorRoots, containment: Containment) -> Result<PathBuf, AnchorError> {
+        let containment = if self.entry.is_some() {
+            Containment::AllowRelocatedFile
+        } else {
+            containment
+        };
         self.target.resolve(roots, containment)
     }
 
@@ -3079,6 +3090,37 @@ mod tests {
     /// inside `.mcp.json`, hashed over `value`'s canonical serialization.
     fn entry_output(tmp: &std::path::Path, pointer: &str, value: &serde_json::Value) -> (ClientOutput, AnchorRoots) {
         entry_output_for(tmp, "claude", ".mcp.json", pointer, value)
+    }
+
+    /// An entry output is only ever read or spliced in place, never deleted,
+    /// so its resolve follows the user's own symlink layout even when the
+    /// caller asks for `Strict` — issue #117's shape on a vendor config.
+    #[cfg(unix)]
+    #[test]
+    fn entry_output_resolves_through_a_symlinked_config_under_strict() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let value = serde_json::json!({"command": "grim"});
+        let (out, roots) = entry_output(tmp.path(), "/mcpServers/grim", &value);
+        let real = tmp.path().parent().unwrap().join(format!(
+            "{}-dotfiles-mcp.json",
+            tmp.path().file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::write(&real, r#"{"mcpServers": {"grim": {"command": "grim"}}}"#).unwrap();
+        symlink(&real, tmp.path().join(".mcp.json")).unwrap();
+
+        assert!(
+            out.is_present(&roots, Containment::Strict).unwrap(),
+            "the entry must be read through the link"
+        );
+        assert_eq!(out.current_hash(&roots, Containment::Strict).unwrap(), out.content_hash);
+        assert_eq!(
+            out.resolved_target(&roots, Containment::Strict).unwrap(),
+            dunce::canonicalize(&real).unwrap(),
+            "the splice target must be the real file"
+        );
+        std::fs::remove_file(&real).unwrap();
     }
 
     #[test]

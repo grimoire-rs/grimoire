@@ -29,7 +29,7 @@
 use std::io;
 use std::path::Path;
 
-use crate::store::atomic_write;
+use crate::store::atomic_write::atomic_write_through_symlink;
 
 use super::json_config::with_path;
 use super::json_splice::{self, Splice};
@@ -110,7 +110,7 @@ pub fn sync_managed_element(config_path: &Path, key: &str, entry: &str, want: bo
     match spliced {
         Splice::Unchanged => Ok(ArraySync::Unchanged),
         Splice::Changed(text) => {
-            atomic_write(config_path, text.as_bytes()).map_err(|e| with_path(config_path, e))?;
+            atomic_write_through_symlink(config_path, text.as_bytes()).map_err(|e| with_path(config_path, e))?;
             Ok(if want { ArraySync::Added } else { ArraySync::Removed })
         }
     }
