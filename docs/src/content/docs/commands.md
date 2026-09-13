@@ -1111,21 +1111,23 @@ grim search --refresh --registry ghcr.io/acme
 
 ### Ordering the results (--sort) {#search-sort}
 
-`--sort <name|updated|rating>` replaces the default ordering with an
-explicit one:
+`--sort <name|updated|rating|downloads>` replaces the default ordering
+with an explicit one:
 
 | Value | Order |
 |---|---|
 | `name` | Leaf name ascending, case-insensitive |
 | `updated` | Publishing date descending; undated last |
 | `rating` | Upvotes descending, then date descending; unrated last |
+| `downloads` | Download total descending, then date descending; uncounted last |
 
 `--sort rating` orders by upvotes descending, then by publishing date
 descending, then by name — and an unrated artifact sorts into a bucket of
 its own at the end rather than as zero votes, so a fresh index with no
 ratings yet still reads in a stable, meaningful order. The same applies to
-an undated artifact under `--sort updated`: a missing value is never folded
-into `0` or epoch `0`, which would order it against real data by accident.
+an uncounted artifact under `--sort downloads` and an undated one under
+`--sort updated`: a missing value is never folded into `0` or epoch `0`,
+which would order it against real data by accident.
 Every mode breaks its last tie on the fully-qualified reference, so the
 order is total — two runs over the same catalog render identically.
 
@@ -1135,7 +1137,7 @@ matches", not "the most relevant, subsorted". Omitted, results keep today's
 order — relevance when queried, registry-declaration order otherwise —
 which is what makes the flag purely additive.
 
-[`grim tui --sort`](#tui) takes the same three values and applies the same
+[`grim tui --sort`](#tui) takes the same four values and applies the same
 order.
 
 ```sh
@@ -1557,11 +1559,12 @@ Press `h` to reveal or re-hide them live, pass `--show-deprecated` to open with
 them shown, or set [`options.show_deprecated`](#config) to `true` for the
 default.
 
-`--sort <name|updated|rating>` opens the browse in one of the
-[three orders `grim search --sort`](#search-sort) applies, with the same
+`--sort <name|updated|rating|downloads>` opens the browse in one of the
+[four orders `grim search --sort`](#search-sort) applies, with the same
 semantics — including replacing the relevance ranking the `/` search
-applies. It is a launch flag, not a keybinding: omitted, the browse groups
-by kind and then by name as it always has. When the browse source publishes
+applies. Omitted, the browse opens grouped by kind and then by name as it
+always has; the `s` key cycles through the same orders live, and the
+Catalog title names the active one. When the browse source publishes
 [artifact ratings](./ratings.md), the detail pane gains a `Rating:` row
 below the provenance rows (`42 upvotes`); an unrated artifact simply has no
 such row, never a `0`.

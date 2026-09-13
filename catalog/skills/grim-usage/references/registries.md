@@ -829,12 +829,12 @@ as *unknown* — never as zero pulls. A `total` of `0` is a real measurement
 and means something different.
 
 The two signals are independent: an artifact may be rated and uncounted,
-counted and unrated, or neither. Neither implies the other. The CLI has no
-`--sort downloads`; `--sort` takes `name`, `updated` or `rating`.
+counted and unrated, or neither. Neither implies the other.
 
-`--sort <name|updated|rating>` applies to `grim search` and `grim tui`
-alike. Unrated and undated artifacts sort into a bucket of their own at
-the *end* rather than as zero votes or epoch 0, and every mode is total —
+`--sort <name|updated|rating|downloads>` applies to `grim search` and
+`grim tui` alike (`downloads` orders by `total` descending, then date).
+Unrated, uncounted and undated artifacts sort into a bucket of their own at
+the *end* rather than as zero votes, zero pulls or epoch 0, and every mode is total —
 two runs over the same catalog render identically. Given together with a
 query, `--sort` **replaces** relevance ranking rather than composing with
 it; omitted, ordering is exactly what it was before the flag existed.

@@ -71,10 +71,11 @@ pub struct SearchArgs {
     pub query: Option<String>,
 
     /// Order the results: `name` (ascending, case-insensitive), `updated`
-    /// (newest first, undated last) or `rating` (most upvotes first, then
-    /// newest, unrated last). Unrated and undated artifacts sort into a
-    /// bucket of their own at the end — never as zero votes or epoch 0.
-    /// Given together with a query this replaces relevance ranking; omitted,
+    /// (newest first, undated last), `rating` (most upvotes first, then
+    /// newest, unrated last) or `downloads` (most pulled first, then newest,
+    /// uncounted last). Unrated, uncounted and undated artifacts sort into a
+    /// bucket of their own at the end — never as zero votes, zero pulls or
+    /// epoch 0. Given together with a query this replaces relevance ranking; omitted,
     /// results keep today's order (relevance when queried, registry order
     /// otherwise).
     #[arg(long, value_name = "ORDER")]
@@ -329,7 +330,12 @@ fn order_results(
 /// so the rendered order does not depend on `sort_by`'s stability.
 fn sort_by_mode(scored: &mut Vec<(i64, (SearchSource, crate::catalog::CatalogRow))>, mode: SortMode) {
     crate::catalog::browse_sort::sort_rows(scored, mode, |(_, (_, r))| {
-        SortKey::new(r.rating.as_ref().map(|x| x.up), r.created.as_deref(), &r.repo())
+        SortKey::new(
+            r.rating.as_ref().map(|x| x.up),
+            r.downloads.as_ref().map(|d| d.total),
+            r.created.as_deref(),
+            &r.repo(),
+        )
     });
 }
 

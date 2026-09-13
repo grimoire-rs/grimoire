@@ -56,12 +56,14 @@ pub struct TuiArgs {
     pub show_deprecated: bool,
 
     /// Order the browse: `name` (ascending, case-insensitive), `updated`
-    /// (newest first, undated last) or `rating` (most upvotes first, then
-    /// newest, unrated last) — the same orders `grim search --sort` applies.
-    /// Unrated and undated artifacts sort into a bucket of their own at the
-    /// end, never as zero votes or epoch 0. Set, it also replaces the
-    /// relevance ranking the `/` search applies; omitted, the browse groups
-    /// by kind and then by name as it does today.
+    /// (newest first, undated last), `rating` (most upvotes first, then
+    /// newest, unrated last) or `downloads` (most pulled first, then newest,
+    /// uncounted last) — the same orders `grim search --sort` applies.
+    /// Unrated, uncounted and undated artifacts sort into a bucket of their
+    /// own at the end, never as zero votes, zero pulls or epoch 0. Set, it
+    /// also replaces the relevance ranking the `/` search applies; omitted,
+    /// the browse groups by kind and then by name as it does today. The `s`
+    /// key cycles through the same orders live.
     #[arg(long, value_name = "ORDER")]
     pub sort: Option<crate::catalog::SortMode>,
 }
