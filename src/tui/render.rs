@@ -364,6 +364,9 @@ pub struct RenderModel {
     /// which registry each artifact came from). False for single-registry
     /// sessions where every row shares the same origin.
     pub show_registry_column: bool,
+    /// The active browse order, painted into the Catalog block's top border
+    /// (`sort: rating desc`); empty in the default order and direction.
+    pub sort_label: String,
 }
 
 /// Pick the widest hint tier whose text (plus a one-cell right margin)
@@ -980,9 +983,10 @@ pub fn frame(state: &TuiState) -> RenderModel {
     // a Status-column legend.
     let hint_tiers = if state.view_mode == crate::tui::state::ViewMode::Tree {
         vec![
-            "space mark · i/u/d act · v versions · o open · g scope · t tree · z fold · ? help · q quit".to_string(),
-            "space mark · i/u/d act · v versions · g scope · t tree · z fold · ? help · q quit".to_string(),
-            "i/u/d act · v ver · g scope · t tree · z fold · ? help · q quit".to_string(),
+            "space mark · i/u/d act · v versions · o open · s sort · g scope · t tree · z fold · ? help · q quit"
+                .to_string(),
+            "space mark · i/u/d act · v versions · s sort · g scope · t tree · z fold · ? help · q quit".to_string(),
+            "i/u/d act · v ver · s sort · g scope · t tree · z fold · ? help · q quit".to_string(),
             "i/u/d g t z ? help q".to_string(),
             "i/u/d v g t ? q".to_string(),
             "? help".to_string(),
@@ -990,9 +994,9 @@ pub fn frame(state: &TuiState) -> RenderModel {
     } else {
         // Flat mode: `z` fold is inert — omit it to avoid misleading users.
         vec![
-            "space mark · i/u/d act · v versions · o open · g scope · t tree · ? help · q quit".to_string(),
-            "space mark · i/u/d act · v versions · g scope · t tree · ? help · q quit".to_string(),
-            "i/u/d act · v ver · g scope · t tree · ? help · q quit".to_string(),
+            "space mark · i/u/d act · v versions · o open · s sort · g scope · t tree · ? help · q quit".to_string(),
+            "space mark · i/u/d act · v versions · s sort · g scope · t tree · ? help · q quit".to_string(),
+            "i/u/d act · v ver · s sort · g scope · t tree · ? help · q quit".to_string(),
             "i/u/d g t ? help q".to_string(),
             "i/u/d v g t ? q".to_string(),
             "? help".to_string(),
@@ -1061,6 +1065,7 @@ pub fn frame(state: &TuiState) -> RenderModel {
         // A: only show Registry column when more than one registry is in scope;
         // the tree view never needs it (registry roots are already tree nodes).
         show_registry_column: state.show_registry_column(),
+        sort_label: state.sort_label(),
     }
 }
 
@@ -1300,13 +1305,24 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
         }
         items.push(ListItem::new(Line::from(spans)));
     }
+    // The active order sits in the top border beside the title, the way the
+    // detail pane's tabs do: it names how the rows below are arranged without
+    // spending a content row, and it is absent until the user changes it.
+    let mut catalog_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Blue))
+        .title(Span::styled("Catalog", accent));
+    if !model.sort_label.is_empty() {
+        catalog_block = catalog_block.title_top(
+            Line::from(Span::styled(
+                format!(" {} ", model.sort_label),
+                Style::default().fg(Color::DarkGray),
+            ))
+            .alignment(Alignment::Right),
+        );
+    }
     let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Blue))
-                .title(Span::styled("Catalog", accent)),
-        )
+        .block(catalog_block)
         .highlight_symbol("")
         .highlight_style(
             Style::default()
@@ -1591,7 +1607,10 @@ fn help_entries() -> [(&'static str, &'static str); 10] {
         ("i / u / d", "install / update / uninstall (marked set or selection)"),
         ("v", "pick a specific version for the selected row"),
         ("o", "open the selected entry's repository URL"),
-        ("g / t", "toggle scope project ⇄ global · toggle tree / flat view"),
+        (
+            "g · t · s",
+            "scope project ⇄ global · tree / flat view · sort (S flips)",
+        ),
         ("→ / ←", "expand / collapse group; z folds all (tree mode)"),
         // `tab` shares this row rather than taking its own: the overlay is
         // sized to fit an 80×24 terminal, and an eleventh row overflows it.
@@ -4034,6 +4053,39 @@ mod spec_multi_registry_render_tests {
         assert!(
             lines.iter().any(|l| l.contains("a-registry-locator-…")),
             "the overlong cell is clipped with an ellipsis: {lines:?}"
+        );
+    }
+
+    // The active order is painted into the Catalog's top border, and only
+    // once the user has changed something — the bare default names nothing.
+    #[test]
+    fn draw_names_the_active_sort_in_the_catalog_border() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let top_border = |s: &TuiState| -> String {
+            let model = frame(s);
+            let w = catalog_width(false) + DETAIL_MIN_WIDTH + 4;
+            let mut term = Terminal::new(TestBackend::new(w, 12)).unwrap();
+            term.draw(|f| draw(f, &model)).unwrap();
+            let buf = term.backend().buffer();
+            let cols = buf.area.width as usize;
+            buf.content()
+                .chunks(cols)
+                .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+                .find(|l| l.contains("Catalog"))
+                .expect("the Catalog block is rendered")
+        };
+        let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
+        s.set_rows(vec![row_with_reg("ghcr.io/acme", "alpha", ArtifactState::Installed)]);
+        assert!(!top_border(&s).contains("sort:"), "the default order paints no label");
+        s.cycle_sort();
+        s.toggle_sort_direction();
+        assert!(
+            top_border(&s).contains("sort: name desc"),
+            "the border names the order and its direction: {:?}",
+            top_border(&s)
         );
     }
 

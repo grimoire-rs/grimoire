@@ -57,6 +57,8 @@ app. The website and the VS Code extension have no key map.
 | `v` | Pick a specific version for the selected row |
 | `o` | Open the selected entry's repository URL |
 | `g` | Toggle scope between project and global |
+| `s` | Cycle the sort order: default, name, updated, rating, downloads. The Catalog title names the active one, and the cursor returns to the top |
+| `S` | Flip the active order between ascending and descending |
 | `t` | Toggle tree and flat view |
 | `→` / `←` | Expand and collapse a group, in tree view. On a collapsed group or a leaf, `←` jumps to the parent |
 | `z` | Fold the whole tree, in tree view. Expands everything, or collapses back to the [`expand_levels`](./configuration.md#options-tui) depth |
