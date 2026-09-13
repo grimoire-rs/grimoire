@@ -39,7 +39,7 @@
 use clap::Args;
 
 use crate::api::search_report::{
-    SearchDownloads, SearchEntry, SearchRating, SearchReport, SearchSource, SearchSourceStatus,
+    SearchDownloadVersion, SearchDownloads, SearchEntry, SearchRating, SearchReport, SearchSource, SearchSourceStatus,
 };
 use crate::catalog::registry_catalog::{CATALOG_GATED_REGISTRIES, REGISTRY_COMPAT_DOCS_URL};
 use crate::catalog::{BadgeContext, SearchQuery, SortKey, SortMode};
@@ -243,6 +243,14 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
             downloads: r.downloads.map(|x| SearchDownloads {
                 total: x.total,
                 as_of: x.as_of,
+                versions: x
+                    .versions
+                    .into_iter()
+                    .map(|v| SearchDownloadVersion {
+                        version: v.version,
+                        total: v.total,
+                    })
+                    .collect(),
             }),
             status: r.badge,
         })

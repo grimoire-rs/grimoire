@@ -31,7 +31,7 @@ because on a real index most rows do.
 
 | Ref | Rating | Downloads | Shows |
 |---|---|---|---|
-| `skills/code-reviewer` | 42 | 1416 + `versions` | Both signals. The compact badge (`1.4K`), and a `versions` map whose sum (1400) is **below** `total` — the other 16 pulls came through a channel tag that names no release. |
+| `skills/code-reviewer` | 42 | 1416 + `versions` | Both signals, and the only row with a per-release breakdown: the DOWNLOADS rail shows `1.2.0` beside the total and folds `1.1.0`/`1.0.0` behind *older releases*. The three sum to 1400, **below** `total` — the other 16 pulls came through a channel tag that names no release, which is why neither figure may be derived from the other. |
 | `skills/support-desk` | — | 250412 | Counted, unrated. Large enough to exercise the compact badge (`250K`). |
 | `skills/hello-world` | 3 | 87 | Both, small enough that the badge shows the exact figure. |
 | `skills/commit-helper` | 7 | — | Rated, **uncounted**. `downloads` is absent, not zero — this is what every GHCR- or GitLab-backed row looks like. |

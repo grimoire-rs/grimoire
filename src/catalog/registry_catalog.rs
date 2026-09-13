@@ -213,6 +213,30 @@ pub struct DownloadSummary {
     /// stays readable — see [`RatingSummary::provider`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub as_of: Option<String>,
+    /// Per-release counts, **highest release first** — ordered once at
+    /// catalog-build time so no renderer has to know how to compare a tag.
+    ///
+    /// A list, not a map: the sidecar keys these by tag, and a JSON object
+    /// carries no order for a consumer to rely on. Empty when the producer
+    /// published no breakdown, which is its own answer and not a zero.
+    ///
+    /// [`Self::total`] is **not** the sum of these — a channel tag carries
+    /// traffic that names no release — so neither may be derived from the
+    /// other.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub versions: Vec<DownloadVersion>,
+}
+
+/// One release's share of an artifact's pull count.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DownloadVersion {
+    /// The release tag, exactly as the sidecar spelled it. A floating tag
+    /// (`latest`, `1.35`) never appears: it aliases a release already counted
+    /// here, and a figure of its own would read as a second, separate one.
+    pub version: String,
+    /// Pulls attributed to that release.
+    pub total: u64,
 }
 
 /// One repository's catalog record.
@@ -1252,6 +1276,7 @@ mod tests {
                 downloads: Some(DownloadSummary {
                     total: 1416,
                     as_of: Some("2026-09-10T21:48:47Z".to_string()),
+                    versions: Vec::new(),
                 }),
                 fetched_at: ts(10),
             },

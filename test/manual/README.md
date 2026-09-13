@@ -616,7 +616,7 @@ What to look for, and the absences that matter as much as the figures:
 
 | Row | Check |
 |---|---|
-| `skills/code-reviewer` | Both signals. `Downloads: 1416 (as of 2026-09-09)`. Its `versions` map sums to 1400 — `total` is **not** the sum, the other 16 came through a channel tag naming no release. |
+| `skills/code-reviewer` | Both signals. `Downloads: 1416 (as of 2026-09-09)` in the TUI; the extension's DOWNLOADS rail adds the per-release rows. The breakdown sums to 1400 — `total` is **not** the sum, the other 16 came through a channel tag naming no release. |
 | `skills/support-desk` | Counted, unrated — 250412, large enough to exercise the extension's compact badge (`250K`). |
 | `skills/commit-helper` | Rated, **uncounted**: `downloads` is `null`, and no `Downloads:` row appears. This is what every GHCR- or GitLab-backed row looks like. |
 | `agents/reviewer` | A measured **zero**. It renders `0` and must not read the same as the row above — `null` is unknown, `0` is "counted, nobody pulled it". |
