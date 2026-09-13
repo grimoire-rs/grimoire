@@ -30,7 +30,7 @@ pub use catalog_error::{CatalogError, CatalogErrorKind};
 #[allow(unused_imports)]
 pub use catalog_service::{BadgeContext, CatalogGroup, CatalogResults, CatalogRow, CatalogScope, load_catalog};
 #[allow(unused_imports)]
-pub use registry_catalog::{Catalog, CatalogEntry, OciMeta};
+pub use registry_catalog::{Catalog, CatalogEntry, DownloadSummary, OciMeta};
 #[allow(unused_imports)]
 pub use search_match::SearchQuery;
 #[allow(unused_imports)]
