@@ -339,7 +339,7 @@ async fn write_config_and_relock(
 /// rather than masking the real error with an I/O one.
 fn restore_config(path: &std::path::Path, original: Option<&[u8]>) {
     let rolled_back = match original {
-        Some(bytes) => crate::store::atomic_write::atomic_write(path, bytes),
+        Some(bytes) => crate::store::atomic_write::atomic_write_through_symlink(path, bytes),
         None => match std::fs::remove_file(path) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
@@ -1055,7 +1055,7 @@ pub(crate) fn write_config(
         }
     }
 
-    crate::store::atomic_write::atomic_write(path, out.as_bytes()).map_err(|e| {
+    crate::store::atomic_write::atomic_write_through_symlink(path, out.as_bytes()).map_err(|e| {
         crate::config::config_error::ConfigError::new(path, crate::config::config_error::ConfigErrorKind::Io(e))
     })
 }

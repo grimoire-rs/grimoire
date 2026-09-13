@@ -18,7 +18,7 @@ use crate::config;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_error::{LockError, LockErrorKind};
 use crate::lock::locked_artifact::LockedArtifact;
-use crate::store::atomic_write::atomic_write;
+use crate::store::atomic_write::atomic_write_through_symlink;
 
 /// Current UTC time as an RFC3339 string (`%Y-%m-%dT%H:%M:%SZ`).
 pub fn now_rfc3339() -> String {
@@ -76,7 +76,7 @@ pub fn save(path: &Path, lock: &GrimoireLock, previous: Option<&GrimoireLock>) -
             },
         ));
     }
-    atomic_write(path, serialized.as_bytes()).map_err(|e| LockError::new(path, LockErrorKind::Io(e)))
+    atomic_write_through_symlink(path, serialized.as_bytes()).map_err(|e| LockError::new(path, LockErrorKind::Io(e)))
 }
 
 /// Read a lock file with the shared config-tier size cap, mapping

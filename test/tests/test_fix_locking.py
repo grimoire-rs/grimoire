@@ -167,3 +167,91 @@ def test_second_init_refuses_and_leaves_a_parseable_config(
     body = (project_dir / "grimoire.toml").read_bytes()
     parsed = tomllib.loads(body.decode())
     assert "skills" in parsed and "rules" in parsed, parsed
+
+
+# ---------------------------------------------------------------------------
+# Symlinked config (issue #117)
+# ---------------------------------------------------------------------------
+
+
+def _stow(grim_home: Path, dotfiles: Path, name: str, body: str | None = None) -> Path:
+    """Put ``<name>`` under ``dotfiles`` and symlink it into ``grim_home``,
+    the way GNU stow / chezmoi / yadm manage a dotfile. Returns the link.
+
+    ``body=None`` moves the existing ``grim_home/<name>`` behind the link
+    instead of writing a fresh file.
+    """
+    real = dotfiles / name
+    link = grim_home / name
+    dotfiles.mkdir(parents=True, exist_ok=True)
+    grim_home.mkdir(parents=True, exist_ok=True)
+    if body is None:
+        link.rename(real)
+    else:
+        real.write_text(body)
+    os.symlink(os.path.relpath(real, grim_home), link)
+    assert link.is_symlink()
+    return link
+
+
+@unix_only
+def test_symlinked_global_config_is_written_through_and_the_link_survives(
+    grim_binary: Path, grim_home: Path, tmp_path: Path
+) -> None:
+    """The issue #117 shape: ``$GRIM_HOME/grimoire.toml`` (and later the
+    lock) are symlinks into a dotfiles repository.
+
+    Before the fix every config-locking command failed with
+    ``I/O error: guarded path is a symlink`` (74). Lifting only that guard
+    would have been worse: the atomic tmp+rename replaced the *link* with a
+    regular file, silently detaching the dotfiles copy. Both files must
+    stay links and the managed copies must carry the new content.
+    """
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.env["GRIM_OFFLINE"] = "1"
+    dotfiles = tmp_path / "dotfiles"
+    toml_link = _stow(grim_home, dotfiles, "grimoire.toml", "[skills]\n")
+
+    result = runner.run("add", "--global", str(_skill(tmp_path, "alpha")), "--no-install", check=False)
+    assert result.returncode == 0, f"add through a symlinked config must succeed: {result.stderr}"
+    assert toml_link.is_symlink(), "the add must write through the link, not replace it"
+    assert "alpha = " in (dotfiles / "grimoire.toml").read_text(), "the dotfiles copy must carry the declaration"
+
+    result = runner.run("install", "--global", check=False)
+    assert result.returncode == 0, f"install --global through a symlinked config must succeed: {result.stderr}"
+
+    # Now the lock is stowed too — the next relock must write through it.
+    lock_link = _stow(grim_home, dotfiles, "grimoire.lock")
+    result = runner.run("add", "--global", str(_skill(tmp_path, "omega")), "--no-install", check=False)
+    assert result.returncode == 0, f"add through a symlinked lock must succeed: {result.stderr}"
+    assert toml_link.is_symlink() and lock_link.is_symlink(), "both links must survive the relock"
+    assert "omega = " in (dotfiles / "grimoire.toml").read_text()
+    assert "omega" in (dotfiles / "grimoire.lock").read_text(), "the dotfiles lock copy must carry the new pin"
+    assert not (grim_home / "grimoire.toml.lock").exists(), "no sidecar may linger beside the link"
+
+
+@unix_only
+def test_symlinked_config_contends_on_the_real_files_flock(
+    grim_binary: Path, grim_home: Path, tmp_path: Path
+) -> None:
+    """The flock keys on the file the link resolves to, not on the link.
+
+    A sidecar beside the link would let a writer reaching the same real
+    file by another path (``--config ~/dotfiles/grimoire.toml``, a second
+    link) run concurrently — exactly the lost update the lock exists to
+    prevent. Holding the real file's sidecar must therefore refuse a
+    mutation issued through the link.
+    """
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.env["GRIM_OFFLINE"] = "1"
+    dotfiles = tmp_path / "dotfiles"
+    _stow(grim_home, dotfiles, "grimoire.toml", "[skills]\n")
+
+    with held_flock(dotfiles / "grimoire.toml.lock"):
+        result = runner.run("add", "--global", str(_skill(tmp_path, "alpha")), "--no-install", check=False)
+
+    assert result.returncode == 75, (
+        f"a mutation through the link must contend on the real file's flock (75), got {result.returncode}; {result.stderr}"
+    )
+    assert not (grim_home / "grimoire.toml.lock").exists(), "the sidecar must not be placed beside the link"
+    assert "alpha = " not in (dotfiles / "grimoire.toml").read_text()

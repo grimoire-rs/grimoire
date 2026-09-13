@@ -11,7 +11,7 @@
 //! parent-directory `fsync` on Unix so the rename survives a crash.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Atomically replace `target` with `bytes`.
 ///
@@ -65,6 +65,39 @@ pub fn atomic_write(target: &Path, bytes: &[u8]) -> io::Result<()> {
     }
 
     Ok(())
+}
+
+/// Atomically replace the file `target` names, following a terminal symlink.
+///
+/// [`atomic_write`]'s rename replaces `target` itself, so a symlinked user
+/// file (a dotfiles-managed `grimoire.toml`, issue #117) would be swapped
+/// for a regular file and the managed copy silently left stale. The
+/// user-authored files grim rewrites in place go through this instead;
+/// grim-owned outputs keep the plain rename, which must clobber a planted
+/// link rather than write through it.
+///
+/// # Errors
+///
+/// As [`atomic_write`].
+pub fn atomic_write_through_symlink(target: &Path, bytes: &[u8]) -> io::Result<()> {
+    atomic_write(&resolve_symlink(target), bytes)
+}
+
+/// The file `target` names once symlinks are followed; `target` itself
+/// when it is not a link or cannot be resolved (absent, dangling).
+///
+/// Shared by the advisory lock so the sidecar sits beside the same real
+/// file the write lands on — keying either on the link would let two
+/// writers reaching one file by different paths run unserialized.
+pub fn resolve_symlink(target: &Path) -> PathBuf {
+    // ponytail: a dangling link is replaced by a regular file, like `>`;
+    // walk `read_link` by hand if that ever matters.
+    match std::fs::symlink_metadata(target) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            dunce::canonicalize(target).unwrap_or_else(|_| target.to_path_buf())
+        }
+        _ => target.to_path_buf(),
+    }
 }
 
 #[cfg(test)]
@@ -141,5 +174,52 @@ mod tests {
         // Restore perms before reading so the assertion is reliable.
         std::fs::set_permissions(&sub, original_perms).unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"original");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn through_symlink_writes_the_target_and_keeps_the_link() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("dotfiles").join("cfg");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, b"old").unwrap();
+        let link = dir.path().join("cfg");
+        symlink(&real, &link).unwrap();
+
+        atomic_write_through_symlink(&link, b"new").unwrap();
+        assert!(link.is_symlink(), "the link must survive the write");
+        assert_eq!(
+            std::fs::read(&real).unwrap(),
+            b"new",
+            "the real file must carry the new bytes"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plain_write_replaces_the_link() {
+        // Characterizes the deliberate split: grim-owned outputs keep the
+        // plain rename, which clobbers a planted link instead of writing
+        // through it (the install containment guarantee).
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("elsewhere");
+        std::fs::write(&real, b"old").unwrap();
+        let link = dir.path().join("out");
+        symlink(&real, &link).unwrap();
+
+        atomic_write(&link, b"new").unwrap();
+        assert!(
+            !link.is_symlink(),
+            "a plain write replaces the link with a regular file"
+        );
+        assert_eq!(
+            std::fs::read(&real).unwrap(),
+            b"old",
+            "a plain write never reaches the link target"
+        );
     }
 }
