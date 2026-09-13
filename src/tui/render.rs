@@ -1663,10 +1663,14 @@ fn help_lines() -> Vec<Line<'static>> {
         )),
         Line::from(""),
     ];
+    // Both columns are sized to their widest key plus a two-cell gutter:
+    // a fixed width silently ran the longest key (`(shift) tab`,
+    // `integrity-missing`) straight into its description.
+    let key_w = help_entries().iter().map(|(k, _)| k.chars().count()).max().unwrap_or(0) + 2;
     for (k, d) in help_entries() {
         lines.push(Line::from(vec![
             Span::styled(
-                format!("  {k:<10}"),
+                format!("  {k:<key_w$}"),
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             ),
             Span::styled(d, Style::default().fg(Color::White)),
@@ -1678,11 +1682,17 @@ fn help_lines() -> Vec<Line<'static>> {
         Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(""));
+    let label_w = legend_entries()
+        .iter()
+        .map(|(s, _)| status_view(*s).1.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 2;
     for (state, meaning) in legend_entries() {
         let (glyph, label, color) = status_view(state);
         lines.push(Line::from(vec![
             Span::styled(
-                format!("  {glyph} {label:<17}"),
+                format!("  {glyph} {label:<label_w$}"),
                 Style::default().fg(color_for(color)).add_modifier(Modifier::BOLD),
             ),
             Span::styled(meaning, Style::default().fg(Color::White)),
@@ -2262,6 +2272,31 @@ mod tests {
                 "legend must show {state}'s own glyph {glyph:?} and label {label:?}"
             );
         }
+    }
+
+    // Every key and every legend label ends at least two cells before its
+    // description starts — the widest of each column used to butt straight
+    // into its text.
+    #[test]
+    fn help_columns_keep_a_gutter_before_every_description() {
+        let plain = |line: &Line<'_>| -> Vec<String> { line.spans.iter().map(|s| s.content.to_string()).collect() };
+        let rows: Vec<Vec<String>> = help_lines().iter().map(plain).filter(|s| s.len() == 2).collect();
+        assert!(rows.len() >= help_entries().len() + legend_entries().len());
+        for row in rows {
+            assert!(
+                row[0].ends_with("  "),
+                "the label column must end in a two-cell gutter: {row:?}"
+            );
+        }
+        // And every label column within one section is the same width, so the
+        // descriptions line up.
+        let widths: std::collections::BTreeSet<usize> = help_lines()
+            .iter()
+            .map(plain)
+            .filter(|s| s.len() == 2)
+            .map(|s| s[0].chars().count())
+            .collect();
+        assert_eq!(widths.len(), 2, "one width per section (keys, legend): {widths:?}");
     }
 
     // The scroll-clamp source of truth (`state::HELP_BODY_LINES`) must match the
