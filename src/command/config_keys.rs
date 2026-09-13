@@ -173,7 +173,10 @@ impl ConfigKey {
                 default: None,
             },
             title: "Sort",
-            description: "Sets the order the browser opens in: `name`, `updated`, `rating` or                            `downloads`, the same orders `grim search --sort` applies. Unset, the                            browser groups by kind and then by name. Overridden by the `--sort` flag                            when given.",
+            description: "Sets the order the browser opens in: `name`, `updated`, `rating` or \
+                           `downloads`, the same orders `grim search --sort` applies. Unset, the \
+                           browser groups by kind and then by name. Overridden by the `--sort` flag \
+                           when given.",
             constraints: None,
         };
         const TUI_SORT_ORDER: KeySpec = KeySpec {
@@ -185,7 +188,9 @@ impl ConfigKey {
                 default: None,
             },
             title: "Sort order",
-            description: "Sets the direction the opening order runs in, `asc` or `desc`. Unset, each                            order runs its natural way: `name` ascending, every other order and the                            default grouping with the biggest or newest first.",
+            description: "Sets the direction the opening order runs in, `asc` or `desc`. Unset, each \
+                           order runs its natural way: `name` ascending, every other order and the \
+                           default grouping with the biggest or newest first.",
             constraints: None,
         };
         match self {
@@ -387,6 +392,23 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+
+    #[test]
+    fn descriptions_carry_no_whitespace_runs() {
+        // A `\` line continuation dropped from a wrapped literal ships the
+        // indentation as ~28 spaces inside `config list --format json`.
+        let specs = ConfigKey::ALL
+            .iter()
+            .map(|k| k.spec())
+            .chain(RegistryField::ALL.iter().map(|f| f.spec()));
+        for spec in specs {
+            assert!(
+                !spec.description.contains("  "),
+                "{}: whitespace run in description",
+                spec.key
+            );
+        }
+    }
 
     #[test]
     fn spec_keys_are_unique_and_parse_round_trips() {

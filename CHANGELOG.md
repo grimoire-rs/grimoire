@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.2] - 2026-09-13
+
+### Added
+
+- Carry the index's download count onto every row *(search)*
+- Show the download count in the detail pane *(tui)*
+- Carry the sidecar's per-release download counts *(search)*
+- Add the downloads browse order *(sort)*
+- Rating and download columns, and an aligned alias-only Registry cell *(tui)*
+- Cycle the browse order with s and flip its direction with S *(tui)*
+- Options.tui.sort and sort_order seed the browse order *(config)*
+- Home and end jump to the first and last row *(tui)*
+- Per-entry `announce = false` opt-out *(publish)*
+
+### Documentation
+
+- Replace mdBook with Astro Starlight, keeping every URL
+- Add twelve use-case pages and eleven recorded screencasts
+- Rebuild the landing around what readers are stuck on
+- Drop footer note and unstyle heading autolinks
+
+### Fixed
+
+- Size the help overlay's columns to their widest entry *(tui)*
+- Keep the transport error off the Overview's Support section *(tui)*
+- Follow a symlinked config instead of refusing it *(lock)*
+- Write vendor config splices through a symlink *(install)*
+- Warn when the generic-client fallback picks the pool *(install)*
+
 ## [0.14.1] - 2026-09-01
 
 ### Added
@@ -793,6 +822,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make release-update.sh executable; add rolling-release regression tests
 - Contact loopback registries over plain HTTP on any port
 
+[0.14.2]: https://github.com/grimoire-rs/grimoire/compare/v0.14.1..v0.14.2
 [0.14.1]: https://github.com/grimoire-rs/grimoire/compare/v0.14.0..v0.14.1
 [0.14.0]: https://github.com/grimoire-rs/grimoire/compare/v0.13.0..v0.14.0
 [0.13.0]: https://github.com/grimoire-rs/grimoire/compare/v0.12.1..v0.13.0

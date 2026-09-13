@@ -70,6 +70,11 @@ if ! curl -fsS "http://$REGISTRY/v2/" >/dev/null 2>&1 ||
     ! curl -fsS "$INDEX_URL/all.json" >/dev/null 2>&1; then
     log "starting registries and the static index via docker compose"
     docker compose -f "$MANUAL_DIR/docker-compose.yml" up -d
+    # A bind mount pins the host directory's inode. A checkout that recreates
+    # index/ under a running container leaves it serving an empty stale dir
+    # (all.json 404 → "package index fetch failed"), and a plain `up -d` is a
+    # no-op on a running, unchanged service — recreate it explicitly.
+    docker compose -f "$MANUAL_DIR/docker-compose.yml" up -d --force-recreate index
 fi
 for reg in "$REGISTRY" "$REGISTRY2"; do
     for _ in $(seq 1 60); do
