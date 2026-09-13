@@ -210,13 +210,20 @@ particular artifact has no votes yet.
 
 #### The `search` downloads object {#search-downloads}
 
-`search`'s `downloads` is `{total, as_of}` when the browsed index published
-a pull count for that row, and **explicit `null`** otherwise — the
+`search`'s `downloads` is `{total, as_of, versions}` when the browsed index
+published a pull count for that row, and **explicit `null`** otherwise — the
 [always-present rule](#null-policy) applies, so `null` always means
 *unknown*, never *older grim* and never *zero pulls*.
 
 ```json
-{ "total": 1416, "as_of": "2026-08-18T09:00:00Z" }
+{
+  "total": 1416,
+  "as_of": "2026-08-18T09:00:00Z",
+  "versions": [
+    { "version": "1.2.0", "total": 900 },
+    { "version": "1.1.0", "total": 400 }
+  ]
+}
 ```
 
 `null` is the **common** case, not the exception. No OCI distribution-spec
@@ -234,13 +241,20 @@ around it. Show it beside the figure — a pull count is a measurement with a
 date on it, and an undated one displayed bare reads as current when it may
 be months old.
 
-An **object rather than a bare number**, and for the same reason multi-item
-reports use an [`items` envelope](#items-envelope): a scalar can never grow
-a sibling under the [additive-only policy](./stability.md), and the sidecar
-already publishes a per-release breakdown (`versions`) this object does not
-carry yet. `total` is **not** the sum of that breakdown — a channel tag
-(`canary`) carries traffic that names no release — so a consumer must never
+`versions` is the per-release breakdown, **ordered highest release first** —
+an array rather than a tag-keyed object because a JSON object carries no order
+a consumer may rely on, and grim already owns the semver comparison. A floating
+tag (`latest`, `1.35`) never appears: it aliases a release already counted.
+`[]` means the producer published no breakdown, which is its own answer and not
+a zero — hence an empty array rather than an absent key.
+
+**`total` is not the sum of `versions`.** A channel tag (`canary`) carries real
+traffic that names no release, so it lands in the total and in no entry. Never
 derive one from the other.
+
+An **object rather than a bare number**, for the same reason multi-item reports
+use an [`items` envelope](#items-envelope): a scalar could never have grown
+`as_of` or `versions` under the [additive-only policy](./stability.md).
 
 #### `status --check` nullability {#status-check-nullability}
 

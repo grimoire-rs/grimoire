@@ -1026,6 +1026,7 @@ mod tests {
         row.downloads = Some(DownloadSummary {
             total: 1416,
             as_of: Some("2026-09-10T21:48:47Z".to_string()),
+            versions: Vec::new(),
         });
         let lines = detail_lines(Some(&row), None);
         // The stamp is trimmed to the day: the pane is a summary, and the
@@ -1042,13 +1043,21 @@ mod tests {
         );
 
         // An unstamped count is still a count.
-        row.downloads = Some(DownloadSummary { total: 5, as_of: None });
+        row.downloads = Some(DownloadSummary {
+            total: 5,
+            as_of: None,
+            versions: Vec::new(),
+        });
         assert_eq!(meta_value(&detail_lines(Some(&row), None), "Downloads:"), Some("5"));
 
         // Zero is a real measurement and renders; absence renders no row at
         // all. Collapsing the two would report "nobody pulled it" for an
         // artifact nothing ever counted.
-        row.downloads = Some(DownloadSummary { total: 0, as_of: None });
+        row.downloads = Some(DownloadSummary {
+            total: 0,
+            as_of: None,
+            versions: Vec::new(),
+        });
         assert_eq!(meta_value(&detail_lines(Some(&row), None), "Downloads:"), Some("0"));
         row.downloads = None;
         assert_eq!(meta_value(&detail_lines(Some(&row), None), "Downloads:"), None);

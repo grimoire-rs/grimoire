@@ -26,8 +26,8 @@
 //! `null` when the browse source publishes no per-artifact counter — which
 //! is every registry but Artifactory, so `null` is the common case and
 //! never means zero; it is an object (`{total, as_of}`), never a bare
-//! number, so the per-release breakdown the sidecar also publishes can be
-//! added later without a break.
+//! number: it carries `as_of` (when the producer read the counters) and
+//! `versions`, the per-release breakdown ordered highest release first.
 //!
 //! `sources` is the always-present sibling naming every browsed source in
 //! registry-declaration order — `{alias, locator, ok, error}` — so a consumer
@@ -98,6 +98,17 @@ pub struct SearchSourceStatus {
     pub error: Option<String>,
 }
 
+/// One release's share of a row's pull count.
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchDownloadVersion {
+    /// The release tag, exactly as the index sidecar spelled it. A floating
+    /// tag (`latest`, `1.35`) never appears — it aliases a release already
+    /// counted here.
+    pub version: String,
+    /// Pulls attributed to that release.
+    pub total: u64,
+}
+
 /// One row's community rating — the count and the human-facing thread link.
 ///
 /// Deliberately **not** the whole
@@ -124,6 +135,15 @@ pub struct SearchSourceStatus {
 pub struct SearchDownloads {
     /// Every pull the browse source could attribute to the artifact.
     pub total: u64,
+    /// Per-release counts, **highest release first**. An ordered array rather
+    /// than a tag-keyed object: JSON objects carry no order a consumer may
+    /// rely on, and grim already owns the semver comparison. `[]` when the
+    /// producer published no breakdown — its own answer, not a zero, and why
+    /// this is an empty array rather than an absent key.
+    ///
+    /// `total` is **not** its sum: a channel tag carries traffic naming no
+    /// release, so it lands in the total and in no entry here.
+    pub versions: Vec<SearchDownloadVersion>,
     /// When the producer read the counters (RFC3339 UTC), or `null` when the
     /// sidecar published no stamp. Distinct from the sidecar's document-level
     /// `generated_at`: a rating-only rebuild republishes a carried-forward
@@ -670,6 +690,16 @@ mod tests {
         e.downloads = Some(SearchDownloads {
             total: 1416,
             as_of: Some("2026-09-10T21:48:47Z".to_string()),
+            versions: vec![
+                SearchDownloadVersion {
+                    version: "1.2.0".to_string(),
+                    total: 900,
+                },
+                SearchDownloadVersion {
+                    version: "1.1.0".to_string(),
+                    total: 400,
+                },
+            ],
         });
         let mut buf = Vec::new();
         SearchReport::new(vec![e.clone()], vec![]).print_json(&mut buf).unwrap();
@@ -681,9 +711,12 @@ mod tests {
         let downloads = v["items"][0]["downloads"].as_object().expect("downloads is an object");
         assert_eq!(
             downloads.len(),
-            2,
-            "downloads carries `total` and `as_of`: {downloads:?}"
+            3,
+            "downloads carries `total`, `as_of` and `versions`: {downloads:?}"
         );
+        // Ordered highest release first, by grim, so no consumer compares tags.
+        assert_eq!(v["items"][0]["downloads"]["versions"][0]["version"], "1.2.0");
+        assert_eq!(v["items"][0]["downloads"]["versions"][0]["total"], 900);
 
         // Unknown ⇒ explicit null, key always present — and never `0`, which
         // would read as "counted, nobody pulled it". Every registry but

@@ -27,7 +27,7 @@ use serde::Deserialize;
 
 use crate::catalog::catalog_error::CatalogError;
 use crate::catalog::rating_provider;
-use crate::catalog::registry_catalog::{CatalogEntry, DownloadSummary, RatingSummary};
+use crate::catalog::registry_catalog::{CatalogEntry, DownloadSummary, DownloadVersion, RatingSummary};
 use crate::config::registry_resolve::SourceKind;
 
 /// HTTP fetch timeout for the compiled index.
@@ -218,10 +218,6 @@ struct WireStats {
 /// the total and appears in no per-release entry. Nothing here should be
 /// derived from the other.
 ///
-/// `versions` itself is deliberately **not read**. It is a map per row, in a
-/// browse catalog capped at 500 rows, to serve one detail rail — and the
-/// cache struct is an object precisely so it can gain the key later without
-/// a wire break.
 #[derive(Debug, Deserialize)]
 struct WireDownloads {
     total: u64,
@@ -230,6 +226,26 @@ struct WireDownloads {
     /// level below the document itself is absent-tolerant.
     #[serde(default)]
     as_of: Option<String>,
+    /// Per-release counts keyed by release tag. Absent when the producer
+    /// published no breakdown; ordered into a list at projection time so the
+    /// cache holds an order and no renderer has to compare tags.
+    #[serde(default)]
+    versions: BTreeMap<String, u64>,
+}
+
+/// Order per-release counts highest release first.
+///
+/// A tag that does not parse as semver sorts after every one that does, and
+/// descending among its own kind. The sidecar's keys are whatever the producer
+/// published, so a tag this binary cannot order must still land somewhere
+/// deterministic rather than vanish.
+fn by_release_desc(a: &DownloadVersion, b: &DownloadVersion) -> std::cmp::Ordering {
+    match (semver::Version::parse(&a.version), semver::Version::parse(&b.version)) {
+        (Ok(x), Ok(y)) => y.cmp(&x),
+        (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+        (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+        (Err(_), Err(_)) => b.version.cmp(&a.version),
+    }
 }
 
 /// One ref's stats as observed in the sidecar, projected for the join onto
@@ -483,9 +499,18 @@ fn parse_stats(bytes: &[u8], url: &str) -> Option<BTreeMap<String, IndexStats>> 
             .filter_map(|(r#ref, row)| {
                 let observed = IndexStats {
                     rating: row.rating.map(|r| r.into_summary(provider.as_deref(), host.as_deref())),
-                    downloads: row.downloads.map(|d| DownloadSummary {
-                        total: d.total,
-                        as_of: d.as_of,
+                    downloads: row.downloads.map(|d| {
+                        let mut versions: Vec<DownloadVersion> = d
+                            .versions
+                            .into_iter()
+                            .map(|(version, total)| DownloadVersion { version, total })
+                            .collect();
+                        versions.sort_by(by_release_desc);
+                        DownloadSummary {
+                            total: d.total,
+                            as_of: d.as_of,
+                            versions,
+                        }
                     }),
                 };
                 // A bag holding only signals this grim does not read is the
@@ -779,12 +804,11 @@ mod tests {
         assert_eq!(rating.up, 7);
         assert_eq!(rating.target, "D_kwDO");
         assert_eq!(rating.url, "https://f/1");
-        // `versions` is a key the wire struct deliberately does not read;
-        // tolerating it is the same contract as tolerating `score`. `as_of`
-        // IS read — it is what makes displaying the count honest.
         let downloads = one.downloads.as_ref().expect("the pull count survives");
         assert_eq!(downloads.total, 91);
         assert_eq!(downloads.as_of.as_deref(), Some("2026-09-10T21:48:47Z"));
+        assert_eq!(downloads.versions.len(), 1);
+        assert_eq!(downloads.versions[0].version, "1.0.0");
 
         let cached = serde_json::from_str::<RatingSummary>(
             r#"{"up": 7, "target": "D_kwDO", "url": "https://f/1", "score": 0.9}"#,
@@ -938,6 +962,43 @@ mod tests {
             "a bag holding only unread signals is the same as no entry at all"
         );
         assert!(!stats.contains_key("ghcr.io/acme/skills/never-mentioned"));
+    }
+
+    #[test]
+    fn per_release_counts_are_ordered_highest_release_first() {
+        // Ordered ONCE here rather than in every renderer, and by semver
+        // rather than by string: `1.10.0` outranks `1.9.0`, which the
+        // lexicographic order a JSON object would arrive in gets backwards.
+        // A tag this binary cannot parse still has to land somewhere
+        // deterministic, so it sorts after every release that does.
+        let stats = parse_stats(
+            br#"{
+                "schema_version": 1,
+                "entries": {
+                    "ghcr.io/acme/skills/one": {
+                        "downloads": {
+                            "total": 1000,
+                            "versions": {
+                                "1.9.0": 10,
+                                "nightly": 1,
+                                "1.10.0": 500,
+                                "1.10.0-rc.1": 5
+                            }
+                        }
+                    }
+                }
+            }"#,
+            "https://index.example/stats.json",
+        )
+        .expect("a parsed document is a completed observation");
+        let d = stats["ghcr.io/acme/skills/one"].downloads.as_ref().expect("counted");
+        let order: Vec<&str> = d.versions.iter().map(|v| v.version.as_str()).collect();
+        assert_eq!(order, vec!["1.10.0", "1.10.0-rc.1", "1.9.0", "nightly"]);
+        assert_eq!(d.versions[0].total, 500);
+        // The total is the producer's, never re-derived: a channel tag carries
+        // traffic naming no release, so the breakdown sums to less.
+        assert_eq!(d.total, 1000);
+        assert!(d.versions.iter().map(|v| v.total).sum::<u64>() < d.total);
     }
 
     #[test]

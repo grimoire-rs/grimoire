@@ -814,9 +814,13 @@ error condition:
 
 The same sidecar carries a second, independent signal. When the browsed
 index publishes it, `grim search --format json` carries a `downloads`
-object per row — `{total, as_of}`, or `null` when the count is unknown.
-`total` is the pull count; `as_of` is when the producer read it, and may
-itself be `null`.
+object per row — `{total, as_of, versions}`, or `null` when the count is
+unknown. `total` is the pull count; `as_of` is when the producer read it and
+may itself be `null`; `versions` is the per-release breakdown, ordered highest
+release first, `[]` when the producer published none.
+
+`total` is **not** the sum of `versions` — a channel tag carries traffic that
+names no release — so never derive one from the other.
 
 `null` is the **common** case here, not the exception: no OCI
 distribution-spec endpoint exposes a per-artifact download counter, and
@@ -825,8 +829,8 @@ as *unknown* — never as zero pulls. A `total` of `0` is a real measurement
 and means something different.
 
 The two signals are independent: an artifact may be rated and uncounted,
-counted and unrated, or neither. Neither implies the other, and there is no
-`--sort downloads`.
+counted and unrated, or neither. Neither implies the other. The CLI has no
+`--sort downloads`; `--sort` takes `name`, `updated` or `rating`.
 
 `--sort <name|updated|rating>` applies to `grim search` and `grim tui`
 alike. Unrated and undated artifacts sort into a bucket of their own at

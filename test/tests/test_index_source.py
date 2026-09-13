@@ -802,9 +802,10 @@ def test_http_index_joins_the_downloads_sidecar_by_ref(
             "ghcr.io/acme/skills/counted": {
                 "downloads": {
                     "total": 1416,
-                    # Published per release, and deliberately NOT read into
-                    # grim's cache — tolerated like any other sidecar key.
-                    "versions": {"1.35.2": 900, "1.35.1": 400},
+                    # Keyed by release tag on the wire; grim projects it to an
+                    # ORDERED array so no renderer has to compare tags. The
+                    # lexicographic order these arrive in gets 1.35.10 wrong.
+                    "versions": {"1.35.1": 400, "1.35.10": 116, "1.35.2": 900},
                     "as_of": "2026-09-10T21:48:47Z",
                 }
             },
@@ -823,9 +824,13 @@ def test_http_index_joins_the_downloads_sidecar_by_ref(
     counted = by_repo["ghcr.io/acme/skills/counted"]["downloads"]
     assert counted["total"] == 1416
     assert counted["as_of"] == "2026-09-10T21:48:47Z"
-    assert set(counted) == {"total", "as_of"}, (
-        f"the per-release breakdown is not carried into the row: {counted}"
-    )
+    assert set(counted) == {"total", "as_of", "versions"}, f"unexpected shape: {counted}"
+    # An ordered ARRAY, highest release first — semver, not string order, so
+    # 1.35.10 leads and does not sort between 1.35.1 and 1.35.2.
+    assert [v["version"] for v in counted["versions"]] == ["1.35.10", "1.35.2", "1.35.1"]
+    assert counted["versions"][0]["total"] == 116
+    # The producer's total stands; it is never re-derived from the breakdown.
+    assert sum(v["total"] for v in counted["versions"]) == 1416
     assert by_repo["ghcr.io/acme/skills/counted"]["rating"] is None, (
         "a counted ref is unrated, never zero-rated"
     )
@@ -840,6 +845,11 @@ def test_http_index_joins_the_downloads_sidecar_by_ref(
     assert cached["ghcr.io/acme/skills/counted"]["downloads"] == {
         "total": 1416,
         "as_of": "2026-09-10T21:48:47Z",
+        "versions": [
+            {"version": "1.35.10", "total": 116},
+            {"version": "1.35.2", "total": 900},
+            {"version": "1.35.1", "total": 400},
+        ],
     }
     assert "downloads" not in cached["ghcr.io/acme/skills/plain"]
 
