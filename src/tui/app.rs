@@ -1181,6 +1181,9 @@ fn map_key(key: KeyEvent) -> Option<TuiInput> {
     Some(match key.code {
         KeyCode::Up => TuiInput::Up,
         KeyCode::Down => TuiInput::Down,
+        // Modifiers are not consulted, so `ctrl-home` / `ctrl-end` work too.
+        KeyCode::Home => TuiInput::Home,
+        KeyCode::End => TuiInput::End,
         KeyCode::PageUp => TuiInput::PageUp,
         KeyCode::PageDown => TuiInput::PageDown,
         KeyCode::Right => TuiInput::Expand,

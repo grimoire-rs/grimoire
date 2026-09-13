@@ -1602,11 +1602,13 @@ fn legend_line(truncation_hint: &str) -> Line<'static> {
 fn help_entries() -> [(&'static str, &'static str); 10] {
     [
         ("↑ / ↓", "move the selection"),
+        ("home / end", "jump to the first / last row"),
         ("j / k", "scroll the detail pane — line, or pgup/pgdn by page"),
         ("space", "mark / unmark — a marks all visible, c clears"),
         ("i / u / d", "install / update / uninstall (marked set or selection)"),
-        ("v", "pick a specific version for the selected row"),
-        ("o", "open the selected entry's repository URL"),
+        // `v` and `o` share a row, like `tab` below: the overlay must fit an
+        // 80×24 terminal, and an eleventh row overflows it.
+        ("v · o", "pick a version for the row · open its repository URL"),
         (
             "g · t · s",
             "scope project ⇄ global · tree / flat view · sort (S flips)",
@@ -2191,6 +2193,7 @@ mod tests {
         // through elsewhere.
         let text: String = help_entries().iter().map(|(k, d)| format!("{k}\t{d}\n")).collect();
         for (needle, what) in [
+            ("home / end", "first/last row jump"),
             ("j / k", "detail-scroll j/k"),
             ("pgup/pgdn", "detail-scroll by page"),
             ("(shift) tab", "detail panel switch"),
