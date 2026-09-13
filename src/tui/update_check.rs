@@ -421,6 +421,7 @@ mod tests {
             revision: None,
             created: None,
             rating: None,
+            downloads: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
             deprecated: None,

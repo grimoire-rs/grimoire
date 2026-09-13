@@ -11,7 +11,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::catalog::{OciMeta, SearchQuery, SortKey, SortMode, browse_sort};
+use crate::catalog::{DownloadSummary, OciMeta, SearchQuery, SortKey, SortMode, browse_sort};
 use crate::config::registry_resolve::RowSource;
 
 use super::bundle_members::{BundleMemberCache, BundleMemberKey};
@@ -183,6 +183,16 @@ pub struct TuiRow {
     /// browse source publishes no sidecar, or it is not an HTTP index. Never
     /// `Some(0)` standing in for absence: an unrated row renders no row at all.
     pub rating: Option<u32>,
+    /// Pull count from the same sidecar, shown in the detail pane. `None`
+    /// means *unknown* — and unlike [`Self::rating`] that is the common case,
+    /// since only a registry publishing a per-artifact counter can produce
+    /// one. Never `Some(0)` standing in for absence; `Some(0)` is a real
+    /// measurement and renders as one.
+    ///
+    /// Carried whole rather than projected to a bare count the way `rating`
+    /// is: the stamp is what makes the figure honest, and dropping it here
+    /// would leave the pane showing a number with no date on it.
+    pub downloads: Option<DownloadSummary>,
     /// Publisher's deprecation message when the artifact is deprecated;
     /// `None` otherwise. Drives the row marker + detail-pane highlight.
     pub deprecated: Option<String>,
@@ -1839,6 +1849,7 @@ mod tests {
             revision: None,
             created: None,
             rating: None,
+            downloads: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
             deprecated: None,
@@ -2948,6 +2959,7 @@ mod tests {
             revision: None,
             created: None,
             rating: None,
+            downloads: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
             deprecated: None,
@@ -3842,6 +3854,7 @@ mod tests {
             revision: None,
             created: None,
             rating: None,
+            downloads: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
             deprecated: None,
@@ -4101,6 +4114,7 @@ mod p2_state_member_node_tests {
             revision: None,
             created: None,
             rating: None,
+            downloads: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
             deprecated: None,

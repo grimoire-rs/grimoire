@@ -309,6 +309,19 @@ pub fn detail_lines(row: Option<&TuiRow>, companion: Option<&CompanionCache>) ->
             },
         });
     }
+    // Pull count — same rule as the rating: shown only when the browse source
+    // published one. Absence is *unknown* and renders no row; `Some(0)` is a
+    // real measurement and renders as `0`. The stamp rides along because a
+    // count with no date on it reads as current when it may be months old.
+    if let Some(d) = &r.downloads {
+        lines.push(DetailLine::MetaEntry {
+            label: "Downloads:",
+            value: match d.as_of.as_deref().and_then(|s| s.split('T').next()) {
+                Some(day) => format!("{} (as of {day})", d.total),
+                None => d.total.to_string(),
+            },
+        });
+    }
     if let Some(msg) = &r.deprecated {
         lines.push(DetailLine::MetaEntry {
             label: "Deprecated:",
@@ -692,6 +705,7 @@ mod tests {
             revision: None,
             created: None,
             rating: None,
+            downloads: None,
             deprecated: deprecated.map(str::to_string),
             latest_tag: "1.0.0".to_string(),
             version: "1.0.0".to_string(),
@@ -1002,6 +1016,42 @@ mod tests {
             l,
             DetailLine::MetaEntry { label: "Revision:", .. } | DetailLine::MetaEntry { label: "Created:", .. }
         )));
+    }
+
+    #[test]
+    fn detail_lines_show_downloads_and_never_synthesize_a_zero() {
+        use crate::catalog::DownloadSummary;
+        let mut row = tui_row(None);
+        row.rating = Some(42);
+        row.downloads = Some(DownloadSummary {
+            total: 1416,
+            as_of: Some("2026-09-10T21:48:47Z".to_string()),
+        });
+        let lines = detail_lines(Some(&row), None);
+        // The stamp is trimmed to the day: the pane is a summary, and the
+        // seconds on a counter read months old are noise.
+        assert_eq!(meta_value(&lines, "Downloads:"), Some("1416 (as of 2026-09-10)"));
+        let pos = |want: &str| {
+            lines
+                .iter()
+                .position(|l| matches!(l, DetailLine::MetaEntry { label, .. } if *label == want))
+        };
+        assert!(
+            pos("Rating:") < pos("Downloads:"),
+            "the two sidecar signals sit together"
+        );
+
+        // An unstamped count is still a count.
+        row.downloads = Some(DownloadSummary { total: 5, as_of: None });
+        assert_eq!(meta_value(&detail_lines(Some(&row), None), "Downloads:"), Some("5"));
+
+        // Zero is a real measurement and renders; absence renders no row at
+        // all. Collapsing the two would report "nobody pulled it" for an
+        // artifact nothing ever counted.
+        row.downloads = Some(DownloadSummary { total: 0, as_of: None });
+        assert_eq!(meta_value(&detail_lines(Some(&row), None), "Downloads:"), Some("0"));
+        row.downloads = None;
+        assert_eq!(meta_value(&detail_lines(Some(&row), None), "Downloads:"), None);
     }
 
     #[test]
