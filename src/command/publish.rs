@@ -477,6 +477,18 @@ pub struct PublishEntrySpec {
     /// overrides it with the entry's own [`DescriptionSpec`]. Absent = inherit
     /// the top-level companion (or the conventional probe).
     pub description: Option<EntryDescription>,
+
+    /// Whether `--announce` writes an index pointer for this entry. `false`
+    /// publishes the artifact but keeps it out of the index — a bundle
+    /// member that is not meant to be discovered and installed on its own
+    /// (the bundle resolves it from its own manifest, no pointer needed).
+    /// Never removes a pointer an earlier run announced. Default `true`.
+    #[serde(default = "default_true")]
+    pub announce: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// The deserialized content of a `publish.toml` manifest.
@@ -586,6 +598,8 @@ pub(crate) struct PlannedEntry {
     pub reference: String,
     /// Whether to pin bundle members.
     pub pin: bool,
+    /// Whether `--announce` writes an index pointer for this entry.
+    pub announce: bool,
     /// True when a per-entry `repository` override was used verbatim and its
     /// last path segment is **not** the entry name — i.e. the name was not
     /// appended. Drives a `--dry-run`-only preview hint so a user who expected
@@ -870,10 +884,11 @@ fn validate_entry_name(name: &str, manifest_path: &std::path::Path) -> anyhow::R
 /// Announce-only by design: the same two names publish to *distinct* OCI
 /// repositories (`skills/x`, `bundles/x`), which is legitimate on its own.
 /// This detects collisions **within one manifest**; a name colliding with a
-/// pointer some earlier run announced is not visible here.
+/// pointer some earlier run announced is not visible here. An entry with
+/// `announce = false` writes no pointer, so it cannot collide either.
 fn validate_announce_names(entries: &[PlannedEntry], manifest_path: &std::path::Path) -> anyhow::Result<()> {
     let mut by_name: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for entry in entries {
+    for entry in entries.iter().filter(|e| e.announce) {
         by_name
             .entry(entry.name.as_str())
             .or_default()
@@ -1247,6 +1262,10 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
     if args.announce {
         if args.dry_run {
             let _ = writeln!(io::stderr(), "announce: skipped (dry run)");
+        } else if entries.iter().all(|e| !e.announce) {
+            // Nothing to write — same null report shape as the dry-run skip,
+            // and no index clone for an empty pointer set.
+            let _ = writeln!(io::stderr(), "announce: skipped (every entry opted out)");
         } else {
             match run_announce(ctx, args, &manifest, &entries, push.as_ref()).await {
                 Ok(section) => announce_section = Some(section),
@@ -1390,7 +1409,7 @@ async fn run_announce(
 
     let access = super::access_seam(ctx)?;
     let mut packages = Vec::with_capacity(entries.len());
-    for planned in entries {
+    for planned in entries.iter().filter(|e| e.announce) {
         let id = crate::oci::Identifier::parse(&planned.reference)
             .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
         let reference = format!("{}/{}", id.registry(), id.repository());
@@ -1964,6 +1983,7 @@ fn plan_entries(
                     path: src,
                     reference,
                     pin: spec.pin,
+                    announce: spec.announce,
                     name_not_appended,
                 });
             }
@@ -2895,6 +2915,7 @@ mod tests {
             pin: false,
             description: None,
             metadata: None,
+            announce: true,
         }
     }
 
@@ -4705,6 +4726,7 @@ mod tests {
             path: PathBuf::from("skills").join(name),
             reference: format!("{repo}:1.0.0"),
             pin: false,
+            announce: true,
             name_not_appended: false,
         }]
     }
@@ -4801,6 +4823,7 @@ mod tests {
                 path: PathBuf::from("skills/a"),
                 reference: "localhost:5000/acme/skills/a:1.0.0".to_string(),
                 pin: false,
+                announce: true,
                 name_not_appended: false,
             },
             PlannedEntry {
@@ -4809,6 +4832,7 @@ mod tests {
                 path: PathBuf::from("skills/b"),
                 reference: "localhost:5000/acme/skills/b:1.0.0".to_string(),
                 pin: false,
+                announce: true,
                 name_not_appended: false,
             },
         ];
@@ -4833,6 +4857,7 @@ mod tests {
             path: PathBuf::from(name),
             reference: format!("localhost:5000/acme/{name}:1.0.0"),
             pin: false,
+            announce: true,
             name_not_appended: false,
         }
     }
@@ -4880,6 +4905,35 @@ mod tests {
             msg.contains("'alpha'") && msg.contains("'beta'"),
             "one run reports every collision, not just the first: {msg}"
         );
+    }
+
+    // ── per-entry announce opt-out (#109) ─────────────────────────────────
+
+    #[test]
+    fn announce_names_ignore_an_opted_out_entry() {
+        let mut member = planned(ArtifactKind::Skill, "hex");
+        member.announce = false;
+        let entries = vec![member, planned(ArtifactKind::Bundle, "hex")];
+        validate_announce_names(&entries, Path::new("publish.toml"))
+            .expect("an entry that writes no pointer cannot collide on the pointer path");
+    }
+
+    #[test]
+    fn plan_entries_carry_the_announce_opt_out_and_default_to_true() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        make_test_manifest_sources(dir);
+
+        let manifest: PublishManifest = toml::from_str(
+            "registry = \"localhost:5000\"\n\n[skills.test-skill]\nversion = \"0.1.0\"\nannounce = false\n\n[rules.test-rule]\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        validate_manifest(&manifest, dir, Path::new("test.toml"), &[]).expect("valid manifest");
+        let entries = plan_entries(&manifest, dir, "localhost:5000", None, &[], None);
+        let by_name = |n: &str| entries.iter().find(|e| e.name == n).unwrap();
+        assert!(!by_name("test-skill").announce, "`announce = false` reaches the plan");
+        assert!(by_name("test-rule").announce, "absent means announced");
     }
 
     // ── B1: description path containment guard ────────────────────────────
@@ -5044,6 +5098,7 @@ mod tests {
                 path: PathBuf::from("skills/a"),
                 reference: "localhost:5000/acme/shared:1.0.0".to_string(),
                 pin: false,
+                announce: true,
                 name_not_appended: false,
             },
             PlannedEntry {
@@ -5052,6 +5107,7 @@ mod tests {
                 path: PathBuf::from("rules/a.md"),
                 reference: "localhost:5000/acme/shared:1.0.0".to_string(),
                 pin: false,
+                announce: true,
                 name_not_appended: false,
             },
         ];

@@ -1745,6 +1745,98 @@ def test_publish_announce_github_fork_branch_pushed_when_pr_creation_fails(
     assert data["announce"]["fork"] == {"repo": "forkuser/index", "created": True}, data
 
 
+# ── per-entry announce opt-out (#109) ──────────────────────────────────────
+#
+# `announce = false` on an entry publishes the artifact but writes no index
+# pointer for it — a bundle member that is not meant to be found and
+# installed on its own. The bundle's pointer is what the index carries.
+
+
+def _opt_out_manifest(project_dir: Path, ns: str, *, announced: list[str], hidden: list[str]) -> None:
+    body = (
+        f'registry = "{REGISTRY_HOST}"\n'
+        f'repository_prefix = "{ns}"\n'
+        f"\n[announce]\n"
+        f'repository = "{INDEX_URL}"\n'
+        'namespace = "acme"\n'
+        "owner_id = 42\n"
+    )
+    for name in announced:
+        _make_skill_source(project_dir, name, f"Announce {name}.")
+        body += f"\n[skills.{name}]\n" 'version = "0.1.0"\n'
+    for name in hidden:
+        _make_skill_source(project_dir, name, f"Hide {name}.")
+        body += f"\n[skills.{name}]\n" 'version = "0.1.0"\n' "announce = false\n"
+    _write(project_dir / "publish.toml", body)
+
+
+def test_publish_announce_opted_out_entry_publishes_without_pointer(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path
+) -> None:
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    _opt_out_manifest(project_dir, ns, announced=["ann-shown"], hidden=["ann-hidden"])
+
+    runner = grim_at(project_dir)
+    bare = _index_remote(tmp_path, runner)
+    result = runner.run("publish", "--announce", format="json", check=False)
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    # Both artifacts are published — the opt-out is announce-only.
+    assert {i["ref"].rsplit("/", 1)[1]: i["status"] for i in data["items"]} == {
+        "ann-shown:0.1.0": "pushed",
+        "ann-hidden:0.1.0": "pushed",
+    }
+    assert data["announce"]["outcome"] == "branch-pushed", data
+
+    branch = _announce_branch(bare)
+    tree = _git(bare, "ls-tree", "-r", "--name-only", branch)
+    assert f"index/{INDEX_HOST}/acme/ann-shown/metadata.json" in tree, tree
+    assert "ann-hidden" not in tree, f"an opted-out entry writes no pointer: {tree}"
+    # The announce commit names only what it announced.
+    subject = _git(bare, "log", "-1", "--format=%s", branch).strip()
+    assert subject == "announce: ann-shown", subject
+
+
+def test_publish_announce_opt_out_lifts_the_name_collision(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path
+) -> None:
+    """A skill and a rule sharing a name collide on the pointer path (#71) —
+    unless one of them writes no pointer."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-hex"
+    _collision_manifest(project_dir, ns, name)
+    manifest = project_dir / "publish.toml"
+    manifest.write_text(manifest.read_text() + "announce = false\n")  # on the trailing [rules.<name>]
+
+    runner = grim_at(project_dir)
+    bare = _index_remote(tmp_path, runner)
+    result = runner.run("publish", "--announce", check=False)
+    assert result.returncode == 0, result.stderr
+
+    branch = _announce_branch(bare)
+    meta = json.loads(_git(bare, "show", f"{branch}:index/{INDEX_HOST}/acme/{name}/metadata.json"))
+    assert meta["kind"] == "skill", meta
+
+
+def test_publish_announce_every_entry_opted_out_skips_the_announce(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path
+) -> None:
+    """Nothing to write ⇒ no index clone, no branch, and the same null
+    `announce` report the dry-run skip produces."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    _opt_out_manifest(project_dir, ns, announced=[], hidden=["ann-only-hidden"])
+
+    runner = grim_at(project_dir)
+    bare = _index_remote(tmp_path, runner)
+    result = runner.run("publish", "--announce", format="json", check=False)
+    assert result.returncode == 0, result.stderr
+    assert "announce: skipped (every entry opted out)" in result.stderr, result.stderr
+    data = json.loads(result.stdout)
+    assert data["items"][0]["status"] == "pushed", data
+    assert data["announce"] is None, data
+    assert _git(bare, "branch", "--list", "announce/*").strip() == ""
+
+
 # ── pointer-name collisions (#71) ──────────────────────────────────────────
 #
 # The index keys a pointer by entry NAME alone

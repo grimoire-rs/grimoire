@@ -96,7 +96,8 @@ scripts/                           # (optional) build/validation tooling
   the first. `grim publish --announce` refuses a manifest whose entries
   share a name before it pushes anything (exit 65) — publishing the same
   two names *without* `--announce` stays fine, since they occupy distinct
-  OCI repositories.
+  OCI repositories, and so does marking all but one of them
+  `announce = false` in the manifest.
 - Top-level directories that are not a host are *reserved* (vanity
   namespaces; maintainer-approved on the default index).
 
@@ -309,6 +310,15 @@ pull/merge request through the forge's REST API — GitHub and GitLab,
 enterprise instances included, no `gh`/`glab` CLI needed. A GitLab host
 without an API token gets the MR via [git push options][push-options]
 instead; a plain git host is left with the pushed branch.
+
+Not every published entry needs a pointer. A manifest entry carrying
+`announce = false` publishes as usual but is left out of the announce —
+the shape for a bundle member that should be installed through its bundle
+rather than found on its own (the bundle's pointer is what the index
+carries; the member resolves from the bundle manifest). The opt-out only
+ever withholds a pointer: one an earlier run announced stays until a
+pull request removes it. See
+[the publish.toml format](./publishing.md#batch-publish-manifest).
 
 Most contributors to a public index have no push access to it — that is
 the normal case for [grimoire-rs/index][index-repo] itself. Rather than

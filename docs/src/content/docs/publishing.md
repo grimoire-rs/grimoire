@@ -826,7 +826,20 @@ version = "1.0.0"
 [bundles.grim-essentials]
 version = "0.1.0"
 pin = true                         # optional, bundle entries only; default false
+
+[skills.grim-essentials-core]
+version = "0.1.0"
+announce = false                   # optional; publish, but write no index pointer
 ```
+
+`announce = false` keeps an entry out of [`--announce`](#batch-publish-flags):
+the artifact publishes like any other, but no index pointer is written for
+it. That is how a bundle member that only makes sense inside its bundle
+stays undiscoverable on its own — the bundle's pointer is what the index
+carries, and the bundle resolves the member from its own manifest. It never
+removes a pointer an earlier run announced, and it hides the entry from an
+index only; a registry that lists its own repositories still shows the
+OCI repository.
 
 #### One version for the whole catalog {#batch-publish-version}
 
@@ -1219,7 +1232,7 @@ special-cased always-moving tag.
 | `--cascade` / `--no-cascade` | Control the rolling cascade (`X.Y.Z` → `X.Y`, `X`, `latest`) for the whole run. Neither flag is the default: cascade automatically for a semver `--version`, single tag for a channel. `--cascade` asserts a semver release and exits 65 if combined with a channel value; `--no-cascade` publishes only each exact version tag. |
 | `--registry <ref>` | The [global `--registry` flag][global-options] overrides the manifest's `registry` value for this run. The value may carry a repository prefix after the host (`host/group/project`): the host overrides the manifest registry and the rest is an enforced namespace prepended to every entry's repository — see [Repository namespace](#batch-publish-namespace). `GRIM_DEFAULT_REGISTRY` and the config-file `default_registry` do **not** override the manifest — `registry` is explicit input, like a fully-qualified reference. Only the flag tier wins. |
 | `--push-registry <host[/prefix]>` | Push to this endpoint instead of the (pull) `registry`, keeping every baked and reported name on the pull registry. Overrides the manifest's `push_registry`. A malformed value exits 65 before any push. See [Push vs pull registries](#batch-publish-push-registry). |
-| `--announce` | After a fully successful, non-dry-run publish, announce the published packages to a [package index](./package-index.md): metadata pointers on a topic branch, pushed, with the PR/MR opened via the forge REST API (GitHub/GitLab, enterprise instances included), via git push options on a token-less GitLab host, or left as a branch on a plain git host. When the credential lacks push access to the index repository, grim automatically forks it (creating or reusing a fork in the token's account) and opens the PR/MR cross-repository against the upstream index instead — and `[announce] fork = "always"` takes that same path even when the credential can push directly; see [Announcing Packages](./package-index.md#announcing). Configured by the optional `[announce]` manifest table (`repository`, `forge`, `host`, `api_url`, `namespace`, `owner_id`, `fork`) plus CI auto-detection — [resolution chains](./package-index.md#announcing). Two entries sharing a name — a skill and a bundle both called `hex` — would render to one index pointer and overwrite each other, so `--announce` refuses the whole run up front (exit 65, nothing published); the same manifest publishes fine without `--announce`. An unreachable index, a failed API call, or a fork that could not be created or verified after a successful publish exits 69 (the packages **are** published; retry the announce); announce misconfiguration exits 64. The completed outcome — including the deterministic topic branch and any fork used — is machine-readable in the JSON report ([Report output](#batch-publish-report)). |
+| `--announce` | After a fully successful, non-dry-run publish, announce the published packages to a [package index](./package-index.md): metadata pointers on a topic branch, pushed, with the PR/MR opened via the forge REST API (GitHub/GitLab, enterprise instances included), via git push options on a token-less GitLab host, or left as a branch on a plain git host. When the credential lacks push access to the index repository, grim automatically forks it (creating or reusing a fork in the token's account) and opens the PR/MR cross-repository against the upstream index instead — and `[announce] fork = "always"` takes that same path even when the credential can push directly; see [Announcing Packages](./package-index.md#announcing). Configured by the optional `[announce]` manifest table (`repository`, `forge`, `host`, `api_url`, `namespace`, `owner_id`, `fork`) plus CI auto-detection — [resolution chains](./package-index.md#announcing). Two entries sharing a name — a skill and a bundle both called `hex` — would render to one index pointer and overwrite each other, so `--announce` refuses the whole run up front (exit 65, nothing published); the same manifest publishes fine without `--announce`, and so does one where all but one of them carry [`announce = false`](#batch-publish-manifest). An entry with `announce = false` publishes but writes no pointer; when every entry opts out the announce is skipped entirely (`announce: skipped (every entry opted out)` on stderr, `announce: null` in the JSON report — the dry-run shape). An unreachable index, a failed API call, or a fork that could not be created or verified after a successful publish exits 69 (the packages **are** published; retry the announce); announce misconfiguration exits 64. The completed outcome — including the deterministic topic branch and any fork used — is machine-readable in the JSON report ([Report output](#batch-publish-report)). |
 | `--announce-repo <url>` | Override the index repository `--announce` targets (default: the manifest's `[announce] repository`, else `https://github.com/grimoire-rs/index`). Requires `--announce`. |
 
 ### Validation and fail-fast {#batch-publish-validation}

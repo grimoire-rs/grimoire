@@ -107,6 +107,9 @@ version = "1.2.0"    # explicit per-entry version wins
 [bundles.dev-stack]
 version = "0.3.0"
 pin = true          # bundle-only: freeze floating member tags to digests
+
+[skills.dev-stack-core]
+announce = false    # publish, but write no index pointer under --announce
 ```
 
 Key behaviors — confirmed invariants, not subject to minor-release drift:
@@ -230,7 +233,14 @@ The pointer path carries no kind, so a name is claimed by one kind per
 namespace. A manifest whose entries share a name — a skill and a bundle
 both called `hex` — is refused before any push (exit 65), on a dry run
 too; drop `--announce` and the same two entries publish fine, to distinct
-OCI repositories.
+OCI repositories — or mark all but one of them `announce = false`.
+
+A per-entry `announce = false` publishes the artifact but writes no
+pointer for it: the shape for a bundle member meant to be installed through
+its bundle, not found on its own. It only withholds a pointer — one an
+earlier run announced stays until a PR removes it. When every entry opts
+out, the announce is skipped (`announce: skipped (every entry opted out)`,
+JSON `announce: null`).
 
 With an API-capable credential, `--announce` auto-forks: when you lack
 push access to the configured index, grim forks it for you and opens the
