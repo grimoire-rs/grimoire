@@ -618,6 +618,9 @@ Two callers, two answers, and the split is load-bearing:
   A recorded `agents` output is likewise treated as unconditionally active
   when reconciling state, since it can only ever have been selected.
 
+  When the fallback is active, `install_and_persist` logs one `warn` naming
+  the pool and both selection knobs (issue #113) — the fallback is the
+  right default for pool readers but silent misplacement for Claude Code.
   **The surviving exit-78.** When that fallback is active **and** the
   artifact set holds nothing the generic client can install (only rules,
   agents, and/or MCP — all declined by it), the command exits **78**. The

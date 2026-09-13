@@ -360,6 +360,17 @@ pub async fn install_and_persist<M: ArtifactMaterializer>(
     progress: &dyn InstallProgress,
 ) -> Result<Vec<ArtifactInstall>, InstallError> {
     refuse_uninstallable_fallback(lock, target, state, roots)?;
+    // The fallback is the right default for the pool-reading clients, but a
+    // Claude Code user on a bare workspace gets an `installed` row and a
+    // skill in a pool Claude never reads (issue #113). Say so once, here, so
+    // `add`, `install`, and the TUI all name the pool and both selection
+    // knobs — `add` has no `--client` flag.
+    if target.is_generic_fallback() {
+        tracing::warn!(
+            "no AI client detected; installing into the cross-vendor `.agents/skills` pool, which Claude Code and \
+             most other clients do not read — select a client with --client or `[options].clients`"
+        );
+    }
 
     // Pre-mutation snapshot for the config sync below. An install is mostly
     // additive, but not purely: a rule whose new version DROPPED its support

@@ -163,6 +163,30 @@ def test_no_detected_clients_falls_back_to_the_generic_agents_client(
         assert_not_exists(project_dir / vendor_dir)
 
 
+def test_generic_fallback_install_prints_a_hint_naming_the_pool_and_the_knobs(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Regression for #113: the fallback is the right default, but it used to
+    fire silently — a Claude Code user following the quick start got an
+    ``added``/``installed`` row and a skill in a pool Claude never reads. The
+    install seam must print one hint on stderr naming the pool and both
+    selection knobs (``add`` has no ``--client``). An explicit
+    ``--client agents`` is a choice, not a fallback, and stays quiet."""
+    sk, ru = _publish_skill_and_rule(unique_repo)
+    _build_toml(project_dir, sk.fq, ru.fq, clients=None)
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+
+    result = runner.run("install", format="json")
+    assert ".agents/skills" in result.stderr, f"hint must name the pool: {result.stderr}"
+    assert "--client" in result.stderr and "[options].clients" in result.stderr, (
+        f"hint must name both knobs: {result.stderr}"
+    )
+
+    chosen = runner.run("install", "--client", "agents", format="json")
+    assert ".agents/skills" not in chosen.stderr, f"an explicit selection is not a fallback: {chosen.stderr}"
+
+
 def test_undetected_workspace_with_no_installable_kind_exits_78(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
