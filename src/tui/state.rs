@@ -1200,6 +1200,21 @@ impl TuiState {
             .unwrap_or_else(|| label_from_root_key(key))
     }
 
+    /// The **row-cell** form of [`Self::registry_label`]: the alias alone
+    /// when the entry declared one, the bare locator otherwise — what
+    /// `configuration.md` promises for the Registry column and the tree's
+    /// registry-root row. `alias (locator)` overflowed `W_REGISTRY` on every
+    /// real locator; the locator stays one keypress away in the group's
+    /// detail pane. Read off the key itself, which carries both halves, so
+    /// no label-map entry can put the long form back into a cell.
+    pub fn registry_cell_label(&self, key: &str) -> String {
+        match root_key_parts(key) {
+            Some((Some(alias), _)) => alias.to_string(),
+            Some((None, locator)) => locator.to_string(),
+            None => self.registry_label(key),
+        }
+    }
+
     /// Whether more than one registry is currently in scope.
     ///
     /// Used to gate the flat list's Registry column: with a single registry
@@ -1819,20 +1834,29 @@ fn leaf_name(repo: &str) -> &str {
 /// does), so a left-split recovers both halves exactly while `rsplit_once`
 /// would return garbage for any multi-segment locator.
 fn label_from_root_key(key: &str) -> String {
+    match root_key_parts(key) {
+        Some((Some(alias), "")) => alias.to_string(),
+        Some((Some(alias), locator)) => format!("{alias} ({locator})"),
+        Some((None, locator)) => locator.to_string(),
+        None => key.to_string(),
+    }
+}
+
+/// The `(alias, locator)` halves of a tagged root key; `None` for an
+/// untagged one (`"Local"`, or a bare key a test seeded).
+///
+/// `split_once` is the left-split E-10.3 requires; `rsplit_once` would hand
+/// back `acme/localhost:5002` + `uxrev` for a namespaced locator. A tagged
+/// key always carries the separator, so the empty-locator arm is unreachable
+/// from `root_key` and degrades to the alias alone.
+fn root_key_parts(key: &str) -> Option<(Option<&str>, &str)> {
     if let Some(rest) = key.strip_prefix("alias:") {
-        // `split_once` is the left-split E-10.3 requires; `rsplit_once` would
-        // hand back `acme/localhost:5002 (uxrev)` for a namespaced locator.
-        // A tagged key always carries the separator, so the `None` arm is
-        // unreachable from `root_key` and degrades to the alias alone.
-        return match rest.split_once('/') {
-            Some((alias, locator)) => format!("{alias} ({locator})"),
-            None => rest.to_string(),
-        };
+        return Some(match rest.split_once('/') {
+            Some((alias, locator)) => (Some(alias), locator),
+            None => (Some(rest), ""),
+        });
     }
-    if let Some(locator) = key.strip_prefix("locator:") {
-        return locator.to_string();
-    }
-    key.to_string()
+    key.strip_prefix("locator:").map(|locator| (None, locator))
 }
 
 #[cfg(test)]

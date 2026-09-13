@@ -60,7 +60,7 @@ Where the counts show up:
 |---|---|
 | `grim search --format json` | A `rating` object `{up, url}`, or `null` — see [the JSON interface][json-search] |
 | `grim search --sort rating` | Orders the browse by upvotes; see [`--sort`][commands-search-sort] |
-| [`grim tui`][commands-tui] | A `Rating:` row in the detail pane, and `--sort rating` |
+| [`grim tui`][commands-tui] | A `Rating` column in the catalog, a `Rating:` row in the detail pane, and `--sort rating` — or the `s` key, which cycles the order live |
 | The index's own catalog site | A vote count per card, and a rating sort tab |
 | The [VS Code extension][vscode] | The count, plus a vote affordance |
 
