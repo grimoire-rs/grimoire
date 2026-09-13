@@ -1075,7 +1075,9 @@ impl TuiState {
             return;
         }
         let max = len as i64 - 1;
-        let next = (self.selected as i64 + delta).clamp(0, max);
+        // Saturating: `Home`/`End` pass `i64::MIN`/`i64::MAX` and let the
+        // clamp find the row.
+        let next = (self.selected as i64).saturating_add(delta).clamp(0, max);
         self.selected = next as usize;
     }
 
@@ -1777,7 +1779,7 @@ impl TuiState {
             && !p.tags.is_empty()
         {
             let max = p.tags.len() as i64 - 1;
-            p.selected = (p.selected as i64 + delta).clamp(0, max) as usize;
+            p.selected = (p.selected as i64).saturating_add(delta).clamp(0, max) as usize;
         }
     }
 

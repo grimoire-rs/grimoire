@@ -37,6 +37,10 @@ pub enum TuiInput {
     Up,
     /// Move selection down.
     Down,
+    /// Jump the selection to the first row (`Home`, with or without a modifier).
+    Home,
+    /// Jump the selection to the last row (`End`, with or without a modifier).
+    End,
     /// A printable character (search-mode text entry / list hotkeys).
     Char(char),
     /// Scroll the detail pane up one page (works without focusing it).
@@ -226,6 +230,11 @@ fn handle_picker(state: &mut TuiState, input: TuiInput) -> TuiAction {
             state.picker_move(1);
             TuiAction::None
         }
+        // Saturating, so the clamp lands on the first / last tag.
+        TuiInput::Home | TuiInput::End => {
+            state.picker_move(if input == TuiInput::Home { i64::MIN } else { i64::MAX });
+            TuiAction::None
+        }
         TuiInput::Enter => {
             state.confirm_version();
             TuiAction::None
@@ -295,6 +304,11 @@ fn handle_search(state: &mut TuiState, input: TuiInput) -> TuiAction {
         TuiInput::Down => {
             state.back();
             state.move_selection(1);
+            TuiAction::None
+        }
+        TuiInput::Home | TuiInput::End => {
+            state.back();
+            state.move_selection(if input == TuiInput::Home { i64::MIN } else { i64::MAX });
             TuiAction::None
         }
         // Tab keys keep cycling the visible detail pane mid-typing, for the
@@ -409,6 +423,12 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
         }
         TuiInput::Down => {
             state.move_selection(1);
+            TuiAction::None
+        }
+        // Saturating, so the clamp lands on the first / last visible row —
+        // in tree view that is the first / last row of the flattened tree.
+        TuiInput::Home | TuiInput::End => {
+            state.move_selection(if input == TuiInput::Home { i64::MIN } else { i64::MAX });
             TuiAction::None
         }
         // `j`/`k` scroll the always-visible detail pane line-by-line from the
@@ -1066,6 +1086,26 @@ mod tests {
         handle(&mut s, TuiInput::Char('/'));
         assert_eq!(handle(&mut s, TuiInput::Char('g')), TuiAction::None);
         assert_eq!(s.query, "g");
+    }
+
+    #[test]
+    fn home_and_end_jump_to_the_first_and_last_row_everywhere() {
+        let mut s = seeded();
+        assert_eq!(handle(&mut s, TuiInput::End), TuiAction::None);
+        assert_eq!(s.selected, 2);
+        assert_eq!(handle(&mut s, TuiInput::Home), TuiAction::None);
+        assert_eq!(s.selected, 0);
+        // From the search box they leave it first, like the arrows do.
+        handle(&mut s, TuiInput::Char('/'));
+        assert_eq!(handle(&mut s, TuiInput::End), TuiAction::None);
+        assert_eq!((s.mode, s.selected), (Mode::List, 2));
+        // And inside the version picker they jump its tag list.
+        handle(&mut s, TuiInput::Char('v'));
+        s.set_picker_tags(vec!["3.0.0".into(), "2.0.0".into(), "1.0.0".into()]);
+        handle(&mut s, TuiInput::End);
+        assert_eq!(s.picker.as_ref().map(|p| p.selected), Some(2));
+        handle(&mut s, TuiInput::Home);
+        assert_eq!(s.picker.as_ref().map(|p| p.selected), Some(0));
     }
 
     #[test]

@@ -46,6 +46,7 @@ app. The website and the VS Code extension have no key map.
 | Key | What it does |
 |---|---|
 | `↑` / `↓` | Move the selection |
+| `home` / `end` | Jump to the first or last row, in both views — also inside the version picker |
 | `j` / `k` | Scroll the detail pane by line |
 | `pgup` / `pgdn` | Scroll the detail pane by page |
 | `space` | Mark or unmark a row |
