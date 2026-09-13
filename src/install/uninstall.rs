@@ -379,11 +379,15 @@ fn refuse_drifted_entries(record: &InstallRecord, roots: &AnchorRoots) -> Result
 /// file, or a malformed recorded pointer has nothing grim-managed left to
 /// remove. The file itself always survives.
 ///
-/// CALLER INVARIANT: `path` MUST originate from a
-/// [`Containment::Strict`] resolve. [`super::path_anchor::AnchoredPath::resolve`] returns a bare
-/// `PathBuf`, so the containment guarantee stops at the resolve boundary and
-/// this function cannot re-check it — a permissively-resolved path here would
-/// let a stored record direct a rewrite of a file outside the anchor root.
+/// CALLER INVARIANT: `path` MUST originate from an
+/// [`AnchoredPath::resolve`](super::path_anchor::AnchoredPath::resolve) of
+/// an `entry` output — which resolves with
+/// [`Containment::AllowRelocatedFile`], the allowance that exists for exactly
+/// this splice-only rewrite (issue #117: a dotfiles-linked vendor config).
+/// The resolve returns a bare `PathBuf`, so the Layer-1 guarantee (a
+/// Normal-only remainder under a known root) stops at that boundary and this
+/// function cannot re-check it; never hand it a path a record did not
+/// resolve.
 ///
 /// Shared with the installer's pin-change decline path
 /// ([`super::installer::install_mcp`]), which reuses this to reap a stale
@@ -418,7 +422,9 @@ pub fn remove_entry(
         McpConfigFormat::Toml => toml_splice::remove_member(&text, container, member),
     };
     match spliced {
-        Ok(Splice::Changed(new_text)) => crate::store::atomic_write::atomic_write(path, new_text.as_bytes()),
+        Ok(Splice::Changed(new_text)) => {
+            crate::store::atomic_write::atomic_write_through_symlink(path, new_text.as_bytes())
+        }
         Ok(Splice::Unchanged) => Ok(()),
         // Removal is tolerant: a config grim cannot parse has nothing
         // grim-managed to remove (never rewrite, never fail the uninstall).
@@ -1052,18 +1058,16 @@ mod tests {
         );
     }
 
-    /// A9(f) — an `entry` (MCP) output resolving through a relocated ancestor:
-    /// the splice is refused and the shared, user-owned config file is
-    /// byte-unchanged. And it must NOT appear in `retained`: that file was
-    /// never grim's to delete, so reporting "left in place" about it would tell
-    /// the user a falsehood. Instead it must appear exactly once in
-    /// `abandoned_entries` — the signal that grim dropped the record without
-    /// splicing the managed member out, so the entry is now unrecorded and
-    /// grim will never remove it again (design-record item 11 / the ADR's
-    /// "silent divergence is not acceptable" applied to a shared config).
+    /// A9(f), revised for issue #117 — an `entry` (MCP) output resolving
+    /// through a relocated ancestor is the user's own dotfiles layout, and an
+    /// entry is only ever spliced, never deleted: the managed member is
+    /// removed from the config file *where it really lives*, every other byte
+    /// survives, and nothing is reported abandoned or retained. (Before, the
+    /// splice was refused as an escape and the entry left behind unrecorded —
+    /// the silent divergence this reversal removes.)
     #[cfg(unix)]
     #[test]
-    fn uninstall_entry_through_relocated_ancestor_never_rewrites_the_outside_config() {
+    fn uninstall_entry_through_relocated_ancestor_splices_the_outside_config() {
         use std::os::unix::fs::symlink;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -1080,7 +1084,9 @@ mod tests {
         std::fs::write(&cfg, original).unwrap();
 
         let mut state = InstallState::empty(&ws.join("state.json"));
-        let mut out = client_output_at("cfg/mcp/.mcp.json", Digest::Sha256("b".repeat(64)));
+        let recorded =
+            crate::install::install_state::entry_value_hash(&serde_json::json!({"command": "grim"})).unwrap();
+        let mut out = client_output_at("cfg/mcp/.mcp.json", recorded);
         out.entry = Some("/mcpServers/grim".to_string());
         state.record(InstallRecord {
             kind: ArtifactKind::Mcp,
@@ -1093,30 +1099,24 @@ mod tests {
         let result = uninstall(&mut state, ArtifactKind::Mcp, "grim", &roots(&ws), false)
             .expect("a relocated ancestor must not wedge uninstall");
         assert_eq!(result.outcome, UninstallOutcome::Removed);
+        let after: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
         assert_eq!(
-            std::fs::read_to_string(&cfg).unwrap(),
-            original,
-            "the splice resolves Strict, so a config file outside the anchor root must be byte-unchanged"
+            after,
+            serde_json::json!({"theme": "dark", "mcpServers": {"user-server": {"command": "x"}}}),
+            "the managed member is spliced out of the real file; everything else survives"
         );
+        assert!(ws.join("cfg/mcp").is_symlink(), "the user's link is untouched");
         assert!(
             result.retained.is_empty(),
-            "an MCP entry output is a shared user-owned config grim never intended to delete — \
-             reporting it as 'left in place' would be a lie, got {:?}",
+            "nothing was left in place, got {:?}",
             result.retained
         );
-        assert_eq!(
-            result.abandoned_entries,
-            vec![AbandonedEntry {
-                path: cfg.clone(),
-                pointer: "/mcpServers/grim".to_string(),
-            }],
-            "the un-spliced entry must be named exactly once so the caller knows grim no longer \
-             tracks it and will never remove it on a later uninstall"
-        );
         assert!(
-            state.get(ArtifactKind::Mcp, "grim").is_none(),
-            "the record must still drop so the user can recover"
+            result.abandoned_entries.is_empty(),
+            "the entry was removed, so nothing is abandoned, got {:?}",
+            result.abandoned_entries
         );
+        assert!(state.get(ArtifactKind::Mcp, "grim").is_none(), "the record drops");
     }
 
     /// A9(g) — the shared-pool dedup. A record's outputs, one per client, can

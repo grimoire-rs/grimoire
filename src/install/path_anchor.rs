@@ -442,6 +442,13 @@ pub enum Containment {
     /// Classify a new call site by intent regardless of platform; do not
     /// assume the escape is permitted.
     AllowRelocatedAncestor,
+    /// Permit any escape — ancestor or leaf — for a caller that only reads
+    /// and splices the leaf file in place: an `entry` output, a member inside
+    /// the user's own vendor config, which a dotfiles layout links out of the
+    /// vendor root wholesale or per file (issue #117). Never deletes, never
+    /// recurses, so the `remove_dir_all` hazard `Strict` exists for cannot
+    /// arise. Needs no symlink predicate, so it holds on every platform.
+    AllowRelocatedFile,
     /// Refuse every escape. For any caller that deletes or rewrites — a
     /// blanket relax would hand `remove_dir_all` a path outside the root.
     Strict,
@@ -644,6 +651,14 @@ impl AnchoredPath {
                             anchor = %self.anchor,
                             path = %canon_candidate.display(),
                             "resolving through a relocated ancestor outside the anchor root"
+                        );
+                        return Ok(canon_candidate);
+                    }
+                    Containment::AllowRelocatedFile => {
+                        tracing::debug!(
+                            anchor = %self.anchor,
+                            path = %canon_candidate.display(),
+                            "resolving a relocated config file outside the anchor root"
                         );
                         return Ok(canon_candidate);
                     }
@@ -3283,6 +3298,51 @@ mod tests {
             combo_count, 60,
             "expected 60 (scope × client × kind) combos but counted {combo_count}; \
              update the table in expected_anchor_and_relative() and this assertion"
+        );
+    }
+
+    /// A `ClientOutput` whose target is a symlinked config file resolving
+    /// outside its vendor root — a dotfiles-managed `~/.codex/config.toml`.
+    /// `Strict` and `AllowRelocatedAncestor` refuse the symlinked leaf; the
+    /// in-place-edit allowance follows it to the real file.
+    #[cfg(unix)]
+    #[test]
+    fn allow_relocated_file_follows_a_symlinked_leaf_outside_the_root() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let anchor_root = tmp.path().join("codex");
+        std::fs::create_dir_all(&anchor_root).unwrap();
+        let real = tmp.path().join("dotfiles").join("config.toml");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, b"model = \"x\"\n").unwrap();
+        symlink(&real, anchor_root.join("config.toml")).unwrap();
+
+        let roots = AnchorRoots {
+            workspace: anchor_root.clone(),
+            grim_home: PathBuf::from("/unused"),
+            vendor_roots: Default::default(),
+            opencode_skills: None,
+            claude_user_dir: None,
+            agents_skills: None,
+        };
+        let ap = AnchoredPath {
+            anchor: PathAnchor::Workspace,
+            relative: "config.toml".to_string(),
+        };
+
+        for refused in [Containment::Strict, Containment::AllowRelocatedAncestor] {
+            let err = ap.resolve(&roots, refused).unwrap_err();
+            assert!(
+                matches!(err, AnchorError::EscapedAnchor { .. }),
+                "{refused:?} must refuse a symlinked leaf"
+            );
+        }
+        let resolved = ap.resolve(&roots, Containment::AllowRelocatedFile).unwrap();
+        assert_eq!(
+            resolved,
+            dunce::canonicalize(&real).unwrap(),
+            "the allowance must hand back the real file"
         );
     }
 }
