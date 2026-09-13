@@ -24,6 +24,10 @@ use crate::config::registry_resolve::RowSource;
 pub const W_KIND: usize = 8;
 pub const W_REPO: usize = 46;
 pub const W_TAG: usize = 12;
+/// The two sidecar-signal columns, right-aligned counts under their own
+/// header word. Blank when the source published nothing — unknown is not 0.
+pub const W_RATING: usize = 6;
+pub const W_DOWNLOADS: usize = 9;
 /// Status column width — wide enough for the longest label
 /// (`✘ integrity-missing`, 19 chars) so the header underline spans the
 /// full column instead of stopping at `Status`.
@@ -39,13 +43,27 @@ pub const W_DEPRECATED: usize = 13;
 /// prepends it when more than one registry is in scope.
 pub const W_REGISTRY: usize = 20;
 /// Total terminal columns the Catalog needs to show every fixed-width
-/// column un-truncated: 2 (mark) + repo + 2 + kind + 2 + tag + 2 + status,
-/// plus room for the trailing deprecation marker and 2 block borders.
+/// column un-truncated: 2 (mark) + repo + 2 + kind + 2 + tag + 2 + rating +
+/// 2 + downloads + 2 + status, plus room for the trailing deprecation marker
+/// and 2 block borders.
 /// Selection is shown by row highlight (no leading symbol). Sized to exactly
 /// this side-by-side so Detail gets all slack. Excludes the optional Registry
 /// column — [`catalog_width`] adds it when that column is shown.
-pub const CATALOG_WIDTH: u16 =
-    (2 + W_REPO + 2 + W_KIND + 2 + W_TAG + 2 + W_STATUS + 2 + W_DEPRECATED) as u16 + 2 /* borders */;
+pub const CATALOG_WIDTH: u16 = (2
+    + W_REPO
+    + 2
+    + W_KIND
+    + 2
+    + W_TAG
+    + 2
+    + W_RATING
+    + 2
+    + W_DOWNLOADS
+    + 2
+    + W_STATUS
+    + 2
+    + W_DEPRECATED) as u16
+    + 2 /* borders */;
 /// Narrowest usable Detail column (the side-by-side layout threshold).
 pub const DETAIL_MIN_WIDTH: u16 = 30;
 

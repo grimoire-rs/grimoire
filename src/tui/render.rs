@@ -19,8 +19,8 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use crate::config::registry_resolve::RowSource;
 
 use super::detail::{
-    BULLET_PREFIX, CODE_PREFIX, DETAIL_MIN_WIDTH, DetailLine, W_DEPRECATED, W_KIND, W_REGISTRY, W_REPO, W_STATUS,
-    W_TAG, catalog_width, detail_lines, scroll_max,
+    BULLET_PREFIX, CODE_PREFIX, DETAIL_MIN_WIDTH, DetailLine, W_DEPRECATED, W_DOWNLOADS, W_KIND, W_RATING, W_REGISTRY,
+    W_REPO, W_STATUS, W_TAG, catalog_width, detail_lines, scroll_max,
 };
 use super::state::{ArtifactState, Mode, TuiState};
 
@@ -73,6 +73,15 @@ fn fit(s: &str, width: usize) -> String {
     } else {
         format!("{s:<width$}")
     }
+}
+
+/// A right-aligned count cell. An absent count is `-`, not `0`: the sidecar
+/// signals are *unknown* on every source that publishes none, and a column
+/// of zeroes would say every artifact was measured and found idle. The same
+/// placeholder a Local row's empty Tag cell shows.
+fn count_cell(n: Option<u64>, width: usize) -> String {
+    let text = n.map_or_else(|| "-".to_string(), |n| n.to_string());
+    fit(&format!("{text:>width$}"), width)
 }
 
 /// Sanitize a bundle member label before display (the display boundary).
@@ -235,7 +244,7 @@ pub struct RenderRow {
     /// In tree mode, `columns[0]` carries the indent prefix (two spaces per
     /// depth level) and the arrow glyph for groups — the single canonical
     /// representation of tree position.
-    pub columns: [String; 4],
+    pub columns: [String; 6],
     /// Whether this row is the current selection.
     pub selected: bool,
     /// Whether this row is marked for a batch action.
@@ -302,7 +311,7 @@ pub struct RenderModel {
     /// (the span is then omitted entirely).
     pub clients: String,
     /// Static column headers for the list.
-    pub headers: [&'static str; 4],
+    pub headers: [&'static str; 6],
     /// The visible (filtered) rows.
     pub rows: Vec<RenderRow>,
     /// The detail-pane content for the selected row, as semantic lines
@@ -413,6 +422,8 @@ fn render_leaf(
             fit(repo_text, W_REPO),
             fit(&r.kind, W_KIND),
             fit(&tag_cell, W_TAG),
+            count_cell(r.rating.map(u64::from), W_RATING),
+            count_cell(r.downloads.as_ref().map(|d| d.total), W_DOWNLOADS),
             format!("{glyph} {label}"),
         ],
         selected,
@@ -470,11 +481,13 @@ fn tree_render_rows(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<R
                 // Arrow: ▾ expanded, ▸ collapsed.
                 let arrow = if *collapsed { "▸" } else { "▾" };
                 let indent = "  ".repeat(*depth);
-                // B: registry-root groups show "alias (url)" when an alias was
-                // configured, or the plain URL otherwise.  Non-registry groups
-                // (org, path segment) keep their existing label unchanged.
+                // B: registry-root groups show the alias when one was
+                // configured, or the plain locator otherwise — the row-cell
+                // form; the full `alias (locator)` sits in the group's detail
+                // pane. Non-registry groups (org, path segment) keep their
+                // existing label unchanged.
                 let display_label = if state.registry_labels.contains_key(key.as_str()) {
-                    state.registry_label(key)
+                    state.registry_cell_label(key)
                 } else {
                     label.clone()
                 };
@@ -492,6 +505,8 @@ fn tree_render_rows(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<R
                         fit(&repo_text, W_REPO),
                         fit("", W_KIND),
                         fit(&rollup_label, W_TAG),
+                        fit("", W_RATING),
+                        fit("", W_DOWNLOADS),
                         status_col,
                     ],
                     selected: pos == state.selected,
@@ -540,6 +555,8 @@ fn tree_render_rows(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<R
                         fit(&repo_text, W_REPO),
                         fit(r.map(|r| r.kind.as_str()).unwrap_or(""), W_KIND),
                         fit(&tag_cell, W_TAG),
+                        count_cell(r.and_then(|r| r.rating).map(u64::from), W_RATING),
+                        count_cell(r.and_then(|r| r.downloads.as_ref()).map(|d| d.total), W_DOWNLOADS),
                         format!("{glyph} {status_label}"),
                     ],
                     selected: pos == state.selected,
@@ -575,6 +592,8 @@ fn tree_render_rows(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<R
                         fit(&repo_text, W_REPO),
                         fit(&kind.to_string(), W_KIND),
                         fit("", W_TAG),
+                        fit("", W_RATING),
+                        fit("", W_DOWNLOADS),
                         format!("{glyph} {status_label}"),
                     ],
                     selected: pos == state.selected,
@@ -844,7 +863,7 @@ pub fn frame(state: &TuiState) -> RenderModel {
                 // bare host and an un-shortened repo.
                 let (root, path) = super::tree::display_split(r, &configured);
                 let (repo_text, registry): (std::borrow::Cow<str>, Option<String>) = if multi {
-                    (std::borrow::Cow::Owned(path), Some(state.registry_label(&root)))
+                    (std::borrow::Cow::Owned(path), Some(state.registry_cell_label(&root)))
                 } else if Some(root.as_str()) == state.default_registry.as_deref() {
                     // D-ELIDE, by the same root-key equality `tree::segments`
                     // applies. It must NOT be a `strip_prefix` on `repo`:
@@ -1020,7 +1039,7 @@ pub fn frame(state: &TuiState) -> RenderModel {
         search_placeholder,
         scope: state.scope_label.clone(),
         clients,
-        headers: ["Repo", "Kind", "Tag", "Status"],
+        headers: ["Repo", "Kind", "Tag", "Rating", "Downloads", "Status"],
         rows,
         detail,
         detail_scroll,
@@ -1177,28 +1196,36 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
     let status_header_w = W_STATUS + 2 + W_DEPRECATED;
     let header_text = if model.show_registry_column {
         format!(
-            "  {:<gw$}  {:<rw$}  {:<kw$}  {:<tw$}  {:<sw$}",
+            "  {:<gw$}  {:<rw$}  {:<kw$}  {:<tw$}  {:>aw$}  {:>dw$}  {:<sw$}",
             "Registry",
             model.headers[0],
             model.headers[1],
             model.headers[2],
             model.headers[3],
+            model.headers[4],
+            model.headers[5],
             gw = W_REGISTRY,
             rw = W_REPO,
             kw = W_KIND,
             tw = W_TAG,
+            aw = W_RATING,
+            dw = W_DOWNLOADS,
             sw = status_header_w,
         )
     } else {
         format!(
-            "  {:<rw$}  {:<kw$}  {:<tw$}  {:<sw$}",
+            "  {:<rw$}  {:<kw$}  {:<tw$}  {:>aw$}  {:>dw$}  {:<sw$}",
             model.headers[0],
             model.headers[1],
             model.headers[2],
             model.headers[3],
+            model.headers[4],
+            model.headers[5],
             rw = W_REPO,
             kw = W_KIND,
             tw = W_TAG,
+            aw = W_RATING,
+            dw = W_DOWNLOADS,
             sw = status_header_w,
         )
     };
@@ -1237,9 +1264,11 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         )];
         if model.show_registry_column {
-            let reg_label = r.registry.as_deref().unwrap_or("");
+            // `fit`, not a pad: a label longer than the column pushed every
+            // cell to its right out of alignment on that one row.
+            let reg_label = fit(r.registry.as_deref().unwrap_or(""), W_REGISTRY);
             spans.push(Span::styled(
-                format!("{:<gw$}  ", reg_label, gw = W_REGISTRY),
+                format!("{reg_label}  "),
                 Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
             ));
         }
@@ -1250,8 +1279,10 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
                 Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
             ),
             Span::styled(format!("{}  ", r.columns[2]), Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{}  ", r.columns[3]), Style::default().fg(Color::Green)),
+            Span::styled(format!("{}  ", r.columns[4]), Style::default().fg(Color::Cyan)),
             Span::styled(
-                r.columns[3].clone(),
+                r.columns[5].clone(),
                 Style::default()
                     .fg(color_for(r.status_color))
                     .add_modifier(Modifier::BOLD),
@@ -1965,7 +1996,7 @@ mod tests {
         assert_eq!(m.search, "type / to search");
         assert!(m.search_placeholder);
         assert_eq!(m.scope, "");
-        assert_eq!(m.headers, ["Repo", "Kind", "Tag", "Status"]);
+        assert_eq!(m.headers, ["Repo", "Kind", "Tag", "Rating", "Downloads", "Status"]);
         assert_eq!(m.rows.len(), 2);
         // Columns are fixed-width (padded/truncated by `fit`) so the
         // table aligns; status keeps its glyph+label verbatim. Repo is
@@ -1974,7 +2005,7 @@ mod tests {
         assert_eq!(m.rows[0].columns[1], fit("skill", W_KIND));
         // The Tag column shows the explicit version, not `latest`.
         assert_eq!(m.rows[0].columns[2], fit("2.1.0", W_TAG));
-        assert_eq!(m.rows[0].columns[3], "✓ installed");
+        assert_eq!(m.rows[0].columns[5], "✓ installed");
         assert_eq!(m.rows[0].columns[0].chars().count(), W_REPO);
         assert_eq!(m.rows[0].status_color, ColorKey::Installed);
         assert_eq!(m.rows[1].status_color, ColorKey::NotInstalled);
@@ -2880,15 +2911,15 @@ mod tests {
             .find(|r| r.group.is_some())
             .expect("must have a group row");
         assert_eq!(
-            group_row.columns[3], "✓ installed",
+            group_row.columns[5], "✓ installed",
             "unmarked group col 3 must be the status glyph, not the rollup label; got: {:?}",
-            group_row.columns[3]
+            group_row.columns[5]
         );
         // Col 3 must NOT contain the rollup label format.
         assert!(
-            !group_row.columns[3].contains('/'),
+            !group_row.columns[5].contains('/'),
             "col 3 must not contain the rollup label fraction; got: {:?}",
-            group_row.columns[3]
+            group_row.columns[5]
         );
 
         // All-marked group: col 3 must include the mark glyph prefix.
@@ -2900,14 +2931,14 @@ mod tests {
             .find(|r| r.group.is_some())
             .expect("must have a group row");
         assert!(
-            group_row_marked.columns[3].starts_with('▣'),
+            group_row_marked.columns[5].starts_with('▣'),
             "all-marked group col 3 must start with the ▣ mark glyph; got: {:?}",
-            group_row_marked.columns[3]
+            group_row_marked.columns[5]
         );
         assert!(
-            group_row_marked.columns[3].contains("installed"),
+            group_row_marked.columns[5].contains("installed"),
             "all-marked group col 3 must still show the status label; got: {:?}",
-            group_row_marked.columns[3]
+            group_row_marked.columns[5]
         );
     }
 
@@ -3891,6 +3922,163 @@ mod spec_multi_registry_render_tests {
             group_labels.iter().any(|l| l.contains("ghcr.io/acme")),
             "tree registry root without alias must show raw URL; got: {group_labels:?}"
         );
+    }
+
+    /// A production-shaped aliased row: `source` is the tagged key the
+    /// resolver hands out, so the frame attributes it the way a live browse
+    /// does rather than through the bare-host fallback.
+    fn aliased_row(alias: &str, locator: &str, repository: &str) -> TuiRow {
+        let mut r = row_with_reg(locator, repository, ArtifactState::NotInstalled);
+        r.source = crate::config::registry_resolve::row_source_of(Some(alias), locator);
+        r
+    }
+
+    // The row cells carry the alias ALONE — `configuration.md` promises the
+    // alias as the Registry-column and tree-root label, and `alias (locator)`
+    // overflowed `W_REGISTRY` on every real locator. The long form is still
+    // the group's detail-pane identifier, so nothing is lost.
+    #[test]
+    fn registry_cells_show_the_alias_alone_and_the_detail_pane_keeps_the_locator() {
+        let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
+        s.set_rows(vec![
+            aliased_row("index", "http://localhost:5052", "grimoire/skills/a"),
+            aliased_row("primary", "localhost:5050/grimoire", "skills/b"),
+        ]);
+        let keys: Vec<String> = s.rows.iter().map(|r| r.source.root_key()).collect();
+        s.set_registry_order(keys.clone());
+        s.set_registry_locators(vec!["http://localhost:5052".into(), "localhost:5050/grimoire".into()]);
+        s.set_registry_labels(
+            keys.iter()
+                .cloned()
+                .zip([
+                    "index (http://localhost:5052)".to_string(),
+                    "primary (localhost:5050/grimoire)".to_string(),
+                ])
+                .collect(),
+        );
+
+        let flat = frame(&s);
+        let cells: Vec<&str> = flat.rows.iter().filter_map(|r| r.registry.as_deref()).collect();
+        assert_eq!(
+            cells,
+            ["index", "primary"],
+            "the flat Registry column is the alias alone"
+        );
+
+        s.toggle_view_mode();
+        // The toggle re-anchors the cursor on the leaf; the first tree row is
+        // the `index` root, whose detail pane is the one under test.
+        s.selected = 0;
+        let tree = frame(&s);
+        // Depth 0 only — the registry roots; deeper groups are indented.
+        let roots: Vec<&str> = tree
+            .rows
+            .iter()
+            .filter(|r| r.group.is_some() && !r.columns[0].starts_with(' '))
+            .map(|r| r.columns[0].trim().trim_start_matches(['▾', '▸', ' ']))
+            .collect();
+        assert_eq!(roots, ["index", "primary"], "a tree registry root is the alias alone");
+        assert!(
+            tree.detail
+                .contains(&DetailLine::Identifier("index (http://localhost:5052)".to_string())),
+            "the selected root's detail pane still names the locator: {:?}",
+            tree.detail
+        );
+    }
+
+    // Regression: a Registry cell longer than its column was padded, never
+    // truncated, so every cell to its right slid out of alignment on that
+    // one row. `fit` clips it to `W_REGISTRY` like every other cell.
+    #[test]
+    fn draw_clips_an_overlong_registry_cell_so_the_columns_stay_aligned() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
+        s.set_registry_order(vec!["reg-one".into(), "reg-two".into()]);
+        s.set_rows(vec![
+            row_with_reg(
+                "a-registry-locator-far-wider-than-the-column",
+                "alpha",
+                ArtifactState::Installed,
+            ),
+            row_with_reg("short", "beta", ArtifactState::Installed),
+        ]);
+        let model = frame(&s);
+        let w = catalog_width(true) + DETAIL_MIN_WIDTH + 4;
+        let mut term = Terminal::new(TestBackend::new(w, 12)).unwrap();
+        term.draw(|f| draw(f, &model)).unwrap();
+        let buf = term.backend().buffer();
+        let cols = buf.area.width as usize;
+        let lines: Vec<String> = buf
+            .content()
+            .chunks(cols)
+            .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+            .collect();
+        // A screen column, so counted in chars — `find` is a byte offset and
+        // the ellipsis is three bytes wide.
+        let col = |needle: &str, cell: &str| {
+            lines
+                .iter()
+                .find(|l| l.contains(needle))
+                .and_then(|l| l.find(cell).map(|b| l[..b].chars().count()))
+                .unwrap_or_else(|| panic!("row {needle} shows {cell}"))
+        };
+        assert_eq!(
+            col("alpha", "✓ installed"),
+            col("beta", "✓ installed"),
+            "the Status column must start at the same screen column on both rows"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("a-registry-locator-…")),
+            "the overlong cell is clipped with an ellipsis: {lines:?}"
+        );
+    }
+
+    // The two sidecar-signal columns: right-aligned counts, `-` when the
+    // source published none — a `0` would claim a measurement nobody made.
+    #[test]
+    fn rating_and_downloads_columns_are_right_aligned_counts_or_a_dash() {
+        let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
+        let mut counted = row_with_reg("ghcr.io/acme", "counted", ArtifactState::NotInstalled);
+        counted.rating = Some(42);
+        counted.downloads = Some(crate::catalog::DownloadSummary {
+            total: 1416,
+            as_of: None,
+            versions: vec![],
+        });
+        let mut zero = row_with_reg("ghcr.io/acme", "zero", ArtifactState::NotInstalled);
+        zero.rating = Some(0);
+        zero.downloads = Some(crate::catalog::DownloadSummary {
+            total: 0,
+            as_of: None,
+            versions: vec![],
+        });
+        // `set_rows` orders by name: counted, unknown, zero.
+        s.set_rows(vec![
+            counted,
+            zero,
+            row_with_reg("ghcr.io/acme", "unknown", ArtifactState::NotInstalled),
+        ]);
+        let m = frame(&s);
+        let cells: Vec<(String, String)> = m
+            .rows
+            .iter()
+            .map(|r| (r.columns[3].clone(), r.columns[4].clone()))
+            .collect();
+        assert_eq!(
+            cells,
+            [
+                ("    42".to_string(), "     1416".to_string()),
+                ("     -".to_string(), "        -".to_string()),
+                ("     0".to_string(), "        0".to_string()),
+            ]
+        );
+        assert_eq!(m.rows[0].columns[3].chars().count(), W_RATING);
+        assert_eq!(m.rows[0].columns[4].chars().count(), W_DOWNLOADS);
     }
 
     // B: registry health status line shows alias label when alias configured.

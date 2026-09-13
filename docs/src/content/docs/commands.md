@@ -1520,7 +1520,7 @@ Like [`grim search`](#search), a registry declaring an `include` / `exclude`
 [browse filter](./configuration.md#browse-filters) shows only the
 repositories its patterns admit — and a source whose filter admits nothing
 keeps its tree root, rolled up as `0/0`, rather than vanishing from the
-tree. The root label is unaffected: it stays `alias (url)` (or the raw
+tree. The root label is unaffected: it stays the alias (or the raw
 locator when no alias was set), exactly as without a filter. `--registry` collapses the browse and
 applies no filter at all. Like the registry set itself, a filter is read
 once at startup — editing `include`/`exclude` in `grimoire.toml` while the
@@ -1537,9 +1537,10 @@ ones:
 offline: ghcr.io/down · truncated: ghcr.io/big · filtered: acme (localhost:5002/uxrev)
 ```
 
-Each name in those clauses is the source's **tree-root label** — `alias (url)`
-for an aliased entry, the bare locator for one without an alias — so the
-status line and the tree root read as the same source rather than as two.
+Each name in those clauses is the source's label — `alias (url)` for an
+aliased entry, the bare locator for one without an alias. The tree root and
+the flat list's Registry column show the same alias on its own (a locator
+rarely fits a table cell); the group's detail pane spells the locator out.
 
 That clause is what explains a `0/0` root without leaving the TUI. It names
 a source only when its own filter can be shown to have caused the empty

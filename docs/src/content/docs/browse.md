@@ -31,7 +31,9 @@ pane for the row you are on.
 4. Press `i` to install it.
 
 The row you installed changes state in place, so you see the result without
-leaving the browser. The browser has its own state words, and they are not the
+leaving the browser. Beside each row's tag sit its `Rating` and `Downloads`
+counts when the browse source [publishes them](./ratings.md); a source that
+publishes neither shows `-` in both cells — a dash means unknown, never zero. The browser has its own state words, and they are not the
 set `grim status` prints. The two share `installed`, `outdated` and `modified`
 and nothing else. Every word from both is defined once at
 [artifact states](./commands.md#artifact-states).
