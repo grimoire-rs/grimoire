@@ -184,6 +184,37 @@ pub struct RatingSummary {
     pub host: Option<String>,
 }
 
+/// One artifact's pull count, joined from the same `stats.json` sidecar as
+/// [`RatingSummary`] and independent of it.
+///
+/// Cache representation, `deny_unknown_fields`, for exactly the reasons
+/// [`RatingSummary`] gives; the lenient wire struct lives in
+/// [`super::index_source`].
+///
+/// **An object, not a bare count.** The sidecar publishes a freshness stamp
+/// beside the number and a per-release breakdown below it, and a scalar could
+/// never grow either — the same reason the JSON reports use an `items`
+/// envelope instead of a bare array (`subsystem-cli-api.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DownloadSummary {
+    /// Every pull the producer could attribute to the artifact.
+    ///
+    /// `u64` because the counter is a registry-side `long`; the width costs
+    /// nothing here and removes the question.
+    pub total: u64,
+    /// The sidecar's per-stat `as_of` — when the producer read the counters,
+    /// RFC3339 UTC. Distinct from the document's `generated_at`: a run that
+    /// only recomputes ratings republishes a carried-forward `downloads`
+    /// whose `as_of` is older than the document around it, which is what
+    /// makes displaying the count honest.
+    ///
+    /// `None` for a sidecar that published none. Additive, so an older cache
+    /// stays readable — see [`RatingSummary::provider`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub as_of: Option<String>,
+}
+
 /// One repository's catalog record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -257,6 +288,16 @@ pub struct CatalogEntry {
     /// older grim rejects a cache a newer grim wrote and rebuilds it.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rating: Option<RatingSummary>,
+    /// Pull count, joined from the same `stats.json` sidecar as
+    /// [`Self::rating`] and independent of it. `None` means **unknown**,
+    /// never zero: only a registry that publishes a per-artifact download
+    /// counter can produce one at all, and neither GHCR nor the GitLab
+    /// registry does — so on most indexes this is absent on every row. (Like
+    /// [`Self::replaced_by`], adding a field to the `deny_unknown_fields`
+    /// on-disk shape means an older grim rejects a cache a newer grim wrote
+    /// and rebuilds it.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub downloads: Option<DownloadSummary>,
     /// RFC3339 UTC timestamp this entry was fetched.
     pub fetched_at: String,
 }
@@ -880,6 +921,7 @@ impl Catalog {
             // Ratings ride the index sidecar; an OCI `_catalog` walk has no
             // sidecar to read, so its rows are always unrated.
             rating: None,
+            downloads: None,
             fetched_at: fetched_at.clone(),
         };
 
@@ -959,6 +1001,7 @@ impl Catalog {
                     latest_tag: Some(tag.clone()),
                     version: version.clone(),
                     rating: None,
+                    downloads: None,
                     fetched_at: fetched_at.clone(),
                 }
             })
@@ -1205,6 +1248,10 @@ mod tests {
                     url: "https://github.com/acme/index/discussions/7".to_string(),
                     provider: Some("github".to_string()),
                     host: None,
+                }),
+                downloads: Some(DownloadSummary {
+                    total: 1416,
+                    as_of: Some("2026-09-10T21:48:47Z".to_string()),
                 }),
                 fetched_at: ts(10),
             },
@@ -2101,6 +2148,7 @@ mod tests {
             latest_tag: Some("latest".to_string()),
             version: None,
             rating: None,
+            downloads: None,
             fetched_at: ts(1),
         };
         assert!(e.matches(&parse("")), "empty query matches all");

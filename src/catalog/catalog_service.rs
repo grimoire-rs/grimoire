@@ -34,7 +34,7 @@
 
 use std::sync::Arc;
 
-use crate::catalog::registry_catalog::{Catalog, OciMeta, RatingSummary};
+use crate::catalog::registry_catalog::{Catalog, DownloadSummary, OciMeta, RatingSummary};
 use crate::catalog::search_match::SearchQuery;
 use crate::config::ResolvedRegistry;
 use crate::config::registry_resolve::{RowSource, SourceKind, row_source_of};
@@ -130,6 +130,10 @@ pub struct CatalogRow {
     /// `None` when the artifact is unrated or the source publishes no
     /// sidecar. Never a zero-vote record — unrated is absent, not `up: 0`.
     pub rating: Option<RatingSummary>,
+    /// Pull count joined from the same sidecar, independent of the rating.
+    /// `None` means *unknown* — most registries publish no per-artifact
+    /// counter — and never zero.
+    pub downloads: Option<DownloadSummary>,
     /// How this repository relates to the current scope.
     pub badge: StatusBadge,
 }
@@ -443,6 +447,7 @@ pub async fn load_catalog(
                         latest_tag: e.latest_tag.clone(),
                         version: e.version.clone(),
                         rating: e.rating.clone(),
+                        downloads: e.downloads.clone(),
                         badge: derive_badge(
                             &e.registry,
                             &e.repository,

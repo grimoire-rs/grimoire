@@ -810,6 +810,24 @@ error condition:
   document from a newer schema all mean *unrated*, logged at `debug`. A
   browse never fails over ratings, and `null` never means `0`.
 
+### Download counts {#downloads}
+
+The same sidecar carries a second, independent signal. When the browsed
+index publishes it, `grim search --format json` carries a `downloads`
+object per row — `{total, as_of}`, or `null` when the count is unknown.
+`total` is the pull count; `as_of` is when the producer read it, and may
+itself be `null`.
+
+`null` is the **common** case here, not the exception: no OCI
+distribution-spec endpoint exposes a per-artifact download counter, and
+neither GHCR nor the GitLab registry publishes one in any API. Read absence
+as *unknown* — never as zero pulls. A `total` of `0` is a real measurement
+and means something different.
+
+The two signals are independent: an artifact may be rated and uncounted,
+counted and unrated, or neither. Neither implies the other, and there is no
+`--sort downloads`.
+
 `--sort <name|updated|rating>` applies to `grim search` and `grim tui`
 alike. Unrated and undated artifacts sort into a bucket of their own at
 the *end* rather than as zero votes or epoch 0, and every mode is total —

@@ -38,7 +38,9 @@
 
 use clap::Args;
 
-use crate::api::search_report::{SearchEntry, SearchRating, SearchReport, SearchSource, SearchSourceStatus};
+use crate::api::search_report::{
+    SearchDownloads, SearchEntry, SearchRating, SearchReport, SearchSource, SearchSourceStatus,
+};
 use crate::catalog::registry_catalog::{CATALOG_GATED_REGISTRIES, REGISTRY_COMPAT_DOCS_URL};
 use crate::catalog::{BadgeContext, SearchQuery, SortKey, SortMode};
 use crate::cli::exit_code::ExitCode;
@@ -237,6 +239,11 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
             oci: r.oci,
             // Absence is *unrated*, never `up: 0` — the JSON field stays null.
             rating: r.rating.map(|x| SearchRating { up: x.up, url: x.url }),
+            // Same doctrine one signal over: absence is *unknown*, never 0.
+            downloads: r.downloads.map(|x| SearchDownloads {
+                total: x.total,
+                as_of: x.as_of,
+            }),
             status: r.badge,
         })
         .collect();
@@ -655,6 +662,7 @@ mod tests {
                 provider: None,
                 host: None,
             }),
+            downloads: None,
             badge: StatusBadge::NotInstalled,
         };
         let source = SearchSource {
