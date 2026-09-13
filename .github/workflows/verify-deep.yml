@@ -30,7 +30,7 @@ jobs:
         with:
           target: ${{ matrix.job.target }}
       - name: Install nextest
-        uses: taiki-e/install-action@d438492cf8a250514fa2d34b30bc3c0dc37c65ff # v2.87.8
+        uses: taiki-e/install-action@fa23953489c080190314742a9b907f8e97c6767c # v2.87.10
         with:
           tool: cargo-nextest
       - name: Test
@@ -98,7 +98,7 @@ jobs:
           mv "test/bin/grim-${{ matrix.job.target }}${{ matrix.job.ext }}" "test/bin/grim${{ matrix.job.ext }}"
           chmod +x test/bin/grim${{ matrix.job.ext }}
       - name: Install uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
       - name: Setup Task
         uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
       - name: Run Acceptance Tests
