@@ -75,6 +75,19 @@ fn fit(s: &str, width: usize) -> String {
     }
 }
 
+/// [`fit`] for the Repo column: the ellipsis leads and the *tail* survives,
+/// because on `registry.host/org/name` the name is the part a reader needs
+/// and the registry prefix is what they can spare.
+fn fit_tail(s: &str, width: usize) -> String {
+    let n = s.chars().count();
+    if n > width {
+        let tail: String = s.chars().skip(n - width.saturating_sub(1)).collect();
+        format!("…{tail}")
+    } else {
+        format!("{s:<width$}")
+    }
+}
+
 /// A right-aligned count cell. An absent count is `-`, not `0`: the sidecar
 /// signals are *unknown* on every source that publishes none, and a column
 /// of zeroes would say every artifact was measured and found idle. The same
@@ -422,7 +435,7 @@ fn render_leaf(
     // left-aligned with every other row.
     RenderRow {
         columns: [
-            fit(repo_text, W_REPO),
+            fit_tail(repo_text, W_REPO),
             fit(&r.kind, W_KIND),
             fit(&tag_cell, W_TAG),
             count_cell(r.rating.map(u64::from), W_RATING),
@@ -505,7 +518,7 @@ fn tree_render_rows(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<R
                 };
                 RenderRow {
                     columns: [
-                        fit(&repo_text, W_REPO),
+                        fit_tail(&repo_text, W_REPO),
                         fit("", W_KIND),
                         fit(&rollup_label, W_TAG),
                         fit("", W_RATING),
@@ -555,7 +568,7 @@ fn tree_render_rows(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<R
                     .unwrap_or_default();
                 RenderRow {
                     columns: [
-                        fit(&repo_text, W_REPO),
+                        fit_tail(&repo_text, W_REPO),
                         fit(r.map(|r| r.kind.as_str()).unwrap_or(""), W_KIND),
                         fit(&tag_cell, W_TAG),
                         count_cell(r.and_then(|r| r.rating).map(u64::from), W_RATING),
@@ -592,7 +605,7 @@ fn tree_render_rows(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<R
                 let _ = related; // consumed by draw layer, not render layer
                 RenderRow {
                     columns: [
-                        fit(&repo_text, W_REPO),
+                        fit_tail(&repo_text, W_REPO),
                         fit(&kind.to_string(), W_KIND),
                         fit("", W_TAG),
                         fit("", W_RATING),
@@ -1194,11 +1207,11 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
     // the header and each flat-view row.  Tree-mode rows never carry a registry
     // (they express it via the group node label), so the column is flat-only.
     //
-    // The Status header reserves its full region — `W_STATUS` plus the gap and
-    // the deprecation marker (`W_DEPRECATED`) that deprecated rows append — so
+    // The Status header reserves its full region — `W_STATUS` plus the
+    // deprecation marker (`W_DEPRECATED`) that deprecated rows append — so
     // the underlined header spans the whole Catalog box width (which always
     // reserves that room via `CATALOG_WIDTH`), instead of stopping short.
-    let status_header_w = W_STATUS + 2 + W_DEPRECATED;
+    let status_header_w = W_STATUS + W_DEPRECATED;
     let header_text = if model.show_registry_column {
         format!(
             "  {:<gw$}  {:<rw$}  {:<kw$}  {:<tw$}  {:>aw$}  {:>dw$}  {:<sw$}",
@@ -1293,13 +1306,14 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
                     .add_modifier(Modifier::BOLD),
             ),
         ]);
-        // Deprecation rides in the Status column: a space-separated yellow
-        // `† deprecated` appended after the install-status label (orthogonal to
-        // its color; the full notice lives in the detail pane). CATALOG_WIDTH
-        // reserves the extra width so the marker is never clipped by the border.
+        // Deprecation rides in the Status column: a space-separated yellow `†`
+        // appended after the install-status label (orthogonal to its color; the
+        // legend names it, the full notice lives in the detail pane). The bare
+        // glyph, not `† deprecated`: the word cost every row 11 blank columns
+        // of reserve. CATALOG_WIDTH reserves the glyph so the border never clips it.
         if r.deprecated {
             spans.push(Span::styled(
-                " † deprecated".to_string(),
+                " †".to_string(),
                 Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
             ));
         }
@@ -1922,8 +1936,8 @@ mod tests {
             .find(|l| l.contains("r/alpha"))
             .expect("the catalog row is rendered");
         assert!(
-            row_line.contains("† deprecated"),
-            "the full `† deprecated` marker must render unclipped on the row: {row_line:?}"
+            row_line.contains("installed †"),
+            "the `†` marker must render unclipped on the row: {row_line:?}"
         );
     }
 
@@ -1970,8 +1984,8 @@ mod tests {
             "the full Status label must render unclipped in multi-registry view: {row_line:?}"
         );
         assert!(
-            row_line.contains("† deprecated"),
-            "the full `† deprecated` marker must render unclipped in multi-registry view: {row_line:?}"
+            row_line.contains("integrity-missing †"),
+            "the `†` marker must render unclipped in multi-registry view: {row_line:?}"
         );
     }
 
@@ -2089,6 +2103,17 @@ mod tests {
         let out = fit(long, 10);
         assert_eq!(out.chars().count(), 10);
         assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn fit_tail_keeps_the_name_end() {
+        assert_eq!(fit_tail("abc", 6), "abc   ");
+        assert_eq!(fit_tail("abc", 3), "abc");
+        // Over-long: the ellipsis leads and the trailing name segment survives.
+        let long = "registry.example.com/very/long/repository/path";
+        let out = fit_tail(long, 10);
+        assert_eq!(out, "…tory/path");
+        assert_eq!(out.chars().count(), 10);
     }
 
     #[test]

@@ -32,12 +32,11 @@ pub const W_DOWNLOADS: usize = 9;
 /// (`✘ integrity-missing`, 19 chars) so the header underline spans the
 /// full column instead of stopping at `Status`.
 pub const W_STATUS: usize = 19;
-/// Extra Catalog width reserved for the deprecation marker (` † deprecated`)
-/// appended inside the Status column on deprecated rows. Sized to the full
-/// marker — leading space + `†` (U+2020, a single monochrome cell) + space +
-/// the word `deprecated` (10) = 13 — so it never clips, even when the status
-/// label is at its widest (`✘ integrity-missing`).
-pub const W_DEPRECATED: usize = 13;
+/// Extra Catalog width reserved for the deprecation marker (` †`) appended
+/// inside the Status column on deprecated rows: leading space + `†` (U+2020,
+/// a single monochrome cell) = 2, so it never clips, even when the status
+/// label is at its widest (`✘ integrity-missing`). The legend spells it out.
+pub const W_DEPRECATED: usize = 2;
 /// Width of the Registry column shown in flat-view multi-registry mode
 /// (label + 2-column gap is added on top by [`catalog_width`]). The flat list
 /// prepends it when more than one registry is in scope.
@@ -61,7 +60,6 @@ pub const CATALOG_WIDTH: u16 = (2
     + W_DOWNLOADS
     + 2
     + W_STATUS
-    + 2
     + W_DEPRECATED) as u16
     + 2 /* borders */;
 /// Narrowest usable Detail column (the side-by-side layout threshold).
