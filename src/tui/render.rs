@@ -1247,15 +1247,17 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
             sw = status_header_w,
         )
     };
-    let header = ListItem::new(Line::from(Span::styled(
+    // The header is its own widget above the list, not the list's first
+    // item, so it stays put while the rows scroll under it.
+    let header = Paragraph::new(Line::from(Span::styled(
         header_text,
         accent.add_modifier(Modifier::UNDERLINED),
     )));
-    let mut items: Vec<ListItem> = vec![header];
+    let mut items: Vec<ListItem> = Vec::with_capacity(model.rows.len());
     let mut selected_index: Option<usize> = None;
     for (idx, r) in model.rows.iter().enumerate() {
         if r.selected {
-            selected_index = Some(idx + 1); // +1 for the header row
+            selected_index = Some(idx);
         }
         // Every cell is its own colored span; columns are already
         // fixed-width from `fit()` so the table never skews.
@@ -1335,18 +1337,31 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
             .alignment(Alignment::Right),
         );
     }
+    let catalog_inner = catalog_block.inner(list_area);
+    f.render_widget(catalog_block, list_area);
+    let catalog_rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(catalog_inner);
+    f.render_widget(header, catalog_rows[0]);
+    let rows_area = catalog_rows[1];
     let list = List::new(items)
-        .block(catalog_block)
         .highlight_symbol("")
         .highlight_style(
             Style::default()
                 .bg(Color::Indexed(236))
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
-        );
+        )
+        // Half the viewport of padding keeps the selection centered while
+        // the rows scroll under it; ratatui shrinks the padding at either end
+        // so the cursor walks to the edge instead of the list over-scrolling.
+        // The `ListState` is rebuilt each frame from offset 0, so the window is
+        // a pure function of the selection — the same whichever way it moved.
+        .scroll_padding(usize::from(rows_area.height / 2));
     let mut list_state = ListState::default();
     list_state.select(selected_index);
-    f.render_stateful_widget(list, list_area, &mut list_state);
+    f.render_stateful_widget(list, rows_area, &mut list_state);
 
     let detail_block = Block::default()
         .borders(Borders::ALL)
@@ -2025,6 +2040,97 @@ mod tests {
                 .modifier
                 .contains(Modifier::UNDERLINED),
             "the header underline must reach the Catalog box border (full table width)"
+        );
+    }
+
+    /// The Catalog box's screen rows (top border through bottom border) of a
+    /// drawn 60-row flat catalog, and the header's index among them.
+    fn draw_long_catalog(selected: usize) -> (Vec<String>, usize) {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
+        s.set_rows(
+            (0..60)
+                .map(|i| row(&format!("r/row{i:02}"), ArtifactState::Installed))
+                .collect(),
+        );
+        s.selected = selected;
+        let model = frame(&s);
+
+        // Stacked layout (narrow): the Catalog is the top half — 30 rows of a
+        // 60-row terminal — so its list viewport is well shorter than the data.
+        let mut term = Terminal::new(TestBackend::new(catalog_width(false), 60)).unwrap();
+        term.draw(|f| draw(f, &model)).unwrap();
+        let buf = term.backend().buffer();
+        let cols = buf.area.width as usize;
+        let screen: Vec<String> = buf
+            .content()
+            .chunks(cols)
+            .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+            .collect();
+        // Only the Catalog box: the Detail pane below repeats the selected
+        // repo's name, which would skew any "last row" search.
+        let top = screen
+            .iter()
+            .position(|l| l.starts_with("┌Catalog"))
+            .expect("catalog box");
+        let bottom = top
+            + screen[top..]
+                .iter()
+                .position(|l| l.starts_with('└'))
+                .expect("catalog bottom");
+        let lines = screen[top..=bottom].to_vec();
+        let header_y = lines
+            .iter()
+            .position(|l| l.contains("Repo") && l.contains("Status"))
+            .expect("the header row is rendered");
+        (lines, header_y)
+    }
+
+    // The selection is kept at the vertical center of the list while there
+    // are rows on both sides to scroll, and the header never scrolls away.
+    #[test]
+    fn draw_keeps_selection_centered_under_a_fixed_header() {
+        let (lines, header_y) = draw_long_catalog(30);
+        let first_row_y = header_y + 1;
+        let last_row_y = lines
+            .iter()
+            .rposition(|l| l.contains("r/row"))
+            .expect("catalog rows are rendered");
+        let viewport = last_row_y - first_row_y + 1;
+        let selected_y = lines
+            .iter()
+            .position(|l| l.contains("r/row30"))
+            .expect("the selected row is on screen");
+        assert!(
+            viewport < 60 && (selected_y - first_row_y).abs_diff(viewport / 2) <= 1,
+            "row 30 must sit mid-viewport (viewport {viewport}, header y {header_y}, selected y {selected_y})"
+        );
+        assert_eq!(
+            header_y, 1,
+            "the header stays on the first Catalog row, it does not scroll off"
+        );
+    }
+
+    // At the list's end the window stops scrolling and the cursor walks down
+    // to the last row instead of the list over-scrolling into blank space.
+    #[test]
+    fn draw_walks_the_cursor_to_the_edge_at_the_list_end() {
+        let (lines, _) = draw_long_catalog(59);
+        let last_row_y = lines
+            .iter()
+            .rposition(|l| l.contains("r/row"))
+            .expect("catalog rows are rendered");
+        assert!(
+            lines[last_row_y].contains("r/row59"),
+            "the last data row is the last visible row"
+        );
+        assert!(
+            lines[last_row_y + 1].starts_with('└'),
+            "no blank rows between the last data row and the Catalog border: {:?}",
+            lines[last_row_y + 1]
         );
     }
 
