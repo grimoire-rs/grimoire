@@ -30,7 +30,7 @@ jobs:
         with:
           target: ${{ matrix.job.target }}
       - name: Install nextest
-        uses: taiki-e/install-action@fa23953489c080190314742a9b907f8e97c6767c # v2.87.10
+        uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2.87.13
         with:
           tool: cargo-nextest
       - name: Test
