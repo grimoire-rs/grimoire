@@ -1523,7 +1523,7 @@ fn confirm_batch_view(state: &TuiState, b: &super::state::PendingBatch) -> Confi
 /// detail, and a Cancel / action button row. Cancel is highlighted until the
 /// user moves off it.
 fn draw_confirm(f: &mut Frame, c: &ConfirmView) {
-    // Reversed video plus a pointer, not the list's subtle 236 background:
+    // A solid cyan fill plus a pointer, not the list's subtle 236 background:
     // on a popup with no other cue, a faint highlight reads as "nothing is
     // selected", which is exactly the doubt a confirm prompt cannot leave.
     let button = |label: &str, chosen: bool| {
@@ -1531,8 +1531,9 @@ fn draw_confirm(f: &mut Frame, c: &ConfirmView) {
             Span::styled(
                 format!("▸ [ {label} ] "),
                 Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             )
         } else {
             Span::styled(format!("  [ {label} ] "), Style::default().fg(Color::DarkGray))
@@ -1573,7 +1574,7 @@ fn draw_confirm(f: &mut Frame, c: &ConfirmView) {
     };
     f.render_widget(
         Paragraph::new(Span::styled(
-            "←/→ switch button · enter confirm · esc cancel",
+            "enter confirm · esc cancel",
             Style::default().fg(Color::DarkGray),
         )),
         hint_area,
