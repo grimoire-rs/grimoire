@@ -15,21 +15,14 @@
       "mcp__ide__executeCode"
     ],
     "deny": [
-      "// === Destructive File Operations ===",
       "Bash(rm -rf:*)",
       "Bash(rm -r:*)",
       "Bash(sudo:*)",
-
-      "// === Network: Force WebFetch for web access (prompt injection containment) ===",
       "Bash(curl:*)",
       "Bash(wget:*)",
-
-      "// === Infrastructure Destructive Operations ===",
       "Bash(docker system prune:*)",
       "Bash(docker rm:*)",
       "Bash(docker rmi:*)",
-
-      "// === Dangerous Permission Changes ===",
       "Bash(chmod 777:*)"
     ]
   },
