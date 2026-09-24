@@ -833,7 +833,7 @@ pub fn frame(state: &TuiState) -> RenderModel {
     let (search, search_placeholder) = if state.mode == Mode::Search {
         (format!("{}_", state.query), false)
     } else if state.query.is_empty() {
-        ("type / to search".to_string(), true)
+        ("type '/' to search".to_string(), true)
     } else {
         (state.query.clone(), false)
     };
@@ -2144,7 +2144,7 @@ mod tests {
         ]);
         let m = frame(&s);
         assert_eq!(m.title, "Grimoire");
-        assert_eq!(m.search, "type / to search");
+        assert_eq!(m.search, "type '/' to search");
         assert!(m.search_placeholder);
         assert_eq!(m.scope, "");
         assert_eq!(m.headers, ["Repo", "Kind", "Tag", "Rating", "Downloads", "Status"]);
