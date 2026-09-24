@@ -178,6 +178,24 @@ not the uniform ones.
 | `$OPENCLAW_HOME` | OpenClaw | not honored | referenced but **never defined** on any page fetched | honor once upstream documents it |
 | opencode lineage | Kilo | separate client from `opencode` | Kilo's current codebase is built on opencode, which grim supports independently | watch for directory convergence — a shared dir would make two clients contend for one path |
 
+## Qoder watchlist
+
+All rows `verified 2026-09-24` against docs.qoder.com
+(`research_vendor_verification_qoder.md`). **Tier 2** — faithful render, no
+compensation. Qoder's config surface is a near-clone of Claude Code's under
+`.qoder/`, so all four kinds are `Native`; the rows below are the gaps.
+
+| Capability | Vendor | Current grim behavior | Upstream status | Action when shipped |
+|---|---|---|---|---|
+| Support-dir exclusion | Qoder | support dir installs under `.qoder/rules/<name>/` and **auto-loads as unscoped rules** — disclosed in `docs/src/content/docs/clients.md` `{#gap-qoder}`, not repaired | rules load recursively (`rules/**/*.md`, [qoder memory docs](https://docs.qoder.com/cli/memory)); `agentsMdExcludes` is named **once**, in a troubleshooting line, with no scope (AGENTS.md only, or `rules/` too?), value format, or settings file documented; absent from the settings reference — the same failure as Claude's #102, without a usable `claudeMdExcludes` | class-1 repair (a `sync_config` like `claude_config.rs`) once `agentsMdExcludes` — or another key — is documented to cover `rules/` |
+| MCP env-ref expansion | Qoder | ref-bearing descriptors skipped + warn (Junie precedent) | no `${VAR}` expansion documented ([qoder mcp reference](https://docs.qoder.com/cli/mcp-reference)) | pass refs through, drop the skip |
+| MCP `ws` transport | Qoder | skipped + warn | documented, but as a `tcp{host,port}` object — grim's descriptor carries a URL | map a `ws` URL's host and port onto `tcp` only if upstream accepts a URL form, or the descriptor grows host/port |
+| MCP `oauth` block | Qoder | skipped + warn | `{enabled, clientId, clientSecret, authorizationUrl, tokenUrl, scopes, callbackPort}` — no `authServerMetadataUrl`, needs endpoints grim does not carry | project when the shapes align |
+| Project MCP file | Qoder | writes `.qoder/settings.json`, **never** the `.mcp.json` Qoder also reads | both documented; `.mcp.json` is Claude's grim-managed target, and two vendors splicing one member would give two state outputs for one path/pointer. A server installed for both is seen twice under one name (later layer wins upstream — harmless) | none — deliberate |
+| IDE path sharing | Qoder | assumes the IDE reads the same `.qoder/` and `~/.qoder` | documented for `qodercli` only; IDE sharing is inferred, not stated | re-verify against the IDE; split the client only if the IDE diverges |
+| `.agents/skills` pool | Qoder | NOT pool-capable — native `.qoder/skills` only | no doc says Qoder scans the pool | add to `POOL_CAPABLE_VENDORS` once evidenced at **both** scopes |
+| `qoder.*` registries | Qoder | empty for every kind; common `model`/`tools` project as-is | agent frontmatter is Claude-shaped (`tools` comma string or list, `model` incl. `inherit`); rules also take `trigger`/`glob`/`alwaysApply`/`description` | add keys on demand — each is a permanent contract |
+
 ## Ratings forge capability watchlist
 
 Not a `Vendor` renderer decline — `grim rate`/`docs/src/content/docs/ratings.md` claims

@@ -199,7 +199,7 @@ that destination a **client target**. The full set is listed in the
 [client compatibility matrix](./clients.md#matrix) and includes
 [Claude Code][claude], [opencode][opencode], [GitHub Copilot][copilot],
 [Codex][codex], Cursor, Kiro, JetBrains Junie, Gemini CLI, Zed, Amp,
-Antigravity, Cline, Droid, Goose, Warp, OpenClaw and Kilo. The same skill is transformed into
+Antigravity, Cline, Droid, Goose, Warp, OpenClaw, Kilo and Qoder. The same skill is transformed into
 each client's native layout on install. Not every client can host every
 artifact kind — the [client compatibility matrix](./clients.md) is the
 authoritative map of what installs where, and why a decline happens.

@@ -48,6 +48,7 @@ pub mod vendor_kilo;
 pub mod vendor_kiro;
 pub mod vendor_openclaw;
 pub mod vendor_opencode;
+pub mod vendor_qoder;
 pub mod vendor_warp;
 pub mod vendor_zed;
 

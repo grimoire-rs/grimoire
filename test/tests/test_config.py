@@ -90,6 +90,7 @@ CLIENT_VALUE_NAMES = [
     "warp",
     "openclaw",
     "kilo",
+    "qoder",
 ]
 
 

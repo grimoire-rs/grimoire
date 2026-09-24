@@ -123,14 +123,21 @@ Per-client rule transforms:
 - **Kiro**: written to `.kiro/steering/<name>.md` (`~/.kiro/steering/` at
   global). Global steering ships inert (no per-file `fileMatch` scoping yet
   — watchlisted #9176) + warn. Marked `generated: true`.
+- **Qoder**: written to `.qoder/rules/<name>.md` — Claude's shape (`paths:`
+  native, verbatim fast path). Qoder loads `rules/**/*.md` recursively and
+  documents **no usable** exclude key (`agentsMdExcludes` is named once, scope
+  and format unstated), so a support directory over-loads exactly as
+  Claude's did before `claudeMdExcludes` (#102) — a disclosed known gap
+  (`clients.md#gap-qoder`), not repaired until upstream ships a key.
 
 Support directory files are copied verbatim for every rule-supporting
-client (Claude, OpenCode, Copilot, Cursor, Kiro). Only the index is ever
+client (Claude, OpenCode, Copilot, Cursor, Kiro, Qoder). Only the index is ever
 transformed. The copy itself is never adjusted per client — where a client
 would mis-read it, grim compensates in that client's own config (Claude, via
-`claudeMdExcludes` above). **Whether the other four over-load a support tree
-the same way is unaudited**; Kiro `steering/` has no per-file scoping at all
-and is the likeliest repeat.
+`claudeMdExcludes` above). Qoder is **known** to over-load it (recursive
+`rules/` load, no usable exclude key). **Whether the other four do the same is
+unaudited**; Kiro `steering/` has no per-file scoping at all and is the
+likeliest repeat.
 
 ### MCP servers {#install-layout-mcp}
 
@@ -159,15 +166,16 @@ config files:
 | **Gemini** | `<workspace>/.gemini/settings.json` (`mcpServers`); sse → `url`, http → `httpUrl`, `${VAR}` native | `~/.gemini/settings.json` (`mcpServers`) |
 | **Zed** | `<workspace>/.zed/settings.json` (`context_servers`, flat shape); env-ref descriptors skipped (no upstream support) | `$XDG_CONFIG_HOME`\|`~/.config/zed` (unix) or `%APPDATA%\Zed` (Windows) `/settings.json` (`context_servers`, JSONC) |
 | **Amp** | `<workspace>/.amp/settings.json` (`amp.mcpServers`, literal dotted key); `${VAR}` refs | `$XDG_CONFIG_HOME`\|`~/.config/amp`/`settings.json` (`amp.mcpServers`) |
+| **Qoder** | `<workspace>/.qoder/settings.json` (`mcpServers`) — **not** the shared `.mcp.json` Qoder also reads (Claude's grim-managed file; one member, two vendors, two state outputs); Claude shape + `cwd`, `timeout` ms; env-ref descriptors skipped (expansion undocumented) | `$QODER_CONFIG_DIR`\|`~/.qoder`/`settings.json` (`mcpServers`) |
 
 Every non-Claude client declines the `ws` transport and the structured
-`oauth` block (skip + warn) — see `docs/src/content/docs/clients.md` "Known gaps".
+`oauth` block (skip + warn; Qoder documents both, in shapes grim cannot carry) — see `docs/src/content/docs/clients.md` "Known gaps".
 
 ### Agents {#install-layout-agents}
 
 An **agent** materializes as a single file in the client's agents
-directory (no support directory). For Claude/OpenCode/Copilot/Cursor/Gemini
-it is a Markdown file (Claude installs a plain agent verbatim; the others
+directory (no support directory). For Claude/OpenCode/Copilot/Cursor/Gemini/Qoder
+it is a Markdown file (Claude and Qoder install a plain agent verbatim; the others
 project the frontmatter, each lifting its own `<vendor>.*` field registry —
 e.g. `cursor.readonly`, `gemini.temperature`). For **Codex** it is a
 **TOML** file (`<name>.toml`) — Codex is the only TOML-emitting vendor: the
@@ -194,14 +202,16 @@ Per-client agent paths:
 | **Cursor** | `~/.cursor/agents/<name>.md` (project `.cursor/agents/`) |
 | **Gemini** | `<gemini_root>/agents/<name>.md` (project `.gemini/agents/`) |
 | **Antigravity** | `~/.gemini/config/agents/<name>.md` (project `.agents/agents/`) |
+| **Qoder** | `<qoder_root>/agents/<name>.md` (project `.qoder/agents/`) |
 | **everyone else** | declined — no agent surface |
 
 `opencode_root` is the parent of the OpenCode skills directory (i.e. the
 directory one level above the `skills/` subdir resolved from
 `$OPENCODE_CONFIG_DIR` or the XDG default). `claude_root`, `copilot_root`,
-`codex_root` and `gemini_root` are the vendor roots in the
+`codex_root`, `gemini_root` and `qoder_root` are the vendor roots in the
 [`VendorRoot` table](#path-anchor-set) — `$CODEX_HOME` else `~/.codex`,
-and `$GEMINI_CLI_HOME/.gemini` else `~/.gemini`.
+`$GEMINI_CLI_HOME/.gemini` else `~/.gemini`, and `$QODER_CONFIG_DIR` else
+`~/.qoder`.
 
 ### Global-scope paths {#global-scope-paths}
 
@@ -229,6 +239,7 @@ client's **native** user-level discovery directory rather than under
 | **Warp** | `~/.warp/skills/<name>/` (native by default; the pool only via `shared_skills`) | declined | declined |
 | **OpenClaw** | `~/.openclaw/skills/<name>/` — **global-only client**, project scope writes nothing | declined | declined |
 | **Kilo** | `~/.kilo/skills/<name>/` | declined | declined |
+| **Qoder** | `<qoder_root>/skills/<name>/` | `<qoder_root>/rules/<name>.md` | `<qoder_root>/agents/<name>.md` |
 
 `$XDG_CONFIG_HOME` falls back to `~/.config` when unset. A client whose
 `[options.vendors.<name>].shared_skills` is set writes its skills to
@@ -285,6 +296,7 @@ variables are honored read-only, `OPENCODE_CONFIG` names a file grim reads
 | `OPENCODE_CONFIG` | Config **file** path only (global `opencode.json` edit target); no effect on skill/agent paths |
 | `CODEX_HOME` | Replaces `~/.codex` — Codex **agents** root **and** the MCP `config.toml` there. Does **not** relocate Codex skills (those follow the `$HOME/.agents/skills` cross-vendor standard) |
 | `KIRO_HOME` | Replaces `~/.kiro` **outright, no `.kiro` segment appended** — the `CODEX_HOME` shape. Kiro skills, `steering/` rules, and `settings/mcp.json` all follow it. grim follows the Kiro **CLI**; the Kiro **IDE** still hardcodes `~/.kiro` and ignores the variable (kirodotdev/Kiro#9148) — that is an upstream fact, not a limit on what grim honors. A user who sets it *and* uses the IDE gets output where the CLI reads it, not the IDE |
+| `QODER_CONFIG_DIR` | Replaces `~/.qoder` **outright** — the `KIRO_HOME` shape. Qoder skills, rules, agents, and `settings.json` all follow it. Always honored since Qoder support landed, so **no** `relocated_vendor_roots` row |
 | `GEMINI_CLI_HOME` | **The opposite shape.** It replaces Node's `os.homedir()`, and Gemini then joins `.gemini` onto it — so the root is `$GEMINI_CLI_HOME/.gemini`, with the segment still appended. Relocates Gemini's `agents/` and `settings.json`. Deliberately does **not** relocate the shared `.agents/skills` pool, which stays keyed on the real `$HOME` (see below) |
 
 **The two shapes are opposites — do not conflate them.** `KIRO_HOME` and
@@ -432,6 +444,7 @@ is read.
 | `warp` | `warp-root` | `~/.warp` (identical on macOS, Linux and Windows, deliberately so upstream) |
 | `openclaw` | `openclaw-root` | `~/.openclaw` |
 | `kilo` | `kilo-root` | `~/.kilo` (the legacy `.kilocode` is read for detection only, never written) |
+| `qoder` | `qoder-root` | `$QODER_CONFIG_DIR` else `~/.qoder` (hosts skills, rules, agents, `settings.json` MCP) |
 
 `goose` has **no row and no tag**: it renders into the shared pool at both
 scopes, so everything it writes anchors at `AgentsSkills` and a vendor root
@@ -575,6 +588,7 @@ for the active scope:
 | **Warp** | `<workspace>/.warp` exists | `~/.warp` exists — deliberately the same path on all three platforms; the OS-specific app-data dirs are **not** consulted |
 | **OpenClaw** | **never** — it has no project scope, and `kind_surface(Skill, Project)` refuses skills there too | `~/.openclaw` exists |
 | **Kilo** | `<workspace>/.kilo` **or** `<workspace>/.kilocode` exists — `.kilocode` counts for detection only and is **never written** | `~/.kilo` or `$XDG_CONFIG_HOME/kilo` exists (OR-ed) |
+| **Qoder** | `<workspace>/.qoder` exists (its `settings.json` MCP file sits inside it, so no extra clause) | native root (`$QODER_CONFIG_DIR` or `~/.qoder`) exists |
 
 **Never key `detect()` on `.agents/`.** It is a shared multi-client marker,
 and for Goose — which *renders into* the pool — keying on it would make the

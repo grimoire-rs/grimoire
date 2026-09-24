@@ -49,6 +49,7 @@ use super::vendor_kilo::KiloVendor;
 use super::vendor_kiro::KiroVendor;
 use super::vendor_openclaw::OpenClawVendor;
 use super::vendor_opencode::OpenCodeVendor;
+use super::vendor_qoder::QoderVendor;
 use super::vendor_warp::WarpVendor;
 use super::vendor_zed::ZedVendor;
 
@@ -120,6 +121,9 @@ pub enum ClientTarget {
     /// Kilo — `.kilo/skills` (skills only). Never writes the deprecated
     /// `.kilocode`; a partial pool member, so off the shared-pool roster.
     Kilo,
+    /// Qoder — `.qoder/{skills,rules,agents,settings.json}` (all four kinds
+    /// native; Claude Code's config shape under its own root).
+    Qoder,
 }
 
 impl std::str::FromStr for ClientTarget {
@@ -145,6 +149,7 @@ impl std::str::FromStr for ClientTarget {
             "warp" => Ok(Self::Warp),
             "openclaw" => Ok(Self::OpenClaw),
             "kilo" => Ok(Self::Kilo),
+            "qoder" => Ok(Self::Qoder),
             other => Err(InstallError::without_reference(InstallErrorKind::UnsupportedClient(
                 other.to_string(),
             ))),
@@ -184,6 +189,7 @@ impl ClientTarget {
             Self::Warp => "warp",
             Self::OpenClaw => "openclaw",
             Self::Kilo => "kilo",
+            Self::Qoder => "qoder",
         }
     }
 
@@ -210,6 +216,7 @@ impl ClientTarget {
         Self::Warp.as_str(),
         Self::OpenClaw.as_str(),
         Self::Kilo.as_str(),
+        Self::Qoder.as_str(),
     ];
 }
 
@@ -248,7 +255,7 @@ pub struct MaterializeRequest<'a> {
 
 impl ClientTarget {
     /// Every supported client, in canonical order.
-    pub const ALL: [ClientTarget; 18] = [
+    pub const ALL: [ClientTarget; 19] = [
         Self::Claude,
         Self::OpenCode,
         Self::Copilot,
@@ -267,6 +274,7 @@ impl ClientTarget {
         Self::Warp,
         Self::OpenClaw,
         Self::Kilo,
+        Self::Qoder,
     ];
 
     /// The per-vendor materialization strategy behind this identity.
@@ -290,6 +298,7 @@ impl ClientTarget {
             Self::Warp => &WarpVendor,
             Self::OpenClaw => &OpenClawVendor,
             Self::Kilo => &KiloVendor,
+            Self::Qoder => &QoderVendor,
         }
     }
 
@@ -645,6 +654,7 @@ mod tests {
             (ClientTarget::Warp, Native, Declined, Declined, false),
             (ClientTarget::OpenClaw, Native, Declined, Declined, false),
             (ClientTarget::Kilo, Native, Declined, Declined, false),
+            (ClientTarget::Qoder, Native, Native, Native, true),
         ];
         assert_eq!(
             grid.len(),
@@ -967,6 +977,7 @@ mod tests {
             ("warp", ClientTarget::Warp),
             ("openclaw", ClientTarget::OpenClaw),
             ("kilo", ClientTarget::Kilo),
+            ("qoder", ClientTarget::Qoder),
         ] {
             assert_eq!(ClientTarget::from_str(s).unwrap(), t);
             assert_eq!(t.to_string(), s);
@@ -991,7 +1002,7 @@ mod tests {
         let w = Path::new("/w");
         let project = crate::config::scope::ConfigScope::Project;
 
-        let table: [(ClientTarget, &str, Option<&str>, Option<&str>); 18] = [
+        let table: [(ClientTarget, &str, Option<&str>, Option<&str>); 19] = [
             (
                 ClientTarget::Claude,
                 ".claude/skills/x",
@@ -1060,6 +1071,12 @@ mod tests {
             // path, never an install destination (`kind_surface` refuses it).
             (ClientTarget::OpenClaw, ".openclaw/skills/x", None, None),
             (ClientTarget::Kilo, ".kilo/skills/x", None, None),
+            (
+                ClientTarget::Qoder,
+                ".qoder/skills/x",
+                Some(".qoder/rules/x.md"),
+                Some(".qoder/agents/x.md"),
+            ),
         ];
         assert_eq!(
             table.len(),

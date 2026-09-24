@@ -3,7 +3,8 @@
 You loaded this file because you are adding a key in a reserved vendor
 namespace — `claude.*`, `opencode.*`, `copilot.*`, `codex.*`, `cursor.*`,
 `kiro.*`, `junie.*`, `gemini.*`, `zed.*`, `amp.*`, `antigravity.*`,
-`cline.*`, `droid.*`, `goose.*`, `warp.*`, `openclaw.*`, `kilo.*` — to an
+`cline.*`, `droid.*`, `goose.*`, `warp.*`, `openclaw.*`, `kilo.*`,
+`qoder.*` — to an
 artifact, or a publish failed or warned on a vendor key.
 
 Contents: [Mental Model](#mental-model) · [Outcome Classes](#outcome-classes) ·
@@ -21,7 +22,8 @@ its native type and lifts it into top-level frontmatter of the written
 file. Each client sees only its own namespace; one canonical file serves
 all clients. The recognized namespaces are `claude`, `opencode`,
 `copilot`, `codex`, `cursor`, `gemini`, `kiro`, `junie`, `zed`, `amp`,
-`antigravity`, `cline`, `droid`, `goose`, `warp`, `openclaw`, and `kilo` —
+`antigravity`, `cline`, `droid`, `goose`, `warp`, `openclaw`, `kilo`, and
+`qoder` —
 **one per client name**, derived from every registered `ClientTarget`, so
 the list grows every time grim adds a client ([canonical
 list][projection]). The vendor-neutral `agents` target is the one
@@ -43,7 +45,7 @@ Reservation is retroactive by design: a `codex.*` key authored before
 Codex client support landed was plain passthrough metadata, and today it
 is a tool-namespaced key subject to the same known/unknown handling as
 the others. The same happened to `antigravity.*`, `cline.*`, `droid.*`,
-`goose.*`, `warp.*`, `openclaw.*` and `kilo.*` when those clients landed,
+`goose.*`, `warp.*`, `openclaw.*`, `kilo.*` and `qoder.*` when those clients landed,
 and it will happen to the next client's prefix. Do not use a client name
 as a plain metadata prefix.
 

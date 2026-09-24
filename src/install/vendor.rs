@@ -121,8 +121,8 @@ pub struct KnownField {
 ///   location), while Warp renders natively to `.warp/skills` and reaches the
 ///   pool only through the opt-in. Membership here is about what a client
 ///   **reads**, not where grim writes — those are separate questions.
-/// - Absent, deliberately: `claude` (does not scan the pool), `kiro` and
-///   `junie` (not evidenced either way), `cline` and `droid` (confirmed
+/// - Absent, deliberately: `claude` (does not scan the pool), `kiro`,
+///   `junie` and `qoder` (not evidenced either way), `cline` and `droid` (confirmed
 ///   *absent* from their own documented scan lists, not merely unevidenced),
 ///   `openclaw` (it does scan the pool at priority 3, but it is global-only
 ///   and the interaction between a scope-gapped client and `shared_skills` is
@@ -591,6 +591,7 @@ mod tests {
         assert!(!ClientTarget::Claude.vendor().pool_capable());
         assert!(!ClientTarget::Kiro.vendor().pool_capable());
         assert!(!ClientTarget::Junie.vendor().pool_capable());
+        assert!(!ClientTarget::Qoder.vendor().pool_capable());
         // Confirmed absences from their own scan lists, not evidence gaps.
         assert!(!ClientTarget::Cline.vendor().pool_capable());
         assert!(!ClientTarget::Droid.vendor().pool_capable());

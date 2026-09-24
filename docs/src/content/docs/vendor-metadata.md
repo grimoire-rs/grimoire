@@ -120,16 +120,17 @@ at both install time and publish-time validation.
 | Plain metadata key (non-tool prefix, e.g. `vendor.x`) | Passes through unchanged |
 | No tool-namespaced keys at all | Fast path: verbatim install, byte-identical to canonical |
 
-The seventeen recognized tool namespaces are `claude`, `opencode`, `copilot`,
+The eighteen recognized tool namespaces are `claude`, `opencode`, `copilot`,
 `codex`, `cursor`, `kiro`, `junie`, `gemini`, `zed`, `amp`, `antigravity`,
-`cline`, `droid`, `goose`, `warp`, `openclaw`, and `kilo`. Any key whose prefix
-is not one of these seventeen is plain metadata and is never treated as a tool
+`cline`, `droid`, `goose`, `warp`, `openclaw`, `kilo`, and `qoder`. Any key whose prefix
+is not one of these eighteen is plain metadata and is never treated as a tool
 key. (The vendor-neutral `agents` target is deliberately excluded — it owns no
 namespace of its own.)
 
 The set is derived from the client list, so **every new client reserves its
-namespace automatically**. `cline`, `droid`, `goose`, `warp`, `openclaw` and
-`kilo` are the most recent names to join; `antigravity` joined before them, and
+namespace automatically**. `qoder` is the most recent name to join; `cline`,
+`droid`, `goose`, `warp`, `openclaw` and `kilo` joined before it,
+`antigravity` before them, and
 `codex` when Codex client support landed. The consequence is the same every
 time, and is worth stating once: a `codex.*` — or now a `goose.*` —
 metadata key that was plain data under earlier grim
@@ -158,6 +159,12 @@ six carry **empty registries for every kind**, because none of them documents a
 these six prefixes warns and drops for *every* target, including its own
 client — there is nothing for it to lift into. If one of these vendors later
 documents a native field, adding it to that vendor's registry is additive.
+
+`qoder` joined alone, with **empty registries for every kind** as well — but
+unlike the skills-only batch, [Qoder][qoder-docs] installs rules and agents,
+and its agent frontmatter is Claude Code's. The common fields `model` and
+`tools` therefore project as-is; a `qoder.*` key warns and drops until a field
+is added to the registry, which is additive.
 
 When a namespaced key collides with a top-level key of the same name,
 the namespaced key wins and a warning is emitted. This situation arises
@@ -340,7 +347,7 @@ vendor namespace at all:
   each project *agent* frontmatter through their own `<vendor>.*` agent
   registry (the agent-registry sections above), but define no skill
   namespace.
-- **No namespace at all** — Kiro, Junie, Zed, and Amp carry no vendor
+- **No namespace at all** — Kiro, Junie, Zed, Amp, and Qoder carry no vendor
   registry for any kind; they read the universal fields only.
 
 Any key prefixed with a client namespace (e.g. `opencode.`, `copilot.`, or
@@ -376,6 +383,7 @@ grim installs skills into the directories each client scans for
 | [Droid][droid-docs] | `.factory/skills/<name>/` — the client is `droid`, the directory is `.factory` |
 | [Warp][warp-docs] | `.warp/skills/<name>/` — native by default; pool-capable via `[options.vendors.warp].shared_skills` |
 | [Kilo][kilo-docs] | `.kilo/skills/<name>/` — never the deprecated `.kilocode/` |
+| [Qoder][qoder-docs] | `.qoder/skills/<name>/` |
 | [OpenClaw][openclaw-docs] | *(none — no project scope; see the global table)* |
 | `agents` (vendor-neutral) | `.agents/skills/<name>/` (shared pool — its only surface; never auto-detected, only selected) |
 
@@ -405,6 +413,7 @@ environment variable):
 | [Warp][warp-docs] | `~/.warp/skills/<name>/` — the same path on macOS, Linux and Windows | None found in current docs |
 | [OpenClaw][openclaw-docs] | `~/.openclaw/skills/<name>/` — **global scope only**; OpenClaw has no per-repository scope | None — `$OPENCLAW_HOME` is referenced but never defined upstream, so grim does not honor it |
 | [Kilo][kilo-docs] | `~/.kilo/skills/<name>/` | None found in current docs |
+| [Qoder][qoder-docs] | `~/.qoder/skills/<name>/` | `$QODER_CONFIG_DIR/skills/<name>/` — the variable replaces the entire `~/.qoder` tree, with **no** `.qoder` segment appended ([Qoder config scope reference][qoder-config-docs]) |
 | `agents` (vendor-neutral) | `$HOME/.agents/skills/<name>/` (shared pool — its only surface) | None — the pool is never relocated by any vendor variable |
 
 When neither the override variable nor `$HOME` can be resolved (rare CI
@@ -446,6 +455,7 @@ The mapping table for rules:
 | [GitHub Copilot][copilot-instructions-docs] | `paths` | top-level | `applyTo` | Comma-joined into a single string (Copilot does not accept a list) |
 | [GitHub Copilot][copilot-instructions-docs] | `copilot.exclude-agent` | `metadata` | `excludeAgent` | Enum: `code-review` or `cloud-agent` (registry in `src/install/vendor_copilot.rs`) |
 | [Cursor][cursor-subagents-docs] | `paths` | top-level | `globs` | Comma-joined into a single string, plus a computed `alwaysApply: false`; unscoped (no `paths`) emits no `globs` and `alwaysApply: true` instead (`src/install/vendor_cursor.rs`) |
+| [Qoder][qoder-rules-docs] | `paths` | top-level | `paths` | Verbatim, as for Claude Code. Qoder loads `rules/` recursively and documents no usable exclude setting, so a rule's support directory loads as unscoped rules — a [known gap](./clients.md#gap-qoder) |
 | [Kiro][kiro-docs] | `paths` | top-level | `fileMatchPattern` | YAML array (not comma-joined), plus a computed `inclusion: fileMatch`; unscoped emits `inclusion: always` instead, no `fileMatchPattern` (`src/install/vendor_kiro.rs`) |
 | [OpenCode][opencode-rules-docs] | — | — | — | No per-file rule frontmatter; loading is registered via the OpenCode config file |
 | [Junie][junie-docs] | `paths` | top-level | — | **Dropped with a warning.** `.junie/rules/*.md` is ownable, but every file in the directory is concatenated automatically with no per-file activation key, so the rule loads unconditionally. Project scope only — no `~/.junie/rules/` exists, and a global rule is skipped with zero outputs (`src/install/vendor_junie.rs`) |
@@ -655,3 +665,6 @@ claude namespace to silence it and gain proper type conversion.
 [warp-docs]: https://warp.dev
 [openclaw-docs]: https://github.com/openclaw/openclaw
 [kilo-docs]: https://kilo.ai
+[qoder-docs]: https://qoder.com
+[qoder-rules-docs]: https://docs.qoder.com/cli/memory
+[qoder-config-docs]: https://docs.qoder.com/cli/config-scope

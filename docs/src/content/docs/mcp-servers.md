@@ -204,6 +204,7 @@ minor release (see [stability][stability-unstable]).
 | [Zed][zed-docs] | project / global | `.zed/settings.json` / the platform-resolved Zed config root + `/settings.json` (JSONC) — `$XDG_CONFIG_HOME`\|`~/.config`/`zed` on Linux and FreeBSD, a hardcoded `~/.config/zed` on macOS, `%APPDATA%\Zed` on Windows | `context_servers` | flat `command`/`args`/`env` (no `type`); oauth skipped | none upstream — ref-bearing descriptors skipped |
 | [Amp][amp-docs] | project / global | `.amp/settings.json` / `~/.config/amp/settings.json` | `amp.mcpServers` (literal dotted key) | `stdio`: `command`/`args`/`env`; oauth skipped | `${VAR_NAME}` (native passthrough) |
 | [Antigravity][antigravity-docs] | project / global | `.agents/mcp_config.json` / `~/.gemini/config/mcp_config.json` | `mcpServers` | `stdio`: `command`/`args`/`env`; remote (`sse`, `http`): `serverUrl` + `headers`; ws + oauth skipped | undocumented — ref-bearing descriptors skipped |
+| [Qoder][qoder-mcp-docs] | project / global | `.qoder/settings.json` / `$QODER_CONFIG_DIR`\|`~/.qoder`/`settings.json` — never the shared `.mcp.json` Qoder also reads, which grim manages for Claude Code | `mcpServers` | `stdio`: `command`/`args`/`env`/`cwd` (no `type`); remote (`sse`, `http`): `type` + `url` + `headers`; `timeout` (ms); ws + oauth skipped | undocumented — ref-bearing descriptors skipped |
 
 Some clients are absent from the table because grim writes no MCP config for
 them at all — they decline the kind, so grim warns, skips, and writes nothing.
@@ -393,7 +394,9 @@ the full tool table lives at [`grim mcp`](./commands.md#mcp).
   document no WebSocket MCP transport; a `transport = "ws"` descriptor is
   skipped for them with a warning rather than registering a remote entry
   they would try to speak HTTP to. Every other client declines it for the
-  same reason. [Antigravity][antigravity-docs]'s MCP docs do name websocket
+  same reason. [Qoder][qoder-mcp-docs] documents a `ws` type, but it takes a
+  `tcp` host-and-port object rather than a URL, so grim declines it there too.
+  [Antigravity][antigravity-docs]'s MCP docs do name websocket
   alongside sse and streamable HTTP under one `serverUrl` field, but that
   single sentence could not be confirmed against raw upstream page text, and
   support is additive to add later while removal would be breaking — so it
@@ -456,6 +459,7 @@ the full tool table lives at [`grim mcp`](./commands.md#mcp).
 [zed-docs]: https://zed.dev
 [amp-docs]: https://ampcode.com
 [antigravity-docs]: https://antigravity.google/docs/mcp
+[qoder-mcp-docs]: https://docs.qoder.com/cli/mcp-reference
 [ansible-blockinfile]: https://docs.ansible.com/ansible/latest/collections/ansible/builtin/blockinfile_module.html
 [catalog-mcp-grim]: https://github.com/grimoire-rs/grimoire/blob/main/catalog/mcp/grim.toml
 [toml-edit-crate]: https://docs.rs/toml_edit/latest/toml_edit/

@@ -115,9 +115,11 @@ can own, and the rest decline outright.
 | [Warp][warp-docs] | not supported | agents declined — agent profiles are Settings-UI-only |
 | [OpenClaw][openclaw-docs] | not supported | agents declined — subagents are runtime-only, nothing on disk |
 | [Kilo][kilo-docs] | not supported | agents declined — custom "modes" are not an installable agent format |
+| [Qoder][qoder-subagents-docs] | `.md` + YAML frontmatter | Claude Code's format — a plain agent installs byte-identical (`generated: false`); nothing lifted — no `qoder.*` registry yet |
 
 The canonical format **is** Claude Code's native subagent format, so a plain
 agent — one with no `<vendor>.<field>` metadata keys — installs for Claude
+and [Qoder][qoder-subagents-docs], which reads the same format,
 byte-identical to the published file (`generated: false`). Every other output
 is a generated transform carrying a provenance comment; editing one by hand is
 detected as [drift][vendor-drift], exactly like any generated file. See the
@@ -141,6 +143,7 @@ layout may change in any minor release (see [stability][stability-unstable]).
 | [Cursor][cursor-subagents-docs] | `.cursor/agents/<name>.md` |
 | [Gemini CLI][gemini-subagents-docs] | `.gemini/agents/<name>.md` |
 | [Antigravity][antigravity-subagents-docs] | `.agents/agents/<name>.md` |
+| [Qoder][qoder-subagents-docs] | `.qoder/agents/<name>.md` |
 
 **Global scope** (native user-level discovery directories, honoring each
 client's directory-override variable — the same resolution as
@@ -155,6 +158,7 @@ client's directory-override variable — the same resolution as
 | [Cursor][cursor-subagents-docs] | `~/.cursor/agents/<name>.md` | None — `CURSOR_CONFIG_DIR` is not honored |
 | [Gemini CLI][gemini-subagents-docs] | `~/.gemini/agents/<name>.md` | `$GEMINI_CLI_HOME/.gemini/agents/` — the variable replaces the home directory, so the `.gemini` segment is still appended. No `GEMINI_CONFIG_DIR` exists upstream |
 | [Antigravity][antigravity-subagents-docs] | `~/.gemini/config/agents/<name>.md` | None found in current docs |
+| [Qoder][qoder-subagents-docs] | `~/.qoder/agents/<name>.md` | `$QODER_CONFIG_DIR/agents/` — the variable replaces the entire `~/.qoder` tree |
 
 Unlike global rules, Copilot agents have a real user-level home — no
 inert-install warning applies.
@@ -254,3 +258,4 @@ grim uninstall agent code-reviewer         # removes files + declaration
 [warp-docs]: https://warp.dev
 [openclaw-docs]: https://github.com/openclaw/openclaw
 [kilo-docs]: https://kilo.ai
+[qoder-subagents-docs]: https://docs.qoder.com/cli/subagent

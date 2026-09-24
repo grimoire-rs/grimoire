@@ -40,6 +40,8 @@ invisible until you intervened, which is worse.
 | Global | `~/.cline`, `~/.factory`, `~/.warp`, `~/.kilo` or `$XDG_CONFIG_HOME/kilo`, `~/.openclaw` |
 | Global | Goose's config roots — `$XDG_CONFIG_HOME/goose` and `~/Library/Application Support/goose`, or `$GOOSE_PATH_ROOT` alone when that variable is set, which **replaces** the candidate list rather than extending it |
 | Global | `~/.gemini/config` (Antigravity) |
+| Project | `.qoder` (Qoder) |
+| Global | `~/.qoder`, or `$QODER_CONFIG_DIR` when that variable is set (Qoder) |
 
 `.clinerules` and `.kilocode` are project markers only; they never fire from
 your home directory. Antigravity has no project marker at all — all of its

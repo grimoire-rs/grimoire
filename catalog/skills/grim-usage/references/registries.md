@@ -50,7 +50,7 @@ Environment variables that matter here (full table:
 | `DOCKER_CONFIG` | Directory of the Docker-compatible credential `config.json` |
 
 Separately, grim honors each **client's own** directory-override variable
-(`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `KIRO_HOME`, `GEMINI_CLI_HOME`,
+(`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `KIRO_HOME`, `QODER_CONFIG_DIR`, `GEMINI_CLI_HOME`,
 `COPILOT_HOME`, `OPENCODE_CONFIG_DIR`, …) so a global-scope install lands
 where that client actually reads. Their shapes are **not** uniform — some
 replace the client's config dir outright, others replace the home
@@ -568,7 +568,8 @@ no extra configuration. The TUI flips scope at runtime with `g`.
 
 An installed artifact lands in a **client target** — `claude`, `opencode`,
 `copilot`, `codex`, `cursor`, `kiro`, `junie`, `gemini`, `zed`, `amp`,
-`antigravity`, `cline`, `droid`, `goose`, `warp`, `openclaw`, `kilo`, or
+`antigravity`, `cline`, `droid`, `goose`, `warp`, `openclaw`, `kilo`,
+`qoder`, or
 the vendor-neutral `agents` — each receiving the artifact in its native
 layout. The set grows; `grim context` reports the names that resolve for
 your scope, and the [Client Compatibility matrix][clients-matrix] is

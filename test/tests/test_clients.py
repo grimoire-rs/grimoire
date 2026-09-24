@@ -141,6 +141,7 @@ def test_no_detected_clients_falls_back_to_the_generic_agents_client(
         ".gemini",
         ".zed",
         ".amp",
+        ".qoder",
     ):
         assert_not_exists(project_dir / vendor_dir)
 
@@ -790,3 +791,121 @@ def test_goose_global_skill_lands_in_the_shared_pool(
 
     assert_path_exists(runner.home / ".agents/skills/code-review/SKILL.md")
     assert_not_exists(runner.home / ".goose/skills/code-review")
+
+
+# ---------------------------------------------------------------------------
+# Qoder: Claude Code's config shapes under `.qoder/`, all four kinds native.
+# ---------------------------------------------------------------------------
+
+_QODER_SKILL = "---\nname: code-review\ndescription: d\n---\n# CR\n"
+_QODER_RULE = "---\npaths: ['**/*.rs']\n---\n# Rust Style\nUse 4 spaces.\n"
+_QODER_AGENT = "---\nname: my-agent\ndescription: d\nmodel: inherit\ntools: Read,Grep\n---\n# my-agent\nbody\n"
+
+
+def _qoder_artifacts(unique_repo: str):
+    sk = make_artifact(
+        f"{unique_repo}/code-review", "skill", {"code-review/SKILL.md": _QODER_SKILL}, tag="v1"
+    )
+    ru = make_artifact(f"{unique_repo}/rust-style", "rule", {"rust-style.md": _QODER_RULE}, tag="v1")
+    ag = make_artifact(f"{unique_repo}/my-agent", "agent", {"my-agent.md": _QODER_AGENT}, tag="v1")
+    return sk, ru, ag
+
+
+def _release_qoder_mcp(runner, registry: str, unique_repo: str, src: Path) -> str:
+    descriptor = src / "mcp" / "q-mcp.toml"
+    descriptor.parent.mkdir(parents=True)
+    descriptor.write_text(
+        'description = "d"\n\n[server]\ntransport = "stdio"\ncommand = "grim"\nargs = ["mcp"]\n'
+        "timeout = 7000\n"
+    )
+    ref = f"{registry}/{unique_repo}/mcp/q-mcp:1.0.0"
+    runner.json("release", str(descriptor), ref, "--kind", "mcp")
+    return ref
+
+
+def test_qoder_project_install_round_trips_every_kind(
+    grim_at, project_dir: Path, registry: str, unique_repo: str, tmp_path: Path
+) -> None:
+    """Qoder reads Claude Code's shapes, so skill, rule and agent install
+    byte-identical under ``.qoder/``, and the MCP entry lands in Qoder's own
+    ``.qoder/settings.json`` — never the ``.mcp.json`` grim manages for Claude."""
+    sk, ru, ag = _qoder_artifacts(unique_repo)
+    (project_dir / ".qoder").mkdir()
+    runner = grim_at(project_dir)
+    mcp_ref = _release_qoder_mcp(runner, registry, unique_repo, tmp_path / "q_src")
+    (project_dir / "grimoire.toml").write_text(
+        f'[skills]\ncode-review = "{sk.fq}"\n[rules]\nrust-style = "{ru.fq}"\n'
+        f'[agents]\nmy-agent = "{ag.fq}"\n[mcp]\nq-mcp = "{mcp_ref}"\n'
+    )
+    runner.run("lock", check=False)
+
+    # Detected from the `.qoder` marker alone — no `--client`.
+    assert runner.json("context")["clients"] == ["qoder"]
+    rows = runner.json("install")["items"]
+    assert all(r["status"] == "installed" for r in rows), rows
+
+    q = project_dir / ".qoder"
+    assert (q / "skills/code-review/SKILL.md").read_text() == _QODER_SKILL
+    assert (q / "rules/rust-style.md").read_text() == _QODER_RULE, "paths: is native"
+    assert (q / "agents/my-agent.md").read_text() == _QODER_AGENT
+    entry = json.loads((q / "settings.json").read_text())["mcpServers"]["q-mcp"]
+    assert entry == {"command": "grim", "args": ["mcp"], "timeout": 7000}, entry
+    assert_not_exists(project_dir / ".mcp.json")
+
+    # Uninstalling the MCP server removes only grim's member, never the file.
+    runner.json("uninstall", "mcp", "q-mcp")
+    assert json.loads((q / "settings.json").read_text()).get("mcpServers", {}) == {}
+
+
+def test_qoder_mcp_with_env_ref_is_skipped_with_a_warning(
+    grim_at, project_dir: Path, registry: str, unique_repo: str, tmp_path: Path
+) -> None:
+    """Qoder documents no ``${VAR}`` expansion, so a ref-bearing descriptor is
+    skipped for Qoder rather than written as a broken literal, while Claude —
+    which expands ``${VAR}`` natively — still registers it."""
+    descriptor = tmp_path / "q_env" / "mcp" / "q-env.toml"
+    descriptor.parent.mkdir(parents=True)
+    descriptor.write_text(
+        'description = "d"\n\n[server]\ntransport = "stdio"\ncommand = "grim"\n'
+        'env = { TOKEN = "${GITHUB_TOKEN}" }\n'
+    )
+    ref = f"{registry}/{unique_repo}/mcp/q-env:1.0.0"
+    runner = grim_at(project_dir)
+    runner.json("release", str(descriptor), ref, "--kind", "mcp")
+    (project_dir / "grimoire.toml").write_text(f'[mcp]\nq-env = "{ref}"\n')
+    runner.run("lock", check=False)
+
+    result = runner.run("install", "--client", "claude,qoder", format="json")
+    assert "skipped for qoder" in result.stderr.lower(), result.stderr
+    assert_not_exists(project_dir / ".qoder/settings.json")
+    assert "q-env" in json.loads((project_dir / ".mcp.json").read_text())["mcpServers"]
+
+
+def test_qoder_global_install_honours_qoder_config_dir(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str, tmp_path: Path
+) -> None:
+    """``QODER_CONFIG_DIR`` replaces ``~/.qoder`` outright — no ``.qoder``
+    segment appended — for every kind, MCP included. The only test that pins
+    the variable's *name*; the unit tests inject values into the resolver."""
+    from src.runner import GrimRunner
+
+    sk, ru, ag = _qoder_artifacts(unique_repo)
+    qoder_dir = grim_home.parent / "qoder_config"
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.env["QODER_CONFIG_DIR"] = str(qoder_dir)
+    mcp_ref = _release_qoder_mcp(runner, registry, unique_repo, tmp_path / "qg_src")
+    (grim_home / "grimoire.toml").write_text(
+        f'[skills]\ncode-review = "{sk.fq}"\n[rules]\nrust-style = "{ru.fq}"\n'
+        f'[agents]\nmy-agent = "{ag.fq}"\n[mcp]\nq-mcp = "{mcp_ref}"\n'
+    )
+    runner.json("lock", "--global")
+
+    rows = runner.json("install", "--global", "--client", "qoder")["items"]
+    assert all(r["status"] == "installed" for r in rows), rows
+
+    assert_path_exists(qoder_dir / "skills/code-review/SKILL.md")
+    assert_path_exists(qoder_dir / "rules/rust-style.md")
+    assert_path_exists(qoder_dir / "agents/my-agent.md")
+    assert "q-mcp" in json.loads((qoder_dir / "settings.json").read_text())["mcpServers"]
+    assert_not_exists(qoder_dir / ".qoder")
+    assert_not_exists(runner.home / ".qoder")

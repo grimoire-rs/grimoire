@@ -28,7 +28,7 @@ use crate::install::vendor::{KindSupport, env_dir, global_skills_root, home_dir}
 use crate::install::{
     opencode_config, vendor_amp, vendor_antigravity, vendor_claude, vendor_cline, vendor_codex, vendor_copilot,
     vendor_cursor, vendor_droid, vendor_gemini, vendor_junie, vendor_kilo, vendor_kiro, vendor_openclaw,
-    vendor_opencode, vendor_warp, vendor_zed,
+    vendor_opencode, vendor_qoder, vendor_warp, vendor_zed,
 };
 use crate::oci::ArtifactKind;
 
@@ -112,6 +112,9 @@ const VENDOR_ROOTS: &[VendorRootRow] = &[
     ("warp", |_, home| vendor_warp::warp_root(home)),
     ("openclaw", |_, home| vendor_openclaw::openclaw_root(home)),
     ("kilo", |_, home| vendor_kilo::kilo_root(home)),
+    ("qoder", |env, home| {
+        vendor_qoder::qoder_root(env("QODER_CONFIG_DIR"), home)
+    }),
     // OpenCode's OTHER root: the directory holding the config **file** grim
     // splices its global MCP entry into. Resolved through the very function
     // the write path uses (`opencode_config::config_path_for_scope`), so the
@@ -832,6 +835,13 @@ fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKin
                 | (ClientTarget::Kilo, ArtifactKind::Skill) => vendor_root(client),
                 (ClientTarget::Goose, ArtifactKind::Skill) => Some(PathAnchor::AgentsSkills),
 
+                // Qoder: all four kinds native under `$QODER_CONFIG_DIR|~/.qoder`
+                // (`settings.json` carries MCP).
+                (ClientTarget::Qoder, ArtifactKind::Skill)
+                | (ClientTarget::Qoder, ArtifactKind::Rule)
+                | (ClientTarget::Qoder, ArtifactKind::Agent)
+                | (ClientTarget::Qoder, ArtifactKind::Mcp) => vendor_root(client),
+
                 // MCP config-entry anchors: Claude's user config file dir
                 // (`.claude.json` — a sibling of `~/.claude`), OpenCode's
                 // config dir (`opencode.json`), Copilot's native root
@@ -1185,6 +1195,7 @@ mod tests {
         "openclaw-root",
         "kilo-root",
         "opencode-config-root",
+        "qoder-root",
     ];
 
     /// Every shipped tag still loads from a LITERAL JSON string, and
@@ -1485,6 +1496,7 @@ mod tests {
             ("warp", home.join(".warp")),
             ("openclaw", home.join(".openclaw")),
             ("kilo", home.join(".kilo")),
+            ("qoder", home.join(".qoder")),
         ]
         .into();
         if cfg!(all(not(windows), not(target_os = "macos"))) {
@@ -1508,6 +1520,7 @@ mod tests {
             ("COPILOT_HOME", "copilot", PathBuf::from("/ovr")),
             ("CODEX_HOME", "codex", PathBuf::from("/ovr")),
             ("KIRO_HOME", "kiro", PathBuf::from("/ovr")),
+            ("QODER_CONFIG_DIR", "qoder", PathBuf::from("/ovr")),
             // `GEMINI_CLI_HOME` replaces the home, not the root: the `.gemini`
             // segment is still appended (the opposite shape to CODEX/KIRO).
             ("GEMINI_CLI_HOME", "gemini", PathBuf::from("/ovr/.gemini")),
@@ -3074,6 +3087,24 @@ mod tests {
             (ConfigScope::Global, ClientTarget::Kilo, ArtifactKind::Skill) => {
                 (PathAnchor::VendorRoot("kilo"), format!("skills/{name}"))
             }
+            (ConfigScope::Project, ClientTarget::Qoder, ArtifactKind::Skill) => {
+                (PathAnchor::Workspace, format!(".qoder/skills/{name}"))
+            }
+            (ConfigScope::Project, ClientTarget::Qoder, ArtifactKind::Rule) => {
+                (PathAnchor::Workspace, format!(".qoder/rules/{name}.md"))
+            }
+            (ConfigScope::Project, ClientTarget::Qoder, ArtifactKind::Agent) => {
+                (PathAnchor::Workspace, format!(".qoder/agents/{name}.md"))
+            }
+            (ConfigScope::Global, ClientTarget::Qoder, ArtifactKind::Skill) => {
+                (PathAnchor::VendorRoot("qoder"), format!("skills/{name}"))
+            }
+            (ConfigScope::Global, ClientTarget::Qoder, ArtifactKind::Rule) => {
+                (PathAnchor::VendorRoot("qoder"), format!("rules/{name}.md"))
+            }
+            (ConfigScope::Global, ClientTarget::Qoder, ArtifactKind::Agent) => {
+                (PathAnchor::VendorRoot("qoder"), format!("agents/{name}.md"))
+            }
 
             // Bundles are never materialised — exclude from the test loop.
             (_, _, ArtifactKind::Bundle) => unreachable!("bundles excluded from this loop"),
@@ -3181,6 +3212,7 @@ mod tests {
                 ("warp", PathBuf::from("/warp")),
                 ("openclaw", PathBuf::from("/openclaw")),
                 ("kilo", PathBuf::from("/kilo")),
+                ("qoder", PathBuf::from("/qoder")),
             ]
             .into(),
             opencode_skills: Some(PathBuf::from("/oc/skills")),
@@ -3282,10 +3314,10 @@ mod tests {
             }
         }
 
-        // Exhaustiveness guard: 2 scopes × 18 clients × 3 kinds = 108, minus
+        // Exhaustiveness guard: 2 scopes × 19 clients × 3 kinds = 114, minus
         // the 23 declined (client, kind) pairs × 2 scopes = 46, minus the two
         // scope gaps that are NOT declines — global Junie-Rule and project
-        // OpenClaw-Skill, both refused by `kind_surface` — → 60 combos.
+        // OpenClaw-Skill, both refused by `kind_surface` — → 66 combos.
         //
         // The 23: Codex-Rule, Kiro-Agent, Junie-Agent, Gemini-Rule,
         // Zed-Rule/Agent, Amp-Rule/Agent, Agents-Rule/Agent, Antigravity-Rule,
@@ -3295,8 +3327,8 @@ mod tests {
         // If a new ClientTarget or ArtifactKind variant is added, this fails,
         // forcing the table to be extended.
         assert_eq!(
-            combo_count, 60,
-            "expected 60 (scope × client × kind) combos but counted {combo_count}; \
+            combo_count, 66,
+            "expected 66 (scope × client × kind) combos but counted {combo_count}; \
              update the table in expected_anchor_and_relative() and this assertion"
         );
     }
