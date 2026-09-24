@@ -97,13 +97,16 @@ VENDORED_RULES = frozenset({
 VENDORED_SKILLS = frozenset({
     "docs-instrument",
     "docs-plan",
+    "docs-review",
     "hex-architect",
     "hex-core",
     "hex-discuss",
     "hex-execute",
     "hex-finalize",
     "hex-init",
+    "hex-loop",
     "hex-plan",
+    "hex-retro",
     "hex-review",
     "nox-review",
 })
@@ -1045,6 +1048,7 @@ class TestAiConfigOverhaulPhase2:
         # ships today; a sync that changes one is a decision, not a detail.
         "docs-instrument": False,
         "docs-plan": False,
+        "docs-review": False,
         "hex-architect": False,
         # Reference library, not a workflow — never auto-invoked; the hex
         # skills link into it.
@@ -1055,7 +1059,10 @@ class TestAiConfigOverhaulPhase2:
         # first-party `finalize`; re-flip both together if that changes.
         "hex-finalize": False,
         "hex-init": True,
+        # Writes a goal file and a paste-ready loop prompt — manual only.
+        "hex-loop": True,
         "hex-plan": False,
+        "hex-retro": False,
         "hex-review": False,
         "nox-review": False,
     }

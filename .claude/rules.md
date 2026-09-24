@@ -140,7 +140,7 @@ Exempt from overlap detection (intended broad coupling):
 
 ## Vendored rules — installed, not authored here
 
-Eight rules under `.claude/rules/` come from upstream bundles: their prose is **not authored here**, and a local edit to it is reverted by the next sync. (The one local edit that exists is mechanical — a shebang on three shell fixtures under `rules/docs-quality/checks/`, which `task shell:verify` requires; it will be lost on sync and re-applied.) They declare provenance in frontmatter (`license:`, `repository:`), which is the marker `.claude/tests/test_ai_config.py::is_vendored` uses to exempt them from this repo's *authoring* standards (dead-glob detection, catalog authorship, skill description and body budgets). Fix upstream, then re-sync. The same holds for the 11 vendored skills under `.claude/skills/` (`docs-instrument`, `docs-plan`, `hex-*`, `nox-review`).
+Eight rules under `.claude/rules/` come from upstream bundles: their prose is **not authored here**, and a local edit to it is reverted by the next sync. (The one local edit that exists is mechanical — a shebang on three shell fixtures under `rules/docs-quality/checks/`, which `task shell:verify` requires; it will be lost on sync and re-applied.) They declare provenance in frontmatter (`license:`, `repository:`), which is the marker `.claude/tests/test_ai_config.py::is_vendored` uses to exempt them from this repo's *authoring* standards (dead-glob detection, catalog authorship, skill description and body budgets). Fix upstream, then re-sync. The same holds for the 14 vendored skills under `.claude/skills/` (`docs-instrument`, `docs-plan`, `docs-review`, `hex-*`, `nox-review`).
 
 | Rule | Upstream |
 |---|---|
