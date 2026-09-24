@@ -52,9 +52,9 @@ app. The website and the VS Code extension have no key map.
 | `space` | Mark or unmark a row |
 | `a` | Mark all visible rows |
 | `c` | Clear the marks |
-| `i` | Install the marked set, or the selection |
-| `u` | Update the marked set, or the selection |
-| `d` | Uninstall the marked set, or the selection |
+| `i` | Install the marked set, or the selection. More than one artifact asks to [confirm](./commands.md#tui) first |
+| `u` | Update the marked set, or the selection. More than one artifact asks to [confirm](./commands.md#tui) first |
+| `d` | Uninstall the marked set, or the selection. More than one artifact asks to [confirm](./commands.md#tui) first |
 | `v` | Pick a specific version for the selected row |
 | `o` | Open the selected entry's repository URL |
 | `g` | Toggle scope between project and global |

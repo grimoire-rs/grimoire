@@ -98,6 +98,10 @@ pub enum Mode {
     /// control, because offering one on a security refusal trains
     /// click-through.
     ConfirmForce,
+    /// Confirming an install / update / uninstall that targets more than one
+    /// artifact — a mark-all or a group selection is one keystroke away from
+    /// acting on the whole catalog.
+    ConfirmBatch,
 }
 
 /// A refused install awaiting the user's Overwrite decision.
@@ -122,6 +126,20 @@ pub struct PendingForce {
     /// queued Enter cancels — a destructive default is how a stray keypress
     /// discards the user's local edits.
     pub overwrite_selected: bool,
+}
+
+/// A multi-artifact batch awaiting the user's go-ahead, when
+/// [`Mode::ConfirmBatch`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingBatch {
+    /// The operation to run once confirmed.
+    pub op: super::event::BatchOp,
+    /// The `rows` indices it runs over, already filtered to rows `op` accepts.
+    pub rows: Vec<usize>,
+    /// Whether the proceed button is selected. Starts `false` for the same
+    /// reason as [`PendingForce::overwrite_selected`]: a letter typed into the
+    /// list by mistake must not be the key that confirms.
+    pub proceed_selected: bool,
 }
 
 /// The modal version picker: the row it targets, the fetched tags, and the
@@ -328,6 +346,8 @@ pub struct TuiState {
     pub picker: Option<VersionPicker>,
     /// The refused install awaiting confirmation, when [`Mode::ConfirmForce`].
     pub confirm: Option<PendingForce>,
+    /// The multi-artifact batch awaiting confirmation, when [`Mode::ConfirmBatch`].
+    pub pending_batch: Option<PendingBatch>,
     /// The effective default registry; when a row's registry host equals
     /// it the registry prefix is elided from the displayed name (shorter
     /// names) while the stored `repo` keeps the full reference.
@@ -470,6 +490,7 @@ impl Default for TuiState {
             scope_label: String::new(),
             picker: None,
             confirm: None,
+            pending_batch: None,
             default_registry: None,
             clients: Vec::new(),
             view_mode: ViewMode::default(),
@@ -1870,6 +1891,31 @@ impl TuiState {
     pub fn take_confirm_force(&mut self) -> Option<PendingForce> {
         self.mode = Mode::List;
         self.confirm.take().filter(|c| c.overwrite_selected)
+    }
+
+    /// Hold a multi-artifact batch for confirmation. Cancel is preselected —
+    /// see [`PendingBatch::proceed_selected`].
+    pub fn open_confirm_batch(&mut self, op: super::event::BatchOp, rows: Vec<usize>) {
+        self.mode = Mode::ConfirmBatch;
+        self.pending_batch = Some(PendingBatch {
+            op,
+            rows,
+            proceed_selected: false,
+        });
+    }
+
+    /// Flip the batch confirmation between Cancel and the proceed button.
+    pub fn confirm_batch_move(&mut self) {
+        if let Some(b) = self.pending_batch.as_mut() {
+            b.proceed_selected = !b.proceed_selected;
+        }
+    }
+
+    /// Close the batch confirmation, yielding the batch only when the user
+    /// chose to proceed.
+    pub fn take_confirm_batch(&mut self) -> Option<PendingBatch> {
+        self.mode = Mode::List;
+        self.pending_batch.take().filter(|b| b.proceed_selected)
     }
 
     /// The currently selected row, if any.

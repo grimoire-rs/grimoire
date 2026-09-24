@@ -295,15 +295,21 @@ pub struct PickerView {
     pub pinned: Option<String>,
 }
 
-/// The modal Overwrite-confirmation overlay, projected for display.
+/// A modal two-button confirmation overlay (Cancel / action), projected for
+/// display. Serves both the Overwrite prompt and the multi-artifact batch
+/// prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConfirmForceView {
-    /// The popup title (e.g. `Overwrite r/alpha?`).
+pub struct ConfirmView {
+    /// The popup title (e.g. `Overwrite r/alpha?`, `Install 3 artifacts?`).
     pub title: String,
-    /// grim's own description of the refusal, shown verbatim.
+    /// The consequence sentence, first line of the body.
+    pub message: String,
+    /// Supporting text under it: grim's refusal verbatim, or the targets.
     pub detail: String,
-    /// Whether the destructive **Overwrite** button is highlighted.
-    pub overwrite_selected: bool,
+    /// The action button's label (`Overwrite`, `Install`, …).
+    pub action: &'static str,
+    /// Whether the action button (not Cancel) is highlighted.
+    pub action_selected: bool,
 }
 
 /// A plain, ratatui-free description of the whole screen.
@@ -369,8 +375,9 @@ pub struct RenderModel {
     pub help_scroll: u16,
     /// The version-picker overlay, when [`Mode::VersionPick`].
     pub picker: Option<PickerView>,
-    /// The Overwrite-confirmation overlay, when [`Mode::ConfirmForce`].
-    pub confirm: Option<ConfirmForceView>,
+    /// The confirmation overlay, when [`Mode::ConfirmForce`] or
+    /// [`Mode::ConfirmBatch`].
+    pub confirm: Option<ConfirmView>,
     /// Whether the flat-view list should prepend a Registry column.
     ///
     /// True when more than one registry is in scope (the column tells the user
@@ -1028,11 +1035,17 @@ pub fn frame(state: &TuiState) -> RenderModel {
         }
     });
 
-    let confirm = state.confirm.as_ref().map(|c| ConfirmForceView {
-        title: format!("Overwrite {}?", c.repo),
-        detail: c.detail.clone(),
-        overwrite_selected: c.overwrite_selected,
-    });
+    let confirm = state
+        .confirm
+        .as_ref()
+        .map(|c| ConfirmView {
+            title: format!("Overwrite {}?", c.repo),
+            message: "Reinstalling discards your local changes. This cannot be undone.".to_string(),
+            detail: c.detail.clone(),
+            action: "Overwrite",
+            action_selected: c.overwrite_selected,
+        })
+        .or_else(|| state.pending_batch.as_ref().map(|b| confirm_batch_view(state, b)));
 
     // Selected clients render as a quiet span on the legend line; empty
     // selection omits the span (no stray `clients:` label).
@@ -1470,36 +1483,65 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
         draw_picker(f, p);
     }
     if let Some(c) = &model.confirm {
-        draw_confirm_force(f, c);
+        draw_confirm(f, c);
     }
 }
 
-/// A centered Overwrite-confirmation popup: the consequence sentence, grim's
-/// own refusal text verbatim, and a two-button row. Cancel is highlighted
-/// until the user moves off it.
-fn draw_confirm_force(f: &mut Frame, c: &ConfirmForceView) {
+/// Names shown in the batch prompt before the rest collapse into a count.
+const CONFIRM_BATCH_NAMES: usize = 5;
+
+/// The batch prompt: the op and target count in the title, the first few
+/// artifact names in the body so a mark-all is recognisable at a glance.
+fn confirm_batch_view(state: &TuiState, b: &super::state::PendingBatch) -> ConfirmView {
+    let action = match b.op {
+        super::event::BatchOp::Install => "Install",
+        super::event::BatchOp::Update => "Update",
+        super::event::BatchOp::Uninstall => "Uninstall",
+    };
+    let mut names: Vec<&str> = b
+        .rows
+        .iter()
+        .filter_map(|&i| state.rows.get(i))
+        .take(CONFIRM_BATCH_NAMES)
+        .map(|r| r.repository.rsplit('/').next().unwrap_or(&r.repository))
+        .collect();
+    let rest = b.rows.len().saturating_sub(names.len());
+    let more = format!("and {rest} more");
+    if rest > 0 {
+        names.push(&more);
+    }
+    ConfirmView {
+        title: format!("{action} {} artifacts?", b.rows.len()),
+        message: format!("{action} every marked or grouped artifact:"),
+        detail: names.join(", "),
+        action,
+        action_selected: b.proceed_selected,
+    }
+}
+
+/// A centered confirmation popup: the consequence sentence, the supporting
+/// detail, and a Cancel / action button row. Cancel is highlighted until the
+/// user moves off it.
+fn draw_confirm(f: &mut Frame, c: &ConfirmView) {
     let selected = Style::default()
         .bg(Color::Indexed(236))
         .fg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
     let unselected = Style::default().fg(Color::White);
-    let (cancel_style, overwrite_style) = if c.overwrite_selected {
+    let (cancel_style, action_style) = if c.action_selected {
         (unselected, selected)
     } else {
         (selected, unselected)
     };
 
     let body = vec![
-        Line::from(Span::styled(
-            "Reinstalling discards your local changes. This cannot be undone.",
-            Style::default().fg(Color::White),
-        )),
+        Line::from(Span::styled(c.message.clone(), Style::default().fg(Color::White))),
         Line::from(""),
         Line::from(Span::styled(c.detail.clone(), Style::default().fg(Color::DarkGray))),
         Line::from(""),
         Line::from(vec![
             Span::styled("  [ Cancel ]  ", cancel_style),
-            Span::styled("  [ Overwrite ]  ", overwrite_style),
+            Span::styled(format!("  [ {} ]  ", c.action), action_style),
         ]),
     ];
 
@@ -2550,11 +2592,33 @@ mod tests {
         let c = frame(&s).confirm.expect("confirm projected once opened");
         assert_eq!(c.title, "Overwrite r/alpha?");
         assert_eq!(c.detail, detail, "grim's refusal text is shown verbatim");
-        assert!(!c.overwrite_selected, "Cancel is preselected");
+        assert!(!c.action_selected, "Cancel is preselected");
 
         // Moving the selection flips the highlight onto Overwrite.
         s.confirm_force_move(1);
-        assert!(frame(&s).confirm.unwrap().overwrite_selected);
+        assert!(frame(&s).confirm.unwrap().action_selected);
+    }
+
+    #[test]
+    fn frame_projects_the_batch_confirm_with_names_and_a_count() {
+        let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
+        let names = ["a1", "a2", "a3", "a4", "a5", "a6", "a7"];
+        s.set_rows(
+            names
+                .iter()
+                .map(|n| row(&format!("r/{n}"), ArtifactState::Installed))
+                .collect(),
+        );
+        s.open_confirm_batch(super::super::event::BatchOp::Uninstall, (0..names.len()).collect());
+        let c = frame(&s).confirm.expect("batch confirm projected once opened");
+        assert_eq!(c.title, "Uninstall 7 artifacts?");
+        assert_eq!(c.action, "Uninstall");
+        assert!(c.detail.starts_with("a1, a2"), "names shown: {}", c.detail);
+        assert!(c.detail.ends_with("and 2 more"), "overflow counted: {}", c.detail);
+        assert!(!c.action_selected, "Cancel is preselected");
+        s.confirm_batch_move();
+        assert!(frame(&s).confirm.unwrap().action_selected);
     }
 
     #[test]

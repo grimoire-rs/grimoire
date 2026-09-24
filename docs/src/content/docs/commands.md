@@ -1750,6 +1750,13 @@ cannot speak for several artifacts, so a batch leaves its refusals in the
 aggregate status line instead. An already-forced retry that refuses again does
 not re-open the dialog, so there is no confirm loop to get stuck in.
 
+**The batch confirmation** stands between one keystroke and a whole catalog.
+An `i`, `u` or `d` that would act on more than one artifact — a marked set, or
+a group selected in tree view — opens a prompt naming the count and the first
+few artifacts before anything runs. Cancel is preselected and there is no `y`
+shortcut: `→` then `enter` confirms, any other key cancels and keeps the marks.
+A single artifact still acts on the first press.
+
 **The `+ pending` badge** marks an artifact that is installed but does not yet
 cover every client it should. It is materialization drift, the same thing
 [`grim status`](#status) reports as `outputs_pending`: a client was added to

@@ -182,6 +182,7 @@ pub fn handle(state: &mut TuiState, input: TuiInput) -> TuiAction {
         Mode::Help => handle_help(state, input),
         Mode::VersionPick => handle_picker(state, input),
         Mode::ConfirmForce => handle_confirm_force(state, input),
+        Mode::ConfirmBatch => handle_confirm_batch(state, input),
         Mode::List => handle_browse(state, input),
     }
 }
@@ -212,6 +213,31 @@ fn handle_confirm_force(state: &mut TuiState, input: TuiInput) -> TuiAction {
         // Esc and anything else dismiss without acting — the safe direction.
         _ => {
             state.confirm = None;
+            state.back();
+            TuiAction::None
+        }
+    }
+}
+
+/// Batch-confirmation keys: the same shape as [`handle_confirm_force`] —
+/// `←`/`→` or `h`/`l` move between Cancel and the action, `Enter` commits,
+/// `q` quits, anything else cancels. No `y` accelerator and Cancel
+/// preselected: the prompt exists to stop keys typed into the list by
+/// mistake (a word containing `a` then `i` marks everything and installs
+/// it), so the next stray key must never be the one that confirms.
+fn handle_confirm_batch(state: &mut TuiState, input: TuiInput) -> TuiAction {
+    match input {
+        TuiInput::Collapse | TuiInput::Expand | TuiInput::Char('h') | TuiInput::Char('l') => {
+            state.confirm_batch_move();
+            TuiAction::None
+        }
+        TuiInput::Enter => match state.take_confirm_batch() {
+            Some(b) => TuiAction::Batch { op: b.op, rows: b.rows },
+            None => TuiAction::None,
+        },
+        TuiInput::Char('q') | TuiInput::Quit => TuiAction::Quit,
+        _ => {
+            state.pending_batch = None;
             state.back();
             TuiAction::None
         }
@@ -385,7 +411,8 @@ fn op_allows(op: BatchOp, state: ArtifactState) -> bool {
 /// `u`/`d` on a group reach `NotInstalled` descendants, which `perform()`
 /// would install rather than reject). `None` when there is nothing to act
 /// on, or when filtering empties the set (a status breadcrumb explains why,
-/// mirroring the single-Member gates' wording).
+/// mirroring the single-Member gates' wording). More than one row opens
+/// [`Mode::ConfirmBatch`] instead of acting.
 fn batch(state: &mut TuiState, op: BatchOp) -> TuiAction {
     let targets = state.action_targets();
     let had_targets = !targets.is_empty();
@@ -401,6 +428,9 @@ fn batch(state: &mut TuiState, op: BatchOp) -> TuiAction {
             };
             state.set_status(reason);
         }
+        TuiAction::None
+    } else if rows.len() > 1 {
+        state.open_confirm_batch(op, rows);
         TuiAction::None
     } else {
         TuiAction::Batch { op, rows }
@@ -759,6 +789,18 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
     }
 }
 
+/// Test helper: apply `input`, and when it opens the batch confirmation,
+/// accept it — for tests about *which* rows a batch targets, not the prompt.
+#[cfg(test)]
+fn confirmed(state: &mut TuiState, input: TuiInput) -> TuiAction {
+    let action = handle(state, input);
+    if state.mode != Mode::ConfirmBatch {
+        return action;
+    }
+    handle(state, TuiInput::Expand);
+    handle(state, TuiInput::Enter)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -936,7 +978,7 @@ mod tests {
         handle(&mut s, TuiInput::Mark);
         // Selection is row 2 but the marked set wins.
         assert_eq!(
-            handle(&mut s, TuiInput::Install),
+            confirmed(&mut s, TuiInput::Install),
             TuiAction::Batch {
                 op: BatchOp::Install,
                 rows: vec![0, 2]
@@ -958,7 +1000,7 @@ mod tests {
         let mut s = seeded();
         handle(&mut s, TuiInput::MarkAll);
         assert_eq!(
-            handle(&mut s, TuiInput::Install),
+            confirmed(&mut s, TuiInput::Install),
             TuiAction::Batch {
                 op: BatchOp::Install,
                 rows: vec![0, 1, 2]
@@ -966,6 +1008,52 @@ mod tests {
         );
         handle(&mut s, TuiInput::MarkAll); // all marked ⇒ clears
         assert!(s.marked.is_empty());
+    }
+
+    #[test]
+    fn multi_row_batch_waits_for_confirmation_with_cancel_preselected() {
+        let mut s = seeded();
+        handle(&mut s, TuiInput::MarkAll);
+        assert_eq!(handle(&mut s, TuiInput::Install), TuiAction::None);
+        assert_eq!(s.mode, Mode::ConfirmBatch);
+        // A bare Enter lands on Cancel: nothing runs, the marks survive.
+        assert_eq!(handle(&mut s, TuiInput::Enter), TuiAction::None);
+        assert_eq!(s.mode, Mode::List);
+        assert!(s.pending_batch.is_none());
+        assert_eq!(s.marked.len(), 3, "cancelling keeps the selection");
+        // Moving to the action button and confirming runs the whole batch.
+        handle(&mut s, TuiInput::Install);
+        handle(&mut s, TuiInput::Expand);
+        assert_eq!(
+            handle(&mut s, TuiInput::Enter),
+            TuiAction::Batch {
+                op: BatchOp::Install,
+                rows: vec![0, 1, 2]
+            }
+        );
+        assert_eq!(s.mode, Mode::List);
+    }
+
+    // The accident this prompt exists for: typing into the list instead of
+    // the search box — `a` marks everything, `i` installs it. Whatever is
+    // typed next must dismiss the prompt, never confirm it.
+    #[test]
+    fn keys_typed_after_mark_all_and_install_cancel_the_prompt() {
+        for next in [
+            TuiInput::Char('y'),
+            TuiInput::Char('Y'),
+            TuiInput::Char('n'),
+            TuiInput::Char('i'),
+            TuiInput::Enter,
+        ] {
+            let mut s = seeded();
+            handle(&mut s, TuiInput::Char('a'));
+            assert_eq!(handle(&mut s, TuiInput::Char('i')), TuiAction::None);
+            assert_eq!(s.mode, Mode::ConfirmBatch);
+            assert_eq!(handle(&mut s, next), TuiAction::None, "{next:?} must not confirm");
+            assert!(s.pending_batch.is_none());
+            assert_eq!(s.mode, Mode::List);
+        }
     }
 
     #[test]
@@ -2452,7 +2540,7 @@ mod bug2_group_batch_state_gate_tests {
             ("gamma", ArtifactState::IntegrityMissing),
         ]);
         assert_eq!(
-            handle(&mut s, TuiInput::Install),
+            confirmed(&mut s, TuiInput::Install),
             TuiAction::Batch {
                 op: BatchOp::Install,
                 rows: vec![0, 2],
@@ -2496,7 +2584,7 @@ mod bug2_group_batch_state_gate_tests {
             ("n6", ArtifactState::NotInstalled),
         ]);
         assert_eq!(
-            handle(&mut s, TuiInput::Update),
+            confirmed(&mut s, TuiInput::Update),
             TuiAction::Batch {
                 op: BatchOp::Update,
                 rows: vec![0, 1, 2, 3, 4],
