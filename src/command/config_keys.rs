@@ -3,7 +3,7 @@
 
 //! The typed registry of `grim config` dotted keys.
 //!
-//! Single source of truth for the 9 fixed `options.*` keys, the 6
+//! Single source of truth for the 10 fixed `options.*` keys, the 6
 //! per-registry field names, and the per-vendor field
 //! ([`VENDOR_SHARED_SKILLS`]): their [`crate::api::ValueType`] (which
 //! carries the runtime default alongside the type), title, and
@@ -48,7 +48,7 @@ pub struct KeySpec {
     pub constraints: Option<ValueConstraints>,
 }
 
-/// The 9 fixed `options.*` config keys, in listing order.
+/// The 10 fixed `options.*` config keys, in listing order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigKey {
     DefaultRegistry,
@@ -60,6 +60,7 @@ pub enum ConfigKey {
     TuiExpandLevels,
     TuiSort,
     TuiSortOrder,
+    SearchMinRelevance,
 }
 
 impl ConfigKey {
@@ -67,7 +68,7 @@ impl ConfigKey {
     /// pins today's `collect_entries` order: `default_registry`,
     /// `clients`, `show_deprecated`, then the `tui.*` keys — **append
     /// only**: consumers of `grim config list --all` may index by position.
-    pub const ALL: [ConfigKey; 9] = [
+    pub const ALL: [ConfigKey; 10] = [
         ConfigKey::DefaultRegistry,
         ConfigKey::Clients,
         ConfigKey::ShowDeprecated,
@@ -77,6 +78,7 @@ impl ConfigKey {
         ConfigKey::TuiExpandLevels,
         ConfigKey::TuiSort,
         ConfigKey::TuiSortOrder,
+        ConfigKey::SearchMinRelevance,
     ];
 
     /// This key's static metadata.
@@ -193,6 +195,16 @@ impl ConfigKey {
                            default grouping with the biggest or newest first.",
             constraints: None,
         };
+        const SEARCH_MIN_RELEVANCE: KeySpec = KeySpec {
+            key: "options.search_min_relevance",
+            value_type: ValueType::U32 {
+                default: defaults::SEARCH_MIN_RELEVANCE,
+            },
+            title: "Search minimum relevance",
+            description: "Sets how relevant a search result must be to be listed, as a percentage of the \
+                           best hit's score, from `0` to `100`. Defaults to `50`; `0` lists every match.",
+            constraints: None,
+        };
         match self {
             Self::DefaultRegistry => &DEFAULT_REGISTRY,
             Self::Clients => &CLIENTS,
@@ -203,6 +215,7 @@ impl ConfigKey {
             Self::TuiExpandLevels => &TUI_EXPAND_LEVELS,
             Self::TuiSort => &TUI_SORT,
             Self::TuiSortOrder => &TUI_SORT_ORDER,
+            Self::SearchMinRelevance => &SEARCH_MIN_RELEVANCE,
         }
     }
 
@@ -596,6 +609,7 @@ mod tests {
                 sort_order: Some(crate::catalog::SortOrder::Desc),
             },
             show_deprecated: true,
+            search_min_relevance: Some(30),
             vendors: [("claude".to_string(), VendorOptions { shared_skills: true })]
                 .into_iter()
                 .collect(),
@@ -851,6 +865,7 @@ mod tests {
                 ConfigKey::TuiExpandLevels => &tui_options["properties"]["expand_levels"],
                 ConfigKey::TuiSort => &tui_options["properties"]["sort"],
                 ConfigKey::TuiSortOrder => &tui_options["properties"]["sort_order"],
+                ConfigKey::SearchMinRelevance => &config_options["properties"]["search_min_relevance"],
             };
             assert_description_prefix(node, spec.description, spec.key);
             let type_node = unwrap_nullable(&schema, node);

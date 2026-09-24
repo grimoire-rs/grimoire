@@ -625,8 +625,12 @@ each term fuzzy-matches (case-insensitive) any of an entry's kind,
 repository, summary, description, or keywords. Fuzzy means subsequence, as
 in fzf: the letters must appear in order but need not be adjacent, so
 `kubctl` finds `kube-control` (a mistyped letter is not forgiven — only a
-missing one). Results are ranked by relevance, best first, across all
-browsed registries; the unqueried browse is unranked and lists registry by
+missing one), and a match must be tight — letters scattered across a
+description do not count, and the registry host is never searched. Results
+are ranked by relevance, best first, across all browsed registries, and
+hits scoring below half the best one are dropped, so a name match hides
+description-only mentions (`grim config set options.search_min_relevance 0`
+lists every match; the value is a percentage of the best hit, default 50); the unqueried browse is unranked and lists registry by
 registry. A bare kind keyword (`skill`/`rule`/`bundle`, singular or plural)
 filters by kind instead of matching as text; an empty query lists the whole
 catalog. Confirm the match fields and kind-filter keywords with

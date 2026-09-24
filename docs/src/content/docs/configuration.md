@@ -66,6 +66,14 @@ stays visible; `true` shows them everywhere. It seeds the initial state only —
 the search `--show-deprecated` flag and the TUI `h` key override it per run, and
 the `h` toggle is never written back to the file.
 
+The top-level `search_min_relevance` integer (default `50`) sets how relevant a
+result must be to be listed by [`grim search`][grim-search], the
+[`grim tui`][grim-tui] search and the MCP `grim_search` tool, as a percentage
+of the best hit's score. At the default, an artifact that only mentions the
+query in its description is dropped whenever another artifact is named for
+it; `0` lists every match, and a value above `100` is rejected on load
+(exit 78).
+
 ### `[options.tui]` {#options-tui}
 
 The optional `[options.tui]` sub-table tunes the interactive catalog browser

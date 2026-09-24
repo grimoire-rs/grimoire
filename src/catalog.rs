@@ -32,6 +32,6 @@ pub use catalog_service::{BadgeContext, CatalogGroup, CatalogResults, CatalogRow
 #[allow(unused_imports)]
 pub use registry_catalog::{Catalog, CatalogEntry, DownloadSummary, DownloadVersion, OciMeta};
 #[allow(unused_imports)]
-pub use search_match::SearchQuery;
+pub use search_match::{SearchQuery, retain_relevant};
 #[allow(unused_imports)]
 pub use vote_store::{VoteIdentity, VoteState, VoteStore};

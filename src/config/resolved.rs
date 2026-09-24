@@ -7,8 +7,9 @@
 //! field with a per-site `unwrap_or` — one seam, one set of defaults, no
 //! drift between call sites.
 //!
-//! Scope is deliberately narrow: only `[options.tui]` keys that carry a
-//! built-in runtime default flow through here. The remaining `[options]`
+//! Scope is deliberately narrow: only keys that carry a built-in runtime
+//! default flow through here — the `[options.tui]` display keys plus
+//! `[options].search_min_relevance`, which the TUI shares with `grim search`. The remaining `[options]`
 //! keys — `default_registry`, `clients`, `show_deprecated`, and `vendors`
 //! — pass through **untouched** at their own consumers, because none has a
 //! runtime default to substitute (their empty/`None`/`false` state is
@@ -60,6 +61,10 @@ pub struct ResolvedOptions {
     /// The direction that order runs in; the mode's own
     /// [`SortMode::natural_order`] when `[options.tui].sort_order` is unset.
     pub sort_order: SortOrder,
+    /// The relevance cutoff, in percent of the best hit, every search
+    /// surface applies; [`defaults::SEARCH_MIN_RELEVANCE`] when
+    /// `[options].search_min_relevance` is unset. An explicit `0` is kept.
+    pub search_min_relevance: u32,
 }
 
 impl ConfigOptions {
@@ -82,6 +87,7 @@ impl ConfigOptions {
             clients: _,
             tui,
             show_deprecated: _,
+            search_min_relevance,
             // Same reasoning as the three above: `[options.vendors]` carries
             // no runtime default to substitute. `shared_skills` is `false`
             // when a client has no entry, which is already the resting
@@ -110,6 +116,7 @@ impl ConfigOptions {
             expand_levels: (*expand_levels).unwrap_or(defaults::EXPAND_LEVELS),
             sort: *sort,
             sort_order: (*sort_order).unwrap_or(SortMode::natural_order(*sort)),
+            search_min_relevance: (*search_min_relevance).unwrap_or(defaults::SEARCH_MIN_RELEVANCE),
         }
     }
 }
@@ -158,6 +165,7 @@ mod tests {
             clients: vec!["claude".to_string(), "opencode".to_string()],
             vendors: Default::default(),
             show_deprecated: true,
+            search_min_relevance: None,
             tui: TuiOptions {
                 default_view: Some(DefaultView::Flat),
                 group_by_type: true,

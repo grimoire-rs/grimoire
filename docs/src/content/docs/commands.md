@@ -128,6 +128,7 @@ The supported dotted keys are:
 | `options.clients` | comma-separated client names, closed set | An unordered set of unique values drawn from the supported client names (see the [client compatibility matrix](./clients.md#matrix)) — e.g. `claude,opencode`. An unrecognized name or a repeated segment exits `65`; input order is otherwise preserved on store. Empty string clears the list. |
 | `options.default_registry` | string | Legacy field — prefer `grim config registry use` for new configs. |
 | `options.show_deprecated` | `true` or `false` | `false` is the default (deprecated artifacts are hidden from `grim search` and the TUI unless installed); setting it to `false` removes the key, so a subsequent `get` exits 1 (consistent with `list`, which omits default values). Seeds the initial state for both `grim search` and `grim tui`; the search `--show-deprecated` flag and the TUI `h` key override it per run. |
+| `options.search_min_relevance` | integer `0`–`100` | How relevant a search result must be to be listed, as a percentage of the best hit's score, in [`grim search`](#search), the TUI search and the MCP `grim_search` tool. `50` is the default when unset; `0` lists every match. Values above `100` or non-integers exit `65`; an explicit value is always kept. |
 | `options.tui.default_view` | `flat` or `tree` | Other values exit `65`. |
 | `options.tui.group_by_type` | `true` or `false` | `false` is the default; setting it to `false` removes the key, so a subsequent `get` exits 1 (consistent with `list`, which omits default values). |
 | `options.tui.tree_separators` | comma-separated single-character strings | Each character must be non-control and non-whitespace; other values exit `65`. |
@@ -999,12 +1000,22 @@ editor command palettes use: a term's letters must appear in order, but need
 not be adjacent. So `grim search kubctl` finds `kube-control`, and a term
 may span a hyphen or a path separator. Letters typed *wrongly* are not
 forgiven — `kuberentes` does not find `kubernetes`, because the `n` and `e`
-are transposed rather than merely missing.
+are transposed rather than merely missing. A match only counts when it is
+*tight*: a term's letters strung out across a sentence of description are
+noise, so `grim search grim` does not find every artifact whose blurb happens
+to contain a `g`, an `r`, an `i` and an `m` in that order. The registry host
+is not searched at all — every artifact on `ghcr.io` shares it.
 
 Because a fuzzy query matches many more repositories than a substring one,
 results are **ranked by relevance**, best match first, across every browsed
 registry at once. A hit on the artifact's own name outranks the same word
-found only in a description. Ranking replaces registry-declaration order
+found only in a description, and results scoring below half the best hit
+are dropped: when some artifact is *named* for the query, artifacts that
+merely mention it in their description are left out. When nothing matches
+by name, the description hits are the best there is and all of them are
+listed. The half is the default of
+[`options.search_min_relevance`](./configuration.md#grimoire-toml), a
+percentage from `0` (list every match) to `100`. Ranking replaces registry-declaration order
 whenever there is a query. What attributes each row to the registry that
 served it is the `source` object under `--format json`, described below.
 The unqueried browse is not ranked and still lists registry by registry,
@@ -1135,7 +1146,10 @@ order is total — two runs over the same catalog render identically.
 
 Given together with a query, `--sort` **replaces** relevance ranking:
 `grim search review --sort rating` is "the best-rated of the review
-matches", not "the most relevant, subsorted". Omitted, results keep today's
+matches", not "the most relevant, subsorted". The matches are the same set
+an unsorted query returns, relevance cutoff included — set
+[`options.search_min_relevance`](./configuration.md#grimoire-toml) to `0` to sort
+every match. Omitted, results keep today's
 order — relevance when queried, registry-declaration order otherwise —
 which is what makes the flag purely additive.
 
@@ -1627,9 +1641,11 @@ way — additionally dropping the `[skills]` / `[rules]` / `[agents]` entry
 for a declared-path row, or just the install record for a dev row (which
 was never declared).
 
-An active search (started with `/`) reveals matching entries even when their
-parent group is collapsed — the tree stays navigable in search mode and does
-not force a switch to flat view.
+An active search (started with `/`) switches the tree to the flat list for
+as long as the query is non-empty, so the ranked results read as one list
+instead of scattering across groups; clearing the query returns to the tree.
+Pressing `t` during a search is honoured and sticks — clearing the query
+then leaves the view as you chose it.
 
 Four config fields under `[options.tui]` in `grimoire.toml` let you set
 the opening view mode, how many tree levels open expanded, and how paths are

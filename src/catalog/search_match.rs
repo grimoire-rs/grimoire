@@ -18,17 +18,18 @@
 //!
 //! Fuzzy here means *subsequence* matching in the fzf/skim sense: the term's
 //! characters must appear in order but need not be adjacent, so `kubctl`
-//! finds `kube-control`. It is a strict superset of the substring matching
-//! this module used to do — nothing that matched before stops matching.
-//! Substitutions and transpositions are **not** tolerated (`kuberentes` does
+//! finds `kube-control`. A hit only counts when it is *tight* (see
+//! [`MIN_SCORE_PER_CHAR`]): a term's letters scattered across a paragraph of
+//! prose are noise, not a match. Substitutions and transpositions are **not** tolerated (`kuberentes` does
 //! not find `kubernetes`); that is the deliberate, conventional trade
 //! (fzf, skim, Helix and VS Code's palette all behave this way).
 //!
 //! Because fuzzy matching admits far more rows than substring matching,
 //! ranking is load-bearing: [`SearchQuery::score_fields`] returns a
 //! relevance score, and every consumer sorts by it whenever the query is
-//! non-empty. [`SearchQuery::matches_fields`] is the boolean view of the
-//! same computation, kept for callers that only decide visibility.
+//! non-empty, and drops the weak tail with [`retain_relevant`].
+//! [`SearchQuery::matches_fields`] is the boolean view of the same
+//! computation, kept for callers that only decide visibility.
 //!
 //! The scoring shape: each term scores against every field independently and
 //! keeps its best field, weighted so a name hit outranks a blurb hit (see
@@ -73,6 +74,41 @@ mod weight {
     pub const KIND: i64 = 1;
 }
 
+/// Minimum raw skim score per query character for a field hit to count.
+///
+/// Subsequence matching finds almost any short term *somewhere* in a long
+/// description — `grim` in "...ag**r**... **i**... **m**..." — and skim
+/// still returns `Some` for it, just with a tiny score. Measured: a real hit
+/// (contiguous, or a tight abbreviation like `kubctl` → `kube-control`)
+/// scores 15–25 per character; a letter-scatter across prose scores ~2, or
+/// ~10 when every letter lands on a word start (`kubctl` in "lockfiles,
+/// wheel contents, and publishing credentials").
+///
+/// ponytail: one threshold for every field, calibrated on those
+/// measurements; retune against a real catalog if abbreviations drop out.
+const MIN_SCORE_PER_CHAR: i64 = 12;
+
+/// Drop the entries of a scored result set scoring below `min_percent` of
+/// the best entry's score (`[options].search_min_relevance`). Order is
+/// preserved.
+///
+/// At the default 50 the [`weight`] ratios drop description-only hits
+/// whenever some entry matched the same terms in its name — searching `grim`
+/// returns the `grim-*` artifacts, not every artifact whose blurb mentions
+/// grim. When no entry hits a strong field, the best score is itself a
+/// description hit and those rows all survive. `0` keeps every match.
+///
+/// Shared by every ranked surface (`grim search`, MCP `grim_search`, the TUI
+/// filter) so they agree on *which* rows a query returns, not only on their
+/// order. An all-zero set (the empty query) keeps everything.
+pub fn retain_relevant<T>(scored: &mut Vec<(i64, T)>, min_percent: u32) {
+    let Some(best) = scored.iter().map(|(s, _)| *s).max() else {
+        return;
+    };
+    let threshold = best.saturating_mul(i64::from(min_percent));
+    scored.retain(|(s, _)| s.saturating_mul(100) >= threshold);
+}
+
 /// A parsed search query: lowercased text terms plus parsed kind filters.
 ///
 /// Constructed via [`Self::parse`]; fields stay private so the parse rules
@@ -103,6 +139,12 @@ impl SearchQuery {
             }
         }
         Self { terms, kinds }
+    }
+
+    /// Whether the query carries at least one text term — i.e. whether it
+    /// ranks anything. A kind-only query filters but scores every entry `0`.
+    pub fn has_text_terms(&self) -> bool {
+        !self.terms.is_empty()
     }
 
     /// Whether the query constrains nothing (no text terms and no kind
@@ -176,9 +218,11 @@ impl SearchQuery {
 /// The best weighted score any single field yields for one term, or `None`
 /// when the term matches no field at all.
 ///
-/// The repository is scored twice — against the full `registry/org/name`
-/// reference and against its trailing leaf segment — keeping the better of
-/// the two. skim penalizes matches spread across a long haystack, so without
+/// The repository is scored twice — against its `org/name` path and against
+/// its trailing leaf segment — keeping the better of the two. The registry
+/// host is never scored: every row shares a handful of hosts, and
+/// `ghcr.io/m…` alone letter-matches `grim` tightly enough to pass the
+/// quality floor on every artifact in that registry. skim penalizes matches spread across a long haystack, so without
 /// the leaf pass a hit on `ghcr.io/acme/code-review`'s actual *name* would
 /// score below an incidental mention in some other entry's short summary.
 fn best_field_score(
@@ -189,11 +233,26 @@ fn best_field_score(
     description: &str,
     keywords: &[String],
 ) -> Option<i64> {
-    let scored = |haystack: &str, weight: i64| MATCHER.fuzzy_match(haystack, term).map(|s| s * weight);
-    let leaf = repo.rsplit('/').next().unwrap_or(repo);
+    let floor = MIN_SCORE_PER_CHAR.saturating_mul(i64::try_from(term.chars().count()).unwrap_or(i64::MAX));
+    let scored = |haystack: &str, weight: i64| {
+        MATCHER
+            .fuzzy_match(haystack, term)
+            .filter(|&s| s >= floor)
+            .map(|s| s * weight)
+    };
+    let path = without_registry_host(repo);
+    let leaf = path.rsplit('/').next().unwrap_or(path);
+    // A term that itself names a host or path (`ghcr.io/acme/x`, a `repo`
+    // copied from `--format json`) is matched against the full reference;
+    // a plain word never sees the host.
+    let full = term
+        .contains(['/', '.', ':'])
+        .then(|| scored(repo, weight::REPO))
+        .flatten();
 
     [
-        scored(repo, weight::REPO),
+        full,
+        scored(path, weight::REPO),
         scored(leaf, weight::REPO),
         scored(summary, weight::SUMMARY),
         scored(description, weight::DESCRIPTION),
@@ -203,6 +262,20 @@ fn best_field_score(
     .into_iter()
     .flatten()
     .max()
+}
+
+/// `repo` minus a leading registry host, recognised the way Docker does: a
+/// first segment containing `.` or `:`, or exactly `localhost`. A bare
+/// `org/name` passes through unchanged.
+///
+/// ponytail: guesses the host from the joined string; a dotless intranet
+/// host (`artifactory/…`) stays searchable. Pass `registry` and
+/// `repository` separately if that ever matters.
+fn without_registry_host(repo: &str) -> &str {
+    match repo.split_once('/') {
+        Some((first, rest)) if first.contains(['.', ':']) || first == "localhost" => rest,
+        _ => repo,
+    }
 }
 
 /// Map a lowercased token to a kind filter, accepting both singular and
@@ -442,5 +515,74 @@ mod tests {
         assert!(q.matches_fields(Some("rule"), "acme/rust-style", "", "", &kw(&["lint"])));
         // Second term absent everywhere ⇒ the whole entry fails.
         assert!(!q.matches_fields(Some("rule"), "acme/rust-style", "", "", &kw(&["quality"])));
+    }
+
+    #[test]
+    fn letters_scattered_across_prose_are_not_a_match() {
+        // Regression: `grim` matched nearly every description as a
+        // subsequence (g…r…i…m spread over a sentence).
+        let q = SearchQuery::parse("grim");
+        let prose = "Tiered multi-agent swarm orchestration: plan, execute, review, and ship with rigor and memory";
+        assert!(!q.matches_fields(Some("skill"), "acme/hex", "", prose, &[]));
+        // A real mention in the same field still matches.
+        assert!(q.matches_fields(Some("skill"), "acme/hex", "", "A grim artifact", &[]));
+    }
+
+    #[test]
+    fn retain_relevant_drops_description_hits_when_a_name_hit_exists() {
+        let q = SearchQuery::parse("grim");
+        let name_hit = q.score_fields(Some("skill"), "acme/grim-usage", "", "", &[]).unwrap();
+        let blurb_hit = q
+            .score_fields(Some("skill"), "acme/other", "", "A grim artifact", &[])
+            .unwrap();
+        let mut scored = vec![(name_hit, "name"), (blurb_hit, "blurb")];
+        retain_relevant(&mut scored, 50);
+        assert_eq!(scored, vec![(name_hit, "name")]);
+
+        // Without a strong hit, the description hits are the best there is.
+        let mut only_blurbs = vec![(blurb_hit, "a"), (blurb_hit, "b")];
+        retain_relevant(&mut only_blurbs, 50);
+        assert_eq!(only_blurbs.len(), 2);
+
+        // The empty query scores 0 everywhere and keeps every row.
+        let mut browse = vec![(0, "a"), (0, "b")];
+        retain_relevant(&mut browse, 50);
+        assert_eq!(browse.len(), 2);
+
+        // `0` turns the cutoff off; `100` keeps only the best-scoring ties.
+        let mut all = vec![(name_hit, "name"), (blurb_hit, "blurb")];
+        retain_relevant(&mut all, 0);
+        assert_eq!(all.len(), 2);
+        retain_relevant(&mut all, 100);
+        assert_eq!(all, vec![(name_hit, "name")]);
+    }
+
+    #[test]
+    fn registry_host_is_not_a_search_field() {
+        // Regression: `ghcr.io/m…` letter-matched `grim` for every artifact
+        // hosted on ghcr.io.
+        let q = SearchQuery::parse("grim");
+        assert!(!q.matches_fields(Some("skill"), "ghcr.io/michael-herwig/arcana/hex", "", "", &[]));
+        assert!(!SearchQuery::parse("ghcr").matches_fields(Some("skill"), "ghcr.io/acme/x", "", "", &[]));
+        // A term naming the host still finds the full reference — a `repo`
+        // copied out of `--format json` must round-trip.
+        assert!(SearchQuery::parse("ghcr.io/acme/x").matches_fields(Some("skill"), "ghcr.io/acme/x", "", "", &[]));
+        assert!(SearchQuery::parse("localhost:5000/acme/x").matches_fields(
+            Some("skill"),
+            "localhost:5000/acme/x",
+            "",
+            "",
+            &[]
+        ));
+        // The org path still matches.
+        assert!(SearchQuery::parse("arcana").matches_fields(
+            Some("skill"),
+            "ghcr.io/michael-herwig/arcana/hex",
+            "",
+            "",
+            &[]
+        ));
+        assert_eq!(without_registry_host("localhost:5000/acme/x"), "acme/x");
+        assert_eq!(without_registry_host("acme/x"), "acme/x");
     }
 }

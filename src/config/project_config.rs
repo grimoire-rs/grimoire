@@ -191,6 +191,14 @@ fn parse_config(s: &str, path: PathBuf) -> Result<ProjectConfig, ConfigError> {
         toml::from_str(s).map_err(|e| ConfigError::new(path.clone(), ConfigErrorKind::TomlParse(e)))?;
     validate_registries(&raw.registries, &path)?;
     validate_tree_separators(&raw.options.tui.tree_separators, &path)?;
+    if let Some(value) = raw.options.search_min_relevance
+        && value > crate::config::defaults::SEARCH_MIN_RELEVANCE_MAX
+    {
+        return Err(ConfigError::new(
+            path,
+            ConfigErrorKind::SearchMinRelevanceInvalid { value },
+        ));
+    }
     validate_clients(&raw.options.clients, &path)?;
     validate_vendors(&raw.options.vendors, &path)?;
     let skills = parse_artifact_map(&raw.skills, &path, PathValues::Allowed)?;
@@ -1949,6 +1957,19 @@ tree_separators = ["/", "-"]
         )
         .expect("single-char tree_separators must be accepted");
         assert_eq!(cfg.options.tui.tree_separators, vec!["/".to_string(), "-".to_string()]);
+    }
+
+    #[test]
+    fn search_min_relevance_above_100_is_a_config_error() {
+        let err = ProjectConfig::from_toml_str("[options]\nsearch_min_relevance = 101\n")
+            .expect_err("a percentage above 100 must be rejected at load");
+        assert!(
+            matches!(err.kind, ConfigErrorKind::SearchMinRelevanceInvalid { value: 101 }),
+            "got {:?}",
+            err.kind
+        );
+        let ok = ProjectConfig::from_toml_str("[options]\nsearch_min_relevance = 0\n").unwrap();
+        assert_eq!(ok.options.search_min_relevance, Some(0));
     }
 
     #[test]

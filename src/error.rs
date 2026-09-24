@@ -305,6 +305,7 @@ fn classify_config(err: &ConfigError) -> Classification {
         | ConfigErrorKind::FileTooLarge { .. }
         | ConfigErrorKind::RegistryInvalid { .. }
         | ConfigErrorKind::TreeSeparatorInvalid { .. }
+        | ConfigErrorKind::SearchMinRelevanceInvalid { .. }
         | ConfigErrorKind::ClientsInvalid { .. }
         | ConfigErrorKind::VendorsInvalid { .. } => Classification::new(ExitCode::ConfigError),
         ConfigErrorKind::NotDiscovered => Classification {

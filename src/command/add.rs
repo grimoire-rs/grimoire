@@ -910,7 +910,10 @@ pub(crate) fn write_config(
     if let Some(directive) = preserved_schema_directive(path) {
         let _ = writeln!(out, "{directive}");
     }
-    let has_base_options = options.default_registry.is_some() || !options.clients.is_empty() || options.show_deprecated;
+    let has_base_options = options.default_registry.is_some()
+        || !options.clients.is_empty()
+        || options.show_deprecated
+        || options.search_min_relevance.is_some();
     let has_tui_options = !options.tui.is_empty();
     if has_base_options || has_tui_options {
         out.push_str("[options]\n");
@@ -932,6 +935,9 @@ pub(crate) fn write_config(
         // default), matching the serde `skip_serializing_if` on the field.
         if options.show_deprecated {
             let _ = writeln!(out, "show_deprecated = true");
+        }
+        if let Some(percent) = options.search_min_relevance {
+            let _ = writeln!(out, "search_min_relevance = {percent}");
         }
         out.push('\n');
     }
@@ -1248,6 +1254,7 @@ mod tests {
         let opts = ConfigOptions {
             vendors: Default::default(),
             show_deprecated: false,
+            search_min_relevance: None,
             default_registry: Some("ghcr.io/acme".to_string()),
             clients: vec!["claude".to_string(), "opencode".to_string()],
             tui: Default::default(),
@@ -1280,6 +1287,7 @@ mod tests {
         let opts = ConfigOptions {
             vendors: Default::default(),
             show_deprecated: true,
+            search_min_relevance: None,
             default_registry: None,
             clients: vec![],
             tui: Default::default(),
@@ -1305,6 +1313,7 @@ mod tests {
         let mut opts = ConfigOptions {
             vendors: Default::default(),
             show_deprecated: false,
+            search_min_relevance: None,
             default_registry: None,
             clients: vec!["cursor".to_string()],
             tui: Default::default(),
@@ -1465,6 +1474,9 @@ mod tests {
         let opts = ConfigOptions {
             vendors: Default::default(),
             show_deprecated: false,
+            // Explicit `0` (cutoff off) must survive, and as a base
+            // `[options]` key it must land before the `[options.tui]` table.
+            search_min_relevance: Some(0),
             default_registry: None,
             clients: vec![],
             tui: TuiOptions {
@@ -1497,6 +1509,7 @@ mod tests {
             Some(2),
             "expand_levels must round-trip through the manual serializer (regression: it was dropped on write)"
         );
+        assert_eq!(cfg.options.search_min_relevance, Some(0));
         assert_eq!(cfg.options.tui.sort, Some(crate::catalog::SortMode::Rating));
         assert_eq!(cfg.options.tui.sort_order, Some(crate::catalog::SortOrder::Asc));
     }
@@ -1514,6 +1527,7 @@ mod tests {
         let opts = ConfigOptions {
             vendors: Default::default(),
             show_deprecated: false,
+            search_min_relevance: None,
             default_registry: Some("ghcr.io/acme".to_string()),
             clients: vec![],
             tui: TuiOptions::default(),
@@ -1549,6 +1563,7 @@ mod tests {
         let opts = ConfigOptions {
             vendors: Default::default(),
             show_deprecated: false,
+            search_min_relevance: None,
             default_registry: None,
             clients: vec![],
             tui: TuiOptions {
@@ -1596,6 +1611,7 @@ mod tests {
         let opts = ConfigOptions {
             vendors: Default::default(),
             show_deprecated: false,
+            search_min_relevance: None,
             default_registry: None,
             clients: vec![],
             tui: TuiOptions {
@@ -1648,6 +1664,7 @@ tree_separators_typo = 1
         let opts = ConfigOptions {
             vendors: Default::default(),
             show_deprecated: false,
+            search_min_relevance: None,
             default_registry: Some("ghcr.io/acme".to_string()),
             clients: vec![],
             tui: Default::default(),
@@ -1734,6 +1751,7 @@ tree_separators_typo = 1
         let opts = ConfigOptions {
             vendors: Default::default(),
             show_deprecated: false,
+            search_min_relevance: None,
             default_registry: Some("legacy.example".to_string()),
             clients: vec![],
             tui: Default::default(),

@@ -229,6 +229,16 @@ pub struct ConfigOptions {
     /// TUI `h` key toggles this ephemerally — config is never rewritten.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub show_deprecated: bool,
+    /// Sets how relevant a search result must be to be listed, as a
+    /// percentage of the best hit's score, from `0` to `100`. Defaults to
+    /// `50`; `0` lists every match. Applies to `grim search`, the TUI search
+    /// and the MCP `grim_search` tool.
+    ///
+    /// At the default, an artifact that merely mentions the query in its
+    /// description is dropped whenever another artifact is named for it.
+    /// `--sort` orders the same set, it does not widen it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_min_relevance: Option<u32>,
     /// Per-client rendering options, keyed by client name — the same
     /// closed set `[options].clients` accepts. An unknown name is rejected
     /// at load. A `BTreeMap` for deterministic serialization order; the

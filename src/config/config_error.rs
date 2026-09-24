@@ -151,6 +151,11 @@ pub enum ConfigErrorKind {
     #[error("invalid tree_separators entry {entry:?}: each entry must be a single printable single-column character")]
     TreeSeparatorInvalid { entry: String },
 
+    /// An authored `options.search_min_relevance` is above 100 — it is a
+    /// percentage of the best hit's score.
+    #[error("invalid options.search_min_relevance {value}: must be a percentage from 0 to 100")]
+    SearchMinRelevanceInvalid { value: u32 },
+
     /// An authored `options.clients` entry is blank, names a client outside
     /// the closed `ClientTarget` set, or repeats one already listed.
     ///

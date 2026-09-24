@@ -1050,14 +1050,17 @@ def _sorted_index(root: Path, project_dir: Path, base: str) -> None:
     _write_all_json(
         root,
         [
-            _package(name, "skill", f"ghcr.io/acme/skills/{name}", desc)
-            for name, desc in [
+            _package(name, "skill", f"ghcr.io/acme/skills/{name}", desc, keywords=kw)
+            for name, desc, kw in [
                 # Scores highest on `tool`: the term appears in the leaf name
                 # AND the description.
-                ("tool-tool", "tool tool tool"),
-                ("apex", "a tool"),
-                ("Zulu", "a tool"),
-                ("unrated", "a tool"),
+                ("tool-tool", "tool tool tool", None),
+                # A keyword hit, not a description-only one: a bare
+                # description mention falls under the relevance cutoff next
+                # to a name hit, and this fixture needs all four to match.
+                ("apex", "a tool", ["tool"]),
+                ("Zulu", "a tool", ["tool"]),
+                ("unrated", "a tool", ["tool"]),
             ]
         ],
     )
@@ -1146,6 +1149,32 @@ def test_sort_updated_is_deterministic_when_every_row_is_undated(
     first = _repos(runner, "--sort", "updated")
     assert first == ["apex", "tool-tool", "unrated", "Zulu"]
     assert _repos(runner, "--sort", "updated") == first, "an undated browse is stable across runs"
+
+
+def test_description_only_mentions_drop_below_a_name_hit(grim_at, project_dir: Path, http_index) -> None:
+    """A query that names an artifact returns that artifact, not every
+    artifact whose description merely mentions the word — the relevance
+    cutoff drops hits scoring under half the best one. With no name hit the
+    description mentions are the best there is and all of them stay."""
+    root, base = http_index
+    _write_all_json(
+        root,
+        [
+            _package("grim-usage", "skill", "ghcr.io/acme/skills/grim-usage", "how to use grim"),
+            _package("hex", "skill", "ghcr.io/acme/skills/hex", "a swarm, installed with grim"),
+            _package("nox", "skill", "ghcr.io/acme/skills/nox", "a reviewer, installed with grim"),
+        ],
+    )
+    _index_config(project_dir, base)
+    runner = grim_at(project_dir)
+    assert _repos(runner, "grim") == ["grim-usage"]
+    assert sorted(_repos(runner, "installed")) == ["hex", "nox"]
+
+    # `options.search_min_relevance = 0` turns the cutoff off; above 100 is
+    # a bad value (65) and writes nothing.
+    assert runner.run("config", "set", "options.search_min_relevance", "101", check=False).returncode == 65
+    runner.run("config", "set", "options.search_min_relevance", "0")
+    assert sorted(_repos(runner, "grim")) == ["grim-usage", "hex", "nox"]
 
 
 def test_sort_overrides_relevance_on_a_query(grim_at, project_dir: Path, http_index) -> None:

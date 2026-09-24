@@ -338,6 +338,13 @@ pub struct TuiState {
     pub clients: Vec<String>,
     /// Whether the catalog renders as a flat list or a grouped tree.
     pub view_mode: ViewMode,
+    /// Set while a search has put a tree view into the flat list: clearing
+    /// the query restores the tree. An explicit `t` toggle clears it — the
+    /// user's own choice wins over the ephemeral switch.
+    pub tree_suspended_by_search: bool,
+    /// `[options].search_min_relevance` of the active scope — the same
+    /// cutoff `grim search` applies.
+    pub search_min_relevance: u32,
     /// The set of tree-group keys that are collapsed (descendants hidden).
     pub collapsed: BTreeSet<String>,
     /// Whether a type-level group appears between the registry root and
@@ -466,6 +473,8 @@ impl Default for TuiState {
             default_registry: None,
             clients: Vec::new(),
             view_mode: ViewMode::default(),
+            tree_suspended_by_search: false,
+            search_min_relevance: crate::config::defaults::SEARCH_MIN_RELEVANCE,
             collapsed: BTreeSet::new(),
             group_by_type: false,
             tree_separators: default_tree_separators(),
@@ -949,7 +958,30 @@ impl TuiState {
     /// selection may now point at a different row.
     pub fn apply_query(&mut self, query: impl Into<String>) {
         self.reset_detail_view();
+        let was_ranked = SearchQuery::parse(&self.query).has_text_terms();
         self.query = query.into();
+        let ranked = SearchQuery::parse(&self.query).has_text_terms();
+        // A ranked result set scattered across tree groups loses its ranking
+        // and its overview, so a text search shows a flat list while it
+        // lasts. A kind-only filter ranks nothing and keeps the tree.
+        if !was_ranked && ranked && self.view_mode == ViewMode::Tree {
+            self.view_mode = ViewMode::Flat;
+            self.tree_suspended_by_search = true;
+            self.recompute_filter();
+            // Land on the best hit, not wherever the tree cursor was.
+            self.selected = 0;
+            return;
+        }
+        if !ranked && self.tree_suspended_by_search {
+            // `selected` means different things in the two views: carry the
+            // artifact under the cursor across, as `toggle_view_mode` does.
+            let anchor = self.selection_anchor();
+            self.view_mode = ViewMode::Tree;
+            self.tree_suspended_by_search = false;
+            self.recompute_filter();
+            self.restore_selection(anchor);
+            return;
+        }
         self.recompute_filter();
         // View-aware clamp: in tree mode `selected` indexes the flattened
         // display list, which is longer than `filtered` (group headers), so
@@ -957,6 +989,14 @@ impl TuiState {
         // different visible row. `display_len()` is the active view's row count.
         let len = self.display_len();
         self.clamp_tree_selection_to(len);
+    }
+
+    /// Seed the search relevance cutoff from the active scope's config and
+    /// re-filter, clamping the cursor as rows appear or disappear.
+    pub fn set_search_min_relevance(&mut self, percent: u32) {
+        self.search_min_relevance = percent;
+        self.recompute_filter();
+        self.clamp_tree_selection_to(self.display_len());
     }
 
     /// Seed the deprecated-hiding filter and recompute the view. Called once
@@ -1388,6 +1428,7 @@ impl TuiState {
     /// Without this, a single (un-marked) install/update/delete after a
     /// toggle could act on a different artifact than the one under the cursor.
     pub fn toggle_view_mode(&mut self) {
+        self.tree_suspended_by_search = false;
         let anchor = self.selection_anchor();
         self.view_mode = match self.view_mode {
             ViewMode::Flat => ViewMode::Tree,
@@ -1874,6 +1915,9 @@ impl TuiState {
                 Some((score, i))
             })
             .collect();
+        // Same cutoff as `grim search`: the two surfaces agree on which rows
+        // a query returns, not only on their order.
+        crate::catalog::retain_relevant(&mut scored, self.search_min_relevance);
         // An explicit `--sort` overrides relevance (C-017): leaving `scored`
         // in row-index order preserves exactly the browse order `set_rows`
         // built, which is what the flag asked for. Composing the two would
@@ -2605,10 +2649,14 @@ mod tests {
         assert_eq!(s.rows[0].repo, "acme/aaa-decoy");
 
         s.apply_query("review");
-        assert_eq!(s.filtered.len(), 2, "both rows match; ranking decides order");
         assert_eq!(
             s.rows[s.filtered[0]].repo, "acme/review",
             "the name hit must rank above the description hit"
+        );
+        assert_eq!(
+            s.filtered.len(),
+            1,
+            "the description-only hit falls below the relevance cutoff"
         );
     }
 
@@ -3277,6 +3325,39 @@ mod tests {
         assert_eq!(s.view_mode, ViewMode::Tree);
         s.toggle_view_mode();
         assert_eq!(s.view_mode, ViewMode::Flat);
+    }
+
+    // A search shows the tree as a flat ranked list; clearing it restores
+    // the tree.
+    #[test]
+    fn search_suspends_tree_view_until_query_clears() {
+        let mut s = tree_seeded();
+        s.toggle_view_mode(); // → Tree
+        s.apply_query("alp");
+        assert_eq!(s.view_mode, ViewMode::Flat, "searching flattens the tree");
+        s.apply_query("alpha");
+        assert_eq!(s.view_mode, ViewMode::Flat, "refining keeps the flat list");
+        s.apply_query("");
+        assert_eq!(s.view_mode, ViewMode::Tree, "clearing restores the tree");
+    }
+
+    // An explicit toggle during a search is the user's choice: clearing the
+    // query must not flip it back.
+    #[test]
+    fn explicit_toggle_during_search_is_not_undone_by_clearing() {
+        let mut s = tree_seeded();
+        s.toggle_view_mode(); // → Tree
+        s.apply_query("alp"); // → Flat (suspended)
+        s.toggle_view_mode(); // user asks for the tree while searching
+        assert_eq!(s.view_mode, ViewMode::Tree);
+        s.apply_query("");
+        assert_eq!(s.view_mode, ViewMode::Tree);
+
+        // And a flat-view user is never switched to the tree by a search.
+        let mut f = tree_seeded();
+        f.apply_query("alp");
+        f.apply_query("");
+        assert_eq!(f.view_mode, ViewMode::Flat);
     }
 
     // Marks survive the flat ⇄ tree toggle (indices into `rows` unchanged).

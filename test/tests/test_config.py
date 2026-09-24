@@ -49,9 +49,9 @@ from src.runner import GrimRunner
 # ---------------------------------------------------------------------------
 
 
-# The 9 fixed option keys ``--all`` must surface unset (I3 frozen spec;
-# ``sort`` and ``sort_order`` were appended, never inserted — consumers may
-# index positionally).
+# The 10 fixed option keys ``--all`` must surface unset (I3 frozen spec;
+# ``sort``, ``sort_order`` and ``search_min_relevance`` were appended, never
+# inserted — consumers may index positionally).
 FIXED_OPTION_KEYS = [
     "options.default_registry",
     "options.clients",
@@ -62,6 +62,7 @@ FIXED_OPTION_KEYS = [
     "options.tui.expand_levels",
     "options.tui.sort",
     "options.tui.sort_order",
+    "options.search_min_relevance",
 ]
 
 _ALLOWED_TYPES = {"string", "boolean", "integer", "enum", "string-list", "string-set"}
@@ -1097,7 +1098,7 @@ def test_list_all_on_empty_config_lists_every_supported_key_unset(
     grim_at: object,
     project_dir: Path,
 ) -> None:
-    """``config list --all`` on an empty config surfaces all 9 fixed option
+    """``config list --all`` on an empty config surfaces all 10 fixed option
     keys as unset rows, each carrying full metadata.
 
     Traces to I3: fixed keys unset -> row only under ``--all``, with

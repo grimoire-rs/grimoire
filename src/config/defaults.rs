@@ -23,6 +23,13 @@ pub const DEFAULT_VIEW: DefaultView = DefaultView::Tree;
 /// Default `[options.tui].tree_separators` when unset or empty.
 pub const TREE_SEPARATORS: &[&str] = &["/"];
 
+/// Default `[options].search_min_relevance` when unset: a result must score
+/// at least half the best hit to be listed.
+pub const SEARCH_MIN_RELEVANCE: u32 = 50;
+
+/// Highest accepted `[options].search_min_relevance` — a percentage.
+pub const SEARCH_MIN_RELEVANCE_MAX: u32 = 100;
+
 /// Default `[options].show_deprecated`. Both this and `group_by_type` below
 /// are plain (non-`Option`) `bool` fields, so their runtime "unset" value is
 /// already single-sourced by `bool::default()` — no consumption site

@@ -36,6 +36,7 @@
 //! three registries did not answer" (grimoire-rs/grimoire#108). The exit code
 //! is deliberately not the carrier: it cannot name *which* source failed.
 
+use crate::config::defaults;
 use clap::Args;
 
 use crate::api::search_report::{
@@ -62,7 +63,8 @@ pub struct SearchArgs {
     /// (case-insensitive) any of kind / repo / summary / description /
     /// keywords. Fuzzy means subsequence — a term's letters must appear in
     /// order but need not be adjacent, so `kubctl` finds `kube-control`.
-    /// Results are ranked by relevance, best match first. A bare kind keyword
+    /// Results are ranked by relevance, best match first, and hits scoring
+    /// under half the best are dropped. A bare kind keyword
     /// (`skill`/`rule`/`bundle`, singular or plural) filters by kind instead
     /// of matching as text. Empty ⇒ list the whole catalog, unranked, in
     /// registry order. Results are narrowed further by each source's
@@ -133,7 +135,8 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     // then browse every configured registry through the shared catalog
     // service (the single seam `search`/`tui`/`mcp` share). A registry given
     // via `--registry` collapses the set to exactly that registry.
-    let (registries, lock, state, roots, active, target, cfg_show_deprecated) = resolve_scope(ctx, args)?;
+    let (registries, lock, state, roots, active, target, cfg_show_deprecated, min_relevance) =
+        resolve_scope(ctx, args)?;
     let badges = BadgeContext {
         lock: lock.as_ref(),
         state: &state,
@@ -214,12 +217,14 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
         })
         .filter(|(_, r)| deprecated_row_visible(show, r.deprecated.is_some(), r.badge != StatusBadge::NotInstalled))
         // Every row here already passed the same matcher inside `load_catalog`,
-        // so it scores; a `None` would mean the two disagreed, and sorting it
-        // last is the honest degradation (never dropping a row the filter
-        // admitted).
+        // so it scores; a `None` would mean the two disagreed, and scoring it
+        // lowest is the honest degradation.
         .map(|(source, r)| (r.score(&parsed).unwrap_or(i64::MIN), (source, r)))
         .collect();
 
+    // The relevance cutoff decides *which* rows a query returns; `--sort`
+    // below only reorders them, so it applies either way.
+    crate::catalog::retain_relevant(&mut scored, min_relevance);
     order_results(&mut scored, args.sort, &parsed);
 
     let entries: Vec<SearchEntry> = scored
@@ -261,12 +266,13 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     // gates the `_catalog` endpoint (GitLab SaaS, GHCR, Docker Hub), not a
     // fault — point at the registry-compatibility docs so an empty list is not
     // read as "nothing published". Offline (serves the cache), any hit, an
-    // index-only browse set (no `_catalog` involved), and a result the
-    // read-time filters emptied all stay quiet.
+    // index-only browse set (no `_catalog` involved), a result the
+    // read-time filters emptied, and a query that simply matched nothing
+    // all stay quiet.
     let any_registry_source = registries.iter().any(|r| !r.kind.is_index());
     if warn_unsupported_browse(
         ctx.offline(),
-        entries.is_empty(),
+        entries.is_empty() && parsed.is_empty(),
         any_registry_source,
         any_rows_before_filter,
     ) {
@@ -389,6 +395,7 @@ type SearchScope = (
     Vec<ClientTarget>,
     Option<InstallTarget>,
     bool,
+    u32,
 );
 
 /// The target `grim install` would resolve for `scope`, or `None` when it
@@ -436,7 +443,16 @@ fn resolve_scope(ctx: &Context, args: &SearchArgs) -> anyhow::Result<SearchScope
         let registries =
             crate::config::resolve_registries(&args.registry, &[], None, &[], None, super::FALLBACK_INDEX, None);
         let (lock, state, roots, active, target) = load_badges_best_effort(ctx, args);
-        return Ok((registries, lock, state, roots, active, target, false));
+        return Ok((
+            registries,
+            lock,
+            state,
+            roots,
+            active,
+            target,
+            false,
+            defaults::SEARCH_MIN_RELEVANCE,
+        ));
     }
 
     let scope = match scope_resolution::resolve_in(ctx, args.global, args.config.as_deref(), args.workspace.as_deref())
@@ -462,6 +478,7 @@ fn resolve_scope(ctx: &Context, args: &SearchArgs) -> anyhow::Result<SearchScope
                 ClientTarget::ALL.to_vec(),
                 None,
                 false,
+                defaults::SEARCH_MIN_RELEVANCE,
             ));
         }
         // A config that EXISTS and failed to parse is a different condition,
@@ -478,7 +495,17 @@ fn resolve_scope(ctx: &Context, args: &SearchArgs) -> anyhow::Result<SearchScope
     let active = detect_clients_or_all(&scope.workspace, scope.scope);
     let target = install_target_best_effort(&scope);
     let show_deprecated = scope.options.show_deprecated;
-    Ok((registries, lock, state, scope.roots, active, target, show_deprecated))
+    let min_relevance = scope.options.resolved().search_min_relevance;
+    Ok((
+        registries,
+        lock,
+        state,
+        scope.roots,
+        active,
+        target,
+        show_deprecated,
+        min_relevance,
+    ))
 }
 
 /// Load the scope's lock + install-state + anchor roots for badge

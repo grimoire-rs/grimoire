@@ -299,7 +299,7 @@ fn flag_pair(on: bool, off: bool) -> Option<bool> {
 /// A parsed dotted config key.
 #[derive(Debug, PartialEq, Eq)]
 enum ParsedKey {
-    /// One of the 9 fixed `options.*` keys — see [`ConfigKey`].
+    /// One of the 10 fixed `options.*` keys — see [`ConfigKey`].
     Fixed(ConfigKey),
     /// `registry.<alias>` — valid only for `unset` (removes the whole entry).
     RegistryAlias { alias: String },
@@ -447,6 +447,7 @@ fn fixed_value(key: ConfigKey, options: &ConfigOptions) -> Option<String> {
         ConfigKey::TuiExpandLevels => options.tui.expand_levels.map(|n| n.to_string()),
         ConfigKey::TuiSort => options.tui.sort.map(|m| m.as_str().to_string()),
         ConfigKey::TuiSortOrder => options.tui.sort_order.map(|o| o.as_str().to_string()),
+        ConfigKey::SearchMinRelevance => options.search_min_relevance.map(|n| n.to_string()),
     }
 }
 
@@ -757,6 +758,17 @@ fn apply_set(
                 options.tui.sort_order = Some(parse_sort_order(value_str)?);
                 Ok(value_str.to_string())
             }
+            ConfigKey::SearchMinRelevance => {
+                let key = "options.search_min_relevance";
+                let percent = parse_u32(value_str, key)?;
+                if percent > crate::config::defaults::SEARCH_MIN_RELEVANCE_MAX {
+                    return Err(super::config_value(format!(
+                        "invalid value for {key}: '{percent}'; must be a percentage from 0 to 100"
+                    )));
+                }
+                options.search_min_relevance = Some(percent);
+                Ok(percent.to_string())
+            }
         },
         ParsedKey::VendorField { vendor } => {
             let enabled = parse_bool(value_str, &format!("options.vendors.{vendor}.{VENDOR_FIELD_NAME}"))?;
@@ -914,6 +926,7 @@ fn apply_unset(
                 ConfigKey::TuiExpandLevels => options.tui.expand_levels = None,
                 ConfigKey::TuiSort => options.tui.sort = None,
                 ConfigKey::TuiSortOrder => options.tui.sort_order = None,
+                ConfigKey::SearchMinRelevance => options.search_min_relevance = None,
             }
             Ok(())
         }
@@ -2328,6 +2341,27 @@ mod tests {
     }
 
     #[test]
+    fn search_min_relevance_is_a_percentage() {
+        use crate::config::declaration::{ConfigOptions, RegistryConfig};
+        let key = parse_key("options.search_min_relevance").unwrap();
+        let mut options = ConfigOptions::default();
+        let mut registries: Vec<RegistryConfig> = vec![];
+
+        assert_eq!(get_value(&key, &options, &registries).unwrap(), None);
+        assert_eq!(apply_set(&key, "0", &mut options, &mut registries).unwrap(), "0");
+        assert_eq!(options.search_min_relevance, Some(0), "explicit 0 turns the cutoff off");
+        assert_eq!(apply_set(&key, "100", &mut options, &mut registries).unwrap(), "100");
+        assert!(apply_set(&key, "101", &mut options, &mut registries).is_err());
+        assert_eq!(
+            options.search_min_relevance,
+            Some(100),
+            "a rejected value writes nothing"
+        );
+        apply_unset(&key, &mut options, &mut registries).unwrap();
+        assert_eq!(options.search_min_relevance, None);
+    }
+
+    #[test]
     fn expand_levels_set_get_unset_round_trip() {
         use crate::config::declaration::{ConfigOptions, RegistryConfig};
         let key = parse_key("options.tui.expand_levels").unwrap();
@@ -2371,8 +2405,8 @@ mod tests {
         let with_all = collect_entries(true, &options, &registries);
         assert_eq!(
             with_all.len(),
-            9,
-            "--all on empty config must emit exactly the 9 fixed keys"
+            10,
+            "--all on empty config must emit exactly the 10 fixed keys"
         );
         for e in &with_all {
             assert_eq!(
@@ -2611,6 +2645,7 @@ mod tests {
             clients: vec![],
             default_registry: None,
             show_deprecated: false,
+            search_min_relevance: None,
             tui: TuiOptions::default(),
             vendors: Default::default(),
         };
@@ -2638,6 +2673,7 @@ mod tests {
             clients: vec![],
             default_registry: None,
             show_deprecated: false,
+            search_min_relevance: None,
             tui: TuiOptions::default(),
             vendors: Default::default(),
         }

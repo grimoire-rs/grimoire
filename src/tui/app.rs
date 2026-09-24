@@ -251,6 +251,7 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
     state.set_registry_order(registry_order(&ctx));
     // Seed the tree display options from the resolved config.
     state.set_view_mode_from_config(ctx.resolved_options.default_view);
+    state.set_search_min_relevance(ctx.resolved_options.search_min_relevance);
     state.set_tree_options(
         ctx.resolved_options.group_by_type,
         ctx.resolved_options.tree_separators.clone(),
@@ -622,6 +623,7 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                         ctx.resolved_options.tree_separators.clone(),
                         ctx.resolved_options.expand_levels as usize,
                     );
+                    state.set_search_min_relevance(ctx.resolved_options.search_min_relevance);
                     recompute_states(&ctx, &mut state);
                     // Invalidate the bundle-member cache: the new scope has a
                     // different lock/install state and a different scope_label key.
