@@ -1523,15 +1523,20 @@ fn confirm_batch_view(state: &TuiState, b: &super::state::PendingBatch) -> Confi
 /// detail, and a Cancel / action button row. Cancel is highlighted until the
 /// user moves off it.
 fn draw_confirm(f: &mut Frame, c: &ConfirmView) {
-    let selected = Style::default()
-        .bg(Color::Indexed(236))
-        .fg(Color::Cyan)
-        .add_modifier(Modifier::BOLD);
-    let unselected = Style::default().fg(Color::White);
-    let (cancel_style, action_style) = if c.action_selected {
-        (unselected, selected)
-    } else {
-        (selected, unselected)
+    // Reversed video plus a pointer, not the list's subtle 236 background:
+    // on a popup with no other cue, a faint highlight reads as "nothing is
+    // selected", which is exactly the doubt a confirm prompt cannot leave.
+    let button = |label: &str, chosen: bool| {
+        if chosen {
+            Span::styled(
+                format!("▸ [ {label} ] "),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+            )
+        } else {
+            Span::styled(format!("  [ {label} ] "), Style::default().fg(Color::DarkGray))
+        }
     };
 
     let body = vec![
@@ -1540,8 +1545,9 @@ fn draw_confirm(f: &mut Frame, c: &ConfirmView) {
         Line::from(Span::styled(c.detail.clone(), Style::default().fg(Color::DarkGray))),
         Line::from(""),
         Line::from(vec![
-            Span::styled("  [ Cancel ]  ", cancel_style),
-            Span::styled(format!("  [ {} ]  ", c.action), action_style),
+            button("Cancel", !c.action_selected),
+            Span::raw("  "),
+            button(c.action, c.action_selected),
         ]),
     ];
 
@@ -1567,7 +1573,7 @@ fn draw_confirm(f: &mut Frame, c: &ConfirmView) {
     };
     f.render_widget(
         Paragraph::new(Span::styled(
-            "←→ select · enter confirm · esc cancel",
+            "←/→ switch button · enter confirm · esc cancel",
             Style::default().fg(Color::DarkGray),
         )),
         hint_area,
