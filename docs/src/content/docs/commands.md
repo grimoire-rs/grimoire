@@ -986,45 +986,74 @@ deleted files, same dropped record — and the undeclare half is a no-op
 
 ## grim search {#search}
 
-`grim search [query]` searches the registry catalog by case-insensitive
-**fuzzy** match against repository, summary, description, and keywords; an
-empty query lists the whole catalog. The query is whitespace-split and the
-terms are ANDed — every term must match somewhere. A bare kind keyword
-(`skill`, `rule`, `agent`, `mcp`, `bundle` — singular or plural) filters by
-kind instead of matching as text, so `grim search skill review` finds skills
-matching "review". When `[[registries]]` are configured, all
-of them are browsed and the results are flattened into one table.
+`grim search [query]` searches the registry catalog. An empty query lists
+the whole catalog. The query is whitespace-split and the terms are ANDed.
+Every term must match somewhere.
 
-Fuzzy means **subsequence** matching, the same shape [fzf][fzf] and most
-editor command palettes use: a term's letters must appear in order, but need
-not be adjacent. So `grim search kubctl` finds `kube-control`, and a term
-may span a hyphen or a path separator. Letters typed *wrongly* are not
-forgiven — `kuberentes` does not find `kubernetes`, because the `n` and `e`
-are transposed rather than merely missing. A match only counts when it is
-*tight*: a term's letters strung out across a sentence of description are
-noise, so `grim search grim` does not find every artifact whose blurb happens
-to contain a `g`, an `r`, an `i` and an `m` in that order. The registry host
-is not searched at all — every artifact on `ghcr.io` shares it.
+A bare kind keyword (`skill`, `rule`, `agent`, `mcp`, `bundle`, singular or
+plural) filters by kind instead of matching as text. For example, `grim
+search skill review` finds skills matching "review". When
+`[[registries]]` are configured, all of them are browsed and the results
+are flattened into one table.
 
-Because a fuzzy query matches many more repositories than a substring one,
-results are **ranked by relevance**, best match first, across every browsed
-registry at once. A hit on the artifact's own name outranks the same word
-found only in a description, and results scoring below half the best hit
-are dropped: when some artifact is *named* for the query, artifacts that
-merely mention it in their description are left out. When nothing matches
-by name, the description hits are the best there is and all of them are
-listed. The half is the default of
-[`options.search_min_relevance`](./configuration.md#grimoire-toml), a
-percentage from `0` (list every match) to `100`. Ranking replaces registry-declaration order
-whenever there is a query. What attributes each row to the registry that
-served it is the `source` object under `--format json`, described below.
-The unqueried browse is not ranked and still lists registry by registry,
-in declaration order.
-`--refresh` forces a catalog rebuild; `--registry <ref>` collapses the
-browse to exactly the registries it names — repeatable and comma-separated
-(`--registry a,b` or `--registry a --registry b`), first value is primary.
+The artifact's name (the repository's leaf segment) and its keywords match
+by **fuzzy subsequence**, the same shape [fzf][fzf] and most editor command
+palettes use. A term's letters must appear in order, but need not be
+adjacent. So `grim search kubctl` finds `kube-control`, and a term may span
+a hyphen or a path separator. Letters typed *wrongly* are not forgiven.
+`kuberentes` does not find `kubernetes`, because the `n` and `e` are
+transposed rather than merely missing.
+
+A match only counts when it is *tight*. A term's letters strung out across a
+long name are noise. A name or keyword that equals the term outright, or
+carries it as a whole word, scores higher still. `grim search grim` ranks
+the artifact literally named `grim` above `grim-usage`, and both above one
+only tagged with the word.
+
+The summary, the description, and the namespace (the path segments above the
+artifact's name) match a different way. A term must be the **prefix of a
+word** in that field. `rev` finds "code review".
+
+`test` does not find "latest". A term that itself carries a separator
+(`code-review`, `node.js`) instead has to appear contiguously. Fuzzy
+subsequence matching is too loose for prose, where a short term's letters
+sit inside almost any sentence.
+
+The registry host is not searched by a plain word. Every artifact on
+`ghcr.io` shares it, and a hit there would match every row from that host. A
+term that itself names a host or a path (containing `/`, `.`, or `:`) is
+matched against the full reference instead, host included. A `repo` value
+copied out of `--format json` finds the artifact it named this way.
+
+Because these matchers admit far more repositories than a plain substring
+search would, results are **ranked by relevance**. Best match comes first,
+across every browsed registry at once. A hit on the artifact's own name or a
+keyword outranks the same word found only in a description. Results scoring
+below [`options.search_min_relevance`](./configuration.md#grimoire-toml)
+percent of the best hit are dropped. That is a percentage from `0` (list
+every match) to `100`, defaulting to `50`.
+
+When some artifact is *named* for the query, artifacts that merely mention
+it in their description are left out. When nothing matches by name, the
+cutoff is measured against whatever the best remaining hit is. A summary hit
+can still drop a mere description prefix sitting beside it. Ranking
+replaces registry-declaration order whenever there is a query. Hidden rows
+are reported on stderr:
+
+```text
+3 weaker matches hidden; set options.search_min_relevance to 0 to list all
+```
+
+What attributes each row to the registry that served it is the `source`
+object under `--format json`, described below. The unqueried browse is not
+ranked and still lists registry by registry, in declaration order.
+`--refresh` forces a catalog rebuild. `--registry <ref>` collapses the
+browse to exactly the registries it names. It is repeatable and
+comma-separated (`--registry a,b` or `--registry a --registry b`), and the
+first value given is primary.
+
 `GRIM_DEFAULT_REGISTRY` is only the
-short-id resolution default — it does not restrict the browse set when
+short-id resolution default. It does not restrict the browse set when
 `[[registries]]` is configured.
 
 A `[[registries]]` entry carrying an `include` / `exclude`
@@ -1059,6 +1088,22 @@ incomplete:
 ```text
 catalog listing capped at 500 repositories; results may be incomplete — narrow the query or use a more specific term
 ```
+
+A registry that gates its `_catalog` browse endpoint (GitLab SaaS, GHCR,
+Docker Hub) lists nothing at all, whatever the query. That looks like an
+empty catalog, so `grim search` warns on stderr instead. The warning fires
+when at least one browsed source is a plain OCI registry. It also requires
+that none of the sources listed any row before the query, the filter, and
+the cutoff ran:
+
+```text
+no catalog entries; some registries (…) gate the `_catalog` browse endpoint and an empty list is expected — install/add/release by explicit reference works regardless; see …
+```
+
+The hint fires under a query too, because a gated registry lists nothing
+under any query. It stays quiet for a query that simply misses a populated
+catalog. It also stays quiet for a source that failed to load outright,
+which gets its own per-source warning instead.
 
 The plain table shows each entry's short summary (`com.grimoire.summary`),
 falling back to the description when no summary is set. On an interactive
@@ -1642,10 +1687,13 @@ for a declared-path row, or just the install record for a dev row (which
 was never declared).
 
 An active search (started with `/`) switches the tree to the flat list for
-as long as the query is non-empty, so the ranked results read as one list
-instead of scattering across groups; clearing the query returns to the tree.
-Pressing `t` during a search is honoured and sticks — clearing the query
-then leaves the view as you chose it.
+as long as the query holds a text term. Ranked results then read as one list
+instead of scattering across groups. A kind-only query like `skill` keeps
+the tree, since it filters but ranks nothing.
+
+Clearing the query returns to the tree. Pressing `t` during a search is
+honoured and sticks. Clearing the query then leaves the view as you chose
+it.
 
 Four config fields under `[options.tui]` in `grimoire.toml` let you set
 the opening view mode, how many tree levels open expanded, and how paths are
@@ -1751,10 +1799,19 @@ aggregate status line instead. An already-forced retry that refuses again does
 not re-open the dialog, so there is no confirm loop to get stuck in.
 
 **The batch confirmation** stands between one keystroke and a whole catalog.
-An `i`, `u` or `d` that would act on more than one artifact — a marked set, or
-a group selected in tree view — opens a prompt naming the count and the first
-few artifacts before anything runs. Cancel is preselected and there is no `y`
-shortcut: `→` then `enter` confirms, any other key cancels and keeps the marks.
+An `i`, `u` or `d` that would act on more than one artifact opens a prompt
+before anything runs. The target is a marked set, or a group selected in
+tree view. The prompt names the count and where the targets came from.
+Examples: `Install all 3 marked artifacts`,
+`Install 2 of 4 marked artifacts (2 already installed)`, and
+`Uninstall every artifact in <group>` for a tree-view group.
+
+It then lists the first few artifact names, followed by `and N more`.
+Cancel is preselected and there is no `y` shortcut. `→`/`←` or `h`/`l`
+switch between Cancel and the action button. `enter` confirms only on the
+action button, and `q` quits the TUI. Any other key, including `esc`,
+cancels and keeps the marks.
+
 A single artifact still acts on the first press.
 
 **The `+ pending` badge** marks an artifact that is installed but does not yet

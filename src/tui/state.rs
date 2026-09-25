@@ -2020,11 +2020,12 @@ impl TuiState {
 
     /// Recompute `filtered` from `rows` against the current query using the
     /// shared [`SearchQuery`] matcher, so the TUI search bar and `grim
-    /// search` apply identical semantics: whitespace-split AND-of-terms
-    /// **fuzzy**-matched over kind / repo / summary / description /
-    /// keywords, plus bare kind keywords (`skill`/`rule`/`bundle` ± plural)
-    /// that filter by kind. The query is parsed once, then every row is
-    /// scored against it.
+    /// search` apply identical semantics: whitespace-split AND-of-terms,
+    /// **fuzzy**-matched over the repo leaf name, keywords, and kind, by
+    /// **word prefix** over summary / description / namespace, plus bare
+    /// kind keywords (`skill`/`rule`/`bundle`/`agent`/`mcp` ± plural) that
+    /// filter by kind. The query is parsed once, then every row is scored
+    /// against it.
     ///
     /// With a query present, `filtered` is ordered by **relevance** — fuzzy
     /// matching admits far more rows than the substring matching it

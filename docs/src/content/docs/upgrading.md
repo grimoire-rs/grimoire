@@ -348,6 +348,21 @@ annotation and restores the 0.13.0 manifest shape exactly.
   renamed or retyped, so a consumer indexing the first three positionally is
   unaffected; one that assumed the list had exactly three entries will see
   five. Field positions are frozen and the list is append-only.
+- **`grim search`, `--format json`, and the MCP `grim_search` tool drop weak
+  hits by default now.** A hit below `options.search_min_relevance` percent
+  of the best score is hidden. A stderr notice says how many. Run
+  `grim config set options.search_min_relevance 0` to list every match
+  again, or add `--global` outside a project. Prose fields (summary,
+  description, and the namespace) now match by word prefix, not by fuzzy
+  subsequence.
+- **`grim config list --all` gains one more row.** The new
+  `options.search_min_relevance` key is appended at the end, with the usual
+  type, title, description, and default metadata. Existing rows keep their
+  positions.
+- **The TUI now asks before acting on more than one artifact.** Pressing `i`,
+  `u`, or `d` on a marked set or a selected group opens a confirmation naming
+  the count and source before anything runs. A single artifact still acts on
+  the first press.
 
 <!-- internal -->
 [changelog]: https://github.com/grimoire-rs/grimoire/blob/main/CHANGELOG.md

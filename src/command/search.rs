@@ -6,11 +6,11 @@
 //! Browses every configured registry through the shared
 //! [`crate::catalog::load_catalog`] seam (the one `search` / `tui` / `mcp`
 //! share): each registry's cached catalog is loaded or coordinately
-//! refreshed, filtered with the [`SearchQuery`] matcher (whitespace-split
-//! AND of terms fuzzy-matched over kind / repo / summary / description /
-//! keywords, plus bare kind keywords — `skill`/`rule`/`bundle`/`agent`/`mcp`
-//! and plurals — acting as kind filters; an empty query lists everything),
-//! and badged
+//! refreshed, filtered with the [`SearchQuery`] matcher (whitespace-split AND
+//! of terms: fuzzy-matched over the repo leaf name, keywords, and kind, by
+//! word prefix over summary / description / namespace, plus bare kind
+//! keywords — `skill`/`rule`/`bundle`/`agent`/`mcp` and plurals — acting as
+//! kind filters; an empty query lists everything), and badged
 //! against the scope's lock + install-state. An explicit `--registry`
 //! (repeatable / comma-separated) collapses the browse set to exactly those
 //! registries; otherwise the declared `[[registries]]` (or the single
@@ -60,10 +60,12 @@ use super::scope_resolution;
 /// `grim search` arguments.
 #[derive(Debug, Args)]
 pub struct SearchArgs {
-    /// Search terms, whitespace-split and ANDed: each term fuzzy-matches
-    /// (case-insensitive) any of kind / repo / summary / description /
-    /// keywords. Fuzzy means subsequence — a term's letters must appear in
-    /// order but need not be adjacent, so `kubctl` finds `kube-control`.
+    /// Search terms, whitespace-split and ANDed, case-insensitive. A term
+    /// fuzzy-matches the artifact name and keywords (subsequence: its letters
+    /// must appear in order but need not be adjacent, so `kubctl` finds
+    /// `kube-control`) and matches the start of a word in the summary,
+    /// description or namespace. Name hits weigh most, then keywords and the
+    /// summary, then the description.
     /// Results are ranked by relevance, best match first, and hits scoring
     /// below `options.search_min_relevance` percent of the best (default 50)
     /// are dropped, with a note on stderr saying how many. A bare kind

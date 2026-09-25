@@ -130,7 +130,7 @@ who wrote a manifest against an earlier release.
 
 ## Unstable — may change in any minor {#unstable}
 
-Three things are deliberately excluded from the guarantee above, because
+Four things are deliberately excluded from the guarantee above, because
 freezing them would block improving Grimoire without a major version bump —
 the exclusions are what keep 1.x able to move at all:
 
@@ -165,6 +165,11 @@ the exclusions are what keep 1.x able to move at all:
   beyond the schema guarantee, TUI appearance and keybindings, and
   human-readable log or error text carry no compatibility promise — only
   exit codes and structured JSON output are contracts.
+- **Search relevance.** Which rows a query returns, and their order, can
+  change between minors as ranking improves. The `grim search` and
+  `grim_search` JSON shape, field names, exit codes and sort keys are
+  contracts. The set of matches is not. Changes you would notice are
+  listed in the [upgrading guide](./upgrading.md).
 - **NDJSON progress events** (`--progress json`) stay **experimental
   through 1.0**, deliberately. The event shapes evolve additively (new
   fields may appear, existing ones keep their meaning), but the surface

@@ -1154,8 +1154,9 @@ def test_sort_updated_is_deterministic_when_every_row_is_undated(
 def test_description_only_mentions_drop_below_a_name_hit(grim_at, project_dir: Path, http_index) -> None:
     """A query that names an artifact returns that artifact, not every
     artifact whose description merely mentions the word — the relevance
-    cutoff drops hits scoring under half the best one. With no name hit the
-    description mentions are the best there is and all of them stay."""
+    cutoff drops hits scoring below options.search_min_relevance percent of
+    the best one (default 50). With no name hit the description mentions are
+    the best there is and all of them stay."""
     root, base = http_index
     _write_all_json(
         root,

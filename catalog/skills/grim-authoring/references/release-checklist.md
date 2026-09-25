@@ -46,7 +46,7 @@ routinely skip because the field table calls them optional:
 | Field | Why it is not optional in practice |
 |---|---|
 | `summary` | The single line `grim search` and the TUI show *instead of* the description |
-| `keywords` | One comma-separated string (never a YAML/TOML list) — the only thing fuzzy search matches beyond the name |
+| `keywords` | One comma-separated string (never a YAML/TOML list) — matches fuzzy at the same weight as the summary, above the description, so a keyword hit survives the relevance cutoff that a description-only mention does not |
 | `repository` | An `https://` URL (anything else: 65). Also the source `homepage` and `documentation` derive from — one key, three annotations |
 | `license` | Never derived. A manifest with no license is one a company's review cannot clear |
 | `authors` | **Never derived.** The only automatic source is the commit author under `--git`, which publishes a person's name; a team alias here is what prevents that |

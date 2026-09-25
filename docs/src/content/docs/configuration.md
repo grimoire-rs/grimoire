@@ -66,13 +66,25 @@ stays visible; `true` shows them everywhere. It seeds the initial state only —
 the search `--show-deprecated` flag and the TUI `h` key override it per run, and
 the `h` toggle is never written back to the file.
 
-The top-level `search_min_relevance` integer (default `50`) sets how relevant a
-result must be to be listed by [`grim search`][grim-search], the
-[`grim tui`][grim-tui] search and the MCP `grim_search` tool, as a percentage
-of the best hit's score. At the default, an artifact that only mentions the
-query in its description is dropped whenever another artifact is named for
-it; `0` lists every match, and a value above `100` is rejected on load
-(exit 78).
+The top-level `search_min_relevance` integer (default `50`, maximum `100`)
+sets how relevant a result must be to be listed, as a percentage of the best
+hit's score. It applies to [`grim search`][grim-search] on every path,
+including `--registry` and a run outside any project. Outside a project the
+global config's value applies. It also applies to the
+[`grim tui`][grim-tui] search and the MCP `grim_search` tool. At the
+default, an artifact that only mentions the query in its description is
+dropped whenever another artifact is named for it.
+
+`0` lists every match. A value above `100` is rejected. `grim config set`
+exits `65`, and a hand-edited file exits `78` at load. Hidden rows are
+reported on stderr:
+
+```text
+3 weaker matches hidden; set options.search_min_relevance to 0 to list all
+```
+
+Under `--registry`, a config that fails to load falls back to the default
+`50` with a warning, rather than failing the search.
 
 ### `[options.tui]` {#options-tui}
 

@@ -621,27 +621,36 @@ counterpart for offline.
 ## Search, TUI, and MCP {#search-tui-and-mcp}
 
 `grim search [query]` splits the query on whitespace and ANDs the terms —
-each term fuzzy-matches (case-insensitive) any of an entry's kind,
-repository, summary, description, or keywords. Fuzzy means subsequence, as
-in fzf: the letters must appear in order but need not be adjacent, so
-`kubctl` finds `kube-control` (a mistyped letter is not forgiven — only a
-missing one), and a match must be tight — letters scattered across a
-description do not count, and the registry host is never searched. Results
-are ranked by relevance, best first, across all browsed registries, and
-hits scoring below half the best one are dropped, so a name match hides
-description-only mentions (`grim config set options.search_min_relevance 0`
-lists every match; the value is a percentage of the best hit, default 50); the unqueried browse is unranked and lists registry by
-registry. A bare kind keyword (`skill`/`rule`/`bundle`, singular or plural)
-filters by kind instead of matching as text; an empty query lists the whole
-catalog. Confirm the match fields and kind-filter keywords with
-`grim search --help`. When
-`[[registries]]` are configured, all
-of them are browsed and flattened into one table. The catalog is cached
-under `$GRIM_HOME` — pass `--refresh` to rebuild it from the registry,
-`--registry` to collapse the browse to exactly the registries it names
-(repeatable / comma-separated for several at once). Plain
-output shows the one-line summary (truncated to the terminal); piped
-output and `--format json` keep the full description, and JSON adds a
+each must match somewhere. The artifact's name (repo leaf) and its keywords
+match fuzzy (case-insensitive) — subsequence, as in fzf: the letters must
+appear in order but need not be adjacent, so `kubctl` finds `kube-control`
+(a mistyped letter is not forgiven — only a missing one), and a match must
+be tight — letters scattered across a long name do not count. A name or
+keyword that equals the term, or carries it as a whole word, scores higher
+still. The summary, description, and namespace match a different way — a
+term must be the *prefix of a word* in that field (`rev` finds "code
+review"; a term with its own separator like `code-review` must appear
+contiguously). The registry host is never searched by a plain word, but a
+term containing `/`, `.`, or `:` matches the full reference, host included.
+Results are ranked by relevance, best first, across all browsed registries,
+and hits scoring below `options.search_min_relevance` percent of the best
+one are dropped (default 50, `0` off, max 100) — so a name match hides
+description-only mentions; when nothing matches by name, the cutoff is
+measured against the best remaining hit instead. Hidden rows are reported on
+stderr (`N weaker matches hidden; set options.search_min_relevance to 0 to
+list all`); `grim config set options.search_min_relevance 0` (or
+`grim config --global set options.search_min_relevance 0` outside a
+project) turns the cutoff off for good. The unqueried browse is unranked
+and lists registry by registry. A bare kind keyword
+(`skill`/`rule`/`bundle`/`agent`/`mcp`, singular or plural) filters by kind
+instead of matching as text; an empty query lists the whole catalog.
+Confirm the match fields and kind-filter keywords with `grim search --help`.
+When `[[registries]]` are configured, all of them are browsed and flattened
+into one table. The catalog is cached under `$GRIM_HOME` — pass `--refresh`
+to rebuild it from the registry, `--registry` to collapse the browse to
+exactly the registries it names (repeatable / comma-separated for several at
+once). Plain output shows the one-line summary (truncated to the terminal);
+piped output and `--format json` keep the full description, and JSON adds a
 `repository` URL field for tooling.
 
 Each JSON item also carries a `source` object — `{alias, locator}` — naming
@@ -679,9 +688,11 @@ repositories its patterns admit — to `grim search`, the TUI, and
 still exits `0`; in the TUI its root stays visible at a `0/0` rollup.
 `--registry` browses **unfiltered**: a forced browse set is exactly what the
 flag names. `grim status --check` is never filtered either. If a search
-comes back thinner than expected, check the entry's `include`/`exclude`
-before blaming the registry — `grim context --format json` reports the
-resolved patterns per source.
+comes back thinner than expected, there are two things to check before
+blaming the registry: the entry's `include`/`exclude` (`grim context
+--format json` reports the resolved patterns per source), and the relevance
+cutoff (`options.search_min_relevance`, default 50) — set it to `0` to rule
+it out.
 
 A package the publisher has marked deprecated is **hidden by default** from
 both `grim search` and the TUI — unless it is installed in the active scope
@@ -753,6 +764,13 @@ one changes what the action keys do:
   offers it, since one answer cannot speak for several artifacts, so a batch
   leaves its refusals in the status line instead. A retry that refuses again
   does not re-open the dialog, so there is no confirm loop to get stuck in.
+- **The batch confirmation** guards `i`/`u`/`d` on more than one artifact —
+  a marked set, or a group selected in tree view. It opens a prompt naming
+  the count and the source before anything runs, then lists the first few
+  artifact names. Cancel is preselected and there is no `y` shortcut:
+  `→`/`←` or `h`/`l` switch between Cancel and the action button, `enter`
+  confirms only on the action button, and any other key cancels and keeps
+  the marks.
 - **A bundle row folds in its members' health.** Declaration is the gate — a
   bundle absent from `[bundles]` reads `not installed` whatever its members
   look like — but past it the row shows the *worst* member state, at the
@@ -844,7 +862,9 @@ Unrated, uncounted and undated artifacts sort into a bucket of their own at
 the *end* rather than as zero votes, zero pulls or epoch 0, and every mode is total —
 two runs over the same catalog render identically. Given together with a
 query, `--sort` **replaces** relevance ranking rather than composing with
-it; omitted, ordering is exactly what it was before the flag existed.
+it — but it only reorders the rows the relevance cutoff already kept, it
+never widens the result set back to what the cutoff dropped; omitted,
+ordering is exactly what it was before the flag existed.
 Inside the TUI the `s` key cycles the same orders live and `S` flips the
 direction; the Catalog title names the active one. Confirm with
 `grim search --help`.
