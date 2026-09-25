@@ -1177,6 +1177,46 @@ def test_description_only_mentions_drop_below_a_name_hit(grim_at, project_dir: P
     assert sorted(_repos(runner, "grim")) == ["grim-usage", "hex", "nox"]
 
 
+def test_sort_does_not_widen_the_relevance_set(grim_at, project_dir: Path, http_index) -> None:
+    """``--sort`` reorders the rows a query returns; it never decides *which*
+    rows those are. The relevance cutoff still drops the description-only
+    mentions of ``grim`` before the rating order is applied."""
+    root, base = http_index
+    _write_all_json(
+        root,
+        [
+            _package("grim-usage", "skill", "ghcr.io/acme/skills/grim-usage", "how to use grim"),
+            _package("hex", "skill", "ghcr.io/acme/skills/hex", "a swarm, installed with grim"),
+            _package("nox", "skill", "ghcr.io/acme/skills/nox", "a reviewer, installed with grim"),
+        ],
+    )
+    _index_config(project_dir, base)
+    assert _repos(grim_at(project_dir), "grim", "--sort", "rating") == ["grim-usage"]
+
+
+def test_prose_and_namespace_match_whole_word_prefixes_only(
+    grim_at, project_dir: Path, http_index
+) -> None:
+    """Descriptions and the org path match by word prefix, not by scattered
+    letters: ``test`` sits inside "la*test*" but starts no word, and ``hex``
+    only letter-matches the org path ``michael-herwig/arcana`` — neither is a
+    hit. A namespace word still finds the artifacts living under it."""
+    root, base = http_index
+    _write_all_json(
+        root,
+        [
+            _package("nox", "skill", "ghcr.io/michael-herwig/arcana/nox", "the latest release"),
+            _package("other", "skill", "ghcr.io/acme/skills/other", "the latest release"),
+        ],
+    )
+    _index_config(project_dir, base)
+    runner = grim_at(project_dir)
+    assert _repos(runner, "test") == []
+    assert _repos(runner, "hex") == []
+    assert _repos(runner, "arcana") == ["nox"]
+    assert sorted(_repos(runner, "lat")) == ["nox", "other"]
+
+
 def test_sort_overrides_relevance_on_a_query(grim_at, project_dir: Path, http_index) -> None:
     """S-011: with a query present ``--sort`` replaces relevance ranking.
     ``tool-tool`` is the strongest match for ``tool`` and heads the unsorted

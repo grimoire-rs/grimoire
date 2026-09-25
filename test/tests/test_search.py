@@ -430,8 +430,9 @@ def test_search_is_fuzzy_and_ranks_a_name_hit_first(
 
     ``kubctl`` never appears literally anywhere, so this query returns
     nothing under substring matching. Two entries match it fuzzily — one
-    through its repository *name*, one only through its description — and
-    the name hit must sort first.
+    through its repository *name*, one only through a *keyword* — and the
+    name hit must sort first. (A description never matches fuzzily: prose
+    matches by word prefix, so the decoy's hit has to be its keyword.)
 
     Same warm-then-``--offline`` shape as the AND test above: the build is
     the capped browse window, so the scoped catalog is warmed with
@@ -452,7 +453,8 @@ def test_search_is_fuzzy_and_ranks_a_name_hit_first(
         {"aaa-decoy/SKILL.md": "---\nname: aaa-decoy\n---\n# d\n"},
         tag="latest",
         annotations={
-            "org.opencontainers.image.description": "drives a kube-control cluster"
+            "org.opencontainers.image.description": "unrelated blurb",
+            "com.grimoire.keywords": "kube-control",
         },
     )
     runner = grim_at(project_dir)
@@ -472,8 +474,11 @@ def test_search_is_fuzzy_and_ranks_a_name_hit_first(
     assert any(r.endswith(f"{unique_repo}/kube-control") for r in repos), (
         f"`kubctl` must fuzzy-match `kube-control`, got {repos}"
     )
+    assert any(r.endswith(f"{unique_repo}/aaa-decoy") for r in repos), (
+        f"the keyword hit must survive the cutoff, or the ranking is vacuous; got {repos}"
+    )
     assert repos[0].endswith(f"{unique_repo}/kube-control"), (
-        f"the name hit must rank above the description-only hit, got {repos}"
+        f"the name hit must rank above the keyword-only hit, got {repos}"
     )
 
 
