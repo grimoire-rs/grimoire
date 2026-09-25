@@ -379,16 +379,9 @@ fn warn_unsupported_browse(offline: bool, any_registry_source: bool, any_rows_li
 }
 
 /// Drop the rows scoring below `min_percent` of the best, returning how
-/// many were dropped.
-///
-/// `0` is "list every match" and skips the cutoff outright rather than
-/// asking [`crate::catalog::retain_relevant`] for it: a row whose score is
-/// `None` is carried as `i64::MIN`, and `i64::MIN * 100` saturates below the
-/// `0` threshold, so the shared cutoff would still drop it at `0`.
+/// many were dropped. `0` lists every match: [`crate::catalog::retain_relevant`]
+/// keeps every row then, including an unscored one carried as `i64::MIN`.
 fn apply_relevance_cutoff<T>(scored: &mut Vec<(i64, T)>, min_percent: u32) -> usize {
-    if min_percent == 0 {
-        return 0;
-    }
     let before = scored.len();
     crate::catalog::retain_relevant(scored, min_percent);
     before - scored.len()
@@ -696,7 +689,7 @@ mod tests {
     #[test]
     fn zero_min_relevance_keeps_an_unscored_row() {
         // "0 lists every match": a row whose score is `None` is carried as
-        // `i64::MIN`, which the shared cutoff drops even at 0.
+        // `i64::MIN`, and the cutoff keeps it (and hides nothing) at 0.
         let mut scored = vec![(90, "strong"), (i64::MIN, "unscored")];
         assert_eq!(apply_relevance_cutoff(&mut scored, 0), 0);
         assert_eq!(scored.len(), 2);
@@ -1097,8 +1090,9 @@ mod tests {
         // would misdescribe what the run browses (S-019).
         //
         // This also pins the deliberate asymmetry recorded in the plan: the
-        // `--registry` branch returns before any global-config read, so it
-        // still resolves (exit 0) on a machine with a broken global config.
+        // `--registry` branch reads the configs only best-effort (for badges
+        // and `options.search_min_relevance`), so it still resolves (exit 0)
+        // on a machine with a broken global config.
         let tmp = tempfile::tempdir().unwrap();
         let cfg = tmp.path().join("grimoire.toml");
         std::fs::write(

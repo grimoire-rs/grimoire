@@ -6,9 +6,9 @@
 //!
 //! A raw query string is parsed once into a [`SearchQuery`]: Unicode
 //! whitespace splits it into tokens, each lowercased. A bare *kind keyword*
-//! (`skill`/`skills`/`rule`/`rules`/`bundle`/`bundles`) is a kind **filter**
-//! (never a literal text term); every other token is a text term. Matching
-//! is an AND across all of them:
+//! (`skill`, `rule`, `bundle`, `agent` or `mcp`, singular or plural) is a
+//! kind **filter** (never a literal text term); every other token is a text
+//! term. Matching is an AND across all of them:
 //!
 //! - each text term must independently hit *any* of an entry's fields
 //!   (case-insensitive), and
@@ -121,8 +121,9 @@ const MIN_SCORE_PER_CHAR: i64 = 12;
 
 /// Raw score per term character for a prose hit that is a whole word.
 const WHOLE_WORD_PER_CHAR: i64 = 20;
-/// Raw score per term character for a prose hit that only starts a word (or
-/// a separator-carrying term found contiguously).
+/// Raw score per term character for a prose hit that only starts a word, or
+/// a separator-carrying term found mid-word. Bounded on both sides, either
+/// scores [`WHOLE_WORD_PER_CHAR`] instead.
 const WORD_PREFIX_PER_CHAR: i64 = 16;
 /// Raw name bonus per term character when the leaf (or a keyword) equals the
 /// term.
@@ -391,11 +392,12 @@ fn without_registry_host(repo: &str) -> &str {
 }
 
 /// Map a lowercased token to a kind filter, accepting both singular and
-/// plural spellings (`skill`/`skills`, `rule`/`rules`, `bundle`/`bundles`).
+/// plural spellings of all five kinds (`skill`, `rule`, `bundle`, `agent`,
+/// `mcp`).
 /// `None` for any other token (it is a text term).
 fn kind_keyword(token: &str) -> Option<ArtifactKind> {
     // Strip a single trailing plural `s`, then delegate to the canonical
-    // singular parser so the six spellings share one mapping.
+    // singular parser so the ten spellings share one mapping.
     let singular = token.strip_suffix('s').unwrap_or(token);
     ArtifactKind::from_kind_str(singular)
 }
@@ -744,6 +746,24 @@ mod tests {
             scored.iter().map(|(_, n)| *n).collect::<Vec<_>>(),
             vec!["name", "keyword"]
         );
+    }
+
+    #[test]
+    fn only_a_whole_word_keyword_survives_next_to_an_exact_name() {
+        // Pins what the catalog docs promise: a keyword that is a whole word
+        // (`grim-cli`) stays beside the exact name, a partial one (`grimoire`)
+        // drops.
+        let q = SearchQuery::parse("grim");
+        let name = q.score_fields(Some("skill"), "org/grim", "", "", &[]).unwrap();
+        let word = q
+            .score_fields(Some("skill"), "org/a", "", "", &kw(&["grim-cli"]))
+            .unwrap();
+        let partial = q
+            .score_fields(Some("skill"), "org/b", "", "", &kw(&["grimoire"]))
+            .unwrap();
+        let mut scored = vec![(name, "name"), (word, "word"), (partial, "partial")];
+        retain_relevant(&mut scored, 50);
+        assert_eq!(scored.iter().map(|(_, n)| *n).collect::<Vec<_>>(), vec!["name", "word"]);
     }
 
     #[test]

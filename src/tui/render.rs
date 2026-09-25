@@ -1575,21 +1575,35 @@ fn draw_confirm(f: &mut Frame, c: &ConfirmView) {
         Line::from(""),
         Line::from(Span::styled(c.detail.clone(), Style::default().fg(Color::DarkGray))),
     ];
-    let buttons = Line::from(vec![
-        button("Cancel", !c.action_selected),
-        Span::raw("  "),
-        button(c.action, c.action_selected),
-    ]);
+    let cancel = button("Cancel", !c.action_selected);
+    let action = button(c.action, c.action_selected);
+    let screen = f.area();
+    // The chosen button must be whole on screen, since Enter executes it
+    // whether or not the user can read it. The popup widens to the button row
+    // plus borders; a screen too narrow even for that stacks the buttons.
+    let (cancel_w, action_w) = (cancel.width(), action.width());
+    let row_w = cancel_w + 2 + action_w;
+    let inline = row_w + 2 <= usize::from(screen.width);
+    let min_w = if inline { row_w } else { cancel_w.max(action_w) } + 2;
+    let (buttons, button_rows): (_, u16) = if inline {
+        (vec![Line::from(vec![cancel, Span::raw("  "), action])], 1)
+    } else {
+        (vec![Line::from(cancel), Line::from(action)], 2)
+    };
 
     // Tall enough for the wrapped message and detail, a spacer and the
     // buttons, capped at the screen; on a screen too short for all of it the
     // detail is what gets clipped, never the buttons. Each `+ 1` absorbs word
     // wrap breaking earlier than a plain character count.
-    let screen = f.area();
     let mut area = centered_rect(60, 35, screen);
+    if usize::from(area.width) < min_w {
+        area.width = u16::try_from(min_w).unwrap_or(u16::MAX).min(screen.width);
+        area.x = screen.x + (screen.width - area.width) / 2;
+    }
     let inner_w = usize::from(area.width.saturating_sub(2)).max(1);
     let wrapped = |text: &str| text.chars().count().div_ceil(inner_w) + 1;
-    let needed = u16::try_from(2 + wrapped(&c.message) + 1 + wrapped(&c.detail) + 1 + 1).unwrap_or(u16::MAX);
+    let needed = u16::try_from(2 + wrapped(&c.message) + 1 + wrapped(&c.detail) + 1 + usize::from(button_rows))
+        .unwrap_or(u16::MAX);
     if area.height < needed {
         area.height = needed.min(screen.height);
         area.y = screen.y + (screen.height - area.height) / 2;
@@ -1603,8 +1617,12 @@ fn draw_confirm(f: &mut Frame, c: &ConfirmView) {
         ));
     // The buttons get a row of their own, so no amount of body text can push
     // the choice the user is about to confirm off the popup.
-    let [text_area, _, button_area] =
-        Layout::vertical([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)]).areas(block.inner(area));
+    let [text_area, _, button_area] = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(button_rows),
+    ])
+    .areas(block.inner(area));
     f.render_widget(Clear, area);
     f.render_widget(block, area);
     f.render_widget(Paragraph::new(body).wrap(Wrap { trim: false }), text_area);
@@ -2795,12 +2813,7 @@ mod tests {
 
     /// Draw `s` on an 80×24 test terminal and return the buffer.
     fn draw_80x24(s: &TuiState) -> ratatui::buffer::Buffer {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-        let model = frame(s);
-        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        term.draw(|f| draw(f, &model)).unwrap();
-        term.backend().buffer().clone()
+        draw_sized(s, 80, 24)
     }
 
     /// The row holding both buttons, and the background of the chosen one.
@@ -2857,6 +2870,71 @@ mod tests {
         let (line, bg) = button_row(&draw_80x24(&s), "Uninstall");
         assert!(line.contains("▸ [ Uninstall ]"), "{line:?}");
         assert_eq!(bg, Some(Color::Cyan));
+    }
+
+    /// Draw `s` on a `w`×`h` test terminal and return the buffer.
+    fn draw_sized(s: &TuiState, w: u16, h: u16) -> ratatui::buffer::Buffer {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let model = frame(s);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| draw(f, &model)).unwrap();
+        term.backend().buffer().clone()
+    }
+
+    /// Both button labels are whole on screen (on one row or stacked), and
+    /// the pointer sits on `chosen` with a solid cyan fill.
+    fn assert_buttons_whole(buf: &ratatui::buffer::Buffer, action: &str, chosen: &str) {
+        let cols = buf.area.width as usize;
+        let rows: Vec<&[ratatui::buffer::Cell]> = buf.content().chunks(cols).collect();
+        let text = |r: &[ratatui::buffer::Cell]| r.iter().map(|c| c.symbol()).collect::<String>();
+        for label in ["Cancel", action] {
+            assert!(
+                rows.iter().any(|r| text(r).contains(&format!("[ {label} ]"))),
+                "{label:?} must be fully on screen:\n{}",
+                screen(buf)
+            );
+        }
+        let pointed = rows
+            .iter()
+            .find(|r| text(r).contains('▸'))
+            .unwrap_or_else(|| panic!("the chosen button must be on screen:\n{}", screen(buf)));
+        assert!(
+            text(pointed).contains(&format!("▸ [ {chosen} ]")),
+            "the pointer must sit on {chosen:?}:\n{}",
+            screen(buf)
+        );
+        let bg = pointed.iter().find(|c| c.symbol() == "▸").map(|c| c.bg);
+        assert_eq!(bg, Some(Color::Cyan), "the chosen button is a solid cyan fill");
+    }
+
+    // The regression: at 40 columns the popup was ~22 columns inside, the
+    // ~31-column button row was clipped, and Enter confirmed an action whose
+    // button was cut off. 30 columns cannot fit the row at all, so the
+    // buttons stack.
+    #[test]
+    fn batch_confirm_buttons_stay_whole_on_narrow_screens() {
+        for (w, h) in [(80, 24), (40, 20), (30, 20)] {
+            let mut s = named_rows(&["alpha", "beta"]);
+            s.set_term_size((w, h));
+            s.toggle_mark_all_filtered();
+            open_marked(&mut s, BatchOp::Uninstall, vec![0, 1], 2);
+            assert_buttons_whole(&draw_sized(&s, w, h), "Uninstall", "Cancel");
+            s.confirm_batch_move();
+            assert_buttons_whole(&draw_sized(&s, w, h), "Uninstall", "Uninstall");
+        }
+    }
+
+    #[test]
+    fn overwrite_confirm_buttons_stay_whole_on_narrow_screens() {
+        for (w, h) in [(80, 24), (40, 20), (30, 20)] {
+            let mut s = named_rows(&["alpha"]);
+            s.set_term_size((w, h));
+            s.open_confirm_force(0, false, "r/alpha", "installed artifact was modified locally");
+            assert_buttons_whole(&draw_sized(&s, w, h), "Overwrite", "Cancel");
+            s.confirm_force_move(1);
+            assert_buttons_whole(&draw_sized(&s, w, h), "Overwrite", "Overwrite");
+        }
     }
 
     #[test]

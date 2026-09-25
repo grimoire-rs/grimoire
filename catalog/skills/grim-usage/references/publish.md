@@ -375,7 +375,7 @@ Treat these as required on every package, not optional:
 | Field | Why it is not optional in practice |
 |---|---|
 | `summary` | The single line `grim search` and the TUI show *instead of* the description |
-| `keywords` | Matches fuzzy at the same weight as the summary, above the description — a keyword hit survives the relevance cutoff that a description-only mention does not |
+| `keywords` | Matches fuzzy at the same weight as the summary, above the description. An exact or whole-word keyword survives the relevance cutoff beside an exact name match. A partial one does not, such as the query `grim` against the keyword `grimoire` |
 | `repository` | Also the source `homepage` and `documentation` derive from — author one key, get three annotations |
 | `license` | Never derived. A manifest with no license is one a company's review cannot clear |
 | `authors` | **Never derived.** The only automatic source is the commit author under `--git` — which publishes a person's name. A team alias here is what prevents that |

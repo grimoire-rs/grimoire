@@ -1575,7 +1575,8 @@ It supports multi-select with batch install, update, and delete. Press `?` in th
 for the full key map; highlights are `t` to toggle tree/flat view, `v` to
 pick a version, `o` to open the selected entry's repository URL in the
 browser, `g` to switch scope, `h` to show/hide deprecated artifacts, and
-`space` to mark rows.
+`space` to mark rows. A search that hides rows below the relevance cutoff
+says so in the status line, as `N weaker matches hidden`.
 
 Like [`grim search`](#search), a registry declaring an `include` / `exclude`
 [browse filter](./configuration.md#browse-filters) shows only the

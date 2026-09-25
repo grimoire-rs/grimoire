@@ -112,8 +112,8 @@ Keep one matcher and raise the floor.
 ### Matching
 
 A query splits on Unicode whitespace; each token is lowercased. A bare kind
-word (`skill`, `rule`, `bundle`, singular or plural) is an **exact kind
-filter**, never a text term. Every text term must hit some field (AND across
+word (`skill`, `rule`, `bundle`, `agent` or `mcp`, singular or plural) is an
+**exact kind filter**, never a text term. Every text term must hit some field (AND across
 terms). Each term scores its best field; the entry's score is the **sum of
 per-term bests**, which is what lets one term hit the name and another only a
 keyword.
@@ -134,7 +134,8 @@ keyword.
 - **Word prefix** splits the field on every non-alphanumeric character
   (Unicode-aware). The term must start a word: 20 per character for a whole
   word, 16 for a prefix. A term carrying its own separator (`code-review`,
-  `node.js`) matches contiguously anywhere, at 16 per character.
+  `node.js`) also matches mid-word, at 16 per character; bounded on both
+  sides it is a whole word and scores 20.
 - **The registry host is excluded.** The full-reference pass runs only when
   the term contains `/`, `.` or `:` — a pasted `ghcr.io/acme/x`, or a `repo`
   copied from `--format json`. Host detection follows Docker: a first segment
@@ -204,9 +205,8 @@ their order under relevance ranking — may change in any minor, and each change
 a user would notice is recorded in `upgrading.md`.
 
 This ruling exists so that retuning a weight or a floor is not re-argued as a
-breaking change. `docs/src/content/docs/stability.md` does not state it today:
-its "Unstable" section covers render layout, human-readable text and NDJSON
-progress, not search results. A one-line addition there is a follow-up.
+breaking change. `docs/src/content/docs/stability.md` states it in the
+"Search relevance" bullet of its "Unstable" section.
 
 ### Consequences
 
@@ -260,10 +260,10 @@ Code: `src/catalog/search_match.rs` (`SearchQuery::score_fields`,
 
 - [x] Unit tests pin the calibration orderings and the regressions named above.
 - [x] JSON report shape unchanged; the hidden-row count is stderr-only.
-- [ ] `upgrading.md` entry for the changed recall.
-- [ ] One-line Principle 9 note in `stability.md` (see the ruling above).
-- [ ] Doc drift: `SearchToolArgs::query` (`src/mcp/tool_args.rs`) and the
-      `src/command/search.rs` module doc still say every field matches fuzzy.
+- [x] `upgrading.md` entry for the changed recall.
+- [x] Principle 9 note in `stability.md` ("Search relevance", Unstable section).
+- [x] Doc drift: `--help`, `SearchToolArgs::query` (`src/mcp/tool_args.rs`) and
+      the `src/command/search.rs` module doc now describe the per-field matchers.
 
 ## Links
 
