@@ -623,7 +623,9 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                         ctx.resolved_options.tree_separators.clone(),
                         ctx.resolved_options.expand_levels as usize,
                     );
-                    state.set_search_min_relevance(ctx.resolved_options.search_min_relevance);
+                    // Seeded without re-filtering: `recompute_states` below
+                    // re-filters (and re-clamps) once for both changes.
+                    state.search_min_relevance = ctx.resolved_options.search_min_relevance;
                     recompute_states(&ctx, &mut state);
                     // Invalidate the bundle-member cache: the new scope has a
                     // different lock/install state and a different scope_label key.

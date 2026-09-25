@@ -10,6 +10,7 @@
 //! place); this module operates on the abstract input so the whole
 //! decision table is unit-testable headlessly.
 
+pub use super::state::BatchOp;
 use super::state::{ArtifactState, Mode, TuiState, ViewMode};
 
 /// Rows one `PageUp`/`PageDown` press scrolls the detail pane. A fixed
@@ -85,19 +86,6 @@ pub enum TuiInput {
     PrevTab,
     /// Quit the TUI.
     Quit,
-}
-
-/// Which batch operation to run over the target rows.
-///
-/// Closed internal enum — matches stay total, no `#[non_exhaustive]`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BatchOp {
-    /// Install (honours the integrity gate).
-    Install,
-    /// Update (force re-materialize — rolling-release contract).
-    Update,
-    /// Uninstall: delete files + drop the install record/lock pin.
-    Uninstall,
 }
 
 /// What the app must do after a transition. `None` = state-only change.
@@ -414,23 +402,23 @@ fn op_allows(op: BatchOp, state: ArtifactState) -> bool {
 /// mirroring the single-Member gates' wording). More than one row opens
 /// [`Mode::ConfirmBatch`] instead of acting.
 fn batch(state: &mut TuiState, op: BatchOp) -> TuiAction {
-    let targets = state.action_targets();
-    let had_targets = !targets.is_empty();
+    let (source, targets) = state.action_scope();
+    let candidates = targets.len();
     let rows: Vec<usize> = targets
         .into_iter()
         .filter(|&idx| state.rows.get(idx).is_some_and(|row| op_allows(op, row.state)))
         .collect();
     if rows.is_empty() {
-        if had_targets {
-            let reason = match op {
-                BatchOp::Install => "already installed",
-                BatchOp::Update | BatchOp::Uninstall => "not installed",
-            };
-            state.set_status(reason);
+        if candidates > 0 {
+            state.set_status(op.skip_reason());
         }
         TuiAction::None
-    } else if rows.len() > 1 {
-        state.open_confirm_batch(op, rows);
+    } else if rows.len() > 1
+        && let Some(source) = source
+    {
+        // `source` is `None` only for the single-selection fallback, which
+        // never yields more than one row.
+        state.open_confirm_batch(op, rows, candidates, source);
         TuiAction::None
     } else {
         TuiAction::Batch { op, rows }
@@ -1054,6 +1042,118 @@ mod tests {
             assert!(s.pending_batch.is_none());
             assert_eq!(s.mode, Mode::List);
         }
+    }
+
+    fn marked_prompt() -> TuiState {
+        let mut s = seeded();
+        handle(&mut s, TuiInput::MarkAll);
+        handle(&mut s, TuiInput::Install);
+        assert_eq!(s.mode, Mode::ConfirmBatch);
+        s
+    }
+
+    #[test]
+    fn esc_cancels_the_batch_prompt_and_keeps_the_marks() {
+        let mut s = marked_prompt();
+        assert_eq!(handle(&mut s, TuiInput::Esc), TuiAction::None);
+        assert_eq!(s.mode, Mode::List);
+        assert!(s.pending_batch.is_none());
+        assert_eq!(s.marked.len(), 3, "a cancelled prompt leaves the marks for another try");
+    }
+
+    #[test]
+    fn q_and_quit_input_quit_from_the_batch_prompt() {
+        for quit in [TuiInput::Char('q'), TuiInput::Quit] {
+            let mut s = marked_prompt();
+            assert_eq!(handle(&mut s, quit), TuiAction::Quit, "{quit:?}");
+        }
+    }
+
+    #[test]
+    fn collapse_then_enter_commits_the_batch() {
+        // `←` from Cancel wraps onto the action: two buttons, one toggle.
+        let mut s = marked_prompt();
+        handle(&mut s, TuiInput::Collapse);
+        assert_eq!(
+            handle(&mut s, TuiInput::Enter),
+            TuiAction::Batch {
+                op: BatchOp::Install,
+                rows: vec![0, 1, 2]
+            }
+        );
+    }
+
+    #[test]
+    fn expand_twice_returns_to_cancel_so_enter_does_nothing() {
+        let mut s = marked_prompt();
+        handle(&mut s, TuiInput::Expand);
+        handle(&mut s, TuiInput::Expand);
+        assert_eq!(handle(&mut s, TuiInput::Enter), TuiAction::None);
+        assert_eq!(s.mode, Mode::List);
+    }
+
+    #[test]
+    fn h_and_l_move_between_the_batch_buttons() {
+        let mut s = marked_prompt();
+        handle(&mut s, TuiInput::Char('l'));
+        assert!(s.pending_batch.as_ref().is_some_and(|b| b.proceed_selected));
+        handle(&mut s, TuiInput::Char('h'));
+        assert!(s.pending_batch.as_ref().is_some_and(|b| !b.proceed_selected));
+        assert_eq!(s.mode, Mode::ConfirmBatch, "h/l move, they never dismiss");
+    }
+
+    // The prompt guards more than one target, not "a mark-all": when the
+    // op filter leaves a single row there is nothing to confirm.
+    #[test]
+    fn mark_all_filtered_to_one_allowed_row_skips_the_prompt() {
+        let mut s = seeded();
+        s.rows[0].state = ArtifactState::Installed;
+        s.rows[1].state = ArtifactState::Installed;
+        handle(&mut s, TuiInput::MarkAll);
+        assert_eq!(
+            handle(&mut s, TuiInput::Install),
+            TuiAction::Batch {
+                op: BatchOp::Install,
+                rows: vec![2]
+            }
+        );
+        assert_eq!(s.mode, Mode::List);
+        assert!(s.pending_batch.is_none());
+    }
+
+    #[test]
+    fn a_filtered_batch_records_how_many_targets_it_started_from() {
+        let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
+        s.set_rows(vec![row("r/a"), row("r/b"), row("r/c"), row("r/d")]);
+        s.rows[0].state = ArtifactState::Installed;
+        handle(&mut s, TuiInput::MarkAll);
+        handle(&mut s, TuiInput::Install);
+        let b = s
+            .pending_batch
+            .as_ref()
+            .expect("three installable rows still need a prompt");
+        assert_eq!(b.rows.len(), 3);
+        assert_eq!(b.candidates, 4, "the prompt must be able to say `3 of 4`");
+        assert_eq!(b.source, crate::tui::state::BatchSource::Marked);
+    }
+
+    #[test]
+    fn a_group_batch_records_the_group_it_came_from() {
+        let mut s = seeded();
+        for r in &mut s.rows {
+            r.state = ArtifactState::Installed;
+        }
+        s.toggle_view_mode(); // → Tree; row 0 is the registry group
+        s.selected = 0;
+        handle(&mut s, TuiInput::Delete);
+        let b = s.pending_batch.as_ref().expect("a three-leaf group asks first");
+        assert!(
+            matches!(b.source, crate::tui::state::BatchSource::Group(_)),
+            "{:?}",
+            b.source
+        );
+        assert_eq!(b.candidates, 3);
     }
 
     #[test]

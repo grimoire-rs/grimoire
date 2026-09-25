@@ -22,7 +22,7 @@ use super::detail::{
     BULLET_PREFIX, CODE_PREFIX, DETAIL_MIN_WIDTH, DetailLine, W_DEPRECATED, W_DOWNLOADS, W_KIND, W_RATING, W_REGISTRY,
     W_REPO, W_STATUS, W_TAG, catalog_width, detail_lines, scroll_max,
 };
-use super::state::{ArtifactState, Mode, TuiState};
+use super::state::{ArtifactState, BatchSource, Mode, TuiState};
 
 /// A pure, ratatui-free color tag for a status cell. [`draw`] maps it to a
 /// concrete ratatui [`Color`]; keeping it abstract preserves the headless
@@ -980,11 +980,18 @@ pub fn frame(state: &TuiState) -> RenderModel {
         "loading catalog…".to_string()
     } else if !registry_health_status.is_empty() {
         registry_health_status
+    } else if state.hidden_by_relevance > 0 {
+        // Below every message that already claims the line: it explains a
+        // missing row, it never reports an outcome.
+        match state.hidden_by_relevance {
+            1 => "1 weaker match hidden".to_string(),
+            n => format!("{n} weaker matches hidden"),
+        }
     } else if state.marked.is_empty() {
         String::new()
     } else {
         format!(
-            "{} marked — i install · u update · d delete · a all · c clear",
+            "{} marked — i install · u update · d uninstall · a all · c clear",
             state.marked.len()
         )
     };
@@ -1039,9 +1046,9 @@ pub fn frame(state: &TuiState) -> RenderModel {
         .confirm
         .as_ref()
         .map(|c| ConfirmView {
-            title: format!("Overwrite {}?", c.repo),
+            title: format!("Overwrite {}?", sanitize_member_label(&c.repo)),
             message: "Reinstalling discards your local changes. This cannot be undone.".to_string(),
-            detail: c.detail.clone(),
+            detail: sanitize_member_label(&c.detail),
             action: "Overwrite",
             action_selected: c.overwrite_selected,
         })
@@ -1490,29 +1497,52 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
 /// Names shown in the batch prompt before the rest collapse into a count.
 const CONFIRM_BATCH_NAMES: usize = 5;
 
-/// The batch prompt: the op and target count in the title, the first few
-/// artifact names in the body so a mark-all is recognisable at a glance.
+/// Display width one name may take in the batch prompt: a readability cap,
+/// so one registry-supplied name cannot fill the list. The popup grows to fit
+/// the wrapped names (`draw_confirm`); this width is not what keeps them on
+/// screen.
+const CONFIRM_NAME_WIDTH: usize = 24;
+
+/// The batch prompt: the op and target count in the title, what the targets
+/// were selected as (and what the op filter skipped) in the message, and the
+/// first few artifact names so a mark-all is recognisable at a glance.
 fn confirm_batch_view(state: &TuiState, b: &super::state::PendingBatch) -> ConfirmView {
-    let action = match b.op {
-        super::event::BatchOp::Install => "Install",
-        super::event::BatchOp::Update => "Update",
-        super::event::BatchOp::Uninstall => "Uninstall",
+    let action = b.op.verb();
+    let n = b.rows.len();
+    let skipped = b.candidates.saturating_sub(n);
+    let of = format!("{n} of {}", b.candidates);
+    let reason = b.op.skip_reason();
+    let message = match (&b.source, skipped) {
+        (BatchSource::Marked, 0) => format!("{action} all {n} marked artifacts:"),
+        (BatchSource::Marked, k) => format!("{action} {of} marked artifacts ({k} {reason}):"),
+        (BatchSource::Group(path), k) => {
+            let group = sanitize_member_label(path);
+            if k == 0 {
+                format!("{action} every artifact in {group}:")
+            } else {
+                format!("{action} {of} artifacts in {group} ({k} {reason}):")
+            }
+        }
     };
-    let mut names: Vec<&str> = b
+    let mut names: Vec<String> = b
         .rows
         .iter()
         .filter_map(|&i| state.rows.get(i))
         .take(CONFIRM_BATCH_NAMES)
-        .map(|r| r.repository.rsplit('/').next().unwrap_or(&r.repository))
+        .map(|r| {
+            let leaf = r.repository.rsplit('/').next().unwrap_or(&r.repository);
+            fit(&sanitize_member_label(leaf), CONFIRM_NAME_WIDTH)
+                .trim_end()
+                .to_string()
+        })
         .collect();
-    let rest = b.rows.len().saturating_sub(names.len());
-    let more = format!("and {rest} more");
+    let rest = n.saturating_sub(names.len());
     if rest > 0 {
-        names.push(&more);
+        names.push(format!("and {rest} more"));
     }
     ConfirmView {
-        title: format!("{action} {} artifacts?", b.rows.len()),
-        message: format!("{action} every marked or grouped artifact:"),
+        title: format!("{action} {n} artifacts?"),
+        message,
         detail: names.join(", "),
         action,
         action_selected: b.proceed_selected,
@@ -1544,28 +1574,41 @@ fn draw_confirm(f: &mut Frame, c: &ConfirmView) {
         Line::from(Span::styled(c.message.clone(), Style::default().fg(Color::White))),
         Line::from(""),
         Line::from(Span::styled(c.detail.clone(), Style::default().fg(Color::DarkGray))),
-        Line::from(""),
-        Line::from(vec![
-            button("Cancel", !c.action_selected),
-            Span::raw("  "),
-            button(c.action, c.action_selected),
-        ]),
     ];
+    let buttons = Line::from(vec![
+        button("Cancel", !c.action_selected),
+        Span::raw("  "),
+        button(c.action, c.action_selected),
+    ]);
 
-    let area = centered_rect(60, 35, f.area());
+    // Tall enough for the wrapped message and detail, a spacer and the
+    // buttons, capped at the screen; on a screen too short for all of it the
+    // detail is what gets clipped, never the buttons. Each `+ 1` absorbs word
+    // wrap breaking earlier than a plain character count.
+    let screen = f.area();
+    let mut area = centered_rect(60, 35, screen);
+    let inner_w = usize::from(area.width.saturating_sub(2)).max(1);
+    let wrapped = |text: &str| text.chars().count().div_ceil(inner_w) + 1;
+    let needed = u16::try_from(2 + wrapped(&c.message) + 1 + wrapped(&c.detail) + 1 + 1).unwrap_or(u16::MAX);
+    if area.height < needed {
+        area.height = needed.min(screen.height);
+        area.y = screen.y + (screen.height - area.height) / 2;
+    }
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(Span::styled(
+            format!(" {} ", c.title),
+            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+        ));
+    // The buttons get a row of their own, so no amount of body text can push
+    // the choice the user is about to confirm off the popup.
+    let [text_area, _, button_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)]).areas(block.inner(area));
     f.render_widget(Clear, area);
-    f.render_widget(
-        Paragraph::new(body).wrap(Wrap { trim: false }).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Yellow))
-                .title(Span::styled(
-                    format!(" {} ", c.title),
-                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
-                )),
-        ),
-        area,
-    );
+    f.render_widget(block, area);
+    f.render_widget(Paragraph::new(body).wrap(Wrap { trim: false }), text_area);
+    f.render_widget(Paragraph::new(buttons), button_area);
     let hint_area = Rect {
         x: area.x + 2,
         y: area.y + area.height.saturating_sub(1),
@@ -1878,7 +1921,7 @@ fn color_for(key: ColorKey) -> Color {
 mod tests {
     use super::*;
     use crate::tui::detail::detail_line_text;
-    use crate::tui::state::{ArtifactState, TuiRow};
+    use crate::tui::state::{ArtifactState, BatchOp, TuiRow};
 
     /// Flatten the semantic detail lines to one plain string for
     /// contains-style assertions (styling is irrelevant to content tests).
@@ -2617,7 +2660,7 @@ mod tests {
                 .map(|n| row(&format!("r/{n}"), ArtifactState::Installed))
                 .collect(),
         );
-        s.open_confirm_batch(super::super::event::BatchOp::Uninstall, (0..names.len()).collect());
+        open_marked(&mut s, BatchOp::Uninstall, (0..names.len()).collect(), names.len());
         let c = frame(&s).confirm.expect("batch confirm projected once opened");
         assert_eq!(c.title, "Uninstall 7 artifacts?");
         assert_eq!(c.action, "Uninstall");
@@ -2626,6 +2669,235 @@ mod tests {
         assert!(!c.action_selected, "Cancel is preselected");
         s.confirm_batch_move();
         assert!(frame(&s).confirm.unwrap().action_selected);
+    }
+
+    /// Mark every row, then open the batch prompt as the marked set.
+    fn open_marked(s: &mut TuiState, op: BatchOp, rows: Vec<usize>, candidates: usize) {
+        s.marked = (0..s.rows.len()).collect();
+        s.open_confirm_batch(op, rows, candidates, BatchSource::Marked);
+    }
+
+    fn named_rows(names: &[&str]) -> TuiState {
+        let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
+        s.set_rows(
+            names
+                .iter()
+                .map(|n| row(&format!("r/{n}"), ArtifactState::Installed))
+                .collect(),
+        );
+        s
+    }
+
+    #[test]
+    fn batch_confirm_lists_exactly_five_names_before_counting_the_rest() {
+        let five = ["a1", "a2", "a3", "a4", "a5"];
+        let mut s = named_rows(&five);
+        open_marked(&mut s, BatchOp::Uninstall, (0..5).collect(), 5);
+        let c = frame(&s).confirm.unwrap();
+        assert_eq!(c.detail, "a1, a2, a3, a4, a5", "five names fit with no overflow clause");
+
+        let six = ["a1", "a2", "a3", "a4", "a5", "a6"];
+        let mut s = named_rows(&six);
+        open_marked(&mut s, BatchOp::Uninstall, (0..6).collect(), 6);
+        assert_eq!(frame(&s).confirm.unwrap().detail, "a1, a2, a3, a4, a5, and 1 more");
+    }
+
+    // A registry-sourced name reaches the prompt: it must be stripped of
+    // terminal controls and kept short enough not to crowd out the buttons.
+    #[test]
+    fn batch_confirm_names_are_sanitized_and_truncated() {
+        let long = "x".repeat(80);
+        let mut s = named_rows(&["evil\u{1b}[31mred", &long]);
+        open_marked(&mut s, BatchOp::Uninstall, vec![0, 1], 2);
+        let d = frame(&s).confirm.unwrap().detail;
+        assert!(!d.contains('\u{1b}'), "escape stripped: {d:?}");
+        assert!(d.contains('…'), "a long name is truncated: {d:?}");
+        assert!(d.chars().count() < 80, "{d:?}");
+    }
+
+    #[test]
+    fn batch_confirm_message_names_the_marked_set() {
+        let mut s = named_rows(&["a1", "a2", "a3"]);
+        s.toggle_mark_all_filtered();
+        open_marked(&mut s, BatchOp::Install, vec![0, 1, 2], 3);
+        assert_eq!(frame(&s).confirm.unwrap().message, "Install all 3 marked artifacts:");
+    }
+
+    #[test]
+    fn batch_confirm_message_says_how_many_the_filter_skipped() {
+        let mut s = named_rows(&["a1", "a2", "a3", "a4"]);
+        s.toggle_mark_all_filtered();
+        open_marked(&mut s, BatchOp::Install, vec![1, 2], 4);
+        assert_eq!(
+            frame(&s).confirm.unwrap().message,
+            "Install 2 of 4 marked artifacts (2 already installed):"
+        );
+        open_marked(&mut s, BatchOp::Uninstall, vec![1, 2], 3);
+        assert_eq!(
+            frame(&s).confirm.unwrap().message,
+            "Uninstall 2 of 3 marked artifacts (1 not installed):"
+        );
+    }
+
+    #[test]
+    fn batch_confirm_message_names_the_group() {
+        let mut s = named_rows(&["a1", "a2", "a3"]);
+        s.toggle_view_mode(); // → Tree; row 0 is the registry group
+        s.selected = 0;
+        let src = s.action_scope().0.expect("a group selection has a source");
+        s.open_confirm_batch(BatchOp::Uninstall, vec![0, 1, 2], 3, src.clone());
+        assert_eq!(frame(&s).confirm.unwrap().message, "Uninstall every artifact in r:");
+        s.open_confirm_batch(BatchOp::Update, vec![0, 1], 3, src);
+        assert_eq!(
+            frame(&s).confirm.unwrap().message,
+            "Update 2 of 3 artifacts in r (1 not installed):"
+        );
+    }
+
+    // A nested group's key carries its registry root's tagged key as a
+    // prefix; reading it whole as a root key named the group
+    // `acme (ghcr.io/acme/ghcr.io/acme/tools)`. The prompt uses the name the
+    // selected tree row shows.
+    #[test]
+    fn batch_confirm_names_a_nested_group_by_its_path() {
+        let source = RowSource::Alias {
+            alias: "acme".to_string(),
+            locator: "ghcr.io/acme".to_string(),
+        };
+        let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
+        s.set_rows(
+            ["a1", "a2"]
+                .iter()
+                .map(|n| {
+                    let mut r = row(&format!("ghcr.io/acme/tools/{n}"), ArtifactState::Installed);
+                    r.registry = "ghcr.io".to_string();
+                    r.repository = format!("acme/tools/{n}");
+                    r.source = source.clone();
+                    r
+                })
+                .collect(),
+        );
+        s.toggle_view_mode(); // → Tree
+        let flat = s.flattened();
+        s.selected = flat
+            .iter()
+            .position(|dr| matches!(dr, crate::tui::tree::DisplayRow::Group { depth, .. } if *depth > 0))
+            .unwrap_or_else(|| panic!("a nested group: {flat:?}"));
+        let (src, rows) = s.action_scope();
+        s.open_confirm_batch(BatchOp::Uninstall, rows, 2, src.expect("a group has a source"));
+        assert_eq!(
+            frame(&s).confirm.unwrap().message,
+            "Uninstall every artifact in ghcr.io/acme/tools:"
+        );
+    }
+
+    /// Draw `s` on an 80×24 test terminal and return the buffer.
+    fn draw_80x24(s: &TuiState) -> ratatui::buffer::Buffer {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let model = frame(s);
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| draw(f, &model)).unwrap();
+        term.backend().buffer().clone()
+    }
+
+    /// The row holding both buttons, and the background of the chosen one.
+    fn button_row(buf: &ratatui::buffer::Buffer, action: &str) -> (String, Option<Color>) {
+        let cols = buf.area.width as usize;
+        let rows: Vec<&[ratatui::buffer::Cell]> = buf.content().chunks(cols).collect();
+        let line = rows
+            .iter()
+            .map(|r| r.iter().map(|c| c.symbol()).collect::<String>())
+            .find(|l| l.contains("[ Cancel ]") && l.contains(&format!("[ {action} ]")))
+            .unwrap_or_else(|| panic!("the button row must be on screen:\n{}", screen(buf)));
+        let row = rows
+            .iter()
+            .find(|r| r.iter().map(|c| c.symbol()).collect::<String>() == line)
+            .unwrap();
+        let chosen_bg = row.iter().find(|c| c.symbol() == "▸").map(|c| c.bg);
+        (line, chosen_bg)
+    }
+
+    fn screen(buf: &ratatui::buffer::Buffer) -> String {
+        buf.content()
+            .chunks(buf.area.width as usize)
+            .map(|r| r.iter().map(|c| c.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    // The regression: five long names wrapped inside the fixed-height popup
+    // and pushed the button row out of it, so arrow + Enter confirmed a
+    // choice the user could not see.
+    #[test]
+    fn batch_confirm_buttons_stay_visible_at_80x24_with_long_names() {
+        let names: Vec<String> = (1..=6)
+            .map(|i| format!("n{i}-very-long-artifact-name-{}", "z".repeat(40)))
+            .collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut s = named_rows(&refs);
+        s.set_term_size((80, 24));
+        s.toggle_mark_all_filtered();
+        open_marked(&mut s, BatchOp::Uninstall, (0..6).collect(), 6);
+
+        // Every listed name and the overflow count are on screen — the
+        // popup grows for them rather than clipping the tail silently.
+        let buf = draw_80x24(&s);
+        let shown = screen(&buf);
+        for needle in ["n1-very-long", "n5-very-long", "and 1 more"] {
+            assert!(shown.contains(needle), "{needle:?} must be visible:\n{shown}");
+        }
+        let (line, bg) = button_row(&buf, "Uninstall");
+        assert!(line.contains("▸ [ Cancel ]"), "Cancel is the chosen button: {line:?}");
+        assert_eq!(bg, Some(Color::Cyan), "the chosen button is a solid cyan fill");
+
+        s.confirm_batch_move();
+        let (line, bg) = button_row(&draw_80x24(&s), "Uninstall");
+        assert!(line.contains("▸ [ Uninstall ]"), "{line:?}");
+        assert_eq!(bg, Some(Color::Cyan));
+    }
+
+    #[test]
+    fn overwrite_confirm_buttons_stay_visible_at_80x24_with_a_long_refusal() {
+        let mut s = named_rows(&["alpha"]);
+        let detail = "installed artifact was modified locally: ".repeat(12);
+        s.open_confirm_force(0, false, "r/alpha", &detail);
+        let (line, bg) = button_row(&draw_80x24(&s), "Overwrite");
+        assert!(line.contains("▸ [ Cancel ]"), "{line:?}");
+        assert_eq!(bg, Some(Color::Cyan));
+    }
+
+    // The status line names what the relevance cutoff hid, below any
+    // message that already claims the line.
+    #[test]
+    fn status_line_reports_weaker_matches_hidden_by_the_cutoff() {
+        let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
+        let mut named = row("acme/review", ArtifactState::NotInstalled);
+        named.description = "unrelated blurb".to_string();
+        let mut decoy = row("acme/aaa-decoy", ArtifactState::NotInstalled);
+        decoy.description = "does a review of things".to_string();
+        s.set_rows(vec![decoy, named]);
+        s.set_status("installed r/a"); // sticky from an earlier action
+        s.apply_query("review");
+        assert_eq!(
+            frame(&s).status,
+            "1 weaker match hidden",
+            "typing a query clears the old message so the notice shows"
+        );
+        s.set_status("installed r/a");
+        assert_eq!(frame(&s).status, "installed r/a", "a transient message wins");
+    }
+
+    #[test]
+    fn marked_legend_says_uninstall_like_the_prompt() {
+        let mut s = named_rows(&["a1", "a2"]);
+        s.toggle_mark_all_filtered();
+        let status = frame(&s).status;
+        assert!(status.contains("d uninstall"), "{status:?}");
+        assert!(!status.contains("delete"), "{status:?}");
     }
 
     #[test]

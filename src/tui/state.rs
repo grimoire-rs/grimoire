@@ -128,14 +128,64 @@ pub struct PendingForce {
     pub overwrite_selected: bool,
 }
 
+/// Which batch operation to run over the target rows. Lives with the state
+/// that holds it ([`PendingBatch`]); `event` re-exports it for its callers.
+///
+/// Closed internal enum — matches stay total, no `#[non_exhaustive]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchOp {
+    /// Install (honours the integrity gate).
+    Install,
+    /// Update (force re-materialize — rolling-release contract).
+    Update,
+    /// Uninstall: delete files + drop the install record/lock pin.
+    Uninstall,
+}
+
+impl BatchOp {
+    /// The capitalised verb the prompt's title, body and button use.
+    pub fn verb(self) -> &'static str {
+        match self {
+            BatchOp::Install => "Install",
+            BatchOp::Update => "Update",
+            BatchOp::Uninstall => "Uninstall",
+        }
+    }
+
+    /// Why a target this op does not accept was left out — the status line
+    /// when nothing is left, the prompt's aside when some is.
+    pub fn skip_reason(self) -> &'static str {
+        match self {
+            BatchOp::Install => "already installed",
+            BatchOp::Update | BatchOp::Uninstall => "not installed",
+        }
+    }
+}
+
+/// Where a batch's targets came from, so the prompt can say what the user
+/// actually selected instead of guessing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BatchSource {
+    /// The marked set.
+    Marked,
+    /// Every leaf under a tree group, carrying the name its tree row shows —
+    /// never the internal tagged key.
+    Group(String),
+}
+
 /// A multi-artifact batch awaiting the user's go-ahead, when
 /// [`Mode::ConfirmBatch`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingBatch {
     /// The operation to run once confirmed.
-    pub op: super::event::BatchOp,
+    pub op: BatchOp,
     /// The `rows` indices it runs over, already filtered to rows `op` accepts.
     pub rows: Vec<usize>,
+    /// What the targets were selected as.
+    pub source: BatchSource,
+    /// How many targets there were before the `op` filter, so the prompt can
+    /// say `7 of 10` when some were skipped.
+    pub candidates: usize,
     /// Whether the proceed button is selected. Starts `false` for the same
     /// reason as [`PendingForce::overwrite_selected`]: a letter typed into the
     /// list by mistake must not be the key that confirms.
@@ -365,6 +415,9 @@ pub struct TuiState {
     /// `[options].search_min_relevance` of the active scope — the same
     /// cutoff `grim search` applies.
     pub search_min_relevance: u32,
+    /// Rows the relevance cutoff dropped from the current query — surfaced
+    /// in the status line so a missing artifact is explained, not mysterious.
+    pub hidden_by_relevance: usize,
     /// The set of tree-group keys that are collapsed (descendants hidden).
     pub collapsed: BTreeSet<String>,
     /// Whether a type-level group appears between the registry root and
@@ -496,6 +549,7 @@ impl Default for TuiState {
             view_mode: ViewMode::default(),
             tree_suspended_by_search: false,
             search_min_relevance: crate::config::defaults::SEARCH_MIN_RELEVANCE,
+            hidden_by_relevance: 0,
             collapsed: BTreeSet::new(),
             group_by_type: false,
             tree_separators: default_tree_separators(),
@@ -598,6 +652,13 @@ impl TuiState {
         // Row identities changed wholesale — stale marks would point at
         // unrelated rows.
         self.marked.clear();
+        // Both prompts hold `rows` indices: confirming one now would act on
+        // whatever artifacts the reload put at those positions.
+        self.pending_batch = None;
+        self.confirm = None;
+        if matches!(self.mode, Mode::ConfirmBatch | Mode::ConfirmForce) {
+            self.mode = Mode::List;
+        }
         // Full reload invalidates all bundle-member cache entries: the set of
         // bundles, their repos, and their members may all have changed.
         self.bundle_members.clear();
@@ -857,7 +918,9 @@ impl TuiState {
         self.marked.clear();
     }
 
-    /// The `rows` indices a batch action should target: the marked set
+    /// The `rows` indices a batch action should target, and what they were
+    /// selected as — one decision, so the batch prompt can never name a
+    /// different source than the rows it acts on. Targets: the marked set
     /// when non-empty, otherwise the single selected row. In tree mode with
     /// no marks, a group selection targets all its descendant leaf rows.
     /// Always returned sorted and de-duplicated for deterministic, stable
@@ -883,23 +946,41 @@ impl TuiState {
     /// - no marks + member selected → empty (read-only, no action target)
     /// - no marks + leaf selected → `[leaf_row_index]`
     /// - no marks + group selected → sorted descendant leaf row indices
-    pub fn action_targets(&self) -> Vec<usize> {
+    ///
+    /// The source is `None` for the single-selection fallback, which yields
+    /// at most one row and so never needs a prompt.
+    pub fn action_scope(&self) -> (Option<BatchSource>, Vec<usize>) {
         if !self.marked.is_empty() {
-            return self.marked.iter().copied().collect();
+            return (Some(BatchSource::Marked), self.marked.iter().copied().collect());
         }
         // No marks: check if a group is selected in tree mode.
         if self.view_mode == ViewMode::Tree {
             let flat = self.flattened();
-            if let Some(super::tree::DisplayRow::Group { rows, .. }) = flat.get(self.selected)
+            if let Some(super::tree::DisplayRow::Group {
+                key,
+                label,
+                depth,
+                rows,
+                ..
+            }) = flat.get(self.selected)
                 && !rows.is_empty()
             {
                 let mut sorted = rows.clone();
                 sorted.sort_unstable();
-                return sorted;
+                // The name the selected row shows. A root's key is tagged, so
+                // it goes through the cell label; a nested key has the root's
+                // tagged key as a prefix, and `registry_label` would read the
+                // whole path as the root's locator (`acme (ghcr.io/acme/tools)`).
+                let name = if *depth == 0 {
+                    self.registry_cell_label(key)
+                } else {
+                    label.clone()
+                };
+                return (Some(BatchSource::Group(name)), sorted);
             }
         }
         // Fall back to the single selected row.
-        self.selected_row_index().into_iter().collect()
+        (None, self.selected_row_index().into_iter().collect())
     }
 
     /// Set the loading flag.
@@ -979,8 +1060,15 @@ impl TuiState {
     /// selection may now point at a different row.
     pub fn apply_query(&mut self, query: impl Into<String>) {
         self.reset_detail_view();
+        let query = query.into();
+        // A status message is sticky until replaced; while the user types a
+        // search it would bury the "weaker matches hidden" notice that
+        // explains the list they are looking at.
+        if query != self.query && !query.is_empty() {
+            self.status_line.clear();
+        }
         let was_ranked = SearchQuery::parse(&self.query).has_text_terms();
-        self.query = query.into();
+        self.query = query;
         let ranked = SearchQuery::parse(&self.query).has_text_terms();
         // A ranked result set scattered across tree groups loses its ranking
         // and its overview, so a text search shows a flat list while it
@@ -1015,6 +1103,9 @@ impl TuiState {
     /// Seed the search relevance cutoff from the active scope's config and
     /// re-filter, clamping the cursor as rows appear or disappear.
     pub fn set_search_min_relevance(&mut self, percent: u32) {
+        if self.search_min_relevance == percent {
+            return;
+        }
         self.search_min_relevance = percent;
         self.recompute_filter();
         self.clamp_tree_selection_to(self.display_len());
@@ -1894,12 +1985,16 @@ impl TuiState {
     }
 
     /// Hold a multi-artifact batch for confirmation. Cancel is preselected —
-    /// see [`PendingBatch::proceed_selected`].
-    pub fn open_confirm_batch(&mut self, op: super::event::BatchOp, rows: Vec<usize>) {
+    /// see [`PendingBatch::proceed_selected`]. `candidates` is the target
+    /// count before the `op` filter, `source` what [`Self::action_scope`]
+    /// said the targets were.
+    pub fn open_confirm_batch(&mut self, op: BatchOp, rows: Vec<usize>, candidates: usize, source: BatchSource) {
         self.mode = Mode::ConfirmBatch;
         self.pending_batch = Some(PendingBatch {
             op,
             rows,
+            source,
+            candidates,
             proceed_selected: false,
         });
     }
@@ -1963,7 +2058,9 @@ impl TuiState {
             .collect();
         // Same cutoff as `grim search`: the two surfaces agree on which rows
         // a query returns, not only on their order.
+        let matched = scored.len();
         crate::catalog::retain_relevant(&mut scored, self.search_min_relevance);
+        self.hidden_by_relevance = matched - scored.len();
         // An explicit `--sort` overrides relevance (C-017): leaving `scored`
         // in row-index order preserves exactly the browse order `set_rows`
         // built, which is what the flag asked for. Composing the two would
@@ -2032,6 +2129,14 @@ fn root_key_parts(key: &str) -> Option<(Option<&str>, &str)> {
         });
     }
     key.strip_prefix("locator:").map(|locator| (None, locator))
+}
+
+#[cfg(test)]
+impl TuiState {
+    /// The targets half of [`Self::action_scope`].
+    pub fn action_targets(&self) -> Vec<usize> {
+        self.action_scope().1
+    }
 }
 
 #[cfg(test)]
@@ -2704,6 +2809,84 @@ mod tests {
             1,
             "the description-only hit falls below the relevance cutoff"
         );
+    }
+
+    fn review_fixture() -> TuiState {
+        let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
+        s.set_rows(vec![
+            row(
+                "acme/aaa-decoy",
+                "does a review of things",
+                &[],
+                ArtifactState::NotInstalled,
+            ),
+            row("acme/review", "unrelated blurb", &[], ArtifactState::NotInstalled),
+        ]);
+        s
+    }
+
+    #[test]
+    fn zero_cutoff_rewidens_and_restoring_it_clamps_the_cursor() {
+        let mut s = review_fixture();
+        s.apply_query("review");
+        assert_eq!(s.filtered.len(), 1);
+        s.set_search_min_relevance(0);
+        assert_eq!(s.filtered.len(), 2, "0 turns the cutoff off");
+        s.move_selection(1);
+        assert_eq!(s.selected, 1);
+        s.set_search_min_relevance(50);
+        assert_eq!(s.filtered.len(), 1);
+        assert_eq!(s.selected, 0, "the cursor is clamped back into range");
+    }
+
+    // `--sort` replaces relevance ordering; it must not also switch off the
+    // relevance cutoff, or a sorted search would show more rows than
+    // `grim search --sort` does for the same query.
+    #[test]
+    fn sorted_search_still_applies_the_relevance_cutoff() {
+        let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
+        s.set_sort(Some(SortMode::Name));
+        s.set_rows(review_fixture().rows);
+        s.apply_query("review");
+        assert_eq!(s.filtered.len(), 1);
+        assert_eq!(s.hidden_by_relevance, 1);
+    }
+
+    #[test]
+    fn hidden_by_relevance_counts_only_what_the_cutoff_dropped() {
+        let mut s = review_fixture();
+        assert_eq!(s.hidden_by_relevance, 0, "no query hides nothing");
+        s.apply_query("review");
+        assert_eq!(s.hidden_by_relevance, 1);
+        s.set_search_min_relevance(0);
+        assert_eq!(s.hidden_by_relevance, 0);
+        s.set_search_min_relevance(50);
+        s.apply_query("");
+        assert_eq!(s.hidden_by_relevance, 0, "clearing the query hides nothing");
+    }
+
+    // A reload renumbers `rows`, so a prompt holding row indices would act on
+    // whichever artifacts now sit at them. Both prompts close instead.
+    #[test]
+    fn set_rows_closes_prompts_that_hold_row_indices() {
+        let mut s = seeded();
+        s.marked.extend([0, 2]);
+        s.open_confirm_batch(BatchOp::Uninstall, vec![0, 2], 2, BatchSource::Marked);
+        s.set_rows(seeded().rows);
+        assert!(s.pending_batch.is_none());
+        assert_eq!(s.mode, Mode::List);
+
+        s.open_confirm_force(1, false, "r/beta", "modified locally");
+        s.merge_catalog_rows(seeded().rows);
+        assert!(s.confirm.is_none());
+        assert_eq!(s.mode, Mode::List);
+
+        // Any other mode is the user's and survives a reload.
+        s.mode = Mode::Search;
+        s.set_rows(seeded().rows);
+        assert_eq!(s.mode, Mode::Search);
     }
 
     #[test]
@@ -3385,6 +3568,67 @@ mod tests {
         assert_eq!(s.view_mode, ViewMode::Flat, "refining keeps the flat list");
         s.apply_query("");
         assert_eq!(s.view_mode, ViewMode::Tree, "clearing restores the tree");
+    }
+
+    fn three_leaf_tree() -> TuiState {
+        let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
+        s.set_rows(vec![
+            tree_row("reg/acme/alpha", "skill", ArtifactState::Installed),
+            tree_row("reg/acme/alpine", "skill", ArtifactState::NotInstalled),
+            tree_row("reg/acme/beta", "skill", ArtifactState::NotInstalled),
+        ]);
+        s.set_default_registry(Some("reg".to_string()));
+        s.toggle_view_mode(); // → Tree
+        s
+    }
+
+    fn select_repo(s: &mut TuiState, repo: &str) {
+        s.select_repo_or_clamp(repo);
+        assert_eq!(s.selected_row().map(|r| r.repo.as_str()), Some(repo));
+    }
+
+    // The first text keystroke lands on the best hit, not on whatever index
+    // the tree cursor had; clearing the query carries the artifact under the
+    // cursor back into the tree.
+    #[test]
+    fn search_lands_on_the_best_hit_and_clearing_keeps_the_cursor_artifact() {
+        let mut s = three_leaf_tree();
+        select_repo(&mut s, "reg/acme/beta");
+        assert!(s.selected > 0, "beta is not the first tree row");
+        s.apply_query("alp");
+        assert_eq!(s.view_mode, ViewMode::Flat);
+        assert_eq!(s.selected, 0, "the first keystroke resets to the best hit");
+        s.move_selection(1);
+        let under_cursor = s.selected_row().map(|r| r.repo.clone()).expect("a second hit");
+        s.apply_query("");
+        assert_eq!(s.view_mode, ViewMode::Tree);
+        assert_eq!(
+            s.selected_row().map(|r| r.repo.clone()),
+            Some(under_cursor),
+            "clearing restores the tree on the artifact the cursor was on"
+        );
+    }
+
+    // A kind-only query ranks nothing, so it must not flatten the tree.
+    #[test]
+    fn kind_only_query_keeps_the_tree() {
+        let mut s = three_leaf_tree();
+        s.apply_query("skill");
+        assert_eq!(s.view_mode, ViewMode::Tree);
+        assert!(!s.tree_suspended_by_search);
+    }
+
+    // Editing a text search into a kind-only one ends the search's claim on
+    // the view: the tree comes back and the flag clears.
+    #[test]
+    fn text_query_edited_to_kind_only_restores_the_tree() {
+        let mut s = three_leaf_tree();
+        s.apply_query("alp");
+        assert!(s.tree_suspended_by_search);
+        s.apply_query("skill");
+        assert_eq!(s.view_mode, ViewMode::Tree);
+        assert!(!s.tree_suspended_by_search);
     }
 
     // An explicit toggle during a search is the user's choice: clearing the
