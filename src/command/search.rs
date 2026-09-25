@@ -8,8 +8,9 @@
 //! share): each registry's cached catalog is loaded or coordinately
 //! refreshed, filtered with the [`SearchQuery`] matcher (whitespace-split
 //! AND of terms fuzzy-matched over kind / repo / summary / description /
-//! keywords, plus bare kind keywords — `skill`/`rule`/`bundle` and plurals —
-//! acting as kind filters; an empty query lists everything), and badged
+//! keywords, plus bare kind keywords — `skill`/`rule`/`bundle`/`agent`/`mcp`
+//! and plurals — acting as kind filters; an empty query lists everything),
+//! and badged
 //! against the scope's lock + install-state. An explicit `--registry`
 //! (repeatable / comma-separated) collapses the browse set to exactly those
 //! registries; otherwise the declared `[[registries]]` (or the single
@@ -64,10 +65,12 @@ pub struct SearchArgs {
     /// keywords. Fuzzy means subsequence — a term's letters must appear in
     /// order but need not be adjacent, so `kubctl` finds `kube-control`.
     /// Results are ranked by relevance, best match first, and hits scoring
-    /// under half the best are dropped. A bare kind keyword
-    /// (`skill`/`rule`/`bundle`, singular or plural) filters by kind instead
-    /// of matching as text. Empty ⇒ list the whole catalog, unranked, in
-    /// registry order. Results are narrowed further by each source's
+    /// below `options.search_min_relevance` percent of the best (default 50)
+    /// are dropped, with a note on stderr saying how many. A bare kind
+    /// keyword (`skill`/`rule`/`bundle`/`agent`/`mcp`, singular or plural)
+    /// filters by kind instead of matching as text. Empty ⇒ list the whole
+    /// catalog, unranked, in registry order. Results are narrowed further by
+    /// each source's
     /// `include`/`exclude` browse filter — `grim context` shows the active
     /// patterns.
     pub query: Option<String>,
@@ -178,11 +181,20 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     // is always shown regardless.
     let show = args.show_deprecated || cfg_show_deprecated;
 
-    // Read before the groups are consumed below: whether any source returned
-    // rows at all *before* the read-time filters ran. It is the same gate
-    // C-019 uses, and it is what tells an empty table caused by a browse
-    // filter apart from one caused by a `_catalog`-gated registry.
-    let any_rows_before_filter = results.any_rows_before_filter();
+    // Read before the groups are consumed below: whether any source listed
+    // rows at all *before* the query and the read-time filters ran. That is
+    // what tells an empty table caused by a query, a browse filter or the
+    // relevance cutoff apart from one caused by a `_catalog`-gated registry.
+    let any_rows_listed = results.any_rows_listed();
+    // A plain OCI source that actually loaded. Index sources never touch
+    // `_catalog`, and a source that failed (unreachable, 401) already
+    // reports its own error — the hint would misdiagnose both. Groups are
+    // one per resolved registry, in order.
+    let any_registry_source = results
+        .groups
+        .iter()
+        .zip(&registries)
+        .any(|(g, r)| g.error.is_none() && !r.kind.is_index());
 
     // Every browsed source and whether it loaded, read off the groups before
     // the flatten below consumes them. Group order is registry-declaration
@@ -223,8 +235,13 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
         .collect();
 
     // The relevance cutoff decides *which* rows a query returns; `--sort`
-    // below only reorders them, so it applies either way.
-    crate::catalog::retain_relevant(&mut scored, min_relevance);
+    // below only reorders them, so it applies either way. Hidden rows are
+    // announced on stderr (never stdout: `grim mcp` speaks JSON-RPC there,
+    // and the JSON report stays byte-identical).
+    let hidden = apply_relevance_cutoff(&mut scored, min_relevance);
+    if let Some(notice) = hidden_rows_notice(hidden) {
+        tracing::warn!("{notice}");
+    }
     order_results(&mut scored, args.sort, &parsed);
 
     let entries: Vec<SearchEntry> = scored
@@ -262,20 +279,14 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
         })
         .collect();
 
-    // An online browse that comes back empty is most often a registry that
-    // gates the `_catalog` endpoint (GitLab SaaS, GHCR, Docker Hub), not a
-    // fault — point at the registry-compatibility docs so an empty list is not
-    // read as "nothing published". Offline (serves the cache), any hit, an
-    // index-only browse set (no `_catalog` involved), a result the
-    // read-time filters emptied, and a query that simply matched nothing
-    // all stay quiet.
-    let any_registry_source = registries.iter().any(|r| !r.kind.is_index());
-    if warn_unsupported_browse(
-        ctx.offline(),
-        entries.is_empty() && parsed.is_empty(),
-        any_registry_source,
-        any_rows_before_filter,
-    ) {
+    // An online browse or search whose sources listed nothing at all is
+    // most often a registry that gates the `_catalog` endpoint (GitLab SaaS,
+    // GHCR, Docker Hub), not a fault — point at the registry-compatibility
+    // docs so an empty list is not read as "nothing published". Offline
+    // (serves the cache), no loaded plain-OCI source (see above), and any
+    // source that listed rows — including a query that simply matched
+    // nothing in a populated catalog — all stay quiet.
+    if warn_unsupported_browse(ctx.offline(), any_registry_source, any_rows_listed) {
         tracing::warn!(
             "no catalog entries; some registries ({CATALOG_GATED_REGISTRIES}) gate the `_catalog` browse endpoint and an empty list is expected — install/add/release by explicit reference works regardless; see {REGISTRY_COMPAT_DOCS_URL}"
         );
@@ -347,29 +358,60 @@ fn sort_by_mode(scored: &mut Vec<(i64, (SearchSource, crate::catalog::CatalogRow
 
 /// Whether to warn that a registry's `_catalog` browse may be unsupported.
 ///
-/// Gate: online (an offline browse legitimately serves the local cache), the
-/// result is empty (any hit proves browse works), at least one browsed
-/// source is a plain OCI registry — an index-only set never touches
-/// `_catalog`, and a failed index fetch already gets its own per-source
-/// "package index fetch failed" warn, so this hint would misdiagnose it —
-/// AND nothing was **considered** anywhere.
+/// Gate: online (an offline browse legitimately serves the local cache), at
+/// least one browsed source is a plain OCI registry that loaded — an
+/// index-only set never touches `_catalog`, and a failed source (index or
+/// OCI) already gets its own per-source warn and JSON `error`, so this hint
+/// would misdiagnose it — AND no source **listed** anything
+/// ([`crate::catalog::CatalogResults::any_rows_listed`]), counted before
+/// the query, the browse filter and the relevance cutoff.
 ///
-/// That last gate is what keeps the hint honest once a source carries a
-/// browse filter (`any_rows_before_filter`, from
-/// [`crate::catalog::CatalogResults::any_rows_before_filter`]): `result_empty` is
-/// the *post*-filter count, so a filter admitting nothing would otherwise
-/// print C-019 ("filter admitted 0 of N") and then this line, which blames
-/// the registry and carries the doc link the user will follow. A source that
-/// returned N rows before filtering has proved its `_catalog` browse works.
+/// Counting before all three is what lets the hint fire under a query (a
+/// `_catalog`-gated registry lists nothing whatever you search for) while a
+/// query, a filter (C-019 names that one itself) or the cutoff that emptied
+/// a populated catalog stays quiet: any listed row proves the browse works.
 ///
 /// Extracted so the gate is unit-testable without a live registry.
-fn warn_unsupported_browse(
-    offline: bool,
-    result_empty: bool,
-    any_registry_source: bool,
-    any_rows_before_filter: bool,
-) -> bool {
-    !offline && result_empty && any_registry_source && !any_rows_before_filter
+fn warn_unsupported_browse(offline: bool, any_registry_source: bool, any_rows_listed: bool) -> bool {
+    !offline && any_registry_source && !any_rows_listed
+}
+
+/// Drop the rows scoring below `min_percent` of the best, returning how
+/// many were dropped.
+///
+/// `0` is "list every match" and skips the cutoff outright rather than
+/// asking [`crate::catalog::retain_relevant`] for it: a row whose score is
+/// `None` is carried as `i64::MIN`, and `i64::MIN * 100` saturates below the
+/// `0` threshold, so the shared cutoff would still drop it at `0`.
+fn apply_relevance_cutoff<T>(scored: &mut Vec<(i64, T)>, min_percent: u32) -> usize {
+    if min_percent == 0 {
+        return 0;
+    }
+    let before = scored.len();
+    crate::catalog::retain_relevant(scored, min_percent);
+    before - scored.len()
+}
+
+/// The warning an explicit `--registry` search logs when the config that
+/// would supply `options.search_min_relevance` fails to load; `err` is that
+/// load error, which names the file.
+fn default_cutoff_warning(err: &str) -> String {
+    format!(
+        "ignoring options.search_min_relevance, using the default cutoff ({}): {err}",
+        defaults::SEARCH_MIN_RELEVANCE
+    )
+}
+
+/// The one stderr line telling the user the relevance cutoff hid rows, or
+/// `None` when it hid none.
+fn hidden_rows_notice(hidden: usize) -> Option<String> {
+    match hidden {
+        0 => None,
+        1 => Some("1 weaker match hidden; set options.search_min_relevance to 0 to list all".to_string()),
+        n => Some(format!(
+            "{n} weaker matches hidden; set options.search_min_relevance to 0 to list all"
+        )),
+    }
 }
 
 /// Whether a catalog row survives the deprecated-hiding filter.
@@ -427,9 +469,10 @@ fn install_target_best_effort(scope: &scope_resolution::ResolvedScope) -> Option
 ///
 /// A malformed or invalid config at **either** scope (exit 78) — the global
 /// one via [`super::global_config_tiers`], the project one via the
-/// scope resolution below. The `--registry` path returns before the global
-/// config is ever read, so an explicit registry keeps working past a broken
-/// one.
+/// scope resolution below. The `--registry` path reads the configs only
+/// best-effort, for badges and the relevance cutoff: a broken one costs
+/// just those (with one warning naming it), so an explicit registry keeps
+/// working past it.
 fn resolve_scope(ctx: &Context, args: &SearchArgs) -> anyhow::Result<SearchScope> {
     // An explicit `--registry` on the command collapses the browse set to
     // exactly those registries (in order, deduped, first is primary),
@@ -442,17 +485,8 @@ fn resolve_scope(ctx: &Context, args: &SearchArgs) -> anyhow::Result<SearchScope
         // never a `_catalog`-gated registry.
         let registries =
             crate::config::resolve_registries(&args.registry, &[], None, &[], None, super::FALLBACK_INDEX, None);
-        let (lock, state, roots, active, target) = load_badges_best_effort(ctx, args);
-        return Ok((
-            registries,
-            lock,
-            state,
-            roots,
-            active,
-            target,
-            false,
-            defaults::SEARCH_MIN_RELEVANCE,
-        ));
+        let (lock, state, roots, active, target, min_relevance) = load_badges_best_effort(ctx, args);
+        return Ok((registries, lock, state, roots, active, target, false, min_relevance));
     }
 
     let scope = match scope_resolution::resolve_in(ctx, args.global, args.config.as_deref(), args.workspace.as_deref())
@@ -467,8 +501,11 @@ fn resolve_scope(ctx: &Context, args: &SearchArgs) -> anyhow::Result<SearchScope
         // which gates `_catalog`). Badge inputs are empty; with no scope
         // to detect against, treat every client as active (no output is
         // filtered).
+        // The global `[options]` come off the same single load, so a
+        // `grim config set --global options.search_min_relevance` applies
+        // here too.
         Err(e) if scope_resolution::config_not_found(&e) => {
-            let registries = super::registries_global_fallback(ctx)?;
+            let (registries, global_options) = super::global_fallback(ctx)?;
             let roots = AnchorRoots::resolve(std::path::PathBuf::new(), ctx);
             return Ok((
                 registries,
@@ -478,7 +515,7 @@ fn resolve_scope(ctx: &Context, args: &SearchArgs) -> anyhow::Result<SearchScope
                 ClientTarget::ALL.to_vec(),
                 None,
                 false,
-                defaults::SEARCH_MIN_RELEVANCE,
+                global_options.resolved().search_min_relevance,
             ));
         }
         // A config that EXISTS and failed to parse is a different condition,
@@ -511,6 +548,12 @@ fn resolve_scope(ctx: &Context, args: &SearchArgs) -> anyhow::Result<SearchScope
 /// Load the scope's lock + install-state + anchor roots for badge
 /// derivation, degrading to an empty state when no scope resolves or the
 /// files are absent/corrupt (badges are advisory, never fail the search).
+///
+/// Also the `--registry` path's relevance cutoff: the resolved scope's
+/// `options.search_min_relevance`, else (no project) the global config's,
+/// else the default. Best-effort like the badges — the `--registry` path
+/// must keep working past a broken config, so a config that fails to load
+/// costs only the setting, announced by one warning naming the file.
 fn load_badges_best_effort(
     ctx: &Context,
     args: &SearchArgs,
@@ -520,23 +563,40 @@ fn load_badges_best_effort(
     AnchorRoots,
     Vec<ClientTarget>,
     Option<InstallTarget>,
+    u32,
 ) {
-    let Ok(scope) = scope_resolution::resolve_in(ctx, args.global, args.config.as_deref(), args.workspace.as_deref())
-    else {
-        let roots = AnchorRoots::resolve(std::path::PathBuf::new(), ctx);
-        return (
-            None,
-            InstallState::empty(std::path::Path::new("")),
-            roots,
-            ClientTarget::ALL.to_vec(),
-            None,
-        );
+    let scope = match scope_resolution::resolve_in(ctx, args.global, args.config.as_deref(), args.workspace.as_deref())
+    {
+        Ok(scope) => scope,
+        Err(e) => {
+            // No project: the global config is the one that applies. Any
+            // other failure is a config that exists and did not load.
+            let min_relevance = if scope_resolution::config_not_found(&e) {
+                super::global_fallback(ctx).map(|(_, options)| options.resolved().search_min_relevance)
+            } else {
+                Err(anyhow::Error::from(crate::error::Error::from(e)))
+            }
+            .unwrap_or_else(|err| {
+                tracing::warn!("{}", default_cutoff_warning(&format!("{err:#}")));
+                defaults::SEARCH_MIN_RELEVANCE
+            });
+            let roots = AnchorRoots::resolve(std::path::PathBuf::new(), ctx);
+            return (
+                None,
+                InstallState::empty(std::path::Path::new("")),
+                roots,
+                ClientTarget::ALL.to_vec(),
+                None,
+                min_relevance,
+            );
+        }
     };
     let lock = lock_io::load(&scope.lock_path).ok();
     let state = scope_resolution::load_state(&scope).unwrap_or_else(|_| InstallState::empty(&scope.state_path));
     let active = detect_clients_or_all(&scope.workspace, scope.scope);
     let target = install_target_best_effort(&scope);
-    (lock, state, scope.roots, active, target)
+    let min_relevance = scope.options.resolved().search_min_relevance;
+    (lock, state, scope.roots, active, target, min_relevance)
 }
 
 #[cfg(test)]
@@ -603,38 +663,134 @@ mod tests {
     }
 
     #[test]
-    fn warn_unsupported_browse_only_when_online_and_empty() {
-        // Online + empty + a registry-kind source + nothing considered → warn
-        // (likely a `_catalog`-gated registry). Mixed sets (index + registry)
-        // still warn — the registry half may be gated.
-        assert!(warn_unsupported_browse(false, true, true, false));
-        // Online + empty but index-only browse set → quiet: `_catalog` was
-        // never involved, and a failed index fetch has its own warn.
-        assert!(!warn_unsupported_browse(false, true, false, false));
-        // Online + hits → quiet (browse works).
-        assert!(!warn_unsupported_browse(false, false, true, false));
-        assert!(!warn_unsupported_browse(false, false, false, false));
+    fn warn_unsupported_browse_only_when_online_and_nothing_listed() {
+        // Online + a registry-kind source + nothing listed → warn (likely a
+        // `_catalog`-gated registry). Mixed sets (index + registry) still
+        // warn — the registry half may be gated.
+        assert!(warn_unsupported_browse(false, true, false));
+        // Index-only browse set → quiet: `_catalog` was never involved, and
+        // a failed index fetch has its own warn.
+        assert!(!warn_unsupported_browse(false, false, false));
+        // Something listed → quiet (browse works).
+        assert!(!warn_unsupported_browse(false, true, true));
         // Offline → quiet regardless (the cache is the source of truth).
-        assert!(!warn_unsupported_browse(true, true, true, false));
-        assert!(!warn_unsupported_browse(true, true, false, false));
-        assert!(!warn_unsupported_browse(true, false, true, false));
+        assert!(!warn_unsupported_browse(true, true, false));
+        assert!(!warn_unsupported_browse(true, false, false));
     }
 
     #[test]
-    fn warn_unsupported_browse_stays_quiet_when_the_filter_emptied_the_result_h4() {
-        // H4: `result_empty` is the POST-filter count, so an `include` list
-        // that admits nothing used to print C-019 ("filter admitted 0 of N")
-        // and then this hint — two contradictory explanations back to back,
-        // and the wrong one carries the doc link. A source that returned rows
-        // before the filter ran has already proved its `_catalog` browse
-        // works; reproduced against a source listing 500 repositories.
-        // The same inputs cover the worse exclude-only case: C-019 stays
-        // deliberately silent for a filter that empties a source by exclusion,
-        // so this hint would be the ONLY message on screen there.
-        assert!(!warn_unsupported_browse(false, true, true, true));
-        // Nothing considered anywhere — every source came back empty before
-        // any filter ran — is the condition the hint was written for.
-        assert!(warn_unsupported_browse(false, true, true, false));
+    fn warn_unsupported_browse_stays_quiet_when_a_query_or_filter_emptied_the_result() {
+        // H4 and the original false-alarm fix: a populated catalog that a
+        // query, an `include` list (C-019 already names it) or the relevance
+        // cutoff narrowed to nothing has proved its `_catalog` browse works,
+        // so the gate reads the PRE-query listing and stays quiet.
+        assert!(!warn_unsupported_browse(false, true, true));
+        // …while a gated registry lists nothing whatever the query — the hint
+        // now fires under a query too, which the old `parsed.is_empty()`
+        // conjunct silenced.
+        assert!(warn_unsupported_browse(false, true, false));
+    }
+
+    #[test]
+    fn zero_min_relevance_keeps_an_unscored_row() {
+        // "0 lists every match": a row whose score is `None` is carried as
+        // `i64::MIN`, which the shared cutoff drops even at 0.
+        let mut scored = vec![(90, "strong"), (i64::MIN, "unscored")];
+        assert_eq!(apply_relevance_cutoff(&mut scored, 0), 0);
+        assert_eq!(scored.len(), 2);
+    }
+
+    #[test]
+    fn cutoff_reports_how_many_rows_it_hid() {
+        let mut scored = vec![(100, "a"), (60, "b"), (40, "c"), (10, "d")];
+        assert_eq!(apply_relevance_cutoff(&mut scored, 50), 2);
+        let kept: Vec<&str> = scored.iter().map(|(_, r)| *r).collect();
+        assert_eq!(kept, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn default_cutoff_warning_names_the_fallback_and_the_cause() {
+        assert_eq!(
+            default_cutoff_warning("/g/grimoire.toml: bad"),
+            "ignoring options.search_min_relevance, using the default cutoff (50): /g/grimoire.toml: bad"
+        );
+    }
+
+    #[test]
+    fn hidden_rows_notice_names_the_count_and_the_setting() {
+        assert_eq!(hidden_rows_notice(0), None);
+        assert_eq!(
+            hidden_rows_notice(1).as_deref(),
+            Some("1 weaker match hidden; set options.search_min_relevance to 0 to list all")
+        );
+        assert_eq!(
+            hidden_rows_notice(3).as_deref(),
+            Some("3 weaker matches hidden; set options.search_min_relevance to 0 to list all")
+        );
+    }
+
+    #[test]
+    fn search_help_names_the_cutoff_setting_and_every_kind_keyword() {
+        let collapsed = search_help().split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            collapsed.contains("below `options.search_min_relevance` percent of the best (default 50)"),
+            "--help must name the setting, not a hard-coded half; got:\n{collapsed}"
+        );
+        assert!(
+            collapsed.contains("(`skill`/`rule`/`bundle`/`agent`/`mcp`, singular or plural)"),
+            "--help must list every kind keyword the parser accepts; got:\n{collapsed}"
+        );
+    }
+
+    #[test]
+    fn no_scope_honors_the_global_min_relevance() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("grimoire.toml"),
+            "[options]\nsearch_min_relevance = 0\n",
+        )
+        .unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+        let mut a = args();
+        a.config = Some(tmp.path().join("no-such/grimoire.toml"));
+        let (.., min_relevance) = resolve_scope(&ctx, &a).expect("scope resolves");
+        assert_eq!(min_relevance, 0);
+    }
+
+    #[test]
+    fn explicit_registry_honors_the_configured_min_relevance() {
+        // A resolved project scope supplies its value…
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("project.toml");
+        std::fs::write(&cfg, "[options]\nsearch_min_relevance = 20\n").unwrap();
+        std::fs::write(
+            tmp.path().join("grimoire.toml"),
+            "[options]\nsearch_min_relevance = 0\n",
+        )
+        .unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+        let mut a = args();
+        a.registry = vec!["ghcr.io".to_string()];
+        a.config = Some(cfg);
+        let (.., min_relevance) = resolve_scope(&ctx, &a).expect("scope resolves");
+        assert_eq!(min_relevance, 20);
+
+        // …and with no project the global config's value applies.
+        a.config = Some(tmp.path().join("no-such/grimoire.toml"));
+        let (.., min_relevance) = resolve_scope(&ctx, &a).expect("scope resolves");
+        assert_eq!(min_relevance, 0);
+    }
+
+    #[test]
+    fn explicit_registry_survives_a_broken_global_config_with_the_default_cutoff() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("grimoire.toml"), "surprise = true\n").unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+        let mut a = args();
+        a.registry = vec!["ghcr.io".to_string()];
+        a.config = Some(tmp.path().join("no-such/grimoire.toml"));
+        let (.., min_relevance) = resolve_scope(&ctx, &a).expect("the --registry branch always resolves");
+        assert_eq!(min_relevance, defaults::SEARCH_MIN_RELEVANCE);
     }
 
     #[test]

@@ -55,8 +55,9 @@ pub struct SearchToolArgs {
     /// keywords. Fuzzy means subsequence — a term's letters must appear in
     /// order but need not be adjacent, so `kubctl` finds `kube-control`;
     /// results come back ranked by relevance, best match first, and hits
-    /// scoring under half the best are dropped. A bare kind
-    /// keyword (`skill`/`rule`/`bundle`/`agent`, singular or plural) filters
+    /// scoring below `options.search_min_relevance` percent of the best
+    /// (default 50) are dropped. A bare kind keyword
+    /// (`skill`/`rule`/`bundle`/`agent`/`mcp`, singular or plural) filters
     /// by kind. Omit to list the whole catalog, unranked, in registry order.
     #[serde(default)]
     pub query: Option<String>,

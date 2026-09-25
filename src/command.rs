@@ -304,10 +304,22 @@ pub fn global_config_tiers(
     if scope == crate::config::scope::ConfigScope::Global {
         return Ok((Vec::new(), None));
     }
-    let cfg = grim(crate::config::global_config::GlobalConfig::load(
-        &ctx.paths().global_config(),
-    ))?;
+    let cfg = load_global_config(ctx)?;
     Ok((cfg.registries, cfg.options.default_registry))
+}
+
+/// The only global-config loader in this module — [`global_config_tiers`]
+/// and [`global_fallback`] both go through it (pinned by
+/// `the_global_config_is_loaded_from_exactly_one_seam_ws2`).
+///
+/// # Errors
+///
+/// A malformed or invalid global config (exit 78); an absent one is an
+/// empty config.
+fn load_global_config(ctx: &crate::context::Context) -> anyhow::Result<crate::config::global_config::GlobalConfig> {
+    grim(crate::config::global_config::GlobalConfig::load(
+        &ctx.paths().global_config(),
+    ))
 }
 
 /// Assemble the ordered registry browse set for a resolved scope.
@@ -456,16 +468,35 @@ pub fn primary_registry_global_fallback(ctx: &crate::context::Context) -> anyhow
 pub fn registries_global_fallback(
     ctx: &crate::context::Context,
 ) -> anyhow::Result<Vec<crate::config::ResolvedRegistry>> {
-    let (global_regs, global_default) = global_config_tiers(ctx, crate::config::scope::ConfigScope::Project)?;
-    Ok(crate::config::resolve_registries(
+    Ok(global_fallback(ctx)?.0)
+}
+
+/// [`registries_global_fallback`]'s browse set **plus** the global
+/// `[options]` table, from the same single load — for a no-project caller
+/// that must also honour a global option (`grim search` reads
+/// `options.search_min_relevance` from it).
+///
+/// # Errors
+///
+/// A malformed or invalid global config (exit 78) — see
+/// [`global_config_tiers`].
+pub fn global_fallback(
+    ctx: &crate::context::Context,
+) -> anyhow::Result<(
+    Vec<crate::config::ResolvedRegistry>,
+    crate::config::declaration::ConfigOptions,
+)> {
+    let cfg = load_global_config(ctx)?;
+    let registries = crate::config::resolve_registries(
         ctx.registry_flags(),
         &[],
         None,
-        &global_regs,
-        global_default.as_deref(),
+        &cfg.registries,
+        cfg.options.default_registry.as_deref(),
         FALLBACK_INDEX,
         ctx.registry_env(),
-    ))
+    );
+    Ok((registries, cfg.options))
 }
 
 /// Resolve the neutral [`crate::fetch::FetchScope`] for a fetch/render:
@@ -913,7 +944,7 @@ mod tests {
         assert_eq!(
             production.matches("global_config::GlobalConfig::load(").count(),
             1,
-            "the global config must be loaded from exactly one place — `global_config_tiers`. \
+            "the global config must be loaded from exactly one place — `load_global_config`. \
              A second loader is how the two tiers get read separately again, which recompiles \
              the whole attacker-controlled browse-filter set for no behavioural difference"
         );

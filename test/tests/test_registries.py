@@ -731,15 +731,16 @@ def test_absent_global_config_still_exits_zero(
     )
 
 
-def test_search_registry_flag_never_reads_the_global_config(
+def test_search_registry_flag_survives_a_malformed_global_config(
     grim_at, project_dir: Path, grim_home: Path
 ) -> None:
-    """`grim search --registry <r>` collapses the browse set before any config
-    is consulted, so a malformed global config cannot fail it.
+    """`grim search --registry <r>` collapses the browse set without needing
+    any config, so a malformed global config cannot fail it.
 
-    Preserving that escape hatch is part of the fix: the flag path never
-    reads the global config, so it must keep exiting 0 — otherwise a user
-    locked out by a broken global config would have no way to search past it.
+    Preserving that escape hatch is part of the fix: the flag path reads the
+    configs only best-effort (badges, relevance cutoff), so it must keep
+    exiting 0 — otherwise a user locked out by a broken global config would
+    have no way to search past it.
     """
     (grim_home / "grimoire.toml").write_text(_MALFORMED_GLOBAL_CONFIG)
     _valid_project_config(project_dir)
@@ -749,9 +750,56 @@ def test_search_registry_flag_never_reads_the_global_config(
         "--offline", "search", "--registry", f"{REGISTRY_HOST}/nothing-here", "foo", check=False
     )
     assert result.returncode == 0, (
-        f"--registry must bypass the global config entirely; "
+        f"--registry must survive a broken global config; "
         f"got {result.returncode}; stderr: {result.stderr}"
     )
+
+
+def test_search_registry_flag_outside_a_project_survives_a_malformed_global_config(
+    grim_binary: Path, grim_home: Path, tmp_path: Path, registry: str
+) -> None:
+    """Outside any project the global config is the one that would supply
+    `options.search_min_relevance` under `--registry`. Broken, it costs only
+    that setting: exit 0, the default cutoff of 50, and one warning naming
+    the file."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    _publish_relevance_pair(ns)
+    global_config = grim_home / "grimoire.toml"
+    global_config.write_text(_MALFORMED_GLOBAL_CONFIG)
+    nowhere = tmp_path / "nowhere"
+    nowhere.mkdir()
+    runner = GrimRunner(grim_binary, grim_home, cwd=nowhere)
+
+    result = runner.run(
+        "--format", "json", "search", "--refresh", "--registry", f"{REGISTRY_HOST}/{ns}", "zebrafinch",
+        check=False,
+    )
+    assert result.returncode == 0, f"got {result.returncode}; stderr: {result.stderr}"
+    assert _repos_under(json.loads(result.stdout), ns) == ["zebrafinch"], "the default cutoff applies"
+    assert "using the default cutoff (50)" in result.stderr, result.stderr
+    assert str(global_config) in result.stderr, f"the warning must name the file; got: {result.stderr!r}"
+    assert result.stderr.count("using the default cutoff") == 1, "one warning, not one per consumer"
+
+
+def test_search_registry_flag_warns_on_an_invalid_project_cutoff(
+    grim_at, project_dir: Path, registry: str
+) -> None:
+    """An out-of-range project value under `--registry` falls back to the
+    default with one warning naming the file — exit 0, the escape hatch."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    _publish_relevance_pair(ns)
+    config = project_dir / "grimoire.toml"
+    config.write_text("[options]\nsearch_min_relevance = 101\n")
+    runner = grim_at(project_dir)
+
+    result = runner.run(
+        "--format", "json", "search", "--refresh", "--registry", f"{REGISTRY_HOST}/{ns}", "zebrafinch",
+        check=False,
+    )
+    assert result.returncode == 0, f"got {result.returncode}; stderr: {result.stderr}"
+    assert _repos_under(json.loads(result.stdout), ns) == ["zebrafinch"]
+    assert "using the default cutoff (50)" in result.stderr, result.stderr
+    assert str(config) in result.stderr, f"the warning must name the file; got: {result.stderr!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -1306,7 +1354,7 @@ def test_status_without_check_survives_a_malformed_global_config_s013(
 ) -> None:
     """Plain `grim status` never resolves a browse set, so it stays 0 (S-013).
 
-    The other half of `test_search_registry_flag_never_reads_the_global_config`:
+    The other half of `test_search_registry_flag_survives_a_malformed_global_config`:
     `registries_for_scope` is reached only from the `--check` branch, so a
     global config grim cannot parse is invisible to a local status report and
     fatal to a live one. Hoisting that call out of the branch — a plausible
@@ -1846,3 +1894,120 @@ def test_search_json_marks_every_source_failed_when_none_load(
         f"empty catalog: {sources!r}"
     )
     assert all(s["error"] for s in sources), f"each failure carries its cause: {sources!r}"
+
+
+# ---------------------------------------------------------------------------
+# Relevance cutoff (`options.search_min_relevance`) and the `_catalog` hint
+# ---------------------------------------------------------------------------
+
+_GATE_HINT = "gate the `_catalog` browse endpoint"
+_HIDDEN_NOTICE = "1 weaker match hidden; set options.search_min_relevance to 0 to list all"
+
+
+def _publish_relevance_pair(ns: str) -> None:
+    """One skill NAMED for the query word, one that only MENTIONS it in its
+    description — the default cutoff keeps the first and hides the second."""
+    for name, description in (
+        ("zebrafinch", "a bird"),
+        ("aviary", "houses a zebrafinch among others"),
+    ):
+        make_artifact(
+            f"{ns}/{name}",
+            "skill",
+            {f"{name}/SKILL.md": f"---\nname: {name}\ndescription: {description}\n---\n# {name}\n"},
+            annotations={"org.opencontainers.image.description": description},
+        )
+
+
+def _repos_under(doc: dict, ns: str) -> list[str]:
+    prefix = f"{REGISTRY_HOST}/{ns}/"
+    return sorted(r["repo"].removeprefix(prefix) for r in doc["items"] if r["repo"].startswith(prefix))
+
+
+def test_catalog_gate_hint_fires_under_a_query_but_not_on_a_populated_miss(
+    grim_at, project_dir: Path, registry: str
+) -> None:
+    """The `_catalog`-unsupported hint keys on whether the source LISTED
+    anything, counted before the query. A source that lists nothing gets the
+    hint whatever is searched for (it used to be silenced for every query);
+    a populated source that a query simply misses must not."""
+    empty_ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    _filtered_config(project_dir, empty_ns)
+    runner = grim_at(project_dir)
+    gated = runner.run("search", "--refresh", "anything", check=False)
+    assert gated.returncode == 0, gated.stderr
+    assert _GATE_HINT in gated.stderr, (
+        f"a source that listed nothing must get the hint under a query too; got: {gated.stderr!r}"
+    )
+
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    _publish_skill(f"{ns}/platform/foo", "foo")
+    _filtered_config(project_dir, ns)
+    missed = runner.run("search", "--refresh", "zzzqqqxxx", check=False)
+    assert missed.returncode == 0, missed.stderr
+    assert _GATE_HINT not in missed.stderr, (
+        f"a query that matched nothing in a populated catalog is not a gated "
+        f"registry; got: {missed.stderr!r}"
+    )
+
+
+def test_relevance_cutoff_announces_hidden_rows_on_stderr_only(
+    grim_at, project_dir: Path, registry: str
+) -> None:
+    """Owner decision: users are TOLD when the cutoff hides rows — one stderr
+    line with the count and the key to turn it off — while the JSON report on
+    stdout stays exactly the visible rows (Principle 9)."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    _publish_relevance_pair(ns)
+    _filtered_config(project_dir, ns)
+    runner = grim_at(project_dir)
+
+    result = runner.run("--format", "json", "search", "--refresh", "zebrafinch", check=False)
+    assert result.returncode == 0, result.stderr
+    assert _repos_under(json.loads(result.stdout), ns) == ["zebrafinch"]
+    assert _HIDDEN_NOTICE in result.stderr, f"the hidden row must be announced; got: {result.stderr!r}"
+    assert "hidden" not in result.stdout, "the notice must never reach stdout"
+
+    runner.run("config", "set", "options.search_min_relevance", "0")
+    widened = runner.run("--format", "json", "search", "zebrafinch", check=False)
+    assert _repos_under(json.loads(widened.stdout), ns) == ["aviary", "zebrafinch"]
+    assert "weaker match" not in widened.stderr, "nothing hidden, nothing announced"
+
+
+def test_global_min_relevance_applies_outside_a_project_and_under_registry_flag(
+    grim_binary: Path, grim_home: Path, tmp_path: Path, registry: str
+) -> None:
+    """`grim config set --global options.search_min_relevance 0` must widen a
+    search run outside any project — both the global-`[[registries]]`
+    fallback and an explicit `--registry` browse. Both paths used to hard-code
+    the default of 50."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    _publish_relevance_pair(ns)
+    nowhere = tmp_path / "nowhere"
+    nowhere.mkdir()
+    runner = GrimRunner(grim_binary, grim_home, cwd=nowhere)
+    (grim_home / "grimoire.toml").write_text(
+        f'[[registries]]\nalias = "acme"\noci = "{REGISTRY_HOST}/{ns}"\ndefault = true\n'
+    )
+
+    fallback = runner.json("search", "--refresh", "zebrafinch")
+    assert _repos_under(fallback, ns) == ["zebrafinch"], "control: the default cutoff applies"
+
+    runner.run("config", "set", "--global", "options.search_min_relevance", "0")
+    assert _repos_under(runner.json("search", "zebrafinch"), ns) == ["aviary", "zebrafinch"]
+    flagged = runner.json("search", "--registry", f"{REGISTRY_HOST}/{ns}", "zebrafinch")
+    assert _repos_under(flagged, ns) == ["aviary", "zebrafinch"]
+
+
+def test_catalog_gate_hint_skips_a_source_that_failed_to_load(grim_at, project_dir: Path) -> None:
+    """A source that failed (unreachable, 401) already reports its own error;
+    blaming `_catalog` gating on top of that is a misdiagnosis, so a browse
+    whose only plain-OCI source failed stays quiet about it."""
+    (project_dir / "grimoire.toml").write_text(
+        '[[registries]]\nalias = "dead"\noci = "localhost:9999/grim-test/dead"\ndefault = true\n'
+    )
+    runner = grim_at(project_dir)
+    for query in ((), ("anything",)):
+        result = runner.run("search", "--refresh", *query, check=False)
+        assert result.returncode == 0, result.stderr
+        assert _GATE_HINT not in result.stderr, f"query {query!r}; got: {result.stderr!r}"

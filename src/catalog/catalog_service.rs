@@ -216,11 +216,12 @@ pub struct CatalogGroup {
     /// That difference is the whole signal: `rows_before_filter > 0` with
     /// `rows` empty means *this filter* emptied the group, while `0` means
     /// the source returned nothing to begin with — offline, failed, or a
-    /// registry that gates its `_catalog` browse. Three surfaces depend on
-    /// telling those apart, and before this field each had to guess:
-    /// [`zero_match_warning`] here, `grim search`'s
-    /// `_catalog`-unsupported hint, and the TUI's `c019_filter_emptied`
-    /// (`src/tui/app.rs`). A failed or offline-degraded source reports `0`.
+    /// registry that gates its `_catalog` browse. Two surfaces depend on
+    /// telling those apart: [`zero_match_warning`] here and the TUI's
+    /// `c019_filter_emptied` (`src/tui/app.rs`). `grim search`'s
+    /// `_catalog`-unsupported hint needs the pre-query count instead —
+    /// [`CatalogResults::any_rows_listed`]. A failed or offline-degraded
+    /// source reports `0`.
     pub rows_before_filter: usize,
     /// The matching rows, already filtered and badged, sorted by repository.
     pub rows: Vec<CatalogRow>,
@@ -245,6 +246,9 @@ impl CatalogGroup {
 pub struct CatalogResults {
     /// One group per configured registry, in resolution order.
     pub groups: Vec<CatalogGroup>,
+    /// Whether any source that loaded listed at least one entry **before**
+    /// the query and the browse filter ran. See [`Self::any_rows_listed`].
+    any_rows_listed: bool,
 }
 
 impl CatalogResults {
@@ -253,15 +257,18 @@ impl CatalogResults {
         self.groups.iter().any(|g| g.truncated)
     }
 
-    /// Whether any registry had rows **before** the read-time browse filter
-    /// ran — i.e. some source's listing genuinely returned something.
+    /// Whether any source that loaded listed at least one entry at all —
+    /// before the query **and** the browse filter narrowed it.
     ///
-    /// An empty end result with this `true` came from filtering, not from a
-    /// registry that gates its `_catalog` browse endpoint; `grim search`
-    /// suppresses the compatibility hint on it so the user is not handed two
-    /// contradictory explanations, one of them carrying a doc link.
-    pub fn any_rows_before_filter(&self) -> bool {
-        self.groups.iter().any(|g| g.rows_before_filter > 0)
+    /// An empty end result with this `true` came from a query, a filter or
+    /// the relevance cutoff, not from a registry that gates its `_catalog`
+    /// browse endpoint; `grim search` suppresses the compatibility hint on
+    /// it. [`CatalogGroup::rows_before_filter`] cannot answer this: it is
+    /// post-query, so under `grim search <query>` it cannot tell "the
+    /// registry listed nothing" from "the query matched nothing in a
+    /// populated catalog".
+    pub fn any_rows_listed(&self) -> bool {
+        self.any_rows_listed
     }
 
     /// Flatten every group's rows into one list in registry **declaration
@@ -399,6 +406,7 @@ pub async fn load_catalog(
     }
 
     let mut groups = Vec::with_capacity(registries.len());
+    let mut any_rows_listed = false;
     for (idx, reg) in registries.iter().enumerate() {
         // Cloned, not removed: sibling views of one locator read the same
         // load, and each narrows it through its own filter below.
@@ -413,6 +421,7 @@ pub async fn load_catalog(
             .unwrap_or_else(|| Err(TASK_FAILED.to_string()));
         let group = match catalog {
             Ok(catalog) => {
+                any_rows_listed |= catalog.entries().next().is_some();
                 // The rows the browse filter is asked about: everything the
                 // shared `SearchQuery` admitted. Materialized so the count is
                 // available for the C-019 diagnostic below.
@@ -495,7 +504,10 @@ pub async fn load_catalog(
         groups.push(group);
     }
 
-    Ok(CatalogResults { groups })
+    Ok(CatalogResults {
+        groups,
+        any_rows_listed,
+    })
 }
 
 /// The cause and remedy appended to the plan C-019 diagnostic: the counts alone
@@ -1237,7 +1249,7 @@ mod tests {
         .await;
         assert_eq!(results.groups[0].rows_before_filter, FIXTURE_REPOS.len(), "pre-filter");
         assert_eq!(results.groups[0].rows.len(), 3, "post-filter");
-        assert!(results.any_rows_before_filter());
+        assert!(results.any_rows_listed());
 
         // The query narrows `considered` too — it counts what the filter was
         // asked about, not what the cache holds.
@@ -1251,7 +1263,7 @@ mod tests {
         assert_eq!(results.groups[0].rows_before_filter, 3);
         assert!(results.groups[0].rows.is_empty());
         assert!(
-            results.any_rows_before_filter(),
+            results.any_rows_listed(),
             "a filter-emptied group still proves the browse itself worked"
         );
     }
@@ -1289,7 +1301,7 @@ mod tests {
         .await
         .expect("a per-registry failure never fails the whole browse");
         assert_eq!(results.groups[0].rows_before_filter, 0);
-        assert!(!results.any_rows_before_filter());
+        assert!(!results.any_rows_listed());
     }
 
     #[tokio::test]
@@ -1683,6 +1695,38 @@ mod tests {
             !logs.contains("filter admitted"),
             "a queried browse must not blame the filter for hiding what it was told to hide; captured:\n{logs}"
         );
+    }
+
+    #[tokio::test]
+    async fn any_rows_listed_counts_before_the_query() {
+        // A query that matches nothing in a populated catalog still reports
+        // the source as listing rows — the signal `grim search` needs to keep
+        // its `_catalog`-unsupported hint quiet under a query.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = GrimPaths::new(tmp.path().to_path_buf());
+        seed_catalog(&paths, "ghcr.io", FIXTURE_REPOS, false);
+        let (results, _) = browse_capturing(
+            tmp.path(),
+            &[source("ghcr.io", None, &[], &[])],
+            "zzzqqqxxx",
+            CatalogScope::Browse,
+        )
+        .await;
+        assert_eq!(results.groups[0].rows_before_filter, 0, "the query matched nothing");
+        assert!(results.any_rows_listed(), "the source listed rows before the query");
+
+        // An empty listing reports nothing listed, query or not.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = GrimPaths::new(tmp.path().to_path_buf());
+        seed_catalog(&paths, "ghcr.io", &[], false);
+        let (results, _) = browse_capturing(
+            tmp.path(),
+            &[source("ghcr.io", None, &[], &[])],
+            "anything",
+            CatalogScope::Browse,
+        )
+        .await;
+        assert!(!results.any_rows_listed());
     }
 
     #[tokio::test]

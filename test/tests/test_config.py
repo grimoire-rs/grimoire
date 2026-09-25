@@ -1603,3 +1603,70 @@ def test_set_dry_run_plain_table_shows_dry_run_true(
 
     assert "Dry Run" in result.stdout, f"plain output must have a Dry Run column; got: {result.stdout!r}"
     assert "true" in result.stdout, f"dry-run row must show true; got: {result.stdout!r}"
+
+
+# ---------------------------------------------------------------------------
+# options.search_min_relevance — load-time and set-time validation
+# ---------------------------------------------------------------------------
+
+
+def test_search_min_relevance_above_100_in_the_file_exits_78_naming_it(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """A hand-authored ``search_min_relevance = 101`` is a config error at
+    load (78) for every reader of the file — ``grim search`` included, which
+    must not degrade to browsing another registry set — and the message names
+    the file the user has to fix."""
+    config = project_dir / "grimoire.toml"
+    config.write_text("[options]\nsearch_min_relevance = 101\n")
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    for args in (("--offline", "search", "x"), ("config", "get", "options.search_min_relevance")):
+        result = runner.run(*args, check=False)
+        assert result.returncode == 78, (
+            f"`grim {' '.join(args)}` must exit 78 on an out-of-range value; "
+            f"got {result.returncode}; stderr: {result.stderr.strip()}"
+        )
+        assert str(config) in result.stderr, (
+            f"`grim {' '.join(args)}` must name {config}; got: {result.stderr!r}"
+        )
+        _assert_not_a_panic(result)
+
+
+def test_search_min_relevance_rejects_a_non_percentage_at_set_with_65(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """``config set`` refuses a negative or non-numeric value as bad data
+    (65) and writes nothing. A bare ``-1`` is taken by clap as a flag (64,
+    usage), so the negative value is passed after ``--`` to reach the value
+    check."""
+    write_config(project_dir)
+    before = (project_dir / "grimoire.toml").read_text()
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    for value in (("--", "-1"), ("abc",)):
+        result = runner.run("config", "set", "options.search_min_relevance", *value, check=False)
+        assert result.returncode == 65, (
+            f"`config set options.search_min_relevance {' '.join(value)}` must exit 65; "
+            f"got {result.returncode}; stderr: {result.stderr.strip()}"
+        )
+        _assert_not_a_panic(result)
+    assert (project_dir / "grimoire.toml").read_text() == before, "a rejected value writes nothing"
+
+
+def test_list_all_emits_the_fixed_keys_in_their_frozen_order(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """``config list --all`` consumers may index fixed keys by position, so
+    the order is part of the contract, not just the set: new keys append."""
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    items = runner.json("config", "list", "--all")["items"]
+    keys = [i["key"] for i in items]
+    assert keys[: len(FIXED_OPTION_KEYS)] == FIXED_OPTION_KEYS, (
+        f"fixed keys must lead in their frozen order; got {keys}"
+    )

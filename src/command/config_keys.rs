@@ -66,8 +66,9 @@ pub enum ConfigKey {
 impl ConfigKey {
     /// Every fixed key, in the order `grim config list` emits them —
     /// pins today's `collect_entries` order: `default_registry`,
-    /// `clients`, `show_deprecated`, then the `tui.*` keys — **append
-    /// only**: consumers of `grim config list --all` may index by position.
+    /// `clients`, `show_deprecated`, then the `tui.*` keys, then
+    /// `search_min_relevance` — **append only**: consumers of
+    /// `grim config list --all` may index by position.
     pub const ALL: [ConfigKey; 10] = [
         ConfigKey::DefaultRegistry,
         ConfigKey::Clients,
@@ -202,7 +203,8 @@ impl ConfigKey {
             },
             title: "Search minimum relevance",
             description: "Sets how relevant a search result must be to be listed, as a percentage of the \
-                           best hit's score, from `0` to `100`. Defaults to `50`; `0` lists every match.",
+                           best hit's score, from `0` to `100`. Defaults to `50`; `0` lists every match. \
+                           Applies to `grim search`, the TUI search and the MCP `grim_search` tool.",
             constraints: None,
         };
         match self {
@@ -895,6 +897,16 @@ mod tests {
                 .get("additionalProperties")
                 .expect("options.vendors must publish an additionalProperties value schema"),
         );
+        // The loader rejects `search_min_relevance` above 100; the schema
+        // must say so too, or an editor validates a config the loader
+        // refuses with exit 78.
+        let relevance = unwrap_nullable(&schema, &config_options["properties"]["search_min_relevance"]);
+        assert_eq!(
+            relevance.get("maximum").and_then(serde_json::Value::as_u64),
+            Some(u64::from(defaults::SEARCH_MIN_RELEVANCE_MAX)),
+            "options.search_min_relevance must publish its 0–100 range; got {relevance}"
+        );
+
         let node = &vendor_options["properties"][VENDOR_FIELD_NAME];
         assert_description_prefix(node, VENDOR_SHARED_SKILLS.description, VENDOR_SHARED_SKILLS.key);
         let type_node = unwrap_nullable(&schema, node);

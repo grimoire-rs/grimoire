@@ -238,6 +238,7 @@ pub struct ConfigOptions {
     /// description is dropped whenever another artifact is named for it.
     /// `--sort` orders the same set, it does not widen it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(max = crate::config::defaults::SEARCH_MIN_RELEVANCE_MAX))]
     pub search_min_relevance: Option<u32>,
     /// Per-client rendering options, keyed by client name — the same
     /// closed set `[options].clients` accepts. An unknown name is rejected

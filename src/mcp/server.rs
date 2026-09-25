@@ -63,9 +63,10 @@ impl GrimMcpServer {
     async fn grim_search(&self, Parameters(args): Parameters<SearchToolArgs>) -> Result<String, ErrorData> {
         let search_args = crate::command::search::SearchArgs {
             query: args.query,
-            // No tool param: the MCP browse keeps relevance ranking exactly
-            // as it has always had it. Adding a sort param is an additive
-            // follow-up, not a behaviour this tool changes on its own.
+            // No tool param: the MCP browse is ranked by relevance (and cut
+            // by the scope's `options.search_min_relevance`) like an unsorted
+            // `grim search`. Adding a sort param is an additive follow-up,
+            // not a behaviour this tool changes on its own.
             sort: None,
             refresh: args.refresh.unwrap_or(false),
             // No tool param: defer to the resolved scope's config default
