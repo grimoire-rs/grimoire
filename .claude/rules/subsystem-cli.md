@@ -49,6 +49,18 @@ exports. Resolution-affecting flags (offline / remote / config / index)
 propagate via env and must be documented in the env-var reference;
 presentation flags (log-level / format / color) must NOT propagate.
 
+## TUI Popups
+
+Check every popup (`src/tui/`) for spacing, not just for content:
+
+- **Padding**: text never touches a border — pad the `Block`
+  (`Padding`), and count the padding in any width/height math.
+- **Buttons**: center the button row between the borders.
+- **No repetition**: the title must not restate the body. When the body
+  already says what happens, use a generic title (`Confirm`).
+- **Prove it** with a `TestBackend` buffer test, not the `RenderModel`
+  alone — layout bugs only show in the drawn cells.
+
 ## Quality Gate
 
 During the review-fix loop, run `task rust:verify` — not the full

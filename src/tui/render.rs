@@ -14,7 +14,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap};
 
 use crate::config::registry_resolve::RowSource;
 
@@ -300,7 +300,7 @@ pub struct PickerView {
 /// prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfirmView {
-    /// The popup title (e.g. `Overwrite r/alpha?`, `Install 3 artifacts?`).
+    /// The popup title (e.g. `Overwrite r/alpha?`, `Confirm`).
     pub title: String,
     /// The consequence sentence, first line of the body.
     pub message: String,
@@ -1494,6 +1494,9 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
     }
 }
 
+/// Columns of blank space between the confirm popup's border and its text.
+const CONFIRM_PAD: u16 = 2;
+
 /// Names shown in the batch prompt before the rest collapse into a count.
 const CONFIRM_BATCH_NAMES: usize = 5;
 
@@ -1503,7 +1506,8 @@ const CONFIRM_BATCH_NAMES: usize = 5;
 /// screen.
 const CONFIRM_NAME_WIDTH: usize = 24;
 
-/// The batch prompt: the op and target count in the title, what the targets
+/// The batch prompt: a generic title (the message already says the op and
+/// count, so restating them in the border only repeats it), what the targets
 /// were selected as (and what the op filter skipped) in the message, and the
 /// first few artifact names so a mark-all is recognisable at a glance.
 fn confirm_batch_view(state: &TuiState, b: &super::state::PendingBatch) -> ConfirmView {
@@ -1541,7 +1545,7 @@ fn confirm_batch_view(state: &TuiState, b: &super::state::PendingBatch) -> Confi
         names.push(format!("and {rest} more"));
     }
     ConfirmView {
-        title: format!("{action} {n} artifacts?"),
+        title: "Confirm".to_string(),
         message,
         detail: names.join(", "),
         action,
@@ -1581,10 +1585,12 @@ fn draw_confirm(f: &mut Frame, c: &ConfirmView) {
     // The chosen button must be whole on screen, since Enter executes it
     // whether or not the user can read it. The popup widens to the button row
     // plus borders; a screen too narrow even for that stacks the buttons.
+    // Borders plus CONFIRM_PAD on each side keep text off the frame.
+    let frame_w = 2 + 2 * usize::from(CONFIRM_PAD);
     let (cancel_w, action_w) = (cancel.width(), action.width());
     let row_w = cancel_w + 2 + action_w;
-    let inline = row_w + 2 <= usize::from(screen.width);
-    let min_w = if inline { row_w } else { cancel_w.max(action_w) } + 2;
+    let inline = row_w + frame_w <= usize::from(screen.width);
+    let min_w = if inline { row_w } else { cancel_w.max(action_w) } + frame_w;
     let (buttons, button_rows): (_, u16) = if inline {
         (vec![Line::from(vec![cancel, Span::raw("  "), action])], 1)
     } else {
@@ -1600,9 +1606,10 @@ fn draw_confirm(f: &mut Frame, c: &ConfirmView) {
         area.width = u16::try_from(min_w).unwrap_or(u16::MAX).min(screen.width);
         area.x = screen.x + (screen.width - area.width) / 2;
     }
-    let inner_w = usize::from(area.width.saturating_sub(2)).max(1);
+    let inner_w = usize::from(area.width).saturating_sub(frame_w).max(1);
     let wrapped = |text: &str| text.chars().count().div_ceil(inner_w) + 1;
-    let needed = u16::try_from(2 + wrapped(&c.message) + 1 + wrapped(&c.detail) + 1 + usize::from(button_rows))
+    // Borders, the top/bottom padding rows, and the content.
+    let needed = u16::try_from(4 + wrapped(&c.message) + 1 + wrapped(&c.detail) + 1 + usize::from(button_rows))
         .unwrap_or(u16::MAX);
     if area.height < needed {
         area.height = needed.min(screen.height);
@@ -1611,6 +1618,7 @@ fn draw_confirm(f: &mut Frame, c: &ConfirmView) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow))
+        .padding(Padding::new(CONFIRM_PAD, CONFIRM_PAD, 1, 1))
         .title(Span::styled(
             format!(" {} ", c.title),
             Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
@@ -1626,7 +1634,7 @@ fn draw_confirm(f: &mut Frame, c: &ConfirmView) {
     f.render_widget(Clear, area);
     f.render_widget(block, area);
     f.render_widget(Paragraph::new(body).wrap(Wrap { trim: false }), text_area);
-    f.render_widget(Paragraph::new(buttons), button_area);
+    f.render_widget(Paragraph::new(buttons).alignment(Alignment::Center), button_area);
     let hint_area = Rect {
         x: area.x + 2,
         y: area.y + area.height.saturating_sub(1),
@@ -2680,7 +2688,7 @@ mod tests {
         );
         open_marked(&mut s, BatchOp::Uninstall, (0..names.len()).collect(), names.len());
         let c = frame(&s).confirm.expect("batch confirm projected once opened");
-        assert_eq!(c.title, "Uninstall 7 artifacts?");
+        assert_eq!(c.title, "Confirm");
         assert_eq!(c.action, "Uninstall");
         assert!(c.detail.starts_with("a1, a2"), "names shown: {}", c.detail);
         assert!(c.detail.ends_with("and 2 more"), "overflow counted: {}", c.detail);
@@ -2870,6 +2878,44 @@ mod tests {
         let (line, bg) = button_row(&draw_80x24(&s), "Uninstall");
         assert!(line.contains("▸ [ Uninstall ]"), "{line:?}");
         assert_eq!(bg, Some(Color::Cyan));
+    }
+
+    // The popup's body text sat flush against the left border and the
+    // buttons hugged the left edge. Text keeps CONFIRM_PAD blank columns off
+    // the border; the button row is centered between the borders.
+    #[test]
+    fn batch_confirm_text_is_padded_and_buttons_centered() {
+        let mut s = named_rows(&["alpha", "beta"]);
+        s.set_term_size((80, 24));
+        s.toggle_mark_all_filtered();
+        open_marked(&mut s, BatchOp::Install, vec![0, 1], 2);
+        let buf = draw_80x24(&s);
+        let rows: Vec<Vec<char>> = screen(&buf).lines().map(|l| l.chars().collect()).collect();
+        let (y, msg_x) = rows
+            .iter()
+            .enumerate()
+            .find_map(|(y, r)| r.iter().collect::<String>().find("Install all").map(|_| (y, r)))
+            .map(|(y, r)| {
+                (
+                    y,
+                    r.iter().collect::<String>().chars().take_while(|c| *c != 'I').count(),
+                )
+            })
+            .expect("message on screen");
+        let border_x = rows[y][..msg_x].iter().rposition(|c| *c == '│').expect("popup border");
+        assert_eq!(msg_x - border_x - 1, usize::from(CONFIRM_PAD), "{}", screen(&buf));
+
+        let (line, _) = button_row(&buf, "Install");
+        let chars: Vec<char> = line.chars().collect();
+        let first = chars.iter().position(|c| *c == '▸').unwrap();
+        let last = chars.iter().rposition(|c| *c == ']').unwrap();
+        let left = chars[..first].iter().rposition(|c| *c == '│').unwrap();
+        let right = last + chars[last..].iter().position(|c| *c == '│').unwrap();
+        let (gap_l, gap_r) = (first - left - 1, right - last - 1);
+        assert!(
+            gap_l.abs_diff(gap_r) <= 2,
+            "buttons centered ({gap_l} vs {gap_r}): {line:?}"
+        );
     }
 
     /// Draw `s` on a `w`×`h` test terminal and return the buffer.
