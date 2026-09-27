@@ -365,7 +365,9 @@ fn classify_access(err: &AccessError) -> ExitCode {
 /// match arm that decides its exit code, so the two can never drift apart.
 fn classify_resolve(err: &ResolveError) -> Classification {
     match &err.kind {
-        ResolveErrorKind::TagNotFound | ResolveErrorKind::BundleNotFound => Classification::new(ExitCode::NotFound),
+        ResolveErrorKind::TagNotFound | ResolveErrorKind::NotDeclared | ResolveErrorKind::BundleNotFound => {
+            Classification::new(ExitCode::NotFound)
+        }
         ResolveErrorKind::AuthFailure(_) => Classification::new(ExitCode::AuthError),
         ResolveErrorKind::RegistryUnreachable(_) | ResolveErrorKind::ResolveTimeout => {
             Classification::new(ExitCode::Unavailable)
@@ -958,6 +960,7 @@ mod tests {
             ResolveErrorKind::StaleLock {
                 previous_hash: "sha256:aaa".to_string(),
                 current_hash: "sha256:bbb".to_string(),
+                retry: "a full resolve".to_string(),
             },
         ))
         .into();
@@ -1000,6 +1003,7 @@ mod tests {
             ResolveErrorKind::StaleLock {
                 previous_hash: "sha256:aaa".to_string(),
                 current_hash: "sha256:bbb".to_string(),
+                retry: "a full resolve".to_string(),
             },
         )))
         .context("while re-resolving the lock");
@@ -1140,6 +1144,14 @@ mod tests {
         // The forward-compat case: a published bundle names a member kind
         // this build has no `ArtifactKind` variant for.
         assert!(unknown_key_hint("invalid bundle: unknown variant `workflow`, expected one of `skill`").is_some());
+    }
+
+    #[test]
+    fn undeclared_name_is_79_not_found() {
+        use crate::oci::ArtifactKind;
+        let err = ResolveError::unidentified(ArtifactKind::Skill, "ghost", ResolveErrorKind::NotDeclared);
+        let c = classify(&anyhow::Error::from(Error::from(err)));
+        assert_eq!((c.exit, c.reason), (ExitCode::NotFound, None));
     }
 
     #[test]

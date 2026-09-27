@@ -202,6 +202,25 @@ def test_partial_update_with_stale_lock_exits_65(
     )
 
 
+def test_update_undeclared_name_is_79_without_a_placeholder_identity(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    # Regression: the undeclared-name refusal printed a synthetic
+    # `invalid.localhost/<name>` identity and called it "tag not found".
+    repo = f"{unique_repo}/a"
+    make_artifact(repo, "rule", {"a.md": "a1\n"}, tag="latest")
+    write_config(project_dir, rules={"a": f"{registry}/{repo}:latest"})
+    runner = grim_at(project_dir)
+    runner.run("lock")
+
+    result = runner.run("--format", "json", "update", "missing", check=False)
+    assert result.returncode == 79, result.stderr
+    assert "invalid.localhost" not in result.stdout + result.stderr, result.stdout
+    error = json.loads(result.stdout)["error"]
+    assert error["exit"] == 79, error
+    assert "'missing'" in error["message"] and "not declared" in error["message"], error
+
+
 def test_update_reaps_unmodified_dropped_client(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
