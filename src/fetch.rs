@@ -40,7 +40,9 @@ use serde::Serialize;
 use crate::config::ResolvedRegistry;
 use crate::config::scope::ConfigScope;
 use crate::install::client_target::ClientTarget;
-use crate::install::materializer::{ArtifactMaterializer, DefaultMaterializer, TarEntryData, unpack_tar_in_memory};
+use crate::install::materializer::{
+    ArtifactMaterializer, DefaultMaterializer, TarEntryData, path_to_slash, unpack_tar_in_memory,
+};
 use crate::oci::access::error::{AccessError, AccessErrorKind};
 use crate::oci::access::{OciAccess, Operation};
 use crate::oci::bundle::BUNDLE_LAYER_SIZE_LIMIT;
@@ -454,7 +456,7 @@ pub async fn fetch_with_limit(
             report.files = entries
                 .iter()
                 .map(|e| FetchFileEntry {
-                    path: e.path.to_string_lossy().into_owned(),
+                    path: path_to_slash(&e.path),
                     size: e.size,
                 })
                 .collect();
@@ -483,7 +485,7 @@ pub async fn fetch_with_limit(
                 report.files = entries
                     .iter()
                     .map(|e| FetchFileEntry {
-                        path: e.path.to_string_lossy().into_owned(),
+                        path: path_to_slash(&e.path),
                         size: e.size,
                     })
                     .collect();
@@ -675,7 +677,7 @@ pub async fn fetch_description(
         .map(|e| {
             let (content, _truncated, encoding) = path_content(e)?;
             Ok(DescriptionFile {
-                path: e.path.to_string_lossy().into_owned(),
+                path: path_to_slash(&e.path),
                 size: e.size,
                 content,
                 encoding,

@@ -212,6 +212,18 @@ fn safe_relative_path(path: &Path) -> Result<PathBuf, InstallError> {
     Ok(clean)
 }
 
+/// Render a relative path `/`-separated on every OS, for reports that must
+/// not vary by platform (a Windows `PathBuf` prints with `\`).
+pub fn path_to_slash(path: &Path) -> String {
+    path.components()
+        .filter_map(|c| match c {
+            Component::Normal(seg) => Some(seg.to_string_lossy()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 fn materialize_failed(msg: String) -> InstallError {
     InstallError::without_reference(InstallErrorKind::MaterializeFailed(msg))
 }
@@ -226,6 +238,16 @@ fn target_io(path: &Path, source: std::io::Error) -> InstallError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_to_slash_joins_components_with_forward_slash() {
+        let rel = safe_relative_path(Path::new("skill/./refs/a.md")).unwrap();
+        assert_eq!(path_to_slash(&rel), "skill/refs/a.md");
+        let mut pushed = PathBuf::from("skill");
+        pushed.push("refs");
+        pushed.push("a.md");
+        assert_eq!(path_to_slash(&pushed), "skill/refs/a.md");
+    }
 
     /// Build an uncompressed tar from `(path, bytes)` pairs.
     fn tar_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
