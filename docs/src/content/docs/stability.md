@@ -28,7 +28,9 @@ Breaking any guarantee below is a major-version change, not a minor one.
 | CLI surface | Subcommand names, arguments, flags, and the [documented exit codes][exit-codes] |
 | `--format json` reports | The report shape for every command that offers one, and the [error document][json-interface] — see [Additive fields](#frozen-additive-fields) and the [JSON interface reference][json-interface] |
 | `grimoire.toml` / `grimoire.lock` | The [config and lock schema][configuration] |
+| `marketplace.toml` / `marketplace.lock` | The [manifest and lock wire shape][marketplace-toml], including the `plugin` field and `[[plugin]]` table — under the same additive rule as `grimoire.lock`, and never sharing a file with it (a `plugin`-bearing entry in `grimoire.lock`, or vice versa, is a rejected scope mismatch, not a migration path) |
 | `publish.toml` | The [batch-publish manifest schema][batch-publish], including every spelling a key has ever accepted — see [Additive fields](#frozen-additive-fields) |
+| [`grim export plugin`][export-plugin] | The `--format json` [export report shape][json-shapes-items], and the `<base>+<12-hex>` [version grammar][export-plugin-output] a rendered `plugin.json`'s `version` follows |
 | Bundle source manifest | The [bundle member declaration schema][bundles], under the same widening rule as the manifests above |
 | [MCP descriptor][mcp-descriptor] (`mcp/<name>.toml`) | The published descriptor schema, including which fields an older grim rejects rather than drops |
 | Install state (`state.json`) | Schema V2, governed by the same additive-field policy as JSON reports |
@@ -178,6 +180,17 @@ the exclusions are what keep 1.x able to move at all:
   nobody has exercised buys a guarantee no one asked for at the cost of
   never being able to fix it. It freezes in a later minor, once a real
   consumer has shaped it. Anything you script against it today may move.
+- **[`grim export plugin`][export-plugin] member bytes.** The report shape
+  and version grammar are frozen under the table row above. Its [exit
+  codes][exit-codes] are frozen the same as every other command's. The
+  exact bytes rendered under `skills/`, `agents/`, `.mcp.json`, or
+  `mcp.json` inside an exported plugin are not. That is the same rule as
+  [vendor render layout](#unstable) above, because export reuses the same
+  per-client materializer `grim install` does. A minor release that
+  changes how a client renders a skill changes an exported plugin's bytes
+  identically, without bumping the plugin's own `version`. Re-export (or
+  bump `--version` by hand) if that matters to a consumer of the exported
+  artifact.
 
 ### The supported discovery channel {#unstable-discovery}
 
@@ -466,6 +479,10 @@ unaffected — they read straight from disk and never touch a manifest.
 [vendor-metadata]: ./vendor-metadata.md
 [path-sources]: ./concepts.md#references-tags-and-digests
 [json-hint]: ./json-interface.md#error-hint
+[marketplace-toml]: ./configuration.md#marketplace-toml
+[export-plugin]: ./commands.md#export-plugin
+[export-plugin-output]: ./commands.md#export-plugin-output
+[json-shapes-items]: ./json-interface.md#shapes-items
 
 <!-- external -->
 [gnu-make]: https://www.gnu.org/software/make/manual/make.html

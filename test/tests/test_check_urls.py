@@ -743,7 +743,7 @@ def test_link_to_absent_page_exits_one(clean_root: Path) -> None:
     """C-010 item 7: a linked ``.html`` page must exist, fragment or not.
 
     Item 1 covers ``STATIC_PATHS`` plus the 21 chapters only — never
-    ``index.html``, the nine ``guides/`` pages or ``tutorials/own-index.html``
+    ``index.html``, the ``guides/`` pages or ``tutorials/own-index.html``
     — so nothing else asserted the target of a link is on disk.  With a
     fragment the old shape was worse than silent: the missing page read as
     "nothing to compare the fragment against" and the link passed.

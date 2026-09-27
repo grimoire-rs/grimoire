@@ -171,6 +171,7 @@ export default defineConfig({
           items: [
             { slug: 'tutorials/own-index', label: 'Publish to your own index' },
             { slug: 'guides/team-ci', label: 'Team and CI' },
+            { slug: 'guides/team-plugin', label: 'Hand a team a plugin' },
             { slug: 'guides/registries', label: 'Company registries' },
             {
               slug: 'guides/catalog-best-practices',

@@ -136,6 +136,15 @@ comments in the config file survive, and grim's drift check is semantic
 (reordering the file is not a modification; editing the entry's values
 is).
 
+**Plugin portability:** `grim export plugin` renders a descriptor into a
+`.mcp.json`/`mcp.json` entry the same way install does, so the same
+authoring rules apply there. A relative `command` path does not travel
+inside an exported plugin (no project root to resolve it against — use an
+absolute path, a `PATH` command, or Claude's own `${CLAUDE_PLUGIN_ROOT}`),
+and a `${…}` reference inside `command` is declined `not-representable`
+for an Agent Plugins export (Copilot/Codex/Cursor), which performs no
+expansion there.
+
 ## Example
 
 ```toml
