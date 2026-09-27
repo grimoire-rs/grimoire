@@ -10,7 +10,10 @@ version: '3'
 # docs/public/ still need a stamp of their own, see docs:build.
 vars:
   GRIM_VERSION:
-    sh: grep -m1 '^version' {{.ROOT_DIR}}/Cargo.toml | cut -d'"' -f2
+    # No double quote in the command: Task's Windows shell mangles one
+    # inside single quotes (cut -d'"' failed there with "the delimiter
+    # must be a single character"), which broke every task on Windows CI.
+    sh: grep -m1 '^version' {{.ROOT_DIR}}/Cargo.toml | grep -oE '[0-9]+[.][0-9]+[.][0-9]+[-+.0-9A-Za-z]*'
 
 env:
   GRIM_VERSION: '{{.GRIM_VERSION}}'
