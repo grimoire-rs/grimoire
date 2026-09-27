@@ -1678,3 +1678,16 @@ def test_s036_update_marketplace_leaves_project_plugins_to_the_project(
     everything = runner.run("update", "--marketplace", "marketplace.toml", format="json", check=False)
     assert everything.returncode == 0, everything.stderr
     assert json.loads(everything.stdout)["items"] == []
+
+
+def test_s037_codex_skills_get_no_generated_icon_metadata(
+    grim_at, work: Path, registry: str, unique_repo: str
+) -> None:
+    """Codex's plugin upload rejects a package whose skills declare an icon."""
+    _skill(f"{unique_repo}/a", "a")
+    make_description(f"{unique_repo}/a", {"README.md": "# A\n", "logo.svg": SVG})
+
+    _ok(_export(grim_at(work), f"{registry}/{unique_repo}/a:1", "--client", "codex", "-o", "dist"))
+
+    skill = work / "dist" / "a.codex" / "skills" / "a"
+    assert sorted(p.name for p in skill.iterdir()) == ["SKILL.md"]

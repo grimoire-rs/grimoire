@@ -1915,7 +1915,10 @@ file without a manifest reference to it.
 
 A member's own logo is separate. A skill directory that ships `logo.png`
 or `logo.svg` keeps it at `skills/<name>/` in every export, as its whole
-tree is copied. No plugin format has a per-skill icon field to point at it.
+tree is copied. Codex reads a per-skill icon from `agents/openai.yaml` in
+the skill directory, but its plugin upload rejects a package whose skills
+declare one there. grim therefore writes no per-skill icon; a skill's own
+`agents/` directory is copied like the rest of its tree.
 
 Rename, description, and version-annotation rules are covered in full in
 the [`marketplace.toml` reference](./configuration.md#marketplace-toml);
