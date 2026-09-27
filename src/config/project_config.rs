@@ -21,6 +21,7 @@ use crate::config::config_error::{ConfigError, ConfigErrorKind};
 use crate::config::declaration::DeclaredSource;
 use crate::config::declaration::{ConfigOptions, DesiredSet, RegistryConfig, VendorOptions};
 use crate::config::path_source::PathSource;
+use crate::config::plugin_meta::PluginMeta;
 use crate::install::client_target::ClientTarget;
 use crate::oci::Identifier;
 use crate::oci::identifier::error::IdentifierErrorKind;
@@ -36,6 +37,10 @@ pub struct ProjectConfig {
     pub registries: Vec<RegistryConfig>,
     /// The declared skills, rules, agents, and bundles.
     pub set: DesiredSet,
+    /// Plugin metadata (`[plugin]`) for `grim export plugin --project`
+    /// and for a `marketplace.toml` plugin pointing at this project.
+    /// Outside the declaration hash.
+    pub plugin: Option<PluginMeta>,
 }
 
 /// The result of [`ProjectConfig::discover`]: the parsed config plus the
@@ -91,6 +96,9 @@ struct RawConfig {
     bundles: BTreeMap<String, String>,
     #[serde(default)]
     mcp: BTreeMap<String, String>,
+    /// Plugin metadata for `grim export plugin --project`.
+    #[serde(default)]
+    plugin: Option<PluginMeta>,
 }
 
 /// The JSON Schema (schemars) for the on-disk `grimoire.toml` shape.
@@ -212,10 +220,16 @@ fn parse_config(s: &str, path: PathBuf) -> Result<ProjectConfig, ConfigError> {
     let mcp = parse_artifact_map(&raw.mcp, &path, PathValues::Rejected)?;
     let mut set = DesiredSet::from_maps(skills, rules, agents, bundles);
     set.mcp = mcp;
+    let mut plugin = raw.plugin;
+    if let Some(meta) = &mut plugin {
+        meta.validate()
+            .map_err(|reason| ConfigError::new(path.clone(), ConfigErrorKind::PluginInvalid { reason }))?;
+    }
     Ok(ProjectConfig {
         options: raw.options,
         registries: raw.registries,
         set,
+        plugin,
     })
 }
 
@@ -981,6 +995,40 @@ fn parse_member_map(raw: &BTreeMap<String, String>, path: &Path) -> Result<BTree
 mod tests {
     use super::*;
     use crate::config::FILE_SIZE_LIMIT_BYTES;
+
+    #[test]
+    fn plugin_table_parses_and_stays_outside_the_declaration_hash() {
+        let skills = "[skills]\ncode-review = \"ghcr.io/acme/skills/code-review:stable\"\n";
+        let bare = ProjectConfig::from_toml_str(skills).expect("parse");
+        let with_plugin = ProjectConfig::from_toml_str(&format!(
+            "{skills}[plugin]\nname = \"team\"\ndescription = \"Team tools\"\nversion = \"v1.2.0\"\n\
+             logo = \"assets/team.svg\"\n[plugin.rename]\nstrip_prefix = \"acme-\"\n"
+        ))
+        .expect("parse");
+        let meta = with_plugin.plugin.as_ref().expect("[plugin]");
+        assert_eq!(meta.name.as_deref(), Some("team"));
+        assert_eq!(meta.version.as_deref(), Some("1.2.0"), "normalized at load");
+        assert_eq!(bare.plugin, None);
+        assert_eq!(
+            bare.set.declaration_hash_cached(),
+            with_plugin.set.declaration_hash_cached(),
+            "editing [plugin] must never make a lock stale"
+        );
+    }
+
+    #[test]
+    fn invalid_plugin_table_is_a_config_error() {
+        for (body, reason) in [
+            ("[plugin]\nname = \"Team\"\n", "invalid plugin name 'Team'"),
+            ("[plugin]\nversion = \"latest\"\n", "invalid version 'latest'"),
+            ("[plugin]\nbogus = 1\n", "invalid TOML"),
+        ] {
+            let err = ProjectConfig::from_toml_str(body).expect_err(body);
+            assert!(err.to_string().contains(reason), "{body}: {err}");
+        }
+        let err = ProjectConfig::from_toml_str("[plugin]\nname = \"Team\"\n").unwrap_err();
+        assert!(matches!(err.kind, ConfigErrorKind::PluginInvalid { .. }), "{err:?}");
+    }
 
     #[test]
     fn parse_minimal_ok() {

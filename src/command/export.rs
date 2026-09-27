@@ -19,7 +19,7 @@ use crate::context::Context;
 use crate::export::export_error::ExportError;
 use crate::export::family::{Family, family_of};
 use crate::export::marketplace::validate_plugin_name;
-use crate::export::stage::{self, ExportMode, ExportOptions};
+use crate::export::stage::{self, ExportMode, ExportOptions, ProjectLock};
 use crate::install::ClientTarget;
 use crate::install::target::parse_client_list;
 
@@ -46,10 +46,24 @@ pub struct ExportPluginArgs {
     /// declared in the marketplace manifest.
     pub refs: Vec<String>,
 
-    /// Plugin name for ad-hoc refs. Required with more than one reference;
-    /// defaults to the reference's name with exactly one.
+    /// Plugin name for ad-hoc refs or `--project`. Required with more
+    /// than one reference; defaults to the reference's name with exactly
+    /// one, and to `[plugin].name` with `--project`.
     #[arg(long)]
     pub name: Option<String>,
+
+    /// Export a project's locked set as one plugin, without resolving
+    /// anything: its `grimoire.lock` supplies the pins, `[plugin]` in its
+    /// `grimoire.toml` the metadata defaults. Without a value, the project
+    /// every project command finds; with one, that directory or
+    /// `grimoire.toml`.
+    #[arg(
+        long,
+        value_name = "PATH",
+        num_args = 0..=1,
+        conflicts_with_all = ["refs", "plugins", "marketplace"]
+    )]
+    pub project: Option<Option<PathBuf>>,
 
     /// Export only this declared plugin (repeatable). Defaults to every
     /// plugin the marketplace manifest declares.
@@ -123,7 +137,14 @@ pub async fn run(ctx: &Context, args: &ExportArgs) -> anyhow::Result<(ExportRepo
 /// contention (75), and every resolver, access and staging failure with
 /// its existing classification.
 pub async fn run_plugin(ctx: &Context, args: &ExportPluginArgs) -> anyhow::Result<(ExportReport, ExitCode)> {
+    if let Some(name) = &args.name {
+        validate_plugin_name(name).map_err(|reason| usage(format!("invalid --name '{name}': {reason}")))?;
+    }
     let mode = match (args.refs.as_slice(), &args.name) {
+        _ if let Some(path) = &args.project => ExportMode::Project {
+            name: args.name.clone(),
+            project: Box::new(super::grim(project_lock(ctx, path.as_deref()))?),
+        },
         ([], Some(_)) => return Err(usage("--name applies only to an ad-hoc export (positional references)")),
         ([], None) => ExportMode::Declared {
             manifest: args
@@ -133,15 +154,10 @@ pub async fn run_plugin(ctx: &Context, args: &ExportPluginArgs) -> anyhow::Resul
             plugins: args.plugins.clone(),
         },
         ([_, _, ..], None) => return Err(usage("--name is required when exporting more than one reference")),
-        (refs, name) => {
-            if let Some(name) = name {
-                validate_plugin_name(name).map_err(|reason| usage(format!("invalid --name '{name}': {reason}")))?;
-            }
-            ExportMode::AdHoc {
-                refs: refs.iter().map(|r| cli_ref(r)).collect(),
-                name: name.clone(),
-            }
-        }
+        (refs, name) => ExportMode::AdHoc {
+            refs: refs.iter().map(|r| cli_ref(r)).collect(),
+            name: name.clone(),
+        },
     };
     let configured = if args.client.is_empty() {
         configured_clients(ctx)?
@@ -163,7 +179,7 @@ pub async fn run_plugin(ctx: &Context, args: &ExportPluginArgs) -> anyhow::Resul
                 super::access_seam_scoped(ctx, false, None, Some(&anchor))?,
             )
         }
-        ExportMode::AdHoc { .. } => (
+        ExportMode::AdHoc { .. } | ExportMode::Project { .. } => (
             super::resolve_fetch_scope(ctx, ctx.global(), ctx.config(), None)?,
             super::access_seam(ctx)?,
         ),
@@ -187,6 +203,36 @@ pub async fn run_plugin(ctx: &Context, args: &ExportPluginArgs) -> anyhow::Resul
     };
     let report = super::grim(stage::run(&mode, &opts, &scope, &access, ctx.offline()).await)?;
     Ok((report, ExitCode::Success))
+}
+
+/// The `--project` input: the project at `path`, else the resolved
+/// scope's fresh lock. A project also contributes its directory
+/// (path-source anchor) and `[plugin]`; the global scope has no
+/// `[plugin]`, and its path sources anchor at `$GRIM_HOME`.
+#[allow(
+    clippy::result_large_err,
+    reason = "crate::error::Error is the classified error every command returns"
+)]
+fn project_lock(ctx: &Context, path: Option<&std::path::Path>) -> Result<ProjectLock, crate::error::Error> {
+    if let Some(path) = path {
+        if ctx.global() || ctx.config().is_some() {
+            return Err(ExportError::Usage(
+                "--project <PATH> names the project itself; it takes no --global or --config".into(),
+            )
+            .into());
+        }
+        return ProjectLock::load(path);
+    }
+    if ctx.global() {
+        let scope = super::scope_resolution::resolve(ctx, true, None)?;
+        return Ok(ProjectLock {
+            dir: scope.config_dir().to_path_buf(),
+            lock: crate::command::install::fresh_lock(&scope.lock_path, &scope.set)?,
+            meta: None,
+        });
+    }
+    let discovered = crate::config::ProjectConfig::discover(ctx.config())?;
+    ProjectLock::load(discovered.config_path())
 }
 
 /// `[options].clients` of the resolved project scope, or of the global
@@ -302,6 +348,7 @@ mod tests {
             description: None,
             logo: None,
             force: false,
+            project: None,
         }
     }
 
@@ -462,6 +509,24 @@ mod tests {
         let ok = parse(&["--plugin", "a", "--plugin", "b", "--client", "claude,codex"]).unwrap();
         assert_eq!(ok.plugins, strings(&["a", "b"]));
         assert_eq!(ok.output, std::path::PathBuf::from("."));
+    }
+
+    #[test]
+    fn project_conflicts_with_refs_plugin_and_marketplace_but_takes_name() {
+        for argv in [
+            &[HELLO, "--project"][..],
+            &["--project", "--plugin", "team"][..],
+            &["--project", "../team", "--marketplace", "m.toml"][..],
+        ] {
+            let err = parse(argv).expect_err("clap conflict");
+            assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict, "{argv:?}");
+        }
+        let bare = parse(&["--project", "--name", "team", "--logo", "l.svg"]).unwrap();
+        assert_eq!(bare.project, Some(None), "no value: the discovered project");
+        assert_eq!(bare.name.as_deref(), Some("team"));
+        let path = parse(&["--project", "../team"]).unwrap();
+        assert_eq!(path.project, Some(Some(PathBuf::from("../team"))));
+        assert_eq!(parse(&[]).unwrap().project, None);
     }
 
     #[test]

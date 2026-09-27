@@ -645,12 +645,17 @@ the plugin's lock entry is not already fresh. Repeated selectors merge
 (`team:a team:b` picks both members); a selector naming an undeclared
 plugin, or a member the plugin does not resolve to, exits `79`.
 
+A plugin declared with `project = "<dir>"` takes its pins from that
+project's own `grimoire.lock`, so this command never rolls it forward. A
+run without selectors leaves it alone, and a selector naming it exits `64`
+with a pointer to `grim update` in the project.
+
 ### Exit codes {#update-marketplace-exit-codes}
 
 | Situation | Code |
 |-----------|------|
 | Success | `0` |
-| `--marketplace` combined with `--global`, `--config`, `--client`, or `--force`; or a malformed selector (an empty plugin/member half, or more than one `:`) | `64` |
+| `--marketplace` combined with `--global`, `--config`, `--client`, or `--force`; a malformed selector (an empty plugin/member half, or more than one `:`); or a selector naming a `project` plugin | `64` |
 | A missing or malformed marketplace manifest | `65` |
 | Concurrent write on the manifest's lock file | `75` |
 | A malformed `marketplace.lock` | `78` |
@@ -1639,6 +1644,7 @@ calls: a skill exported for Claude Code is byte-for-byte the `SKILL.md`
 ```sh
 grim export plugin ghcr.io/acme/skills/code-review:1 --client claude --zip -o dist
 grim export plugin --plugin team --client codex -o dist
+grim export plugin --project --client claude -o dist
 ```
 
 ### Ad-hoc vs. declared {#export-plugin-modes}
@@ -1649,7 +1655,7 @@ grim export plugin --plugin team --client codex -o dist
 | 1 | set | — | Ad-hoc plugin named `--name` |
 | ≥2 | set | — | Ad-hoc plugin merging every reference |
 | ≥2 | absent | — | Exit `64` — `--name` is required for more than one reference |
-| 0 | set | any | Exit `64` — `--name` applies only to an ad-hoc export (positional references) |
+| 0 | set | any | Exit `64` — `--name` applies only to an ad-hoc or a `--project` export |
 | 0 | — | `P…` | Declared plugin(s) named by `--plugin` (repeatable), read from `--marketplace` (default `./marketplace.toml`); an unknown name exits `79` — but a manifest declaring zero plugins exits `65` first, before `--plugin` is even checked against it |
 | 0 | — | none | Every plugin the manifest declares; a manifest declaring none exits `65` with a hint toward `<ref>… --name` |
 | ≥1 | — | set | Exit `64` (refs and `--plugin` conflict at the flag level) |
@@ -1669,14 +1675,15 @@ plugins this run touched.
 | Flag | Effect |
 |------|--------|
 | `[REFS]…` | Positional references to export as one ad-hoc plugin |
-| `--name <NAME>` | Plugin name for an ad-hoc export; required with more than one reference |
+| `--name <NAME>` | Plugin name for an ad-hoc or `--project` export; required with more than one reference |
+| `--project [PATH]` | Export a project's `grimoire.lock` as one plugin, without resolving anything; `PATH` is its directory or `grimoire.toml`, else the project is discovered — see [export your project](#export-plugin-project); conflicts with `REFS`, `--plugin` and `--marketplace` |
 | `--plugin <NAME>` | Export only this declared plugin (repeatable); conflicts with `REFS` |
 | `--marketplace <PATH>` | The manifest declaring the plugins (default `./marketplace.toml`); conflicts with `REFS` |
 | `--client <NAME>` | Client(s) to export for, comma-separated and repeatable (default: the config `clients` option, then `agents`); a list naming no client (`--client ""`) exits `64` |
 | `--zip` | Write `<name>.<client>.zip` instead of a directory |
 | `-o, --output <DIR>` | Directory the plugins are written into (default `.`, created if absent) |
 | `--version <SEMVER>` | Plugin version base — defaults to the declared `version`, then the single ad-hoc reference's version annotation, then `0.0.0`; grim always appends a content-hash suffix |
-| `--description <TEXT>` | Plugin description base — overrides the declared `description` and the single ad-hoc reference's description annotation; longer than 500 characters exits `65` (see [the description cap](#export-plugin-description)) |
+| `--description <TEXT>` | Plugin description base — overrides the declared `description`, the project's `[plugin].description`, and the single ad-hoc reference's description annotation; longer than 500 characters exits `65` (see [the description cap](#export-plugin-description)) |
 | `--logo <PATH>` | Plugin logo, `.png` or `.svg` up to 1 MiB — overrides the declared `logo`; see [logo](#export-plugin-logo) |
 | `--force` | Replace existing outputs instead of refusing them |
 
@@ -1685,6 +1692,35 @@ plugins this run touched.
 below for which ones this command can render at all. Every other global flag
 (`--offline`, `--registry`, `--config`, `--global`, …) behaves as documented
 under [Global options](#global-options).
+
+### Export your project {#export-plugin-project}
+
+`--project` shares exactly what your project runs. It reads the
+project's `grimoire.toml` and `grimoire.lock` and renders those pins as
+one plugin. Without a value, it finds the project the way every project
+command does. A value names the project directory or its `grimoire.toml`,
+and cannot be combined with `--global` or `--config` (exit `64`). No
+tag is re-resolved, so the plugin carries the digests your team installed,
+even if a tag has moved since. Local path members are re-packed and must
+still match their locked hash; a changed one exits `65` and asks for
+`grim lock` in the project.
+
+```sh
+grim export plugin --project --client claude -o dist
+grim export plugin --project ../team --client codex --zip -o dist
+```
+
+The lock must be fresh: declarations edited since the last `grim lock` exit
+`65` (`grim lock` first), and a missing lock exits `79`. Nothing is
+written besides the plugin output. Name and metadata come from flags,
+then from the optional [`[plugin]` table](./configuration.md#plugin-table)
+in `grimoire.toml`. With neither `--name` nor `[plugin].name` the export
+exits `64`.
+
+A [`marketplace.toml`](./configuration.md#marketplace-toml) can point one
+of its plugins at a project with `project = "<dir>"`. The project's lock
+supplies the pins, its `[plugin]` table any field the marketplace leaves
+unset, and `marketplace.lock` records nothing for that plugin.
 
 ### Client families {#export-plugin-families}
 
@@ -1826,10 +1862,10 @@ field reference, alongside every other command's `--format json` shape.
 | Situation | Code |
 |-----------|------|
 | Success | `0` |
-| `≥2` refs without `--name`; refs combined with `--plugin`/`--marketplace`; `--name` given with 0 refs; or an invalid `--name`, or an invalid plugin name derived from a single reference | `64` |
-| A missing or malformed manifest, or a malformed `--version`; a `--description` or declared `description` too long for the cap; a manifest declaring zero plugins, regardless of `--plugin` (it is checked first); a bad rename or a stale reference a rename left behind; an unsafe entry name; an admitted member set that is empty for a client; or an existing output without `--force` | `65` |
+| `≥2` refs without `--name`; refs combined with `--plugin`/`--marketplace`; `--project` combined with refs, `--plugin` or `--marketplace`, or without any plugin name; `--name` given with 0 refs and no `--project`; or an invalid `--name`, or an invalid plugin name derived from a single reference | `64` |
+| A missing or malformed manifest, or a malformed `--version`; a `--description` or declared `description` too long for the cap; a stale `grimoire.lock` behind `--project` or a `project` plugin; a locked local member that changed on disk; a manifest declaring zero plugins, regardless of `--plugin` (it is checked first); a bad rename or a stale reference a rename left behind; an unsafe entry name; an admitted member set that is empty for a client; or an existing output without `--force` | `65` |
 | Two references disagreeing on the same member's identity, or a `--client` (explicit or unrecognized) naming a client with no plugin format at all | `78` |
-| A named plugin, a `<plugin>`/`<plugin>:<member>` selector, or an include's tag or manifest, not found | `79` |
+| A named plugin, a `<plugin>`/`<plugin>:<member>` selector, or an include's tag or manifest, not found; a project's `grimoire.toml` or `grimoire.lock` missing | `79` |
 | Registry unreachable | `69` |
 | Missing or rejected registry credential | `80` |
 | An include's floating tag needs the network under `--offline` — this includes a pinned, already-cached registry member, since export has no manifest cache; only a local path source resolves offline (the same limitation `grim install --offline` has) | `81` |

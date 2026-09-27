@@ -312,7 +312,8 @@ fn classify_config(err: &ConfigError) -> Classification {
         | ConfigErrorKind::TreeSeparatorInvalid { .. }
         | ConfigErrorKind::SearchMinRelevanceInvalid { .. }
         | ConfigErrorKind::ClientsInvalid { .. }
-        | ConfigErrorKind::VendorsInvalid { .. } => Classification::new(ExitCode::ConfigError),
+        | ConfigErrorKind::VendorsInvalid { .. }
+        | ConfigErrorKind::PluginInvalid { .. } => Classification::new(ExitCode::ConfigError),
         ConfigErrorKind::NotDiscovered => Classification {
             exit: ExitCode::NotFound,
             reason: Some(ErrorReason::NoConfig),

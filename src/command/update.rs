@@ -357,9 +357,22 @@ async fn run_marketplace(ctx: &Context, manifest: &Path, names: &[String]) -> an
     // `load` makes the path absolute; it is deliberately not canonicalized,
     // so L and the sidecar stay beside M as named (C-010), never beside a
     // symlink target that skipped C-001's name check.
-    let m = super::grim(marketplace::load(manifest))?;
+    let full = super::grim(marketplace::load(manifest))?;
     // A malformed selector is 64 even against a held lock or a corrupt L.
     let selection = super::grim(parse_selectors(names))?;
+    // A `project` plugin's pins are its project's own lock: rolling them
+    // forward is `grim update` in that project, never here.
+    if let PluginSelection::Some(picks) = &selection
+        && let Some((name, project)) = picks
+            .keys()
+            .find_map(|p| full.plugins.get(p).and_then(|d| d.project.as_ref()).map(|dir| (p, dir)))
+    {
+        return super::grim(Err(ExportError::Usage(format!(
+            "plugin '{name}' follows the lock of project {}; run `grim update` there",
+            project.display()
+        ))));
+    }
+    let m = full.include_plugins();
     let _guard = super::grim(ConfigFileLock::try_acquire(&m.path))?;
 
     let lock_path = resolve::lock_path(&m.path);

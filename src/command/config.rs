@@ -21,13 +21,15 @@ use crate::api::config_report::{
 };
 use crate::cli::exit_code::ExitCode;
 use crate::config::declaration::{ConfigOptions, DefaultView, RegistryConfig};
+use crate::config::plugin_meta::{self, PluginMeta};
 use crate::config::project_config::validate_registries;
 use crate::config::scope::ConfigScope;
 use crate::context::Context;
 use crate::install::client_target::ClientTarget;
 use crate::lock::file_lock::ConfigFileLock;
 
-use super::config_keys::{ConfigKey, KeySpec, RegistryField, VENDOR_FIELD_NAME, VENDOR_SHARED_SKILLS};
+use super::add::{read_plugin_table, write_config_with_plugin};
+use super::config_keys::{ConfigKey, KeySpec, PluginField, RegistryField, VENDOR_FIELD_NAME, VENDOR_SHARED_SKILLS};
 use super::scope_resolution::{self, lockable_config_path};
 
 /// `grim config` arguments.
@@ -1328,9 +1330,157 @@ fn commit_config(
     ))
 }
 
+// ── Plugin keys ───────────────────────────────────────────────────────────────
+
+/// Resolve the project scope for a `plugin.*` key. `[plugin]` is never read
+/// from the global config, so `--global` is a usage error (exit 64), refused
+/// before anything is resolved.
+fn plugin_scope(ctx: &Context, key: &str) -> anyhow::Result<scope_resolution::ResolvedScope> {
+    if ctx.global() {
+        return Err(super::config_usage(format!(
+            "{key} is project-only: the global config has no [plugin] table; drop --global"
+        )));
+    }
+    super::grim(scope_resolution::resolve(ctx, false, ctx.config()))
+}
+
+/// The effective value of one `[plugin]` field, `None` when unset. The
+/// version reads back normalized, as `grim export plugin` sees it.
+fn plugin_value(field: PluginField, plugin: Option<&PluginMeta>) -> Option<String> {
+    let meta = plugin?;
+    match field {
+        PluginField::Name => meta.name.clone(),
+        PluginField::Description => meta.description.clone(),
+        PluginField::Version => meta
+            .version
+            .as_deref()
+            .map(|v| plugin_meta::normalize_version(v).unwrap_or_else(|| v.to_string())),
+        PluginField::Logo => meta.logo.as_ref().map(|l| l.to_string_lossy().into_owned()),
+    }
+}
+
+/// Validate `value` with the load-time `[plugin]` rules (exit 65 on
+/// rejection) and store it; returns the stored value. The version is stored
+/// normalized (leading `v` dropped), matching what load hands to export.
+fn apply_plugin_set(field: PluginField, value: &str, plugin: &mut Option<PluginMeta>) -> anyhow::Result<String> {
+    let key = field.spec().key;
+    reject_control_chars(value, key)?;
+    // The shared validators quote the raw value; escape it in place so a
+    // bidi override (not `char::is_control`) never reaches stderr raw.
+    let invalid = |reason: String| {
+        super::config_value(format!(
+            "invalid value for {key}: {}",
+            reason.replace(value, &value.escape_debug().to_string())
+        ))
+    };
+    let stored = match field {
+        PluginField::Name => plugin_meta::validate_plugin_name(value).map(|()| value.to_string()),
+        PluginField::Description => plugin_meta::validate_description(value).map(|()| value.to_string()),
+        PluginField::Version => plugin_meta::checked_version(value),
+        PluginField::Logo if value.is_empty() => Err("must not be empty".to_string()),
+        PluginField::Logo => Ok(value.to_string()),
+    }
+    .map_err(invalid)?;
+    let meta = plugin.get_or_insert_with(PluginMeta::default);
+    match field {
+        PluginField::Name => meta.name = Some(stored.clone()),
+        PluginField::Description => meta.description = Some(stored.clone()),
+        PluginField::Version => meta.version = Some(stored.clone()),
+        PluginField::Logo => meta.logo = Some(stored.clone().into()),
+    }
+    Ok(stored)
+}
+
+/// Clear one `[plugin]` field, dropping the whole table once nothing is left
+/// in it (a `[plugin.rename]` rule keeps it alive).
+fn apply_plugin_unset(field: PluginField, plugin: &mut Option<PluginMeta>) {
+    let Some(meta) = plugin else { return };
+    match field {
+        PluginField::Name => meta.name = None,
+        PluginField::Description => meta.description = None,
+        PluginField::Version => meta.version = None,
+        PluginField::Logo => meta.logo = None,
+    }
+    if *meta == PluginMeta::default() {
+        *plugin = None;
+    }
+}
+
+/// The `plugin.*` rows of a project-scope `grim config list`, appended after
+/// every other row so no existing position moves.
+fn plugin_entries(all: bool, plugin: Option<&PluginMeta>) -> Vec<ConfigEntry> {
+    PluginField::ALL
+        .into_iter()
+        .filter_map(|field| {
+            let value = plugin_value(field, plugin);
+            (value.is_some() || all).then(|| entry(field.spec().key.to_string(), value, field.spec()))
+        })
+        .collect()
+}
+
+fn run_plugin_get(ctx: &Context, key: &str, field: PluginField) -> anyhow::Result<(ConfigReport, ExitCode)> {
+    let scope = plugin_scope(ctx, key)?;
+    let plugin = super::grim(read_plugin_table(&scope.config_path))?;
+    let value = plugin_value(field, plugin.as_ref());
+    let exit_code = if value.is_some() {
+        ExitCode::Success
+    } else {
+        ExitCode::Failure
+    };
+    Ok((
+        ConfigReport::Get(ConfigGetReport {
+            key: key.to_string(),
+            value,
+            scope: Origin::Project,
+        }),
+        exit_code,
+    ))
+}
+
+/// `set` and `unset` of a `plugin.*` key: read the table as authored under
+/// the lock, edit one field, write it back (never under `--dry-run`).
+fn run_plugin_write(
+    ctx: &Context,
+    key: &str,
+    edit: impl FnOnce(&mut Option<PluginMeta>) -> anyhow::Result<Option<String>>,
+    dry_run: bool,
+) -> anyhow::Result<(ConfigReport, ExitCode)> {
+    let scope = plugin_scope(ctx, key)?;
+    let _guard = if dry_run { None } else { acquire_config_lock(&scope)? };
+    let mut plugin = super::grim(read_plugin_table(&scope.config_path))?;
+    let stored = edit(&mut plugin)?;
+    if !dry_run {
+        super::grim(write_config_with_plugin(
+            &scope.config_path,
+            &scope.options,
+            &scope.registries,
+            &scope.set,
+            plugin.as_ref(),
+        ))?;
+    }
+    Ok((
+        ConfigReport::Write(ConfigWriteReport {
+            action: if stored.is_some() {
+                WriteAction::Set
+            } else {
+                WriteAction::Unset
+            },
+            key: key.to_string(),
+            value: stored,
+            scope: Origin::Project,
+            dry_run,
+            fields: Vec::new(),
+        }),
+        ExitCode::Success,
+    ))
+}
+
 // ── Sub-command handlers ──────────────────────────────────────────────────────
 
 fn run_get(ctx: &Context, key: &str) -> anyhow::Result<(ConfigReport, ExitCode)> {
+    if let Some(field) = PluginField::parse(key) {
+        return run_plugin_get(ctx, key, field);
+    }
     let parsed = parse_key(key)?;
     if matches!(parsed, ParsedKey::RegistryAlias { .. }) {
         return Err(super::config_usage(
@@ -1360,6 +1510,14 @@ fn run_get(ctx: &Context, key: &str) -> anyhow::Result<(ConfigReport, ExitCode)>
 /// but skips the advisory lock and the write, so error parity with the real
 /// path is by construction (same validators, same 64/65/79 envelopes).
 fn run_set(ctx: &Context, key: &str, value: &str, dry_run: bool) -> anyhow::Result<(ConfigReport, ExitCode)> {
+    if let Some(field) = PluginField::parse(key) {
+        return run_plugin_write(
+            ctx,
+            key,
+            |plugin| apply_plugin_set(field, value, plugin).map(Some),
+            dry_run,
+        );
+    }
     let parsed = parse_key(key)?;
     let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
     let origin = scope_to_origin(scope.scope);
@@ -1391,6 +1549,17 @@ fn run_set(ctx: &Context, key: &str, value: &str, dry_run: bool) -> anyhow::Resu
 }
 
 fn run_unset(ctx: &Context, key: &str) -> anyhow::Result<(ConfigReport, ExitCode)> {
+    if let Some(field) = PluginField::parse(key) {
+        return run_plugin_write(
+            ctx,
+            key,
+            |plugin| {
+                apply_plugin_unset(field, plugin);
+                Ok(None)
+            },
+            false,
+        );
+    }
     let parsed = parse_key(key)?;
     let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
     let origin = scope_to_origin(scope.scope);
@@ -1417,7 +1586,11 @@ fn run_unset(ctx: &Context, key: &str) -> anyhow::Result<(ConfigReport, ExitCode
 
 fn run_list(ctx: &Context, all: bool) -> anyhow::Result<(ConfigReport, ExitCode)> {
     let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
-    let items = collect_entries(all, &scope.options, &scope.registries);
+    let mut items = collect_entries(all, &scope.options, &scope.registries);
+    if scope.scope == ConfigScope::Project {
+        let plugin = super::grim(read_plugin_table(&scope.config_path))?;
+        items.extend(plugin_entries(all, plugin.as_ref()));
+    }
     Ok((ConfigReport::List(ConfigListReport { items }), ExitCode::Success))
 }
 
@@ -5236,6 +5409,89 @@ mod tests {
             serde_json::to_value(&w.fields).expect("fields serialize"),
             serde_json::json!([{ "field": "default", "action": "set", "value": true }]),
             "an already-default entry re-flagged still emits its element"
+        );
+    }
+
+    // ── plugin.* keys ──
+
+    #[test]
+    fn plugin_set_validates_like_load_and_normalizes_the_version() {
+        let mut plugin = None;
+        assert_eq!(
+            apply_plugin_set(PluginField::Name, "team", &mut plugin).unwrap(),
+            "team"
+        );
+        assert_eq!(
+            apply_plugin_set(PluginField::Version, "v1.2.0", &mut plugin).unwrap(),
+            "1.2.0"
+        );
+        assert_eq!(
+            apply_plugin_set(PluginField::Logo, "assets/x.svg", &mut plugin).unwrap(),
+            "assets/x.svg"
+        );
+        apply_plugin_set(PluginField::Description, "Team tools", &mut plugin).unwrap();
+        let meta = plugin.clone().unwrap();
+        assert_eq!(meta.version.as_deref(), Some("1.2.0"));
+        assert_eq!(
+            plugin_value(PluginField::Logo, plugin.as_ref()).as_deref(),
+            Some("assets/x.svg")
+        );
+
+        let long = "x".repeat(501);
+        for (field, value, reason) in [
+            (PluginField::Name, "Team", "invalid plugin name"),
+            (PluginField::Description, long.as_str(), "at most 500"),
+            (PluginField::Version, "1.0.0+b", "invalid version"),
+            (PluginField::Logo, "", "must not be empty"),
+            (PluginField::Name, "a\nb", "control characters"),
+        ] {
+            let err = apply_plugin_set(field, value, &mut plugin).expect_err(value);
+            assert!(format!("{err:#}").contains(reason), "{field:?}: {err:#}");
+            assert_eq!(crate::error::classify_error(&err), ExitCode::DataError, "{field:?}");
+        }
+        assert_eq!(plugin.unwrap(), meta, "a rejected value changes nothing");
+    }
+
+    #[test]
+    fn plugin_set_error_escapes_a_bidi_override() {
+        let err = apply_plugin_set(PluginField::Name, "a\u{202e}b", &mut None).unwrap_err();
+        assert!(!format!("{err:#}").contains('\u{202e}'), "{err:#}");
+    }
+
+    #[test]
+    fn plugin_unset_drops_the_table_once_empty_but_not_a_rename_rule() {
+        let mut plugin = None;
+        apply_plugin_set(PluginField::Name, "team", &mut plugin).unwrap();
+        apply_plugin_unset(PluginField::Version, &mut plugin);
+        assert!(plugin.is_some(), "unsetting an unset field is a no-op");
+        apply_plugin_unset(PluginField::Name, &mut plugin);
+        assert_eq!(plugin, None);
+
+        let mut plugin = Some(PluginMeta {
+            name: Some("team".into()),
+            rename: Some(plugin_meta::RenameRule {
+                strip_prefix: "acme-".into(),
+            }),
+            ..PluginMeta::default()
+        });
+        apply_plugin_unset(PluginField::Name, &mut plugin);
+        assert!(plugin.is_some_and(|p| p.rename.is_some()));
+    }
+
+    #[test]
+    fn plugin_entries_list_set_rows_and_all_four_under_all() {
+        let plugin = PluginMeta {
+            version: Some("v2.0.0".into()),
+            ..PluginMeta::default()
+        };
+        let set = plugin_entries(false, Some(&plugin));
+        assert_eq!(set.len(), 1);
+        assert_eq!(set[0].key, "plugin.version");
+        assert_eq!(set[0].value.as_deref(), Some("2.0.0"));
+        let keys: Vec<String> = plugin_entries(true, None).into_iter().map(|e| e.key).collect();
+        assert_eq!(
+            keys,
+            ["plugin.name", "plugin.description", "plugin.version", "plugin.logo"]
         );
     }
 }

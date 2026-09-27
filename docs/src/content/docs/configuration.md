@@ -904,6 +904,48 @@ name = "code-reviewer"
 id = "ghcr.io/acme/code-reviewer:1"
 ```
 
+## `[plugin]` — share the project as a plugin {#plugin-table}
+
+A project can describe itself as a plugin. [`grim export plugin
+--project`](./commands.md#export-plugin-project) renders the project's
+locked set as one plugin, and the optional `[plugin]` table in
+`grimoire.toml` supplies its name and metadata. A `marketplace.toml` entry
+that points at the project falls back to the same table.
+
+```toml
+[plugin]
+name = "team"
+description = "The acme platform team's shared skills"
+version = "1.2.0"
+logo = "assets/team.svg"
+
+[plugin.rename]
+strip_prefix = "acme-"
+```
+
+Every key is optional and follows the same rules as a `marketplace.toml`
+plugin. `name` follows the plugin name rule, `description` holds at most
+500 characters, and `version` is a semver version without build metadata.
+`logo` is a `.png` or `.svg` path relative to `grimoire.toml`'s directory.
+A value that breaks a rule fails the config load with exit `78`, like any
+other invalid `grimoire.toml` key. The table sits outside the declaration
+hash, so editing it never makes `grimoire.lock` stale.
+
+`name`, `description`, `version` and `logo` are also
+[`grim config`](./commands.md#config-settings) keys (`plugin.name` and so
+on) at project scope. `grim config set` checks a value against the same
+rules and exits `65` on a bad one. `rename.strip_prefix` is edited in the
+file only.
+
+```sh
+grim config set plugin.version v1.2.0   # stored as 1.2.0
+grim config get plugin.name
+grim config unset plugin.logo           # an emptied [plugin] table is removed
+```
+
+The keys are project-only: `--global` exits `64`. Other config writes
+leave `[plugin]` as authored.
+
 ## `marketplace.toml` and `marketplace.lock` {#marketplace-toml}
 
 `grimoire.toml` declares what *you* install. A `marketplace.toml` declares
@@ -926,9 +968,12 @@ logo = "assets/team.svg"
 strip_prefix = "acme-"
 ```
 
-`include` is the only required key: one or more artifact references. Each
-resolves exactly as [`grim add`](./commands.md#add) would resolve it — a
-registry reference, a bundle, or a local path. `description` and
+Each plugin declares exactly one source. `include` lists one or more
+artifact references, each resolved exactly as [`grim add`](./commands.md#add)
+would resolve it — a registry reference, a bundle, or a local path.
+`project` instead names a grim project, as its directory or its
+`grimoire.toml`, relative to the manifest (see [project
+plugins](#marketplace-project)). Declaring both, or neither, exits `65`. `description` and
 `version` seed the rendered `plugin.json`'s corresponding fields; grim
 always appends a content-hash suffix to `version` (see [export's output
 naming](./commands.md#export-plugin-output)). Both are optional here.
@@ -942,6 +987,24 @@ characters exits `65` on export
 OCI-annotation fallback
 described there belongs only to an **ad-hoc, single-reference** export,
 never to a declared plugin.
+
+### Project plugins {#marketplace-project}
+
+```toml
+[plugins.team]
+project = "../team"
+description = "Curated for the marketplace"
+```
+
+A `project` plugin is the project's locked set: its members and pins come
+from that project's `grimoire.lock`, which must be fresh (a stale one
+exits `65` and asks for `grim lock` in the project; a missing one exits
+`79`). Each metadata field the marketplace table sets wins; every field
+it leaves unset falls back to the project's [`[plugin]`](#plugin-table)
+table. The plugin's name is always its `[plugins.<name>]` key.
+`marketplace.lock` records nothing for a project plugin, and [`grim
+update --marketplace`](./commands.md#update-marketplace) leaves it to
+`grim update` in the project.
 
 `rename.strip_prefix` rewrites every member's emitted name by removing a
 common prefix. That is useful when your registry namespaces artifacts
