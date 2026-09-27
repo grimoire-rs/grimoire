@@ -69,7 +69,7 @@ jobs:
         uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
         with:
           version: ${{ env.OCX_VERSION }}
-          project: "" # binary-only; grimoire has no ocx.toml project to activate
+          project: "" # binary-only; the root ocx.toml is the test toolchain, not needed here
 
       - name: Resolve release tag
         id: ver

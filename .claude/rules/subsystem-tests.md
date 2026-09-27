@@ -9,7 +9,7 @@ Pytest acceptance tests run the compiled `grim` binary against a real OCI regist
 
 ## Design Rationale
 
-Pytest (not Rust integration tests) because acceptance tests exercise the real compiled binary against a real OCI registry — catches issues mocked unit tests miss. The registry host is resolved once per session in `pytest_configure` (before any test module imports `src.registry`), and a `registry:2` container is started via `docker run -d --rm` when nothing already answers on `localhost:5000`. UUID-prefixed repo names (`unique_repo`) give per-test isolation on the shared registry — no per-test cleanup needed. See `arch-principles.md` for the full pattern catalog.
+Pytest (not Rust integration tests) because acceptance tests exercise the real compiled binary against a real OCI registry — catches issues mocked unit tests miss. The registry host is resolved once per session in `pytest_configure` (before any test module imports `src.registry`), and unless `GRIM_TEST_REGISTRY_HOST` names one, the controller starts a private zot (`src/zot.py`) on a random loopback port. zot comes from the repo's `ocx.toml` (`task test` runs pytest under `ocx exec`; CI activates it with `setup-ocx`); a watchdog kills it when pytest exits, however it exits. zot drops a manifest from its index once its last tag moves, so a test that pins a digest and then moves the tag must keep it tagged (`retag(..., "keep", ...)`). `test/manual/` keeps its own docker-compose registries. UUID-prefixed repo names (`unique_repo`) give per-test isolation on the shared registry — no per-test cleanup needed. See `arch-principles.md` for the full pattern catalog.
 
 ## Structure
 
@@ -28,7 +28,7 @@ Pytest (not Rust integration tests) because acceptance tests exercise the real c
 | Fixture | Scope | Defined in | Purpose |
 |---------|-------|-----------|---------|
 | `grim_binary` | session | `conftest.py` | Path to the `grim` binary — `$GRIM_COMMAND` env if set, else `test/bin/grim(.exe)` |
-| `registry` | session | `conftest.py` | Registry host string (e.g. `"localhost:5000"`); skips the test if unreachable |
+| `registry` | session | `conftest.py` | Registry host string (e.g. `"127.0.0.1:41875"`); skips only under `GRIM_ALLOW_NO_REGISTRY` |
 | `grim_home` | function | `conftest.py` | Isolated `tmp_path/grim-home` dir used as `GRIM_HOME` |
 | `grim` | function | `conftest.py` | `GrimRunner(grim_binary, grim_home)` — no cwd set |
 | `unique_repo` | function | `conftest.py` | UUID-prefixed repo name: `f"grim-test/{uuid4().hex[:12]}"` |

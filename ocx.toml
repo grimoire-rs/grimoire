@@ -1,0 +1,5 @@
+#:schema https://ocx.sh/schemas/project/v1.json
+# OCX project toolchain — managed by `ocx add` / `ocx remove`
+
+[tools]
+zot = "ocx.sh/project-zot/zot:2"
