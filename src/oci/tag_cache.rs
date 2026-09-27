@@ -170,8 +170,13 @@ impl TagCache {
 /// component so it can be a safe directory name. `Identifier` already
 /// rejects `.`/`..` segments at parse time, but defence-in-depth keeps a
 /// hand-built identifier from escaping the tags root.
+///
+/// Windows also rejects `:` in a path component (a `host:port` registry
+/// fails with os error 123). The replacement is Windows-only so the
+/// existing Unix cache layout stays byte-identical.
 fn sanitize(component: &str) -> String {
-    component.replace(['/', '\\'], "_").replace("..", "_")
+    let safe = component.replace(['/', '\\'], "_").replace("..", "_");
+    if cfg!(windows) { safe.replace(':', "_") } else { safe }
 }
 
 #[cfg(test)]
@@ -230,6 +235,14 @@ mod tests {
         cache.put(&bare, &sha('a')).unwrap();
         let latest = Identifier::parse("ghcr.io/acme/x:latest").unwrap();
         assert_eq!(cache.get(&latest).unwrap(), Some(sha('a')));
+    }
+
+    #[test]
+    fn registry_with_port_round_trips() {
+        let (_d, cache) = cache();
+        let id = Identifier::parse("localhost:5000/acme/x:stable").unwrap();
+        cache.put(&id, &sha('a')).unwrap();
+        assert_eq!(cache.get(&id).unwrap(), Some(sha('a')));
     }
 
     #[test]
