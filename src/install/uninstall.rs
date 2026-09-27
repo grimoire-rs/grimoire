@@ -433,6 +433,21 @@ pub fn remove_entry(
     }
 }
 
+/// Remove a non-directory entry: a file, or a symlink itself (never its
+/// target). Windows keeps a symlink-to-directory as a directory entry, which
+/// `remove_file` refuses ("Access is denied"); `remove_dir` unlinks it
+/// without following it.
+pub(crate) fn remove_file_or_link(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileTypeExt;
+        if std::fs::symlink_metadata(path)?.file_type().is_symlink_dir() {
+            return std::fs::remove_dir(path);
+        }
+    }
+    std::fs::remove_file(path)
+}
+
 /// Remove one recorded output `path` (a file or directory), pushing it onto
 /// `removed` when it was present. An absent path is tolerated (idempotent).
 /// `symlink_metadata` does not traverse links, so a symlinked target is
@@ -452,7 +467,7 @@ pub(crate) fn remove_output(path: &std::path::Path, removed: &mut Vec<PathBuf>) 
             if meta.is_dir() {
                 std::fs::remove_dir_all(path)?;
             } else {
-                std::fs::remove_file(path)?;
+                remove_file_or_link(path)?;
             }
             removed.push(path.to_path_buf());
             Ok(())

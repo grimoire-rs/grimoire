@@ -2610,7 +2610,7 @@ fn remove_path(path: &std::path::Path) -> std::io::Result<()> {
     if meta.is_dir() {
         std::fs::remove_dir_all(path)
     } else {
-        std::fs::remove_file(path)
+        super::uninstall::remove_file_or_link(path)
     }
 }
 
