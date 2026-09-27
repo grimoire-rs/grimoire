@@ -28,6 +28,7 @@ Behaviors covered:
 """
 from __future__ import annotations
 
+import sys
 import tomllib  # stdlib (Python 3.11+)
 from pathlib import Path
 
@@ -1005,6 +1006,11 @@ def test_set_registry_include_with_a_bad_pattern_writes_nothing(
     )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="a 66 KB argv exceeds the 32,767-char Windows command line; the budget "
+    "itself is covered by registry_filter.rs::compile_set_rejects_a_list_over_the_aggregate_budget",
+)
 def test_registry_add_over_the_aggregate_pattern_budget_exits_65(
     grim_at: object,
     project_dir: Path,

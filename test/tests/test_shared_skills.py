@@ -759,7 +759,10 @@ def test_a_flip_onto_a_live_symlink_refuses_instead_of_erroring(
     assert (native / "SKILL.md").is_file()
 
     pool.mkdir(parents=True)
-    (pool / "symlink-skill").symlink_to(native, target_is_directory=True)
+    try:
+        (pool / "symlink-skill").symlink_to(native, target_is_directory=True)
+    except OSError as e:  # WinError 1314: symlinks need a privilege on Windows
+        pytest.skip(f"cannot create a symlink here: {e}")
 
     runner.json("config", "set", "options.vendors.cursor.shared_skills", "true")
     result = runner.run("install", format="json", check=False)
