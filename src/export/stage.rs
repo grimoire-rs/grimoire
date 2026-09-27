@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::api::export_report::{ExportItem, ExportMember, ExportOmission, ExportReport, OutputFormatKind};
+use crate::cli::exit_code::ExitCode;
 use crate::config::is_path_value;
 use crate::config::scope::ConfigScope;
 use crate::export::export_error::ExportError;
@@ -161,7 +162,10 @@ pub(crate) async fn run(
             } else {
                 (None, None)
             };
-            let input = plugin_input(&name, &members, None, (opts.version, opts.description), annotations)?;
+            let mut input = plugin_input(&name, &members, None, (opts.version, opts.description), annotations)?;
+            if let ([single], None) = (refs.as_slice(), opts.logo) {
+                input.fallback_logo = companion_logo(scope, access, single).await;
+            }
             let items = export_plugins(&request(std::slice::from_ref(&input), &cwd, None), access).await?;
             Ok(ExportReport::new(items))
         }
@@ -370,6 +374,7 @@ pub(crate) fn plugin_input(
         version,
         description_base: authored.or(annotation_description),
         logo: decl.and_then(|d| d.logo.clone()),
+        fallback_logo: None,
         renamed,
     })
 }
@@ -391,6 +396,10 @@ pub(crate) struct PluginInput {
     pub renamed: Vec<(String, String)>,
     /// Declared `logo`, as written (relative to the manifest's directory).
     pub logo: Option<PathBuf>,
+    /// `(extension, bytes)` of the single ad-hoc reference's published
+    /// logo (its repository description companion); used only when neither
+    /// `--logo` nor a declared `logo` names one.
+    pub fallback_logo: Option<(&'static str, Vec<u8>)>,
 }
 
 /// One export run: what to stage, for whom, and where it lands (C-027).
@@ -510,11 +519,11 @@ async fn export_staged(
         }
         stale_scan(plugin, &rendered)?;
 
-        let logo_source = req
-            .logo
-            .map(Path::to_path_buf)
-            .or_else(|| plugin.logo.as_ref().map(|l| req.anchor.join(l)));
-        let logo = logo_source.as_deref().map(read_logo).transpose()?;
+        let logo = match (req.logo, &plugin.logo) {
+            (Some(flag), _) => Some(read_logo(flag)?),
+            (None, Some(declared)) => Some(read_logo(&req.anchor.join(declared))?),
+            (None, None) => plugin.fallback_logo.clone(),
+        };
         let logo_rel = logo.as_ref().map(|(ext, _)| family::logo_path(ext));
         let base = plugin.description_base.as_deref();
         let (description, cut) = family::plugin_description(base);
@@ -942,6 +951,40 @@ fn write_staged(root: &Path, rel: &str, bytes: &[u8]) -> Result<(), ExportError>
         std::fs::create_dir_all(parent).map_err(|e| io_error(parent, e))?;
     }
     std::fs::write(&path, bytes).map_err(|e| io_error(&path, e))
+}
+
+/// The published logo of `reference`'s repository: `logo.png` or
+/// `logo.svg` from its description companion (`__grimoire` tag), checked by
+/// [`read_logo`]. The companion is the publisher's optional metadata, so it
+/// never fails an export: none published, a local path, or offline yields
+/// `None` quietly; any other failure, or a logo `read_logo` refuses, warns
+/// and yields `None`. The tag floats, so the logo reflects the companion at
+/// export time, not the pin.
+async fn companion_logo(
+    scope: &FetchScope,
+    access: &Arc<dyn OciAccess>,
+    reference: &str,
+) -> Option<(&'static str, Vec<u8>)> {
+    if is_path_value(reference) {
+        return None;
+    }
+    let dir = tempfile::tempdir().ok()?;
+    if let Err(e) = crate::fetch::fetch_description(scope, access, reference, Some(dir.path())).await {
+        match crate::error::classify(&e).exit {
+            ExitCode::NotFound | ExitCode::OfflineBlocked => {
+                tracing::debug!("no published logo for {reference}: {e:#}")
+            }
+            _ => tracing::warn!("cannot read the published logo of {reference}: {e:#}"),
+        }
+        return None;
+    }
+    let path = ["logo.svg", "logo.png"]
+        .iter()
+        .map(|n| dir.path().join(n))
+        .find(|p| p.is_file())?;
+    read_logo(&path)
+        .inspect_err(|e| tracing::warn!("ignoring the published logo of {reference}: {e}"))
+        .ok()
 }
 
 /// Largest plugin logo accepted, in bytes.
@@ -2466,6 +2509,7 @@ mod tests {
             description_base: Some("Base".to_string()),
             renamed: Vec::new(),
             logo: None,
+            fallback_logo: None,
         }
     }
 

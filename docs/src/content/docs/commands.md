@@ -1861,7 +1861,12 @@ that client, and the pointer sentence.
 ### Logo {#export-plugin-logo}
 
 `--logo`, else the declared `logo`, names a `.png` or `.svg` file of at
-most 1 MiB. grim copies it to `assets/logo.png` or `assets/logo.svg` in
+most 1 MiB. An ad-hoc export of a single reference with neither falls back
+to that repository's published logo, the `logo.svg` or `logo.png` of its
+[description companion](./publishing.md#description-companion). That
+companion tag is not pinned, so the logo is whatever it holds at export
+time. A missing companion adds no logo, and an unreadable one only warns.
+grim copies the logo to `assets/logo.png` or `assets/logo.svg` in
 every exported plugin and shows it at the top of the README. A missing
 file, another format, or a larger file exits `65` and places no
 output.
@@ -1871,6 +1876,10 @@ The plugin formats differ in whether a client reads it. An Agent Plugins
 `extensions."com.openai".interface.logo`, which Codex shows. Claude's
 `plugin.json` has no logo field, so a Claude-family plugin carries the
 file without a manifest reference to it.
+
+A member's own logo is separate. A skill directory that ships `logo.png`
+or `logo.svg` keeps it at `skills/<name>/` in every export, as its whole
+tree is copied. No plugin format has a per-skill icon field to point at it.
 
 Rename, description, and version-annotation rules are covered in full in
 the [`marketplace.toml` reference](./configuration.md#marketplace-toml);

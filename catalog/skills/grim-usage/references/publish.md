@@ -545,7 +545,8 @@ description is the base text alone, capped at 500 characters: a
 `--description` or declared `description` over 500 exits 65, while a
 publisher's annotation text is cut to fit. Omitted members are listed in
 the plugin's generated `README.md`. A plugin logo (`--logo` or a declared
-`logo`, `.png`/`.svg` up to 1 MiB) ships as `assets/logo.<ext>`. Confirm the current flag set with
+`logo`, `.png`/`.svg` up to 1 MiB) ships as `assets/logo.<ext>`; a single-reference export without one uses
+that repository's published companion logo. Confirm the current flag set with
 `grim export plugin --help`, and see the full walkthrough in [Hand a team
 a plugin without grim][team-plugin] and the [command
 reference][commands-export].
