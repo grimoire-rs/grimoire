@@ -138,7 +138,7 @@ fn has_path_entry(set: &DesiredSet, name: &str) -> bool {
 /// # Errors
 ///
 /// [`ResolveErrorKind::StaleLock`] when the predecessor is stale;
-/// [`ResolveErrorKind::TagNotFound`] when a requested name is not
+/// [`ResolveErrorKind::NotDeclared`] when a requested name is not
 /// declared; otherwise the same failures as [`resolve_lock`].
 pub async fn resolve_lock_partial(
     set: &DesiredSet,
@@ -155,13 +155,14 @@ pub async fn resolve_lock_partial(
     let current = set.declaration_hash_cached();
     if previous.metadata.declaration_hash != current {
         // No single artifact owns this failure; attribute it to the first
-        // requested name (or a synthetic placeholder) for context.
-        let reference = stale_reference(set, names);
-        return Err(ResolveError::new(
-            reference,
+        // requested name for context.
+        return Err(stale_reference(
+            set,
+            names,
             ResolveErrorKind::StaleLock {
                 previous_hash: previous.metadata.declaration_hash.clone(),
                 current_hash: current.to_string(),
+                retry: "a full resolve".to_string(),
             },
         ));
     }
@@ -173,14 +174,11 @@ pub async fn resolve_lock_partial(
     // path-sourced, or a bundle member).
     for name in names {
         if !all_work.iter().any(|w| &w.reference.name == name) && !has_path_entry(set, name) {
-            // A placeholder identifier: the name is undeclared, so no
-            // real id exists. `parse` cannot fail on this literal.
-            let reference = ArtifactRef::registry(
+            return Err(ResolveError::unidentified(
                 ArtifactKind::Skill,
                 name.clone(),
-                Identifier::new_registry(name.clone(), "invalid.localhost"),
-            );
-            return Err(ResolveError::new(reference, ResolveErrorKind::TagNotFound));
+                ResolveErrorKind::NotDeclared,
+            ));
         }
     }
 
@@ -969,25 +967,14 @@ fn build_lock(resolved: Vec<LockedArtifact>, set: &DesiredSet, bundles: Vec<Lock
     }
 }
 
-/// A best-effort artifact reference for the stale-lock error: the first
-/// requested name if it is declared, else a synthetic placeholder.
-fn stale_reference(set: &DesiredSet, names: &[String]) -> ArtifactRef {
-    if let Some(first) = names.first() {
-        let work = collect_work(set);
-        if let Some(found) = work.into_iter().find(|w| &w.reference.name == first) {
-            return found.reference;
-        }
-        return ArtifactRef::registry(
-            ArtifactKind::Skill,
-            first.clone(),
-            Identifier::new_registry(first.clone(), "invalid.localhost"),
-        );
+/// The stale-lock error attributed to the first requested name if it is
+/// declared, else to that name unidentified.
+fn stale_reference(set: &DesiredSet, names: &[String], kind: ResolveErrorKind) -> ResolveError {
+    let first = names.first().cloned().unwrap_or_else(|| "<partial>".to_string());
+    match collect_work(set).into_iter().find(|w| w.reference.name == first) {
+        Some(found) => ResolveError::new(found.reference, kind),
+        None => ResolveError::unidentified(ArtifactKind::Skill, first, kind),
     }
-    ArtifactRef::registry(
-        ArtifactKind::Skill,
-        "<partial>",
-        Identifier::new_registry("partial", "invalid.localhost"),
-    )
 }
 
 #[cfg(test)]
@@ -1472,7 +1459,43 @@ mod tests {
         )
         .await
         .expect_err("undeclared name must be rejected");
-        assert!(matches!(err.kind, ResolveErrorKind::TagNotFound));
+        assert!(matches!(err.kind, ResolveErrorKind::NotDeclared), "{err:?}");
+        // Regression: the placeholder identity never reaches the message.
+        assert_eq!(err.to_string(), "'does-not-exist': not declared");
+    }
+
+    #[tokio::test]
+    async fn partial_stale_refusal_for_an_undeclared_name_hides_the_placeholder() {
+        let set = single_skill_set();
+        let previous = GrimoireLock {
+            metadata: LockMetadata {
+                lock_version: LockVersion::V1,
+                declaration_hash_version: DECLARATION_HASH_VERSION,
+                declaration_hash: "sha256:stale".to_string(),
+                generated_by: LockMetadata::generated_by_current(),
+                generated_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+            skills: vec![],
+            rules: vec![],
+            agents: vec![],
+            mcp: vec![],
+            bundles: vec![],
+        };
+        let err = resolve_lock_partial(
+            &set,
+            &previous,
+            &arc(MockAccess::new(vec![])),
+            &["ghost".to_string()],
+            ConfigScope::Project,
+            &fast_options(),
+            std::path::Path::new("."),
+        )
+        .await
+        .expect_err("stale predecessor");
+        assert!(matches!(err.kind, ResolveErrorKind::StaleLock { .. }), "{err:?}");
+        let s = err.to_string();
+        assert!(s.starts_with("'ghost': partial-resolve refused"), "{s}");
+        assert!(s.ends_with("retry with a full resolve"), "{s}");
     }
 
     // ── Bundle conflict engine (pure merge) ──────────────────────────────

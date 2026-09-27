@@ -539,9 +539,10 @@ async fn pin_members(
 
 /// Build a [`ResolveError`] carrying a bundle member as its reference.
 fn member_error(member: &crate::oci::bundle::BundleMember, kind: ResolveErrorKind) -> ResolveError {
-    let id = Identifier::parse(&member.id)
-        .unwrap_or_else(|_| Identifier::new_registry(member.name.clone(), "invalid.localhost"));
-    ResolveError::new(ArtifactRef::registry(member.kind, member.name.clone(), id), kind)
+    match Identifier::parse(&member.id) {
+        Ok(id) => ResolveError::new(ArtifactRef::registry(member.kind, member.name.clone(), id), kind),
+        Err(_) => ResolveError::unidentified(member.kind, member.name.clone(), kind),
+    }
 }
 
 /// Parse `<ref>`, expanding a short identifier against `default_registry`

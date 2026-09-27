@@ -8,8 +8,15 @@
 //! about — boxed to keep the kind small, mirroring OCX's precedent) →
 //! discriminant [`ResolveErrorKind`].
 
+use crate::config::declaration::DeclaredSource;
 use crate::oci::access::error::AccessError;
 use crate::oci::reference::ArtifactRef;
+use crate::oci::{ArtifactKind, Identifier};
+
+/// Registry of the placeholder identity an error carries when its name has
+/// no real identifier (an undeclared name, an unparseable member id).
+/// [`ResolveError`]'s `Display` never prints it.
+const PLACEHOLDER_REGISTRY: &str = "invalid.localhost";
 
 /// A resolution failed for one declared artifact.
 #[derive(Debug)]
@@ -29,10 +36,27 @@ impl ResolveError {
             kind,
         }
     }
+
+    /// An error about `name` when no real identifier exists for it. The
+    /// reference carries a placeholder identity that `Display` never prints.
+    pub fn unidentified(artifact: ArtifactKind, name: impl Into<String>, kind: ResolveErrorKind) -> Self {
+        let name = name.into();
+        let id = Identifier::new_registry(name.clone(), PLACEHOLDER_REGISTRY);
+        Self::new(ArtifactRef::registry(artifact, name, id), kind)
+    }
+
+    /// Whether the reference is [`Self::unidentified`]'s placeholder.
+    fn is_unidentified(&self) -> bool {
+        matches!(&self.reference.source, DeclaredSource::Registry(id) if id.registry() == PLACEHOLDER_REGISTRY)
+    }
 }
 
 impl std::fmt::Display for ResolveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // A placeholder's kind and identity are invented: name only.
+        if self.is_unidentified() {
+            return write!(f, "'{}': {}", self.reference.name, self.kind);
+        }
         write!(
             f,
             "{} '{}' ({}): {}",
@@ -57,6 +81,11 @@ pub enum ResolveErrorKind {
     /// the access layer). Not retried.
     #[error("tag not found")]
     TagNotFound,
+
+    /// A requested name is not declared (not a direct entry, path entry,
+    /// or bundle member). Classified like [`Self::TagNotFound`] (79).
+    #[error("not declared")]
+    NotDeclared,
 
     /// The registry rejected the request for authentication reasons.
     /// Terminal — not retried.
@@ -102,20 +131,21 @@ pub enum ResolveErrorKind {
 
     /// Partial-resolve refused: the predecessor lock's declaration hash
     /// does not match the current declaration. Both are surfaced so an
-    /// operator can diff the lock against the live config.
+    /// operator can diff the lock against the live config. `retry` names
+    /// what to run instead.
     #[error(
-        "partial-resolve refused: lock declaration_hash {previous_hash} does not match current {current_hash}; retry with a full resolve"
+        "partial-resolve refused: lock declaration_hash {previous_hash} does not match current {current_hash}; retry with {retry}"
     )]
     StaleLock {
         previous_hash: String,
         current_hash: String,
+        retry: String,
     },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::oci::{ArtifactKind, Identifier};
 
     fn artifact_ref() -> ArtifactRef {
         ArtifactRef::registry(
@@ -132,6 +162,24 @@ mod tests {
         assert!(s.contains("skill"));
         assert!(s.contains("code-review"));
         assert!(s.contains("tag not found"));
+    }
+
+    #[test]
+    fn unidentified_display_never_prints_the_placeholder() {
+        let stale = ResolveErrorKind::StaleLock {
+            previous_hash: "sha256:a".to_string(),
+            current_hash: "sha256:b".to_string(),
+            retry: "a full resolve".to_string(),
+        };
+        for kind in [ResolveErrorKind::NotDeclared, stale] {
+            let s = ResolveError::unidentified(ArtifactKind::Skill, "ghost", kind).to_string();
+            assert!(!s.contains(PLACEHOLDER_REGISTRY), "{s}");
+            assert!(s.starts_with("'ghost': "), "{s}");
+        }
+        assert_eq!(
+            ResolveError::unidentified(ArtifactKind::Skill, "ghost", ResolveErrorKind::NotDeclared).to_string(),
+            "'ghost': not declared"
+        );
     }
 
     #[test]
