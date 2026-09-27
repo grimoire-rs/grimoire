@@ -16,6 +16,7 @@ pub mod defaults;
 pub mod global_config;
 pub mod hash;
 pub mod path_source;
+pub mod plugin_meta;
 pub mod project_config;
 pub mod registry_filter;
 pub mod registry_resolve;

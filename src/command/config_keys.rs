@@ -389,15 +389,92 @@ pub const VENDOR_SHARED_SKILLS: KeySpec = KeySpec {
 /// unknown-field error message.
 pub const VENDOR_FIELD_NAME: &str = "shared_skills";
 
+/// The four addressable `[plugin]` fields, `plugin.<field>`.
+///
+/// A registry of its own rather than `ConfigKey` arms: `[plugin]` is a
+/// project-only table outside `[options]`, so it has no place in the
+/// `ConfigOptions` drift tests or in a global-scope listing.
+/// `plugin.rename.strip_prefix` is deliberately not addressable — a rename
+/// rule is authored in `grimoire.toml` by hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginField {
+    Name,
+    Description,
+    Version,
+    Logo,
+}
+
+impl PluginField {
+    /// Every plugin field, in the order `grim config list` emits them
+    /// (after every other row) — **append only**, like [`ConfigKey::ALL`].
+    pub const ALL: [PluginField; 4] = [
+        PluginField::Name,
+        PluginField::Description,
+        PluginField::Version,
+        PluginField::Logo,
+    ];
+
+    /// This field's static metadata.
+    pub fn spec(self) -> &'static KeySpec {
+        const NAME: KeySpec = KeySpec {
+            key: "plugin.name",
+            value_type: ValueType::String { default: None },
+            title: "Plugin name",
+            description: "Sets the name of the plugin `grim export plugin --project` builds from this \
+                           project. Overridden by the `--name` flag when given.",
+            constraints: None,
+        };
+        const DESCRIPTION: KeySpec = KeySpec {
+            key: "plugin.description",
+            value_type: ValueType::String { default: None },
+            title: "Plugin description",
+            description: "Sets the description written to the exported plugin, at most 500 characters. \
+                           Overridden by the `--description` flag when given.",
+            constraints: None,
+        };
+        const VERSION: KeySpec = KeySpec {
+            key: "plugin.version",
+            value_type: ValueType::String { default: None },
+            title: "Plugin version",
+            description: "Sets the plugin version base, a semver version without build metadata; grim \
+                           appends a content-hash suffix on export. Overridden by the `--version` flag \
+                           when given.",
+            constraints: None,
+        };
+        const LOGO: KeySpec = KeySpec {
+            key: "plugin.logo",
+            value_type: ValueType::String { default: None },
+            title: "Plugin logo",
+            description: "Sets the plugin logo, a `.png` or `.svg` file relative to the `grimoire.toml` \
+                           directory, shipped as `assets/logo.<ext>` in every exported plugin. Overridden \
+                           by the `--logo` flag when given.",
+            constraints: None,
+        };
+        match self {
+            Self::Name => &NAME,
+            Self::Description => &DESCRIPTION,
+            Self::Version => &VERSION,
+            Self::Logo => &LOGO,
+        }
+    }
+
+    /// Parse a dotted key against every plugin field's spec.
+    pub fn parse(key: &str) -> Option<PluginField> {
+        Self::ALL.into_iter().find(|f| f.spec().key == key)
+    }
+}
+
 /// All valid dotted key names (fixed keys' literal keys, then registry
-/// field pattern keys, then the per-vendor field pattern key), comma-joined
-/// for the unknown-key error message.
+/// field pattern keys, then the per-vendor field pattern key, then the
+/// plugin keys), comma-joined for the unknown-key error message.
 pub fn valid_keys() -> String {
     let fixed = ConfigKey::ALL.iter().map(|k| k.spec().key);
     let registry = RegistryField::ALL.iter().map(|f| f.spec().key);
+    let plugin = PluginField::ALL.iter().map(|f| f.spec().key);
     fixed
         .chain(registry)
         .chain(std::iter::once(VENDOR_SHARED_SKILLS.key))
+        .chain(plugin)
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -415,7 +492,8 @@ mod tests {
         let specs = ConfigKey::ALL
             .iter()
             .map(|k| k.spec())
-            .chain(RegistryField::ALL.iter().map(|f| f.spec()));
+            .chain(RegistryField::ALL.iter().map(|f| f.spec()))
+            .chain(PluginField::ALL.iter().map(|f| f.spec()));
         for spec in specs {
             assert!(
                 !spec.description.contains("  "),
@@ -687,6 +765,46 @@ mod tests {
     }
 
     #[test]
+    fn plugin_fields_parse_and_match_plugin_meta_minus_rename() {
+        // DRIFT TEST: every scalar `[plugin]` field has exactly one spec;
+        // `rename` is the one table deliberately left unaddressable.
+        use crate::config::plugin_meta::{PluginMeta, RenameRule};
+        let meta = PluginMeta {
+            name: Some("team".into()),
+            description: Some("d".into()),
+            version: Some("1.0.0".into()),
+            logo: Some("logo.svg".into()),
+            rename: Some(RenameRule {
+                strip_prefix: "x-".into(),
+            }),
+        };
+        let mut fields: BTreeSet<String> = serde_json::to_value(meta)
+            .expect("PluginMeta must serialize")
+            .as_object()
+            .expect("PluginMeta must serialize as an object")
+            .keys()
+            .cloned()
+            .collect();
+        assert!(fields.remove("rename"));
+        let expected: BTreeSet<String> = PluginField::ALL
+            .iter()
+            .map(|f| {
+                f.spec()
+                    .key
+                    .strip_prefix("plugin.")
+                    .expect("plugin. prefix")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(fields, expected);
+        for f in PluginField::ALL {
+            assert_eq!(PluginField::parse(f.spec().key), Some(f));
+        }
+        assert_eq!(PluginField::parse("plugin.rename.strip_prefix"), None);
+        assert!(valid_keys().ends_with("plugin.name, plugin.description, plugin.version, plugin.logo"));
+    }
+
+    #[test]
     fn registry_field_completeness_matches_registry_config() {
         // DRIFT TEST: a fully-populated RegistryConfig (every field
         // set/non-empty/true, so no serde skip fires) must produce exactly
@@ -911,5 +1029,14 @@ mod tests {
         assert_description_prefix(node, VENDOR_SHARED_SKILLS.description, VENDOR_SHARED_SKILLS.key);
         let type_node = unwrap_nullable(&schema, node);
         assert_schema_type_matches(VENDOR_SHARED_SKILLS.value_type, type_node, VENDOR_SHARED_SKILLS.key);
+
+        let plugin_meta = &schema["$defs"]["PluginMeta"];
+        for field in PluginField::ALL {
+            let spec = field.spec();
+            let node = &plugin_meta["properties"][spec.key.strip_prefix("plugin.").expect("plugin. prefix")];
+            assert_description_prefix(node, spec.description, spec.key);
+            let type_node = unwrap_nullable(&schema, node);
+            assert_schema_type_matches(spec.value_type, type_node, spec.key);
+        }
     }
 }

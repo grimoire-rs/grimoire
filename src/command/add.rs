@@ -1143,12 +1143,46 @@ fn toml_key(name: &str) -> String {
 /// table is emitted only when at least one bundle is declared, so a
 /// bundle-free config is byte-identical to one written before bundles
 /// existed. A `#:schema` directive in the existing file's leading comment
-/// block is preserved at the top of the rewritten file.
+/// block is preserved at the top of the rewritten file, and so is its
+/// `[plugin]` table, exactly as authored.
 pub(crate) fn write_config(
     path: &std::path::Path,
     options: &crate::config::declaration::ConfigOptions,
     registries: &[crate::config::declaration::RegistryConfig],
     set: &crate::config::declaration::DesiredSet,
+) -> Result<(), crate::config::config_error::ConfigError> {
+    // ponytail: re-read from disk instead of threading `[plugin]` through
+    // every declaration writer — none of them edits it, and each already
+    // holds the config lock, so the file is the one they loaded.
+    let plugin = read_plugin_table(path)?;
+    write_config_with_plugin(path, options, registries, set, plugin.as_ref())
+}
+
+/// The `[plugin]` table of the config at `path` exactly as authored
+/// (unvalidated, version not normalized); `None` when the file or the table
+/// is absent.
+pub(crate) fn read_plugin_table(
+    path: &std::path::Path,
+) -> Result<Option<crate::config::plugin_meta::PluginMeta>, crate::config::config_error::ConfigError> {
+    use crate::config::config_error::{ConfigError, ConfigErrorKind};
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(ConfigError::new(path, ConfigErrorKind::Io(e))),
+    };
+    crate::config::plugin_meta::PluginMeta::from_config_toml(&content)
+        .map_err(|e| ConfigError::new(path, ConfigErrorKind::TomlParse(e)))
+}
+
+/// [`write_config`] with the `[plugin]` table given rather than preserved:
+/// the one writer that edits it is `grim config set|unset plugin.*`. An
+/// all-empty table is omitted.
+pub(crate) fn write_config_with_plugin(
+    path: &std::path::Path,
+    options: &crate::config::declaration::ConfigOptions,
+    registries: &[crate::config::declaration::RegistryConfig],
+    set: &crate::config::declaration::DesiredSet,
+    plugin: Option<&crate::config::plugin_meta::PluginMeta>,
 ) -> Result<(), crate::config::config_error::ConfigError> {
     use std::fmt::Write as _;
 
@@ -1276,6 +1310,37 @@ pub(crate) fn write_config(
         // fails when a new field is added here and forgotten.
         if rc.insecure {
             let _ = writeln!(out, "insecure = true");
+        }
+        out.push('\n');
+    }
+    if let Some(plugin) = plugin.filter(|p| **p != crate::config::plugin_meta::PluginMeta::default()) {
+        // Destructured without `..` for the reason `[options.tui]` is: a new
+        // field fails to compile here until it is written out.
+        let crate::config::plugin_meta::PluginMeta {
+            name,
+            description,
+            version,
+            logo,
+            rename,
+        } = plugin;
+        out.push_str("[plugin]\n");
+        let logo = logo.as_ref().map(|l| l.to_string_lossy().into_owned());
+        for (key, value) in [
+            ("name", name),
+            ("description", description),
+            ("version", version),
+            ("logo", &logo),
+        ] {
+            if let Some(value) = value {
+                let _ = writeln!(out, "{key} = {}", toml::Value::String(value.clone()));
+            }
+        }
+        if let Some(rename) = rename {
+            let _ = writeln!(
+                out,
+                "\n[plugin.rename]\nstrip_prefix = {}",
+                toml::Value::String(rename.strip_prefix.clone())
+            );
         }
         out.push('\n');
     }
@@ -1941,6 +2006,35 @@ tree_separators_typo = 1
         let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
         write_config(&path, &ConfigOptions::default(), &[], &set).unwrap();
         std::fs::read_to_string(&path).unwrap()
+    }
+
+    #[test]
+    fn write_config_preserves_the_plugin_table_as_authored() {
+        let authored = "[plugin]\nname = \"team\"\ndescription = \"Team \\\"tools\\\"\"\nversion = \"v1.2.0\"\n\
+                        logo = \"assets/team.svg\"\n\n[plugin.rename]\nstrip_prefix = \"acme-\"\n\n[skills]\n";
+        let body = rewrite_over(Some(authored));
+        let before = crate::config::plugin_meta::PluginMeta::from_config_toml(authored).unwrap();
+        let after = crate::config::plugin_meta::PluginMeta::from_config_toml(&body).unwrap();
+        assert_eq!(
+            after, before,
+            "an unrelated rewrite must keep [plugin] verbatim: {body}"
+        );
+        assert_eq!(after.unwrap().version.as_deref(), Some("v1.2.0"), "not normalized");
+        ProjectConfig::from_toml_str(&body).expect("rewritten config still parses");
+    }
+
+    #[test]
+    fn write_config_with_plugin_omits_an_absent_or_empty_table() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("grimoire.toml");
+        std::fs::write(&path, "[plugin]\nname = \"team\"\n").unwrap();
+        let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
+        let empty = crate::config::plugin_meta::PluginMeta::default();
+        for plugin in [None, Some(&empty)] {
+            write_config_with_plugin(&path, &ConfigOptions::default(), &[], &set, plugin).unwrap();
+            let body = std::fs::read_to_string(&path).unwrap();
+            assert!(!body.contains("[plugin]"), "{body}");
+        }
     }
 
     #[test]

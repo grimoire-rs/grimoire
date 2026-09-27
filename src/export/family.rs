@@ -136,15 +136,7 @@ pub fn plugin_version(base: Option<&str>, members: &[(LockedArtifact, String)]) 
     Ok(format!("{base}+{suffix}"))
 }
 
-/// Most characters a plugin `description` may carry, counted in UTF-16
-/// code units (the JavaScript `length` harness validators apply, never
-/// fewer than Unicode scalars).
-pub const MAX_DESCRIPTION_LEN: usize = 500;
-
-/// Length of `s` as [`MAX_DESCRIPTION_LEN`] counts it.
-pub fn description_len(s: &str) -> usize {
-    s.encode_utf16().count()
-}
+pub use crate::config::plugin_meta::{MAX_DESCRIPTION_LEN, description_len};
 
 /// `s` cut to at most `max` units: at the last whole sentence when that
 /// keeps half the budget, else at a word boundary ending in `…`. Trailing

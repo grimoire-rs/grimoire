@@ -332,26 +332,45 @@ pub(crate) fn state_io(path: &std::path::Path, source: std::io::Error) -> crate:
 /// Lock missing ⇒ NotFound (79); declaration drift ⇒ DataError (65). Both
 /// messages tell the user to run `grim lock`.
 pub(crate) fn require_fresh_lock(scope: &ResolvedScope) -> anyhow::Result<crate::lock::grimoire_lock::GrimoireLock> {
-    let lock = lock_io::load(&scope.lock_path).map_err(|e| {
+    Ok(fresh_lock(&scope.lock_path, &scope.set)?)
+}
+
+/// [`require_fresh_lock`] for any lock path and declared set — also how
+/// `grim export plugin` reads a project's lock (`--project`, a
+/// marketplace `project` plugin).
+///
+/// # Errors
+///
+/// `LockMissing` (79) when `lock_path` does not exist, `LockStale` (65)
+/// when its declaration hash no longer matches `set`, and any lock-tier
+/// read or parse failure.
+#[allow(
+    clippy::result_large_err,
+    reason = "crate::error::Error is the classified error every command returns"
+)]
+pub(crate) fn fresh_lock(
+    lock_path: &std::path::Path,
+    set: &crate::config::DesiredSet,
+) -> Result<crate::lock::grimoire_lock::GrimoireLock, crate::error::Error> {
+    let lock = lock_io::load(lock_path).map_err(|e| {
         // A missing lock surfaces as the lock-tier Io(NotFound); re-key it
         // as the command-tier `LockMissing` so it classifies as NotFound.
         if let crate::lock::lock_error::LockErrorKind::Io(io) = &e.kind
             && io.kind() == std::io::ErrorKind::NotFound
         {
-            return anyhow::Error::from(crate::error::Error::from(CommandError::LockMissing {
-                path: scope.lock_path.clone(),
-            }));
+            return crate::error::Error::from(CommandError::LockMissing {
+                path: lock_path.to_path_buf(),
+            });
         }
-        anyhow::Error::from(crate::error::Error::from(e))
+        crate::error::Error::from(e)
     })?;
 
-    let current = scope.set.declaration_hash_cached();
+    let current = set.declaration_hash_cached();
     if lock.metadata.declaration_hash != current {
         return Err(crate::error::Error::from(CommandError::LockStale {
             locked: lock.metadata.declaration_hash.clone(),
             current: current.to_string(),
-        })
-        .into());
+        }));
     }
     Ok(lock)
 }

@@ -199,6 +199,8 @@ def _manifest(root: Path) -> dict:
         keys = ["$schema", "name", "version", "description"]
     assert raw.endswith(b"}\n") and not raw.endswith(b"\n\n"), "plugin.json ends in exactly one newline"
     doc = json.loads(raw)
+    if "extensions" in doc:  # S-034: only an Agent Plugins manifest with a logo
+        keys.append("extensions")
     assert list(doc) == keys, doc
     if "$schema" in doc:
         assert doc["$schema"] == AGENT_PLUGINS_SCHEMA
@@ -1472,3 +1474,207 @@ def test_s034_two_refs_never_borrow_a_members_logo(grim_at, work: Path, registry
     _ok(_export(runner, *refs, "--name", "duo", "--client", "claude", "-o", "dist"))
 
     assert not (work / "dist" / "duo.claude" / "assets").exists()
+
+
+# ── S-035 — `--project`: the project's locked set as one plugin ──────────
+
+
+def _lock_project(
+    grim_at, root: Path, skills: dict[str, str], plugin: str = "", extra: str = ""
+) -> tuple[Path, GrimRunner]:
+    """A project at ``root`` declaring ``skills`` (+ a raw ``[plugin]`` body), locked."""
+    root.mkdir(parents=True, exist_ok=True)
+    write_config(root, skills=skills)
+    config = root / "grimoire.toml"
+    if plugin:
+        config.write_text(config.read_text() + f"\n[plugin]\n{plugin}")
+    if extra:
+        config.write_text(config.read_text() + extra)
+    runner = grim_at(root)
+    runner.run("lock")
+    return root, runner
+
+
+def test_s035_project_renders_the_pins_without_resolving(
+    grim_at, tmp_path: Path, work: Path, registry: str, unique_repo: str
+) -> None:
+    repo = f"{unique_repo}/a"
+    pinned = _skill(repo, "a", heading="Pinned")
+    proj, runner = _lock_project(grim_at, tmp_path / "proj", {"a": f"{registry}/{repo}:1"})
+    _skill(repo, "a", heading="Moved")  # the tag moves after locking
+
+    _ok(_export(runner, "--project", "--name", "team", "--client", "claude", "-o", "dist"))
+    _ok(_export(grim_at(work), f"{registry}/{repo}@{pinned}", "--name", "team", "--client", "claude", "-o", "adhoc"))
+
+    root = proj / "dist" / "team.claude"
+    assert "# Pinned" in (root / "skills" / "a" / "SKILL.md").read_text(), "the lock's digest, not the moved tag"
+    assert _tree(root) == _tree(work / "adhoc" / "team.claude"), "same bytes as an ad-hoc export of the pins"
+    assert not list(proj.glob("marketplace*")), "--project writes no lock of its own"
+
+
+def test_s035_plugin_table_supplies_metadata_and_flags_override(
+    grim_at, tmp_path: Path, registry: str, unique_repo: str
+) -> None:
+    _skill(f"{unique_repo}/a", "a")
+    proj = tmp_path / "proj"
+    (proj / "art").mkdir(parents=True)
+    (proj / "art" / "team.svg").write_bytes(SVG)
+    _, runner = _lock_project(
+        grim_at,
+        proj,
+        {"a": f"{registry}/{unique_repo}/a:1"},
+        plugin='name = "team"\ndescription = "Project text"\nversion = "v1.2.0"\nlogo = "art/team.svg"\n',
+    )
+
+    _ok(_export(runner, "--project", "--client", "codex", "-o", "dist"))
+    root = proj / "dist" / "team.codex"
+    doc = _manifest(root)
+    assert doc["description"] == "Project text"
+    assert doc["version"].startswith("1.2.0+")
+    assert (root / "assets" / "logo.svg").read_bytes() == SVG
+
+    _ok(_export(runner, "--project", "--name", "other", "--description", "Flag text", "--version", "2.0.0",
+                "--client", "codex", "-o", "flags"))
+    doc = _manifest(proj / "flags" / "other.codex")
+    assert (doc["name"], doc["description"]) == ("other", "Flag text")
+    assert doc["version"].startswith("2.0.0+")
+
+
+def test_s035_no_name_anywhere_is_64(grim_at, tmp_path: Path, registry: str, unique_repo: str) -> None:
+    _skill(f"{unique_repo}/a", "a")
+    proj, runner = _lock_project(grim_at, tmp_path / "proj", {"a": f"{registry}/{unique_repo}/a:1"})
+
+    result = _export(runner, "--project", "--client", "claude", "-o", "dist")
+
+    assert result.returncode == 64, result.stderr
+    assert "[plugin].name" in _error(result)["message"]
+    assert not (proj / "dist").exists()
+
+
+def test_s035_stale_lock_is_65_and_missing_lock_is_79(grim_at, tmp_path: Path, registry: str, unique_repo: str) -> None:
+    _skill(f"{unique_repo}/a", "a")
+    _skill(f"{unique_repo}/b", "b")
+    proj, runner = _lock_project(grim_at, tmp_path / "proj", {"a": f"{registry}/{unique_repo}/a:1"})
+    write_config(proj, skills={"a": f"{registry}/{unique_repo}/a:1", "b": f"{registry}/{unique_repo}/b:1"})
+
+    stale = _export(runner, "--project", "--name", "team", "--client", "claude", "-o", "dist")
+    assert stale.returncode == 65, stale.stderr
+    assert "grim lock" in _error(stale)["message"]
+
+    (proj / "grimoire.lock").unlink()
+    missing = _export(runner, "--project", "--name", "team", "--client", "claude", "-o", "dist")
+    assert missing.returncode == 79, missing.stderr
+    assert not (proj / "dist").exists()
+
+
+def test_s035_config_flag_exports_another_project(
+    grim_at, tmp_path: Path, work: Path, registry: str, unique_repo: str
+) -> None:
+    _skill(f"{unique_repo}/a", "a")
+    proj, _ = _lock_project(grim_at, tmp_path / "proj", {"a": f"{registry}/{unique_repo}/a:1"}, plugin='name = "team"\n')
+
+    runner = grim_at(work)
+    result = runner.run(
+        "--config", str(proj / "grimoire.toml"), "export", "plugin", "--project", "--client", "claude", "-o", "dist",
+        format="json", check=False,
+    )
+
+    _ok(result)
+    assert (work / "dist" / "team.claude" / "skills" / "a" / "SKILL.md").is_file()
+
+
+def test_s035_project_path_names_the_project_directly(
+    grim_at, tmp_path: Path, work: Path, registry: str, unique_repo: str
+) -> None:
+    _skill(f"{unique_repo}/a", "a")
+    proj, _ = _lock_project(grim_at, tmp_path / "proj", {"a": f"{registry}/{unique_repo}/a:1"}, plugin='name = "team"\n')
+    runner = grim_at(work)
+
+    for path in (str(proj), str(proj / "grimoire.toml")):
+        _ok(_export(runner, "--project", path, "--client", "claude", "-o", "dist", "--force"))
+        assert (work / "dist" / "team.claude" / "skills" / "a" / "SKILL.md").is_file()
+
+    both = runner.run(
+        "--config", str(proj / "grimoire.toml"), "export", "plugin", "--project", str(proj), "--client", "claude",
+        format="json", check=False,
+    )
+    assert both.returncode == 64, both.stderr
+    missing = _export(runner, "--project", str(tmp_path / "nowhere"), "--client", "claude", "-o", "dist")
+    assert missing.returncode == 79, missing.stderr
+
+
+def test_s035_drifted_local_member_names_grim_lock(grim_at, tmp_path: Path) -> None:
+    proj = tmp_path / "proj"
+    (proj / "skills" / "local").mkdir(parents=True)
+    (proj / "skills" / "local" / "SKILL.md").write_text(_skill_md("local", "Local"))
+    _, runner = _lock_project(grim_at, proj, {"local": "./skills/local"}, plugin='name = "team"\n')
+    (proj / "skills" / "local" / "SKILL.md").write_text(_skill_md("local", "Edited"))
+
+    result = _export(runner, "--project", "--client", "claude", "-o", "dist")
+
+    assert result.returncode == 65, result.stderr
+    assert f"run `grim lock` in {proj}" in _error(result)["message"]
+
+
+def test_s035_config_schema_documents_the_plugin_table(grim_at, work: Path) -> None:
+    schema = json.loads(grim_at(work).run("schema", "--kind", "config").stdout)
+    assert "plugin" in schema["properties"]
+
+
+# ── S-036 — A marketplace plugin pointing at a project ─────────────────────
+
+
+def _project_marketplace(grim_at, tmp_path: Path, work: Path, registry: str, unique_repo: str, decl: str) -> Path:
+    _skill(f"{unique_repo}/a", "a")
+    proj = work / "proj"
+    (proj / "art").mkdir(parents=True)
+    (proj / "art" / "team.svg").write_bytes(SVG)
+    _lock_project(
+        grim_at, proj, {"a": f"{registry}/{unique_repo}/a:1"},
+        plugin='name = "ignored"\ndescription = "Project text"\nlogo = "art/team.svg"\n',
+    )
+    manifest = work / "marketplace.toml"
+    manifest.write_text(f'[plugins.team]\nproject = "proj"\n{decl}')
+    return manifest
+
+
+def test_s036_project_plugin_takes_the_projects_pins_and_metadata(
+    grim_at, tmp_path: Path, work: Path, registry: str, unique_repo: str
+) -> None:
+    _project_marketplace(grim_at, tmp_path, work, registry, unique_repo, 'description = "Market text"\n')
+    runner = grim_at(work)
+
+    _ok(_export(runner, "--client", "claude", "-o", "dist"))
+
+    root = work / "dist" / "team.claude"
+    assert _manifest(root)["description"] == "Market text", "the marketplace field wins"
+    assert (root / "assets" / "logo.svg").read_bytes() == SVG, "the unset logo comes from the project"
+    assert (root / "skills" / "a" / "SKILL.md").is_file()
+    assert not (work / "marketplace.lock").exists(), "the project lock is the only pin record"
+
+
+def test_s036_stale_project_lock_is_65(grim_at, tmp_path: Path, work: Path, registry: str, unique_repo: str) -> None:
+    _project_marketplace(grim_at, tmp_path, work, registry, unique_repo, "")
+    _skill(f"{unique_repo}/b", "b")
+    write_config(work / "proj", skills={"a": f"{registry}/{unique_repo}/a:1", "b": f"{registry}/{unique_repo}/b:1"})
+
+    result = _export(grim_at(work), "--client", "claude", "-o", "dist")
+
+    assert result.returncode == 65, result.stderr
+    assert "run `grim lock` there" in _error(result)["message"]
+    assert not (work / "dist").exists()
+
+
+def test_s036_update_marketplace_leaves_project_plugins_to_the_project(
+    grim_at, tmp_path: Path, work: Path, registry: str, unique_repo: str
+) -> None:
+    _project_marketplace(grim_at, tmp_path, work, registry, unique_repo, "")
+    runner = grim_at(work)
+
+    named = runner.run("update", "--marketplace", "marketplace.toml", "team", format="json", check=False)
+    assert named.returncode == 64, named.stderr
+    assert "run `grim update` there" in json.loads(named.stdout)["error"]["message"]
+
+    everything = runner.run("update", "--marketplace", "marketplace.toml", format="json", check=False)
+    assert everything.returncode == 0, everything.stderr
+    assert json.loads(everything.stdout)["items"] == []

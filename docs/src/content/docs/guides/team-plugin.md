@@ -139,6 +139,28 @@ This updates `marketplace.lock` and installs nothing. See
 grammar. The *next* `grim export plugin` then renders whatever that run
 just wrote.
 
+## Share the project you already run {#from-lock}
+
+When the plugin should be exactly what your project installs, skip the
+separate manifest. Name the plugin once in `grimoire.toml`, then export
+the lock:
+
+```toml
+[plugin]
+name = "team"
+description = "The acme platform team's shared skills"
+```
+
+```sh
+grim export plugin --project --client claude --zip -o dist
+```
+
+The export renders the pins in `grimoire.lock` without re-resolving any
+tag, so the plugin matches what `grim install` gave your team. After
+`grim update`, export again to ship the new pins. A marketplace can list
+the same project with `project = "."` in place of `include`; see
+[project plugins](../configuration.md#marketplace-project).
+
 <!-- external -->
 [claude-code]: https://docs.anthropic.com/en/docs/claude-code
 [agent-plugins]: https://agent-plugins.org/

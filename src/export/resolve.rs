@@ -662,6 +662,7 @@ mod tests {
                             version: None,
                             rename: None,
                             logo: None,
+                            project: None,
                         },
                     )
                 })

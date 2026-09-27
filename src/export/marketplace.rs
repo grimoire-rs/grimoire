@@ -29,12 +29,20 @@ pub struct MarketplaceManifest {
     pub plugins: BTreeMap<String, PluginDecl>,
 }
 
-/// One `[plugins.<name>]` table.
+/// One `[plugins.<name>]` table: exactly one of `include` (references
+/// resolved into `marketplace.lock`) or `project` (a grim project whose
+/// own lock supplies the pins).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginDecl {
-    /// Registry refs or local paths; non-empty.
+    /// Registry refs or local paths; empty when `project` is set.
+    #[serde(default)]
     pub include: Vec<String>,
+    /// A project directory, or its `grimoire.toml`, relative to the
+    /// manifest's directory. Its `grimoire.lock` supplies the members and
+    /// its `[plugin]` table the metadata this table leaves unset.
+    #[serde(default)]
+    pub project: Option<PathBuf>,
     /// Base plugin description (C-024).
     #[serde(default)]
     pub description: Option<String>,
@@ -51,13 +59,7 @@ pub struct PluginDecl {
     pub logo: Option<PathBuf>,
 }
 
-/// `[plugins.<name>.rename]`.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RenameRule {
-    /// Prefix removed from member names that start with it; non-empty.
-    pub strip_prefix: String,
-}
+pub use crate::config::plugin_meta::{RenameRule, normalize_version, validate_plugin_name};
 
 /// Declaration hashes of a manifest (C-004): `sha256:<hex>` over the JCS
 /// form of each plugin's sorted include expansion, and over the object of
@@ -68,6 +70,22 @@ pub struct DeclarationHashes {
     pub whole: String,
     /// Hash per plugin name.
     pub per_plugin: BTreeMap<String, String>,
+}
+
+impl MarketplaceManifest {
+    /// `self` without its `project` plugins: the part `marketplace.lock`
+    /// pins and `resolve_marketplace` resolves.
+    pub fn include_plugins(&self) -> MarketplaceManifest {
+        MarketplaceManifest {
+            path: self.path.clone(),
+            plugins: self
+                .plugins
+                .iter()
+                .filter(|(_, d)| d.project.is_none())
+                .map(|(n, d)| (n.clone(), d.clone()))
+                .collect(),
+        }
+    }
 }
 
 /// Top-level wire shape of `marketplace.toml`.
@@ -154,8 +172,11 @@ fn check_file_name(path: &Path) -> Result<(), String> {
 /// Validate one declared plugin and normalize its `version` in place.
 fn validate_plugin(name: &str, decl: &mut PluginDecl) -> Result<(), String> {
     validate_plugin_name(name)?;
-    if decl.include.is_empty() {
-        return Err("`include` must list at least one reference".to_string());
+    match (decl.include.is_empty(), &decl.project) {
+        (true, None) => return Err("declare `include` (at least one reference) or `project`".to_string()),
+        (false, Some(_)) => return Err("`include` and `project` are exclusive; declare one".to_string()),
+        (true, Some(p)) if p.as_os_str().is_empty() => return Err("`project` must not be empty".to_string()),
+        _ => {}
     }
     if decl.rename.as_ref().is_some_and(|r| r.strip_prefix.is_empty()) {
         return Err("`rename.strip_prefix` must not be empty".to_string());
@@ -166,30 +187,6 @@ fn validate_plugin(name: &str, decl: &mut PluginDecl) -> Result<(), String> {
         })?);
     }
     Ok(())
-}
-
-/// The plugin name rule (C-002): a plugin name is valid iff
-/// [`crate::skill::SkillName::parse`] accepts it. Returns the reason on
-/// rejection; callers choose the exit code (65 for manifest keys, 64 for
-/// `--name` and derived names).
-pub fn validate_plugin_name(name: &str) -> Result<(), String> {
-    crate::skill::SkillName::parse(name)
-        .map(drop)
-        .map_err(|reason| format!("invalid plugin name '{name}': {reason}"))
-}
-
-/// The single home of the plugin version grammar (C-023): strip one
-/// leading `v`, parse with [`semver::Version::parse`], reject non-empty
-/// build metadata (pre-release is allowed). Returns the normalized string,
-/// or `None` when invalid — `load` maps that to [`ExportError::Manifest`],
-/// `plugin_version` to [`ExportError::InvalidVersion`], and the export
-/// command ignores an invalid annotation version.
-pub fn normalize_version(raw: &str) -> Option<String> {
-    let bare = raw.strip_prefix('v').unwrap_or(raw);
-    semver::Version::parse(bare)
-        .ok()
-        .filter(|v| v.build.is_empty())
-        .map(|v| v.to_string())
 }
 
 /// Compute the declaration hashes of `m` (C-004) — local only, no network.
@@ -206,7 +203,8 @@ pub fn declaration_hashes(m: &MarketplaceManifest, ctx: &FetchScope) -> Result<D
         message,
     };
     let mut expansions: BTreeMap<&str, Vec<String>> = BTreeMap::new();
-    for (name, decl) in &m.plugins {
+    // A `project` plugin's pins live in that project's lock, never in L.
+    for (name, decl) in m.plugins.iter().filter(|(_, d)| d.project.is_none()) {
         let mut expanded = decl
             .include
             .iter()
@@ -319,6 +317,7 @@ mod tests {
                 strip_prefix: "team-".into(),
             }),
             logo: None,
+            project: None,
         };
         assert_eq!(m.plugins, BTreeMap::from([("team".to_string(), decl)]));
     }
@@ -391,6 +390,31 @@ mod tests {
         load_err_body("[plugins.team]\ninclude = \"x/y:1\"\n");
         load_err_body("[plugins.team]\ndescription = \"no include\"\n");
         load_err_body("plugins = 1\n");
+    }
+
+    #[test]
+    fn project_plugin_loads_without_include() {
+        let m = load_ok_body("[plugins.team]\nproject = \"../team\"\ndescription = \"Override\"\n");
+        let decl = &m.plugins["team"];
+        assert_eq!(decl.project.as_deref(), Some(Path::new("../team")));
+        assert!(decl.include.is_empty());
+        assert_eq!(decl.description.as_deref(), Some("Override"));
+    }
+
+    #[test]
+    fn include_and_project_are_exclusive() {
+        let both = load_err_body("[plugins.team]\ninclude = [\"ghcr.io/acme/a:1\"]\nproject = \"../team\"\n");
+        assert!(
+            both.contains("plugin 'team': `include` and `project` are exclusive"),
+            "{both}"
+        );
+        let neither = load_err_body("[plugins.team]\ndescription = \"d\"\n");
+        assert!(
+            neither.contains("declare `include` (at least one reference) or `project`"),
+            "{neither}"
+        );
+        let empty = load_err_body("[plugins.team]\nproject = \"\"\n");
+        assert!(empty.contains("`project` must not be empty"), "{empty}");
     }
 
     #[test]
@@ -596,6 +620,7 @@ mod tests {
             version: None,
             rename: None,
             logo: None,
+            project: None,
         }
     }
 
@@ -604,6 +629,18 @@ mod tests {
             path: PathBuf::from(dir).join("market.toml"),
             plugins: plugins.iter().map(|(n, d)| ((*n).to_string(), d.clone())).collect(),
         }
+    }
+
+    #[test]
+    fn project_plugins_are_outside_the_hashes_and_include_plugins() {
+        let base = manifest("/w", &[("team", decl(&["x/a:1"]))]);
+        let mut project = decl(&[]);
+        project.project = Some("../other".into());
+        let with_project = manifest("/w", &[("team", decl(&["x/a:1"])), ("other", project)]);
+        assert_eq!(hashes(&base), hashes(&with_project), "a project plugin never enters L");
+        let includes = with_project.include_plugins();
+        assert_eq!(includes.plugins.keys().collect::<Vec<_>>(), ["team"]);
+        assert_eq!(includes.path, with_project.path);
     }
 
     fn hashes(m: &MarketplaceManifest) -> DeclarationHashes {

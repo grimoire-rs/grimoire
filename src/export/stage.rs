@@ -17,6 +17,7 @@ use std::sync::Arc;
 use crate::api::export_report::{ExportItem, ExportMember, ExportOmission, ExportReport, OutputFormatKind};
 use crate::cli::exit_code::ExitCode;
 use crate::config::is_path_value;
+use crate::config::plugin_meta::PluginMeta;
 use crate::config::scope::ConfigScope;
 use crate::export::export_error::ExportError;
 use crate::export::family::{self, Family, OmitReason};
@@ -52,6 +53,91 @@ pub(crate) enum ExportMode {
     /// Plugins declared in `manifest` (`--marketplace`, else
     /// `./marketplace.toml`); `plugins` empty = every declared plugin.
     Declared { manifest: PathBuf, plugins: Vec<String> },
+    /// `--project`: the project's already-locked set as one plugin,
+    /// rendered without resolution. `name` is `--name`, else the project's
+    /// `[plugin].name`.
+    Project {
+        name: Option<String>,
+        project: Box<ProjectLock>,
+    },
+}
+
+/// A grim project's fresh lock plus the metadata and directory export
+/// needs from it (`--project`, a marketplace `project` plugin).
+#[derive(Debug)]
+pub(crate) struct ProjectLock {
+    /// The directory holding `grimoire.toml`: anchor of its path sources
+    /// and of `[plugin].logo`.
+    pub dir: PathBuf,
+    pub lock: crate::lock::grimoire_lock::GrimoireLock,
+    /// `[plugin]`; `None` when the table is absent (always, for the
+    /// global scope).
+    pub meta: Option<PluginMeta>,
+}
+
+impl ProjectLock {
+    /// Load the project at `path` — a directory or its `grimoire.toml` —
+    /// with its lock, which must be fresh.
+    ///
+    /// # Errors
+    ///
+    /// A missing config (79), an invalid one (78 / 65), a missing lock
+    /// (79), a stale lock (65).
+    #[allow(
+        clippy::result_large_err,
+        reason = "crate::error::Error is the classified error every command returns"
+    )]
+    pub(crate) fn load(path: &Path) -> Result<ProjectLock, crate::error::Error> {
+        let config_path = if path.is_dir() {
+            path.join("grimoire.toml")
+        } else {
+            path.to_path_buf()
+        };
+        let discovered = crate::config::ProjectConfig::discover(Some(&config_path))?;
+        let lock = crate::command::install::fresh_lock(&discovered.lock_path(), &discovered.config.set)?;
+        let dir = config_path
+            .parent()
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        Ok(ProjectLock {
+            dir,
+            lock,
+            meta: discovered.config.plugin,
+        })
+    }
+
+    /// Every locked artifact, in lock kind order.
+    fn members(&self) -> Vec<LockedArtifact> {
+        self.lock.iter_artifacts().cloned().collect()
+    }
+}
+
+/// The export-side declaration of a project's `[plugin]` table, its logo
+/// kept relative to the project directory.
+fn project_decl(meta: &PluginMeta) -> PluginDecl {
+    PluginDecl {
+        include: Vec::new(),
+        project: None,
+        description: meta.description.clone(),
+        version: meta.version.clone(),
+        rename: meta.rename.clone(),
+        logo: meta.logo.clone(),
+    }
+}
+
+/// A marketplace `project` plugin's effective declaration: every field
+/// `decl` sets wins, the rest comes from the project's `[plugin]`. A
+/// project logo is made absolute (it is relative to the project, not to
+/// the manifest).
+fn merged_decl(decl: &PluginDecl, project: &ProjectLock) -> PluginDecl {
+    let meta = project.meta.clone().unwrap_or_default();
+    PluginDecl {
+        include: Vec::new(),
+        project: decl.project.clone(),
+        description: decl.description.clone().or(meta.description),
+        version: decl.version.clone().or(meta.version),
+        rename: decl.rename.clone().or(meta.rename),
+        logo: decl.logo.clone().or_else(|| meta.logo.map(|l| project.dir.join(l))),
+    }
 }
 
 /// The per-run output options of `grim export plugin`.
@@ -136,6 +222,7 @@ pub(crate) async fn run(
                         version: None,
                         rename: None,
                         logo: None,
+                        project: None,
                     },
                 )]),
             };
@@ -169,22 +256,61 @@ pub(crate) async fn run(
             let items = export_plugins(&request(std::slice::from_ref(&input), &cwd, None), access).await?;
             Ok(ExportReport::new(items))
         }
+        ExportMode::Project { name, project } => {
+            let meta = project.meta.clone().unwrap_or_default();
+            let name = name.clone().or_else(|| meta.name.clone()).ok_or_else(|| {
+                ExportError::Usage(
+                    "--project needs a plugin name: pass --name or set [plugin].name in grimoire.toml".into(),
+                )
+            })?;
+            let decl = project_decl(&meta);
+            let mut input = plugin_input(
+                &name,
+                &project.members(),
+                Some(&decl),
+                (opts.version, opts.description),
+                (None, None),
+            )?;
+            input.project_dir = Some(project.dir.clone());
+            let items = export_plugins(&request(std::slice::from_ref(&input), &project.dir, None), access).await?;
+            Ok(ExportReport::new(items))
+        }
         ExportMode::Declared { manifest, plugins } => {
-            let m = marketplace::load(manifest).map_err(missing_manifest_hint)?;
-            let _guard = ConfigFileLock::try_acquire(&m.path)?;
-            let lock_path = resolve::lock_path(&m.path);
+            let full = marketplace::load(manifest).map_err(missing_manifest_hint)?;
+            let _guard = ConfigFileLock::try_acquire(&full.path)?;
+            let lock_path = resolve::lock_path(&full.path);
             let previous = resolve::load_lock(&lock_path)?;
-            if m.plugins.is_empty() {
-                return Err(ExportError::NoneDeclared { path: m.path.clone() }.into());
+            if full.plugins.is_empty() {
+                return Err(ExportError::NoneDeclared {
+                    path: full.path.clone(),
+                }
+                .into());
             }
-            let selected: BTreeSet<String> = if plugins.is_empty() {
-                m.plugins.keys().cloned().collect()
+            let all_selected: BTreeSet<String> = if plugins.is_empty() {
+                full.plugins.keys().cloned().collect()
             } else {
-                if let Some(missing) = plugins.iter().find(|p| !m.plugins.contains_key(*p)) {
+                if let Some(missing) = plugins.iter().find(|p| !full.plugins.contains_key(*p)) {
                     return Err(ExportError::PluginNotFound { name: missing.clone() }.into());
                 }
                 plugins.iter().cloned().collect()
             };
+            // `project` plugins take their pins from the project's own lock;
+            // L and the resolver only ever see the `include` plugins.
+            let m = full.include_plugins();
+            let anchor = full.path.parent().unwrap_or(Path::new("."));
+            let mut projects: BTreeMap<String, ProjectLock> = BTreeMap::new();
+            for name in all_selected.iter().filter(|p| !m.plugins.contains_key(*p)) {
+                let rel = full.plugins[name].project.clone().unwrap_or_default();
+                projects.insert(
+                    name.clone(),
+                    load_project_plugin(&full.path, name, &anchor.join(&rel), &rel)?,
+                );
+            }
+            let selected: BTreeSet<String> = all_selected
+                .iter()
+                .filter(|p| m.plugins.contains_key(*p))
+                .cloned()
+                .collect();
             let hashes = declaration_hashes(&m, scope)?;
             let stale: BTreeMap<String, PluginPick> = selected
                 .iter()
@@ -201,31 +327,72 @@ pub(crate) async fn run(
                 offline,
             )
             .await?;
-            let inputs = selected
-                .iter()
-                .map(|p| {
-                    plugin_input(
+            let mut inputs = Vec::with_capacity(all_selected.len());
+            for p in &all_selected {
+                let input = match projects.get(p) {
+                    Some(project) => {
+                        let decl = merged_decl(&full.plugins[p], project);
+                        let mut input = plugin_input(
+                            p,
+                            &project.members(),
+                            Some(&decl),
+                            (opts.version, opts.description),
+                            (None, None),
+                        )?;
+                        input.project_dir = Some(project.dir.clone());
+                        input
+                    }
+                    None => plugin_input(
                         p,
                         &part_members(&res, p),
                         m.plugins.get(p),
                         (opts.version, opts.description),
                         (None, None),
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let anchor = m.path.parent().unwrap_or(Path::new("."));
-            let items = export_plugins(&request(&inputs, anchor, Some(&m.path)), access).await?;
+                    )?,
+                };
+                inputs.push(input);
+            }
+            let items = export_plugins(&request(&inputs, anchor, Some(&full.path)), access).await?;
 
             // After placement (C-027): a fresh lock is never rewritten.
             let dropped = previous
                 .as_ref()
                 .is_some_and(|l| l.plugins.keys().any(|p| !m.plugins.contains_key(p)));
-            if previous.is_none() || !stale.is_empty() || dropped {
+            // A manifest of project plugins only never grows an empty L.
+            if (previous.is_none() && !m.plugins.is_empty()) || !stale.is_empty() || dropped {
                 lock_io::save_marketplace(&lock_path, &res.lock, previous.as_ref())?;
             }
             Ok(ExportReport::new(items))
         }
     }
+}
+
+/// Load a marketplace `project` plugin's project. A stale project lock
+/// becomes a manifest error naming where to re-lock (still 65); every other
+/// failure keeps its classification.
+#[allow(
+    clippy::result_large_err,
+    reason = "crate::error::Error is the classified error every command returns"
+)]
+fn load_project_plugin(
+    manifest: &Path,
+    plugin: &str,
+    path: &Path,
+    rel: &Path,
+) -> Result<ProjectLock, crate::error::Error> {
+    ProjectLock::load(path).map_err(|e| match e {
+        crate::error::Error::Command(crate::command::command_error::CommandError::LockStale { .. }) => {
+            ExportError::Manifest {
+                path: manifest.to_path_buf(),
+                message: format!(
+                    "plugin '{plugin}': the lock of project {} is stale; run `grim lock` there",
+                    rel.display()
+                ),
+            }
+            .into()
+        }
+        other => other,
+    })
 }
 
 /// A missing manifest (S-008, still 65) names the ways out of a declared
@@ -375,6 +542,7 @@ pub(crate) fn plugin_input(
         description_base: authored.or(annotation_description),
         logo: decl.and_then(|d| d.logo.clone()),
         fallback_logo: None,
+        project_dir: None,
         renamed,
     })
 }
@@ -400,6 +568,10 @@ pub(crate) struct PluginInput {
     /// logo (its repository description companion); used only when neither
     /// `--logo` nor a declared `logo` names one.
     pub fallback_logo: Option<(&'static str, Vec<u8>)>,
+    /// The project whose lock supplied the members (`--project`, a
+    /// marketplace `project` plugin): anchor of their path sources, and
+    /// where a drifted local source is re-locked.
+    pub project_dir: Option<PathBuf>,
 }
 
 /// One export run: what to stage, for whom, and where it lands (C-027).
@@ -507,9 +679,10 @@ async fn export_staged(
     let mut items = Vec::new();
     for plugin in req.plugins {
         let progress = (req.progress, &mut position, plugin.name.as_str());
-        let staged = stage_members(&plugin.members, &clients, access, req.anchor, staging.path(), progress)
+        let anchor = plugin.project_dir.as_deref().unwrap_or(req.anchor);
+        let staged = stage_members(&plugin.members, &clients, access, anchor, staging.path(), progress)
             .await
-            .map_err(|e| local_drift_hint(e, req.manifest, &plugin.name))?;
+            .map_err(|e| local_drift_hint(e, req.manifest, plugin))?;
         let mut rendered = Vec::with_capacity(clients.len());
         for &(client, fam) in &clients {
             let root = contained(staging.path(), Path::new(&format!("{}.{client}", plugin.name)))?;
@@ -635,7 +808,8 @@ fn aside_path(staging: &Path, final_path: &Path) -> PathBuf {
 /// declared member is refreshed by `grim update --marketplace <M> <P>`, an
 /// ad-hoc one (`manifest` `None`) by re-running the export. Still 65; any
 /// other error passes through.
-fn local_drift_hint(err: crate::error::Error, manifest: Option<&Path>, plugin: &str) -> crate::error::Error {
+fn local_drift_hint(err: crate::error::Error, manifest: Option<&Path>, input: &PluginInput) -> crate::error::Error {
+    let plugin = input.name.as_str();
     let crate::error::Error::Install(InstallError {
         reference,
         kind: InstallErrorKind::LocalContentChanged { name, locked, actual },
@@ -644,6 +818,16 @@ fn local_drift_hint(err: crate::error::Error, manifest: Option<&Path>, plugin: &
         return err;
     };
     let drift = format!("local source '{name}' changed (locked {locked}, found {actual})");
+    if let Some(dir) = &input.project_dir {
+        return InstallError {
+            reference,
+            kind: InstallErrorKind::MaterializeFailed(format!(
+                "plugin '{plugin}': {drift}; run `grim lock` in {}",
+                dir.display()
+            )),
+        }
+        .into();
+    }
     match manifest {
         Some(m) => ExportError::Manifest {
             path: m.to_path_buf(),
@@ -1231,6 +1415,7 @@ mod tests {
                 strip_prefix: p.to_string(),
             }),
             logo: None,
+            project: None,
         }
     }
 
@@ -1893,7 +2078,8 @@ mod tests {
             }))
         };
         let m = Path::new("/w/market.toml");
-        let declared = local_drift_hint(drift(), Some(m), "team");
+        let team = input("team", Vec::new());
+        let declared = local_drift_hint(drift(), Some(m), &team);
         assert!(
             declared
                 .to_string()
@@ -1901,15 +2087,22 @@ mod tests {
             "{declared}"
         );
         assert_eq!(exit_of(declared), ExitCode::DataError);
-        let ad_hoc = local_drift_hint(drift(), None, "team");
+        let ad_hoc = local_drift_hint(drift(), None, &team);
         let shown = ad_hoc.to_string();
         assert!(
             shown.ends_with("re-run the export") && !shown.contains("grim update"),
             "{shown}"
         );
         assert_eq!(exit_of(ad_hoc), ExitCode::DataError);
+        // A project-backed plugin is re-locked in its project, even when a
+        // manifest declared it.
+        let mut from_project = input("team", Vec::new());
+        from_project.project_dir = Some(PathBuf::from("/w/team"));
+        let project = local_drift_hint(drift(), Some(m), &from_project);
+        assert!(project.to_string().ends_with("run `grim lock` in /w/team"), "{project}");
+        assert_eq!(exit_of(project), ExitCode::DataError);
         // Any other failure passes through untouched.
-        let other = local_drift_hint(ExportError::Usage("u".into()).into(), Some(m), "team");
+        let other = local_drift_hint(ExportError::Usage("u".into()).into(), Some(m), &team);
         assert!(matches!(other, Error::Export(ExportError::Usage(_))), "{other:?}");
     }
 
@@ -2510,6 +2703,7 @@ mod tests {
             renamed: Vec::new(),
             logo: None,
             fallback_logo: None,
+            project_dir: None,
         }
     }
 

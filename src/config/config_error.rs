@@ -173,6 +173,11 @@ pub enum ConfigErrorKind {
     /// never apply.
     #[error("invalid options.vendors: {detail}")]
     VendorsInvalid { detail: String },
+
+    /// The `[plugin]` table breaks a plugin metadata rule (name, version,
+    /// description length, empty logo or rename prefix).
+    #[error("invalid [plugin]: {reason}")]
+    PluginInvalid { reason: String },
 }
 
 #[cfg(test)]
