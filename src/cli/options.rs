@@ -86,7 +86,7 @@ pub struct GlobalOptions {
     pub config: Option<PathBuf>,
 
     /// Operate on the global scope rather than the discovered project.
-    #[arg(long, global = true)]
+    #[arg(short = 'g', long, global = true)]
     pub global: bool,
 
     /// Registry override for short identifiers and the browse set.
@@ -160,6 +160,21 @@ mod tests {
             ),
             "--registry must say it discards the filter; got:\n{collapsed}"
         );
+    }
+
+    #[test]
+    fn short_g_selects_the_global_scope() {
+        use clap::Parser as _;
+
+        #[derive(clap::Parser)]
+        struct Harness {
+            #[command(flatten)]
+            global: GlobalOptions,
+        }
+
+        assert!(Harness::parse_from(["grim", "-g"]).global.global);
+        assert!(Harness::parse_from(["grim", "--global"]).global.global);
+        assert!(!Harness::parse_from(["grim"]).global.global);
     }
 
     #[test]

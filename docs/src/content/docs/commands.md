@@ -19,7 +19,7 @@ These apply to every subcommand:
 |------|--------|
 | `--format <plain\|json>` | Output format for structured results (default `plain`). |
 | `--color <auto\|always\|never>` | When to colorize clap's help/error output and `--format json` (default `auto`): colorize only when stdout is a terminal, honoring `NO_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE`, and `TERM=dumb` — see [environment variables](./configuration.md#environment-variables). `always` overrides every one of those signals, including `NO_COLOR`. |
-| `--global` | Operate on the global scope instead of the discovered project. |
+| `-g`, `--global` | Operate on the global scope instead of the discovered project. |
 | `--config <path>` | Use an explicit project config file. |
 | `--registry <ref>` | Registry for short identifiers and the browse set. Repeatable / comma-separated (`--registry a,b`); the first value is the default. |
 | `--offline` | Disable all network access; work from the cache only and fail rather than reach a registry. |

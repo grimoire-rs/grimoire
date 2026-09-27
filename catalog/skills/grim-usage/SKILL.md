@@ -97,7 +97,7 @@ full reference is `--help` plus the docs site linked below.
 > `--no-git` suppresses every derived annotation. Confirm with
 > `grim release --help`.
 >
-> **Global flags** apply to every subcommand — `--format`, `--global`,
+> **Global flags** apply to every subcommand — `--format`, `--global` (`-g`),
 > `--config`, `--registry`, `--offline`, `--log-level`, and `--color
 > <auto|always|never>` (default `auto` colorizes clap's help/error output
 > and `--format json` only when stdout is a terminal; `--color always`

@@ -108,7 +108,7 @@ pub struct SearchArgs {
 
     /// Search the global scope's lock/state for badges instead of the
     /// discovered project.
-    #[arg(long)]
+    #[arg(short = 'g', long)]
     pub global: bool,
 
     /// Explicit project config path (for scope badge derivation).

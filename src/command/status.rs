@@ -78,7 +78,7 @@ struct UpdateCheck {
 #[derive(Debug, Args)]
 pub struct StatusArgs {
     /// Report on the global scope instead of the discovered project.
-    #[arg(long)]
+    #[arg(short = 'g', long)]
     pub global: bool,
 
     /// Explicit project config path.
