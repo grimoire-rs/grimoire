@@ -130,6 +130,22 @@ research-axes:
   `research_agent_plugins_spec_verify.md`,
   `research_claude_app_install_surfaces.md`. Next: `/hex-loop` on it.
 
+- **Discussion handed off → loop (2026-09-27):**
+  `.agents/discussions/harness-capability-freshness.md` — a recurring
+  upstream-freshness skill (`.claude/skills/upstream-refresh/`), a committed
+  check ledger `.agents/upstream-checks.md` with a recency depth ladder, and
+  a warn-only staleness task. Goal file
+  `.agents/goals/harness-capability-freshness.md`. Research:
+  `research_upstream_claim_surfaces.md`,
+  `research_capability_matrix_freshness.md`,
+  `research_multi_harness_tool_freshness.md`,
+  `research_harness_change_feeds.md`,
+  `research_repo_reverification_history.md`.
+
+- **Archived plan (2026-09-27):** `.agents/plans/plan_harness_capability_freshness.md`
+  — done (hex-review Approve, round 1); WP-J…WP-M deferred by owner. No
+  `## Spec Deltas`, so no fold target.
+
 - **Active plan (2026-09-06):** `.agents/plans/plan_docs_site_redesign.md`
   — State `plan-approved`, tier xhigh, on branch `docs/use-case-discovery`
   (worktree `.agents/worktrees/docs-plan`). mdBook → Astro Starlight with the
