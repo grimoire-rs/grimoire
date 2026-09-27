@@ -532,14 +532,32 @@ when ≥1 member was emitted. One assembly routine serves both families.
 
 ### C-024 — Description [G4]
 
-`description = join(" ", [base?, omissions?, ONRAMP])` where
+`description = base ?? ONRAMP`, at most 500 UTF-16 units; `README.md =
+join("\n\n", ["# <name>", base?, omissions?, ONRAMP]) + "\n"` at the plugin
+root, per client. Amended 2026-09-27 (owner review): the omissions and the
+on-ramp moved out of the description.
 
-- `base` = declared `description` / ad-hoc single-ref
+- `base` = `--description` / declared `description` / ad-hoc single-ref
   `org.opencontainers.image.description` annotation (same pinned source as
-  C-023) / absent; trimmed; omitted when empty.
-- `omissions` = `"Omitted for this client: " + join(", ", "<kind> <emitted>") + "."`,
+  C-023) / absent; trimmed; omitted when empty. An authored base (flag or
+  declared) over 500 → `DescriptionTooLong` 65; an annotation base is cut
+  in the description only (last whole sentence keeping ≥ half the budget,
+  else word boundary + `…`) with a stderr warning; the README keeps it whole.
+- `omissions` = `"Omitted for <client>: " + join(", ", "<kind> <emitted>") + "."`,
   in C-016 order; absent when nothing was omitted.
 - `ONRAMP` = `Packaged by grim (https://grimoire.rs); install grim for pinned, updatable installs.` (exact bytes).
+
+Logo (added 2026-09-27, owner review): `--logo` / declared `logo` (relative
+to the manifest directory), `.png`/`.svg` case-insensitive, ≤ 1 MiB, regular
+file → `assets/logo.<lowercase ext>` in every client tree, README line
+`![<name>](assets/logo.<ext>)` under the title, and for Agent Plugins
+`extensions."com.openai".interface.logo = "./assets/logo.<ext>"` (Codex's
+documented key; Claude's `plugin.json` has no icon field). Outside the
+declaration hash and the version hash, like `description`. A bad logo →
+`InvalidLogo` 65 before staging. Fallback: an ad-hoc single registry ref
+with no `--logo` takes `logo.svg`/`logo.png` from its repository's
+description companion (`__grimoire`, floating); not-found/offline → none
+silently, other failures or a refused logo → warn, none.
 
 ### C-025 — `plugin.json` emitters [G4]
 
@@ -770,6 +788,24 @@ mapping. Deterministic (object keys sorted by `serde_json::Map`).
 
 ---
 
+### C-037 — Project as a plugin (amendment 2026-09-27)
+
+- `--project [PATH]`: `ExportMode::Project { name, project: ProjectLock }` (PATH = dir or grimoire.toml, else discovery; PATH with --global/--config → 64);
+  `ProjectLock { dir, lock, meta }` from the resolved scope via
+  `install::fresh_lock` (missing → `LockMissing` 79, stale → `LockStale` 65).
+  Members = `lock.iter_artifacts()`; no resolver call; no lock written. Name
+  `--name` > `[plugin].name` > `Usage` 64. Metadata decl = `[plugin]` fields;
+  flags override via `plugin_input`. `PluginInput.project_dir` anchors path
+  sources and turns a drift into 65 "run `grim lock` in <dir>".
+- `[plugin]`: `config::plugin_meta::PluginMeta`, validated at load
+  (`PluginInvalid` 78), never in `declaration_hash`.
+- `project` plugins: `PluginDecl.project`, exclusive with `include`
+  (`Manifest` 65). `include_plugins()` feeds `declaration_hashes`,
+  `resolve_marketplace` and L; a project plugin's decl is `merged_decl`
+  (decl field ?? project field; project logo made absolute). Stale project
+  lock → `Manifest` 65 naming the project. `update --marketplace`: `All`
+  skips, a selector naming one → `Usage` 64.
+
 ## Scenarios
 
 Fixtures: `make_artifact`/`make_bundle`/`write_config` helpers in
@@ -782,8 +818,8 @@ agent `team-reviewer`, rule `team-style`, mcp `team-srv` (stdio).
 `.claude-plugin/plugin.json` at depth 1, `skills/team-plan/SKILL.md`,
 `agents/team-reviewer.md`, `.mcp.json`; no `team-style` file; manifest `name`
 = `team-stack`, `version` = `<annotation version of the pinned bundle>+<12 hex>`,
-description contains `Omitted for this client: rule team-style.` and the
-on-ramp sentence. No `marketplace.lock` anywhere. Errors: registry down → 69;
+description is the annotation text; `README.md` lists `Omitted for claude:
+rule team-style.` and the on-ramp sentence. No `marketplace.lock` anywhere. Errors: registry down → 69;
 tag absent → 79.
 
 **S-002 — Agent Plugins directory.** [G2, G4]

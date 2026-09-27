@@ -321,11 +321,16 @@ No other keys (Agent Plugins is `additionalProperties:false`; `homepage`,
   declared `description` edit or a grim renderer change yields new bytes under
   the same version, which string-comparing harnesses will not offer as an
   update. Mitigation: bump `version`; stated in the docs (C-032).
-- **Description**: space-joined `<base>`, `Omitted for this client: <kind> <name>, <kind> <name>.`
-  (only when non-empty, sorted by kind then name) and the fixed on-ramp sentence
-  `Packaged by grim (https://grimoire.rs); install grim for pinned, updatable installs.`
-  Base = `[plugins.x].description` / the single ref's
-  `org.opencontainers.image.description` (same pinned source) / empty.
+- **Description**: the base alone, at most 500 UTF-16 units; the fixed on-ramp
+  sentence `Packaged by grim (https://grimoire.rs); install grim for pinned, updatable installs.`
+  when there is no base. Base = `--description` / `[plugins.x].description` /
+  the single ref's `org.opencontainers.image.description` (same pinned source).
+  An authored base over 500 exits 65; an annotation is cut (last whole sentence
+  keeping half the budget, else word boundary + `…`). A generated root
+  `README.md` carries the name, the uncut base, `Omitted for <client>: <kind>
+  <name>, ….` and the on-ramp. Amended 2026-09-27 on owner review: the
+  space-joined description (base, omission sentence, on-ramp) read badly once
+  cut to fit.
 
 Reversibility: one-way for the version grammar and hash input (a change
 fires a phantom update in every harness); two-way for description wording.
@@ -547,6 +552,29 @@ grim export plugin ── export::stage ── per plugin part ─ rename ─ st
 - [ ] `grim schema --kind lock` output byte-identical to `main`
 - [ ] Security review of `--force` placement, zip writer, containment checks, staged-tree scan
 
+## Amendment 2026-09-27 — share a project as a plugin
+
+Owner review reversed the "0-ref lock input dropped" note in
+`.agents/discussions/harness-native-marketplaces.md`, as a thin wrapper
+rather than a second lock system (plan: `.agents/plans/plan_export_project.md`):
+
+- **`grim export plugin --project`** renders the resolved scope's fresh
+  `grimoire.lock` (`install::fresh_lock`: missing 79, stale 65) as one plugin.
+  No resolution, no lock written. Path sources anchor at the project dir; a
+  drifted one exits 65 pointing at `grim lock` there. Name: `--name`, else
+  `[plugin].name`, else 64 (no directory default, as before).
+- **`[plugin]` in `grimoire.toml`** (`config::plugin_meta::PluginMeta`:
+  `name`, `description`, `version`, `logo`, `rename`) — optional, outside the
+  declaration hash (existing locks stay fresh), invalid at load → 78. The four
+  scalars are `grim config` keys (`plugin.*`, project scope, bad value 65).
+  The name/version/description grammars moved from `export::marketplace` to
+  `config::plugin_meta` so config does not depend on export.
+- **`project = "<dir>"` in `marketplace.toml`**, exclusive with `include`
+  (both/neither 65). Pins come from that project's lock, never from
+  `marketplace.lock` (no part, outside the declaration hashes, skipped by
+  `grim update --marketplace`; naming one there → 64). Metadata falls back
+  per field: flag > `[plugins.x]` > project `[plugin]` > none.
+
 ## Links
 
 - `.agents/adr/adr_render_layout_stability.md` (D12)
@@ -565,3 +593,4 @@ grim export plugin ── export::stage ── per plugin part ─ rename ─ st
 | 2026-09-27 | hex-plan review round 1 | Amendments A1–A20: `MarketplaceLock` map with wire-only `plugin`; per-plugin staleness; strict member conflicts; path containment; error channels; pinned version source; selection model; manifest-anchored registry context; `declare_reference`/`roll_forward` seams; atomic placement; D13 supersessions. Status → Accepted |
 | 2026-09-27 | hex-plan re-validation | R1–R9: `grim context` keeps exit 0 with `lock_error`; MCP lock/emitted names use a containment check, not `SkillName`; part metadata copies top-level `[metadata]`; `DeclareError` → exit mapping with explicit offline check; `.toml`-stem and absolute manifest path; D4 atomicity order |
 | 2026-09-27 | meta-orchestrator decision | D5 → option i: Agent Plugins `mcp.json` emitter (C-036, S-031); `not-yet-supported` reason removed; Agent Plugins MCP admitted per family, not gated on client `kind_support` |
+| 2026-09-27 | owner review | Amendment: `--project`, `[plugin]` in `grimoire.toml`, marketplace `project` plugins |
