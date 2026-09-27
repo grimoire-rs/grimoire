@@ -206,6 +206,10 @@ def _manifest(root: Path) -> dict:
     return doc
 
 
+def _readme(root: Path) -> str:
+    return (root / "README.md").read_text()
+
+
 def _tree(root: Path) -> list[tuple[str, str]]:
     """Sorted `(relpath, sha256)` of every regular file under ``root``."""
     out = []
@@ -275,8 +279,10 @@ def test_s001_claude_zip_from_one_bundle_ref(grim_at, tmp_path: Path, work: Path
     with zipfile.ZipFile(zpath) as z:
         names = z.namelist()
         manifest_bytes = z.read(".claude-plugin/plugin.json")
+        readme = z.read("README.md").decode()
     for expected in (
         ".claude-plugin/plugin.json",
+        "README.md",
         "skills/team-plan/SKILL.md",
         "skills/team-plan/notes.md",
         "skills/team-review/SKILL.md",
@@ -296,7 +302,8 @@ def test_s001_claude_zip_from_one_bundle_ref(grim_at, tmp_path: Path, work: Path
     assert doc["name"] == "team-stack"
     # C-023: the pinned bundle's version annotation, leading `v` stripped.
     assert doc["version"] == f"1.4.0+{_suffix(stack.digests)}"
-    assert doc["description"] == f"The team stack. Omitted for this client: rule team-style. {ONRAMP}"
+    assert doc["description"] == "The team stack."
+    assert readme == f"# team-stack\n\nThe team stack.\n\nOmitted for claude: rule team-style.\n\n{ONRAMP}\n"
 
     (item,) = out["items"]
     assert item["family"] == "claude" and item["format"] == "zip"
@@ -338,9 +345,8 @@ def test_s002_agent_plugins_directory_for_codex(grim_at, tmp_path: Path, work: P
     doc = _manifest(root)
     assert doc["name"] == "team-stack"
     assert doc["version"] == f"1.4.0+{_suffix(stack.digests)}"
-    assert doc["description"] == (
-        f"The team stack. Omitted for this client: rule team-style, agent team-reviewer. {ONRAMP}"
-    )
+    assert doc["description"] == "The team stack."
+    assert "Omitted for codex: rule team-style, agent team-reviewer." in _readme(root)
     assert (root / "skills" / "team-plan" / "SKILL.md").is_file()
     assert (root / "skills" / "team-review" / "SKILL.md").is_file()
     assert not (root / "agents").exists()
@@ -584,7 +590,7 @@ def test_s006_description_edit_keeps_lock_and_version(
     doc = _manifest(work / "dist" / "team.claude")
     assert lock_path.read_bytes() == lock_before
     assert doc["version"] == version_before
-    assert doc["description"].startswith("Second. ")
+    assert doc["description"] == "Second."
 
 
 def test_s006_include_edit_reresolves_and_rewrites_lock(
@@ -789,7 +795,7 @@ def test_s010_per_client_declines(grim_at, tmp_path: Path, work: Path, registry:
     assert "team-srv" in json.loads((junie / ".mcp.json").read_text())["mcpServers"]
     assert (claude / "agents" / "team-reviewer.md").is_file()
     assert "team-srv" in json.loads((claude / ".mcp.json").read_text())["mcpServers"]
-    assert "Omitted for this client: rule team-style, agent team-reviewer, mcp team-srv." in _manifest(droid)["description"]
+    assert "Omitted for droid: rule team-style, agent team-reviewer, mcp team-srv." in _readme(droid)
 
 
 # ── S-011 — Rendered like install (C-017, C-018, C-020) ─────────────────────
@@ -906,7 +912,8 @@ def test_s013_strip_prefix_renames_every_member(grim_at, tmp_path: Path, work: P
     doc = _manifest(root)
     assert doc["version"] == f"0.0.0+{_suffix(stack.digests, RENAMED)}"
     assert _suffix(stack.digests, RENAMED) != _suffix(stack.digests)
-    assert f"Omitted for this client: rule style. {ONRAMP}" in doc["description"]
+    assert doc["description"] == ONRAMP, "no base text: the on-ramp stands in"
+    assert f"Omitted for claude: rule style.\n\n{ONRAMP}\n" in _readme(root)
     plan = next(m for m in out["items"][0]["members"] if m["name"] == "plan")
     assert (plan["kind"], plan["lock_name"]) == ("skill", "team-plan")
 
@@ -1153,7 +1160,7 @@ def test_s028_junie_omits_oauth_mcp_as_not_representable(
     # Decision 34: the only MCP member was declined, so no MCP file at all.
     assert not mcp.exists()
     assert {"kind": "mcp", "name": "authd", "reason": "not-representable"} in item["omitted"]
-    assert "Omitted for this client: mcp authd." in _manifest(root)["description"]
+    assert "Omitted for junie: mcp authd." in _readme(root)
 
 
 # ── S-029 — Hand-edited lock cannot escape (C-006, C-035) ───────────────────
@@ -1266,13 +1273,12 @@ def test_s031_agent_plugins_mcp_projection(grim_at, tmp_path: Path, work: Path, 
         assert item["omitted"] == [
             {"kind": "mcp", "name": n, "reason": "not-representable"} for n in ("authd", "hdr", "sock")
         ]
-        assert "Omitted for this client: mcp authd, mcp hdr, mcp sock." in _manifest(root)["description"]
+        assert f"Omitted for {item['client']}: mcp authd, mcp hdr, mcp sock." in _readme(root)
 
 
-# ── S-032 — Description cap: 500 characters, on-ramp kept whole (C-024) ────
+# ── S-032 — Description cap: 500 characters, README keeps the rest (C-024) ─
 
 MAX_DESCRIPTION = 500
-MAX_BASE = MAX_DESCRIPTION - len(ONRAMP) - 1
 
 
 def test_s032_description_flag_overrides_the_annotation(
@@ -1284,7 +1290,8 @@ def test_s032_description_flag_overrides_the_annotation(
     _ok(_export(runner, stack.bundle, "--client", "claude", "--description", "  Flag text. "))
 
     doc = _manifest(work / "team-stack.claude")
-    assert doc["description"] == f"Flag text. Omitted for this client: rule team-style. {ONRAMP}"
+    assert doc["description"] == "Flag text."
+    assert _readme(work / "team-stack.claude").startswith("# team-stack\n\nFlag text.\n\n")
 
 
 @pytest.mark.parametrize("where", ["flag", "declared"])
@@ -1294,7 +1301,7 @@ def test_s032_authored_description_over_the_cap_exits_65_and_writes_nothing(
     runner = grim_at(work)
     _skill(f"{unique_repo}/a", "a")
     ref = f"{registry}/{unique_repo}/a:1"
-    long = "x" * (MAX_BASE + 1)
+    long = "x" * (MAX_DESCRIPTION + 1)
     if where == "flag":
         result = _export(runner, ref, "--client", "claude", "--description", long)
     else:
@@ -1302,21 +1309,21 @@ def test_s032_authored_description_over_the_cap_exits_65_and_writes_nothing(
         result = _export(runner, "--client", "claude")
 
     assert result.returncode == 65, result.stderr
-    assert f"at most {MAX_BASE} fit" in _error(result)["message"]
+    assert f"at most {MAX_DESCRIPTION}" in _error(result)["message"]
     assert _entries(work) == ([] if where == "flag" else ["marketplace.toml"])
 
 
 def test_s032_authored_description_at_the_cap_fits_exactly(grim_at, work: Path, registry: str, unique_repo: str) -> None:
     runner = grim_at(work)
     _skill(f"{unique_repo}/a", "a")
-    base = "x" * MAX_BASE
+    base = "x" * MAX_DESCRIPTION
 
     _ok(_export(runner, f"{registry}/{unique_repo}/a:1", "--client", "claude", "--description", base))
 
-    assert _manifest(work / "a.claude")["description"] == f"{base} {ONRAMP}"
+    assert _manifest(work / "a.claude")["description"] == base
 
 
-def test_s032_long_annotation_is_cut_with_ellipsis_and_warned(
+def test_s032_long_annotation_is_cut_at_a_word_and_kept_whole_in_readme(
     grim_at, tmp_path: Path, work: Path, registry: str, unique_repo: str
 ) -> None:
     """A publisher's text is outside the exporter's control: cut, never refused."""
@@ -1331,8 +1338,9 @@ def test_s032_long_annotation_is_cut_with_ellipsis_and_warned(
 
     desc = _manifest(work / "team-stack.claude")["description"]
     assert len(desc.encode("utf-16-le")) // 2 <= MAX_DESCRIPTION
-    assert desc.startswith("Everything a repository needs.")
-    assert desc.endswith(f"… Omitted for this client: rule team-style. {ONRAMP}")
+    assert desc.endswith("Everything a repository needs."), "cut at the last whole sentence: " + desc
+    assert long.startswith(desc)
+    assert f"\n\n{long.strip()}\n\n" in _readme(work / "team-stack.claude"), "README keeps the text whole"
     assert "description cut to 500 characters" in result.stderr
 
 

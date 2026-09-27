@@ -932,9 +932,9 @@ registry reference, a bundle, or a local path. `description` and
 always appends a content-hash suffix to `version` (see [export's output
 naming](./commands.md#export-plugin-output)). Both are optional here.
 Omitted, a declared plugin's `version` defaults straight to `0.0.0` and
-its `description` carries no base text. A `description` longer than 412
-characters exits `65` on export: the rendered text is capped at 500
-([description cap](./commands.md#export-plugin-description)). The
+its `description` carries no base text. A `description` longer than 500
+characters exits `65` on export
+([description and README](./commands.md#export-plugin-description)). The
 OCI-annotation fallback
 described there belongs only to an **ad-hoc, single-reference** export,
 never to a declared plugin.

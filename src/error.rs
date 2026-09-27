@@ -1243,7 +1243,7 @@ mod tests {
                 ExportError::DescriptionTooLong {
                     plugin: s("p"),
                     len: 501,
-                    max: 412,
+                    max: 500,
                 },
                 ExitCode::DataError,
                 None,
