@@ -109,6 +109,9 @@ class GrimRunner:
             cmd,
             capture_output=True,
             text=True,
+            # grim writes UTF-8; the locale codepage (cp1252 on Windows) mangles it.
+            encoding="utf-8",
+            errors="replace",
             env=self.env,
             cwd=str(self.cwd) if self.cwd else None,
         )
