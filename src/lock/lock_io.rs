@@ -15,7 +15,7 @@
 use std::path::Path;
 
 use crate::config;
-use crate::lock::grimoire_lock::GrimoireLock;
+use crate::lock::grimoire_lock::{GrimoireLock, MarketplaceLock};
 use crate::lock::lock_error::{LockError, LockErrorKind};
 use crate::lock::locked_artifact::LockedArtifact;
 use crate::store::atomic_write::atomic_write_through_symlink;
@@ -57,15 +57,75 @@ pub fn load(path: &Path) -> Result<GrimoireLock, LockError> {
 pub fn save(path: &Path, lock: &GrimoireLock, previous: Option<&GrimoireLock>) -> Result<(), LockError> {
     let mut to_write = lock.clone();
     if let Some(prev) = previous {
-        if content_equal(&to_write, prev) {
-            to_write.metadata.generated_at = prev.metadata.generated_at.clone();
-        } else if to_write.metadata.generated_at <= prev.metadata.generated_at {
-            to_write.metadata.generated_at =
-                bump_one_second(&prev.metadata.generated_at).unwrap_or_else(|| to_write.metadata.generated_at.clone());
-        }
+        let unchanged = content_equal(&to_write, prev);
+        stamp_generated_at(&mut to_write.metadata, &prev.metadata, unchanged);
     }
-
     let serialized = to_write.to_toml_string().map_err(|e| LockError::new(path, e.kind))?;
+    write_capped(path, &serialized)
+}
+
+/// Load a `marketplace.lock` from `path`: the same capped read and raw
+/// parse as [`load`], then the marketplace flavor checks (every entry
+/// scoped to a `[[plugin]]` row, no `[[bundle]]`, materializable names,
+/// `declaration_hash_version` = [`config::hash::MARKETPLACE_HASH_VERSION`]).
+///
+/// # Errors
+///
+/// As [`load`], plus [`LockErrorKind::ScopeMismatch`] for a lock of the
+/// other flavor or an unsafe name — all with `path` context.
+pub fn load_marketplace(path: &Path) -> Result<MarketplaceLock, LockError> {
+    let content = read_capped(path)?;
+    MarketplaceLock::from_toml_str(&content).map_err(|e| LockError::new(path, e.kind))
+}
+
+/// Atomically save a `marketplace.lock`, refusing anything
+/// [`load_marketplace`] would reject. `generated_at` is preserved from
+/// `previous` iff the plugin key sets match and every part is
+/// [`content_equal`] to its previous part — per part, never over the union,
+/// so one artifact pinned differently by two plugins is never conflated;
+/// otherwise it moves as in [`save`].
+///
+/// # Errors
+///
+/// [`LockErrorKind::ScopeMismatch`], [`LockErrorKind::UnsupportedVersion`],
+/// [`LockErrorKind::FileTooLarge`], or serialization / I/O failure — all
+/// with `path` context.
+pub fn save_marketplace(
+    path: &Path,
+    lock: &MarketplaceLock,
+    previous: Option<&MarketplaceLock>,
+) -> Result<(), LockError> {
+    let mut to_write = lock.clone();
+    if let Some(prev) = previous {
+        let unchanged = to_write.plugins.len() == prev.plugins.len()
+            && to_write
+                .plugins
+                .iter()
+                .all(|(name, part)| prev.plugins.get(name).is_some_and(|p| content_equal(part, p)));
+        stamp_generated_at(&mut to_write.metadata, &prev.metadata, unchanged);
+    }
+    let serialized = to_write.to_toml_string().map_err(|e| LockError::new(path, e.kind))?;
+    write_capped(path, &serialized)
+}
+
+/// Keep the previous `generated_at` when content is `unchanged`; otherwise
+/// make sure the new stamp moves past it.
+fn stamp_generated_at(
+    metadata: &mut crate::lock::grimoire_lock::LockMetadata,
+    previous: &crate::lock::grimoire_lock::LockMetadata,
+    unchanged: bool,
+) {
+    if unchanged {
+        metadata.generated_at = previous.generated_at.clone();
+    } else if metadata.generated_at <= previous.generated_at {
+        metadata.generated_at =
+            bump_one_second(&previous.generated_at).unwrap_or_else(|| metadata.generated_at.clone());
+    }
+}
+
+/// Write `serialized` atomically, refusing (before the write, so the
+/// previous file survives) anything over the cap the load path enforces.
+fn write_capped(path: &Path, serialized: &str) -> Result<(), LockError> {
     let size = serialized.len() as u64;
     if size > config::FILE_SIZE_LIMIT_BYTES {
         return Err(LockError::new(
@@ -550,5 +610,727 @@ mod tests {
         std::fs::write(&path, &body).unwrap();
         let err = load(&path).expect_err("oversize rejects");
         assert!(matches!(err.kind, LockErrorKind::FileTooLarge { .. }));
+    }
+
+    // ---------------------------------------------------------------
+    // C-031.2 — `grimoire.lock` bytes unchanged by the plugin wire scope.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn existing_grimoire_lock_fixtures_round_trip_byte_identically() {
+        // C-031.2 / C-005: every canonical `grimoire.lock` fixture (written
+        // by the pre-change serializer) survives load → to_toml_string
+        // unchanged. Iterates the directory so a new fixture is covered too.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lock/testdata/grimoire_lock");
+        let mut seen = 0;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "lock") {
+                continue;
+            }
+            let bytes = std::fs::read_to_string(&path).unwrap();
+            let out = load(&path)
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+                .to_toml_string()
+                .unwrap();
+            assert_eq!(out, bytes, "{} must round-trip byte-identically", path.display());
+            seen += 1;
+        }
+        assert!(seen >= 3, "fixture directory must not be silently empty ({seen})");
+    }
+
+    // ---------------------------------------------------------------
+    // Marketplace lock flavor (C-006, C-007, C-008, C-035 load names,
+    // S-024 / S-029 unit halves).
+    // ---------------------------------------------------------------
+
+    use crate::config::hash::MARKETPLACE_HASH_VERSION;
+    use crate::lock::grimoire_lock::MarketplaceLock;
+    use std::collections::BTreeMap;
+
+    const T1: &str = "2026-04-19T00:00:00Z";
+
+    /// The exit code a propagated lock error surfaces as.
+    fn exit_of(err: LockError) -> u8 {
+        let err: anyhow::Error = crate::error::Error::from(err).into();
+        crate::error::classify_error(&err) as u8
+    }
+
+    fn write_lock(dir: &tempfile::TempDir, body: &str) -> std::path::PathBuf {
+        let path = dir.path().join("marketplace.lock");
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    /// `[metadata]` block of a marketplace lock with the given hash version.
+    fn mkt_metadata(hash_version: u8) -> String {
+        format!(
+            "[metadata]\nlock_version = 1\ndeclaration_hash_version = {hash_version}\n\
+             declaration_hash = \"sha256:{w}\"\ngenerated_by = \"grim 0.1.0\"\n\
+             generated_at = \"{T1}\"\n",
+            w = sha('0')
+        )
+    }
+
+    /// One `[[plugin]]` row; `name` is raw TOML string content.
+    fn plugin_row(name: &str, byte: char) -> String {
+        format!(
+            "\n[[plugin]]\nname = \"{name}\"\ndeclaration_hash = \"sha256:{h}\"\n",
+            h = sha(byte)
+        )
+    }
+
+    /// One kind-array entry; `name` / `plugin` are raw TOML string content.
+    fn entry(kind: &str, name: &str, plugin: Option<&str>) -> String {
+        let plugin = plugin.map(|p| format!("plugin = \"{p}\"\n")).unwrap_or_default();
+        format!(
+            "\n[[{kind}]]\nname = \"{name}\"\n{plugin}pinned = \"ghcr.io/acme/x@sha256:{a}\"\n",
+            a = sha('a')
+        )
+    }
+
+    const BUNDLE_TABLE: &str = "\n[[bundle]]\nname = \"stack\"\nrepo = \"ghcr.io/acme/bundles/stack\"\n\
+        tag = \"1\"\npinned = \"ghcr.io/acme/bundles/stack@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"\n\
+        \n[[bundle.member]]\nkind = \"skill\"\nname = \"x\"\nid = \"ghcr.io/acme/x:1\"\n";
+
+    fn assert_load_marketplace_scope_mismatch(body: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_lock(&dir, body);
+        let err = load_marketplace(&path).expect_err(&format!("must reject:\n{body}"));
+        assert!(
+            matches!(err.kind, LockErrorKind::ScopeMismatch { .. }),
+            "expected ScopeMismatch, got {:?} for:\n{body}",
+            err.kind
+        );
+        assert_eq!(err.path, path, "error carries the path context");
+        assert_eq!(exit_of(err), 78);
+    }
+
+    fn assert_load_scope_mismatch(body: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grimoire.lock");
+        std::fs::write(&path, body).unwrap();
+        let err = load(&path).expect_err(&format!("grimoire.lock must reject:\n{body}"));
+        assert!(
+            matches!(err.kind, LockErrorKind::ScopeMismatch { .. }),
+            "expected ScopeMismatch, got {:?}",
+            err.kind
+        );
+        assert_eq!(exit_of(err), 78);
+    }
+
+    /// Top-level metadata of a valid marketplace lock.
+    fn mkt_top(generated_at: &str) -> LockMetadata {
+        LockMetadata {
+            lock_version: LockVersion::V1,
+            declaration_hash_version: MARKETPLACE_HASH_VERSION,
+            declaration_hash: format!("sha256:{}", sha('0')),
+            generated_by: "grim 0.1.0".to_string(),
+            generated_at: generated_at.to_string(),
+        }
+    }
+
+    fn entry_of(name: &str, kind: ArtifactKind, repo: &str, byte: char) -> LockedArtifact {
+        LockedArtifact::direct(name.to_string(), kind, pinned(repo, None, byte))
+    }
+
+    /// A C-007-shaped part: top metadata with the per-plugin hash, entries
+    /// split by kind in the given order, no bundles.
+    fn part(top: &LockMetadata, byte: char, entries: Vec<LockedArtifact>) -> GrimoireLock {
+        let of = |k: ArtifactKind| entries.iter().filter(|a| a.kind == k).cloned().collect::<Vec<_>>();
+        GrimoireLock {
+            metadata: LockMetadata {
+                declaration_hash: format!("sha256:{}", sha(byte)),
+                ..top.clone()
+            },
+            skills: of(ArtifactKind::Skill),
+            rules: of(ArtifactKind::Rule),
+            agents: of(ArtifactKind::Agent),
+            mcp: of(ArtifactKind::Mcp),
+            bundles: vec![],
+        }
+    }
+
+    fn mkt(generated_at: &str, parts: Vec<(&str, char, Vec<LockedArtifact>)>) -> MarketplaceLock {
+        let top = mkt_top(generated_at);
+        let plugins = parts
+            .into_iter()
+            .map(|(name, byte, entries)| (name.to_string(), part(&top, byte, entries)))
+            .collect::<BTreeMap<_, _>>();
+        MarketplaceLock { metadata: top, plugins }
+    }
+
+    /// The reference marketplace lock: `alpha` and `beta` both pin
+    /// `code-review` at different digests (C-008), `empty` has no entries,
+    /// `beta`'s mcp name is outside the `SkillName` grammar (exempt).
+    fn reference_mkt(generated_at: &str) -> MarketplaceLock {
+        let mut beta_review = entry_of("code-review", ArtifactKind::Skill, "acme/code-review", '3');
+        beta_review.bundles = vec![crate::lock::locked_artifact::BundleProvenance::new(
+            "ghcr.io/acme/bundles/stack",
+            "1",
+        )];
+        mkt(
+            generated_at,
+            vec![
+                (
+                    "alpha",
+                    'a',
+                    vec![
+                        entry_of("code-review", ArtifactKind::Skill, "acme/code-review", '2'),
+                        entry_of("zeta", ArtifactKind::Skill, "acme/zeta", '1'),
+                        entry_of("reviewer", ArtifactKind::Agent, "acme/reviewer", '4'),
+                    ],
+                ),
+                (
+                    "beta",
+                    'b',
+                    vec![
+                        beta_review,
+                        entry_of("rust-style", ArtifactKind::Rule, "acme/rust-style", '5'),
+                        entry_of("My_Server", ArtifactKind::Mcp, "acme/mcp/server", '6'),
+                    ],
+                ),
+                ("empty", 'e', vec![]),
+            ],
+        )
+    }
+
+    /// Canonical wire form of [`reference_mkt`]: `[metadata]`, `[[plugin]]`
+    /// by name, kind arrays sorted by `(plugin, name)` (not by name alone),
+    /// `plugin` right after `name`, no `[[bundle]]`.
+    fn reference_wire() -> String {
+        let pin = |repo: &str, b: char| format!("ghcr.io/acme/{repo}@sha256:{}", sha(b));
+        format!(
+            "{meta}{alpha}{beta}{empty}
+[[skill]]
+name = \"code-review\"
+plugin = \"alpha\"
+pinned = \"{p2}\"
+
+[[skill]]
+name = \"zeta\"
+plugin = \"alpha\"
+pinned = \"{p1}\"
+
+[[skill]]
+name = \"code-review\"
+plugin = \"beta\"
+pinned = \"{p3}\"
+bundle = \"ghcr.io/acme/bundles/stack\"
+bundle_tag = \"1\"
+
+[[rule]]
+name = \"rust-style\"
+plugin = \"beta\"
+pinned = \"{p5}\"
+
+[[agent]]
+name = \"reviewer\"
+plugin = \"alpha\"
+pinned = \"{p4}\"
+
+[[mcp]]
+name = \"My_Server\"
+plugin = \"beta\"
+pinned = \"{p6}\"
+",
+            meta = mkt_metadata(MARKETPLACE_HASH_VERSION),
+            alpha = plugin_row("alpha", 'a'),
+            beta = plugin_row("beta", 'b'),
+            empty = plugin_row("empty", 'e'),
+            p1 = pin("zeta", '1'),
+            p2 = pin("code-review", '2'),
+            p3 = pin("code-review", '3'),
+            p4 = pin("reviewer", '4'),
+            p5 = pin("rust-style", '5'),
+            p6 = pin("mcp/server", '6'),
+        )
+    }
+
+    // C-006 — `grimoire.lock` refuses the marketplace flavor (S-024 unit).
+
+    #[test]
+    fn load_rejects_an_entry_carrying_plugin_scope() {
+        // C-006 / S-024: `plugin` on an entry, no `[[plugin]]` table.
+        let body = format!("{}{}", mkt_metadata(1), entry("skill", "x", Some("team")));
+        assert_load_scope_mismatch(&body);
+    }
+
+    #[test]
+    fn load_rejects_a_non_empty_plugin_table() {
+        // C-006 / S-024: `[[plugin]]` rows alone are the marketplace flavor.
+        let body = format!("{}{}", mkt_metadata(1), plugin_row("team", 'b'));
+        assert_load_scope_mismatch(&body);
+    }
+
+    #[test]
+    fn load_rejects_a_marketplace_lock() {
+        // C-006 / S-024: entry `plugin` plus a matching `[[plugin]]` row.
+        let body = format!(
+            "{}{}{}{}",
+            mkt_metadata(1),
+            plugin_row("team", 'b'),
+            entry("skill", "x", Some("team")),
+            entry("mcp", "srv", Some("team"))
+        );
+        assert_load_scope_mismatch(&body);
+    }
+
+    // C-006 — `load_marketplace` rejections.
+
+    #[test]
+    fn load_marketplace_accepts_a_minimal_valid_lock() {
+        // Control for the rejection fixtures below: the same builders with
+        // every check satisfied load cleanly.
+        let body = format!(
+            "{}{}{}{}",
+            mkt_metadata(MARKETPLACE_HASH_VERSION),
+            plugin_row("team", 'b'),
+            entry("skill", "x", Some("team")),
+            entry("mcp", "srv", Some("team"))
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let lock = load_marketplace(&write_lock(&dir, &body)).expect("valid marketplace lock loads");
+        assert_eq!(lock.plugins.keys().collect::<Vec<_>>(), ["team"]);
+        assert_eq!(lock.plugins["team"].skills.len(), 1);
+        assert_eq!(lock.plugins["team"].mcp.len(), 1);
+    }
+
+    #[test]
+    fn load_marketplace_rejects_an_entry_without_plugin() {
+        // C-006 / S-024: a `grimoire.lock`-shaped entry.
+        for kind in ["skill", "rule", "agent", "mcp"] {
+            let body = format!(
+                "{}{}{}",
+                mkt_metadata(MARKETPLACE_HASH_VERSION),
+                plugin_row("team", 'b'),
+                entry(kind, "x", None)
+            );
+            assert_load_marketplace_scope_mismatch(&body);
+        }
+    }
+
+    #[test]
+    fn load_marketplace_rejects_an_orphan_plugin_scope() {
+        // C-006: the entry's `plugin` has no `[[plugin]]` row.
+        let body = format!(
+            "{}{}{}",
+            mkt_metadata(MARKETPLACE_HASH_VERSION),
+            plugin_row("team", 'b'),
+            entry("skill", "x", Some("ghost"))
+        );
+        assert_load_marketplace_scope_mismatch(&body);
+        // No rows at all.
+        let body = format!(
+            "{}{}",
+            mkt_metadata(MARKETPLACE_HASH_VERSION),
+            entry("skill", "x", Some("team"))
+        );
+        assert_load_marketplace_scope_mismatch(&body);
+    }
+
+    #[test]
+    fn load_marketplace_rejects_a_bundle_table() {
+        // C-006 / S-024: bundle pins travel in memory only.
+        let body = format!(
+            "{}{}{}{}",
+            mkt_metadata(MARKETPLACE_HASH_VERSION),
+            plugin_row("team", 'b'),
+            entry("skill", "x", Some("team")),
+            BUNDLE_TABLE
+        );
+        assert_load_marketplace_scope_mismatch(&body);
+    }
+
+    #[test]
+    fn load_marketplace_rejects_an_invalid_plugin_value() {
+        // C-006 / C-035: a `plugin` value failing `SkillName` is refused
+        // even when a `[[plugin]]` row matches it.
+        for bad in ["../evil", "/x", "A"] {
+            let body = format!(
+                "{}{}{}",
+                mkt_metadata(MARKETPLACE_HASH_VERSION),
+                plugin_row(bad, 'b'),
+                entry("skill", "x", Some(bad))
+            );
+            assert_load_marketplace_scope_mismatch(&body);
+        }
+    }
+
+    #[test]
+    fn load_marketplace_rejects_an_invalid_plugin_row_name() {
+        // C-006 / C-035: a `[[plugin]].name` failing `SkillName`, even with
+        // no entry scoped to it.
+        for bad in ["../evil", "/x", "A"] {
+            let body = format!(
+                "{}{}{}{}",
+                mkt_metadata(MARKETPLACE_HASH_VERSION),
+                plugin_row("team", 'b'),
+                plugin_row(bad, 'c'),
+                entry("skill", "x", Some("team"))
+            );
+            assert_load_marketplace_scope_mismatch(&body);
+        }
+    }
+
+    #[test]
+    fn load_marketplace_rejects_skill_rule_agent_names_failing_skill_name() {
+        // C-006 / C-035: these names become install paths.
+        for kind in ["skill", "rule", "agent"] {
+            for bad in ["../evil", "/x", "A"] {
+                let body = format!(
+                    "{}{}{}",
+                    mkt_metadata(MARKETPLACE_HASH_VERSION),
+                    plugin_row("team", 'b'),
+                    entry(kind, bad, Some("team"))
+                );
+                assert_load_marketplace_scope_mismatch(&body);
+            }
+        }
+    }
+
+    #[test]
+    fn load_marketplace_rejects_uncontained_mcp_names() {
+        // C-006 / C-035: mcp is exempt from `SkillName` but must be
+        // non-empty with no `/`, `\`, `..` or NUL. Raw TOML escapes.
+        for bad in ["", "a/b", "a\\\\b", "..", "a..b", "a\\u0000b"] {
+            let body = format!(
+                "{}{}{}",
+                mkt_metadata(MARKETPLACE_HASH_VERSION),
+                plugin_row("team", 'b'),
+                entry("mcp", bad, Some("team"))
+            );
+            assert_load_marketplace_scope_mismatch(&body);
+        }
+    }
+
+    #[test]
+    fn load_marketplace_accepts_an_mcp_name_outside_the_skill_name_grammar() {
+        // C-006: mcp bindings are exempt from `SkillName` (add.rs parity).
+        let body = format!(
+            "{}{}{}",
+            mkt_metadata(MARKETPLACE_HASH_VERSION),
+            plugin_row("team", 'b'),
+            entry("mcp", "My_Server", Some("team"))
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let lock = load_marketplace(&write_lock(&dir, &body)).expect("mcp name exempt from SkillName");
+        assert_eq!(lock.plugins["team"].mcp[0].name, "My_Server");
+    }
+
+    #[test]
+    fn load_marketplace_rejects_a_foreign_hash_version() {
+        // C-006: `declaration_hash_version` gated on MARKETPLACE_HASH_VERSION.
+        let version = MARKETPLACE_HASH_VERSION + 1;
+        let body = format!(
+            "{}{}{}",
+            mkt_metadata(version),
+            plugin_row("team", 'b'),
+            entry("skill", "x", Some("team"))
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let err = load_marketplace(&write_lock(&dir, &body)).expect_err("foreign version rejects");
+        assert!(
+            matches!(err.kind, LockErrorKind::UnsupportedVersion { version: v } if v == version),
+            "{:?}",
+            err.kind
+        );
+        assert_eq!(exit_of(err), 78);
+    }
+
+    #[test]
+    fn hand_edited_traversal_name_with_matching_plugin_hash_is_refused() {
+        // S-029 (unit half): `name = "../evil"`, `[[plugin]]` hash intact.
+        let body = format!(
+            "{}{}{}",
+            mkt_metadata(MARKETPLACE_HASH_VERSION),
+            plugin_row("team", 'b'),
+            entry("skill", "../evil", Some("team"))
+        );
+        assert_load_marketplace_scope_mismatch(&body);
+    }
+
+    // C-006 — `save_marketplace` refuses what load rejects.
+
+    fn assert_save_refused(lock: &MarketplaceLock, scope_mismatch: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("marketplace.lock");
+        let err = save_marketplace(&path, lock, None).expect_err("save must refuse");
+        if scope_mismatch {
+            assert!(
+                matches!(err.kind, LockErrorKind::ScopeMismatch { .. }),
+                "{:?}",
+                err.kind
+            );
+        } else {
+            assert!(
+                matches!(err.kind, LockErrorKind::UnsupportedVersion { .. }),
+                "{:?}",
+                err.kind
+            );
+        }
+        assert_eq!(exit_of(err), 78);
+        assert!(!path.exists(), "a refused save writes nothing");
+    }
+
+    #[test]
+    fn save_marketplace_refuses_an_invalid_plugin_key() {
+        // C-006 / C-035.
+        for bad in ["../evil", "/x", "A"] {
+            let lock = mkt(
+                T1,
+                vec![(bad, 'b', vec![entry_of("x", ArtifactKind::Skill, "acme/x", 'a')])],
+            );
+            assert_save_refused(&lock, true);
+            let lock = mkt(T1, vec![(bad, 'b', vec![])]);
+            assert_save_refused(&lock, true);
+        }
+    }
+
+    #[test]
+    fn save_marketplace_refuses_skill_rule_agent_names_failing_skill_name() {
+        // C-006 / C-035 / S-029.
+        for kind in [ArtifactKind::Skill, ArtifactKind::Rule, ArtifactKind::Agent] {
+            for bad in ["../evil", "/x", "A"] {
+                let lock = mkt(T1, vec![("team", 'b', vec![entry_of(bad, kind, "acme/x", 'a')])]);
+                assert_save_refused(&lock, true);
+            }
+        }
+    }
+
+    #[test]
+    fn save_marketplace_refuses_uncontained_mcp_names() {
+        // C-006 / C-035.
+        for bad in ["", "a/b", "a\\b", "..", "a..b", "a\0b"] {
+            let lock = mkt(
+                T1,
+                vec![("team", 'b', vec![entry_of(bad, ArtifactKind::Mcp, "acme/x", 'a')])],
+            );
+            assert_save_refused(&lock, true);
+        }
+    }
+
+    #[test]
+    fn save_marketplace_refuses_a_part_with_bundles() {
+        // C-006: `[[bundle]]` is never written to a marketplace lock.
+        let mut lock = mkt(T1, vec![("team", 'b', vec![])]);
+        lock.plugins.get_mut("team").unwrap().bundles = vec![path_bundle(
+            "stack",
+            "./bundles/stack.toml",
+            'f',
+            vec![bundle_member("x", "ghcr.io/acme/x:1")],
+        )];
+        assert_save_refused(&lock, true);
+    }
+
+    #[test]
+    fn save_marketplace_refuses_a_foreign_hash_version() {
+        // C-006.
+        let mut lock = mkt(T1, vec![("team", 'b', vec![])]);
+        lock.metadata.declaration_hash_version = MARKETPLACE_HASH_VERSION + 1;
+        for part in lock.plugins.values_mut() {
+            part.metadata.declaration_hash_version = MARKETPLACE_HASH_VERSION + 1;
+        }
+        assert_save_refused(&lock, false);
+    }
+
+    #[test]
+    fn save_marketplace_refusal_leaves_the_previous_file() {
+        // C-006: the check runs before the write (`save`'s size-check
+        // precedent), so the previous readable lock survives.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("marketplace.lock");
+        std::fs::write(&path, reference_wire()).unwrap();
+        let bad = mkt(
+            T1,
+            vec![(
+                "team",
+                'b',
+                vec![entry_of("../evil", ArtifactKind::Skill, "acme/x", 'a')],
+            )],
+        );
+        save_marketplace(&path, &bad, None).expect_err("refused");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), reference_wire());
+    }
+
+    // C-007 / C-008 — shape, wire order, round trip.
+
+    #[test]
+    fn load_marketplace_builds_one_part_per_plugin_row() {
+        // C-007 / C-008: parts keyed by `[[plugin]]`, empty part kept, part
+        // metadata = top-level copy with the per-plugin hash, no bundles,
+        // and one artifact pinned differently by two plugins stays two.
+        let dir = tempfile::tempdir().unwrap();
+        let lock = load_marketplace(&write_lock(&dir, &reference_wire())).expect("reference loads");
+        assert_eq!(lock.metadata, mkt_top(T1));
+        assert_eq!(lock.plugins.keys().collect::<Vec<_>>(), ["alpha", "beta", "empty"]);
+        for (name, byte) in [("alpha", 'a'), ("beta", 'b'), ("empty", 'e')] {
+            let p = &lock.plugins[name];
+            assert_eq!(
+                p.metadata,
+                LockMetadata {
+                    declaration_hash: format!("sha256:{}", sha(byte)),
+                    ..mkt_top(T1)
+                },
+                "{name} metadata"
+            );
+            assert!(p.bundles.is_empty(), "{name} has no bundles");
+        }
+        let empty = &lock.plugins["empty"];
+        assert_eq!(empty.iter_artifacts().count(), 0);
+        let digest_of = |plugin: &str| {
+            lock.plugins[plugin]
+                .skills
+                .iter()
+                .find(|a| a.name == "code-review")
+                .map(|a| a.source.pinned().unwrap().digest().to_string())
+                .unwrap()
+        };
+        assert!(digest_of("alpha").ends_with(&sha('2')), "C-008 alpha keeps its own pin");
+        assert!(digest_of("beta").ends_with(&sha('3')), "C-008 beta keeps its own pin");
+        assert_eq!(lock.plugins["beta"].mcp[0].kind, ArtifactKind::Mcp, "kind re-stamped");
+        assert_eq!(lock.plugins["beta"].rules[0].kind, ArtifactKind::Rule);
+        assert_eq!(lock.plugins["alpha"].agents[0].kind, ArtifactKind::Agent);
+        assert_eq!(lock, reference_mkt(T1));
+    }
+
+    #[test]
+    fn save_marketplace_emits_the_canonical_wire_order() {
+        // C-007 / C-005: [metadata], [[plugin]] by name, kind arrays by
+        // (plugin, name), `plugin` right after `name`, no [[bundle]].
+        // Parts are built with entries out of order to prove the sort.
+        let mut lock = reference_mkt(T1);
+        for part in lock.plugins.values_mut() {
+            part.skills.reverse();
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("marketplace.lock");
+        save_marketplace(&path, &lock, None).expect("save");
+        let out = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(out, reference_wire());
+    }
+
+    #[test]
+    fn marketplace_lock_bytes_round_trip() {
+        // C-007: load → save of the canonical form is byte-identical.
+        let dir = tempfile::tempdir().unwrap();
+        let src = write_lock(&dir, &reference_wire());
+        let lock = load_marketplace(&src).unwrap();
+        let dst = dir.path().join("again.lock");
+        save_marketplace(&dst, &lock, None).unwrap();
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), reference_wire());
+    }
+
+    #[test]
+    fn load_after_save_is_identity() {
+        // C-007 property: load_marketplace(save_marketplace(x, None)) == x.
+        let cases = vec![
+            reference_mkt(T1),
+            mkt(T1, vec![("solo", 'c', vec![])]),
+            mkt(
+                "2026-09-27T12:34:56Z",
+                vec![
+                    (
+                        "one",
+                        '1',
+                        vec![entry_of("shared", ArtifactKind::Skill, "acme/shared", 'a')],
+                    ),
+                    (
+                        "two",
+                        '2',
+                        vec![entry_of("shared", ArtifactKind::Skill, "acme/shared", 'b')],
+                    ),
+                    ("three", '3', vec![entry_of("srv", ArtifactKind::Mcp, "acme/srv", 'c')]),
+                ],
+            ),
+        ];
+        for x in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("marketplace.lock");
+            save_marketplace(&path, &x, None).expect("save");
+            assert_eq!(load_marketplace(&path).expect("load"), x);
+        }
+    }
+
+    // C-007 / C-008 — `generated_at` preservation, per part.
+
+    fn saved_generated_at(next: &MarketplaceLock, prev: &MarketplaceLock) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("marketplace.lock");
+        save_marketplace(&path, next, Some(prev)).expect("save");
+        load_marketplace(&path).unwrap().metadata.generated_at
+    }
+
+    #[test]
+    fn marketplace_generated_at_preserved_when_every_part_is_content_equal() {
+        // C-007: same key set, every part content_equal → previous stamp.
+        let prev = reference_mkt("2026-01-01T00:00:00Z");
+        let next = reference_mkt("2099-12-31T23:59:59Z");
+        assert_eq!(saved_generated_at(&next, &prev), "2026-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn marketplace_generated_at_bumped_when_one_part_changes() {
+        // C-007: a changed pin in one part moves the stamp (+1s on collision).
+        let prev = reference_mkt(T1);
+        let mut next = reference_mkt(T1);
+        next.plugins.get_mut("beta").unwrap().rules[0] =
+            entry_of("rust-style", ArtifactKind::Rule, "acme/rust-style", '9');
+        assert_eq!(saved_generated_at(&next, &prev), "2026-04-19T00:00:01Z");
+    }
+
+    #[test]
+    fn marketplace_generated_at_bumped_when_a_plugin_is_added() {
+        // C-007: key sets differ (new empty part), every shared part equal.
+        let prev = reference_mkt(T1);
+        let mut next = reference_mkt(T1);
+        let extra = part(&next.metadata, 'f', vec![]);
+        next.plugins.insert("extra".to_string(), extra);
+        assert_eq!(saved_generated_at(&next, &prev), "2026-04-19T00:00:01Z");
+    }
+
+    #[test]
+    fn marketplace_generated_at_bumped_when_a_plugin_is_dropped() {
+        // C-007: key sets differ (empty part removed), rest equal.
+        let prev = reference_mkt(T1);
+        let mut next = reference_mkt(T1);
+        next.plugins.remove("empty");
+        assert_eq!(saved_generated_at(&next, &prev), "2026-04-19T00:00:01Z");
+    }
+
+    #[test]
+    fn marketplace_generated_at_compares_parts_not_the_union() {
+        // C-008: the two plugins swap their `code-review` digests. The
+        // union of pins is unchanged, but each part changed.
+        let prev = reference_mkt(T1);
+        let mut next = reference_mkt(T1);
+        let swap = |p: &mut GrimoireLock, byte: char| {
+            let e = p.skills.iter_mut().find(|a| a.name == "code-review").unwrap();
+            e.source = crate::lock::locked_source::LockedSource::Registry(pinned("acme/code-review", None, byte));
+        };
+        swap(next.plugins.get_mut("alpha").unwrap(), '3');
+        swap(next.plugins.get_mut("beta").unwrap(), '2');
+        assert_eq!(saved_generated_at(&next, &prev), "2026-04-19T00:00:01Z");
+    }
+
+    #[test]
+    fn load_rejects_an_empty_plugin_array() {
+        // C-006: `plugin = []` was an unknown key before the scope existed;
+        // a grimoire.lock still refuses it.
+        assert_load_scope_mismatch(&format!("plugin = []\n{}", mkt_metadata(1)));
+    }
+
+    #[test]
+    fn load_marketplace_rejects_duplicate_plugin_rows() {
+        // C-006 (plan decision): two `[[plugin]]` rows for one name would
+        // otherwise let the later row silently replace the earlier part.
+        let body = format!(
+            "{}{}{}{}",
+            mkt_metadata(MARKETPLACE_HASH_VERSION),
+            plugin_row("team", 'b'),
+            plugin_row("team", 'c'),
+            entry("skill", "x", Some("team"))
+        );
+        assert_load_marketplace_scope_mismatch(&body);
     }
 }

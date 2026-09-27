@@ -7,7 +7,7 @@
 //!
 //! JSON format: `{"items": [...]}` where each item is a
 //! `{kind, name, old, new, action, reaped_clients, kept_modified_clients,
-//! retained, abandoned_entries, refused}` object (uniform `items` envelope, per
+//! retained, abandoned_entries, refused, plugin}` object (uniform `items` envelope, per
 //! subsystem-cli-api.md). `old` is `null` for an artifact that had no
 //! previous lock entry; `reaped_clients` / `kept_modified_clients` are
 //! always-present sorted client-name arrays (`[]` when no client was
@@ -19,6 +19,8 @@
 //! always-present `{path, pointer}` objects (`[]` on every healthy row).
 //! `refused` is an always-present bool — `true` only on a row the integrity
 //! gate refused to overwrite (exit 65, forceable), `false` everywhere else.
+//! `plugin` is always present: the plugin name on a `--marketplace` row,
+//! `null` otherwise; the plain table then shows `Name` as `<plugin>:<name>`.
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -77,6 +79,10 @@ pub struct UpdateEntry {
     /// `action` deliberately keeps reporting the lock diff: the pin did roll
     /// forward, only the materialization was refused.
     pub refused: bool,
+    /// The marketplace plugin this row belongs to (C-013) — the plugin name
+    /// on a `grim update --marketplace` row, `null` on every other row.
+    /// Always present; last so every earlier key keeps its position.
+    pub plugin: Option<String>,
 }
 
 fn serialize_kind<S: Serializer>(kind: &ArtifactKind, s: S) -> Result<S::Ok, S::Error> {
@@ -102,6 +108,11 @@ impl UpdateReport {
         Self { items }
     }
 
+    /// The rows, for a caller concatenating several reports in order.
+    pub fn into_items(self) -> Vec<UpdateEntry> {
+        self.items
+    }
+
     /// Flag the row for `(kind, name)` as refused by the integrity gate.
     ///
     /// Applied after the fact because the refusal is only known once the
@@ -123,7 +134,10 @@ impl Printable for UpdateReport {
             .map(|e| {
                 vec![
                     e.kind.to_string(),
-                    e.name.clone(),
+                    match &e.plugin {
+                        Some(p) => format!("{p}:{}", e.name),
+                        None => e.name.clone(),
+                    },
                     e.old
                         .as_ref()
                         .map(Digest::to_short_string)
@@ -152,6 +166,7 @@ mod tests {
     #[test]
     fn plain_single_table_with_old_dash_when_absent() {
         let r = UpdateReport::new(vec![UpdateEntry {
+            plugin: None,
             kind: ArtifactKind::Skill,
             name: "code-review".to_string(),
             old: None,
@@ -177,6 +192,7 @@ mod tests {
         let old = Algorithm::Sha256.hash(b"old");
         let r = UpdateReport::new(vec![
             UpdateEntry {
+                plugin: None,
                 kind: ArtifactKind::Rule,
                 name: "a".to_string(),
                 old: None,
@@ -189,6 +205,7 @@ mod tests {
                 refused: false,
             },
             UpdateEntry {
+                plugin: None,
                 kind: ArtifactKind::Rule,
                 name: "b".to_string(),
                 old: Some(old.clone()),
@@ -234,6 +251,7 @@ mod tests {
 
     fn plain_row(kind: ArtifactKind, name: &str) -> UpdateEntry {
         UpdateEntry {
+            plugin: None,
             kind,
             name: name.to_string(),
             old: None,
@@ -261,5 +279,49 @@ mod tests {
         assert!(r.items[0].refused);
         assert!(!r.items[1].refused, "a sibling that reconciled stays clean");
         assert!(!r.items[2].refused, "same name, other kind, must not be flagged");
+    }
+
+    #[test]
+    fn c013_plugin_is_always_present_and_serialized_last() {
+        // C-013 / C-031.3: `null` on a normal row, the name on a marketplace
+        // row, and last so every pre-existing key keeps its position.
+        let normal = serde_json::to_string(&plain_row(ArtifactKind::Rule, "a")).unwrap();
+        assert!(normal.ends_with(r#","refused":false,"plugin":null}"#), "{normal}");
+        let mkt = serde_json::to_string(&UpdateEntry {
+            plugin: Some("team".to_string()),
+            ..plain_row(ArtifactKind::Skill, "hex-plan")
+        })
+        .unwrap();
+        assert!(mkt.ends_with(r#","refused":false,"plugin":"team"}"#), "{mkt}");
+        assert!(
+            normal.starts_with(r#"{"kind":"rule","name":"a","old":null,"new":"#),
+            "earlier keys unchanged: {normal}"
+        );
+    }
+
+    #[test]
+    fn c013_plain_prefixes_the_plugin_only_on_marketplace_rows() {
+        let r = UpdateReport::new(vec![
+            UpdateEntry {
+                plugin: Some("team".to_string()),
+                ..plain_row(ArtifactKind::Skill, "hex-plan")
+            },
+            plain_row(ArtifactKind::Rule, "code-review"),
+        ]);
+        let mut buf = Vec::new();
+        r.print_plain(&mut buf).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines[0].split_whitespace().collect::<Vec<_>>(),
+            ["Kind", "Name", "Old", "New", "Action"],
+            "no new column: {out}"
+        );
+        assert!(lines.iter().any(|l| l.contains("team:hex-plan")), "{out}");
+        let normal = lines.iter().find(|l| l.contains("code-review")).unwrap();
+        assert!(
+            normal.split_whitespace().any(|w| w == "code-review"),
+            "a normal row's Name is unprefixed: {out}"
+        );
     }
 }

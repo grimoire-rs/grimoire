@@ -18,6 +18,7 @@ use crate::cli::exit_code::ExitCode;
 use crate::cli::printer::StdoutPipeClosed;
 use crate::command::command_error::CommandError;
 use crate::config::config_error::{ConfigError, ConfigErrorKind};
+use crate::export::export_error::ExportError;
 use crate::install::install_error::{InstallError, InstallErrorKind};
 use crate::install::path_anchor::AnchorError;
 use crate::lock::lock_error::{LockError, LockErrorKind};
@@ -83,6 +84,9 @@ pub enum Error {
 
     #[error(transparent)]
     Rate(#[from] RateError),
+
+    #[error(transparent)]
+    Export(#[from] ExportError),
 }
 
 /// Machine-readable failure `reason` subtype for the JSON error envelope
@@ -238,6 +242,7 @@ pub fn classify(err: &anyhow::Error) -> Classification {
                     | AnnounceError::Fork { .. }
                     | AnnounceError::Client(_) => ExitCode::Unavailable,
                 }),
+                Error::Export(ee) => classify_export(ee),
             };
         }
     }
@@ -342,8 +347,37 @@ fn classify_lock(err: &LockError) -> Classification {
         LockErrorKind::TomlParse(_)
         | LockErrorKind::TomlSerialize(_)
         | LockErrorKind::FileTooLarge { .. }
-        | LockErrorKind::UnsupportedVersion { .. } => Classification::new(ExitCode::ConfigError),
+        | LockErrorKind::UnsupportedVersion { .. }
+        | LockErrorKind::ScopeMismatch { .. } => Classification::new(ExitCode::ConfigError),
         LockErrorKind::Io(io) => Classification::new(classify_io(io)),
+    }
+}
+
+/// Map an export-owned error to a classification (C-028). Only
+/// `OutputExists` carries a reason: it is the same force-recoverable
+/// refusal as an install's untracked destination.
+fn classify_export(err: &ExportError) -> Classification {
+    match err {
+        ExportError::Usage(_) => Classification::new(ExitCode::UsageError),
+        ExportError::Manifest { .. }
+        | ExportError::NoneDeclared { .. }
+        | ExportError::InvalidVersion { .. }
+        | ExportError::RenameInvalid { .. }
+        | ExportError::RenameCollision { .. }
+        | ExportError::RenameStaleReference { .. }
+        | ExportError::EmptyPlugin { .. }
+        | ExportError::UnsafeEntry { .. } => Classification::new(ExitCode::DataError),
+        ExportError::OutputExists { .. } => Classification {
+            exit: ExitCode::DataError,
+            reason: Some(ErrorReason::UntrackedDestination),
+        },
+        ExportError::NoPluginFormat { .. } | ExportError::MemberConflict { .. } => {
+            Classification::new(ExitCode::ConfigError)
+        }
+        ExportError::PluginNotFound { .. }
+        | ExportError::SelectorNotFound { .. }
+        | ExportError::IncludeNotFound { .. } => Classification::new(ExitCode::NotFound),
+        ExportError::Io { source, .. } => Classification::new(classify_io(source)),
     }
 }
 
@@ -1147,6 +1181,254 @@ mod tests {
     }
 
     #[test]
+    fn unknown_key_hint_stays_silent_on_an_unrelated_error() {
+        assert!(unknown_key_hint("bundle not found").is_none());
+        assert!(unknown_key_hint("invalid bundle: missing field `id`").is_none());
+    }
+
+    // ── C-028 export classification ────────────────────────────────
+
+    /// The variant name of `err`. Exhaustive without a wildcard: a new
+    /// `ExportError` variant fails to compile until the C-028 table below
+    /// names it.
+    fn export_variant(err: &ExportError) -> &'static str {
+        match err {
+            ExportError::Usage(_) => "Usage",
+            ExportError::Manifest { .. } => "Manifest",
+            ExportError::NoneDeclared { .. } => "NoneDeclared",
+            ExportError::InvalidVersion { .. } => "InvalidVersion",
+            ExportError::RenameInvalid { .. } => "RenameInvalid",
+            ExportError::RenameCollision { .. } => "RenameCollision",
+            ExportError::RenameStaleReference { .. } => "RenameStaleReference",
+            ExportError::EmptyPlugin { .. } => "EmptyPlugin",
+            ExportError::UnsafeEntry { .. } => "UnsafeEntry",
+            ExportError::OutputExists { .. } => "OutputExists",
+            ExportError::NoPluginFormat { .. } => "NoPluginFormat",
+            ExportError::MemberConflict { .. } => "MemberConflict",
+            ExportError::PluginNotFound { .. } => "PluginNotFound",
+            ExportError::IncludeNotFound { .. } => "IncludeNotFound",
+            ExportError::SelectorNotFound { .. } => "SelectorNotFound",
+            ExportError::Io { .. } => "Io",
+        }
+    }
+
+    #[test]
+    fn c028_every_export_error_variant_classifies_per_the_table() {
+        use crate::install::ClientTarget;
+        use crate::oci::ArtifactKind;
+        use std::path::PathBuf;
+
+        let s = String::from;
+        let cases: Vec<(ExportError, ExitCode, Option<ErrorReason>)> = vec![
+            (ExportError::Usage(s("u")), ExitCode::UsageError, None),
+            (
+                ExportError::Manifest {
+                    path: PathBuf::from("/w/marketplace.toml"),
+                    message: s("m"),
+                },
+                ExitCode::DataError,
+                None,
+            ),
+            (
+                ExportError::NoneDeclared {
+                    path: PathBuf::from("/w/marketplace.toml"),
+                },
+                ExitCode::DataError,
+                None,
+            ),
+            (ExportError::InvalidVersion { value: s("x") }, ExitCode::DataError, None),
+            (
+                ExportError::RenameInvalid {
+                    plugin: s("p"),
+                    from: s("a"),
+                    to: s(""),
+                },
+                ExitCode::DataError,
+                None,
+            ),
+            (
+                ExportError::RenameCollision {
+                    plugin: s("p"),
+                    kind: ArtifactKind::Skill,
+                    name: s("n"),
+                    members: [s("a"), s("b")],
+                },
+                ExitCode::DataError,
+                None,
+            ),
+            (
+                ExportError::RenameStaleReference {
+                    plugin: s("p"),
+                    hits: vec![s("claude: x:1: 'old'")],
+                },
+                ExitCode::DataError,
+                None,
+            ),
+            (
+                ExportError::EmptyPlugin {
+                    plugin: s("p"),
+                    client: ClientTarget::Claude,
+                },
+                ExitCode::DataError,
+                None,
+            ),
+            (
+                ExportError::UnsafeEntry {
+                    path: PathBuf::from("../x"),
+                },
+                ExitCode::DataError,
+                None,
+            ),
+            (
+                ExportError::OutputExists {
+                    paths: vec![PathBuf::from("/out/p")],
+                },
+                ExitCode::DataError,
+                Some(ErrorReason::UntrackedDestination),
+            ),
+            (
+                ExportError::NoPluginFormat {
+                    client: ClientTarget::Claude,
+                },
+                ExitCode::ConfigError,
+                None,
+            ),
+            (
+                ExportError::MemberConflict {
+                    plugin: s("p"),
+                    kind: ArtifactKind::Skill,
+                    name: s("x"),
+                    first: s("a/x:1"),
+                    second: s("b/x:1"),
+                },
+                ExitCode::ConfigError,
+                None,
+            ),
+            (ExportError::PluginNotFound { name: s("p") }, ExitCode::NotFound, None),
+            (
+                ExportError::IncludeNotFound {
+                    plugin: s("p"),
+                    include: s("a/x:1"),
+                },
+                ExitCode::NotFound,
+                None,
+            ),
+            (
+                ExportError::SelectorNotFound { selector: s("p:m") },
+                ExitCode::NotFound,
+                None,
+            ),
+            (
+                ExportError::Io {
+                    path: PathBuf::from("/out"),
+                    source: std::io::Error::other("disk full"),
+                },
+                ExitCode::IoError,
+                None,
+            ),
+            (
+                ExportError::Io {
+                    path: PathBuf::from("/out"),
+                    source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+                },
+                ExitCode::NoPermission,
+                None,
+            ),
+        ];
+
+        let covered: std::collections::BTreeSet<&str> = cases.iter().map(|(e, ..)| export_variant(e)).collect();
+        assert_eq!(covered.len(), 16, "every ExportError variant has a row: {covered:?}");
+
+        for (inner, exit, reason) in cases {
+            let variant = export_variant(&inner);
+            let c = classify(&anyhow::Error::from(Error::from(inner)));
+            assert_eq!((c.exit, c.reason), (exit, reason), "{variant}");
+        }
+    }
+
+    #[test]
+    fn c028_output_exists_is_a_forceable_refusal() {
+        // Same recovery as an install's untracked destination: `--force`.
+        let err = Error::from(ExportError::OutputExists {
+            paths: vec![std::path::PathBuf::from("/out/p.zip")],
+        });
+        let reason = classify(&anyhow::Error::from(err)).reason.expect("reason");
+        assert_eq!(reason.to_string(), "untracked-destination");
+        assert!(reason.forceable());
+        assert!(!reason.retryable());
+    }
+
+    // ── C-031.4 frozen exit codes and reason slugs ─────────────────
+
+    /// `(code, slug)` of every `ExitCode` at 520c6540, the base of the
+    /// harness plugin export work.
+    const FROZEN_EXIT_CODES: [(u8, &str); 12] = [
+        (0, "success"),
+        (1, "failure"),
+        (64, "usage"),
+        (65, "data"),
+        (69, "unavailable"),
+        (74, "io"),
+        (75, "temp-fail"),
+        (77, "no-permission"),
+        (78, "config"),
+        (79, "not-found"),
+        (80, "auth"),
+        (81, "offline-blocked"),
+    ];
+
+    /// Every `ErrorReason` slug at 520c6540.
+    const FROZEN_REASON_SLUGS: [&str; 6] = [
+        "stale-lock",
+        "modified",
+        "untracked-destination",
+        "no-config",
+        "locked",
+        "anchor-escape",
+    ];
+
+    #[test]
+    fn c031_4_no_new_exit_code_variant() {
+        // Exhaustive, no wildcard: a new variant needs an arm, and the next
+        // index has no frozen row.
+        fn position(c: ExitCode) -> usize {
+            match c {
+                ExitCode::Success => 0,
+                ExitCode::Failure => 1,
+                ExitCode::UsageError => 2,
+                ExitCode::DataError => 3,
+                ExitCode::Unavailable => 4,
+                ExitCode::IoError => 5,
+                ExitCode::TempFail => 6,
+                ExitCode::NoPermission => 7,
+                ExitCode::ConfigError => 8,
+                ExitCode::NotFound => 9,
+                ExitCode::AuthError => 10,
+                ExitCode::OfflineBlocked => 11,
+            }
+        }
+        let every = [
+            ExitCode::Success,
+            ExitCode::Failure,
+            ExitCode::UsageError,
+            ExitCode::DataError,
+            ExitCode::Unavailable,
+            ExitCode::IoError,
+            ExitCode::TempFail,
+            ExitCode::NoPermission,
+            ExitCode::ConfigError,
+            ExitCode::NotFound,
+            ExitCode::AuthError,
+            ExitCode::OfflineBlocked,
+        ];
+        for (i, c) in every.iter().enumerate() {
+            assert_eq!(position(*c), i);
+        }
+        let listed: Vec<(u8, &str)> = every.iter().map(|c| (*c as u8, c.slug())).collect();
+        assert_eq!(listed, FROZEN_EXIT_CODES);
+    }
+
+    #[test]
     fn undeclared_name_is_79_not_found() {
         use crate::oci::ArtifactKind;
         let err = ResolveError::unidentified(ArtifactKind::Skill, "ghost", ResolveErrorKind::NotDeclared);
@@ -1155,8 +1437,29 @@ mod tests {
     }
 
     #[test]
-    fn unknown_key_hint_stays_silent_on_an_unrelated_error() {
-        assert!(unknown_key_hint("bundle not found").is_none());
-        assert!(unknown_key_hint("invalid bundle: missing field `id`").is_none());
+    fn c031_4_no_new_error_reason_slug() {
+        fn position(r: ErrorReason) -> usize {
+            match r {
+                ErrorReason::StaleLock => 0,
+                ErrorReason::LocalModified => 1,
+                ErrorReason::UntrackedDestination => 2,
+                ErrorReason::NoConfig => 3,
+                ErrorReason::Locked => 4,
+                ErrorReason::AnchorEscape => 5,
+            }
+        }
+        let every = [
+            ErrorReason::StaleLock,
+            ErrorReason::LocalModified,
+            ErrorReason::UntrackedDestination,
+            ErrorReason::NoConfig,
+            ErrorReason::Locked,
+            ErrorReason::AnchorEscape,
+        ];
+        for (i, r) in every.iter().enumerate() {
+            assert_eq!(position(*r), i);
+        }
+        let listed: Vec<String> = every.iter().map(ToString::to_string).collect();
+        assert_eq!(listed, FROZEN_REASON_SLUGS);
     }
 }

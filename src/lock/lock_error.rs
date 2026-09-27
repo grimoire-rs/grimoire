@@ -88,6 +88,12 @@ pub enum LockErrorKind {
     /// computed hash.
     #[error("unsupported declaration_hash_version {version}; this build understands version 1")]
     UnsupportedVersion { version: u8 },
+
+    /// The file is the other lock flavor: a `grimoire.lock` carrying
+    /// plugin scope, or a `marketplace.lock` entry outside a declared
+    /// plugin (or with a name unsafe to materialize).
+    #[error("{message}")]
+    ScopeMismatch { message: String },
 }
 
 #[cfg(test)]

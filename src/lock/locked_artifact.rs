@@ -97,6 +97,54 @@ struct RawLockedArtifact {
     /// this member. Mutually exclusive with the `bundle`/`bundle_tag` pair.
     #[serde(default)]
     bundles: Vec<BundleProvenance>,
+    /// `marketplace.lock` only: the plugin this entry belongs to. Wire-only
+    /// — it never reaches [`LockedArtifact`], and it is skipped from the
+    /// published `grimoire.lock` schema, which must stay byte-identical.
+    #[serde(default)]
+    #[schemars(skip)]
+    plugin: Option<String>,
+}
+
+/// One lock entry as the shared raw parse sees it: the artifact plus the
+/// wire-only `plugin` scope, which is split off here so it never reaches
+/// [`LockedArtifact`]. Each lock flavor decides whether a scope is
+/// required or forbidden.
+#[derive(Debug, Deserialize)]
+#[serde(try_from = "RawLockedArtifact")]
+pub(crate) struct ScopedEntry {
+    /// `marketplace.lock` plugin this entry belongs to.
+    pub plugin: Option<String>,
+    /// The artifact, `kind` still at its default until re-stamped.
+    pub artifact: LockedArtifact,
+}
+
+impl TryFrom<RawLockedArtifact> for ScopedEntry {
+    type Error = String;
+
+    fn try_from(mut raw: RawLockedArtifact) -> Result<Self, Self::Error> {
+        let plugin = raw.plugin.take();
+        Ok(Self {
+            plugin,
+            artifact: LockedArtifact::try_from(raw)?,
+        })
+    }
+}
+
+impl schemars::JsonSchema for ScopedEntry {
+    // The published lock schema must not change (C-031.1): this type
+    // stands in for `LockedArtifact` in the raw parse, so it describes
+    // itself as exactly that definition.
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        LockedArtifact::schema_name()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        LockedArtifact::schema_id()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        LockedArtifact::json_schema(generator)
+    }
 }
 
 impl schemars::JsonSchema for LockedArtifact {
@@ -129,6 +177,11 @@ impl TryFrom<RawLockedArtifact> for LockedArtifact {
     type Error = String;
 
     fn try_from(raw: RawLockedArtifact) -> Result<Self, Self::Error> {
+        // Only `ScopedEntry` may consume a plugin scope; a bare artifact
+        // refuses it exactly as it refused the unknown field before.
+        if raw.plugin.is_some() {
+            return Err("unknown field `plugin`".to_string());
+        }
         let bundles = match (raw.bundle, raw.bundle_tag, raw.bundles) {
             (None, None, list) => list,
             (Some(repo), Some(tag), list) if list.is_empty() => vec![BundleProvenance::new(repo, tag)],

@@ -1,0 +1,329 @@
+{
+  "$defs": {
+    "ArtifactKind": {
+      "description": "A Grimoire-managed artifact kind.\n\nClosed internal enum: the binary is the only consumer, so matches stay\ntotal — no `#[non_exhaustive]`.",
+      "oneOf": [
+        {
+          "const": "skill",
+          "description": "An Agent Skill: a `SKILL.md` directory with YAML frontmatter.\n\nAlso the `Default`: the lock layer's `LockedArtifact::kind` is\n`#[serde(skip)]` and re-stamped from the array it was read from, so\nthe deserialization placeholder is never observed.",
+          "type": "string"
+        },
+        {
+          "const": "rule",
+          "description": "A rule: a single `paths:`-scoped markdown file.",
+          "type": "string"
+        },
+        {
+          "const": "agent",
+          "description": "An agent: a single markdown file whose required frontmatter\n(`name`, `description`) plus optional common fields (`model`,\n`tools`) define an AI agent; the body is the system prompt.\nProjected per client at install time.",
+          "type": "string"
+        },
+        {
+          "const": "bundle",
+          "description": "A bundle: a curated set of members (`skill`, `rule`, `agent` or\n`mcp`), declared in\n`[bundles]` and expanded into its members at resolve time. A bundle\nis never materialized or written to the lock itself — only the\nmembers it expands to are.",
+          "type": "string"
+        },
+        {
+          "const": "mcp",
+          "description": "An MCP server descriptor: a vendor-agnostic definition of a Model\nContext Protocol server (transport, command/url, env). Installs by\nregistering an entry in each client's native MCP config file —\nnever as a materialized file of its own.",
+          "type": "string"
+        }
+      ]
+    },
+    "BundleMember": {
+      "additionalProperties": false,
+      "description": "One member of a bundle: a reference to another artifact.",
+      "properties": {
+        "id": {
+          "description": "Fully-qualified member identifier (floating `registry/repo:tag` or\npinned `registry/repo@sha256:…`).",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ArtifactKind",
+          "description": "The member kind: `skill`, `rule`, `agent`, or `mcp` — one per\nmember table of the bundle source. A nested `bundle` is rejected at\nexpansion time (no recursion in v1)."
+        },
+        "name": {
+          "description": "The config binding name the member installs under.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "name",
+        "id"
+      ],
+      "type": "object"
+    },
+    "BundleProvenance": {
+      "additionalProperties": false,
+      "description": "One bundle that contributed a lock member: the bundle's\n`registry/repo` plus the tag the declaration resolved.",
+      "properties": {
+        "repo": {
+          "description": "The bundle's `registry/repo`.",
+          "type": "string"
+        },
+        "tag": {
+          "description": "The declared bundle tag that resolved this member.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repo",
+        "tag"
+      ],
+      "type": "object"
+    },
+    "Digest": {
+      "description": "A content digest in canonical `algorithm:hex` form (e.g. `sha256:<64 hex>`)",
+      "pattern": "^(sha256|sha384|sha512):[0-9a-f]+$",
+      "type": "string"
+    },
+    "LockMetadata": {
+      "additionalProperties": false,
+      "description": "Lock metadata header.",
+      "properties": {
+        "declaration_hash": {
+          "description": "`sha256:<hex>` of the RFC 8785 JCS-canonicalized declaration.",
+          "type": "string"
+        },
+        "declaration_hash_version": {
+          "description": "Canonicalization-contract version for [`Self::declaration_hash`].",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "generated_at": {
+          "description": "RFC3339 UTC timestamp. Preserved verbatim when the resolved\ncontent of every artifact is unchanged between two lock runs.",
+          "type": "string"
+        },
+        "generated_by": {
+          "description": "Tooling version string that wrote the lock, e.g. `\"grim 0.1.0\"`.",
+          "type": "string"
+        },
+        "lock_version": {
+          "$ref": "#/$defs/LockVersion",
+          "description": "On-disk schema version (currently always [`LockVersion::V1`])."
+        }
+      },
+      "required": [
+        "lock_version",
+        "declaration_hash_version",
+        "declaration_hash",
+        "generated_by",
+        "generated_at"
+      ],
+      "type": "object"
+    },
+    "LockVersion": {
+      "description": "Lock-file format version (currently always 1)",
+      "enum": [
+        1
+      ],
+      "type": "integer"
+    },
+    "LockedArtifact": {
+      "additionalProperties": false,
+      "description": "One locked artifact, pinned either to a registry manifest digest (`pinned`) or to a local path source (`path` + `hash`, set together) — never both on one entry. Bundle provenance is either the legacy `bundle` + `bundle_tag` pair (set together) or the `bundles` array — never both, and never on a path-sourced entry",
+      "properties": {
+        "bundle": {
+          "default": null,
+          "description": "Legacy single-provenance pair: the contributing bundle's\n`registry/repo`. Set together with `bundle_tag`; mutually exclusive\nwith `bundles`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bundle_tag": {
+          "default": null,
+          "description": "Legacy single-provenance pair: the declared bundle tag. Set\ntogether with `bundle`; mutually exclusive with `bundles`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bundles": {
+          "default": [],
+          "description": "Multi-provenance array: every declared bundle that contributed\nthis member. Mutually exclusive with the `bundle`/`bundle_tag` pair.",
+          "items": {
+            "$ref": "#/$defs/BundleProvenance"
+          },
+          "type": "array"
+        },
+        "hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Digest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Content hash of the path source's canonical packed layer. Set\ntogether with `path`."
+        },
+        "name": {
+          "description": "Config binding name (TOML key from `grimoire.toml`).",
+          "type": "string"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PathSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Local path source (relative to the config file's directory, or\nabsolute). Set together with `hash`; mutually exclusive with\n`pinned`."
+        },
+        "pinned": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PinnedIdentifier"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Resolved registry/repo pinned to a content digest. Mutually\nexclusive with the `path` + `hash` pair."
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "LockedBundle": {
+      "additionalProperties": false,
+      "description": "One cached bundle expansion, pinned either to a registry manifest digest (`repo` + `tag` + `pinned`, set together) or to a local path source (`path` + `hash`, set together) — never both on one entry",
+      "properties": {
+        "hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Digest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Path arm: the SHA-256 of the canonical members layer. Set together\nwith `path`."
+        },
+        "member": {
+          "default": [],
+          "description": "The member list the bundle carried at resolution time.",
+          "items": {
+            "$ref": "#/$defs/BundleMember"
+          },
+          "type": "array"
+        },
+        "name": {
+          "description": "Config binding name (TOML key from `[bundles]`).",
+          "type": "string"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PathSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Path arm: the declared local path source. Set together with `hash`;\nmutually exclusive with the registry arm."
+        },
+        "pinned": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PinnedIdentifier"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Registry arm: the resolved bundle manifest digest. Set together with\n`repo` and `tag`."
+        },
+        "repo": {
+          "description": "Registry arm: the bundle's `registry/repo`. Set together with `tag`\nand `pinned`; mutually exclusive with `path` + `hash`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tag": {
+          "description": "Registry arm: the declared tag this expansion resolved. Set together\nwith `repo` and `pinned`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "PathSource": {
+      "description": "A local path source: `./` or `../` relative to the config file's directory, or an absolute path (forward slashes only)",
+      "type": "string"
+    },
+    "PinnedIdentifier": {
+      "description": "A fully-qualified OCI reference pinned to a content digest (`registry/repo@sha256:<hex>`; an advisory `:tag` may precede the digest)",
+      "pattern": "@sha256:[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "$id": "https://grimoire.rs/schemas/grimoire-lock.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Raw on-disk shape used for deserialization.",
+  "properties": {
+    "agent": {
+      "description": "Locked agents (`[[agent]]`).",
+      "items": {
+        "$ref": "#/$defs/LockedArtifact"
+      },
+      "type": "array"
+    },
+    "bundle": {
+      "default": [],
+      "description": "Cached bundle expansions (`[[bundle]]`).",
+      "items": {
+        "$ref": "#/$defs/LockedBundle"
+      },
+      "type": "array"
+    },
+    "mcp": {
+      "description": "Locked MCP server descriptors (`[[mcp]]`).",
+      "items": {
+        "$ref": "#/$defs/LockedArtifact"
+      },
+      "type": "array"
+    },
+    "metadata": {
+      "$ref": "#/$defs/LockMetadata",
+      "description": "Metadata header (`[metadata]`)."
+    },
+    "rule": {
+      "description": "Locked rules (`[[rule]]`).",
+      "items": {
+        "$ref": "#/$defs/LockedArtifact"
+      },
+      "type": "array"
+    },
+    "skill": {
+      "description": "Locked skills (`[[skill]]`).",
+      "items": {
+        "$ref": "#/$defs/LockedArtifact"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "metadata"
+  ],
+  "title": "grimoire.lock — Grimoire lockfile",
+  "type": "object"
+}

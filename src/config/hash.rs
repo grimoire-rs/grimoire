@@ -26,6 +26,12 @@ use crate::oci::Algorithm;
 /// to the hash input format and a migration event, not a drive-by edit.
 pub const DECLARATION_HASH_VERSION: u8 = 1;
 
+/// Canonicalization-contract version of a `marketplace.lock`'s
+/// `declaration_hash_version` — the per-plugin include-expansion hash.
+/// Independent of [`DECLARATION_HASH_VERSION`]: the two inputs evolve
+/// separately, so neither bump may drag the other along.
+pub const MARKETPLACE_HASH_VERSION: u8 = 1;
+
 /// Compute the declaration hash for a [`DesiredSet`].
 ///
 /// Algorithm (v1):

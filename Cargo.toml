@@ -82,6 +82,10 @@ globset = "0.4"
 # algorithm is stable and only this one module names the crate, so swapping
 # it (e.g. for nucleo-matcher, MPL-2.0) stays a one-file change.
 fuzzy-matcher = "0.3"
+# Byte-reproducible zip writer for `grim export plugin --zip`
+# (export::archive::write_zip, design record C-026). No extra features
+# needed: entries are stored (uncompressed), not deflated.
+zip = { version = "8.6", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

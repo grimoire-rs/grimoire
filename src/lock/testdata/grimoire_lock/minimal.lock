@@ -1,0 +1,10 @@
+skill = []
+rule = []
+agent = []
+
+[metadata]
+lock_version = 1
+declaration_hash_version = 1
+declaration_hash = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+generated_by = "grim 0.1.0"
+generated_at = "2026-04-19T00:00:00Z"
