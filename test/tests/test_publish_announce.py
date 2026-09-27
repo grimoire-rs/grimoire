@@ -112,7 +112,7 @@ def _index_remote(tmp_path: Path, runner) -> Path:
     runner.env.update(
         {
             "GIT_CONFIG_COUNT": "1",
-            "GIT_CONFIG_KEY_0": f"url.{bare}.insteadOf",
+            "GIT_CONFIG_KEY_0": f"url.{bare.as_posix()}.insteadOf",
             "GIT_CONFIG_VALUE_0": INDEX_URL,
         }
     )
@@ -133,9 +133,9 @@ def _index_and_fork_remote(tmp_path: Path, runner, fork_url: str = FORK_URL) -> 
     runner.env.update(
         {
             "GIT_CONFIG_COUNT": "2",
-            "GIT_CONFIG_KEY_0": f"url.{upstream}.insteadOf",
+            "GIT_CONFIG_KEY_0": f"url.{upstream.as_posix()}.insteadOf",
             "GIT_CONFIG_VALUE_0": INDEX_URL,
-            "GIT_CONFIG_KEY_1": f"url.{fork}.insteadOf",
+            "GIT_CONFIG_KEY_1": f"url.{fork.as_posix()}.insteadOf",
             "GIT_CONFIG_VALUE_1": fork_url,
         }
     )
@@ -542,7 +542,7 @@ def test_publish_announce_local_path_requires_host(
     name = "ann-nohost"
     _make_skill_source(project_dir, name, "No host.")
     bare = _bare_index_repo(tmp_path)
-    _manifest(project_dir, ns, name, str(bare))
+    _manifest(project_dir, ns, name, bare.as_posix())
 
     runner = grim_at(project_dir)
     result = runner.run("publish", "--announce", check=False)
@@ -581,7 +581,7 @@ def test_publish_announce_unreachable_index_exits_unavailable(
     name = "ann-fail"
     _make_skill_source(project_dir, name, "Unreachable index.")
     # host set explicitly so the failure is the clone, not host derivation
-    _manifest(project_dir, ns, name, str(tmp_path / "no-such-repo.git"), host=INDEX_HOST)
+    _manifest(project_dir, ns, name, (tmp_path / "no-such-repo.git").as_posix(), host=INDEX_HOST)
 
     runner = grim_at(project_dir)
     result = runner.run("publish", "--announce", check=False)
@@ -913,7 +913,7 @@ def test_publish_announce_json_failure_keeps_entries(
     ns = f"grim-test/{uuid.uuid4().hex[:12]}"
     name = "ann-json-fail"
     _make_skill_source(project_dir, name, "Fail JSON.")
-    _manifest(project_dir, ns, name, str(tmp_path / "no-such-repo.git"), host=INDEX_HOST)
+    _manifest(project_dir, ns, name, (tmp_path / "no-such-repo.git").as_posix(), host=INDEX_HOST)
 
     runner = grim_at(project_dir)
     result = runner.run("publish", "--announce", format="json", check=False)
