@@ -229,11 +229,11 @@ def _sha(p: Path) -> str:
 
 
 def _write_marketplace(path: Path, plugins: dict[str, dict]) -> Path:
-    """`{name: {"include": [...], "description"?: str, "version"?: str, "strip_prefix"?: str}}`."""
+    """`{name: {"include": [...], "description"?: str, "version"?: str, "logo"?: str, "strip_prefix"?: str}}`."""
     chunks = []
     for name, decl in plugins.items():
         lines = [f"[plugins.{name}]", f"include = {json.dumps(decl['include'])}"]
-        for key in ("description", "version"):
+        for key in ("description", "version", "logo"):
             if key in decl:
                 lines.append(f"{key} = {json.dumps(decl[key])}")
         if "strip_prefix" in decl:
@@ -1364,3 +1364,77 @@ def test_s033_progress_json_counts_members_across_plugins(grim_at, work: Path, r
     assert [(e["position"], e["total"]) for e in advances] == [(1, 3), (2, 3), (3, 3)]
     assert [e["label"] for e in advances] == ["one: skill a", "two: skill b", "two: skill c"]
     assert events[-1] == {"event": "finish"}
+
+
+# ── S-034 — Plugin logo: assets/logo.<ext>, Codex manifest key, README ─────
+
+SVG = b'<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"/>\n'
+
+
+def test_s034_declared_logo_ships_in_every_client(grim_at, work: Path, registry: str, unique_repo: str) -> None:
+    runner = grim_at(work)
+    _skill(f"{unique_repo}/a", "a")
+    (work / "art").mkdir()
+    (work / "art" / "team.svg").write_bytes(SVG)
+    _write_marketplace(
+        work / "marketplace.toml", {"team": {"include": [f"{registry}/{unique_repo}/a:1"], "logo": "art/team.svg"}}
+    )
+
+    _ok(_export(runner, "--client", "claude,codex", "-o", "dist"))
+
+    claude, codex = work / "dist" / "team.claude", work / "dist" / "team.codex"
+    for root in (claude, codex):
+        assert (root / "assets" / "logo.svg").read_bytes() == SVG
+        assert _readme(root).startswith("# team\n\n![team](assets/logo.svg)\n\n")
+    assert "extensions" not in _manifest(claude), "Claude plugin.json has no logo field"
+    raw = json.loads((codex / "plugin.json").read_text())
+    assert list(raw) == ["$schema", "name", "version", "description", "extensions"]
+    assert raw["extensions"] == {"com.openai": {"interface": {"logo": "./assets/logo.svg"}}}
+
+
+def test_s034_logo_flag_overrides_and_uppercase_png_is_normalized(
+    grim_at, work: Path, registry: str, unique_repo: str
+) -> None:
+    runner = grim_at(work)
+    _skill(f"{unique_repo}/a", "a")
+    png = b"\x89PNG\r\n\x1a\nnot-really"
+    (work / "Logo.PNG").write_bytes(png)
+
+    _ok(_export(runner, f"{registry}/{unique_repo}/a:1", "--client", "agents", "--logo", "Logo.PNG", "-o", "dist"))
+
+    root = work / "dist" / "a.agents"
+    assert (root / "assets" / "logo.png").read_bytes() == png
+    assert json.loads((root / "plugin.json").read_text())["extensions"]["com.openai"]["interface"]["logo"] == (
+        "./assets/logo.png"
+    )
+
+
+def test_s034_no_logo_writes_no_assets_and_no_extensions(grim_at, work: Path, registry: str, unique_repo: str) -> None:
+    runner = grim_at(work)
+    _skill(f"{unique_repo}/a", "a")
+
+    _ok(_export(runner, f"{registry}/{unique_repo}/a:1", "--client", "codex", "-o", "dist"))
+
+    root = work / "dist" / "a.codex"
+    assert not (root / "assets").exists()
+    assert "extensions" not in _manifest(root)
+    assert "![" not in _readme(root)
+
+
+@pytest.mark.parametrize(
+    ("name", "content", "reason"),
+    [("logo.gif", b"GIF89a", "must be a .png or .svg"), ("absent.svg", None, "not found"), ("big.svg", b"x" * (1024 * 1024 + 1), "larger than 1 MiB")],
+)
+def test_s034_bad_logo_exits_65_and_writes_nothing(
+    grim_at, work: Path, registry: str, unique_repo: str, name: str, content: bytes | None, reason: str
+) -> None:
+    runner = grim_at(work)
+    _skill(f"{unique_repo}/a", "a")
+    if content is not None:
+        (work / name).write_bytes(content)
+
+    result = _export(runner, f"{registry}/{unique_repo}/a:1", "--client", "claude", "--logo", name, "-o", "dist")
+
+    assert result.returncode == 65, result.stderr
+    assert reason in _error(result)["message"]
+    assert _entries(work / "dist") == [], "no output and no staging dir left behind"

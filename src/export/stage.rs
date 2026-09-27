@@ -68,6 +68,8 @@ pub(crate) struct ExportOptions<'a> {
     pub description: Option<&'a str>,
     /// Member-fetch progress sink (`--progress`).
     pub progress: &'a dyn InstallProgress,
+    /// `--logo`, absolute; overrides every plugin's declared `logo`.
+    pub logo: Option<&'a Path>,
 }
 
 /// Run one export end to end and build its report.
@@ -105,6 +107,7 @@ pub(crate) async fn run(
         anchor,
         manifest,
         progress: opts.progress,
+        logo: opts.logo,
     };
     match mode {
         ExportMode::AdHoc { refs, name } => {
@@ -131,6 +134,7 @@ pub(crate) async fn run(
                         description: None,
                         version: None,
                         rename: None,
+                        logo: None,
                     },
                 )]),
             };
@@ -365,6 +369,7 @@ pub(crate) fn plugin_input(
         members,
         version,
         description_base: authored.or(annotation_description),
+        logo: decl.and_then(|d| d.logo.clone()),
         renamed,
     })
 }
@@ -384,6 +389,8 @@ pub(crate) struct PluginInput {
     /// `(old, new)` for every member whose name changed; empty skips the
     /// C-022 scan.
     pub renamed: Vec<(String, String)>,
+    /// Declared `logo`, as written (relative to the manifest's directory).
+    pub logo: Option<PathBuf>,
 }
 
 /// One export run: what to stage, for whom, and where it lands (C-027).
@@ -403,6 +410,9 @@ pub(crate) struct ExportRequest<'a> {
     pub manifest: Option<&'a Path>,
     /// Advanced once per member fetched, across all plugins (`--progress`).
     pub progress: &'a dyn InstallProgress,
+    /// `--logo`, absolute; wins over the declared `logo`, which resolves
+    /// against `anchor`.
+    pub logo: Option<&'a Path>,
 }
 
 /// A member fetched and verified once per run, rendered for every client.
@@ -500,6 +510,12 @@ async fn export_staged(
         }
         stale_scan(plugin, &rendered)?;
 
+        let logo_source = req
+            .logo
+            .map(Path::to_path_buf)
+            .or_else(|| plugin.logo.as_ref().map(|l| req.anchor.join(l)));
+        let logo = logo_source.as_deref().map(read_logo).transpose()?;
+        let logo_rel = logo.as_ref().map(|(ext, _)| family::logo_path(ext));
         let base = plugin.description_base.as_deref();
         let (description, cut) = family::plugin_description(base);
         if cut {
@@ -511,10 +527,20 @@ async fn export_staged(
         }
         for (client, fam, root, r) in rendered {
             let omitted: Vec<(ArtifactKind, String)> = r.omitted.iter().map(|o| (o.kind, o.name.clone())).collect();
-            write_manifest(&root, fam, &plugin.name, &plugin.version, &description)?;
+            write_manifest(
+                &root,
+                fam,
+                &plugin.name,
+                &plugin.version,
+                &description,
+                logo_rel.as_deref(),
+            )?;
             let readme = contained(&root, Path::new("README.md"))?;
-            std::fs::write(&readme, family::plugin_readme(&plugin.name, client, base, &omitted))
-                .map_err(|e| io_error(&readme, e))?;
+            let readme_bytes = family::plugin_readme(&plugin.name, client, base, &omitted, logo_rel.as_deref());
+            std::fs::write(&readme, readme_bytes).map_err(|e| io_error(&readme, e))?;
+            if let (Some((_, bytes)), Some(rel)) = (&logo, &logo_rel) {
+                write_staged(&root, rel, bytes)?;
+            }
             let final_path = final_path(req.output_dir, &plugin.name, client, req.zip);
             let (staged_path, format) = if req.zip {
                 let zip = root.with_extension(format!("{client}.zip"));
@@ -894,6 +920,7 @@ pub(crate) fn write_manifest(
     name: &str,
     version: &str,
     description: &str,
+    logo: Option<&str>,
 ) -> Result<(), ExportError> {
     let (rel, bytes) = match family {
         Family::Claude => (
@@ -902,14 +929,59 @@ pub(crate) fn write_manifest(
         ),
         Family::AgentPlugins => (
             "plugin.json",
-            family::agent_plugins_plugin_json(name, version, description),
+            family::agent_plugins_plugin_json(name, version, description, logo),
         ),
     };
+    write_staged(root, rel, &bytes)
+}
+
+/// Write `bytes` to `root/rel` through [`contained`], creating parents.
+fn write_staged(root: &Path, rel: &str, bytes: &[u8]) -> Result<(), ExportError> {
     let path = contained(root, Path::new(rel))?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| io_error(parent, e))?;
     }
     std::fs::write(&path, bytes).map_err(|e| io_error(&path, e))
+}
+
+/// Largest plugin logo accepted, in bytes.
+const MAX_LOGO_BYTES: u64 = 1024 * 1024;
+
+/// Read and check a plugin logo: a regular file (a symlink is followed),
+/// `.png` or `.svg` (case-insensitive), at most [`MAX_LOGO_BYTES`].
+/// Returns the lowercase extension and the bytes.
+///
+/// # Errors
+///
+/// `InvalidLogo` (65) for each rule; `Io` for any other read failure.
+fn read_logo(path: &Path) -> Result<(&'static str, Vec<u8>), ExportError> {
+    let invalid = |reason: &str| ExportError::InvalidLogo {
+        path: path.to_path_buf(),
+        reason: reason.to_string(),
+    };
+    let ext = match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("png") => "png",
+        Some("svg") => "svg",
+        _ => return Err(invalid("must be a .png or .svg file")),
+    };
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(invalid("not found")),
+        Err(e) => return Err(io_error(path, e)),
+    };
+    if !meta.is_file() {
+        return Err(invalid("not a regular file"));
+    }
+    if meta.len() > MAX_LOGO_BYTES {
+        return Err(invalid("larger than 1 MiB"));
+    }
+    let bytes = std::fs::read(path).map_err(|e| io_error(path, e))?;
+    Ok((ext, bytes))
 }
 
 /// The containment assertion every staged write passes (C-035): `rel`
@@ -1115,6 +1187,7 @@ mod tests {
             rename: strip_prefix.map(|p| RenameRule {
                 strip_prefix: p.to_string(),
             }),
+            logo: None,
         }
     }
 
@@ -1802,7 +1875,7 @@ mod tests {
     #[test]
     fn c025_write_manifest_claude_goes_under_dot_claude_plugin() {
         let tmp = tempfile::tempdir().unwrap();
-        write_manifest(tmp.path(), Family::Claude, "team-stack", "1.0.0+abc", "D").unwrap();
+        write_manifest(tmp.path(), Family::Claude, "team-stack", "1.0.0+abc", "D", None).unwrap();
         assert_eq!(
             std::fs::read(tmp.path().join(".claude-plugin/plugin.json")).unwrap(),
             family::claude_plugin_json("team-stack", "1.0.0+abc", "D")
@@ -1813,10 +1886,10 @@ mod tests {
     #[test]
     fn c025_write_manifest_agent_plugins_goes_at_the_root() {
         let tmp = tempfile::tempdir().unwrap();
-        write_manifest(tmp.path(), Family::AgentPlugins, "team-stack", "1.0.0+abc", "D").unwrap();
+        write_manifest(tmp.path(), Family::AgentPlugins, "team-stack", "1.0.0+abc", "D", None).unwrap();
         assert_eq!(
             std::fs::read(tmp.path().join("plugin.json")).unwrap(),
-            family::agent_plugins_plugin_json("team-stack", "1.0.0+abc", "D")
+            family::agent_plugins_plugin_json("team-stack", "1.0.0+abc", "D", None)
         );
         assert!(!tmp.path().join(".claude-plugin").exists());
     }
@@ -2392,6 +2465,7 @@ mod tests {
             version,
             description_base: Some("Base".to_string()),
             renamed: Vec::new(),
+            logo: None,
         }
     }
 
@@ -2423,6 +2497,7 @@ mod tests {
             anchor: out.path(),
             manifest: None,
             progress: &crate::install::SilentProgress,
+            logo: None,
         };
         let items = export_plugins(&req, &access).await.unwrap();
 
@@ -2455,7 +2530,12 @@ mod tests {
         let codex_root = dir.join("team.codex");
         assert_eq!(
             std::fs::read(codex_root.join("plugin.json")).unwrap(),
-            family::agent_plugins_plugin_json("team", &plugins[0].version, &family::plugin_description(Some("Base")).0)
+            family::agent_plugins_plugin_json(
+                "team",
+                &plugins[0].version,
+                &family::plugin_description(Some("Base")).0,
+                None
+            )
         );
         assert!(codex_root.join("mcp.json").is_file());
     }
@@ -2477,6 +2557,7 @@ mod tests {
             anchor: out.path(),
             manifest: None,
             progress: &crate::install::SilentProgress,
+            logo: None,
         };
         let items = export_plugins(&req, &access).await.unwrap();
         assert_eq!(entries(out.path()), vec!["team.claude.zip"]);
@@ -2507,6 +2588,7 @@ mod tests {
             anchor: out.path(),
             manifest: None,
             progress: &crate::install::SilentProgress,
+            logo: None,
         };
         let err = export_plugins(&req, &access).await.unwrap_err();
         match export_error(&err) {
@@ -2539,6 +2621,7 @@ mod tests {
             anchor: out.path(),
             manifest: None,
             progress: &crate::install::SilentProgress,
+            logo: None,
         };
         export_plugins(&req, &access).await.unwrap();
         assert_eq!(entries(out.path()), vec!["team.claude"]);
@@ -2565,6 +2648,7 @@ mod tests {
             anchor: out.path(),
             manifest: None,
             progress: &crate::install::SilentProgress,
+            logo: None,
         };
         let err = export_plugins(&req, &access).await.unwrap_err();
         assert!(

@@ -1677,6 +1677,7 @@ plugins this run touched.
 | `-o, --output <DIR>` | Directory the plugins are written into (default `.`, created if absent) |
 | `--version <SEMVER>` | Plugin version base — defaults to the declared `version`, then the single ad-hoc reference's version annotation, then `0.0.0`; grim always appends a content-hash suffix |
 | `--description <TEXT>` | Plugin description base — overrides the declared `description` and the single ad-hoc reference's description annotation; longer than 500 characters exits `65` (see [the description cap](#export-plugin-description)) |
+| `--logo <PATH>` | Plugin logo, `.png` or `.svg` up to 1 MiB — overrides the declared `logo`; see [logo](#export-plugin-logo) |
 | `--force` | Replace existing outputs instead of refusing them |
 
 `--client` accepts the same client names as
@@ -1854,8 +1855,22 @@ when that keeps at least half the text, otherwise at a word boundary
 followed by `…`.
 
 Each plugin also carries a generated `README.md`: the plugin name, the
-full uncut base text, the members omitted for that client, and the
-pointer sentence.
+logo when there is one, the full uncut base text, the members omitted for
+that client, and the pointer sentence.
+
+### Logo {#export-plugin-logo}
+
+`--logo`, else the declared `logo`, names a `.png` or `.svg` file of at
+most 1 MiB. grim copies it to `assets/logo.png` or `assets/logo.svg` in
+every exported plugin and shows it at the top of the README. A missing
+file, another format, or a larger file exits `65` and places no
+output.
+
+The plugin formats differ in whether a client reads it. An Agent Plugins
+`plugin.json` points at it under the Codex namespace,
+`extensions."com.openai".interface.logo`, which Codex shows. Claude's
+`plugin.json` has no logo field, so a Claude-family plugin carries the
+file without a manifest reference to it.
 
 Rename, description, and version-annotation rules are covered in full in
 the [`marketplace.toml` reference](./configuration.md#marketplace-toml);

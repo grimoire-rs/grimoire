@@ -47,6 +47,11 @@ pub enum ExportError {
     #[error("plugin '{plugin}': description is {len} characters; plugin descriptions allow at most {max}")]
     DescriptionTooLong { plugin: String, len: usize, max: usize },
 
+    /// The plugin logo is missing, not a regular file, not `.png`/`.svg`, or
+    /// larger than the cap (65).
+    #[error("plugin logo {}: {reason}", path.display())]
+    InvalidLogo { path: PathBuf, reason: String },
+
     /// A rename produced an empty or invalid member name (65).
     #[error("plugin '{plugin}': renaming '{from}' yields invalid name '{to}'")]
     RenameInvalid { plugin: String, from: String, to: String },

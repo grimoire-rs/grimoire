@@ -89,6 +89,11 @@ pub struct ExportPluginArgs {
     #[arg(long)]
     pub description: Option<String>,
 
+    /// Plugin logo (`.png` or `.svg`, at most 1 MiB), overriding the
+    /// declared `logo`. Shipped as `assets/logo.<ext>` in every plugin.
+    #[arg(long, value_name = "PATH")]
+    pub logo: Option<PathBuf>,
+
     /// Replace existing outputs instead of refusing them.
     #[arg(long)]
     pub force: bool,
@@ -164,6 +169,12 @@ pub async fn run_plugin(ctx: &Context, args: &ExportPluginArgs) -> anyhow::Resul
         ),
     };
     let progress = crate::cli::progress::select_progress(ctx.progress(), true);
+    let logo = args
+        .logo
+        .as_deref()
+        .map(std::path::absolute)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("cannot resolve --logo: {e}"))?;
     let opts = ExportOptions {
         clients: &clients,
         output_dir: &args.output,
@@ -172,6 +183,7 @@ pub async fn run_plugin(ctx: &Context, args: &ExportPluginArgs) -> anyhow::Resul
         version: args.version.as_deref(),
         description: args.description.as_deref(),
         progress: progress.as_ref(),
+        logo: logo.as_deref(),
     };
     let report = super::grim(stage::run(&mode, &opts, &scope, &access, ctx.offline()).await)?;
     Ok((report, ExitCode::Success))
@@ -288,6 +300,7 @@ mod tests {
             output: out.to_path_buf(),
             version: None,
             description: None,
+            logo: None,
             force: false,
         }
     }

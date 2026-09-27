@@ -44,6 +44,11 @@ pub struct PluginDecl {
     /// Member rename rule (C-021).
     #[serde(default)]
     pub rename: Option<RenameRule>,
+    /// Plugin logo (`.png` or `.svg`), relative to the manifest's directory.
+    /// Not a resolution input: outside the declaration hash, like
+    /// `description`.
+    #[serde(default)]
+    pub logo: Option<PathBuf>,
 }
 
 /// `[plugins.<name>.rename]`.
@@ -313,6 +318,7 @@ mod tests {
             rename: Some(RenameRule {
                 strip_prefix: "team-".into(),
             }),
+            logo: None,
         };
         assert_eq!(m.plugins, BTreeMap::from([("team".to_string(), decl)]));
     }
@@ -589,6 +595,7 @@ mod tests {
             description: None,
             version: None,
             rename: None,
+            logo: None,
         }
     }
 
@@ -690,6 +697,7 @@ mod tests {
         d.rename = Some(RenameRule {
             strip_prefix: "x-".into(),
         });
+        d.logo = Some("assets/logo.svg".into());
         assert_eq!(hashes(&base), hashes(&decorated));
     }
 
