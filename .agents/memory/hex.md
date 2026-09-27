@@ -44,6 +44,8 @@ preferences, not copies. Team-shared — commit it.
   1.0.0: breaking changes are prohibited, evolution is additive-only.
   Contract detail: `docs/src/stability.md`,
   `.agents/adr/adr_render_layout_stability.md`.
+- Discussions: `.agents/discussions/` (hex default) — `/hex-discuss`
+  artifacts; `State: active` there arms the hex-state no-edit rule.
 - Worktrees: agent worktrees at the hex default `.agents/worktrees/`
   (gitignored); human feature worktrees are siblings `../grimoire-wt-<topic>`
   (`AGENTS.md` › "Workflow"). Whoever creates one removes it.
@@ -97,6 +99,36 @@ research-axes:
   before anything else, regardless of tier.
 
 ## Memory
+
+- **Landed plan (2026-09-27):** `.agents/plans/plan_harness_plugin_export.md`
+  — State `done` (L3 `/hex-review` approved 2026-09-27; next `/hex-finalize`; fold target: none, the plan has no Spec Deltas block), tier xhigh, branch `hex/harness-native-marketplaces`
+  (worktree `grimoire-duo`). Phase 1 of harness plugin export: 9 WPs in 4
+  waves, critical path WP-03a → WP-05 → WP-07 → WP-08. ADR
+  `adr_harness_plugin_export.md` (Accepted by the goal loop, amendments
+  A1–A20 + R1–R9), design record `design_harness_plugin_export.md`
+  (C-001…C-035, S-001…S-030). Round 1 panel + cross-model pass reshaped the
+  lock design: `plugin` is wire-only, `MarketplaceLock` is a map of
+  `GrimoireLock`, per-plugin staleness, strict member conflicts, path
+  containment on hand-edited locks.
+  **Adversary:** `codex exec --sandbox read-only --skip-git-repo-check -`
+  (prompt on stdin) ran the plan-artifact pass directly in ~6 min and found
+  12 Blocks the native panel partly missed (lock-path/advisory-sidecar
+  collision, overwrite race, path-include duplicates). It reads the live
+  working tree, so uncommitted artifacts are visible — unlike `nox-review`.
+
+- **Discussion handed off → loop (2026-09-27):**
+  `.agents/discussions/harness-native-marketplaces.md` — ratified phase 1
+  of harness plugin export: `grim export plugin` (ad-hoc refs or
+  `marketplace.toml` `[plugins]`, per `--client`, folder or `--zip`,
+  rendered like install, reproducible), `grim update --marketplace`,
+  `marketplace.lock`, `[plugins.x.rename] strip_prefix`; Claude and Agent
+  Plugins 1.0 manifest shapes; binding reuse mandate (no second lock,
+  update or render path). Phase 2 (`grim export marketplace`, CI
+  component, opt-in annotation, public marketplace) recorded, not built.
+  Research: `research_plugin_format_compat_{a,b,c}.md`,
+  `research_plugin_support_matrix.md`,
+  `research_agent_plugins_spec_verify.md`,
+  `research_claude_app_install_surfaces.md`. Next: `/hex-loop` on it.
 
 - **Active plan (2026-09-06):** `.agents/plans/plan_docs_site_redesign.md`
   — State `plan-approved`, tier xhigh, on branch `docs/use-case-discovery`
@@ -339,6 +371,19 @@ re-arguing settled design while still reporting divergences as information.
   Request Changes, findings merged into
   `.agents/handover_registry_set_review.md` and planned as
   `plan_registry_filter_fixes`. `Step: finalized`.
+
+### Execution learnings, 2026-09-27 (plan_harness_plugin_export, 9 WPs)
+
+- **A subagent cannot `SendMessage`-resume into the foreground.** Resumed
+  workers run in the background and report as teammate messages; keep the
+  orchestrator idle between them rather than polling.
+- **The commit hook blocks a whole compound Bash command**, including the
+  non-commit steps before `git commit` — run teardown/edits separately, then
+  `task --force verify`, then commit.
+- **The cross-model pass earned its keep again**: 3 Blocks (symlinked
+  manifest aliasing the advisory sidecar, a `--force` rollback that could
+  delete the backup, Windows CLI path normalization) that four native
+  reviewers missed. Run it at every xhigh join.
 
 ### Execution learnings, 2026-08-09 (for the next `/hex-execute`)
 
