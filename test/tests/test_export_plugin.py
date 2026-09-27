@@ -30,7 +30,7 @@ from pathlib import Path
 import pytest
 import tomllib
 
-from src.helpers import make_artifact, make_bundle, write_config
+from src.helpers import make_artifact, make_bundle, make_description, write_config
 from src.registry import push_artifact
 from src.runner import GrimRunner
 
@@ -1438,3 +1438,37 @@ def test_s034_bad_logo_exits_65_and_writes_nothing(
     assert result.returncode == 65, result.stderr
     assert reason in _error(result)["message"]
     assert _entries(work / "dist") == [], "no output and no staging dir left behind"
+
+
+def test_s034_single_ref_falls_back_to_its_published_logo(
+    grim_at, tmp_path: Path, work: Path, registry: str, unique_repo: str
+) -> None:
+    """One bundle ref, no --logo: the bundle repository's companion logo ships."""
+    runner = grim_at(work)
+    stack = _publish_stack(runner, tmp_path, registry, unique_repo)
+    make_description(f"{unique_repo}/team-stack", {"README.md": "# Team\n", "logo.svg": SVG})
+
+    _ok(_export(runner, stack.bundle, "--client", "claude,codex", "-o", "dist"))
+
+    for client in ("claude", "codex"):
+        assert (work / "dist" / f"team-stack.{client}" / "assets" / "logo.svg").read_bytes() == SVG
+    raw = json.loads((work / "dist" / "team-stack.codex" / "plugin.json").read_text())
+    assert raw["extensions"]["com.openai"]["interface"]["logo"] == "./assets/logo.svg"
+
+    (work / "own.png").write_bytes(b"\x89PNG own")
+    _ok(_export(runner, stack.bundle, "--client", "claude", "--logo", "own.png", "-o", "flag"))
+    root = work / "flag" / "team-stack.claude"
+    assert (root / "assets" / "logo.png").read_bytes() == b"\x89PNG own", "--logo wins over the published one"
+    assert not (root / "assets" / "logo.svg").exists()
+
+
+def test_s034_two_refs_never_borrow_a_members_logo(grim_at, work: Path, registry: str, unique_repo: str) -> None:
+    runner = grim_at(work)
+    for name in ("a", "b"):
+        _skill(f"{unique_repo}/{name}", name)
+        make_description(f"{unique_repo}/{name}", {"logo.svg": SVG})
+
+    refs = [f"{registry}/{unique_repo}/{n}:1" for n in ("a", "b")]
+    _ok(_export(runner, *refs, "--name", "duo", "--client", "claude", "-o", "dist"))
+
+    assert not (work / "dist" / "duo.claude" / "assets").exists()
