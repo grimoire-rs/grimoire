@@ -23,7 +23,7 @@ pub mod locked_source;
 #[allow(unused_imports)]
 pub use file_lock::ConfigFileLock;
 #[allow(unused_imports)]
-pub use grimoire_lock::{GrimoireLock, LockMetadata};
+pub use grimoire_lock::{GrimoireLock, LockMetadata, MarketplaceLock};
 #[allow(unused_imports)]
 pub use lock_error::{LockError, LockErrorKind};
 #[allow(unused_imports)]

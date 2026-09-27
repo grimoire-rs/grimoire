@@ -15,6 +15,7 @@ pub mod build_report;
 pub mod config_report;
 pub mod context_report;
 pub mod describe_report;
+pub mod export_report;
 pub mod fetch_report;
 pub mod init_report;
 pub mod install_report;
@@ -45,6 +46,8 @@ pub use config_report::{
 pub use context_report::{ContextRegistry, ContextRegistryKind, ContextReport, OfflineSource};
 #[allow(unused_imports)]
 pub use describe_report::DescribeCliReport;
+#[allow(unused_imports)]
+pub use export_report::{ExportItem, ExportMember, ExportOmission, ExportReport, OutputFormatKind};
 #[allow(unused_imports)]
 pub use fetch_report::FetchCliReport;
 #[allow(unused_imports)]

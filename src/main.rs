@@ -22,6 +22,7 @@ mod config;
 mod context;
 mod env;
 mod error;
+mod export;
 mod fetch;
 mod glob;
 mod install;
@@ -50,6 +51,7 @@ use crate::command::completions::CompletionsArgs;
 use crate::command::config::ConfigArgs;
 use crate::command::context::ContextArgs;
 use crate::command::describe::DescribeArgs;
+use crate::command::export::ExportArgs;
 use crate::command::fetch::FetchArgs;
 use crate::command::init::InitArgs;
 use crate::command::install::InstallArgs;
@@ -122,6 +124,9 @@ pub enum Command {
     /// Report an artifact's metadata (kind, annotations, tags) without
     /// downloading its content.
     Describe(DescribeArgs),
+    /// Package locked artifacts as a plugin for Claude-family or Agent
+    /// Plugins clients.
+    Export(ExportArgs),
     /// Print the JSON Schema for grimoire.toml, publish.toml, or grimoire.lock.
     Schema(SchemaArgs),
     /// Print a shell completion script (bash, zsh, fish, elvish, powershell).

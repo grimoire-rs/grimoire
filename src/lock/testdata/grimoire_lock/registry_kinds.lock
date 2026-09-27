@@ -1,0 +1,26 @@
+[metadata]
+lock_version = 1
+declaration_hash_version = 1
+declaration_hash = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+generated_by = "grim 0.1.0"
+generated_at = "2026-04-19T00:00:00Z"
+
+[[skill]]
+name = "alpha"
+pinned = "ghcr.io/acme/alpha@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+
+[[skill]]
+name = "code-review"
+pinned = "ghcr.io/acme/code-review@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[[rule]]
+name = "rust-style"
+pinned = "ghcr.io/acme/rust-style@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+[[agent]]
+name = "code-reviewer"
+pinned = "ghcr.io/acme/code-reviewer@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+
+[[mcp]]
+name = "grim"
+pinned = "ghcr.io/acme/mcp/grim@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"

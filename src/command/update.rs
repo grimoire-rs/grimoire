@@ -23,7 +23,8 @@
 //! what did happen is emitted alongside exit 65 — the refused row flagged
 //! `refused: true`, and every refusal also named on stderr.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Args;
@@ -32,6 +33,9 @@ use crate::api::artifact_status::UpdateAction;
 use crate::api::update_report::{UpdateEntry, UpdateReport};
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
+use crate::export::ExportError;
+use crate::export::marketplace;
+use crate::export::resolve::{self, IncludeOrigin, PluginPick, PluginSelection};
 use crate::install::installer::{InstallIntent, install_all_with_progress};
 use crate::install::materializer::DefaultMaterializer;
 use crate::install::prune::{PruneOutcome, PrunedArtifact, ReapedClients, prune_orphans, reap_dropped_clients};
@@ -43,14 +47,15 @@ use crate::lock::locked_artifact::LockedArtifact;
 use crate::oci::ArtifactKind;
 use crate::oci::access::OciAccess;
 use crate::resolve::resolve_options::ResolveOptions;
-use crate::resolve::resolver::{resolve_lock, resolve_lock_partial};
+use crate::resolve::resolver::roll_forward;
 
 use super::scope_resolution;
 
 /// `grim update` arguments.
 #[derive(Debug, Args)]
 pub struct UpdateArgs {
-    /// Specific artifact names to update; empty ⇒ update everything.
+    /// Specific artifact names to update; empty ⇒ update everything. With
+    /// --marketplace: `<plugin>` or `<plugin>:<member>` selectors.
     pub names: Vec<String>,
 
     /// Overwrite a locally modified artifact instead of refusing it, and
@@ -65,33 +70,11 @@ pub struct UpdateArgs {
     /// detected.
     #[arg(long = "client")]
     pub client: Vec<String>,
-}
 
-/// Roll `set` forward from `previous`: no `names` re-resolves everything;
-/// named entries re-resolve alone against a predecessor (whose stale-lock
-/// guard fires inside `resolve_lock_partial`), or fully when there is none
-/// to be stale against. The one roll-forward — `grim update` and
-/// marketplace update both call it.
-///
-/// # Errors
-///
-/// Any [`ResolveError`](crate::resolve::resolve_error::ResolveError),
-/// including the partial stale-lock guard (65).
-pub(crate) async fn roll_forward(
-    set: &crate::config::declaration::DesiredSet,
-    previous: Option<&GrimoireLock>,
-    names: &[String],
-    access: &Arc<dyn OciAccess>,
-    scope: crate::config::scope::ConfigScope,
-    options: &ResolveOptions,
-    anchor: &std::path::Path,
-) -> Result<GrimoireLock, crate::resolve::resolve_error::ResolveError> {
-    match (names.is_empty(), previous) {
-        (false, Some(prev)) => resolve_lock_partial(set, prev, access, names, scope, options, anchor).await,
-        // Partial requires a predecessor; absent ⇒ behave like a full
-        // resolve (nothing to be stale against).
-        _ => resolve_lock(set, access, scope, options, anchor).await,
-    }
+    /// Roll the pins of a marketplace lock forward (`<stem>.lock` beside
+    /// PATH); installs nothing.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["force", "client"])]
+    pub marketplace: Option<PathBuf>,
 }
 
 /// Run `grim update`.
@@ -104,6 +87,9 @@ pub(crate) async fn roll_forward(
 /// [`ExitCode::DataError`] (65) — the same gate and exit code `grim install`
 /// applies — and names the refusal on stderr.
 pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateReport, ExitCode)> {
+    if let Some(m) = &args.marketplace {
+        return run_marketplace(ctx, m, &args.names).await;
+    }
     let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
 
     let _guard = match scope_resolution::lockable_config_path(&scope) {
@@ -315,7 +301,7 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     //
     // A hard `Err` keeps propagating: its exit code comes from
     // `classify_error` walking the chain, which a fixed code here would flatten.
-    let mut report = build_report(&new_lock, previous.as_ref(), &pruned, &reaped);
+    let mut report = build_report(None, &new_lock, previous.as_ref(), &pruned, &reaped);
     let mut refused = false;
     for o in outcomes {
         let (kind, name) = (o.reference.kind, o.reference.name.clone());
@@ -351,6 +337,108 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     Ok((report, ExitCode::Success))
 }
 
+/// Run `grim update --marketplace <M>` (C-011): roll the pins of `M`'s
+/// `marketplace.lock` forward through the single marketplace resolution seam.
+/// Never touches install scope, install state, or any client output.
+///
+/// # Errors
+///
+/// `--global`/`--config` or a malformed selector (64), manifest failures
+/// (65), lock contention (75), unknown selector (79), and every resolver,
+/// access or lock failure with its existing classification.
+async fn run_marketplace(ctx: &Context, manifest: &Path, names: &[String]) -> anyhow::Result<(UpdateReport, ExitCode)> {
+    // Global flags live outside `UpdateArgs`, so clap cannot conflict them;
+    // refuse before M is read so a missing M never masks the usage error.
+    if ctx.global() || ctx.config().is_some() {
+        return super::grim(Err(ExportError::Usage(
+            "--marketplace updates a marketplace lock; it takes no --global or --config".to_string(),
+        )));
+    }
+    // `load` makes the path absolute; it is deliberately not canonicalized,
+    // so L and the sidecar stay beside M as named (C-010), never beside a
+    // symlink target that skipped C-001's name check.
+    let m = super::grim(marketplace::load(manifest))?;
+    // A malformed selector is 64 even against a held lock or a corrupt L.
+    let selection = super::grim(parse_selectors(names))?;
+    let _guard = super::grim(ConfigFileLock::try_acquire(&m.path))?;
+
+    let lock_path = resolve::lock_path(&m.path);
+    let previous = super::grim(resolve::load_lock(&lock_path))?;
+
+    let anchor = m.path.parent().unwrap_or(Path::new("."));
+    let scope = super::resolve_fetch_scope(ctx, false, None, Some(anchor))?;
+    // Insecure hosts come from M's directory, like the registry list.
+    let access: Arc<dyn OciAccess> = super::access_seam_scoped(ctx, false, None, Some(anchor))?;
+    let offline = ctx.offline();
+
+    let result = resolve::resolve_marketplace(
+        &m,
+        previous.as_ref(),
+        &selection,
+        &scope,
+        &access,
+        IncludeOrigin::Declared,
+        offline,
+    )
+    .await?;
+    super::grim(lock_io::save_marketplace(&lock_path, &result.lock, previous.as_ref()))?;
+
+    // One `build_report` per part of the result (plan decision 32): a
+    // carried part reports `unchanged` rows; a dropped plugin reports none.
+    let items = result
+        .lock
+        .plugins
+        .iter()
+        .flat_map(|(plugin, part)| {
+            let prev = previous.as_ref().and_then(|p| p.plugins.get(plugin));
+            build_report(Some(plugin), part, prev, &[], &[]).into_items()
+        })
+        .collect();
+    Ok((UpdateReport::new(items), ExitCode::Success))
+}
+
+/// Parse `grim update --marketplace` selectors (C-012): `<P>` or
+/// `<P>:<member>`, both halves non-empty; none ⇒ [`PluginSelection::All`].
+/// Order-independent: a whole-plugin selector subsumes member selectors of
+/// the same plugin, repeated members merge, exact duplicates are accepted
+/// (plan decision 30). Whether `<P>` is declared is the resolver's call.
+///
+/// # Errors
+///
+/// [`ExportError::Usage`] (64) for an empty selector, an empty half, or more
+/// than one `:`.
+fn parse_selectors(names: &[String]) -> Result<PluginSelection, ExportError> {
+    if names.is_empty() {
+        return Ok(PluginSelection::All);
+    }
+    let mut picks: BTreeMap<String, PluginPick> = BTreeMap::new();
+    for sel in names {
+        let malformed = || {
+            ExportError::Usage(format!(
+                "invalid selector '{sel}': expected <plugin> or <plugin>:<member>"
+            ))
+        };
+        let (plugin, member) = match sel.split_once(':') {
+            None => (sel.as_str(), None),
+            Some((p, m)) => (p, Some(m)),
+        };
+        if plugin.is_empty() || member.is_some_and(|m| m.is_empty() || m.contains(':')) {
+            return Err(malformed());
+        }
+        let pick = picks
+            .entry(plugin.to_string())
+            .or_insert_with(|| PluginPick::Members(BTreeSet::new()));
+        match (member, &mut *pick) {
+            (None, _) => *pick = PluginPick::Whole,
+            (Some(m), PluginPick::Members(set)) => {
+                set.insert(m.to_string());
+            }
+            (Some(_), PluginPick::Whole) => {}
+        }
+    }
+    Ok(PluginSelection::Some(picks))
+}
+
 fn state_io(path: &std::path::Path, source: std::io::Error) -> crate::error::Error {
     crate::error::Error::from(crate::install::install_error::InstallError::without_reference(
         crate::install::install_error::InstallErrorKind::TargetIo {
@@ -360,8 +448,6 @@ fn state_io(path: &std::path::Path, source: std::io::Error) -> crate::error::Err
     ))
 }
 
-/// Build the report by diffing the new lock against the previous one, then
-/// appending one row per pruned/kept orphan.
 /// Re-pack every dev-install record's local source and re-materialize the
 /// ones whose content hash drifted. Failures degrade to warnings — a dev
 /// install must never fail a declared update.
@@ -446,7 +532,12 @@ async fn refresh_dev_installs(
     }
 }
 
+/// Build the report by diffing the new lock against the previous one, then
+/// appending one row per pruned/kept orphan.
+/// `plugin` is stamped on every row (C-013): `None` for `grim update`, the
+/// plugin name for one part of a marketplace lock.
 fn build_report(
+    plugin: Option<&str>,
     new_lock: &GrimoireLock,
     previous: Option<&GrimoireLock>,
     pruned: &[PrunedArtifact],
@@ -470,6 +561,7 @@ fn build_report(
             };
             let drop = reaped_index.get(&(a.kind, a.name.as_str()));
             UpdateEntry {
+                plugin: plugin.map(str::to_string),
                 kind: a.kind,
                 name: a.name.clone(),
                 old: old.map(|o| o.content_digest()),
@@ -491,6 +583,7 @@ fn build_report(
     // whole-artifact prune is disjoint from a per-client reap (the reaped
     // artifact stays in the lock), so these rows carry empty client arrays.
     entries.extend(pruned.iter().map(|p| UpdateEntry {
+        plugin: plugin.map(str::to_string),
         kind: p.kind,
         name: p.name.clone(),
         old: Some(p.old.clone()),
@@ -549,7 +642,7 @@ mod tests {
     fn report_marks_changed_and_unchanged() {
         let prev = lock_of(vec![locked("a", 'a'), locked("b", 'b')]);
         let new = lock_of(vec![locked("a", 'a'), locked("b", 'c')]);
-        let r = build_report(&new, Some(&prev), &[], &[]);
+        let r = build_report(None, &new, Some(&prev), &[], &[]);
         let v = serde_json::to_value(&r).unwrap();
         let a = v["items"]
             .as_array()
@@ -571,7 +664,7 @@ mod tests {
     #[test]
     fn report_old_is_null_for_new_artifact() {
         let new = lock_of(vec![locked("fresh", 'f')]);
-        let r = build_report(&new, None, &[], &[]);
+        let r = build_report(None, &new, None, &[], &[]);
         let v = serde_json::to_value(&r).unwrap();
         assert!(v["items"][0]["old"].is_null());
         assert_eq!(v["items"][0]["action"], "updated");
@@ -591,7 +684,7 @@ mod tests {
             retained: vec![],
             abandoned_entries: vec![],
         }];
-        let r = build_report(&new, Some(&new), &[], &reaped);
+        let r = build_report(None, &new, Some(&new), &[], &reaped);
         let v = serde_json::to_value(&r).unwrap();
         let keep = v["items"]
             .as_array()
@@ -630,7 +723,7 @@ mod tests {
                 clients: vec![],
             },
         ];
-        let r = build_report(&new, None, &pruned, &[]);
+        let r = build_report(None, &new, None, &pruned, &[]);
         let v = serde_json::to_value(&r).unwrap();
         let arr = v["items"].as_array().unwrap();
         assert_eq!(arr.len(), 3, "1 locked + 2 pruned rows");
@@ -643,170 +736,172 @@ mod tests {
         assert!(edited["new"].is_null());
     }
 
-    // ── roll_forward (C-034) ───────────────────────────────────────
-    //
-    // Path-sourced skills pin locally (content hash), so the three branches
-    // are observable without a registry: editing a skill on disk moves its
-    // pin only when the branch actually re-resolves it.
+    // ── parse_selectors (C-012, plan decision 30) ──────────────────
 
-    mod roll_forward_spec {
-        use super::super::roll_forward;
-        use crate::config::declaration::{DeclaredSource, DesiredSet};
-        use crate::config::path_source::PathSource;
-        use crate::config::scope::ConfigScope;
-        use crate::lock::grimoire_lock::GrimoireLock;
-        use crate::oci::access::OciAccess;
-        use crate::oci::access::memory_registry::MemoryRegistry;
-        use crate::resolve::resolve_error::ResolveErrorKind;
-        use crate::resolve::resolve_options::ResolveOptions;
-        use std::collections::BTreeMap;
-        use std::path::Path;
-        use std::sync::Arc;
+    mod parse_selectors_spec {
+        use super::super::parse_selectors;
+        use crate::export::ExportError;
+        use crate::export::resolve::{PluginPick, PluginSelection};
+        use std::collections::{BTreeMap, BTreeSet};
 
-        fn write_skill(root: &Path, name: &str, body: &str) {
-            let dir = root.join("skills").join(name);
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(
-                dir.join("SKILL.md"),
-                format!("---\nname: {name}\ndescription: d\n---\n{body}\n"),
+        fn parse(names: &[&str]) -> Result<PluginSelection, ExportError> {
+            parse_selectors(&names.iter().map(|s| (*s).to_string()).collect::<Vec<_>>())
+        }
+
+        fn some(picks: &[(&str, PluginPick)]) -> PluginSelection {
+            PluginSelection::Some(
+                picks
+                    .iter()
+                    .map(|(p, pick)| ((*p).to_string(), pick.clone()))
+                    .collect::<BTreeMap<_, _>>(),
             )
-            .unwrap();
         }
 
-        fn set_of(names: &[&str]) -> DesiredSet {
-            let skills: BTreeMap<String, DeclaredSource> = names
-                .iter()
-                .map(|n| {
-                    (
-                        n.to_string(),
-                        DeclaredSource::Path(PathSource::parse(&format!("./skills/{n}")).unwrap()),
-                    )
-                })
-                .collect();
-            DesiredSet::from_parts(skills, BTreeMap::new())
+        fn members(names: &[&str]) -> PluginPick {
+            PluginPick::Members(names.iter().map(|s| (*s).to_string()).collect::<BTreeSet<_>>())
         }
 
-        fn access() -> Arc<dyn OciAccess> {
-            Arc::new(MemoryRegistry::new())
+        #[test]
+        fn c012_valid_selector_table() {
+            let table: &[(&[&str], PluginSelection)] = &[
+                // No selector: every declared plugin.
+                (&[], PluginSelection::All),
+                (&["team"], some(&[("team", PluginPick::Whole)])),
+                // The member half is the lock name, pre-rename.
+                (&["team:hex-plan"], some(&[("team", members(&["hex-plan"]))])),
+                (&["a", "b:x"], some(&[("a", PluginPick::Whole), ("b", members(&["x"]))])),
+                // Whole subsumes members of the same plugin.
+                (&["a", "a:x"], some(&[("a", PluginPick::Whole)])),
+                // Decision 30: order-independent …
+                (&["a:x", "a"], some(&[("a", PluginPick::Whole)])),
+                (&["b:x", "a"], some(&[("a", PluginPick::Whole), ("b", members(&["x"]))])),
+                // … repeated members merge …
+                (&["a:x", "a:y"], some(&[("a", members(&["x", "y"]))])),
+                (&["a:y", "a:x", "a:y"], some(&[("a", members(&["x", "y"]))])),
+                // … and exact duplicates are accepted.
+                (&["a", "a"], some(&[("a", PluginPick::Whole)])),
+                (&["a:x", "a:x"], some(&[("a", members(&["x"]))])),
+            ];
+            for (input, want) in table {
+                let got = parse(input).unwrap_or_else(|e| panic!("{input:?} must parse, got {e:?}"));
+                assert_eq!(&got, want, "selectors {input:?}");
+            }
         }
 
-        /// `name → provenance` for every locked skill.
-        fn pins(lock: &GrimoireLock) -> BTreeMap<String, String> {
-            lock.iter_artifacts()
-                .map(|a| (a.name.clone(), a.source.provenance()))
-                .collect()
+        #[test]
+        fn c012_malformed_selectors_are_usage_errors() {
+            // Empty half, empty selector, more than one `:` → 64. A bad
+            // selector anywhere in the list fails the whole run.
+            for input in [
+                &["team:"][..],
+                &[":x"],
+                &[":"],
+                &["a:b:c"],
+                &["a::b"],
+                &[""],
+                &["a", "b:"],
+                &["a:x", ":y"],
+            ] {
+                let err = parse(input).expect_err(&format!("{input:?} must be refused"));
+                assert!(
+                    matches!(err, ExportError::Usage(_)),
+                    "{input:?} must be ExportError::Usage (64), got {err:?}"
+                );
+                let err: anyhow::Error = crate::error::Error::from(err).into();
+                assert_eq!(
+                    crate::error::classify_error(&err),
+                    crate::cli::exit_code::ExitCode::UsageError,
+                    "{input:?} exits 64"
+                );
+            }
         }
+    }
 
-        async fn full(set: &DesiredSet, anchor: &Path) -> GrimoireLock {
-            crate::resolve::resolver::resolve_lock(
-                set,
-                &access(),
-                ConfigScope::Project,
-                &ResolveOptions::default(),
-                anchor,
-            )
-            .await
-            .unwrap()
+    // ── build_report plugin stamping (C-013) ───────────────────────
+
+    fn locked_kind(name: &str, kind: ArtifactKind, byte: char) -> LockedArtifact {
+        let id = Identifier::new_registry(name, "localhost:5000")
+            .clone_with_digest(Digest::Sha256(std::iter::repeat_n(byte, 64).collect()));
+        LockedArtifact::direct(name.to_string(), kind, PinnedIdentifier::try_from(id).unwrap())
+    }
+
+    #[test]
+    fn c013_normal_update_rows_carry_a_null_plugin() {
+        let prev = lock_of(vec![locked("a", 'a')]);
+        let new = lock_of(vec![locked("a", 'b')]);
+        let pruned = vec![PrunedArtifact {
+            kind: ArtifactKind::Skill,
+            name: "gone".to_string(),
+            old: Digest::Sha256("e".repeat(64)),
+            outcome: PruneOutcome::Pruned,
+            removed: vec![],
+            retained: vec![],
+            abandoned_entries: vec![],
+            clients: vec![],
+        }];
+        let v = serde_json::to_value(build_report(None, &new, Some(&prev), &pruned, &[])).unwrap();
+        let rows = v["items"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        for row in rows {
+            // Present, not omitted: a consumer's key check must see it.
+            assert!(row.as_object().unwrap().contains_key("plugin"), "{row}");
+            assert!(row["plugin"].is_null(), "{row}");
         }
+    }
 
-        #[tokio::test]
-        async fn c034_no_names_full_resolves_even_against_a_stale_predecessor() {
-            let tmp = tempfile::tempdir().unwrap();
-            write_skill(tmp.path(), "a", "v1");
-            write_skill(tmp.path(), "b", "v1");
-            // Predecessor locked a different declaration: stale for `{a, b}`.
-            let stale = full(&set_of(&["a"]), tmp.path()).await;
-            write_skill(tmp.path(), "a", "v2");
-            let set = set_of(&["a", "b"]);
+    #[test]
+    fn c013_marketplace_rows_stamp_the_plugin_on_every_row() {
+        let prev = lock_of(vec![locked("a", 'a')]);
+        let new = lock_of(vec![locked("a", 'b'), locked("fresh", 'f')]);
+        let pruned = vec![PrunedArtifact {
+            kind: ArtifactKind::Skill,
+            name: "gone".to_string(),
+            old: Digest::Sha256("e".repeat(64)),
+            outcome: PruneOutcome::Pruned,
+            removed: vec![],
+            retained: vec![],
+            abandoned_entries: vec![],
+            clients: vec![],
+        }];
+        let v = serde_json::to_value(build_report(Some("team"), &new, Some(&prev), &pruned, &[])).unwrap();
+        let rows = v["items"].as_array().unwrap();
+        assert_eq!(rows.len(), 3, "2 locked + 1 pruned row");
+        assert!(rows.iter().all(|r| r["plugin"] == "team"), "{rows:?}");
+    }
 
-            let lock = roll_forward(
-                &set,
-                Some(&stale),
-                &[],
-                &access(),
-                ConfigScope::Project,
-                &ResolveOptions::default(),
-                tmp.path(),
-            )
-            .await
-            .expect("no names ⇒ full resolve, never the stale guard");
-            assert_eq!(pins(&lock), pins(&full(&set, tmp.path()).await));
-            assert_ne!(pins(&lock)["a"], pins(&stale)["a"], "a re-pinned");
+    #[test]
+    fn c013_rows_are_keyed_by_plugin_kind_and_name() {
+        // The same name pinned by two plugins lives in two parts: each
+        // plugin's rows diff only against that plugin's previous part.
+        let a_prev = lock_of(vec![locked("x", '1')]);
+        let a_new = lock_of(vec![locked("x", '1')]);
+        let b_prev = lock_of(vec![locked("x", '2')]);
+        let b_new = lock_of(vec![locked("x", '3')]);
+        let mut rows = Vec::new();
+        for (p, new, prev) in [("a", &a_new, &a_prev), ("b", &b_new, &b_prev)] {
+            let v = serde_json::to_value(build_report(Some(p), new, Some(prev), &[], &[])).unwrap();
+            rows.extend(v["items"].as_array().unwrap().clone());
         }
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            (rows[0]["plugin"].as_str(), rows[0]["action"].as_str()),
+            (Some("a"), Some("unchanged"))
+        );
+        assert_eq!(
+            (rows[1]["plugin"].as_str(), rows[1]["action"].as_str()),
+            (Some("b"), Some("updated"))
+        );
+        assert_eq!(rows[1]["old"], serde_json::json!(format!("sha256:{}", "2".repeat(64))));
 
-        #[tokio::test]
-        async fn c034_names_with_a_fresh_predecessor_re_resolve_only_the_named() {
-            let tmp = tempfile::tempdir().unwrap();
-            write_skill(tmp.path(), "a", "v1");
-            write_skill(tmp.path(), "b", "v1");
-            let set = set_of(&["a", "b"]);
-            let previous = full(&set, tmp.path()).await;
-            // Both drift on disk; only the named one may move.
-            write_skill(tmp.path(), "a", "v2");
-            write_skill(tmp.path(), "b", "v2");
-
-            let lock = roll_forward(
-                &set,
-                Some(&previous),
-                &["a".to_string()],
-                &access(),
-                ConfigScope::Project,
-                &ResolveOptions::default(),
-                tmp.path(),
-            )
-            .await
-            .expect("fresh predecessor ⇒ partial");
-            let (before, after) = (pins(&previous), pins(&lock));
-            assert_ne!(after["a"], before["a"], "named entry re-resolved");
-            assert_eq!(after["b"], before["b"], "unnamed entry carried forward");
-        }
-
-        #[tokio::test]
-        async fn c034_names_with_a_stale_predecessor_refuse_with_stale_lock_65() {
-            let tmp = tempfile::tempdir().unwrap();
-            write_skill(tmp.path(), "a", "v1");
-            write_skill(tmp.path(), "b", "v1");
-            let stale = full(&set_of(&["a"]), tmp.path()).await;
-
-            let err = roll_forward(
-                &set_of(&["a", "b"]),
-                Some(&stale),
-                &["a".to_string()],
-                &access(),
-                ConfigScope::Project,
-                &ResolveOptions::default(),
-                tmp.path(),
-            )
-            .await
-            .expect_err("partial against a stale lock must refuse");
-            assert!(matches!(err.kind, ResolveErrorKind::StaleLock { .. }), "{err:?}");
-            assert_eq!(
-                crate::error::classify_error(&anyhow::Error::from(crate::error::Error::from(err))),
-                crate::cli::exit_code::ExitCode::DataError
-            );
-        }
-
-        #[tokio::test]
-        async fn c034_names_without_a_predecessor_full_resolve() {
-            let tmp = tempfile::tempdir().unwrap();
-            write_skill(tmp.path(), "a", "v1");
-            write_skill(tmp.path(), "b", "v1");
-            let set = set_of(&["a", "b"]);
-
-            let lock = roll_forward(
-                &set,
-                None,
-                &["a".to_string()],
-                &access(),
-                ConfigScope::Project,
-                &ResolveOptions::default(),
-                tmp.path(),
-            )
-            .await
-            .expect("nothing to be stale against ⇒ full resolve");
-            // A full resolve locks the unnamed `b` too.
-            assert_eq!(pins(&lock), pins(&full(&set, tmp.path()).await));
-            assert!(pins(&lock).contains_key("b"));
-        }
+        // Same name, other kind: never the previous pin of this row.
+        let prev = GrimoireLock {
+            rules: vec![locked_kind("x", ArtifactKind::Rule, '1')],
+            skills: vec![],
+            ..lock_of(vec![])
+        };
+        let new = lock_of(vec![locked_kind("x", ArtifactKind::Skill, '1')]);
+        let v = serde_json::to_value(build_report(Some("a"), &new, Some(&prev), &[], &[])).unwrap();
+        assert!(v["items"][0]["old"].is_null(), "{v}");
+        assert_eq!(v["items"][0]["action"], "updated");
     }
 }

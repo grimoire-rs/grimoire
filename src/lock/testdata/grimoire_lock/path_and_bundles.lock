@@ -1,0 +1,58 @@
+rule = []
+agent = []
+
+[metadata]
+lock_version = 1
+declaration_hash_version = 1
+declaration_hash = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+generated_by = "grim 0.1.0"
+generated_at = "2026-04-19T00:00:00Z"
+
+[[skill]]
+name = "local-skill"
+path = "./skills/local-skill"
+hash = "sha256:9999999999999999999999999999999999999999999999999999999999999999"
+
+[[skill]]
+name = "one-bundle"
+pinned = "ghcr.io/acme/one-bundle@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+bundle = "ghcr.io/acme/bundles/stack"
+bundle_tag = "1"
+
+[[skill]]
+name = "two-bundles"
+pinned = "ghcr.io/acme/two-bundles@sha256:3333333333333333333333333333333333333333333333333333333333333333"
+
+[[skill.bundles]]
+repo = "ghcr.io/acme/bundles/stack"
+tag = "1"
+
+[[skill.bundles]]
+repo = "./bundles/local.toml"
+tag = "sha256-abc"
+
+[[bundle]]
+name = "local"
+path = "./bundles/local.toml"
+hash = "sha256:8888888888888888888888888888888888888888888888888888888888888888"
+
+[[bundle.member]]
+kind = "skill"
+name = "two-bundles"
+id = "ghcr.io/acme/two-bundles:1"
+
+[[bundle]]
+name = "stack"
+repo = "ghcr.io/acme/bundles/stack"
+tag = "1"
+pinned = "ghcr.io/acme/bundles/stack@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+
+[[bundle.member]]
+kind = "skill"
+name = "one-bundle"
+id = "ghcr.io/acme/one-bundle:1"
+
+[[bundle.member]]
+kind = "skill"
+name = "two-bundles"
+id = "ghcr.io/acme/two-bundles:1"

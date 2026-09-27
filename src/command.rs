@@ -16,6 +16,7 @@ pub mod config;
 pub mod config_keys;
 pub mod context;
 pub mod describe;
+pub mod export;
 pub mod fetch;
 pub mod init;
 pub mod install;

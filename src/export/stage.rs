@@ -1,0 +1,2499 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Grimoire Authors
+
+//! The export orchestrator (ADR § Module placement): [`run`] takes the
+//! command's checked inputs and does everything after them — manifest and
+//! lock load under the advisory lock (C-010), per-plugin staleness
+//! (C-033), `resolve_marketplace` (C-009), rename, version and
+//! description (C-021, C-023, C-024), staging of every member once and
+//! rendering per client (C-017, C-018, C-020, C-022, C-025, C-035), atomic
+//! placement (C-027), and the marketplace lock write after placement.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use crate::api::export_report::{ExportItem, ExportMember, ExportOmission, ExportReport, OutputFormatKind};
+use crate::config::is_path_value;
+use crate::config::scope::ConfigScope;
+use crate::export::export_error::ExportError;
+use crate::export::family::{self, Family, OmitReason};
+use crate::export::marketplace::{self, MarketplaceManifest, PluginDecl, declaration_hashes};
+use crate::export::resolve::{
+    self, IncludeOrigin, MarketplaceResolution, PluginPick, PluginSelection, is_stale, resolve_marketplace,
+};
+use crate::export::{archive, rename};
+use crate::fetch::FetchScope;
+use crate::install::client_target::MaterializeRequest;
+use crate::install::installer::{StagedArtifact, fetch_verified_layer, stage_locked_artifact};
+use crate::install::{ClientTarget, DefaultMaterializer, InstallError, InstallErrorKind, json_splice};
+use crate::lock::{ConfigFileLock, LockedArtifact, lock_io};
+use crate::oci::access::OciAccess;
+use crate::oci::mcp::McpDescriptor;
+use crate::oci::{ArtifactKind, PinnedIdentifier};
+
+const VERSION_ANNOTATION: &str = "org.opencontainers.image.version";
+const DESCRIPTION_ANNOTATION: &str = "org.opencontainers.image.description";
+/// The `mcpServers` container both plugin MCP files use (C-020).
+const MCP_SERVERS: &str = "mcpServers";
+/// In-memory plugin key of a single ad-hoc path ref until its binding is
+/// known (never written anywhere).
+const PENDING: &str = "adhoc";
+
+/// What `grim export plugin` exports (C-014), matrix already checked.
+#[derive(Debug)]
+pub(crate) enum ExportMode {
+    /// Positional refs as one in-memory plugin: no manifest read, no lock
+    /// read or written, no advisory lock. `name` is `--name`; `None` only
+    /// with exactly one ref (name = its binding, C-002).
+    AdHoc { refs: Vec<String>, name: Option<String> },
+    /// Plugins declared in `manifest` (`--marketplace`, else
+    /// `./marketplace.toml`); `plugins` empty = every declared plugin.
+    Declared { manifest: PathBuf, plugins: Vec<String> },
+}
+
+/// The per-run output options of `grim export plugin`.
+#[derive(Debug)]
+pub(crate) struct ExportOptions<'a> {
+    /// Clients in selection order, each with its family (C-015).
+    pub clients: &'a [(ClientTarget, Family)],
+    /// `-o`; made absolute (`std::path::absolute`) before any
+    /// [`final_path`], so report paths are absolute (C-029).
+    pub output_dir: &'a Path,
+    pub zip: bool,
+    pub force: bool,
+    /// `--version`, the C-023 base override.
+    pub version: Option<&'a str>,
+}
+
+/// Run one export end to end and build its report.
+///
+/// Ad-hoc: an in-memory manifest through `resolve_marketplace(None, All,
+/// AdHoc)`. Declared: `marketplace::load`, `ConfigFileLock::try_acquire(M)`
+/// held to the end, `resolve::load_lock`, `--plugin` checked against M
+/// (`PluginNotFound` 79; none declared → `NoneDeclared` 65), then
+/// `resolve_marketplace` always — `Some{stale → Whole}`, or `Some{}` (carry
+/// and drop only, no network) when nothing is stale. Per exported plugin
+/// [`plugin_input`], then [`export_plugins`]; after placement, `L` is saved
+/// with `save_marketplace(path, &lock, previous)` when an exported plugin
+/// was stale, `L` holds a part for a plugin no longer in M, or `L` was
+/// absent.
+///
+/// # Errors
+///
+/// Export-owned failures as [`ExportError`] (65 / 74 / 78 / 79), lock
+/// contention (75), and every resolver, access and staging failure with
+/// its existing classification.
+pub(crate) async fn run(
+    mode: &ExportMode,
+    opts: &ExportOptions<'_>,
+    scope: &FetchScope,
+    access: &Arc<dyn OciAccess>,
+    offline: bool,
+) -> Result<ExportReport, crate::error::Error> {
+    let output_dir = std::path::absolute(opts.output_dir).map_err(|e| io_error(opts.output_dir, e))?;
+    let request = |plugins, anchor, manifest| ExportRequest {
+        plugins,
+        clients: opts.clients,
+        output_dir: &output_dir,
+        zip: opts.zip,
+        force: opts.force,
+        anchor,
+        manifest,
+    };
+    match mode {
+        ExportMode::AdHoc { refs, name } => {
+            let cwd = std::env::current_dir().map_err(|e| io_error(Path::new("."), e))?;
+            // A single path ref's binding is its packed intrinsic name, known
+            // only after resolution: resolve under a placeholder key first.
+            let path_binding = name.is_none() && matches!(refs.as_slice(), [r] if is_path_value(r));
+            let key = match (name, refs.as_slice()) {
+                (Some(name), _) => name.clone(),
+                (None, _) if path_binding => PENDING.to_string(),
+                (None, [include]) => registry_ref_name(include, scope, &cwd)?,
+                (None, _) => {
+                    return Err(
+                        ExportError::Usage("--name is required when exporting more than one reference".into()).into(),
+                    );
+                }
+            };
+            let m = MarketplaceManifest {
+                path: cwd.join(format!("{key}.toml")),
+                plugins: BTreeMap::from([(
+                    key.clone(),
+                    PluginDecl {
+                        include: refs.clone(),
+                        description: None,
+                        version: None,
+                        rename: None,
+                    },
+                )]),
+            };
+            let res = resolve_marketplace(
+                &m,
+                None,
+                &PluginSelection::All,
+                scope,
+                access,
+                IncludeOrigin::AdHoc,
+                offline,
+            )
+            .await?;
+            let members = part_members(&res, &key);
+            let name = if path_binding {
+                let binding = members.first().map(|e| e.name.clone()).unwrap_or_default();
+                checked_derived_name(binding, &refs[0])?
+            } else {
+                key.clone()
+            };
+            // C-023: only a single ref's own annotations describe the plugin.
+            let annotations = if refs.len() == 1 {
+                pinned_annotations(access, &res, &key).await?
+            } else {
+                (None, None)
+            };
+            let input = plugin_input(&name, &members, None, opts.version, annotations)?;
+            let items = export_plugins(&request(std::slice::from_ref(&input), &cwd, None), access).await?;
+            Ok(ExportReport::new(items))
+        }
+        ExportMode::Declared { manifest, plugins } => {
+            let m = marketplace::load(manifest).map_err(missing_manifest_hint)?;
+            let _guard = ConfigFileLock::try_acquire(&m.path)?;
+            let lock_path = resolve::lock_path(&m.path);
+            let previous = resolve::load_lock(&lock_path)?;
+            if m.plugins.is_empty() {
+                return Err(ExportError::NoneDeclared { path: m.path.clone() }.into());
+            }
+            let selected: BTreeSet<String> = if plugins.is_empty() {
+                m.plugins.keys().cloned().collect()
+            } else {
+                if let Some(missing) = plugins.iter().find(|p| !m.plugins.contains_key(*p)) {
+                    return Err(ExportError::PluginNotFound { name: missing.clone() }.into());
+                }
+                plugins.iter().cloned().collect()
+            };
+            let hashes = declaration_hashes(&m, scope)?;
+            let stale: BTreeMap<String, PluginPick> = selected
+                .iter()
+                .filter(|p| is_stale(p, previous.as_ref(), &hashes))
+                .map(|p| (p.clone(), PluginPick::Whole))
+                .collect();
+            let res = resolve_marketplace(
+                &m,
+                previous.as_ref(),
+                &PluginSelection::Some(stale.clone()),
+                scope,
+                access,
+                IncludeOrigin::Declared,
+                offline,
+            )
+            .await?;
+            let inputs = selected
+                .iter()
+                .map(|p| plugin_input(p, &part_members(&res, p), m.plugins.get(p), opts.version, (None, None)))
+                .collect::<Result<Vec<_>, _>>()?;
+            let anchor = m.path.parent().unwrap_or(Path::new("."));
+            let items = export_plugins(&request(&inputs, anchor, Some(&m.path)), access).await?;
+
+            // After placement (C-027): a fresh lock is never rewritten.
+            let dropped = previous
+                .as_ref()
+                .is_some_and(|l| l.plugins.keys().any(|p| !m.plugins.contains_key(p)));
+            if previous.is_none() || !stale.is_empty() || dropped {
+                lock_io::save_marketplace(&lock_path, &res.lock, previous.as_ref())?;
+            }
+            Ok(ExportReport::new(items))
+        }
+    }
+}
+
+/// A missing manifest (S-008, still 65) names the ways out of a declared
+/// export; every other manifest failure passes through.
+fn missing_manifest_hint(err: ExportError) -> ExportError {
+    match err {
+        ExportError::Manifest { path, message } if message == marketplace::NOT_FOUND => ExportError::Manifest {
+            path,
+            message: format!("{message}; pass <ref>… for an ad-hoc export, or --marketplace <PATH>"),
+        },
+        other => other,
+    }
+}
+
+/// Every locked member of `plugin`'s part, in lock kind order.
+fn part_members(res: &MarketplaceResolution, plugin: &str) -> Vec<LockedArtifact> {
+    res.lock
+        .plugins
+        .get(plugin)
+        .map(|part| part.iter_artifacts().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// The plugin name of a single registry ref without `--name` (C-002): its
+/// last repository segment, `grim add`'s default binding. A malformed ref
+/// fails as `grim add` would.
+#[allow(clippy::result_large_err, reason = "as render_members")]
+fn registry_ref_name(include: &str, scope: &FetchScope, cwd: &Path) -> Result<String, crate::error::Error> {
+    match crate::config::resolve_reference(include, &scope.registries, &scope.short_id_default) {
+        Ok(id) => Ok(checked_derived_name(id.name().to_string(), include)?),
+        Err(e) => Err(resolve::declare_failure(
+            crate::command::add::DeclareError::Reference(e),
+            include,
+            include,
+            &cwd.join(format!("{PENDING}.toml")),
+            IncludeOrigin::AdHoc,
+            false,
+        )),
+    }
+}
+
+/// A plugin name derived from `include` must pass C-002 like `--name`
+/// (64, naming `--name` as the way out).
+fn checked_derived_name(name: String, include: &str) -> Result<String, ExportError> {
+    marketplace::validate_plugin_name(&name).map_err(|reason| {
+        ExportError::Usage(format!(
+            "plugin name '{name}' derived from '{include}' is invalid: {reason}; pass --name"
+        ))
+    })?;
+    Ok(name)
+}
+
+/// The C-023 / C-024 base version and description of an ad-hoc
+/// single-ref plugin, read from the pinned manifest's
+/// `org.opencontainers.image.{version,description}` annotations via
+/// `access.fetch_manifest(pin)`. The pin is `resolution.bundle_pins[plugin]`
+/// for a bundle ref, else the single lock entry's pin — never the floating
+/// tag. A path source → `(None, None)`; an absent annotation → `None`;
+/// the version is filtered through `marketplace::normalize_version`, an
+/// invalid one → `None`.
+///
+/// # Errors
+///
+/// A registry, auth or offline failure reading the pinned manifest, with
+/// its existing classification — never swallowed into `None`.
+pub(crate) async fn pinned_annotations(
+    access: &Arc<dyn OciAccess>,
+    resolution: &MarketplaceResolution,
+    plugin: &str,
+) -> Result<(Option<String>, Option<String>), crate::error::Error> {
+    let pin: Option<&PinnedIdentifier> = match resolution.bundle_pins.get(plugin).map(Vec::as_slice) {
+        Some([bundle]) => Some(bundle),
+        _ => match resolution
+            .lock
+            .plugins
+            .get(plugin)
+            .map(|part| part.iter_artifacts().collect::<Vec<_>>())
+            .as_deref()
+        {
+            Some([single]) => single.source.pinned(),
+            _ => None,
+        },
+    };
+    let Some(pin) = pin else {
+        return Ok((None, None));
+    };
+    let Some(manifest) = access.fetch_manifest(pin).await? else {
+        return Ok((None, None));
+    };
+    let version = manifest
+        .annotations
+        .get(VERSION_ANNOTATION)
+        .and_then(|v| marketplace::normalize_version(v));
+    let description = manifest.annotations.get(DESCRIPTION_ANNOTATION).cloned();
+    Ok((version, description))
+}
+
+/// Assemble one plugin's [`PluginInput`]: `rename::apply` over its lock
+/// part members (C-021), then `family::plugin_version` with base
+/// `version_flag` → `decl.version` → `annotation_version` (C-023), and the
+/// description base `decl.description` → `annotation_description` (C-024).
+/// `decl` is `None` ad-hoc.
+///
+/// # Errors
+///
+/// `RenameInvalid`, `RenameCollision`, `InvalidVersion` (65).
+pub(crate) fn plugin_input(
+    name: &str,
+    members: &[LockedArtifact],
+    decl: Option<&PluginDecl>,
+    version_flag: Option<&str>,
+    annotations: (Option<String>, Option<String>),
+) -> Result<PluginInput, ExportError> {
+    let (annotation_version, annotation_description) = annotations;
+    let members = rename::apply(name, members, decl.and_then(|d| d.rename.as_ref()))?;
+    let base = version_flag
+        .map(str::to_string)
+        .or_else(|| decl.and_then(|d| d.version.clone()))
+        .or(annotation_version);
+    let version = family::plugin_version(base.as_deref(), &members)?;
+    let renamed = members
+        .iter()
+        .filter(|(locked, emitted)| locked.name != *emitted)
+        .map(|(locked, emitted)| (locked.name.clone(), emitted.clone()))
+        .collect();
+    Ok(PluginInput {
+        name: name.to_string(),
+        members,
+        version,
+        description_base: decl.and_then(|d| d.description.clone()).or(annotation_description),
+        renamed,
+    })
+}
+
+/// One resolved plugin ready to stage: members already renamed
+/// (`rename::apply`, C-021) and the client-independent manifest inputs.
+#[derive(Debug)]
+pub(crate) struct PluginInput {
+    pub name: String,
+    /// `(locked member, emitted name)`, every member of the plugin.
+    pub members: Vec<(LockedArtifact, String)>,
+    /// C-023 version, computed over all members (client-independent).
+    pub version: String,
+    /// C-024 base description (declared or annotation); omissions and the
+    /// on-ramp are added per client.
+    pub description_base: Option<String>,
+    /// `(old, new)` for every member whose name changed; empty skips the
+    /// C-022 scan.
+    pub renamed: Vec<(String, String)>,
+}
+
+/// One export run: what to stage, for whom, and where it lands (C-027).
+#[derive(Debug)]
+pub(crate) struct ExportRequest<'a> {
+    /// Plugins in byte order of name.
+    pub plugins: &'a [PluginInput],
+    /// Clients in selection order, each with its family (C-015).
+    pub clients: &'a [(ClientTarget, Family)],
+    /// `-o`, absolute: created if absent; the staging dir lives inside it.
+    pub output_dir: &'a Path,
+    pub zip: bool,
+    pub force: bool,
+    /// Path-source anchor (the manifest's parent, or the cwd ad-hoc).
+    pub anchor: &'a Path,
+    /// The declared manifest `M`; `None` ad-hoc. Names `M` in the
+    /// changed-local-source hint.
+    pub manifest: Option<&'a Path>,
+}
+
+/// A member fetched and verified once per run, rendered for every client.
+pub(crate) struct StagedMember<'a> {
+    pub locked: &'a LockedArtifact,
+    pub emitted: &'a str,
+    pub content: MemberContent,
+}
+
+/// What [`stage_members`] fetched for a member.
+pub(crate) enum MemberContent {
+    /// A skill directory or agent file (`installer::stage_locked_artifact`).
+    Tree(StagedArtifact),
+    /// An MCP descriptor (`fetch_verified_layer` →
+    /// `McpDescriptor::from_layer_bytes`, as `install_mcp`).
+    Mcp(Box<McpDescriptor>),
+    /// No selected client admits the kind (always so for rules): never
+    /// fetched, only reported as omitted.
+    Unfetched,
+}
+
+/// One per-(plugin, client) output staged under the staging dir, not yet
+/// placed.
+#[derive(Debug)]
+pub(crate) struct StagedOutput {
+    /// The staged plugin root (directory) or zip file.
+    pub staged: PathBuf,
+    /// `<DIR>/<P>.<c>` or `<DIR>/<P>.<c>.zip`.
+    pub final_path: PathBuf,
+    pub format: OutputFormatKind,
+}
+
+/// What rendering one client's plugin tree produced (C-016, C-018, C-020).
+#[derive(Debug)]
+pub(crate) struct RenderedPlugin {
+    pub members: Vec<ExportMember>,
+    pub omitted: Vec<ExportOmission>,
+}
+
+/// Run one export (C-027): dedupe `(P, c)` pairs, create `<DIR>`, open the
+/// `.grim-export-` staging dir in it, stage every output ([`stage_members`],
+/// [`render_members`], the C-022 scan across all clients, [`write_manifest`],
+/// the zip), refuse existing outputs without `force`, then [`place`] each.
+/// Returns the report items in (plugin, client-selection) order.
+///
+/// # Errors
+///
+/// Export-owned failures (65 / 74) as [`ExportError`]; staging, access
+/// and install failures with their existing classification. Nothing is
+/// placed on any failure before the first placement.
+pub(crate) async fn export_plugins(
+    req: &ExportRequest<'_>,
+    access: &Arc<dyn OciAccess>,
+) -> Result<Vec<ExportItem>, crate::error::Error> {
+    let mut clients: Vec<(ClientTarget, Family)> = Vec::with_capacity(req.clients.len());
+    for pair in req.clients {
+        if !clients.contains(pair) {
+            clients.push(*pair);
+        }
+    }
+    std::fs::create_dir_all(req.output_dir).map_err(|e| io_error(req.output_dir, e))?;
+    // Inside <DIR> so every placement is a same-filesystem rename; dropped
+    // (with any replaced old tree) on every exit path.
+    let staging = tempfile::Builder::new()
+        .prefix(".grim-export-")
+        .tempdir_in(req.output_dir)
+        .map_err(|e| io_error(req.output_dir, e))?;
+
+    let mut outputs = Vec::new();
+    let mut items = Vec::new();
+    for plugin in req.plugins {
+        let staged = stage_members(&plugin.members, &clients, access, req.anchor, staging.path())
+            .await
+            .map_err(|e| local_drift_hint(e, req.manifest, &plugin.name))?;
+        let mut rendered = Vec::with_capacity(clients.len());
+        for &(client, fam) in &clients {
+            let root = contained(staging.path(), Path::new(&format!("{}.{client}", plugin.name)))?;
+            std::fs::create_dir(&root).map_err(|e| io_error(&root, e))?;
+            let r = render_members(&plugin.name, &staged, client, fam, &root)?;
+            rendered.push((client, fam, root, r));
+        }
+        stale_scan(plugin, &rendered)?;
+
+        for (client, fam, root, r) in rendered {
+            let omitted: Vec<(ArtifactKind, String)> = r.omitted.iter().map(|o| (o.kind, o.name.clone())).collect();
+            let description = family::plugin_description(plugin.description_base.as_deref(), &omitted);
+            write_manifest(&root, fam, &plugin.name, &plugin.version, &description)?;
+            let final_path = final_path(req.output_dir, &plugin.name, client, req.zip);
+            let (staged_path, format) = if req.zip {
+                let zip = root.with_extension(format!("{client}.zip"));
+                zip_plugin(&root, &zip)?;
+                (zip, OutputFormatKind::Zip)
+            } else {
+                archive::check_tree(&root).map_err(|e| archive_error(&root, e))?;
+                (root, OutputFormatKind::Dir)
+            };
+            items.push(ExportItem {
+                plugin: plugin.name.clone(),
+                client: client.to_string(),
+                family: fam,
+                format,
+                path: final_path.clone(),
+                version: plugin.version.clone(),
+                members: r.members,
+                omitted: r.omitted,
+            });
+            outputs.push(StagedOutput {
+                staged: staged_path,
+                final_path,
+                format,
+            });
+        }
+    }
+
+    check_existing(&outputs, req.force)?;
+    place_all(&outputs, req.force, staging, &mut |from, to| std::fs::rename(from, to))?;
+    Ok(items)
+}
+
+/// Maps an `archive` I/O error to `ExportError` (C-026, C-035): an unsafe
+/// entry name is `UnsafeEntry` (65) naming that entry; anything else — a
+/// symlink under the root included — is `Io` on `path` (74).
+fn archive_error(path: &Path, e: io::Error) -> ExportError {
+    match archive::unsafe_entry(&e) {
+        Some(entry) => ExportError::UnsafeEntry {
+            path: entry.to_path_buf(),
+        },
+        None => io_error(path, e),
+    }
+}
+
+/// Zip the staged plugin `root` to `zip`.
+fn zip_plugin(root: &Path, zip: &Path) -> Result<(), ExportError> {
+    archive::write_zip(root, zip).map_err(|e| archive_error(zip, e))
+}
+
+/// [`place`] every output in order, stopping at the first failure. The
+/// staging dir is dropped on return — unless a failed `--force` replace
+/// left the user's old output aside in it, which is then kept (decision 40).
+fn place_all(
+    outputs: &[StagedOutput],
+    force: bool,
+    staging: tempfile::TempDir,
+    rename: &mut dyn FnMut(&Path, &Path) -> io::Result<()>,
+) -> Result<(), ExportError> {
+    for output in outputs {
+        if let Err(e) = place(output, force, staging.path(), rename) {
+            if std::fs::symlink_metadata(aside_path(staging.path(), &output.final_path)).is_ok() {
+                // The error message already names the backup path.
+                let _ = staging.keep();
+            }
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+/// Where `--force` moves the existing output at `final_path` before
+/// placing the new one.
+fn aside_path(staging: &Path, final_path: &Path) -> PathBuf {
+    let name = final_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    staging.join(format!(".replaced-{name}"))
+}
+
+/// Re-point a drifted local source's hint (decision 42). The installer's
+/// names `grim update <x>` / `grim lock`, which act on `grimoire.toml`; a
+/// declared member is refreshed by `grim update --marketplace <M> <P>`, an
+/// ad-hoc one (`manifest` `None`) by re-running the export. Still 65; any
+/// other error passes through.
+fn local_drift_hint(err: crate::error::Error, manifest: Option<&Path>, plugin: &str) -> crate::error::Error {
+    let crate::error::Error::Install(InstallError {
+        reference,
+        kind: InstallErrorKind::LocalContentChanged { name, locked, actual },
+    }) = err
+    else {
+        return err;
+    };
+    let drift = format!("local source '{name}' changed (locked {locked}, found {actual})");
+    match manifest {
+        Some(m) => ExportError::Manifest {
+            path: m.to_path_buf(),
+            message: format!(
+                "plugin '{plugin}': {drift}; run `grim update --marketplace {} {plugin}`",
+                m.display()
+            ),
+        }
+        .into(),
+        None => InstallError {
+            reference,
+            kind: InstallErrorKind::MaterializeFailed(format!("{drift}; re-run the export")),
+        }
+        .into(),
+    }
+}
+
+/// The C-022 scan over every client tree of `plugin`: any hit refuses the
+/// plugin before its manifests are written.
+fn stale_scan(
+    plugin: &PluginInput,
+    rendered: &[(ClientTarget, Family, PathBuf, RenderedPlugin)],
+) -> Result<(), ExportError> {
+    if plugin.renamed.is_empty() {
+        return Ok(());
+    }
+    let mut hits = Vec::new();
+    for (client, _, root, _) in rendered {
+        for hit in rename::scan(root, &plugin.renamed).map_err(|e| io_error(root, e))? {
+            hits.push(format!("{client}: {}:{}: '{}'", hit.path, hit.line, hit.old));
+        }
+    }
+    if hits.is_empty() {
+        return Ok(());
+    }
+    hits.sort();
+    Err(ExportError::RenameStaleReference {
+        plugin: plugin.name.clone(),
+        hits,
+    })
+}
+
+/// Fetch and verify each member some client in `clients` admits, once
+/// (C-017): skills/agents through `installer::stage_locked_artifact` into
+/// `staging_parent`, MCP through `fetch_verified_layer` +
+/// `McpDescriptor::from_layer_bytes`; every other member is
+/// [`MemberContent::Unfetched`]. Output order = `members` order.
+///
+/// # Errors
+///
+/// Any staging failure with its existing classification (offline miss 81,
+/// digest mismatch 65, …).
+pub(crate) async fn stage_members<'a>(
+    members: &'a [(LockedArtifact, String)],
+    clients: &[(ClientTarget, Family)],
+    access: &Arc<dyn OciAccess>,
+    anchor: &Path,
+    staging_parent: &Path,
+) -> Result<Vec<StagedMember<'a>>, crate::error::Error> {
+    let mut staged = Vec::with_capacity(members.len());
+    for (locked, emitted) in members {
+        let kind = locked.kind;
+        let admitted = clients.iter().any(|&(c, f)| family::admits(f, c, kind).is_ok());
+        let content = if !admitted {
+            MemberContent::Unfetched
+        } else if kind == ArtifactKind::Mcp {
+            // As `install_mcp`: MCP has no canonical tree to stage.
+            let blob = fetch_verified_layer(locked, kind, access).await?;
+            let descriptor = McpDescriptor::from_layer_bytes(&blob).map_err(|e| {
+                InstallError::without_reference(InstallErrorKind::MaterializeFailed(format!(
+                    "invalid MCP descriptor layer: {e}"
+                )))
+            })?;
+            MemberContent::Mcp(Box::new(descriptor))
+        } else {
+            MemberContent::Tree(
+                stage_locked_artifact(locked, kind, access, anchor, &DefaultMaterializer, staging_parent).await?,
+            )
+        };
+        staged.push(StagedMember {
+            locked,
+            emitted,
+            content,
+        });
+    }
+    Ok(staged)
+}
+
+/// Render `client`'s plugin tree under `root` (C-016, C-018, C-020): the
+/// admission gate per member (the vendor's `kind_support`, via
+/// `family::admits`); skills to `skills/<emitted>/` and agents
+/// (Claude family, rebound via `render::rebind_agent_name` when renamed) to
+/// `agents/<emitted>.md` through `ClientTarget::materialize` at global
+/// scope with the member's provenance as `pinned`; admitted MCP members
+/// through [`mcp_value`] and [`assemble_mcp_file`] into `.mcp.json`
+/// (Claude) or `mcp.json` (Agent Plugins), written only when at least one
+/// MCP member was emitted. Every write goes through [`contained`]. No
+/// manifest — that follows the scan.
+///
+/// # Errors
+///
+/// `EmptyPlugin` (65) when no member was emitted for this client after
+/// MCP projection declines, `UnsafeEntry` (65),
+/// `Io` (74 / 77), and materialize failures with their classification.
+#[allow(
+    clippy::result_large_err,
+    reason = "sync sibling of the async staging fns that return this same error untripped (the lint skips Future signatures); reshaping the shared error type is out of scope"
+)]
+pub(crate) fn render_members(
+    plugin: &str,
+    members: &[StagedMember<'_>],
+    client: ClientTarget,
+    family: Family,
+    root: &Path,
+) -> Result<RenderedPlugin, crate::error::Error> {
+    let mut emitted = Vec::new();
+    let mut omitted = Vec::new();
+    let mut mcp_entries = Vec::new();
+    for member in members {
+        let (kind, name) = (member.locked.kind, member.emitted);
+        let omit = |reason| ExportOmission {
+            kind,
+            name: name.to_string(),
+            reason,
+        };
+        if let Err(reason) = family::admits(family, client, kind) {
+            omitted.push(omit(reason));
+            continue;
+        }
+        let pinned = member.locked.source.provenance();
+        match (&member.content, kind) {
+            (MemberContent::Mcp(descriptor), _) => match mcp_value(family, client, name, descriptor) {
+                Some(value) => mcp_entries.push((name.to_string(), value)),
+                None => {
+                    omitted.push(omit(OmitReason::NotRepresentable));
+                    continue;
+                }
+            },
+            (MemberContent::Tree(staged), ArtifactKind::Skill) => {
+                let dest = contained(root, &Path::new("skills").join(name))?;
+                materialize(client, kind, name, &staged.canonical, &dest, &pinned)?;
+            }
+            (MemberContent::Tree(staged), ArtifactKind::Agent) => {
+                let dest = contained(root, &Path::new("agents").join(format!("{name}.md")))?;
+                let source = rebound_agent(staged, &member.locked.name, name)?;
+                materialize(client, kind, name, &source, &dest, &pinned)?;
+            }
+            _ => {
+                return Err(
+                    InstallError::without_reference(InstallErrorKind::MaterializeFailed(format!(
+                        "{kind} '{}' was admitted for {client} but not staged",
+                        member.locked.name
+                    )))
+                    .into(),
+                );
+            }
+        }
+        emitted.push(ExportMember {
+            kind,
+            name: name.to_string(),
+            lock_name: member.locked.name.clone(),
+            pinned,
+        });
+    }
+    if emitted.is_empty() {
+        return Err(ExportError::EmptyPlugin {
+            plugin: plugin.to_string(),
+            client,
+        }
+        .into());
+    }
+    if !mcp_entries.is_empty() {
+        let file = match family {
+            Family::Claude => ".mcp.json",
+            Family::AgentPlugins => "mcp.json",
+        };
+        let path = contained(root, Path::new(file))?;
+        let text = assemble_mcp_file(&mcp_entries).map_err(|e| io_error(&path, e))?;
+        std::fs::write(&path, text).map_err(|e| io_error(&path, e))?;
+    }
+    emitted.sort_by(|a, b| (a.kind, &a.name).cmp(&(b.kind, &b.name)));
+    omitted.sort_by(|a, b| (a.kind, &a.name).cmp(&(b.kind, &b.name)));
+    Ok(RenderedPlugin {
+        members: emitted,
+        omitted,
+    })
+}
+
+/// `ClientTarget::materialize` at global scope (C-018): scope reaches only
+/// rules, which are never exported.
+#[allow(clippy::result_large_err, reason = "as render_members")]
+fn materialize(
+    client: ClientTarget,
+    kind: ArtifactKind,
+    name: &str,
+    artifact_root: &Path,
+    dest: &Path,
+    pinned: &str,
+) -> Result<(), crate::error::Error> {
+    client.materialize(MaterializeRequest {
+        kind,
+        name,
+        artifact_root,
+        dest,
+        scope: ConfigScope::Global,
+        pinned,
+        support_dir: None,
+    })?;
+    Ok(())
+}
+
+/// The agent file to materialize: the canonical one, or — renamed — a copy
+/// whose frontmatter `name` is rebound (C-019), written beside the staged
+/// tree so the canonical bytes stay untouched for other clients.
+#[allow(clippy::result_large_err, reason = "as render_members")]
+fn rebound_agent(staged: &StagedArtifact, lock_name: &str, emitted: &str) -> Result<PathBuf, crate::error::Error> {
+    if lock_name == emitted {
+        return Ok(staged.canonical.clone());
+    }
+    let doc = std::fs::read_to_string(&staged.canonical).map_err(|e| io_error(&staged.canonical, e))?;
+    let Some(rebound) = crate::install::render::rebind_agent_name(&doc, emitted) else {
+        return Ok(staged.canonical.clone());
+    };
+    let dir = contained(staged.dir.path(), Path::new("rebound"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| io_error(&dir, e))?;
+    let path = contained(&dir, Path::new(&format!("{emitted}.md")))?;
+    std::fs::write(&path, rebound).map_err(|e| io_error(&path, e))?;
+    Ok(path)
+}
+
+/// The `mcpServers` value of one admitted MCP member for `client` (C-020):
+/// Claude family → `vendor().mcp_entry(Global, …)`, `None` or a pointer
+/// whose container is not `mcpServers` → `None`; Agent Plugins →
+/// `family::agent_plugins_mcp_entry` (C-036). `None` = omitted
+/// `not-representable`.
+pub(crate) fn mcp_value(
+    family: Family,
+    client: ClientTarget,
+    emitted: &str,
+    descriptor: &McpDescriptor,
+) -> Option<serde_json::Value> {
+    match family {
+        Family::Claude => {
+            let (pointer, value) = client.vendor().mcp_entry(ConfigScope::Global, emitted, descriptor)?;
+            let (container, _) = json_splice::split_pointer(&pointer)?;
+            (container == MCP_SERVERS).then_some(value)
+        }
+        Family::AgentPlugins => family::agent_plugins_mcp_entry(emitted, descriptor),
+    }
+}
+
+/// The one MCP file assembly routine for both families (C-020): starting
+/// from `""`, `json_splice::upsert_member(text, "mcpServers", name, value)`
+/// per entry in emitted-name byte order, applying each `Splice`.
+///
+/// # Errors
+///
+/// A splice failure from `upsert_member`.
+pub(crate) fn assemble_mcp_file(entries: &[(String, serde_json::Value)]) -> io::Result<String> {
+    let mut sorted: Vec<&(String, serde_json::Value)> = entries.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut text = String::new();
+    for (name, value) in sorted {
+        if let json_splice::Splice::Changed(next) = json_splice::upsert_member(&text, MCP_SERVERS, name, value)? {
+            text = next;
+        }
+    }
+    Ok(text)
+}
+
+/// Write the family's `plugin.json` under `root` (C-025):
+/// `.claude-plugin/plugin.json` (Claude) or `plugin.json` (Agent Plugins).
+///
+/// # Errors
+///
+/// `UnsafeEntry` (65) or `Io` (74 / 77).
+pub(crate) fn write_manifest(
+    root: &Path,
+    family: Family,
+    name: &str,
+    version: &str,
+    description: &str,
+) -> Result<(), ExportError> {
+    let (rel, bytes) = match family {
+        Family::Claude => (
+            ".claude-plugin/plugin.json",
+            family::claude_plugin_json(name, version, description),
+        ),
+        Family::AgentPlugins => (
+            "plugin.json",
+            family::agent_plugins_plugin_json(name, version, description),
+        ),
+    };
+    let path = contained(root, Path::new(rel))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| io_error(parent, e))?;
+    }
+    std::fs::write(&path, bytes).map_err(|e| io_error(&path, e))
+}
+
+/// The containment assertion every staged write passes (C-035): `rel`
+/// must be a name `archive::entry_name` accepts (the rule's one home);
+/// returns `root.join(rel)`.
+///
+/// # Errors
+///
+/// `UnsafeEntry { path: rel }` (65).
+pub(crate) fn contained(root: &Path, rel: &Path) -> Result<PathBuf, ExportError> {
+    archive::entry_name(rel).map_err(|_| ExportError::UnsafeEntry {
+        path: rel.to_path_buf(),
+    })?;
+    Ok(root.join(rel))
+}
+
+/// The final path of `(plugin, client)` in `dir` (C-027): `<P>.<c>`, or
+/// `<P>.<c>.zip` with `zip`.
+pub(crate) fn final_path(dir: &Path, plugin: &str, client: ClientTarget, zip: bool) -> PathBuf {
+    let ext = if zip { ".zip" } else { "" };
+    dir.join(format!("{plugin}.{client}{ext}"))
+}
+
+/// Refuse the run before any placement when an output already exists and
+/// `force` is off (C-027). Existence is `symlink_metadata` (lstat), never
+/// `exists()`: a dangling symlink at an output path counts as existing.
+///
+/// # Errors
+///
+/// `OutputExists { paths }` (65, `untracked-destination`), every existing
+/// final path listed.
+pub(crate) fn check_existing(outputs: &[StagedOutput], force: bool) -> Result<(), ExportError> {
+    if force {
+        return Ok(());
+    }
+    let paths: Vec<PathBuf> = outputs
+        .iter()
+        .filter(|o| std::fs::symlink_metadata(&o.final_path).is_ok())
+        .map(|o| o.final_path.clone())
+        .collect();
+    if paths.is_empty() {
+        Ok(())
+    } else {
+        Err(ExportError::OutputExists { paths })
+    }
+}
+
+/// Place one staged output atomically (C-027). Existence checks use
+/// `symlink_metadata` (lstat), never `exists()`. Without `force`: a zip by
+/// `hard_link` then removing the staged file (EEXIST → `OutputExists`), a
+/// directory by `rename` (a non-empty directory, ENOTDIR or any existing
+/// non-directory — a symlink included, decision 34 — → `OutputExists`).
+/// With `force`: a zip renamed over a regular file; any other existing
+/// path first moved into `staging` (a symlink moved, never followed), then
+/// the new one renamed in.
+///
+/// # Errors
+///
+/// `OutputExists` (65) on a lost race without `force`; `Io` (74 / 77).
+/// `rename` performs the `--force` swap's renames (`std::fs::rename`;
+/// injectable so a test can fail the rename-in and the restore together).
+fn place(
+    output: &StagedOutput,
+    force: bool,
+    staging: &Path,
+    rename: &mut dyn FnMut(&Path, &Path) -> io::Result<()>,
+) -> Result<(), ExportError> {
+    let final_path = &output.final_path;
+    let exists = || ExportError::OutputExists {
+        paths: vec![final_path.clone()],
+    };
+    let existing = std::fs::symlink_metadata(final_path).ok();
+    if force {
+        let replace_in_place =
+            matches!(output.format, OutputFormatKind::Zip) && existing.as_ref().is_some_and(|m| m.is_file());
+        if existing.is_some() && !replace_in_place {
+            // Moved, never followed; removed with the staging dir.
+            let aside = aside_path(staging, final_path);
+            rename(final_path, &aside).map_err(|e| io_error(final_path, e))?;
+            return rename(&output.staged, final_path).map_err(|e| {
+                // Put the old output back: a failed replace must not lose it.
+                // If that fails too it stays aside, and `place_all` keeps
+                // the staging dir so the backup this message names survives.
+                match rename(&aside, final_path) {
+                    Ok(()) => io_error(final_path, e),
+                    Err(restore) => io_error(
+                        final_path,
+                        io::Error::new(
+                            e.kind(),
+                            format!(
+                                "{e}; restoring the previous output failed ({restore}), it is kept at '{}'",
+                                aside.display()
+                            ),
+                        ),
+                    ),
+                }
+            });
+        }
+        return std::fs::rename(&output.staged, final_path).map_err(|e| io_error(final_path, e));
+    }
+    match output.format {
+        OutputFormatKind::Zip => {
+            std::fs::hard_link(&output.staged, final_path).map_err(|e| match e.kind() {
+                io::ErrorKind::AlreadyExists => exists(),
+                kind => io_error(
+                    final_path,
+                    io::Error::new(
+                        kind,
+                        format!("{e}; if this filesystem does not support hard links, retry with --force"),
+                    ),
+                ),
+            })?;
+            std::fs::remove_file(&output.staged).map_err(|e| io_error(&output.staged, e))
+        }
+        OutputFormatKind::Dir => {
+            // `rename` would silently replace an empty directory and follows
+            // nothing, but a symlink or file must never be clobbered.
+            if existing.is_some_and(|m| !m.is_dir()) {
+                return Err(exists());
+            }
+            std::fs::rename(&output.staged, final_path).map_err(|e| match e.kind() {
+                io::ErrorKind::AlreadyExists | io::ErrorKind::DirectoryNotEmpty | io::ErrorKind::NotADirectory => {
+                    exists()
+                }
+                _ => io_error(final_path, e),
+            })
+        }
+    }
+}
+
+/// An export-owned I/O failure on `path` (74 / 77 via `classify_io`).
+fn io_error(path: &Path, source: io::Error) -> ExportError {
+    ExportError::Io {
+        path: path.to_path_buf(),
+        source,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Specification tests written from the design record (C-017, C-018,
+    //! C-020, C-021, C-023, C-024, C-025, C-027, C-035) and WP-07 plan
+    //! decisions 31 and 33, not from the implementation.
+
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+    use serde_json::json;
+
+    use super::*;
+    use crate::cli::exit_code::ExitCode;
+    use crate::config::PathSource;
+    use crate::config::hash::MARKETPLACE_HASH_VERSION;
+    use crate::config::scope::ConfigScope;
+    use crate::error::{Error, classify_error};
+    use crate::export::family::{self, OmitReason};
+    use crate::export::marketplace::RenameRule;
+    use crate::install::json_splice::{self, Splice};
+    use crate::lock::LockedSource;
+    use crate::lock::grimoire_lock::{GrimoireLock, LockMetadata, MarketplaceLock};
+    use crate::lock::lock_version::LockVersion;
+    use crate::oci::access::Operation;
+    use crate::oci::access::error::{AccessError, AccessErrorKind};
+    use crate::oci::access::memory_registry::MemoryRegistry;
+    use crate::oci::artifact_kind::KIND_ANNOTATION;
+    use crate::oci::manifest::{Descriptor, OciManifest};
+    use crate::oci::mcp::MCP_LAYER_MEDIA_TYPE;
+    use crate::oci::{ArtifactKind, Digest, Identifier, PinnedIdentifier};
+
+    const REG: &str = "localhost:5000";
+    const VERSION_ANNOTATION: &str = "org.opencontainers.image.version";
+    const DESCRIPTION_ANNOTATION: &str = "org.opencontainers.image.description";
+
+    // ── fixtures ───────────────────────────────────────────────────
+
+    fn sha(byte: char) -> Digest {
+        Digest::Sha256(std::iter::repeat_n(byte, 64).collect())
+    }
+
+    fn registry_member(name: &str, kind: ArtifactKind, digest: Digest) -> LockedArtifact {
+        let id = Identifier::new_registry(format!("team/{name}"), REG).clone_with_digest(digest);
+        LockedArtifact::direct(name.to_string(), kind, PinnedIdentifier::try_from(id).unwrap())
+    }
+
+    fn path_member(name: &str, kind: ArtifactKind) -> LockedArtifact {
+        LockedArtifact {
+            name: name.to_string(),
+            kind,
+            source: LockedSource::Path {
+                path: PathSource::parse(&format!("./{name}")).unwrap(),
+                hash: sha('c'),
+            },
+            bundles: Vec::new(),
+        }
+    }
+
+    fn decl(version: Option<&str>, description: Option<&str>, strip_prefix: Option<&str>) -> PluginDecl {
+        PluginDecl {
+            include: vec!["unused".to_string()],
+            description: description.map(str::to_string),
+            version: version.map(str::to_string),
+            rename: strip_prefix.map(|p| RenameRule {
+                strip_prefix: p.to_string(),
+            }),
+        }
+    }
+
+    fn descriptor(server: &str) -> McpDescriptor {
+        McpDescriptor::from_toml_str(&format!("description = \"d\"\n[server]\n{server}")).unwrap()
+    }
+
+    fn stdio(command: &str) -> McpDescriptor {
+        descriptor(&format!("transport = \"stdio\"\ncommand = \"{command}\""))
+    }
+
+    /// A descriptor neither Junie nor Agent Plugins can carry (env ref /
+    /// websocket).
+    fn ws() -> McpDescriptor {
+        descriptor("transport = \"ws\"\nurl = \"wss://x/mcp\"")
+    }
+
+    fn with_env_ref() -> McpDescriptor {
+        descriptor("transport = \"stdio\"\ncommand = \"grim\"\nenv = { TOKEN = \"${TOKEN}\" }")
+    }
+
+    fn metadata() -> LockMetadata {
+        LockMetadata {
+            lock_version: LockVersion::V1,
+            declaration_hash_version: MARKETPLACE_HASH_VERSION,
+            declaration_hash: "sha256:0".to_string(),
+            generated_by: "grim 0.1.0".to_string(),
+            generated_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    fn part(members: Vec<LockedArtifact>) -> GrimoireLock {
+        let mut part = GrimoireLock {
+            metadata: metadata(),
+            skills: vec![],
+            rules: vec![],
+            agents: vec![],
+            mcp: vec![],
+            bundles: vec![],
+        };
+        for m in members {
+            match m.kind {
+                ArtifactKind::Skill => part.skills.push(m),
+                ArtifactKind::Rule => part.rules.push(m),
+                ArtifactKind::Agent => part.agents.push(m),
+                ArtifactKind::Mcp => part.mcp.push(m),
+                ArtifactKind::Bundle => unreachable!("bundles are not lock members here"),
+            }
+        }
+        part
+    }
+
+    fn resolution(
+        plugin: &str,
+        members: Vec<LockedArtifact>,
+        bundle_pins: Vec<PinnedIdentifier>,
+    ) -> MarketplaceResolution {
+        MarketplaceResolution {
+            lock: MarketplaceLock {
+                metadata: metadata(),
+                plugins: BTreeMap::from([(plugin.to_string(), part(members))]),
+            },
+            bundle_pins: if bundle_pins.is_empty() {
+                BTreeMap::new()
+            } else {
+                BTreeMap::from([(plugin.to_string(), bundle_pins)])
+            },
+        }
+    }
+
+    /// Push a one-layer manifest carrying `annotations` (plus the kind
+    /// annotation) under `reference`'s tag; returns its pin.
+    async fn publish(
+        reg: &MemoryRegistry,
+        reference: &str,
+        kind: &str,
+        blob: &[u8],
+        media_type: &str,
+        annotations: &[(&str, &str)],
+    ) -> PinnedIdentifier {
+        let id = Identifier::parse(reference).unwrap();
+        let layer = reg.push_blob(&id, blob).await.unwrap();
+        let mut ann: BTreeMap<String, String> = annotations
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        ann.insert(KIND_ANNOTATION.to_string(), kind.to_string());
+        let manifest = OciManifest {
+            media_type: None,
+            artifact_type: None,
+            config_media_type: None,
+            layers: vec![Descriptor {
+                digest: layer,
+                media_type: media_type.to_string(),
+                size: blob.len() as u64,
+            }],
+            annotations: ann,
+        };
+        let digest = reg.push_manifest(&id, &manifest).await.unwrap();
+        reg.put_tag(&id, id.tag().unwrap(), &digest).await.unwrap();
+        PinnedIdentifier::try_from(id.clone_with_digest(digest)).unwrap()
+    }
+
+    async fn publish_skill(reg: &MemoryRegistry, reference: &str, annotations: &[(&str, &str)]) -> PinnedIdentifier {
+        publish(
+            reg,
+            reference,
+            "skill",
+            reference.as_bytes(),
+            "application/vnd.grimoire.artifact.layer.v1.tar",
+            annotations,
+        )
+        .await
+    }
+
+    /// A registry MCP member `name` whose layer is `d`.
+    async fn publish_mcp(reg: &MemoryRegistry, name: &str, d: &McpDescriptor) -> LockedArtifact {
+        let reference = format!("{REG}/team/{name}:1.0.0");
+        let bytes = d.to_layer_bytes().unwrap();
+        let pin = publish(reg, &reference, "mcp", &bytes, MCP_LAYER_MEDIA_TYPE, &[]).await;
+        LockedArtifact::direct(name.to_string(), ArtifactKind::Mcp, pin)
+    }
+
+    /// Refuses (offline miss) and counts every call.
+    #[derive(Default)]
+    struct NoNetwork {
+        calls: AtomicUsize,
+    }
+
+    impl NoNetwork {
+        fn refuse(&self) -> AccessError {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            AccessError::without_identifier(AccessErrorKind::OfflineMiss)
+        }
+    }
+
+    #[async_trait]
+    impl OciAccess for NoNetwork {
+        async fn resolve_digest(&self, _id: &Identifier, _op: Operation) -> Result<Option<Digest>, AccessError> {
+            Err(self.refuse())
+        }
+        async fn fetch_manifest(&self, _id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
+            Err(self.refuse())
+        }
+        async fn fetch_blob(&self, _r: &Identifier, _d: &Digest, _m: u64) -> Result<Option<Vec<u8>>, AccessError> {
+            Err(self.refuse())
+        }
+        async fn list_tags(&self, _id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
+            Err(self.refuse())
+        }
+        async fn list_catalog(&self, _registry: &str) -> Result<Vec<String>, AccessError> {
+            Err(self.refuse())
+        }
+        async fn push_blob(&self, _repo: &Identifier, _bytes: &[u8]) -> Result<Digest, AccessError> {
+            Err(self.refuse())
+        }
+        async fn push_manifest(&self, _repo: &Identifier, _m: &OciManifest) -> Result<Digest, AccessError> {
+            Err(self.refuse())
+        }
+        async fn put_tag(&self, _repo: &Identifier, _t: &str, _d: &Digest) -> Result<(), AccessError> {
+            Err(self.refuse())
+        }
+    }
+
+    /// A [`MemoryRegistry`] that counts manifest fetches and refuses tag
+    /// resolution — proves a pin is used and fetched once.
+    struct PinOnly {
+        inner: MemoryRegistry,
+        manifests: AtomicUsize,
+    }
+
+    impl PinOnly {
+        fn new(inner: MemoryRegistry) -> Arc<Self> {
+            Arc::new(Self {
+                inner,
+                manifests: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl OciAccess for PinOnly {
+        async fn resolve_digest(&self, id: &Identifier, _op: Operation) -> Result<Option<Digest>, AccessError> {
+            panic!("export must use the pin, never resolve '{id}'")
+        }
+        async fn fetch_manifest(&self, id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
+            self.manifests.fetch_add(1, Ordering::SeqCst);
+            self.inner.fetch_manifest(id).await
+        }
+        async fn fetch_blob(&self, r: &Identifier, d: &Digest, m: u64) -> Result<Option<Vec<u8>>, AccessError> {
+            self.inner.fetch_blob(r, d, m).await
+        }
+        async fn list_tags(&self, id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
+            self.inner.list_tags(id).await
+        }
+        async fn list_catalog(&self, registry: &str) -> Result<Vec<String>, AccessError> {
+            self.inner.list_catalog(registry).await
+        }
+        async fn push_blob(&self, repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {
+            self.inner.push_blob(repo, bytes).await
+        }
+        async fn push_manifest(&self, repo: &Identifier, m: &OciManifest) -> Result<Digest, AccessError> {
+            self.inner.push_manifest(repo, m).await
+        }
+        async fn put_tag(&self, repo: &Identifier, t: &str, d: &Digest) -> Result<(), AccessError> {
+            self.inner.put_tag(repo, t, d).await
+        }
+    }
+
+    fn export_error(err: &Error) -> &ExportError {
+        match err {
+            Error::Export(e) => e,
+            other => panic!("expected an export error, got {other:?}"),
+        }
+    }
+
+    fn exit_of(err: Error) -> ExitCode {
+        classify_error(&anyhow::Error::from(err))
+    }
+
+    fn dir_output(staged: PathBuf, final_path: PathBuf) -> StagedOutput {
+        StagedOutput {
+            staged,
+            final_path,
+            format: OutputFormatKind::Dir,
+        }
+    }
+
+    fn zip_output(staged: PathBuf, final_path: PathBuf) -> StagedOutput {
+        StagedOutput {
+            staged,
+            final_path,
+            format: OutputFormatKind::Zip,
+        }
+    }
+
+    /// A staged plugin directory `<parent>/<name>` holding one marker file.
+    fn staged_dir(parent: &Path, name: &str, marker: &str) -> PathBuf {
+        let dir = parent.join(name);
+        std::fs::create_dir_all(dir.join("skills/a")).unwrap();
+        std::fs::write(dir.join("skills/a/SKILL.md"), marker).unwrap();
+        dir
+    }
+
+    fn staged_file(parent: &Path, name: &str, bytes: &[u8]) -> PathBuf {
+        let file = parent.join(name);
+        std::fs::write(&file, bytes).unwrap();
+        file
+    }
+
+    /// [`super::place`] with the real `std::fs::rename`.
+    fn place(output: &StagedOutput, force: bool, staging: &Path) -> Result<(), ExportError> {
+        super::place(output, force, staging, &mut |from, to| std::fs::rename(from, to))
+    }
+
+    fn assert_output_exists(err: ExportError, expected: &[PathBuf]) {
+        match err {
+            ExportError::OutputExists { mut paths } => {
+                paths.sort();
+                let mut expected = expected.to_vec();
+                expected.sort();
+                assert_eq!(paths, expected);
+            }
+            other => panic!("expected OutputExists, got {other:?}"),
+        }
+    }
+
+    // ── C-035 containment ─────────────────────────────────────────
+
+    #[test]
+    fn c035_contained_joins_a_relative_normal_path() {
+        let root = Path::new("/stage/root");
+        assert_eq!(
+            contained(root, Path::new("skills/plan/SKILL.md")).unwrap(),
+            root.join("skills/plan/SKILL.md")
+        );
+        assert_eq!(
+            contained(root, Path::new(".claude-plugin/plugin.json")).unwrap(),
+            root.join(".claude-plugin/plugin.json")
+        );
+    }
+
+    #[test]
+    fn c035_contained_refuses_every_escaping_shape_as_unsafe_entry_65() {
+        let root = Path::new("/stage/root");
+        for rel in [
+            "../escape",
+            "skills/../../escape",
+            "/etc/passwd",
+            "skills/a\\b",
+            "C:evil",
+            "c:/evil",
+        ] {
+            let err = contained(root, Path::new(rel)).expect_err(rel);
+            match &err {
+                ExportError::UnsafeEntry { path } => assert_eq!(path, Path::new(rel), "{rel}"),
+                other => panic!("{rel}: expected UnsafeEntry, got {other:?}"),
+            }
+            assert_eq!(exit_of(Error::Export(err)), ExitCode::DataError, "{rel}");
+        }
+    }
+
+    // ── C-026 / C-035 zip error mapping ───────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn c026_symlink_under_the_staged_root_is_io_74_on_the_zip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("team.claude");
+        std::fs::create_dir_all(root.join("skills")).unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", root.join("skills/leak")).unwrap();
+        let zip = tmp.path().join("team.claude.zip");
+        let err = zip_plugin(&root, &zip).unwrap_err();
+        assert!(matches!(&err, ExportError::Io { path, .. } if *path == zip), "{err:?}");
+        assert_eq!(exit_of(Error::Export(err)), ExitCode::IoError);
+        assert!(!zip.exists(), "no partial zip");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn c035_unsafe_entry_name_is_unsafe_entry_65_naming_the_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("team.claude");
+        std::fs::create_dir_all(root.join("skills")).unwrap();
+        std::fs::write(root.join("skills/a\\b"), "x").unwrap();
+        let err = zip_plugin(&root, &tmp.path().join("team.claude.zip")).unwrap_err();
+        match &err {
+            ExportError::UnsafeEntry { path } => assert_eq!(path, Path::new("skills/a\\b")),
+            other => panic!("expected UnsafeEntry, got {other:?}"),
+        }
+        assert_eq!(exit_of(Error::Export(err)), ExitCode::DataError);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn c035_dir_export_refuses_unsafe_entry_name_like_zip() {
+        // C-035 gap: a directory export skipped `write_zip`'s entry-name
+        // walk entirely — only `--zip` caught an unsafe nested name.
+        // `check_tree` runs the same walk for the dir branch, so both
+        // formats refuse identically.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("team.claude");
+        std::fs::create_dir_all(root.join("skills")).unwrap();
+        std::fs::write(root.join("skills/a\\b"), "x").unwrap();
+
+        let dir_err = archive::check_tree(&root)
+            .map_err(|e| archive_error(&root, e))
+            .unwrap_err();
+        let zip_err = zip_plugin(&root, &tmp.path().join("team.claude.zip")).unwrap_err();
+        for err in [&dir_err, &zip_err] {
+            match err {
+                ExportError::UnsafeEntry { path } => assert_eq!(path, Path::new("skills/a\\b")),
+                other => panic!("expected UnsafeEntry, got {other:?}"),
+            }
+        }
+        assert_eq!(exit_of(Error::Export(dir_err)), ExitCode::DataError);
+    }
+
+    // ── C-027 naming ──────────────────────────────────────────────
+
+    #[test]
+    fn c027_final_path_is_plugin_dot_client_with_optional_zip() {
+        let dir = Path::new("/out");
+        assert_eq!(
+            final_path(dir, "team-stack", ClientTarget::Claude, false),
+            PathBuf::from("/out/team-stack.claude")
+        );
+        assert_eq!(
+            final_path(dir, "team-stack", ClientTarget::Codex, true),
+            PathBuf::from("/out/team-stack.codex.zip")
+        );
+        assert_eq!(
+            final_path(dir, "hex", ClientTarget::OpenClaw, false),
+            PathBuf::from("/out/hex.openclaw")
+        );
+    }
+
+    // ── C-027 pre-placement check ─────────────────────────────────
+
+    #[test]
+    fn c027_check_existing_passes_when_no_output_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outputs = [
+            dir_output(tmp.path().join("s1"), tmp.path().join("p.claude")),
+            zip_output(tmp.path().join("s2"), tmp.path().join("p.codex.zip")),
+        ];
+        check_existing(&outputs, false).unwrap();
+    }
+
+    #[test]
+    fn c027_check_existing_lists_every_existing_path_without_force() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir_final = tmp.path().join("p.claude");
+        let zip_final = tmp.path().join("p.codex.zip");
+        std::fs::create_dir(&dir_final).unwrap();
+        std::fs::write(&zip_final, b"old").unwrap();
+        let outputs = [
+            dir_output(tmp.path().join("s1"), dir_final.clone()),
+            zip_output(tmp.path().join("s2"), zip_final.clone()),
+            dir_output(tmp.path().join("s3"), tmp.path().join("p.agents")),
+        ];
+        assert_output_exists(check_existing(&outputs, false).unwrap_err(), &[dir_final, zip_final]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn c027_check_existing_counts_a_dangling_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let final_path = tmp.path().join("p.claude");
+        std::os::unix::fs::symlink(tmp.path().join("nowhere"), &final_path).unwrap();
+        let outputs = [dir_output(tmp.path().join("s1"), final_path.clone())];
+        assert_output_exists(check_existing(&outputs, false).unwrap_err(), &[final_path]);
+    }
+
+    #[test]
+    fn c027_check_existing_is_a_no_op_with_force() {
+        let tmp = tempfile::tempdir().unwrap();
+        let final_path = tmp.path().join("p.claude");
+        std::fs::create_dir(&final_path).unwrap();
+        check_existing(&[dir_output(tmp.path().join("s1"), final_path)], true).unwrap();
+    }
+
+    // ── C-027 placement without --force ───────────────────────────
+
+    #[test]
+    fn c027_place_dir_into_absent_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let staging = tmp.path().join(".grim-export-x");
+        std::fs::create_dir(&staging).unwrap();
+        let staged = staged_dir(&staging, "p.claude", "new");
+        let final_path = tmp.path().join("p.claude");
+        place(&dir_output(staged.clone(), final_path.clone()), false, &staging).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(final_path.join("skills/a/SKILL.md")).unwrap(),
+            "new"
+        );
+        assert!(
+            std::fs::symlink_metadata(&staged).is_err(),
+            "staged dir moved, not copied"
+        );
+    }
+
+    #[test]
+    fn c027_place_zip_into_absent_path_removes_the_staged_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let staging = tmp.path().join(".grim-export-x");
+        std::fs::create_dir(&staging).unwrap();
+        let staged = staged_file(&staging, "p.claude.zip", b"zip-bytes");
+        let final_path = tmp.path().join("p.claude.zip");
+        place(&zip_output(staged.clone(), final_path.clone()), false, &staging).unwrap();
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"zip-bytes");
+        assert!(std::fs::symlink_metadata(&staged).is_err(), "staged zip removed");
+    }
+
+    #[test]
+    fn c027_place_zip_refuses_an_existing_file_and_leaves_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let staging = tmp.path().join(".grim-export-x");
+        std::fs::create_dir(&staging).unwrap();
+        let staged = staged_file(&staging, "p.claude.zip", b"new");
+        let final_path = staged_file(tmp.path(), "p.claude.zip", b"old");
+        let err = place(&zip_output(staged, final_path.clone()), false, &staging).unwrap_err();
+        assert_output_exists(err, std::slice::from_ref(&final_path));
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"old");
+    }
+
+    #[test]
+    fn c027_place_dir_refuses_a_non_empty_dir_and_leaves_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let staging = tmp.path().join(".grim-export-x");
+        std::fs::create_dir(&staging).unwrap();
+        let staged = staged_dir(&staging, "p.claude", "new");
+        let final_path = staged_dir(tmp.path(), "p.claude", "old");
+        let err = place(&dir_output(staged, final_path.clone()), false, &staging).unwrap_err();
+        assert_output_exists(err, std::slice::from_ref(&final_path));
+        assert_eq!(
+            std::fs::read_to_string(final_path.join("skills/a/SKILL.md")).unwrap(),
+            "old"
+        );
+    }
+
+    #[test]
+    fn c027_place_dir_refuses_an_existing_non_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let staging = tmp.path().join(".grim-export-x");
+        std::fs::create_dir(&staging).unwrap();
+        let staged = staged_dir(&staging, "p.claude", "new");
+        let final_path = staged_file(tmp.path(), "p.claude", b"a file");
+        let err = place(&dir_output(staged, final_path.clone()), false, &staging).unwrap_err();
+        assert_output_exists(err, std::slice::from_ref(&final_path));
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"a file");
+    }
+
+    #[test]
+    fn c027_each_output_is_atomic_a_failed_second_leaves_the_first_complete() {
+        let tmp = tempfile::tempdir().unwrap();
+        let staging = tmp.path().join(".grim-export-x");
+        std::fs::create_dir(&staging).unwrap();
+        let first = dir_output(staged_dir(&staging, "p.claude", "one"), tmp.path().join("p.claude"));
+        let taken = staged_dir(tmp.path(), "p.codex", "old");
+        let second = dir_output(staged_dir(&staging, "p.codex", "two"), taken.clone());
+        place(&first, false, &staging).unwrap();
+        place(&second, false, &staging).unwrap_err();
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("p.claude/skills/a/SKILL.md")).unwrap(),
+            "one"
+        );
+        assert_eq!(std::fs::read_to_string(taken.join("skills/a/SKILL.md")).unwrap(), "old");
+    }
+
+    // ── C-027 placement with --force ──────────────────────────────
+
+    #[test]
+    fn c027_force_replaces_a_non_empty_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let staging = tmp.path().join(".grim-export-x");
+        std::fs::create_dir(&staging).unwrap();
+        let staged = staged_dir(&staging, "p.claude", "new");
+        let final_path = staged_dir(tmp.path(), "p.claude", "old");
+        std::fs::write(final_path.join("stale.txt"), "gone").unwrap();
+        place(&dir_output(staged, final_path.clone()), true, &staging).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(final_path.join("skills/a/SKILL.md")).unwrap(),
+            "new"
+        );
+        assert!(!final_path.join("stale.txt").exists(), "old tree replaced, not merged");
+    }
+
+    #[test]
+    fn c027_force_replaces_an_existing_zip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let staging = tmp.path().join(".grim-export-x");
+        std::fs::create_dir(&staging).unwrap();
+        let staged = staged_file(&staging, "p.claude.zip", b"new");
+        let final_path = staged_file(tmp.path(), "p.claude.zip", b"old");
+        place(&zip_output(staged, final_path.clone()), true, &staging).unwrap();
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"new");
+    }
+
+    #[test]
+    fn c027_force_dir_replaces_a_regular_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let staging = tmp.path().join(".grim-export-x");
+        std::fs::create_dir(&staging).unwrap();
+        let staged = staged_dir(&staging, "p.claude", "new");
+        let final_path = staged_file(tmp.path(), "p.claude", b"a file");
+        place(&dir_output(staged, final_path.clone()), true, &staging).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(final_path.join("skills/a/SKILL.md")).unwrap(),
+            "new"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn c027_force_moves_a_dir_symlink_and_leaves_its_target_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let staging = tmp.path().join(".grim-export-x");
+        std::fs::create_dir(&staging).unwrap();
+        let target = staged_dir(tmp.path(), "elsewhere", "precious");
+        let final_path = tmp.path().join("p.claude");
+        std::os::unix::fs::symlink(&target, &final_path).unwrap();
+        let staged = staged_dir(&staging, "p.claude", "new");
+        place(&dir_output(staged, final_path.clone()), true, &staging).unwrap();
+        let meta = std::fs::symlink_metadata(&final_path).unwrap();
+        assert!(meta.is_dir() && !meta.file_type().is_symlink(), "a real directory now");
+        assert_eq!(
+            std::fs::read_to_string(final_path.join("skills/a/SKILL.md")).unwrap(),
+            "new"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("skills/a/SKILL.md")).unwrap(),
+            "precious",
+            "symlink target never followed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn c027_force_replaces_a_zip_symlink_and_leaves_its_target_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let staging = tmp.path().join(".grim-export-x");
+        std::fs::create_dir(&staging).unwrap();
+        let target = staged_file(tmp.path(), "elsewhere.zip", b"precious");
+        let final_path = tmp.path().join("p.claude.zip");
+        std::os::unix::fs::symlink(&target, &final_path).unwrap();
+        let staged = staged_file(&staging, "p.claude.zip", b"new");
+        place(&zip_output(staged, final_path.clone()), true, &staging).unwrap();
+        assert!(std::fs::symlink_metadata(&final_path).unwrap().is_file());
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"new");
+        assert_eq!(std::fs::read(&target).unwrap(), b"precious");
+    }
+
+    #[test]
+    fn c027_force_restores_the_old_output_when_the_replace_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let staging = tmp.path().join(".grim-export-x");
+        std::fs::create_dir(&staging).unwrap();
+        let final_path = staged_dir(tmp.path(), "p.claude", "old");
+        // The staged output is missing, so the rename into place fails after
+        // the old output was moved aside.
+        let missing = staging.join("p.claude");
+        let err = place(&dir_output(missing, final_path.clone()), true, &staging).unwrap_err();
+        assert!(matches!(err, ExportError::Io { .. }), "{err:?}");
+        assert_eq!(
+            std::fs::read_to_string(final_path.join("skills/a/SKILL.md")).unwrap(),
+            "old",
+            "old output restored"
+        );
+    }
+
+    #[test]
+    fn c027_force_keeps_the_old_output_when_replace_and_restore_both_fail() {
+        // Decision 40: the aside old output lives in the staging dir; when
+        // it cannot be put back, dropping the staging dir must not delete it.
+        let tmp = tempfile::tempdir().unwrap();
+        let staging = tempfile::Builder::new()
+            .prefix(".grim-export-")
+            .tempdir_in(tmp.path())
+            .unwrap();
+        let staging_path = staging.path().to_path_buf();
+        let final_path = staged_dir(tmp.path(), "p.claude", "old");
+        let staged = staged_dir(&staging_path, "p.claude", "new");
+        // The move aside succeeds; the rename-in and the restore fail.
+        let mut calls = 0;
+        let mut rename = |from: &Path, to: &Path| {
+            calls += 1;
+            if calls == 1 {
+                std::fs::rename(from, to)
+            } else {
+                Err(io::Error::other("injected"))
+            }
+        };
+        let err = place_all(&[dir_output(staged, final_path.clone())], true, staging, &mut rename).unwrap_err();
+
+        let aside = aside_path(&staging_path, &final_path);
+        assert!(matches!(err, ExportError::Io { .. }), "{err:?}");
+        let cause = std::error::Error::source(&err).unwrap().to_string();
+        assert!(
+            cause.contains(&aside.display().to_string()),
+            "names the backup: {cause}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(aside.join("skills/a/SKILL.md")).unwrap(),
+            "old",
+            "old output survives the staging dir drop"
+        );
+        std::fs::remove_dir_all(&staging_path).unwrap();
+    }
+
+    #[test]
+    fn c010_changed_local_member_hints_the_marketplace_update() {
+        // Decision 42: the installer's `grim update x` / `grim lock` hint acts
+        // on grimoire.toml; a declared member is refreshed through M.
+        let drift = || {
+            Error::from(InstallError::without_reference(InstallErrorKind::LocalContentChanged {
+                name: "x".into(),
+                locked: sha('a'),
+                actual: sha('b'),
+            }))
+        };
+        let m = Path::new("/w/market.toml");
+        let declared = local_drift_hint(drift(), Some(m), "team");
+        assert!(
+            declared
+                .to_string()
+                .ends_with("run `grim update --marketplace /w/market.toml team`"),
+            "{declared}"
+        );
+        assert_eq!(exit_of(declared), ExitCode::DataError);
+        let ad_hoc = local_drift_hint(drift(), None, "team");
+        let shown = ad_hoc.to_string();
+        assert!(
+            shown.ends_with("re-run the export") && !shown.contains("grim update"),
+            "{shown}"
+        );
+        assert_eq!(exit_of(ad_hoc), ExitCode::DataError);
+        // Any other failure passes through untouched.
+        let other = local_drift_hint(ExportError::Usage("u".into()).into(), Some(m), "team");
+        assert!(matches!(other, Error::Export(ExportError::Usage(_))), "{other:?}");
+    }
+
+    // ── C-025 manifest write ──────────────────────────────────────
+
+    #[test]
+    fn c025_write_manifest_claude_goes_under_dot_claude_plugin() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_manifest(tmp.path(), Family::Claude, "team-stack", "1.0.0+abc", "D").unwrap();
+        assert_eq!(
+            std::fs::read(tmp.path().join(".claude-plugin/plugin.json")).unwrap(),
+            family::claude_plugin_json("team-stack", "1.0.0+abc", "D")
+        );
+        assert!(!tmp.path().join("plugin.json").exists());
+    }
+
+    #[test]
+    fn c025_write_manifest_agent_plugins_goes_at_the_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_manifest(tmp.path(), Family::AgentPlugins, "team-stack", "1.0.0+abc", "D").unwrap();
+        assert_eq!(
+            std::fs::read(tmp.path().join("plugin.json")).unwrap(),
+            family::agent_plugins_plugin_json("team-stack", "1.0.0+abc", "D")
+        );
+        assert!(!tmp.path().join(".claude-plugin").exists());
+    }
+
+    // ── C-020 MCP projection and assembly ─────────────────────────
+
+    #[test]
+    fn c020_claude_family_value_is_the_vendor_global_entry() {
+        assert_eq!(
+            mcp_value(Family::Claude, ClientTarget::Claude, "srv", &stdio("grim")),
+            Some(json!({"command": "grim"}))
+        );
+        assert_eq!(
+            mcp_value(Family::Claude, ClientTarget::Claude, "srv", &with_env_ref()),
+            Some(json!({"command": "grim", "env": {"TOKEN": "${TOKEN}"}})),
+            "Claude reads `${{VAR}}` natively: no env translation"
+        );
+    }
+
+    #[test]
+    fn c020_claude_family_vendor_decline_is_not_representable() {
+        // Junie declines env refs (vendor_junie.rs), the design's named None case.
+        assert_eq!(
+            mcp_value(Family::Claude, ClientTarget::Junie, "srv", &with_env_ref()),
+            None
+        );
+        assert!(mcp_value(Family::Claude, ClientTarget::Junie, "srv", &stdio("grim")).is_some());
+    }
+
+    #[test]
+    fn c020_claude_family_pointer_outside_mcp_servers_is_not_representable() {
+        // Amp's pointer container is the literal `amp.mcpServers`, not
+        // `mcpServers`: a projection whose pointer lands elsewhere is refused.
+        let d = stdio("grim");
+        let (pointer, _) = ClientTarget::Amp
+            .vendor()
+            .mcp_entry(ConfigScope::Global, "srv", &d)
+            .unwrap();
+        assert!(!pointer.starts_with("/mcpServers/"), "fixture premise: {pointer}");
+        assert_eq!(mcp_value(Family::Claude, ClientTarget::Amp, "srv", &d), None);
+    }
+
+    #[test]
+    fn c020_agent_plugins_value_is_the_c036_projection() {
+        let d = stdio("grim");
+        assert_eq!(
+            mcp_value(Family::AgentPlugins, ClientTarget::Codex, "srv", &d),
+            family::agent_plugins_mcp_entry("srv", &d)
+        );
+        assert_eq!(mcp_value(Family::AgentPlugins, ClientTarget::Codex, "srv", &ws()), None);
+    }
+
+    #[test]
+    fn c020_assembly_splices_in_emitted_name_byte_order_from_empty_text() {
+        let zeta = json!({"command": "z"});
+        let alpha = json!({"command": "a"});
+        let text = assemble_mcp_file(&[("zeta".into(), zeta.clone()), ("alpha".into(), alpha.clone())]).unwrap();
+
+        let mut expected = String::new();
+        for (name, value) in [("alpha", &alpha), ("zeta", &zeta)] {
+            if let Splice::Changed(s) = json_splice::upsert_member(&expected, "mcpServers", name, value).unwrap() {
+                expected = s;
+            }
+        }
+        assert_eq!(text, expected, "one upsert chain from \"\" in byte order");
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed, json!({"mcpServers": {"alpha": alpha, "zeta": zeta}}));
+        assert!(text.find("\"alpha\"").unwrap() < text.find("\"zeta\"").unwrap());
+    }
+
+    #[test]
+    fn c020_assembly_of_nothing_is_empty_text() {
+        assert_eq!(assemble_mcp_file(&[]).unwrap(), "");
+    }
+
+    // ── C-018 / C-020 member rendering ────────────────────────────
+
+    /// A staged skill tree `<tmp>/<name>/SKILL.md` whose frontmatter name is
+    /// `name`.
+    fn staged_skill(name: &str) -> StagedArtifact {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().join(name);
+        std::fs::create_dir_all(&canonical).unwrap();
+        std::fs::write(
+            canonical.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: A skill\n---\nBody\n"),
+        )
+        .unwrap();
+        StagedArtifact {
+            dir,
+            canonical,
+            support_dir: None,
+        }
+    }
+
+    fn staged_agent(name: &str) -> StagedArtifact {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().join(format!("{name}.md"));
+        std::fs::write(
+            &canonical,
+            format!("---\nname: {name}\ndescription: An agent\n---\nBody\n"),
+        )
+        .unwrap();
+        StagedArtifact {
+            dir,
+            canonical,
+            support_dir: None,
+        }
+    }
+
+    fn omissions(r: &RenderedPlugin) -> Vec<(ArtifactKind, String, OmitReason)> {
+        let mut v: Vec<_> = r.omitted.iter().map(|o| (o.kind, o.name.clone(), o.reason)).collect();
+        v.sort_by(|a, b| a.1.cmp(&b.1));
+        v
+    }
+
+    fn emitted(r: &RenderedPlugin) -> Vec<(ArtifactKind, String, String, String)> {
+        let mut v: Vec<_> = r
+            .members
+            .iter()
+            .map(|m| (m.kind, m.name.clone(), m.lock_name.clone(), m.pinned.clone()))
+            .collect();
+        v.sort_by(|a, b| a.1.cmp(&b.1));
+        v
+    }
+
+    #[test]
+    fn c018_claude_renders_skills_agents_and_mcp_under_the_root() {
+        let skill = registry_member("hex-plan", ArtifactKind::Skill, sha('a'));
+        let agent = registry_member("hex-review", ArtifactKind::Agent, sha('b'));
+        let mcp = registry_member("srv", ArtifactKind::Mcp, sha('d'));
+        let rule = registry_member("style", ArtifactKind::Rule, sha('e'));
+        let members = vec![
+            StagedMember {
+                locked: &skill,
+                emitted: "plan",
+                content: MemberContent::Tree(staged_skill("hex-plan")),
+            },
+            StagedMember {
+                locked: &agent,
+                emitted: "review",
+                content: MemberContent::Tree(staged_agent("hex-review")),
+            },
+            StagedMember {
+                locked: &mcp,
+                emitted: "srv",
+                content: MemberContent::Mcp(Box::new(stdio("grim"))),
+            },
+            StagedMember {
+                locked: &rule,
+                emitted: "style",
+                content: MemberContent::Unfetched,
+            },
+        ];
+        let root = tempfile::tempdir().unwrap();
+        let r = render_members("team", &members, ClientTarget::Claude, Family::Claude, root.path()).unwrap();
+
+        let skill_md = std::fs::read_to_string(root.path().join("skills/plan/SKILL.md")).unwrap();
+        assert!(skill_md.contains("name: plan"), "renamed skill rebound: {skill_md}");
+        let agent_md = std::fs::read_to_string(root.path().join("agents/review.md")).unwrap();
+        assert!(
+            agent_md.contains("name: review"),
+            "renamed agent rebound (C-019): {agent_md}"
+        );
+        let mcp_json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(root.path().join(".mcp.json")).unwrap()).unwrap();
+        assert_eq!(mcp_json, json!({"mcpServers": {"srv": {"command": "grim"}}}));
+        assert!(!root.path().join("rules").exists() && !root.path().join("bin").exists());
+        assert!(
+            !root.path().join(".claude-plugin").exists(),
+            "manifest is written after the scan, not here"
+        );
+
+        assert_eq!(
+            emitted(&r),
+            vec![
+                (
+                    ArtifactKind::Skill,
+                    "plan".into(),
+                    "hex-plan".into(),
+                    skill.source.provenance()
+                ),
+                (
+                    ArtifactKind::Agent,
+                    "review".into(),
+                    "hex-review".into(),
+                    agent.source.provenance()
+                ),
+                (ArtifactKind::Mcp, "srv".into(), "srv".into(), mcp.source.provenance()),
+            ]
+        );
+        assert_eq!(
+            omissions(&r),
+            vec![(ArtifactKind::Rule, "style".into(), OmitReason::NoFormatSurface)]
+        );
+    }
+
+    #[test]
+    fn c016_c020_agent_plugins_writes_mcp_json_and_names_its_omissions() {
+        let agent = registry_member("reviewer", ArtifactKind::Agent, sha('b'));
+        let ok = registry_member("ok", ArtifactKind::Mcp, sha('d'));
+        let socket = registry_member("socket", ArtifactKind::Mcp, sha('e'));
+        let members = vec![
+            StagedMember {
+                locked: &agent,
+                emitted: "reviewer",
+                content: MemberContent::Tree(staged_agent("reviewer")),
+            },
+            StagedMember {
+                locked: &ok,
+                emitted: "ok",
+                content: MemberContent::Mcp(Box::new(stdio("grim"))),
+            },
+            StagedMember {
+                locked: &socket,
+                emitted: "socket",
+                content: MemberContent::Mcp(Box::new(ws())),
+            },
+        ];
+        let root = tempfile::tempdir().unwrap();
+        let r = render_members("team", &members, ClientTarget::Codex, Family::AgentPlugins, root.path()).unwrap();
+
+        let text = std::fs::read_to_string(root.path().join("mcp.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            parsed,
+            json!({"mcpServers": {"ok": family::agent_plugins_mcp_entry("ok", &stdio("grim")).unwrap()}})
+        );
+        assert!(!root.path().join(".mcp.json").exists());
+        assert!(
+            !root.path().join("agents").exists(),
+            "Agent Plugins has no agent surface"
+        );
+        assert_eq!(
+            omissions(&r),
+            vec![
+                (ArtifactKind::Agent, "reviewer".into(), OmitReason::NoFormatSurface),
+                (ArtifactKind::Mcp, "socket".into(), OmitReason::NotRepresentable),
+            ]
+        );
+    }
+
+    #[test]
+    fn c020_c027_only_declined_mcp_members_is_empty_plugin_with_no_mcp_file() {
+        let socket = registry_member("socket", ArtifactKind::Mcp, sha('e'));
+        let members = vec![StagedMember {
+            locked: &socket,
+            emitted: "socket",
+            content: MemberContent::Mcp(Box::new(ws())),
+        }];
+        let root = tempfile::tempdir().unwrap();
+        let err = render_members("team", &members, ClientTarget::Codex, Family::AgentPlugins, root.path()).unwrap_err();
+        assert!(
+            matches!(export_error(&err), ExportError::EmptyPlugin { plugin, client }
+                if plugin == "team" && *client == ClientTarget::Codex),
+            "{err:?}"
+        );
+        assert!(!root.path().join("mcp.json").exists(), "no file when nothing admitted");
+    }
+
+    #[test]
+    fn c016_client_declined_kinds_are_omitted_for_droid() {
+        let skill = registry_member("plan", ArtifactKind::Skill, sha('a'));
+        let agent = registry_member("reviewer", ArtifactKind::Agent, sha('b'));
+        let mcp = registry_member("srv", ArtifactKind::Mcp, sha('d'));
+        let members = vec![
+            StagedMember {
+                locked: &skill,
+                emitted: "plan",
+                content: MemberContent::Tree(staged_skill("plan")),
+            },
+            StagedMember {
+                locked: &agent,
+                emitted: "reviewer",
+                content: MemberContent::Tree(staged_agent("reviewer")),
+            },
+            StagedMember {
+                locked: &mcp,
+                emitted: "srv",
+                content: MemberContent::Mcp(Box::new(stdio("grim"))),
+            },
+        ];
+        let root = tempfile::tempdir().unwrap();
+        let r = render_members("team", &members, ClientTarget::Droid, Family::Claude, root.path()).unwrap();
+        assert!(root.path().join("skills/plan/SKILL.md").is_file());
+        assert!(!root.path().join(".mcp.json").exists() && !root.path().join("agents").exists());
+        assert_eq!(
+            omissions(&r),
+            vec![
+                (ArtifactKind::Agent, "reviewer".into(), OmitReason::ClientDeclined),
+                (ArtifactKind::Mcp, "srv".into(), OmitReason::ClientDeclined),
+            ]
+        );
+    }
+
+    // ── C-021 / C-023 / C-024 plugin input ────────────────────────
+
+    #[test]
+    fn c021_c023_rename_applies_before_the_version_is_computed() {
+        let members = vec![registry_member("hex-plan", ArtifactKind::Skill, sha('a'))];
+        let d = decl(Some("1.0.0"), None, Some("hex-"));
+        let input = plugin_input("hex", &members, Some(&d), None, (None, None)).unwrap();
+        assert_eq!(input.name, "hex");
+        assert_eq!(input.members.len(), 1);
+        assert_eq!(input.members[0].1, "plan");
+        assert_eq!(input.renamed, vec![("hex-plan".to_string(), "plan".to_string())]);
+        let renamed = vec![(members[0].clone(), "plan".to_string())];
+        let unrenamed = vec![(members[0].clone(), "hex-plan".to_string())];
+        assert_eq!(input.version, family::plugin_version(Some("1.0.0"), &renamed).unwrap());
+        assert_ne!(
+            input.version,
+            family::plugin_version(Some("1.0.0"), &unrenamed).unwrap()
+        );
+    }
+
+    #[test]
+    fn c021_no_rule_leaves_names_and_renamed_empty() {
+        let members = vec![registry_member("plan", ArtifactKind::Skill, sha('a'))];
+        let input = plugin_input("team", &members, None, None, (None, None)).unwrap();
+        assert_eq!(input.members[0].1, "plan");
+        assert!(input.renamed.is_empty());
+    }
+
+    #[test]
+    fn c021_rename_collision_is_reported() {
+        let members = vec![
+            registry_member("hex-plan", ArtifactKind::Skill, sha('a')),
+            registry_member("plan", ArtifactKind::Skill, sha('b')),
+        ];
+        let d = decl(None, None, Some("hex-"));
+        let err = plugin_input("hex", &members, Some(&d), None, (None, None)).unwrap_err();
+        assert!(matches!(err, ExportError::RenameCollision { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn c023_version_precedence_flag_then_declared_then_annotation_then_zero() {
+        let members = vec![registry_member("plan", ArtifactKind::Skill, sha('a'))];
+        let pairs = vec![(members[0].clone(), "plan".to_string())];
+        let v = |base: Option<&str>| family::plugin_version(base, &pairs).unwrap();
+        let ann = || (Some("0.5.0".to_string()), None);
+        let declared = decl(Some("1.0.0"), None, None);
+        let bare = decl(None, None, None);
+
+        let all = plugin_input("p", &members, Some(&declared), Some("v2.0.0"), ann()).unwrap();
+        assert_eq!(all.version, v(Some("2.0.0")), "--version wins, leading v stripped");
+        let no_flag = plugin_input("p", &members, Some(&declared), None, ann()).unwrap();
+        assert_eq!(no_flag.version, v(Some("1.0.0")), "declared beats annotation");
+        let ann_only = plugin_input("p", &members, Some(&bare), None, ann()).unwrap();
+        assert_eq!(ann_only.version, v(Some("0.5.0")));
+        let ad_hoc = plugin_input("p", &members, None, None, ann()).unwrap();
+        assert_eq!(ad_hoc.version, v(Some("0.5.0")));
+        let none = plugin_input("p", &members, None, None, (None, None)).unwrap();
+        assert_eq!(none.version, v(None));
+        assert!(none.version.starts_with("0.0.0+"));
+    }
+
+    #[test]
+    fn c023_invalid_version_flag_is_invalid_version_65() {
+        let members = vec![registry_member("plan", ArtifactKind::Skill, sha('a'))];
+        for bad in ["latest", "1.0.0+x"] {
+            let err = plugin_input("p", &members, None, Some(bad), (None, None)).unwrap_err();
+            assert!(
+                matches!(&err, ExportError::InvalidVersion { value } if value == bad),
+                "{bad}: {err:?}"
+            );
+            assert_eq!(exit_of(Error::Export(err)), ExitCode::DataError);
+        }
+    }
+
+    #[test]
+    fn c024_description_base_declared_then_annotation() {
+        let members = vec![registry_member("plan", ArtifactKind::Skill, sha('a'))];
+        let ann = || (None, Some("From annotation".to_string()));
+        let declared = decl(None, Some("Declared"), None);
+        let bare = decl(None, None, None);
+        assert_eq!(
+            plugin_input("p", &members, Some(&declared), None, ann())
+                .unwrap()
+                .description_base
+                .as_deref(),
+            Some("Declared")
+        );
+        assert_eq!(
+            plugin_input("p", &members, Some(&bare), None, ann())
+                .unwrap()
+                .description_base
+                .as_deref(),
+            Some("From annotation")
+        );
+        assert_eq!(
+            plugin_input("p", &members, None, None, (None, None))
+                .unwrap()
+                .description_base,
+            None
+        );
+    }
+
+    // ── C-023 / C-024 pinned annotations (decision 33) ────────────
+
+    #[tokio::test]
+    async fn c023_annotations_come_from_the_single_members_pin_not_its_tag() {
+        let reg = MemoryRegistry::new();
+        let reference = format!("{REG}/team/plan:1.0");
+        let pinned = publish_skill(
+            &reg,
+            &reference,
+            &[(VERSION_ANNOTATION, "v1.4.0"), (DESCRIPTION_ANNOTATION, "Team plan")],
+        )
+        .await;
+        // The floating tag moves on; the pin must still win.
+        publish_skill(
+            &reg,
+            &format!("{REG}/team/plan:1.0"),
+            &[(VERSION_ANNOTATION, "9.9.9"), (DESCRIPTION_ANNOTATION, "Moved")],
+        )
+        .await;
+        let res = resolution(
+            "plan",
+            vec![LockedArtifact::direct("plan".into(), ArtifactKind::Skill, pinned)],
+            vec![],
+        );
+        let access: Arc<dyn OciAccess> = PinOnly::new(reg);
+        assert_eq!(
+            pinned_annotations(&access, &res, "plan").await.unwrap(),
+            (Some("1.4.0".to_string()), Some("Team plan".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn c023_a_bundle_ref_reads_the_bundle_pin() {
+        let reg = MemoryRegistry::new();
+        let bundle = publish(
+            &reg,
+            &format!("{REG}/team/stack:2.0"),
+            "bundle",
+            b"{}",
+            crate::oci::bundle::BUNDLE_LAYER_MEDIA_TYPE,
+            &[(VERSION_ANNOTATION, "2.0.0"), (DESCRIPTION_ANNOTATION, "Stack")],
+        )
+        .await;
+        let a = publish_skill(&reg, &format!("{REG}/team/a:1.0"), &[(VERSION_ANNOTATION, "7.0.0")]).await;
+        let b = publish_skill(&reg, &format!("{REG}/team/b:1.0"), &[(VERSION_ANNOTATION, "8.0.0")]).await;
+        let res = resolution(
+            "stack",
+            vec![
+                LockedArtifact::direct("a".into(), ArtifactKind::Skill, a),
+                LockedArtifact::direct("b".into(), ArtifactKind::Skill, b),
+            ],
+            vec![bundle],
+        );
+        let access: Arc<dyn OciAccess> = PinOnly::new(reg);
+        assert_eq!(
+            pinned_annotations(&access, &res, "stack").await.unwrap(),
+            (Some("2.0.0".to_string()), Some("Stack".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn c023_absent_annotations_are_none() {
+        let reg = MemoryRegistry::new();
+        let pinned = publish_skill(&reg, &format!("{REG}/team/plan:1.0"), &[]).await;
+        let res = resolution(
+            "plan",
+            vec![LockedArtifact::direct("plan".into(), ArtifactKind::Skill, pinned)],
+            vec![],
+        );
+        let access: Arc<dyn OciAccess> = Arc::new(reg);
+        assert_eq!(pinned_annotations(&access, &res, "plan").await.unwrap(), (None, None));
+    }
+
+    #[tokio::test]
+    async fn c023_an_invalid_annotation_version_is_ignored_description_kept() {
+        let reg = MemoryRegistry::new();
+        let pinned = publish_skill(
+            &reg,
+            &format!("{REG}/team/plan:1.0"),
+            &[(VERSION_ANNOTATION, "latest"), (DESCRIPTION_ANNOTATION, "Kept")],
+        )
+        .await;
+        let res = resolution(
+            "plan",
+            vec![LockedArtifact::direct("plan".into(), ArtifactKind::Skill, pinned)],
+            vec![],
+        );
+        let access: Arc<dyn OciAccess> = Arc::new(reg);
+        assert_eq!(
+            pinned_annotations(&access, &res, "plan").await.unwrap(),
+            (None, Some("Kept".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn c023_a_path_source_has_no_annotations_and_touches_no_registry() {
+        let counter = Arc::new(NoNetwork::default());
+        let access: Arc<dyn OciAccess> = counter.clone();
+        let res = resolution("plan", vec![path_member("plan", ArtifactKind::Skill)], vec![]);
+        assert_eq!(pinned_annotations(&access, &res, "plan").await.unwrap(), (None, None));
+        assert_eq!(counter.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn d33_a_registry_failure_propagates_with_its_exit_code() {
+        let access: Arc<dyn OciAccess> = Arc::new(NoNetwork::default());
+        let res = resolution(
+            "plan",
+            vec![registry_member("plan", ArtifactKind::Skill, sha('a'))],
+            vec![],
+        );
+        let err = pinned_annotations(&access, &res, "plan").await.unwrap_err();
+        assert_eq!(exit_of(err), ExitCode::OfflineBlocked, "never swallowed into None");
+    }
+
+    // ── C-017 / C-027 export run (MCP members: no tar layer needed) ──
+
+    fn claude() -> (ClientTarget, Family) {
+        (ClientTarget::Claude, Family::Claude)
+    }
+
+    fn codex() -> (ClientTarget, Family) {
+        (ClientTarget::Codex, Family::AgentPlugins)
+    }
+
+    fn input(name: &str, members: Vec<LockedArtifact>) -> PluginInput {
+        let members: Vec<(LockedArtifact, String)> = members.into_iter().map(|m| (m.clone(), m.name)).collect();
+        let version = family::plugin_version(Some("1.0.0"), &members).unwrap();
+        PluginInput {
+            name: name.to_string(),
+            members,
+            version,
+            description_base: Some("Base".to_string()),
+            renamed: Vec::new(),
+        }
+    }
+
+    fn entries(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[tokio::test]
+    async fn c027_export_places_one_dir_per_client_and_fetches_each_member_once() {
+        let reg = MemoryRegistry::new();
+        let srv = publish_mcp(&reg, "srv", &stdio("grim")).await;
+        let plugins = [input("team", vec![srv.clone()])];
+        let clients = [claude(), codex(), claude()];
+        let out = tempfile::tempdir().unwrap();
+        let dir = out.path().join("dist");
+        let counting = PinOnly::new(reg);
+        let access: Arc<dyn OciAccess> = counting.clone();
+        let req = ExportRequest {
+            plugins: &plugins,
+            clients: &clients,
+            output_dir: &dir,
+            zip: false,
+            force: false,
+            anchor: out.path(),
+            manifest: None,
+        };
+        let items = export_plugins(&req, &access).await.unwrap();
+
+        assert_eq!(
+            counting.manifests.load(Ordering::SeqCst),
+            1,
+            "C-017: fetched once per run"
+        );
+        assert_eq!(
+            entries(&dir),
+            vec!["team.claude", "team.codex"],
+            "dedupe; staging dir gone"
+        );
+        let pairs: Vec<(String, String)> = items.iter().map(|i| (i.plugin.clone(), i.client.clone())).collect();
+        assert_eq!(
+            pairs,
+            vec![("team".into(), "claude".into()), ("team".into(), "codex".into())]
+        );
+        assert_eq!(items[0].path, dir.join("team.claude"));
+        assert_eq!(items[0].version, plugins[0].version);
+        assert_eq!(items[0].family, Family::Claude);
+        assert_eq!(items[1].family, Family::AgentPlugins);
+
+        let claude_root = dir.join("team.claude");
+        assert_eq!(
+            std::fs::read(claude_root.join(".claude-plugin/plugin.json")).unwrap(),
+            family::claude_plugin_json(
+                "team",
+                &plugins[0].version,
+                &family::plugin_description(Some("Base"), &[])
+            )
+        );
+        assert!(claude_root.join(".mcp.json").is_file());
+        let codex_root = dir.join("team.codex");
+        assert_eq!(
+            std::fs::read(codex_root.join("plugin.json")).unwrap(),
+            family::agent_plugins_plugin_json(
+                "team",
+                &plugins[0].version,
+                &family::plugin_description(Some("Base"), &[])
+            )
+        );
+        assert!(codex_root.join("mcp.json").is_file());
+    }
+
+    #[tokio::test]
+    async fn c027_zip_mode_places_zip_files() {
+        let reg = MemoryRegistry::new();
+        let srv = publish_mcp(&reg, "srv", &stdio("grim")).await;
+        let plugins = [input("team", vec![srv])];
+        let clients = [claude()];
+        let out = tempfile::tempdir().unwrap();
+        let access: Arc<dyn OciAccess> = Arc::new(reg);
+        let req = ExportRequest {
+            plugins: &plugins,
+            clients: &clients,
+            output_dir: out.path(),
+            zip: true,
+            force: false,
+            anchor: out.path(),
+            manifest: None,
+        };
+        let items = export_plugins(&req, &access).await.unwrap();
+        assert_eq!(entries(out.path()), vec!["team.claude.zip"]);
+        assert!(
+            std::fs::symlink_metadata(out.path().join("team.claude.zip"))
+                .unwrap()
+                .is_file()
+        );
+        assert!(matches!(items[0].format, OutputFormatKind::Zip));
+        assert_eq!(items[0].path, out.path().join("team.claude.zip"));
+    }
+
+    #[tokio::test]
+    async fn c027_an_existing_output_refuses_the_whole_run_before_any_placement() {
+        let reg = MemoryRegistry::new();
+        let srv = publish_mcp(&reg, "srv", &stdio("grim")).await;
+        let plugins = [input("team", vec![srv])];
+        let clients = [claude(), codex()];
+        let out = tempfile::tempdir().unwrap();
+        let taken = staged_dir(out.path(), "team.codex", "old");
+        let access: Arc<dyn OciAccess> = Arc::new(reg);
+        let req = ExportRequest {
+            plugins: &plugins,
+            clients: &clients,
+            output_dir: out.path(),
+            zip: false,
+            force: false,
+            anchor: out.path(),
+            manifest: None,
+        };
+        let err = export_plugins(&req, &access).await.unwrap_err();
+        match export_error(&err) {
+            ExportError::OutputExists { paths } => assert_eq!(paths, &vec![taken.clone()]),
+            other => panic!("expected OutputExists, got {other:?}"),
+        }
+        assert_eq!(
+            entries(out.path()),
+            vec!["team.codex"],
+            "claude not placed; staging removed"
+        );
+        assert_eq!(std::fs::read_to_string(taken.join("skills/a/SKILL.md")).unwrap(), "old");
+    }
+
+    #[tokio::test]
+    async fn c027_force_replaces_an_existing_output() {
+        let reg = MemoryRegistry::new();
+        let srv = publish_mcp(&reg, "srv", &stdio("grim")).await;
+        let plugins = [input("team", vec![srv])];
+        let clients = [claude()];
+        let out = tempfile::tempdir().unwrap();
+        let taken = staged_dir(out.path(), "team.claude", "old");
+        let access: Arc<dyn OciAccess> = Arc::new(reg);
+        let req = ExportRequest {
+            plugins: &plugins,
+            clients: &clients,
+            output_dir: out.path(),
+            zip: false,
+            force: true,
+            anchor: out.path(),
+            manifest: None,
+        };
+        export_plugins(&req, &access).await.unwrap();
+        assert_eq!(entries(out.path()), vec!["team.claude"]);
+        assert!(taken.join(".mcp.json").is_file());
+        assert!(!taken.join("skills").exists(), "old tree gone");
+    }
+
+    #[tokio::test]
+    async fn c017_c027_a_rule_only_plugin_fetches_nothing_and_places_nothing() {
+        let counter = Arc::new(NoNetwork::default());
+        let access: Arc<dyn OciAccess> = counter.clone();
+        let plugins = [input(
+            "rules",
+            vec![registry_member("style", ArtifactKind::Rule, sha('e'))],
+        )];
+        let clients = [claude()];
+        let out = tempfile::tempdir().unwrap();
+        let req = ExportRequest {
+            plugins: &plugins,
+            clients: &clients,
+            output_dir: out.path(),
+            zip: false,
+            force: false,
+            anchor: out.path(),
+            manifest: None,
+        };
+        let err = export_plugins(&req, &access).await.unwrap_err();
+        assert!(
+            matches!(export_error(&err), ExportError::EmptyPlugin { plugin, client }
+                if plugin == "rules" && *client == ClientTarget::Claude),
+            "{err:?}"
+        );
+        assert_eq!(counter.calls.load(Ordering::SeqCst), 0, "rules are never fetched");
+        assert!(entries(out.path()).is_empty(), "no output and no staging dir left");
+    }
+
+    #[tokio::test]
+    async fn c017_stage_members_fetches_only_admitted_kinds() {
+        let reg = MemoryRegistry::new();
+        let srv = publish_mcp(&reg, "srv", &stdio("grim")).await;
+        let rule = registry_member("style", ArtifactKind::Rule, sha('e'));
+        let members = vec![(srv, "srv".to_string()), (rule, "style".to_string())];
+        let counting = PinOnly::new(reg);
+        let access: Arc<dyn OciAccess> = counting.clone();
+        let tmp = tempfile::tempdir().unwrap();
+        let staged = stage_members(&members, &[claude(), codex()], &access, tmp.path(), tmp.path())
+            .await
+            .unwrap();
+        assert_eq!(staged.len(), 2, "output order = members order");
+        assert_eq!(staged[0].emitted, "srv");
+        assert!(matches!(&staged[0].content, MemberContent::Mcp(d) if **d == stdio("grim")));
+        assert_eq!(staged[1].emitted, "style");
+        assert!(matches!(staged[1].content, MemberContent::Unfetched));
+        assert_eq!(counting.manifests.load(Ordering::SeqCst), 1);
+    }
+}

@@ -618,21 +618,7 @@ pub fn render_universal_skill_doc(doc: &str) -> Option<RenderedDoc> {
 /// Deterministic (identical input yields identical output), so the
 /// installer's untracked-clobber preview and the real install agree.
 pub fn rebind_skill_name(doc: &str, binding: &str) -> Option<String> {
-    let path = std::path::Path::new("SKILL.md");
-    let (fm_yaml, body) = SkillFrontmatter::split(doc, path).ok()?;
-    let fm = SkillFrontmatter::from_yaml(&fm_yaml, path).ok()?;
-    if fm.name.as_str() == binding {
-        return None;
-    }
-    let mut mapping: serde_yaml::Mapping = serde_yaml::from_str(&fm_yaml).ok()?;
-    mapping.insert(Value::String("name".to_string()), Value::String(binding.to_string()));
-
-    let mut document = String::with_capacity(doc.len() + 16);
-    document.push_str("---\n");
-    document.push_str(&serialize_mapping(&mapping));
-    document.push_str("---\n");
-    document.push_str(&body);
-    Some(document)
+    rebind_name::<SkillFrontmatter>(doc, binding, |fm| fm.name.as_str())
 }
 
 /// [`rebind_skill_name`] for an agent document: rewrite only the
@@ -642,12 +628,17 @@ pub fn rebind_skill_name(doc: &str, binding: &str) -> Option<String> {
 /// Why: a renamed plugin member ships as `agents/<binding>.md`, and the
 /// client addresses the agent by its frontmatter `name` — a stale one would
 /// collide with the unrenamed original. Only export renames agents.
-#[allow(dead_code, reason = "export calls it (WP-07)")]
 pub fn rebind_agent_name(doc: &str, binding: &str) -> Option<String> {
-    let path = std::path::Path::new("agent.md");
-    let (fm_yaml, body) = SkillFrontmatter::split(doc, path).ok()?;
-    let fm: AgentFrontmatter = serde_yaml::from_str(&fm_yaml).ok()?;
-    if fm.name.as_str() == binding {
+    rebind_name::<AgentFrontmatter>(doc, binding, |fm| fm.name.as_str())
+}
+
+/// The shared rewrite behind [`rebind_skill_name`] and
+/// [`rebind_agent_name`]: `T` is the frontmatter the document must parse
+/// as, `name` reads its current name.
+fn rebind_name<T: serde::de::DeserializeOwned>(doc: &str, binding: &str, name: fn(&T) -> &str) -> Option<String> {
+    let (fm_yaml, body) = SkillFrontmatter::split(doc, std::path::Path::new("SKILL.md")).ok()?;
+    let fm: T = serde_yaml::from_str(&fm_yaml).ok()?;
+    if name(&fm) == binding {
         return None;
     }
     let mut mapping: serde_yaml::Mapping = serde_yaml::from_str(&fm_yaml).ok()?;
