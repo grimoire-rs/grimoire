@@ -321,6 +321,43 @@ fn warn_cross_scope_shadow(other: &InstallState, kind: ArtifactKind, name: &str,
     );
 }
 
+/// Warn once when a global Copilot skill routed into the shared
+/// `.agents/skills` pool via `shared_skills` is invisible to Copilot because
+/// COPILOT_HOME/--config-dir names a non-default root — Copilot stops
+/// scanning that pool entirely on such a host (watchlist: "Pool gap").
+/// Narrow warn, not a skip: the skill still installs, it just may go unread
+/// by Copilot.
+///
+/// A free function, not inlined into [`install_and_persist`], so `grim
+/// update` — which bypasses that function and calls
+/// [`install_all_with_progress`] directly — can run the same check. The
+/// condition is a target/config property (`is_shared_skills`,
+/// `COPILOT_HOME`), not an artifact one: checking it once per run at the
+/// point the target is resolved, rather than per artifact inside the
+/// materialize loop, means an unchanged, already-installed skill (every
+/// existing user on a later `install`/`update`, or anyone who sets
+/// COPILOT_HOME after installing) still gets the warning even though the
+/// per-artifact integrity gate short-circuits it to `AlreadyInstalled`
+/// before the loop runs.
+pub(crate) fn warn_copilot_pool_gap(target: &InstallTarget, scope: crate::config::scope::ConfigScope) {
+    if scope == crate::config::scope::ConfigScope::Global
+        && target
+            .clients()
+            .contains(&crate::install::client_target::ClientTarget::Copilot)
+        && target.is_shared_skills(crate::install::client_target::ClientTarget::Copilot)
+        && crate::install::vendor_copilot::copilot_home_diverges_from_default(
+            crate::install::vendor::env_dir("COPILOT_HOME"),
+            crate::install::vendor::home_dir(),
+        )
+    {
+        tracing::warn!(
+            "shared_skills is set for copilot, but COPILOT_HOME/--config-dir is set to a non-default \
+             root; Copilot CLI stops scanning ~/.agents/skills once that root diverges from \
+             $HOME/.copilot, so global skills installed to the pool may not be discovered by Copilot"
+        );
+    }
+}
+
 /// Materialize `lock` into `target`'s clients, persist the resulting state,
 /// then converge each involved client's vendor-owned config.
 ///
@@ -371,6 +408,8 @@ pub async fn install_and_persist<M: ArtifactMaterializer>(
              most other clients do not read — select a client with --client or `[options].clients`"
         );
     }
+
+    warn_copilot_pool_gap(target, scope);
 
     // Pre-mutation snapshot for the config sync below. An install is mostly
     // additive, but not purely: a rule whose new version DROPPED its support
@@ -2146,7 +2185,7 @@ fn record_partial_pass(
 /// [`ClientOutput`] hashed semantically over the rendered value.
 ///
 /// A vendor with no writable MCP surface for this scope — or one that
-/// cannot represent the descriptor (Copilot's global config supports no
+/// cannot represent the descriptor (e.g. Zed's config supports no
 /// `${VAR}` substitution) — is skipped with a warning. No registrable
 /// client at all is an error, not a silent no-op.
 async fn install_mcp(
@@ -2210,8 +2249,8 @@ async fn install_mcp(
             continue;
         };
         // A vendor that cannot represent this descriptor at this scope
-        // warns with its own specific reason (e.g. Copilot global + env
-        // references) and is skipped. On a pin change this can strand a
+        // warns with its own specific reason (e.g. Zed + env references)
+        // and is skipped. On a pin change this can strand a
         // prior-tracked client whose OLD pin was representable but whose NEW
         // one is not (http→ws, oauth added): its recorded entry would drop
         // from the rebuilt record while its stale member lingered in the

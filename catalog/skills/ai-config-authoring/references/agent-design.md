@@ -111,19 +111,25 @@ every other client hosts none (as of 2026; re-verify):
 | [Gemini CLI][gem-agents] | `.gemini/agents/*.md` | Markdown | Loaded only while the `experimental.enableAgents` setting is on — it defaults on (as of 2026; re-verify) |
 | [Antigravity][ag-agents] | `.agents/agents/*.md` | Markdown | `tools` is typed `string[]` upstream — a YAML list, not the comma string other clients take |
 
-**Several clients have no agent file you can package**: [Kiro][kiro] — a
+**Several clients have no agent file to package**: [Kiro][kiro] — a
 native IDE format exists, but its CLI expects an incompatible schema in the
 same `.kiro/agents/` directory ([kiro #8040][kiro-8040]), so no single file
-serves both; [Junie][junie] — its agents directory is early-access preview,
-not generally available; [Zed][zed] — agents run over the Agent Client
-Protocol, with no file to install; and [Amp][amp] — subagents are spawned at
-runtime. Newer skills-first clients are in the same position by default:
-assume no packageable agent format until a client documents one — a later
-survey of seven of them turned up exactly one exception (Antigravity,
-above), with Goose and OpenClaw spawning subagents at runtime, Warp
-confining agent profiles to its settings UI, and Cline, Droid and Kilo
-shipping no agent file at all. Delegation still works on those clients —
-it is just not something you can package.
+serves both; [Zed][zed] — agents run over the Agent Client Protocol, with no
+file to install; and [Amp][amp] — subagents are spawned at runtime. Newer
+skills-first clients default to the same assumption until a client documents
+otherwise — but a later survey of seven of them found a real installable
+agent format on five of the seven: Antigravity (already in the table above),
+Droid (`.factory/droids/*.md`), Kilo (`.kilo/agents/`), and Goose
+(`.agents/agents/`) — plus Cline, whose CLI reads installable agents from
+`.cline/agents/` and `~/.cline/agents/` (Markdown with YAML frontmatter) even
+though its VS Code extension never spawns one. Warp and OpenClaw are the
+other two of the seven, and both genuinely have no file: Warp's agent
+profiles live in its settings UI, and OpenClaw's subagents are spawned at
+runtime with nothing on disk. [Junie][junie] belongs to neither survey but
+shares the same shape as the five: `.junie/agents/` is real and not
+early-access, just not yet packaged here. Whether a given tool packages a
+format is a separate question from whether the format exists; check current
+docs before assuming either way.
 
 The only documented cross-read: VS Code Copilot also detects
 `.claude/agents/*.md`; no other cross-read is documented (as of 2026;

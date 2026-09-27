@@ -3,7 +3,7 @@
 
 //! Amp's vendor strategy: shared-pool skills + MCP; rules and agents declined.
 //!
-//! Amp mapping (`adr_vendor_wave_expansion.md`; live-verified 2026-07-19,
+//! Amp mapping (`adr_vendor_wave_expansion.md`; live-verified 2026-07-19, re-verified 2026-09-27,
 //! `research_vendor_verification_zed_amp.md`):
 //!
 //! - **Skills**: the shared `.agents/skills` pool (project

@@ -15,8 +15,10 @@ Writing a rule into a client that silently drops its path scoping — or an agen
 into one that never reads it — is worse than an honest refusal: the config
 looks installed but does nothing. grim renders only what each client can
 faithfully host, degrades with a warning where a surface exists but loses
-fidelity, and declines (warn, skip, zero files) where no ownable surface exists
-at all.
+fidelity, and declines (warn, skip, zero files) everywhere else — usually
+because no ownable surface exists upstream, sometimes because a real one
+does and grim has not built the render yet (see [Known gaps](#known-gaps)
+for which is which).
 
 This page is the enforced source of truth. A table-parity test in
 `src/install/client_target.rs` reads this matrix when the test suite runs and
@@ -27,8 +29,9 @@ Legend:
 
 - `✓` — supported: a native surface, or a faithful transform.
 - `◐` — supported with a documented limitation (see [Known gaps](#known-gaps)).
-- `✗` — declined: no ownable surface, so grim warns, skips, and writes nothing
-  (see [Known gaps](#known-gaps)).
+- `✗` — declined: grim warns, skips, and writes nothing — no ownable
+  surface exists upstream for most of these, but a few are a grim capability
+  gap against a real surface (see [Known gaps](#known-gaps) for which).
 
 ## Support matrix {#matrix}
 
@@ -130,9 +133,15 @@ split) worth calling out even where the surface is otherwise fully supported.
 Every MCP cell except [Claude] is ◐ because grim declines two descriptor shapes
 for every client other than [Claude]: the WebSocket (`ws`) transport and the
 structured `oauth` block. No surveyed client other than [Claude] documents a
-native config surface for either, so grim skips a ws- or oauth-bearing server
-for that client with a warning rather than writing an entry the client cannot
-honor. Every other transport (stdio, sse, http) registers normally.
+native config surface for `ws`, so grim skips a ws-bearing server for that
+client with a warning rather than writing an entry the client cannot honor.
+Several clients — [Zed], [OpenCode], [Copilot], [Codex], [Gemini], [Kiro],
+[Antigravity], [Qoder], and [Cursor] — document their own native OAuth
+configuration (most as an `oauth` object; [Cursor]'s is `auth`, [Copilot]
+uses flat `oauth*` keys). None of those shapes map losslessly onto grim's
+`McpOAuth` descriptor yet, so grim skips
+an oauth-bearing server there too, with the same warning. Every other
+transport (stdio, sse, http) registers normally.
 
 [Qoder] does document both, but in shapes grim's descriptor cannot carry — see
 [Qoder's entry](#gap-qoder).
@@ -146,11 +155,12 @@ declines `ws` there too, and revisits it on confirmation.
 
 ### Copilot: global MCP environment references {#gap-copilot-env}
 
-At global scope, the [GitHub Copilot][copilot] CLI does not substitute `${VAR}`
-environment references in its MCP config, so grim skips a descriptor that
-carries one (project scope is unaffected). Upstream shipped substitution in
-v0.0.406 and regressed it in v0.0.407 — grim will drop the skip once a fixed
-release is confirmed.
+Closed on 2026-09-27. The [GitHub Copilot][copilot] CLI expands
+`${VAR}` references in its global MCP config itself (verified against CLI
+1.0.88). grim writes them as authored instead of skipping the descriptor.
+The next `grim install` adds a registration that an earlier grim skipped.
+See [Environment references][env-refs] for the
+upstream edge cases.
 
 ### Cursor: a comma inside a glob splits the pattern {#gap-cursor-globs}
 
@@ -189,13 +199,19 @@ authored for one file type being applied to everything.
 and directory-granular, with no `paths`/`applyTo` equivalent. grim declines a
 rule for [Codex]: warn, skip, and write no file.
 
-### Kiro: global rules are inert until #9176 {#gap-kiro-rules}
+### Kiro: rule scoping is inert on the CLI and at global scope {#gap-kiro-rules}
 
 [Kiro] steering rules are native at both scopes, but a global-scope scoped rule
-is written correctly yet ignored by [Kiro] until upstream bug [kiro #9176] is
-fixed. grim writes the correct `fileMatch` steering and emits a warning citing
-the issue; the file self-heals (becomes active) when the bug closes, with no
-grim change.
+is written correctly yet ignored by the [Kiro] IDE because of upstream bug
+[kiro #9176]. grim writes the correct `fileMatch` steering and emits a warning
+citing the issue. The file self-heals (becomes active) once upstream fixes the
+bug, with no grim change. An inactivity bot closed #9176 in August 2026 without
+a confirmed fix, so grim keeps the warning.
+
+The [Kiro] CLI ignores scoping at every scope. Its docs state that inclusion
+modes are not supported on the CLI and that every steering file loads
+([Kiro steering docs][kiro-steering-docs]). A path-scoped rule is therefore
+always-on for CLI users, at project scope too, and grim does not warn about it.
 
 A manual workaround exists today: switching the steering block to
 `inclusion: auto` makes [Kiro] load it heuristically at the global scope. grim
@@ -228,8 +244,11 @@ At **global scope** grim writes nothing at all. There is no `~/.junie/rules/`
 upstream, so a global rule is skipped with a warning and records zero outputs
 rather than landing in a directory [Junie] never reads.
 
-[Junie]'s `.junie/agents/` format exists but is early-access-preview only, not
-generally available; agents are declined until it ships.
+[Junie]'s `.junie/agents/` format is not early-access — creating a custom
+subagent, its file location and its frontmatter carry no EAP notice on
+JetBrains' own docs. Only a separate usage setting (automatic subagent
+invocation) is EAP. Agents are declined here only because grim does not
+render them for Junie yet, tracked in [grimoire#148][grimoire-148].
 
 ### Gemini: rules declined, agents gated by a setting {#gap-gemini}
 
@@ -259,19 +278,23 @@ live under its own `~/.gemini/config/skills`, so a global install for it is a
 separate copy.
 
 *Reading* — several more clients scan the pool without grim writing there by
-default. [Cursor], [Copilot], [OpenCode] and [Warp] all read it at both
-scopes, but each has a first-class directory of its own upstream, and grim
-prefers a vendor-specific location wherever one exists. [Kilo] reads the
-**project** pool but has no global support, and [OpenClaw] reads the
-**global** pool but has no project scope; both are partial readers, and grim
-installs both to their own directories.
+default. [Cursor], [Copilot], [OpenCode], [Warp], [Droid], [Kilo] and [Cline]
+all read it at both scopes, but each has a first-class directory of its own
+upstream, and grim prefers a vendor-specific location wherever one exists.
+[Copilot] stops reading the global pool once `COPILOT_HOME` points anywhere
+but `~/.copilot` (verified against CLI 1.0.88) — grim warns at install time
+when `shared_skills` is set for Copilot and that condition holds, since the
+skill still installs into a pool Copilot will not scan. [Kilo] stops reading it when
+`KILO_DISABLE_EXTERNAL_SKILLS` is set. [OpenClaw] reads the **global** pool
+but has no project scope; it is a partial reader, and grim installs it to its
+own directory.
 
 Set `[options.vendors.<name>].shared_skills` on any full pool reader —
-[Cursor], [Copilot], [OpenCode] or [Warp] — to move that client's skills into
-the pool instead. The key is refused (exit `65` at `grim config set`, `78`
-when hand-authored) for a client that is not a verified pool reader, because
-enabling it there would write where nothing reads. Partial readers are
-excluded on purpose: membership is scope-blind, so a client that reads the
+[Cursor], [Copilot], [OpenCode], [Warp], [Droid], [Kilo] or [Cline] — to move
+that client's skills into the pool instead. The key is refused (exit `65` at
+`grim config set`, `78` when hand-authored) for a client that is not a
+verified pool reader, because enabling it there would write where nothing
+reads. Partial readers are excluded on purpose: membership is scope-blind, so a client that reads the
 pool at only one scope would get skills written where it never scans at the
 other.
 
@@ -305,13 +328,14 @@ spawned at runtime with no installable file format, so agents are declined.
 ### Antigravity: rules declined, project detection is opt-in {#gap-antigravity}
 
 [Antigravity] documents a workspace `.agents/rules` folder, but grim declines
-rules for it on two counts. Global rules are a single `~/.gemini/GEMINI.md` —
-not a per-file surface, and a file [Gemini] writes to as well
-([gemini-cli #16058][antigravity-rules-collision]), so grim cannot own it. And
-no rule-file frontmatter key was found for the workspace folder: scoping is
-described as a glob-based "activation mode" configured in the product, so a
-rule written there would silently lose its `paths`. grim declines rather than
-install a rule that looks scoped and is not.
+rules for it — not for lack of a capability, but because grim does not
+render Rule for Antigravity yet. Both the workspace folder and a global
+`~/.gemini/config/rules/*.md` support real per-file frontmatter scoping: a
+required `trigger` (`model_decision`, `always_on`, `glob` or `manual`) plus
+`globs`/`glob` when `trigger` is `glob`. Antigravity also writes a
+standalone, unscoped `~/.gemini/GEMINI.md`, the same file [Gemini] writes to
+([gemini-cli #16058][antigravity-rules-collision]), but that collision does
+not extend to the modular `rules/*.md` directory, which is Antigravity's own.
 
 [Antigravity] is also never auto-detected in a workspace. All of its
 project-scope surfaces live under `.agents/`, which [Codex], [Gemini], [Zed],
@@ -344,12 +368,21 @@ their own names.
 
 [Cline], [Droid], [Goose], [Warp], [OpenClaw] and [Kilo] install **skills
 only**. Rules, agents and MCP are declined for all six, but not for the same
-reason in every case. Four of them — [Droid], [Goose], [Warp] and [OpenClaw] —
-document no per-file rules surface that can express a rule's `paths`. For
-[Cline] and [Kilo] the decline is a **scheduling** decision rather than a
-capability one: this release ships skills for these clients, and rule support
-is additive to add later. None of the six ships an installable subagent file
-format, and grim writes no MCP config for any of them. Each decline is additive
+reason in every case. Five of them — [Droid], [Goose], [Warp], [OpenClaw] and
+[Kilo] — document no per-file rules surface that can express a rule's
+`paths`: [Kilo]'s rules are a flat `instructions` array of file paths/globs
+in `kilo.jsonc`, monolithic like the other four, not a per-file directory.
+For [Cline] alone the decline is a **scheduling** decision rather than a
+capability one: `.clinerules/` genuinely supports per-file `paths:`
+scoping, and this release ships skills for these clients while rule support
+is additive to add later. Agents split similarly, but unevenly: [Droid],
+[Kilo] and [Goose] all document an installable per-file subagent format
+upstream, declined here only because grim does not render agents for them
+yet. [Cline]'s CLI reads one too (`.cline/agents`, `~/.cline/agents`),
+though its VS Code extension does not, so the same render gap applies once
+that split is worth carrying. Only [Warp] and [OpenClaw] have no
+installable format to decline at all, and grim writes no MCP config for
+any of the six. Each decline is additive
 to reverse — support can be added later without breaking anything, while
 withdrawing it could not be.
 
@@ -359,15 +392,17 @@ Client-specific detail worth knowing:
   capability. Its `.clinerules/` genuinely documents per-file `paths:`
   scoping — the exact mechanism whose absence forces a decline elsewhere. It
   is declined here only because this release ships skills for these clients;
-  it is the strongest candidate to gain rule support next. Cline is also a
-  documented **non-adopter** of the shared `.agents/skills` pool: its own docs
-  list `.cline/skills/`, `.clinerules/skills/` and `.claude/skills/`, and the
-  pool appears nowhere.
+  it is the strongest candidate to gain rule support next. Cline reads the
+  `.agents` pool at both scopes too — its CLI and VS Code extension source
+  both scan project `.agents/skills` and global `~/.agents/skills` alongside
+  `.cline/skills/` — so `[options.vendors.cline].shared_skills` moves its
+  skills there.
 - **[Droid]** is Factory's agent. The client is named `droid` but its directory
   is `.factory/` — grim names the client, not the vendor org, the same way it
-  uses `claude` rather than `anthropic`. Factory also documents a compatibility
-  directory `.agent/skills/`, singular, which is a different convention from
-  the `.agents` pool; grim writes neither.
+  uses `claude` rather than `anthropic`. Droid reads the `.agents` pool at
+  both scopes, so `[options.vendors.droid].shared_skills` moves its skills
+  there. Factory also reads a singular `.agent/skills/`, a different
+  convention that grim never writes.
 - **[Goose]** is the one client here that installs into the shared
   `.agents/skills` pool rather than its own directory, because Goose's own docs
   label `.goose/skills/` backward-compatibility and name `.agents/skills` the
@@ -386,7 +421,8 @@ Client-specific detail worth knowing:
 - **[Kilo]** was formerly Kilo Code, and grim uses the current name. It writes
   `.kilo/` exclusively; the older `.kilocode/` is deprecated upstream and grim
   never writes it, though an existing one is still recognized when detecting
-  whether Kilo is in use.
+  whether Kilo is in use. Kilo reads the pool at both scopes, so
+  `[options.vendors.kilo].shared_skills` moves its skills there.
 
 ### Qoder: rule support directories load as rules, MCP env references {#gap-qoder}
 
@@ -410,6 +446,20 @@ Three server shapes are skipped with a warning: `ws` (Qoder expects a host and
 port, not a URL), an `oauth` block (Qoder's fields differ from grim's), and any
 server using a `${VAR}` reference, which [Qoder] does not document expanding.
 Set `QODER_CONFIG_DIR` to move global installs out of `~/.qoder`.
+
+### Claude: a global env override can move CLAUDE_CONFIG_DIR without grim seeing it {#gap-claude-config-dir-env}
+
+Not a matrix gap — every [Claude] cell is ✓ — but a caveat worth stating next
+to `CLAUDE_CONFIG_DIR` itself. grim honors that variable read-only wherever it
+resolves the environment for the running `grim` process (see
+[Configuration][envvars]). Since Claude Code 2.1.251, Claude Code no longer
+lets a **project** or **local** `settings.json` `env` block set it — only
+shell, user, and managed settings can. A value set in user or managed settings
+still relocates Claude's real config root, and grim has no way to read that
+setting: it never parses Claude's own `settings.json`, only the process
+environment. A global-scope install can land at the old `~/.claude` while
+Claude itself now reads a different directory, with no warning from either
+side.
 
 ## The `compatibility:` frontmatter field {#compatibility-disclaimer}
 
@@ -435,7 +485,7 @@ where.
 [antigravity]: https://antigravity.google
 [cline]: https://cline.bot
 [droid]: https://factory.ai
-[goose]: https://block.github.io/goose
+[goose]: https://goose-docs.ai
 [warp]: https://warp.dev
 [openclaw]: https://github.com/openclaw/openclaw
 [kilo]: https://kilo.ai
@@ -443,8 +493,12 @@ where.
 [antigravity-rules-collision]: https://github.com/google-gemini/gemini-cli/issues/16058
 [cursor-glob-split]: https://forum.cursor.com/t/76648
 [kiro #9176]: https://github.com/kirodotdev/Kiro/issues/9176
+[kiro-steering-docs]: https://kiro.dev/docs/steering/
 [kiro #8040]: https://github.com/kirodotdev/Kiro/issues/8040
 [gemini-antigravity]: https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/
+[grimoire-148]: https://github.com/grimoire-rs/grimoire/issues/148
 
 <!-- internal -->
 [agents]: #gap-shared-pool
+[env-refs]: ./mcp-servers.md#env-references
+[envvars]: ./configuration.md#environment-variables

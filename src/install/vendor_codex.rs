@@ -2,6 +2,7 @@
 // Copyright 2026 The Grimoire Authors
 
 //! OpenAI Codex's vendor strategy: universal skills, TOML agents, no rules.
+//! Mapping verified 2026-09-27 against Codex CLI 0.157.1 (`rust-v0.157.1`).
 //!
 //! Codex reads only the universal agentskills `SKILL.md` fields and
 //! auto-discovers skills from the cross-vendor open standard directory
@@ -26,7 +27,8 @@
 //! — project `<workspace>/.codex/config.toml`, global `$CODEX_HOME|~/.codex`
 //! — the first TOML-formatted vendor MCP config (see
 //! [`super::toml_splice`]). [`Vendor::mcp_entry`] maps stdio →
-//! `command`/`args`/`env` and HTTP/SSE → `url` under `mcp_servers.<name>`.
+//! `command`/`args`/`env` and HTTP/SSE → `url` under `mcp_servers.<name>`,
+//! and the descriptor's millisecond `timeout` → `startup_timeout_ms` on both.
 //! A stdio `env` value is written **verbatim** — a literal `${VAR}` is the
 //! launched subprocess's OS environment assignment (the same passthrough
 //! Claude/OpenCode give it), not something grim or Codex substitutes.
@@ -67,7 +69,17 @@ pub const CODEX_AGENT_FIELDS: &[KnownField] = &[
     KnownField {
         field: "reasoning-effort",
         native: "model_reasoning_effort",
-        ty: FieldType::Enum(&["ultra", "max", "xhigh", "high", "medium", "low", "minimal", "none"]),
+        ty: FieldType::Enum(&[
+            "ultra",
+            "max",
+            "xhigh",
+            "high",
+            "medium",
+            "low",
+            "minimal",
+            "none",
+            "persistent",
+        ]),
     },
     KnownField {
         field: "sandbox-mode",
@@ -173,14 +185,21 @@ impl Vendor for CodexVendor {
     ) -> Option<(String, serde_json::Value)> {
         use crate::oci::mcp::McpTransport;
 
-        // Refinement fields (`timeout`/`always_load`/`headers_helper`/
-        // `cwd`) have no documented Codex target — dropped (pure
-        // refinements, nothing auth-critical is lost). A structured oauth
-        // block, by contrast, IS auth-critical: no Codex target exists,
-        // so the whole descriptor is skipped with a warning.
+        // `timeout` (startup, ms) maps onto Codex's `startup_timeout_ms`,
+        // valid on both transports. The other refinements are dropped (pure
+        // refinements, nothing auth-critical is lost): `always_load` has no
+        // Codex key; Codex's `cwd` resolves a relative path against the
+        // directory Codex was launched from, not the config file, so it is
+        // not faithful; `http_headers_helper` differs from Claude's
+        // `headersHelper` contract (vendor-capability-watchlist.md). A
+        // structured oauth block, by contrast, IS auth-critical: Codex
+        // documents its own `auth` enum plus an `oauth` table (`client_id`,
+        // `client_secret`, `callback_url`, `callback_port`,
+        // `authorization_server_issuer`), but the shape differs from grim's
+        // `McpOAuth`, so the whole descriptor is skipped with a warning.
         let s = &descriptor.server;
         if s.oauth.is_some() {
-            tracing::warn!("mcp server '{name}' skipped for codex ({scope}): config.toml has no oauth surface");
+            tracing::warn!("mcp server '{name}' skipped for codex ({scope}): config.toml oauth shape differs");
             return None;
         }
         let mut entry = serde_json::Map::new();
@@ -234,6 +253,9 @@ impl Vendor for CodexVendor {
                     entry.insert("env_http_headers".into(), serde_json::Value::Object(env_http_headers));
                 }
             }
+        }
+        if let Some(timeout) = s.timeout {
+            entry.insert("startup_timeout_ms".into(), serde_json::json!(timeout));
         }
         Some((format!("/mcp_servers/{name}"), serde_json::Value::Object(entry)))
     }
@@ -812,15 +834,48 @@ mod tests {
     }
 
     #[test]
-    fn mcp_entry_drops_refinement_fields() {
+    fn mcp_entry_maps_timeout_and_drops_other_refinements() {
         let d = crate::oci::mcp::McpDescriptor::from_toml_str(
             "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"\ntimeout = 7000\ncwd = \"./srv\"\nalways_load = true\n",
         )
         .unwrap();
         let (_, value) = CodexVendor.mcp_entry(ConfigScope::Project, "m", &d).unwrap();
-        for key in ["timeout", "cwd", "always_load", "alwaysLoad", "headers_helper"] {
-            assert!(value.get(key).is_none(), "no Codex target for '{key}': {value}");
+        assert_eq!(value["startup_timeout_ms"], 7000, "startup timeout is native, in ms");
+        for key in [
+            "timeout",
+            "cwd",
+            "always_load",
+            "alwaysLoad",
+            "headers_helper",
+            "http_headers_helper",
+        ] {
+            assert!(
+                value.get(key).is_none(),
+                "no faithful Codex target for '{key}': {value}"
+            );
         }
+    }
+
+    #[test]
+    fn mcp_entry_http_maps_timeout_and_drops_headers_helper() {
+        let d = crate::oci::mcp::McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://mcp.example.com/mcp\"\ntimeout = 2500\nheaders_helper = \"/usr/local/bin/tok\"\n",
+        )
+        .unwrap();
+        let (_, value) = CodexVendor.mcp_entry(ConfigScope::Global, "m", &d).unwrap();
+        assert_eq!(value["startup_timeout_ms"], 2500);
+        assert!(value.get("http_headers_helper").is_none(), "{value}");
+        assert!(value.get("headers_helper").is_none(), "{value}");
+    }
+
+    #[test]
+    fn mcp_entry_without_timeout_emits_no_startup_timeout() {
+        let d = crate::oci::mcp::McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"\n",
+        )
+        .unwrap();
+        let (_, value) = CodexVendor.mcp_entry(ConfigScope::Project, "m", &d).unwrap();
+        assert!(value.get("startup_timeout_ms").is_none(), "{value}");
     }
 
     #[test]
@@ -919,7 +974,17 @@ mod tests {
 
     #[test]
     fn agent_index_accepts_updated_reasoning_effort_literals() {
-        for accepted in ["ultra", "max", "xhigh", "high", "medium", "low", "minimal", "none"] {
+        for accepted in [
+            "ultra",
+            "max",
+            "xhigh",
+            "high",
+            "medium",
+            "low",
+            "minimal",
+            "none",
+            "persistent",
+        ] {
             let doc =
                 format!("---\nname: rev\ndescription: d\nmetadata:\n  codex.reasoning-effort: {accepted}\n---\nbody\n");
             let out = CodexVendor

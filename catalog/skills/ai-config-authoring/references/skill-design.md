@@ -99,13 +99,12 @@ The pool is where portability actually pays off, and it is the one place
 where **reading it and writing to it are different lists** — conflating
 them is the usual mistake. [Codex][cx], [Gemini CLI][gem], [Zed][zed],
 [Amp][amp] and [Goose][goose] point at `.agents/skills/` as their own
-location. [OpenCode][oc], [Copilot][cop], [Cursor][cur] and [Warp][warp]
-scan it *in addition* to a first-class directory of their own, so a tool
-writing on your behalf will usually prefer the vendor-specific path and
-treat the pool as an opt-in. And adoption is not universal: [Cline][cline]
-documents `.cline/skills/`, `.clinerules/skills/` and `.claude/skills/`
-with the pool named nowhere (as of 2026; re-verify each of these — this
-list moves faster than anything else in this guide).
+location. [OpenCode][oc], [Copilot][cop], [Cursor][cur], [Warp][warp],
+[Droid][droid], [Kilo][kilo] and [Cline][cline] scan it *in addition* to a
+first-class directory of their own, so a tool writing on your behalf will
+usually prefer the vendor-specific path and treat the pool as an opt-in (as
+of 2026; re-verify each of these — this list moves faster than anything else
+in this guide).
 
 Two consequences worth designing for:
 
@@ -184,9 +183,11 @@ body.
 [zed]: https://zed.dev
 [amp]: https://ampcode.com
 [cur]: https://cursor.com
-[goose]: https://block.github.io/goose
+[goose]: https://goose-docs.ai
 [warp]: https://warp.dev
 [cline]: https://cline.bot
+[droid]: https://factory.ai
+[kilo]: https://kilo.ai
 [bp]: https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices
 [overview]: https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview
 [eng]: https://www.anthropic.com/engineering/equipping-agents-for-the-real-world-with-agent-skills

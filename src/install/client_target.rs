@@ -78,7 +78,8 @@ pub enum ClientTarget {
     /// JetBrains Junie — `.junie/{skills,rules,mcp/mcp.json}` (skills + MCP
     /// native; rules **degraded and project-only** — `.junie/rules/` is
     /// ownable but concatenated wholesale, so `paths` is dropped, and no
-    /// global `~/.junie/rules/` exists; agents declined — EAP-only).
+    /// global `~/.junie/rules/` exists; agents declined — not EAP-gated,
+    /// just not rendered by grim yet).
     Junie,
     /// Gemini CLI — shared `.agents/skills` + `.gemini/{agents,settings.json}`
     /// (skills, agents, MCP; rules declined — GEMINI.md hierarchy only).
@@ -103,7 +104,7 @@ pub enum ClientTarget {
     /// global directories and are not served by this name.
     Antigravity,
     /// Cline — `.cline/skills` (skills only; rules, agents, and MCP declined).
-    /// A documented non-adopter of the shared `.agents/skills` pool.
+    /// Pool-capable via the `shared_skills` opt-in.
     Cline,
     /// Droid (Factory) — `.factory/skills` (skills only). The client is
     /// `droid`; its directory is `.factory`. That mismatch is deliberate.
@@ -119,7 +120,7 @@ pub enum ClientTarget {
     /// path is a fixed daemon home that does not track the repository.
     OpenClaw,
     /// Kilo — `.kilo/skills` (skills only). Never writes the deprecated
-    /// `.kilocode`; a partial pool member, so off the shared-pool roster.
+    /// `.kilocode`; pool-capable via the `shared_skills` opt-in.
     Kilo,
     /// Qoder — `.qoder/{skills,rules,agents,settings.json}` (all four kinds
     /// native; Claude Code's config shape under its own root).

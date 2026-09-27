@@ -4,7 +4,7 @@
 //! Google Antigravity's vendor strategy: pooled project skills, a private
 //! global root, native agents and MCP; rules declined.
 //!
-//! Antigravity 2.0 mapping, verified 2026-07-26 against the doc tree the
+//! Antigravity 2.0 mapping, verified 2026-07-26 (re-verified 2026-09-27 against 2.17.0) against the doc tree the
 //! antigravity.google nav labels **Antigravity 2.0 (v2.4.2)** — distinct from
 //! its Antigravity CLI (v1.1.x) and Antigravity IDE (v2.1.x) sections, which
 //! document different global directories:
@@ -35,10 +35,15 @@
 //!   `<ws>/.agents/agents/<name>.md`, global `~/.gemini/config/agents/<name>.md`.
 //!   `tools` is a `string[]`, so the canonical comma string is emitted as a
 //!   YAML sequence (the Copilot/Gemini pattern).
-//! - **Rules**: **declined**. See [`AntigravityVendor::kind_support`] — a
-//!   workspace `.agents/rules` folder exists, but the global half is a single
-//!   `~/.gemini/GEMINI.md` shared with Gemini CLI, and `kind_support` cannot
-//!   answer per scope.
+//! - **Rules**: **declined**, but not for lack of a real surface — grim just
+//!   does not render Rule for Antigravity yet. Re-verified 2026-09-27 against
+//!   <https://antigravity.google/docs/rules>: both scopes document a modular,
+//!   per-file directory with real `trigger`/`globs` frontmatter scoping —
+//!   workspace `.agents/rules/*.md` and global `~/.gemini/config/rules/*.md`
+//!   (`trigger` required: `model_decision` \| `always_on` \| `glob` \|
+//!   `manual`; `globs`/`glob` required when `trigger` is `glob`). Antigravity
+//!   separately writes an unscoped `~/.gemini/GEMINI.md`, shared with Gemini
+//!   CLI, but that collision does not extend to `config/rules/*.md`.
 //! - **MCP**: `mcpServers`, project `<ws>/.agents/mcp_config.json`, global
 //!   `~/.gemini/config/mcp_config.json`; remote transports use `serverUrl`
 //!   (not `url`/`httpUrl`). `ws` and `oauth` are declined — see
@@ -83,26 +88,22 @@ impl Vendor for AntigravityVendor {
     }
 
     fn kind_support(&self, kind: ArtifactKind) -> KindSupport {
-        // Rules declined. Upstream `/docs/rules-workflows` documents a
-        // workspace `.agents/rules` FOLDER — an ownable per-file surface — but
-        // two things stop grim from claiming the kind:
+        // Rules declined — re-verified 2026-09-27 against
+        // <https://antigravity.google/docs/rules>, and both flip conditions
+        // that used to block this are now met: a real per-file rule surface
+        // exists at BOTH scopes (workspace `.agents/rules/*.md`, global
+        // `~/.gemini/config/rules/*.md`), and each documents a genuine
+        // frontmatter scoping key (`trigger` = `model_decision` | `always_on`
+        // | `glob` | `manual`, `globs`/`glob` required for `glob`). Antigravity
+        // separately writes an unscoped `~/.gemini/GEMINI.md`, shared with
+        // Gemini CLI (google-gemini/gemini-cli #16058), but that is a
+        // different file from `config/rules/*.md` and does not block it.
         //
-        // 1. `kind_support` has no scope parameter, so one answer must be true
-        //    at BOTH scopes. Globally there is no per-file surface at all:
-        //    "Global rules live in ~/.gemini/GEMINI.md" — a single file, and
-        //    one Gemini CLI writes to as well (google-gemini/gemini-cli
-        //    #16058). grim cannot own it, and writing global rules somewhere
-        //    nothing reads is the failure this project refuses.
-        // 2. A rule's scoping is `paths`, and Antigravity's equivalent is a
-        //    glob-based "activation mode" described in product-UI terms. No
-        //    frontmatter field table for a rule FILE was found on
-        //    `/docs/rules-workflows` — an observed absence, not a published
-        //    negative — so grim has no verified on-disk key to project `paths`
-        //    onto, and a written rule would silently lose its scoping.
-        //
-        // Declined is the reversible direction (decline → support is additive,
-        // the reverse is a breaking change), and the workspace folder makes
-        // this a live candidate rather than a dead end. Watchlisted.
+        // Still declined ONLY because grim does not render Rule for
+        // Antigravity yet — a scoped render is real work (kind enablement),
+        // not this wording fix. Declined is the reversible direction
+        // (decline → support is additive, the reverse is a breaking change).
+        // Watchlisted.
         match kind {
             ArtifactKind::Rule => KindSupport::Declined,
             _ => KindSupport::Native,
@@ -140,11 +141,10 @@ impl Vendor for AntigravityVendor {
     fn rule_path(&self, workspace: &Path, scope: ConfigScope, name: &str) -> PathBuf {
         // Dead path: `kind_support` declines `Rule`. Defensive location only.
         //
-        // The PROJECT arm is the documented `.agents/rules` folder, so a future
-        // flip starts there. The GLOBAL arm — `~/.gemini/config/rules/` — is
-        // **not** documented anywhere: upstream's global rules are the single
-        // `~/.gemini/GEMINI.md` file. It exists so the method is total, and a
-        // flip must NOT simply adopt it.
+        // Both arms ARE documented, re-verified 2026-09-27: PROJECT is
+        // `.agents/rules/*.md`, GLOBAL is `~/.gemini/config/rules/*.md` — this
+        // path already matches it. A future flip can adopt this location as-is
+        // for both scopes; see the module doc for the frontmatter shape.
         antigravity_scope_root(workspace, scope)
             .join("rules")
             .join(format!("{name}.md"))
@@ -338,7 +338,7 @@ pub(crate) fn antigravity_root(home: Option<PathBuf>) -> Option<PathBuf> {
 mod tests {
     //! Specification tests for Antigravity 2.0 — pooled project skills, a
     //! private global root, native agents + MCP, rules declined. Paths verified
-    //! 2026-07-26 against antigravity.google's 2.0 doc tree, subject to the
+    //! 2026-07-26 (re-verified 2026-09-27) against antigravity.google's 2.0 doc tree, subject to the
     //! summarizer caveat in this module's header.
     use super::*;
     use crate::oci::mcp::McpDescriptor;
@@ -354,8 +354,8 @@ mod tests {
         assert_eq!(
             AntigravityVendor.kind_support(ArtifactKind::Rule),
             KindSupport::Declined,
-            "global rules are a single ~/.gemini/GEMINI.md shared with Gemini CLI, and the \
-             workspace .agents/rules folder publishes no frontmatter key to carry `paths`"
+            "a real scoped surface exists at both scopes; declined only because grim does \
+             not render Rule for Antigravity yet"
         );
     }
 

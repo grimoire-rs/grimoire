@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Grimoire Authors
 
-//! Kilo's vendor strategy: own-directory skills only; everything else declined.
+//! Kilo's vendor strategy: own-directory skills, pool-eligible; rest declined.
 //!
-//! Kilo Code (`Kilo-Org/kilocode`), verified 2026-07-27 against the project's
+//! Kilo Code (`Kilo-Org/kilocode`), verified 2026-07-27, re-verified 2026-09-27, against the project's
 //! own source — `globalDirs()` and `skillDirectories()` — rather than prose.
 //!
 //! **The client name is `kilo`, not `kilocode`.** The product has rebranded to
@@ -19,18 +19,22 @@
 //!   2026-07-31. grim writes `.kilo` exclusively — a second write path would
 //!   be a second thing to reap, and adding one "for safety" is how a
 //!   deprecated directory outlives its deprecation.
-//! - **Not pool-capable — partial member, the Antigravity shape.** Kilo does
-//!   load `<ws>/.agents/skills` by default at *project* scope, but there is no
-//!   global `$HOME/.agents/skills` support; the nearest thing upstream is an
-//!   open, unmerged feature request. Pool membership is **scope-blind**, so
-//!   joining the roster would let `shared_skills = true` write global skills
-//!   where Kilo never scans — and nothing would fail, because the anchor table
-//!   classifies the pooled destination happily. A partial member needs a
-//!   scope-aware predicate before it can join. Watchlisted on the upstream
-//!   issue.
+//! - **Pool-capable at both scopes**, verified 2026-09-27 against Kilo v7.8.1:
+//!   "To share personal skills across projects, install them at
+//!   `~/.agents/skills/<name>/SKILL.md`. Kilo discovers this user-level
+//!   directory by default"
+//!   (<https://github.com/Kilo-Org/kilocode/blob/v7.8.1/packages/kilo-docs/pages/customize/skills.md>).
+//!   `packages/opencode/src/skill/index.ts` scans project `.agents/skills`
+//!   (walk-up) and `~/.agents/skills` unless `KILO_DISABLE_EXTERNAL_SKILLS` is
+//!   set. So Kilo is on [`POOL_CAPABLE_VENDORS`](super::vendor) — eligible for
+//!   the `[options.vendors.kilo].shared_skills` opt-in, not pooled by default:
+//!   `.kilo/skills/` is first-class upstream, so grim writes it, the Warp shape.
+//!   A user who sets `KILO_DISABLE_EXTERNAL_SKILLS` and opts in gets skills
+//!   Kilo does not load; that is their pairing to avoid, not grim's to detect.
 //! - **Rules**: **declined** this wave.
-//! - **Agents**: **declined**. Custom "modes" are not an installable subagent
-//!   file format.
+//! - **Agents**: **declined** this wave. Since re-verified 2026-09-27 Kilo
+//!   documents markdown subagents (`.kilo/agents/`, `~/.config/kilo/agents/`) —
+//!   a watchlisted kind change.
 //! - **MCP**: **declined**. Note for whoever enables it later: Kilo's env
 //!   substitution form is **`{env:VAR}`**, *not* the `${VAR}` shape grim's
 //!   renderer would otherwise assume.
@@ -200,18 +204,18 @@ mod tests {
     }
 
     #[test]
-    fn skills_root_is_kilos_own_dir_and_it_is_not_pool_capable() {
+    fn skills_root_is_kilos_own_dir_and_the_pool_is_only_an_opt_in() {
         let ws = Path::new("/w");
         assert_eq!(
             KiloVendor.skills_root(ws, ConfigScope::Project),
             ws.join(".kilo/skills")
         );
-        // Partial pool member (project only, no global support) — the
-        // Antigravity shape. Membership is scope-blind, so joining the roster
-        // would write global skills where Kilo never scans, silently.
+        // Kilo reads `.agents/skills` at both scopes (v7.8.1), so it is a full
+        // pool member — but pool-capable must not mean pool-by-default.
+        assert!(KiloVendor.pool_capable(), "eligible for the shared_skills opt-in");
         assert!(
-            !KiloVendor.pool_capable(),
-            "a partial pool member must stay off the roster"
+            KiloVendor.skill_fields().is_empty(),
+            "an opt-in member must render the universal bytes"
         );
     }
 

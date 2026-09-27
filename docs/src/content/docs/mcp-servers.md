@@ -95,10 +95,10 @@ validation error, not a silent merge:
 | `url` | `http`/`sse`/`ws` | `http://` or `https://` for `http`/`sse`; `ws://` or `wss://` for `ws` |
 | `headers` | `http`/`sse`/`ws`, optional | String→string map, same `${VAR}` referencing as `env` |
 | `oauth` | `http`/`sse`, optional | OAuth client block, see [below](#server-oauth) — not valid for `ws` ([Claude documents no OAuth over WebSocket][claude-code-mcp-docs]) or `stdio` |
-| `timeout` | any transport, optional | Startup/tool-fetch timeout in milliseconds — projected for [Claude Code][claude-code-mcp-docs] (`timeout`), [OpenCode][opencode-mcp-docs] (`timeout`), and [Gemini CLI][gemini-docs] (`timeout`); dropped for clients without a native key |
+| `timeout` | any transport, optional | Startup/tool-fetch timeout in milliseconds — projected for [Claude Code][claude-code-mcp-docs] (`timeout`), [OpenCode][opencode-mcp-docs] (`timeout`), [Gemini CLI][gemini-docs] (`timeout`, which Gemini also applies to every tool call), [Qoder][qoder-mcp-docs] (`timeout`), and [Codex][codex-mcp-docs] (`startup_timeout_ms`); dropped for clients without a native key |
 | `always_load` | any transport, optional | Load the server eagerly at client startup — projected for [Claude Code][claude-code-mcp-docs] (`alwaysLoad`) only |
 | `headers_helper` | `http`/`sse`/`ws`, optional | Executable that produces fresh auth headers — projected for [Claude Code][claude-code-mcp-docs] (`headersHelper`) only |
-| `cwd` | `stdio`, optional | Working directory for the launched process — projected for [OpenCode][opencode-mcp-docs] (`cwd`) and [Gemini CLI][gemini-docs] (`cwd`) |
+| `cwd` | `stdio`, optional | Working directory for the launched process — projected for [OpenCode][opencode-mcp-docs] (`cwd`), [Gemini CLI][gemini-docs] (`cwd`), and [Qoder][qoder-mcp-docs] (`cwd`) |
 
 ### Example — a remote server {#server-example-remote}
 
@@ -112,10 +112,12 @@ url = "https://mcp.acme.internal/search"
 headers = { Authorization = "Bearer ${ACME_MCP_TOKEN}" }
 ```
 
-`sse` takes the same shape as `http` — [Server-Sent Events][mcp-spec]
-transport is deprecated upstream in the MCP spec but still accepted by
-every client Grimoire supports, so grim keeps it as a first-class
-transport value.
+`sse` takes the same shape as `http`. The [HTTP+SSE transport][mcp-spec]
+is deprecated in the MCP spec but not removed, so grim keeps it as a
+first-class transport value. How each client receives it is in
+[What each client receives](#emit-matrix). [Codex][codex-mcp-docs] has no
+SSE transport, so grim writes an `sse` descriptor there as a
+streamable-HTTP `url` entry.
 
 `ws` describes a persistent WebSocket server (`wss://` canonical). Only
 [Claude Code][claude-code-mcp-docs] reads a `type: "ws"` entry — every
@@ -194,8 +196,8 @@ minor release (see [stability][stability-unstable]).
 | [OpenCode][opencode-mcp-docs] | project | `<workspace>/opencode.json` (or `.jsonc` when present) | `mcp` | local: `type: "local"`, `command` as **one** array (`[cmd, ...args]`), `environment`, `enabled: true`; remote: `type: "remote"`, `url`, `headers`, `enabled`; refinements: `timeout`/`cwd` | `{env:VAR}` |
 | [OpenCode][opencode-mcp-docs] | global | `$OPENCODE_CONFIG` else the XDG default `opencode.json` (or `.jsonc` when present) | `mcp` | same as project | `{env:VAR}` |
 | [VS Code][vscode-mcp-docs] (Copilot Chat) | project | `<workspace>/.vscode/mcp.json` | `servers` | `type: "stdio"` + `command`/`args`/`env`; `type: "http"\|"sse"` + `url`/`headers` | `${env:VAR}` |
-| [Copilot CLI][copilot-mcp-docs] | global | `$COPILOT_HOME`\|`~/.copilot`/`mcp-config.json` | `mcpServers` | `type: "local"` + `command`/`args`/`env` + `tools: ["*"]`; `type: "http"\|"sse"` + `url`/`headers` + `tools` | **none** — see [Environment references](#env-references) |
-| [Codex][codex-mcp-docs] | project | `<workspace>/.codex/config.toml` | `mcp_servers` | `stdio`: `command`/`args`/`env`; remote: `url` + headers mapped onto `http_headers` (static) / `env_http_headers` (whole-value `${VAR}`) / `bearer_token_env_var` (`Authorization: Bearer ${VAR}`) — see [Limitations](#limitations) for the residual skip | `${VAR}` (literal passthrough, not substituted by grim) |
+| [Copilot CLI][copilot-mcp-docs] | global | `$COPILOT_HOME`\|`~/.copilot`/`mcp-config.json` | `mcpServers` | `type: "local"` + `command`/`args`/`env` + `tools: ["*"]`; `type: "http"\|"sse"` + `url`/`headers` + `tools` | `${VAR}` (identity — Copilot CLI expands it) |
+| [Codex][codex-mcp-docs] | project | `<workspace>/.codex/config.toml` | `mcp_servers` | `stdio`: `command`/`args`/`env`; remote: `url` + headers mapped onto `http_headers` (static) / `env_http_headers` (whole-value `${VAR}`) / `bearer_token_env_var` (`Authorization: Bearer ${VAR}`) — see [Limitations](#limitations) for the residual skip; refinement: `timeout` → `startup_timeout_ms` | `${VAR}` (literal passthrough, not substituted by grim) |
 | [Codex][codex-mcp-docs] | global | `$CODEX_HOME`\|`~/.codex`/`config.toml` | `mcp_servers` | same as project | same as project |
 | [Cursor][cursor-docs] | project / global | `.cursor/mcp.json` / `~/.cursor/mcp.json` | `mcpServers` | `stdio`: `type: "stdio"` + `command`/`args`/`env`; remote: `url` + `headers`; oauth skipped | `${env:VAR}` (grim translates `${VAR}`) |
 | [Kiro][kiro-docs] | project / global | `.kiro/settings/mcp.json` / `$KIRO_HOME`\|`~/.kiro`/`settings/mcp.json` | `mcpServers` | `stdio`: `command`/`args`/`env` (no `type`); oauth skipped | `${VAR}` (native passthrough) |
@@ -259,15 +261,35 @@ query parameter, say) still translates correctly:
 | [Claude Code][claude-code-mcp-docs] | `${VAR}` (identity — no translation) |
 | [OpenCode][opencode-mcp-docs] | `{env:VAR}` |
 | [VS Code][vscode-mcp-docs] (Copilot Chat) | `${env:VAR}` |
-| [Copilot CLI][copilot-mcp-docs] (global) | not supported |
+| [Copilot CLI][copilot-mcp-docs] (global) | `${VAR}` (identity — Copilot CLI expands it itself) |
 | [Codex][codex-mcp-docs] | `${VAR}` (literal passthrough — an `env` value is an OS environment assignment for the launched subprocess, not substituted by grim or Codex) |
 
-[Copilot CLI][copilot-mcp-docs]'s global `mcp-config.json` has no
-variable-substitution mechanism at all — there is no syntax to translate
-into. A descriptor with any `${VAR}` reference **skips** that one client
-with a warning rather than ever inlining the resolved secret value into
-a file on disk. Every other client and scope still installs normally;
-only the Copilot-global registration is omitted.
+[Copilot CLI][copilot-mcp-docs] expands `${VAR}` in its global
+`mcp-config.json` itself, in `command`, `args`, `env`, `url` and `headers`
+(verified against CLI 1.0.88). grim writes the reference as authored and
+never its value. Five upstream behaviors are worth knowing:
+
+- An unset variable is passed on literally as `${VAR}`, not as an empty string.
+- Copilot parses `url` before it expands it. A reference in the port
+  therefore makes it drop the entry. grim skips such a descriptor for Copilot's global
+  config with a warning. A reference in the host or the path works.
+- Copilot also expands a bare `$NAME`, so a literal `$` word in an argument
+  or value can be substituted there.
+- Copilot CLI releases before about April 2026, 0.0.406 aside, pass an
+  `env` reference on unexpanded, so the server sees the literal `${VAR}`.
+- Unlike Claude Code, Copilot does not blank well-known credential
+  variables, so a `${GITHUB_TOKEN}` in a `url` or header reaches that host.
+
+Until 2026-09-27 grim skipped the Copilot-global registration for any
+descriptor with a `${VAR}` reference. The next `grim install` adds it, and
+`grim status` lists it under `outputs_pending` until then.
+
+[Claude Code][claude-code-mcp-docs] reads a fixed set of well-known
+credential variables as empty in a remote server's `url` and `headers`.
+Examples are `ANTHROPIC_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK` and
+`NPM_TOKEN`. The server then usually fails with a 401. Name the variable
+after the server instead, such as `${ACME_MCP_TOKEN}`. grim does not
+rename it for you: it writes the reference exactly as authored.
 
 ## Semantic modification detection {#modification-detection}
 
@@ -386,9 +408,11 @@ the full tool table lives at [`grim mcp`](./commands.md#mcp).
 - **VS Code's user-profile `mcp.json` (global VS Code, outside Copilot
   CLI) is not written.** Global Copilot registration always targets
   Copilot CLI's own `mcp-config.json`.
-- **Copilot CLI's global config skips descriptors with `${VAR}`
-  references** — see [Environment references](#env-references). Every
-  other client and scope still installs normally.
+- **Copilot CLI does not read the project-scope file grim writes.** At
+  project scope grim registers servers in `.vscode/mcp.json` for VS Code's
+  Copilot Chat. The standalone Copilot CLI reads `.mcp.json` and
+  `.github/mcp.json` instead, and no longer reads `.vscode/mcp.json`. To
+  reach the CLI, install the server with `--global`.
 - **`ws` transport is Claude-only.** [OpenCode][opencode-mcp-docs],
   [Copilot][copilot-mcp-docs] (both scopes), and [Codex][codex-mcp-docs]
   document no WebSocket MCP transport; a `transport = "ws"` descriptor is
@@ -406,8 +430,10 @@ the full tool table lives at [`grim mcp`](./commands.md#mcp).
   [Copilot][copilot-mcp-docs], and [Codex][codex-mcp-docs] — OAuth is
   auth-critical, so grim never registers a connection those clients could
   not authenticate. Descriptors without the block are unaffected.
-  (OpenCode documents an `oauth` key of its own; projecting it is on the
-  vendor capability watchlist pending schema verification.)
+  OpenCode has an `oauth` object of its own, for remote servers only. It
+  takes a client ID, a client secret, one scope string and a callback port,
+  and discovers the authorization server itself. Projecting grim's block
+  onto it is an open decision, and until it is made the skip stands.
 - **New descriptor fields do not parse on an older grim.** The descriptor
   layer is `deny_unknown_fields`: an artifact published with `timeout`,
   `always_load`, `headers_helper`, `cwd`, `oauth`, or `transport = "ws"`
@@ -446,7 +472,7 @@ the full tool table lives at [`grim mcp`](./commands.md#mcp).
 [stability-unstable]: ./stability.md#unstable
 
 <!-- external -->
-[mcp-spec]: https://spec.modelcontextprotocol.io/
+[mcp-spec]: https://modelcontextprotocol.io/specification/latest
 [claude-code-mcp-docs]: https://code.claude.com/docs/en/mcp
 [opencode-mcp-docs]: https://opencode.ai/docs/mcp-servers/
 [vscode-mcp-docs]: https://code.visualstudio.com/docs/copilot/chat/mcp-servers

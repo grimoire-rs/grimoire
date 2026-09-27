@@ -3,7 +3,7 @@
 
 //! Warp's vendor strategy: own-directory skills, pool-eligible; rest declined.
 //!
-//! Warp is the agentic terminal (<https://docs.warp.dev>), verified 2026-07-27
+//! Warp is the agentic terminal (<https://docs.warp.dev>), verified 2026-07-27, re-verified 2026-09-27
 //! against Warp's own documentation, quoted directly at both scopes.
 //!
 //! **Warp's skills are plain on-disk directories**, scanned by name across ten
@@ -22,10 +22,12 @@
 //!   first-class entry in its own scanned list — not deprecated, unlike
 //!   Goose's `.goose/skills/` — so the owner principle applies and grim writes
 //!   the vendor-specific directory.
-//! - **Rules**: **declined**. Warp's global rules are UI/cloud-managed with no
-//!   on-disk path at all — there is nothing for grim to own.
-//! - **Agents**: **declined**. Agent profiles are Settings-UI-only.
-//! - **MCP**: **declined**. No grim-writable config file surface.
+//! - **Rules**: **declined**. Warp's global rules are UI/cloud-managed; project
+//!   rules are a location-scoped `AGENTS.md` / `WARP.md` with no scoping key.
+//! - **Agents**: **declined**. Agent profiles live in the shared settings file,
+//!   not in per-agent files.
+//! - **MCP**: **declined** this wave. Since re-verified 2026-09-27 Warp
+//!   documents `~/.warp/.mcp.json` / `.warp/.mcp.json` — a watchlisted kind change.
 //!
 //! **No environment override found.** `~/.warp/` is deliberately
 //! **cross-platform** upstream — identical on macOS, Linux and Windows — while

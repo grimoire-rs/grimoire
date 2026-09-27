@@ -189,10 +189,11 @@ the `CLAUDE_SKILL_FIELDS` constant in `src/install/vendor_claude.rs`.
 | `claude.argument-hint` | `argument-hint` | string | |
 | `claude.when-to-use` | `when_to_use` | string | Note: the native key uses an underscore, not a hyphen |
 | `claude.arguments` | `arguments` | string | |
-| `claude.allowed-tools` | `allowed-tools` | string | Comma-separated tool allowlist, passed through verbatim |
+| `claude.allowed-tools` | `allowed-tools` | string | Space- or comma-separated tool list (Claude accepts both), passed through verbatim |
 | `claude.disallowed-tools` | `disallowed-tools` | string | |
 | `claude.shell` | `shell` | enum | Accepted values: `bash`, `powershell` |
 | `claude.paths` | `paths` | string | Comma-separated glob patterns |
+| `claude.background` | `background` | bool | `"true"` or `"false"`. Only takes effect with `claude.context: fork`, in Claude Code 2.1.218 and later |
 
 `hooks` is not in this registry. It is an object-valued field that
 cannot be expressed as a single string metadata value; a separate ADR
@@ -235,6 +236,7 @@ mapping from the `CLAUDE_AGENT_FIELDS` constant in
 | `claude.isolation` | `isolation` | enum | Accepted values: `worktree` |
 | `claude.color` | `color` | enum | Accepted values: `red`, `blue`, `green`, `yellow`, `purple`, `orange`, `pink`, `cyan` |
 | `claude.initial-prompt` | `initialPrompt` | string | |
+| `claude.omit-claude-md` | `omitClaudeMd` | bool | `"true"` or `"false"`. Starts the subagent without the user, project and local `CLAUDE.md` files, in Claude Code 2.1.271 and later |
 
 `mcpServers` and `hooks` are not in this registry — both are object-valued
 fields that cannot be expressed as a single string metadata value. This
@@ -254,18 +256,18 @@ rich native agent frontmatter. Every row maps from the
 | `opencode.mode` | `mode` | enum | Accepted values: `primary`, `subagent`, `all` |
 | `opencode.temperature` | `temperature` | float | |
 | `opencode.top-p` | `top_p` | float | Note: the native key uses an underscore |
-| `opencode.steps` | `steps` | integer | Maximum agentic iterations |
+| `opencode.steps` | `steps` | integer | Maximum agentic iterations. OpenCode accepts only a positive safe integer (≤ 2^53−1); grim drops a value outside that range at install time with a warning instead of writing a config OpenCode would reject in its entirety |
 | `opencode.prompt` | `prompt` | string | Custom system prompt reference |
 | `opencode.disable` | `disable` | bool | |
 | `opencode.hidden` | `hidden` | bool | |
-| `opencode.color` | `color` | string | Hex color or theme name |
+| `opencode.color` | `color` | string | A six-digit hex color such as `#FF5733`, or a theme color: `primary`, `secondary`, `accent`, `success`, `warning`, `error`, `info`. grim validates the value at install time and drops it with a warning instead of writing a config OpenCode would reject in its entirety |
 
 `permission` (an object) and the deprecated object-valued `tools` map are
 not in this registry.
 
 ## The copilot.* agent registry {#copilot-agent-registry}
 
-[GitHub Copilot CLI][copilot-agents-docs] custom agents recognize two
+[GitHub Copilot CLI][copilot-agents-docs] custom agents recognize five
 projectable vendor keys, mapped from `COPILOT_AGENT_FIELDS` in
 `src/install/vendor_copilot.rs`.
 
@@ -273,9 +275,17 @@ projectable vendor keys, mapped from `COPILOT_AGENT_FIELDS` in
 |---|---|---|---|
 | `copilot.tools` | `tools` | comma list | **Overrides** the common `tools` field for Copilot; comma-separated string → YAML list |
 | `copilot.model` | `model` | string | **Overrides** the common `model` field for Copilot — the escape hatch when the common value is not Copilot-shaped |
+| `copilot.disable-model-invocation` | `disable-model-invocation` | bool | Stops Copilot's cloud agent from auto-selecting this agent by task context; supersedes the retired `infer: false` |
+| `copilot.user-invocable` | `user-invocable` | bool | `false` hides the agent from manual selection — programmatic access only; supersedes the retired `infer` |
+| `copilot.target` | `target` | enum | `vscode` or `github-copilot`; unset targets both environments |
 
-`mcp-servers` (an object) is not in this registry, for the same reason as
-Claude's `mcpServers` above — see
+`infer` (retired upstream in favor of `disable-model-invocation` and
+`user-invocable`) is not in this registry. Two changelog-only capabilities
+with no documented frontmatter spelling — a reasoning-effort control and an
+instruction-inclusion toggle — are also absent pending a documented key
+name. The object-valued `skills`, `metadata` and `mcp-servers` fields are
+gated on `adr_structured_vendor_metadata.md` acceptance (`FieldType::Json`)
+— `mcp-servers` for the same reason as Claude's `mcpServers` above, see
 [MCP Server Artifacts](./mcp-servers.md).
 
 ## The codex.* agent registry {#codex-agent-registry}
@@ -292,7 +302,7 @@ Three vendor keys are projectable, mapped from `CODEX_AGENT_FIELDS` in
 | Key | Native TOML field | Type | Notes |
 |---|---|---|---|
 | `codex.model` | `model` | string | **Overrides** the common `model` field for Codex |
-| `codex.reasoning-effort` | `model_reasoning_effort` | enum | Accepted values: `ultra`, `max`, `xhigh`, `high`, `medium`, `low`, `minimal`, `none` |
+| `codex.reasoning-effort` | `model_reasoning_effort` | enum | Accepted values: `ultra`, `max`, `xhigh`, `high`, `medium`, `low`, `minimal`, `none`, `persistent`. Codex before 0.138 skips an agent file carrying `max`, `ultra` or `persistent`; `persistent` is a named value from 0.151 |
 | `codex.sandbox-mode` | `sandbox_mode` | enum | Accepted values: `read-only`, `workspace-write`, `danger-full-access` |
 
 A `codex.model` key overrides the projected common `model` field silently,
@@ -379,10 +389,10 @@ grim installs skills into the directories each client scans for
 | [Kiro][kiro-docs] | `.kiro/skills/<name>/` |
 | [Junie][junie-docs] | `.junie/skills/<name>/` |
 | [Codex][codex-skills-docs], [Gemini][gemini-subagents-docs], [Zed][zed-docs], [Amp][amp-docs], [Antigravity][antigravity-skills-docs], [Goose][goose-docs] | `.agents/skills/<name>/` (shared pool) |
-| [Cline][cline-docs] | `.cline/skills/<name>/` — first in Cline's own precedence (`.cline/` → `.clinerules/` → `.claude/`); **not** a pool client |
-| [Droid][droid-docs] | `.factory/skills/<name>/` — the client is `droid`, the directory is `.factory` |
+| [Cline][cline-docs] | `.cline/skills/<name>/` — first in Cline's own precedence (`.cline/` → `.clinerules/` → `.claude/`); native by default; pool-capable via `[options.vendors.cline].shared_skills` |
+| [Droid][droid-docs] | `.factory/skills/<name>/` — the client is `droid`, the directory is `.factory`; native by default; pool-capable via `[options.vendors.droid].shared_skills` |
 | [Warp][warp-docs] | `.warp/skills/<name>/` — native by default; pool-capable via `[options.vendors.warp].shared_skills` |
-| [Kilo][kilo-docs] | `.kilo/skills/<name>/` — never the deprecated `.kilocode/` |
+| [Kilo][kilo-docs] | `.kilo/skills/<name>/` — never the deprecated `.kilocode/`; native by default; pool-capable via `[options.vendors.kilo].shared_skills` |
 | [Qoder][qoder-docs] | `.qoder/skills/<name>/` |
 | [OpenClaw][openclaw-docs] | *(none — no project scope; see the global table)* |
 | `agents` (vendor-neutral) | `.agents/skills/<name>/` (shared pool — its only surface; never auto-detected, only selected) |
@@ -401,17 +411,17 @@ environment variable):
 | [OpenCode][opencode-skills-docs] | `~/.config/opencode/skills/<name>/` (or `$XDG_CONFIG_HOME/opencode/skills/<name>/`) | `$OPENCODE_CONFIG_DIR/skills/<name>/` — OpenCode's *additive* scan directory ([OpenCode config docs][opencode-config-docs]): the XDG default stays scanned either way; grim prefers the override as install target when set. `$OPENCODE_CONFIG` (a config *file* path) does not affect skill discovery and plays no role here |
 | [Cursor][cursor-subagents-docs] | `~/.cursor/skills/<name>/` | None — `CURSOR_CONFIG_DIR` is not honored (possibly CLI-only; watchlisted) |
 | [Kiro][kiro-docs] | `~/.kiro/skills/<name>/` | `$KIRO_HOME/skills/<name>/` — the variable replaces the entire `~/.kiro` tree, with **no** `.kiro` segment appended ([Kiro CLI configuration reference][kiro-cli-config-docs]). grim follows the **CLI**. The Kiro **IDE** still hardcodes `~/.kiro` and ignores the variable ([kiro #9148]), so a user who sets `KIRO_HOME` and also uses the IDE gets grim's output where the CLI reads it, not the IDE |
-| [Junie][junie-docs] | `~/.junie/skills/<name>/` | None — the per-kind `JUNIE_*_LOCATIONS` family is not honored |
+| [Junie][junie-docs] | `~/.junie/skills/<name>/` | None — `JUNIE_HOME` (which replaces `~/.junie`) is not honored; the per-kind `JUNIE_*_LOCATIONS` family only adds search paths, so grim's default paths stay read |
 | [Codex][codex-skills-docs] | `$HOME/.agents/skills/<name>/` (shared pool) | None — `$CODEX_HOME` does not relocate skills; they are always keyed on `$HOME` |
 | [Gemini][gemini-subagents-docs] | `$HOME/.agents/skills/<name>/` (shared pool) | None **for skills** — they always key on `$HOME`. `GEMINI_CONFIG_DIR` does not exist upstream, but `$GEMINI_CLI_HOME` **does**, and grim honors it: it replaces the *home directory*, so Gemini's config root (agents, `settings.json`) becomes `$GEMINI_CLI_HOME/.gemini` — the `.gemini` segment is still appended, the opposite shape to `$CODEX_HOME`/`$KIRO_HOME`. The shared pool deliberately does not follow it: one physical tree serves every pool client under a single refcount, so it stays keyed on the real `$HOME` |
 | [Zed][zed-docs] | `$HOME/.agents/skills/<name>/` (shared pool) | None — skills always key on `$HOME`, independent of Zed's settings root. That settings root is `$XDG_CONFIG_HOME`-rooted on **Linux and FreeBSD only**; macOS is a hardcoded `~/.config/zed` and Windows is `%APPDATA%\Zed` |
 | [Amp][amp-docs] | `$HOME/.agents/skills/<name>/` (shared pool) | None — skills always key on `$HOME`. (`$AMP_SETTINGS_FILE` is not honored either; its existence is contested rather than disproven, and no source documents its precedence — see the vendor capability watchlist) |
 | [Antigravity][antigravity-skills-docs] | `~/.gemini/config/skills/<name>/` — **not** the shared pool: Antigravity pools only at project scope, and globally reads its own root | None found in current docs (`ANTIGRAVITY_API_KEY` / `ANTIGRAVITY_TOKEN` are auth credentials and relocate nothing) |
-| [Cline][cline-docs] | `~/.cline/skills/<name>/` (`%USERPROFILE%\.cline\skills\` on Windows) | None — `CLINE_DATA_DIR` is evidenced only for the MCP data directory, never for skill discovery, so grim does not honor it |
+| [Cline][cline-docs] | `~/.cline/skills/<name>/` (`%USERPROFILE%\.cline\skills\` on Windows) | None — `CLINE_DATA_DIR` only relocates Cline's settings/session data (`resolveClineDataDir()`), never skills, so it was never a candidate here. `CLINE_DIR` genuinely relocates the CLI's skills root, but the IDE extension hardcodes `os.homedir()/.cline` and ignores it, so grim does not honor either variable for skills |
 | [Droid][droid-docs] | `~/.factory/skills/<name>/` | None — no `FACTORY_HOME` or `DROID_HOME` appears in current docs |
 | [Goose][goose-docs] | `$HOME/.agents/skills/<name>/` (shared pool) — Goose's own `.goose/skills/` is labelled backward-compatibility upstream, and `.agents/skills` the recommended location | None — skills always key on `$HOME`. `$GOOSE_PATH_ROOT` relocates Goose's *config* root, which grim only reads for detection |
 | [Warp][warp-docs] | `~/.warp/skills/<name>/` — the same path on macOS, Linux and Windows | None found in current docs |
-| [OpenClaw][openclaw-docs] | `~/.openclaw/skills/<name>/` — **global scope only**; OpenClaw has no per-repository scope | None — `$OPENCLAW_HOME` is referenced but never defined upstream, so grim does not honor it |
+| [OpenClaw][openclaw-docs] | `~/.openclaw/skills/<name>/` — **global scope only**; OpenClaw has no per-repository scope | None — `$OPENCLAW_HOME` replaces the home directory for OpenClaw's own paths upstream, but grim does not honor it yet, so a user who sets it gets skills under the real `~/.openclaw` |
 | [Kilo][kilo-docs] | `~/.kilo/skills/<name>/` | None found in current docs |
 | [Qoder][qoder-docs] | `~/.qoder/skills/<name>/` | `$QODER_CONFIG_DIR/skills/<name>/` — the variable replaces the entire `~/.qoder` tree, with **no** `.qoder` segment appended ([Qoder config scope reference][qoder-config-docs]) |
 | `agents` (vendor-neutral) | `$HOME/.agents/skills/<name>/` (shared pool — its only surface) | None — the pool is never relocated by any vendor variable |
@@ -661,7 +671,7 @@ claude namespace to silence it and gain proper type conversion.
 
 [cline-docs]: https://cline.bot
 [droid-docs]: https://factory.ai
-[goose-docs]: https://block.github.io/goose
+[goose-docs]: https://goose-docs.ai
 [warp-docs]: https://warp.dev
 [openclaw-docs]: https://github.com/openclaw/openclaw
 [kilo-docs]: https://kilo.ai

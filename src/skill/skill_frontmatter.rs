@@ -47,6 +47,17 @@ pub struct SkillFrontmatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compatibility: Option<String>,
 
+    /// True when the frontmatter wrote `compatibility` as an explicit YAML
+    /// null (a bare `compatibility:` or `compatibility: ~`) rather than
+    /// omitting the key. Null and "key absent" both deserialize
+    /// [`Self::compatibility`] to `None`, so the empty-value warning in
+    /// [`crate::install::render::validate_namespaced_metadata`] needs this
+    /// bit to tell the two apart. Computed by [`Self::from_yaml`] from the
+    /// raw mapping, never authored — `#[serde(skip)]` keeps it out of
+    /// (de)serialization so rendered bytes are unaffected.
+    #[serde(skip)]
+    pub compatibility_key_is_null: bool,
+
     /// Optional allowed-tools restriction (YAML key `allowed-tools`).
     #[serde(rename = "allowed-tools", default, skip_serializing_if = "Option::is_none")]
     pub allowed_tools: Option<String>,
@@ -130,8 +141,22 @@ impl SkillFrontmatter {
     /// [`SkillErrorKind::FrontmatterParse`] when the YAML cannot be
     /// deserialized (including missing/invalid `name`/`description`).
     pub fn from_yaml(yaml: &str, path: &std::path::Path) -> Result<Self, SkillError> {
-        serde_yaml::from_str(yaml).map_err(|e| SkillError::new(path, SkillErrorKind::FrontmatterParse(e)))
+        let mut fm: Self =
+            serde_yaml::from_str(yaml).map_err(|e| SkillError::new(path, SkillErrorKind::FrontmatterParse(e)))?;
+        fm.compatibility_key_is_null = compatibility_key_is_explicit_null(yaml);
+        Ok(fm)
     }
+}
+
+/// Whether the raw frontmatter mapping has a `compatibility` key whose
+/// value is YAML null — true for both a bare `compatibility:` and
+/// `compatibility: ~`, which the standard typed parse cannot distinguish
+/// from an absent key (both land in `Option::None`).
+fn compatibility_key_is_explicit_null(yaml: &str) -> bool {
+    let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(yaml) else {
+        return false;
+    };
+    matches!(value.get("compatibility"), Some(serde_yaml::Value::Null))
 }
 
 #[cfg(test)]
@@ -151,6 +176,40 @@ mod tests {
         assert_eq!(fm.description.as_str(), "Use when reviewing code.");
         assert!(fm.license.is_none());
         assert!(fm.extra.is_empty());
+        assert!(
+            !fm.compatibility_key_is_null,
+            "no compatibility key at all is not the same as an explicit null"
+        );
+    }
+
+    #[test]
+    fn bare_and_tilde_compatibility_are_explicit_null_not_absent() {
+        for doc in [
+            "---\nname: s\ndescription: d\ncompatibility:\n---\n",
+            "---\nname: s\ndescription: d\ncompatibility: ~\n---\n",
+        ] {
+            let fm = SkillFrontmatter::parse_doc(doc, p()).expect("parse");
+            assert!(fm.compatibility.is_none(), "null still deserializes to None");
+            assert!(
+                fm.compatibility_key_is_null,
+                "bare/`~` compatibility must be flagged as an explicit null: {doc}"
+            );
+        }
+
+        // A real string value or an absent key are both NOT an explicit null.
+        let present =
+            SkillFrontmatter::parse_doc("---\nname: s\ndescription: d\ncompatibility: x\n---\n", p()).expect("parse");
+        assert!(!present.compatibility_key_is_null);
+        let absent = SkillFrontmatter::parse_doc("---\nname: s\ndescription: d\n---\n", p()).expect("parse");
+        assert!(!absent.compatibility_key_is_null);
+
+        // The flag never reaches the wire: serializing a null-flagged
+        // frontmatter emits nothing for `compatibility` at all, same as
+        // when the key was absent (rendered bytes are unaffected).
+        let doc = "---\nname: s\ndescription: d\ncompatibility:\n---\n";
+        let fm = SkillFrontmatter::parse_doc(doc, p()).expect("parse");
+        let yaml = serde_yaml::to_string(&fm).unwrap();
+        assert!(!yaml.contains("compatibility"), "{yaml}");
     }
 
     #[test]

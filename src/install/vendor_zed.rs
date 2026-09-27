@@ -3,7 +3,7 @@
 
 //! Zed's vendor strategy: shared-pool skills + MCP; rules and agents declined.
 //!
-//! Zed mapping (`adr_vendor_wave_expansion.md`; live-verified 2026-07-19,
+//! Zed mapping (`adr_vendor_wave_expansion.md`; live-verified 2026-07-19, re-verified 2026-09-27 against v1.21.0,
 //! `research_vendor_verification_zed_amp.md`):
 //!
 //! - **Skills**: the shared `.agents/skills` pool (project
@@ -95,12 +95,14 @@ impl Vendor for ZedVendor {
     ) -> Option<(String, serde_json::Value)> {
         use crate::oci::mcp::McpTransport;
 
-        // Zed's `context_servers` schema has no OAuth surface — a structured
+        // Zed's HTTP `context_servers` accept only a pre-registered
+        // `oauth: { client_id, client_secret }` (since zed #52900), which cannot
+        // carry grim's scopes / callback port / metadata URL — a structured
         // oauth block is auth-critical, so the whole descriptor is skipped
-        // with a warning rather than written lossy.
+        // with a warning rather than written lossy (watchlisted).
         let s = &descriptor.server;
         if s.oauth.is_some() {
-            tracing::warn!("mcp server '{name}' skipped for zed ({scope}): no oauth surface in context_servers");
+            tracing::warn!("mcp server '{name}' skipped for zed ({scope}): context_servers oauth shape differs");
             return None;
         }
         // Zed performs no env-var expansion in settings.json (open upstream

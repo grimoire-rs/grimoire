@@ -1358,12 +1358,15 @@ mod tests {
     #[test]
     fn appending_the_pool_anchor_leaves_native_skill_dests_on_their_own_root() {
         let roots = pool_test_roots();
-        // The three clients the opt-in actually moves: pool-capable, but with
-        // a native skills root of their own.
+        // Clients the opt-in actually moves: pool-capable, but with a native
+        // skills root of their own.
         for (client, expected, relative) in [
             (ClientTarget::Cursor, PathAnchor::VendorRoot("cursor"), "skills/demo"),
             (ClientTarget::Copilot, PathAnchor::VendorRoot("copilot"), "skills/demo"),
             (ClientTarget::OpenCode, PathAnchor::OpenCodeSkills, "demo"),
+            (ClientTarget::Droid, PathAnchor::VendorRoot("droid"), "skills/demo"),
+            (ClientTarget::Kilo, PathAnchor::VendorRoot("kilo"), "skills/demo"),
+            (ClientTarget::Cline, PathAnchor::VendorRoot("cline"), "skills/demo"),
         ] {
             let native = expected.root(&roots).unwrap().join(relative);
             let ap =

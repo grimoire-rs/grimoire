@@ -21,6 +21,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from src.helpers import make_artifact
 from src.runner import GrimRunner
 
@@ -772,3 +774,175 @@ def test_a_flip_onto_a_live_symlink_refuses_instead_of_erroring(
     runner.json("install", "--force")
     assert not (pool / "symlink-skill").is_symlink(), "--force must replace the link"
     assert (pool / "symlink-skill/SKILL.md").is_file()
+
+
+# Droid and Kilo joined the pool roster 2026-09-27: both read `.agents/skills`
+# at both scopes upstream, but render natively by default (the Warp shape).
+# Cline joined the same day, source-verified against extension v4.1.21 / CLI
+# v3.0.65: the CLI's shared SDK and the VS Code extension both scan the pool
+# at both scopes, reversing the earlier "confirmed absence" reading.
+POOL_OPT_IN_CLIENTS = [
+    pytest.param("droid", ".factory", id="droid"),
+    pytest.param("kilo", ".kilo", id="kilo"),
+    pytest.param("cline", ".cline", id="cline"),
+]
+
+
+@pytest.mark.parametrize(("client", "native_root"), POOL_OPT_IN_CLIENTS)
+def test_pool_reader_keeps_native_default_and_accepts_the_opt_in(
+    grim_at, bare_project_dir: Path, registry: str, unique_repo: str, client: str, native_root: str
+) -> None:
+    """Joining the roster is additive: the default layout is untouched, and a
+    native install re-materializes as ``unchanged``, byte-identical and not
+    modified. This proves idempotence of the default render, which stands in
+    for upgrade self-heal because no default path or renderer changed. Only
+    then does ``shared_skills = true`` — refused before 2026-09-27 — move the
+    skill into the pool."""
+    name = f"{client}-pool-skill"
+    sk = _skill(unique_repo, name)
+    native = bare_project_dir / native_root / "skills" / name
+    pool = bare_project_dir / ".agents/skills" / name
+    (bare_project_dir / "grimoire.toml").write_text(
+        f'[options]\nclients = ["{client}"]\n\n[skills]\n{name} = "{sk.fq}"\n'
+    )
+    runner = grim_at(bare_project_dir)
+    runner.run("lock", check=False)
+    runner.json("install")
+    assert (native / "SKILL.md").is_file(), "pool-capable must not mean pool-by-default"
+    assert not pool.exists()
+
+    # The default render is unchanged by the roster change, so a native
+    # install re-materializes as-is.
+    before = (native / "SKILL.md").read_bytes()
+    again = runner.json("install")["items"]
+    assert all(r["status"] == "unchanged" for r in again), again
+    assert (native / "SKILL.md").read_bytes() == before, "the default render must be byte-identical"
+    item = next(r for r in runner.json("status")["items"] if r["name"] == name)
+    assert item["state"] == "installed", item
+    assert not any(o.get("modified") for o in item["outputs"]), item
+
+    runner.json("config", "set", f"options.vendors.{client}.shared_skills", "true")
+    rows = runner.json("install")["items"]
+    assert all(r["status"] in ("installed", "unchanged", "updated") for r in rows), rows
+    assert (pool / "SKILL.md").is_file(), "the opt-in must render into the shared pool"
+    assert not native.exists(), "the native copy must be reaped"
+    item = next(r for r in runner.json("status")["items"] if r["name"] == name)
+    assert item["state"] == "installed", item
+    [output] = item["outputs"]
+    assert output["client"] == client
+    assert output["path"].replace("\\", "/").endswith(f".agents/skills/{name}"), output
+    assert not output.get("modified"), output
+
+
+@pytest.mark.parametrize(("client", "native_root"), POOL_OPT_IN_CLIENTS)
+def test_pool_reader_global_opt_in_reanchors_the_record(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str, client: str, native_root: str
+) -> None:
+    """Global half: both clients read ``~/.agents/skills`` upstream, so the
+    opt-in must re-anchor ``<client>-root`` → ``agents-skills`` rather than
+    fail with ``UnknownAnchor`` after the files are on disk."""
+    name = f"{client}-glob-pool"
+    sk = _skill(unique_repo, name)
+    (grim_home / "grimoire.toml").write_text(f'[skills]\n{name} = "{sk.fq}"\n')
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("lock", "--global")
+    runner.json("install", "--global", "--client", client)
+
+    native = runner.home / native_root / "skills" / name
+    pool = runner.home / ".agents/skills" / name
+    state_path = grim_home / "state/global.json"
+    assert (native / "SKILL.md").is_file()
+
+    def anchors() -> list[str]:
+        state = json.loads(state_path.read_text())
+        [record] = [r for r in state["records"] if r["name"] == name]
+        return [o["target"]["anchor"] for o in record["outputs"]]
+
+    assert anchors() == [f"{client}-root"], anchors()
+
+    runner.json("config", "set", "--global", f"options.vendors.{client}.shared_skills", "true")
+    rows = runner.json("install", "--global", "--client", client)["items"]
+    assert all(r["status"] in ("installed", "unchanged", "updated") for r in rows), rows
+    assert (pool / "SKILL.md").is_file(), "global skills must land in $HOME/.agents/skills"
+    assert not native.exists(), "the native copy must be reaped"
+    assert anchors() == ["agents-skills"], anchors()
+    item = next(r for r in runner.json("status", "--global")["items"] if r["name"] == name)
+    assert item["state"] == "installed", item
+
+
+# ---------------------------------------------------------------------------
+# Copilot pool-gap warning: shared_skills + a diverging COPILOT_HOME
+# ---------------------------------------------------------------------------
+
+
+def test_copilot_pool_gap_warns_on_install_and_on_a_later_already_installed_run(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """Copilot CLI stops scanning ``~/.agents/skills`` once its root diverges
+    from ``$HOME/.copilot``, so a skill pooled via ``shared_skills`` may go
+    unread. grim warns once per run when global scope, ``shared_skills`` for
+    copilot, and a diverging ``COPILOT_HOME`` all hold — checked where the
+    target is resolved, not inside the per-artifact integrity gate, so the
+    warning survives a LATER, already-installed run too (the case the gate
+    would otherwise short-circuit to ``AlreadyInstalled`` before ever
+    reaching the old per-artifact check)."""
+    name = "cp-pool-skill"
+    sk = _skill(unique_repo, name)
+    (grim_home / "grimoire.toml").write_text(f'[skills]\n{name} = "{sk.fq}"\n')
+    runner = GrimRunner(grim_binary, grim_home)
+    copilot_home = grim_home.parent / "copilot-home-diverged"
+    runner.env["COPILOT_HOME"] = str(copilot_home)
+    runner.json("lock", "--global")
+    runner.json("config", "set", "--global", "options.vendors.copilot.shared_skills", "true")
+
+    pool = runner.home / ".agents/skills" / name
+
+    first = runner.run("install", "--global", "--client", "copilot", format="json", log_level="warn")
+    assert (pool / "SKILL.md").is_file(), "the skill must still install into the pool"
+    assert "shared_skills" in first.stderr and "copilot" in first.stderr, (
+        f"first install must warn about the pool gap; got: {first.stderr!r}"
+    )
+
+    # Re-run on an already-installed skill: the integrity gate now returns
+    # `AlreadyInstalled` and the materialize loop never runs, so this proves
+    # the warning is decoupled from it (finding: the pre-fix check lived only
+    # inside that loop and could never fire here).
+    second = runner.run("install", "--global", "--client", "copilot", format="json", log_level="warn")
+    assert json.loads(second.stdout)["items"][0]["status"] == "unchanged", second.stdout
+    assert "shared_skills" in second.stderr and "copilot" in second.stderr, (
+        f"a later already-installed run must still warn about the pool gap; got: {second.stderr!r}"
+    )
+
+    # `grim update` re-materializes through `install_all_with_progress`
+    # directly, bypassing `install_and_persist` — the docs promise the
+    # warning on `update` too (configuration.md, the COPILOT_HOME watchlist
+    # row), so it must fire here as well. `--client copilot` mirrors the
+    # install calls above: with COPILOT_HOME diverged, Copilot's native root
+    # never materializes (skills route to the pool instead), so autodetect
+    # alone would not select it.
+    third = runner.run("update", "--global", "--client", "copilot", format="json", log_level="warn")
+    assert "shared_skills" in third.stderr and "copilot" in third.stderr, (
+        f"`grim update --global` must still warn about the pool gap; got: {third.stderr!r}"
+    )
+
+
+def test_copilot_pool_gap_warning_absent_without_a_diverging_copilot_home(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """Negative case: ``shared_skills`` alone is not enough — with
+    ``COPILOT_HOME`` unset (resolves to the default ``$HOME/.copilot``),
+    Copilot still scans the pool, so no warning is due."""
+    name = "cp-pool-ok-skill"
+    sk = _skill(unique_repo, name)
+    (grim_home / "grimoire.toml").write_text(f'[skills]\n{name} = "{sk.fq}"\n')
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("lock", "--global")
+    runner.json("config", "set", "--global", "options.vendors.copilot.shared_skills", "true")
+
+    pool = runner.home / ".agents/skills" / name
+
+    result = runner.run("install", "--global", "--client", "copilot", format="json", log_level="warn")
+    assert (pool / "SKILL.md").is_file()
+    assert "shared_skills is set for copilot" not in result.stderr, (
+        f"no divergence, so the pool-gap warning must not fire; got: {result.stderr!r}"
+    )

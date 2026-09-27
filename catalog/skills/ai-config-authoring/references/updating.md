@@ -40,7 +40,7 @@ durable; update the numbers, keep the spine.
 - `amp AGENTS.md skills subagents site:ampcode.com`
 - `antigravity subagents mcp agents rules site:antigravity.google`
 - `cline clinerules skills directories site:cline.bot`
-- `goose skills .agents/skills recommended location site:block.github.io`
+- `goose skills .agents/skills recommended location site:goose-docs.ai`
 - `warp skills directory site:warp.dev`
 - `kilo modes skills site:kilo.ai`
 - `agents skills shared pool which clients scan`
@@ -98,7 +98,7 @@ durable; update the numbers, keep the spine.
 [ag]: https://antigravity.google
 [cline]: https://cline.bot
 [droid]: https://factory.ai
-[goose]: https://block.github.io/goose
+[goose]: https://goose-docs.ai
 [warp]: https://warp.dev
 [openclaw]: https://github.com/openclaw/openclaw
 [kilo]: https://kilo.ai

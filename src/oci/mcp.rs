@@ -41,8 +41,8 @@ pub enum McpTransport {
     Stdio,
     /// A remote server over streamable HTTP (`url` + `headers`).
     Http,
-    /// A remote server over server-sent events (deprecated upstream but
-    /// still accepted by every client).
+    /// A remote server over HTTP+SSE (deprecated in the MCP spec, not
+    /// removed; each client projects it onto its own remote transport).
     Sse,
     /// A remote server over a persistent WebSocket (`url` + `headers`,
     /// `ws://`/`wss://` scheme). Claude-native (`type: "ws"`); other
@@ -354,8 +354,8 @@ impl McpDescriptor {
     }
 
     /// Whether any string value carries a canonical `${VAR}` reference.
-    /// Copilot CLI's global config supports no variable substitution, so
-    /// its writer skips descriptors that need one (never inlines secrets).
+    /// A vendor whose MCP config supports no variable substitution skips
+    /// descriptors that need one (never inlines secrets).
     pub fn has_env_refs(&self) -> bool {
         self.string_values().any(|v| env_ref_names(v).next().is_some())
     }

@@ -65,8 +65,13 @@ pub enum FieldType {
 /// - [`Degraded`](KindSupport::Degraded): a grim-ownable per-file surface
 ///   exists but cannot express the kind's scoping — installed with the lossy
 ///   field dropped **and a warning** (OpenCode rules: `paths:` dropped).
-/// - [`Declined`](KindSupport::Declined): no grim-ownable surface at all —
-///   warn + skip + zero outputs (Codex rules, and the wave-1 declines).
+/// - [`Declined`](KindSupport::Declined): grim renders nothing for this
+///   (vendor, kind) pair — warn + skip + zero outputs. Sometimes because no
+///   ownable surface exists upstream at all (Codex rules, and the wave-1
+///   declines); sometimes because a real surface exists but grim has not
+///   built the render yet (Junie/Droid/Kilo/Goose agents, Cline's CLI
+///   agent surface, Antigravity rules) — a grim capability gap, not an
+///   upstream absence. The module doc on each `Vendor` impl states which.
 ///
 /// Behavior mapping onto the old bool: `Declined` is the old `false`;
 /// `Native` and `Degraded` are both the old `true`.
@@ -76,7 +81,8 @@ pub enum KindSupport {
     Native,
     /// Ownable surface, reduced fidelity — installs with a warning.
     Degraded,
-    /// No ownable surface — warn + skip + zero outputs.
+    /// Nothing rendered — warn + skip + zero outputs (no surface upstream,
+    /// or a real one grim has not built yet; see `Vendor::kind_support`).
     Declined,
 }
 
@@ -121,14 +127,25 @@ pub struct KnownField {
 ///   location), while Warp renders natively to `.warp/skills` and reaches the
 ///   pool only through the opt-in. Membership here is about what a client
 ///   **reads**, not where grim writes — those are separate questions.
+/// - `droid` and `kilo` scan it at **both** scopes, verified 2026-09-27
+///   (Factory CLI v0.228.0 lists `.agents/skills` as a compatibility source at
+///   project and personal scope; Kilo v7.8.1 scans project `.agents/skills`
+///   and `~/.agents/skills` by default). Both render natively by default and
+///   reach the pool only through the opt-in, the Warp shape.
+/// - `cline` scans it at **both** scopes too, source-verified 2026-09-27
+///   against extension v4.1.21 / CLI v3.0.65: the shared SDK's
+///   `resolveSkillsConfigSearchPaths` and the VS Code extension's
+///   `getSkillsDirectoriesForScan` both list project `.agents/skills` and
+///   global `~/.agents/skills` alongside Cline's own `.cline/skills` —
+///   reversing the earlier "confirmed absence" reading, which had checked
+///   only the extension's docs page, not its source, and missed the CLI
+///   entirely. Renders natively by default, the Warp shape.
 /// - Absent, deliberately: `claude` (does not scan the pool), `kiro`,
-///   `junie` and `qoder` (not evidenced either way), `cline` and `droid` (confirmed
-///   *absent* from their own documented scan lists, not merely unevidenced),
+///   `junie` and `qoder` (not evidenced either way),
 ///   `openclaw` (it does scan the pool at priority 3, but it is global-only
 ///   and the interaction between a scope-gapped client and `shared_skills` is
 ///   unproven — a deliberate deferral, since adding is additive and removing
-///   is breaking), `kilo` (**partial**: project pool only, no global support)
-///   and `antigravity` — which **does**
+///   is breaking), and `antigravity` — which **does**
 ///   read the project pool but not the global one (its global skills live
 ///   under its own `~/.gemini/config/skills`). Membership here is scope-blind,
 ///   so adding it would make `shared_skills = true` write global skills where
@@ -161,7 +178,8 @@ pub struct KnownField {
 /// Both have the same fix, and it is not a guard in the installer: keep a
 /// fields-declaring vendor out of the pool.
 const POOL_CAPABLE_VENDORS: &[&str] = &[
-    "codex", "gemini", "zed", "amp", "agents", "cursor", "copilot", "opencode", "goose", "warp",
+    "codex", "gemini", "zed", "amp", "agents", "cursor", "copilot", "opencode", "goose", "warp", "droid", "kilo",
+    "cline",
 ];
 
 /// [`Vendor::pool_capable`] with both inputs injected.
@@ -582,7 +600,8 @@ mod tests {
         assert_eq!(
             capable,
             vec![
-                "opencode", "copilot", "codex", "cursor", "gemini", "zed", "amp", "agents", "goose", "warp"
+                "opencode", "copilot", "codex", "cursor", "gemini", "zed", "amp", "agents", "cline", "droid", "goose",
+                "warp", "kilo"
             ],
             "the pool-capable set is an evidence roster; a client joining or leaving it is a deliberate change"
         );
@@ -592,12 +611,13 @@ mod tests {
         assert!(!ClientTarget::Kiro.vendor().pool_capable());
         assert!(!ClientTarget::Junie.vendor().pool_capable());
         assert!(!ClientTarget::Qoder.vendor().pool_capable());
-        // Confirmed absences from their own scan lists, not evidence gaps.
-        assert!(!ClientTarget::Cline.vendor().pool_capable());
-        assert!(!ClientTarget::Droid.vendor().pool_capable());
+        // Cline scans both `.agents/skills` (project) and `~/.agents/skills`
+        // (global) in its shared SDK and its VS Code extension alike —
+        // verified 2026-09-27 against source, reversing the earlier
+        // confirmed-absence reading.
+        assert!(ClientTarget::Cline.vendor().pool_capable());
         // Partial members / deliberate deferrals — the shape that silently
         // writes global skills where the client never scans if let in.
-        assert!(!ClientTarget::Kilo.vendor().pool_capable());
         assert!(!ClientTarget::OpenClaw.vendor().pool_capable());
     }
 

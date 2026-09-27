@@ -121,7 +121,7 @@ grim add ghcr.io/grimoire-rs/skills/grim-authoring:0   # installs by default
 [ag]: https://antigravity.google
 [cline]: https://cline.bot
 [droid]: https://factory.ai
-[goose]: https://block.github.io/goose
+[goose]: https://goose-docs.ai
 [warp]: https://warp.dev
 [openclaw]: https://github.com/openclaw/openclaw
 [kilo]: https://kilo.ai

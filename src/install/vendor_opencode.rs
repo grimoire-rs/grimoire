@@ -9,6 +9,11 @@
 //! no per-file rule scoping: the rule index is rewritten to provenance +
 //! body, and loading is wired through the managed `instructions` entry in
 //! `opencode.json` (see [`super::opencode_config`]).
+//!
+//! Skill, agent, rule and MCP surfaces verified 2026-09-27 against
+//! OpenCode 1.18.32 (docs and source at tag `v1.18.32`); live-verified the
+//! same day with `opencode agent list`, `opencode debug skill`,
+//! `opencode debug config` and `opencode mcp list` in a sandbox.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -282,6 +287,8 @@ impl Vendor for OpenCodeVendor {
             ));
         }
 
+        let lifted = drop_invalid_opencode_values(projection.lifted, &mut warnings, projection.cleaned.name.as_str());
+
         let mut natives: Vec<(&'static str, serde_yaml::Value)> = vec![(
             "description",
             serde_yaml::Value::String(projection.cleaned.description.to_string()),
@@ -290,13 +297,8 @@ impl Vendor for OpenCodeVendor {
             natives.push(("model", serde_yaml::Value::String(model.clone())));
         }
 
-        let mut document = render::agent_frontmatter_block(
-            natives,
-            projection.lifted,
-            self.name(),
-            OPENCODE_AGENT_OVERRIDES,
-            &mut warnings,
-        );
+        let mut document =
+            render::agent_frontmatter_block(natives, lifted, self.name(), OPENCODE_AGENT_OVERRIDES, &mut warnings);
         document.push_str(&provenance(pinned));
         document.push_str(&parsed.body);
         Ok(Some(RenderedDoc { document, warnings }))
@@ -341,6 +343,90 @@ fn global_agents_root(config_dir_override: Option<PathBuf>, xdg_config: Option<P
     config_dir_override
         .map(|d| d.join("agents"))
         .or_else(|| xdg_config.map(|c| c.join("opencode").join("agents")))
+}
+
+/// OpenCode theme names accepted for `color` alongside a `#RRGGBB` hex
+/// literal (`config/agent.ts`'s `Color` union, tag `v1.18.32`).
+const OPENCODE_COLOR_THEMES: &[&str] = &["primary", "secondary", "accent", "success", "warning", "error", "info"];
+
+/// Drop a lifted `color` or `steps` value OpenCode's own schema would
+/// reject, warning once per drop instead of writing a config OpenCode
+/// refuses to load in its entirety (every agent and verb, not just this
+/// one — vendor-capability-watchlist.md). `color` must be `#RRGGBB` or one
+/// of [`OPENCODE_COLOR_THEMES`]; `steps` must be a positive safe integer
+/// (`Number.isSafeInteger`, i.e. `1..=2^53-1` — OpenCode's `PositiveInt` is
+/// `Schema.Int.check(isGreaterThan(0))` over that narrower integer type, not
+/// every `i64`). `FieldType::String`/`FieldType::Integer` accept any
+/// string/any `i64`, so an invalid literal survives that gate — this is
+/// grim repairing its own output (class 1, `adr_vendor_support_tiers.md`),
+/// not a tightening of publish-time validation: an artifact valid today
+/// stays installable, and only the bad field is dropped.
+fn drop_invalid_opencode_values(
+    lifted: Vec<(&'static str, serde_yaml::Value)>,
+    warnings: &mut Vec<String>,
+    agent_name: &str,
+) -> Vec<(&'static str, serde_yaml::Value)> {
+    lifted
+        .into_iter()
+        .filter(|(native, value)| match *native {
+            "color" => {
+                let raw = value.as_str().unwrap_or_default();
+                let valid = is_opencode_hex_color(raw) || OPENCODE_COLOR_THEMES.contains(&raw);
+                if !valid {
+                    // `raw` is unconstrained registry-fetched text reaching a
+                    // terminal through `tracing::warn!` — escaped and capped
+                    // for the same reason as `RenderError::InvalidValue` and
+                    // the unknown-key warning in `render::partition_metadata`.
+                    warnings.push(format!(
+                        "agent '{agent_name}': opencode.color {} is not '#RRGGBB' or one of {} \
+                         (OpenCode rejects its whole config on an invalid value); dropped",
+                        quote_opencode_value(raw),
+                        OPENCODE_COLOR_THEMES.join(", ")
+                    ));
+                }
+                valid
+            }
+            "steps" => {
+                let valid = value
+                    .as_i64()
+                    .is_some_and(|n| (1..=OPENCODE_MAX_SAFE_INTEGER).contains(&n));
+                if !valid {
+                    warnings.push(format!(
+                        "agent '{agent_name}': opencode.steps must be a positive safe integer (<= 2^53-1) \
+                         (OpenCode rejects its whole config on an invalid value); dropped"
+                    ));
+                }
+                valid
+            }
+            _ => true,
+        })
+        .collect()
+}
+
+/// `^#[0-9a-fA-F]{6}$`, written by hand rather than pulling in `regex` for
+/// one fixed-shape check.
+fn is_opencode_hex_color(s: &str) -> bool {
+    s.len() == 7 && s.starts_with('#') && s[1..].chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// `Number.MAX_SAFE_INTEGER` (2^53 - 1) — the upper bound of effect's
+/// `isInt` (`Number.isSafeInteger`), which underlies OpenCode's
+/// `PositiveInt` schema for `steps`.
+const OPENCODE_MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+
+/// Chars of an invalid `opencode.color` value shown in a warning before
+/// truncation, mirroring `command::config::quote_pattern`'s cap on another
+/// unconstrained-length, registry-fetched string reaching a terminal.
+const MAX_SHOWN_COLOR_CHARS: usize = 80;
+
+/// `escape_debug`d and length-capped, so a hostile or oversized
+/// `opencode.color` literal cannot inject terminal control sequences or
+/// flood the warning line.
+fn quote_opencode_value(raw: &str) -> String {
+    match raw.char_indices().nth(MAX_SHOWN_COLOR_CHARS) {
+        None => format!("'{}'", raw.escape_debug()),
+        Some((cut, _)) => format!("'{}…' ({} bytes total)", raw[..cut].escape_debug(), raw.len()),
+    }
 }
 
 #[cfg(test)]
@@ -496,6 +582,113 @@ mod tests {
             let parsed = crate::skill::AgentFrontmatter::parse_doc(doc, Path::new("a.md")).unwrap();
             assert!(OpenCodeVendor.agent_index(&parsed, "p").is_err(), "{doc}");
         }
+    }
+
+    #[test]
+    fn agent_index_drops_invalid_color_with_warning() {
+        let doc = "---\nname: a\ndescription: d\nmetadata:\n  opencode.color: not-a-color\n---\nbody\n";
+        let parsed = crate::skill::AgentFrontmatter::parse_doc(doc, Path::new("a.md")).unwrap();
+        let out = OpenCodeVendor.agent_index(&parsed, "p").unwrap().unwrap();
+        assert!(!out.document.contains("color:"), "{}", out.document);
+        assert_eq!(out.warnings.len(), 1, "{:?}", out.warnings);
+        assert!(out.warnings[0].contains("color"), "{:?}", out.warnings);
+    }
+
+    #[test]
+    fn agent_index_drops_non_positive_steps_with_warning() {
+        for steps in ["0", "-1"] {
+            let doc = format!("---\nname: a\ndescription: d\nmetadata:\n  opencode.steps: \"{steps}\"\n---\nbody\n");
+            let parsed = crate::skill::AgentFrontmatter::parse_doc(&doc, Path::new("a.md")).unwrap();
+            let out = OpenCodeVendor.agent_index(&parsed, "p").unwrap().unwrap();
+            assert!(!out.document.contains("steps:"), "{steps}: {}", out.document);
+            assert_eq!(out.warnings.len(), 1, "{steps}: {:?}", out.warnings);
+            assert!(out.warnings[0].contains("steps"), "{steps}: {:?}", out.warnings);
+        }
+    }
+
+    /// A `steps` value that is a positive `i64` but exceeds
+    /// `Number.MAX_SAFE_INTEGER` still fails OpenCode's own `PositiveInt`
+    /// schema (effect's `isInt` is `Number.isSafeInteger`), so grim must
+    /// drop it too, not just non-positive values.
+    #[test]
+    fn agent_index_drops_unsafe_integer_steps_with_warning() {
+        let doc = "---\nname: a\ndescription: d\nmetadata:\n  opencode.steps: \"9007199254740992\"\n---\nbody\n";
+        let parsed = crate::skill::AgentFrontmatter::parse_doc(doc, Path::new("a.md")).unwrap();
+        let out = OpenCodeVendor.agent_index(&parsed, "p").unwrap().unwrap();
+        assert!(!out.document.contains("steps:"), "{}", out.document);
+        assert_eq!(out.warnings.len(), 1, "{:?}", out.warnings);
+        assert!(out.warnings[0].contains("safe integer"), "{:?}", out.warnings);
+    }
+
+    /// The registry-fetched `opencode.color` literal reaches a
+    /// `tracing::warn!` line unescaped otherwise — a bidi/control-character
+    /// value must not survive into the warning raw.
+    #[test]
+    fn agent_index_escapes_control_chars_in_invalid_color_warning() {
+        let doc = "---\nname: a\ndescription: d\nmetadata:\n  opencode.color: \"not\u{202e}color\"\n---\nbody\n";
+        let parsed = crate::skill::AgentFrontmatter::parse_doc(doc, Path::new("a.md")).unwrap();
+        let out = OpenCodeVendor.agent_index(&parsed, "p").unwrap().unwrap();
+        assert_eq!(out.warnings.len(), 1, "{:?}", out.warnings);
+        assert!(!out.warnings[0].contains('\u{202e}'), "{:?}", out.warnings);
+        assert!(out.warnings[0].contains("\\u{202e}"), "{:?}", out.warnings);
+    }
+
+    #[test]
+    fn agent_index_keeps_valid_hex_color_and_positive_steps() {
+        let doc = "---\nname: a\ndescription: d\nmetadata:\n  opencode.color: \"#FF5733\"\n  opencode.steps: \"3\"\n---\nbody\n";
+        let parsed = crate::skill::AgentFrontmatter::parse_doc(doc, Path::new("a.md")).unwrap();
+        let out = OpenCodeVendor.agent_index(&parsed, "p").unwrap().unwrap();
+        // Exact bytes, not just `contains` — pins the commit-message claim
+        // that a valid `color`/`steps` pair renders unchanged (`steps`
+        // precedes `color` because `OPENCODE_AGENT_FIELDS` declares it
+        // first; `append_lifted` preserves registry order, not frontmatter
+        // order). `serde_yaml` single-quotes `#FF5733` because a bare `#`
+        // opens a YAML comment.
+        assert_eq!(
+            out.document,
+            "---\ndescription: d\nsteps: 3\ncolor: '#FF5733'\n---\n\
+             <!-- generated by grim from p; edits will be overwritten -->\nbody\n"
+        );
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    }
+
+    #[test]
+    fn agent_index_keeps_valid_theme_color() {
+        let doc = "---\nname: a\ndescription: d\nmetadata:\n  opencode.color: primary\n---\nbody\n";
+        let parsed = crate::skill::AgentFrontmatter::parse_doc(doc, Path::new("a.md")).unwrap();
+        let out = OpenCodeVendor.agent_index(&parsed, "p").unwrap().unwrap();
+        assert!(out.document.contains("color: primary"), "{}", out.document);
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    }
+
+    /// Principle 9's self-heal contract (`adr_render_layout_stability.md`):
+    /// re-materializing must leave `status` not-modified, which requires
+    /// `agent_index` to be a pure function of its input — the same gap
+    /// Copilot, Codex, Cursor, Gemini and Antigravity each already pin with
+    /// their own `agent_index_is_deterministic`. Covers both the keep path
+    /// (valid `color`/`steps` survive) and the drop path (an invalid
+    /// `steps` is dropped with a warning both times, not just once).
+    #[test]
+    fn agent_index_is_deterministic() {
+        let valid = "---\nname: a\ndescription: d\nmetadata:\n  opencode.color: \"#FF5733\"\n  opencode.steps: \"3\"\n---\nbody\n";
+        let parsed = crate::skill::AgentFrontmatter::parse_doc(valid, Path::new("a.md")).unwrap();
+        let a = OpenCodeVendor.agent_index(&parsed, "p").unwrap().unwrap();
+        let b = OpenCodeVendor.agent_index(&parsed, "p").unwrap().unwrap();
+        assert_eq!(a.document, b.document, "regeneration must be byte-identical");
+        assert_eq!(a.warnings, b.warnings, "warnings must be byte-identical");
+
+        let dropped = "---\nname: a\ndescription: d\nmetadata:\n  opencode.steps: \"0\"\n---\nbody\n";
+        let parsed = crate::skill::AgentFrontmatter::parse_doc(dropped, Path::new("a.md")).unwrap();
+        let a = OpenCodeVendor.agent_index(&parsed, "p").unwrap().unwrap();
+        let b = OpenCodeVendor.agent_index(&parsed, "p").unwrap().unwrap();
+        assert_eq!(
+            a.document, b.document,
+            "regeneration must be byte-identical on the drop path too"
+        );
+        assert_eq!(
+            a.warnings, b.warnings,
+            "the drop warning must not duplicate or vary across renders"
+        );
     }
 
     #[test]

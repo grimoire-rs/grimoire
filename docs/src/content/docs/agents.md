@@ -92,9 +92,11 @@ OpenCode needs.
 ## What each client receives {#emit-matrix}
 
 On install, grim projects the canonical agent file into each client's native
-format, or declines it where the client ships no ownable agent surface. Agents
-are the least uniform kind — only a minority of clients ship a file format grim
-can own, and the rest decline outright.
+format, or declines it — either because the client ships no ownable agent
+surface at all, or because it does and grim has not built that render yet
+(the table below says which). Agents are the least uniform kind — only a
+minority of clients have a file format grim currently renders, and the rest
+decline.
 
 | Client | Output | What grim projects |
 |---|---|---|
@@ -105,16 +107,16 @@ can own, and the rest decline outright.
 | [Cursor][cursor-subagents-docs] | `.md` + YAML frontmatter | `cursor.*` lifted (`model`, `readonly`, `is_background`), `tools` dropped with a warning; provenance comment |
 | [Gemini CLI][gemini-subagents-docs] | `.md` + YAML frontmatter | `gemini.*` lifted (`model`, `temperature`, `max_turns`, `timeout_mins`, `kind`); loaded only when `experimental.enableAgents` is on (the default) |
 | [Kiro][kiro-docs] | not supported | agents declined — the Kiro CLI expects an incompatible schema in the same directory ([kiro #8040]) |
-| [Junie][junie-docs] | not supported | agents declined — the `.junie/agents/` format is early-access-preview only |
+| [Junie][junie-docs] | not supported | agents declined — not yet enabled in grim, tracked in [grimoire#148] |
 | [Zed][zed-docs] | not supported | agents declined — external agents run over ACP with no installable file |
 | [Amp][amp-docs] | not supported | agents declined — subagents are spawned at runtime with no file format |
 | [Antigravity][antigravity-subagents-docs] | `.md` + YAML frontmatter | `tools` emitted as a YAML **list** (upstream types it `string[]`); nothing lifted — no `antigravity.*` registry yet |
-| [Cline][cline-docs] | not supported | agents declined — no installable subagent file format |
-| [Droid][droid-docs] | not supported | agents declined — no installable subagent file format |
-| [Goose][goose-docs] | not supported | agents declined — subagents are runtime-only, nothing on disk |
+| [Cline][cline-docs] | not supported | agents declined — not rendered by grim yet |
+| [Droid][droid-docs] | not supported | agents declined — not rendered by grim yet |
+| [Goose][goose-docs] | not supported | agents declined — not rendered by grim yet |
 | [Warp][warp-docs] | not supported | agents declined — agent profiles are Settings-UI-only |
 | [OpenClaw][openclaw-docs] | not supported | agents declined — subagents are runtime-only, nothing on disk |
-| [Kilo][kilo-docs] | not supported | agents declined — custom "modes" are not an installable agent format |
+| [Kilo][kilo-docs] | not supported | agents declined — not rendered by grim yet |
 | [Qoder][qoder-subagents-docs] | `.md` + YAML frontmatter | Claude Code's format — a plain agent installs byte-identical (`generated: false`); nothing lifted — no `qoder.*` registry yet |
 
 The canonical format **is** Claude Code's native subagent format, so a plain
@@ -243,6 +245,7 @@ grim uninstall agent code-reviewer         # removes files + declaration
 [zed-docs]: https://zed.dev
 [amp-docs]: https://ampcode.com
 [kiro #8040]: https://github.com/kirodotdev/Kiro/issues/8040
+[grimoire#148]: https://github.com/grimoire-rs/grimoire/issues/148
 
 <!-- internal -->
 [vendor-metadata]: ./vendor-metadata.md
@@ -254,7 +257,7 @@ grim uninstall agent code-reviewer         # removes files + declaration
 
 [cline-docs]: https://cline.bot
 [droid-docs]: https://factory.ai
-[goose-docs]: https://block.github.io/goose
+[goose-docs]: https://goose-docs.ai
 [warp-docs]: https://warp.dev
 [openclaw-docs]: https://github.com/openclaw/openclaw
 [kilo-docs]: https://kilo.ai

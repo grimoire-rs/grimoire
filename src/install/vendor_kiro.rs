@@ -4,7 +4,8 @@
 //! Kiro's vendor strategy: universal skills, steering rules, declined agents.
 //!
 //! Kiro (AWS) mapping (`adr_vendor_wave_expansion.md`; live-verified
-//! 2026-07-19, `research_vendor_verification_cursor_kiro.md`):
+//! 2026-07-19, re-verified 2026-09-27, `research_vendor_verification_cursor_kiro.md`,
+//! `research_upstream_kiro_20260927.md`):
 //!
 //! - **Skills**: `.kiro/skills/<name>/` (project), `~/.kiro/skills/`
 //!   (global). Universal agentskills shape.
@@ -99,14 +100,14 @@ impl Vendor for KiroVendor {
         use crate::oci::mcp::McpTransport;
 
         // Kiro's `mcp.json` reads `${VARIABLE_NAME}` natively — passthrough,
-        // no translation (the same Claude/Gemini env-ref shape). A structured
-        // oauth block is auth-critical and has no home in Kiro's `mcpServers`
-        // schema (its oauth shape ≠ grim's `McpOAuth`), so the whole
-        // descriptor is skipped with a warning rather than writing an entry
-        // that silently drops the auth.
+        // no translation (the same Claude/Gemini env-ref shape). Kiro does
+        // document a remote `oauth` object (`clientId`, `clientSecret`,
+        // `redirectUri`, `clientMetadataUrl`, `oauthScopes`), but it is not
+        // grim's `McpOAuth` shape, so the whole descriptor is skipped with a
+        // warning rather than writing an entry that silently drops the auth.
         let s = &descriptor.server;
         if s.oauth.is_some() {
-            tracing::warn!("mcp server '{name}' skipped for kiro ({scope}): mcp.json has no oauth surface");
+            tracing::warn!("mcp server '{name}' skipped for kiro ({scope}): mcp.json oauth shape differs");
             return None;
         }
         let mut entry = serde_json::Map::new();

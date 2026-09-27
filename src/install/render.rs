@@ -699,6 +699,10 @@ fn serialize_mapping(mapping: &serde_yaml::Mapping) -> String {
     })
 }
 
+/// The agentskills-standard cap on a skill's `compatibility` field: 1-500
+/// characters if provided.
+const MAX_SKILL_COMPATIBILITY_LEN: usize = 500;
+
 /// Validate the namespaced metadata of a skill against **every** supported
 /// target: a publish-time gate. Returns the union of per-target warnings
 /// (deduplicated, in target order).
@@ -716,6 +720,37 @@ pub fn validate_namespaced_metadata(fm: &SkillFrontmatter) -> Result<Vec<String>
                 warnings.push(w);
             }
         }
+    }
+    // agentskills cap: `compatibility`, if provided, must be 1-500 characters
+    // (https://github.com/agentskills/agentskills/blob/main/docs/specification.mdx).
+    // Additive: warn only, never fails the publish (Principle 9).
+    if let Some(compatibility) = &fm.compatibility {
+        if compatibility.trim().is_empty() {
+            warnings.push(
+                "skill 'compatibility' is empty; omit the field or describe environment requirements".to_string(),
+            );
+        } else {
+            let len = compatibility.chars().count();
+            if len > MAX_SKILL_COMPATIBILITY_LEN {
+                warnings.push(format!(
+                    "skill 'compatibility' is {len} characters, exceeding the agentskills {MAX_SKILL_COMPATIBILITY_LEN}-character cap"
+                ));
+            }
+        }
+    } else if fm.compatibility_key_is_null {
+        // A bare `compatibility:` or `compatibility: ~` parses as YAML
+        // null, indistinguishable from an absent key at the `Option<String>`
+        // level — the null form still needs the same warning, since the
+        // spec requires the field to be "1-500 characters if provided"
+        // (https://github.com/agentskills/agentskills/blob/main/docs/specification.mdx)
+        // and an authored-but-empty value does not meet that bar. This is
+        // NOT because the upstream reference validator rejects it: its
+        // `_validate_compatibility` only checks `isinstance(str)` and
+        // `len > 500`, and strictyaml parses both a bare `compatibility:`
+        // and `compatibility: ~` to strings (`''` and `'~'` respectively),
+        // so the reference validator accepts both.
+        warnings
+            .push("skill 'compatibility' is empty; omit the field or describe environment requirements".to_string());
     }
     // Migration nudge: a known tool-specific field authored as a top-level
     // frontmatter key (it landed in `extra`) should move into namespaced
@@ -1418,6 +1453,69 @@ metadata:
 
         let bad = fm("---\nname: s\ndescription: d\nmetadata:\n  claude.effort: warp\n---\n");
         assert!(validate_namespaced_metadata(&bad).is_err());
+    }
+
+    #[test]
+    fn validate_warns_on_empty_or_oversized_compatibility() {
+        let blank = fm("---\nname: s\ndescription: d\ncompatibility: \"   \"\n---\n");
+        let warnings = validate_namespaced_metadata(&blank).expect("valid");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("compatibility") && w.contains("empty")),
+            "{warnings:?}"
+        );
+
+        // A bare `compatibility:` and `compatibility: ~` both parse as YAML
+        // null — `SkillFrontmatter.compatibility` sees `None` either way,
+        // same as an absent key, so the warning relies on
+        // `compatibility_key_is_null` rather than the `Option`.
+        let bare_null = fm("---\nname: s\ndescription: d\ncompatibility:\n---\n");
+        let warnings = validate_namespaced_metadata(&bare_null).expect("valid");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("compatibility") && w.contains("empty")),
+            "{warnings:?}"
+        );
+
+        let tilde_null = fm("---\nname: s\ndescription: d\ncompatibility: ~\n---\n");
+        let warnings = validate_namespaced_metadata(&tilde_null).expect("valid");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("compatibility") && w.contains("empty")),
+            "{warnings:?}"
+        );
+
+        let long = format!(
+            "---\nname: s\ndescription: d\ncompatibility: \"{}\"\n---\n",
+            "x".repeat(501)
+        );
+        let warnings = validate_namespaced_metadata(&fm(&long)).expect("valid");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("compatibility") && w.contains("500")),
+            "{warnings:?}"
+        );
+
+        // Exactly 500 chars is the accepted maximum — no warning.
+        let max = format!(
+            "---\nname: s\ndescription: d\ncompatibility: \"{}\"\n---\n",
+            "x".repeat(500)
+        );
+        let warnings = validate_namespaced_metadata(&fm(&max)).expect("valid");
+        assert!(warnings.iter().all(|w| !w.contains("compatibility")), "{warnings:?}");
+
+        let ok = fm("---\nname: s\ndescription: d\ncompatibility: claude>=2\n---\n");
+        let warnings = validate_namespaced_metadata(&ok).expect("valid");
+        assert!(warnings.iter().all(|w| !w.contains("compatibility")), "{warnings:?}");
+
+        // Field absent entirely ⇒ no warning either.
+        let absent = fm("---\nname: s\ndescription: d\n---\n");
+        let warnings = validate_namespaced_metadata(&absent).expect("valid");
+        assert!(warnings.iter().all(|w| !w.contains("compatibility")), "{warnings:?}");
     }
 
     #[test]

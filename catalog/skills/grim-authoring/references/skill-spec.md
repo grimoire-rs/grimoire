@@ -31,8 +31,8 @@ round-trip, never rejected.
 | `name` | yes | Must equal the directory name |
 | `description` | yes | Non-empty, ≤ 1024 chars; what it does + when to use it |
 | `license` | no | SPDX-style id (e.g. `Apache-2.0`); becomes the OCI license annotation |
-| `compatibility` | no | Free-text environment hint (e.g. `grim>=0.4`); published as the `com.grimoire.compatibility` annotation |
-| `allowed-tools` | no | Comma-separated tool allowlist |
+| `compatibility` | no | Free-text environment hint (e.g. `grim>=0.4`), at most 500 characters per the spec — grim warns (never fails) on an empty or oversized value; published as the `com.grimoire.compatibility` annotation |
+| `allowed-tools` | no | Space-separated list of pre-approved tools; experimental, support varies by client |
 | `metadata` | no | String→string map: catalog keys + vendor extensions |
 
 All `metadata` values are strings — quote anything that YAML would

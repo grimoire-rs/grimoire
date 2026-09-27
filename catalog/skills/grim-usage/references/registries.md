@@ -62,6 +62,13 @@ grim reaps the copy stranded at the old root on the next `install`,
 never deleted). And they drive global-scope client *detection*: a client
 counts as present when its overridden root exists.
 
+grim reads these from the process environment only — never from a client's
+own settings file. `CLAUDE_CONFIG_DIR` set in Claude Code's user or managed
+settings `env` still relocates Claude's real config root (project and local
+settings can no longer set it, since Claude Code 2.1.251), and grim has no
+way to see that: a global-scope install can land at the old root while
+Claude itself reads the new one.
+
 ## Multiple Registries {#multiple-registries}
 
 When a project draws from more than one registry, declare them in a
@@ -933,5 +940,5 @@ rate][rate] and [Artifact Ratings][ratings-doc].
 [ratings-doc]: https://grimoire.rs/ratings.html
 [tui]: https://grimoire.rs/commands.html#tui
 [mcp]: https://grimoire.rs/commands.html#mcp
-[mcp-spec]: https://spec.modelcontextprotocol.io/
+[mcp-spec]: https://modelcontextprotocol.io/specification/latest
 [claude-code]: https://docs.anthropic.com/en/docs/claude-code
