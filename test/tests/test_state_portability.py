@@ -666,6 +666,10 @@ def test_no_collision_reaps_legacy_sha_file_on_install(
     # $GRIM_HOME/state/projects/.
     config_path = ws / "grimoire.toml"
     canonical_str = str(config_path.resolve())
+    if sys.platform == "win32":
+        # Rust's `std::fs::canonicalize` returns the verbatim `\\?\` form
+        # on Windows, and the legacy formula hashes exactly that string.
+        canonical_str = "\\\\?\\" + canonical_str
     sha = hashlib.sha256(canonical_str.encode()).hexdigest()
     legacy_dir = grim_home / "state" / "projects"
     legacy_dir.mkdir(parents=True, exist_ok=True)
