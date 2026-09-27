@@ -27,7 +27,7 @@ use crate::export::{archive, rename};
 use crate::fetch::FetchScope;
 use crate::install::client_target::MaterializeRequest;
 use crate::install::installer::{StagedArtifact, fetch_verified_layer, stage_locked_artifact};
-use crate::install::{ClientTarget, DefaultMaterializer, InstallError, InstallErrorKind, json_splice};
+use crate::install::{ClientTarget, DefaultMaterializer, InstallError, InstallErrorKind, InstallProgress, json_splice};
 use crate::lock::{ConfigFileLock, LockedArtifact, lock_io};
 use crate::oci::access::OciAccess;
 use crate::oci::mcp::McpDescriptor;
@@ -54,7 +54,6 @@ pub(crate) enum ExportMode {
 }
 
 /// The per-run output options of `grim export plugin`.
-#[derive(Debug)]
 pub(crate) struct ExportOptions<'a> {
     /// Clients in selection order, each with its family (C-015).
     pub clients: &'a [(ClientTarget, Family)],
@@ -65,6 +64,10 @@ pub(crate) struct ExportOptions<'a> {
     pub force: bool,
     /// `--version`, the C-023 base override.
     pub version: Option<&'a str>,
+    /// `--description`, the C-024 base override.
+    pub description: Option<&'a str>,
+    /// Member-fetch progress sink (`--progress`).
+    pub progress: &'a dyn InstallProgress,
 }
 
 /// Run one export end to end and build its report.
@@ -101,6 +104,7 @@ pub(crate) async fn run(
         force: opts.force,
         anchor,
         manifest,
+        progress: opts.progress,
     };
     match mode {
         ExportMode::AdHoc { refs, name } => {
@@ -153,7 +157,7 @@ pub(crate) async fn run(
             } else {
                 (None, None)
             };
-            let input = plugin_input(&name, &members, None, opts.version, annotations)?;
+            let input = plugin_input(&name, &members, None, (opts.version, opts.description), annotations)?;
             let items = export_plugins(&request(std::slice::from_ref(&input), &cwd, None), access).await?;
             Ok(ExportReport::new(items))
         }
@@ -191,7 +195,15 @@ pub(crate) async fn run(
             .await?;
             let inputs = selected
                 .iter()
-                .map(|p| plugin_input(p, &part_members(&res, p), m.plugins.get(p), opts.version, (None, None)))
+                .map(|p| {
+                    plugin_input(
+                        p,
+                        &part_members(&res, p),
+                        m.plugins.get(p),
+                        (opts.version, opts.description),
+                        (None, None),
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             let anchor = m.path.parent().unwrap_or(Path::new("."));
             let items = export_plugins(&request(&inputs, anchor, Some(&m.path)), access).await?;
@@ -306,20 +318,37 @@ pub(crate) async fn pinned_annotations(
 /// Assemble one plugin's [`PluginInput`]: `rename::apply` over its lock
 /// part members (C-021), then `family::plugin_version` with base
 /// `version_flag` → `decl.version` → `annotation_version` (C-023), and the
-/// description base `decl.description` → `annotation_description` (C-024).
-/// `decl` is `None` ad-hoc.
+/// description base `description_flag` → `decl.description` →
+/// `annotation_description` (C-024). `decl` is `None` ad-hoc. An
+/// author-written base (flag or declared) must fit beside the on-ramp; a
+/// publisher's annotation is cut to fit instead, since the exporter cannot
+/// edit it.
 ///
 /// # Errors
 ///
-/// `RenameInvalid`, `RenameCollision`, `InvalidVersion` (65).
+/// `RenameInvalid`, `RenameCollision`, `InvalidVersion`,
+/// `DescriptionTooLong` (65).
 pub(crate) fn plugin_input(
     name: &str,
     members: &[LockedArtifact],
     decl: Option<&PluginDecl>,
-    version_flag: Option<&str>,
+    (version_flag, description_flag): (Option<&str>, Option<&str>),
     annotations: (Option<String>, Option<String>),
 ) -> Result<PluginInput, ExportError> {
     let (annotation_version, annotation_description) = annotations;
+    let authored = description_flag
+        .map(str::to_string)
+        .or_else(|| decl.and_then(|d| d.description.clone()));
+    if let Some(text) = &authored {
+        let (len, max) = (family::description_len(text.trim()), family::max_description_base_len());
+        if len > max {
+            return Err(ExportError::DescriptionTooLong {
+                plugin: name.to_string(),
+                len,
+                max,
+            });
+        }
+    }
     let members = rename::apply(name, members, decl.and_then(|d| d.rename.as_ref()))?;
     let base = version_flag
         .map(str::to_string)
@@ -335,7 +364,7 @@ pub(crate) fn plugin_input(
         name: name.to_string(),
         members,
         version,
-        description_base: decl.and_then(|d| d.description.clone()).or(annotation_description),
+        description_base: authored.or(annotation_description),
         renamed,
     })
 }
@@ -358,7 +387,6 @@ pub(crate) struct PluginInput {
 }
 
 /// One export run: what to stage, for whom, and where it lands (C-027).
-#[derive(Debug)]
 pub(crate) struct ExportRequest<'a> {
     /// Plugins in byte order of name.
     pub plugins: &'a [PluginInput],
@@ -373,6 +401,8 @@ pub(crate) struct ExportRequest<'a> {
     /// The declared manifest `M`; `None` ad-hoc. Names `M` in the
     /// changed-local-source hint.
     pub manifest: Option<&'a Path>,
+    /// Advanced once per member fetched, across all plugins (`--progress`).
+    pub progress: &'a dyn InstallProgress,
 }
 
 /// A member fetched and verified once per run, rendered for every client.
@@ -427,6 +457,19 @@ pub(crate) async fn export_plugins(
     req: &ExportRequest<'_>,
     access: &Arc<dyn OciAccess>,
 ) -> Result<Vec<ExportItem>, crate::error::Error> {
+    req.progress.start(req.plugins.iter().map(|p| p.members.len()).sum());
+    let result = export_staged(req, access).await;
+    // Cleared on every exit, so an error message never lands mid-bar.
+    req.progress.finish();
+    result
+}
+
+/// [`export_plugins`] between the progress `start` and `finish`.
+async fn export_staged(
+    req: &ExportRequest<'_>,
+    access: &Arc<dyn OciAccess>,
+) -> Result<Vec<ExportItem>, crate::error::Error> {
+    let mut position = 0;
     let mut clients: Vec<(ClientTarget, Family)> = Vec::with_capacity(req.clients.len());
     for pair in req.clients {
         if !clients.contains(pair) {
@@ -444,7 +487,8 @@ pub(crate) async fn export_plugins(
     let mut outputs = Vec::new();
     let mut items = Vec::new();
     for plugin in req.plugins {
-        let staged = stage_members(&plugin.members, &clients, access, req.anchor, staging.path())
+        let progress = (req.progress, &mut position, plugin.name.as_str());
+        let staged = stage_members(&plugin.members, &clients, access, req.anchor, staging.path(), progress)
             .await
             .map_err(|e| local_drift_hint(e, req.manifest, &plugin.name))?;
         let mut rendered = Vec::with_capacity(clients.len());
@@ -458,7 +502,14 @@ pub(crate) async fn export_plugins(
 
         for (client, fam, root, r) in rendered {
             let omitted: Vec<(ArtifactKind, String)> = r.omitted.iter().map(|o| (o.kind, o.name.clone())).collect();
-            let description = family::plugin_description(plugin.description_base.as_deref(), &omitted);
+            let (description, cut) = family::plugin_description(plugin.description_base.as_deref(), &omitted);
+            if cut {
+                tracing::warn!(
+                    "plugin '{}': description cut to {} characters for client '{client}'",
+                    plugin.name,
+                    family::MAX_DESCRIPTION_LEN
+                );
+            }
             write_manifest(&root, fam, &plugin.name, &plugin.version, &description)?;
             let final_path = final_path(req.output_dir, &plugin.name, client, req.zip);
             let (staged_path, format) = if req.zip {
@@ -612,10 +663,13 @@ pub(crate) async fn stage_members<'a>(
     access: &Arc<dyn OciAccess>,
     anchor: &Path,
     staging_parent: &Path,
+    (progress, position, plugin): (&dyn InstallProgress, &mut usize, &str),
 ) -> Result<Vec<StagedMember<'a>>, crate::error::Error> {
     let mut staged = Vec::with_capacity(members.len());
     for (locked, emitted) in members {
         let kind = locked.kind;
+        *position += 1;
+        progress.advance(*position, &format!("{plugin}: {kind} {emitted}"));
         let admitted = clients.iter().any(|&(c, f)| family::admits(f, c, kind).is_ok());
         let content = if !admitted {
             MemberContent::Unfetched
@@ -2060,7 +2114,7 @@ mod tests {
     fn c021_c023_rename_applies_before_the_version_is_computed() {
         let members = vec![registry_member("hex-plan", ArtifactKind::Skill, sha('a'))];
         let d = decl(Some("1.0.0"), None, Some("hex-"));
-        let input = plugin_input("hex", &members, Some(&d), None, (None, None)).unwrap();
+        let input = plugin_input("hex", &members, Some(&d), (None, None), (None, None)).unwrap();
         assert_eq!(input.name, "hex");
         assert_eq!(input.members.len(), 1);
         assert_eq!(input.members[0].1, "plan");
@@ -2077,7 +2131,7 @@ mod tests {
     #[test]
     fn c021_no_rule_leaves_names_and_renamed_empty() {
         let members = vec![registry_member("plan", ArtifactKind::Skill, sha('a'))];
-        let input = plugin_input("team", &members, None, None, (None, None)).unwrap();
+        let input = plugin_input("team", &members, None, (None, None), (None, None)).unwrap();
         assert_eq!(input.members[0].1, "plan");
         assert!(input.renamed.is_empty());
     }
@@ -2089,7 +2143,7 @@ mod tests {
             registry_member("plan", ArtifactKind::Skill, sha('b')),
         ];
         let d = decl(None, None, Some("hex-"));
-        let err = plugin_input("hex", &members, Some(&d), None, (None, None)).unwrap_err();
+        let err = plugin_input("hex", &members, Some(&d), (None, None), (None, None)).unwrap_err();
         assert!(matches!(err, ExportError::RenameCollision { .. }), "{err:?}");
     }
 
@@ -2102,15 +2156,15 @@ mod tests {
         let declared = decl(Some("1.0.0"), None, None);
         let bare = decl(None, None, None);
 
-        let all = plugin_input("p", &members, Some(&declared), Some("v2.0.0"), ann()).unwrap();
+        let all = plugin_input("p", &members, Some(&declared), (Some("v2.0.0"), None), ann()).unwrap();
         assert_eq!(all.version, v(Some("2.0.0")), "--version wins, leading v stripped");
-        let no_flag = plugin_input("p", &members, Some(&declared), None, ann()).unwrap();
+        let no_flag = plugin_input("p", &members, Some(&declared), (None, None), ann()).unwrap();
         assert_eq!(no_flag.version, v(Some("1.0.0")), "declared beats annotation");
-        let ann_only = plugin_input("p", &members, Some(&bare), None, ann()).unwrap();
+        let ann_only = plugin_input("p", &members, Some(&bare), (None, None), ann()).unwrap();
         assert_eq!(ann_only.version, v(Some("0.5.0")));
-        let ad_hoc = plugin_input("p", &members, None, None, ann()).unwrap();
+        let ad_hoc = plugin_input("p", &members, None, (None, None), ann()).unwrap();
         assert_eq!(ad_hoc.version, v(Some("0.5.0")));
-        let none = plugin_input("p", &members, None, None, (None, None)).unwrap();
+        let none = plugin_input("p", &members, None, (None, None), (None, None)).unwrap();
         assert_eq!(none.version, v(None));
         assert!(none.version.starts_with("0.0.0+"));
     }
@@ -2119,7 +2173,7 @@ mod tests {
     fn c023_invalid_version_flag_is_invalid_version_65() {
         let members = vec![registry_member("plan", ArtifactKind::Skill, sha('a'))];
         for bad in ["latest", "1.0.0+x"] {
-            let err = plugin_input("p", &members, None, Some(bad), (None, None)).unwrap_err();
+            let err = plugin_input("p", &members, None, (Some(bad), None), (None, None)).unwrap_err();
             assert!(
                 matches!(&err, ExportError::InvalidVersion { value } if value == bad),
                 "{bad}: {err:?}"
@@ -2135,24 +2189,68 @@ mod tests {
         let declared = decl(None, Some("Declared"), None);
         let bare = decl(None, None, None);
         assert_eq!(
-            plugin_input("p", &members, Some(&declared), None, ann())
+            plugin_input("p", &members, Some(&declared), (None, None), ann())
                 .unwrap()
                 .description_base
                 .as_deref(),
             Some("Declared")
         );
         assert_eq!(
-            plugin_input("p", &members, Some(&bare), None, ann())
+            plugin_input("p", &members, Some(&bare), (None, None), ann())
                 .unwrap()
                 .description_base
                 .as_deref(),
             Some("From annotation")
         );
         assert_eq!(
-            plugin_input("p", &members, None, None, (None, None))
+            plugin_input("p", &members, None, (None, None), (None, None))
                 .unwrap()
                 .description_base,
             None
+        );
+        assert_eq!(
+            plugin_input("p", &members, Some(&declared), (None, Some("Flag")), ann())
+                .unwrap()
+                .description_base
+                .as_deref(),
+            Some("Flag"),
+            "--description wins over declared and annotation"
+        );
+    }
+
+    #[test]
+    fn c024_authored_description_too_long_is_65_annotation_is_not() {
+        let members = vec![registry_member("plan", ArtifactKind::Skill, sha('a'))];
+        let max = family::max_description_base_len();
+        let long = "x".repeat(max + 1);
+        let fits = format!("  {}  ", "x".repeat(max));
+        let too_long = |r: Result<PluginInput, ExportError>| {
+            matches!(r, Err(ExportError::DescriptionTooLong { plugin, len, max: m })
+                if plugin == "p" && len == max + 1 && m == max)
+        };
+        assert!(too_long(plugin_input(
+            "p",
+            &members,
+            None,
+            (None, Some(&long)),
+            (None, None)
+        )));
+        assert!(too_long(plugin_input(
+            "p",
+            &members,
+            Some(&decl(None, Some(&long), None)),
+            (None, None),
+            (None, None)
+        )));
+        assert!(
+            plugin_input("p", &members, None, (None, Some(&fits)), (None, None)).is_ok(),
+            "surrounding blanks are trimmed first"
+        );
+        let from_annotation = plugin_input("p", &members, None, (None, None), (None, Some(long.clone()))).unwrap();
+        assert_eq!(
+            from_annotation.description_base,
+            Some(long),
+            "a publisher's text is cut at render, not refused"
         );
     }
 
@@ -2320,6 +2418,7 @@ mod tests {
             force: false,
             anchor: out.path(),
             manifest: None,
+            progress: &crate::install::SilentProgress,
         };
         let items = export_plugins(&req, &access).await.unwrap();
 
@@ -2349,7 +2448,7 @@ mod tests {
             family::claude_plugin_json(
                 "team",
                 &plugins[0].version,
-                &family::plugin_description(Some("Base"), &[])
+                &family::plugin_description(Some("Base"), &[]).0
             )
         );
         assert!(claude_root.join(".mcp.json").is_file());
@@ -2359,7 +2458,7 @@ mod tests {
             family::agent_plugins_plugin_json(
                 "team",
                 &plugins[0].version,
-                &family::plugin_description(Some("Base"), &[])
+                &family::plugin_description(Some("Base"), &[]).0
             )
         );
         assert!(codex_root.join("mcp.json").is_file());
@@ -2381,6 +2480,7 @@ mod tests {
             force: false,
             anchor: out.path(),
             manifest: None,
+            progress: &crate::install::SilentProgress,
         };
         let items = export_plugins(&req, &access).await.unwrap();
         assert_eq!(entries(out.path()), vec!["team.claude.zip"]);
@@ -2410,6 +2510,7 @@ mod tests {
             force: false,
             anchor: out.path(),
             manifest: None,
+            progress: &crate::install::SilentProgress,
         };
         let err = export_plugins(&req, &access).await.unwrap_err();
         match export_error(&err) {
@@ -2441,6 +2542,7 @@ mod tests {
             force: true,
             anchor: out.path(),
             manifest: None,
+            progress: &crate::install::SilentProgress,
         };
         export_plugins(&req, &access).await.unwrap();
         assert_eq!(entries(out.path()), vec!["team.claude"]);
@@ -2466,6 +2568,7 @@ mod tests {
             force: false,
             anchor: out.path(),
             manifest: None,
+            progress: &crate::install::SilentProgress,
         };
         let err = export_plugins(&req, &access).await.unwrap_err();
         assert!(
@@ -2486,9 +2589,16 @@ mod tests {
         let counting = PinOnly::new(reg);
         let access: Arc<dyn OciAccess> = counting.clone();
         let tmp = tempfile::tempdir().unwrap();
-        let staged = stage_members(&members, &[claude(), codex()], &access, tmp.path(), tmp.path())
-            .await
-            .unwrap();
+        let staged = stage_members(
+            &members,
+            &[claude(), codex()],
+            &access,
+            tmp.path(),
+            tmp.path(),
+            (&crate::install::SilentProgress, &mut 0, "p"),
+        )
+        .await
+        .unwrap();
         assert_eq!(staged.len(), 2, "output order = members order");
         assert_eq!(staged[0].emitted, "srv");
         assert!(matches!(&staged[0].content, MemberContent::Mcp(d) if **d == stdio("grim")));

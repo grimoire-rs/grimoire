@@ -82,6 +82,13 @@ pub struct ExportPluginArgs {
     #[arg(long)]
     pub version: Option<String>,
 
+    /// Plugin description, overriding the declared `description` and the
+    /// reference's description annotation. grim appends omitted members
+    /// and an on-ramp sentence; the whole must fit 500 characters, so a
+    /// longer text is refused.
+    #[arg(long)]
+    pub description: Option<String>,
+
     /// Replace existing outputs instead of refusing them.
     #[arg(long)]
     pub force: bool,
@@ -156,12 +163,15 @@ pub async fn run_plugin(ctx: &Context, args: &ExportPluginArgs) -> anyhow::Resul
             super::access_seam(ctx)?,
         ),
     };
+    let progress = crate::cli::progress::select_progress(ctx.progress(), true);
     let opts = ExportOptions {
         clients: &clients,
         output_dir: &args.output,
         zip: args.zip,
         force: args.force,
         version: args.version.as_deref(),
+        description: args.description.as_deref(),
+        progress: progress.as_ref(),
     };
     let report = super::grim(stage::run(&mode, &opts, &scope, &access, ctx.offline()).await)?;
     Ok((report, ExitCode::Success))
@@ -277,6 +287,7 @@ mod tests {
             zip: false,
             output: out.to_path_buf(),
             version: None,
+            description: None,
             force: false,
         }
     }

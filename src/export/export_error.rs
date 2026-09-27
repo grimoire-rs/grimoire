@@ -42,6 +42,15 @@ pub enum ExportError {
     #[error("invalid plugin version '{value}': expected a semver version without build metadata (e.g. 1.2.0)")]
     InvalidVersion { value: String },
 
+    /// An author-written description (`--description` or a declared
+    /// `description`) is longer than a plugin description can carry
+    /// beside grim's on-ramp sentence (65).
+    #[error(
+        "plugin '{plugin}': description is {len} characters; at most {max} fit (plugin descriptions are capped at {cap}, the rest is grim's on-ramp sentence)",
+        cap = super::family::MAX_DESCRIPTION_LEN
+    )]
+    DescriptionTooLong { plugin: String, len: usize, max: usize },
+
     /// A rename produced an empty or invalid member name (65).
     #[error("plugin '{plugin}': renaming '{from}' yields invalid name '{to}'")]
     RenameInvalid { plugin: String, from: String, to: String },
