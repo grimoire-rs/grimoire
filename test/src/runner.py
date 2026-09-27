@@ -63,6 +63,9 @@ class GrimRunner:
             # set both so global-scope installs resolve the isolated home on
             # every platform.
             "USERPROFILE": str(self._home),
+            # Windows-native vendor roots (Zed's `%APPDATA%\Zed`) must also
+            # land under the isolated home, never the real user profile.
+            "APPDATA": str(self._home / "AppData/Roaming"),
             "XDG_CONFIG_HOME": str(self._home / ".config"),
         }
         # Windows needs these for subprocess spawning and executable resolution

@@ -25,6 +25,7 @@ Vendor env-var overrides (tested at the bottom of this file):
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from src.helpers import make_artifact
@@ -190,7 +191,7 @@ def test_global_install_claude_support_dir_rule_registers_absolute_glob(
     settings = runner.home / ".claude/settings.json"
     assert settings.is_file(), "a global support-dir rule registers the exclusion"
     assert json.loads(settings.read_text())["claudeMdExcludes"] == [
-        f"{runner.home}/.claude/rules/my-rule/**"
+        f"{runner.home.as_posix()}/.claude/rules/my-rule/**"
     ], "global scope must write the absolute glob, not the project **/ form"
 
     uninstall_rows = runner.json("uninstall", "--global", "rule", "my-rule")
@@ -261,7 +262,7 @@ def test_global_install_opencode_rule_stays_in_grim_home_and_registers_glob(
     )
     cfg = json.loads(opencode_cfg.read_text())
     instructions = cfg.get("instructions", [])
-    assert any(str(grim_home) in entry for entry in instructions), (
+    assert any(grim_home.as_posix() in entry for entry in instructions), (
         f"opencode.json instructions must contain an absolute glob pointing at $GRIM_HOME; "
         f"instructions={instructions}"
     )
@@ -660,7 +661,7 @@ def test_global_opencode_rule_honors_opencode_config_file(
         "managed instructions glob must be registered in $OPENCODE_CONFIG"
     )
     instructions = json.loads(custom_cfg.read_text()).get("instructions", [])
-    assert any(str(grim_home) in e for e in instructions), (
+    assert any(grim_home.as_posix() in e for e in instructions), (
         f"absolute glob missing from $OPENCODE_CONFIG; instructions={instructions}"
     )
     assert not (runner.home / ".config/opencode/opencode.json").exists(), (
@@ -715,7 +716,7 @@ def test_global_opencode_honors_custom_xdg_config_home(
         "opencode.json must be created under the custom $XDG_CONFIG_HOME"
     )
     instructions = json.loads(cfg.read_text()).get("instructions", [])
-    assert any(str(grim_home) in e for e in instructions)
+    assert any(grim_home.as_posix() in e for e in instructions)
     # The ~/.config default must stay untouched.
     assert not (runner.home / ".config/opencode").exists(), (
         "default ~/.config must stay untouched when XDG_CONFIG_HOME points elsewhere"
@@ -1522,8 +1523,8 @@ def test_global_install_zed_skill_lands_in_shared_agents_skills(
 def test_global_install_zed_mcp_lands_in_config_zed_settings(
     grim_binary: Path, grim_home: Path, registry: str, unique_repo: str, tmp_path: Path
 ) -> None:
-    """Global Zed MCP → ``$HOME/.config/zed/settings.json``, key
-    ``context_servers`` — proving the ``~/.config/zed`` global root."""
+    """Global Zed MCP → ``$HOME/.config/zed/settings.json`` (``%APPDATA%\\Zed``
+    on Windows), key ``context_servers`` — proving the Zed global root."""
     runner = GrimRunner(grim_binary, grim_home)
     ref = _release_global_mcp(runner, tmp_path, registry, unique_repo)
     (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n')
@@ -1531,8 +1532,11 @@ def test_global_install_zed_mcp_lands_in_config_zed_settings(
 
     rows = runner.json("install", "--global", "--client", "zed")["items"]
     assert rows[0]["status"] == "installed", rows
-    cfg = runner.home / ".config/zed/settings.json"
-    assert cfg.is_file(), "global Zed MCP entry must land in $HOME/.config/zed/settings.json"
+    zed_root = (
+        Path(runner.env["APPDATA"]) / "Zed" if sys.platform == "win32" else runner.home / ".config/zed"
+    )
+    cfg = zed_root / "settings.json"
+    assert cfg.is_file(), f"global Zed MCP entry must land in {cfg}"
     assert json.loads(cfg.read_text())["context_servers"]["grim-mcp"]["command"] == "grim"
 
 
