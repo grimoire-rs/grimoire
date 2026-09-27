@@ -920,6 +920,7 @@ taking references straight on the command line.
 include = ["ghcr.io/acme/skills/code-review:1", "ghcr.io/acme/agents/reviewer:1"]
 description = "The acme platform team's shared skills"
 version = "1.2.0"
+logo = "assets/team.svg"
 
 [plugins.team.rename]
 strip_prefix = "acme-"
@@ -931,6 +932,9 @@ registry reference, a bundle, or a local path. `description` and
 `version` seed the rendered `plugin.json`'s corresponding fields; grim
 always appends a content-hash suffix to `version` (see [export's output
 naming](./commands.md#export-plugin-output)). Both are optional here.
+`logo` is an optional `.png` or `.svg` path, relative to the manifest's
+directory, shipped in every exported plugin (see [export's
+logo](./commands.md#export-plugin-logo)).
 Omitted, a declared plugin's `version` defaults straight to `0.0.0` and
 its `description` carries no base text. A `description` longer than 500
 characters exits `65` on export

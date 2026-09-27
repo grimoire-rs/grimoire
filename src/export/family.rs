@@ -59,7 +59,8 @@ struct ClaudeManifest<'a> {
     description: &'a str,
 }
 
-/// Agent Plugins `plugin.json`: exactly these keys, in this order.
+/// Agent Plugins `plugin.json`: exactly these keys, in this order;
+/// `extensions` only when the plugin has a logo.
 #[derive(Serialize)]
 struct AgentPluginsManifest<'a> {
     #[serde(rename = "$schema")]
@@ -67,6 +68,13 @@ struct AgentPluginsManifest<'a> {
     name: &'a str,
     version: &'a str,
     description: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extensions: Option<serde_json::Value>,
+}
+
+/// Where a plugin logo lands in every exported tree, by file extension.
+pub fn logo_path(ext: &str) -> String {
+    format!("assets/logo.{ext}")
 }
 
 /// The plugin family of `client`, or `None` when it has no plugin format
@@ -184,16 +192,20 @@ pub fn plugin_description(base: Option<&str>) -> (String, bool) {
     }
 }
 
-/// The plugin root's `README.md` (C-024): the name, the full uncut base,
-/// the members omitted for `client`, then [`ONRAMP`]. `omitted` is `(kind,
-/// emitted name)` in C-016 order.
+/// The plugin root's `README.md` (C-024): the name, the logo image when
+/// there is one, the full uncut base, the members omitted for `client`, then
+/// [`ONRAMP`]. `omitted` is `(kind, emitted name)` in C-016 order.
 pub fn plugin_readme(
     name: &str,
     client: ClientTarget,
     base: Option<&str>,
     omitted: &[(ArtifactKind, String)],
+    logo: Option<&str>,
 ) -> Vec<u8> {
     let mut parts = vec![format!("# {name}")];
+    if let Some(logo) = logo {
+        parts.push(format!("![{name}]({logo})"));
+    }
     if let Some(base) = base.map(str::trim).filter(|b| !b.is_empty()) {
         parts.push(base.to_string());
     }
@@ -226,12 +238,17 @@ pub fn claude_plugin_json(name: &str, version: &str, description: &str) -> Vec<u
 /// Serializing a struct of `&str` cannot fail, so this returns bytes, not a
 /// `Result`; the body uses a non-panicking form (no `unwrap`/`expect`, per
 /// the crate lints).
-pub fn agent_plugins_plugin_json(name: &str, version: &str, description: &str) -> Vec<u8> {
+///
+/// `logo` is the plugin-root-relative logo path ([`logo_path`]); it is
+/// declared under the Codex namespace (`extensions."com.openai".interface.logo`,
+/// `./`-prefixed), the one Agent Plugins client that reads a logo.
+pub fn agent_plugins_plugin_json(name: &str, version: &str, description: &str, logo: Option<&str>) -> Vec<u8> {
     pretty_json_line(&AgentPluginsManifest {
         schema: AGENT_PLUGINS_SCHEMA,
         name,
         version,
         description,
+        extensions: logo.map(|l| serde_json::json!({"com.openai": {"interface": {"logo": format!("./{l}")}}})),
     })
 }
 
@@ -574,17 +591,43 @@ mod tests {
     }
 
     #[test]
+    fn c024_readme_shows_the_logo_under_the_title() {
+        let readme = plugin_readme(
+            "team",
+            ClientTarget::Claude,
+            Some("Tools"),
+            &[],
+            Some("assets/logo.svg"),
+        );
+        assert_eq!(
+            String::from_utf8(readme).unwrap(),
+            format!("# team\n\n![team](assets/logo.svg)\n\nTools\n\n{ONRAMP}\n")
+        );
+    }
+
+    #[test]
+    fn c025_agent_plugins_logo_goes_under_the_codex_namespace() {
+        let got = agent_plugins_plugin_json("team", "1.0.0+c5a5324c93a6", "Team tools", Some("assets/logo.png"));
+        let v: serde_json::Value = serde_json::from_slice(&got).unwrap();
+        assert_eq!(
+            top_level_keys(&got),
+            ["$schema", "name", "version", "description", "extensions"]
+        );
+        assert_eq!(v["extensions"]["com.openai"]["interface"]["logo"], "./assets/logo.png");
+    }
+
+    #[test]
     fn c024_readme_carries_base_omissions_and_onramp() {
         let omitted = [
             (ArtifactKind::Rule, "style".to_string()),
             (ArtifactKind::Agent, "reviewer".to_string()),
         ];
-        let readme = plugin_readme("team", ClientTarget::Codex, Some(" Team tools "), &omitted);
+        let readme = plugin_readme("team", ClientTarget::Codex, Some(" Team tools "), &omitted, None);
         assert_eq!(
             String::from_utf8(readme).unwrap(),
             format!("# team\n\nTeam tools\n\nOmitted for codex: rule style, agent reviewer.\n\n{ONRAMP}\n")
         );
-        let bare = plugin_readme("team", ClientTarget::Claude, None, &[]);
+        let bare = plugin_readme("team", ClientTarget::Claude, None, &[], None);
         assert_eq!(String::from_utf8(bare).unwrap(), format!("# team\n\n{ONRAMP}\n"));
     }
 
@@ -609,7 +652,7 @@ mod tests {
 
     #[test]
     fn c025_agent_plugins_plugin_json_exact_bytes_schema_first() {
-        let got = agent_plugins_plugin_json("team", "1.0.0+c5a5324c93a6", "Team tools");
+        let got = agent_plugins_plugin_json("team", "1.0.0+c5a5324c93a6", "Team tools", None);
         assert_eq!(
             String::from_utf8(got).unwrap(),
             "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \
@@ -632,7 +675,7 @@ mod tests {
     fn c025_key_lists_order_and_single_trailing_newline() {
         let desc = "Say \"hi\" — é\nnext";
         let claude = claude_plugin_json("team", "0.0.0+c5a5324c93a6", desc);
-        let agent = agent_plugins_plugin_json("team", "0.0.0+c5a5324c93a6", desc);
+        let agent = agent_plugins_plugin_json("team", "0.0.0+c5a5324c93a6", desc, None);
         assert_eq!(top_level_keys(&claude), ["name", "version", "description"]);
         assert_eq!(top_level_keys(&agent), ["$schema", "name", "version", "description"]);
         for bytes in [&claude, &agent] {
