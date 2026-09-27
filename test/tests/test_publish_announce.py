@@ -861,6 +861,32 @@ def test_publish_announce_json_up_to_date_keeps_branch(
     assert announce["url"] is None, announce
 
 
+def test_publish_announce_up_to_date_under_autocrlf(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path
+) -> None:
+    """core.autocrlf=true (Git for Windows' system default) checks the index
+    metadata out with CRLF; grim's LF rewrite is a line-ending-only change
+    and must still report up-to-date, not fail on an empty commit."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-crlf-utd"
+    _make_skill_source(project_dir, name, "Up to date under autocrlf.")
+    _manifest(project_dir, ns, name, INDEX_URL)
+
+    runner = grim_at(project_dir)
+    bare = _index_remote(tmp_path, runner)
+    runner.env.update(
+        {"GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_1": "core.autocrlf", "GIT_CONFIG_VALUE_1": "true"}
+    )
+    first = runner.run("publish", "--announce", check=False)
+    assert first.returncode == 0, first.stderr
+    branch = _announce_branch(bare)
+    default = _git(bare, "symbolic-ref", "--short", "HEAD").strip()
+    _git(bare, "update-ref", f"refs/heads/{default}", f"refs/heads/{branch}")
+
+    announce = runner.json("publish", "--announce")["announce"]
+    assert announce["outcome"] == "up-to-date", announce
+
+
 def test_publish_announce_json_dry_run_announce_is_null(
     grim_at, project_dir: Path, registry: str, tmp_path: Path
 ) -> None:

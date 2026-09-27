@@ -271,12 +271,16 @@ pub async fn announce(http: &reqwest::Client, request: &AnnounceRequest) -> Resu
         tokio::fs::write(path, content).await?;
     }
 
+    // Stage before checking emptiness: under core.autocrlf=true (Git for
+    // Windows' default) the clone checks files out with CRLF, so the LF
+    // rewrite shows as modified in the worktree even when `add`'s
+    // normalization leaves the index identical to HEAD.
+    git(Some(&clone), "add", &["add", "-A"]).await?;
     let status = git_output(&clone, "status", &["status", "--porcelain"]).await?;
     if status.trim().is_empty() {
         return Ok(AnnounceOutcome::UpToDate { branch });
     }
 
-    git(Some(&clone), "add", &["add", "-A"]).await?;
     let names: Vec<&str> = request.packages.iter().map(|p| p.name.as_str()).collect();
     let message = format!("announce: {}", names.join(", "));
     git(
