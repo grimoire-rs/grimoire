@@ -23,7 +23,8 @@ tasks:
       - task: build
         vars:
           SKIP_BUILD: "{{.SKIP_BUILD}}"
-      - uv run pytest {{.CLI_ARGS | default "-v"}}
+      # ocx exec puts zot (pinned in the root ocx.toml) on PATH for the suite.
+      - ocx exec -- uv run pytest {{.CLI_ARGS | default "-v"}}
     env:
       GRIM_COMMAND: "{{.GRIM_BINARY}}"
 
@@ -63,6 +64,6 @@ tasks:
       - task: build
         vars:
           SKIP_BUILD: "{{.SKIP_BUILD}}"
-      - uv run pytest recordings/ -v
+      - ocx exec -- uv run pytest recordings/ -v
     env:
       GRIM_COMMAND: "{{.GRIM_BINARY}}"

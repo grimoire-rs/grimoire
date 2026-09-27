@@ -2,8 +2,8 @@
 # Copyright 2026 The Grimoire Authors
 """Minimal OCI registry client for the acceptance suite.
 
-The suite pushes single-layer OCI artifacts to a local ``registry:2`` on
-``localhost:5000`` over plain HTTP using only the standard library (no
+The suite pushes single-layer OCI artifacts to the session's zot registry
+(``GRIM_TEST_REGISTRY_HOST``) over plain HTTP using only the standard library (no
 extra test dependency): a tiny ``{}`` config blob typed as the OCI empty
 config (``application/vnd.oci.empty.v1+json``), one uncompressed-tar layer
 blob, and a manifest carrying the OCI ``artifactType``
@@ -12,7 +12,7 @@ annotation.
 
 Note this is intentionally a *richer* manifest than grim's own output:
 grim drops ``artifactType`` on the wire because GitLab rejects it (see
-``adr_oci_empty_config_compat.md``), but ``registry:2`` accepts it, so the
+``adr_oci_empty_config_compat.md``), but zot accepts it, so the
 harness keeps it to exercise the read path's tier-1 ``artifactType``
 resolution (how new grim reads legacy / non-GitLab artifacts). grim's own
 GitLab-safe output — empty config, NO ``artifactType``, kind via the

@@ -69,7 +69,7 @@ schedule with nowhere to send it is a usage error.
 
 `seed:` is a block sequence of plain scalars, the same shape as `dirs:`.
 Each entry is an OCI repository path (e.g. `grim-docs/hello-world`)
-published into the session's local `registry:2` fixture before the shell
+published into the session's local zot registry before the shell
 opens, so a `registry: local` cast has something to `grim add`. It exists
 because the parametrized runner starts against an empty registry, and the
 alternative -- visible `grim release` steps recorded into the cast itself
@@ -646,20 +646,12 @@ def _nested_pytest(
 ) -> subprocess.CompletedProcess[str]:
     """Run pytest as a child process from `test/` and capture its output.
 
-    The child inherits this session's environment **minus**
-    ``_GRIM_FRESH_REGISTRY_NAME``. That variable names the throwaway
-    ``registry:2`` container the *parent* session started, and the child's
-    ``pytest_unconfigure`` (`test/conftest.py`) would ``docker rm -f`` it on
-    exit -- destroying the registry every surrounding test in this run
-    depends on. Every nested pytest invocation in this module must go
-    through this helper for that reason alone.
-
-    ``GRIM_TEST_REGISTRY_HOST`` and ``_GRIM_REGISTRY_VERIFIED`` are kept, so
-    the child reuses the parent's registry rather than probing for or
-    starting another one.
+    The child inherits ``GRIM_TEST_REGISTRY_HOST`` and
+    ``_GRIM_REGISTRY_VERIFIED``, so it reuses the parent's zot rather than
+    probing for or starting another one. It never holds the parent's zot
+    handle, so its ``pytest_unconfigure`` cannot stop that registry.
     """
     env = os.environ.copy()
-    env.pop("_GRIM_FRESH_REGISTRY_NAME", None)
     # pytest sizes its report lines to COLUMNS; the assertions below look for
     # whole file paths and whole commands, so give it room not to wrap.
     env["COLUMNS"] = "1000"
@@ -847,7 +839,7 @@ def test_local_registry_cast_records_against_the_session_registry(
     tmp_path: Path, grim_binary: Path, registry: str
 ) -> None:
     """A `registry: local` cast drives grim against the session's own
-    `registry:2` fixture, substitutes `{registry}` for its host, and leaks no
+    zot registry, substitutes `{registry}` for its host, and leaks no
     `ghcr.io` reference into the committed asset.
     """
     # Same UUID-prefixed shape as the `unique_repo` fixture; generated here

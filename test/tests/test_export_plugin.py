@@ -31,7 +31,7 @@ import pytest
 import tomllib
 
 from src.helpers import make_artifact, make_bundle, make_description, write_config
-from src.registry import push_artifact
+from src.registry import push_artifact, retag
 from src.runner import GrimRunner
 
 unix_only = pytest.mark.skipif(sys.platform == "win32", reason="needs a Unix host (flock, umask, symlinks)")
@@ -1191,7 +1191,8 @@ def test_s030_only_the_edited_plugin_is_reresolved(grim_at, work: Path, registry
     runner = grim_at(work)
     reg = f"{registry}/{unique_repo}"
     _skill(f"{unique_repo}/a-skill", "a-skill", heading="A1", tag="stable")
-    _skill(f"{unique_repo}/b-skill", "b-skill", heading="B1", tag="stable")
+    b1 = _skill(f"{unique_repo}/b-skill", "b-skill", heading="B1", tag="stable")
+    retag(f"{unique_repo}/b-skill", "keep", b1)  # zot drops a manifest once its last tag moves
     _skill(f"{unique_repo}/a2", "a2")
     m = work / "marketplace.toml"
     lock_path = work / "marketplace.lock"
@@ -1426,6 +1427,7 @@ def test_s034_no_logo_writes_no_assets_and_no_extensions(grim_at, work: Path, re
 @pytest.mark.parametrize(
     ("name", "content", "reason"),
     [("logo.gif", b"GIF89a", "must be a .png or .svg"), ("absent.svg", None, "not found"), ("big.svg", b"x" * (1024 * 1024 + 1), "larger than 1 MiB")],
+    ids=["gif", "absent", "too-big"],  # a 1 MiB content id overflows Windows' 32767-char PYTEST_CURRENT_TEST
 )
 def test_s034_bad_logo_exits_65_and_writes_nothing(
     grim_at, work: Path, registry: str, unique_repo: str, name: str, content: bytes | None, reason: str
@@ -1500,6 +1502,7 @@ def test_s035_project_renders_the_pins_without_resolving(
 ) -> None:
     repo = f"{unique_repo}/a"
     pinned = _skill(repo, "a", heading="Pinned")
+    retag(repo, "keep", pinned)  # zot drops a manifest once its last tag moves
     proj, runner = _lock_project(grim_at, tmp_path / "proj", {"a": f"{registry}/{repo}:1"})
     _skill(repo, "a", heading="Moved")  # the tag moves after locking
 

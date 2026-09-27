@@ -52,7 +52,7 @@ def test_release_wire_shape_empty_config_and_kind_annotation(
     manifest carries the OCI empty config and NO ``artifactType`` — the kind
     rides solely on the ``com.grimoire.kind`` annotation.
 
-    ``registry:2`` accepts everything, so this asserts the wire shape that
+    zot accepts both shapes, so this asserts the wire shape that
     satisfies GitLab, not GitLab's rejection itself.
     """
     skill = _local_skill(project_dir)
