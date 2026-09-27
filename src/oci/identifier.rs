@@ -263,6 +263,18 @@ impl Identifier {
         self.tag.as_deref().unwrap_or("latest")
     }
 
+    /// `self` tagged `latest` when it carries neither tag nor digest — the
+    /// untagged-reference rule `grimoire.toml`, `grim add` and
+    /// `marketplace.toml` share; a digest-only reference stays bare.
+    #[must_use]
+    pub fn or_latest(self) -> Self {
+        if self.tag.is_none() && self.digest.is_none() {
+            self.clone_with_tag("latest")
+        } else {
+            self
+        }
+    }
+
     /// Content-addressed digest, if pinned.
     pub fn digest(&self) -> Option<Digest> {
         self.digest.clone()
@@ -630,6 +642,15 @@ mod tests {
         assert_eq!(bare.tag(), None);
         assert_eq!(bare.tag_or_latest(), "latest");
         assert_eq!(bare.registry(), "localhost:5000");
+    }
+
+    #[test]
+    fn or_latest_tags_only_a_bare_reference() {
+        let parse = |s: &str| Identifier::parse(s).unwrap().or_latest().to_string();
+        assert_eq!(parse("ghcr.io/org/tool"), "ghcr.io/org/tool:latest");
+        assert_eq!(parse("ghcr.io/org/tool:1.0"), "ghcr.io/org/tool:1.0");
+        let digest = format!("ghcr.io/org/tool@sha256:{}", "a".repeat(64));
+        assert_eq!(parse(&digest), digest, "a digest-only ref stays bare");
     }
 
     #[test]

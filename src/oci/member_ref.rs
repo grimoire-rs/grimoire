@@ -131,13 +131,7 @@ impl MemberRef {
     #[must_use]
     pub fn with_default_tag_latest(self) -> Self {
         match self {
-            Self::Absolute(id) => {
-                if id.tag().is_none() && id.digest().is_none() {
-                    Self::Absolute(id.clone_with_tag("latest"))
-                } else {
-                    Self::Absolute(id)
-                }
-            }
+            Self::Absolute(id) => Self::Absolute(id.or_latest()),
             Self::Relative { parents, remainder } => {
                 // The probe in `parse` guarantees this parses; if it somehow
                 // does not, leave the remainder untouched (no panic in lib

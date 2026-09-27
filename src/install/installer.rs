@@ -486,37 +486,13 @@ async fn install_one<M: ArtifactMaterializer>(
         )));
     }
 
-    let blob = match &artifact.source {
-        crate::lock::locked_source::LockedSource::Registry(_) => fetch_verified_layer(artifact, kind, access).await?,
-        crate::lock::locked_source::LockedSource::Path { path, hash } => {
-            pack_verified_local(artifact, kind, path, hash, anchor).await?
-        }
-    };
-
     // Materialize the canonical tree once into a temp dir; every client
     // target then transforms/copies from that single extracted tree.
-    let staging = tempfile::Builder::new()
-        .prefix(".grim-staging-")
-        .tempdir_in(std::env::temp_dir())
-        .map_err(|e| target_io(std::env::temp_dir().as_path(), e))?;
-    let materialized_root = staging.path().join("content");
-    materializer.materialize(kind, &artifact.name, &blob, &materialized_root)?;
-
-    let canonical = locate_canonical(&materialized_root, kind, &artifact.name)?;
-
-    // A rule may carry a sibling support directory staged beside the index
-    // file (`<root>/<stem>/…`); a plain single-file rule has none. The
-    // sibling is keyed by the INDEX file's stem (the wire layout), which
-    // under a `--name` rebinding differs from the binding name. Skills
-    // are a single directory tree, never a support dir; agents are a
-    // single file with no support-directory contract.
-    let staged_support: Option<std::path::PathBuf> = match kind {
-        ArtifactKind::Rule => canonical.file_stem().and_then(|stem| {
-            let dir = materialized_root.join(stem);
-            dir.is_dir().then_some(dir)
-        }),
-        _ => None,
-    };
+    let StagedArtifact {
+        dir: staging,
+        canonical,
+        support_dir: staged_support,
+    } = stage_locked_artifact(artifact, kind, access, anchor, materializer, &std::env::temp_dir()).await?;
     // A rebound multi-file rule installs its support dir under the BINDING
     // name (consistent footprint for uninstall), but the index body's
     // relative links still point at the original stem — warn, don't fail.
@@ -1911,6 +1887,72 @@ pub(crate) enum ReapContext {
     Uninstalled,
 }
 
+/// A locked skill/rule/agent fetched (or packed), verified, and unpacked
+/// into a private temp tree, ready for every client to render from.
+///
+/// `dir` owns the tree: dropping it deletes `canonical` and `support_dir`.
+pub(crate) struct StagedArtifact {
+    pub dir: tempfile::TempDir,
+    /// The canonical entry: a skill directory, or a rule/agent `.md` file.
+    pub canonical: PathBuf,
+    /// A rule's sibling support directory, keyed by the index file's stem.
+    pub support_dir: Option<PathBuf>,
+}
+
+/// Fetch (registry) or pack (path source) `artifact`, verify it against its
+/// lock pin, and materialize its canonical tree under a fresh temp dir in
+/// `staging_parent` — the one staging path `install_one` and export share.
+/// Never called for MCP, which has no canonical tree (see [`install_mcp`]).
+///
+/// # Errors
+///
+/// Every failure keeps the classification `install_one` has always given
+/// it: access failures their own taxonomy (offline miss 81, auth 80,
+/// registry 69), a digest or content-pin mismatch 65.
+pub(crate) async fn stage_locked_artifact(
+    artifact: &LockedArtifact,
+    kind: ArtifactKind,
+    access: &Arc<dyn OciAccess>,
+    anchor: &Path,
+    materializer: &impl ArtifactMaterializer,
+    staging_parent: &Path,
+) -> Result<StagedArtifact, crate::error::Error> {
+    let blob = match &artifact.source {
+        crate::lock::locked_source::LockedSource::Registry(_) => fetch_verified_layer(artifact, kind, access).await?,
+        crate::lock::locked_source::LockedSource::Path { path, hash } => {
+            pack_verified_local(artifact, kind, path, hash, anchor).await?
+        }
+    };
+
+    let dir = tempfile::Builder::new()
+        .prefix(".grim-staging-")
+        .tempdir_in(staging_parent)
+        .map_err(|e| target_io(staging_parent, e))?;
+    let materialized_root = dir.path().join("content");
+    materializer.materialize(kind, &artifact.name, &blob, &materialized_root)?;
+
+    let canonical = locate_canonical(&materialized_root, kind, &artifact.name)?;
+
+    // A rule may carry a sibling support directory staged beside the index
+    // file (`<root>/<stem>/…`); a plain single-file rule has none. The
+    // sibling is keyed by the INDEX file's stem (the wire layout), which
+    // under a `--name` rebinding differs from the binding name. Skills
+    // are a single directory tree, never a support dir; agents are a
+    // single file with no support-directory contract.
+    let support_dir: Option<PathBuf> = match kind {
+        ArtifactKind::Rule => canonical.file_stem().and_then(|stem| {
+            let dir = materialized_root.join(stem);
+            dir.is_dir().then_some(dir)
+        }),
+        _ => None,
+    };
+    Ok(StagedArtifact {
+        dir,
+        canonical,
+        support_dir,
+    })
+}
+
 /// Validate + pack a locked path source and verify the bytes hash to the
 /// locked content pin — the local counterpart of [`fetch_verified_layer`]
 /// (fail-closed: a drifted source refuses to install stale lock content).
@@ -1954,7 +1996,7 @@ async fn pack_verified_local(
 /// allows a mock that does not). An access failure (offline miss, auth, registry)
 /// propagates with its own taxonomy so the exit code is correct
 /// (81/80/69/...).
-async fn fetch_verified_layer(
+pub(crate) async fn fetch_verified_layer(
     artifact: &LockedArtifact,
     kind: ArtifactKind,
     access: &Arc<dyn OciAccess>,
@@ -5793,5 +5835,317 @@ mod tests {
             InstallOutcome::Refused { .. }
         ));
         let _ = Path::new("/x");
+    }
+
+    // ── stage_locked_artifact (C-017) ──────────────────────────────
+
+    /// Mock whose every read is an offline cache miss (`--offline`, nothing
+    /// cached): the access error must reach the caller unreclassified.
+    struct OfflineMock;
+
+    #[async_trait]
+    impl OciAccess for OfflineMock {
+        async fn resolve_digest(&self, _id: &Identifier, _op: Operation) -> Result<Option<Digest>, AccessError> {
+            Err(AccessError::without_identifier(
+                crate::oci::access::error::AccessErrorKind::OfflineMiss,
+            ))
+        }
+        async fn fetch_manifest(&self, _id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
+            Err(AccessError::without_identifier(
+                crate::oci::access::error::AccessErrorKind::OfflineMiss,
+            ))
+        }
+        async fn fetch_blob(
+            &self,
+            _repo: &Identifier,
+            _digest: &Digest,
+            _max_bytes: u64,
+        ) -> Result<Option<Vec<u8>>, AccessError> {
+            Err(AccessError::without_identifier(
+                crate::oci::access::error::AccessErrorKind::OfflineMiss,
+            ))
+        }
+        async fn list_tags(&self, _id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
+            Ok(None)
+        }
+        async fn list_catalog(&self, _registry: &str) -> Result<Vec<String>, AccessError> {
+            Ok(Vec::new())
+        }
+        async fn push_blob(&self, _repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {
+            Ok(Algorithm::Sha256.hash(bytes))
+        }
+        async fn push_manifest(&self, _repo: &Identifier, _m: &OciManifest) -> Result<Digest, AccessError> {
+            Ok(Algorithm::Sha256.hash(b"m"))
+        }
+        async fn put_tag(&self, _repo: &Identifier, _t: &str, _d: &Digest) -> Result<(), AccessError> {
+            Ok(())
+        }
+    }
+
+    fn exit_of(err: crate::error::Error) -> crate::cli::exit_code::ExitCode {
+        crate::error::classify_error(&anyhow::Error::from(err))
+    }
+
+    /// A locked path-sourced artifact pinned to the packed bytes of
+    /// `anchor/<rel>` as they are on disk right now.
+    fn locked_path(name: &str, kind: ArtifactKind, anchor: &Path, rel: &str) -> LockedArtifact {
+        let source = crate::config::path_source::PathSource::parse(rel).unwrap();
+        let (_, layer) = crate::skill::pack_local_artifact(kind, &source.resolve(anchor)).unwrap();
+        LockedArtifact {
+            name: name.to_string(),
+            kind,
+            source: crate::lock::locked_source::LockedSource::Path {
+                path: source,
+                hash: Algorithm::Sha256.hash(&layer),
+            },
+            bundles: Vec::new(),
+        }
+    }
+
+    const SKILL_DOC: &[u8] = b"---\nname: code-review\ndescription: d\n---\n# Review\n";
+
+    #[tokio::test]
+    async fn c017_registry_skill_stages_its_canonical_dir_under_the_given_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("staging");
+        std::fs::create_dir_all(&parent).unwrap();
+        let blob = skill_tar("code-review", SKILL_DOC);
+        let artifact = locked_skill("code-review", &blob);
+
+        let staged = stage_locked_artifact(
+            &artifact,
+            ArtifactKind::Skill,
+            &arc(BlobMock { blob }),
+            Path::new("."),
+            &DefaultMaterializer,
+            &parent,
+        )
+        .await
+        .expect("stage");
+        assert!(
+            staged.dir.path().starts_with(&parent),
+            "temp dir under the staging parent"
+        );
+        assert!(
+            staged.canonical.starts_with(staged.dir.path()),
+            "canonical inside the owned tree"
+        );
+        assert!(staged.canonical.is_dir());
+        assert_eq!(staged.canonical.file_name().unwrap(), "code-review");
+        assert_eq!(std::fs::read(staged.canonical.join("SKILL.md")).unwrap(), SKILL_DOC);
+        assert!(staged.support_dir.is_none(), "a skill never has a support dir");
+
+        // Dropping the handle deletes the staged tree.
+        let root = staged.dir.path().to_path_buf();
+        drop(staged);
+        assert!(!root.exists(), "TempDir owns the staged tree");
+    }
+
+    #[tokio::test]
+    async fn c017_registry_multi_file_rule_stages_its_support_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blob = multi_rule_tar("rust-style", b"# rust\n", &[("examples/a.md", b"example\n")]);
+        let artifact = locked_rule("rust-style", &blob);
+
+        let staged = stage_locked_artifact(
+            &artifact,
+            ArtifactKind::Rule,
+            &arc(BlobMock { blob }),
+            Path::new("."),
+            &DefaultMaterializer,
+            tmp.path(),
+        )
+        .await
+        .expect("stage");
+        assert!(staged.canonical.starts_with(tmp.path()));
+        assert!(staged.canonical.is_file());
+        assert_eq!(staged.canonical.file_name().unwrap(), "rust-style.md");
+        assert_eq!(std::fs::read(&staged.canonical).unwrap(), b"# rust\n");
+        let support = staged.support_dir.as_ref().expect("multi-file rule has a support dir");
+        assert!(support.starts_with(staged.dir.path()));
+        assert_eq!(support.file_name().unwrap(), "rust-style", "keyed by the index stem");
+        assert_eq!(std::fs::read(support.join("examples/a.md")).unwrap(), b"example\n");
+    }
+
+    #[tokio::test]
+    async fn c017_single_file_rule_and_agent_stage_without_a_support_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        for kind in [ArtifactKind::Rule, ArtifactKind::Agent] {
+            let blob = rule_tar("solo", b"---\nname: solo\ndescription: d\n---\nbody\n");
+            let artifact = locked_of("solo", &blob, kind);
+            let staged = stage_locked_artifact(
+                &artifact,
+                kind,
+                &arc(BlobMock { blob }),
+                Path::new("."),
+                &DefaultMaterializer,
+                tmp.path(),
+            )
+            .await
+            .expect("stage");
+            assert!(staged.canonical.starts_with(tmp.path()), "{kind}");
+            assert_eq!(staged.canonical.file_name().unwrap(), "solo.md", "{kind}");
+            assert!(staged.support_dir.is_none(), "{kind}");
+        }
+    }
+
+    #[tokio::test]
+    async fn c017_path_skill_stages_from_the_anchor_without_touching_the_registry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let skill = project.join("skills").join("code-review");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), SKILL_DOC).unwrap();
+        std::fs::write(skill.join("notes.md"), b"extra\n").unwrap();
+        let artifact = locked_path("code-review", ArtifactKind::Skill, &project, "./skills/code-review");
+        let parent = tmp.path().join("staging");
+        std::fs::create_dir_all(&parent).unwrap();
+
+        // An offline access that fails every call proves the path branch
+        // never reaches the registry.
+        let staged = stage_locked_artifact(
+            &artifact,
+            ArtifactKind::Skill,
+            &arc(OfflineMock),
+            &project,
+            &DefaultMaterializer,
+            &parent,
+        )
+        .await
+        .expect("stage path skill");
+        assert!(staged.canonical.starts_with(&parent));
+        assert!(staged.canonical.is_dir());
+        assert_eq!(std::fs::read(staged.canonical.join("SKILL.md")).unwrap(), SKILL_DOC);
+        assert_eq!(std::fs::read(staged.canonical.join("notes.md")).unwrap(), b"extra\n");
+        assert!(staged.support_dir.is_none());
+    }
+
+    #[tokio::test]
+    async fn c017_path_multi_file_rule_stages_its_support_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rules = tmp.path().join("rules");
+        std::fs::create_dir_all(rules.join("rust-style")).unwrap();
+        std::fs::write(rules.join("rust-style.md"), b"---\npaths: [\"**/*.rs\"]\n---\n# Rust\n").unwrap();
+        std::fs::write(rules.join("rust-style").join("ex.md"), b"example\n").unwrap();
+        let artifact = locked_path("rust-style", ArtifactKind::Rule, tmp.path(), "./rules/rust-style.md");
+
+        let staged = stage_locked_artifact(
+            &artifact,
+            ArtifactKind::Rule,
+            &arc(OfflineMock),
+            tmp.path(),
+            &DefaultMaterializer,
+            tmp.path(),
+        )
+        .await
+        .expect("stage path rule");
+        assert_eq!(staged.canonical.file_name().unwrap(), "rust-style.md");
+        let support = staged.support_dir.as_ref().expect("support dir staged");
+        assert_eq!(std::fs::read(support.join("ex.md")).unwrap(), b"example\n");
+    }
+
+    #[tokio::test]
+    async fn c017_offline_miss_keeps_its_access_classification_81() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blob = skill_tar("code-review", SKILL_DOC);
+        let err = stage_locked_artifact(
+            &locked_skill("code-review", &blob),
+            ArtifactKind::Skill,
+            &arc(OfflineMock),
+            Path::new("."),
+            &DefaultMaterializer,
+            tmp.path(),
+        )
+        .await
+        .err()
+        .expect("offline miss must error");
+        assert!(
+            matches!(&err, crate::error::Error::Access(ae)
+                if matches!(ae.kind, crate::oci::access::error::AccessErrorKind::OfflineMiss)),
+            "{err:?}"
+        );
+        assert_eq!(exit_of(err), crate::cli::exit_code::ExitCode::OfflineBlocked);
+    }
+
+    #[tokio::test]
+    async fn c017_blob_digest_mismatch_keeps_its_classification_65() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blob = skill_tar("code-review", SKILL_DOC);
+        let mock = WrongBlobMock {
+            manifest_blob: blob.clone(),
+            served_blob: skill_tar("code-review", b"tampered\n"),
+        };
+        let err = stage_locked_artifact(
+            &locked_skill("code-review", &blob),
+            ArtifactKind::Skill,
+            &arc(mock),
+            Path::new("."),
+            &DefaultMaterializer,
+            tmp.path(),
+        )
+        .await
+        .err()
+        .expect("digest mismatch must error");
+        assert!(
+            matches!(&err, crate::error::Error::Install(ie)
+                if matches!(ie.kind, InstallErrorKind::BlobDigestMismatch { .. })),
+            "{err:?}"
+        );
+        assert_eq!(exit_of(err), crate::cli::exit_code::ExitCode::DataError);
+    }
+
+    #[tokio::test]
+    async fn c017_missing_blob_keeps_its_classification_79() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blob = skill_tar("code-review", SKILL_DOC);
+        let err = stage_locked_artifact(
+            &locked_skill("code-review", &blob),
+            ArtifactKind::Skill,
+            &arc(MissingMock { blob: blob.clone() }),
+            Path::new("."),
+            &DefaultMaterializer,
+            tmp.path(),
+        )
+        .await
+        .err()
+        .expect("missing blob must error");
+        assert!(
+            matches!(&err, crate::error::Error::Install(ie) if matches!(ie.kind, InstallErrorKind::BlobMissing)),
+            "{err:?}"
+        );
+        assert_eq!(exit_of(err), crate::cli::exit_code::ExitCode::NotFound);
+    }
+
+    #[tokio::test]
+    async fn c017_drifted_path_source_keeps_its_content_changed_classification_65() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill = tmp.path().join("skills").join("code-review");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), SKILL_DOC).unwrap();
+        let artifact = locked_path("code-review", ArtifactKind::Skill, tmp.path(), "./skills/code-review");
+        // Edited after locking: the stale lock content must never stage.
+        std::fs::write(
+            skill.join("SKILL.md"),
+            b"---\nname: code-review\ndescription: edited\n---\n",
+        )
+        .unwrap();
+
+        let err = stage_locked_artifact(
+            &artifact,
+            ArtifactKind::Skill,
+            &arc(OfflineMock),
+            tmp.path(),
+            &DefaultMaterializer,
+            tmp.path(),
+        )
+        .await
+        .err()
+        .expect("drift must error");
+        assert!(
+            matches!(&err, crate::error::Error::Install(ie)
+                if matches!(ie.kind, InstallErrorKind::LocalContentChanged { .. })),
+            "{err:?}"
+        );
+        assert_eq!(exit_of(err), crate::cli::exit_code::ExitCode::DataError);
     }
 }

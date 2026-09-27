@@ -67,6 +67,33 @@ pub struct UpdateArgs {
     pub client: Vec<String>,
 }
 
+/// Roll `set` forward from `previous`: no `names` re-resolves everything;
+/// named entries re-resolve alone against a predecessor (whose stale-lock
+/// guard fires inside `resolve_lock_partial`), or fully when there is none
+/// to be stale against. The one roll-forward — `grim update` and
+/// marketplace update both call it.
+///
+/// # Errors
+///
+/// Any [`ResolveError`](crate::resolve::resolve_error::ResolveError),
+/// including the partial stale-lock guard (65).
+pub(crate) async fn roll_forward(
+    set: &crate::config::declaration::DesiredSet,
+    previous: Option<&GrimoireLock>,
+    names: &[String],
+    access: &Arc<dyn OciAccess>,
+    scope: crate::config::scope::ConfigScope,
+    options: &ResolveOptions,
+    anchor: &std::path::Path,
+) -> Result<GrimoireLock, crate::resolve::resolve_error::ResolveError> {
+    match (names.is_empty(), previous) {
+        (false, Some(prev)) => resolve_lock_partial(set, prev, access, names, scope, options, anchor).await,
+        // Partial requires a predecessor; absent ⇒ behave like a full
+        // resolve (nothing to be stale against).
+        _ => resolve_lock(set, access, scope, options, anchor).await,
+    }
+}
+
 /// Run `grim update`.
 ///
 /// # Errors
@@ -90,46 +117,18 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     let access: Arc<dyn OciAccess> = super::access_seam(ctx)?;
     let previous = lock_io::load(&scope.lock_path).ok();
 
-    let new_lock = if args.names.is_empty() {
-        super::grim(
-            resolve_lock(
-                &scope.set,
-                &access,
-                scope.scope,
-                &ResolveOptions::default(),
-                scope.config_dir(),
-            )
-            .await,
-        )?
-    } else {
-        // Partial requires a predecessor; absent ⇒ behave like a full
-        // resolve (nothing to be stale against). The stale guard fires
-        // inside `resolve_lock_partial` when a predecessor exists.
-        match &previous {
-            Some(prev) => super::grim(
-                resolve_lock_partial(
-                    &scope.set,
-                    prev,
-                    &access,
-                    &args.names,
-                    scope.scope,
-                    &ResolveOptions::default(),
-                    scope.config_dir(),
-                )
-                .await,
-            )?,
-            None => super::grim(
-                resolve_lock(
-                    &scope.set,
-                    &access,
-                    scope.scope,
-                    &ResolveOptions::default(),
-                    scope.config_dir(),
-                )
-                .await,
-            )?,
-        }
-    };
+    let new_lock = super::grim(
+        roll_forward(
+            &scope.set,
+            previous.as_ref(),
+            &args.names,
+            &access,
+            scope.scope,
+            &ResolveOptions::default(),
+            scope.config_dir(),
+        )
+        .await,
+    )?;
 
     super::grim(lock_io::save(&scope.lock_path, &new_lock, previous.as_ref()))?;
 
@@ -642,5 +641,172 @@ mod tests {
         let edited = arr.iter().find(|e| e["name"] == "edited").unwrap();
         assert_eq!(edited["action"], "kept-modified");
         assert!(edited["new"].is_null());
+    }
+
+    // ── roll_forward (C-034) ───────────────────────────────────────
+    //
+    // Path-sourced skills pin locally (content hash), so the three branches
+    // are observable without a registry: editing a skill on disk moves its
+    // pin only when the branch actually re-resolves it.
+
+    mod roll_forward_spec {
+        use super::super::roll_forward;
+        use crate::config::declaration::{DeclaredSource, DesiredSet};
+        use crate::config::path_source::PathSource;
+        use crate::config::scope::ConfigScope;
+        use crate::lock::grimoire_lock::GrimoireLock;
+        use crate::oci::access::OciAccess;
+        use crate::oci::access::memory_registry::MemoryRegistry;
+        use crate::resolve::resolve_error::ResolveErrorKind;
+        use crate::resolve::resolve_options::ResolveOptions;
+        use std::collections::BTreeMap;
+        use std::path::Path;
+        use std::sync::Arc;
+
+        fn write_skill(root: &Path, name: &str, body: &str) {
+            let dir = root.join("skills").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: d\n---\n{body}\n"),
+            )
+            .unwrap();
+        }
+
+        fn set_of(names: &[&str]) -> DesiredSet {
+            let skills: BTreeMap<String, DeclaredSource> = names
+                .iter()
+                .map(|n| {
+                    (
+                        n.to_string(),
+                        DeclaredSource::Path(PathSource::parse(&format!("./skills/{n}")).unwrap()),
+                    )
+                })
+                .collect();
+            DesiredSet::from_parts(skills, BTreeMap::new())
+        }
+
+        fn access() -> Arc<dyn OciAccess> {
+            Arc::new(MemoryRegistry::new())
+        }
+
+        /// `name → provenance` for every locked skill.
+        fn pins(lock: &GrimoireLock) -> BTreeMap<String, String> {
+            lock.iter_artifacts()
+                .map(|a| (a.name.clone(), a.source.provenance()))
+                .collect()
+        }
+
+        async fn full(set: &DesiredSet, anchor: &Path) -> GrimoireLock {
+            crate::resolve::resolver::resolve_lock(
+                set,
+                &access(),
+                ConfigScope::Project,
+                &ResolveOptions::default(),
+                anchor,
+            )
+            .await
+            .unwrap()
+        }
+
+        #[tokio::test]
+        async fn c034_no_names_full_resolves_even_against_a_stale_predecessor() {
+            let tmp = tempfile::tempdir().unwrap();
+            write_skill(tmp.path(), "a", "v1");
+            write_skill(tmp.path(), "b", "v1");
+            // Predecessor locked a different declaration: stale for `{a, b}`.
+            let stale = full(&set_of(&["a"]), tmp.path()).await;
+            write_skill(tmp.path(), "a", "v2");
+            let set = set_of(&["a", "b"]);
+
+            let lock = roll_forward(
+                &set,
+                Some(&stale),
+                &[],
+                &access(),
+                ConfigScope::Project,
+                &ResolveOptions::default(),
+                tmp.path(),
+            )
+            .await
+            .expect("no names ⇒ full resolve, never the stale guard");
+            assert_eq!(pins(&lock), pins(&full(&set, tmp.path()).await));
+            assert_ne!(pins(&lock)["a"], pins(&stale)["a"], "a re-pinned");
+        }
+
+        #[tokio::test]
+        async fn c034_names_with_a_fresh_predecessor_re_resolve_only_the_named() {
+            let tmp = tempfile::tempdir().unwrap();
+            write_skill(tmp.path(), "a", "v1");
+            write_skill(tmp.path(), "b", "v1");
+            let set = set_of(&["a", "b"]);
+            let previous = full(&set, tmp.path()).await;
+            // Both drift on disk; only the named one may move.
+            write_skill(tmp.path(), "a", "v2");
+            write_skill(tmp.path(), "b", "v2");
+
+            let lock = roll_forward(
+                &set,
+                Some(&previous),
+                &["a".to_string()],
+                &access(),
+                ConfigScope::Project,
+                &ResolveOptions::default(),
+                tmp.path(),
+            )
+            .await
+            .expect("fresh predecessor ⇒ partial");
+            let (before, after) = (pins(&previous), pins(&lock));
+            assert_ne!(after["a"], before["a"], "named entry re-resolved");
+            assert_eq!(after["b"], before["b"], "unnamed entry carried forward");
+        }
+
+        #[tokio::test]
+        async fn c034_names_with_a_stale_predecessor_refuse_with_stale_lock_65() {
+            let tmp = tempfile::tempdir().unwrap();
+            write_skill(tmp.path(), "a", "v1");
+            write_skill(tmp.path(), "b", "v1");
+            let stale = full(&set_of(&["a"]), tmp.path()).await;
+
+            let err = roll_forward(
+                &set_of(&["a", "b"]),
+                Some(&stale),
+                &["a".to_string()],
+                &access(),
+                ConfigScope::Project,
+                &ResolveOptions::default(),
+                tmp.path(),
+            )
+            .await
+            .expect_err("partial against a stale lock must refuse");
+            assert!(matches!(err.kind, ResolveErrorKind::StaleLock { .. }), "{err:?}");
+            assert_eq!(
+                crate::error::classify_error(&anyhow::Error::from(crate::error::Error::from(err))),
+                crate::cli::exit_code::ExitCode::DataError
+            );
+        }
+
+        #[tokio::test]
+        async fn c034_names_without_a_predecessor_full_resolve() {
+            let tmp = tempfile::tempdir().unwrap();
+            write_skill(tmp.path(), "a", "v1");
+            write_skill(tmp.path(), "b", "v1");
+            let set = set_of(&["a", "b"]);
+
+            let lock = roll_forward(
+                &set,
+                None,
+                &["a".to_string()],
+                &access(),
+                ConfigScope::Project,
+                &ResolveOptions::default(),
+                tmp.path(),
+            )
+            .await
+            .expect("nothing to be stale against ⇒ full resolve");
+            // A full resolve locks the unnamed `b` too.
+            assert_eq!(pins(&lock), pins(&full(&set, tmp.path()).await));
+            assert!(pins(&lock).contains_key("b"));
+        }
     }
 }

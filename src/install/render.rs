@@ -635,6 +635,32 @@ pub fn rebind_skill_name(doc: &str, binding: &str) -> Option<String> {
     Some(document)
 }
 
+/// [`rebind_skill_name`] for an agent document: rewrite only the
+/// frontmatter `name` to `binding`, or `None` when the names already agree
+/// or the document does not parse as an agent. Deterministic.
+///
+/// Why: a renamed plugin member ships as `agents/<binding>.md`, and the
+/// client addresses the agent by its frontmatter `name` — a stale one would
+/// collide with the unrenamed original. Only export renames agents.
+#[allow(dead_code, reason = "export calls it (WP-07)")]
+pub fn rebind_agent_name(doc: &str, binding: &str) -> Option<String> {
+    let path = std::path::Path::new("agent.md");
+    let (fm_yaml, body) = SkillFrontmatter::split(doc, path).ok()?;
+    let fm: AgentFrontmatter = serde_yaml::from_str(&fm_yaml).ok()?;
+    if fm.name.as_str() == binding {
+        return None;
+    }
+    let mut mapping: serde_yaml::Mapping = serde_yaml::from_str(&fm_yaml).ok()?;
+    mapping.insert(Value::String("name".to_string()), Value::String(binding.to_string()));
+
+    let mut document = String::with_capacity(doc.len() + 16);
+    document.push_str("---\n");
+    document.push_str(&serialize_mapping(&mapping));
+    document.push_str("---\n");
+    document.push_str(&body);
+    Some(document)
+}
+
 /// Serialize a struct to a YAML mapping (a struct always serializes to a
 /// mapping; the fallback keeps the arm total without panicking).
 fn to_mapping<T: serde::Serialize>(value: &T) -> serde_yaml::Mapping {
@@ -832,6 +858,60 @@ mod tests {
         let a = rebind_skill_name(doc, "bar").unwrap();
         let b = rebind_skill_name(doc, "bar").unwrap();
         assert_eq!(a, b, "rebind must be byte-identical across runs");
+    }
+
+    // ── rebind_agent_name (C-019) ──────────────────────────────────
+
+    /// Body with a `name:` line and a `---` fence of its own: only the
+    /// frontmatter key may change, never these bytes.
+    const AGENT_BODY: &str = "\n# Reviewer\n\nname: foo stays in the body.\n---\ntrailing  \n\n";
+
+    fn agent_doc() -> String {
+        format!(
+            "---\nname: foo\ndescription: Review diffs.\nmodel: opus\ntools: Read, Grep\nmetadata:\n  keywords: a,b\nfuture-key: kept\n---\n{AGENT_BODY}"
+        )
+    }
+
+    #[test]
+    fn c019_rebind_agent_rewrites_only_the_frontmatter_name() {
+        let out = rebind_agent_name(&agent_doc(), "bar").expect("mismatch must rebind");
+        let ParsedAgent { frontmatter: fm, body } =
+            AgentFrontmatter::parse_doc(&out, Path::new("bar.md")).expect("still an agent");
+        assert_eq!(fm.name.as_str(), "bar");
+        assert_eq!(fm.description.as_str(), "Review diffs.");
+        assert_eq!(fm.model.as_deref(), Some("opus"));
+        assert_eq!(fm.tools.as_deref(), Some("Read, Grep"));
+        assert_eq!(fm.metadata.get("keywords").map(String::as_str), Some("a,b"));
+        assert!(fm.extra.contains_key("future-key"), "unknown key kept: {out}");
+        assert_eq!(body, AGENT_BODY, "body bytes untouched");
+        assert!(out.ends_with(AGENT_BODY), "{out}");
+        assert!(
+            out.contains("name: foo stays in the body."),
+            "body `name:` line not rewritten: {out}"
+        );
+    }
+
+    #[test]
+    fn c019_rebind_agent_is_none_when_names_agree() {
+        assert!(rebind_agent_name(&agent_doc(), "foo").is_none());
+    }
+
+    #[test]
+    fn c019_rebind_agent_is_none_for_an_unparseable_document() {
+        assert!(rebind_agent_name("# plain markdown\n", "bar").is_none());
+        assert!(rebind_agent_name("---\ndescription: no name\n---\n", "bar").is_none());
+        // A name alone is not an agent: `description` is required.
+        assert!(rebind_agent_name("---\nname: foo\n---\nbody\n", "bar").is_none());
+        assert!(rebind_agent_name("---\nname: [unterminated\n---\n", "bar").is_none());
+    }
+
+    #[test]
+    fn c019_rebind_agent_is_deterministic() {
+        let a = rebind_agent_name(&agent_doc(), "bar").unwrap();
+        let b = rebind_agent_name(&agent_doc(), "bar").unwrap();
+        assert_eq!(a, b, "rebind must be byte-identical across runs");
+        // Idempotent: the rebound document already carries the binding.
+        assert!(rebind_agent_name(&a, "bar").is_none());
     }
 
     fn rule(doc: &str) -> ParsedRule {
