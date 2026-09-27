@@ -37,6 +37,13 @@ is the most common publishing mistake — see
 would point at, without touching the registry. Make it a habit before
 any version release.
 
+A skill directory or a rule support directory can drop a `.grimignore` at
+its root (gitignore syntax) to keep runtime junk — `__pycache__/`,
+`.venv/`, `.DS_Store` — out of the pack; a built-in default list already
+covers the common cases, so `.grimignore` is only for exceptions. See
+[Artifact Reference § .grimignore][grimignore] for the full default list
+and semantics.
+
 ## Cascade Tags
 
 Releasing a full semver version moves the floating tags consumers track.
@@ -578,4 +585,5 @@ reference][commands-export].
 [team-plugin]: https://grimoire.rs/guides/team-plugin.html
 [agent-plugins]: https://agent-plugins.org/
 [artifacts-readme]: https://grimoire.rs/artifacts.html#well-known-assets
+[grimignore]: https://grimoire.rs/artifacts.html#grimignore
 [ci]: https://grimoire.rs/ci.html

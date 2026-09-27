@@ -39,6 +39,7 @@ Breaking any guarantee below is a major-version change, not a minor one.
 | [MCP server][mcp-server] tool surface | Tool names (`grim_search`, `grim_status`, `grim_fetch`, `grim_describe`, `grim_render`) and their argument names — the payloads are covered by the reports row |
 | Published schema URLs | `https://grimoire.rs/schemas/{grimoire-config,grim-publish,grimoire-lock}.schema.json` keep resolving — [`grim init`][init] writes the first into every generated `grimoire.toml` |
 | Environment variables | The documented [`GRIM_*` set and honored vendor overrides][env-vars] |
+| [`.grimignore`][grimignore] | gitignore syntax, defaults-extend-not-replace semantics, and the three never-ignored names (`SKILL.md`, a rule's index, `.grimignore` itself) — see [Additive fields](#frozen-additive-fields) for what growing the built-in default list does and does not cover |
 
 ### Additive fields {#frozen-additive-fields}
 
@@ -129,6 +130,15 @@ being deprecated out. The obligation this places on grim is deliberate
 and one-directional: old manifests keep working, so the cost of a widened
 key is paid once by the implementation instead of repeatedly by everyone
 who wrote a manifest against an earlier release.
+
+The [`.grimignore`][grimignore] built-in default list follows the additive
+rule too, but only in one direction: growing it (adding a new pattern in a
+minor release) changes what **new publishes** pack. A published layer is
+never rewritten, so an artifact that already ships a now-defaulted file
+keeps its bytes. The one visible effect: if such an artifact is installed
+and its hash was recorded before the growth, it reads as ordinary drift,
+recoverable the same way any local edit is: `grim install --force` /
+`grim update --force`.
 
 ## Unstable — may change in any minor {#unstable}
 
@@ -457,6 +467,7 @@ unaffected — they read straight from disk and never touch a manifest.
 [context]: ./commands.md#context
 [exit-codes]: ./json-interface.md#error-document
 [annotations]: ./artifacts.md#annotations
+[grimignore]: ./artifacts.md#grimignore
 [bundles]: ./artifacts.md#bundles
 [mcp-descriptor]: ./mcp-servers.md#format
 [mcp-server]: ./commands.md#mcp

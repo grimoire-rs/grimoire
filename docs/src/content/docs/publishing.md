@@ -78,6 +78,11 @@ verbatim for every [client](./concepts.md#clients), and only the index is
 ever transformed. A rule with no support directory packs to exactly the single
 `my-rule.md` it always did.
 
+A support directory (and, the same way, a skill directory) can drop a
+[`.grimignore`](./artifacts.md#grimignore) at its root to keep runtime junk
+— a `__pycache__/` a bundled script left behind, a `.venv/` built for local
+testing — out of the layer and out of drift detection.
+
 ### Agents with a README and logo {#agent-companions}
 
 An [agent](./agents.md) is a single `.md`, but it may carry a `README.md` and a
@@ -95,7 +100,9 @@ agents/
 
 Only `README.md`, `logo.png`, and `logo.svg` ride the layer (any other file in
 the directory is ignored, so an agent never becomes an accidental multi-file
-artifact). They pack under `code-reviewer/…`, so a consumer pulls them with the
+artifact) — the allowlist already does the job a
+[`.grimignore`](./artifacts.md#grimignore) would, so agents get none. They
+pack under `code-reviewer/…`, so a consumer pulls them with the
 same path shape as a skill or rule:
 
 ```sh

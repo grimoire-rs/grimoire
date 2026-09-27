@@ -79,8 +79,9 @@ A mismatch fails the build with exit code 65 (data error).
 
 A skill is a directory: the `SKILL.md` index plus any supporting files
 (scripts, templates, references). Everything in the tree is packed into a
-single tar layer and installed verbatim — only `SKILL.md` itself is ever
-re-rendered, and only when it carries vendor-namespaced metadata keys.
+single tar layer and installed verbatim, except files excluded by
+[`.grimignore`](#grimignore) — only `SKILL.md` itself is ever re-rendered,
+and only when it carries vendor-namespaced metadata keys.
 
 The frontmatter follows the [agentskills specification][agentskills-spec].
 Parsing is forward-compatible: unknown top-level keys are preserved
@@ -193,6 +194,85 @@ declare a `[description]` table in `publish.toml` (or let grim probe the
 conventional `README.md` / `CHANGELOG.md` / `logo.*` files) and it rides
 [`grim publish`](./commands.md#publish); read it back with
 [`grim fetch <repo> --description`](./commands.md#fetch-description).
+
+### Excluding files with `.grimignore` {#grimignore}
+
+A skill directory, or a rule's [support directory](#rules), accumulates
+files that have nothing to do with the artifact: a `__pycache__/` left
+behind by running a bundled script, a stray `.DS_Store`, a `.venv/` built
+for local testing. None of that belongs in a published layer, and none of
+it should make [`grim status`](./commands.md#artifact-states) report the
+artifact `modified` just because a consumer ran a script.
+
+Grim applies a built-in default ignore list — [gitignore][gitignore-spec]
+syntax — to every skill directory and rule support directory, both when
+packing (`grim build`/`release`/`publish`) and when hashing an installed
+tree (`grim status`/`update`):
+
+```
+__pycache__/
+*.py[co]
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+node_modules/
+.git/
+.svn/
+.hg/
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+```
+
+`target/` and `.gitignore` are deliberately absent: both are plausible
+artifact content (a Rust example, a shipped `.gitignore` template) rather
+than junk, so a publisher who wants either ignored adds it explicitly.
+
+Drop a `.grimignore` at the directory root — a skill's own root, or a
+support directory's root for a multi-file rule — to extend the defaults
+with full gitignore syntax, including `!pattern` to re-include a default
+(`!node_modules/` ships it after all). Lines *add to* the built-in list; a
+`.grimignore` never replaces it, so an empty or trivial file cannot
+accidentally widen what gets published — the opposite of npm's
+`.npmignore`, whose mere presence discards the `.gitignore`-derived
+defaults. Only the walk root's `.grimignore` counts — one nested inside a
+subdirectory is an ordinary file, packed like any other.
+
+`SKILL.md`, a rule's index file, and `.grimignore` itself are never
+ignored, however a pattern is written, so a stray `*.md` or `.*` line
+cannot strip the artifact's own identity. `.grimignore` is itself packed,
+installed, and hashed, so a publisher's ignore rules travel with the
+artifact — editing them after install is itself drift. An invalid line
+fails `grim build` at exit 65, naming the file and line; the same line
+found on an already-installed tree is skipped with a warning rather than
+failing the read. A `.grimignore` over 64 KiB is refused the same way:
+`grim build` exits 65, and an installed one is set aside with a warning so
+only the defaults apply. Matching is case-sensitive on every OS, so the packed
+bytes hash identically regardless of platform.
+
+Ignored files are never packed and never count toward drift — `grim
+status`/`update` treat them as if they did not exist — and an ignored
+directory is pruned rather than walked, so a large `node_modules/` cannot
+trip the packaging size limits. `grim update` still replaces the whole
+installed directory on a pin change, so anything living only under an
+ignored path — a hand-built `.venv/`, a `__pycache__/` — is disposable and
+is wiped along with everything else; `.grimignore` hides local junk from
+drift detection, it does not protect it. This holds for *every* path the
+artifact's `.grimignore` ignores, not just the defaults: a hand edit there
+is never reported as drift and `grim update` wipes it without the
+`--force` refusal, so keep no hand-edited files under an ignored path.
+
+[Agents](#agents) get no `.grimignore`: their companion directory is
+already an allowlist of exactly `README.md`, `logo.png`, and `logo.svg`,
+so there is nothing else to exclude.
 
 ## Rules {#rules}
 
@@ -550,6 +630,7 @@ updated without re-releasing every published version.
 
 <!-- external -->
 [agentskills-spec]: https://agentskills.io/specification
+[gitignore-spec]: https://git-scm.com/docs/gitignore
 [oci-annotations]: https://github.com/opencontainers/image-spec/blob/main/annotations.md
 [ghcr-source-label]: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#labelling-container-images
 [mcp-spec]: https://modelcontextprotocol.io/specification/latest

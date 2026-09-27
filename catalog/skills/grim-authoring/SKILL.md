@@ -31,6 +31,15 @@ servers (always `--kind mcp`, or the `.toml` is treated as a bundle).
 | MCP server | `.toml` descriptor with a `[server]` table | **never — `--kind mcp` mandatory** | Entry in each client's MCP config file, per-client render |
 | Bundle | `.toml` member list | `.toml` → bundle | Never materializes — expands to its members |
 
+A skill directory or a rule's support directory can drop a `.grimignore`
+at its root (gitignore syntax) to keep runtime junk — `__pycache__/`,
+`.venv/`, `.DS_Store` — out of the pack and out of drift detection; a
+built-in default list already covers the common cases and `.grimignore`
+lines extend it; a `!pattern` line re-includes a default. `SKILL.md`, a rule's index, and `.grimignore` itself
+are never ignorable. Agents get no `.grimignore` — their companion
+directory is already an allowlist. Full default list and semantics:
+[Artifact Reference § .grimignore][grimignore].
+
 ## Which Clients Host Which Kind
 
 Grim installs into a growing set of clients, and not every client can
@@ -203,6 +212,7 @@ trust the tool. Treat this skill as the map, not the territory.
 Verified against the grim release this package ships beside.
 
 [artifacts]: https://grimoire.rs/artifacts.html
+[grimignore]: https://grimoire.rs/artifacts.html#grimignore
 [vendor]: https://grimoire.rs/vendor-metadata.html
 [publishing]: https://grimoire.rs/publishing.html
 [agents]: https://grimoire.rs/agents.html
