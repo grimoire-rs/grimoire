@@ -552,7 +552,8 @@ warnings?}`.
 
 Each `files[]` entry is the familiar GitHub Contents API style — a `path`
 plus inline `content` (base64 for binary members) — so a consumer already
-written against that shape maps onto it directly.
+written against that shape maps onto it directly. Every `files[].path` is
+`/`-separated on every OS, Windows included.
 
 Bounded by the same 8 MiB layer gate as any fetch, with no per-file
 truncation — the whole companion returns in one call. A multi-file bundle
