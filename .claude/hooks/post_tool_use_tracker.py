@@ -150,6 +150,14 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
         ),
         "a plan file — keep the Status block fresh so /next stays accurate",
     ),
+    (
+        ".agents/upstream-checks.md",
+        (
+            "- .claude/skills/upstream-refresh/SKILL.md (the check ledger is written by passes of this skill;\n"
+            "  run `task upstream:stale` or `upstream_stale.py ladder` to confirm dates and depths still parse)"
+        ),
+        "the upstream check ledger — it is owned by the upstream-refresh skill",
+    ),
 ]
 
 
@@ -161,6 +169,7 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
 _AI_CONFIG_MD_PREFIXES = (
     ".claude/rules/",
     ".claude/skills/",
+    ".agents/upstream-checks.md",  # exact file; startswith() covers it
 )
 
 

@@ -1,6 +1,6 @@
 ---
 name: next
-description: Use when user asks "what's next" or "next step". Prints next slash command from current state via a sonnet subagent. Flags: `--clear`, `--list`.
+description: 'Use when user asks "what''s next" or "next step". Prints next slash command from current state via a sonnet subagent. Flags: `--clear`, `--list`.'
 user-invocable: true
 disable-model-invocation: true
 argument-hint: "[--clear | --list]"

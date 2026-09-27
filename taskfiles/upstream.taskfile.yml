@@ -1,0 +1,14 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+tasks:
+  stale:
+    desc: Warn-only upstream staleness report (watchlist, vendor stamps, research expiry, check ledger)
+    summary: |
+      Lists every upstream-facing ledger entry past its freshness threshold
+      (STALE / EXPIRED / UNCHECKED / MISSING) and a summary line. Always
+      exits 0 once the scan completes — deliberately not part of `task verify`.
+      Refresh with the `upstream-refresh` skill.
+    cmds:
+      - python3 .claude/skills/upstream-refresh/scripts/upstream_stale.py report

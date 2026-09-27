@@ -140,7 +140,7 @@ Exempt from overlap detection (intended broad coupling):
 
 ## Vendored rules — installed, not authored here
 
-Eight rules under `.claude/rules/` come from upstream bundles: their prose is **not authored here**, and a local edit to it is reverted by the next sync. (The one local edit that exists is mechanical — a shebang on three shell fixtures under `rules/docs-quality/checks/`, which `task shell:verify` requires; it will be lost on sync and re-applied.) They declare provenance in frontmatter (`license:`, `repository:`), which is the marker `.claude/tests/test_ai_config.py::is_vendored` uses to exempt them from this repo's *authoring* standards (dead-glob detection, catalog authorship, skill description and body budgets). Fix upstream, then re-sync. The same holds for the 14 vendored skills under `.claude/skills/` (`docs-instrument`, `docs-plan`, `docs-review`, `hex-*`, `nox-review`).
+Eight rules under `.claude/rules/` come from upstream bundles: their prose is **not authored here**, and a local edit to it is reverted by the next sync. (Two local edits exist, both lost on sync and re-applied after every one: a shebang on three shell fixtures under `rules/docs-quality/checks/`, which `task shell:verify` requires; and the Starlight branch of `rules/docs-quality/checks/nav_depth.py` plus its `fixtures/nav_depth/pass-nav-starlight/` fixture, which the docs-site tests require — upstream `ocx-sh/grimoire-lore` never had it.) They declare provenance in frontmatter (`license:`, `repository:`), which is the marker `.claude/tests/test_ai_config.py::is_vendored` uses to exempt them from this repo's *authoring* standards (dead-glob detection, catalog authorship, skill description and body budgets). Fix upstream, then re-sync. The same holds for the 14 vendored skills under `.claude/skills/` (`docs-instrument`, `docs-plan`, `docs-review`, `hex-*`, `nox-review`).
 
 | Rule | Upstream |
 |---|---|
@@ -171,3 +171,4 @@ Eight rules under `.claude/rules/` come from upstream bundles: their prose is **
 | Commits (working phase) | `commit` |
 | Finalize branch for merge onto main | `finalize` |
 | Suggest next slash command from current state | `next` |
+| Upstream freshness sweep | `upstream-refresh` |

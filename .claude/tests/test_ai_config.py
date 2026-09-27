@@ -1035,6 +1035,11 @@ class TestAiConfigOverhaulPhase2:
         # the manual-only policy is restored.
         "finalize": False,
         "meta-maintain-config": True,
+        # Action skill (edits ledgers, lands renderer changes, commits) left
+        # model-invocable on purpose: the freshness loop's pass WPs reach it
+        # through the Skill tool with no human in the loop — the `finalize`
+        # precedent above. Re-flip both together if that changes.
+        "upstream-refresh": False,
         # Pure analysis / advisory — auto-invocation safe
         "bugfix": False,
         "builder": False,
@@ -1122,6 +1127,32 @@ class TestAiConfigOverhaulPhase2:
         assert not violations, (
             f"Skill descriptions violate CSO policy: {violations}. "
             f"See `.agents/adr/adr_ai_config_skill_description_csopolicy.md`."
+        )
+
+    def test_skill_frontmatter_plain_scalars_are_valid_yaml(self) -> None:
+        """No first-party top-level frontmatter value is an unquoted scalar
+        holding `: ` or ` #`. YAML reads the first as a nested mapping and
+        fails the whole block ("mapping values are not allowed"), the second
+        as a comment. Claude Code tolerated it; Copilot CLI's `skill list`
+        and `grim build` both reject the skill (WP-F, 2026-09-27). Stdlib
+        check, so no YAML dependency: quote such a value.
+        """
+        violations: list[str] = []
+        for skill_md in sorted((CLAUDE_DIR / "skills").glob("*/SKILL.md")):
+            if is_vendored(skill_md):
+                continue
+            _, front, _ = skill_md.read_text().split("---", 2)
+            for line in front.splitlines():
+                key, sep, value = line.partition(": ")
+                value = value.strip()
+                if not sep or line[:1].isspace() or not value:
+                    continue
+                if value[0] in "'\"[{|>&*!":
+                    continue
+                if ": " in value or value.endswith(":") or " #" in value:
+                    violations.append(f"{skill_md.parent.name}: {key}")
+        assert not violations, (
+            f"Unquoted frontmatter values that are invalid YAML: {violations}"
         )
 
     def test_skill_description_budget_under_cap(self, pytestconfig) -> None:
