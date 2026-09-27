@@ -621,6 +621,59 @@ equivalent of a floating registry tag rolling to a new digest. Before you
 run it, [`grim status`](#status) surfaces that drift ahead of time as
 `outdated`, the same state a moved registry tag produces.
 
+### `--marketplace <PATH>` {#update-marketplace}
+
+`grim update --marketplace marketplace.toml [selectors…]` rolls a
+[declared plugin's](./configuration.md#marketplace-toml) pins forward, the
+same way plain `update` rolls `grimoire.toml`'s. It re-resolves every
+floating tag and writes a fresh `marketplace.lock`, but it **installs
+nothing**. `--client` and `--force` both conflict with it — the flags
+describe an installer this path never runs. It needs no `grimoire.toml` or
+project scope either, so `--global`/`--config` conflict with it too.
+
+```sh
+grim update --marketplace marketplace.toml
+grim update --marketplace marketplace.toml team
+grim update --marketplace marketplace.toml team:code-review
+```
+
+With no selector, every declared plugin re-resolves. A bare `<plugin>`
+selector scopes one plugin; `<plugin>:<member>` scopes one member inside
+it, matched by lock name — mirroring plain `update <name>`'s partial
+resolve. That partial resolve is refused at exit `65` (`stale-lock`) when
+the plugin's lock entry is not already fresh. Repeated selectors merge
+(`team:a team:b` picks both members); a selector naming an undeclared
+plugin, or a member the plugin does not resolve to, exits `79`.
+
+### Exit codes {#update-marketplace-exit-codes}
+
+| Situation | Code |
+|-----------|------|
+| Success | `0` |
+| `--marketplace` combined with `--global`, `--config`, `--client`, or `--force`; or a malformed selector (an empty plugin/member half, or more than one `:`) | `64` |
+| A missing or malformed marketplace manifest | `65` |
+| Concurrent write on the manifest's lock file | `75` |
+| A malformed `marketplace.lock` | `78` |
+| A selector naming an undeclared plugin, or a member the plugin does not resolve to | `79` |
+| An include's floating tag needs the network under `--offline` | `81` |
+
+Every other failure — registry unreachable, a rejected credential, or the
+`stale-lock` partial refusal named above — propagates from the resolver
+with its existing classification, the same taxonomy [`grim export
+plugin`](#export-plugin-exit-codes) documents in full.
+
+Rerun it after editing `marketplace.toml`, or on a schedule, to keep a
+plugin current between renders. A plugin you already shipped with
+[`grim export plugin`](#export-plugin) picks up the rolled-forward pins
+the next time someone re-exports it. This command is only the
+roll-forward half of that workflow, never the render half.
+
+The JSON report is [`update`'s own shape](./json-interface.md#shapes-items),
+with one addition: every row gains an always-present `plugin` field. It is
+`null` for a plain `update` run, and the plugin's name for every row this
+flag produced. The plain table prefixes `Name` with `<plugin>:` instead of
+adding a column.
+
 ## grim status {#status}
 
 Reports each declared artifact's state in a `State` column, one of
@@ -1561,6 +1614,229 @@ failure (parity with `grim fetch`), an auth failure exits 80, an offline run
 that cannot reach the registry exits 81, and an unreachable registry exits
 69.
 
+## grim export plugin {#export-plugin}
+
+Every command above installs pinned artifacts *through* grim — a lockfile,
+an install record, a rolling `grim update`. That reach stops at grim's own
+door. A teammate who has not installed grim gets nothing from your
+`grimoire.toml`, no matter how carefully it is pinned.
+
+Two client families solve the same handoff problem their own way.
+[Claude Code][claude-code] loads a self-contained directory carrying a
+`.claude-plugin/plugin.json` manifest. It installs from a folder, a zip
+upload, or a git marketplace — see [Plugins][claude-code-plugins] and
+[Upload a plugin][claude-plugin-upload]. [GitHub Copilot][copilot],
+[Codex][codex], and [Cursor][cursor] implement the same idea against the
+vendor-neutral [Agent Plugins 1.0][agent-plugins] specification instead.
+
+`grim export plugin` renders your already-locked artifacts into either
+shape — a directory or a `--zip` archive. A teammate without grim installs
+it exactly as their client documents, no OCI registry involved on their
+end. Rendering reuses the same per-client materializer `grim install`
+calls: a skill exported for Claude Code is byte-for-byte the `SKILL.md`
+`grim install --client claude` would have written.
+
+```sh
+grim export plugin ghcr.io/acme/skills/code-review:1 --client claude --zip -o dist
+grim export plugin --plugin team --client codex -o dist
+```
+
+### Ad-hoc vs. declared {#export-plugin-modes}
+
+| Refs | `--name` | `--plugin` | Behavior |
+|---|---|---|---|
+| 1 | absent | — | Ad-hoc plugin; name defaults to the reference's binding (its last path segment, or a local path's packed intrinsic name) |
+| 1 | set | — | Ad-hoc plugin named `--name` |
+| ≥2 | set | — | Ad-hoc plugin merging every reference |
+| ≥2 | absent | — | Exit `64` — `--name` is required for more than one reference |
+| 0 | set | any | Exit `64` — `--name` applies only to an ad-hoc export (positional references) |
+| 0 | — | `P…` | Declared plugin(s) named by `--plugin` (repeatable), read from `--marketplace` (default `./marketplace.toml`); an unknown name exits `79` — but a manifest declaring zero plugins exits `65` first, before `--plugin` is even checked against it |
+| 0 | — | none | Every plugin the manifest declares; a manifest declaring none exits `65` with a hint toward `<ref>… --name` |
+| ≥1 | — | set | Exit `64` (refs and `--plugin` conflict at the flag level) |
+
+An **ad-hoc** export takes references directly on the command line.
+Nothing is read from or written to a manifest or lock, and no
+[`marketplace.lock`](./configuration.md#marketplace-toml) appears anywhere.
+A **declared** export instead reads a
+[`marketplace.toml`](./configuration.md#marketplace-toml)'s `[plugins.<name>]`
+tables. It re-resolves only the plugins whose declaration or pins have
+drifted since the last export, then writes `marketplace.lock` back. That is
+the same roll-forward [`grim update`](#update) performs, scoped to just the
+plugins this run touched.
+
+### Flags {#export-plugin-flags}
+
+| Flag | Effect |
+|------|--------|
+| `[REFS]…` | Positional references to export as one ad-hoc plugin |
+| `--name <NAME>` | Plugin name for an ad-hoc export; required with more than one reference |
+| `--plugin <NAME>` | Export only this declared plugin (repeatable); conflicts with `REFS` |
+| `--marketplace <PATH>` | The manifest declaring the plugins (default `./marketplace.toml`); conflicts with `REFS` |
+| `--client <NAME>` | Client(s) to export for, comma-separated and repeatable (default: the config `clients` option, then `agents`); a list naming no client (`--client ""`) exits `64` |
+| `--zip` | Write `<name>.<client>.zip` instead of a directory |
+| `-o, --output <DIR>` | Directory the plugins are written into (default `.`, created if absent) |
+| `--version <SEMVER>` | Plugin version base — defaults to the declared `version`, then the single ad-hoc reference's version annotation, then `0.0.0`; grim always appends a content-hash suffix |
+| `--force` | Replace existing outputs instead of refusing them |
+
+`--client` accepts the same client names as
+[`grim install`](#install) — see the [family table](#export-plugin-families)
+below for which ones this command can render at all. Every other global flag
+(`--offline`, `--registry`, `--config`, `--global`, …) behaves as documented
+under [Global options](#global-options).
+
+### Client families {#export-plugin-families}
+
+Export renders into one of two on-disk shapes, never a client's own
+[render layout](./stability.md#unstable):
+
+| Family | Clients | Manifest | Members |
+|---|---|---|---|
+| Claude | `claude`, [`droid`][droid], [`junie`][junie], [`openclaw`][openclaw] | `.claude-plugin/plugin.json` | `skills/<name>/`, `agents/<name>.md`, `.mcp.json` |
+| Agent Plugins | [`copilot`][copilot], [`codex`][codex], [`cursor`][cursor], `agents` | `plugin.json` (with a `$schema`) | `skills/<name>/`, `mcp.json` |
+
+A client outside both families, or a client with no plugin surface at all
+(explicitly named with `--client`), exits `78`. `--client` left unset falls
+back to the config `clients` option and then to the generic `agents`
+client, which always resolves to Agent Plugins.
+
+### What each client admits {#export-plugin-admission}
+
+Not every member kind survives every client, the same faithfulness rule
+[`grim install`](#install) applies at materialization time. A rule never
+survives any client — neither plugin format has a place for one
+(`no-format-surface`) — and a bundle never reaches this gate at all:
+resolution expands it into its members first.
+
+| Client | Family | Emits | Omits |
+|---|---|---|---|
+| `claude` | Claude | skill, agent, mcp | rule (`no-format-surface`) |
+| [`droid`][droid] | Claude | skill | agent, mcp (`client-declined`); rule (`no-format-surface`) |
+| [`junie`][junie] | Claude | skill, mcp | agent (`client-declined`); rule (`no-format-surface`) |
+| [`openclaw`][openclaw] | Claude | skill | agent, mcp (`client-declined`); rule (`no-format-surface`) |
+| [`copilot`][copilot] | Agent Plugins | skill, mcp | agent (`no-format-surface`); rule (`no-format-surface`) |
+| [`codex`][codex] | Agent Plugins | skill, mcp | agent (`no-format-surface`); rule (`no-format-surface`) |
+| [`cursor`][cursor] | Agent Plugins | skill, mcp | agent (`no-format-surface`); rule (`no-format-surface`) |
+| `agents` | Agent Plugins | skill, mcp | agent (`no-format-surface`); rule (`no-format-surface`) |
+
+An agent is omitted `no-format-surface` for every Agent Plugins client —
+that family's manifest has no agent key at all, so this is never
+`client-declined` even where the client would install an agent through
+`grim install`. MCP, by contrast, is admitted for every Agent Plugins
+client regardless of that client's own install-time MCP support: the
+`mcp.json` shape belongs to the family, not the client (`agents` declines
+MCP on install yet still emits it here). Within the Claude family, MCP and
+agent support instead follow the client's own [install-time kind
+support][clients-matrix] — which is why `droid` and `openclaw` drop both,
+while `junie` keeps MCP and drops only agents. An omitted member is never
+an error. It is named in `plugin.json`'s `description` and in the JSON
+report's `omitted` array. An export whose every member is omitted for a
+given client exits `65` (`EmptyPlugin`) rather than writing an empty
+plugin.
+
+An MCP descriptor using a transport or field the target shape cannot
+express is omitted `not-representable` rather than silently dropped. For
+an **Agent Plugins** export this covers `oauth`, the `ws` transport, or a
+`${…}` reference inside `command`, `url`, an env key, or a header — the
+spec performs no expansion there. Claude family MCP has its own, narrower
+decline: Junie refuses a descriptor carrying OAuth or an env reference.
+The [team-plugin guide](./guides/team-plugin.md) covers the practical
+fallout for stdio servers.
+
+### Output naming and placement {#export-plugin-output}
+
+Each `(plugin, client)` pair writes to `<DIR>/<plugin>.<client>` (a
+directory) or `<DIR>/<plugin>.<client>.zip` (with `--zip`). `<DIR>` is
+`--output`, the current directory by default. By default, `grim export
+plugin` **refuses** to replace an existing output at exit `65`
+(`untracked-destination`) and places nothing. `--force` replaces it
+atomically instead. A zip is renamed over the old file; a directory's
+previous contents are swapped out and removed. Neither route ever follows
+a symlink at that path.
+
+Two runs against the same manifest, lock, and grim build reproduce
+byte-identical output: the same files at the same paths with the same
+bytes. That holds independent of time zone, working directory, or
+directory-iteration order.
+
+Every output stages in a hidden `<DIR>/.grim-export-*` directory before
+being placed. A run interrupted mid-flight (`SIGINT`, a crashed process)
+can leave that staging directory behind; it is not automatically reaped
+on the next run. Before deleting it, check for a `.replaced-<name>`
+entry — the previous output an interrupted `--force` replace moved
+aside. Move it back to `<name>` if that destination is missing, then
+delete the staging directory.
+
+The `version` grim assembles is `<base>+<12 hex>`. `base` is `--version`,
+else the declared `version`. Failing both, an ad-hoc single reference
+falls back to its own version annotation, else `0.0.0`.
+
+The suffix is a content hash over every plugin member's kind, its
+**emitted name**, and its digest. It changes when a member's digest
+changes. It also changes when a rename changes a member's emitted name.
+It does **not** change when a `description` edit, or a grim release,
+changes how a client renders a skill. Those alter the plugin's actual
+bytes without touching the hash inputs. Bump `--version` by hand when
+either of those should be visible to a consumer.
+
+### JSON report {#export-plugin-json}
+
+`--format json` emits the [enveloped shape](./json-interface.md#shapes-items)
+`{"items": [...]}`, one object per `(plugin, client)` pair actually written:
+
+```json
+{
+  "items": [
+    {
+      "plugin": "team",
+      "client": "claude",
+      "family": "claude",
+      "format": "zip",
+      "path": "/abs/path/dist/team.claude.zip",
+      "version": "0.0.0+c2cfaefc6f09",
+      "members": [
+        {"kind": "skill", "name": "team-plan", "lock_name": "team-plan", "pinned": "ghcr.io/acme/team-plan@sha256:…"}
+      ],
+      "omitted": [
+        {"kind": "rule", "name": "team-reviewer", "reason": "no-format-surface"}
+      ]
+    }
+  ]
+}
+```
+
+`members`/`omitted` are sorted by kind then name; `family` is `claude` or
+`agent-plugins`; `format` is `dir` or `zip`; `path` is the absolute final
+path. See [the enveloped reports table][json-shapes-items] for the full
+field reference, alongside every other command's `--format json` shape.
+
+### Exit codes {#export-plugin-exit-codes}
+
+| Situation | Code |
+|-----------|------|
+| Success | `0` |
+| `≥2` refs without `--name`; refs combined with `--plugin`/`--marketplace`; `--name` given with 0 refs; or an invalid `--name`, or an invalid plugin name derived from a single reference | `64` |
+| A missing or malformed manifest, or a malformed `--version`; a manifest declaring zero plugins, regardless of `--plugin` (it is checked first); a bad rename or a stale reference a rename left behind; an unsafe entry name; an admitted member set that is empty for a client; or an existing output without `--force` | `65` |
+| Two references disagreeing on the same member's identity, or a `--client` (explicit or unrecognized) naming a client with no plugin format at all | `78` |
+| A named plugin, a `<plugin>`/`<plugin>:<member>` selector, or an include's tag or manifest, not found | `79` |
+| Registry unreachable | `69` |
+| Missing or rejected registry credential | `80` |
+| An include's floating tag needs the network under `--offline` — this includes a pinned, already-cached registry member, since export has no manifest cache; only a local path source resolves offline (the same limitation `grim install --offline` has) | `81` |
+| Concurrent write on the manifest's lock file | `75` |
+| I/O failure (unwritable output, non-hardlink filesystem, a symlink under the staged root, …) | `74` / `77` |
+
+Export-owned failures classify as above. Every other failure — a bad
+reference, a bundle conflict, a stale lock — propagates from the resolver
+or installer with its own existing exit code.
+
+Rename, description, and version-annotation rules are covered in full in
+the [`marketplace.toml` reference](./configuration.md#marketplace-toml);
+a worked, end-to-end handoff is the [team-plugin guide](./guides/team-plugin.md).
+
+`--marketplace` under `grim update` (above) rolls a declared plugin's pins
+forward without exporting anything. It is the way to keep a shipped
+plugin's *next* export current, without re-running `grim export plugin`
+by hand first.
+
 ## grim tui {#tui}
 
 `grim tui` opens an interactive browser over your declared registries'
@@ -2160,6 +2436,7 @@ registers the same entry — in every detected client, not just Claude Code
 [options-tui]: ./configuration.md#options-tui
 [json-mcp-parity]: ./json-interface.md#mcp-parity
 [json-broken-pipe]: ./json-interface.md#broken-pipe
+[json-shapes-items]: ./json-interface.md#shapes-items
 [path-source-trust]: ./stability.md#limitations-path-source-trust
 [clients-matrix]: ./clients.md#matrix
 
@@ -2168,6 +2445,15 @@ registers the same entry — in every detected client, not just Claude Code
 [vscode-compact]: https://code.visualstudio.com/docs/getstarted/userinterface
 [mcp-spec]: https://spec.modelcontextprotocol.io/
 [claude-code]: https://docs.anthropic.com/en/docs/claude-code
+[claude-code-plugins]: https://code.claude.com/docs/en/plugins
+[claude-plugin-upload]: https://claude.com/docs/plugins/overview
+[agent-plugins]: https://agent-plugins.org/
+[copilot]: https://github.com/features/copilot
+[codex]: https://developers.openai.com/codex
+[cursor]: https://cursor.com
+[junie]: https://www.jetbrains.com/junie/
+[droid]: https://factory.ai
+[openclaw]: https://github.com/openclaw/openclaw
 [opencode]: https://opencode.ai/
 [json-rpc]: https://www.jsonrpc.org/specification
 [clap]: https://docs.rs/clap/latest/clap/

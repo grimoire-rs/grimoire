@@ -10,7 +10,7 @@ Contents: [Build, Then Release](#build-then-release) ·
 [Announcing to the Index](#announce) · [Bundles](#bundles) ·
 [Catalog Metadata](#catalog-metadata) ·
 [Description Companion](#description-companion) ·
-[Authentication](#authentication)
+[Exporting Without a Registry](#export) · [Authentication](#authentication)
 
 Flags shown here track the release this package ships beside; confirm with
 `grim <cmd> --help` before relying on one.
@@ -523,6 +523,28 @@ grim logout "$REGISTRY"
 With no positional registry, `login`/`logout` resolve `--registry`, then
 `GRIM_DEFAULT_REGISTRY` — confirm with `grim login --help`.
 
+## Exporting Without a Registry {#export}
+
+Everything above pushes to an OCI registry, which is the right target
+when the consumer runs grim. `grim export plugin` covers the case where
+they do not: it packages already-published skills, agents, and MCP
+servers as a Claude Code or [Agent Plugins][agent-plugins] plugin — a
+directory or `--zip` archive a teammate installs directly, no registry
+credential or grim binary needed on their end.
+
+```sh
+grim export plugin ghcr.io/acme/skills/code-review:1 --client claude --zip -o dist
+```
+
+A `--plugin`/`--marketplace` declared export re-resolves from a
+`marketplace.toml` and writes a `marketplace.lock` beside it — a separate
+file from `grimoire.lock`, never mixed with it. This is a rendering step,
+not a release: it carries no version-cascade, no announce, and no
+skip-existing semantics of its own. Confirm the current flag set with
+`grim export plugin --help`, and see the full walkthrough in [Hand a team
+a plugin without grim][team-plugin] and the [command
+reference][commands-export].
+
 ## Further Reading
 
 - [Publishing][publishing] — the full workflow: support directories,
@@ -531,6 +553,7 @@ With no positional registry, `login`/`logout` resolve `--registry`, then
   hosting your own.
 - [Authentication][auth] — credential resolution, storage tiers, CI.
 - [Command reference: build, release, login, logout][commands].
+- [Command reference: export plugin][commands-export].
 - [Publishing from CI][ci] — wiring publish/announce into GitHub or
   GitLab CI.
 
@@ -541,5 +564,8 @@ With no positional registry, `login`/`logout` resolve `--registry`, then
 [editor-schema]: https://grimoire.rs/configuration.html#editor-schema
 [auth]: https://grimoire.rs/authentication.html
 [commands]: https://grimoire.rs/commands.html#build
+[commands-export]: https://grimoire.rs/commands.html#export-plugin
+[team-plugin]: https://grimoire.rs/guides/team-plugin.html
+[agent-plugins]: https://agent-plugins.org/
 [artifacts-readme]: https://grimoire.rs/artifacts.html#well-known-assets
 [ci]: https://grimoire.rs/ci.html

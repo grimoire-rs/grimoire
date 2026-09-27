@@ -904,6 +904,96 @@ name = "code-reviewer"
 id = "ghcr.io/acme/code-reviewer:1"
 ```
 
+## `marketplace.toml` and `marketplace.lock` {#marketplace-toml}
+
+`grimoire.toml` declares what *you* install. A `marketplace.toml` declares
+what you hand to someone else: one or more named **plugins**, each a set
+of already-published references. [`grim export
+plugin`](./commands.md#export-plugin) renders a plugin as a Claude-family
+or [Agent Plugins][agent-plugins] directory or zip. This is a separate,
+optional file — a project with no `marketplace.toml` behaves exactly as
+it does today. `grim export plugin` also works with no manifest at all,
+taking references straight on the command line.
+
+```toml
+[plugins.team]
+include = ["ghcr.io/acme/skills/code-review:1", "ghcr.io/acme/agents/reviewer:1"]
+description = "The acme platform team's shared skills"
+version = "1.2.0"
+
+[plugins.team.rename]
+strip_prefix = "acme-"
+```
+
+`include` is the only required key: one or more artifact references. Each
+resolves exactly as [`grim add`](./commands.md#add) would resolve it — a
+registry reference, a bundle, or a local path. `description` and
+`version` seed the rendered `plugin.json`'s corresponding fields; grim
+always appends a content-hash suffix to `version` (see [export's output
+naming](./commands.md#export-plugin-output)). Both are optional here.
+Omitted, a declared plugin's `version` defaults straight to `0.0.0` and
+its `description` carries no base text. The OCI-annotation fallback
+described there belongs only to an **ad-hoc, single-reference** export,
+never to a declared plugin.
+
+`rename.strip_prefix` rewrites every member's emitted name by removing a
+common prefix. That is useful when your registry namespaces artifacts
+(`acme-code-review`) but a teammate's client should see the plain skill
+name. A rename that would collide two members is refused. So is one that
+would leave a stale reference to the old name inside a rendered file —
+neither is ever silently applied. A top-level `name`, `owner`, or
+`description` (outside
+`[plugins.<name>]`) is **reserved** and rejected — a plugin-of-plugins is
+not supported.
+
+`marketplace.lock` is `marketplace.toml`'s lockfile, generated the first
+time any command resolves the manifest. It is named `<stem>.lock` beside
+it (`marketplace.toml` → `marketplace.lock`, `team.toml` → `team.lock`),
+never `grimoire.lock`, and never read by a command that does not know
+about plugins. It shares its wire format with `grimoire.lock`
+field-for-field, plus a `plugin` key on every entry and a `[[plugin]]`
+table recording each plugin's own declaration hash:
+
+```toml
+[metadata]
+lock_version = 1
+declaration_hash_version = 1
+declaration_hash = "sha256:…"
+generated_by = "grim 0.14.2"
+generated_at = "2026-09-27T04:33:02Z"
+
+[[plugin]]
+name = "team"
+declaration_hash = "sha256:…"
+
+[[skill]]
+name = "code-review"
+plugin = "team"
+pinned = "ghcr.io/acme/skills/code-review@sha256:…"
+```
+
+Only the plugins a run actually touches are re-resolved. Each `[[plugin]]`
+row carries its own `declaration_hash`, so editing one plugin's `include`
+list never disturbs another plugin's pins. [`grim export
+plugin`](./commands.md#export-plugin) re-resolves only the plugins whose
+hash has drifted. That is the same "declaration changed" test
+`grimoire.lock` applies at the whole-file level, scoped down to one
+plugin. A plugin removed from `marketplace.toml` drops its rows on the
+next write; nothing else in the file is disturbed. [`grim update
+--marketplace`](./commands.md#update-marketplace) is the other command
+that reads and rewrites this file. It rolls every selected plugin's pins
+forward without exporting or installing anything.
+
+`marketplace.toml`/`marketplace.lock` and `grimoire.toml`/`grimoire.lock`
+never mix. A `grimoire.lock` carrying a `plugin` key or a `[[plugin]]`
+table is rejected as a scope mismatch, and vice versa. The two families of
+file cannot be swapped by accident.
+
+Unlike the two files above, neither carries a published [JSON
+Schema](#editor-schema) yet. `grim schema` covers `config`, `publish`,
+`lock`, and `mcp` only; extending it here is an unclaimed follow-up, not a
+promise.
+
 ## Editor schema support {#editor-schema}
 
 Both author-facing files ship a published [JSON Schema](https://json-schema.org/),
@@ -1064,6 +1154,7 @@ state file is kept out of version control without touching your root
 [grim-login]: ./authentication.md#login
 
 <!-- external -->
+[agent-plugins]: https://agent-plugins.org/
 [ghcr]: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry
 [gitlab-registry]: https://docs.gitlab.com/ee/user/packages/container_registry/
 [zot]: https://zotregistry.dev/

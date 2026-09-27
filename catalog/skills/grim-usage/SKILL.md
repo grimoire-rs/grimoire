@@ -1,6 +1,6 @@
 ---
 name: grim-usage
-description: Drive the grim CLI — the OCI package manager for AI skills, rules, agents, and bundles. Use when installing, updating, searching, rating, or publishing AI-config artifacts with grim; when composing grim init, config, add, lock, install, update, status, context, fetch, describe, search, rate, tui, mcp, build, release, publish, login, logout, or completions commands; when configuring settings, multiple registries, or qualified alias/repo references; or when resolving registries, project vs global scope, client targets, or offline mode.
+description: Drive the grim CLI — the OCI package manager for AI skills, rules, agents, and bundles. Use when installing, updating, searching, rating, or publishing AI-config artifacts with grim; when composing grim init, config, add, lock, install, update, status, context, fetch, describe, export, search, rate, tui, mcp, build, release, publish, login, logout, or completions commands; when configuring settings, multiple registries, or qualified alias/repo references; or when resolving registries, project vs global scope, client targets, or offline mode.
 license: Apache-2.0
 compatibility: grim>=0.14
 metadata:
@@ -65,12 +65,13 @@ full reference is `--help` plus the docs site linked below.
 | `grim add` | Declare an artifact and pin it in the lock | [consume](references/consume.md) |
 | `grim lock` | Resolve floating tags to digests | [consume](references/consume.md) |
 | `grim install` | Materialize the lock into AI clients | [consume](references/consume.md) |
-| `grim update` | Re-resolve, re-materialize, prune | [consume](references/consume.md) |
+| `grim update` | Re-resolve, re-materialize, prune; `--marketplace <path>` instead rolls a declared plugin's own lock forward and installs nothing | [consume](references/consume.md) |
 | `grim status` | Report each declared artifact's state | [consume](references/consume.md) |
 | `grim context` | Report the resolved scope, paths, clients, registries | [consume](references/consume.md) |
 | `grim fetch` | Print an artifact's content without installing | [consume](references/consume.md) |
 | `grim describe` | Report an artifact's metadata (kind, annotations, tags) without downloading content | [consume](references/consume.md) |
 | `grim remove` / `uninstall` | Undeclare vs full inverse of install | [consume](references/consume.md) |
+| `grim export plugin` | Render already-locked artifacts as a Claude Code or Agent Plugins plugin (directory or `--zip`), for a client with no grim install | [publish](references/publish.md) |
 | `grim search` / `tui` | Browse your declared registries' catalogs | [registries](references/registries.md) |
 | `grim rate` | Vote on an artifact through the index's rating forge | [registries](references/registries.md) |
 | `grim mcp` | Run a local STDIO MCP server for AI agent integration | [registries](references/registries.md) |
