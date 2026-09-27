@@ -102,6 +102,9 @@ pub enum Mode {
     /// artifact — a mark-all or a group selection is one keystroke away from
     /// acting on the whole catalog.
     ConfirmBatch,
+    /// Confirming the creation of a project `grimoire.toml`, offered when the
+    /// user switches scope and no project config exists yet.
+    ConfirmInit,
 }
 
 /// A refused install awaiting the user's Overwrite decision.
@@ -189,6 +192,16 @@ pub struct PendingBatch {
     /// Whether the proceed button is selected. Starts `false` for the same
     /// reason as [`PendingForce::overwrite_selected`]: a letter typed into the
     /// list by mistake must not be the key that confirms.
+    pub proceed_selected: bool,
+}
+
+/// A project init awaiting the user's go-ahead, when [`Mode::ConfirmInit`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingInit {
+    /// The `grimoire.toml` the init would create, shown in the prompt.
+    pub config_path: String,
+    /// Whether the Initialize button is selected. Starts `false`: the prompt
+    /// writes a file, so a stray Enter must cancel.
     pub proceed_selected: bool,
 }
 
@@ -398,6 +411,8 @@ pub struct TuiState {
     pub confirm: Option<PendingForce>,
     /// The multi-artifact batch awaiting confirmation, when [`Mode::ConfirmBatch`].
     pub pending_batch: Option<PendingBatch>,
+    /// The project init awaiting confirmation, when [`Mode::ConfirmInit`].
+    pub pending_init: Option<PendingInit>,
     /// The effective default registry; when a row's registry host equals
     /// it the registry prefix is elided from the displayed name (shorter
     /// names) while the stored `repo` keeps the full reference.
@@ -544,6 +559,7 @@ impl Default for TuiState {
             picker: None,
             confirm: None,
             pending_batch: None,
+            pending_init: None,
             default_registry: None,
             clients: Vec::new(),
             view_mode: ViewMode::default(),
@@ -2011,6 +2027,30 @@ impl TuiState {
     pub fn take_confirm_batch(&mut self) -> Option<PendingBatch> {
         self.mode = Mode::List;
         self.pending_batch.take().filter(|b| b.proceed_selected)
+    }
+
+    /// Ask before creating the project config at `config_path`. Cancel is
+    /// preselected — see [`PendingInit::proceed_selected`].
+    pub fn open_confirm_init(&mut self, config_path: &str) {
+        self.mode = Mode::ConfirmInit;
+        self.pending_init = Some(PendingInit {
+            config_path: config_path.to_string(),
+            proceed_selected: false,
+        });
+    }
+
+    /// Flip the init confirmation between Cancel and Initialize.
+    pub fn confirm_init_move(&mut self) {
+        if let Some(p) = self.pending_init.as_mut() {
+            p.proceed_selected = !p.proceed_selected;
+        }
+    }
+
+    /// Close the init confirmation, returning whether the user chose to
+    /// initialize.
+    pub fn take_confirm_init(&mut self) -> bool {
+        self.mode = Mode::List;
+        self.pending_init.take().is_some_and(|p| p.proceed_selected)
     }
 
     /// The currently selected row, if any.

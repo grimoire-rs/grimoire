@@ -1578,6 +1578,16 @@ browser, `g` to switch scope, `h` to show/hide deprecated artifacts, and
 `space` to mark rows. A search that hides rows below the relevance cutoff
 says so in the status line, as `N weaker matches hidden`.
 
+The TUI opens in project scope when it finds a `grimoire.toml` by walking
+up from the working directory. When it finds none, it opens in global
+scope, which needs no config file, and the status line says so. Pressing
+`g` then asks whether to create a project `grimoire.toml`, at the root of
+the enclosing git repository or in the working directory outside one.
+Initialize writes it and switches to project scope; Cancel stays in
+global scope and writes nothing. The new file declares no registry, so
+the default browse source applies until you add one. `grim tui --global`
+with no global config opens too: the global config is optional.
+
 Like [`grim search`](#search), a registry declaring an `include` / `exclude`
 [browse filter](./configuration.md#browse-filters) shows only the
 repositories its patterns admit — and a source whose filter admits nothing

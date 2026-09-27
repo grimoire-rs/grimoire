@@ -11,7 +11,7 @@
 //! The fix is a [`SwitchableWriter`]: a [`MakeWriter`] implementation
 //! backed by an [`Arc<Mutex<WriterTarget>>`]. At startup the target is
 //! `Stderr`. When the TUI enters alt-screen it calls
-//! [`LogSinkGuard::redirect`], which opens `$GRIM_HOME/tui.log` (falling
+//! [`LogSinkGuard::redirect_to`], which opens `$GRIM_HOME/tui.log` (falling
 //! back to a temporary file) and swaps the target to that file. When the
 //! guard drops (after `TerminalGuard` drops and the alt-screen is left)
 //! the target is swapped back to `Stderr`.
@@ -142,7 +142,7 @@ pub(crate) fn set_global_writer(w: SwitchableWriter) -> &'static SwitchableWrite
 /// RAII guard that redirects tracing output to a log file for the duration
 /// of a TUI alt-screen session.
 ///
-/// Acquire with [`LogSinkGuard::redirect`] **before** [`TerminalGuard`]
+/// Acquire with [`LogSinkGuard::redirect_to`] **before** [`TerminalGuard`]
 /// so it drops **after** `TerminalGuard` — Rust drops locals in reverse
 /// declaration order, meaning the alt-screen is left before logging is
 /// restored to `stderr`. A log record emitted during the guard's own
@@ -159,20 +159,6 @@ pub struct LogSinkGuard {
 }
 
 impl LogSinkGuard {
-    /// Redirect tracing output to `grim_home/tui.log`. Falls back to an
-    /// anonymous temporary file (unlinked-after-open, no leaked inode) when
-    /// the `GRIM_HOME` directory does not exist or the file cannot be
-    /// created. Returns `None` only when no writable destination is
-    /// available (very unusual; tracing continues to `stderr` in that case).
-    ///
-    /// **Sync callers only.** This opens the file with blocking I/O on the
-    /// calling thread. Async callers must use [`open_log_file_off_thread`]
-    /// + [`LogSinkGuard::redirect_to`] instead.
-    pub fn redirect(writer: &SwitchableWriter, grim_home: &Path) -> Option<Self> {
-        let file = open_log_file_sync(grim_home);
-        Self::redirect_to(writer, file)
-    }
-
     /// Activate the redirect from a pre-opened file (or `None`).
     ///
     /// Use this on async callers: open the file with
@@ -342,7 +328,7 @@ mod tests {
         writer.make_writer().flush().unwrap();
 
         // Redirect to file.
-        let guard = LogSinkGuard::redirect(&writer, tmp.path()).expect("should open log file");
+        let guard = LogSinkGuard::redirect_to(&writer, open_log_file_sync(tmp.path())).expect("should open log file");
 
         // Write through the switched writer — should reach the file.
         writer.make_writer().write_all(b"hello from tui\n").unwrap();
@@ -367,7 +353,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let writer = SwitchableWriter::new();
         {
-            let _guard = LogSinkGuard::redirect(&writer, tmp.path()).unwrap();
+            let _guard = LogSinkGuard::redirect_to(&writer, open_log_file_sync(tmp.path())).unwrap();
             // Guard drops here.
         }
         // After drop: flush must succeed (back on stderr path).
@@ -383,8 +369,8 @@ mod tests {
         let writer = SwitchableWriter::new();
         // The fallback (tempfile::tempfile()) succeeds; we don't require a
         // specific outcome since the temp path may or may not be writable in
-        // CI. Just confirm redirect() doesn't panic.
-        let _ = LogSinkGuard::redirect(&writer, non_existent);
+        // CI. Just confirm the redirect doesn't panic.
+        let _ = LogSinkGuard::redirect_to(&writer, open_log_file_sync(non_existent));
         writer.make_writer().flush().unwrap();
     }
 

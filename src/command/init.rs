@@ -60,16 +60,25 @@ pub async fn run(ctx: &Context, args: &InitArgs) -> anyhow::Result<(InitReport, 
         (cwd.join("grimoire.toml"), ConfigScope::Project)
     };
 
-    // Detect against the directory the config will govern, so a project init
-    // reads the workspace's vendor dirs and a global init reads `$HOME`'s.
-    let workspace = path.parent().unwrap_or(&path).to_path_buf();
-    let detected = crate::install::target::detect_clients(&workspace, scope);
-
-    let body = render_config(snapshot_registry(ctx, args.registry.as_deref()), &detected);
-    create_config(&path, &body)?;
+    create_config_at(&path, scope, snapshot_registry(ctx, args.registry.as_deref()))?;
 
     let report = InitReport::new(path, scope, InitStatus::Created);
     Ok((report, ExitCode::Success))
+}
+
+/// Create a seeded config for `scope` at `path`: detected clients, plus a
+/// `[[registries]]` entry only when `registry` is given. Shared with the
+/// TUI, which creates the project config in place and writes no registry.
+///
+/// # Errors
+///
+/// Same contract as [`create_config`].
+pub fn create_config_at(path: &std::path::Path, scope: ConfigScope, registry: Option<&str>) -> anyhow::Result<()> {
+    // Detect against the directory the config will govern, so a project init
+    // reads the workspace's vendor dirs and a global init reads `$HOME`'s.
+    let workspace = path.parent().unwrap_or(path);
+    let detected = crate::install::target::detect_clients(workspace, scope);
+    create_config(path, &render_config(registry, &detected))
 }
 
 /// Create `path` with `body`, refusing to overwrite an existing config.

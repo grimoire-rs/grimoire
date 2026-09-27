@@ -562,7 +562,9 @@ Commands operate on the discovered project by default; `--global`
 switches to the global scope (and `grim init --global` creates it).
 Global-scope installs land in each client's *native* user-level
 directory (for example `~/.claude/skills/`), so clients find them with
-no extra configuration. The TUI flips scope at runtime with `g`.
+no extra configuration. The TUI flips scope at runtime with `g`; outside
+any project it opens in global scope, and `g` offers to create the project
+`grimoire.toml` (at the git repository root, else the working directory).
 
 ## Client Targets
 

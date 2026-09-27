@@ -203,6 +203,19 @@ impl TuiContext {
     }
 }
 
+/// The project setup `g` offers when the session has no project scope to
+/// switch to: where the config would go, and how to create it. `create`
+/// writes the file and resolves the new scope; the TUI then swaps into it.
+pub struct ProjectInit<'a> {
+    /// The `grimoire.toml` that `create` writes, shown in the prompt.
+    pub config_path: std::path::PathBuf,
+    /// Create the config and resolve the project scope it defines.
+    pub create: Box<dyn Fn() -> anyhow::Result<ScopeSwap> + 'a>,
+    /// Whether the session opened in global scope only because no project
+    /// config was found — the first frame then says so.
+    pub fell_back: bool,
+}
+
 /// Run the TUI to a clean quit.
 ///
 /// # Errors
@@ -210,7 +223,7 @@ impl TuiContext {
 /// A terminal-setup or draw I/O failure. Catalog-load and install/update
 /// failures are surfaced *in* the status line, not as a hard error — the
 /// TUI degrades rather than crashing (offline included).
-pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
+pub async fn run(mut ctx: TuiContext, mut project_init: Option<ProjectInit<'_>>) -> anyhow::Result<()> {
     // Redirect tracing output to $GRIM_HOME/tui.log for the duration of
     // the alt-screen session. Declared BEFORE the terminal guard so it
     // drops AFTER it (Rust drops locals in reverse declaration order):
@@ -269,6 +282,9 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
     // Initial async catalog load: show `loading`, then populate.
     terminal.draw(|f| draw(f, &frame(&state)))?;
     load_into(&ctx, &mut state).await;
+    if project_init.as_ref().is_some_and(|p| p.fell_back) {
+        state.set_status("no grimoire.toml here, so this is your global setup · press g to set up a project");
+    }
     terminal.draw(|f| draw(f, &frame(&state)))?;
 
     // The background-update-check machinery: a bounded set of tokio tasks
@@ -603,54 +619,28 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
             }
             TuiAction::ToggleScope => {
                 if ctx.toggle_scope() {
-                    state.set_scope_label(&ctx.scope_label);
-                    state.set_clients(client_names(&ctx));
-                    // Recompute single-registry elision for the swapped scope —
-                    // the two scopes may declare a different registry count
-                    // (D-ELIDE: elide only when exactly one registry resolves).
-                    state.set_default_registry(elision_registry(&ctx));
-                    // The swapped scope may declare a different registry set —
-                    // re-seed the precedence order for the tree roots (F13).
-                    state.set_registry_order(registry_order(&ctx));
-                    // Structural tree display options follow the active scope's
-                    // `[options.tui]` (the two scopes may differ). The runtime
-                    // `t` view-mode choice is deliberately NOT re-seeded from
-                    // config here, so a view toggled with `t` survives the swap.
-                    // The collapse set is likewise preserved — only `expand_levels`
-                    // is re-synced so a later `z` uses the new scope's level.
-                    state.set_tree_options(
-                        ctx.resolved_options.group_by_type,
-                        ctx.resolved_options.tree_separators.clone(),
-                        ctx.resolved_options.expand_levels as usize,
-                    );
-                    // Seeded without re-filtering: `recompute_states` below
-                    // re-filters (and re-clamps) once for both changes.
-                    state.search_min_relevance = ctx.resolved_options.search_min_relevance;
-                    recompute_states(&ctx, &mut state);
-                    // Invalidate the bundle-member cache: the new scope has a
-                    // different lock/install state and a different scope_label key.
-                    // A BundleMembersMsg from a fetch spawned under the old scope
-                    // must be discarded (stale generation) — bump to ensure that.
-                    bundle_checker.bump_generation();
-                    state.bundle_members.clear();
-                    // The companion cache is deliberately NOT touched here. It
-                    // is keyed by bare repo, and a companion belongs to the
-                    // repository rather than the scope, so every entry stays
-                    // correct across a toggle. The generation is not bumped
-                    // either: discarding an in-flight result would strand its
-                    // `Loading` placeholder, which `companion_to_fetch` treats
-                    // as settled and would never retry.
-                    // Lifecycle (D3b): clear expanded_bundles alongside bundle_members
-                    // so no stale expand state leaks across a scope toggle.
-                    state.expanded_bundles.clear();
-                    // The new scope has a different lock/state — re-check its
-                    // installed rows against the registry.
-                    arm_background_checks(&ctx, &state, &mut checker);
-                    // The colored MODE box already shows the active scope
-                    // — no redundant title-bar status.
-                    state.set_status("");
+                    after_scope_swap(&ctx, &mut state, &mut checker, &mut bundle_checker);
+                } else if let Some(init) = &project_init {
+                    state.open_confirm_init(&init.config_path.display().to_string());
                 } else {
                     state.set_status("no alternate scope to switch to");
+                }
+            }
+            TuiAction::InitProject => {
+                if let Some(init) = &project_init {
+                    match (init.create)() {
+                        Ok(swap) => {
+                            let created = init.config_path.display().to_string();
+                            project_init = None;
+                            ctx.alt = Some(swap);
+                            ctx.toggle_scope();
+                            after_scope_swap(&ctx, &mut state, &mut checker, &mut bundle_checker);
+                            state.set_status(format!("created {created}"));
+                        }
+                        // The session stays in its current scope, and `g`
+                        // offers the setup again.
+                        Err(e) => state.set_status(format!("project setup failed: {e:#}")),
+                    }
                 }
             }
         }
@@ -664,6 +654,62 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
         terminal.draw(|f| draw(f, &frame(&state)))?;
     }
     Ok(())
+}
+
+/// Bring `state` in line with the scope `ctx` just swapped to: labels,
+/// registries, tree options, install states, and the scope-keyed caches.
+fn after_scope_swap(
+    ctx: &TuiContext,
+    state: &mut TuiState,
+    checker: &mut UpdateChecker,
+    bundle_checker: &mut super::bundle_member_fetch::BundleMemberChecker,
+) {
+    state.set_scope_label(&ctx.scope_label);
+    state.set_clients(client_names(ctx));
+    // Recompute single-registry elision for the swapped scope —
+    // the two scopes may declare a different registry count
+    // (D-ELIDE: elide only when exactly one registry resolves).
+    state.set_default_registry(elision_registry(ctx));
+    // The swapped scope may declare a different registry set —
+    // re-seed the precedence order for the tree roots (F13).
+    state.set_registry_order(registry_order(ctx));
+    // Structural tree display options follow the active scope's
+    // `[options.tui]` (the two scopes may differ). The runtime
+    // `t` view-mode choice is deliberately NOT re-seeded from
+    // config here, so a view toggled with `t` survives the swap.
+    // The collapse set is likewise preserved — only `expand_levels`
+    // is re-synced so a later `z` uses the new scope's level.
+    state.set_tree_options(
+        ctx.resolved_options.group_by_type,
+        ctx.resolved_options.tree_separators.clone(),
+        ctx.resolved_options.expand_levels as usize,
+    );
+    // Seeded without re-filtering: `recompute_states` below
+    // re-filters (and re-clamps) once for both changes.
+    state.search_min_relevance = ctx.resolved_options.search_min_relevance;
+    recompute_states(ctx, state);
+    // Invalidate the bundle-member cache: the new scope has a
+    // different lock/install state and a different scope_label key.
+    // A BundleMembersMsg from a fetch spawned under the old scope
+    // must be discarded (stale generation) — bump to ensure that.
+    bundle_checker.bump_generation();
+    state.bundle_members.clear();
+    // The companion cache is deliberately NOT touched here. It
+    // is keyed by bare repo, and a companion belongs to the
+    // repository rather than the scope, so every entry stays
+    // correct across a toggle. The generation is not bumped
+    // either: discarding an in-flight result would strand its
+    // `Loading` placeholder, which `companion_to_fetch` treats
+    // as settled and would never retry.
+    // Lifecycle (D3b): clear expanded_bundles alongside bundle_members
+    // so no stale expand state leaks across a scope toggle.
+    state.expanded_bundles.clear();
+    // The new scope has a different lock/state — re-check its
+    // installed rows against the registry.
+    arm_background_checks(ctx, state, checker);
+    // The colored MODE box already shows the active scope
+    // — no redundant title-bar status.
+    state.set_status("");
 }
 
 /// Spawn the launch/refresh/scope-toggle round of background checks against

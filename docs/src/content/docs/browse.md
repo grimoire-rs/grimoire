@@ -26,6 +26,9 @@ pane for the row you are on.
    grim tui
    ```
 
+   If the project has no `grimoire.toml` yet, the browser opens your global
+   setup instead. Press `g` and confirm to create the project config.
+
 2. Press `/` and type part of a name to narrow the list.
 3. Move to the row you want with the arrow keys.
 4. Press `i` to install it.
@@ -57,7 +60,7 @@ app. The website and the VS Code extension have no key map.
 | `d` | Uninstall the marked set, or the selection. More than one artifact asks to [confirm](./commands.md#tui) first |
 | `v` | Pick a specific version for the selected row |
 | `o` | Open the selected entry's repository URL |
-| `g` | Toggle scope between project and global |
+| `g` | Toggle scope between project and global. With no project config yet, it offers to create one |
 | `s` | Cycle the sort order: default, name, updated, rating, downloads. The Catalog title names the active one, and the cursor returns to the top |
 | `S` | Flip the active order between ascending and descending |
 | `t` | Toggle tree and flat view |

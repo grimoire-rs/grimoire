@@ -1052,7 +1052,8 @@ pub fn frame(state: &TuiState) -> RenderModel {
             action: "Overwrite",
             action_selected: c.overwrite_selected,
         })
-        .or_else(|| state.pending_batch.as_ref().map(|b| confirm_batch_view(state, b)));
+        .or_else(|| state.pending_batch.as_ref().map(|b| confirm_batch_view(state, b)))
+        .or_else(|| state.pending_init.as_ref().map(confirm_init_view));
 
     // Selected clients render as a quiet span on the legend line; empty
     // selection omits the span (no stray `clients:` label).
@@ -1550,6 +1551,26 @@ fn confirm_batch_view(state: &TuiState, b: &super::state::PendingBatch) -> Confi
         detail: names.join(", "),
         action,
         action_selected: b.proceed_selected,
+    }
+}
+
+/// The project-init prompt: the file it creates, then what creating it does.
+/// It names the folder rather than saying "this project" — to a user who
+/// launched the TUI from a plain directory, nothing is a project yet.
+fn confirm_init_view(p: &super::state::PendingInit) -> ConfirmView {
+    let path = std::path::Path::new(&p.config_path);
+    let folder = path.parent().unwrap_or(path).display().to_string();
+    ConfirmView {
+        title: "Set up a project".to_string(),
+        message: format!("Create {}?", sanitize_member_label(&p.config_path)),
+        detail: format!(
+            "This makes {} a grim project. Installs you make here go into its client folders, \
+             like .claude/, and are recorded in grimoire.toml. Commit that file to share the \
+             setup. Your global installs stay as they are.",
+            sanitize_member_label(&folder)
+        ),
+        action: "Initialize",
+        action_selected: p.proceed_selected,
     }
 }
 
@@ -2915,6 +2936,32 @@ mod tests {
         assert!(
             gap_l.abs_diff(gap_r) <= 2,
             "buttons centered ({gap_l} vs {gap_r}): {line:?}"
+        );
+    }
+
+    // The init prompt is where a user first meets the project/global split,
+    // so its explanation must be readable in full on a standard terminal —
+    // a clipped last sentence would drop "your global installs stay".
+    #[test]
+    fn init_prompt_shows_the_path_its_explanation_and_both_buttons() {
+        let mut s = named_rows(&["alpha"]);
+        s.set_term_size((80, 24));
+        s.open_confirm_init("/home/u/repo/grimoire.toml");
+        let buf = draw_80x24(&s);
+        let text: String = screen(&buf).split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(text.contains("Create /home/u/repo/grimoire.toml?"), "{}", screen(&buf));
+        assert!(
+            text.contains("This makes /home/u/repo a grim project."),
+            "{}",
+            screen(&buf)
+        );
+        for word in ["client", "global", "installs", "stay", "are."] {
+            assert!(text.contains(word), "{word:?} missing:\n{}", screen(&buf));
+        }
+        let (line, _) = button_row(&buf, "Initialize");
+        assert!(
+            line.contains("▸ [ Cancel ]"),
+            "Cancel is the highlighted default: {line:?}"
         );
     }
 

@@ -153,6 +153,9 @@ pub enum TuiAction {
         /// Whether the refused action was an update (vs. a fresh install).
         is_update: bool,
     },
+    /// Create the project `grimoire.toml` and switch to project scope, after
+    /// the user chose **Initialize** in [`Mode::ConfirmInit`].
+    InitProject,
     /// Exit the TUI cleanly.
     Quit,
     /// Nothing to do beyond the in-place state change.
@@ -171,6 +174,7 @@ pub fn handle(state: &mut TuiState, input: TuiInput) -> TuiAction {
         Mode::VersionPick => handle_picker(state, input),
         Mode::ConfirmForce => handle_confirm_force(state, input),
         Mode::ConfirmBatch => handle_confirm_batch(state, input),
+        Mode::ConfirmInit => handle_confirm_init(state, input),
         Mode::List => handle_browse(state, input),
     }
 }
@@ -226,6 +230,26 @@ fn handle_confirm_batch(state: &mut TuiState, input: TuiInput) -> TuiAction {
         TuiInput::Char('q') | TuiInput::Quit => TuiAction::Quit,
         _ => {
             state.pending_batch = None;
+            state.back();
+            TuiAction::None
+        }
+    }
+}
+
+/// Project-init confirmation keys: the same shape as
+/// [`handle_confirm_batch`], with Cancel preselected so a stray Enter never
+/// writes a config file. Cancelling leaves the session in its current scope.
+fn handle_confirm_init(state: &mut TuiState, input: TuiInput) -> TuiAction {
+    match input {
+        TuiInput::Collapse | TuiInput::Expand | TuiInput::Char('h') | TuiInput::Char('l') => {
+            state.confirm_init_move();
+            TuiAction::None
+        }
+        TuiInput::Enter if state.take_confirm_init() => TuiAction::InitProject,
+        TuiInput::Enter => TuiAction::None,
+        TuiInput::Char('q') | TuiInput::Quit => TuiAction::Quit,
+        _ => {
+            state.pending_init = None;
             state.back();
             TuiAction::None
         }
@@ -1264,6 +1288,31 @@ mod tests {
         assert_eq!(handle(&mut s, TuiInput::Char('y')), TuiAction::None);
         assert_eq!(s.mode, Mode::List, "an unrecognized key dismisses");
         assert!(s.confirm.is_none());
+    }
+
+    #[test]
+    fn init_prompt_cancels_by_default_and_initializes_only_when_chosen() {
+        let mut s = seeded();
+        s.open_confirm_init("/repo/grimoire.toml");
+        assert_eq!(
+            handle(&mut s, TuiInput::Enter),
+            TuiAction::None,
+            "Cancel is preselected"
+        );
+        assert_eq!(s.mode, Mode::List);
+        assert!(s.pending_init.is_none());
+
+        s.open_confirm_init("/repo/grimoire.toml");
+        handle(&mut s, TuiInput::Char('l'));
+        assert_eq!(s.mode, Mode::ConfirmInit, "h/l move, they never dismiss");
+        assert_eq!(handle(&mut s, TuiInput::Enter), TuiAction::InitProject);
+        assert_eq!(s.mode, Mode::List);
+
+        s.open_confirm_init("/repo/grimoire.toml");
+        handle(&mut s, TuiInput::Expand);
+        assert_eq!(handle(&mut s, TuiInput::Esc), TuiAction::None, "Esc cancels");
+        assert!(s.pending_init.is_none());
+        assert_eq!(s.mode, Mode::List);
     }
 
     #[test]

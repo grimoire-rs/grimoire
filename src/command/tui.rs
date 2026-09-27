@@ -11,14 +11,12 @@
 //! a non-interactive caller (pipe, CI, `</dev/null`) must never have its
 //! terminal mangled.
 //!
-//! When the requested scope has no `grimoire.toml` yet (project discovery
-//! misses, or the global config file is absent), the command offers to
-//! initialize one before the session starts via the popup-style
-//! [`crate::tui::init_dialog`]: a confirm popup, a source-type selector
-//! (package **index** — the default — or plain **oci** registry), then a
-//! locator input pre-filled with the selected type's effective default,
-//! so plain Enter accepts — and persists as a `[[registries]]` entry with
-//! `default = true`. Cancelling closes the TUI cleanly with exit 0.
+//! Project scope needs a `grimoire.toml`; global scope does not. When no
+//! project config is discoverable (and no `--config` names one), the
+//! session opens in global scope instead of stopping at a setup prompt, and
+//! the scope key `g` offers to create the project config in place: at the
+//! enclosing git work tree's root, else the working directory. Declining
+//! leaves the session in global scope with nothing written.
 
 use std::io::{self, IsTerminal, Write};
 
@@ -29,8 +27,7 @@ use crate::config::ResolvedRegistry;
 use crate::config::scope::ConfigScope;
 use crate::context::Context;
 use crate::install::client_target::ClientTarget;
-use crate::tui::app::{self, ScopeSwap, TuiContext};
-use crate::tui::init_dialog::{InitDialog, InitDialogOutcome, RegistryKindChoice};
+use crate::tui::app::{self, ProjectInit, ScopeSwap, TuiContext};
 
 use super::scope_resolution;
 
@@ -86,14 +83,12 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
         return Ok(ExitCode::Success);
     }
 
-    // No config for the requested scope yet: offer to initialize one before
-    // the session starts. The prompt runs before raw mode, so plain stdin
-    // reads are safe; declining closes the TUI cleanly.
-    if config_missing(ctx) && matches!(prompt_init(ctx).await?, InitPrompt::Cancelled) {
-        return Ok(ExitCode::Success);
-    }
-
-    let scope = scope_resolution::resolve(ctx, ctx.global(), ctx.config())
+    // No project config to open: fall back to global scope, which needs no
+    // file, and let `g` offer to create one. A parse failure on an existing
+    // file is not "missing" — it surfaces through the resolve below.
+    let project_missing = !ctx.global() && ctx.config().is_none() && project_config_missing();
+    let global = ctx.global() || project_missing;
+    let scope = scope_resolution::resolve(ctx, global, ctx.config())
         .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
     let access = super::access_seam(ctx)?;
 
@@ -109,30 +104,31 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
     // malformed global config is NOT best-effort — it propagates here (as
     // above, before raw mode) rather than silently dropping the user's
     // global registries from the swapped scope.
-    let alt = match scope_resolution::resolve(ctx, !ctx.global(), ctx.config())
+    let alt = match scope_resolution::resolve(ctx, !global, ctx.config())
         .ok()
         .filter(|other| other.scope != scope.scope)
     {
-        Some(other) => {
-            let alt_registries = resolve_registries_for_tui(ctx, &other)?;
-            let alt_primary = crate::config::primary_registry(&alt_registries).to_string();
-            Some(ScopeSwap {
-                scope: other.scope,
-                workspace: other.workspace.clone(),
-                lock_path: other.lock_path.clone(),
-                state_path: other.state_path.clone(),
-                config_path: other.config_path.clone(),
-                clients_default: other.options.clients.clone(),
-                vendors: other.options.vendors.clone(),
-                clients_selected: selected_clients(&other.workspace, other.scope, &other.options.clients),
-                label: scope_label(other.scope).to_string(),
-                roots: other.roots,
-                resolved_options: other.options.resolved(),
-                registries: alt_registries,
-                primary_registry: alt_primary,
-            })
-        }
+        Some(other) => Some(scope_swap(ctx, other)?),
         None => None,
+    };
+
+    // With no project to switch to, `g` offers to create one instead.
+    let project_init = if alt.is_none() && scope.scope == ConfigScope::Global {
+        let cwd = std::env::current_dir()?;
+        let config_path = project_init_dir(&cwd, crate::env::home_dir_for_ceiling().as_deref()).join("grimoire.toml");
+        let target = config_path.clone();
+        Some(ProjectInit {
+            config_path,
+            create: Box::new(move || {
+                super::init::create_config_at(&target, ConfigScope::Project, None)?;
+                let project = scope_resolution::resolve(ctx, false, Some(&target))
+                    .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
+                scope_swap(ctx, project)
+            }),
+            fell_back: project_missing,
+        })
+    } else {
+        None
     };
 
     // `--sort` wins over `[options.tui].sort`. A configured direction still
@@ -172,165 +168,57 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
         sort_order,
     };
 
-    app::run(tui_ctx).await?;
+    app::run(tui_ctx, project_init).await?;
     Ok(ExitCode::Success)
 }
 
-/// Outcome of the missing-config init prompt.
-enum InitPrompt {
-    /// A config exists now — continue into the TUI session.
-    Ready,
-    /// The user declined (or stdin cannot prompt) — close the TUI.
-    Cancelled,
-}
-
-/// Whether the requested scope has no config yet. Global scope checks
-/// `$GRIM_HOME/grimoire.toml` directly; project scope asks discovery. An
-/// explicit `--config` path is never treated as missing here — `grim init`
-/// writes only the canonical locations, so a bad explicit path keeps
-/// surfacing as the usual hard error instead of initializing elsewhere.
-fn config_missing(ctx: &Context) -> bool {
-    if ctx.global() {
-        return !ctx.paths().global_config().exists();
-    }
-    if ctx.config().is_some() {
-        return false;
-    }
+/// Whether project discovery found no `grimoire.toml` at all. A parse
+/// failure on an existing file is not "missing" — the caller's resolve
+/// surfaces it as the usual hard error.
+fn project_config_missing() -> bool {
     match crate::config::project_config::ProjectConfig::discover(None) {
         Ok(_) => false,
-        // Only a genuine "nothing found" offers init; a parse failure on an
-        // existing file must surface through the normal resolve path.
         Err(e) => scope_resolution::config_not_found(&e),
     }
 }
 
-/// Interactive missing-config prompt, run as a popup-style modal TUI
-/// session ([`crate::tui::init_dialog`]): confirm initialization, pick
-/// the browse source type (**index** — the default — or **oci**), edit
-/// the type's pre-filled locator, and create the scope's `grimoire.toml`
-/// via `grim init` (which keys the entry `index` vs `oci` by the
-/// locator's shape — the type choice only picks the prefill, so an
-/// edited value can never contradict its stored key).
-///
-/// The pre-selected type and its prefill come from the **effective**
-/// browse primary (root `--registry` flag > `[[registries]]` primary >
-/// legacy `default_registry` chain > the built-in fallback **index**,
-/// [`crate::command::FALLBACK_INDEX`]); the non-default type prefills its
-/// built-in fallback, so plain Enter persists a browse source that
-/// actually lists packages either way.
-///
-/// Accepting the pre-filled value snapshots it as a `[[registries]]`
-/// entry with `default = true` in the new config — **except** when the
-/// accepted value is the built-in fallback index: that stays floating
-/// (never written to disk), matching bare `grim init` (`command/init.rs`)
-/// and avoiding a redundant declaration that duplicates the implicit
-/// default in the merged browse set (issue #28).
-///
-/// # Errors
-///
-/// Propagates dialog I/O failures and any `grim init` error (e.g. a
-/// config racing into existence maps to the usual exit-64 error).
-async fn prompt_init(ctx: &Context) -> anyhow::Result<InitPrompt> {
-    if !std::io::stdin().is_terminal() {
-        // Best-effort (both cold guards on this pre-session path): a closed
-        // std stream must not panic before the session even starts.
-        let _ = writeln!(
-            io::stderr(),
-            "no grimoire.toml found and stdin is not a terminal; run `grim init` first"
-        );
-        return Ok(InitPrompt::Cancelled);
-    }
-
-    let label = if ctx.global() {
-        ctx.paths().global_config().display().to_string()
-    } else {
-        "./grimoire.toml".to_string()
-    };
-    let scope = if ctx.global() {
-        ConfigScope::Global
-    } else {
-        ConfigScope::Project
-    };
-
-    // The same precedence the session itself browses with — including the
-    // built-in fallback — so the dialog's default and the browsed source
-    // can never diverge. The browse default's shape pre-selects the type
-    // (index for an unconfigured user); the other type falls back to its
-    // built-in so switching always offers a working prefill.
-    let browse_default = resolve_browse_default(ctx)?;
-    let (index_prefill, oci_prefill, kind) =
-        if crate::config::registry_resolve::classify_index(&browse_default).is_some() {
-            (
-                browse_default,
-                crate::command::FALLBACK_REGISTRY.to_string(),
-                RegistryKindChoice::Index,
-            )
-        } else {
-            (
-                crate::command::FALLBACK_INDEX.to_string(),
-                browse_default,
-                RegistryKindChoice::Oci,
-            )
-        };
-    let mut dialog = InitDialog::new(&label, scope_label(scope), index_prefill, oci_prefill, kind);
-    let registry = match crate::tui::init_dialog::run(&mut dialog)? {
-        InitDialogOutcome::Cancelled => return Ok(InitPrompt::Cancelled),
-        InitDialogOutcome::Confirmed { registry } => registry,
-    };
-
-    let init_args = crate::command::init::InitArgs {
-        registry: snapshot_choice(registry),
-    };
-    let (report, _) = crate::command::init::run(ctx, &init_args).await?;
-    let _ = writeln!(io::stderr(), "initialized {}", report.path.display());
-    Ok(InitPrompt::Ready)
+/// Where the TUI creates a project config: the root of the enclosing git
+/// work tree, so a session started in a subdirectory sets up the whole
+/// repository; the working directory when there is none. `home` is never a
+/// candidate — a config there would become the project for every directory
+/// below it, since discovery walks up to `$HOME`.
+fn project_init_dir(cwd: &std::path::Path, home: Option<&std::path::Path>) -> std::path::PathBuf {
+    cwd.ancestors()
+        .take_while(|d| Some(*d) != home)
+        .find(|d| d.join(".git").exists())
+        .unwrap_or(cwd)
+        .to_path_buf()
 }
 
-/// The registry the init dialog's accepted value snapshots into the new
-/// config — `None` for the built-in fallback index, which must stay
-/// floating (`command/init.rs` invariant; issue #28).
-fn snapshot_choice(registry: Option<String>) -> Option<String> {
-    registry.filter(|r| r != crate::command::FALLBACK_INDEX)
-}
-
-/// Resolve the init dialog's pre-fill: the primary **browse** source's
-/// locator. The root `--registry` flag (`ctx.registry_flags()`) wins
-/// outright — and, unlike the fallthrough paths below, is checked before
-/// any scope resolution runs, so this stays a pure, I/O-free lookup when
-/// the flag is set; otherwise the scope's browse set resolves via the same
-/// seam the session browses with ([`crate::command::registries_for_scope`])
-/// and the primary entry's locator is returned — which for an
-/// unconfigured user is the built-in fallback **index**
-/// ([`crate::command::FALLBACK_INDEX`]), not the push-side
-/// [`crate::command::FALLBACK_REGISTRY`] (a GHCR-style OCI entry would
-/// browse empty because `_catalog` is gated).
-///
-/// On scope-resolution failure (no `grimoire.toml` discoverable — the
-/// normal case for this dialog), the global-`[[registries]]`-aware
-/// fallback set ([`crate::command::registries_global_fallback`]) is used so
-/// a `[[registries]]`-only global config is still honored.
+/// The swappable half of a resolved scope, for the TUI's `g` toggle.
 ///
 /// # Errors
 ///
 /// A malformed or invalid global config (exit 78) — see
-/// [`crate::command::global_config_tiers`]. Surfaced before the dialog
-/// opens (like every other pre-session failure here), so raw mode is never
-/// entered and the terminal is never left mangled.
-fn resolve_browse_default(ctx: &Context) -> anyhow::Result<String> {
-    if let Some(r) = ctx.registry_flags().first() {
-        return Ok(r.clone());
-    }
-    let set = match scope_resolution::resolve(ctx, ctx.global(), ctx.config()) {
-        Ok(scope) => crate::command::registries_for_scope(ctx, &scope)?,
-        Err(_) => crate::command::registries_global_fallback(ctx)?,
-    };
-    Ok(set
-        .iter()
-        .find(|r| r.is_default)
-        .or_else(|| set.first())
-        .map(|r| r.url.clone())
-        // resolve_registries never returns an empty set; defensive only.
-        .unwrap_or_else(|| crate::command::FALLBACK_INDEX.to_string()))
+/// [`super::global_config_tiers`].
+fn scope_swap(ctx: &Context, other: scope_resolution::ResolvedScope) -> anyhow::Result<ScopeSwap> {
+    let registries = resolve_registries_for_tui(ctx, &other)?;
+    let primary_registry = crate::config::primary_registry(&registries).to_string();
+    Ok(ScopeSwap {
+        scope: other.scope,
+        workspace: other.workspace.clone(),
+        lock_path: other.lock_path.clone(),
+        state_path: other.state_path.clone(),
+        config_path: other.config_path.clone(),
+        clients_default: other.options.clients.clone(),
+        vendors: other.options.vendors.clone(),
+        clients_selected: selected_clients(&other.workspace, other.scope, &other.options.clients),
+        label: scope_label(other.scope).to_string(),
+        roots: other.roots,
+        resolved_options: other.options.resolved(),
+        registries,
+        primary_registry,
+    })
 }
 
 /// Resolve the ordered registry set for a TUI session, mirroring the
@@ -391,124 +279,12 @@ fn selected_clients(workspace: &std::path::Path, scope: ConfigScope, config_clie
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::options::{GlobalOptions, OutputFormat};
-
-    fn opts() -> GlobalOptions {
-        GlobalOptions {
-            format: OutputFormat::Plain,
-            color: crate::cli::color::ColorMode::Auto,
-            progress: crate::cli::options::ProgressMode::Auto,
-            offline: false,
-            log_level: None,
-            config: None,
-            global: false,
-            registry: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn snapshot_choice_keeps_fallback_index_floating() {
-        // Issue #28: accepting the pre-filled built-in fallback index must
-        // NOT snapshot a [[registries]] entry — it stays implicit, matching
-        // bare `grim init` — while any other accepted value still persists.
-        assert_eq!(snapshot_choice(Some(crate::command::FALLBACK_INDEX.to_string())), None);
-        assert_eq!(
-            snapshot_choice(Some("https://index.example".to_string())),
-            Some("https://index.example".to_string())
-        );
-        assert_eq!(snapshot_choice(None), None);
-    }
-
-    #[test]
-    fn explicit_registry_wins() {
-        // The registry-flag short-circuit runs before any scope resolution,
-        // so a non-hermetic Context is safe here (matches the pre-collapse
-        // test — see `resolve_browse_default`'s doc comment).
-        let mut o = opts();
-        o.registry = vec!["ghcr.io".to_string()];
-        let ctx = Context::new(&o);
-        assert_eq!(resolve_browse_default(&ctx).expect("flag short-circuits"), "ghcr.io");
-    }
-
-    #[test]
-    fn no_registry_anywhere_prefills_builtin_index() {
-        // Hermetic: the developer's $GRIM_DEFAULT_REGISTRY / $GRIM_HOME /
-        // a CWD-discovered project config must not leak in — pin all
-        // three tiers explicitly. Nothing configured ⇒ the built-in
-        // fallback INDEX (the public package index), never the push-side
-        // OCI fallback — a GHCR-style entry would browse empty.
-        let tmp = tempfile::tempdir().unwrap();
-        let cfg = tmp.path().join("grimoire.toml");
-        std::fs::write(&cfg, "[options]\n").unwrap();
-        let ctx = Context::hermetic_scoped(tmp.path().to_path_buf(), false, Some(cfg));
-        assert_eq!(
-            resolve_browse_default(&ctx).expect("valid global config"),
-            crate::command::FALLBACK_INDEX
-        );
-    }
-
-    #[test]
-    fn resolve_browse_default_honors_global_registries_array_when_no_project_config() {
-        // Regression guard: a user with a [[registries]]-only global config
-        // (no [options].default_registry) running `grim tui` from a directory
-        // without a project grimoire.toml must get their declared registry —
-        // not the built-in fallback. The Err branch previously bypassed
-        // [[registries]] entirely, resolving only the legacy scalar
-        // [options].default_registry chain.
-        //
-        // Point the hermetic ctx at a temp dir that has a global config with
-        // [[registries]] but no project grimoire.toml. scope_resolution will
-        // fail (no project config), triggering the Err branch.
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(
-            tmp.path().join("grimoire.toml"),
-            "[[registries]]\nurl = \"global-tui.example\"\ndefault = true\n",
-        )
-        .unwrap();
-        // No --config, no --global: scope_resolution tries to discover a
-        // project config in the CWD. In a hermetic test this may succeed or
-        // fail depending on CWD; pass a missing explicit config path to force
-        // scope resolution to error (no file at that path ⇒ Err branch).
-        let missing_cfg = tmp.path().join("no-such/grimoire.toml");
-        let ctx = Context::hermetic_scoped(tmp.path().to_path_buf(), false, Some(missing_cfg));
-        assert_eq!(
-            resolve_browse_default(&ctx).expect("valid global config"),
-            "global-tui.example"
-        );
-    }
 
     /// A global config whose `[[registries]]` entry carries an uncompilable
     /// `include` glob — one of `test_registries.py`'s `_BROKEN_GLOBAL_CONFIGS`
     /// shapes, rejected by `validate_registries` (exit 78).
     const MALFORMED_GLOBAL_CONFIG: &str =
         "[[registries]]\nalias = \"acme\"\noci = \"ghcr.io/acme\"\ninclude = [\"acme{unclosed\"]\n";
-
-    /// A hermetic ctx whose `$GRIM_HOME` holds [`MALFORMED_GLOBAL_CONFIG`] and
-    /// whose `--config` points at a path that does not exist, so project scope
-    /// resolution fails and the global tier is the only one left to read.
-    fn ctx_with_a_broken_global_config(tmp: &tempfile::TempDir) -> Context {
-        std::fs::write(tmp.path().join("grimoire.toml"), MALFORMED_GLOBAL_CONFIG).unwrap();
-        let missing_cfg = tmp.path().join("no-such/grimoire.toml");
-        Context::hermetic_scoped(tmp.path().to_path_buf(), false, Some(missing_cfg))
-    }
-
-    #[test]
-    fn resolve_browse_default_propagates_a_broken_global_config_t4() {
-        // T-4: every pre-session seam in this file returns `Result` so a
-        // malformed global config exits 78 instead of silently dropping the
-        // user's global registries — and until now nothing asserted the `Err`
-        // side of any of them. The acceptance tier cannot: `run` returns
-        // `ExitCode::Success` the moment stdout is not a TTY, before a byte of
-        // config is read (`test_registries.py`'s test 9 records that).
-        let tmp = tempfile::tempdir().unwrap();
-        let ctx = ctx_with_a_broken_global_config(&tmp);
-        let err = resolve_browse_default(&ctx).expect_err("a malformed global config must surface, not vanish");
-        assert_eq!(
-            crate::error::classify_error(&err),
-            ExitCode::ConfigError,
-            "the init dialog's prefill must fail closed at 78: {err:#}"
-        );
-    }
 
     #[test]
     fn resolve_registries_for_tui_propagates_a_broken_global_config_t4() {
@@ -564,26 +340,35 @@ mod tests {
     }
 
     #[test]
-    fn config_missing_global_checks_grim_home_file() {
+    fn project_init_targets_the_git_root_else_the_working_directory() {
         let tmp = tempfile::tempdir().unwrap();
-        let ctx = Context::hermetic_scoped(tmp.path().to_path_buf(), true, None);
-        assert!(config_missing(&ctx), "absent global config offers init");
+        let home = tmp.path().join("home");
+        let repo = home.join("repo");
+        let nested = repo.join("src/deep");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir(repo.join(".git")).unwrap();
+        assert_eq!(
+            project_init_dir(&nested, Some(&home)),
+            repo,
+            "a subdirectory sets up its repo"
+        );
 
-        std::fs::write(ctx.paths().global_config(), "[skills]\n\n[rules]\n").unwrap();
-        assert!(!config_missing(&ctx), "existing global config skips the prompt");
+        let loose = home.join("notes");
+        std::fs::create_dir_all(&loose).unwrap();
+        assert_eq!(project_init_dir(&loose, Some(&home)), loose, "outside a repo: the cwd");
     }
 
     #[test]
-    fn config_missing_never_fires_for_explicit_config_path() {
-        // An explicit --config path (even a missing one) keeps the normal
-        // hard-error path — init writes only canonical locations.
+    fn project_init_never_targets_home() {
+        // A git repo at $HOME (a dotfiles checkout) must not put the config
+        // there: discovery walks up to $HOME, so it would become the project
+        // for every directory below it.
         let tmp = tempfile::tempdir().unwrap();
-        let ctx = Context::hermetic_scoped(
-            tmp.path().to_path_buf(),
-            false,
-            Some(tmp.path().join("nope/grimoire.toml")),
-        );
-        assert!(!config_missing(&ctx));
+        let home = tmp.path().to_path_buf();
+        let dir = home.join("scratch");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir(home.join(".git")).unwrap();
+        assert_eq!(project_init_dir(&dir, Some(&home)), dir);
     }
 
     #[test]

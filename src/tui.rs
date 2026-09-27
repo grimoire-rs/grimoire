@@ -25,11 +25,8 @@
 //! are layer content rather than annotations, the channels because they are
 //! repository-level and mutable.
 //!
-//! [`init_dialog`] is the missing-config init prompt: a small popup-style
-//! modal session (confirm + registry input) that runs before the main
-//! browser when the scope has no `grimoire.toml` yet. Its state machine
-//! is pure; its runner shares the raw-mode [`terminal_guard`] with
-//! [`app`].
+//! When the session has no project scope, the scope key offers to create
+//! one in place through the same confirm popup the batch actions use.
 
 pub mod app;
 pub mod bundle_member_fetch;
@@ -38,7 +35,6 @@ pub mod companion;
 pub mod companion_fetch;
 pub mod detail;
 pub mod event;
-pub mod init_dialog;
 pub mod install_progress;
 pub mod markdown;
 pub mod render;
