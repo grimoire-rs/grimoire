@@ -1676,7 +1676,7 @@ plugins this run touched.
 | `--zip` | Write `<name>.<client>.zip` instead of a directory |
 | `-o, --output <DIR>` | Directory the plugins are written into (default `.`, created if absent) |
 | `--version <SEMVER>` | Plugin version base — defaults to the declared `version`, then the single ad-hoc reference's version annotation, then `0.0.0`; grim always appends a content-hash suffix |
-| `--description <TEXT>` | Plugin description base — overrides the declared `description` and the single ad-hoc reference's description annotation; longer than 412 characters exits `65` (see [the description cap](#export-plugin-description)) |
+| `--description <TEXT>` | Plugin description base — overrides the declared `description` and the single ad-hoc reference's description annotation; longer than 500 characters exits `65` (see [the description cap](#export-plugin-description)) |
 | `--force` | Replace existing outputs instead of refusing them |
 
 `--client` accepts the same client names as
@@ -1729,7 +1729,7 @@ MCP on install yet still emits it here). Within the Claude family, MCP and
 agent support instead follow the client's own [install-time kind
 support][clients-matrix] — which is why `droid` and `openclaw` drop both,
 while `junie` keeps MCP and drops only agents. An omitted member is never
-an error. It is named in `plugin.json`'s `description` and in the JSON
+an error. It is named in the plugin's `README.md` and in the JSON
 report's `omitted` array. An export whose every member is omitted for a
 given client exits `65` (`EmptyPlugin`) rather than writing an empty
 plugin.
@@ -1829,18 +1829,23 @@ Export-owned failures classify as above. Every other failure — a bad
 reference, a bundle conflict, a stale lock — propagates from the resolver
 or installer with its own existing exit code.
 
-### Description cap {#export-plugin-description}
+### Description and README {#export-plugin-description}
 
-A `plugin.json` `description` is at most 500 characters, counted in UTF-16
-code units. grim builds it from the base text, then the sentence naming
-omitted members, then a fixed 87-character sentence pointing at grim, so
-412 characters remain for the base. A base you wrote — `--description` or a
-declared `description` — that exceeds 412 exits `65`. The base is the one
-part you can edit, so it is refused, never cut. A base taken from a
-reference's description annotation belongs to its publisher, so it is cut
-to fit and ends in `…`, and grim warns on stderr. When a long omitted-member
-sentence would push the text past 500 characters, the base is cut first,
-then that sentence. The pointer sentence always stays whole.
+`plugin.json`'s `description` is the base text alone: `--description`, else
+the declared `description`, else the single ad-hoc reference's description
+annotation. With no base it is grim's pointer sentence, `Packaged by grim
+(https://grimoire.rs); install grim for pinned, updatable installs.`
+
+The description is at most 500 characters, counted in UTF-16 code units.
+A base you wrote that is longer exits `65`: you can shorten it, so grim
+refuses rather than cut it. A publisher's annotation text is cut to fit
+instead, and grim warns on stderr. The cut ends at the last whole sentence
+when that keeps at least half the text, otherwise at a word boundary
+followed by `…`.
+
+Each plugin also carries a generated `README.md`: the plugin name, the
+full uncut base text, the members omitted for that client, and the
+pointer sentence.
 
 Rename, description, and version-annotation rules are covered in full in
 the [`marketplace.toml` reference](./configuration.md#marketplace-toml);

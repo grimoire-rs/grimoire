@@ -19,7 +19,8 @@ use crate::oci::{Algorithm, ArtifactKind};
 /// Hex digits of the member digest hash appended to a plugin version.
 const VERSION_SUFFIX_LEN: usize = 12;
 
-/// The on-ramp sentence ending every plugin description (C-024).
+/// The on-ramp sentence closing every plugin `README.md`, and the
+/// description of a plugin with no base text (C-024).
 pub const ONRAMP: &str = "Packaged by grim (https://grimoire.rs); install grim for pinned, updatable installs.";
 
 /// The `$schema` value of an Agent Plugins `plugin.json` (C-025).
@@ -137,64 +138,73 @@ pub fn description_len(s: &str) -> usize {
     s.encode_utf16().count()
 }
 
-/// Most characters an author-written description base may carry: whatever
-/// [`ONRAMP`] and its separating space leave of [`MAX_DESCRIPTION_LEN`].
-pub fn max_description_base_len() -> usize {
-    MAX_DESCRIPTION_LEN - description_len(ONRAMP) - 1
-}
-
-/// `s` cut to at most `max` units, ending in `…` when cut; empty when not
-/// even the ellipsis fits beside some text.
-fn fit(s: &str, max: usize) -> String {
-    if description_len(s) <= max {
-        return s.to_string();
-    }
-    let mut out = String::new();
+/// `s` cut to at most `max` units: at the last whole sentence when that
+/// keeps half the budget, else at a word boundary ending in `…`. Trailing
+/// separators (`,;:(-`) go with the cut word; a single word longer
+/// than `max` is cut mid-word, the only way it fits.
+fn cut_at_word(s: &str, max: usize) -> String {
+    let mut end = 0;
     let mut used = 1; // the ellipsis
-    for c in s.chars() {
+    for (i, c) in s.char_indices() {
         used += c.len_utf16();
         if used > max {
             break;
         }
-        out.push(c);
+        end = i + c.len_utf8();
     }
-    let kept = out.trim_end();
-    if kept.is_empty() {
-        String::new()
-    } else {
-        format!("{kept}…")
+    let head = &s[..end];
+    // A whole sentence reads better than a cut one: end at the last one when
+    // that keeps at least half the budget.
+    let sentence_end = head
+        .char_indices()
+        .filter(|&(i, c)| matches!(c, '.' | '!' | '?') && s[i + c.len_utf8()..].starts_with(char::is_whitespace))
+        .map(|(i, c)| i + c.len_utf8())
+        .next_back();
+    if let Some(e) = sentence_end.filter(|&e| description_len(&s[..e]) * 2 >= max) {
+        return s[..e].to_string();
+    }
+    let at_boundary = s[end..].starts_with(char::is_whitespace);
+    let head = match head.rfind(char::is_whitespace) {
+        Some(space) if !at_boundary => &head[..space],
+        _ => head,
+    };
+    let head = head.trim_end_matches(|c: char| c.is_whitespace() || ",;:(-".contains(c));
+    format!("{head}…")
+}
+
+/// The plugin description (C-024): the trimmed base alone, cut to
+/// [`MAX_DESCRIPTION_LEN`] (see [`cut_at_word`]); [`ONRAMP`] when there is no base.
+/// Omissions and the on-ramp live in the plugin's `README.md`
+/// ([`plugin_readme`]), never here. The flag is true when the base was cut.
+pub fn plugin_description(base: Option<&str>) -> (String, bool) {
+    match base.map(str::trim).filter(|b| !b.is_empty()) {
+        None => (ONRAMP.to_string(), false),
+        Some(b) if description_len(b) <= MAX_DESCRIPTION_LEN => (b.to_string(), false),
+        Some(b) => (cut_at_word(b, MAX_DESCRIPTION_LEN), true),
     }
 }
 
-/// The plugin description (C-024): `base`, the omission sentence, then
-/// [`ONRAMP`], space-joined, never longer than [`MAX_DESCRIPTION_LEN`].
-/// The on-ramp is kept whole; the base is cut first, then the omission
-/// sentence, each ending in `…` when cut. `omitted` is `(kind, emitted
-/// name)`, already sorted by the caller in C-016 order. The flag is true
-/// when anything was cut.
-pub fn plugin_description(base: Option<&str>, omitted: &[(ArtifactKind, String)]) -> (String, bool) {
-    let mut tail: Vec<String> = Vec::new();
-    let mut cut = false;
+/// The plugin root's `README.md` (C-024): the name, the full uncut base,
+/// the members omitted for `client`, then [`ONRAMP`]. `omitted` is `(kind,
+/// emitted name)` in C-016 order.
+pub fn plugin_readme(
+    name: &str,
+    client: ClientTarget,
+    base: Option<&str>,
+    omitted: &[(ArtifactKind, String)],
+) -> Vec<u8> {
+    let mut parts = vec![format!("# {name}")];
+    if let Some(base) = base.map(str::trim).filter(|b| !b.is_empty()) {
+        parts.push(base.to_string());
+    }
     if !omitted.is_empty() {
         let list: Vec<String> = omitted.iter().map(|(kind, name)| format!("{kind} {name}")).collect();
-        let sentence = format!("Omitted for this client: {}.", list.join(", "));
-        let fitted = fit(&sentence, max_description_base_len());
-        cut |= fitted != sentence;
-        tail.push(fitted);
+        parts.push(format!("Omitted for {client}: {}.", list.join(", ")));
     }
-    tail.push(ONRAMP.to_string());
-    let tail = tail.join(" ");
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(base) = base.map(str::trim).filter(|b| !b.is_empty()) {
-        let room = MAX_DESCRIPTION_LEN.saturating_sub(description_len(&tail) + 1);
-        let fitted = fit(base, room);
-        cut |= fitted != base;
-        if !fitted.is_empty() {
-            parts.push(fitted);
-        }
-    }
-    parts.push(tail);
-    (parts.join(" "), cut)
+    parts.push(ONRAMP.to_string());
+    let mut text = parts.join("\n\n");
+    text.push('\n');
+    text.into_bytes()
 }
 
 /// Bytes of `.claude-plugin/plugin.json` (C-025): pretty JSON plus one `\n`.
@@ -477,7 +487,7 @@ mod tests {
         }
     }
 
-    // ── C-024 description ──
+    // ── C-024 description and README ──
 
     #[test]
     fn c024_onramp_exact_bytes() {
@@ -488,85 +498,94 @@ mod tests {
     }
 
     #[test]
-    fn c024_description_without_base_or_omissions_is_onramp_only() {
+    fn c024_description_is_the_trimmed_base_alone() {
         assert_eq!(
-            plugin_description(None, &[]).0,
-            "Packaged by grim (https://grimoire.rs); install grim for pinned, updatable installs."
+            plugin_description(Some("  Team tools\n")),
+            ("Team tools".to_string(), false)
         );
     }
 
     #[test]
-    fn c024_base_is_trimmed_and_blank_base_dropped() {
-        assert_eq!(
-            plugin_description(Some("  Team tools\n"), &[]).0,
-            "Team tools Packaged by grim (https://grimoire.rs); install grim for pinned, updatable installs."
-        );
-        for blank in ["", "   ", "\n\t "] {
-            assert_eq!(plugin_description(Some(blank), &[]).0, ONRAMP, "{blank:?}");
+    fn c024_no_or_blank_base_falls_back_to_onramp() {
+        for base in [None, Some(""), Some("   "), Some("\n\t ")] {
+            assert_eq!(plugin_description(base), (ONRAMP.to_string(), false), "{base:?}");
         }
     }
 
     #[test]
-    fn c024_omissions_sentence_between_base_and_onramp() {
-        let omitted = [
-            (ArtifactKind::Agent, "reviewer".to_string()),
-            (ArtifactKind::Mcp, "srv".to_string()),
-        ];
-        assert_eq!(
-            plugin_description(Some("Team tools"), &omitted).0,
-            "Team tools Omitted for this client: agent reviewer, mcp srv. \
-             Packaged by grim (https://grimoire.rs); install grim for pinned, updatable installs."
-        );
-        assert_eq!(
-            plugin_description(Some(" "), &omitted[..1]).0,
-            "Omitted for this client: agent reviewer. \
-             Packaged by grim (https://grimoire.rs); install grim for pinned, updatable installs."
-        );
+    fn c024_base_at_the_cap_is_uncut() {
+        let base = "b".repeat(MAX_DESCRIPTION_LEN);
+        assert_eq!(plugin_description(Some(&base)), (base, false));
     }
 
     #[test]
-    fn c024_description_fitting_the_cap_is_uncut() {
-        let base = "b".repeat(max_description_base_len());
-        let (desc, cut) = plugin_description(Some(&base), &[]);
-        assert!(!cut);
-        assert_eq!(description_len(&desc), MAX_DESCRIPTION_LEN);
-        assert_eq!(desc, format!("{base} {ONRAMP}"));
-    }
-
-    #[test]
-    fn c024_long_base_is_cut_with_ellipsis_onramp_kept_whole() {
-        let omitted = [(ArtifactKind::Rule, "r".to_string())];
-        let base = "word ".repeat(200);
-        let (desc, cut) = plugin_description(Some(&base), &omitted);
+    fn c024_long_base_is_cut_at_a_word_boundary() {
+        let base = format!("{}per-language migration order.", "word ".repeat(96));
+        let (desc, cut) = plugin_description(Some(&base));
         assert!(cut);
         assert!(description_len(&desc) <= MAX_DESCRIPTION_LEN);
-        assert!(desc.starts_with("word word"), "{desc}");
+        assert!(desc.ends_with("word per-language…"), "{desc}");
+        let kept = desc.trim_end_matches('…');
+        assert!(base.starts_with(kept), "a prefix of the base: {desc}");
         assert!(
-            desc.ends_with(&format!("… Omitted for this client: rule r. {ONRAMP}")),
-            "{desc}"
+            base[kept.len()..].starts_with(char::is_whitespace),
+            "cut at whitespace: {desc}"
         );
-        assert!(!desc.contains(" …"), "no blank before the ellipsis: {desc}");
+    }
+
+    #[test]
+    fn c024_cut_drops_trailing_separators() {
+        let base = format!("{}, and more", "x".repeat(MAX_DESCRIPTION_LEN - 3));
+        let (desc, _) = plugin_description(Some(&base));
+        assert_eq!(desc, format!("{}…", "x".repeat(MAX_DESCRIPTION_LEN - 3)));
+    }
+
+    #[test]
+    fn c024_single_overlong_word_is_cut_mid_word() {
+        let (desc, cut) = plugin_description(Some(&"y".repeat(600)));
+        assert!(cut);
+        assert_eq!(desc, format!("{}…", "y".repeat(MAX_DESCRIPTION_LEN - 1)));
     }
 
     #[test]
     fn c024_cut_counts_utf16_units_and_never_splits_a_char() {
         // 🦀 is two UTF-16 units: the budget is spent in units, not chars.
-        let base = "🦀".repeat(400);
-        let (desc, cut) = plugin_description(Some(&base), &[]);
+        let (desc, cut) = plugin_description(Some(&"🦀 ".repeat(200)));
         assert!(cut);
         assert!(description_len(&desc) <= MAX_DESCRIPTION_LEN);
-        assert!(desc.starts_with('🦀') && desc.contains("🦀… Packaged"), "{desc}");
+        assert!(desc.ends_with("🦀…"), "{desc}");
     }
 
     #[test]
-    fn c024_huge_omission_list_drops_base_and_cuts_sentence() {
-        let omitted: Vec<(ArtifactKind, String)> =
-            (0..100).map(|i| (ArtifactKind::Rule, format!("rule-{i:03}"))).collect();
-        let (desc, cut) = plugin_description(Some("Team tools"), &omitted);
+    fn c024_cut_prefers_the_last_whole_sentence() {
+        let base = "Short one. ".repeat(60);
+        let (desc, cut) = plugin_description(Some(&base));
         assert!(cut);
+        assert!(desc.ends_with("Short one."), "{desc}");
         assert!(description_len(&desc) <= MAX_DESCRIPTION_LEN);
-        assert!(desc.starts_with("Omitted for this client: rule rule-000"), "{desc}");
-        assert!(desc.ends_with(&format!("… {ONRAMP}")), "{desc}");
+        assert!(description_len(&desc) * 2 >= MAX_DESCRIPTION_LEN);
+    }
+
+    #[test]
+    fn c024_early_sentence_end_is_not_worth_the_loss() {
+        let base = format!("Intro. {}", "word ".repeat(150));
+        let (desc, _) = plugin_description(Some(&base));
+        assert!(desc.ends_with("word…"), "{desc}");
+    }
+
+    #[test]
+    fn c024_readme_carries_base_omissions_and_onramp() {
+        let omitted = [
+            (ArtifactKind::Rule, "style".to_string()),
+            (ArtifactKind::Agent, "reviewer".to_string()),
+        ];
+        let readme = plugin_readme("team", ClientTarget::Codex, Some(" Team tools "), &omitted);
+        assert_eq!(
+            String::from_utf8(readme).unwrap(),
+            format!("# team\n\nTeam tools\n\nOmitted for codex: rule style, agent reviewer.\n\n{ONRAMP}\n")
+        );
+        let bare = plugin_readme("team", ClientTarget::Claude, None, &[]);
+        assert_eq!(String::from_utf8(bare).unwrap(), format!("# team\n\n{ONRAMP}\n"));
     }
 
     // ── C-025 plugin.json emitters ──

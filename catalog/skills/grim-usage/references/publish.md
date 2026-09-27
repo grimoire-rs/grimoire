@@ -541,9 +541,10 @@ A `--plugin`/`--marketplace` declared export re-resolves from a
 file from `grimoire.lock`, never mixed with it. This is a rendering step,
 not a release: it carries no version-cascade, no announce, and no
 skip-existing semantics of its own. The rendered `plugin.json`
-description is capped at 500 characters: a `--description` or declared
-`description` over 412 exits 65, while a publisher's annotation text is
-cut to fit. Confirm the current flag set with
+description is the base text alone, capped at 500 characters: a
+`--description` or declared `description` over 500 exits 65, while a
+publisher's annotation text is cut to fit. Omitted members are listed in
+the plugin's generated `README.md`. Confirm the current flag set with
 `grim export plugin --help`, and see the full walkthrough in [Hand a team
 a plugin without grim][team-plugin] and the [command
 reference][commands-export].

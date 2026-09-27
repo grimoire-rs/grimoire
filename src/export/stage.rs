@@ -320,9 +320,9 @@ pub(crate) async fn pinned_annotations(
 /// `version_flag` → `decl.version` → `annotation_version` (C-023), and the
 /// description base `description_flag` → `decl.description` →
 /// `annotation_description` (C-024). `decl` is `None` ad-hoc. An
-/// author-written base (flag or declared) must fit beside the on-ramp; a
-/// publisher's annotation is cut to fit instead, since the exporter cannot
-/// edit it.
+/// author-written base (flag or declared) must fit
+/// `family::MAX_DESCRIPTION_LEN`; a publisher's annotation is cut to fit
+/// at render instead, since the exporter cannot edit it.
 ///
 /// # Errors
 ///
@@ -340,7 +340,7 @@ pub(crate) fn plugin_input(
         .map(str::to_string)
         .or_else(|| decl.and_then(|d| d.description.clone()));
     if let Some(text) = &authored {
-        let (len, max) = (family::description_len(text.trim()), family::max_description_base_len());
+        let (len, max) = (family::description_len(text.trim()), family::MAX_DESCRIPTION_LEN);
         if len > max {
             return Err(ExportError::DescriptionTooLong {
                 plugin: name.to_string(),
@@ -378,8 +378,8 @@ pub(crate) struct PluginInput {
     pub members: Vec<(LockedArtifact, String)>,
     /// C-023 version, computed over all members (client-independent).
     pub version: String,
-    /// C-024 base description (declared or annotation); omissions and the
-    /// on-ramp are added per client.
+    /// C-024 base description (flag, declared or annotation); the per-client
+    /// omissions and the on-ramp go to `README.md`.
     pub description_base: Option<String>,
     /// `(old, new)` for every member whose name changed; empty skips the
     /// C-022 scan.
@@ -500,17 +500,21 @@ async fn export_staged(
         }
         stale_scan(plugin, &rendered)?;
 
+        let base = plugin.description_base.as_deref();
+        let (description, cut) = family::plugin_description(base);
+        if cut {
+            tracing::warn!(
+                "plugin '{}': description cut to {} characters; README.md keeps it whole",
+                plugin.name,
+                family::MAX_DESCRIPTION_LEN
+            );
+        }
         for (client, fam, root, r) in rendered {
             let omitted: Vec<(ArtifactKind, String)> = r.omitted.iter().map(|o| (o.kind, o.name.clone())).collect();
-            let (description, cut) = family::plugin_description(plugin.description_base.as_deref(), &omitted);
-            if cut {
-                tracing::warn!(
-                    "plugin '{}': description cut to {} characters for client '{client}'",
-                    plugin.name,
-                    family::MAX_DESCRIPTION_LEN
-                );
-            }
             write_manifest(&root, fam, &plugin.name, &plugin.version, &description)?;
+            let readme = contained(&root, Path::new("README.md"))?;
+            std::fs::write(&readme, family::plugin_readme(&plugin.name, client, base, &omitted))
+                .map_err(|e| io_error(&readme, e))?;
             let final_path = final_path(req.output_dir, &plugin.name, client, req.zip);
             let (staged_path, format) = if req.zip {
                 let zip = root.with_extension(format!("{client}.zip"));
@@ -2221,7 +2225,7 @@ mod tests {
     #[test]
     fn c024_authored_description_too_long_is_65_annotation_is_not() {
         let members = vec![registry_member("plan", ArtifactKind::Skill, sha('a'))];
-        let max = family::max_description_base_len();
+        let max = family::MAX_DESCRIPTION_LEN;
         let long = "x".repeat(max + 1);
         let fits = format!("  {}  ", "x".repeat(max));
         let too_long = |r: Result<PluginInput, ExportError>| {
@@ -2445,21 +2449,13 @@ mod tests {
         let claude_root = dir.join("team.claude");
         assert_eq!(
             std::fs::read(claude_root.join(".claude-plugin/plugin.json")).unwrap(),
-            family::claude_plugin_json(
-                "team",
-                &plugins[0].version,
-                &family::plugin_description(Some("Base"), &[]).0
-            )
+            family::claude_plugin_json("team", &plugins[0].version, &family::plugin_description(Some("Base")).0)
         );
         assert!(claude_root.join(".mcp.json").is_file());
         let codex_root = dir.join("team.codex");
         assert_eq!(
             std::fs::read(codex_root.join("plugin.json")).unwrap(),
-            family::agent_plugins_plugin_json(
-                "team",
-                &plugins[0].version,
-                &family::plugin_description(Some("Base"), &[]).0
-            )
+            family::agent_plugins_plugin_json("team", &plugins[0].version, &family::plugin_description(Some("Base")).0)
         );
         assert!(codex_root.join("mcp.json").is_file());
     }
