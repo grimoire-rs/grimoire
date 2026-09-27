@@ -1700,6 +1700,16 @@ A client outside both families, or a client with no plugin surface at all
 back to the config `clients` option and then to the generic `agents`
 client, which always resolves to Agent Plugins.
 
+The family fixes the manifest shape, but each member is still rendered
+through the named client's own [`grim install`](#install) path. A plugin
+for `claude` therefore gets the same file bytes an install for `claude`
+would, including any vendor-specific rendering such as `claude.*` metadata
+lifted to native keys. Name the client the plugin is for. Today `copilot`,
+`codex`, `cursor`, and `agents` render the same bytes, so `--client agents`
+gives one plugin all four can load. Only the output name and the README's
+omitted-members line differ. Claude-family clients differ from each other
+in what they admit (table below).
+
 ### What each client admits {#export-plugin-admission}
 
 Not every member kind survives every client, the same faithfulness rule
