@@ -224,7 +224,7 @@ impl Vendor for ClaudeVendor {
             // (or its `$CLAUDE_CONFIG_DIR` override) being present marks
             // Claude as a configured client on this machine.
             ConfigScope::Global => {
-                global_root(env_dir("CLAUDE_CONFIG_DIR"), home_dir()).is_some_and(|p| p.exists()) || mcp_present
+                global_root(config_dir_override(), home_dir()).is_some_and(|p| p.exists()) || mcp_present
             }
         }
     }
@@ -249,9 +249,7 @@ impl Vendor for ClaudeVendor {
             // SIBLING of the `~/.claude` root (inside `$CLAUDE_CONFIG_DIR`
             // when set, which relocates every Claude path). `None` without
             // a resolvable home: never a CWD-relative fallback.
-            ConfigScope::Global => {
-                Some(user_config_dir(env_dir("CLAUDE_CONFIG_DIR"), home_dir())?.join(".claude.json"))
-            }
+            ConfigScope::Global => Some(user_config_dir(config_dir_override(), home_dir())?.join(".claude.json")),
         }
     }
 
@@ -364,7 +362,7 @@ pub(crate) fn scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
     match scope {
         ConfigScope::Project => workspace.join(".claude"),
         ConfigScope::Global => {
-            global_root(env_dir("CLAUDE_CONFIG_DIR"), home_dir()).unwrap_or_else(|| workspace.join(".claude"))
+            global_root(config_dir_override(), home_dir()).unwrap_or_else(|| workspace.join(".claude"))
         }
     }
 }
@@ -404,10 +402,214 @@ pub(crate) fn user_config_dir(config_dir_override: Option<PathBuf>, home: Option
     config_dir_override.or(home)
 }
 
+/// The `CLAUDE_CONFIG_DIR` Claude Code itself runs with: the value every
+/// global Claude path resolves against. Feed it to [`global_root`] and
+/// [`user_config_dir`] in place of the raw shell variable.
+///
+/// Resolved once per process: every Claude path in one run agrees on one root,
+/// and the settings files are read once rather than per path. The inputs are
+/// process-lifetime anyway — the environment cannot change under grim
+/// (`set_var` is `unsafe`, and this crate forbids it).
+pub(crate) fn config_dir_override() -> Option<PathBuf> {
+    static RESOLVED: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    RESOLVED
+        .get_or_init(|| config_dir_from(env_dir("CLAUDE_CONFIG_DIR"), home_dir(), &managed_settings_dir()))
+        .clone()
+}
+
+/// [`config_dir_override`] with every input injected, so tests never read
+/// the system managed-settings directory.
+///
+/// Claude writes each settings `env` entry into its process environment,
+/// replacing the value inherited from the shell
+/// (code.claude.com/docs/en/env-vars, "Precedence"), and managed settings
+/// outrank user settings. Project and local settings cannot set this variable
+/// (Claude ≥ 2.1.251), so they are never read. Order, highest first:
+///
+/// 1. managed `env` — `managed-settings.json`, then `managed-settings.d/*.json`
+///    in name order, a later file replacing an earlier value;
+/// 2. user `env` — `settings.json` in the root the shell value alone resolves
+///    (`$CLAUDE_CONFIG_DIR` else `~/.claude`), which is where Claude keeps it;
+/// 3. the shell value.
+///
+/// MDM, registry and server-managed policy are not files grim can read.
+pub(crate) fn config_dir_from(shell: Option<PathBuf>, home: Option<PathBuf>, managed_dir: &Path) -> Option<PathBuf> {
+    let managed = managed_setting_files(managed_dir)
+        .iter()
+        .rev()
+        .find_map(|f| settings_env_config_dir(f));
+    managed
+        .or_else(|| {
+            global_root(shell.clone(), home).and_then(|root| settings_env_config_dir(&root.join("settings.json")))
+        })
+        .or(shell)
+}
+
+/// Claude Code's system managed-settings directory
+/// (code.claude.com/docs/en/managed-settings, "Where each mechanism stores
+/// the policy").
+fn managed_settings_dir() -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(r"C:\Program Files\ClaudeCode")
+    } else if cfg!(target_os = "macos") {
+        PathBuf::from("/Library/Application Support/ClaudeCode")
+    } else {
+        PathBuf::from("/etc/claude-code")
+    }
+}
+
+/// `managed-settings.json`, then every non-hidden `*.json` drop-in under
+/// `managed-settings.d/`, in the order Claude merges them.
+fn managed_setting_files(dir: &Path) -> Vec<PathBuf> {
+    let mut drop_ins: Vec<PathBuf> = std::fs::read_dir(dir.join("managed-settings.d"))
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.extension().is_some_and(|x| x == "json")
+                && p.file_name().is_some_and(|n| !n.to_string_lossy().starts_with('.'))
+        })
+        .collect();
+    drop_ins.sort();
+    std::iter::once(dir.join("managed-settings.json"))
+        .chain(drop_ins)
+        .collect()
+}
+
+/// `env.CLAUDE_CONFIG_DIR` from one settings file. The file is the user's or
+/// an admin's, so its value is untrusted input: a missing or unreadable file,
+/// invalid JSON, a non-string value, or anything but an absolute path free of
+/// `..` drops the layer (debug log) and never fails the command. Nothing is
+/// expanded — not `~`, not `$VAR`.
+fn settings_env_config_dir(file: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(file).ok()?;
+    let doc: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(doc) => doc,
+        Err(e) => {
+            tracing::debug!(file = %file.display(), "ignoring unparseable Claude settings file: {e}");
+            return None;
+        }
+    };
+    let value = doc.get("env")?.get("CLAUDE_CONFIG_DIR")?;
+    let path = value.as_str().filter(|s| !s.is_empty()).map(PathBuf::from);
+    match path {
+        Some(p) if p.is_absolute() && !p.components().any(|c| c == std::path::Component::ParentDir) => Some(p),
+        _ => {
+            tracing::debug!(file = %file.display(), "ignoring env.CLAUDE_CONFIG_DIR: not an absolute path without `..`");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// `(managed dir, home)` in a fresh temp tree, neither touching a system path.
+    fn settings_env_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let managed = tmp.path().join("managed");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&managed).unwrap();
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        (tmp, managed, home)
+    }
+
+    fn write_env(file: &Path, value: &serde_json::Value) {
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(
+            file,
+            serde_json::json!({ "env": { "CLAUDE_CONFIG_DIR": value } }).to_string(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn config_dir_precedence_is_managed_then_user_then_shell() {
+        let (tmp, managed, home) = settings_env_fixture();
+        // Absolute in the host's own spelling, so the Windows run sees one too.
+        let abs = |tail: &str| tmp.path().join(tail);
+        let shell = Some(abs("shell"));
+        assert_eq!(
+            config_dir_from(None, Some(home.clone()), &managed),
+            None,
+            "nothing set anywhere"
+        );
+        assert_eq!(config_dir_from(shell.clone(), Some(home.clone()), &managed), shell);
+
+        write_env(&home.join(".claude/settings.json"), &serde_json::json!(abs("user")));
+        assert_eq!(
+            config_dir_from(None, Some(home.clone()), &managed),
+            Some(abs("user")),
+            "user settings env relocates the root"
+        );
+        // The shell value decides WHERE the user settings file is, and the
+        // settings value then replaces it (env-vars "Precedence").
+        write_env(
+            &abs("shell").join("settings.json"),
+            &serde_json::json!(abs("from-shell-root")),
+        );
+        assert_eq!(
+            config_dir_from(shell.clone(), Some(home.clone()), &managed),
+            Some(abs("from-shell-root")),
+            "a settings env value beats the inherited shell value"
+        );
+
+        write_env(
+            &managed.join("managed-settings.json"),
+            &serde_json::json!(abs("managed")),
+        );
+        assert_eq!(
+            config_dir_from(shell, Some(home.clone()), &managed),
+            Some(abs("managed"))
+        );
+
+        // Drop-ins merge after the base file, in name order; the last wins.
+        write_env(
+            &managed.join("managed-settings.d/20-b.json"),
+            &serde_json::json!(abs("b")),
+        );
+        write_env(
+            &managed.join("managed-settings.d/10-a.json"),
+            &serde_json::json!(abs("a")),
+        );
+        write_env(
+            &managed.join("managed-settings.d/.30-hidden.json"),
+            &serde_json::json!(abs("hidden")),
+        );
+        write_env(
+            &managed.join("managed-settings.d/40-c.txt"),
+            &serde_json::json!(abs("txt")),
+        );
+        assert_eq!(config_dir_from(None, Some(home), &managed), Some(abs("b")));
+    }
+
+    #[test]
+    fn untrusted_settings_values_are_ignored_never_fatal() {
+        let (tmp, managed, home) = settings_env_fixture();
+        let abs = |tail: &str| tmp.path().join(tail);
+        let settings = home.join(".claude/settings.json");
+        for bad in [
+            serde_json::json!("relative/dir"),
+            serde_json::json!("~/claude"),
+            serde_json::json!(""),
+            serde_json::json!(42),
+            serde_json::json!(null),
+            serde_json::json!(abs("x").join("..").join("y")),
+        ] {
+            write_env(&settings, &bad);
+            assert_eq!(config_dir_from(None, Some(home.clone()), &managed), None, "{bad}");
+        }
+        std::fs::write(&settings, "{ not json").unwrap();
+        assert_eq!(config_dir_from(None, Some(home.clone()), &managed), None);
+        std::fs::write(&settings, r#"{"env": "flat"}"#).unwrap();
+        assert_eq!(config_dir_from(None, Some(home.clone()), &managed), None);
+        // A broken managed layer falls through to the next one.
+        std::fs::write(managed.join("managed-settings.json"), "[").unwrap();
+        write_env(&settings, &serde_json::json!(abs("user")));
+        assert_eq!(config_dir_from(None, Some(home), &managed), Some(abs("user")));
+    }
 
     #[test]
     fn global_root_resolution_order() {
@@ -616,15 +818,9 @@ mod tests {
             ClaudeVendor.agent_path(w, ConfigScope::Project, "rev"),
             PathBuf::from("/w/.claude/agents/rev.md")
         );
-        if let Some(home) = home_dir() {
-            // No CLAUDE_CONFIG_DIR manipulation here (env is process-global);
-            // the override order is covered by `global_root_resolution_order`.
-            if env_dir("CLAUDE_CONFIG_DIR").is_none() {
-                assert_eq!(
-                    ClaudeVendor.agent_path(w, ConfigScope::Global, "rev"),
-                    home.join(".claude/agents/rev.md")
-                );
-            }
-        }
+        // The global arm resolves the ambient `CLAUDE_CONFIG_DIR`, which a
+        // host's managed settings can set, so it is not asserted here: the
+        // resolution order is covered hermetically by
+        // `global_root_resolution_order` and `config_dir_from`'s tests.
     }
 }

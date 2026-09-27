@@ -62,8 +62,8 @@ impl std::fmt::Display for McpTransport {
 }
 
 /// The `[server.oauth]` block: OAuth client configuration for a remote
-/// server (Claude-native projection; other vendors decline descriptors
-/// that carry it).
+/// server. Claude maps every field; other vendors project it only when
+/// they map every field it sets (`McpOAuth::unmapped`).
 ///
 /// `client_secret` is deliberately absent: a secret has no safe home in a
 /// published artifact (the same principle behind `${VAR}` env references —
@@ -85,6 +85,40 @@ pub struct McpOAuth {
     /// Authorization-server metadata URL (RFC 8414); https-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_server_metadata_url: Option<String>,
+}
+
+/// One [`McpOAuth`] field, as a vendor's oauth projection declares it can
+/// map it natively (`adr_mcp_oauth_projection.md`, lossless-or-skip).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OAuthField {
+    ClientId,
+    Scopes,
+    CallbackPort,
+    AuthServerMetadataUrl,
+}
+
+impl McpOAuth {
+    /// The descriptor field names this block sets that `supported` does not
+    /// cover, in declaration order. Empty ⇒ the vendor can project the block
+    /// losslessly; otherwise it must skip the server and name these fields —
+    /// dropping a scope or a metadata URL on an auth surface can widen what
+    /// the client is granted.
+    pub fn unmapped(&self, supported: &[OAuthField]) -> Vec<&'static str> {
+        [
+            (OAuthField::ClientId, "client_id", self.client_id.is_some()),
+            (OAuthField::Scopes, "scopes", !self.scopes.is_empty()),
+            (OAuthField::CallbackPort, "callback_port", self.callback_port.is_some()),
+            (
+                OAuthField::AuthServerMetadataUrl,
+                "auth_server_metadata_url",
+                self.auth_server_metadata_url.is_some(),
+            ),
+        ]
+        .into_iter()
+        .filter(|(field, _, set)| *set && !supported.contains(field))
+        .map(|(_, name, _)| name)
+        .collect()
+    }
 }
 
 /// The `[server]` table: how clients launch or reach the server.
@@ -429,6 +463,51 @@ pub fn env_ref_names(value: &str) -> impl Iterator<Item = &str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oauth_unmapped_names_set_fields_outside_the_supported_set() {
+        use OAuthField::*;
+        let full = McpOAuth {
+            client_id: Some("${CID}".into()),
+            scopes: vec!["read".into()],
+            callback_port: Some(8080),
+            auth_server_metadata_url: Some("https://auth.example/.well-known".into()),
+        };
+        let only_client = McpOAuth {
+            client_id: Some("id".into()),
+            scopes: Vec::new(),
+            callback_port: None,
+            auth_server_metadata_url: None,
+        };
+        let empty = McpOAuth {
+            client_id: None,
+            scopes: Vec::new(),
+            callback_port: None,
+            auth_server_metadata_url: None,
+        };
+        let all_names = vec!["client_id", "scopes", "callback_port", "auth_server_metadata_url"];
+        let cases: [(&McpOAuth, &[OAuthField], Vec<&str>); 7] = [
+            // Claude: everything maps.
+            (&full, &[ClientId, Scopes, CallbackPort, AuthServerMetadataUrl], vec![]),
+            // Nothing supported: every set field, declaration order.
+            (&full, &[], all_names.clone()),
+            // OpenCode: metadata URL is the only gap.
+            (
+                &full,
+                &[ClientId, Scopes, CallbackPort],
+                vec!["auth_server_metadata_url"],
+            ),
+            // Copilot / Zed / Droid: client id only.
+            (&full, &[ClientId], all_names[1..].to_vec()),
+            (&only_client, &[ClientId], vec![]),
+            // An unset field is never unmapped, supported or not.
+            (&only_client, &[], vec!["client_id"]),
+            (&empty, &[], vec![]),
+        ];
+        for (oauth, supported, want) in cases {
+            assert_eq!(oauth.unmapped(supported), want, "{oauth:?} with {supported:?}");
+        }
+    }
 
     const STDIO: &str = r#"
 description = "Grimoire catalog over MCP."

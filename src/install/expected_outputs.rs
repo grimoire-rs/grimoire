@@ -25,10 +25,11 @@ use std::path::PathBuf;
 
 use crate::install::client_target::ClientTarget;
 use crate::install::install_state::{ClientOutput, InstallRecord};
-use crate::install::installer::client_supports_kind;
+use crate::install::installer::client_hosts;
 use crate::install::path_anchor::AnchorRoots;
 use crate::install::target::InstallTarget;
 use crate::oci::ArtifactKind;
+use crate::oci::mcp::McpDescriptor;
 
 /// The clients a pass over `kind` would produce output for: the target
 /// selection minus those whose vendor declines the kind at this scope.
@@ -37,12 +38,12 @@ use crate::oci::ArtifactKind;
 /// the installer drops it before any write — so it must never count as
 /// missing coverage or as pending drift. Reporting it would name drift that
 /// no `install`, `--force` or `update` could ever clear.
-pub fn expected_clients(kind: ArtifactKind, target: &InstallTarget) -> Vec<ClientTarget> {
+pub fn expected_clients(kind: ArtifactKind, name: &str, target: &InstallTarget) -> Vec<ClientTarget> {
     target
         .clients()
         .iter()
         .copied()
-        .filter(|c| client_supports_kind(*c, kind, target.workspace(), target.scope()))
+        .filter(|c| client_hosts(*c, kind, name, target.workspace(), target.scope()))
         .collect()
 }
 
@@ -67,20 +68,121 @@ pub fn expected_clients(kind: ArtifactKind, target: &InstallTarget) -> Vec<Clien
 /// file that they are missing an install. A recorded output whose file was
 /// *deleted* is likewise absent: nothing here touches the filesystem, and that
 /// state surfaces as `state: missing` instead.
+///
+/// `mcp` is the artifact's MCP descriptor when the caller has it. A surface
+/// the vendor cannot write THIS descriptor to (`mcp_entry_for` is `None`) is
+/// skipped by every install, so it is never pending; without the descriptor
+/// only the vendor's surface list is known and every surface counts.
 pub fn pending_outputs(
     record: Option<&InstallRecord>,
     kind: ArtifactKind,
     name: &str,
     target: &InstallTarget,
     roots: &AnchorRoots,
+    mcp: Option<&McpDescriptor>,
 ) -> Vec<(ClientTarget, PathBuf)> {
-    let mut pending: Vec<(ClientTarget, PathBuf)> = expected_clients(kind, target)
+    let mut pending: Vec<(ClientTarget, PathBuf)> = expected_clients(kind, name, target)
         .into_iter()
-        .filter(|client| !is_covered(record, *client, target, roots))
-        .map(|client| (client, target.path_for(client, kind, name)))
+        .flat_map(|client| pending_for_client(record, client, kind, name, target, roots, mcp))
         .collect();
+    // Stable: a client's several MCP surfaces keep the vendor's order.
     pending.sort_by_key(|(client, _)| client.as_str());
     pending
+}
+
+fn pending_for_client(
+    record: Option<&InstallRecord>,
+    client: ClientTarget,
+    kind: ArtifactKind,
+    name: &str,
+    target: &InstallTarget,
+    roots: &AnchorRoots,
+    mcp: Option<&McpDescriptor>,
+) -> Vec<(ClientTarget, PathBuf)> {
+    if kind == ArtifactKind::Mcp {
+        let surfaces = writable_mcp_surfaces(client, name, target, roots, mcp);
+        // One recorded entry must not cover a sibling surface, or a surface
+        // added in a later release would never heal. A single surface keeps
+        // the client-level rule below: its file may be repointed by a vendor
+        // variable, and an entry output is exempt from layout moves.
+        match surfaces.len() {
+            0 => return Vec::new(),
+            1 => {}
+            _ => {
+                return uncovered_mcp_surfaces(record, client, surfaces, target, roots)
+                    .into_iter()
+                    .map(|path| (client, path))
+                    .collect();
+            }
+        }
+    }
+    if is_covered(record, client, target, roots) {
+        Vec::new()
+    } else {
+        vec![(client, target.path_for(client, kind, name))]
+    }
+}
+
+/// The MCP config files an install would actually write for `client`: the
+/// vendor's surfaces minus the ones the install skips with a warning — an
+/// unanchorable path, or (with the descriptor in hand) one the vendor cannot
+/// represent it in. Reporting either as pending would be drift no install
+/// could clear.
+fn writable_mcp_surfaces(
+    client: ClientTarget,
+    name: &str,
+    target: &InstallTarget,
+    roots: &AnchorRoots,
+    mcp: Option<&McpDescriptor>,
+) -> Vec<PathBuf> {
+    let vendor = client.vendor();
+    vendor
+        .mcp_config_paths(target.workspace(), target.scope())
+        .into_iter()
+        .filter(|path| {
+            crate::install::path_anchor::AnchoredPath::from_target(
+                path,
+                target.scope(),
+                client,
+                ArtifactKind::Mcp,
+                roots,
+            )
+            .is_ok()
+        })
+        .filter(|path| mcp.is_none_or(|d| vendor.mcp_entry_for(target.scope(), path, name, d).is_some()))
+        .collect()
+}
+
+/// The `surfaces` no recorded entry output of `client` sits at. An
+/// unanchorable surface is never pending: the install skips it with a
+/// warning and records nothing, so reporting it would be drift no install
+/// could clear.
+fn uncovered_mcp_surfaces(
+    record: Option<&InstallRecord>,
+    client: ClientTarget,
+    surfaces: Vec<PathBuf>,
+    target: &InstallTarget,
+    roots: &AnchorRoots,
+) -> Vec<PathBuf> {
+    surfaces
+        .into_iter()
+        .filter(|path| {
+            match crate::install::path_anchor::AnchoredPath::from_target(
+                path,
+                target.scope(),
+                client,
+                ArtifactKind::Mcp,
+                roots,
+            ) {
+                Ok(anchored) => !record.is_some_and(|rec| {
+                    rec.outputs
+                        .iter()
+                        .any(|out| out.client == client.as_str() && out.entry.is_some() && out.target == anchored)
+                }),
+                Err(_) => false,
+            }
+        })
+        .collect()
 }
 
 /// Whether `record` already accounts for `client` at the current layout.
@@ -176,7 +278,14 @@ mod tests {
     fn no_record_makes_every_expected_client_pending() {
         let dir = tempfile::tempdir().unwrap();
         let target = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Claude]);
-        let pending = pending_outputs(None, ArtifactKind::Rule, "rust-style", &target, &roots(dir.path()));
+        let pending = pending_outputs(
+            None,
+            ArtifactKind::Rule,
+            "rust-style",
+            &target,
+            &roots(dir.path()),
+            None,
+        );
         assert_eq!(pending.len(), 1, "{pending:?}");
         assert_eq!(pending[0].0, ClientTarget::Claude);
     }
@@ -192,6 +301,7 @@ mod tests {
             "rust-style",
             &target,
             &roots(dir.path()),
+            None,
         );
         assert!(pending.is_empty(), "{pending:?}");
     }
@@ -214,6 +324,7 @@ mod tests {
             "rust-style",
             &target,
             &roots(dir.path()),
+            None,
         );
         assert_eq!(pending.len(), 1, "{pending:?}");
         assert_eq!(pending[0].0, ClientTarget::Copilot);
@@ -232,6 +343,7 @@ mod tests {
             "rust-style",
             &target,
             &roots(dir.path()),
+            None,
         );
         assert_eq!(pending.len(), 1, "{pending:?}");
         assert_eq!(
@@ -248,11 +360,101 @@ mod tests {
         // Codex declines rules outright (`adr_codex_vendor.md`).
         let target = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Codex]);
         assert!(
-            expected_clients(ArtifactKind::Rule, &target).is_empty(),
+            expected_clients(ArtifactKind::Rule, "r", &target).is_empty(),
             "codex must not be an expected rule target"
         );
-        let pending = pending_outputs(None, ArtifactKind::Rule, "rust-style", &target, &roots(dir.path()));
+        let pending = pending_outputs(
+            None,
+            ArtifactKind::Rule,
+            "rust-style",
+            &target,
+            &roots(dir.path()),
+            None,
+        );
         assert!(pending.is_empty(), "{pending:?}");
+    }
+
+    /// A Junie agent whose name Junie's grammar rejects is skipped at install,
+    /// so it must never be expected or pending — or `grim status` would carry
+    /// drift no install could clear. A fitting name still is.
+    #[test]
+    fn an_agent_name_the_vendor_rejects_is_never_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Junie]);
+        for rejected in ["2fa-helper", "rev.v2"] {
+            assert!(
+                expected_clients(ArtifactKind::Agent, rejected, &target).is_empty(),
+                "{rejected}"
+            );
+            let pending = pending_outputs(None, ArtifactKind::Agent, rejected, &target, &roots(dir.path()), None);
+            assert!(pending.is_empty(), "{rejected}: {pending:?}");
+        }
+        let pending = pending_outputs(None, ArtifactKind::Agent, "rev", &target, &roots(dir.path()), None);
+        assert_eq!(
+            pending,
+            vec![(ClientTarget::Junie, dir.path().join(".junie/agents/rev.md"))]
+        );
+    }
+
+    fn copilot_entry(relative: &str) -> ClientOutput {
+        ClientOutput {
+            client: "copilot".to_string(),
+            target: AnchoredPath {
+                anchor: PathAnchor::Workspace,
+                relative: relative.to_string(),
+            },
+            content_hash: Digest::Sha256("c".repeat(64)),
+            support_dir: None,
+            entry: Some("/servers/x".to_string()),
+            adopted: false,
+        }
+    }
+
+    /// A vendor with two MCP files: the recorded one is covered, the sibling
+    /// is pending — one entry must not stand for both, or a surface added in
+    /// a later release never heals.
+    #[test]
+    fn each_mcp_surface_is_covered_on_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Copilot]);
+        let surfaces = vec![dir.path().join(".vscode/mcp.json"), dir.path().join(".github/mcp.json")];
+        let rec = record("x", vec![copilot_entry(".vscode/mcp.json")]);
+        let roots = roots(dir.path());
+        assert_eq!(
+            uncovered_mcp_surfaces(Some(&rec), ClientTarget::Copilot, surfaces.clone(), &target, &roots),
+            vec![surfaces[1].clone()]
+        );
+        assert_eq!(
+            uncovered_mcp_surfaces(None, ClientTarget::Copilot, surfaces.clone(), &target, &roots),
+            surfaces,
+            "no record: every surface is pending, in vendor order"
+        );
+        let both = record(
+            "x",
+            vec![copilot_entry(".vscode/mcp.json"), copilot_entry(".github/mcp.json")],
+        );
+        assert!(uncovered_mcp_surfaces(Some(&both), ClientTarget::Copilot, surfaces, &target, &roots).is_empty());
+    }
+
+    /// A surface the vendor cannot write THIS descriptor to is skipped by
+    /// every install, so it must not be pending — or the integrity gate never
+    /// answers `unchanged`. Without the descriptor every surface counts.
+    #[test]
+    fn a_surface_the_descriptor_cannot_be_written_to_is_never_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Warp]);
+        let env_ref = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"x\"\nenv = { T = \"${T}\" }\n",
+        )
+        .unwrap();
+        let plain =
+            McpDescriptor::from_toml_str("description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"x\"\n")
+                .unwrap();
+        let roots = roots(dir.path());
+        let pending = |d| pending_outputs(None, ArtifactKind::Mcp, "m", &target, &roots, d);
+        assert!(pending(Some(&env_ref)).is_empty());
+        assert_eq!(pending(Some(&plain)).len(), 1);
+        assert_eq!(pending(None).len(), 1, "no descriptor: today's answer");
     }
 
     /// C-002: `outputs_pending` must be deterministic regardless of
@@ -272,7 +474,14 @@ mod tests {
             ConfigScope::Project,
             vec![ClientTarget::Codex, ClientTarget::Claude, ClientTarget::OpenCode],
         );
-        let pending = pending_outputs(None, ArtifactKind::Skill, "some-skill", &target, &roots(dir.path()));
+        let pending = pending_outputs(
+            None,
+            ArtifactKind::Skill,
+            "some-skill",
+            &target,
+            &roots(dir.path()),
+            None,
+        );
         let clients: Vec<ClientTarget> = pending.iter().map(|(client, _)| *client).collect();
         assert_eq!(
             clients,

@@ -595,9 +595,8 @@ def test_uninstall_of_a_zero_output_declined_record_is_clean(
 # than legacy: it is now Degraded at project scope (installs, `paths`
 # dropped) and has no global surface at all, so it is covered by its own
 # pair of tests in test_shared_skills.py instead.
-# Agent declines: Kiro (#8040 CLI/IDE schema collision), Junie (format
-# exists, not rendered by grim yet — #148), Zed (ACP, no file format),
-# Amp (runtime-spawned subagents).
+# Agent declines: Kiro (#8040 CLI/IDE schema collision), Zed (ACP, no file
+# format), Amp (runtime-spawned subagents).
 # ---------------------------------------------------------------------------
 
 
@@ -643,7 +642,7 @@ def test_declined_rule_vendor_warns_skips_and_uninstalls_clean(
 
 @pytest.mark.parametrize(
     "client",
-    ["kiro", "junie", "zed", "amp", "cline", "droid", "goose", "warp", "kilo"],
+    ["kiro", "zed", "amp", "cline", "warp"],
 )
 def test_declined_agent_vendor_warns_skips_and_uninstalls_clean(
     grim_at, project_dir: Path, registry: str, unique_repo: str, client: str

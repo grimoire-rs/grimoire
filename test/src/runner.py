@@ -7,6 +7,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 
 # ---------------------------------------------------------------------------
 # Platform helpers
@@ -31,6 +33,11 @@ def current_platform() -> str:
 # ---------------------------------------------------------------------------
 # GrimRunner
 # ---------------------------------------------------------------------------
+
+# Set by the session fixture in ``conftest.py`` when the host's managed Claude
+# settings impose ``CLAUDE_CONFIG_DIR`` — a root no per-test env can redirect.
+HOST_MANAGED_CLAUDE_CONFIG_DIR: str | None = None
+
 
 
 class GrimRunner:
@@ -99,6 +106,12 @@ class GrimRunner:
         log_level: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         """Run ``grim`` with the given arguments."""
+        if HOST_MANAGED_CLAUDE_CONFIG_DIR and "--global" in args:
+            pytest.skip(
+                "HOST ISOLATION: this machine's managed Claude settings set "
+                f"CLAUDE_CONFIG_DIR={HOST_MANAGED_CLAUDE_CONFIG_DIR!r}, which grim "
+                "honors; a --global run would write into that real directory"
+            )
         cmd: list[str] = [str(self.binary)]
         if format:
             cmd += ["--format", format]

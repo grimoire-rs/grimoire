@@ -84,6 +84,7 @@ published rule lands differently per client:
 | Claude Code | ~Verbatim — `paths:` is native frontmatter; re-rendered only when `metadata` carries vendor keys |
 | Copilot | Written to `.github/instructions/<name>.instructions.md` at project scope (global scope lands in native `~/.copilot/instructions/`); `paths` comma-joined into a single `applyTo:` string; `copilot.exclude-agent` → `excludeAgent` |
 | Cursor | Written to `.cursor/rules/<name>.mdc`; `paths` comma-joined into a single `globs` string plus a computed `alwaysApply: false` — unscoped emits no `globs` and `alwaysApply: true` |
+| Antigravity | Written to `.agents/rules/<name>.md` (global `~/.gemini/config/rules/<name>.md`); `paths` comma-joined into a single `globs` string plus `trigger: glob` — unscoped emits `trigger: always_on`. A `description` is written from the rule's first heading or line |
 | Kiro | Written to `.kiro/steering/<name>.md`; `paths` become a `fileMatchPattern` YAML **array** (not comma-joined) plus `inclusion: fileMatch` — unscoped emits `inclusion: always`. Global-scope scoping is upstream-inert today; grim writes the correct file and warns |
 | OpenCode | Frontmatter **stripped** and `paths` dropped with a warning; body written with a provenance comment, preceded by a one-line prose notice restating the dropped scope (`> Applies only when working on files matching …`) so the model still gates on it; loading registered as a managed glob in `opencode.json` |
 | Junie | **Degraded, project scope only.** Written to `.junie/rules/<name>.md` as provenance + the same prose scope notice OpenCode gets + body, with `paths` dropped and a warning — the directory is ownable, but every Markdown file in it is concatenated automatically with no per-file activation key. At global scope grim warns, skips, and writes nothing: no `~/.junie/rules/` exists upstream |
@@ -91,7 +92,7 @@ published rule lands differently per client:
 
 OpenCode never sees rule frontmatter at all — anything that must reach
 OpenCode belongs in the body. Two authoring consequences of the rest:
-Cursor splits its `globs` string on **every** comma, including one inside
+Cursor and Antigravity split their `globs` string on **every** comma, including one inside
 a `{a,b}` brace alternation, so author `src/**/*.rs` and `src/**/*.toml`
 as two patterns rather than `src/**/*.{rs,toml}`; and when the audience
 is broad, a skill reaches every client a rule cannot — most of the fleet.

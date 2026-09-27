@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Grimoire Authors
 
-//! Goose's vendor strategy: shared-pool skills; everything else declined.
+//! Goose's vendor strategy: shared-pool skills, own-directory agents; rules and MCP declined.
 //!
 //! Goose is Block's open-source agent (<https://goose-docs.ai>, repo
 //! `aaif-goose/goose`, formerly `block/goose`), verified 2026-07-27, re-verified 2026-09-27
@@ -24,8 +24,17 @@
 //!   makes one physical pool tree safe to share.
 //! - **Rules**: **declined**. `.goosehints` / `AGENTS.md` are monolithic with
 //!   no in-file scoping key, so a rule's `paths` has nowhere to land.
-//! - **Agents**: **declined** this wave. Since re-verified 2026-09-27 Goose
-//!   documents file agents in `.agents/agents/` — a watchlisted kind change.
+//! - **Agents**: `.goose/agents/<name>.md` (project), `~/.goose/agents/<name>.md`
+//!   (global), verified 2026-09-27 against `discover_filesystem_sources` in
+//!   `crates/goose/src/agents/platform_extensions/summon.rs`. Goose's docs
+//!   recommend `.agents/agents/`, but that is Antigravity's project agent dir
+//!   too, with a different field set — one physical file two clients read
+//!   with different schemas. `.goose/agents/` is scanned first at both scopes
+//!   and belongs to Goose alone, so grim writes there. Frontmatter is
+//!   `name` (required, the identity), `description`, `model`; `tools` has no
+//!   Goose field and drops with a warning. The `goose.*` registry is empty.
+//!   `$GOOSE_PATH_ROOT` does not move it: Goose joins `.goose/agents` onto
+//!   the real home directory.
 //! - **MCP**: **declined**, and the reason is grim's side, not Goose's. Goose
 //!   is heavily MCP-based ("extensions"), but its config is **YAML**
 //!   (`config.yaml`) and grim splices only JSON and TOML. Adding a YAML splice
@@ -37,8 +46,8 @@
 //! because nothing grim *writes* depends on it. Goose's docs and its own
 //! source disagree about whether the user config root is `~/.config/goose/` on
 //! macOS or an Application Support path. That conflict only touches the config
-//! file — MCP and agent territory, both declined here. Skills are unambiguous
-//! and first-party at both scopes. Detection OR-s the candidates instead of
+//! file — MCP territory, declined here. Skills and agents are unambiguous at
+//! both scopes. Detection OR-s the candidates instead of
 //! picking a side: a write path must be exactly one location, but detection is
 //! a boolean, so a false negative costs a missed autodetect and nothing else.
 
@@ -50,7 +59,7 @@ use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
 use super::render::{self, RenderError, RenderedDoc};
-use super::vendor::{KindSupport, Vendor, env_dir, global_skills_root, home_dir, xdg_config_dir};
+use super::vendor::{KindSupport, Vendor, env_dir, global_skills_root, home_dir, provenance, xdg_config_dir};
 
 /// Goose (Block).
 pub struct GooseVendor;
@@ -66,7 +75,7 @@ impl Vendor for GooseVendor {
 
     fn kind_support(&self, kind: ArtifactKind) -> KindSupport {
         match kind {
-            ArtifactKind::Rule | ArtifactKind::Agent | ArtifactKind::Mcp => KindSupport::Declined,
+            ArtifactKind::Rule | ArtifactKind::Mcp => KindSupport::Declined,
             _ => KindSupport::Native,
         }
     }
@@ -102,7 +111,6 @@ impl Vendor for GooseVendor {
     }
 
     fn agent_path(&self, workspace: &Path, scope: ConfigScope, name: &str) -> PathBuf {
-        // Dead path: `kind_support` declines `Agent`. Defensive location.
         scope_root(workspace, scope).join("agents").join(format!("{name}.md"))
     }
 
@@ -132,33 +140,63 @@ impl Vendor for GooseVendor {
         Ok(None)
     }
 
-    fn agent_index(&self, _parsed: &ParsedAgent, _pinned: &str) -> Result<Option<RenderedDoc>, RenderError> {
-        // Never called: agents are skipped at the `kind_support` gate.
-        Ok(None)
+    fn agent_index(&self, parsed: &ParsedAgent, pinned: &str) -> Result<Option<RenderedDoc>, RenderError> {
+        // Always a transform: Goose reads `name`, `description` and `model`
+        // only. The registry is empty, so nothing is lifted.
+        let projection = render::project_agent(&parsed.frontmatter, self)?;
+        let mut warnings = projection.warnings;
+        if projection.cleaned.tools.is_some() {
+            warnings.push(format!(
+                "agent field 'tools' has no Goose equivalent; dropped for agent '{}'",
+                projection.cleaned.name
+            ));
+        }
+
+        let mut natives: Vec<(&'static str, serde_yaml::Value)> = vec![
+            ("name", serde_yaml::Value::String(projection.cleaned.name.to_string())),
+            (
+                "description",
+                serde_yaml::Value::String(projection.cleaned.description.to_string()),
+            ),
+        ];
+        if let Some(model) = &projection.cleaned.model {
+            natives.push(("model", serde_yaml::Value::String(model.clone())));
+        }
+
+        let mut document = render::agent_frontmatter_block(natives, projection.lifted, self.name(), &[], &mut warnings);
+        document.push_str(&provenance(pinned));
+        document.push_str(&parsed.body);
+        Ok(Some(RenderedDoc { document, warnings }))
     }
 }
 
-/// Goose's own `.goose` dir for a scope, backing the two defensive dead paths.
-/// Skills do NOT root here — they follow the shared `.agents/skills` pool.
+/// Goose's own `.goose` dir for a scope: agents root here, and so does the
+/// defensive dead rule path. Skills do NOT — they follow the shared
+/// `.agents/skills` pool.
 fn scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
     match scope {
         ConfigScope::Project => workspace.join(".goose"),
-        ConfigScope::Global => home_dir()
-            .map(|h| h.join(".goose"))
-            .unwrap_or_else(|| workspace.join(".goose")),
+        ConfigScope::Global => goose_root(home_dir()).unwrap_or_else(|| workspace.join(".goose")),
     }
+}
+
+/// Goose's user-level `~/.goose`, where its global agents live. The
+/// [`PathAnchor`](super::path_anchor) `goose-root` anchor is rooted here.
+pub(crate) fn goose_root(home: Option<PathBuf>) -> Option<PathBuf> {
+    home.map(|h| h.join(".goose"))
 }
 
 /// Every plausible Goose user-level config root, for **detection only**.
 ///
 /// Returned as a list rather than a single path on purpose: upstream's docs
 /// and source disagree about the macOS location, and grim writes none of these
-/// (Goose's skills live in the shared pool; its config is YAML and declined).
+/// (skills live in the shared pool, agents under [`goose_root`]; its config
+/// is YAML and declined).
 /// A boolean "is Goose present" may safely OR over candidates, where a write
 /// path may not. `$GOOSE_PATH_ROOT` relocates all of them when set.
 ///
-/// No [`PathAnchor`](super::path_anchor) is rooted here — Goose has no
-/// `VENDOR_ROOTS` row, because nothing it installs anchors outside the pool.
+/// No [`PathAnchor`](super::path_anchor) is rooted here — Goose's anchor is
+/// [`goose_root`], which none of these candidates is.
 pub(crate) fn goose_config_roots(
     path_root: Option<PathBuf>,
     xdg_config: Option<PathBuf>,
@@ -181,13 +219,14 @@ pub(crate) fn goose_config_roots(
 
 #[cfg(test)]
 mod tests {
-    //! Specification tests for Goose — shared-pool skills only.
+    //! Specification tests for Goose — shared-pool skills, own-directory agents.
     use super::*;
 
     #[test]
-    fn kind_support_declines_everything_but_skills() {
+    fn kind_support_hosts_skills_and_agents_and_declines_the_rest() {
         assert_eq!(GooseVendor.kind_support(ArtifactKind::Skill), KindSupport::Native);
-        for kind in [ArtifactKind::Rule, ArtifactKind::Agent, ArtifactKind::Mcp] {
+        assert_eq!(GooseVendor.kind_support(ArtifactKind::Agent), KindSupport::Native);
+        for kind in [ArtifactKind::Rule, ArtifactKind::Mcp] {
             assert_eq!(GooseVendor.kind_support(kind), KindSupport::Declined, "{kind:?}");
         }
         assert!(
@@ -196,6 +235,63 @@ mod tests {
                 .is_none(),
             "Goose's MCP config is YAML; grim splices only JSON and TOML"
         );
+    }
+
+    #[test]
+    fn agent_path_is_gooses_own_dir_never_the_shared_agents_pool() {
+        // `.agents/agents/` is Antigravity's project agent dir; Goose also
+        // reads `.goose/agents/` at both scopes (summon.rs, v1.52.0), so grim
+        // writes that Goose-only path and the two clients never share a file.
+        let ws = Path::new("/w");
+        assert_eq!(
+            GooseVendor.agent_path(ws, ConfigScope::Project, "rev"),
+            ws.join(".goose/agents/rev.md")
+        );
+        assert_eq!(
+            GooseVendor.agent_path(ws, ConfigScope::Global, "rev"),
+            goose_root(home_dir())
+                .unwrap_or_else(|| ws.join(".goose"))
+                .join("agents/rev.md")
+        );
+        assert_eq!(goose_root(Some(PathBuf::from("/h"))), Some(PathBuf::from("/h/.goose")));
+        assert_eq!(goose_root(None), None);
+    }
+
+    fn agent(doc: &str) -> ParsedAgent {
+        crate::skill::agent_frontmatter::AgentFrontmatter::parse_doc(doc, Path::new("rev.md")).expect("valid agent")
+    }
+
+    #[test]
+    fn agent_index_emits_name_description_model_and_drops_tools_with_a_warning() {
+        let parsed = agent("---\nname: rev\ndescription: d\nmodel: gpt-5\ntools: Read, Grep\n---\nbody\n");
+        let out = GooseVendor
+            .agent_index(&parsed, "pin")
+            .expect("empty registry ⇒ no render error")
+            .expect("agents always transform");
+        let doc = &out.document;
+        assert!(
+            doc.starts_with("---\nname: rev\ndescription: d\nmodel: gpt-5\n---\n"),
+            "{doc}"
+        );
+        assert!(!doc.contains("tools"), "Goose has no tools field: {doc}");
+        assert!(doc.contains("generated by grim from pin"), "{doc}");
+        assert!(doc.ends_with("body\n"), "{doc}");
+        assert!(
+            out.warnings
+                .iter()
+                .any(|w| w.contains("'tools'") && w.contains("Goose")),
+            "dropping tools must be named: {:?}",
+            out.warnings
+        );
+    }
+
+    #[test]
+    fn agent_index_without_tools_warns_nothing_and_is_deterministic() {
+        let parsed = agent("---\nname: rev\ndescription: d\n---\nbody\n");
+        let a = GooseVendor.agent_index(&parsed, "pin").unwrap().unwrap();
+        assert!(a.warnings.is_empty(), "{:?}", a.warnings);
+        assert!(!a.document.contains("model"), "{}", a.document);
+        assert_eq!(Some(a), GooseVendor.agent_index(&parsed, "pin").unwrap());
     }
 
     #[test]

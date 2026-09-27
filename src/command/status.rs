@@ -45,7 +45,7 @@ use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
 use crate::install::client_target::ClientTarget;
 use crate::install::install_state::{ClientOutput, InstallRecord, InstallState, active_outputs};
-use crate::install::installer::client_supports_kind;
+use crate::install::installer::client_hosts;
 use crate::install::path_anchor::{AnchorRoots, Containment};
 use crate::install::target::{InstallTarget, detect_clients_or_all};
 use crate::lock::grimoire_lock::GrimoireLock;
@@ -287,7 +287,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
         };
         let (clients_missing, clients_extra) =
             client_drift(desired_clients.as_deref(), recorded_clients(record), |c| {
-                client_supports_kind(c, decl.kind, &scope.workspace, scope.scope)
+                client_hosts(c, decl.kind, &decl.name, &scope.workspace, scope.scope)
             });
         let pinned = locked.and_then(|l| l.source.pinned().cloned());
         // A registry-locked row is eligible for a fresh update re-resolution
@@ -387,7 +387,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             let outputs = record_outputs(record, &active, &scope.roots);
             let (clients_missing, clients_extra) =
                 client_drift(desired_clients.as_deref(), recorded_clients(record), |c| {
-                    client_supports_kind(c, member.kind, &scope.workspace, scope.scope)
+                    client_hosts(c, member.kind, &member.name, &scope.workspace, scope.scope)
                 });
             let outputs_pending = pending_outputs_for(record, member.kind, &member.name, &target, &scope.roots);
             // A member's own reference can float independently of the bundle
@@ -652,7 +652,7 @@ fn pending_outputs_for(
     target: &InstallTarget,
     roots: &AnchorRoots,
 ) -> Vec<StatusOutput> {
-    crate::install::expected_outputs::pending_outputs(record, kind, name, target, roots)
+    crate::install::expected_outputs::pending_outputs(record, kind, name, target, roots, None)
         .into_iter()
         .map(|(client, path)| StatusOutput {
             client: client.to_string(),
@@ -946,6 +946,7 @@ mod tests {
     use super::*;
     use crate::install::content_hash::content_hash;
     use crate::install::install_state::{ClientOutput, InstallRecord};
+    use crate::install::installer::client_supports_kind;
     use crate::install::path_anchor::{AnchorRoots, AnchoredPath, PathAnchor};
     use crate::oci::pinned_identifier::PinnedIdentifier;
     use crate::oci::{Algorithm, Digest, Identifier};
@@ -1889,8 +1890,8 @@ mod tests {
         ));
         assert_eq!(
             client_supports_kind(ClientTarget::Claude, ArtifactKind::Mcp, ws, scope),
-            ClientTarget::Claude.vendor().mcp_config_path(ws, scope).is_some(),
-            "the MCP arm must track mcp_config_path, not kind_support"
+            !ClientTarget::Claude.vendor().mcp_config_paths(ws, scope).is_empty(),
+            "the MCP arm must track mcp_config_paths, not kind_support"
         );
         assert!(
             !client_supports_kind(ClientTarget::Claude, ArtifactKind::Bundle, ws, scope),

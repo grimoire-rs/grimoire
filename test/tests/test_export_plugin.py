@@ -792,12 +792,15 @@ def test_s010_per_client_declines(grim_at, tmp_path: Path, work: Path, registry:
         assert not list(root.rglob("*team-style*")), f"{client}: rules have no plugin surface"
         _manifest(root)
     droid, junie, claude = (dist / f"team-stack.{c}" for c in ("droid", "junie", "claude"))
-    assert not (droid / "agents").exists() and not (droid / ".mcp.json").exists()
-    assert not (junie / "agents").exists()
+    # Droid hosts agents and MCP; its install translates a Claude-format
+    # plugin's `agents/` and `.mcp.json`.
+    assert (droid / "agents" / "team-reviewer.md").is_file()
+    assert json.loads((droid / ".mcp.json").read_text())["mcpServers"]["team-srv"]["type"] == "stdio"
+    assert (junie / "agents" / "team-reviewer.md").is_file()
     assert "team-srv" in json.loads((junie / ".mcp.json").read_text())["mcpServers"]
     assert (claude / "agents" / "team-reviewer.md").is_file()
     assert "team-srv" in json.loads((claude / ".mcp.json").read_text())["mcpServers"]
-    assert "Omitted for droid: rule team-style, agent team-reviewer, mcp team-srv." in _readme(droid)
+    assert "Omitted for droid: rule team-style." in _readme(droid)
 
 
 # ── S-011 — Rendered like install (C-017, C-018, C-020) ─────────────────────
@@ -1104,16 +1107,12 @@ def test_s026_json_items_follow_client_order_with_sorted_members(
 
     skills = [("skill", "team-plan"), ("skill", "team-review")]
     assert shape(items[0]) == (
-        skills,
-        [
-            ("rule", "team-style", "no-format-surface"),
-            ("agent", "team-reviewer", "client-declined"),
-            ("mcp", "team-srv", "client-declined"),
-        ],
+        [*skills, ("agent", "team-reviewer"), ("mcp", "team-srv")],
+        [("rule", "team-style", "no-format-surface")],
     )
     assert shape(items[1]) == (
-        [*skills, ("mcp", "team-srv")],
-        [("rule", "team-style", "no-format-surface"), ("agent", "team-reviewer", "client-declined")],
+        [*skills, ("agent", "team-reviewer"), ("mcp", "team-srv")],
+        [("rule", "team-style", "no-format-surface")],
     )
     assert shape(items[2]) == (
         [*skills, ("agent", "team-reviewer"), ("mcp", "team-srv")],

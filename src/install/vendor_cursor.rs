@@ -176,16 +176,7 @@ impl Vendor for CursorVendor {
 
         // Cursor splits the single `globs:` string on EVERY comma — including
         // a comma inside a `{a,b}` brace alternation (forum.cursor.com/t/76648).
-        // A glob carrying a literal comma is therefore silently read as
-        // multiple patterns; grim renders the comma-joined string unchanged
-        // but flags the hazard so the author can split the rule.
-        if parsed.frontmatter.paths.iter().any(|p| p.contains(',')) {
-            warnings.push(
-                "a glob contains a comma: Cursor splits `globs:` on every comma (including inside `{a,b}` \
-                 braces), so the pattern will be read as multiple globs (forum.cursor.com/t/76648)"
-                    .to_string(),
-            );
-        }
+        warnings.extend(render::comma_glob_warning(&parsed.frontmatter.paths, "Cursor"));
 
         // `.mdc` always carries frontmatter: `paths` comma-join into the single
         // `globs` STRING Cursor reads plus `alwaysApply: false` when scoped; no

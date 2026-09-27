@@ -51,6 +51,7 @@ Environment variables that matter here (full table:
 
 Separately, grim honors each **client's own** directory-override variable
 (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `KIRO_HOME`, `QODER_CONFIG_DIR`, `GEMINI_CLI_HOME`,
+`JUNIE_HOME`, `OPENCLAW_STATE_DIR`, `OPENCLAW_HOME`,
 `COPILOT_HOME`, `OPENCODE_CONFIG_DIR`, …) so a global-scope install lands
 where that client actually reads. Their shapes are **not** uniform — some
 replace the client's config dir outright, others replace the home
@@ -62,12 +63,12 @@ grim reaps the copy stranded at the old root on the next `install`,
 never deleted). And they drive global-scope client *detection*: a client
 counts as present when its overridden root exists.
 
-grim reads these from the process environment only — never from a client's
-own settings file. `CLAUDE_CONFIG_DIR` set in Claude Code's user or managed
-settings `env` still relocates Claude's real config root (project and local
-settings can no longer set it, since Claude Code 2.1.251), and grim has no
-way to see that: a global-scope install can land at the old root while
-Claude itself reads the new one.
+grim reads these from the process environment, with one exception:
+`CLAUDE_CONFIG_DIR` is also read from the `env` block of Claude Code's
+managed settings file and your user `settings.json`, and a value there wins
+over the shell export, as it does in Claude itself. Project and local
+settings cannot set it (Claude Code 2.1.251+), and a value delivered by MDM
+or server-managed settings stays invisible to grim.
 
 ## Multiple Registries {#multiple-registries}
 

@@ -960,6 +960,12 @@ pub(crate) fn render_members(
             omitted.push(omit(reason));
             continue;
         }
+        // The install-time name gate holds here too: a name the client's
+        // agent grammar rejects is not something its plugin can carry.
+        if !crate::install::installer::name_fits(client, kind, name) {
+            omitted.push(omit(OmitReason::NotRepresentable));
+            continue;
+        }
         let pinned = member.locked.source.provenance();
         match (&member.content, kind) {
             (MemberContent::Mcp(descriptor), _) => match mcp_value(family, client, name, descriptor) {
@@ -2387,7 +2393,7 @@ mod tests {
     }
 
     #[test]
-    fn c016_client_declined_kinds_are_omitted_for_droid() {
+    fn c016_client_declined_kinds_are_omitted_for_openclaw() {
         let skill = registry_member("plan", ArtifactKind::Skill, sha('a'));
         let agent = registry_member("reviewer", ArtifactKind::Agent, sha('b'));
         let mcp = registry_member("srv", ArtifactKind::Mcp, sha('d'));
@@ -2409,7 +2415,7 @@ mod tests {
             },
         ];
         let root = tempfile::tempdir().unwrap();
-        let r = render_members("team", &members, ClientTarget::Droid, Family::Claude, root.path()).unwrap();
+        let r = render_members("team", &members, ClientTarget::OpenClaw, Family::Claude, root.path()).unwrap();
         assert!(root.path().join("skills/plan/SKILL.md").is_file());
         assert!(!root.path().join(".mcp.json").exists() && !root.path().join("agents").exists());
         assert_eq!(
@@ -2418,6 +2424,69 @@ mod tests {
                 (ArtifactKind::Agent, "reviewer".into(), OmitReason::ClientDeclined),
                 (ArtifactKind::Mcp, "srv".into(), OmitReason::ClientDeclined),
             ]
+        );
+    }
+
+    #[test]
+    fn junie_plugin_carries_agents_and_omits_a_name_junie_rejects() {
+        let ok = registry_member("review", ArtifactKind::Agent, sha('a'));
+        let bad = registry_member("2fa-review", ArtifactKind::Agent, sha('b'));
+        let members = vec![
+            StagedMember {
+                locked: &ok,
+                emitted: "review",
+                content: MemberContent::Tree(staged_agent("review")),
+            },
+            StagedMember {
+                locked: &bad,
+                emitted: "2fa-review",
+                content: MemberContent::Tree(staged_agent("2fa-review")),
+            },
+        ];
+        let root = tempfile::tempdir().unwrap();
+        let r = render_members("team", &members, ClientTarget::Junie, Family::Claude, root.path()).unwrap();
+        assert!(root.path().join("agents/review.md").is_file());
+        assert!(!root.path().join("agents/2fa-review.md").exists());
+        assert_eq!(
+            omissions(&r),
+            vec![(ArtifactKind::Agent, "2fa-review".into(), OmitReason::NotRepresentable)]
+        );
+    }
+
+    #[test]
+    fn c016_droid_emits_agents_and_mcp_and_omits_a_name_it_rejects() {
+        let agent = registry_member("reviewer", ArtifactKind::Agent, sha('b'));
+        let dotted = registry_member("code.rev", ArtifactKind::Agent, sha('c'));
+        let mcp = registry_member("srv", ArtifactKind::Mcp, sha('d'));
+        let members = vec![
+            StagedMember {
+                locked: &agent,
+                emitted: "reviewer",
+                content: MemberContent::Tree(staged_agent("reviewer")),
+            },
+            StagedMember {
+                locked: &dotted,
+                emitted: "code.rev",
+                content: MemberContent::Tree(staged_agent("code.rev")),
+            },
+            StagedMember {
+                locked: &mcp,
+                emitted: "srv",
+                content: MemberContent::Mcp(Box::new(stdio("grim"))),
+            },
+        ];
+        let root = tempfile::tempdir().unwrap();
+        let r = render_members("team", &members, ClientTarget::Droid, Family::Claude, root.path()).unwrap();
+        // Droid translates a Claude-format plugin's `agents/` and `.mcp.json`
+        // on install, so both carry Droid's own shapes.
+        assert!(root.path().join("agents/reviewer.md").is_file());
+        assert!(!root.path().join("agents/code.rev.md").exists());
+        let mcp: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(root.path().join(".mcp.json")).unwrap()).unwrap();
+        assert_eq!(mcp["mcpServers"]["srv"]["type"], "stdio");
+        assert_eq!(
+            omissions(&r),
+            vec![(ArtifactKind::Agent, "code.rev".into(), OmitReason::NotRepresentable)]
         );
     }
 

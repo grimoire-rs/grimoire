@@ -127,7 +127,7 @@ other two of the seven, and both genuinely have no file: Warp's agent
 profiles live in its settings UI, and OpenClaw's subagents are spawned at
 runtime with nothing on disk. [Junie][junie] belongs to neither survey but
 shares the same shape as the five: `.junie/agents/` is real and not
-early-access, just not yet packaged here. Whether a given tool packages a
+early-access, and grim now installs there. Whether a given tool packages a
 format is a separate question from whether the format exists; check current
 docs before assuming either way.
 

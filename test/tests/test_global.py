@@ -28,6 +28,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 from src.helpers import make_artifact
 from src.registry import retag
 from src.runner import GrimRunner
@@ -1727,3 +1729,455 @@ def test_global_kiro_home_upgrade_uninstall_abandons_a_hand_edited_stranded_entr
     assert report["retained"] == [], (
         f"a config file the user owns is never grim's to name in `retained`: {report}"
     )
+# ---------------------------------------------------------------------------
+# Legacy-root reaper for the roots honored since 2026-09-27: JUNIE_HOME,
+# OPENCLAW_HOME, and CLAUDE_CONFIG_DIR set in Claude's own settings `env`.
+# The same fixture set the KIRO_HOME tests above pin, parametrized over the
+# three newly moved roots so each gets every case.
+# ---------------------------------------------------------------------------
+
+
+def _set_claude_settings_env(runner: GrimRunner, config_dir: Path) -> None:
+    """Point ``CLAUDE_CONFIG_DIR`` at ``config_dir`` the way a Claude user
+    does it without a shell export: the ``env`` block of
+    ``~/.claude/settings.json``, keeping whatever that file already holds."""
+    settings = runner.home / ".claude/settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    doc = json.loads(settings.read_text()) if settings.is_file() else {}
+    doc.setdefault("env", {})["CLAUDE_CONFIG_DIR"] = str(config_dir)
+    settings.write_text(json.dumps(doc, indent=2))
+
+
+def _relocate_junie(runner: GrimRunner, scratch: Path) -> Path:
+    root = scratch / "junie_home"
+    root.mkdir()
+    runner.env["JUNIE_HOME"] = str(root)
+    return root
+
+
+def _relocate_openclaw(runner: GrimRunner, scratch: Path) -> Path:
+    # `OPENCLAW_HOME` replaces `$HOME`: the `.openclaw` segment is appended.
+    home = scratch / "openclaw_home"
+    (home / ".openclaw").mkdir(parents=True)
+    runner.env["OPENCLAW_HOME"] = str(home)
+    return home / ".openclaw"
+
+
+def _relocate_claude(runner: GrimRunner, scratch: Path) -> Path:
+    root = scratch / "claude_settings_dir"
+    root.mkdir()
+    _set_claude_settings_env(runner, root)
+    return root
+
+
+# (client, old root under $HOME, relocate, old MCP file under $HOME,
+#  new MCP file under the new root). `None` MCP paths: the vendor has no MCP.
+_MOVED_ROOTS = {
+    "junie": (
+        "junie",
+        ".junie",
+        _relocate_junie,
+        ".junie/mcp/mcp.json",
+        "mcp/mcp.json",
+    ),
+    "openclaw": ("openclaw", ".openclaw", _relocate_openclaw, None, None),
+    "claude-settings-env": (
+        "claude",
+        ".claude",
+        _relocate_claude,
+        ".claude.json",
+        ".claude.json",
+    ),
+}
+_MOVED_MCP = [k for k, v in _MOVED_ROOTS.items() if v[3] is not None]
+
+
+def _write_moved_skills(grim_home: Path, unique_repo: str, *names: str) -> None:
+    """Publish one plain skill per name and declare them all globally."""
+    lines = []
+    for name in names:
+        sk = make_artifact(
+            f"{unique_repo}/{name}",
+            "skill",
+            {f"{name}/SKILL.md": f"---\nname: {name}\ndescription: d\n---\n# body\n"},
+            tag="v1",
+        )
+        lines.append(f'{name} = "{sk.fq}"\n')
+    (grim_home / "grimoire.toml").write_text("[skills]\n" + "".join(lines))
+
+
+def _write_moved_mcp(
+    runner: GrimRunner,
+    grim_home: Path,
+    name: str,
+    registry: str,
+    unique_repo: str,
+    tmp_path: Path,
+) -> None:
+    """Release a plain stdio MCP descriptor and declare it globally."""
+    descriptor = tmp_path / f"{name}_src" / "mcp" / f"{name}.toml"
+    descriptor.parent.mkdir(parents=True)
+    descriptor.write_text(
+        'description = "d"\n\n[server]\ntransport = "stdio"\ncommand = "grim"\nargs = ["mcp"]\n'
+    )
+    ref = f"{registry}/{unique_repo}/mcp/{name}:1.0.0"
+    runner.json("release", str(descriptor), ref, "--kind", "mcp")
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\n{name} = "{ref}"\n')
+
+
+@pytest.mark.parametrize("case", list(_MOVED_ROOTS))
+def test_global_moved_root_upgrade_reaps_the_pre_override_root(
+    case: str,
+    grim_binary: Path,
+    grim_home: Path,
+    registry: str,
+    unique_repo: str,
+    tmp_path: Path,
+) -> None:
+    """``update`` after the upgrade re-materializes under the honored root,
+    reaps the unmodified pre-override copy, keeps the recorded anchor, and
+    round-trips ``status`` and ``uninstall``."""
+    client, old_rel, relocate, _, _ = _MOVED_ROOTS[case]
+    runner = GrimRunner(grim_binary, grim_home)
+    _write_moved_skills(grim_home, unique_repo, "mv-skill")
+    runner.json("lock", "--global")
+    rows = runner.json("install", "--global", "--client", client)["items"]
+    assert all(r["status"] == "installed" for r in rows), rows
+    old_skill = runner.home / old_rel / "skills/mv-skill"
+    assert (old_skill / "SKILL.md").is_file()
+    state = json.loads((grim_home / "state/global.json").read_text())
+    anchors_before = {
+        o["target"]["anchor"] for r in state["records"] for o in r["outputs"]
+    }
+
+    new_root = relocate(runner, tmp_path)
+    runner.json("update", "--global", "--client", client)
+
+    assert (new_root / "skills/mv-skill/SKILL.md").is_file(), (
+        "update must re-materialize under the honored root"
+    )
+    assert not old_skill.exists(), "the unmodified pre-override copy must be reaped"
+    state = json.loads((grim_home / "state/global.json").read_text())
+    anchors = {o["target"]["anchor"] for r in state["records"] for o in r["outputs"]}
+    assert anchors == anchors_before == {f"{client}-root"}, (
+        f"the recorded anchor must not move: {anchors}"
+    )
+    status = runner.json("status", "--global")["items"]
+    assert all(r["state"] == "installed" for r in status), status
+
+    runner.json("uninstall", "skill", "mv-skill", "--global")
+    assert not (new_root / "skills/mv-skill").exists(), (
+        "uninstall must remove the migrated output"
+    )
+
+
+@pytest.mark.parametrize("case", list(_MOVED_ROOTS))
+def test_global_moved_root_upgrade_keeps_the_only_copy_when_not_written(
+    case: str,
+    grim_binary: Path,
+    grim_home: Path,
+    registry: str,
+    unique_repo: str,
+    tmp_path: Path,
+) -> None:
+    """A pass that does not materialize the moved client must not reap its
+    only copy at the pre-override root."""
+    client, old_rel, relocate, _, _ = _MOVED_ROOTS[case]
+    runner = GrimRunner(grim_binary, grim_home)
+    _write_moved_skills(grim_home, unique_repo, "mv-keep")
+    runner.json("lock", "--global")
+    runner.json("install", "--global", "--client", client)
+    old_skill = runner.home / old_rel / "skills/mv-keep"
+    assert (old_skill / "SKILL.md").is_file()
+
+    new_root = relocate(runner, tmp_path)
+    runner.json("update", "--global", "--client", "cursor")
+
+    assert not (new_root / "skills/mv-keep").exists(), (
+        "a pass that does not target the client writes nothing there"
+    )
+    assert (old_skill / "SKILL.md").is_file(), (
+        "the only copy must survive a pass that migrated nothing"
+    )
+
+
+@pytest.mark.parametrize("case", _MOVED_MCP)
+def test_global_moved_root_upgrade_unsplices_the_stranded_mcp_entry(
+    case: str,
+    grim_binary: Path,
+    grim_home: Path,
+    registry: str,
+    unique_repo: str,
+    tmp_path: Path,
+) -> None:
+    """The managed MCP member is spliced out of the OLD config file, which
+    survives with every byte the user owns."""
+    client, _, relocate, old_mcp, new_mcp = _MOVED_ROOTS[case]
+    runner = GrimRunner(grim_binary, grim_home)
+    _write_moved_mcp(runner, grim_home, "mv-mcp", registry, unique_repo, tmp_path)
+    runner.json("lock", "--global")
+    rows = runner.json("install", "--global", "--client", client)["items"]
+    assert rows[0]["status"] == "installed", rows
+    old_config = runner.home / old_mcp
+    parsed = json.loads(old_config.read_text())
+    assert parsed["mcpServers"]["mv-mcp"]["command"] == "grim"
+    parsed["mcpServers"]["user-server"] = {"command": "keep-me"}
+    old_config.write_text(json.dumps(parsed, indent=2))
+
+    new_root = relocate(runner, tmp_path)
+    runner.json("update", "--global", "--client", client)
+
+    new_config = new_root / new_mcp
+    assert (
+        json.loads(new_config.read_text())["mcpServers"]["mv-mcp"]["command"] == "grim"
+    ), "the registration must move to the honored root"
+    left = json.loads(old_config.read_text())
+    assert "mv-mcp" not in left["mcpServers"], (
+        f"the stranded member must be spliced out: {left}"
+    )
+    assert left["mcpServers"]["user-server"]["command"] == "keep-me", (
+        f"user bytes must survive: {left}"
+    )
+
+
+@pytest.mark.parametrize("case", list(_MOVED_ROOTS))
+def test_global_moved_root_upgrade_uninstall_reaps_the_pre_override_root(
+    case: str,
+    grim_binary: Path,
+    grim_home: Path,
+    registry: str,
+    unique_repo: str,
+    tmp_path: Path,
+) -> None:
+    """Uninstall straight after the upgrade, with no install in between,
+    reaps the copy stranded at the pre-override root."""
+    client, old_rel, relocate, _, _ = _MOVED_ROOTS[case]
+    runner = GrimRunner(grim_binary, grim_home)
+    _write_moved_skills(grim_home, unique_repo, "mv-uni")
+    runner.json("lock", "--global")
+    runner.json("install", "--global", "--client", client)
+    old_skill = runner.home / old_rel / "skills/mv-uni"
+    assert (old_skill / "SKILL.md").is_file()
+
+    relocate(runner, tmp_path)
+    runner.json("uninstall", "--global", "skill", "mv-uni")
+
+    assert not old_skill.exists(), "uninstall must reap the stranded pre-override copy"
+
+
+@pytest.mark.parametrize("case", list(_MOVED_ROOTS))
+def test_global_moved_root_upgrade_uninstall_preserves_a_hand_edited_stray(
+    case: str,
+    grim_binary: Path,
+    grim_home: Path,
+    registry: str,
+    unique_repo: str,
+    tmp_path: Path,
+) -> None:
+    """A stranded copy the user edited survives uninstall and is reported in
+    ``retained``; the untouched control proves the reaper ran."""
+    client, old_rel, relocate, _, _ = _MOVED_ROOTS[case]
+    runner = GrimRunner(grim_binary, grim_home)
+    _write_moved_skills(grim_home, unique_repo, "mv-edit", "mv-ctrl")
+    runner.json("lock", "--global")
+    runner.json("install", "--global", "--client", client)
+
+    edited_doc = runner.home / old_rel / "skills/mv-edit/SKILL.md"
+    control_dir = runner.home / old_rel / "skills/mv-ctrl"
+    assert edited_doc.is_file() and (control_dir / "SKILL.md").is_file()
+    edited_doc.write_text("---\nname: mv-edit\ndescription: d\n---\n# MINE\n")
+
+    relocate(runner, tmp_path)
+    edited_report = runner.json("uninstall", "--global", "skill", "mv-edit")
+    control_report = runner.json("uninstall", "--global", "skill", "mv-ctrl")
+
+    assert not control_dir.exists(), "the control proves the uninstall-path reaper ran"
+    assert edited_doc.read_text().endswith("# MINE\n"), (
+        "a hand-edited stray must be preserved"
+    )
+    retained = [Path(p).resolve() for p in edited_report["retained"]]
+    assert (
+        edited_doc.parent.resolve() in retained or edited_doc.resolve() in retained
+    ), edited_report
+    assert control_report["retained"] == [], control_report
+
+
+@pytest.mark.parametrize("case", _MOVED_MCP)
+def test_global_moved_root_upgrade_uninstall_abandons_a_hand_edited_stranded_entry(
+    case: str,
+    grim_binary: Path,
+    grim_home: Path,
+    registry: str,
+    unique_repo: str,
+    tmp_path: Path,
+) -> None:
+    """A stranded MCP member the user edited is preserved and reported in
+    ``abandoned_entries``, never in ``retained``."""
+    client, _, relocate, old_mcp, _ = _MOVED_ROOTS[case]
+    runner = GrimRunner(grim_binary, grim_home)
+    _write_moved_mcp(runner, grim_home, "mv-aband", registry, unique_repo, tmp_path)
+    runner.json("lock", "--global")
+    runner.json("install", "--global", "--client", client)
+    old_config = runner.home / old_mcp
+    parsed = json.loads(old_config.read_text())
+    parsed["mcpServers"]["mv-aband"]["args"] = ["mcp", "--mine"]
+    old_config.write_text(json.dumps(parsed, indent=2))
+
+    relocate(runner, tmp_path)
+    report = runner.json("uninstall", "--global", "mcp", "mv-aband")
+
+    left = json.loads(old_config.read_text())
+    assert left["mcpServers"]["mv-aband"]["args"] == ["mcp", "--mine"], left
+    [entry] = report["abandoned_entries"]
+    assert Path(entry["path"]).resolve() == old_config.resolve(), entry
+    assert "mv-aband" in entry["pointer"], entry
+    assert report["retained"] == [], report
+
+
+def test_global_moved_root_uninstall_keeps_an_adopted_stranded_entry(
+    grim_binary: Path,
+    grim_home: Path,
+    registry: str,
+    unique_repo: str,
+    tmp_path: Path,
+) -> None:
+    """An entry grim ADOPTED at the pre-override root is the user's own, so
+    the legacy-root reaper must leave it exactly as ordinary uninstall does:
+    kept, and reported in ``abandoned_entries`` (``--force`` removes it)."""
+    runner = GrimRunner(grim_binary, grim_home)
+    _write_moved_mcp(runner, grim_home, "mv-adopt", registry, unique_repo, tmp_path)
+    old_config = runner.home / ".claude.json"
+    hand_authored = {"mcpServers": {"mv-adopt": {"command": "grim", "args": ["mcp"]}}}
+    old_config.write_text(json.dumps(hand_authored, indent=2))
+    runner.json("lock", "--global")
+    installed = runner.json("install", "--global", "--client", "claude")
+    assert {r["status"] for r in installed["items"]} == {"unchanged"}, (
+        f"the identical hand-authored member must be adopted, not rewritten: {installed}"
+    )
+
+    _relocate_claude(runner, tmp_path)
+    report = runner.json("uninstall", "--global", "mcp", "mv-adopt")
+
+    assert json.loads(old_config.read_text()) == hand_authored, (
+        "the reaper must not splice out a member grim never wrote"
+    )
+    [entry] = report["abandoned_entries"]
+    assert Path(entry["path"]).resolve() == old_config.resolve(), entry
+    assert entry["pointer"].endswith("mv-adopt"), entry
+    assert report["retained"] == [], report
+
+
+def test_global_openclaw_state_dir_wins_over_openclaw_home(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str, tmp_path: Path
+) -> None:
+    """``OPENCLAW_STATE_DIR`` names the state root itself and takes precedence
+    over ``OPENCLAW_HOME`` (docs.openclaw.ai/help/environment)."""
+    runner = GrimRunner(grim_binary, grim_home)
+    _write_moved_skills(grim_home, unique_repo, "oc-state")
+    state_dir = tmp_path / "oc_state"
+    state_dir.mkdir()
+    runner.env["OPENCLAW_HOME"] = str(tmp_path / "oc_home")
+    runner.env["OPENCLAW_STATE_DIR"] = str(state_dir)
+    runner.json("lock", "--global")
+    runner.json("install", "--global", "--client", "openclaw")
+    assert (state_dir / "skills/oc-state/SKILL.md").is_file()
+    assert not (tmp_path / "oc_home").exists()
+
+
+def test_global_claude_settings_env_beats_the_shell_export(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str, tmp_path: Path
+) -> None:
+    """Claude applies a settings ``env`` value over the inherited shell value
+    (code.claude.com/docs/en/env-vars, "Precedence"), so grim must too. The
+    user settings file sits in the shell-resolved root."""
+    runner = GrimRunner(grim_binary, grim_home)
+    _write_moved_skills(grim_home, unique_repo, "cc-prec")
+    shell_dir = tmp_path / "cc_shell"
+    settings_dir = tmp_path / "cc_settings"
+    shell_dir.mkdir()
+    settings_dir.mkdir()
+    runner.env["CLAUDE_CONFIG_DIR"] = str(shell_dir)
+    (shell_dir / "settings.json").write_text(
+        json.dumps({"env": {"CLAUDE_CONFIG_DIR": str(settings_dir)}})
+    )
+    runner.json("lock", "--global")
+    runner.json("install", "--global", "--client", "claude")
+    assert (settings_dir / "skills/cc-prec/SKILL.md").is_file()
+    assert not (shell_dir / "skills").exists()
+
+
+def test_global_claude_settings_env_relative_value_is_ignored(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """A settings value is untrusted input: anything but an absolute path is
+    ignored and the default root stays in force."""
+    runner = GrimRunner(grim_binary, grim_home)
+    _write_moved_skills(grim_home, unique_repo, "cc-rel")
+    settings = runner.home / ".claude/settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"env": {"CLAUDE_CONFIG_DIR": "relative/dir"}}))
+    runner.json("lock", "--global")
+    runner.json("install", "--global", "--client", "claude")
+    assert (runner.home / ".claude/skills/cc-rel/SKILL.md").is_file()
+
+
+def _write_support_dir_rule(grim_home: Path, unique_repo: str, name: str) -> None:
+    ru = make_artifact(
+        f"{unique_repo}/{name}",
+        "rule",
+        {
+            f"{name}.md": f"---\npaths: ['**/*.rs']\n---\n# {name}\nSee [ex](./{name}/ex.md).\n",
+            f"{name}/ex.md": "# Ex\n",
+        },
+        tag="v1",
+    )
+    (grim_home / "grimoire.toml").write_text(f'[rules]\n{name} = "{ru.fq}"\n')
+
+
+def test_global_claude_settings_env_moves_the_claude_md_excludes_element(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str, tmp_path: Path
+) -> None:
+    """Fresh install under a settings-sourced root: the support-dir exclusion
+    lands in ``<root>/settings.json``, and the user's own
+    ``~/.claude/settings.json`` — the file carrying the ``env`` block — is
+    left byte-for-byte alone."""
+    runner = GrimRunner(grim_binary, grim_home)
+    _write_support_dir_rule(grim_home, unique_repo, "cc-excl")
+    new_root = _relocate_claude(runner, tmp_path)
+    user_settings = runner.home / ".claude/settings.json"
+    before = user_settings.read_bytes()
+    runner.json("lock", "--global")
+    runner.json("install", "--global", "--client", "claude")
+
+    assert (new_root / "rules/cc-excl/ex.md").is_file()
+    assert json.loads((new_root / "settings.json").read_text())["claudeMdExcludes"] == [
+        f"{new_root.as_posix()}/rules/cc-excl/**"
+    ]
+    assert user_settings.read_bytes() == before, "the file holding the env block must stay byte-intact"
+
+
+def test_global_claude_settings_env_upgrade_moves_the_claude_md_excludes_element(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str, tmp_path: Path
+) -> None:
+    """The upgrade: an element grim wrote into ``~/.claude/settings.json``
+    before it honored the settings ``env`` is not rewritten there by
+    ``update`` — the new element lands in the new root, and the old file
+    (now also carrying the user's ``env`` block) is byte-intact. The stale
+    old element is inert and documented in the upgrading guide."""
+    runner = GrimRunner(grim_binary, grim_home)
+    _write_support_dir_rule(grim_home, unique_repo, "cc-excl-up")
+    runner.json("lock", "--global")
+    runner.json("install", "--global", "--client", "claude")
+    user_settings = runner.home / ".claude/settings.json"
+    old_element = f"{(runner.home / '.claude').as_posix()}/rules/cc-excl-up/**"
+    assert json.loads(user_settings.read_text())["claudeMdExcludes"] == [old_element]
+
+    new_root = _relocate_claude(runner, tmp_path)
+    before = user_settings.read_bytes()
+    runner.json("update", "--global", "--client", "claude")
+
+    assert json.loads((new_root / "settings.json").read_text())["claudeMdExcludes"] == [
+        f"{new_root.as_posix()}/rules/cc-excl-up/**"
+    ]
+    assert not (runner.home / ".claude/rules/cc-excl-up").exists(), "the unmodified old copy is reaped"
+    assert user_settings.read_bytes() == before, "the file holding the env block must stay byte-intact"

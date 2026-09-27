@@ -169,14 +169,34 @@ impl Vendor for OpenCodeVendor {
         // under `environment`; `type: remote` with `url`/`headers`. Env
         // references use `{env:VAR}`.
         let s = &descriptor.server;
-        // A structured oauth block has no verified OpenCode mapping
-        // (upstream `oauth` is object|false with an unverified schema —
-        // see the vendor capability watchlist). Skip the whole descriptor
-        // with a warning rather than registering a server that cannot
-        // authenticate; plain descriptors are unaffected.
-        if s.oauth.is_some() {
-            tracing::warn!("mcp server '{name}' skipped for opencode ({scope}): no verified oauth mapping");
-            return None;
+        // OpenCode's remote `oauth` object (`McpOAuthConfig`, config/mcp.ts
+        // v1.18.32) takes `clientId`, `scope` (one space-separated string)
+        // and `callbackPort` (1..=65535). Lossless-or-skip
+        // (`adr_mcp_oauth_projection.md`): a pinned metadata URL, or a port
+        // OpenCode rejects, skips the server instead of being dropped.
+        let mut oauth = serde_json::Map::new();
+        if let Some(o) = &s.oauth {
+            use crate::oci::mcp::OAuthField;
+            let mut unmapped = o.unmapped(&[OAuthField::ClientId, OAuthField::Scopes, OAuthField::CallbackPort]);
+            if o.callback_port == Some(0) {
+                unmapped.push("callback_port");
+            }
+            if !unmapped.is_empty() {
+                tracing::warn!(
+                    "mcp server '{name}' skipped for opencode ({scope}): no oauth mapping for {}",
+                    unmapped.join(", ")
+                );
+                return None;
+            }
+            if let Some(client_id) = &o.client_id {
+                oauth.insert("clientId".into(), serde_json::json!(client_id));
+            }
+            if !o.scopes.is_empty() {
+                oauth.insert("scope".into(), serde_json::json!(o.scopes.join(" ")));
+            }
+            if let Some(port) = o.callback_port {
+                oauth.insert("callbackPort".into(), serde_json::json!(port));
+            }
         }
         let mut entry = serde_json::Map::new();
         match s.transport {
@@ -207,6 +227,11 @@ impl Vendor for OpenCodeVendor {
                 entry.insert("url".into(), serde_json::json!(s.url));
                 if !s.headers.is_empty() {
                     entry.insert("headers".into(), serde_json::json!(s.headers));
+                }
+                // Validation admits oauth on http/sse only, so this is the
+                // one arm that can carry it.
+                if !oauth.is_empty() {
+                    entry.insert("oauth".into(), serde_json::Value::Object(oauth));
                 }
             }
         }
@@ -287,7 +312,12 @@ impl Vendor for OpenCodeVendor {
             ));
         }
 
-        let lifted = drop_invalid_opencode_values(projection.lifted, &mut warnings, projection.cleaned.name.as_str());
+        let lifted = drop_invalid_opencode_values(
+            projection.lifted,
+            &mut warnings,
+            self.name(),
+            projection.cleaned.name.as_str(),
+        );
 
         let mut natives: Vec<(&'static str, serde_yaml::Value)> = vec![(
             "description",
@@ -361,9 +391,14 @@ const OPENCODE_COLOR_THEMES: &[&str] = &["primary", "secondary", "accent", "succ
 /// grim repairing its own output (class 1, `adr_vendor_support_tiers.md`),
 /// not a tightening of publish-time validation: an artifact valid today
 /// stays installable, and only the bad field is dropped.
-fn drop_invalid_opencode_values(
+///
+/// Kilo shares the schema (its `ConfigAgentV1`), so it calls this too with
+/// its own `vendor` namespace; there an invalid value makes Kilo skip the
+/// one agent rather than the whole config, still a silent loss.
+pub(super) fn drop_invalid_opencode_values(
     lifted: Vec<(&'static str, serde_yaml::Value)>,
     warnings: &mut Vec<String>,
+    vendor: &str,
     agent_name: &str,
 ) -> Vec<(&'static str, serde_yaml::Value)> {
     lifted
@@ -378,8 +413,8 @@ fn drop_invalid_opencode_values(
                     // for the same reason as `RenderError::InvalidValue` and
                     // the unknown-key warning in `render::partition_metadata`.
                     warnings.push(format!(
-                        "agent '{agent_name}': opencode.color {} is not '#RRGGBB' or one of {} \
-                         (OpenCode rejects its whole config on an invalid value); dropped",
+                        "agent '{agent_name}': {vendor}.color {} is not '#RRGGBB' or one of {} \
+                         ({vendor} rejects an invalid value); dropped",
                         quote_opencode_value(raw),
                         OPENCODE_COLOR_THEMES.join(", ")
                     ));
@@ -392,8 +427,8 @@ fn drop_invalid_opencode_values(
                     .is_some_and(|n| (1..=OPENCODE_MAX_SAFE_INTEGER).contains(&n));
                 if !valid {
                     warnings.push(format!(
-                        "agent '{agent_name}': opencode.steps must be a positive safe integer (<= 2^53-1) \
-                         (OpenCode rejects its whole config on an invalid value); dropped"
+                        "agent '{agent_name}': {vendor}.steps must be a positive safe integer (<= 2^53-1) \
+                         ({vendor} rejects an invalid value); dropped"
                     ));
                 }
                 valid
@@ -692,21 +727,42 @@ mod tests {
     }
 
     #[test]
-    fn mcp_entry_oauth_descriptor_is_declined_plain_is_not() {
-        let with_oauth = crate::oci::mcp::McpDescriptor::from_toml_str(
-            "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"\n[server.oauth]\nclient_id = \"c\"",
-        )
-        .unwrap();
-        assert!(
-            OpenCodeVendor
-                .mcp_entry(ConfigScope::Project, "m", &with_oauth)
-                .is_none()
+    fn mcp_entry_oauth_is_projected_losslessly_or_skipped() {
+        let entry = |oauth: &str| {
+            let d = crate::oci::mcp::McpDescriptor::from_toml_str(&format!(
+                "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"\n[server.oauth]\n{oauth}"
+            ))
+            .unwrap();
+            OpenCodeVendor.mcp_entry(ConfigScope::Project, "m", &d).map(|(_, v)| v)
+        };
+        // Every mappable field set: written, scopes space-joined, `${VAR}`
+        // translated to OpenCode's `{env:VAR}`.
+        let full = entry("client_id = \"${CID}\"\nscopes = [\"read\", \"write\"]\ncallback_port = 43110").unwrap();
+        assert_eq!(
+            full["oauth"],
+            serde_json::json!({"clientId": "{env:CID}", "scope": "read write", "callbackPort": 43110})
         );
+        // Only the fields the descriptor sets are written.
+        assert_eq!(
+            entry("client_id = \"c\"").unwrap()["oauth"],
+            serde_json::json!({"clientId": "c"})
+        );
+        // An empty block projects nothing and is never a reason to skip.
+        assert!(entry("").unwrap().get("oauth").is_none());
+        // A pinned metadata URL has no OpenCode target: skip, never drop it.
+        assert!(entry("client_id = \"c\"\nauth_server_metadata_url = \"https://auth/.well-known/x\"").is_none());
+        // OpenCode rejects port 0 (1..=65535), which would break its whole config.
+        assert!(entry("callback_port = 0").is_none());
+    }
+
+    #[test]
+    fn mcp_entry_plain_remote_writes_no_oauth_key() {
         let plain = crate::oci::mcp::McpDescriptor::from_toml_str(
             "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"",
         )
         .unwrap();
-        assert!(OpenCodeVendor.mcp_entry(ConfigScope::Project, "m", &plain).is_some());
+        let (_, v) = OpenCodeVendor.mcp_entry(ConfigScope::Project, "m", &plain).unwrap();
+        assert!(v.get("oauth").is_none());
     }
 
     #[test]

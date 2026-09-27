@@ -99,9 +99,12 @@ impl Vendor for CopilotVendor {
 
     fn detect(&self, workspace: &Path, scope: ConfigScope) -> bool {
         // A client whose only footprint is its grim-managed MCP config is
-        // still a real Copilot user — check that path too (`.vscode/mcp.json`
-        // for project scope, `mcp-config.json` for global scope).
-        let mcp_present = self.mcp_config_path(workspace, scope).is_some_and(|p| p.is_file());
+        // still a real Copilot user — check those paths too (`.vscode/mcp.json`
+        // and `.github/mcp.json` for project scope, `mcp-config.json` for
+        // global scope). `.github/mcp.json` is the CLI's own project file, as
+        // Copilot-specific as `.vscode/mcp.json`, so it counts where bare
+        // `.github` does not.
+        let mcp_present = self.mcp_config_paths(workspace, scope).iter().any(|p| p.is_file());
         match scope {
             // Project: a Copilot-SPECIFIC marker, NOT bare `.github` —
             // nearly every repo carries `.github/` for CI with nothing to
@@ -152,9 +155,9 @@ impl Vendor for CopilotVendor {
 
     fn mcp_config_path(&self, workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
         match scope {
-            // Copilot CLI reads only a global file; the project-scope MCP
-            // surface in the Copilot ecosystem is VS Code's workspace
-            // config (`servers` key), used by Copilot Chat.
+            // The first project surface, VS Code's workspace config
+            // (`servers` key), used by Copilot Chat. The CLI's own file
+            // follows in `mcp_config_paths`.
             ConfigScope::Project => Some(workspace.join(".vscode").join("mcp.json")),
             ConfigScope::Global => Some(
                 env_dir("COPILOT_HOME")
@@ -164,120 +167,44 @@ impl Vendor for CopilotVendor {
         }
     }
 
+    fn mcp_config_paths(&self, workspace: &Path, scope: ConfigScope) -> Vec<PathBuf> {
+        match scope {
+            // Two clients, two files: VS Code Chat reads `.vscode/mcp.json`,
+            // Copilot CLI reads `.github/mcp.json` and never the VS Code file
+            // (docs.github.com "add MCP servers", CLI 1.0.61+). The VS Code
+            // file stays first, so a record written before the CLI file
+            // existed keeps its first surface and heals by gaining the second.
+            ConfigScope::Project => vec![
+                workspace.join(".vscode").join("mcp.json"),
+                workspace.join(".github").join("mcp.json"),
+            ],
+            ConfigScope::Global => self.mcp_config_path(workspace, scope).into_iter().collect(),
+        }
+    }
+
     fn mcp_entry(
         &self,
         scope: ConfigScope,
         name: &str,
         descriptor: &crate::oci::mcp::McpDescriptor,
     ) -> Option<(String, serde_json::Value)> {
-        use crate::oci::mcp::McpTransport;
-
-        // Refinement fields (`timeout`/`always_load`/`headers_helper`/
-        // `cwd`) have no documented Copilot target — dropped (pure
-        // refinements, nothing auth-critical is lost). A structured oauth
-        // block, by contrast, IS auth-critical: Copilot documents its own
-        // oauth fields (`oauthClientId`, `oauthPublicClient`,
-        // `oauthGrantType`, `oidc`), but the shape differs from grim's
-        // `McpOAuth`, so the whole descriptor is skipped with a warning.
-        let s = &descriptor.server;
-        if s.oauth.is_some() {
-            tracing::warn!("mcp server '{name}' skipped for copilot ({scope}): config schema oauth shape differs");
-            return None;
-        }
         match scope {
-            // Project: VS Code's workspace `mcp.json` (`servers` key,
-            // `type: stdio|http|sse`, env references as `${env:VAR}`).
-            ConfigScope::Project => {
-                let mut entry = serde_json::Map::new();
-                match s.transport {
-                    McpTransport::Stdio => {
-                        entry.insert("type".into(), serde_json::json!("stdio"));
-                        entry.insert("command".into(), serde_json::json!(s.command));
-                        if !s.args.is_empty() {
-                            entry.insert("args".into(), serde_json::json!(s.args));
-                        }
-                        if !s.env.is_empty() {
-                            entry.insert("env".into(), serde_json::json!(s.env));
-                        }
-                    }
-                    // WebSocket transport has no VS Code `servers` schema
-                    // mapping — skip with a warning.
-                    McpTransport::Ws => {
-                        tracing::warn!(
-                            "mcp server '{name}' skipped for copilot (project): no ws transport in the servers schema"
-                        );
-                        return None;
-                    }
-                    McpTransport::Http | McpTransport::Sse => {
-                        entry.insert("type".into(), serde_json::json!(s.transport.to_string()));
-                        entry.insert("url".into(), serde_json::json!(s.url));
-                        if !s.headers.is_empty() {
-                            entry.insert("headers".into(), serde_json::json!(s.headers));
-                        }
-                    }
-                }
-                let mut value = serde_json::Value::Object(entry);
-                super::mcp_config::translate_env_refs(&mut value, &|var| format!("${{env:{var}}}"));
-                Some((format!("/servers/{name}"), value))
-            }
-            // Global: Copilot CLI's `mcp-config.json`. Copilot expands
-            // `${VAR}` itself in `command`, `args`, `env`, `url` and
-            // `headers` (live-verified against CLI 1.0.88), which is grim's
-            // canonical syntax, so references are written as authored —
-            // never their values. Until 2026-09-27 grim skipped such
-            // descriptors here; an unset variable stays literal upstream.
-            ConfigScope::Global => {
-                let mut entry = serde_json::Map::new();
-                match s.transport {
-                    McpTransport::Stdio => {
-                        entry.insert("type".into(), serde_json::json!("local"));
-                        entry.insert("command".into(), serde_json::json!(s.command));
-                        if !s.args.is_empty() {
-                            entry.insert("args".into(), serde_json::json!(s.args));
-                        }
-                        if !s.env.is_empty() {
-                            entry.insert("env".into(), serde_json::json!(s.env));
-                        }
-                    }
-                    // WebSocket transport has no Copilot CLI mapping —
-                    // skip with a warning.
-                    McpTransport::Ws => {
-                        tracing::warn!(
-                            "mcp server '{name}' skipped for copilot (global): no ws transport in mcp-config.json"
-                        );
-                        return None;
-                    }
-                    McpTransport::Http | McpTransport::Sse => {
-                        // Copilot validates `url` before expanding it and
-                        // silently drops an entry whose raw text is not a
-                        // URL (a `${VAR}` in the port) — skip it here so
-                        // grim never reports a dead entry as installed.
-                        // Same WHATWG parser as Copilot's `new URL()`.
-                        // Scoped to URLs carrying a reference, so an
-                        // env-free descriptor renders exactly as before.
-                        if s.url
-                            .as_deref()
-                            .is_some_and(|u| u.contains("${") && reqwest::Url::parse(u).is_err())
-                        {
-                            tracing::warn!(
-                                "mcp server '{name}' skipped for copilot (global): its url is not a valid URL \
-                                 before ${{VAR}} expansion, which Copilot CLI rejects"
-                            );
-                            return None;
-                        }
-                        entry.insert("type".into(), serde_json::json!(s.transport.to_string()));
-                        entry.insert("url".into(), serde_json::json!(s.url));
-                        if !s.headers.is_empty() {
-                            entry.insert("headers".into(), serde_json::json!(s.headers));
-                        }
-                    }
-                }
-                // Explicit tool allowlist: everything (the user curates in
-                // Copilot itself; grim manages presence, not policy).
-                entry.insert("tools".into(), serde_json::json!(["*"]));
-                Some((format!("/mcpServers/{name}"), serde_json::Value::Object(entry)))
-            }
+            ConfigScope::Project => vscode_entry(name, descriptor),
+            ConfigScope::Global => cli_entry("global", name, descriptor),
         }
+    }
+
+    fn mcp_entry_for(
+        &self,
+        scope: ConfigScope,
+        config_path: &Path,
+        name: &str,
+        descriptor: &crate::oci::mcp::McpDescriptor,
+    ) -> Option<(String, serde_json::Value)> {
+        if scope == ConfigScope::Project && config_path.ends_with(".github/mcp.json") {
+            return cli_entry("project, .github/mcp.json", name, descriptor);
+        }
+        self.mcp_entry(scope, name, descriptor)
     }
 
     fn agent_path(&self, workspace: &Path, scope: ConfigScope, name: &str) -> PathBuf {
@@ -364,6 +291,155 @@ impl Vendor for CopilotVendor {
         document.push_str(&parsed.body);
         Ok(Some(RenderedDoc { document, warnings }))
     }
+}
+
+/// The client id to write for `descriptor`'s oauth block, `Some(None)` when
+/// there is no block (or an empty one), `None` when the server must be
+/// skipped (warned). Lossless-or-skip (`adr_mcp_oauth_projection.md`):
+/// Copilot's oauth fields (`oauthClientId`, `oauthPublicClient`,
+/// `oauthGrantType`, `oidc`; VS Code's `oauth.clientId`) give only
+/// `client_id` a target — dropping `scopes` or a metadata URL on an auth
+/// surface could widen the grant. Neither client documents `${VAR}`
+/// expansion inside the client id, so a reference there skips too.
+fn oauth_client_id<'a>(
+    surface: &str,
+    name: &str,
+    descriptor: &'a crate::oci::mcp::McpDescriptor,
+) -> Option<Option<&'a str>> {
+    use crate::oci::mcp::OAuthField;
+
+    let Some(oauth) = &descriptor.server.oauth else {
+        return Some(None);
+    };
+    let unmapped = oauth.unmapped(&[OAuthField::ClientId]);
+    if !unmapped.is_empty() {
+        tracing::warn!(
+            "mcp server '{name}' skipped for copilot ({surface}): oauth field(s) {} have no Copilot target",
+            unmapped.join(", ")
+        );
+        return None;
+    }
+    let client_id = oauth.client_id.as_deref();
+    if client_id.is_some_and(|id| crate::oci::mcp::env_ref_names(id).next().is_some()) {
+        tracing::warn!(
+            "mcp server '{name}' skipped for copilot ({surface}): oauth client_id references an environment \
+             variable, which Copilot does not document expanding there"
+        );
+        return None;
+    }
+    Some(client_id)
+}
+
+/// VS Code's workspace `mcp.json` entry (`servers` key, `type:
+/// stdio|http|sse`, env references as `${env:VAR}`), read by Copilot Chat.
+fn vscode_entry(name: &str, descriptor: &crate::oci::mcp::McpDescriptor) -> Option<(String, serde_json::Value)> {
+    use crate::oci::mcp::McpTransport;
+
+    // Refinement fields (`timeout`/`always_load`/`headers_helper`/`cwd`)
+    // have no documented Copilot target — dropped (pure refinements,
+    // nothing auth-critical is lost).
+    let s = &descriptor.server;
+    let client_id = oauth_client_id("project", name, descriptor)?;
+    let mut entry = serde_json::Map::new();
+    match s.transport {
+        McpTransport::Stdio => {
+            entry.insert("type".into(), serde_json::json!("stdio"));
+            entry.insert("command".into(), serde_json::json!(s.command));
+            if !s.args.is_empty() {
+                entry.insert("args".into(), serde_json::json!(s.args));
+            }
+            if !s.env.is_empty() {
+                entry.insert("env".into(), serde_json::json!(s.env));
+            }
+        }
+        // WebSocket transport has no VS Code `servers` schema mapping — skip
+        // with a warning.
+        McpTransport::Ws => {
+            tracing::warn!("mcp server '{name}' skipped for copilot (project): no ws transport in the servers schema");
+            return None;
+        }
+        McpTransport::Http | McpTransport::Sse => {
+            entry.insert("type".into(), serde_json::json!(s.transport.to_string()));
+            entry.insert("url".into(), serde_json::json!(s.url));
+            if !s.headers.is_empty() {
+                entry.insert("headers".into(), serde_json::json!(s.headers));
+            }
+            // VS Code: `oauth: { clientId }` on http/sse servers
+            // (code.visualstudio.com MCP configuration reference).
+            if let Some(id) = client_id {
+                entry.insert("oauth".into(), serde_json::json!({ "clientId": id }));
+            }
+        }
+    }
+    let mut value = serde_json::Value::Object(entry);
+    super::mcp_config::translate_env_refs(&mut value, &|var| format!("${{env:{var}}}"));
+    Some((format!("/servers/{name}"), value))
+}
+
+/// A Copilot CLI entry (`mcpServers` key) — the shape of both the global
+/// `mcp-config.json` and the project `.github/mcp.json`. Copilot expands
+/// `${VAR}` itself in `command`, `args`, `env`, `url` and `headers` in both
+/// (live-verified against CLI 1.0.88), which is grim's canonical syntax, so
+/// references are written as authored — never their values. An unset
+/// variable stays literal upstream. `surface` names the file in warnings.
+fn cli_entry(
+    surface: &str,
+    name: &str,
+    descriptor: &crate::oci::mcp::McpDescriptor,
+) -> Option<(String, serde_json::Value)> {
+    use crate::oci::mcp::McpTransport;
+
+    let s = &descriptor.server;
+    let client_id = oauth_client_id(surface, name, descriptor)?;
+    let mut entry = serde_json::Map::new();
+    match s.transport {
+        McpTransport::Stdio => {
+            entry.insert("type".into(), serde_json::json!("local"));
+            entry.insert("command".into(), serde_json::json!(s.command));
+            if !s.args.is_empty() {
+                entry.insert("args".into(), serde_json::json!(s.args));
+            }
+            if !s.env.is_empty() {
+                entry.insert("env".into(), serde_json::json!(s.env));
+            }
+        }
+        // WebSocket transport has no Copilot CLI mapping — skip with a
+        // warning.
+        McpTransport::Ws => {
+            tracing::warn!("mcp server '{name}' skipped for copilot ({surface}): no ws transport in mcp-config.json");
+            return None;
+        }
+        McpTransport::Http | McpTransport::Sse => {
+            // Copilot validates `url` before expanding it and silently drops
+            // an entry whose raw text is not a URL (a `${VAR}` in the port) —
+            // skip it here so grim never reports a dead entry as installed.
+            // Same WHATWG parser as Copilot's `new URL()`. Scoped to URLs
+            // carrying a reference, so an env-free descriptor renders
+            // exactly as before.
+            if s.url
+                .as_deref()
+                .is_some_and(|u| u.contains("${") && reqwest::Url::parse(u).is_err())
+            {
+                tracing::warn!(
+                    "mcp server '{name}' skipped for copilot ({surface}): its url is not a valid URL \
+                     before ${{VAR}} expansion, which Copilot CLI rejects"
+                );
+                return None;
+            }
+            entry.insert("type".into(), serde_json::json!(s.transport.to_string()));
+            entry.insert("url".into(), serde_json::json!(s.url));
+            if !s.headers.is_empty() {
+                entry.insert("headers".into(), serde_json::json!(s.headers));
+            }
+            if let Some(id) = client_id {
+                entry.insert("oauthClientId".into(), serde_json::json!(id));
+            }
+        }
+    }
+    // Explicit tool allowlist: everything (the user curates in Copilot
+    // itself; grim manages presence, not policy).
+    entry.insert("tools".into(), serde_json::json!(["*"]));
+    Some((format!("/mcpServers/{name}"), serde_json::Value::Object(entry)))
 }
 
 /// Copilot CLI's personal config root. `$COPILOT_HOME` "replaces the entire
@@ -662,23 +738,137 @@ mod tests {
         assert!(err.to_string().contains("copilot.target"), "{err}");
     }
 
+    fn oauth_descriptor(oauth: &str) -> crate::oci::mcp::McpDescriptor {
+        crate::oci::mcp::McpDescriptor::from_toml_str(&format!(
+            "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"\n[server.oauth]\n{oauth}"
+        ))
+        .unwrap()
+    }
+
+    /// Lossless-or-skip (`adr_mcp_oauth_projection.md`): a client id alone
+    /// maps onto every Copilot file; any other oauth field skips the server.
     #[test]
-    fn mcp_entry_oauth_descriptor_is_declined_plain_is_not() {
-        let with_oauth = crate::oci::mcp::McpDescriptor::from_toml_str(
-            "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"\n[server.oauth]\nclient_id = \"c\"",
-        )
-        .unwrap();
-        assert!(
-            CopilotVendor
-                .mcp_entry(ConfigScope::Project, "m", &with_oauth)
-                .is_none()
-        );
-        assert!(CopilotVendor.mcp_entry(ConfigScope::Global, "m", &with_oauth).is_none());
+    fn mcp_entry_oauth_client_id_is_written_other_fields_skip() {
+        let ws = Path::new("/w");
+        let github = ws.join(".github/mcp.json");
+        let client_only = oauth_descriptor("client_id = \"cid\"");
+        let (_, vscode) = CopilotVendor
+            .mcp_entry(ConfigScope::Project, "m", &client_only)
+            .unwrap();
+        assert_eq!(vscode["oauth"], serde_json::json!({"clientId": "cid"}));
+        let (_, cli) = CopilotVendor
+            .mcp_entry_for(ConfigScope::Project, &github, "m", &client_only)
+            .unwrap();
+        assert_eq!(cli["oauthClientId"], "cid");
+        assert!(cli.get("oauth").is_none(), "{cli}");
+        let (_, global) = CopilotVendor.mcp_entry(ConfigScope::Global, "m", &client_only).unwrap();
+        assert_eq!(global["oauthClientId"], "cid");
+
+        for lossy in [
+            "client_id = \"cid\"\nscopes = [\"read\"]",
+            "client_id = \"cid\"\ncallback_port = 8080",
+            "auth_server_metadata_url = \"https://a/.well-known\"",
+            // Copilot documents no expansion inside its oauth client id.
+            "client_id = \"${CID}\"",
+        ] {
+            let d = oauth_descriptor(lossy);
+            assert!(
+                CopilotVendor.mcp_entry(ConfigScope::Project, "m", &d).is_none(),
+                "{lossy}"
+            );
+            assert!(
+                CopilotVendor
+                    .mcp_entry_for(ConfigScope::Project, &github, "m", &d)
+                    .is_none(),
+                "{lossy}"
+            );
+            assert!(
+                CopilotVendor.mcp_entry(ConfigScope::Global, "m", &d).is_none(),
+                "{lossy}"
+            );
+        }
+
         let plain = crate::oci::mcp::McpDescriptor::from_toml_str(
             "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"",
         )
         .unwrap();
-        assert!(CopilotVendor.mcp_entry(ConfigScope::Project, "m", &plain).is_some());
+        let (_, value) = CopilotVendor.mcp_entry(ConfigScope::Project, "m", &plain).unwrap();
+        assert!(value.get("oauth").is_none(), "no oauth block, no oauth key: {value}");
+    }
+
+    /// Project scope has two files: VS Code Chat's `.vscode/mcp.json` first
+    /// (unchanged, so every pre-existing record keeps its first surface),
+    /// then the Copilot CLI's `.github/mcp.json`.
+    #[test]
+    fn mcp_config_paths_project_lists_vscode_then_github() {
+        let ws = Path::new("/w");
+        assert_eq!(
+            CopilotVendor.mcp_config_paths(ws, ConfigScope::Project),
+            vec![ws.join(".vscode/mcp.json"), ws.join(".github/mcp.json")]
+        );
+        assert_eq!(
+            CopilotVendor.mcp_config_paths(ws, ConfigScope::Global).len(),
+            usize::from(CopilotVendor.mcp_config_path(ws, ConfigScope::Global).is_some()),
+            "global keeps its single mcp-config.json"
+        );
+    }
+
+    /// `.github/mcp.json` takes the CLI's `mcpServers` shape with `${VAR}`
+    /// verbatim (live-verified, CLI 1.0.88); `.vscode/mcp.json` keeps its
+    /// `servers` shape.
+    #[test]
+    fn mcp_entry_for_github_file_uses_the_cli_shape() {
+        let ws = Path::new("/w");
+        let d = crate::oci::mcp::McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"srv\"\nargs = [\"${TOKEN}\"]\n[server.env]\nKEY = \"${API_KEY}\"",
+        )
+        .unwrap();
+        let (pointer, value) = CopilotVendor
+            .mcp_entry_for(ConfigScope::Project, &ws.join(".github/mcp.json"), "m", &d)
+            .unwrap();
+        assert_eq!(pointer, "/mcpServers/m");
+        assert_eq!(value["type"], "local");
+        assert_eq!(value["args"], serde_json::json!(["${TOKEN}"]));
+        assert_eq!(value["env"]["KEY"], "${API_KEY}");
+        assert_eq!(value["tools"], serde_json::json!(["*"]));
+
+        assert_eq!(
+            CopilotVendor.mcp_entry_for(ConfigScope::Project, &ws.join(".vscode/mcp.json"), "m", &d),
+            CopilotVendor.mcp_entry(ConfigScope::Project, "m", &d),
+            "the VS Code file renders exactly as before"
+        );
+        let (pointer, value) = CopilotVendor.mcp_entry(ConfigScope::Project, "m", &d).unwrap();
+        assert_eq!(pointer, "/servers/m");
+        assert_eq!(value["env"]["KEY"], "${env:API_KEY}");
+
+        // The CLI rejects a url invalid before expansion in its project
+        // files too; VS Code's file still takes it.
+        let port = crate::oci::mcp::McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"http://h:${PORT}/x\"",
+        )
+        .unwrap();
+        assert!(
+            CopilotVendor
+                .mcp_entry_for(ConfigScope::Project, &ws.join(".github/mcp.json"), "m", &port)
+                .is_none()
+        );
+        assert!(
+            CopilotVendor
+                .mcp_entry_for(ConfigScope::Project, &ws.join(".vscode/mcp.json"), "m", &port)
+                .is_some()
+        );
+    }
+
+    /// A grim-managed `.github/mcp.json` is a Copilot footprint, the same
+    /// way `.vscode/mcp.json` is — unlike bare `.github`.
+    #[test]
+    fn detect_project_by_github_mcp_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let w = tmp.path();
+        std::fs::create_dir_all(w.join(".github")).unwrap();
+        assert!(!CopilotVendor.detect(w, ConfigScope::Project));
+        std::fs::write(w.join(".github").join("mcp.json"), "{}").unwrap();
+        assert!(CopilotVendor.detect(w, ConfigScope::Project));
     }
 
     #[test]

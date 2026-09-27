@@ -69,8 +69,8 @@ pub enum FieldType {
 ///   (vendor, kind) pair — warn + skip + zero outputs. Sometimes because no
 ///   ownable surface exists upstream at all (Codex rules, and the wave-1
 ///   declines); sometimes because a real surface exists but grim has not
-///   built the render yet (Junie/Droid/Kilo/Goose agents, Cline's CLI
-///   agent surface, Antigravity rules) — a grim capability gap, not an
+///   built the render yet (Droid agents, Cline's CLI
+///   agent surface) — a grim capability gap, not an
 ///   upstream absence. The module doc on each `Vendor` impl states which.
 ///
 /// Behavior mapping onto the old bool: `Declined` is the old `false`;
@@ -277,6 +277,16 @@ pub trait Vendor {
         &[]
     }
 
+    /// The agent-name grammar this client enforces when it is narrower than
+    /// grim's own, or `None` when every grim name is valid here. An agent
+    /// whose name falls outside it is skipped for this client with a warning
+    /// — never renamed, which would break every reference to it — and
+    /// [`super::installer::client_hosts`] leaves it out of every support
+    /// decision, so the skip is not reported as pending drift.
+    fn agent_name_grammar(&self) -> Option<super::render::NameGrammar> {
+        None
+    }
+
     /// Whether this client is *detected* for `scope` — its vendor
     /// directory / config marker is present — so a default install (no
     /// `--client`, no `[options].clients`) should target it. Pure existence
@@ -313,6 +323,27 @@ pub trait Vendor {
         None
     }
 
+    /// Every MCP config file the vendor reads at `scope` — the surface the
+    /// installer writes and every support decision consults. Empty ⇔ no
+    /// writable surface. Default: [`Self::mcp_config_path`] alone; a vendor
+    /// whose clients read more than one file (Copilot: VS Code Chat's
+    /// `.vscode/mcp.json` and the CLI's `.github/mcp.json`) overrides this,
+    /// and each file gets its own recorded output.
+    fn mcp_config_paths(&self, workspace: &Path, scope: ConfigScope) -> Vec<PathBuf> {
+        self.mcp_config_path(workspace, scope).into_iter().collect()
+    }
+
+    /// Top-level keys of a grim-managed MCP entry that the vendor itself
+    /// writes into it — approvals, toggles, OAuth tokens. They are left out
+    /// of the integrity hash and the adopt/refuse comparison, and a grim
+    /// rewrite carries them over from the entry on disk, so the client's own
+    /// state neither reads as a user edit nor gets wiped. Uninstall still
+    /// removes the whole entry. Default: none, which keeps every other
+    /// vendor byte-identical.
+    fn mcp_entry_vendor_owned_keys(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// The config-file format [`Self::mcp_config_path`] writes, so the
     /// installer's MCP registration step picks the matching span-preserving
     /// splice engine ([`super::json_splice`] vs [`super::toml_splice`]).
@@ -336,6 +367,21 @@ pub trait Vendor {
         _descriptor: &crate::oci::mcp::McpDescriptor,
     ) -> Option<(String, serde_json::Value)> {
         None
+    }
+
+    /// [`Self::mcp_entry`] for one file of [`Self::mcp_config_paths`] — what
+    /// the installer calls, once per file. Default: every file takes the same
+    /// entry; a vendor whose files follow different schemas overrides this
+    /// (Copilot's `.github/mcp.json` takes the CLI shape, `.vscode/mcp.json`
+    /// VS Code's).
+    fn mcp_entry_for(
+        &self,
+        scope: ConfigScope,
+        _config_path: &Path,
+        name: &str,
+        descriptor: &crate::oci::mcp::McpDescriptor,
+    ) -> Option<(String, serde_json::Value)> {
+        self.mcp_entry(scope, name, descriptor)
     }
 
     /// Render the `SKILL.md` index for this vendor, or `None` when the
@@ -382,6 +428,24 @@ pub trait Vendor {
     /// [`RenderError`] when a known `<vendor>.<field>` metadata key
     /// carries an unconvertible literal.
     fn agent_index(&self, parsed: &ParsedAgent, pinned: &str) -> Result<Option<RenderedDoc>, RenderError>;
+
+    /// [`Self::agent_index`] with the installed binding name (the file stem)
+    /// known, for a vendor that must write a name its grammar accepts where
+    /// the artifact's own frontmatter `name` would be rejected. Default:
+    /// ignores `binding` and delegates.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::agent_index`].
+    fn agent_index_named(
+        &self,
+        parsed: &ParsedAgent,
+        binding: &str,
+        pinned: &str,
+    ) -> Result<Option<RenderedDoc>, RenderError> {
+        let _ = binding;
+        self.agent_index(parsed, pinned)
+    }
 
     /// Converge vendor-owned configuration on the current install state —
     /// the reversible config-registration seam (hooks ADR pattern).

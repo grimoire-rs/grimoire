@@ -253,6 +253,121 @@ def test_antigravity_agent_and_mcp_install_at_both_scopes(
     ), "an untouched install must not report drift"
 
 
+def _antigravity_rules(unique_repo: str) -> tuple:
+    scoped = make_artifact(
+        f"{unique_repo}/agy-scoped",
+        "rule",
+        {"agy-scoped.md": "---\npaths: ['src/**/*.rs', 'Cargo.toml']\n---\n# Rust style\nUse 4 spaces.\n"},
+        tag="v1",
+    )
+    unscoped = make_artifact(
+        f"{unique_repo}/agy-always",
+        "rule",
+        {"agy-always.md": "# Always\nBe terse.\n"},
+        tag="v1",
+    )
+    return scoped, unscoped
+
+
+def _frontmatter(text: str) -> str:
+    assert text.startswith("---\n"), text
+    return text[4 : text.index("\n---\n", 4)]
+
+
+def _assert_antigravity_rules(rules_dir: Path, runner: GrimRunner, *status_args: str) -> None:
+    scoped = rules_dir / "agy-scoped.md"
+    unscoped = rules_dir / "agy-always.md"
+    fm = _frontmatter(scoped.read_text())
+    assert "trigger: glob" in fm, fm
+    assert "globs: src/**/*.rs,Cargo.toml" in fm, fm
+    assert "description: Rust style" in fm, fm
+    assert "paths" not in fm, f"canonical paths must not leak: {fm}"
+    assert scoped.read_text().endswith("# Rust style\nUse 4 spaces.\n")
+    fm = _frontmatter(unscoped.read_text())
+    assert "trigger: always_on" in fm and "globs" not in fm, fm
+
+    # Self-heal: re-installing untouched rules is a byte-identical no-op.
+    before = (scoped.read_bytes(), unscoped.read_bytes())
+    again = runner.json("install", *status_args, "--client", "antigravity")["items"]
+    assert all(r["status"] == "unchanged" for r in again), again
+    assert (scoped.read_bytes(), unscoped.read_bytes()) == before
+    status = runner.json("status", *status_args)["items"]
+    assert all(r["state"] == "installed" for r in status), status
+    assert not any(r["outputs_pending"] for r in status), status
+
+
+def test_antigravity_rules_render_trigger_frontmatter_at_project_scope(
+    grim_at, bare_project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A rule with ``paths`` becomes ``trigger: glob`` + comma-joined
+    ``globs``; one without becomes ``trigger: always_on``. Both land in
+    ``.agents/rules`` beside the pooled skills."""
+    scoped, unscoped = _antigravity_rules(unique_repo)
+    (bare_project_dir / "grimoire.toml").write_text(
+        f'[rules]\nagy-scoped = "{scoped.fq}"\nagy-always = "{unscoped.fq}"\n'
+    )
+    runner = grim_at(bare_project_dir)
+    runner.run("lock", check=False)
+    rows = runner.json("install", "--client", "antigravity")["items"]
+    assert all(r["status"] == "installed" for r in rows), rows
+    _assert_antigravity_rules(bare_project_dir / ".agents/rules", runner)
+
+
+def test_antigravity_rules_land_in_gemini_config_at_global_scope(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """Global rules live under Antigravity's own ``~/.gemini/config/rules``,
+    never Gemini CLI's ``~/.gemini``."""
+    scoped, unscoped = _antigravity_rules(unique_repo)
+    (grim_home / "grimoire.toml").write_text(
+        f'[rules]\nagy-scoped = "{scoped.fq}"\nagy-always = "{unscoped.fq}"\n'
+    )
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("lock", "--global")
+    rows = runner.json("install", "--global", "--client", "antigravity")["items"]
+    assert all(r["status"] == "installed" for r in rows), rows
+    assert not (runner.home / ".gemini/rules").exists()
+    _assert_antigravity_rules(runner.home / ".gemini/config/rules", runner, "--global")
+
+    runner.json("uninstall", "--global", "rule", "agy-scoped")
+    assert not (runner.home / ".gemini/config/rules/agy-scoped.md").exists()
+
+
+def test_antigravity_rule_recorded_before_the_kind_flip_heals_on_install(
+    grim_at, bare_project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """The upgrading.md claim: a rule installed while grim still declined it
+    for Antigravity carries no Antigravity output. ``status`` lists that
+    output under ``outputs_pending``, and the next ``install`` writes it
+    without touching the other client's file. The pre-change record is
+    simulated by a Claude-only first install."""
+    scoped, _ = _antigravity_rules(unique_repo)
+    (bare_project_dir / "grimoire.toml").write_text(
+        '[options]\nclients = ["claude", "antigravity"]\n\n'
+        f'[rules]\nagy-scoped = "{scoped.fq}"\n'
+    )
+    runner = grim_at(bare_project_dir)
+    runner.run("lock", check=False)
+    runner.json("install", "--client", "claude")
+    agy_rule = bare_project_dir / ".agents/rules/agy-scoped.md"
+    claude_rule = bare_project_dir / ".claude/rules/agy-scoped.md"
+    assert not agy_rule.exists(), "the pre-change record carries no Antigravity output"
+    row = next(r for r in runner.json("status")["items"] if r["name"] == "agy-scoped")
+    pending = row["outputs_pending"]
+    assert [o["client"] for o in pending] == ["antigravity"], pending
+    assert pending[0]["path"].replace("\\", "/").endswith(".agents/rules/agy-scoped.md"), pending
+    claude_before = claude_rule.read_bytes()
+
+    rows = runner.json("install")["items"]
+    assert [r["status"] for r in rows] == ["updated"], rows
+    assert "trigger: glob" in agy_rule.read_text()
+    assert claude_rule.read_bytes() == claude_before, "the Claude output is untouched"
+    row = next(r for r in runner.json("status")["items"] if r["name"] == "agy-scoped")
+    assert row["state"] == "installed", row
+    assert row["outputs_pending"] == [], row
+    assert not any(o.get("modified") for o in row["outputs"]), row
+
+
 # ---------------------------------------------------------------------------
 # Kiro global scoped rule: written correctly, warned as upstream-inert
 # ---------------------------------------------------------------------------
@@ -402,6 +517,144 @@ def test_junie_global_rule_skips_while_a_sibling_client_still_installs(
     clients = {out["client"] for out in runner.json("status", "--global")["items"][0]["outputs"]}
     assert clients == {"claude"}, f"Junie must record no output: {clients}"
     assert "junie" in result.stderr.lower(), result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Junie agents: `.junie/agents/`, never the shared `.agents/`; name grammar
+# ---------------------------------------------------------------------------
+
+
+def _junie_agent(unique_repo: str, name: str):
+    """An agent carrying all three ``junie.*`` keys, so the render is a real
+    transform and a byte-identity assertion means something."""
+    doc = (
+        f"---\nname: {name}\ndescription: Reviews.\ntools: Read, Grep\nmetadata:\n"
+        "  junie.permission-mode: acceptEdits\n  junie.reasoning-level: high\n"
+        '  junie.max-turns: "12"\n---\nYou review.\n'
+    )
+    return make_artifact(f"{unique_repo}/{name}", "agent", {f"{name}.md": doc}, tag="v1")
+
+
+def test_junie_agent_installs_at_both_scopes_and_self_heals(
+    grim_at, grim_binary: Path, grim_home: Path, bare_project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Project and global Junie agents land in Junie's own ``agents/`` dir with
+    ``tools`` as a YAML list and the ``junie.*`` keys lifted to camelCase. A
+    re-install of the untouched artifact stays byte-identical, unmodified and
+    with nothing pending."""
+    ag = _junie_agent(unique_repo, "rev")
+    (bare_project_dir / "grimoire.toml").write_text(
+        f'[options]\nclients = ["junie"]\n\n[agents]\nrev = "{ag.fq}"\n'
+    )
+    runner = grim_at(bare_project_dir)
+    runner.run("lock", check=False)
+    rows = runner.json("install")["items"]
+    assert rows[0]["status"] == "installed", rows
+
+    agent_file = bare_project_dir / ".junie/agents/rev.md"
+    assert agent_file.is_file(), "Junie agents land in .junie/agents/"
+    assert not (bare_project_dir / ".agents").exists(), "grim must never write Junie agents to the shared .agents/"
+    text = agent_file.read_text()
+    assert "- Read" in text and "- Grep" in text, f"tools must be a YAML list: {text}"
+    for native in ("permissionMode: acceptEdits", "reasoningLevel: high", "maxTurns: 12"):
+        assert native in text, f"{native!r} must be lifted: {text}"
+    assert "junie." not in text, f"namespaced keys must not leak: {text}"
+    assert "generated by grim" in text, text
+
+    before = agent_file.read_bytes()
+    again = runner.json("install")["items"]
+    assert again[0]["status"] == "unchanged", again
+    assert agent_file.read_bytes() == before, "regeneration must be byte-identical"
+    item = runner.json("status")["items"][0]
+    assert item["state"] == "installed", item
+    assert item["outputs_pending"] == [], item
+    assert not any(o.get("modified") for o in item["outputs"]), item
+
+    (grim_home / "grimoire.toml").write_text(f'[agents]\nrev = "{ag.fq}"\n')
+    global_runner = GrimRunner(grim_binary, grim_home)
+    global_runner.json("lock", "--global")
+    rows = global_runner.json("install", "--global", "--client", "junie")["items"]
+    assert rows[0]["status"] == "installed", rows
+    assert (global_runner.home / ".junie/agents/rev.md").is_file(), "global Junie agents land in ~/.junie/agents/"
+    assert not (global_runner.home / ".agents/agents").exists()
+
+
+def test_junie_skips_an_agent_name_it_rejects_without_pending_drift(
+    grim_at, bare_project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Junie accepts only ``[a-z][a-z0-9_-]*``. A leading-digit name is valid
+    for grim, so Claude still gets the agent while Junie is skipped with a
+    warning naming both. The skip is not drift: ``status`` reports nothing
+    missing or pending, and a re-install is a no-op."""
+    ag = _junie_agent(unique_repo, "2fa-review")
+    (bare_project_dir / "grimoire.toml").write_text(
+        f'[options]\nclients = ["claude", "junie"]\n\n[agents]\n2fa-review = "{ag.fq}"\n'
+    )
+    runner = grim_at(bare_project_dir)
+    runner.run("lock", check=False)
+    result = runner.run("install", format="json", log_level="warn")
+    rows = json.loads(result.stdout)["items"]
+    assert rows[0]["status"] == "installed", rows
+    assert (bare_project_dir / ".claude/agents/2fa-review.md").is_file()
+    assert not (bare_project_dir / ".junie/agents").exists(), "Junie must get nothing"
+    assert "2fa-review" in result.stderr and "junie" in result.stderr, result.stderr
+
+    item = runner.json("status")["items"][0]
+    assert {o["client"] for o in item["outputs"]} == {"claude"}, item
+    assert item["outputs_pending"] == [], item
+    assert item["clients_missing"] == [], item
+    assert runner.json("install")["items"][0]["status"] == "unchanged"
+
+
+def test_junie_only_install_of_a_rejected_name_warns_once_with_the_pattern(
+    grim_at, bare_project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """With Junie the only client, nothing can host the agent, so the install
+    skips before any per-client step. The one warning must name the grammar,
+    never the false "no native target", and the skip must not be drift."""
+    ag = _junie_agent(unique_repo, "2fa-review")
+    (bare_project_dir / "grimoire.toml").write_text(
+        f'[options]\nclients = ["junie"]\n\n[agents]\n2fa-review = "{ag.fq}"\n'
+    )
+    runner = grim_at(bare_project_dir)
+    runner.run("lock", check=False)
+    result = runner.run("install", format="json", log_level="warn")
+    rows = json.loads(result.stdout)["items"]
+    assert rows[0]["status"] == "skipped", rows
+    warnings = [line for line in result.stderr.splitlines() if "WARN" in line]
+    assert len(warnings) == 1, result.stderr
+    assert "[a-z][a-z0-9_-]*" in warnings[0] and "2fa-review" in warnings[0], warnings
+    assert "no native target" not in result.stderr, result.stderr
+    assert not (bare_project_dir / ".junie/agents").exists()
+
+    item = runner.json("status")["items"][0]
+    assert item["outputs"] == [], item
+    assert item["outputs_pending"] == [], item
+    assert item["clients_missing"] == [], item
+
+
+def test_junie_agent_is_pending_until_the_next_install_writes_it(
+    grim_at, bare_project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """The upgrade path: a record written before Junie hosted agents covers
+    only the other clients. ``status`` names the Junie file under
+    ``outputs_pending``, and the next ``install`` writes it and clears it."""
+    ag = _junie_agent(unique_repo, "rev")
+    config = bare_project_dir / "grimoire.toml"
+    config.write_text(f'[options]\nclients = ["claude"]\n\n[agents]\nrev = "{ag.fq}"\n')
+    runner = grim_at(bare_project_dir)
+    runner.run("lock", check=False)
+    runner.json("install")
+
+    config.write_text(f'[options]\nclients = ["claude", "junie"]\n\n[agents]\nrev = "{ag.fq}"\n')
+    pending = runner.json("status")["items"][0]["outputs_pending"]
+    assert [p["client"] for p in pending] == ["junie"], pending
+    assert Path(pending[0]["path"]).as_posix().endswith(".junie/agents/rev.md"), pending
+
+    rows = runner.json("install")["items"]
+    assert rows[0]["status"] in ("installed", "updated"), rows
+    assert (bare_project_dir / ".junie/agents/rev.md").is_file()
+    assert runner.json("status")["items"][0]["outputs_pending"] == []
 
 
 # ---------------------------------------------------------------------------

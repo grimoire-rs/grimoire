@@ -551,7 +551,15 @@ fn classify_auth(err: &AuthError) -> ExitCode {
 
 /// `PermissionDenied` → `NoPermission` (77); any other I/O → `IoError` (74).
 fn classify_io(io: &std::io::Error) -> ExitCode {
-    if io.kind() == std::io::ErrorKind::PermissionDenied {
+    // A foreign lock still held after its wait (Cline's settings lock,
+    // `install::cline_lock`) surfaces through an I/O-typed seam.
+    if io
+        .get_ref()
+        .and_then(|e| e.downcast_ref::<LockError>())
+        .is_some_and(|le| matches!(le.kind, LockErrorKind::Locked))
+    {
+        ExitCode::TempFail
+    } else if io.kind() == std::io::ErrorKind::PermissionDenied {
         ExitCode::NoPermission
     } else {
         ExitCode::IoError
@@ -851,6 +859,30 @@ mod tests {
                 exit: ExitCode::NotFound,
                 reason: Some(ErrorReason::NoConfig),
             }
+        );
+    }
+
+    #[test]
+    fn a_held_foreign_lock_behind_an_io_seam_classifies_as_temp_fail() {
+        let io = std::io::Error::other(LockError::new(
+            std::path::PathBuf::from("/h/cline_mcp_settings.json.lock"),
+            LockErrorKind::Locked,
+        ));
+        let err: anyhow::Error = Error::from(InstallError::without_reference(InstallErrorKind::TargetIo {
+            path: std::path::PathBuf::from("/h/cline_mcp_settings.json"),
+            source: io,
+        }))
+        .into();
+        assert_eq!(classify(&err).exit, ExitCode::TempFail);
+        let plain: anyhow::Error = Error::from(InstallError::without_reference(InstallErrorKind::TargetIo {
+            path: std::path::PathBuf::from("/h/x"),
+            source: std::io::Error::other("disk full"),
+        }))
+        .into();
+        assert_eq!(
+            classify(&plain).exit,
+            ExitCode::IoError,
+            "only a lock refusal moves to 75"
         );
     }
 

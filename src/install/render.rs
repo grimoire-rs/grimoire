@@ -227,6 +227,38 @@ pub fn comma_list_value(value: &str) -> Value {
     )
 }
 
+/// A vendor's agent-name grammar that is narrower than grim's own
+/// `[a-z0-9]+([.-][a-z0-9]+)*` ([`crate::skill::skill_name`]). A name the
+/// vendor would reject is skipped for that vendor with a warning, never
+/// renamed — a rename would break every reference to the agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NameGrammar {
+    /// `[a-z][a-z0-9_-]*` (Junie): no leading digit, no `.`.
+    LeadingLetterNoDot,
+    /// `[a-z0-9_-]+` (Droid): no `.`.
+    NoDot,
+}
+
+impl NameGrammar {
+    /// The grammar as a regex, for the skip warning.
+    pub(crate) fn pattern(self) -> &'static str {
+        match self {
+            Self::LeadingLetterNoDot => "[a-z][a-z0-9_-]*",
+            Self::NoDot => "[a-z0-9_-]+",
+        }
+    }
+}
+
+/// Whether `name` fits `grammar`.
+pub(crate) fn agent_name_fits(name: &str, grammar: NameGrammar) -> bool {
+    let body = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-';
+    let first_ok = match grammar {
+        NameGrammar::LeadingLetterNoDot => name.starts_with(|c: char| c.is_ascii_lowercase()),
+        NameGrammar::NoDot => !name.is_empty(),
+    };
+    first_ok && name.chars().all(body)
+}
+
 /// Partition a metadata map for one vendor: plain keys into `plain`,
 /// the vendor's own known keys converted into `lifted` (registry order),
 /// own unknown keys into `warnings`, foreign tool keys dropped.
@@ -335,6 +367,20 @@ pub fn project_rule(fm: &RuleFrontmatter, vendor: &dyn Vendor) -> Result<RulePro
         cleaned,
         warnings,
         had_tool_keys,
+    })
+}
+
+/// The warning for a client that reads its `globs` value as one
+/// comma-separated string (Cursor, Antigravity): a comma inside a glob — a
+/// `{a,b}` brace alternation included — splits it into several patterns.
+/// The render stays unchanged; this only flags the hazard so the author can
+/// split the rule. `None` when no glob carries a comma.
+pub fn comma_glob_warning(paths: &[String], client: &str) -> Option<String> {
+    paths.iter().any(|p| p.contains(',')).then(|| {
+        format!(
+            "a glob contains a comma: {client} splits `globs:` on every comma (including inside `{{a,b}}` \
+             braces), so the pattern will be read as multiple globs"
+        )
     })
 }
 
@@ -845,6 +891,28 @@ pub fn validate_rule_metadata(fm: &RuleFrontmatter) -> Result<Vec<String>, Rende
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn agent_name_fits_each_vendor_grammar() {
+        use NameGrammar::*;
+        // (name, LeadingLetterNoDot, NoDot)
+        let cases = [
+            ("reviewer", true, true),
+            ("code-reviewer", true, true),
+            ("snake_case", true, true),
+            ("a1", true, true),
+            ("1password", false, true),
+            ("socket.io", false, false),
+            ("9.x", false, false),
+            ("", false, false),
+            ("Upper", false, false),
+            ("_lead", false, true),
+        ];
+        for (name, junie, droid) in cases {
+            assert_eq!(agent_name_fits(name, LeadingLetterNoDot), junie, "{name:?} junie");
+            assert_eq!(agent_name_fits(name, NoDot), droid, "{name:?} droid");
+        }
+    }
 
     fn fm(doc: &str) -> SkillFrontmatter {
         SkillFrontmatter::parse_doc(doc, Path::new("SKILL.md")).expect("parse")

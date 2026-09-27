@@ -33,7 +33,7 @@ set (e.g. `vendor.x`) is plain metadata and passes through untouched.
 
 **Most of those namespaces carry no populated field registry.** Only
 Claude has a *skill* registry; Claude, OpenCode, Copilot, Codex, Cursor,
-and Gemini have an *agent* registry. Everyone else installs the universal
+Gemini, Kilo, Junie and Droid have an *agent* registry. Everyone else installs the universal
 agentskills shape — but the namespace is still reserved, so a key using
 one of those prefixes hits an **empty** registry and is **warned +
 dropped**, the same typo-guard outcome as an unknown key in a populated
@@ -49,9 +49,10 @@ the others. The same happened to `antigravity.*`, `cline.*`, `droid.*`,
 and it will happen to the next client's prefix. Do not use a client name
 as a plain metadata prefix.
 
-Note also that not every client hosts every kind — most decline rules,
-most decline agents, and the skills-only clients write no MCP config at
-all — and grim warns and skips a kind a client cannot host. The enforced
+Note also that not every client hosts every kind — most decline rules, but
+agents are hosted by a majority of clients, and the skills-only clients
+mostly write no MCP config either — except Cline (global scope only),
+Droid, and Warp — and grim warns and skips a kind a client cannot host. The enforced
 matrix is authoritative ([client matrix][clients]).
 
 ## Outcome Classes
@@ -101,6 +102,8 @@ grow over time. The authoritative tables:
 - [`codex.*` agent registry][codex-agent-reg] (`codex.model`, `codex.reasoning-effort`, `codex.sandbox-mode`)
 - [`cursor.*` agent registry][cursor-agent-reg] (`cursor.model`, `cursor.readonly`, `cursor.is-background`)
 - [`gemini.*` agent registry][gemini-agent-reg] (`gemini.model`, `gemini.temperature`, `gemini.max-turns`, `gemini.timeout-mins`, `gemini.kind`)
+- [`junie.*` agent registry][junie-agent-reg] (`junie.permission-mode`, `junie.reasoning-level`, `junie.max-turns`)
+- [`droid.*` agent registry][droid-agent-reg] (`droid.reasoning-effort`)
 - [Rule-level keys][rule-keys] (today: `copilot.exclude-agent` only)
 - [Empty skill registries][empty-reg] — every client but Claude; a namespaced skill key always warns and drops
 
@@ -146,6 +149,8 @@ to silence the nudge and gain type conversion ([migration][migration]).
 [codex-agent-reg]: https://grimoire.rs/vendor-metadata.html#codex-agent-registry
 [cursor-agent-reg]: https://grimoire.rs/vendor-metadata.html#cursor-agent-registry
 [gemini-agent-reg]: https://grimoire.rs/vendor-metadata.html#gemini-agent-registry
+[junie-agent-reg]: https://grimoire.rs/vendor-metadata.html#junie-agent-registry
+[droid-agent-reg]: https://grimoire.rs/vendor-metadata.html#droid-agent-registry
 [rule-keys]: https://grimoire.rs/vendor-metadata.html#rule-keys
 [empty-reg]: https://grimoire.rs/vendor-metadata.html#empty-registries
 [publish-val]: https://grimoire.rs/vendor-metadata.html#publish-validation

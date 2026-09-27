@@ -113,8 +113,19 @@ Three roots moved most recently:
 The two shapes are opposites. Getting them the wrong way round is the easiest
 mistake to make here.
 
-**What you will see** if you had already set `$KIRO_HOME` or
-`$GEMINI_CLI_HOME`: artifacts installed before the upgrade sit at a root grim
+Three more moved on 2026-09-27, with the same reaper and the same promises:
+
+| Variable | Shape |
+|---|---|
+| `$JUNIE_HOME` | Replaces `~/.junie` **outright** — the `$KIRO_HOME` shape. Junie skills, agents, and `mcp/mcp.json` follow it |
+| `$OPENCLAW_STATE_DIR`, `$OPENCLAW_HOME` | `$OPENCLAW_STATE_DIR` names OpenClaw's state root itself and wins; else `$OPENCLAW_HOME` replaces the **home directory**, so the root is `$OPENCLAW_HOME/.openclaw` — the `$GEMINI_CLI_HOME` shape. A leading `~` expands to your home directory; any other relative value is ignored |
+| `CLAUDE_CONFIG_DIR` in Claude's own settings | grim now reads the `env` block of Claude's managed settings file and of your user `settings.json`, as Claude does. A value set there wins over the shell export, so Claude skills, rules, agents, `.claude.json` and the `settings.json` grim writes for `claudeMdExcludes` move to it. Only a value that differs from what the shell export alone resolved counts as a move |
+
+The `claudeMdExcludes` element grim wrote into the **old** `settings.json`
+stays behind: it names a directory the reaper removed, so it excludes
+nothing. Remove it by hand if you want the file tidy.
+
+**What you will see** if you had already set one of these variables: artifacts installed before the upgrade sit at a root grim
 no longer resolves — which is to say, where your CLI was never reading them
 anyway. Until you run a mutating command, [`grim status`][status] reports the
 artifact's `state` as `missing` even though the file is on disk.
@@ -363,15 +374,17 @@ annotation and restores the 0.13.0 manifest shape exactly.
   `timeout` (milliseconds) now renders as `startup_timeout_ms` in Codex's
   `config.toml`, so a short `timeout` actually shortens Codex's startup
   wait — before it had no effect there. An artifact installed before this
-  release keeps its old bytes until the pin changes (`grim update`) or you
-  run `grim install --force`.
+  release keeps its old bytes until the pin changes (`grim update`).
+  `--force` alone does not rewrite it: delete the server's
+  `[mcp_servers.<name>]` table from `config.toml`, then run `grim install`.
 - **Two more Claude keys render instead of warning.** `claude.background`
   (skill) and `claude.omit-claude-md` (agent) are now known keys that
   render natively — an unknown key used to warn and drop. Values must be
   `true` or `false`; any other literal now fails `grim build` (exit 65)
   and a fresh install. Same rule as above: an artifact installed before
-  this release keeps its old bytes until the pin changes (`grim update`)
-  or you run `grim install --force`.
+  this release keeps its old bytes until the pin changes (`grim update`).
+  `--force` alone does not rewrite it: delete the rendered skill or agent
+  file, then run `grim install`.
 - **A global MCP server with a `${VAR}` reference registers for Copilot
   CLI.** grim used to skip it, because Copilot CLI did not expand
   references in `mcp-config.json`. Current releases do (verified against
@@ -385,6 +398,69 @@ annotation and restores the 0.13.0 manifest shape exactly.
   `${VAR}` form. Copilot CLI releases older than about April 2026 pass an
   `env` reference through unexpanded rather than expanding it. See
   [Environment references][env-refs].
+- **Rules install for Antigravity.** grim used to skip every rule for
+  `antigravity`. It writes `.agents/rules/<name>.md` in a workspace and
+  `~/.gemini/config/rules/<name>.md` globally. A scoped rule gets
+  `trigger: glob`, any other rule `trigger: always_on`. An existing Antigravity
+  install shows the new file under `outputs_pending` in `grim status`, and the
+  next `grim install` writes it without touching other clients. A
+  hand-written file already at that path is refused (exit `65`) until you
+  remove it or pass `--force` ([Antigravity][gap-antigravity]).
+- **A project MCP server reaches Copilot CLI.** grim writes a Copilot
+  server into `.github/mcp.json` as well as `.vscode/mcp.json`, because the
+  CLI does not read the VS Code file. An install from an earlier release
+  lists `.github/mcp.json` under `outputs_pending`, and the next
+  `grim install` writes it without touching the VS Code entry. If you
+  hand-added a same-named `mcpServers.<name>` entry to `.github/mcp.json`,
+  grim refuses to install over it as untracked (exit 65). Delete yours, or
+  run `grim install --force`. A workspace `.mcp.json` takes precedence over
+  `.github/mcp.json` in the CLI, as [MCP limitations][mcp-limitations]
+  explains.
+- **An MCP server whose `[server.oauth]` block sets only `client_id`
+  registers for Copilot.** grim used to skip every oauth-bearing server for
+  Copilot. It writes the client ID as `oauthClientId` (and
+  `oauth.clientId` in `.vscode/mcp.json`). A block with scopes, a callback
+  port, or a metadata URL is still skipped with a warning naming the field.
+  A same-named entry you added by hand is refused as untracked (exit 65)
+  until you delete it or pass `--force`.
+- **Junie receives agents from this release on.** grim used to decline
+  them. It writes `.junie/agents/<name>.md`, or `~/.junie/agents/<name>.md`
+  with `--global`. `grim status` lists each missing agent under
+  `outputs_pending`, and the next `grim install` writes it. The other
+  clients' files stay untouched.
+  - **A hand-written agent of the same name** in that directory is
+    untracked, so grim refuses to install over it (exit 65). Delete yours,
+    or run `grim install --force`.
+  - **A name Junie rejects**, with a leading digit or a `.`, is skipped for
+    Junie with a warning and never reported as pending.
+  - **The `junie.permission-mode`, `junie.reasoning-level` and
+    `junie.max-turns` agent keys render natively.** An unknown key used to
+    warn and drop. A bad literal (outside the enum, or not an integer) now
+    fails `grim build` (exit 65) and a fresh install. No Junie agent was
+    rendered before this release, so no existing file keeps old bytes.
+
+  See [Junie][junie-gap].
+- **A global MCP server registers for Cline.** grim used to decline MCP for
+  Cline entirely. It writes the flat entry into the file the Cline CLI and VS
+  Code extension share, `~/.cline/data/settings/cline_mcp_settings.json`,
+  under Cline's own lock. `grim status --global` lists the missing
+  registration under `outputs_pending`, and the next `grim install --global`
+  adds it. A same-named `mcpServers.<name>` entry you added there yourself
+  makes that install exit **65**. Delete yours, or run
+  `grim install --global --force` to replace it.
+- **A project-scope MCP install warns for Cline.** Cline has no project MCP
+  file, so grim names it in a warning and writes nothing for it.
+- **Droid now installs agents and MCP servers.** An agent lands as a custom
+  droid in `.factory/droids/<name>.md`, and an MCP server as an entry in
+  `.factory/mcp.json` (`~/.factory/` with `--global`). Before, both were
+  skipped for Droid. `grim status` lists the new outputs under
+  `outputs_pending`, and the next `grim install` writes them without touching
+  other clients. A file or a same-named `mcpServers` entry you added there by
+  hand is refused as untracked (exit `65`) until you remove it or run
+  `grim install --force`. That includes the copy Droid's UI writes to
+  `~/.factory/mcp.json` when you toggle a project server. `droid.reasoning-effort`
+  (`low`, `medium` or `high`) now renders instead of warning; any other
+  literal fails `grim build` (exit `65`). See [Droid's entry][droid-gap].
 - **The TUI now asks before acting on more than one artifact.** Pressing `i`,
   `u`, or `d` on a marked set or a selected group opens a confirmation naming
   the count and source before anything runs. A single artifact still acts on
@@ -396,7 +472,8 @@ annotation and restores the 0.13.0 manifest shape exactly.
   literal (not `true`/`false`, or a `target` outside the two-value enum)
   now fails `grim build` (exit 65) and a fresh install. An artifact
   installed before this release keeps its old bytes until the pin changes
-  (`grim update`) or you run `grim install --force`.
+  (`grim update`). `--force` alone does not rewrite it: delete the rendered
+  agent file, then run `grim install`.
 - **An OpenCode agent with an invalid `opencode.color` or `opencode.steps`
   now installs with the field dropped, not rejected wholesale.** OpenCode's
   own schema accepts only `#RRGGBB` or one of seven theme names for
@@ -408,9 +485,60 @@ annotation and restores the 0.13.0 manifest shape exactly.
   that touches the agent. `--force` alone does not repair it: delete the
   rendered agent file first, then run `grim install` to repair it right
   away. See the [`opencode.*` agent registry][vendor-metadata-opencode].
+- **An MCP server with a `[server.oauth]` block now registers for OpenCode
+  and Zed when they can carry it.** grim used to skip such a server for
+  both. OpenCode now gets an `oauth` object when the block sets no
+  `auth_server_metadata_url` and no `callback_port = 0`. Zed gets one when
+  the block sets only a literal `client_id`; a `${VAR}` id still skips,
+  because Zed expands no references. Any other block still skips, and the warning now names the
+  fields that could not be carried. The next `grim install` writes the new
+  entry without touching the other clients' entries.
+  If you worked around the old skip by adding a same-named entry to
+  `opencode.json` (`mcp.<name>`) or Zed's `settings.json`
+  (`context_servers.<name>`) by hand, grim now refuses to install over it
+  as untracked (exit 65). Delete your entry, or run `grim install --force`
+  to replace it. See [the oauth block][mcp-oauth].
+- **Goose and Kilo install agents.** Earlier releases skipped an agent
+  artifact for both, and this release writes it to the paths listed under
+  [agent install locations][agent-locations]. On a project that already has
+  agents installed, `grim status` lists the new files under
+  `outputs_pending`, and the next `grim install` writes them. A file you
+  placed at one of those paths by hand is refused as untracked (exit 65).
+  Delete it, or run `grim install --force`.
+- **Gemini CLI no longer receives a server's `timeout`.** Gemini applies
+  that value to every tool call as well as startup, so a descriptor tuned for
+  a quick start also cut long tool calls short. grim now drops it with a
+  warning, and Gemini's 10-minute default applies. An entry installed before
+  this release keeps its `timeout` until the pin changes (`grim update`).
+  `--force` alone does not rewrite an entry that is still intact. To drop it
+  now, delete the server's entry under `mcpServers` in `.gemini/settings.json`
+  (globally `~/.gemini/settings.json`, or `$GEMINI_CLI_HOME/.gemini/settings.json`
+  when that is set) and run `grim install`. An entry you edited yourself reads `modified` as
+  before, and grim leaves it alone unless you pass `--force`. See
+  [`timeout`][mcp-server-table].
+- **MCP servers now register for Warp.** grim writes them into
+  `.warp/.mcp.json`, or `~/.warp/.mcp.json` with `--global`. `grim status`
+  lists the missing Warp registration under `outputs_pending`, and the next
+  `grim install` adds it without touching other clients' entries. A server
+  using a `${VAR}` reference, any `oauth` field or the `ws` transport is
+  skipped for Warp with a warning, as the next entry describes. If you already added a same-named server to
+  that file by hand, grim refuses to install over it (exit 65): delete your
+  entry, or pass `--force` to replace it. Warp can also read Claude's
+  `.mcp.json`, so with both clients selected a server can show up twice in
+  Warp. See [Warp: MCP][clients-warp-mcp].
+- **A server a client cannot represent no longer makes every install report
+  `updated`.** Some clients skip some servers with a warning. Warp skips a
+  `${VAR}` reference, and Copilot CLI skips a url invalid before expansion.
+  Cline skips any oauth block. grim used to count that skipped file as
+  missing, so each `grim install` re-ran the MCP pass. Now the install
+  reports the server `unchanged` and writes nothing. `grim status` may still
+  list that client under `outputs_pending` for a registry artifact, because
+  status reads no server descriptor offline.
 
 <!-- internal -->
+[agent-locations]: ./agents.md#locations
 [changelog]: https://github.com/grimoire-rs/grimoire/blob/main/CHANGELOG.md
+[mcp-oauth]: ./mcp-servers.md#server-oauth
 [git-provenance]: ./publishing.md#git-provenance
 [browse-filters]: ./configuration.md#browse-filters
 [ratings]: ./ratings.md
@@ -426,4 +554,10 @@ annotation and restores the 0.13.0 manifest shape exactly.
 [vendor-metadata-opencode]: ./vendor-metadata.md#opencode-agent-registry
 [no-clobber]: ./json-interface.md#error-reason
 [multi-registry]: ./configuration.md#multiple-registries
+[droid-gap]: ./clients.md#gap-droid
 [env-refs]: ./mcp-servers.md#env-references
+[gap-antigravity]: ./clients.md#gap-antigravity
+[mcp-limitations]: ./mcp-servers.md#limitations
+[mcp-server-table]: ./mcp-servers.md#server-table
+[clients-warp-mcp]: ./clients.md#gap-warp-mcp
+[junie-gap]: ./clients.md#gap-junie

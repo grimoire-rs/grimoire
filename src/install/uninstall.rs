@@ -257,7 +257,7 @@ pub fn uninstall(
             // and read-back sides. An unparsable/legacy client string falls
             // back to the JSON default rather than failing the
             // otherwise-idempotent uninstall.
-            remove_entry(&target, pointer, out.mcp_format())?;
+            remove_entry(&target, pointer, out, roots)?;
             continue;
         }
         // The index/target first, then a multi-file rule's sibling support
@@ -304,6 +304,7 @@ pub fn uninstall(
         &super::installer::relocated_vendor_roots_from_env(),
         &handled,
         super::installer::ReapContext::Uninstalled,
+        force,
     );
     retained.extend(stranded_files);
     abandoned_entries.extend(stranded_entries);
@@ -395,11 +396,13 @@ fn refuse_drifted_entries(record: &InstallRecord, roots: &AnchorRoots) -> Result
 ///
 /// # Errors
 ///
-/// An I/O error from reading or atomically rewriting `path`.
+/// An I/O error from reading or atomically rewriting `path`, or Cline's
+/// settings lock still held after its wait.
 pub fn remove_entry(
     path: &std::path::Path,
     pointer: &str,
-    format: crate::install::vendor::McpConfigFormat,
+    out: &crate::install::install_state::ClientOutput,
+    roots: &AnchorRoots,
 ) -> std::io::Result<()> {
     use crate::install::json_splice::{self, Splice, split_pointer};
     use crate::install::toml_splice;
@@ -411,6 +414,17 @@ pub fn remove_entry(
             path.display()
         );
         return Ok(());
+    };
+    let format = out.mcp_format();
+    // Held across the read and the rewrite (see `cline_lock`). Not taken for
+    // an absent file: there is nothing to remove, and the lock would create
+    // its parent directory.
+    // Named from the path as recorded, not `path` (canonicalized): a
+    // stow-linked settings file must get the lock Cline itself takes.
+    let lock_at = out.target.lexical(roots).unwrap_or_else(|| path.to_path_buf());
+    let _settings_lock = match out.client.parse() {
+        Ok(client) if path.exists() => crate::install::cline_lock::guard(client, &lock_at)?,
+        _ => None,
     };
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
