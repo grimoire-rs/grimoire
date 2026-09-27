@@ -13,6 +13,7 @@ includes:
   release: ./taskfiles/release.taskfile.yml
   schema: ./taskfiles/schema.taskfile.yml
   docs: ./taskfiles/docs.taskfile.yml
+  upstream: ./taskfiles/upstream.taskfile.yml
   claude:
     taskfile: ./.claude/taskfile.yml
     dir: ./.claude

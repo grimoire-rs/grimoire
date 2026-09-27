@@ -1,6 +1,6 @@
 ---
 name: security-auditor
-description: Use for security audits, threat modelling, vulnerability assessment, or evaluating the attack surface of a new capability before merge. Trigger: /security-auditor.
+description: 'Use for security audits, threat modelling, vulnerability assessment, or evaluating the attack surface of a new capability before merge. Trigger: /security-auditor.'
 user-invocable: true
 argument-hint: "scope-or-component"
 triggers:

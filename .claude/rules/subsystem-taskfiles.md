@@ -21,6 +21,7 @@ paths:
 | `taskfiles/release.taskfile.yml` | cross-cutting | `release:` |
 | `taskfiles/schema.taskfile.yml` | cross-cutting | `schema:` -- generate JSON Schemas from grim's parse structs into `docs/public/schemas/` (gitignored, regenerated every build) |
 | `taskfiles/docs.taskfile.yml` | docs site | `docs:` -- build/serve the Astro Starlight site; `docs:build` regenerates schemas first (CI Pages source); `docs:check` (alias `docs:verify`) is the docs subsystem gate |
+| `taskfiles/upstream.taskfile.yml` | cross-cutting | `upstream:` -- `stale`: warn-only upstream staleness report (`upstream-refresh` skill script); never part of `verify` |
 | `.claude/taskfile.yml` | `.claude/` subsystem | `claude:` |
 | `test/taskfile.yml` | acceptance tests | `test:` |
 | `catalog/taskfile.yml` | first-party catalog packages | `catalog:` -- verify (`grim build` per package), release (publish.toml-driven driver) |

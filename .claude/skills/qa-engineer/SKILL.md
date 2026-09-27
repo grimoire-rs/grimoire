@@ -1,6 +1,6 @@
 ---
 name: qa-engineer
-description: Use when designing test suites, writing acceptance tests, validating an implementation against a spec, or planning test coverage before implementation. Trigger: /qa-engineer.
+description: 'Use when designing test suites, writing acceptance tests, validating an implementation against a spec, or planning test coverage before implementation. Trigger: /qa-engineer.'
 user-invocable: true
 argument-hint: "component-to-test"
 triggers:
