@@ -26,7 +26,7 @@ use crate::oci::mcp::MCP_LAYER_SIZE_LIMIT;
 use crate::oci::reference::ArtifactRef;
 use crate::oci::{ArtifactKind, Digest, Identifier};
 
-use super::content_hash::footprint_hash;
+use super::content_hash::{footprint_hash, footprint_hash_for_record};
 use super::expected_outputs::{expected_clients, output_at_current_layout, pending_outputs};
 use super::install_error::{InstallError, InstallErrorKind};
 use super::install_state::{ClientOutput, InstallRecord, InstallState, PersistError};
@@ -680,7 +680,8 @@ async fn install_one<M: ArtifactMaterializer>(
                     // symlink shapes below — counts as untracked and falls
                     // through to their dedicated refusal.
                     (!dest.exists() && !dest.is_symlink())
-                        || footprint_hash(&dest, existing_support.as_deref()).is_ok_and(|h| h == out.content_hash)
+                        || footprint_hash_for_record(&dest, existing_support.as_deref(), &out.content_hash)
+                            .is_ok_and(|h| h == out.content_hash)
                 });
             if tracked {
                 continue;

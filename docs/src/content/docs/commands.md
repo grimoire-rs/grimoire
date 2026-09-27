@@ -583,6 +583,15 @@ below, and the client reap below that.
 > while `grim install` refused the identical bytes. If you relied on that,
 > add `--force`.
 
+A [`.grimignore`](./artifacts.md#grimignore)d path is invisible to this
+gate — it drifts without ever refusing the overwrite — because updating
+still **replaces the whole installed directory** on a pin change. That
+covers every path the publisher's `.grimignore` lists, not only the
+defaults — a hand edit there is wiped without a refusal. A
+hand-built `.venv/` or a script's `__pycache__/` is disposable: it survives
+until the next `update`, then it is gone along with everything else that
+was never part of the artifact's own tree.
+
 Because update reconciles the workspace to the freshly-resolved lock, it also
 **prunes** artifacts that have dropped out of the lock — most often a
 [bundle](./concepts.md#bundles) member that the bundle stopped including. A
@@ -855,6 +864,12 @@ this order and taking the first that matches: `stale`, `missing`,
 | `modified` | Recorded, outputs present, at least one drifted from its recorded hash — a hand edit. | Keep the edit, or [`grim install --force`](#install) to overwrite it |
 | `missing` | No lock entry, **or** no install record, **or** a recorded output absent from disk. | [`grim install`](#install) — preceded by [`grim lock`](#lock) when the lock has no entry for it |
 | `stale` | `grimoire.lock`'s `declaration_hash` no longer matches the live config. | [`grim lock`](#lock) |
+
+A file excluded by [`.grimignore`](./artifacts.md#grimignore) never
+contributes to the hash `modified` tests: a `__pycache__/` a bundled
+script left behind, or any other file the artifact's default or authored
+ignore list covers, cannot flip a row to `modified`. Only files that
+*would* have been packed count.
 
 Two of those rows say less than they appear to. `missing` collapses
 never-installed and installed-then-deleted into a single word; the

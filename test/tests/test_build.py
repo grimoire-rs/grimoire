@@ -155,3 +155,85 @@ def test_build_rejects_leading_dot_skill_dir(grim_at, project_dir: Path) -> None
     assert result.returncode == 65, (
         f"leading-dot name must exit 65, got {result.returncode}; {result.stderr}"
     )
+
+
+# ── .grimignore ────────────────────────────────────────────────────────
+# `grim build` emits no layer, but its `layer_digest` covers exactly the
+# packed entries, so equal digests prove a file was left out.
+
+
+def _layer_digest(runner, skill: Path) -> str:
+    return runner.json("build", str(skill))["layer_digest"]
+
+
+def _grimignore_skill(project_dir: Path) -> Path:
+    skill = project_dir / "runner"
+    _write(skill / "SKILL.md", "---\nname: runner\ndescription: d\n---\n")
+    _write(skill / "scripts/foo.py", "print('hi')\n")
+    return skill
+
+
+def test_build_omits_default_ignored_junk(grim_at, project_dir: Path) -> None:
+    skill = _grimignore_skill(project_dir)
+    runner = grim_at(project_dir)
+    clean = _layer_digest(runner, skill)
+
+    _write(skill / "scripts/__pycache__/foo.cpython-313.pyc", "bytecode")
+    _write(skill / ".DS_Store", "junk")
+    assert _layer_digest(runner, skill) == clean
+
+
+def test_build_grimignore_negation_ships_a_default(
+    grim_at, project_dir: Path
+) -> None:
+    skill = _grimignore_skill(project_dir)
+    _write(skill / ".grimignore", "!.DS_Store\n")
+    runner = grim_at(project_dir)
+    without = _layer_digest(runner, skill)
+
+    _write(skill / ".DS_Store", "kept")
+    assert _layer_digest(runner, skill) != without, "`!.DS_Store` must ship it"
+
+
+def test_build_grimignore_excludes_listed_file(
+    grim_at, project_dir: Path
+) -> None:
+    skill = _grimignore_skill(project_dir)
+    _write(skill / ".grimignore", "secret.txt\n")
+    runner = grim_at(project_dir)
+    without = _layer_digest(runner, skill)
+
+    _write(skill / "secret.txt", "do not ship")
+    assert _layer_digest(runner, skill) == without
+
+
+def test_build_rejects_invalid_grimignore(grim_at, project_dir: Path) -> None:
+    skill = _grimignore_skill(project_dir)
+    _write(skill / ".grimignore", "ok.txt\n{unclosed\n")
+    result = grim_at(project_dir).run("build", str(skill), check=False)
+    assert result.returncode == 65, result.stderr
+    assert ".grimignore" in result.stderr and "line 2" in result.stderr, (
+        result.stderr
+    )
+
+
+def test_build_relative_path_honours_multi_segment_pattern(
+    grim_at, project_dir: Path
+) -> None:
+    """Regression: a relative root `s` must not byte-strip `scripts/…`."""
+    skill = project_dir / "s"
+    _write(skill / "SKILL.md", "---\nname: s\ndescription: d\n---\n")
+    _write(skill / ".grimignore", "scripts/secret.txt\n")
+    runner = grim_at(project_dir)
+    without = _layer_digest(runner, Path("s"))
+
+    _write(skill / "scripts/secret.txt", "do not ship")
+    assert _layer_digest(runner, Path("s")) == without
+
+
+def test_build_rejects_oversized_grimignore(grim_at, project_dir: Path) -> None:
+    skill = _grimignore_skill(project_dir)
+    _write(skill / ".grimignore", "#" * (64 * 1024 + 1))
+    result = grim_at(project_dir).run("build", str(skill), check=False)
+    assert result.returncode == 65, result.stderr
+    assert ".grimignore" in result.stderr, result.stderr

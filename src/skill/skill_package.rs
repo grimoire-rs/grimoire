@@ -21,6 +21,7 @@ use super::rule_frontmatter::{ParsedRule, RuleFrontmatter};
 use super::skill_error::{SkillError, SkillErrorKind};
 use super::skill_frontmatter::SkillFrontmatter;
 use super::skill_name::SkillName;
+use crate::install::ignore_set::{IgnoreSet, IgnoreSetError};
 
 /// Validate the skill directory at `dir`.
 ///
@@ -188,7 +189,8 @@ fn reject_symlinked_index(file: &Path) -> Result<(), SkillError> {
 
 /// Pack the skill directory at `dir` into an uncompressed tar whose
 /// entries are rooted at `<name>/`, matching the materializer's expected
-/// layout. The whole tree under `dir` is included; entries are emitted in
+/// layout. The tree under `dir` is included minus its ignore set (defaults plus
+/// `.grimignore`, see [`IgnoreSet`]); entries are emitted in
 /// sorted path order for a deterministic digest.
 ///
 /// # Errors
@@ -212,7 +214,8 @@ fn pack_skill_dir_limited(dir: &Path, limits: &PackLimits) -> Result<Vec<u8>, Sk
         })?;
 
     let mut state = WalkState::default();
-    collect_files(dir, dir, &name, &mut state, 0, limits)?;
+    let ignore = ignore_set(dir)?;
+    collect_files(dir, dir, &name, &ignore, &mut state, 0, limits)?;
     let mut files = state.out;
     files.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -260,7 +263,8 @@ pub fn pack_rule_file(file: &Path) -> Result<Vec<u8>, SkillError> {
     // single-file case untouched.
     let support = file.with_extension("");
     if support.is_dir() {
-        collect_files(&support, &support, &name, &mut state, 0, limits)?;
+        let ignore = ignore_set(&support)?;
+        collect_files(&support, &support, &name, &ignore, &mut state, 0, limits)?;
     }
     let mut files = state.out;
     files.sort_by(|a, b| a.0.cmp(&b.0));
@@ -526,6 +530,29 @@ fn check_pack_bounds(root: &Path, total_bytes: u64, file_count: usize, limits: &
     Ok(())
 }
 
+/// Strict [`IgnoreSet`] for a pack walk root: an invalid `.grimignore` line
+/// is a data error (exit 65) naming the file and line.
+fn ignore_set(root: &Path) -> Result<IgnoreSet, SkillError> {
+    IgnoreSet::for_root(root).map_err(|err| match err {
+        IgnoreSetError::Io { path, source } => SkillError::new(path, SkillErrorKind::Io(source)),
+        IgnoreSetError::InvalidLine { path, line, message } => SkillError::new(
+            path,
+            SkillErrorKind::ValidationFailed(format!("line {line}: invalid pattern: {message}")),
+        ),
+        IgnoreSetError::TooLarge { path } => SkillError::new(
+            path,
+            SkillErrorKind::ValidationFailed(format!(
+                "larger than {} bytes",
+                crate::install::ignore_set::MAX_GRIMIGNORE_BYTES
+            )),
+        ),
+        IgnoreSetError::Build { path, message } => SkillError::new(
+            path,
+            SkillErrorKind::ValidationFailed(format!("cannot compile ignore patterns: {message}")),
+        ),
+    })
+}
+
 /// Mutable accumulators carried through the recursive [`collect_files`]
 /// walk: the collected `(tar_entry_path, absolute_path)` pairs, the running
 /// cumulative byte total, and the count of filesystem entries visited (files
@@ -565,6 +592,7 @@ fn collect_files(
     root: &Path,
     dir: &Path,
     root_name: &str,
+    ignore: &IgnoreSet,
     state: &mut WalkState,
     depth: usize,
     limits: &PackLimits,
@@ -601,10 +629,15 @@ fn collect_files(
     children.sort();
     for path in children {
         let meta = std::fs::symlink_metadata(&path).map_err(|e| SkillError::new(&path, SkillErrorKind::Io(e)))?;
+        let rel = path.strip_prefix(root).unwrap_or(&path);
+        // Ignored directories are pruned here: their children are never read,
+        // so a large `node_modules/` cannot trip the node/byte caps.
+        if ignore.is_ignored(rel, meta.is_dir()) {
+            continue;
+        }
         if meta.is_dir() {
-            collect_files(root, &path, root_name, state, depth + 1, limits)?;
+            collect_files(root, &path, root_name, ignore, state, depth + 1, limits)?;
         } else if meta.is_file() {
-            let rel = path.strip_prefix(root).unwrap_or(&path);
             let rel_str: Vec<String> = rel
                 .components()
                 .filter_map(|c| match c {
@@ -1162,6 +1195,80 @@ mod tests {
             "expected TooLarge, got {:?}",
             err.kind
         );
+    }
+
+    // ── .grimignore ─────────────────────────────────────────────────────
+
+    fn tar_names(tar: &[u8]) -> Vec<String> {
+        tar::Archive::new(tar)
+            .entries()
+            .unwrap()
+            .map(|e| e.unwrap().path().unwrap().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn pack_skips_ignored_files_and_packs_grimignore() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("s");
+        write(&dir.join("SKILL.md"), "---\nname: s\ndescription: d\n---\n");
+        write(&dir.join("scripts/foo.py"), "print(1)\n");
+        write(&dir.join("scripts/__pycache__/foo.cpython-313.pyc"), "x");
+        write(&dir.join(".DS_Store"), "x");
+        write(&dir.join("secret.txt"), "x");
+        write(&dir.join(".grimignore"), "secret.txt\n");
+        let names = tar_names(&pack_skill_dir(&dir).unwrap());
+        assert_eq!(names, vec!["s/.grimignore", "s/SKILL.md", "s/scripts/foo.py"]);
+    }
+
+    #[test]
+    fn ignored_dir_is_pruned_before_the_node_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("s");
+        write(&dir.join("SKILL.md"), "---\nname: s\ndescription: d\n---\n");
+        for i in 0..10 {
+            write(&dir.join(format!("node_modules/f{i}.js")), "x");
+        }
+        let limits = PackLimits {
+            node_limit: 5,
+            ..PackLimits::DEFAULT
+        };
+        let names = tar_names(&pack_skill_dir_limited(&dir, &limits).expect("pruned dir is never read"));
+        assert_eq!(names, vec!["s/SKILL.md"]);
+    }
+
+    #[test]
+    fn invalid_grimignore_is_a_data_error_naming_the_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("s");
+        write(&dir.join("SKILL.md"), "---\nname: s\ndescription: d\n---\n");
+        write(&dir.join(".grimignore"), "# comment\n{unclosed\n");
+        let err = pack_skill_dir(&dir).expect_err("invalid pattern must fail the pack");
+        assert!(
+            matches!(err.kind, SkillErrorKind::ValidationFailed(_)),
+            "{:?}",
+            err.kind
+        );
+        assert!(err.path.ends_with(".grimignore"));
+        assert!(err.to_string().contains("line 2"), "{err}");
+        let top = anyhow::Error::from(crate::error::Error::from(err));
+        assert_eq!(
+            crate::error::classify_error(&top),
+            crate::cli::exit_code::ExitCode::DataError
+        );
+    }
+
+    #[test]
+    fn rule_support_dir_honours_its_own_grimignore() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("rules/my-rule.md");
+        write(&f, "# index\n");
+        write(&tmp.path().join("rules/my-rule/run.py"), "x\n");
+        write(&tmp.path().join("rules/my-rule/__pycache__/run.cpython-313.pyc"), "x");
+        write(&tmp.path().join("rules/my-rule/draft.md"), "x\n");
+        write(&tmp.path().join("rules/my-rule/.grimignore"), "draft.md\n");
+        let names = tar_names(&pack_rule_file(&f).unwrap());
+        assert_eq!(names, vec!["my-rule.md", "my-rule/.grimignore", "my-rule/run.py"]);
     }
 
     /// F3 (read-side TOCTOU): `read_capped` bounds the ACTUAL read by the

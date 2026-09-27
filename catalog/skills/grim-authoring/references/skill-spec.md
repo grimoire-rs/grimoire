@@ -12,9 +12,13 @@ Contents: [Directory Shape](#directory-shape) · [Frontmatter](#frontmatter) ·
 
 A skill is a directory whose entrypoint is `SKILL.md`. Everything else in
 the tree (scripts, templates, references) packs into one tar layer and
-installs **verbatim**. Only `SKILL.md` itself is ever re-rendered per
-client, and only when its `metadata` map carries vendor-namespaced keys —
-a plain skill installs byte-identical to what you published.
+installs **verbatim**, except files a `.grimignore` at the directory root
+excludes — a built-in default list already keeps `__pycache__/`, `.venv/`,
+`node_modules/`, and similar runtime junk out of the pack and out of
+`grim status` drift detection; `.grimignore` extends it (a `!pattern` line re-includes a default), and
+`SKILL.md` itself is never ignorable. Only `SKILL.md` is ever re-rendered
+per client, and only when its `metadata` map carries vendor-namespaced
+keys — a plain skill installs byte-identical to what you published.
 
 The directory name is the skill's identity: `name` in frontmatter must
 equal it exactly, subject to the universal name rules.

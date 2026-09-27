@@ -40,7 +40,7 @@ use sha2::Digest as _;
 
 use crate::config::scope::ConfigScope;
 use crate::install::client_target::ClientTarget;
-use crate::install::content_hash::footprint_hash;
+use crate::install::content_hash::footprint_hash_for_record;
 use crate::install::path_anchor::{AnchorError, AnchorRoots, AnchoredPath, Containment};
 use crate::oci::{ArtifactKind, Digest, PinnedIdentifier};
 use crate::store::atomic_write::atomic_write;
@@ -130,7 +130,10 @@ impl ClientOutput {
                 .map_err(|source| AnchorError::Io { path: target, source });
         }
         let support = self.resolved_support_dir(roots, containment)?;
-        footprint_hash(&target, support.as_deref()).map_err(|source| AnchorError::Io { path: target, source })
+        // A record from before `.grimignore` hashed ignored files too; the
+        // fallback returns that legacy digest when it still matches.
+        footprint_hash_for_record(&target, support.as_deref(), &self.content_hash)
+            .map_err(|source| AnchorError::Io { path: target, source })
     }
 
     /// Whether this output is present on disk: the target path exists, and —
@@ -3279,5 +3282,28 @@ mod tests {
             "JSON fallback must parse the file"
         );
         assert_eq!(out.current_hash(&roots, Containment::Strict).unwrap(), out.content_hash);
+    }
+
+    /// A record written before `.grimignore` existed hashed every file,
+    /// including a `.pyc` the artifact shipped. The filtered walk no longer
+    /// sees that file, so `current_hash` must fall back to the unfiltered
+    /// digest when it reproduces the record — and still report real drift.
+    #[test]
+    fn legacy_unfiltered_record_is_not_drift() {
+        use crate::install::content_hash::footprint_hash_unfiltered;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let skill = tmp.path().join(".claude/skills/s");
+        std::fs::create_dir_all(skill.join("__pycache__")).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "---\nname: s\n---\n").unwrap();
+        std::fs::write(skill.join("__pycache__/x.cpython-313.pyc"), "shipped").unwrap();
+        let (mut out, roots) = entry_output_for(tmp.path(), "claude", ".claude/skills/s", "/", &serde_json::json!({}));
+        out.entry = None;
+        out.content_hash = footprint_hash_unfiltered(&skill, None).unwrap();
+
+        assert_eq!(out.current_hash(&roots, Containment::Strict).unwrap(), out.content_hash);
+
+        std::fs::write(skill.join("SKILL.md"), "---\nname: s\n---\nedited\n").unwrap();
+        assert_ne!(out.current_hash(&roots, Containment::Strict).unwrap(), out.content_hash);
     }
 }

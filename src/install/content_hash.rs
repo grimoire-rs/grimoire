@@ -12,12 +12,17 @@
 //! Both shapes are supported: a single file (rule) hashes as one entry
 //! keyed by its file name; a directory (skill) hashes every regular file
 //! beneath it keyed by the path relative to the root.
+//!
+//! A walked directory honours its [`IgnoreSet`] (built-in defaults plus the
+//! root's `.grimignore`): ignored paths are not artifact content, so runtime
+//! junk such as `__pycache__/` never reads as drift.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
 use sha2::Digest as _;
 
+use crate::install::ignore_set::IgnoreSet;
 use crate::oci::Digest;
 
 /// Compute the deterministic SHA-256 over the tree (or single file) at
@@ -26,12 +31,28 @@ use crate::oci::Digest;
 /// # Errors
 ///
 /// Returns any I/O error from walking or reading the tree.
+// Production reads go through `footprint_hash`; this stays the tests'
+// shorthand for a support-less footprint.
+#[cfg(test)]
 pub fn content_hash(root: &Path) -> io::Result<Digest> {
+    content_hash_with(root, Filter::Ignore)
+}
+
+/// Whether a directory walk applies the root's [`IgnoreSet`] (`Ignore`) or
+/// hashes every regular file (`All`, the pre-`.grimignore` scheme that
+/// legacy records were written with).
+#[derive(Clone, Copy)]
+enum Filter {
+    Ignore,
+    All,
+}
+
+fn content_hash_with(root: &Path, filter: Filter) -> io::Result<Digest> {
     let meta = std::fs::symlink_metadata(root)?;
 
     let mut entries: Vec<(PathBuf, PathBuf)> = Vec::new();
     if meta.is_dir() {
-        collect_files(root, root, &mut entries)?;
+        walk(root, filter, &mut entries)?;
     } else {
         // Single-file artifact (a rule): key on the file name so the hash
         // is location-independent, matching the directory case where keys
@@ -62,12 +83,42 @@ pub fn content_hash(root: &Path) -> io::Result<Digest> {
 ///
 /// Returns any I/O error from walking or reading the footprint.
 pub fn footprint_hash(target: &Path, support_dir: Option<&Path>) -> io::Result<Digest> {
+    footprint_hash_with(target, support_dir, Filter::Ignore)
+}
+
+/// The footprint hash to compare against `recorded`: the current (filtered)
+/// [`footprint_hash`], unless it mismatches and the legacy unfiltered walk
+/// reproduces `recorded` exactly — a record written before `.grimignore`
+/// existed, over an artifact that shipped a now-ignored file. Such a record
+/// migrates to the filtered scheme on its next write. The second walk only
+/// runs on mismatch.
+///
+/// # Errors
+///
+/// Returns any I/O error from walking or reading the footprint.
+pub fn footprint_hash_for_record(target: &Path, support_dir: Option<&Path>, recorded: &Digest) -> io::Result<Digest> {
+    let filtered = footprint_hash(target, support_dir)?;
+    if &filtered == recorded {
+        return Ok(filtered);
+    }
+    let unfiltered = footprint_hash_with(target, support_dir, Filter::All)?;
+    Ok(if &unfiltered == recorded { unfiltered } else { filtered })
+}
+
+/// The legacy (pre-`.grimignore`) digest, for tests that fabricate an old
+/// record.
+#[cfg(test)]
+pub(crate) fn footprint_hash_unfiltered(target: &Path, support_dir: Option<&Path>) -> io::Result<Digest> {
+    footprint_hash_with(target, support_dir, Filter::All)
+}
+
+fn footprint_hash_with(target: &Path, support_dir: Option<&Path>, filter: Filter) -> io::Result<Digest> {
     // No support dir — or a recorded one the user has since deleted — hashes
     // the index alone. A deleted dir therefore yields a digest that differs
     // from the recorded combined one: detected as drift (not surfaced as an
     // I/O error by the integrity readers), consistent across every reader.
     let Some(dir) = support_dir.filter(|d| d.is_dir()) else {
-        return content_hash(target);
+        return content_hash_with(target, filter);
     };
 
     let mut entries: Vec<(PathBuf, PathBuf)> = Vec::new();
@@ -84,7 +135,7 @@ pub fn footprint_hash(target: &Path, support_dir: Option<&Path>) -> io::Result<D
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("support"));
     let mut support: Vec<(PathBuf, PathBuf)> = Vec::new();
-    collect_files(dir, dir, &mut support)?;
+    walk(dir, filter, &mut support)?;
     for (rel, abs) in support {
         entries.push((dir_key.join(rel), abs));
     }
@@ -108,22 +159,42 @@ fn hash_entries(entries: &[(PathBuf, PathBuf)]) -> io::Result<Digest> {
     Ok(Digest::Sha256(hex::encode(hasher.finalize())))
 }
 
+/// Collect the files under `root`, honouring its [`IgnoreSet`] unless
+/// `filter` is [`Filter::All`]. An invalid installed `.grimignore` line is
+/// skipped with a warning — never fatal here.
+fn walk(root: &Path, filter: Filter, out: &mut Vec<(PathBuf, PathBuf)>) -> io::Result<()> {
+    let ignore = match filter {
+        Filter::Ignore => Some(IgnoreSet::for_root_lenient(root)),
+        Filter::All => None,
+    };
+    collect_files(root, root, ignore.as_ref(), out)
+}
+
 /// Recursively collect `(relative_path, absolute_path)` for every regular
-/// file under `dir`. Directories are not hashed directly — an empty
+/// file under `dir` not matched by `ignore` (ignored directories are pruned,
+/// never read). Directories are not hashed directly — an empty
 /// directory contributes nothing, which is acceptable for the
 /// modification-detection use case (the materializer never emits empty
 /// directories that carry meaning).
-fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(PathBuf, PathBuf)>) -> io::Result<()> {
+fn collect_files(
+    root: &Path,
+    dir: &Path,
+    ignore: Option<&IgnoreSet>,
+    out: &mut Vec<(PathBuf, PathBuf)>,
+) -> io::Result<()> {
     let mut children: Vec<PathBuf> = std::fs::read_dir(dir)?
         .map(|e| e.map(|e| e.path()))
         .collect::<io::Result<Vec<_>>>()?;
     children.sort();
     for path in children {
         let meta = std::fs::symlink_metadata(&path)?;
+        let rel = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+        if ignore.is_some_and(|set| set.is_ignored(&rel, meta.is_dir())) {
+            continue;
+        }
         if meta.is_dir() {
-            collect_files(root, &path, out)?;
+            collect_files(root, &path, ignore, out)?;
         } else if meta.is_file() {
-            let rel = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
             out.push((rel, path));
         }
         // Symlinks and other special files are ignored: the materializer
@@ -297,6 +368,88 @@ mod tests {
         let before = footprint_hash(&index, Some(&support)).unwrap();
         std::fs::write(support.join("b.md"), b"b\n").unwrap();
         assert_ne!(before, footprint_hash(&index, Some(&support)).unwrap());
+    }
+
+    fn skill_tree() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("s");
+        std::fs::create_dir_all(root.join("scripts")).unwrap();
+        std::fs::write(root.join("SKILL.md"), b"---\nname: s\n---\n").unwrap();
+        std::fs::write(root.join("scripts/foo.py"), b"print(1)\n").unwrap();
+        (dir, root)
+    }
+
+    #[test]
+    fn ignored_runtime_junk_does_not_change_the_hash() {
+        let (_d, root) = skill_tree();
+        let before = content_hash(&root).unwrap();
+        std::fs::create_dir_all(root.join("scripts/__pycache__")).unwrap();
+        std::fs::write(root.join("scripts/__pycache__/foo.cpython-313.pyc"), b"\0bytecode").unwrap();
+        std::fs::write(root.join(".DS_Store"), b"junk").unwrap();
+        assert_eq!(before, content_hash(&root).unwrap());
+    }
+
+    #[test]
+    fn a_real_new_file_still_changes_the_hash() {
+        let (_d, root) = skill_tree();
+        let before = content_hash(&root).unwrap();
+        std::fs::write(root.join("scripts/new.py"), b"print(2)\n").unwrap();
+        assert_ne!(before, content_hash(&root).unwrap());
+    }
+
+    #[test]
+    fn editing_grimignore_changes_the_hash() {
+        let (_d, root) = skill_tree();
+        std::fs::write(root.join(".grimignore"), b"*.log\n").unwrap();
+        let before = content_hash(&root).unwrap();
+        std::fs::write(root.join(".grimignore"), b"*.log\n*.tmp\n").unwrap();
+        assert_ne!(before, content_hash(&root).unwrap());
+    }
+
+    #[test]
+    fn invalid_installed_grimignore_is_not_fatal() {
+        let (_d, root) = skill_tree();
+        std::fs::write(root.join(".grimignore"), b"{unclosed\n").unwrap();
+        std::fs::create_dir_all(root.join("__pycache__")).unwrap();
+        std::fs::write(root.join("__pycache__/x.pyc"), b"x").unwrap();
+        let with_junk = content_hash(&root).expect("invalid line is skipped, not an error");
+        std::fs::remove_dir_all(root.join("__pycache__")).unwrap();
+        assert_eq!(with_junk, content_hash(&root).unwrap(), "defaults still apply");
+    }
+
+    #[test]
+    fn support_dir_ignores_junk_but_not_real_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = dir.path().join("my-rule.md");
+        let support = dir.path().join("my-rule");
+        std::fs::create_dir_all(&support).unwrap();
+        std::fs::write(&index, b"# index\n").unwrap();
+        std::fs::write(support.join("run.py"), b"x\n").unwrap();
+        let before = footprint_hash(&index, Some(&support)).unwrap();
+        std::fs::create_dir_all(support.join("__pycache__")).unwrap();
+        std::fs::write(support.join("__pycache__/run.cpython-313.pyc"), b"x").unwrap();
+        assert_eq!(before, footprint_hash(&index, Some(&support)).unwrap());
+        std::fs::write(support.join("other.py"), b"y\n").unwrap();
+        assert_ne!(before, footprint_hash(&index, Some(&support)).unwrap());
+    }
+
+    #[test]
+    fn legacy_unfiltered_record_is_honoured_and_real_drift_is_not() {
+        // A record written before `.grimignore`: the artifact shipped a
+        // `.pyc`, and the recorded digest covers it.
+        let (_d, root) = skill_tree();
+        std::fs::create_dir_all(root.join("__pycache__")).unwrap();
+        std::fs::write(root.join("__pycache__/x.pyc"), b"shipped").unwrap();
+        let legacy = footprint_hash_with(&root, None, Filter::All).unwrap();
+        assert_ne!(
+            legacy,
+            footprint_hash(&root, None).unwrap(),
+            "fixture must exercise the fallback"
+        );
+        assert_eq!(footprint_hash_for_record(&root, None, &legacy).unwrap(), legacy);
+
+        std::fs::write(root.join("scripts/foo.py"), b"edited\n").unwrap();
+        assert_ne!(footprint_hash_for_record(&root, None, &legacy).unwrap(), legacy);
     }
 
     #[test]

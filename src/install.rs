@@ -14,6 +14,7 @@ pub mod claude_config;
 pub mod client_target;
 pub mod content_hash;
 pub mod expected_outputs;
+pub mod ignore_set;
 pub mod install_error;
 pub mod install_state;
 pub mod installer;
@@ -54,8 +55,11 @@ pub mod vendor_zed;
 
 #[allow(unused_imports)]
 pub use client_target::{ClientTarget, MaterializedFile};
+#[cfg(test)]
 #[allow(unused_imports)]
-pub use content_hash::{content_hash, footprint_hash};
+pub use content_hash::content_hash;
+#[allow(unused_imports)]
+pub use content_hash::footprint_hash;
 #[allow(unused_imports)]
 pub use install_error::{InstallError, InstallErrorKind};
 #[allow(unused_imports)]

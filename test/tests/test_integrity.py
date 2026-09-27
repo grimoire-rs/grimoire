@@ -301,3 +301,93 @@ def test_update_refusal_names_the_artifact_on_stderr(
     assert "rust-style" in result.stderr, (
         f"the refusal must name the artifact; got {result.stderr}"
     )
+
+
+# ── .grimignore: runtime junk is not drift ─────────────────────────────
+
+
+def _install_skill_with_script(grim_at, project_dir, registry, unique_repo):
+    repo = f"{unique_repo}/runner"
+    make_artifact(
+        repo,
+        "skill",
+        {
+            "runner/SKILL.md": "---\nname: runner\ndescription: d\n---\n",
+            "runner/scripts/foo.py": "print('hi')\n",
+        },
+        tag="v1",
+    )
+    write_config(project_dir, skills={"runner": f"{registry}/{repo}:v1"})
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    runner.run("install")
+    return runner, project_dir / ".claude/skills/runner"
+
+
+def _state(runner, name: str) -> str:
+    rows = runner.json("status")["items"]
+    return next(r for r in rows if r["name"] == name)["state"]
+
+
+def test_pycache_in_installed_skill_is_not_drift(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Running a bundled script writes `__pycache__/`; that must not flip
+    status to modified or make update refuse (issue #128)."""
+    runner, skill = _install_skill_with_script(
+        grim_at, project_dir, registry, unique_repo
+    )
+    cache = skill / "scripts/__pycache__"
+    cache.mkdir()
+    (cache / "foo.cpython-313.pyc").write_bytes(b"\x00bytecode")
+
+    assert _state(runner, "runner") == "installed"
+    updated = runner.run("update", check=False)
+    assert updated.returncode == 0, updated.stderr
+
+
+def test_real_edit_beside_pycache_is_still_modified(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Guard against over-ignoring: a real script edit is still drift."""
+    runner, skill = _install_skill_with_script(
+        grim_at, project_dir, registry, unique_repo
+    )
+    cache = skill / "scripts/__pycache__"
+    cache.mkdir()
+    (cache / "foo.cpython-313.pyc").write_bytes(b"\x00bytecode")
+    (skill / "scripts/foo.py").write_text("print('edited')\n")
+
+    assert _state(runner, "runner") == "modified"
+    refused = runner.run("update", check=False)
+    assert refused.returncode == 65, refused.stderr
+
+
+def test_pycache_in_rule_support_dir_is_not_drift(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    repo = f"{unique_repo}/tooling"
+    make_artifact(
+        repo,
+        "rule",
+        {
+            "tooling.md": "---\npaths: ['**/*.py']\n---\n# tooling\n",
+            "tooling/check.py": "print('check')\n",
+        },
+        tag="v1",
+    )
+    write_config(project_dir, rules={"tooling": f"{registry}/{repo}:v1"})
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    runner.run("install")
+    support = project_dir / ".claude/rules/tooling"
+    assert (support / "check.py").is_file(), "fixture must install a support dir"
+    (support / "__pycache__").mkdir()
+    (support / "__pycache__/check.cpython-313.pyc").write_bytes(b"\x00")
+
+    assert _state(runner, "tooling") == "installed"
+    updated = runner.run("update", check=False)
+    assert updated.returncode == 0, updated.stderr
+
+    (support / "check.py").write_text("print('edited')\n")
+    assert _state(runner, "tooling") == "modified"

@@ -74,6 +74,13 @@ unicode-width = "0.2"
 # `bstr` — everything else it needs is already in Cargo.lock via `regex`.
 # See adr_registry_browse_filters.md and research_registry_browse_filters.md.
 globset = "0.4"
+# `.grimignore` + built-in default ignore list (src/install/ignore_set.rs),
+# applied by both the pack walk and the drift-hash walk. Only
+# `ignore::gitignore` is used: ripgrep's gitignore matcher (anchoring, `**`,
+# dir-only `/`, `!` re-include) without a hand-rolled parser. Net-new crates
+# are `ignore` and the crossbeam trio; the rest rides in via `globset`.
+# See plan_grimignore.md.
+ignore = "0.4"
 # Fuzzy (subsequence) matching + relevance scoring for the one shared search
 # matcher (`src/catalog/search_match.rs`), which backs `grim search`, the TUI
 # search bar and the MCP `grim_search` tool. skim's SkimMatcherV2: MIT,
