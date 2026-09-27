@@ -23,7 +23,7 @@ These apply to every subcommand:
 | `--config <path>` | Use an explicit project config file. |
 | `--registry <ref>` | Registry for short identifiers and the browse set. Repeatable / comma-separated (`--registry a,b`); the first value is the default. |
 | `--offline` | Disable all network access; work from the cache only and fail rather than reach a registry. |
-| `--progress <auto\|json\|none>` | Progress rendering for long-running passes (default `auto` = tty-gated stderr bar on `install`, silent elsewhere). `json` emits NDJSON events on **stderr** — `{"event":"start","total":N}`, `{"event":"advance","position":i,"total":N,"label":"…"}` (`label` is display-only), `{"event":"finish"}` — while stdout keeps the normal report. **Experimental pre-1.0**; see [Stability](./stability.md#unstable). |
+| `--progress <auto\|json\|none>` | Progress rendering for long-running passes (default `auto` = tty-gated stderr bar on `install` and `export plugin`, silent elsewhere; `export plugin` counts every member fetched, across all plugins). `json` emits NDJSON events on **stderr** — `{"event":"start","total":N}`, `{"event":"advance","position":i,"total":N,"label":"…"}` (`label` is display-only), `{"event":"finish"}` — while stdout keeps the normal report. **Experimental pre-1.0**; see [Stability](./stability.md#unstable). |
 | `--log-level <level>` | Override the tracing log level (`warn`, `info`, `debug`). |
 
 A downstream reader that closes the pipe early — `grim status --format
@@ -1676,6 +1676,7 @@ plugins this run touched.
 | `--zip` | Write `<name>.<client>.zip` instead of a directory |
 | `-o, --output <DIR>` | Directory the plugins are written into (default `.`, created if absent) |
 | `--version <SEMVER>` | Plugin version base — defaults to the declared `version`, then the single ad-hoc reference's version annotation, then `0.0.0`; grim always appends a content-hash suffix |
+| `--description <TEXT>` | Plugin description base — overrides the declared `description` and the single ad-hoc reference's description annotation; longer than 412 characters exits `65` (see [the description cap](#export-plugin-description)) |
 | `--force` | Replace existing outputs instead of refusing them |
 
 `--client` accepts the same client names as
@@ -1815,7 +1816,7 @@ field reference, alongside every other command's `--format json` shape.
 |-----------|------|
 | Success | `0` |
 | `≥2` refs without `--name`; refs combined with `--plugin`/`--marketplace`; `--name` given with 0 refs; or an invalid `--name`, or an invalid plugin name derived from a single reference | `64` |
-| A missing or malformed manifest, or a malformed `--version`; a manifest declaring zero plugins, regardless of `--plugin` (it is checked first); a bad rename or a stale reference a rename left behind; an unsafe entry name; an admitted member set that is empty for a client; or an existing output without `--force` | `65` |
+| A missing or malformed manifest, or a malformed `--version`; a `--description` or declared `description` too long for the cap; a manifest declaring zero plugins, regardless of `--plugin` (it is checked first); a bad rename or a stale reference a rename left behind; an unsafe entry name; an admitted member set that is empty for a client; or an existing output without `--force` | `65` |
 | Two references disagreeing on the same member's identity, or a `--client` (explicit or unrecognized) naming a client with no plugin format at all | `78` |
 | A named plugin, a `<plugin>`/`<plugin>:<member>` selector, or an include's tag or manifest, not found | `79` |
 | Registry unreachable | `69` |
@@ -1827,6 +1828,19 @@ field reference, alongside every other command's `--format json` shape.
 Export-owned failures classify as above. Every other failure — a bad
 reference, a bundle conflict, a stale lock — propagates from the resolver
 or installer with its own existing exit code.
+
+### Description cap {#export-plugin-description}
+
+A `plugin.json` `description` is at most 500 characters, counted in UTF-16
+code units. grim builds it from the base text, then the sentence naming
+omitted members, then a fixed 87-character sentence pointing at grim, so
+412 characters remain for the base. A base you wrote — `--description` or a
+declared `description` — that exceeds 412 exits `65`. The base is the one
+part you can edit, so it is refused, never cut. A base taken from a
+reference's description annotation belongs to its publisher, so it is cut
+to fit and ends in `…`, and grim warns on stderr. When a long omitted-member
+sentence would push the text past 500 characters, the base is cut first,
+then that sentence. The pointer sentence always stays whole.
 
 Rename, description, and version-annotation rules are covered in full in
 the [`marketplace.toml` reference](./configuration.md#marketplace-toml);

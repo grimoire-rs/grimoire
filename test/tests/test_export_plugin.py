@@ -1267,3 +1267,92 @@ def test_s031_agent_plugins_mcp_projection(grim_at, tmp_path: Path, work: Path, 
             {"kind": "mcp", "name": n, "reason": "not-representable"} for n in ("authd", "hdr", "sock")
         ]
         assert "Omitted for this client: mcp authd, mcp hdr, mcp sock." in _manifest(root)["description"]
+
+
+# ── S-032 — Description cap: 500 characters, on-ramp kept whole (C-024) ────
+
+MAX_DESCRIPTION = 500
+MAX_BASE = MAX_DESCRIPTION - len(ONRAMP) - 1
+
+
+def test_s032_description_flag_overrides_the_annotation(
+    grim_at, tmp_path: Path, work: Path, registry: str, unique_repo: str
+) -> None:
+    runner = grim_at(work)
+    stack = _annotated_stack(runner, tmp_path, registry, unique_repo)
+
+    _ok(_export(runner, stack.bundle, "--client", "claude", "--description", "  Flag text. "))
+
+    doc = _manifest(work / "team-stack.claude")
+    assert doc["description"] == f"Flag text. Omitted for this client: rule team-style. {ONRAMP}"
+
+
+@pytest.mark.parametrize("where", ["flag", "declared"])
+def test_s032_authored_description_over_the_cap_exits_65_and_writes_nothing(
+    grim_at, work: Path, registry: str, unique_repo: str, where: str
+) -> None:
+    runner = grim_at(work)
+    _skill(f"{unique_repo}/a", "a")
+    ref = f"{registry}/{unique_repo}/a:1"
+    long = "x" * (MAX_BASE + 1)
+    if where == "flag":
+        result = _export(runner, ref, "--client", "claude", "--description", long)
+    else:
+        _write_marketplace(work / "marketplace.toml", {"team": {"include": [ref], "description": long}})
+        result = _export(runner, "--client", "claude")
+
+    assert result.returncode == 65, result.stderr
+    assert f"at most {MAX_BASE} fit" in _error(result)["message"]
+    assert _entries(work) == ([] if where == "flag" else ["marketplace.toml"])
+
+
+def test_s032_authored_description_at_the_cap_fits_exactly(grim_at, work: Path, registry: str, unique_repo: str) -> None:
+    runner = grim_at(work)
+    _skill(f"{unique_repo}/a", "a")
+    base = "x" * MAX_BASE
+
+    _ok(_export(runner, f"{registry}/{unique_repo}/a:1", "--client", "claude", "--description", base))
+
+    assert _manifest(work / "a.claude")["description"] == f"{base} {ONRAMP}"
+
+
+def test_s032_long_annotation_is_cut_with_ellipsis_and_warned(
+    grim_at, tmp_path: Path, work: Path, registry: str, unique_repo: str
+) -> None:
+    """A publisher's text is outside the exporter's control: cut, never refused."""
+    runner = grim_at(work)
+    long = "Everything a repository needs. " * 30
+    stack = _publish_stack(
+        runner, tmp_path, registry, unique_repo, annotations={"org.opencontainers.image.description": long}
+    )
+
+    result = _export(runner, stack.bundle, "--client", "claude")
+    _ok(result)
+
+    desc = _manifest(work / "team-stack.claude")["description"]
+    assert len(desc.encode("utf-16-le")) // 2 <= MAX_DESCRIPTION
+    assert desc.startswith("Everything a repository needs.")
+    assert desc.endswith(f"… Omitted for this client: rule team-style. {ONRAMP}")
+    assert "description cut to 500 characters" in result.stderr
+
+
+# ── S-033 — `--progress` reports every member fetched (C-027) ───────────────
+
+
+def test_s033_progress_json_counts_members_across_plugins(grim_at, work: Path, registry: str, unique_repo: str) -> None:
+    runner = grim_at(work)
+    refs = []
+    for name in ("a", "b", "c"):
+        _skill(f"{unique_repo}/{name}", name)
+        refs.append(f"{registry}/{unique_repo}/{name}:1")
+    _write_marketplace(work / "marketplace.toml", {"one": {"include": refs[:1]}, "two": {"include": refs[1:]}})
+
+    result = runner.run("--progress", "json", "export", "plugin", "--client", "claude", check=False)
+    assert result.returncode == 0, result.stderr
+
+    events = [json.loads(line) for line in result.stderr.splitlines() if line.startswith("{")]
+    assert events[0] == {"event": "start", "total": 3}
+    advances = [e for e in events if e["event"] == "advance"]
+    assert [(e["position"], e["total"]) for e in advances] == [(1, 3), (2, 3), (3, 3)]
+    assert [e["label"] for e in advances] == ["one: skill a", "two: skill b", "two: skill c"]
+    assert events[-1] == {"event": "finish"}

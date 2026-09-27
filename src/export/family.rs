@@ -127,20 +127,74 @@ pub fn plugin_version(base: Option<&str>, members: &[(LockedArtifact, String)]) 
     Ok(format!("{base}+{suffix}"))
 }
 
-/// The plugin description (C-024): `base`, the omission sentence, then
-/// [`ONRAMP`], space-joined. `omitted` is `(kind, emitted name)`, already
-/// sorted by the caller in C-016 order.
-pub fn plugin_description(base: Option<&str>, omitted: &[(ArtifactKind, String)]) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(base) = base.map(str::trim).filter(|b| !b.is_empty()) {
-        parts.push(base.to_string());
+/// Most characters a plugin `description` may carry, counted in UTF-16
+/// code units (the JavaScript `length` harness validators apply, never
+/// fewer than Unicode scalars).
+pub const MAX_DESCRIPTION_LEN: usize = 500;
+
+/// Length of `s` as [`MAX_DESCRIPTION_LEN`] counts it.
+pub fn description_len(s: &str) -> usize {
+    s.encode_utf16().count()
+}
+
+/// Most characters an author-written description base may carry: whatever
+/// [`ONRAMP`] and its separating space leave of [`MAX_DESCRIPTION_LEN`].
+pub fn max_description_base_len() -> usize {
+    MAX_DESCRIPTION_LEN - description_len(ONRAMP) - 1
+}
+
+/// `s` cut to at most `max` units, ending in `…` when cut; empty when not
+/// even the ellipsis fits beside some text.
+fn fit(s: &str, max: usize) -> String {
+    if description_len(s) <= max {
+        return s.to_string();
     }
+    let mut out = String::new();
+    let mut used = 1; // the ellipsis
+    for c in s.chars() {
+        used += c.len_utf16();
+        if used > max {
+            break;
+        }
+        out.push(c);
+    }
+    let kept = out.trim_end();
+    if kept.is_empty() {
+        String::new()
+    } else {
+        format!("{kept}…")
+    }
+}
+
+/// The plugin description (C-024): `base`, the omission sentence, then
+/// [`ONRAMP`], space-joined, never longer than [`MAX_DESCRIPTION_LEN`].
+/// The on-ramp is kept whole; the base is cut first, then the omission
+/// sentence, each ending in `…` when cut. `omitted` is `(kind, emitted
+/// name)`, already sorted by the caller in C-016 order. The flag is true
+/// when anything was cut.
+pub fn plugin_description(base: Option<&str>, omitted: &[(ArtifactKind, String)]) -> (String, bool) {
+    let mut tail: Vec<String> = Vec::new();
+    let mut cut = false;
     if !omitted.is_empty() {
         let list: Vec<String> = omitted.iter().map(|(kind, name)| format!("{kind} {name}")).collect();
-        parts.push(format!("Omitted for this client: {}.", list.join(", ")));
+        let sentence = format!("Omitted for this client: {}.", list.join(", "));
+        let fitted = fit(&sentence, max_description_base_len());
+        cut |= fitted != sentence;
+        tail.push(fitted);
     }
-    parts.push(ONRAMP.to_string());
-    parts.join(" ")
+    tail.push(ONRAMP.to_string());
+    let tail = tail.join(" ");
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(base) = base.map(str::trim).filter(|b| !b.is_empty()) {
+        let room = MAX_DESCRIPTION_LEN.saturating_sub(description_len(&tail) + 1);
+        let fitted = fit(base, room);
+        cut |= fitted != base;
+        if !fitted.is_empty() {
+            parts.push(fitted);
+        }
+    }
+    parts.push(tail);
+    (parts.join(" "), cut)
 }
 
 /// Bytes of `.claude-plugin/plugin.json` (C-025): pretty JSON plus one `\n`.
@@ -436,7 +490,7 @@ mod tests {
     #[test]
     fn c024_description_without_base_or_omissions_is_onramp_only() {
         assert_eq!(
-            plugin_description(None, &[]),
+            plugin_description(None, &[]).0,
             "Packaged by grim (https://grimoire.rs); install grim for pinned, updatable installs."
         );
     }
@@ -444,11 +498,11 @@ mod tests {
     #[test]
     fn c024_base_is_trimmed_and_blank_base_dropped() {
         assert_eq!(
-            plugin_description(Some("  Team tools\n"), &[]),
+            plugin_description(Some("  Team tools\n"), &[]).0,
             "Team tools Packaged by grim (https://grimoire.rs); install grim for pinned, updatable installs."
         );
         for blank in ["", "   ", "\n\t "] {
-            assert_eq!(plugin_description(Some(blank), &[]), ONRAMP, "{blank:?}");
+            assert_eq!(plugin_description(Some(blank), &[]).0, ONRAMP, "{blank:?}");
         }
     }
 
@@ -459,15 +513,60 @@ mod tests {
             (ArtifactKind::Mcp, "srv".to_string()),
         ];
         assert_eq!(
-            plugin_description(Some("Team tools"), &omitted),
+            plugin_description(Some("Team tools"), &omitted).0,
             "Team tools Omitted for this client: agent reviewer, mcp srv. \
              Packaged by grim (https://grimoire.rs); install grim for pinned, updatable installs."
         );
         assert_eq!(
-            plugin_description(Some(" "), &omitted[..1]),
+            plugin_description(Some(" "), &omitted[..1]).0,
             "Omitted for this client: agent reviewer. \
              Packaged by grim (https://grimoire.rs); install grim for pinned, updatable installs."
         );
+    }
+
+    #[test]
+    fn c024_description_fitting_the_cap_is_uncut() {
+        let base = "b".repeat(max_description_base_len());
+        let (desc, cut) = plugin_description(Some(&base), &[]);
+        assert!(!cut);
+        assert_eq!(description_len(&desc), MAX_DESCRIPTION_LEN);
+        assert_eq!(desc, format!("{base} {ONRAMP}"));
+    }
+
+    #[test]
+    fn c024_long_base_is_cut_with_ellipsis_onramp_kept_whole() {
+        let omitted = [(ArtifactKind::Rule, "r".to_string())];
+        let base = "word ".repeat(200);
+        let (desc, cut) = plugin_description(Some(&base), &omitted);
+        assert!(cut);
+        assert!(description_len(&desc) <= MAX_DESCRIPTION_LEN);
+        assert!(desc.starts_with("word word"), "{desc}");
+        assert!(
+            desc.ends_with(&format!("… Omitted for this client: rule r. {ONRAMP}")),
+            "{desc}"
+        );
+        assert!(!desc.contains(" …"), "no blank before the ellipsis: {desc}");
+    }
+
+    #[test]
+    fn c024_cut_counts_utf16_units_and_never_splits_a_char() {
+        // 🦀 is two UTF-16 units: the budget is spent in units, not chars.
+        let base = "🦀".repeat(400);
+        let (desc, cut) = plugin_description(Some(&base), &[]);
+        assert!(cut);
+        assert!(description_len(&desc) <= MAX_DESCRIPTION_LEN);
+        assert!(desc.starts_with('🦀') && desc.contains("🦀… Packaged"), "{desc}");
+    }
+
+    #[test]
+    fn c024_huge_omission_list_drops_base_and_cuts_sentence() {
+        let omitted: Vec<(ArtifactKind, String)> =
+            (0..100).map(|i| (ArtifactKind::Rule, format!("rule-{i:03}"))).collect();
+        let (desc, cut) = plugin_description(Some("Team tools"), &omitted);
+        assert!(cut);
+        assert!(description_len(&desc) <= MAX_DESCRIPTION_LEN);
+        assert!(desc.starts_with("Omitted for this client: rule rule-000"), "{desc}");
+        assert!(desc.ends_with(&format!("… {ONRAMP}")), "{desc}");
     }
 
     // ── C-025 plugin.json emitters ──
