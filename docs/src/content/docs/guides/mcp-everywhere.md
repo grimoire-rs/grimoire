@@ -9,7 +9,7 @@ This guide registers one server descriptor into every client you use, then reads
 
 ## Declare the server once
 
-Every client that speaks the [Model Context Protocol](https://spec.modelcontextprotocol.io/) wants the same three facts: a name, a command, and its arguments. Each one wants them in its own file, under its own key, in its own format. Registering a server by hand across four agents means writing the same server four times and keeping four files in step.
+Every client that speaks the [Model Context Protocol](https://modelcontextprotocol.io/specification/latest) wants the same three facts: a name, a command, and its arguments. Each one wants them in its own file, under its own key, in its own format. Registering a server by hand across four agents means writing the same server four times and keeping four files in step.
 
 An [MCP artifact](../mcp-servers.md) carries that descriptor once. `grim add` renders it into each client on your list, in the shape that client parses.
 

@@ -2535,7 +2535,7 @@ registers the same entry — in every detected client, not just Claude Code
 <!-- external -->
 [git-config]: https://git-scm.com/docs/git-config
 [vscode-compact]: https://code.visualstudio.com/docs/getstarted/userinterface
-[mcp-spec]: https://spec.modelcontextprotocol.io/
+[mcp-spec]: https://modelcontextprotocol.io/specification/latest
 [claude-code]: https://docs.anthropic.com/en/docs/claude-code
 [claude-code-plugins]: https://code.claude.com/docs/en/plugins
 [claude-plugin-upload]: https://claude.com/docs/plugins/overview

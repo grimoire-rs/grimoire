@@ -136,8 +136,8 @@ shared_skills = true
 Only a client that actually reads the pool may be opted into it — grim never
 writes where nothing reads. Those clients are `codex`, `gemini`, `zed`, `amp`,
 `goose` and the generic `agents` client (which already render there), plus
-`cursor`, `copilot`, `opencode` and `warp` (which scan it alongside their own
-skills directory).
+`cursor`, `copilot`, `opencode`, `warp`, `droid`, `kilo` and `cline` (which
+scan it alongside their own skills directory).
 Setting `true` on any other client is refused: exit 65 (`EX_DATAERR`) from
 [`grim config set`](./commands.md#config), exit 78 (`EX_CONFIG`) at load when
 the value was hand-authored. `false` stays accepted for every client — it is
@@ -1107,7 +1107,7 @@ applies.
 | `GRIM_ANNOUNCE_TOKEN` | Forge API token for [`grim publish --announce`](./package-index.md#announcing) — always wins over CI-provided tokens. Sent as an API header only, never logged. | unset |
 | `GRIM_RATE_TOKEN` | Forge API token for [`grim rate`](./ratings.md) — the first rung of its own credential ladder, separate from and narrower than `GRIM_ANNOUNCE_TOKEN`. Sent as an `Authorization` header only, never logged. | unset |
 | `DOCKER_CONFIG` | Directory holding the Docker-compatible `config.json` that [`grim login`](./authentication.md) reads and writes. | `~/.docker` |
-| `CLAUDE_CONFIG_DIR` | Claude Code config-dir override (vendor variable, honored read-only). Global-scope installs follow it: it replaces `~/.claude` for skills, rules, and agents, relocates the global MCP registration file to `$CLAUDE_CONFIG_DIR/.claude.json`, and relocates the `settings.json` grim writes for a support-dir rule's `claudeMdExcludes` registration. Also drives global-scope client detection. | unset |
+| `CLAUDE_CONFIG_DIR` | Claude Code config-dir override (vendor variable, honored read-only). Global-scope installs follow it: it replaces `~/.claude` for skills, rules, and agents, relocates the global MCP registration file to `$CLAUDE_CONFIG_DIR/.claude.json`, and relocates the `settings.json` grim writes for a support-dir rule's `claudeMdExcludes` registration. Also drives global-scope client detection. **Known gap:** since Claude Code 2.1.251, project and local settings `env` can no longer set this variable — shell, user, and managed settings still can, and a value set there moves Claude's root without grim seeing it. | unset |
 | `COPILOT_HOME` | GitHub Copilot home override (vendor variable). Replaces `~/.copilot` for global-scope skills and agents, and relocates `mcp-config.json`. Also drives detection. | unset |
 | `OPENCODE_CONFIG_DIR` | OpenCode config-dir override (vendor variable). Preferred over the XDG default (`$XDG_CONFIG_HOME/opencode`) as the global-scope install target for skills and agents — additive, OpenCode scans both. Also drives detection. | unset |
 | `OPENCODE_CONFIG` | OpenCode config **file** that grim edits for global-scope rule and MCP registration (read and written). Falls back to `$XDG_CONFIG_HOME/opencode/opencode.json`. No effect on skill/agent paths. | unset |
@@ -1127,12 +1127,18 @@ One further vendor variable is read for **detection only** and never changes
 where grim writes: `$GOOSE_PATH_ROOT`. When it is set it **replaces** Goose's
 candidate config roots rather than extending them.
 
-`COPILOT_HOME` carries an upstream caveat worth stating separately from what
-grim does with it. grim honors it for the **standalone** Copilot CLI, as the
-table says. VS Code's *embedded* Copilot CLI ignores the variable
-([microsoft/vscode#314806](https://github.com/microsoft/vscode/issues/314806),
-open), so setting it moves grim's output for one and not the other. That is an
-upstream split, not a limit on what grim honors.
+`COPILOT_HOME` carries two upstream caveats worth stating separately from
+what grim does with it. VS Code's embedded Copilot CLI honors the variable
+since VS Code 1.132.0
+([microsoft/vscode#314917](https://github.com/microsoft/vscode/pull/314917)),
+but its Skills dialog still ignores it in portable mode
+([microsoft/vscode#331073](https://github.com/microsoft/vscode/issues/331073)).
+And once it points anywhere but `~/.copilot`, Copilot CLI stops reading the
+shared `~/.agents/skills` pool, so skills moved there with `shared_skills`
+are not loaded. Both are upstream behavior, not a limit on what grim honors.
+grim warns on `install`/`update` when both conditions hold — `shared_skills`
+set for Copilot at global scope and `COPILOT_HOME` diverging from the
+default — since it still writes the skill; it just may go unread.
 
 Newly honoring a vendor variable relocates a render root for anyone who
 already set it. That is a layout move, not a breaking change — grim reaps

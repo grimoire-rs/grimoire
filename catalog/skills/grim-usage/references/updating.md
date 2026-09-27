@@ -7,7 +7,7 @@ need to refresh it against a newer grim release.
 
 1. Run `grim --version` and `grim <cmd> --help` for every command this
    package narrates (init, config, add, lock, install, update, status,
-   context, fetch, describe, remove, uninstall, search, schema,
+   context, fetch, describe, remove, uninstall, search, rate, schema,
    completions, tui, mcp, build, release, publish, login, logout). Diff
    the help output against what the reference files claim. Run `grim
    --help` too — the global flag set is narrated in `SKILL.md`.

@@ -3,8 +3,9 @@
 
 //! Goose's vendor strategy: shared-pool skills; everything else declined.
 //!
-//! Goose is Block's open-source agent (<https://block.github.io/goose>, repo
-//! `block/goose`), verified 2026-07-27 against its own raw documentation.
+//! Goose is Block's open-source agent (<https://goose-docs.ai>, repo
+//! `aaif-goose/goose`, formerly `block/goose`), verified 2026-07-27, re-verified 2026-09-27
+//! against v1.52.0, both times against its own raw documentation.
 //!
 //! - **Skills**: the cross-vendor `.agents/skills` pool at BOTH scopes —
 //!   `<ws>/.agents/skills` (project), `$HOME/.agents/skills` (global).
@@ -23,7 +24,8 @@
 //!   makes one physical pool tree safe to share.
 //! - **Rules**: **declined**. `.goosehints` / `AGENTS.md` are monolithic with
 //!   no in-file scoping key, so a rule's `paths` has nowhere to land.
-//! - **Agents**: **declined**. Subagents are runtime-only with nothing on disk.
+//! - **Agents**: **declined** this wave. Since re-verified 2026-09-27 Goose
+//!   documents file agents in `.agents/agents/` — a watchlisted kind change.
 //! - **MCP**: **declined**, and the reason is grim's side, not Goose's. Goose
 //!   is heavily MCP-based ("extensions"), but its config is **YAML**
 //!   (`config.yaml`) and grim splices only JSON and TOML. Adding a YAML splice

@@ -595,8 +595,9 @@ def test_uninstall_of_a_zero_output_declined_record_is_clean(
 # than legacy: it is now Degraded at project scope (installs, `paths`
 # dropped) and has no global surface at all, so it is covered by its own
 # pair of tests in test_shared_skills.py instead.
-# Agent declines: Kiro (#8040 CLI/IDE schema collision), Junie (EAP-only),
-# Zed (ACP, no file format), Amp (runtime-spawned subagents).
+# Agent declines: Kiro (#8040 CLI/IDE schema collision), Junie (format
+# exists, not rendered by grim yet — #148), Zed (ACP, no file format),
+# Amp (runtime-spawned subagents).
 # ---------------------------------------------------------------------------
 
 
@@ -698,6 +699,8 @@ def _skill_only(unique_repo: str):
 @pytest.mark.parametrize(
     ("client", "expected", "forbidden"),
     [
+        # Pool-capable since 2026-09-27, but native by default (the Warp
+        # shape) — the pool path is still the mistake to catch here.
         ("cline", ".cline/skills/code-review", ".agents/skills/code-review"),
         # The client is `droid`; the directory is `.factory`. Both frozen.
         ("droid", ".factory/skills/code-review", ".droid/skills/code-review"),
@@ -775,7 +778,7 @@ def test_openclaw_global_scope_installs_to_its_own_root(
 def test_goose_global_skill_lands_in_the_shared_pool(
     grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
 ) -> None:
-    """Goose is a full pool member at BOTH scopes, unlike Antigravity and Kilo.
+    """Goose is a full pool member at BOTH scopes, unlike Antigravity.
     Its global skill must land in ``$HOME/.agents/skills`` — the same physical
     tree Codex/Gemini/Zed/Amp read — and never under a ``~/.goose`` root, which
     grim deliberately does not define an anchor for."""

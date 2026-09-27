@@ -114,6 +114,37 @@ def test_build_dotted_rule_stem(grim_at, project_dir: Path) -> None:
     assert out["status"] == "built"
 
 
+def test_build_warns_on_oversized_compatibility(grim_at, project_dir: Path) -> None:
+    """Issue #154: `compatibility` over the agentskills 500-char cap warns
+    on stderr but still builds cleanly (exit 0) — additive, never a hard
+    failure."""
+    skill = project_dir / "code-review"
+    _write(
+        skill / "SKILL.md",
+        "---\nname: code-review\ndescription: Review code.\n"
+        f"compatibility: {'x' * 501}\n---\n# Body\n",
+    )
+    runner = grim_at(project_dir)
+    result = runner.run("build", str(skill))
+    assert result.returncode == 0, result.stderr
+    assert "compatibility" in result.stderr, result.stderr
+    assert "500" in result.stderr, result.stderr
+
+
+def test_build_warns_on_empty_compatibility(grim_at, project_dir: Path) -> None:
+    """Issue #154: a blank `compatibility` warns but still builds (exit 0)."""
+    skill = project_dir / "code-review"
+    _write(
+        skill / "SKILL.md",
+        '---\nname: code-review\ndescription: Review code.\ncompatibility: "   "\n---\n# Body\n',
+    )
+    runner = grim_at(project_dir)
+    result = runner.run("build", str(skill))
+    assert result.returncode == 0, result.stderr
+    assert "compatibility" in result.stderr, result.stderr
+    assert "empty" in result.stderr, result.stderr
+
+
 def test_build_rejects_leading_dot_skill_dir(grim_at, project_dir: Path) -> None:
     """Issue #40 guard rail: a leading-dot name (hidden dir) stays a data
     error (65) after the dotted-name relaxation."""

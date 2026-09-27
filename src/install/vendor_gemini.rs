@@ -4,7 +4,8 @@
 //! Gemini CLI's vendor strategy: shared-pool skills, native agents, declined rules.
 //!
 //! Gemini CLI mapping (`adr_vendor_wave_expansion.md`; live-verified
-//! 2026-07-19, `research_vendor_verification_junie_gemini.md`):
+//! 2026-07-19, re-verified 2026-09-27 against v0.61.0,
+//! `research_vendor_verification_junie_gemini.md`, `research_upstream_gemini_20260927.md`):
 //!
 //! - **Skills**: the shared `.agents/skills` pool (project `<ws>/.agents/skills`,
 //!   global `$HOME/.agents/skills`) — Gemini's same-tier precedence favors it
@@ -146,13 +147,14 @@ impl Vendor for GeminiVendor {
 
         // Gemini's `settings.json` env refs are native POSIX `${VAR}` — no
         // translation, the same passthrough Claude gives it. A structured
-        // oauth block is auth-critical and has no Gemini `mcpServers` target
-        // (its shape ≠ grim's `McpOAuth`), so the whole descriptor is
-        // skipped with a warning rather than writing an entry that silently
-        // drops the auth.
+        // oauth block is auth-critical: Gemini documents its own
+        // `MCPOAuthConfig` (`enabled`, `clientId`, `clientSecret`, …) plus a
+        // separate `authProviderType`, but the shape differs from grim's
+        // `McpOAuth`, so the whole descriptor is skipped with a warning
+        // rather than writing an entry that silently drops the auth.
         let s = &descriptor.server;
         if s.oauth.is_some() {
-            tracing::warn!("mcp server '{name}' skipped for gemini ({scope}): settings.json has no oauth surface");
+            tracing::warn!("mcp server '{name}' skipped for gemini ({scope}): settings.json oauth shape differs");
             return None;
         }
         let mut entry = serde_json::Map::new();

@@ -3,7 +3,7 @@
 
 //! Qoder's vendor strategy: Claude Code's config surface under `.qoder`.
 //!
-//! Qoder (Alibaba; IDE + `qodercli`) mapping, verified 2026-09-24 against
+//! Qoder (Alibaba; IDE + `qodercli`) mapping, verified 2026-09-24, re-verified 2026-09-27, against
 //! docs.qoder.com (`research_vendor_verification_qoder.md`):
 //!
 //! - **Skills**: `.qoder/skills/<name>/` (project), `<root>/skills/<name>/`

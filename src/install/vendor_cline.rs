@@ -3,7 +3,7 @@
 
 //! Cline's vendor strategy: own-directory skills only; everything else declined.
 //!
-//! Cline mapping (verified 2026-07-27 against Cline's own documentation,
+//! Cline mapping (verified 2026-07-27, re-verified 2026-09-27, against Cline's own documentation,
 //! <https://docs.cline.bot>; the skills page was read as raw markdown rather
 //! than through a summarizing fetch, which is what makes the pool answer below
 //! a confirmed absence rather than a gap in the search):
@@ -13,25 +13,46 @@
 //!   three-entry project precedence — `.cline/skills/` → `.clinerules/skills/`
 //!   → `.claude/skills/` — and grim writes the **first**, its own directory.
 //!   Universal `<name>/SKILL.md` shape.
-//! - **Not a shared-pool client.** `.agents/skills` appears in neither the
-//!   project nor the global list. This is a *confirmed absence* from Cline's
-//!   own docs, not missing evidence, so Cline stays off
-//!   [`POOL_CAPABLE_VENDORS`](super::vendor). The single `.agents/` mention
-//!   anywhere in its documentation is `~/.agents/AGENTS.md`, an unrelated
-//!   rules file.
+//! - **Pool-capable, reversed 2026-09-27.** Re-verified against source
+//!   (`sdk/packages/shared/src/storage/paths.ts::resolveSkillsConfigSearchPaths`
+//!   for the CLI, `skill-directories.ts::getSkillsDirectoriesForScan` for the
+//!   VS Code extension), not the docs page this time: both scan project
+//!   `.agents/skills` and global `~/.agents/skills` alongside Cline's own
+//!   directory. The earlier "confirmed absence" read the extension's docs
+//!   page only, never its source, and never looked at the CLI at all — Cline
+//!   now joins [`POOL_CAPABLE_VENDORS`](super::vendor). Native `.cline/skills`
+//!   stays the default render; the pool is the `shared_skills` opt-in, the
+//!   Warp shape.
 //! - **Rules**: **declined for now, and this one is a live candidate.** Unlike
 //!   the other declines in this batch, Cline's `.clinerules/` genuinely
 //!   documents per-file `paths:` frontmatter scoping — the exact capability
 //!   whose absence forces a decline elsewhere. It is declined here only
 //!   because this wave ships skills, and widening scope mid-wave is how a
 //!   permanent name gets shipped wrong. Watchlisted with the evidence.
-//! - **Agents**: **declined**. No installable subagent file format.
-//! - **MCP**: **declined**. No grim-writable config file surface.
+//! - **Agents**: **declined**. Re-verified 2026-09-27 against source
+//!   (`sdk/packages/shared/src/storage/paths.ts::resolveAgentConfigSearchPaths`
+//!   at CLI v3.0.65): the CLI reads installable subagents (Markdown with
+//!   YAML frontmatter, `sdk/packages/core/src/extensions/tools/team/configured-agent-config.ts`)
+//!   from `.cline/agents/` (project) and `~/.cline/agents/` (global). The VS
+//!   Code extension hardcodes `enableSpawnAgent: false`
+//!   (`apps/vscode/src/sdk/cline-session-factory.ts:1087` at v4.1.21), so the
+//!   format exists but is not rendered by grim yet.
+//! - **MCP**: **declined**. When this shipped there was no grim-writable config
+//!   file; since re-verified 2026-09-27 against source (`sdk/packages/shared/src/storage/paths.ts`
+//!   and the VS Code extension's `mcp-settings-legacy-migration.ts`), the CLI
+//!   and the IDE both resolve the **same** shared file,
+//!   `<cline dir>/data/settings/cline_mcp_settings.json` — the docs page's
+//!   "CLI `~/.cline/mcp.json`, IDE UI-managed" split does not hold in source —
+//!   enablement is a watchlisted kind change.
 //!
-//! `CLINE_DATA_DIR` is **not** honored. It exists, but every source that names
-//! it ties it to Cline's MCP data directory, never to skill discovery —
-//! honoring it for skills would relocate them on a guess. Watchlisted as
-//! unconfirmed.
+//! `CLINE_DIR` and `CLINE_DATA_DIR` are **not** honored, for different
+//! reasons. `CLINE_DATA_DIR` only ever feeds `resolveClineDataDir()`
+//! (settings/sessions/teams data), which grim's skills write never touches —
+//! it was never a skills candidate to begin with. `CLINE_DIR` genuinely
+//! replaces the CLI's `resolveClineDir()`, the base both `<dir>/skills` and
+//! `<dir>/data/...` resolve under, but the VS Code extension hardcodes
+//! `os.homedir()/.cline` and ignores it — so honoring it would move the CLI's
+//! output while leaving the IDE reading the old path. Watchlisted.
 
 use std::path::{Path, PathBuf};
 
@@ -151,10 +172,10 @@ mod tests {
     }
 
     #[test]
-    fn skills_root_is_clines_own_dir_not_the_shared_pool() {
-        // The load-bearing assertion: Cline is a documented non-adopter of
-        // `.agents/skills`. Writing there would put its skills where Cline
-        // never scans while every other pool member silently picked them up.
+    fn skills_root_defaults_to_clines_own_dir_not_the_shared_pool() {
+        // The load-bearing assertion: without the `shared_skills` opt-in,
+        // Cline's default render is byte-identical to before — native
+        // `.cline/skills`, never the pool.
         let ws = Path::new("/w");
         assert_eq!(
             ClineVendor.skills_root(ws, ConfigScope::Project),
@@ -164,9 +185,12 @@ mod tests {
             !ClineVendor
                 .skills_root(ws, ConfigScope::Project)
                 .starts_with(ws.join(".agents")),
-            "Cline must never render into the shared pool"
+            "the default render must stay off the shared pool"
         );
-        assert!(!ClineVendor.pool_capable(), "confirmed absence, not missing evidence");
+        assert!(
+            ClineVendor.pool_capable(),
+            "source-verified reader of the pool — see the module doc"
+        );
     }
 
     #[test]

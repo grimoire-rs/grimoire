@@ -12,6 +12,9 @@
 //! string Copilot reads, and the vendor-unique `copilot.exclude-agent`
 //! metadata key lifts to `excludeAgent:` (enum `code-review` /
 //! `cloud-agent`, per docs.github.com "add repository instructions").
+//!
+//! Skills, rules, agents and the global MCP entry live-verified 2026-09-27
+//! against Copilot CLI 1.0.88 (`research_upstream_copilot_20260927.md`).
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -36,9 +39,14 @@ pub const COPILOT_RULE_FIELDS: &[KnownField] = &[KnownField {
 /// `copilot.*` agent fields → custom-agent frontmatter
 /// (docs.github.com → Copilot CLI custom agents). `tools` shadows the
 /// projected canonical common field (Copilot reads a YAML list, so the
-/// override is also comma-split). The object-valued `mcp-servers` is
-/// deliberately absent: it cannot be expressed as a single string
-/// metadata value.
+/// override is also comma-split). `disable-model-invocation`,
+/// `user-invocable` and `target` add no common-field collision — they
+/// project straight through, appended after the natives (verified
+/// 2026-09-27 against docs.github.com/en/copilot/reference/custom-agents-configuration:
+/// `infer` is retired in favor of the first two; `target` selects `vscode`
+/// or `github-copilot`, defaulting to both when unset). The object-valued
+/// `mcp-servers` is deliberately absent: it cannot be expressed as a
+/// single string metadata value.
 pub const COPILOT_AGENT_FIELDS: &[KnownField] = &[
     KnownField {
         field: "tools",
@@ -49,6 +57,21 @@ pub const COPILOT_AGENT_FIELDS: &[KnownField] = &[
         field: "model",
         native: "model",
         ty: FieldType::String,
+    },
+    KnownField {
+        field: "disable-model-invocation",
+        native: "disable-model-invocation",
+        ty: FieldType::Bool,
+    },
+    KnownField {
+        field: "user-invocable",
+        native: "user-invocable",
+        ty: FieldType::Bool,
+    },
+    KnownField {
+        field: "target",
+        native: "target",
+        ty: FieldType::Enum(&["vscode", "github-copilot"]),
     },
 ];
 
@@ -152,11 +175,13 @@ impl Vendor for CopilotVendor {
         // Refinement fields (`timeout`/`always_load`/`headers_helper`/
         // `cwd`) have no documented Copilot target — dropped (pure
         // refinements, nothing auth-critical is lost). A structured oauth
-        // block, by contrast, IS auth-critical: no Copilot target exists,
-        // so the whole descriptor is skipped with a warning.
+        // block, by contrast, IS auth-critical: Copilot documents its own
+        // oauth fields (`oauthClientId`, `oauthPublicClient`,
+        // `oauthGrantType`, `oidc`), but the shape differs from grim's
+        // `McpOAuth`, so the whole descriptor is skipped with a warning.
         let s = &descriptor.server;
         if s.oauth.is_some() {
-            tracing::warn!("mcp server '{name}' skipped for copilot ({scope}): no oauth surface in the config schema");
+            tracing::warn!("mcp server '{name}' skipped for copilot ({scope}): config schema oauth shape differs");
             return None;
         }
         match scope {
@@ -195,18 +220,13 @@ impl Vendor for CopilotVendor {
                 super::mcp_config::translate_env_refs(&mut value, &|var| format!("${{env:{var}}}"));
                 Some((format!("/servers/{name}"), value))
             }
-            // Global: Copilot CLI's `mcp-config.json` supports NO variable
-            // substitution — values must be literals. A descriptor that
-            // needs `${VAR}` is skipped rather than ever writing a secret
-            // value (or a broken literal reference) to disk.
+            // Global: Copilot CLI's `mcp-config.json`. Copilot expands
+            // `${VAR}` itself in `command`, `args`, `env`, `url` and
+            // `headers` (live-verified against CLI 1.0.88), which is grim's
+            // canonical syntax, so references are written as authored —
+            // never their values. Until 2026-09-27 grim skipped such
+            // descriptors here; an unset variable stays literal upstream.
             ConfigScope::Global => {
-                if descriptor.has_env_refs() {
-                    tracing::warn!(
-                        "mcp server '{name}' skipped for copilot (global): ~/.copilot/mcp-config.json supports no \
-                         ${{VAR}} substitution and grim never inlines secret values"
-                    );
-                    return None;
-                }
                 let mut entry = serde_json::Map::new();
                 match s.transport {
                     McpTransport::Stdio => {
@@ -228,6 +248,23 @@ impl Vendor for CopilotVendor {
                         return None;
                     }
                     McpTransport::Http | McpTransport::Sse => {
+                        // Copilot validates `url` before expanding it and
+                        // silently drops an entry whose raw text is not a
+                        // URL (a `${VAR}` in the port) — skip it here so
+                        // grim never reports a dead entry as installed.
+                        // Same WHATWG parser as Copilot's `new URL()`.
+                        // Scoped to URLs carrying a reference, so an
+                        // env-free descriptor renders exactly as before.
+                        if s.url
+                            .as_deref()
+                            .is_some_and(|u| u.contains("${") && reqwest::Url::parse(u).is_err())
+                        {
+                            tracing::warn!(
+                                "mcp server '{name}' skipped for copilot (global): its url is not a valid URL \
+                                 before ${{VAR}} expansion, which Copilot CLI rejects"
+                            );
+                            return None;
+                        }
                         entry.insert("type".into(), serde_json::json!(s.transport.to_string()));
                         entry.insert("url".into(), serde_json::json!(s.url));
                         if !s.headers.is_empty() {
@@ -351,11 +388,58 @@ fn global_agents_root(copilot_home: Option<PathBuf>, home: Option<PathBuf>) -> O
     global_native_root(copilot_home, home).map(|d| d.join("agents"))
 }
 
+/// Whether `$COPILOT_HOME` (or `--config-dir`) is set to anything other than
+/// the default `$HOME/.copilot` root.
+///
+/// Copilot CLI stops scanning the shared `~/.agents/skills` pool once
+/// `COPILOT_HOME`/`--config-dir` is set to a non-default root (changelog
+/// 1.0.66, "COPILOT_HOME and --config-dir stop loading skills from
+/// ~/.agents/skills"; live-checked 2026-09-27 against CLI 1.0.88,
+/// github.com/github/copilot-cli/blob/main/changelog.md). A global skill
+/// routed into that pool via `[options.vendors.copilot].shared_skills` is
+/// then invisible to Copilot on such a host — the installer warns using
+/// this predicate. No default to compare against (`home` unresolved) still
+/// counts as a divergence, since an explicit override is in effect either
+/// way.
+pub(crate) fn copilot_home_diverges_from_default(copilot_home: Option<PathBuf>, home: Option<PathBuf>) -> bool {
+    match (copilot_home, home) {
+        (Some(copilot_home), Some(home)) => copilot_home != home.join(".copilot"),
+        (Some(_), None) => true,
+        (None, _) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::skill::RuleFrontmatter;
     use std::path::Path;
+
+    #[test]
+    fn copilot_home_diverges_from_default_detects_override() {
+        // Unset COPILOT_HOME: always the default, never diverges.
+        assert!(!copilot_home_diverges_from_default(
+            None,
+            Some(PathBuf::from("/home/u"))
+        ));
+        assert!(!copilot_home_diverges_from_default(None, None));
+        // Set to exactly the default root: not a divergence.
+        assert!(!copilot_home_diverges_from_default(
+            Some(PathBuf::from("/home/u/.copilot")),
+            Some(PathBuf::from("/home/u"))
+        ));
+        // Set to a custom root: diverges — this is the pool-skills gap.
+        assert!(copilot_home_diverges_from_default(
+            Some(PathBuf::from("/custom/cop")),
+            Some(PathBuf::from("/home/u"))
+        ));
+        // Set with no HOME to compare against: still a divergence (there is
+        // no default to be equal to).
+        assert!(copilot_home_diverges_from_default(
+            Some(PathBuf::from("/custom/cop")),
+            None
+        ));
+    }
 
     #[test]
     fn global_skills_root_resolution_order() {
@@ -558,6 +642,27 @@ mod tests {
     }
 
     #[test]
+    fn agent_index_emits_disable_model_invocation_user_invocable_and_target() {
+        let doc = "---\nname: code-reviewer\ndescription: d\nmetadata:\n  copilot.disable-model-invocation: \"true\"\n  copilot.user-invocable: \"false\"\n  copilot.target: vscode\n---\nbody\n";
+        let out = CopilotVendor.agent_index(&parsed_agent(doc), "p").unwrap().unwrap();
+        assert!(
+            out.document.contains("disable-model-invocation: true"),
+            "{}",
+            out.document
+        );
+        assert!(out.document.contains("user-invocable: false"), "{}", out.document);
+        assert!(out.document.contains("target: vscode"), "{}", out.document);
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    }
+
+    #[test]
+    fn agent_index_rejects_bad_target_literal() {
+        let doc = "---\nname: code-reviewer\ndescription: d\nmetadata:\n  copilot.target: everywhere\n---\nbody\n";
+        let err = CopilotVendor.agent_index(&parsed_agent(doc), "p").unwrap_err();
+        assert!(err.to_string().contains("copilot.target"), "{err}");
+    }
+
+    #[test]
     fn mcp_entry_oauth_descriptor_is_declined_plain_is_not() {
         let with_oauth = crate::oci::mcp::McpDescriptor::from_toml_str(
             "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"\n[server.oauth]\nclient_id = \"c\"",
@@ -574,6 +679,57 @@ mod tests {
         )
         .unwrap();
         assert!(CopilotVendor.mcp_entry(ConfigScope::Project, "m", &plain).is_some());
+    }
+
+    #[test]
+    fn mcp_entry_global_writes_env_refs_verbatim() {
+        // Copilot CLI expands `${VAR}` in its global config itself
+        // (live-verified, CLI 1.0.88): the reference is written as authored,
+        // never translated and never resolved to a value.
+        let stdio = crate::oci::mcp::McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"srv\"\nargs = [\"--t\", \"${TOKEN}\"]\n[server.env]\nKEY = \"${API_KEY}\"",
+        )
+        .unwrap();
+        let (pointer, value) = CopilotVendor.mcp_entry(ConfigScope::Global, "m", &stdio).unwrap();
+        assert_eq!(pointer, "/mcpServers/m");
+        assert_eq!(value["type"], "local");
+        assert_eq!(value["args"], serde_json::json!(["--t", "${TOKEN}"]));
+        assert_eq!(value["env"]["KEY"], "${API_KEY}");
+
+        let http = crate::oci::mcp::McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://${HOST}/mcp\"\n[server.headers]\nAuthorization = \"Bearer ${TOKEN}\"",
+        )
+        .unwrap();
+        let (_, value) = CopilotVendor.mcp_entry(ConfigScope::Global, "m", &http).unwrap();
+        assert_eq!(value["url"], "https://${HOST}/mcp");
+        assert_eq!(value["headers"]["Authorization"], "Bearer ${TOKEN}");
+        assert_eq!(value["tools"], serde_json::json!(["*"]));
+
+        // Copilot rejects a url that is invalid before expansion (live:
+        // "url: Invalid url") and drops the entry, so grim skips it. A
+        // whole-URL reference never gets here: descriptor validation
+        // already rejects it.
+        for url in ["http://h:${PORT}/x", "https://${H}:${P}/x"] {
+            let d = crate::oci::mcp::McpDescriptor::from_toml_str(&format!(
+                "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"{url}\""
+            ))
+            .unwrap();
+            assert!(CopilotVendor.mcp_entry(ConfigScope::Global, "m", &d).is_none(), "{url}");
+            assert!(
+                CopilotVendor.mcp_entry(ConfigScope::Project, "m", &d).is_some(),
+                "{url}"
+            );
+        }
+        // Written: a reference outside the port parses; an env-free url
+        // renders exactly as before this guard existed.
+        for url in ["https://u:${P}@h/x", "https://h:99999/x"] {
+            let d = crate::oci::mcp::McpDescriptor::from_toml_str(&format!(
+                "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"{url}\""
+            ))
+            .unwrap();
+            let (_, value) = CopilotVendor.mcp_entry(ConfigScope::Global, "m", &d).expect(url);
+            assert_eq!(value["url"], url);
+        }
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! Cursor's vendor strategy: universal skills, `.mdc` rules, native agents.
 //!
 //! Cursor (v2.4+) is the only wave-1 vendor native for all four kinds
-//! (`adr_vendor_wave_expansion.md` mapping table; live-verified 2026-07-19,
+//! (`adr_vendor_wave_expansion.md` mapping table; live-verified 2026-07-19, re-verified 2026-09-27,
 //! `research_vendor_verification_cursor_kiro.md`):
 //!
 //! - **Skills**: `.cursor/skills/<name>/` (project), `~/.cursor/skills/`
@@ -20,7 +20,8 @@
 //!   needs `type: "stdio"`; env refs `${env:NAME}`; oauth shape ≠ grim block
 //!   → skip; `json_splice`.
 //!
-//! `CURSOR_CONFIG_DIR` is **not** honored in wave 1 (possibly CLI-only —
+//! `CURSOR_CONFIG_DIR` is **not** honored: upstream documents it only as the
+//! location of the CLI's own `cli-config.json` (re-verified 2026-09-27 —
 //! watchlisted); paths hardcode the documented `~/.cursor` default.
 
 use std::path::{Path, PathBuf};
@@ -108,12 +109,14 @@ impl Vendor for CursorVendor {
     ) -> Option<(String, serde_json::Value)> {
         use crate::oci::mcp::McpTransport;
 
-        // A structured oauth block is auth-critical and has no Cursor target
-        // (its shape ≠ grim's `McpOAuth`) — skip the whole descriptor with a
-        // warning rather than write an entry that silently drops the auth.
+        // A structured oauth block is auth-critical: Cursor documents its
+        // own remote `auth` object (`CLIENT_ID`, `CLIENT_SECRET`, `scopes`),
+        // but the shape differs from grim's `McpOAuth` — skip the whole
+        // descriptor with a warning rather than write an entry that
+        // silently drops the auth.
         let s = &descriptor.server;
         if s.oauth.is_some() {
-            tracing::warn!("mcp server '{name}' skipped for cursor ({scope}): no oauth surface in mcp.json");
+            tracing::warn!("mcp server '{name}' skipped for cursor ({scope}): mcp.json oauth shape differs");
             return None;
         }
         let mut entry = serde_json::Map::new();

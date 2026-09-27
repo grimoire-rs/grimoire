@@ -95,7 +95,7 @@ first and rules later, if ever.
 
 | Per-file rule surface | Clients | What you get |
 |---|---|---|
-| Real glob scoping | [Claude Code][cc-mem] `.claude/rules/*.md` + `paths:`; [Copilot][cop-ci] `.github/instructions/*.instructions.md` + `applyTo:`; [Cursor][cur] `.cursor/rules/*.mdc` + a `globs` string; [Kiro][kiro] `.kiro/steering/*.md` + a `fileMatchPattern` list; [Cline][cline] `.clinerules/*.md` + `paths:` | Content loads only when a matching file is in play |
+| Real glob scoping | [Claude Code][cc-mem] `.claude/rules/*.md` + `paths:`; [Copilot][cop-ci] `.github/instructions/*.instructions.md` + `applyTo:`; [Cursor][cur] `.cursor/rules/*.mdc` + a `globs` string; [Kiro][kiro] `.kiro/steering/*.md` + a `fileMatchPattern` list, **IDE/Web project scope only** (see caveats); [Cline][cline] `.clinerules/*.md` + `paths:` | Content loads only when a matching file is in play |
 | Per-file, no scoping | [OpenCode][oc-rules] — rule files load through the always-on `instructions` array; [Junie][junie] — `.junie/rules/*.md`, every Markdown file in the directory concatenated automatically, project scope only (no user-level rules directory exists) | The body loads, the scope does not: permanent cost |
 | None | [Codex][cx-skills], [Gemini CLI][gem], [Zed][zed], [Amp][amp], and most of the newer skills-first clients | Nothing to install — route the content to the always-on file |
 
@@ -104,9 +104,13 @@ Per-client caveats worth knowing before you write a glob:
 - **Cursor** splits its `globs` string on every comma, including one inside
   a `{a,b}` alternation — `src/**/*.{rs,toml}` is read as two patterns.
   Write one extension per glob (as of 2026; re-verify).
-- **Kiro** honors `fileMatch` steering at project scope; the same file at
-  user scope is written correctly but currently ignored ([kiro
-  #9176][kiro-9176], as of 2026; re-verify).
+- **Kiro** honors `fileMatch` steering only in the IDE and Web, and only at
+  project scope; the same file written correctly at user scope is ignored
+  there too ([kiro #9176][kiro-9176], closed 2026-08-06 by an inactivity
+  bot with no confirmed fix; re-verify).
+  **The Kiro CLI supports no inclusion mode at all** — every file in
+  `.kiro/steering/` loads unconditionally, at both scopes ([steering
+  docs][kiro-steering-docs]).
 
 Always-on hard limits: Copilot code review reads only the **first 4,000
 characters** of copilot-instructions.md (as of 2026; re-verify), and
@@ -175,6 +179,7 @@ session and merely lives in another file.
 [cur]: https://cursor.com
 [kiro]: https://kiro.dev
 [kiro-9176]: https://github.com/kirodotdev/Kiro/issues/9176
+[kiro-steering-docs]: https://kiro.dev/docs/steering/
 [junie]: https://www.jetbrains.com/junie/
 [gem]: https://geminicli.com
 [zed]: https://zed.dev

@@ -671,18 +671,20 @@ def test_global_status_reports_installed_for_copilot_mcp_without_copilot_skills_
     )
 
 
-def test_global_copilot_skips_env_ref_descriptors(
+def test_global_copilot_registers_env_ref_descriptors_verbatim(
     grim_binary, grim_home: Path, registry: str, unique_repo: str, tmp_path: Path
 ) -> None:
-    """Copilot CLI's global config supports no variable substitution: a
-    descriptor with `${VAR}` refs registers for Claude/OpenCode but skips
-    Copilot with a warning — no secrets (or broken literals) on disk."""
+    """Copilot CLI expands `${VAR}` in its global `mcp-config.json` itself
+    (live-verified, CLI 1.0.88), so an env-ref descriptor registers there with
+    the reference written as authored — never its value. Grim skipped Copilot
+    for such descriptors until 2026-09-27: an install recorded before then
+    (simulated by a Claude-only first install) self-heals on the next install
+    without disturbing the existing entry, and a repeat install is a no-op."""
     from src.runner import GrimRunner
 
     runner = GrimRunner(grim_binary, grim_home)
-    # This test asserts on all three clients' global configs, so all three
-    # must be detected; an unmarked home resolves to the generic `agents`
-    # client, which has no MCP surface at all.
+    # All three clients must be detected; an unmarked home resolves to the
+    # generic `agents` client, which has no MCP surface at all.
     for marker in (".claude", ".config/opencode/skills", ".copilot/skills"):
         (runner.home / marker).mkdir(parents=True, exist_ok=True)
     descriptor = tmp_path / "src" / "mcp" / "grim-mcp.toml"
@@ -693,19 +695,29 @@ def test_global_copilot_skips_env_ref_descriptors(
 
     (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n')
     runner.json("lock", "--global")
+    runner.json("install", "--global", "--client", "claude")
+    copilot_cfg = runner.home / ".copilot" / "mcp-config.json"
+    assert not copilot_cfg.exists(), "the pre-change record carries no Copilot output"
+    pending = next(r for r in runner.json("status", "--global")["items"] if r["name"] == "grim-mcp")
+    assert any(o["client"] == "copilot" for o in pending["outputs_pending"]), pending
+    claude_before = (runner.home / ".claude.json").read_bytes()
+
     result = runner.run("install", "--global", check=False)
     assert result.returncode == 0, result.stderr
-    assert "copilot" in result.stderr and "substitution" in result.stderr, (
-        f"the Copilot skip must be announced: {result.stderr}"
-    )
-
-    assert not (runner.home / ".copilot" / "mcp-config.json").exists(), (
-        "no Copilot config may be written for an env-ref descriptor"
-    )
-    claude = json.loads((runner.home / ".claude.json").read_text())
-    assert claude["mcpServers"]["grim-mcp"]["env"]["GRIM_TOKEN"] == "${GITHUB_TOKEN}"
+    assert "substitution" not in result.stderr, f"no Copilot skip any more: {result.stderr}"
+    entry = json.loads(copilot_cfg.read_text())["mcpServers"]["grim-mcp"]
+    assert entry["type"] == "local"
+    assert entry["env"]["GRIM_TOKEN"] == "${GITHUB_TOKEN}", "reference written verbatim"
+    assert (runner.home / ".claude.json").read_bytes() == claude_before, "existing entry untouched"
     opencode = json.loads((runner.home / ".config" / "opencode" / "opencode.json").read_text())
     assert opencode["mcp"]["grim-mcp"]["environment"]["GRIM_TOKEN"] == "{env:GITHUB_TOKEN}"
+
+    before = copilot_cfg.read_bytes()
+    runner.json("install", "--global")
+    assert copilot_cfg.read_bytes() == before, "repeat install must be byte-identical"
+    row = next(r for r in runner.json("status", "--global")["items"] if r["name"] == "grim-mcp")
+    assert row["state"] == "installed", row
+    assert row["outputs_pending"] == [], row
 
 
 def test_project_repeat_install_is_byte_stable_for_every_json_client(
@@ -920,3 +932,61 @@ def test_global_copilot_registers_env_free_descriptors(
     assert copilot["mcpServers"]["grim-mcp"]["type"] == "local"
     assert copilot["mcpServers"]["grim-mcp"]["command"] == "grim"
     assert copilot["mcpServers"]["grim-mcp"]["tools"] == ["*"]
+
+
+def test_global_copilot_refuses_untracked_hand_inlined_workaround_then_force_replaces(
+    grim_binary, grim_home: Path, registry: str, unique_repo: str, tmp_path: Path
+) -> None:
+    """Regression guard for the 2026-09-27 upgrade: before Copilot's live
+    `${VAR}` expansion was verified, the documented workaround was
+    hand-inlining the secret value into `~/.copilot/mcp-config.json`
+    instead of writing the reference. That hand-written entry has no grim
+    install record, so `grim install --global` must refuse to clobber it
+    (untracked-destination gate, exit 65) and leave it byte-untouched;
+    `--force` replaces it with the `${VAR}` form grim now writes verbatim.
+    Mirrors `test_mcp_install_refuses_untracked_member`
+    (test_clobber_guard.py), extended to the global Copilot env-ref path."""
+    from src.runner import GrimRunner
+
+    runner = GrimRunner(grim_binary, grim_home)
+    descriptor = tmp_path / "src" / "mcp" / "grim-mcp.toml"
+    descriptor.parent.mkdir(parents=True)
+    descriptor.write_text(ENV_DESCRIPTOR)
+    ref = f"{registry}/{unique_repo}/mcp/grim-mcp:1.0.0"
+    runner.json("release", str(descriptor), ref, "--kind", "mcp")
+
+    copilot_cfg = runner.home / ".copilot" / "mcp-config.json"
+    copilot_cfg.parent.mkdir(parents=True, exist_ok=True)
+    hand_written = {
+        "mcpServers": {
+            "grim-mcp": {
+                "type": "local",
+                "command": "grim",
+                "args": ["mcp"],
+                "tools": ["*"],
+                "env": {"GRIM_TOKEN": "sk-hand-inlined-secret"},
+            }
+        }
+    }
+    copilot_cfg.write_text(json.dumps(hand_written, indent=2))
+
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n')
+    runner.json("lock", "--global")
+
+    result = runner.run("install", "--global", "--client", "copilot", check=False)
+    assert result.returncode == 65, (
+        f"untracked Copilot MCP member clobber must exit 65, got {result.returncode}; {result.stderr}"
+    )
+    assert "--force" in result.stderr, f"refusal must hint --force; stderr: {result.stderr}"
+    assert "copilot" in result.stderr, f"refusal must name the copilot client; stderr: {result.stderr}"
+    entry = json.loads(copilot_cfg.read_text())["mcpServers"]["grim-mcp"]
+    assert entry["env"]["GRIM_TOKEN"] == "sk-hand-inlined-secret", (
+        "refusal must leave the hand-written entry untouched"
+    )
+
+    rows = runner.json("install", "--global", "--client", "copilot", "--force")["items"]
+    assert rows[0]["status"] == "installed", rows
+    entry = json.loads(copilot_cfg.read_text())["mcpServers"]["grim-mcp"]
+    assert entry["env"]["GRIM_TOKEN"] == "${GITHUB_TOKEN}", (
+        "--force must replace the hand-inlined workaround with the ${VAR} form, never the resolved value"
+    )

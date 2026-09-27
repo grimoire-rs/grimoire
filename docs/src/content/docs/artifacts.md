@@ -91,8 +91,8 @@ round-trip rather than rejected.
 | `name` | yes | string | Must equal the skill directory name; see [Names](#names) |
 | `description` | yes | string | What the skill does and when to use it |
 | `license` | no | string | SPDX-style identifier (e.g. `Apache-2.0`); emitted as the OCI license annotation |
-| `compatibility` | no | string | Editor/runtime hint (free text) |
-| `allowed-tools` | no | string | Comma-separated tool allowlist |
+| `compatibility` | no | string | Environment requirements as free text; the spec caps it at 500 characters — grim warns (never fails) on empty or oversized values |
+| `allowed-tools` | no | string | Space-separated list of pre-approved tools; experimental in the spec, and support varies by client |
 | `metadata` | no | string→string map | Catalog keys + vendor extensions, see below |
 | *(any other key)* | no | any YAML | Preserved verbatim (forward compatibility) |
 
@@ -136,7 +136,7 @@ description: Review a diff for SOLID/DRY violations, missing tests, and
   risky changes. Use when asked to review a pull request or audit a patch.
 license: Apache-2.0
 compatibility: claude>=2
-allowed-tools: Read,Grep,Bash
+allowed-tools: Read Grep Bash
 metadata:
   summary: Multi-pass diff reviewer
   keywords: review,quality,solid,dry,audit
@@ -475,9 +475,9 @@ in [Vendor-Specific Metadata](./vendor-metadata.md):
 
 | Vendor | Skills | Rules | Agents |
 |--------|--------|-------|--------|
-| `claude.*` | `disable-model-invocation`, `user-invocable`, `model`, `effort`, `context`, `agent`, `argument-hint`, `when-to-use`, `arguments`, `allowed-tools`, `disallowed-tools`, `shell`, `paths` ([registry](./vendor-metadata.md#claude-registry)) | *(none today — unknown keys warn + drop)* | `model`, `tools`, `disallowed-tools`, `permission-mode`, `max-turns`, `skills`, `memory`, `background`, `effort`, `isolation`, `color`, `initial-prompt` ([registry](./vendor-metadata.md#claude-agent-registry)) |
+| `claude.*` | `disable-model-invocation`, `user-invocable`, `model`, `effort`, `context`, `agent`, `argument-hint`, `when-to-use`, `arguments`, `allowed-tools`, `disallowed-tools`, `shell`, `paths`, `background` ([registry](./vendor-metadata.md#claude-registry)) | *(none today — unknown keys warn + drop)* | `model`, `tools`, `disallowed-tools`, `permission-mode`, `max-turns`, `skills`, `memory`, `background`, `effort`, `isolation`, `color`, `initial-prompt`, `omit-claude-md` ([registry](./vendor-metadata.md#claude-agent-registry)) |
 | `opencode.*` | *(none — universal fields only)* | *(none)* | `model`, `mode`, `temperature`, `top-p`, `steps`, `prompt`, `disable`, `hidden`, `color` ([registry](./vendor-metadata.md#opencode-agent-registry)) |
-| `copilot.*` | *(none — universal fields only)* | `exclude-agent` ([registry](./vendor-metadata.md#rule-keys)) | `tools`, `model` ([registry](./vendor-metadata.md#copilot-agent-registry)) |
+| `copilot.*` | *(none — universal fields only)* | `exclude-agent` ([registry](./vendor-metadata.md#rule-keys)) | `tools`, `model`, `disable-model-invocation`, `user-invocable`, `target` ([registry](./vendor-metadata.md#copilot-agent-registry)) |
 | `codex.*` | *(none — universal fields only)* | **unsupported** — warns + skips | `model`, `reasoning-effort`, `sandbox-mode` ([registry](./vendor-metadata.md#codex-agent-registry)) |
 
 Every value is authored as a string and converted at install time:
@@ -552,4 +552,4 @@ updated without re-releasing every published version.
 [agentskills-spec]: https://agentskills.io/specification
 [oci-annotations]: https://github.com/opencontainers/image-spec/blob/main/annotations.md
 [ghcr-source-label]: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#labelling-container-images
-[mcp-spec]: https://spec.modelcontextprotocol.io/
+[mcp-spec]: https://modelcontextprotocol.io/specification/latest

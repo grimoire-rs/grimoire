@@ -139,6 +139,11 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
         &scope.options.clients,
         &scope.options.vendors,
     ))?;
+    // `install_and_persist` runs this same check; `update` calls
+    // `install_all_with_progress` directly and would otherwise never warn
+    // about the Copilot pool gap (the docs promise it on both `install` and
+    // `update`).
+    crate::install::installer::warn_copilot_pool_gap(&target, scope.scope);
     let mut state = scope_resolution::load_state(&scope).map_err(|e| state_io(&scope.state_path, e))?;
     // Snapshot before any mutation: the vendor config sync below needs the
     // outputs this run retires — pruned orphans, reaped dropped clients, and

@@ -46,7 +46,7 @@ Reality — support and failure modes:
 | Always-on instruction file | Universal — every client has one, under a different name: CLAUDE.md (Claude Code, hierarchy + imports), AGENTS.md (OpenCode, Codex, Zed, Amp — Amp falls back to AGENT.md then CLAUDE.md), copilot-instructions.md plus AGENTS.md/CLAUDE.md (Copilot), GEMINI.md (Gemini CLI), always-on steering (Kiro), an unscoped always-apply rule (Cursor), `.junie/AGENTS.md` (Junie — a client-specific path, not the root file) — all as of 2026; re-verify | Adherence collapses with size: ~150–200-instruction consistency ceiling measured; oversized files get half-ignored. A controlled study found LLM-*generated* context files net-negative (−3% task success, +20% cost) while human-written gained ~4% (as of 2026) |
 | Glob-scoped rule | A minority capability — see [the grouping below](#where-vendors-disagree). Real per-file scoping on four clients (Claude Code, Copilot, Cursor, Kiro); a per-file surface without scoping on OpenCode and Junie; every other surveyed client has no ownable per-file rule file at all (as of 2026; re-verify) | Dead globs silently never fire after renames; glob mismatch is the primary documented load-failure cause (Copilot); invisible during planning; porting to a client without scoping either drops the scope or converts it to always-on cost |
 | On-demand skill | Universal — the only type every client hosts, via the Agent Skills open standard (~35 adopters, as of 2026; re-verify). Discovery directories differ, and a growing group of clients share one cross-vendor pool — see [skill-design.md](skill-design.md) | Silent non-activation: ~50% baseline trigger with weak descriptions; 73% of 214 audited community skills never fired; 0% auto-activation inside spawned subagents (all as of 2026; re-verify) |
-| Subagent | A minority of clients ship an installable agent file, each in its own incompatible envelope; every other client has no installable format at all — the per-client table is in [agent-design.md](agent-design.md) (as of 2026; re-verify) | Over-summarization loses cross-domain context; skills and rules do not auto-fire inside; cost multiplies linearly with parallelism; an agent file written for a client with no format is simply never read |
+| Subagent | A minority of clients ship an installable agent file, each in its own incompatible envelope; several more document a real agent-file format this skill has not yet packaged; only a smaller remainder has no installable format at all — the per-client table and the full breakdown are in [agent-design.md](agent-design.md) (as of 2026; re-verify) | Over-summarization loses cross-domain context; skills and rules do not auto-fire inside; cost multiplies linearly with parallelism; an agent file written for a client with no format is simply never read |
 | Hook | Claude Code: shell commands + exit-code protocol. OpenCode: JS/TS plugins (can throw to cancel a tool call). Copilot: declarative JSON in `.github/hooks/` | Not a security boundary: condition filters fail open, blocked tools get routed around, and some headless/pipe modes skip hooks entirely (as of 2026) |
 
 ## Decision Heuristics
@@ -99,16 +99,20 @@ until its own docs say otherwise:
 | Skill | [Claude Code][cc], [OpenCode][oc-home], [Copilot][cop-home], [Codex][cx-home], [Cursor][cur], [Kiro][kiro], [Junie][junie], [Gemini CLI][gem], [Zed][zed], [Amp][amp] | — | — |
 | Always-on file | all ten, under different filenames | — | — |
 | Glob-scoped rule | — | Claude Code, Copilot, Cursor, Kiro (real scoping); OpenCode, Junie (per-file, no scoping) | Codex, Gemini CLI, Zed, Amp — always-on file only |
-| Subagent | — | Claude Code, OpenCode, Copilot, Codex, Cursor, Gemini CLI | Kiro, Junie, Zed, Amp — no installable format |
+| Subagent | — | Claude Code, OpenCode, Copilot, Codex, Cursor, Gemini CLI, Junie | Zed, Amp — no installable format; Kiro has two incompatible ones (CLI `.json`, IDE `.md`) in one directory, so authoring for both is not yet possible |
 | Hook | — | Claude Code, OpenCode, Copilot | unsurveyed for the other seven |
 
 The skills-only assumption above is not a hedge — it is the observed
 pattern. A later survey of seven more clients (Antigravity, Cline, Droid,
 Goose, Warp, OpenClaw, Kilo, as of 2026; re-verify) found **every one of
-them hosting skills**, only Antigravity adding a packageable subagent
-file, and only Cline documenting a per-file rules surface with real
-`paths:` scoping (`.clinerules/`). Assume the same of the next client you
-meet, and confirm before you author anything other than a skill for it.
+them hosting skills**, a real installable subagent format on five of the
+seven — Antigravity, Droid, Kilo, Goose, and Cline's CLI (not its VS Code
+extension) — and two of the seven documenting a per-file rules surface with
+real scoping: Cline's `.clinerules/` (`paths:` frontmatter) and
+Antigravity's `.agents/rules/` (glob-based "activation mode" — a capability
+gap grim declines, not an absent surface). Assume the same of the next
+client you meet, and confirm before you author anything other than a skill
+for it.
 
 The two outliers worth memorizing: **rules are the least portable prose
 type** (half the clients cannot host one — route that content to the

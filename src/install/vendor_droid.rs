@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Grimoire Authors
 
-//! Droid's vendor strategy: own-directory skills only; everything else declined.
+//! Droid's vendor strategy: own-directory skills, pool-eligible; rest declined.
 //!
-//! Droid is Factory's agent (<https://docs.factory.ai>), verified 2026-07-27
+//! Droid is Factory's agent (<https://docs.factory.ai>), verified 2026-07-27, re-verified 2026-09-27
 //! against Factory's own skills and settings pages plus its sitemap. Both
 //! directory claims below are raw-text confidence — the strongest evidence in
 //! this batch.
@@ -17,16 +17,26 @@
 //!
 //! - **Skills**: `.factory/skills/<name>/SKILL.md` (project),
 //!   `~/.factory/skills/<name>/` (global).
-//! - **Not a shared-pool client.** `.agents/skills` appears in neither list.
-//!   Factory *does* document a compatibility directory `.agent/skills/` —
-//!   **singular `.agent`** — which is a different convention from the
-//!   cross-vendor `.agents` pool and must not be mistaken for membership.
-//!   grim writes neither: `.factory/skills/` is the first-class location.
+//! - **Pool-capable at both scopes**, verified 2026-09-27 against Factory CLI
+//!   v0.228.0. The skills page lists "Compatibility |
+//!   `<repo>/.agents/skills/**/SKILL.md`, `<repo>/.agent/skills/**/SKILL.md`"
+//!   and "Personal compatibility | `~/.agents/skills/**/SKILL.md`,
+//!   `~/.agent/skills/**/SKILL.md`"
+//!   (<https://docs.factory.ai/cli/configuration/skills>). So Droid is on
+//!   [`POOL_CAPABLE_VENDORS`](super::vendor) — eligible for the
+//!   `[options.vendors.droid].shared_skills` opt-in, not pooled by default:
+//!   `.factory/skills/` is the first-class location, so grim writes it. The
+//!   singular `.agent/skills/` is a different convention; grim never writes it.
+//!   On a name clash "Droid keeps one effective version and shows the others
+//!   as overridden".
 //! - **Rules**: **declined**. Factory's rules are `AGENTS.md`-style and
 //!   hierarchical *by file location*, with no in-file scoping key — so a
 //!   rule's `paths` would have nowhere to land. Same class as Codex.
-//! - **Agents**: **declined**. No installable subagent file format.
-//! - **MCP**: **declined**. No grim-writable config file surface this wave.
+//! - **Agents**: **declined** this wave. Since re-verified 2026-09-27 Factory
+//!   documents installable custom droids (`.factory/droids/`).
+//! - **MCP**: **declined** this wave. Since re-verified 2026-09-27 Factory
+//!   documents `.factory/mcp.json` / `~/.factory/mcp.json`. Both enablements
+//!   are watchlisted kind changes, not done here.
 //!
 //! **No environment override was found.** Neither a `FACTORY_HOME` nor a
 //! `DROID_HOME` appears on the settings or skills pages checked; both are
@@ -163,7 +173,7 @@ mod tests {
             ws.join(".factory/skills")
         );
         // `.agent` (singular) is Factory's own compat dir and is NOT the
-        // cross-vendor `.agents` pool; grim writes neither.
+        // cross-vendor `.agents` pool; grim writes neither by default.
         for foreign in [".agents", ".agent"] {
             assert!(
                 !DroidVendor
@@ -172,7 +182,13 @@ mod tests {
                 "must not render into {foreign}"
             );
         }
-        assert!(!DroidVendor.pool_capable());
+        // Droid reads `.agents/skills` at both scopes (CLI v0.228.0), so the
+        // pool is reachable — but only through the `shared_skills` opt-in.
+        assert!(DroidVendor.pool_capable(), "eligible for the shared_skills opt-in");
+        assert!(
+            DroidVendor.skill_fields().is_empty(),
+            "an opt-in member must render the universal bytes"
+        );
     }
 
     #[test]

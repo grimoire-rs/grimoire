@@ -71,15 +71,19 @@ whether your audience is in that set:
 |---|---|---|
 | Claude Code | `claude.*` (richest) | The canonical format itself — a plain agent installs byte-identical, no provenance comment |
 | OpenCode | `opencode.*` | Drops `name` (the filename is its identity) and drops `tools` with a warning (deprecated upstream in favor of `permission`) |
-| Copilot | `copilot.*` | Emits `name`, `description`, `model`, and `tools` as a YAML list |
+| Copilot | `copilot.*` | Emits `name`, `description`, `model`, and `tools` as a YAML list; `copilot.disable-model-invocation`/`copilot.user-invocable` (bool) and `copilot.target` (`vscode` \| `github-copilot`) project straight through |
 | Codex | `codex.*` | **TOML** (see below) |
 | Cursor | `cursor.*` | Markdown frontmatter; the common `tools` has no equivalent and is dropped with a warning |
 | Gemini CLI | `gemini.*` | Markdown frontmatter; Gemini loads agents only when its `experimental.enableAgents` setting is on (the default) |
 | Antigravity | *(none yet)* | Markdown frontmatter; `tools` emitted as a YAML list (upstream types it `string[]`). The namespace is reserved but its agent registry is empty, so an `antigravity.*` key warns and drops |
 
 Every emit but Claude's carries a provenance comment. **Every other
-client declines agents** — no installable agent file format exists for
-them, so grim warns, skips, and writes nothing. Their namespaces are
+client declines agents** — some (Junie, Droid, Kilo, Goose, and Cline's
+CLI surface) document an installable format grim does not render yet;
+the rest have no installable format at all, save Kiro, blocked instead
+by a CLI/IDE schema collision — an incompatible format already occupies
+the same directory — so grim warns, skips, and writes nothing. Their
+namespaces are
 still reserved but carry **no populated registry for any kind**: such a
 key hits an empty registry and is
 warned + dropped, the same typo-guard outcome as a misspelt key in a
@@ -89,7 +93,9 @@ Codex emits its TOML at `.codex/agents/<name>.toml`. The body becomes
 `developer_instructions`; `name` and `description` map directly; `model`
 is optional; `tools` is dropped with a warning. Its three keys —
 `codex.model`, `codex.reasoning-effort` (`ultra` | `max` | `xhigh` |
-`high` | `medium` | `low` | `minimal` | `none`), `codex.sandbox-mode`
+`high` | `medium` | `low` | `minimal` | `none` | `persistent` — Codex
+before 0.138 skips an agent file carrying `max`, `ultra` or `persistent`;
+`persistent` is a named value from 0.151), `codex.sandbox-mode`
 (`read-only` | `workspace-write` | `danger-full-access`) — live in
 `metadata` like any vendor key.
 

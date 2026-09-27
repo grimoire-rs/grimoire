@@ -201,6 +201,12 @@ impl InstallTarget {
         }
         client.path_for(&self.workspace, self.scope, kind, name)
     }
+
+    /// Whether `client`'s skills render into the shared `.agents/skills`
+    /// pool rather than its native skills directory (see [`Self::path_for`]).
+    pub fn is_shared_skills(&self, client: ClientTarget) -> bool {
+        self.shared_skills.contains(&client)
+    }
 }
 
 /// Parse `--client`-style values into client targets: each value may be a

@@ -5,11 +5,12 @@
 //! (degraded); agents declined.
 //!
 //! JetBrains Junie mapping (`adr_vendor_wave_expansion.md`; live-verified
-//! 2026-07-19, `research_vendor_verification_junie_gemini.md`):
+//! 2026-07-19, re-verified 2026-09-27, `research_vendor_verification_junie_gemini.md`,
+//! `research_upstream_junie_20260927.md`):
 //!
 //! - **Skills**: `.junie/skills/<name>/` (project), `~/.junie/skills/<name>/`
 //!   (global); project overrides a same-name user skill. Universal shape.
-//! - **Rules**: **degraded, project scope only** (re-verified 2026-07-27,
+//! - **Rules**: **degraded, project scope only** (re-verified 2026-07-27 and 2026-09-27,
 //!   <https://junie.jetbrains.com/docs/environment-variables.html>).
 //!
 //!   The earlier verdict — "no grim-ownable per-file rules surface" — was
@@ -30,14 +31,16 @@
 //!   which returns `false` at global scope. The installer then warns, skips,
 //!   and records zero outputs rather than writing to a directory Junie never
 //!   reads.
-//! - **Agents**: **declined**. `.junie/agents/*.md` exists but is **EAP-only,
-//!   not GA** — watchlisted for GA.
+//! - **Agents**: **declined**. `.junie/agents/*.md` was EAP-only when this
+//!   shipped; since re-verified 2026-09-27 it is documented without an EAP
+//!   gate — enablement is a watchlisted kind change, not done here.
 //! - **MCP**: `.junie/mcp/mcp.json` (project) / `~/.junie/mcp/mcp.json`
 //!   (user), `mcpServers`; env refs **undocumented** → skip ref-bearing
 //!   descriptors; `json_splice`.
 //!
-//! Junie's per-kind `JUNIE_*_LOCATIONS` env family is **not** honored in
-//! wave 1 (untested — watchlisted).
+//! Junie's per-kind `JUNIE_*_LOCATIONS` env family is **not** honored; it only
+//! adds search paths, so grim's defaults stay read (re-verified 2026-09-27).
+//! `JUNIE_HOME`, which replaces `~/.junie`, is not honored either — watchlisted.
 
 use std::path::{Path, PathBuf};
 
@@ -64,7 +67,8 @@ impl Vendor for JunieVendor {
     fn kind_support(&self, kind: ArtifactKind) -> KindSupport {
         // Rules degraded — `.junie/rules/*.md` is ownable, but every file in
         // it is concatenated unconditionally, so `paths` scoping is dropped.
-        // Agents declined — `.junie/agents/*.md` is EAP-only.
+        // Agents declined — not EAP-gated (see the module doc), just not
+        // yet enabled in grim.
         match kind {
             ArtifactKind::Rule => KindSupport::Degraded,
             ArtifactKind::Agent => KindSupport::Declined,
@@ -232,7 +236,8 @@ pub(crate) fn junie_root(home: Option<PathBuf>) -> Option<PathBuf> {
 mod tests {
     //! Specification tests for Junie — skills + MCP native, rules degraded at
     //! project scope only, agents declined (`adr_vendor_wave_expansion.md` +
-    //! `research_vendor_verification_junie_gemini.md`, re-verified 2026-07-27).
+    //! `research_vendor_verification_junie_gemini.md`, re-verified 2026-07-27
+    //! and 2026-09-27).
     use super::*;
     use crate::oci::mcp::McpDescriptor;
     use crate::skill::RuleFrontmatter;
@@ -251,7 +256,7 @@ mod tests {
         assert_eq!(
             JunieVendor.kind_support(ArtifactKind::Agent),
             KindSupport::Declined,
-            "`.junie/agents/*.md` is EAP-only, not GA"
+            "not EAP-gated — grim just doesn't render it yet"
         );
     }
 

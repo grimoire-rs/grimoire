@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import re
+import tomllib
 from pathlib import Path
 
 from src.helpers import make_artifact, write_config
@@ -194,6 +195,142 @@ def test_claude_skill_lifts_namespaced_keys_to_native_typed_fields(
     assert "keywords: testing,automation" in text, (
         f"expected plain metadata key `keywords` in:\n{text}"
     )
+
+
+def test_claude_background_and_omit_claude_md_lift_and_self_heal(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """``claude.background`` (skill) and ``claude.omit-claude-md`` (agent)
+    lift to Claude's native ``background`` / ``omitClaudeMd`` bools, and a
+    second install of the untouched artifacts is a byte-identical no-op
+    that ``status`` reports unmodified (Principle 9 renderer self-heal)."""
+    skill = make_artifact(
+        f"{unique_repo}/bg-skill",
+        "skill",
+        {
+            "bg-skill/SKILL.md": "---\nname: bg-skill\ndescription: d\nmetadata:\n"
+            '  claude.context: fork\n  claude.background: "false"\n---\nbody\n'
+        },
+        tag="v1",
+    )
+    agent = make_artifact(
+        f"{unique_repo}/lean-agent",
+        "agent",
+        {
+            "lean-agent.md": "---\nname: lean-agent\ndescription: d\nmetadata:\n"
+            '  claude.omit-claude-md: "true"\n---\nbody\n'
+        },
+        tag="v1",
+    )
+    write_config(project_dir, skills={"bg-skill": skill.fq}, agents={"lean-agent": agent.fq})
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+    rows = runner.json("install", "--client", "claude")["items"]
+    assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
+
+    skill_md = project_dir / ".claude/skills/bg-skill/SKILL.md"
+    agent_md = project_dir / ".claude/agents/lean-agent.md"
+    assert "background: false" in skill_md.read_text(), skill_md.read_text()
+    assert "omitClaudeMd: true" in agent_md.read_text(), agent_md.read_text()
+
+    before = (skill_md.read_bytes(), agent_md.read_bytes())
+    again = runner.json("install", "--client", "claude")["items"]
+    assert all(r["status"] == "unchanged" for r in again), again
+    assert (skill_md.read_bytes(), agent_md.read_bytes()) == before, "regeneration must be byte-identical"
+    status = runner.json("status")["items"]
+    assert status and all(r["outputs"] for r in status), status
+    assert all(r["state"] == "installed" for r in status), status
+
+
+def test_copilot_agent_keys_lift_and_self_heal(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """``copilot.disable-model-invocation``, ``copilot.user-invocable`` and
+    ``copilot.target`` lift to Copilot's native custom-agent frontmatter
+    (bools unquoted, ``target`` verbatim), and a second install of the
+    untouched agent is a byte-identical no-op that ``status`` reports
+    unmodified (Principle 9 renderer self-heal)."""
+    agent = make_artifact(
+        f"{unique_repo}/cp-agent",
+        "agent",
+        {
+            "cp-agent.md": "---\nname: cp-agent\ndescription: d\nmetadata:\n"
+            '  copilot.disable-model-invocation: "true"\n'
+            '  copilot.user-invocable: "false"\n'
+            "  copilot.target: vscode\n---\nbody\n"
+        },
+        tag="v1",
+    )
+    write_config(project_dir, agents={"cp-agent": agent.fq})
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+    rows = runner.json("install", "--client", "copilot")["items"]
+    assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
+
+    agent_md = project_dir / ".github/agents/cp-agent.md"
+    text = agent_md.read_text()
+    assert "disable-model-invocation: true" in text, text
+    assert "user-invocable: false" in text, text
+    assert "target: vscode" in text, text
+    assert "copilot." not in text, f"copilot.* namespaced keys must be gone from the rendered agent:\n{text}"
+
+    before = agent_md.read_bytes()
+    again = runner.json("install", "--client", "copilot")["items"]
+    assert all(r["status"] == "unchanged" for r in again), again
+    assert agent_md.read_bytes() == before, "regeneration must be byte-identical"
+    item = next(r for r in runner.json("status")["items"] if r["name"] == "cp-agent")
+    assert item["state"] == "installed", item
+    assert not any(o.get("modified") for o in item["outputs"]), item
+
+
+def test_codex_startup_timeout_and_persistent_effort_render_and_self_heal(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """An MCP descriptor's millisecond ``timeout`` lands as Codex's
+    ``startup_timeout_ms``, ``codex.reasoning-effort: persistent`` lands as
+    ``model_reasoning_effort``, and a second install is a byte-identical
+    no-op that ``status`` reports unmodified (Principle 9 renderer
+    self-heal)."""
+    agent = make_artifact(
+        f"{unique_repo}/deep-agent",
+        "agent",
+        {
+            "deep-agent.md": "---\nname: deep-agent\ndescription: d\nmetadata:\n"
+            "  codex.reasoning-effort: persistent\n---\nbody\n"
+        },
+        tag="v1",
+    )
+    descriptor = project_dir / "src" / "mcp" / "slow-mcp.toml"
+    _write(
+        descriptor,
+        'description = "d"\n\n[server]\ntransport = "stdio"\ncommand = "grim"\n'
+        'args = ["mcp"]\ntimeout = 7000\n',
+    )
+    runner = grim_at(project_dir)
+    mcp_ref = f"{registry}/{unique_repo}/mcp/slow-mcp:1.0.0"
+    runner.json("release", str(descriptor), mcp_ref, "--kind", "mcp")
+    (project_dir / ".codex").mkdir()
+    write_config(project_dir, agents={"deep-agent": agent.fq})
+    runner.run("lock", check=False)
+    runner.json("add", mcp_ref, "--no-install")
+    rows = runner.json("install", "--client", "codex")["items"]
+    assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
+
+    cfg = project_dir / ".codex" / "config.toml"
+    agent_toml = project_dir / ".codex" / "agents" / "deep-agent.toml"
+    entry = tomllib.loads(cfg.read_text())["mcp_servers"]["slow-mcp"]
+    assert entry["startup_timeout_ms"] == 7000, entry
+    assert type(entry["startup_timeout_ms"]) is int, "Codex reads a u64, never a TOML float"
+    assert "timeout" not in entry, entry
+    assert tomllib.loads(agent_toml.read_text())["model_reasoning_effort"] == "persistent"
+
+    before = (cfg.read_bytes(), agent_toml.read_bytes())
+    again = runner.json("install", "--client", "codex")["items"]
+    assert all(r["status"] == "unchanged" for r in again), again
+    assert (cfg.read_bytes(), agent_toml.read_bytes()) == before, "regeneration must be byte-identical"
+    status = runner.json("status")["items"]
+    assert status and all(r["outputs"] for r in status), status
+    assert all(r["state"] == "installed" for r in status), status
 
 
 def test_opencode_skill_is_clean_universal_no_tool_keys(

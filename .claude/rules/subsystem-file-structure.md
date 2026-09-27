@@ -46,12 +46,17 @@ are one footprint: the integrity hash folds both, and uninstall removes
 both. See `arch-principles.md` ADR index → `adr_multifile_rules.md`.
 
 **Most clients decline rules** (`Vendor::kind_support(Rule) == Declined`) —
-Codex, Gemini, Zed, Amp, Antigravity, the six skills-only clients, and the
-generic `agents` target all lack an ownable path-scoped instruction surface
-(AGENTS.md / GEMINI.md hierarchies, or a UI-managed surface with no on-disk
-path). The installer skips them silently, writes no file, and records no
-output: a declined kind logs at `debug` only (`installer.rs:558`), so nothing
-reaches stderr.
+Codex, Gemini, Zed, Amp, the generic `agents` target, and five of the six
+skills-only clients (Goose, Warp, Droid, OpenClaw, Kilo) lack an ownable
+path-scoped instruction surface at all (AGENTS.md / GEMINI.md hierarchies, or
+a UI-managed surface with no on-disk path). Two declines are a grim
+capability gap instead, not an upstream absence: Antigravity documents a real
+per-file `.agents/rules/*.md` surface with `trigger`/`globs` scoping grim has
+not wired up yet, and Cline (the sixth skills-only client) documents a real
+`.clinerules/` surface with genuine `paths:` scoping, declined only because
+this wave shipped skills-only. The installer skips every one of them
+silently, writes no file, and records no output: a declined kind logs at
+`debug` only (`installer.rs:558`), so nothing reaches stderr.
 **Junie is Degraded, not Declined** — `.junie/rules/*.md` is a real
 per-file directory grim can own; what it lacks is a per-file activation
 key, so `paths` is dropped with a warning. **`docs/src/content/docs/clients.md` is the
@@ -158,8 +163,8 @@ config files:
 |--------|---------|--------|
 | **Claude** | `<workspace>/.mcp.json` (`mcpServers`) | `~/.claude.json` — `$CLAUDE_CONFIG_DIR/.claude.json` when set (`mcpServers`) |
 | **OpenCode** | `<workspace>/opencode.json`/`.jsonc` (`mcp`) | `$OPENCODE_CONFIG` else XDG `opencode.json` (`mcp`) |
-| **Copilot** | `<workspace>/.vscode/mcp.json` (`servers`) | `$COPILOT_HOME`\|`~/.copilot`/`mcp-config.json` (`mcpServers`); env-ref descriptors are skipped (no substitution support) |
-| **Codex** | `<workspace>/.codex/config.toml` (`mcp_servers`); only honored by Codex for **trusted** projects — grim writes it regardless, an untrusted project simply won't have it read | `$CODEX_HOME`\|`~/.codex`/`config.toml` (`mcp_servers`); HTTP/SSE headers map to `http_headers`/`env_http_headers`/`bearer_token_env_var`; a header embedding an env ref in text is unrepresentable → descriptor skipped |
+| **Copilot** | `<workspace>/.vscode/mcp.json` (`servers`) — VS Code's Copilot Chat file; the Copilot **CLI** reads `.mcp.json`/`.github/mcp.json` instead | `$COPILOT_HOME`\|`~/.copilot`/`mcp-config.json` (`mcpServers`); `${VAR}` written verbatim — Copilot CLI expands it (skipped before 2026-09-27) |
+| **Codex** | `<workspace>/.codex/config.toml` (`mcp_servers`); only honored by Codex for **trusted** projects — grim writes it regardless, an untrusted project simply won't have it read | `$CODEX_HOME`\|`~/.codex`/`config.toml` (`mcp_servers`); HTTP/SSE headers map to `http_headers`/`env_http_headers`/`bearer_token_env_var`; a header embedding an env ref in text is unrepresentable → descriptor skipped; `timeout` (ms) → `startup_timeout_ms` |
 | **Cursor** | `<workspace>/.cursor/mcp.json` (`mcpServers`); stdio needs `type: "stdio"`, env refs `${env:VAR}` | `~/.cursor/mcp.json` (`mcpServers`) |
 | **Kiro** | `<workspace>/.kiro/settings/mcp.json` (`mcpServers`); `${VAR}` env refs native | `~/.kiro/settings/mcp.json` (`mcpServers`) |
 | **Junie** | `<workspace>/.junie/mcp/mcp.json` (`mcpServers`); env-ref descriptors skipped (interpolation undocumented) | `~/.junie/mcp/mcp.json` (`mcpServers`) |
@@ -185,9 +190,10 @@ the `tools` field has no Codex equivalent and is dropped with a warning.
 For **Antigravity** it is a Markdown file too, with `tools` emitted as a
 YAML sequence (upstream types it `string[]`) and nothing lifted — the
 `antigravity.*` registry is empty. **Every other client declines agents**
-(`kind_support == Declined`): CLI/IDE schema collision (Kiro), EAP-only
-(Junie), ACP/runtime-only (Zed, Amp, Goose, OpenClaw), or no installable
-format at all (Cline, Droid, Warp, Kilo, and the generic `agents` target) —
+(`kind_support == Declined`): CLI/IDE schema collision (Kiro); Junie,
+Droid, Kilo, Goose, and Cline's CLI surface each document an installable
+format grim does not render yet; ACP/runtime-only (Zed, Amp, OpenClaw); or
+no installable format at all (Warp and the generic `agents` target) —
 installer skips silently and records no output, logging at
 `debug` only.
 
@@ -235,10 +241,10 @@ client's **native** user-level discovery directory rather than under
 | **Antigravity** | `~/.gemini/config/skills/<name>/` — **not** the pool at global scope | declined | `~/.gemini/config/agents/<name>.md` |
 | **Goose** | `$HOME/.agents/skills/<name>/` (shared pool, both scopes) | declined | declined |
 | **Cline** | `~/.cline/skills/<name>/` | declined | declined |
-| **Droid** | `~/.factory/skills/<name>/` | declined | declined |
+| **Droid** | `~/.factory/skills/<name>/` (native by default; the pool only via `shared_skills`) | declined | declined |
 | **Warp** | `~/.warp/skills/<name>/` (native by default; the pool only via `shared_skills`) | declined | declined |
 | **OpenClaw** | `~/.openclaw/skills/<name>/` — **global-only client**, project scope writes nothing | declined | declined |
-| **Kilo** | `~/.kilo/skills/<name>/` | declined | declined |
+| **Kilo** | `~/.kilo/skills/<name>/` (native by default; the pool only via `shared_skills`) | declined | declined |
 | **Qoder** | `<qoder_root>/skills/<name>/` | `<qoder_root>/rules/<name>.md` | `<qoder_root>/agents/<name>.md` |
 
 `$XDG_CONFIG_HOME` falls back to `~/.config` when unset. A client whose
@@ -251,8 +257,12 @@ at `grim config set` / **78** at load.
 **Vendor config-dir env vars that are NOT honored** (paths hardcode the
 documented native root), each for its own reason:
 
-- `CURSOR_CONFIG_DIR` — possibly CLI-only; never verified against the IDE.
-- the `JUNIE_*_LOCATIONS` family — per-kind override family, untested.
+- `CURSOR_CONFIG_DIR` — documented only as the location of the CLI's own
+  `cli-config.json`, never tied to the directories grim writes (skills,
+  rules, agents, `mcp.json`).
+- the `JUNIE_*_LOCATIONS` family — additive, not untested: it only adds
+  search paths, so grim's defaults stay read. `JUNIE_HOME`, which replaces
+  `~/.junie` outright, is not honored either.
 - `GEMINI_CONFIG_DIR` — genuinely does not exist upstream (only FR #2815).
   The variable that *does* exist is `GEMINI_CLI_HOME`, which grim honors —
   see the override table below.
@@ -264,8 +274,9 @@ documented native root), each for its own reason:
   Shipping behaviour on that evidence would be a coin flip, so behaviour
   is unchanged — the reason is *unaddressed precedence*, not
   *nonexistence*. Do not "correct" this back to "no such variable exists".
-- `$OPENCLAW_HOME` — referenced in OpenClaw material but never defined on
-  any page fetched.
+- `$OPENCLAW_HOME` — now documented upstream to replace the home directory
+  for OpenClaw's own paths, but not yet honored: doing so would move
+  global output, so it is a watchlisted layout change, not a comment fix.
 
 All are watchlisted for re-verification — see
 `vendor-capability-watchlist.md`.
@@ -291,7 +302,7 @@ variables are honored read-only, `OPENCODE_CONFIG` names a file grim reads
 | Variable | Effect on global paths |
 |----------|------------------------|
 | `CLAUDE_CONFIG_DIR` | Replaces the entire `~/.claude` tree — Claude skills, rules, and agents root there. Also relocates the global MCP registration file to `$CLAUDE_CONFIG_DIR/.claude.json` |
-| `COPILOT_HOME` | Replaces `~/.copilot` — Copilot skills and agents land under `$COPILOT_HOME/`. **Caveat:** correct for the standalone Copilot CLI, but VS Code's *embedded* Copilot CLI ignores the variable (microsoft/vscode#314806, open), so "Copilot" is not uniform here |
+| `COPILOT_HOME` | Replaces `~/.copilot` — Copilot skills and agents land under `$COPILOT_HOME/`. VS Code's embedded Copilot CLI honors it since VS Code 1.132.0 (microsoft/vscode#314917). **Caveat:** set to anything but `~/.copilot`, Copilot stops scanning `~/.agents/skills`, so `shared_skills` output goes unread (watchlist) |
 | `OPENCODE_CONFIG_DIR` | OpenCode's additive scan dir — preferred over the XDG default for skills and agents when set |
 | `OPENCODE_CONFIG` | Config **file** path only (global `opencode.json` edit target); no effect on skill/agent paths |
 | `CODEX_HOME` | Replaces `~/.codex` — Codex **agents** root **and** the MCP `config.toml` there. Does **not** relocate Codex skills (those follow the `$HOME/.agents/skills` cross-vendor standard) |

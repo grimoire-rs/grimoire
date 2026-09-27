@@ -359,10 +359,55 @@ annotation and restores the 0.13.0 manifest shape exactly.
   `options.search_min_relevance` key is appended at the end, with the usual
   type, title, description, and default metadata. Existing rows keep their
   positions.
+- **Codex MCP servers pick up a shorter startup wait.** A descriptor's
+  `timeout` (milliseconds) now renders as `startup_timeout_ms` in Codex's
+  `config.toml`, so a short `timeout` actually shortens Codex's startup
+  wait — before it had no effect there. An artifact installed before this
+  release keeps its old bytes until the pin changes (`grim update`) or you
+  run `grim install --force`.
+- **Two more Claude keys render instead of warning.** `claude.background`
+  (skill) and `claude.omit-claude-md` (agent) are now known keys that
+  render natively — an unknown key used to warn and drop. Values must be
+  `true` or `false`; any other literal now fails `grim build` (exit 65)
+  and a fresh install. Same rule as above: an artifact installed before
+  this release keeps its old bytes until the pin changes (`grim update`)
+  or you run `grim install --force`.
+- **A global MCP server with a `${VAR}` reference registers for Copilot
+  CLI.** grim used to skip it, because Copilot CLI did not expand
+  references in `mcp-config.json`. Current releases do (verified against
+  CLI 1.0.88), so grim writes the reference as authored.
+  `grim status` lists the missing registration under `outputs_pending`, and
+  the next `grim install` adds it without touching the other clients'
+  entries. If you worked around the old skip by hand-adding a same-named
+  `mcpServers.<name>` entry directly in `~/.copilot/mcp-config.json`, grim
+  now refuses to install over it as untracked — delete your hand-added
+  entry, or run `grim install --global --force` to replace it with the
+  `${VAR}` form. Copilot CLI releases older than about April 2026 pass an
+  `env` reference through unexpanded rather than expanding it. See
+  [Environment references][env-refs].
 - **The TUI now asks before acting on more than one artifact.** Pressing `i`,
   `u`, or `d` on a marked set or a selected group opens a confirmation naming
   the count and source before anything runs. A single artifact still acts on
   the first press.
+- **Three more Copilot agent keys render instead of warning.**
+  `copilot.disable-model-invocation`, `copilot.user-invocable` (both bool),
+  and `copilot.target` (`vscode` or `github-copilot`) are now known keys
+  that render natively — an unknown key used to warn and drop. A bad
+  literal (not `true`/`false`, or a `target` outside the two-value enum)
+  now fails `grim build` (exit 65) and a fresh install. An artifact
+  installed before this release keeps its old bytes until the pin changes
+  (`grim update`) or you run `grim install --force`.
+- **An OpenCode agent with an invalid `opencode.color` or `opencode.steps`
+  now installs with the field dropped, not rejected wholesale.** OpenCode's
+  own schema accepts only `#RRGGBB` or one of seven theme names for
+  `color`, and a positive integer for `steps`; a bad value used to reach the
+  written agent file unchecked, and OpenCode would then refuse its entire
+  config — every agent and verb, not just the offending one. grim now
+  validates the lifted value at install time and drops it with a warning
+  instead. An existing broken install repairs itself on the next pin change
+  that touches the agent. `--force` alone does not repair it: delete the
+  rendered agent file first, then run `grim install` to repair it right
+  away. See the [`opencode.*` agent registry][vendor-metadata-opencode].
 
 <!-- internal -->
 [changelog]: https://github.com/grimoire-rs/grimoire/blob/main/CHANGELOG.md
@@ -378,5 +423,7 @@ annotation and restores the 0.13.0 manifest shape exactly.
 [remove]: ./commands.md#remove
 [tui]: ./commands.md#tui
 [vendor-metadata]: ./vendor-metadata.md#projection-semantics
+[vendor-metadata-opencode]: ./vendor-metadata.md#opencode-agent-registry
 [no-clobber]: ./json-interface.md#error-reason
 [multi-registry]: ./configuration.md#multiple-registries
+[env-refs]: ./mcp-servers.md#env-references

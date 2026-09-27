@@ -4,7 +4,7 @@
 //! OpenClaw's vendor strategy: GLOBAL-scope skills only; everything else declined.
 //!
 //! OpenClaw (formerly ClawdBot) is an open-source agent daemon, verified
-//! 2026-07-27 against the project's own repository and documentation. The
+//! 2026-07-27, re-verified 2026-09-27, against the project's own repository and documentation. The
 //! rename is first-party proven, not aggregator hearsay: OpenClaw's own
 //! backward-compatibility code still carries `metadata.clawdbot` /
 //! `metadata.clawdis` legacy aliases. **The client ships under the current
@@ -32,18 +32,20 @@
 //!   Adding a client to that roster later is additive; removing one is
 //!   breaking — so the reversible direction wins. Watchlisted with the
 //!   priority-3 evidence so a later wave can flip it in one line.
-//! - **Rules**: **declined**. Monolithic fixed-name files whose only
-//!   frontmatter is `title` / `summary` / `read_when` — no scoping key.
+//! - **Rules**: **declined**. OpenClaw injects a fixed set of workspace
+//!   files (`AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`,
+//!   `BOOTSTRAP.md` first-run only) — plain files with no frontmatter, no
+//!   scoping key, nothing to project onto.
 //! - **Agents**: **declined**. Subagents are runtime-only, nothing on disk.
 //! - **MCP**: **declined**. `openclaw.json` mixes strict JSON and JSON5
 //!   (unquoted keys, a `--strict-json` flag), so grim's splice engine would
 //!   need JSON5 tolerance before it could edit that file without corrupting
 //!   it. A reason to keep MCP declined, not a task. Watchlisted.
 //!
-//! `$OPENCLAW_HOME` was seen referenced but **never defined** on any page
-//! fetched. It is recorded as unconfirmed and deliberately not honored —
-//! honoring an env var on a mention alone would relocate every install on a
-//! guess.
+//! `$OPENCLAW_HOME` is **not** honored. It looked undefined when this shipped,
+//! but re-verified 2026-09-27 it is documented to replace the home directory
+//! for OpenClaw's own paths. Honoring it moves global output, so it is a
+//! watchlisted layout change, not a comment fix.
 
 use std::path::{Path, PathBuf};
 
@@ -149,8 +151,10 @@ fn scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
 }
 
 /// OpenClaw's user-level root `~/.openclaw` — what
-/// `openclaw skills install --global` itself writes under. `$OPENCLAW_HOME` is
-/// unconfirmed upstream and deliberately not honored. The
+/// `openclaw skills install --global` itself writes under. `$OPENCLAW_HOME`
+/// is documented upstream to replace the home directory, but deliberately
+/// not honored here: doing so would move global output, so it is a
+/// watchlisted layout change, not a comment fix. The
 /// [`PathAnchor`](super::path_anchor) `VendorRoot("openclaw")` anchor is rooted
 /// here.
 pub(crate) fn openclaw_root(home: Option<PathBuf>) -> Option<PathBuf> {
