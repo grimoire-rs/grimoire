@@ -7,22 +7,12 @@
       "WebSearch",
       "Edit",
       "Write",
-      "NotebookEdit",
-      "mcp__context7__resolve-library-id",
-      "mcp__context7__query-docs",
-      "mcp__sequential-thinking__sequentialthinking",
-      "mcp__ide__getDiagnostics",
-      "mcp__ide__executeCode"
+      "NotebookEdit"
     ],
     "deny": [
-      "Bash(rm -rf:*)",
-      "Bash(rm -r:*)",
       "Bash(sudo:*)",
       "Bash(curl:*)",
       "Bash(wget:*)",
-      "Bash(docker system prune:*)",
-      "Bash(docker rm:*)",
-      "Bash(docker rmi:*)",
       "Bash(chmod 777:*)"
     ]
   },
