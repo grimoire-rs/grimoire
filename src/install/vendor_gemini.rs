@@ -21,7 +21,8 @@
 //!   `gemini.timeout-mins`[int] / `gemini.kind`.
 //! - **MCP**: `.gemini/settings.json` (project/user), `mcpServers`; transport
 //!   maps **sse → `url`, http → `httpUrl`**, stdio → `command`; env refs
-//!   `${VAR}` native; oauth shape ≠ grim block → skip; `json_splice`.
+//!   `${VAR}` native; oauth shape ≠ grim block → skip; `timeout` dropped
+//!   with a warning (Gemini bounds every tool call with it); `json_splice`.
 //!
 //! `GEMINI_CONFIG_DIR` does not exist upstream (FR #2815); `GEMINI_CLI_HOME`
 //! does — it replaces Node's `os.homedir()` at the root, so the config dir is
@@ -194,11 +195,17 @@ impl Vendor for GeminiVendor {
                 }
             }
         }
-        // `timeout` is native for every transport (Claude/OpenCode
-        // precedent); `always_load`/`headers_helper` have no Gemini
-        // equivalent — dropped (pure refinements, nothing auth-critical).
-        if let Some(timeout) = s.timeout {
-            entry.insert("timeout".into(), serde_json::json!(timeout));
+        // Gemini's `timeout` bounds `connect` AND every `callTool` (v0.61.0
+        // `mcp-client.ts`), not just startup, so projecting grim's
+        // startup-tuned value would abort any longer tool call. Dropped with
+        // a warning; Gemini's 10-minute default applies. `always_load` /
+        // `headers_helper` have no Gemini equivalent — dropped silently
+        // (pure refinements, nothing auth-critical).
+        if s.timeout.is_some() {
+            tracing::warn!(
+                "mcp server '{name}' timeout dropped for gemini ({scope}): settings.json applies it to every \
+                 tool call, not only startup; Gemini's 10-minute default applies"
+            );
         }
         Some((format!("/mcpServers/{name}"), serde_json::Value::Object(entry)))
     }
@@ -551,18 +558,26 @@ mod tests {
     }
 
     #[test]
-    fn mcp_entry_projects_timeout_and_cwd_for_stdio() {
-        // Gemini is the only wave-1 vendor that projects BOTH `timeout`
-        // (native for every transport) and `cwd` (native, stdio-only) —
-        // every sibling vendor drops these as pure refinements.
+    fn mcp_entry_drops_timeout_and_projects_cwd_for_stdio() {
+        // Gemini passes its `timeout` to `connect` AND every `callTool`
+        // (v0.61.0 mcp-client.ts), so a startup-tuned descriptor value would
+        // abort long tool calls. grim drops it for every transport and lets
+        // Gemini's 10-minute default apply; `cwd` stays native (stdio-only).
+        for toml in [
+            "transport = \"stdio\"\ncommand = \"grim\"\ntimeout = 7000\ncwd = \"./srv\"\n",
+            "transport = \"http\"\nurl = \"https://x\"\ntimeout = 7000\n",
+        ] {
+            let d = McpDescriptor::from_toml_str(&format!("description = \"d\"\n[server]\n{toml}")).unwrap();
+            let (_, value) = GeminiVendor
+                .mcp_entry(ConfigScope::Project, "grim", &d)
+                .expect("still registers");
+            assert!(value.get("timeout").is_none(), "timeout must not project: {value}");
+        }
         let d = McpDescriptor::from_toml_str(
-            "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"\ntimeout = 7000\ncwd = \"./srv\"\n",
+            "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"\ncwd = \"./srv\"\n",
         )
         .unwrap();
-        let (_, value) = GeminiVendor
-            .mcp_entry(ConfigScope::Project, "grim", &d)
-            .expect("stdio registers");
-        assert_eq!(value["timeout"], 7000, "timeout projects natively: {value}");
+        let (_, value) = GeminiVendor.mcp_entry(ConfigScope::Project, "grim", &d).unwrap();
         assert_eq!(value["cwd"], "./srv", "cwd projects natively (stdio-only): {value}");
     }
 

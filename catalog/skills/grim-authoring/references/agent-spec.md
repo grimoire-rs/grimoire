@@ -75,11 +75,16 @@ whether your audience is in that set:
 | Codex | `codex.*` | **TOML** (see below) |
 | Cursor | `cursor.*` | Markdown frontmatter; the common `tools` has no equivalent and is dropped with a warning |
 | Gemini CLI | `gemini.*` | Markdown frontmatter; Gemini loads agents only when its `experimental.enableAgents` setting is on (the default) |
+| Junie | `junie.*` | Markdown frontmatter; `tools` emitted as a YAML list; `junie.permission-mode`, `junie.reasoning-level`, `junie.max-turns` lift to `permissionMode`, `reasoningLevel`, `maxTurns`. Junie accepts only names matching `[a-z][a-z0-9_-]*` — a name with a leading digit or a `.` is skipped for Junie with a warning, never renamed |
+| Droid | `droid.*` | Markdown frontmatter at `.factory/droids/`; `tools` emitted as a YAML list of tool ids, `model` verbatim (`inherit` included), `droid.reasoning-effort` → `reasoningEffort`. A name containing `.` is skipped for Droid with a warning; a dotted frontmatter `name` under an accepted binding is written as the binding name. A lone `tools` category still renders as a list, which Droid reads as a tool id |
 | Antigravity | *(none yet)* | Markdown frontmatter; `tools` emitted as a YAML list (upstream types it `string[]`). The namespace is reserved but its agent registry is empty, so an `antigravity.*` key warns and drops |
+| Goose | *(none)* | Markdown frontmatter at `.goose/agents/`; `name`, `description` and `model` only, `tools` dropped with a warning |
+| Kilo | `kilo.*` | OpenCode's shape: drops `name` (the filename is its identity) and drops `tools` with a warning; `kilo.mode`, `kilo.temperature`, `kilo.steps` and friends lift |
+| Qoder | *(none yet)* | Claude's shape — a plain agent installs byte-identical, no provenance comment. The namespace is reserved but its agent registry is empty, so a `qoder.*` key warns and drops |
 
 Every emit but Claude's carries a provenance comment. **Every other
-client declines agents** — some (Junie, Droid, Kilo, Goose, and Cline's
-CLI surface) document an installable format grim does not render yet;
+client declines agents** — one (Cline's
+CLI surface) documents an installable format grim does not render yet;
 the rest have no installable format at all, save Kiro, blocked instead
 by a CLI/IDE schema collision — an incompatible format already occupies
 the same directory — so grim warns, skips, and writes nothing. Their

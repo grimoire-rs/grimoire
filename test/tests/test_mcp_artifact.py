@@ -10,7 +10,9 @@ vendor MCP writers land.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import sys
 import tomllib  # stdlib (Python 3.11+)
 from pathlib import Path
 
@@ -990,3 +992,702 @@ def test_global_copilot_refuses_untracked_hand_inlined_workaround_then_force_rep
     assert entry["env"]["GRIM_TOKEN"] == "${GITHUB_TOKEN}", (
         "--force must replace the hand-inlined workaround with the ${VAR} form, never the resolved value"
     )
+
+
+def _oauth_descriptor(oauth: str) -> str:
+    return (
+        'description = "Server behind OAuth."\n\n'
+        '[server]\ntransport = "http"\nurl = "https://example.com/mcp"\n\n'
+        f"[server.oauth]\n{oauth}"
+    )
+
+
+# client, project MCP config path, container key, oauth block every field of
+# which the client maps, the oauth object it must write, an oauth block it
+# cannot map losslessly, and the field the skip warning must name
+# (adr_mcp_oauth_projection.md, lossless-or-skip).
+_OAUTH_CLIENTS = [
+    (
+        "opencode",
+        "opencode.json",
+        "mcp",
+        'client_id = "${CID}"\nscopes = ["read", "write"]\ncallback_port = 43110\n',
+        {"clientId": "{env:CID}", "scope": "read write", "callbackPort": 43110},
+        'client_id = "c"\nauth_server_metadata_url = "https://auth.example.com/.well-known/x"\n',
+        "auth_server_metadata_url",
+    ),
+    (
+        "zed",
+        ".zed/settings.json",
+        "context_servers",
+        'client_id = "grim-client"\n',
+        {"client_id": "grim-client"},
+        'client_id = "grim-client"\nscopes = ["read"]\n',
+        "scopes",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "client, config_rel, container_key, mapped, want, unmapped, unmapped_field", _OAUTH_CLIENTS
+)
+def test_oauth_server_is_written_losslessly_and_self_heals(
+    grim_at,
+    project_dir: Path,
+    registry: str,
+    unique_repo: str,
+    client: str,
+    config_rel: str,
+    container_key: str,
+    mapped: str,
+    want: dict,
+    unmapped: str,
+    unmapped_field: str,
+) -> None:
+    """An oauth block whose every field the client maps is written onto its
+    native oauth object; a repeat install is byte-stable and `grim status`
+    reports it installed, never modified (Principle 9 self-heal)."""
+    runner = grim_at(project_dir)
+    ref = _release(runner, project_dir, registry, unique_repo, body=_oauth_descriptor(mapped))
+    write_config(project_dir)
+    runner.json("add", "--no-install", ref)
+
+    first = runner.json("install", "--client", client)["items"]
+    assert first[0]["status"] == "installed", first
+    cfg = project_dir / config_rel
+    entry = json.loads(cfg.read_text())[container_key]["grim-mcp"]
+    assert entry["oauth"] == want, entry
+    assert "clientSecret" not in entry["oauth"] and "client_secret" not in entry["oauth"]
+
+    before = cfg.read_text()
+    second = runner.json("install", "--client", client)["items"]
+    assert second[0]["status"] == "unchanged", second
+    assert cfg.read_text() == before, f"{client} config must be byte-stable on repeat install"
+    row = next(r for r in runner.json("status")["items"] if r["name"] == "grim-mcp")
+    assert row["state"] == "installed", row
+
+
+@pytest.mark.parametrize(
+    "client, config_rel, container_key, mapped, want, unmapped, unmapped_field", _OAUTH_CLIENTS
+)
+def test_oauth_server_with_an_unmapped_field_is_skipped_and_named(
+    grim_at,
+    project_dir: Path,
+    registry: str,
+    unique_repo: str,
+    client: str,
+    config_rel: str,
+    container_key: str,
+    mapped: str,
+    want: dict,
+    unmapped: str,
+    unmapped_field: str,
+) -> None:
+    """A field the client cannot carry skips the whole server — dropping a
+    scope or a pinned metadata URL could widen the grant — and the warning
+    names the field in the descriptor's own vocabulary."""
+    runner = grim_at(project_dir)
+    ref = _release(runner, project_dir, registry, unique_repo, body=_oauth_descriptor(unmapped))
+    write_config(project_dir)
+    runner.json("add", "--no-install", ref)
+
+    # Claude maps every field, so the install succeeds and only `client` skips.
+    result = runner.run("install", "--client", f"claude,{client}", check=False)
+    assert result.returncode == 0, result.stderr
+    assert "grim-mcp" in json.loads((project_dir / ".mcp.json").read_text())["mcpServers"]
+    assert f"skipped for {client}" in result.stderr, result.stderr
+    assert unmapped_field in result.stderr, result.stderr
+    cfg = project_dir / config_rel
+    if cfg.exists():
+        assert "grim-mcp" not in json.loads(cfg.read_text()).get(container_key, {})
+
+
+@pytest.mark.parametrize(
+    "client, config_rel, container_key, mapped, want, unmapped, unmapped_field", _OAUTH_CLIENTS
+)
+def test_oauth_server_newly_written_refuses_hand_authored_entry_then_force_replaces(
+    grim_at,
+    project_dir: Path,
+    registry: str,
+    unique_repo: str,
+    client: str,
+    config_rel: str,
+    container_key: str,
+    mapped: str,
+    want: dict,
+    unmapped: str,
+    unmapped_field: str,
+) -> None:
+    """Upgrade guard: before the oauth projection, grim skipped this server
+    for the client, so a user may have hand-authored a same-named entry.
+    Now that grim writes it, the untracked entry is refused with exit 65 and
+    left untouched; `--force` replaces it (upgrading.md)."""
+    runner = grim_at(project_dir)
+    ref = _release(runner, project_dir, registry, unique_repo, body=_oauth_descriptor(mapped))
+    write_config(project_dir)
+    runner.json("add", "--no-install", ref)
+
+    cfg = project_dir / config_rel
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    hand_written = {container_key: {"grim-mcp": {"url": "https://example.com/mcp", "hand": True}}}
+    cfg.write_text(json.dumps(hand_written, indent=2))
+
+    result = runner.run("install", "--client", client, check=False)
+    assert result.returncode == 65, result.stderr
+    assert "--force" in result.stderr, result.stderr
+    assert json.loads(cfg.read_text()) == hand_written, "refusal must leave the hand-written entry untouched"
+
+    rows = runner.json("install", "--client", client, "--force")["items"]
+    assert rows[0]["status"] == "installed", rows
+    entry = json.loads(cfg.read_text())[container_key]["grim-mcp"]
+    assert entry["oauth"] == want and "hand" not in entry, entry
+
+
+@pytest.mark.parametrize(
+    "client, config_rel, container_key, mapped, want, unmapped, unmapped_field", _OAUTH_CLIENTS
+)
+def test_oauth_server_recorded_without_the_client_is_added_by_a_plain_install(
+    grim_at,
+    project_dir: Path,
+    registry: str,
+    unique_repo: str,
+    client: str,
+    config_rel: str,
+    container_key: str,
+    mapped: str,
+    want: dict,
+    unmapped: str,
+    unmapped_field: str,
+) -> None:
+    """The upgrade path: an install record that covers only Claude — what a
+    grim that skipped oauth for `client` left behind — is completed by a
+    plain `grim install` (no `--client`, no `--force`) once the client is
+    configured, which writes the oauth entry,
+    leaves Claude's untouched, and reads back not-modified."""
+    runner = grim_at(project_dir)
+    ref = _release(runner, project_dir, registry, unique_repo, body=_oauth_descriptor(mapped))
+    write_config(project_dir)
+    runner.json("add", "--no-install", ref)
+
+    first = runner.json("install", "--client", "claude")["items"]
+    assert first[0]["status"] == "installed", first
+    claude_cfg = project_dir / ".mcp.json"
+    claude_before = claude_cfg.read_text()
+    cfg = project_dir / config_rel
+    assert not cfg.exists() or "grim-mcp" not in json.loads(cfg.read_text()).get(container_key, {})
+
+    runner.run("config", "set", "options.clients", f"claude,{client}")
+    upgraded = runner.run("install", check=False)
+    assert upgraded.returncode == 0, upgraded.stderr
+    assert json.loads(cfg.read_text())[container_key]["grim-mcp"]["oauth"] == want
+    assert claude_cfg.read_text() == claude_before, "claude entry must be untouched"
+
+    row = next(r for r in runner.json("status")["items"] if r["name"] == "grim-mcp")
+    assert row["state"] == "installed", row
+    assert row["outputs_pending"] == [], row
+
+
+# ── Copilot project scope: VS Code Chat's file and the CLI's file ──────────
+
+_VSCODE_MCP = Path(".vscode") / "mcp.json"
+_GITHUB_MCP = Path(".github") / "mcp.json"
+
+
+def _copilot_project(project_dir: Path) -> None:
+    (project_dir / ".github").mkdir(exist_ok=True)
+    (project_dir / ".github" / "copilot-instructions.md").write_text("# ci\n")
+
+
+def _copilot_outputs(row: dict, field: str = "outputs") -> set[str]:
+    return {Path(o["path"]).as_posix() for o in row[field] if o["client"] == "copilot"}
+
+
+def test_project_copilot_writes_both_mcp_files_and_uninstall_removes_both(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Copilot CLI never reads `.vscode/mcp.json`, so a project install also
+    writes `.github/mcp.json` (`mcpServers`, `${VAR}` verbatim — the CLI
+    expands it). Status lists both outputs, a repeat install is byte-stable,
+    and uninstall removes both entries but neither file."""
+    runner = grim_at(project_dir)
+    ref = _release(runner, project_dir, registry, unique_repo, body=ENV_DESCRIPTOR)
+    _copilot_project(project_dir)
+    write_config(project_dir)
+    runner.json("add", "--no-install", ref)
+    rows = runner.json("install", "--client", "copilot")["items"]
+    assert rows[0]["status"] == "installed", rows
+
+    vscode = json.loads((project_dir / _VSCODE_MCP).read_text())["servers"]["grim-mcp"]
+    assert vscode["type"] == "stdio"
+    assert vscode["env"]["GRIM_TOKEN"] == "${env:GITHUB_TOKEN}"
+    cli = json.loads((project_dir / _GITHUB_MCP).read_text())["mcpServers"]["grim-mcp"]
+    assert cli["type"] == "local"
+    assert cli["command"] == "grim"
+    assert cli["env"]["GRIM_TOKEN"] == "${GITHUB_TOKEN}", "reference written verbatim"
+    assert cli["tools"] == ["*"]
+
+    row = next(r for r in runner.json("status")["items"] if r["name"] == "grim-mcp")
+    assert row["state"] == "installed", row
+    assert _copilot_outputs(row, "outputs_pending") == set(), row
+    outputs = _copilot_outputs(row)
+    assert any(p.endswith(".vscode/mcp.json") for p in outputs), row
+    assert any(p.endswith(".github/mcp.json") for p in outputs), row
+
+    before = {p: (project_dir / p).read_bytes() for p in (_VSCODE_MCP, _GITHUB_MCP)}
+    again = runner.json("install", "--client", "copilot")["items"]
+    assert again[0]["status"] == "unchanged", again
+    for p, data in before.items():
+        assert (project_dir / p).read_bytes() == data, f"{p} must be byte-stable on repeat install"
+
+    out = runner.json("uninstall", "mcp", "grim-mcp")
+    assert out["status"] in ("uninstalled", "removed"), out
+    for p, container in ((_VSCODE_MCP, "servers"), (_GITHUB_MCP, "mcpServers")):
+        cfg = project_dir / p
+        assert cfg.is_file(), f"{p} itself must survive"
+        assert "grim-mcp" not in json.loads(cfg.read_text()).get(container, {}), p
+
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="file symlinks need a privilege on Windows")
+def test_project_copilot_mcp_files_aliased_by_a_symlink_compose(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A workspace that links `.github/mcp.json` to `.vscode/mcp.json` gives
+    Copilot's two registrations one physical file. The second splice must
+    land on top of the first, not on bytes read before it was written, so
+    both members survive and a repeat install is a byte-stable no-op."""
+    runner = grim_at(project_dir)
+    ref = _release(runner, project_dir, registry, unique_repo, body=ENV_DESCRIPTOR)
+    _copilot_project(project_dir)
+    (project_dir / ".vscode").mkdir(exist_ok=True)
+    (project_dir / _VSCODE_MCP).write_text("{}\n")
+    (project_dir / _GITHUB_MCP).symlink_to(Path("..") / _VSCODE_MCP)
+    write_config(project_dir)
+    runner.json("add", "--no-install", ref)
+    runner.json("install", "--client", "copilot")
+
+    doc = json.loads((project_dir / _VSCODE_MCP).read_text())
+    assert "grim-mcp" in doc["servers"], doc
+    assert "grim-mcp" in doc["mcpServers"], doc
+    assert (project_dir / _GITHUB_MCP).is_symlink(), "the alias survives the write"
+
+    before = (project_dir / _VSCODE_MCP).read_bytes()
+    again = runner.json("install", "--client", "copilot")["items"]
+    assert again[0]["status"] == "unchanged", again
+    assert (project_dir / _VSCODE_MCP).read_bytes() == before
+
+def test_project_copilot_record_without_cli_file_heals_on_install(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A Copilot project install recorded before grim wrote `.github/mcp.json`
+    covers only `.vscode/mcp.json`. Status reports the CLI file pending; the
+    next install writes it without touching the VS Code entry, and after
+    that nothing is pending."""
+    runner = grim_at(project_dir)
+    ref = _release(runner, project_dir, registry, unique_repo)
+    _copilot_project(project_dir)
+    write_config(project_dir)
+    runner.json("add", "--no-install", ref)
+    runner.json("install", "--client", "copilot")
+
+    # Rewind to the pre-change shape: drop the CLI file and its record output.
+    (project_dir / _GITHUB_MCP).unlink()
+    state_path = project_dir / ".grimoire" / "state.json"
+    state = json.loads(state_path.read_text())
+    record = next(r for r in state["records"] if r["name"] == "grim-mcp")
+    record["outputs"] = [o for o in record["outputs"] if not o["target"]["relative"].endswith(".github/mcp.json")]
+    assert len(record["outputs"]) == 1, record
+    state_path.write_text(json.dumps(state))
+    vscode_before = (project_dir / _VSCODE_MCP).read_bytes()
+
+    row = next(r for r in runner.json("status")["items"] if r["name"] == "grim-mcp")
+    assert row["state"] == "installed", row
+    pending = _copilot_outputs(row, "outputs_pending")
+    assert len(pending) == 1 and pending.pop().endswith(".github/mcp.json"), row
+
+    runner.json("install", "--client", "copilot")
+    assert (project_dir / _VSCODE_MCP).read_bytes() == vscode_before, "the VS Code entry is untouched"
+    assert json.loads((project_dir / _GITHUB_MCP).read_text())["mcpServers"]["grim-mcp"]["command"] == "grim"
+    row = next(r for r in runner.json("status")["items"] if r["name"] == "grim-mcp")
+    assert row["state"] == "installed", row
+    assert _copilot_outputs(row, "outputs_pending") == set(), row
+    assert len(_copilot_outputs(row)) == 2, row
+
+
+_OAUTH_DESCRIPTOR = """\
+description = "Remote server behind OAuth."
+
+[server]
+transport = "http"
+url = "https://mcp.example.com/mcp"
+
+[server.oauth]
+"""
+
+
+@pytest.mark.parametrize(
+    "oauth, written",
+    [
+        ('client_id = "grim-client"\n', True),
+        ('client_id = "grim-client"\nscopes = ["read"]\n', False),
+        ('client_id = "grim-client"\ncallback_port = 8080\n', False),
+    ],
+    ids=["client-id-only", "scopes", "callback-port"],
+)
+def test_project_copilot_oauth_client_id_written_or_skipped(
+    grim_at, project_dir: Path, registry: str, unique_repo: str, oauth: str, written: bool
+) -> None:
+    """Lossless-or-skip: a client id alone becomes VS Code's `oauth.clientId`
+    and the CLI's `oauthClientId`; any other oauth field skips Copilot with a
+    warning naming it, while Claude (full mapping) still registers."""
+    runner = grim_at(project_dir)
+    ref = _release(runner, project_dir, registry, unique_repo, body=_OAUTH_DESCRIPTOR + oauth)
+    _copilot_project(project_dir)
+    write_config(project_dir)
+    runner.json("add", "--no-install", ref)
+    result = runner.run("install", "--client", "claude", "--client", "copilot", check=False)
+    assert result.returncode == 0, result.stderr
+    assert "grim-mcp" in json.loads((project_dir / ".mcp.json").read_text())["mcpServers"]
+
+    if written:
+        vscode = json.loads((project_dir / _VSCODE_MCP).read_text())["servers"]["grim-mcp"]
+        assert vscode["oauth"] == {"clientId": "grim-client"}
+        cli = json.loads((project_dir / _GITHUB_MCP).read_text())["mcpServers"]["grim-mcp"]
+        assert cli["oauthClientId"] == "grim-client"
+        assert cli["type"] == "http"
+    else:
+        for p in (_VSCODE_MCP, _GITHUB_MCP):
+            assert not (project_dir / p).exists(), f"{p} must not be written for a lossy oauth block"
+        unmapped = "scopes" if "scopes" in oauth else "callback_port"
+        assert unmapped in result.stderr, result.stderr
+
+
+def test_update_copilot_one_file_declines_new_pin_and_its_stale_entry_goes(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A pin that only one Copilot file can take: the CLI rejects a url with a
+    `${VAR}` in the port, VS Code does not. The update re-splices
+    `.vscode/mcp.json` and removes the old `.github/mcp.json` member instead of
+    stranding it outside every record."""
+    runner = grim_at(project_dir)
+    descriptor = project_dir / "src" / "mcp" / "grim-mcp.toml"
+    descriptor.parent.mkdir(parents=True)
+    repo_path = f"{unique_repo}/mcp/grim-mcp"
+    repo = f"{registry}/{repo_path}"
+    body = 'description = "Remote."\n\n[server]\ntransport = "http"\nurl = "{url}"\n'
+
+    descriptor.write_text(body.format(url="http://mcp.example.com:8080/mcp"))
+    runner.json("release", str(descriptor), f"{repo}:1.0.0", "--kind", "mcp")
+    runner.json("release", str(descriptor), f"{repo}:stable", "--kind", "mcp")
+    _copilot_project(project_dir)
+    (project_dir / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{repo}:stable"\n')
+    runner.run("lock", check=False)
+    runner.json("install", "--client", "copilot")
+    assert "grim-mcp" in json.loads((project_dir / _GITHUB_MCP).read_text())["mcpServers"]
+
+    descriptor.write_text(body.format(url="http://mcp.example.com:${PORT}/mcp"))
+    second = runner.json("release", str(descriptor), f"{repo}:2.0.0", "--kind", "mcp")
+    retag(repo_path, "stable", second["manifest_digest"])
+    result = runner.run("update", "--client", "copilot", check=False)
+    assert result.returncode == 0, result.stderr
+    assert ".github/mcp.json" in result.stderr, result.stderr
+
+    vscode = json.loads((project_dir / _VSCODE_MCP).read_text())["servers"]["grim-mcp"]
+    assert vscode["url"] == "http://mcp.example.com:${env:PORT}/mcp"
+    assert "grim-mcp" not in json.loads((project_dir / _GITHUB_MCP).read_text()).get("mcpServers", {}), (
+        "the stale CLI entry must not outlive its record"
+    )
+    row = next(r for r in runner.json("status")["items"] if r["name"] == "grim-mcp")
+    outputs = _copilot_outputs(row)
+    assert len(outputs) == 1 and outputs.pop().endswith(".vscode/mcp.json"), row
+    # Pinned: plain `grim status` has no local copy of a registry descriptor
+    # (no manifest cache), so the declined file still reads pending there.
+    # Follow-up: cache manifests so status can ask the renderer too.
+    pending = _copilot_outputs(row, "outputs_pending")
+    assert len(pending) == 1 and pending.pop().endswith(".github/mcp.json"), row
+    # The install gate does ask it: a repeat install is a byte-stable no-op.
+    before = {p: (project_dir / p).read_bytes() for p in (_VSCODE_MCP, _GITHUB_MCP)}
+    again = runner.json("install", "--client", "copilot")["items"]
+    assert again[0]["status"] == "unchanged", again
+    for p, data in before.items():
+        assert (project_dir / p).read_bytes() == data, p
+
+
+
+def test_project_copilot_port_env_url_reinstalls_unchanged(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A `${PORT}` url is valid for VS Code but not for the Copilot CLI (it
+    validates before expanding), so
+    `.github/mcp.json` is skipped on every pass. The skip must not make each
+    later install re-run the MCP pass and report `updated`."""
+    runner = grim_at(project_dir)
+    body = 'description = "Remote."\n\n[server]\ntransport = "http"\nurl = "http://mcp.example.com:${PORT}/mcp"\n'
+    ref = _release(runner, project_dir, registry, unique_repo, body=body)
+    _copilot_project(project_dir)
+    write_config(project_dir)
+    runner.json("add", "--no-install", ref)
+    first = runner.run("install", "--client", "copilot", check=False)
+    assert first.returncode == 0, first.stderr
+    assert "grim-mcp" in json.loads((project_dir / _VSCODE_MCP).read_text())["servers"]
+    cli = project_dir / _GITHUB_MCP
+    assert not cli.exists() or "grim-mcp" not in json.loads(cli.read_text()).get("mcpServers", {})
+
+    before = (project_dir / _VSCODE_MCP).read_bytes()
+    again = runner.json("install", "--client", "copilot")["items"]
+    assert again[0]["status"] == "unchanged", again
+    assert (project_dir / _VSCODE_MCP).read_bytes() == before
+
+# ── Gemini: `timeout` is not projected (grimoire-rs/grimoire#146) ─────────
+
+
+def _entry_hash(value: dict) -> str:
+    """grim's semantic hash of a managed MCP member: sha256 over the compact
+    JSON of the value, keys sorted (``install_state::entry_value_hash``)."""
+    canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _rehash_recorded_entry(state_path: Path, client: str, value: dict) -> None:
+    """Point the recorded hash of ``client``'s MCP entry at ``value`` — what
+    an older grim that rendered ``value`` would have recorded."""
+    state = json.loads(state_path.read_text())
+    hits = 0
+
+    def walk(node: object) -> None:
+        nonlocal hits
+        if isinstance(node, dict):
+            if node.get("client") == client and node.get("entry"):
+                node["content_hash"] = _entry_hash(value)
+                hits += 1
+            for child in node.values():
+                walk(child)
+        elif isinstance(node, list):
+            for child in node:
+                walk(child)
+
+    walk(state)
+    assert hits == 1, f"expected one {client} MCP output in {state_path}"
+    state_path.write_text(json.dumps(state))
+
+
+def test_gemini_drops_timeout_with_warning_and_heals_an_old_render(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Gemini applies `timeout` to every tool call, so grim no longer writes
+    it and warns instead. An entry an older grim rendered with `timeout`
+    stays `installed` (the record matches it), keeps its bytes on a
+    same-pin install, and is rewritten without the key on the next pin
+    change; a repeat install is then a no-op that `status` reports
+    unmodified. A hand-added `timeout` reads `modified` and is refused."""
+    runner = grim_at(project_dir)
+    descriptor = project_dir / "src" / "mcp" / "grim-mcp.toml"
+    descriptor.parent.mkdir(parents=True)
+    repo_path = f"{unique_repo}/mcp/grim-mcp"
+    repo = f"{registry}/{repo_path}"
+    descriptor.write_text(DESCRIPTOR + "timeout = 7000\n")
+    runner.json("release", str(descriptor), f"{repo}:1.0.0", "--kind", "mcp")
+    runner.json("release", str(descriptor), f"{repo}:stable", "--kind", "mcp")
+    (project_dir / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{repo}:stable"\n')
+    runner.run("lock", check=False)
+
+    first = runner.run("install", "--client", "gemini", check=False)
+    assert first.returncode == 0, first.stderr
+    assert "timeout dropped for gemini" in first.stderr, first.stderr
+    cfg = project_dir / ".gemini" / "settings.json"
+    entry = json.loads(cfg.read_text())["mcpServers"]["grim-mcp"]
+    assert "timeout" not in entry, entry
+
+    # What an older grim wrote and recorded: the same entry plus `timeout`.
+    old = {**entry, "timeout": 7000}
+    cfg.write_text(json.dumps({"mcpServers": {"grim-mcp": old}}, indent=2))
+    _rehash_recorded_entry(project_dir / ".grimoire" / "state.json", "gemini", old)
+    row = next(r for r in runner.json("status")["items"] if r["name"] == "grim-mcp")
+    assert row["state"] == "installed", f"the simulated old render must match its record: {row}"
+    for extra in ((), ("--force",)):
+        runner.json("install", "--client", "gemini", *extra)
+        assert json.loads(cfg.read_text())["mcpServers"]["grim-mcp"]["timeout"] == 7000, (
+            f"a same-pin install {extra} keeps the intact old bytes (the integrity gate trusts the record)"
+        )
+
+    descriptor.write_text(DESCRIPTOR.replace("grim as an MCP server", "grim over MCP") + "timeout = 7000\n")
+    second = runner.json("release", str(descriptor), f"{repo}:1.0.1", "--kind", "mcp")
+    retag(repo_path, "stable", second["manifest_digest"])
+    runner.json("update", "--client", "gemini")
+    healed = json.loads(cfg.read_text())["mcpServers"]["grim-mcp"]
+    assert "timeout" not in healed, f"the pin change must re-render without timeout: {healed}"
+
+    before = cfg.read_bytes()
+    again = runner.json("install", "--client", "gemini")["items"]
+    assert all(r["status"] == "unchanged" for r in again), again
+    assert cfg.read_bytes() == before, "regeneration must be byte-identical"
+    row = next(r for r in runner.json("status")["items"] if r["name"] == "grim-mcp")
+    assert row["state"] == "installed", row
+
+    # A timeout the user adds back by hand is theirs: modified, never clobbered.
+    cfg.write_text(json.dumps({"mcpServers": {"grim-mcp": {**healed, "timeout": 7000}}}))
+    row = next(r for r in runner.json("status")["items"] if r["name"] == "grim-mcp")
+    assert row["state"] == "modified", row
+    refused = runner.run("install", "--client", "gemini", check=False)
+    assert refused.returncode == 65, refused.stderr
+    assert json.loads(cfg.read_text())["mcpServers"]["grim-mcp"]["timeout"] == 7000
+
+    # The documented immediate remedy: delete the entry, then install.
+    cfg.write_text(json.dumps({"mcpServers": {}}))
+    runner.json("install", "--client", "gemini")
+    assert "timeout" not in json.loads(cfg.read_text())["mcpServers"]["grim-mcp"]
+    row = next(r for r in runner.json("status")["items"] if r["name"] == "grim-mcp")
+    assert row["state"] == "installed", row
+
+
+# ── Warp: `.warp/.mcp.json` (grimoire-rs/grimoire#155) ───────────────────
+
+
+def test_warp_project_registers_in_dot_warp_mcp_json_and_is_idempotent(
+    grim_at, bare_project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A project install writes Warp's `.warp/.mcp.json` under
+    `mcpServers`, mapping `cwd` to `working_directory`; a repeat install is a
+    byte-identical no-op and `status` reports it installed with nothing
+    pending. Warp is the only detected client here."""
+    project_dir = bare_project_dir
+    runner = grim_at(project_dir)
+    ref = _release(runner, project_dir, registry, unique_repo, body=DESCRIPTOR + 'cwd = "./srv"\n')
+    (project_dir / ".warp").mkdir()
+    write_config(project_dir)
+    runner.json("add", "--no-install", ref)
+
+    first = runner.json("install", "--client", "warp")["items"]
+    assert first[0]["status"] == "installed", first
+    cfg = project_dir / ".warp" / ".mcp.json"
+    assert json.loads(cfg.read_text()) == {
+        "mcpServers": {"grim-mcp": {"command": "grim", "args": ["mcp"], "working_directory": "./srv"}}
+    }
+
+    before = cfg.read_bytes()
+    second = runner.json("install", "--client", "warp")["items"]
+    assert second[0]["status"] == "unchanged", second
+    assert cfg.read_bytes() == before, "warp config must be byte-stable on repeat install"
+    row = next(r for r in runner.json("status")["items"] if r["name"] == "grim-mcp")
+    assert row["state"] == "installed", row
+    assert row["outputs_pending"] == [], row
+
+
+def test_warp_global_registers_in_home_dot_warp_mcp_json(
+    grim_binary, grim_home: Path, registry: str, unique_repo: str, tmp_path: Path
+) -> None:
+    """A global install writes `~/.warp/.mcp.json`, the same path on every OS."""
+    from src.runner import GrimRunner
+
+    runner = GrimRunner(grim_binary, grim_home)
+    descriptor = tmp_path / "src" / "mcp" / "grim-mcp.toml"
+    descriptor.parent.mkdir(parents=True)
+    descriptor.write_text(
+        'description = "d"\n[server]\ntransport = "http"\nurl = "https://mcp.example.com/mcp"\n'
+        'headers = { X-Client = "grim" }\n'
+    )
+    ref = f"{registry}/{unique_repo}/mcp/grim-mcp:1.0.0"
+    runner.json("release", str(descriptor), ref, "--kind", "mcp")
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n')
+    runner.json("lock", "--global")
+
+    rows = runner.json("install", "--global", "--client", "warp")["items"]
+    assert rows[0]["status"] == "installed", rows
+    entry = json.loads((runner.home / ".warp" / ".mcp.json").read_text())["mcpServers"]["grim-mcp"]
+    assert entry == {"url": "https://mcp.example.com/mcp", "headers": {"X-Client": "grim"}}, entry
+    row = next(r for r in runner.json("status", "--global")["items"] if r["name"] == "grim-mcp")
+    assert row["state"] == "installed", row
+
+
+@pytest.mark.parametrize(
+    "body, reason",
+    [
+        (ENV_DESCRIPTOR, "env-ref substitution is undocumented"),
+        (
+            'description = "d"\n[server]\ntransport = "http"\nurl = "https://x.example.com/mcp"\n'
+            '[server.oauth]\nclient_id = "grim"\n',
+            "no oauth field for client_id",
+        ),
+    ],
+    ids=["env-ref", "oauth"],
+)
+def test_warp_skips_env_ref_and_oauth_descriptors_with_a_warning(
+    grim_at, project_dir: Path, registry: str, unique_repo: str, body: str, reason: str
+) -> None:
+    """Warp documents neither `${VAR}` expansion in `.mcp.json` nor oauth
+    config keys, so such a server is skipped for Warp with a warning while
+    Claude (also detected) still registers it and the install succeeds."""
+    runner = grim_at(project_dir)
+    ref = _release(runner, project_dir, registry, unique_repo, body=body)
+    (project_dir / ".warp").mkdir()
+    write_config(project_dir)
+    runner.json("add", "--no-install", ref)
+
+    result = runner.run("install", check=False)
+    assert result.returncode == 0, result.stderr
+    assert "skipped for warp" in result.stderr and reason in result.stderr, result.stderr
+    assert "grim-mcp" in json.loads((project_dir / ".mcp.json").read_text())["mcpServers"]
+    cfg = project_dir / ".warp" / ".mcp.json"
+    assert not cfg.exists() or "grim-mcp" not in json.loads(cfg.read_text()).get("mcpServers", {})
+
+
+
+def test_warp_global_env_ref_server_is_never_pending_and_reinstalls_unchanged(
+    grim_binary, grim_home: Path, registry: str, unique_repo: str, tmp_path: Path
+) -> None:
+    """Warp skips a `${VAR}` server on every pass, so the install gate must
+    not count its surface as uncovered: otherwise every `grim install`
+    re-runs the MCP pass and reports `updated` for a file it never writes."""
+    from src.runner import GrimRunner
+
+    runner = GrimRunner(grim_binary, grim_home)
+    descriptor = _write_descriptor(tmp_path / "src", name="grim-mcp", body=ENV_DESCRIPTOR)
+    ref = f"{registry}/{unique_repo}/mcp/grim-mcp:1.0.0"
+    runner.json("release", str(descriptor), ref, "--kind", "mcp")
+    (grim_home / "grimoire.toml").write_text(
+        f'[options]\nclients = ["claude", "warp"]\n\n[mcp]\ngrim-mcp = "{ref}"\n'
+    )
+    runner.json("lock", "--global")
+
+    first = runner.run("install", "--global", check=False)
+    assert first.returncode == 0, first.stderr
+    assert "skipped for warp" in first.stderr, first.stderr
+    claude_cfg = runner.home / ".claude.json"
+    before = claude_cfg.read_bytes()
+    again = runner.json("install", "--global")["items"]
+    assert again[0]["status"] == "unchanged", again
+    assert claude_cfg.read_bytes() == before
+    assert not (runner.home / ".warp" / ".mcp.json").exists()
+    # Pinned: plain `grim status` has no local copy of a registry descriptor
+    # (no manifest cache), so it still lists Warp. Follow-up: cache manifests
+    # so status can ask the renderer too.
+    row = next(r for r in runner.json("status", "--global")["items"] if r["name"] == "grim-mcp")
+    assert [o["client"] for o in row["outputs_pending"]] == ["warp"], row
+
+def test_warp_refuses_untracked_hand_added_entry_then_force_replaces(
+    grim_at, bare_project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A same-named server the user added to `.warp/.mcp.json` by hand has no
+    grim record, so `grim install` refuses to clobber it (exit 65) and leaves
+    it byte-untouched; `--force` replaces it with grim's entry. Mirrors
+    `test_global_copilot_refuses_untracked_hand_inlined_workaround_then_force_replaces`."""
+    project_dir = bare_project_dir
+    runner = grim_at(project_dir)
+    ref = _release(runner, project_dir, registry, unique_repo)
+    cfg = project_dir / ".warp" / ".mcp.json"
+    cfg.parent.mkdir(parents=True)
+    hand_written = json.dumps({"mcpServers": {"grim-mcp": {"command": "npx", "args": ["grim-by-hand"]}}}, indent=2)
+    cfg.write_text(hand_written)
+    write_config(project_dir)
+    runner.json("add", "--no-install", ref)
+
+    result = runner.run("install", "--client", "warp", check=False)
+    assert result.returncode == 65, result.stderr
+    assert "--force" in result.stderr and "warp" in result.stderr, result.stderr
+    assert cfg.read_text() == hand_written, "refusal must leave the hand-written entry untouched"
+
+    rows = runner.json("install", "--client", "warp", "--force")["items"]
+    assert rows[0]["status"] == "installed", rows
+    assert json.loads(cfg.read_text())["mcpServers"]["grim-mcp"] == {"command": "grim", "args": ["mcp"]}
+    row = next(r for r in runner.json("status")["items"] if r["name"] == "grim-mcp")
+    assert row["state"] == "installed", row

@@ -12,6 +12,7 @@
 
 pub mod claude_config;
 pub mod client_target;
+pub mod cline_lock;
 pub mod content_hash;
 pub mod expected_outputs;
 pub mod ignore_set;

@@ -143,8 +143,8 @@ publish` surface an affected key through the same unknown-key warning.
 reserved set together when wave-1 vendor support landed. A `<vendor>.*`
 metadata key using one of these six prefixes that was plain data under
 earlier grim versions is now a tool-namespaced key: consumed by
-[Cursor][cursor-subagents-docs] or [Gemini][gemini-subagents-docs]
-against their agent registries when one is a target (unknown fields
+[Cursor][cursor-subagents-docs], [Gemini][gemini-subagents-docs] or
+[Junie][junie-subagents-docs] against their agent registries when one is a target (unknown fields
 warn and are dropped); for skills, all six carry an empty registry, so
 every skill key using one of these prefixes warns and drops regardless
 of vendor (see [Empty skill registries](#empty-registries)) — and
@@ -154,11 +154,15 @@ unknown-key warning.
 
 `cline`, `droid`, `goose`, `warp`, `openclaw` and `kilo` joined together when
 the skills-only batch landed, and their case is the simplest of the three: all
-six carry **empty registries for every kind**, because none of them documents a
-`<vendor>.*` frontmatter field grim could lift. So a metadata key using one of
-these six prefixes warns and drops for *every* target, including its own
-client — there is nothing for it to lift into. If one of these vendors later
-documents a native field, adding it to that vendor's registry is additive.
+six carried **empty registries for every kind**, because none of them
+documented a `<vendor>.*` frontmatter field grim could lift. So a metadata key
+using one of these prefixes warns and drops for *every* target, including its
+own client, because there is nothing for it to lift into. Two agent registries
+are the exception, both added later and additively: Kilo's
+([`kilo.*`](#kilo-agent-registry)) and [Droid][droid-subagents-docs]'s
+([`droid.*`](#droid-agent-registry), holding `droid.reasoning-effort`). A
+`kilo.*` or `droid.*` agent key that used to warn and drop now lifts for its
+own client. Goose installs agents too, with an empty `goose.*` registry.
 
 `qoder` joined alone, with **empty registries for every kind** as well — but
 unlike the skills-only batch, [Qoder][qoder-docs] installs rules and agents,
@@ -339,6 +343,68 @@ projectable, mapped from `GEMINI_AGENT_FIELDS` in
 | `gemini.timeout-mins` | `timeout_mins` | integer | The native key uses an underscore |
 | `gemini.kind` | `kind` | string | Subagent kind selector |
 
+## The kilo.* agent registry {#kilo-agent-registry}
+
+[Kilo][kilo-agents-docs] agents use OpenCode's agent format, so they render
+the same way. The file name is the agent name, so the `name` field is
+dropped. The common `tools` field is dropped with a warning. Eight vendor keys
+are projectable, mapped from `KILO_AGENT_FIELDS` in
+`src/install/vendor_kilo.rs`.
+
+| Key | Native field | Type | Notes |
+|---|---|---|---|
+| `kilo.model` | `model` | string | **Overrides** the common `model` field for Kilo, which expects `provider/model-id` |
+| `kilo.mode` | `mode` | enum | Accepted values: `primary`, `subagent`, `all`. Kilo defaults a custom agent to `all` |
+| `kilo.temperature` | `temperature` | float | |
+| `kilo.top-p` | `top_p` | float | The native key uses an underscore |
+| `kilo.steps` | `steps` | integer | Maximum agentic iterations. Kilo accepts only a positive safe integer (≤ 2^53−1); grim drops any other value with a warning |
+| `kilo.disable` | `disable` | bool | |
+| `kilo.hidden` | `hidden` | bool | Hides a `subagent` from the `@` menu |
+| `kilo.color` | `color` | string | A six-digit hex color such as `#FF5733`, or a theme color: `primary`, `secondary`, `accent`, `success`, `warning`, `error`, `info`. grim drops any other value with a warning |
+
+Kilo skips an agent whose `steps` or `color` it rejects, so grim checks
+both at install time. An invalid value is dropped with a warning, and the
+agent installs without it.
+The registry has no prompt key: the agent body is the prompt, and Kilo lets
+it override a frontmatter `prompt`. `permission` (an object) is not in this
+registry.
+
+## The junie.* agent registry {#junie-agent-registry}
+
+[Junie][junie-subagents-docs] subagents render to native
+`.junie/agents/<name>.md` frontmatter, with the common `tools` field emitted
+as a YAML list. Three vendor keys are projectable, mapped from
+`JUNIE_AGENT_FIELDS` in `src/install/vendor_junie.rs`. None of them overrides
+a common field.
+
+| Key | Native field | Type | Notes |
+|---|---|---|---|
+| `junie.permission-mode` | `permissionMode` | enum | One of `default`, `acceptEdits`, `dontAsk`, `bypassPermissions`, `plan` |
+| `junie.reasoning-level` | `reasoningLevel` | enum | One of `low`, `medium`, `high`. Upstream support varies by model |
+| `junie.max-turns` | `maxTurns` | integer | Step limit for the subagent |
+
+[Junie][junie-subagents-docs] accepts only agent names matching
+`[a-z][a-z0-9_-]*`. An agent whose name starts with a digit or contains a
+`.` is skipped for Junie with a warning. Every other client still receives
+it. When only the agent's own frontmatter `name` fails that check, for
+example after `grim add --name`, grim omits `name:` and Junie names the agent
+after its file. A non-positive `junie.max-turns` is dropped with a warning.
+
+## The droid.* agent registry {#droid-agent-registry}
+
+[Droid][droid-subagents-docs] custom droids render to native
+`.factory/droids/<name>.md` frontmatter. The common `model` passes through
+verbatim, `inherit` included, and the common `tools` becomes a YAML list of
+Droid tool ids. One vendor key is projectable, mapped from
+`DROID_AGENT_FIELDS` in `src/install/vendor_droid.rs`.
+
+| Key | Native field | Type | Notes |
+|---|---|---|---|
+| `droid.reasoning-effort` | `reasoningEffort` | enum: `low`, `medium`, `high` | Droid ignores it when `model` is `inherit` |
+
+Droid only accepts agent names matching `[a-z0-9_-]+`. An agent whose name
+contains a `.` is skipped for Droid with a warning; grim never renames it.
+
 ## Empty skill registries for every non-Claude client {#empty-registries}
 
 Only [Claude Code][claude-code-docs] carries a client-specific *skill*
@@ -353,11 +419,12 @@ vendor namespace at all:
 
 - **Non-skill namespaces** — [Codex][codex-subagents-docs],
   [Cursor][cursor-subagents-docs], [Gemini][gemini-subagents-docs],
-  [OpenCode][opencode-agents-docs], and [GitHub Copilot][copilot-agents-docs]
+  [Junie][junie-subagents-docs], [OpenCode][opencode-agents-docs],
+  [GitHub Copilot][copilot-agents-docs], [Kilo][kilo-agents-docs], and [Droid][droid-subagents-docs]
   each project *agent* frontmatter through their own `<vendor>.*` agent
   registry (the agent-registry sections above), but define no skill
   namespace.
-- **No namespace at all** — Kiro, Junie, Zed, Amp, and Qoder carry no vendor
+- **No namespace at all** — Kiro, Zed, Amp, and Qoder carry no vendor
   registry for any kind; they read the universal fields only.
 
 Any key prefixed with a client namespace (e.g. `opencode.`, `copilot.`, or
@@ -406,12 +473,12 @@ environment variable):
 
 | Client | Directory | Env override |
 |---|---|---|
-| [Claude Code][claude-code-docs] | `~/.claude/skills/<name>/` | `$CLAUDE_CONFIG_DIR/skills/<name>/` — the variable replaces the entire `~/.claude` tree ([claude-directory reference][claude-dir-docs]) |
+| [Claude Code][claude-code-docs] | `~/.claude/skills/<name>/` | `$CLAUDE_CONFIG_DIR/skills/<name>/` — the variable replaces the entire `~/.claude` tree ([claude-directory reference][claude-dir-docs]). grim also reads it from the `env` block of Claude's managed and user settings, which win over the shell export as they do in Claude |
 | [GitHub Copilot][copilot-skills-docs] | `~/.copilot/skills/<name>/` | `$COPILOT_HOME/skills/<name>/` — the variable replaces the entire `~/.copilot` path ([Copilot CLI config-dir reference][copilot-config-dir-docs]) |
 | [OpenCode][opencode-skills-docs] | `~/.config/opencode/skills/<name>/` (or `$XDG_CONFIG_HOME/opencode/skills/<name>/`) | `$OPENCODE_CONFIG_DIR/skills/<name>/` — OpenCode's *additive* scan directory ([OpenCode config docs][opencode-config-docs]): the XDG default stays scanned either way; grim prefers the override as install target when set. `$OPENCODE_CONFIG` (a config *file* path) does not affect skill discovery and plays no role here |
 | [Cursor][cursor-subagents-docs] | `~/.cursor/skills/<name>/` | None — `CURSOR_CONFIG_DIR` is not honored (possibly CLI-only; watchlisted) |
 | [Kiro][kiro-docs] | `~/.kiro/skills/<name>/` | `$KIRO_HOME/skills/<name>/` — the variable replaces the entire `~/.kiro` tree, with **no** `.kiro` segment appended ([Kiro CLI configuration reference][kiro-cli-config-docs]). grim follows the **CLI**. The Kiro **IDE** still hardcodes `~/.kiro` and ignores the variable ([kiro #9148]), so a user who sets `KIRO_HOME` and also uses the IDE gets grim's output where the CLI reads it, not the IDE |
-| [Junie][junie-docs] | `~/.junie/skills/<name>/` | None — `JUNIE_HOME` (which replaces `~/.junie`) is not honored; the per-kind `JUNIE_*_LOCATIONS` family only adds search paths, so grim's default paths stay read |
+| [Junie][junie-docs] | `~/.junie/skills/<name>/` | `$JUNIE_HOME/skills/<name>/` — the variable replaces the entire `~/.junie` tree, with **no** `.junie` segment appended. The per-kind `JUNIE_*_LOCATIONS` family only adds search paths, so it is not needed |
 | [Codex][codex-skills-docs] | `$HOME/.agents/skills/<name>/` (shared pool) | None — `$CODEX_HOME` does not relocate skills; they are always keyed on `$HOME` |
 | [Gemini][gemini-subagents-docs] | `$HOME/.agents/skills/<name>/` (shared pool) | None **for skills** — they always key on `$HOME`. `GEMINI_CONFIG_DIR` does not exist upstream, but `$GEMINI_CLI_HOME` **does**, and grim honors it: it replaces the *home directory*, so Gemini's config root (agents, `settings.json`) becomes `$GEMINI_CLI_HOME/.gemini` — the `.gemini` segment is still appended, the opposite shape to `$CODEX_HOME`/`$KIRO_HOME`. The shared pool deliberately does not follow it: one physical tree serves every pool client under a single refcount, so it stays keyed on the real `$HOME` |
 | [Zed][zed-docs] | `$HOME/.agents/skills/<name>/` (shared pool) | None — skills always key on `$HOME`, independent of Zed's settings root. That settings root is `$XDG_CONFIG_HOME`-rooted on **Linux and FreeBSD only**; macOS is a hardcoded `~/.config/zed` and Windows is `%APPDATA%\Zed` |
@@ -421,7 +488,7 @@ environment variable):
 | [Droid][droid-docs] | `~/.factory/skills/<name>/` | None — no `FACTORY_HOME` or `DROID_HOME` appears in current docs |
 | [Goose][goose-docs] | `$HOME/.agents/skills/<name>/` (shared pool) — Goose's own `.goose/skills/` is labelled backward-compatibility upstream, and `.agents/skills` the recommended location | None — skills always key on `$HOME`. `$GOOSE_PATH_ROOT` relocates Goose's *config* root, which grim only reads for detection |
 | [Warp][warp-docs] | `~/.warp/skills/<name>/` — the same path on macOS, Linux and Windows | None found in current docs |
-| [OpenClaw][openclaw-docs] | `~/.openclaw/skills/<name>/` — **global scope only**; OpenClaw has no per-repository scope | None — `$OPENCLAW_HOME` replaces the home directory for OpenClaw's own paths upstream, but grim does not honor it yet, so a user who sets it gets skills under the real `~/.openclaw` |
+| [OpenClaw][openclaw-docs] | `~/.openclaw/skills/<name>/` — **global scope only**; OpenClaw has no per-repository scope | `$OPENCLAW_STATE_DIR/skills/<name>/` when set; else `$OPENCLAW_HOME/.openclaw/skills/<name>/` — `$OPENCLAW_HOME` replaces the home directory, so the `.openclaw` segment is still appended |
 | [Kilo][kilo-docs] | `~/.kilo/skills/<name>/` | None found in current docs |
 | [Qoder][qoder-docs] | `~/.qoder/skills/<name>/` | `$QODER_CONFIG_DIR/skills/<name>/` — the variable replaces the entire `~/.qoder` tree, with **no** `.qoder` segment appended ([Qoder config scope reference][qoder-config-docs]) |
 | `agents` (vendor-neutral) | `$HOME/.agents/skills/<name>/` (shared pool — its only surface) | None — the pool is never relocated by any vendor variable |
@@ -467,6 +534,7 @@ The mapping table for rules:
 | [Cursor][cursor-subagents-docs] | `paths` | top-level | `globs` | Comma-joined into a single string, plus a computed `alwaysApply: false`; unscoped (no `paths`) emits no `globs` and `alwaysApply: true` instead (`src/install/vendor_cursor.rs`) |
 | [Qoder][qoder-rules-docs] | `paths` | top-level | `paths` | Verbatim, as for Claude Code. Qoder loads `rules/` recursively and documents no usable exclude setting, so a rule's support directory loads as unscoped rules — a [known gap](./clients.md#gap-qoder) |
 | [Kiro][kiro-docs] | `paths` | top-level | `fileMatchPattern` | YAML array (not comma-joined), plus a computed `inclusion: fileMatch`; unscoped emits `inclusion: always` instead, no `fileMatchPattern` (`src/install/vendor_kiro.rs`) |
+| [Antigravity][antigravity-rules-docs] | `paths` | top-level | `globs` | Comma-joined into a single string, plus a computed `trigger: glob`; unscoped emits `trigger: always_on` instead, no `globs`. A `description` is written from the rule's first heading or line, when the body has one (`src/install/vendor_antigravity.rs`). The `antigravity.*` rule registry is empty |
 | [OpenCode][opencode-rules-docs] | — | — | — | No per-file rule frontmatter; loading is registered via the OpenCode config file |
 | [Junie][junie-docs] | `paths` | top-level | — | **Dropped with a warning.** `.junie/rules/*.md` is ownable, but every file in the directory is concatenated automatically with no per-file activation key, so the rule loads unconditionally. Project scope only — no `~/.junie/rules/` exists, and a global rule is skipped with zero outputs (`src/install/vendor_junie.rs`) |
 | [Codex][codex-subagents-docs] | — | — | — | **Rules are unsupported.** Codex uses an always-on, directory-granular `AGENTS.md` with no path-glob or `applyTo` mechanism. Installing a rule with `--client codex` emits a warning and writes no file. |
@@ -650,6 +718,7 @@ claude namespace to silence it and gain proper type conversion.
 [copilot-config-dir-docs]: https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference
 [opencode-skills-docs]: https://opencode.ai/docs/skills
 [antigravity-skills-docs]: https://antigravity.google/docs/skills
+[antigravity-rules-docs]: https://antigravity.google/docs/rules
 [opencode-rules-docs]: https://opencode.ai/docs/rules
 [opencode-config-docs]: https://opencode.ai/docs/config
 [codex-skills-docs]: https://developers.openai.com/codex/skills
@@ -660,6 +729,7 @@ claude namespace to silence it and gain proper type conversion.
 [kiro-cli-config-docs]: https://kiro.dev/docs/cli/chat/configuration
 [kiro #9148]: https://github.com/kirodotdev/Kiro/issues/9148
 [junie-docs]: https://www.jetbrains.com/junie/
+[junie-subagents-docs]: https://junie.jetbrains.com/docs/junie-cli-subagents.html
 [zed-docs]: https://zed.dev
 [amp-docs]: https://ampcode.com
 [xdg-spec]: https://specifications.freedesktop.org/basedir-spec/latest/
@@ -671,10 +741,12 @@ claude namespace to silence it and gain proper type conversion.
 
 [cline-docs]: https://cline.bot
 [droid-docs]: https://factory.ai
+[droid-subagents-docs]: https://docs.factory.ai/cli/configuration/custom-droids
 [goose-docs]: https://goose-docs.ai
 [warp-docs]: https://warp.dev
 [openclaw-docs]: https://github.com/openclaw/openclaw
 [kilo-docs]: https://kilo.ai
+[kilo-agents-docs]: https://github.com/Kilo-Org/kilocode/blob/v7.8.1/packages/kilo-docs/pages/customize/custom-subagents.md
 [qoder-docs]: https://qoder.com
 [qoder-rules-docs]: https://docs.qoder.com/cli/memory
 [qoder-config-docs]: https://docs.qoder.com/cli/config-scope

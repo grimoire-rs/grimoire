@@ -63,11 +63,13 @@ durable; update the numbers, keep the spine.
   comma-in-glob split and Kiro's user-scope steering bug.
 - [Gemini CLI: subagents][gem-agents] — re-verify the enabling setting and
   the enterprise-vs-individual serving status.
-- [Junie][junie] / [Zed][zed] / [Amp][amp] — currently skills-only targets;
-  re-check whether a rule or agent surface has shipped.
+- [Junie][junie] — hosts rules (degraded, project scope only), agents, and
+  MCP; re-check whether global-scope rules have shipped.
+- [Zed][zed] / [Amp][amp] — decline rules and agents, still register MCP;
+  re-check whether either has since shipped a rule or agent surface.
 - The skills-first wave — [Antigravity][ag] (the one with a subagent
   file), [Cline][cline] (the one with real `.clinerules/` `paths:`
-  scoping), [Droid][droid], [Goose][goose], [Warp][warp],
+  scoping), [Droid][droid] (agents and MCP now rendered), [Goose][goose], [Warp][warp],
   [OpenClaw][openclaw], [Kilo][kilo]. Re-check two things specifically:
   whether any has since shipped a rule or agent surface, and **which of
   them read `.agents/skills`** — pool membership is the fastest-moving

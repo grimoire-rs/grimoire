@@ -27,7 +27,7 @@ use crate::install::client_target::ClientTarget;
 use crate::install::vendor::{KindSupport, env_dir, global_skills_root, home_dir};
 use crate::install::{
     opencode_config, vendor_amp, vendor_antigravity, vendor_claude, vendor_cline, vendor_codex, vendor_copilot,
-    vendor_cursor, vendor_droid, vendor_gemini, vendor_junie, vendor_kilo, vendor_kiro, vendor_openclaw,
+    vendor_cursor, vendor_droid, vendor_gemini, vendor_goose, vendor_junie, vendor_kilo, vendor_kiro, vendor_openclaw,
     vendor_opencode, vendor_qoder, vendor_warp, vendor_zed,
 };
 use crate::oci::ArtifactKind;
@@ -87,7 +87,7 @@ const VENDOR_ROOTS: &[VendorRootRow] = &[
     ("codex", |env, home| vendor_codex::codex_root(env("CODEX_HOME"), home)),
     ("cursor", |_, home| vendor_cursor::cursor_root(home)),
     ("kiro", |env, home| vendor_kiro::kiro_root(env("KIRO_HOME"), home)),
-    ("junie", |_, home| vendor_junie::junie_root(home)),
+    ("junie", |env, home| vendor_junie::junie_root(env("JUNIE_HOME"), home)),
     ("gemini", |env, home| {
         vendor_gemini::gemini_root(env("GEMINI_CLI_HOME"), home)
     }),
@@ -101,19 +101,27 @@ const VENDOR_ROOTS: &[VendorRootRow] = &[
     // row's `~/.gemini`. Each client's candidate set holds only its own
     // root, so the nesting never cross-classifies.
     ("antigravity", |_, home| vendor_antigravity::antigravity_root(home)),
-    // Wave-2 batch. `goose` deliberately has NO row: it renders into the
-    // shared pool at both scopes, so every path it writes anchors at
-    // `AgentsSkills` and a vendor root would never be reachable.
+    // Wave-2 batch.
     ("cline", |_, home| vendor_cline::cline_root(home)),
     // `droid-root` resolves to `~/.factory` — the tag follows the CLIENT name,
     // the directory follows the vendor's. Both are frozen; they differ on
     // purpose.
     ("droid", |_, home| vendor_droid::droid_root(home)),
     ("warp", |_, home| vendor_warp::warp_root(home)),
-    ("openclaw", |_, home| vendor_openclaw::openclaw_root(home)),
+    ("openclaw", |env, home| {
+        vendor_openclaw::openclaw_root(env("OPENCLAW_STATE_DIR"), env("OPENCLAW_HOME"), home)
+    }),
     ("kilo", |_, home| vendor_kilo::kilo_root(home)),
     ("qoder", |env, home| {
         vendor_qoder::qoder_root(env("QODER_CONFIG_DIR"), home)
+    }),
+    // `~/.goose` — Goose's global agents. Its skills still anchor at
+    // `AgentsSkills` (pooled at both scopes).
+    ("goose", |_, home| vendor_goose::goose_root(home)),
+    // Kilo's OTHER root: the XDG config dir holding its global agents,
+    // distinct from the `kilo` row's `~/.kilo` skills root.
+    (KILO_CONFIG_ROW, |env, home| {
+        vendor_kilo::kilo_config_root(xdg_config_from(env, home))
     }),
     // OpenCode's OTHER root: the directory holding the config **file** grim
     // splices its global MCP entry into. Resolved through the very function
@@ -132,6 +140,10 @@ const VENDOR_ROOTS: &[VendorRootRow] = &[
 /// once so the row, the `candidate_anchors` arm, and the tests cannot drift;
 /// its on-disk tag is `opencode-config-root` (Principle 9: append-only).
 const OPENCODE_CONFIG_ROW: &str = "opencode-config";
+
+/// The [`VENDOR_ROOTS`] row naming Kilo's XDG config dir (global agents).
+/// On-disk tag `kilo-config-root` (Principle 9: append-only).
+const KILO_CONFIG_ROW: &str = "kilo-config";
 
 /// `$XDG_CONFIG_HOME`, else `<home>/.config` — the injected-input twin of
 /// [`xdg_config_dir`], so a [`VENDOR_ROOTS`] row that needs an XDG dir stays a
@@ -367,7 +379,13 @@ impl AnchorRoots {
     /// delegated to [`Self::resolve_from`] with the real lookups so the
     /// mapping itself stays assertable.
     pub fn resolve(workspace: PathBuf, ctx: &Context) -> Self {
-        Self::resolve_from(workspace, ctx.grim_home().to_path_buf(), &env_dir, home_dir())
+        // `CLAUDE_CONFIG_DIR` is the one variable whose effective value is
+        // not the process env: Claude's own settings `env` block can set it.
+        let env = |var: &str| match var {
+            "CLAUDE_CONFIG_DIR" => vendor_claude::config_dir_override(),
+            _ => env_dir(var),
+        };
+        Self::resolve_from(workspace, ctx.grim_home().to_path_buf(), &env, home_dir())
     }
 
     /// [`Self::resolve`] with the environment injected — a pure function of
@@ -581,6 +599,15 @@ impl AnchoredPath {
     /// # Errors
     ///
     /// See the variant list above.
+    /// `root/relative` as recorded, never canonicalized: the path a vendor
+    /// derives sibling names from (Cline's `<file>.lock` sits beside the
+    /// path it resolved, not beside a stow link's target). Carries no
+    /// containment guarantee — act on [`Self::resolve`], name siblings from
+    /// this.
+    pub fn lexical(&self, roots: &AnchorRoots) -> Option<PathBuf> {
+        self.anchor.root(roots).map(|root| root.join(&self.relative))
+    }
+
     pub fn resolve(&self, roots: &AnchorRoots, containment: Containment) -> Result<PathBuf, AnchorError> {
         let root = self
             .anchor
@@ -781,10 +808,10 @@ fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKin
                 | (ClientTarget::Kiro, ArtifactKind::Rule)
                 | (ClientTarget::Kiro, ArtifactKind::Mcp) => vendor_root(client),
 
-                // Junie: skills + MCP under `~/.junie` (agents declined).
-                (ClientTarget::Junie, ArtifactKind::Skill) | (ClientTarget::Junie, ArtifactKind::Mcp) => {
-                    vendor_root(client)
-                }
+                // Junie: skills, agents and MCP under `~/.junie`.
+                (ClientTarget::Junie, ArtifactKind::Skill)
+                | (ClientTarget::Junie, ArtifactKind::Agent)
+                | (ClientTarget::Junie, ArtifactKind::Mcp) => vendor_root(client),
 
                 // Junie rules are `Degraded`, not declined — but only at
                 // PROJECT scope, where every target anchors at `Workspace`
@@ -819,21 +846,34 @@ fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKin
 
                 // Antigravity: the ONE pool member whose global skills are not
                 // pooled. Project skills share `.agents/skills`, but globally
-                // all three kinds live under its own `~/.gemini/config` root —
+                // every kind lives under its own `~/.gemini/config` root —
                 // skills included. `AgentsSkills` here would write where
-                // Antigravity does not read (rules declined; handled above).
+                // Antigravity does not read.
                 (ClientTarget::Antigravity, ArtifactKind::Skill)
+                | (ClientTarget::Antigravity, ArtifactKind::Rule)
                 | (ClientTarget::Antigravity, ArtifactKind::Agent)
                 | (ClientTarget::Antigravity, ArtifactKind::Mcp) => vendor_root(client),
 
-                // Wave-2 skills-only batch. Each owns its global root except
-                // Goose, whose skills are pooled at both scopes.
+                // Wave-2 batch. Each owns its global root except Goose, whose
+                // skills are pooled at both scopes. Warp's `.mcp.json` sits in
+                // that same root.
                 (ClientTarget::Cline, ArtifactKind::Skill)
+                | (ClientTarget::Cline, ArtifactKind::Mcp)
                 | (ClientTarget::Droid, ArtifactKind::Skill)
                 | (ClientTarget::Warp, ArtifactKind::Skill)
+                | (ClientTarget::Warp, ArtifactKind::Mcp)
                 | (ClientTarget::OpenClaw, ArtifactKind::Skill)
                 | (ClientTarget::Kilo, ArtifactKind::Skill) => vendor_root(client),
                 (ClientTarget::Goose, ArtifactKind::Skill) => Some(PathAnchor::AgentsSkills),
+                // Goose agents: `~/.goose/agents`. Kilo agents: the XDG
+                // config dir, not the `~/.kilo` skills root.
+                (ClientTarget::Goose, ArtifactKind::Agent) => vendor_root(client),
+                (ClientTarget::Kilo, ArtifactKind::Agent) => Some(PathAnchor::VendorRoot(KILO_CONFIG_ROW)),
+
+                // Droid: custom droids (`droids/`) and `mcp.json` under `~/.factory`.
+                (ClientTarget::Droid, ArtifactKind::Agent) | (ClientTarget::Droid, ArtifactKind::Mcp) => {
+                    vendor_root(client)
+                }
 
                 // Qoder: all four kinds native under `$QODER_CONFIG_DIR|~/.qoder`
                 // (`settings.json` carries MCP).
@@ -859,7 +899,6 @@ fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKin
                 // new vendor's kind gap must still be classified here.
                 (ClientTarget::Codex, ArtifactKind::Rule)
                 | (ClientTarget::Kiro, ArtifactKind::Agent)
-                | (ClientTarget::Junie, ArtifactKind::Agent)
                 | (ClientTarget::Gemini, ArtifactKind::Rule)
                 | (ClientTarget::Zed, ArtifactKind::Rule)
                 | (ClientTarget::Zed, ArtifactKind::Agent)
@@ -868,24 +907,17 @@ fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKin
                 | (ClientTarget::Agents, ArtifactKind::Rule)
                 | (ClientTarget::Agents, ArtifactKind::Agent)
                 | (ClientTarget::Agents, ArtifactKind::Mcp)
-                | (ClientTarget::Antigravity, ArtifactKind::Rule)
                 | (ClientTarget::Cline, ArtifactKind::Rule)
                 | (ClientTarget::Cline, ArtifactKind::Agent)
-                | (ClientTarget::Cline, ArtifactKind::Mcp)
                 | (ClientTarget::Droid, ArtifactKind::Rule)
-                | (ClientTarget::Droid, ArtifactKind::Agent)
-                | (ClientTarget::Droid, ArtifactKind::Mcp)
                 | (ClientTarget::Goose, ArtifactKind::Rule)
-                | (ClientTarget::Goose, ArtifactKind::Agent)
                 | (ClientTarget::Goose, ArtifactKind::Mcp)
                 | (ClientTarget::Warp, ArtifactKind::Rule)
                 | (ClientTarget::Warp, ArtifactKind::Agent)
-                | (ClientTarget::Warp, ArtifactKind::Mcp)
                 | (ClientTarget::OpenClaw, ArtifactKind::Rule)
                 | (ClientTarget::OpenClaw, ArtifactKind::Agent)
                 | (ClientTarget::OpenClaw, ArtifactKind::Mcp)
                 | (ClientTarget::Kilo, ArtifactKind::Rule)
-                | (ClientTarget::Kilo, ArtifactKind::Agent)
                 | (ClientTarget::Kilo, ArtifactKind::Mcp) => None,
 
                 // Bundles are never materialized; they expand into members, so
@@ -1132,7 +1164,7 @@ pub enum AnchorError {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::OPENCODE_CONFIG_ROW;
+    use super::{KILO_CONFIG_ROW, OPENCODE_CONFIG_ROW};
     use crate::config::scope::ConfigScope;
     use crate::install::client_target::ClientTarget;
     use crate::oci::ArtifactKind;
@@ -1196,6 +1228,8 @@ mod tests {
         "kilo-root",
         "opencode-config-root",
         "qoder-root",
+        "goose-root",
+        "kilo-config-root",
     ];
 
     /// Every shipped tag still loads from a LITERAL JSON string, and
@@ -1500,6 +1534,8 @@ mod tests {
             ("openclaw", home.join(".openclaw")),
             ("kilo", home.join(".kilo")),
             ("qoder", home.join(".qoder")),
+            ("goose", home.join(".goose")),
+            ("kilo-config", home.join(".config").join("kilo")),
         ]
         .into();
         if cfg!(all(not(windows), not(target_os = "macos"))) {
@@ -1527,6 +1563,11 @@ mod tests {
             // `GEMINI_CLI_HOME` replaces the home, not the root: the `.gemini`
             // segment is still appended (the opposite shape to CODEX/KIRO).
             ("GEMINI_CLI_HOME", "gemini", PathBuf::from("/ovr/.gemini")),
+            ("JUNIE_HOME", "junie", PathBuf::from("/ovr")),
+            // `OPENCLAW_HOME` is the `GEMINI_CLI_HOME` shape; `OPENCLAW_STATE_DIR`
+            // names the state root itself.
+            ("OPENCLAW_HOME", "openclaw", PathBuf::from("/ovr/.openclaw")),
+            ("OPENCLAW_STATE_DIR", "openclaw", PathBuf::from("/ovr")),
         ] {
             let one = |v: &str| (v == var).then(|| PathBuf::from("/ovr"));
             let roots =
@@ -2990,6 +3031,12 @@ mod tests {
             (ConfigScope::Global, ClientTarget::Junie, ArtifactKind::Skill) => {
                 (PathAnchor::VendorRoot("junie"), format!("skills/{name}"))
             }
+            (ConfigScope::Project, ClientTarget::Junie, ArtifactKind::Agent) => {
+                (PathAnchor::Workspace, format!(".junie/agents/{name}.md"))
+            }
+            (ConfigScope::Global, ClientTarget::Junie, ArtifactKind::Agent) => {
+                (PathAnchor::VendorRoot("junie"), format!("agents/{name}.md"))
+            }
 
             // Gemini: skills via the shared `.agents/skills` pool; agents
             // native under `.gemini` / `~/.gemini` (rules declined).
@@ -3040,6 +3087,12 @@ mod tests {
             (ConfigScope::Project, ClientTarget::Antigravity, ArtifactKind::Agent) => {
                 (PathAnchor::Workspace, format!(".agents/agents/{name}.md"))
             }
+            (ConfigScope::Project, ClientTarget::Antigravity, ArtifactKind::Rule) => {
+                (PathAnchor::Workspace, format!(".agents/rules/{name}.md"))
+            }
+            (ConfigScope::Global, ClientTarget::Antigravity, ArtifactKind::Rule) => {
+                (PathAnchor::VendorRoot("antigravity"), format!("rules/{name}.md"))
+            }
             (ConfigScope::Global, ClientTarget::Antigravity, ArtifactKind::Skill) => {
                 (PathAnchor::VendorRoot("antigravity"), format!("skills/{name}"))
             }
@@ -3047,7 +3100,7 @@ mod tests {
                 (PathAnchor::VendorRoot("antigravity"), format!("agents/{name}.md"))
             }
 
-            // ── Wave-2 skills-only batch ──
+            // ── Wave-2 batch ──
             // Own-directory clients: Workspace + dot-dir at project scope,
             // their own vendor root at global scope.
             (ConfigScope::Project, ClientTarget::Cline, ArtifactKind::Skill) => {
@@ -3063,12 +3116,24 @@ mod tests {
             (ConfigScope::Global, ClientTarget::Droid, ArtifactKind::Skill) => {
                 (PathAnchor::VendorRoot("droid"), format!("skills/{name}"))
             }
+            (ConfigScope::Project, ClientTarget::Droid, ArtifactKind::Agent) => {
+                (PathAnchor::Workspace, format!(".factory/droids/{name}.md"))
+            }
+            (ConfigScope::Global, ClientTarget::Droid, ArtifactKind::Agent) => {
+                (PathAnchor::VendorRoot("droid"), format!("droids/{name}.md"))
+            }
             // Goose: the shared pool at BOTH scopes — no vendor root exists.
             (ConfigScope::Project, ClientTarget::Goose, ArtifactKind::Skill) => {
                 (PathAnchor::Workspace, format!(".agents/skills/{name}"))
             }
             (ConfigScope::Global, ClientTarget::Goose, ArtifactKind::Skill) => {
                 (PathAnchor::AgentsSkills, name.to_string())
+            }
+            (ConfigScope::Project, ClientTarget::Goose, ArtifactKind::Agent) => {
+                (PathAnchor::Workspace, format!(".goose/agents/{name}.md"))
+            }
+            (ConfigScope::Global, ClientTarget::Goose, ArtifactKind::Agent) => {
+                (PathAnchor::VendorRoot("goose"), format!("agents/{name}.md"))
             }
             // Warp: native by default. Pool-capable, so `candidate_anchors`
             // also offers `AgentsSkills` — but the native dest must still sort
@@ -3089,6 +3154,12 @@ mod tests {
             }
             (ConfigScope::Global, ClientTarget::Kilo, ArtifactKind::Skill) => {
                 (PathAnchor::VendorRoot("kilo"), format!("skills/{name}"))
+            }
+            (ConfigScope::Project, ClientTarget::Kilo, ArtifactKind::Agent) => {
+                (PathAnchor::Workspace, format!(".kilo/agents/{name}.md"))
+            }
+            (ConfigScope::Global, ClientTarget::Kilo, ArtifactKind::Agent) => {
+                (PathAnchor::VendorRoot(KILO_CONFIG_ROW), format!("agents/{name}.md"))
             }
             (ConfigScope::Project, ClientTarget::Qoder, ArtifactKind::Skill) => {
                 (PathAnchor::Workspace, format!(".qoder/skills/{name}"))
@@ -3121,7 +3192,6 @@ mod tests {
             // calling this function — unreachable here.
             (_, ClientTarget::Kiro, ArtifactKind::Agent)
             | (_, ClientTarget::Junie, ArtifactKind::Rule)
-            | (_, ClientTarget::Junie, ArtifactKind::Agent)
             | (_, ClientTarget::Gemini, ArtifactKind::Rule)
             | (_, ClientTarget::Zed, ArtifactKind::Rule)
             | (_, ClientTarget::Zed, ArtifactKind::Agent)
@@ -3129,19 +3199,15 @@ mod tests {
             | (_, ClientTarget::Amp, ArtifactKind::Agent)
             | (_, ClientTarget::Agents, ArtifactKind::Rule)
             | (_, ClientTarget::Agents, ArtifactKind::Agent)
-            | (_, ClientTarget::Antigravity, ArtifactKind::Rule)
             | (_, ClientTarget::Cline, ArtifactKind::Rule)
             | (_, ClientTarget::Cline, ArtifactKind::Agent)
             | (_, ClientTarget::Droid, ArtifactKind::Rule)
-            | (_, ClientTarget::Droid, ArtifactKind::Agent)
             | (_, ClientTarget::Goose, ArtifactKind::Rule)
-            | (_, ClientTarget::Goose, ArtifactKind::Agent)
             | (_, ClientTarget::Warp, ArtifactKind::Rule)
             | (_, ClientTarget::Warp, ArtifactKind::Agent)
             | (_, ClientTarget::OpenClaw, ArtifactKind::Rule)
             | (_, ClientTarget::OpenClaw, ArtifactKind::Agent)
             | (_, ClientTarget::Kilo, ArtifactKind::Rule)
-            | (_, ClientTarget::Kilo, ArtifactKind::Agent)
             // OpenClaw has no project scope at all — `kind_surface` refuses it.
             | (ConfigScope::Project, ClientTarget::OpenClaw, ArtifactKind::Skill) => {
                 unreachable!("declined (client, kind) pairs are skipped by the test loop before this call")
@@ -3216,6 +3282,8 @@ mod tests {
                 ("openclaw", PathBuf::from("/openclaw")),
                 ("kilo", PathBuf::from("/kilo")),
                 ("qoder", PathBuf::from("/qoder")),
+                ("goose", PathBuf::from("/goose")),
+                ("kilo-config", PathBuf::from("/xdg/kilo")),
             ]
             .into(),
             opencode_skills: Some(PathBuf::from("/oc/skills")),
@@ -3318,20 +3386,20 @@ mod tests {
         }
 
         // Exhaustiveness guard: 2 scopes × 19 clients × 3 kinds = 114, minus
-        // the 23 declined (client, kind) pairs × 2 scopes = 46, minus the two
+        // the 18 declined (client, kind) pairs × 2 scopes = 36, minus the two
         // scope gaps that are NOT declines — global Junie-Rule and project
-        // OpenClaw-Skill, both refused by `kind_surface` — → 66 combos.
+        // OpenClaw-Skill, both refused by `kind_surface` — → 76 combos.
         //
-        // The 23: Codex-Rule, Kiro-Agent, Junie-Agent, Gemini-Rule,
-        // Zed-Rule/Agent, Amp-Rule/Agent, Agents-Rule/Agent, Antigravity-Rule,
-        // and Rule+Agent for each of the six skills-only wave-2 clients
-        // (Cline, Droid, Goose, Warp, OpenClaw, Kilo).
+        // The 18: Codex-Rule, Kiro-Agent, Gemini-Rule,
+        // Zed-Rule/Agent, Amp-Rule/Agent, Agents-Rule/Agent, Rule for each of
+        // the six wave-2 clients (Cline, Droid, Goose, Warp, OpenClaw, Kilo),
+        // and Agent for three of them (Cline, Warp, OpenClaw).
         //
         // If a new ClientTarget or ArtifactKind variant is added, this fails,
         // forcing the table to be extended.
         assert_eq!(
-            combo_count, 66,
-            "expected 66 (scope × client × kind) combos but counted {combo_count}; \
+            combo_count, 76,
+            "expected 76 (scope × client × kind) combos but counted {combo_count}; \
              update the table in expected_anchor_and_relative() and this assertion"
         );
     }

@@ -75,11 +75,10 @@ pub enum ClientTarget {
     /// Kiro (AWS) — `.kiro/{skills,steering,settings/mcp.json}` (skills,
     /// rules, MCP; agents declined — CLI/IDE schema collision).
     Kiro,
-    /// JetBrains Junie — `.junie/{skills,rules,mcp/mcp.json}` (skills + MCP
-    /// native; rules **degraded and project-only** — `.junie/rules/` is
-    /// ownable but concatenated wholesale, so `paths` is dropped, and no
-    /// global `~/.junie/rules/` exists; agents declined — not EAP-gated,
-    /// just not rendered by grim yet).
+    /// JetBrains Junie — `.junie/{skills,rules,agents,mcp/mcp.json}` (skills,
+    /// agents, MCP native; rules **degraded and project-only** —
+    /// `.junie/rules/` is ownable but concatenated wholesale, so `paths` is
+    /// dropped, and no global `~/.junie/rules/` exists).
     Junie,
     /// Gemini CLI — shared `.agents/skills` + `.gemini/{agents,settings.json}`
     /// (skills, agents, MCP; rules declined — GEMINI.md hierarchy only).
@@ -103,17 +102,18 @@ pub enum ClientTarget {
     /// desktop product; the Antigravity CLI and IDE variants read different
     /// global directories and are not served by this name.
     Antigravity,
-    /// Cline — `.cline/skills` (skills only; rules, agents, and MCP declined).
+    /// Cline — `.cline/skills` and global MCP (rules and agents declined).
     /// Pool-capable via the `shared_skills` opt-in.
     Cline,
-    /// Droid (Factory) — `.factory/skills` (skills only). The client is
-    /// `droid`; its directory is `.factory`. That mismatch is deliberate.
+    /// Droid (Factory) — `.factory/skills`, `.factory/droids`,
+    /// `.factory/mcp.json` (rules declined). The client is `droid`; its
+    /// directory is `.factory`. That mismatch is deliberate.
     Droid,
     /// Goose (Block) — shared `.agents/skills` at both scopes (skills only).
     /// The one client in its batch that renders to the pool: its own
     /// `.goose/skills` is labelled back-compat upstream.
     Goose,
-    /// Warp — `.warp/skills` (skills only). Renders natively but is
+    /// Warp — `.warp/{skills,.mcp.json}` (skills + MCP). Renders natively but is
     /// pool-*capable*, so it can be opted into `.agents/skills`.
     Warp,
     /// OpenClaw — `~/.openclaw/skills`, **global scope only**: its "project"
@@ -321,12 +321,16 @@ impl ClientTarget {
             ArtifactKind::Agent => self.vendor().agent_path(workspace, scope, name),
             // An MCP descriptor registers into the vendor's MCP config file
             // (no file of its own); the config path is the reportable
-            // target. The workspace-conventional `.mcp.json` stands in when
-            // the vendor has no surface for this scope (report-only — the
-            // install itself skips such a vendor).
+            // target — the first one, for a vendor with several (each is
+            // reported on its own by `expected_outputs`). The
+            // workspace-conventional `.mcp.json` stands in when the vendor
+            // has no surface for this scope (report-only — the install
+            // itself skips such a vendor).
             ArtifactKind::Mcp => self
                 .vendor()
-                .mcp_config_path(workspace, scope)
+                .mcp_config_paths(workspace, scope)
+                .into_iter()
+                .next()
                 .unwrap_or_else(|| workspace.join(".mcp.json")),
             // Bundles never materialize; they expand into members.
             ArtifactKind::Bundle => unreachable!("bundles are never materialized; they expand into members"),
@@ -365,7 +369,7 @@ impl ClientTarget {
         match kind {
             ArtifactKind::Skill => self.materialize_skill(name, artifact_root, dest),
             ArtifactKind::Rule => self.materialize_rule(name, artifact_root, dest, scope, pinned, support_dir),
-            ArtifactKind::Agent => self.materialize_agent(artifact_root, dest, pinned),
+            ArtifactKind::Agent => self.materialize_agent(name, artifact_root, dest, pinned),
             // Bundles never materialize; they expand into members.
             ArtifactKind::Bundle => unreachable!("bundles are never materialized; they expand into members"),
             // MCP descriptors register into client configs; the installer
@@ -497,6 +501,7 @@ impl ClientTarget {
     /// materialize failure — unlike a rule, the frontmatter is required.
     fn materialize_agent(
         self,
+        name: &str,
         artifact_root: &Path,
         dest: &Path,
         pinned: &str,
@@ -510,7 +515,7 @@ impl ClientTarget {
         let parsed = AgentFrontmatter::parse_doc(&doc, artifact_root).map_err(|e| materialize_failed(e.to_string()))?;
         let rendered = self
             .vendor()
-            .agent_index(&parsed, pinned)
+            .agent_index_named(&parsed, name, pinned)
             .map_err(|e| materialize_failed(e.to_string()))?;
 
         let out = match rendered {
@@ -622,7 +627,7 @@ mod tests {
 
     /// Full vendor × kind grid asserted against the `adr_vendor_wave_expansion`
     /// §1 mapping table: Skill/Rule/Agent via [`Vendor::kind_support`], MCP via
-    /// the boolean [`Vendor::mcp_config_path`] surface.
+    /// the boolean [`Vendor::mcp_config_paths`] surface.
     #[test]
     fn kind_support_grid_matches_adr_mapping_table() {
         use crate::install::vendor::KindSupport::{Declined, Degraded, Native};
@@ -639,22 +644,23 @@ mod tests {
             // Junie: rules Degraded — `.junie/rules/*.md` is ownable but every
             // file in it is concatenated, so `paths` is dropped. Project scope
             // only; the global half is gated by `Vendor::kind_surface`.
-            (ClientTarget::Junie, Native, Degraded, Declined, true),
+            (ClientTarget::Junie, Native, Degraded, Native, true),
             (ClientTarget::Gemini, Native, Declined, Native, true),
             (ClientTarget::Zed, Native, Declined, Declined, true),
             (ClientTarget::Amp, Native, Declined, Declined, true),
             (ClientTarget::Agents, Native, Declined, Declined, false),
-            // Antigravity: rules declined (global rules are a monolithic
-            // ~/.gemini/GEMINI.md shared with Gemini CLI).
-            (ClientTarget::Antigravity, Native, Declined, Native, true),
-            // The wave-2 skills-only batch: every one declines Rule, Agent and
-            // MCP, so each has no MCP config surface either.
-            (ClientTarget::Cline, Native, Declined, Declined, false),
-            (ClientTarget::Droid, Native, Declined, Declined, false),
-            (ClientTarget::Goose, Native, Declined, Declined, false),
-            (ClientTarget::Warp, Native, Declined, Declined, false),
+            // Antigravity: rules native — `.agents/rules/*.md` and
+            // `~/.gemini/config/rules/*.md` with `trigger`/`globs` frontmatter.
+            (ClientTarget::Antigravity, Native, Native, Native, true),
+            // The wave-2 batch: every one declines Rule. Cline (global scope
+            // only), Droid and Warp host MCP (grimoire-rs/grimoire#145, #155).
+            (ClientTarget::Cline, Native, Declined, Declined, true),
+            // Droid, Goose and Kilo host agents (grimoire-rs/grimoire#145, #147, #149).
+            (ClientTarget::Droid, Native, Declined, Native, true),
+            (ClientTarget::Goose, Native, Declined, Native, false),
+            (ClientTarget::Warp, Native, Declined, Declined, true),
             (ClientTarget::OpenClaw, Native, Declined, Declined, false),
-            (ClientTarget::Kilo, Native, Declined, Declined, false),
+            (ClientTarget::Kilo, Native, Declined, Native, false),
             (ClientTarget::Qoder, Native, Native, Native, true),
         ];
         assert_eq!(
@@ -662,14 +668,13 @@ mod tests {
             ClientTarget::ALL.len(),
             "grid must cover every ClientTarget"
         );
-        let project = crate::config::scope::ConfigScope::Project;
         for (client, skill, rule, agent, has_mcp) in grid {
             let v = client.vendor();
             assert_eq!(v.kind_support(ArtifactKind::Skill), skill, "{client} skill");
             assert_eq!(v.kind_support(ArtifactKind::Rule), rule, "{client} rule");
             assert_eq!(v.kind_support(ArtifactKind::Agent), agent, "{client} agent");
             assert_eq!(
-                v.mcp_config_path(Path::new("/w"), project).is_some(),
+                has_mcp_surface(client),
                 has_mcp,
                 "{client} MCP config surface must match the grid"
             );
@@ -679,9 +684,17 @@ mod tests {
             assert_eq!(
                 v.kind_support(ArtifactKind::Mcp) != Declined,
                 has_mcp,
-                "{client} kind_support(Mcp) must track mcp_config_path"
+                "{client} kind_support(Mcp) must track mcp_config_paths"
             );
         }
+    }
+
+    /// Whether `client` has an MCP config file at project or global scope.
+    fn has_mcp_surface(client: ClientTarget) -> bool {
+        use crate::config::scope::ConfigScope;
+        [ConfigScope::Project, ConfigScope::Global]
+            .into_iter()
+            .any(|scope| !client.vendor().mcp_config_paths(Path::new("/w"), scope).is_empty())
     }
 
     /// A documented support-matrix cell.
@@ -753,8 +766,8 @@ mod tests {
     /// Table-parity: reads `docs/src/content/docs/clients.md` at TEST RUNTIME (not compile
     /// time — `std::fs::read_to_string` below), parses the
     /// first markdown table, and asserts for every `(client, kind)` that a
-    /// documented `✗` ⇔ `kind_support == Declined` (MCP: `mcp_config_path` is
-    /// `None`), `◐` ⇔ `Degraded` (rule column), `✓` ⇔ `Native`, and the row
+    /// documented `✗` ⇔ `kind_support == Declined` (MCP: `mcp_config_paths` is
+    /// empty), `◐` ⇔ `Degraded` (rule column), `✓` ⇔ `Native`, and the row
     /// set equals `ClientTarget::ALL` exactly.
     #[test]
     fn docs_matrix_row_set_matches_all_and_cells_track_kind_support() {
@@ -770,7 +783,6 @@ mod tests {
             "clients.md row set must equal ClientTarget::ALL exactly"
         );
 
-        let project = crate::config::scope::ConfigScope::Project;
         for (name, cells) in &rows {
             let client: ClientTarget = name.parse().unwrap_or_else(|_| panic!("unknown client row '{name}'"));
             let v = client.vendor();
@@ -787,10 +799,15 @@ mod tests {
                 };
                 assert_eq!(cell, expected, "{name} {kind:?} cell must track kind_support");
             }
-            // MCP column: boolean surface — ✗ ⇔ no config path, ✓/◐ ⇔ some.
+            // MCP column: boolean surface — ✗ ⇔ no config path at either
+            // scope, ✓/◐ ⇔ some (Cline's global-only file reads ◐).
             let mcp = cells[3].unwrap_or_else(|| panic!("unparsed MCP cell for '{name}' (TODO placeholder?)"));
-            let supported = v.mcp_config_path(Path::new("/w"), project).is_some();
-            assert_eq!(mcp != Cell::No, supported, "{name} MCP cell must track mcp_config_path");
+            let supported = has_mcp_surface(client);
+            assert_eq!(
+                mcp != Cell::No,
+                supported,
+                "{name} MCP cell must track mcp_config_paths"
+            );
         }
     }
 
@@ -909,7 +926,7 @@ mod tests {
     /// Row-presence for `docs/src/content/docs/agents.md`'s `{#locations}` section,
     /// scoped to clients that do **not** decline the Agent kind — mirrors
     /// [`vendor_metadata_rule_keys_lists_every_rule_capable_client`]: the
-    /// four declined clients (Kiro, Junie, Zed, Amp) have no install path
+    /// declined clients (Kiro, Zed, Amp, …) have no install path
     /// to list, and are already covered by the `{#emit-matrix}` row-
     /// presence test above.
     #[test]
@@ -1039,8 +1056,14 @@ mod tests {
             ),
             // Kiro: rules render as steering docs; agents declined.
             (ClientTarget::Kiro, ".kiro/skills/x", Some(".kiro/steering/x.md"), None),
-            // Junie: skills + project-scope rules (degraded); agents declined.
-            (ClientTarget::Junie, ".junie/skills/x", Some(".junie/rules/x.md"), None),
+            // Junie: skills, project-scope rules (degraded), agents in its own
+            // `.junie/agents` (never the shared `.agents/`).
+            (
+                ClientTarget::Junie,
+                ".junie/skills/x",
+                Some(".junie/rules/x.md"),
+                Some(".junie/agents/x.md"),
+            ),
             // Gemini: skills via the shared pool; agents native; rules declined.
             (
                 ClientTarget::Gemini,
@@ -1053,25 +1076,36 @@ mod tests {
             (ClientTarget::Amp, ".agents/skills/x", None, None),
             // Generic client: the shared pool is its only surface.
             (ClientTarget::Agents, ".agents/skills/x", None, None),
-            // Antigravity: project skills join the pool, agents sit beside
-            // them under `.agents`; rules declined.
+            // Antigravity: project skills join the pool, rules and agents sit
+            // beside them under `.agents`.
             (
                 ClientTarget::Antigravity,
                 ".agents/skills/x",
-                None,
+                Some(".agents/rules/x.md"),
                 Some(".agents/agents/x.md"),
             ),
-            // Wave-2 batch: skills only, each in its own dir except Goose,
-            // which renders to the shared pool at both scopes.
+            // Wave-2 batch: skills in each client's own dir except Goose,
+            // which renders to the shared pool at both scopes. Goose and Kilo
+            // also host agents, each in its own dot-dir.
             (ClientTarget::Cline, ".cline/skills/x", None, None),
             // Droid's client name and directory deliberately differ.
-            (ClientTarget::Droid, ".factory/skills/x", None, None),
-            (ClientTarget::Goose, ".agents/skills/x", None, None),
+            (
+                ClientTarget::Droid,
+                ".factory/skills/x",
+                None,
+                Some(".factory/droids/x.md"),
+            ),
+            (
+                ClientTarget::Goose,
+                ".agents/skills/x",
+                None,
+                Some(".goose/agents/x.md"),
+            ),
             (ClientTarget::Warp, ".warp/skills/x", None, None),
             // OpenClaw has no project scope at all; this is its defensive dead
             // path, never an install destination (`kind_surface` refuses it).
             (ClientTarget::OpenClaw, ".openclaw/skills/x", None, None),
-            (ClientTarget::Kilo, ".kilo/skills/x", None, None),
+            (ClientTarget::Kilo, ".kilo/skills/x", None, Some(".kilo/agents/x.md")),
             (
                 ClientTarget::Qoder,
                 ".qoder/skills/x",

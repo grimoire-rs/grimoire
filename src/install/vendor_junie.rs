@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Grimoire Authors
 
-//! Junie's vendor strategy: universal skills + MCP; project-scope rules
-//! (degraded); agents declined.
+//! Junie's vendor strategy: universal skills + MCP + agents; project-scope
+//! rules (degraded).
 //!
 //! JetBrains Junie mapping (`adr_vendor_wave_expansion.md`; live-verified
 //! 2026-07-19, re-verified 2026-09-27, `research_vendor_verification_junie_gemini.md`,
@@ -31,16 +31,24 @@
 //!   which returns `false` at global scope. The installer then warns, skips,
 //!   and records zero outputs rather than writing to a directory Junie never
 //!   reads.
-//! - **Agents**: **declined**. `.junie/agents/*.md` was EAP-only when this
-//!   shipped; since re-verified 2026-09-27 it is documented without an EAP
-//!   gate — enablement is a watchlisted kind change, not done here.
 //! - **MCP**: `.junie/mcp/mcp.json` (project) / `~/.junie/mcp/mcp.json`
 //!   (user), `mcpServers`; env refs **undocumented** → skip ref-bearing
 //!   descriptors; `json_splice`.
+//! - **Agents**: `.junie/agents/<name>.md` (project), `~/.junie/agents/<name>.md`
+//!   (global) — re-verified 2026-09-27,
+//!   <https://junie.jetbrains.com/docs/junie-cli-subagents.html>. Junie also
+//!   reads the shared `.agents/` and `~/.agents/`; grim never writes there,
+//!   because Antigravity and Goose use the same tree with other schemas.
+//!   `tools` is a YAML list; the `junie.*` registry lifts `permissionMode`,
+//!   `reasoningLevel`, `maxTurns`. A name outside `[a-z][a-z0-9_-]*` is
+//!   skipped with a warning, never renamed. Junie also offers to import
+//!   agents it finds in `.claude/agents/`, `.cursor/agents/` and
+//!   `.codex/agents/`; an accepted import is Junie's own copy, not grim's.
 //!
 //! Junie's per-kind `JUNIE_*_LOCATIONS` env family is **not** honored; it only
 //! adds search paths, so grim's defaults stay read (re-verified 2026-09-27).
-//! `JUNIE_HOME`, which replaces `~/.junie`, is not honored either — watchlisted.
+//! `JUNIE_HOME` **is** honored: it replaces `~/.junie` outright for every
+//! global path ([`junie_root`]); project scope is unaffected.
 
 use std::path::{Path, PathBuf};
 
@@ -49,11 +57,33 @@ use crate::oci::ArtifactKind;
 use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
-use super::render::{self, RenderError, RenderedDoc};
-use super::vendor::{KindSupport, Vendor, home_dir, provenance};
+use super::render::{self, NameGrammar, RenderError, RenderedDoc};
+use super::vendor::{FieldType, KindSupport, KnownField, Vendor, env_dir, home_dir, provenance};
 
 /// JetBrains Junie.
 pub struct JunieVendor;
+
+/// `junie.*` agent fields → native Junie subagent frontmatter (camelCase
+/// keys, junie.jetbrains.com/docs/junie-cli-subagents.html, 2026-09-27).
+/// `reasoningLevel` is model-dependent upstream; grim accepts the three
+/// values the docs name.
+pub const JUNIE_AGENT_FIELDS: &[KnownField] = &[
+    KnownField {
+        field: "permission-mode",
+        native: "permissionMode",
+        ty: FieldType::Enum(&["default", "acceptEdits", "dontAsk", "bypassPermissions", "plan"]),
+    },
+    KnownField {
+        field: "reasoning-level",
+        native: "reasoningLevel",
+        ty: FieldType::Enum(&["low", "medium", "high"]),
+    },
+    KnownField {
+        field: "max-turns",
+        native: "maxTurns",
+        ty: FieldType::Integer,
+    },
+];
 
 impl Vendor for JunieVendor {
     fn name(&self) -> &'static str {
@@ -67,13 +97,18 @@ impl Vendor for JunieVendor {
     fn kind_support(&self, kind: ArtifactKind) -> KindSupport {
         // Rules degraded — `.junie/rules/*.md` is ownable, but every file in
         // it is concatenated unconditionally, so `paths` scoping is dropped.
-        // Agents declined — not EAP-gated (see the module doc), just not
-        // yet enabled in grim.
         match kind {
             ArtifactKind::Rule => KindSupport::Degraded,
-            ArtifactKind::Agent => KindSupport::Declined,
             _ => KindSupport::Native,
         }
+    }
+
+    fn agent_fields(&self) -> &'static [KnownField] {
+        JUNIE_AGENT_FIELDS
+    }
+
+    fn agent_name_grammar(&self) -> Option<NameGrammar> {
+        Some(NameGrammar::LeadingLetterNoDot)
     }
 
     fn kind_surface(&self, kind: ArtifactKind, scope: ConfigScope) -> bool {
@@ -88,7 +123,7 @@ impl Vendor for JunieVendor {
     fn detect(&self, workspace: &Path, scope: ConfigScope) -> bool {
         match scope {
             ConfigScope::Project => workspace.join(".junie").exists(),
-            ConfigScope::Global => junie_root(home_dir()).is_some_and(|p| p.exists()),
+            ConfigScope::Global => junie_root(env_dir("JUNIE_HOME"), home_dir()).is_some_and(|p| p.exists()),
         }
     }
 
@@ -104,7 +139,6 @@ impl Vendor for JunieVendor {
     }
 
     fn agent_path(&self, workspace: &Path, scope: ConfigScope, name: &str) -> PathBuf {
-        // Dead path: `kind_support` declines `Agent`. Defensive location.
         scope_root(workspace, scope).join("agents").join(format!("{name}.md"))
     }
 
@@ -209,9 +243,62 @@ impl Vendor for JunieVendor {
         Ok(Some(RenderedDoc { document, warnings }))
     }
 
-    fn agent_index(&self, _parsed: &ParsedAgent, _pinned: &str) -> Result<Option<RenderedDoc>, RenderError> {
-        // Never called: agents are skipped at the `kind_support` gate.
-        Ok(None)
+    fn agent_index(&self, parsed: &ParsedAgent, pinned: &str) -> Result<Option<RenderedDoc>, RenderError> {
+        // Always a transform: the common `tools` comma string becomes the
+        // YAML list Junie reads, and the `junie.*` registry lifts typed
+        // camelCase keys. None of them shadows a common field, so there is
+        // no override set. Emit order: name, description, model, tools, then
+        // the lifted keys in registry order.
+        let projection = render::project_agent(&parsed.frontmatter, self)?;
+        let mut warnings = projection.warnings;
+
+        // The installer gates the binding name (the file name), but the
+        // frontmatter carries the artifact's own name, which `add --name`
+        // does not rebind. Junie falls back to the file name when `name` is
+        // absent, so a name its grammar rejects is omitted, not written.
+        let name = projection.cleaned.name.to_string();
+        let mut natives: Vec<(&'static str, serde_yaml::Value)> = Vec::new();
+        if render::agent_name_fits(&name, NameGrammar::LeadingLetterNoDot) {
+            natives.push(("name", serde_yaml::Value::String(name.clone())));
+        } else {
+            warnings.push(format!(
+                "agent '{name}': Junie only accepts names matching {}; `name:` omitted, so Junie \
+                 names the agent after its file",
+                NameGrammar::LeadingLetterNoDot.pattern()
+            ));
+        }
+        natives.push((
+            "description",
+            serde_yaml::Value::String(projection.cleaned.description.to_string()),
+        ));
+        if let Some(model) = &projection.cleaned.model {
+            natives.push(("model", serde_yaml::Value::String(model.to_string())));
+        }
+        if let Some(tools) = &projection.cleaned.tools {
+            natives.push(("tools", render::comma_list_value(tools)));
+        }
+
+        // `FieldType::Integer` takes any `i64`; Junie's `maxTurns` is a
+        // positive integer, so a non-positive one is dropped with a warning
+        // (the `opencode.steps` precedent) rather than written.
+        let lifted = projection
+            .lifted
+            .into_iter()
+            .filter(|(native, value)| {
+                let keep = *native != "maxTurns" || value.as_i64().is_some_and(|n| n > 0);
+                if !keep {
+                    warnings.push(format!(
+                        "agent '{name}': junie.max-turns must be a positive integer; dropped"
+                    ));
+                }
+                keep
+            })
+            .collect();
+
+        let mut document = render::agent_frontmatter_block(natives, lifted, self.name(), &[], &mut warnings);
+        document.push_str(&provenance(pinned));
+        document.push_str(&parsed.body);
+        Ok(Some(RenderedDoc { document, warnings }))
     }
 }
 
@@ -221,31 +308,37 @@ impl Vendor for JunieVendor {
 fn scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
     match scope {
         ConfigScope::Project => workspace.join(".junie"),
-        ConfigScope::Global => junie_root(home_dir()).unwrap_or_else(|| workspace.join(".junie")),
+        ConfigScope::Global => {
+            junie_root(env_dir("JUNIE_HOME"), home_dir()).unwrap_or_else(|| workspace.join(".junie"))
+        }
     }
 }
 
-/// Junie's user-level config root `~/.junie`. The per-kind `JUNIE_*_LOCATIONS`
-/// env family is **not** honored in wave 1 (watchlisted). The
-/// [`PathAnchor`](super::path_anchor) `JunieRoot` anchor is rooted here.
-pub(crate) fn junie_root(home: Option<PathBuf>) -> Option<PathBuf> {
-    home.map(|h| h.join(".junie"))
+/// Junie's user-level config root: `$JUNIE_HOME` when set — it "Overrides
+/// the default `~/.junie`" outright, no `.junie` segment appended (the
+/// `KIRO_HOME` shape) — else `~/.junie`. Every global Junie path (skills,
+/// agents, MCP, detection) resolves through here. The additive
+/// `JUNIE_*_LOCATIONS` family is not honored (grim's defaults stay read).
+/// The [`PathAnchor`](super::path_anchor) `VendorRoot("junie")` anchor is
+/// rooted here.
+pub(crate) fn junie_root(junie_home: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
+    junie_home.or_else(|| home.map(|h| h.join(".junie")))
 }
 
 #[cfg(test)]
 mod tests {
-    //! Specification tests for Junie — skills + MCP native, rules degraded at
-    //! project scope only, agents declined (`adr_vendor_wave_expansion.md` +
+    //! Specification tests for Junie — skills + MCP + agents native, rules
+    //! degraded at project scope only (`adr_vendor_wave_expansion.md` +
     //! `research_vendor_verification_junie_gemini.md`, re-verified 2026-07-27
     //! and 2026-09-27).
     use super::*;
     use crate::oci::mcp::McpDescriptor;
     use crate::skill::RuleFrontmatter;
 
-    // ── kind_support: rules degraded (ownable, unscopable), agents declined ──
+    // ── kind_support: rules degraded (ownable, unscopable), agents native ──
 
     #[test]
-    fn kind_support_degrades_rule_and_declines_agent() {
+    fn kind_support_degrades_rule_and_hosts_agent() {
         assert_eq!(JunieVendor.kind_support(ArtifactKind::Skill), KindSupport::Native);
         assert_eq!(JunieVendor.kind_support(ArtifactKind::Mcp), KindSupport::Native);
         assert_eq!(
@@ -255,8 +348,127 @@ mod tests {
         );
         assert_eq!(
             JunieVendor.kind_support(ArtifactKind::Agent),
-            KindSupport::Declined,
-            "not EAP-gated — grim just doesn't render it yet"
+            KindSupport::Native,
+            "`.junie/agents/` subagents are GA (re-verified 2026-09-27)"
+        );
+        for scope in [ConfigScope::Project, ConfigScope::Global] {
+            assert!(
+                JunieVendor.kind_surface(ArtifactKind::Agent, scope),
+                "agents at {scope:?}"
+            );
+        }
+    }
+
+    // ── agents: `.junie/agents/<name>.md`, never the shared `.agents/` ──
+
+    fn agent(doc: &str) -> ParsedAgent {
+        crate::skill::AgentFrontmatter::parse_doc(doc, Path::new("rev.md")).unwrap()
+    }
+
+    #[test]
+    fn agent_path_is_junie_agents_dir_not_the_shared_pool() {
+        let w = Path::new("/w");
+        assert_eq!(
+            JunieVendor.agent_path(w, ConfigScope::Project, "rev"),
+            Path::new("/w/.junie/agents/rev.md")
+        );
+        let global = JunieVendor.agent_path(w, ConfigScope::Global, "rev");
+        assert!(global.ends_with(".junie/agents/rev.md"), "{global:?}");
+        assert!(!global.starts_with("/w"), "global lands under ~/.junie: {global:?}");
+    }
+
+    #[test]
+    fn agent_index_maps_common_fields_and_lifts_the_junie_registry() {
+        let doc = "---\nname: rev\ndescription: Reviews.\nmodel: gpt-5\ntools: Read, Grep\nmetadata:\n  junie.permission-mode: acceptEdits\n  junie.reasoning-level: high\n  junie.max-turns: \"12\"\n---\nYou review.\n";
+        let out = JunieVendor.agent_index(&agent(doc), "r@sha256:d").unwrap().unwrap();
+        let d = &out.document;
+        assert_eq!(
+            d,
+            "---\nname: rev\ndescription: Reviews.\nmodel: gpt-5\ntools:\n- Read\n- Grep\n\
+             permissionMode: acceptEdits\nreasoningLevel: high\nmaxTurns: 12\n---\n\
+             <!-- generated by grim from r@sha256:d; edits will be overwritten -->\nYou review.\n"
+        );
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    }
+
+    #[test]
+    fn agent_index_rejects_out_of_set_junie_literals() {
+        for bad in [
+            "junie.permission-mode: yolo",
+            "junie.reasoning-level: xhigh",
+            "junie.max-turns: many",
+        ] {
+            let doc = format!("---\nname: rev\ndescription: d\nmetadata:\n  {bad}\n---\nbody\n");
+            assert!(
+                JunieVendor.agent_index(&agent(&doc), "p").is_err(),
+                "{bad} must fail render"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_index_drops_non_positive_max_turns_with_warning() {
+        for turns in ["0", "-3"] {
+            let doc = format!("---\nname: rev\ndescription: d\nmetadata:\n  junie.max-turns: \"{turns}\"\n---\nbody\n");
+            let out = JunieVendor.agent_index(&agent(&doc), "p").unwrap().unwrap();
+            assert!(!out.document.contains("maxTurns"), "{turns}: {}", out.document);
+            assert_eq!(out.warnings.len(), 1, "{turns}: {:?}", out.warnings);
+            assert!(out.warnings[0].contains("max-turns"), "{turns}: {:?}", out.warnings);
+        }
+    }
+
+    #[test]
+    fn agent_index_omits_a_frontmatter_name_junie_rejects() {
+        // A `2fa-review` artifact bound as `review` installs to review.md,
+        // but its frontmatter still says `2fa-review`: omit it so Junie
+        // names the agent after the file instead of rejecting it.
+        let doc = "---\nname: 2fa-review\ndescription: d\n---\nbody\n";
+        let parsed = crate::skill::AgentFrontmatter::parse_doc(doc, Path::new("2fa-review.md")).unwrap();
+        let out = JunieVendor.agent_index(&parsed, "p").unwrap().unwrap();
+        assert!(out.document.starts_with("---\ndescription: d\n"), "{}", out.document);
+        assert!(!out.document.contains("name:"), "{}", out.document);
+        assert_eq!(out.warnings.len(), 1, "{:?}", out.warnings);
+        assert!(out.warnings[0].contains("[a-z][a-z0-9_-]*"), "{:?}", out.warnings);
+    }
+
+    #[test]
+    fn agent_index_is_deterministic() {
+        let doc = "---\nname: rev\ndescription: d\ntools: Read\n---\nbody\n";
+        let a = JunieVendor.agent_index(&agent(doc), "p").unwrap();
+        let b = JunieVendor.agent_index(&agent(doc), "p").unwrap();
+        assert_eq!(a, b, "regeneration must be byte-identical");
+    }
+
+    #[test]
+    fn agent_name_grammar_is_leading_letter_no_dot() {
+        use crate::install::render::{NameGrammar, agent_name_fits};
+        assert_eq!(JunieVendor.agent_name_grammar(), Some(NameGrammar::LeadingLetterNoDot));
+        assert!(agent_name_fits("code-reviewer", NameGrammar::LeadingLetterNoDot));
+        assert!(!agent_name_fits("2fa-helper", NameGrammar::LeadingLetterNoDot));
+        assert!(!agent_name_fits("rev.v2", NameGrammar::LeadingLetterNoDot));
+    }
+
+    #[test]
+    fn docs_reference_matches_junie_registry() {
+        // Doc/registry parity: `vendor-metadata.md` documents exactly the
+        // `junie.*` keys the registry knows (agent registry only — skills and
+        // rules have none). Mirrors vendor_gemini.rs.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/content/docs/vendor-metadata.md");
+        let doc = std::fs::read_to_string(path).expect("vendor-metadata.md exists (doc/registry parity)");
+        let mut documented = std::collections::BTreeSet::new();
+        for token in doc.split('`').skip(1).step_by(2) {
+            if let Some(field) = token.strip_prefix("junie.")
+                && !field.is_empty()
+                && field.chars().all(|c| c.is_ascii_lowercase() || c == '-')
+            {
+                documented.insert(field.to_string());
+            }
+        }
+        let registry: std::collections::BTreeSet<String> =
+            JUNIE_AGENT_FIELDS.iter().map(|f| f.field.to_string()).collect();
+        assert_eq!(
+            documented, registry,
+            "vendor-metadata.md must document exactly the junie.* registry"
         );
     }
 
@@ -334,6 +546,18 @@ mod tests {
         let a = JunieVendor.rule_index(&parsed, ConfigScope::Project, "p").unwrap();
         let b = JunieVendor.rule_index(&parsed, ConfigScope::Project, "p").unwrap();
         assert_eq!(a, b, "regeneration must be byte-identical");
+    }
+
+    #[test]
+    fn junie_root_resolution_order() {
+        let home = || Some(PathBuf::from("/home/u"));
+        assert_eq!(junie_root(None, home()), Some(PathBuf::from("/home/u/.junie")));
+        assert_eq!(
+            junie_root(Some(PathBuf::from("/jh")), home()),
+            Some(PathBuf::from("/jh")),
+            "JUNIE_HOME replaces ~/.junie outright — no `.junie` segment appended"
+        );
+        assert_eq!(junie_root(None, None), None);
     }
 
     // ── detect: project scope follows the `.junie` dot-dir ──

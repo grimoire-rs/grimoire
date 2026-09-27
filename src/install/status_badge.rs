@@ -132,7 +132,8 @@ pub fn derive_badge(
     // Intact and at the locked pin — the only thing left that an install
     // would still do is materialize an output the record never covered.
     let pending = target.is_some_and(|t| {
-        !crate::install::expected_outputs::pending_outputs(Some(record), record.kind, &record.name, t, roots).is_empty()
+        !crate::install::expected_outputs::pending_outputs(Some(record), record.kind, &record.name, t, roots, None)
+            .is_empty()
     });
     if pending {
         StatusBadge::Pending

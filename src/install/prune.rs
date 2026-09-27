@@ -711,7 +711,7 @@ fn delete_output(out: &ClientOutput, roots: &AnchorRoots) -> Result<(), PruneErr
             source,
         })?;
     if let Some(pointer) = &out.entry {
-        return crate::install::uninstall::remove_entry(&target, pointer, out.mcp_format())
+        return crate::install::uninstall::remove_entry(&target, pointer, out, roots)
             .map_err(|source| PruneError::Io { path: target, source });
     }
     let mut removed = Vec::new();

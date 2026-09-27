@@ -42,10 +42,8 @@
 //!   need JSON5 tolerance before it could edit that file without corrupting
 //!   it. A reason to keep MCP declined, not a task. Watchlisted.
 //!
-//! `$OPENCLAW_HOME` is **not** honored. It looked undefined when this shipped,
-//! but re-verified 2026-09-27 it is documented to replace the home directory
-//! for OpenClaw's own paths. Honoring it moves global output, so it is a
-//! watchlisted layout change, not a comment fix.
+//! `$OPENCLAW_STATE_DIR` and `$OPENCLAW_HOME` **are** honored for the global
+//! root, state dir first ([`openclaw_root`]).
 
 use std::path::{Path, PathBuf};
 
@@ -55,7 +53,7 @@ use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
 use super::render::{self, RenderError, RenderedDoc};
-use super::vendor::{KindSupport, Vendor, home_dir};
+use super::vendor::{KindSupport, Vendor, env_dir, home_dir};
 
 /// OpenClaw (formerly ClawdBot).
 pub struct OpenClawVendor;
@@ -94,7 +92,8 @@ impl Vendor for OpenClawVendor {
                 let _ = workspace;
                 false
             }
-            ConfigScope::Global => openclaw_root(home_dir()).is_some_and(|p| p.exists()),
+            ConfigScope::Global => openclaw_root(env_dir("OPENCLAW_STATE_DIR"), env_dir("OPENCLAW_HOME"), home_dir())
+                .is_some_and(|p| p.exists()),
         }
     }
 
@@ -104,7 +103,7 @@ impl Vendor for OpenClawVendor {
             // location under OpenClaw's own dir — deliberately NOT
             // `~/.openclaw/workspace`, which would look like a real target.
             ConfigScope::Project => workspace.join(".openclaw").join("skills"),
-            ConfigScope::Global => openclaw_root(home_dir())
+            ConfigScope::Global => openclaw_root(env_dir("OPENCLAW_STATE_DIR"), env_dir("OPENCLAW_HOME"), home_dir())
                 .unwrap_or_else(|| workspace.join(".openclaw"))
                 .join("skills"),
         }
@@ -146,19 +145,49 @@ impl Vendor for OpenClawVendor {
 fn scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
     match scope {
         ConfigScope::Project => workspace.join(".openclaw"),
-        ConfigScope::Global => openclaw_root(home_dir()).unwrap_or_else(|| workspace.join(".openclaw")),
+        ConfigScope::Global => openclaw_root(env_dir("OPENCLAW_STATE_DIR"), env_dir("OPENCLAW_HOME"), home_dir())
+            .unwrap_or_else(|| workspace.join(".openclaw")),
     }
 }
 
-/// OpenClaw's user-level root `~/.openclaw` — what
-/// `openclaw skills install --global` itself writes under. `$OPENCLAW_HOME`
-/// is documented upstream to replace the home directory, but deliberately
-/// not honored here: doing so would move global output, so it is a
-/// watchlisted layout change, not a comment fix. The
-/// [`PathAnchor`](super::path_anchor) `VendorRoot("openclaw")` anchor is rooted
-/// here.
-pub(crate) fn openclaw_root(home: Option<PathBuf>) -> Option<PathBuf> {
-    home.map(|h| h.join(".openclaw"))
+/// OpenClaw's state root, where `openclaw skills install --global` writes
+/// (`<state-dir>/skills`): `$OPENCLAW_STATE_DIR` when set, else
+/// `$OPENCLAW_HOME/.openclaw` (`OPENCLAW_HOME` replaces the home directory —
+/// the `GEMINI_CLI_HOME` shape), else `~/.openclaw`. "Explicit path variables
+/// like `OPENCLAW_STATE_DIR` … take precedence over `OPENCLAW_HOME`"
+/// (docs.openclaw.ai/help/environment). Neither moves the `~/.agents/skills`
+/// pool, which grim does not write for OpenClaw anyway. The
+/// [`PathAnchor`](super::path_anchor) `VendorRoot("openclaw")` anchor is
+/// rooted here.
+///
+/// Both variables may start with `~` (expanded against the real home, as
+/// upstream does); any other relative value is ignored, never resolved against
+/// the CWD.
+pub(crate) fn openclaw_root(
+    state_dir: Option<PathBuf>,
+    openclaw_home: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    let expand = |var: &str, value: Option<PathBuf>| value.and_then(|v| expand_home(var, &v, home.as_deref()));
+    expand("OPENCLAW_STATE_DIR", state_dir).or_else(|| {
+        expand("OPENCLAW_HOME", openclaw_home)
+            .or(home.clone())
+            .map(|h| h.join(".openclaw"))
+    })
+}
+
+/// `value` as an absolute path: a leading `~` component becomes `home`, an
+/// absolute path passes through, anything else is dropped (debug log).
+fn expand_home(var: &str, value: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    let mut components = value.components();
+    if components.next() == Some(std::path::Component::Normal("~".as_ref())) {
+        return home.map(|h| h.join(components.as_path()));
+    }
+    if value.is_absolute() {
+        return Some(value.to_path_buf());
+    }
+    tracing::debug!(value = %value.display(), "ignoring ${var}: not an absolute or `~`-rooted path");
+    None
 }
 
 #[cfg(test)]
@@ -192,7 +221,7 @@ mod tests {
         // off the roster and renders to its own directory — the owner
         // principle prefers a vendor-specific dir wherever one exists.
         let ws = Path::new("/w");
-        let expected = openclaw_root(home_dir())
+        let expected = openclaw_root(env_dir("OPENCLAW_STATE_DIR"), env_dir("OPENCLAW_HOME"), home_dir())
             .unwrap_or_else(|| ws.join(".openclaw"))
             .join("skills");
         assert_eq!(OpenClawVendor.skills_root(ws, ConfigScope::Global), expected);
@@ -203,12 +232,56 @@ mod tests {
     }
 
     #[test]
-    fn openclaw_root_is_home_dot_openclaw() {
+    fn openclaw_root_resolution_order() {
+        let home = || Some(PathBuf::from("/home/u"));
         assert_eq!(
-            openclaw_root(Some(PathBuf::from("/home/u"))),
+            openclaw_root(None, None, home()),
             Some(PathBuf::from("/home/u/.openclaw"))
         );
-        assert_eq!(openclaw_root(None), None);
+        assert_eq!(
+            openclaw_root(None, Some(PathBuf::from("/oc")), home()),
+            Some(PathBuf::from("/oc/.openclaw")),
+            "OPENCLAW_HOME replaces $HOME; the `.openclaw` segment is still appended"
+        );
+        assert_eq!(
+            openclaw_root(Some(PathBuf::from("/state")), Some(PathBuf::from("/oc")), home()),
+            Some(PathBuf::from("/state")),
+            "OPENCLAW_STATE_DIR names the state root itself and wins over OPENCLAW_HOME"
+        );
+        assert_eq!(openclaw_root(None, None, None), None);
+    }
+
+    #[test]
+    fn openclaw_root_expands_tilde_and_ignores_other_relative_values() {
+        let home = || Some(PathBuf::from("/home/u"));
+        assert_eq!(
+            openclaw_root(Some(PathBuf::from("~/state")), None, home()),
+            Some(PathBuf::from("/home/u/state"))
+        );
+        assert_eq!(
+            openclaw_root(None, Some(PathBuf::from("~/svc")), home()),
+            Some(PathBuf::from("/home/u/svc/.openclaw"))
+        );
+        assert_eq!(
+            openclaw_root(None, Some(PathBuf::from("~")), home()),
+            Some(PathBuf::from("/home/u/.openclaw"))
+        );
+        // A relative value never resolves against the CWD: the layer drops and
+        // the next one applies.
+        assert_eq!(
+            openclaw_root(Some(PathBuf::from("state")), Some(PathBuf::from("/oc")), home()),
+            Some(PathBuf::from("/oc/.openclaw"))
+        );
+        assert_eq!(
+            openclaw_root(None, Some(PathBuf::from("~other/x")), home()),
+            Some(PathBuf::from("/home/u/.openclaw")),
+            "only a bare `~` component expands, never `~user`"
+        );
+        assert_eq!(
+            openclaw_root(Some(PathBuf::from("~/state")), None, None),
+            None,
+            "no home to expand against"
+        );
     }
 
     #[test]

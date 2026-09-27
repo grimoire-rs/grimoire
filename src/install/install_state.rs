@@ -126,7 +126,7 @@ impl ClientOutput {
     pub fn current_hash(&self, roots: &AnchorRoots, containment: Containment) -> Result<Digest, AnchorError> {
         let target = self.resolved_target(roots, containment)?;
         if let Some(pointer) = &self.entry {
-            return current_entry_hash(&target, pointer, self.mcp_format())
+            return current_entry_hash(&target, pointer, self.mcp_format(), self.mcp_vendor_owned_keys())
                 .map_err(|source| AnchorError::Io { path: target, source });
         }
         let support = self.resolved_support_dir(roots, containment)?;
@@ -171,6 +171,15 @@ impl ClientOutput {
         self.client
             .parse::<ClientTarget>()
             .map(|c| c.vendor().mcp_config_format())
+            .unwrap_or_default()
+    }
+
+    /// [`Vendor::mcp_entry_vendor_owned_keys`](crate::install::vendor::Vendor::mcp_entry_vendor_owned_keys)
+    /// of [`Self::client`]'s vendor; none for an unparsable client string.
+    pub fn mcp_vendor_owned_keys(&self) -> &'static [&'static str] {
+        self.client
+            .parse::<ClientTarget>()
+            .map(|c| c.vendor().mcp_entry_vendor_owned_keys())
             .unwrap_or_default()
     }
 
@@ -225,6 +234,34 @@ pub fn entry_value_hash(value: &serde_json::Value) -> Result<Digest, io::Error> 
     Ok(crate::oci::Algorithm::Sha256.hash(canonical.as_bytes()))
 }
 
+/// `value` without the top-level `keys` the vendor owns inside grim's entry
+/// — the view the integrity hash and the adopt/refuse comparison judge.
+pub fn without_vendor_owned(value: &serde_json::Value, keys: &[&str]) -> serde_json::Value {
+    let mut value = value.clone();
+    if let Some(map) = value.as_object_mut() {
+        map.retain(|k, _| !keys.contains(&k.as_str()));
+    }
+    value
+}
+
+/// `value` with the vendor-owned `keys` carried over from `existing` (the
+/// entry on disk), so a grim rewrite never wipes the client's own state.
+pub fn with_vendor_owned(
+    value: &serde_json::Value,
+    existing: Option<&serde_json::Value>,
+    keys: &[&str],
+) -> serde_json::Value {
+    let mut value = value.clone();
+    if let (Some(map), Some(existing)) = (value.as_object_mut(), existing.and_then(|e| e.as_object())) {
+        for key in keys {
+            if let Some(kept) = existing.get(*key) {
+                map.insert((*key).to_string(), kept.clone());
+            }
+        }
+    }
+    value
+}
+
 /// Read the managed member `pointer` points at inside the config file at
 /// `target`, using the splice engine `format` names (JSON/JSONC-tolerant,
 /// or TOML). `Ok(None)` when the member (or the `instructions`-style
@@ -258,6 +295,7 @@ fn current_entry_hash(
     target: &Path,
     pointer: &str,
     format: crate::install::vendor::McpConfigFormat,
+    vendor_owned: &[&str],
 ) -> io::Result<Digest> {
     let value = read_entry_value(target, pointer, format)?.ok_or_else(|| {
         io::Error::new(
@@ -265,7 +303,7 @@ fn current_entry_hash(
             format!("managed entry '{pointer}' not present in '{}'", target.display()),
         )
     })?;
-    entry_value_hash(&value)
+    entry_value_hash(&without_vendor_owned(&value, vendor_owned))
 }
 
 /// Filter `outputs` to those whose client is in the currently-active set.
@@ -3179,6 +3217,24 @@ mod tests {
     }
 
     #[test]
+    fn vendor_owned_keys_are_invisible_to_the_hash_and_survive_a_rewrite() {
+        let written = serde_json::json!({"command": "grim"});
+        let on_disk = serde_json::json!({"command": "grim", "autoApprove": ["t"], "oauth": {"tokens": {}}});
+        let keys = ["autoApprove", "oauth"];
+        assert_eq!(
+            entry_value_hash(&without_vendor_owned(&on_disk, &keys)).unwrap(),
+            entry_value_hash(&written).unwrap()
+        );
+        assert_eq!(with_vendor_owned(&written, Some(&on_disk), &keys), on_disk);
+        assert_eq!(
+            without_vendor_owned(&on_disk, &[]),
+            on_disk,
+            "no keys: every other vendor unchanged"
+        );
+        assert_eq!(with_vendor_owned(&written, Some(&on_disk), &[]), written);
+    }
+
+    #[test]
     fn entry_value_hash_is_sorted_key_canonical() {
         // Guard: serde_json without `preserve_order` serializes maps
         // sorted-key, which the semantic drift check depends on. A future
@@ -3225,11 +3281,11 @@ mod tests {
             .expect("member present");
         assert_eq!(value["command"], "grim");
 
-        let hash = current_entry_hash(&cfg, "/mcp_servers/grim", McpConfigFormat::Toml).unwrap();
+        let hash = current_entry_hash(&cfg, "/mcp_servers/grim", McpConfigFormat::Toml, &[]).unwrap();
         assert_eq!(hash, entry_value_hash(&value).unwrap());
 
         // Absent member surfaces as NotFound (missing-vs-modified precedence).
-        let err = current_entry_hash(&cfg, "/mcp_servers/absent", McpConfigFormat::Toml).unwrap_err();
+        let err = current_entry_hash(&cfg, "/mcp_servers/absent", McpConfigFormat::Toml, &[]).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 

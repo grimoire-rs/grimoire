@@ -71,3 +71,40 @@ its subject with `git log --grep`.
 contradictions (decline legends, the `ai-config-authoring` counts, the Kiro
 subagent row). It landed with those fixed; the full `task verify` passed on
 the combined branch.
+
+## Second pass — every remaining finding concluded (plan_upstream_followups_2)
+
+One squashed commit on `feat/upstream-followups` concludes every row above that
+was not yet `landed`/`done`. Decisions were made by the owner where marked;
+the rest follow `plan_upstream_followups_2.md`.
+
+| Issue | Finding | Final disposition |
+|---|---|---|
+| [#139](https://github.com/grimoire-rs/grimoire/issues/139) | Antigravity Rule kind | landed — `.agents/rules/` (project), `~/.gemini/config/rules/` (global); `trigger: glob`+`globs` or `always_on`; derived `description` |
+| [#141](https://github.com/grimoire-rs/grimoire/issues/141) | Claude kinds (commands, output styles, LSP, workflows, themes, monitors) | declined (owner) — documented in clients.md#gap-claude-kinds; watchlist revisit trigger for output styles |
+| [#141](https://github.com/grimoire-rs/grimoire/issues/141) | CLAUDE_CONFIG_DIR from settings `env` | landed (owner) — managed > user settings > shell > `~/.claude`, with reaper + upgrade fixtures |
+| [#142](https://github.com/grimoire-rs/grimoire/issues/142) | Cline MCP | landed — global `cline_mcp_settings.json`, Cline lock participation, vendor-owned entry keys; `CLINE_DIR` honored for MCP only |
+| [#143](https://github.com/grimoire-rs/grimoire/issues/143) | Codex `agents/openai.yaml` sidecar | declined permanently — breaks shared-pool byte identity |
+| [#143](https://github.com/grimoire-rs/grimoire/issues/143) | Codex `http_headers_helper` | declined permanently — different helper contract |
+| [#144](https://github.com/grimoire-rs/grimoire/issues/144) | Copilot project MCP | landed — second project output `.github/mcp.json` via plural `mcp_config_paths` |
+| [#144](https://github.com/grimoire-rs/grimoire/issues/144) | Copilot OAuth | landed — lossless-or-skip (`adr_mcp_oauth_projection.md`, owner) |
+| [#145](https://github.com/grimoire-rs/grimoire/issues/145) | Droid Agent kind | landed — `.factory/droids/`, NoDot name gate, `droid.reasoning-effort` |
+| [#145](https://github.com/grimoire-rs/grimoire/issues/145) | Droid MCP | landed — `.factory/mcp.json` both scopes, env refs only in env/headers/clientId, `disabled`/`disabledTools` vendor-owned |
+| [#146](https://github.com/grimoire-rs/grimoire/issues/146) | Gemini `timeout` bounds tool calls | landed (owner) — no longer projected, warning; heals on pin change or delete + install |
+| [#147](https://github.com/grimoire-rs/grimoire/issues/147) | Goose Agent kind | landed — Goose-exclusive `.goose/agents/` both scopes (avoids the Antigravity `.agents/agents/` collision) |
+| [#148](https://github.com/grimoire-rs/grimoire/issues/148) | Junie Agent kind | landed — `.junie/agents/`, name grammar gate, `junie.*` registry |
+| [#148](https://github.com/grimoire-rs/grimoire/issues/148) | JUNIE_HOME | landed — replace shape, reaper + upgrade fixtures |
+| [#149](https://github.com/grimoire-rs/grimoire/issues/149) | Kilo Agent kind | landed — `.kilo/agents/`, `$XDG_CONFIG_HOME/kilo/agents/`; `permission` waits on `FieldType::Json` |
+| [#151](https://github.com/grimoire-rs/grimoire/issues/151) | OPENCLAW_HOME | landed — `OPENCLAW_STATE_DIR` > `$OPENCLAW_HOME/.openclaw` > `~/.openclaw`, reaper + fixtures |
+| [#152](https://github.com/grimoire-rs/grimoire/issues/152) | OpenCode OAuth | landed — lossless-or-skip |
+| [#155](https://github.com/grimoire-rs/grimoire/issues/155) | Warp MCP | landed — `.warp/.mcp.json` both scopes; env-ref servers skipped (expansion unverified) |
+| [#156](https://github.com/grimoire-rs/grimoire/issues/156) | Zed OAuth | landed — lossless-or-skip (literal `client_id` only) |
+
+**Left for follow-up** (not in any of these issues):
+
+- `grim status` still lists a registry-sourced MCP server under
+  `outputs_pending` for a client that cannot represent it; `grim install` now
+  reports it `unchanged`. Needs a local manifest cache (status has no offline
+  path to the descriptor).
+- Dropping a client from `[options].clients` while its root is relocated leaves
+  the old-root copy untracked (pre-existing for `KIRO_HOME`).

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Grimoire Authors
 
-//! Cline's vendor strategy: own-directory skills only; everything else declined.
+//! Cline's vendor strategy: own-directory skills and global MCP; rules and agents declined.
 //!
 //! Cline mapping (verified 2026-07-27, re-verified 2026-09-27, against Cline's own documentation,
 //! <https://docs.cline.bot>; the skills page was read as raw markdown rather
@@ -37,22 +37,37 @@
 //!   Code extension hardcodes `enableSpawnAgent: false`
 //!   (`apps/vscode/src/sdk/cline-session-factory.ts:1087` at v4.1.21), so the
 //!   format exists but is not rendered by grim yet.
-//! - **MCP**: **declined**. When this shipped there was no grim-writable config
-//!   file; since re-verified 2026-09-27 against source (`sdk/packages/shared/src/storage/paths.ts`
-//!   and the VS Code extension's `mcp-settings-legacy-migration.ts`), the CLI
-//!   and the IDE both resolve the **same** shared file,
-//!   `<cline dir>/data/settings/cline_mcp_settings.json` — the docs page's
-//!   "CLI `~/.cline/mcp.json`, IDE UI-managed" split does not hold in source —
-//!   enablement is a watchlisted kind change.
+//! - **MCP**: **global scope only**, enabled 2026-09-27. Source-verified at
+//!   cline/cline@252082b9: the CLI and the VS Code extension resolve the
+//!   **same** shared file — `$CLINE_MCP_SETTINGS_PATH`, else
+//!   `$CLINE_DATA_DIR/settings/cline_mcp_settings.json`, else
+//!   `<CLINE_DIR|~/.cline>/data/settings/cline_mcp_settings.json`
+//!   (`sdk/packages/shared/src/storage/paths.ts::resolveMcpSettingsPath`,
+//!   `apps/vscode/src/hosts/vscode/mcp-settings-legacy-migration.ts::getSharedMcpSettingsPath`).
+//!   The docs page's "CLI `~/.cline/mcp.json`, IDE UI-managed" split does not
+//!   hold in source. There is no project MCP surface, so
+//!   [`Vendor::mcp_config_path`] is `None` there. Both writers rewrite the
+//!   file whole under a directory lock grim joins
+//!   ([`super::cline_lock`]). Entries use the flat form
+//!   `mcpServers.<name>.{type, command, args, cwd, env, url, headers}`;
+//!   env references render `${env:VAR}`, which the extension expands
+//!   (`apps/vscode/src/utils/envExpansion.ts`) and the CLI passes through
+//!   literally. Either side rejects the **whole file** when one entry fails
+//!   its schema, so a url that is not a URL before expansion is skipped. An
+//!   oauth block that sets any field is skipped: Cline's own oauth shape is
+//!   unverified (`adr_mcp_oauth_projection.md`).
 //!
-//! `CLINE_DIR` and `CLINE_DATA_DIR` are **not** honored, for different
-//! reasons. `CLINE_DATA_DIR` only ever feeds `resolveClineDataDir()`
-//! (settings/sessions/teams data), which grim's skills write never touches —
-//! it was never a skills candidate to begin with. `CLINE_DIR` genuinely
-//! replaces the CLI's `resolveClineDir()`, the base both `<dir>/skills` and
-//! `<dir>/data/...` resolve under, but the VS Code extension hardcodes
-//! `os.homedir()/.cline` and ignores it — so honoring it would move the CLI's
-//! output while leaving the IDE reading the old path. Watchlisted.
+//! `CLINE_DIR` and `CLINE_DATA_DIR` do **not** move Cline's skills, for
+//! different reasons. `CLINE_DATA_DIR` only ever feeds `resolveClineDataDir()`
+//! (settings/sessions/teams data), which the skills write never touches.
+//! `CLINE_DIR` genuinely replaces the CLI's `resolveClineDir()`, the base
+//! `<dir>/skills` resolves under, but the VS Code extension hardcodes
+//! `os.homedir()/.cline` for skills and ignores it — so honoring it there
+//! would move the CLI's output while leaving the IDE reading the old path.
+//! Watchlisted. Both variables — and `CLINE_MCP_SETTINGS_PATH` — **are**
+//! honored for the MCP settings file, where CLI and IDE agree; a file they
+//! relocate outside `~/.cline` is unanchorable, and the installer skips it
+//! with a warning rather than record a write it could not find again.
 
 use std::path::{Path, PathBuf};
 
@@ -62,7 +77,7 @@ use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
 use super::render::{self, RenderError, RenderedDoc};
-use super::vendor::{KindSupport, Vendor, home_dir};
+use super::vendor::{KindSupport, Vendor, env_dir, home_dir};
 
 /// Cline.
 pub struct ClineVendor;
@@ -77,11 +92,12 @@ impl Vendor for ClineVendor {
     }
 
     fn kind_support(&self, kind: ArtifactKind) -> KindSupport {
-        // Skills only this wave. Rules are declined despite a real scoped
-        // surface (see the module doc) — declining is the reversible
-        // direction, and support is additive later.
+        // Rules are declined despite a real scoped surface (see the module
+        // doc) — declining is the reversible direction, and support is
+        // additive later. MCP is global-only: `mcp_config_path` has no
+        // project file.
         match kind {
-            ArtifactKind::Rule | ArtifactKind::Agent | ArtifactKind::Mcp => KindSupport::Declined,
+            ArtifactKind::Rule | ArtifactKind::Agent => KindSupport::Declined,
             _ => KindSupport::Native,
         }
     }
@@ -110,6 +126,98 @@ impl Vendor for ClineVendor {
     fn agent_path(&self, workspace: &Path, scope: ConfigScope, name: &str) -> PathBuf {
         // Dead path: `kind_support` declines `Agent`. Defensive location.
         scope_root(workspace, scope).join("agents").join(format!("{name}.md"))
+    }
+
+    fn mcp_config_path(&self, _workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
+        match scope {
+            ConfigScope::Project => None,
+            ConfigScope::Global => mcp_settings_path(&env_dir, home_dir()),
+        }
+    }
+
+    fn mcp_entry_vendor_owned_keys(&self) -> &'static [&'static str] {
+        // Cline writes these into every server entry, grim's included:
+        // approvals and toggles (`McpHub.ts`), OAuth state and client config,
+        // and metadata (`config-loader.ts`) at cline/cline@252082b9.
+        &[
+            "autoApprove",
+            "disabled",
+            "timeout",
+            "oauth",
+            "oauthClient",
+            "metadata",
+            "remoteConfigured",
+        ]
+    }
+
+    fn mcp_entry(
+        &self,
+        scope: ConfigScope,
+        name: &str,
+        descriptor: &crate::oci::mcp::McpDescriptor,
+    ) -> Option<(String, serde_json::Value)> {
+        use crate::oci::mcp::McpTransport;
+
+        let s = &descriptor.server;
+        if let Some(unmapped) = s.oauth.as_ref().map(|o| o.unmapped(&[]))
+            && !unmapped.is_empty()
+        {
+            tracing::warn!(
+                "mcp server '{name}' skipped for cline ({scope}): no verified Cline target for oauth {}",
+                unmapped.join(", ")
+            );
+            return None;
+        }
+        let mut entry = serde_json::Map::new();
+        match s.transport {
+            McpTransport::Stdio => {
+                entry.insert("type".into(), serde_json::json!("stdio"));
+                entry.insert("command".into(), serde_json::json!(s.command));
+                if !s.args.is_empty() {
+                    entry.insert("args".into(), serde_json::json!(s.args));
+                }
+                if let Some(cwd) = &s.cwd {
+                    entry.insert("cwd".into(), serde_json::json!(cwd));
+                }
+                if !s.env.is_empty() {
+                    entry.insert("env".into(), serde_json::json!(s.env));
+                }
+            }
+            McpTransport::Ws => {
+                tracing::warn!("mcp server '{name}' skipped for cline ({scope}): no ws transport in Cline's schema");
+                return None;
+            }
+            McpTransport::Http | McpTransport::Sse => {
+                let kind = if s.transport == McpTransport::Http {
+                    "streamableHttp"
+                } else {
+                    "sse"
+                };
+                entry.insert("type".into(), serde_json::json!(kind));
+                entry.insert("url".into(), serde_json::json!(s.url));
+                if !s.headers.is_empty() {
+                    entry.insert("headers".into(), serde_json::json!(s.headers));
+                }
+            }
+        }
+        // `timeout` (Cline counts seconds), `always_load` and
+        // `headers_helper` have no Cline target — dropped, the sibling
+        // refinement convention.
+        let mut value = serde_json::Value::Object(entry);
+        super::mcp_config::translate_env_refs(&mut value, &|var| format!("${{env:{var}}}"));
+        // One entry failing Cline's `z.string().url()` rejects the whole
+        // settings file, and the CLI validates before (never) expanding.
+        if value["url"]
+            .as_str()
+            .is_some_and(|u| u.contains("${") && reqwest::Url::parse(u).is_err())
+        {
+            tracing::warn!(
+                "mcp server '{name}' skipped for cline ({scope}): its url is not a valid URL before \
+                 ${{env:VAR}} expansion, and Cline would reject the whole settings file"
+            );
+            return None;
+        }
+        Some((format!("/mcpServers/{name}"), value))
     }
 
     fn skill_index(&self, doc: &str) -> Result<Option<RenderedDoc>, RenderError> {
@@ -152,22 +260,143 @@ pub(crate) fn cline_root(home: Option<PathBuf>) -> Option<PathBuf> {
     home.map(|h| h.join(".cline"))
 }
 
+/// Cline's shared MCP settings file — upstream `resolveMcpSettingsPath()`,
+/// with `env` injected so the precedence is testable.
+fn mcp_settings_path(env: &dyn Fn(&str) -> Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(explicit) = env("CLINE_MCP_SETTINGS_PATH") {
+        return Some(explicit);
+    }
+    let data = env("CLINE_DATA_DIR")
+        .or_else(|| env("CLINE_DIR").map(|d| d.join("data")))
+        .or_else(|| cline_root(home).map(|r| r.join("data")))?;
+    Some(data.join("settings").join("cline_mcp_settings.json"))
+}
+
 #[cfg(test)]
 mod tests {
-    //! Specification tests for Cline — own-directory skills only.
+    //! Specification tests for Cline — own-directory skills and global MCP.
     use super::*;
+    use crate::oci::mcp::McpDescriptor;
 
     #[test]
-    fn kind_support_declines_everything_but_skills() {
+    fn kind_support_hosts_skills_and_mcp_only() {
         assert_eq!(ClineVendor.kind_support(ArtifactKind::Skill), KindSupport::Native);
-        for kind in [ArtifactKind::Rule, ArtifactKind::Agent, ArtifactKind::Mcp] {
+        assert_eq!(ClineVendor.kind_support(ArtifactKind::Mcp), KindSupport::Native);
+        for kind in [ArtifactKind::Rule, ArtifactKind::Agent] {
             assert_eq!(ClineVendor.kind_support(kind), KindSupport::Declined, "{kind:?}");
         }
         assert!(
             ClineVendor
                 .mcp_config_path(Path::new("/w"), ConfigScope::Project)
                 .is_none(),
-            "no MCP surface is written this wave"
+            "Cline has no project MCP file"
+        );
+    }
+
+    #[test]
+    fn mcp_settings_path_follows_upstream_precedence() {
+        let home = Some(PathBuf::from("/home/u"));
+        let env_of = |pairs: &'static [(&'static str, &'static str)]| {
+            move |var: &str| pairs.iter().find(|(k, _)| *k == var).map(|(_, v)| PathBuf::from(v))
+        };
+        assert_eq!(
+            mcp_settings_path(&env_of(&[]), home.clone()),
+            Some(PathBuf::from("/home/u/.cline/data/settings/cline_mcp_settings.json"))
+        );
+        assert_eq!(
+            mcp_settings_path(&env_of(&[("CLINE_DIR", "/c")]), home.clone()),
+            Some(PathBuf::from("/c/data/settings/cline_mcp_settings.json"))
+        );
+        assert_eq!(
+            mcp_settings_path(&env_of(&[("CLINE_DIR", "/c"), ("CLINE_DATA_DIR", "/d")]), home.clone()),
+            Some(PathBuf::from("/d/settings/cline_mcp_settings.json"))
+        );
+        assert_eq!(
+            mcp_settings_path(
+                &env_of(&[("CLINE_DATA_DIR", "/d"), ("CLINE_MCP_SETTINGS_PATH", "/x/mcp.json")]),
+                home
+            ),
+            Some(PathBuf::from("/x/mcp.json"))
+        );
+        assert_eq!(mcp_settings_path(&env_of(&[]), None), None);
+    }
+
+    fn entry(toml: &str) -> Option<(String, serde_json::Value)> {
+        let d = McpDescriptor::from_toml_str(&format!("description = \"d\"\n[server]\n{toml}")).unwrap();
+        ClineVendor.mcp_entry(ConfigScope::Global, "srv", &d)
+    }
+
+    #[test]
+    fn mcp_entry_stdio_is_flat_with_env_refs_translated() {
+        let (pointer, value) = entry(
+            "transport = \"stdio\"\ncommand = \"grim\"\nargs = [\"mcp\", \"${A}\"]\ncwd = \"/tmp\"\n\
+             timeout = 5000\n[server.env]\nKEY = \"${API_KEY}\"",
+        )
+        .expect("stdio registers");
+        assert_eq!(pointer, "/mcpServers/srv");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "type": "stdio",
+                "command": "grim",
+                "args": ["mcp", "${env:A}"],
+                "cwd": "/tmp",
+                "env": {"KEY": "${env:API_KEY}"},
+            }),
+            "flat form, no timeout (Cline counts seconds)"
+        );
+    }
+
+    #[test]
+    fn mcp_entry_remote_types_are_streamable_http_and_sse() {
+        let (_, http) = entry(
+            "transport = \"http\"\nurl = \"https://h.example/${P}\"\n[server.headers]\nAuthorization = \"Bearer ${T}\"",
+        )
+        .unwrap();
+        assert_eq!(http["type"], "streamableHttp");
+        assert_eq!(http["url"], "https://h.example/${env:P}");
+        assert_eq!(http["headers"]["Authorization"], "Bearer ${env:T}");
+        let (_, sse) = entry("transport = \"sse\"\nurl = \"https://h.example/sse\"").unwrap();
+        assert_eq!(sse["type"], "sse");
+    }
+
+    #[test]
+    fn mcp_entry_skips_what_would_break_the_whole_settings_file() {
+        assert!(
+            entry("transport = \"http\"\nurl = \"https://${HOST}/mcp\"").is_none(),
+            "a url that is not a URL before expansion fails Cline's schema for every entry"
+        );
+        assert!(entry("transport = \"ws\"\nurl = \"wss://h.example\"").is_none());
+    }
+
+    #[test]
+    fn mcp_entry_never_renders_a_key_cline_owns() {
+        // A rendered vendor-owned key is excluded from the recorded hash yet
+        // rewritten on every install, so it would read `modified` forever.
+        let (_, value) = entry(
+            "transport = \"http\"\nurl = \"https://h.example/mcp\"\ntimeout = 5000\n\
+             [server.headers]\nAuthorization = \"Bearer ${T}\"",
+        )
+        .unwrap();
+        let (_, stdio) = entry(
+            "transport = \"stdio\"\ncommand = \"grim\"\ncwd = \"/tmp\"\ntimeout = 5000\n\
+             [server.env]\nK = \"v\"",
+        )
+        .unwrap();
+        for rendered in [value, stdio] {
+            for key in ClineVendor.mcp_entry_vendor_owned_keys() {
+                assert!(
+                    rendered.get(*key).is_none(),
+                    "grim must not render Cline-owned `{key}`: {rendered}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mcp_entry_skips_any_oauth_field() {
+        assert!(
+            entry("transport = \"http\"\nurl = \"https://h.example\"\n[server.oauth]\nclient_id = \"c\"").is_none()
         );
     }
 

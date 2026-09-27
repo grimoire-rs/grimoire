@@ -95,15 +95,22 @@ impl Vendor for ZedVendor {
     ) -> Option<(String, serde_json::Value)> {
         use crate::oci::mcp::McpTransport;
 
-        // Zed's HTTP `context_servers` accept only a pre-registered
-        // `oauth: { client_id, client_secret }` (since zed #52900), which cannot
-        // carry grim's scopes / callback port / metadata URL — a structured
-        // oauth block is auth-critical, so the whole descriptor is skipped
-        // with a warning rather than written lossy (watchlisted).
+        // Zed's HTTP `context_servers` accept a pre-registered
+        // `oauth: { client_id, client_secret }` (since zed #52900,
+        // `OAuthClientSettings` in settings_content/src/project.rs v1.21.0).
+        // Lossless-or-skip (`adr_mcp_oauth_projection.md`): only `client_id`
+        // maps, so scopes / callback port / metadata URL skip the server
+        // rather than being dropped from an auth-critical block.
         let s = &descriptor.server;
-        if s.oauth.is_some() {
-            tracing::warn!("mcp server '{name}' skipped for zed ({scope}): context_servers oauth shape differs");
-            return None;
+        if let Some(o) = &s.oauth {
+            let unmapped = o.unmapped(&[crate::oci::mcp::OAuthField::ClientId]);
+            if !unmapped.is_empty() {
+                tracing::warn!(
+                    "mcp server '{name}' skipped for zed ({scope}): no context_servers oauth mapping for {}",
+                    unmapped.join(", ")
+                );
+                return None;
+            }
         }
         // Zed performs no env-var expansion in settings.json (open upstream
         // discussions #26043/#18630/#56881/#53780) — a descriptor that needs
@@ -142,6 +149,9 @@ impl Vendor for ZedVendor {
                 entry.insert("url".into(), serde_json::json!(s.url));
                 if !s.headers.is_empty() {
                     entry.insert("headers".into(), serde_json::json!(s.headers));
+                }
+                if let Some(client_id) = s.oauth.as_ref().and_then(|o| o.client_id.as_ref()) {
+                    entry.insert("oauth".into(), serde_json::json!({ "client_id": client_id }));
                 }
             }
         }
@@ -407,15 +417,34 @@ mod tests {
     }
 
     #[test]
-    fn mcp_entry_declines_oauth_and_ws() {
-        let oauth = McpDescriptor::from_toml_str(
-            "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"\n[server.oauth]\nclient_id = \"c\"",
-        )
-        .unwrap();
-        assert!(
-            ZedVendor.mcp_entry(ConfigScope::Project, "m", &oauth).is_none(),
-            "oauth skipped"
+    fn mcp_entry_oauth_is_projected_losslessly_or_skipped() {
+        let entry = |oauth: &str| {
+            let d = McpDescriptor::from_toml_str(&format!(
+                "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"\n[server.oauth]\n{oauth}"
+            ))
+            .unwrap();
+            ZedVendor.mcp_entry(ConfigScope::Project, "m", &d).map(|(_, v)| v)
+        };
+        assert_eq!(
+            entry("client_id = \"c\"").unwrap()["oauth"],
+            serde_json::json!({"client_id": "c"})
         );
+        // An empty block projects nothing and is never a reason to skip.
+        assert!(entry("").unwrap().get("oauth").is_none());
+        // Anything beyond `client_id` has no context_servers target: skip.
+        for unmapped in [
+            "client_id = \"c\"\nscopes = [\"read\"]",
+            "client_id = \"c\"\ncallback_port = 43110",
+            "auth_server_metadata_url = \"https://auth/.well-known/x\"",
+        ] {
+            assert!(entry(unmapped).is_none(), "{unmapped}");
+        }
+        // Zed expands no `${VAR}`: an env-ref client id skips like any env ref.
+        assert!(entry("client_id = \"${CID}\"").is_none());
+    }
+
+    #[test]
+    fn mcp_entry_declines_ws() {
         let ws =
             McpDescriptor::from_toml_str("description = \"d\"\n[server]\ntransport = \"ws\"\nurl = \"wss://x/socket\"")
                 .unwrap();

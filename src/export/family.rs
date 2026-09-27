@@ -375,8 +375,8 @@ mod tests {
         // (family, client, skill, agent, mcp, rule)
         let table = [
             (Family::Claude, ClientTarget::Claude, ok, ok, ok, Err(Nfs)),
-            (Family::Claude, ClientTarget::Droid, ok, Err(Cd), Err(Cd), Err(Nfs)),
-            (Family::Claude, ClientTarget::Junie, ok, Err(Cd), ok, Err(Nfs)),
+            (Family::Claude, ClientTarget::Droid, ok, ok, ok, Err(Nfs)),
+            (Family::Claude, ClientTarget::Junie, ok, ok, ok, Err(Nfs)),
             (Family::Claude, ClientTarget::OpenClaw, ok, Err(Cd), Err(Cd), Err(Nfs)),
             // Agent Plugins: agents have no format surface (not client-declined,
             // even where the client would install them); MCP is the family's

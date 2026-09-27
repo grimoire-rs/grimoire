@@ -3,6 +3,7 @@
 """Shared fixtures for the Grimoire acceptance-test suite."""
 from __future__ import annotations
 
+import json
 import os
 import sys
 import urllib.error
@@ -228,3 +229,51 @@ def unique_repo() -> str:
     """A UUID-prefixed repository name, isolated per test on the shared
     registry."""
     return f"grim-test/{uuid.uuid4().hex[:12]}"
+
+
+# ---------------------------------------------------------------------------
+# Host managed Claude settings
+# ---------------------------------------------------------------------------
+
+# Claude Code's system managed-settings directory per OS
+# (code.claude.com/docs/en/managed-settings). grim reads it for
+# `env.CLAUDE_CONFIG_DIR`, and nothing in the per-test environment can mask it.
+_CLAUDE_MANAGED_DIR = {
+    "darwin": Path("/Library/Application Support/ClaudeCode"),
+    "win32": Path(r"C:\Program Files\ClaudeCode"),
+}.get(sys.platform, Path("/etc/claude-code"))
+
+
+def _host_managed_claude_config_dir(managed_dir: Path = _CLAUDE_MANAGED_DIR) -> str | None:
+    """The ``env.CLAUDE_CONFIG_DIR`` the host's managed settings impose, if
+    any: ``managed-settings.json`` then ``managed-settings.d/*.json`` in name
+    order, the last value set winning — the order grim itself reads."""
+    drop_in_dir = managed_dir / "managed-settings.d"
+    drop_ins = sorted(
+        p for p in (drop_in_dir.iterdir() if drop_in_dir.is_dir() else ())
+        if p.suffix == ".json" and not p.name.startswith(".")
+    )
+    found = None
+    for path in [managed_dir / "managed-settings.json", *drop_ins]:
+        try:
+            value = json.loads(path.read_text()).get("env", {}).get("CLAUDE_CONFIG_DIR")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(value, str) and value:
+            found = value
+    return found
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _guard_host_managed_claude_settings() -> None:
+    """Skip every ``--global`` grim run on a host whose managed Claude settings
+    set ``CLAUDE_CONFIG_DIR``.
+
+    grim honors that value exactly as Claude Code does, so on such a host a
+    global install — or an autodetected one that picks Claude up — would
+    write into the machine's REAL Claude config directory, outside the
+    per-test ``$HOME``. The skip happens in ``GrimRunner.run`` before the
+    process starts, so nothing is written."""
+    from src import runner
+
+    runner.HOST_MANAGED_CLAUDE_CONFIG_DIR = _host_managed_claude_config_dir()

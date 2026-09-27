@@ -90,7 +90,7 @@ use crate::oci::ArtifactKind;
 
 use super::client_target::ClientTarget;
 use super::managed_config;
-use super::vendor::{env_dir, home_dir};
+use super::vendor::home_dir;
 
 /// The root config key holding Claude Code's auto-load exclusion globs.
 const EXCLUDES_KEY: &str = "claudeMdExcludes";
@@ -190,7 +190,12 @@ fn root_for(
 /// [`root_for`] over the ambient environment — the one place this module
 /// reads it.
 fn scope_root(workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
-    root_for(workspace, scope, env_dir("CLAUDE_CONFIG_DIR"), home_dir())
+    root_for(
+        workspace,
+        scope,
+        super::vendor_claude::config_dir_override(),
+        home_dir(),
+    )
 }
 
 /// Converge `claudeMdExcludes` on the state's needs: one managed element

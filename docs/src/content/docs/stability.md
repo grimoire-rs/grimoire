@@ -161,8 +161,10 @@ the exclusions are what keep 1.x able to move at all:
 
   A root that a vendor environment variable relocates moves the layout
   with it, and a release that *starts* honoring one moves it for everyone
-  who already set that variable. The most recent instance: `$KIRO_HOME`
-  and `$GEMINI_CLI_HOME` became honored, and Zed's macOS root stopped
+  who already set that variable. The most recent instance: `$JUNIE_HOME`,
+  `$OPENCLAW_STATE_DIR` / `$OPENCLAW_HOME`, and a `CLAUDE_CONFIG_DIR` set
+  in Claude Code's own settings `env` became honored. Before them,
+  `$KIRO_HOME` and `$GEMINI_CLI_HOME` did, and Zed's macOS root stopped
   consulting `$XDG_CONFIG_HOME` (upstream never read it there). An
   artifact installed under the old resolution then sits at a root grim no
   longer resolves. The next `install`, `update`, or `uninstall` reaps
@@ -332,6 +334,10 @@ state entry using [local path sources](./concepts.md#references-tags-and-digests
 bundle](./concepts.md#bundles)) is unreadable by a `grim` build that
 predates the feature. It exits 78 (`EX_CONFIG`), the same code any other
 config or lock parse failure uses.
+The same holds for an install-state file that records an anchor tag added
+in a newer release, such as `goose-root`, `kilo-config-root` or
+`qoder-root`. A `grim` build that predates the anchor refuses to load that
+file rather than drop the record it cannot place.
 
 This hard-reject is a deliberate departure from the ecosystem norm:
 [Cargo][cargo-manifest] warns rather than errors on an unrecognized

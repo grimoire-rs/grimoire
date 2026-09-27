@@ -196,7 +196,7 @@ pub async fn install_all_with_progress<M: ArtifactMaterializer>(
         // so it must report their target and must NOT warn "recording no
         // output". Computing this from `target.clients()` alone would lie.
         let recorded_before = state.get(kind, &artifact.name).cloned();
-        let effective = effective_supporting_clients(target, kind, recorded_before.as_ref(), roots);
+        let effective = effective_supporting_clients(target, kind, &artifact.name, recorded_before.as_ref(), roots);
         if effective.is_empty() {
             // No selected client — and no still-resolvable recorded client —
             // can host this kind: the artifact installs nowhere (this is
@@ -205,16 +205,25 @@ pub async fn install_all_with_progress<M: ArtifactMaterializer>(
             // is the single user-facing warning for the decline path (the
             // per-client skip in `install_one` stays at debug to keep the
             // common case quiet).
+            // A client that hosts the kind but rejects this agent's name gets
+            // the grammar warning instead: "no native target" would be false.
+            let rejected = name_rejecting_clients(target, kind, &artifact.name);
+            for (client, grammar) in &rejected {
+                warn_name_rejected(kind, &artifact.name, *client, *grammar);
+            }
             let declined = target
                 .clients()
                 .iter()
+                .filter(|c| !rejected.iter().any(|(r, _)| r == *c))
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(", ");
-            tracing::warn!(
-                "{declined} cannot host {kind} '{}': no native target for {kind}; recording no output",
-                artifact.name
-            );
+            if !declined.is_empty() {
+                tracing::warn!(
+                    "{declined} cannot host {kind} '{}': no native target for {kind}; recording no output",
+                    artifact.name
+                );
+            }
         }
         let report_target = effective.first().map(|c| target.path_for(*c, kind, &artifact.name));
         let result = install_one(
@@ -501,7 +510,7 @@ async fn install_one<M: ArtifactMaterializer>(
     // AND the record covers every targeted client. A declined-kind record has
     // zero outputs, so `covers_targets` is false for any client that could
     // support the kind — it never masks a later supported install (F-1).
-    if let Some(outcome) = integrity_gate(recorded.as_ref(), &artifact.source, target, roots, force)? {
+    if let Some(outcome) = integrity_gate(recorded.as_ref(), &artifact.source, target, roots, force, None)? {
         return Ok(outcome);
     }
 
@@ -512,7 +521,7 @@ async fn install_one<M: ArtifactMaterializer>(
     // stranding a still-active recorded client at the old pin when a
     // narrowed `--client` selection happens to name only kind-declining
     // clients — see that function's doc comment.
-    if effective_supporting_clients(target, kind, recorded.as_ref(), roots).is_empty() {
+    if effective_supporting_clients(target, kind, &artifact.name, recorded.as_ref(), roots).is_empty() {
         state.record(InstallRecord {
             kind,
             name: artifact.name.clone(),
@@ -520,9 +529,7 @@ async fn install_one<M: ArtifactMaterializer>(
             dev: intent.is_dev(),
             outputs: Vec::new(),
         });
-        return Ok(InstallOutcome::Skipped(format!(
-            "no selected client has a native target for {kind}"
-        )));
+        return Ok(InstallOutcome::Skipped(skipped_reason(target, kind, &artifact.name)));
     }
 
     // Materialize the canonical tree once into a temp dir; every client
@@ -595,8 +602,13 @@ async fn install_one<M: ArtifactMaterializer>(
                     target.scope()
                 );
             }
+            return false;
         }
-        supported
+        let fits = name_fits(*client, kind, &artifact.name);
+        if !fits && let Some(grammar) = client.vendor().agent_name_grammar() {
+            warn_name_rejected(kind, &artifact.name, *client, grammar);
+        }
+        fits
     });
 
     // Untracked-clobber gate: a destination that exists on disk with no
@@ -1090,6 +1102,7 @@ async fn install_one<M: ArtifactMaterializer>(
             &relocated_vendor_roots_from_env(),
             &materialize_set,
             ReapContext::Reinstalled,
+            force,
         );
     }
 
@@ -1106,7 +1119,7 @@ async fn install_one<M: ArtifactMaterializer>(
     Ok(if nothing_installed {
         // Every selected client declined the kind: the artifact is declared
         // and recorded (zero outputs) but nothing was written to disk.
-        InstallOutcome::Skipped(format!("no selected client has a native target for {kind}"))
+        InstallOutcome::Skipped(skipped_reason(target, kind, &artifact.name))
     } else if recorded.is_some() {
         InstallOutcome::Updated
     } else if adopted > 0 && adopted == materialize_set.len() {
@@ -1124,7 +1137,7 @@ async fn install_one<M: ArtifactMaterializer>(
 /// [`kind_support`](crate::install::vendor::Vendor::kind_support) cannot give,
 /// because it takes no scope:
 ///
-/// - **MCP** is judged by [`Vendor::mcp_config_path`](crate::install::vendor::Vendor::mcp_config_path)
+/// - **MCP** is judged by [`Vendor::mcp_config_paths`](crate::install::vendor::Vendor::mcp_config_paths)
 ///   — a vendor may materialize other kinds but carry no MCP config surface here;
 /// - **every other kind** additionally consults
 ///   [`Vendor::kind_surface`](crate::install::vendor::Vendor::kind_surface) —
@@ -1147,7 +1160,7 @@ pub fn client_supports_kind(
     scope: ConfigScope,
 ) -> bool {
     match kind {
-        ArtifactKind::Mcp => client.vendor().mcp_config_path(workspace, scope).is_some(),
+        ArtifactKind::Mcp => !client.vendor().mcp_config_paths(workspace, scope).is_empty(),
         // A bundle never materializes — it expands into members — so no client
         // ever records an output for one. The installer never asks (it returns
         // early for bundles); the report side does, for bundle declaration rows.
@@ -1163,6 +1176,80 @@ pub fn client_supports_kind(
                 && client.vendor().kind_surface(kind, scope)
         }
     }
+}
+
+/// Whether `client` would write output for the artifact `name` of `kind`:
+/// [`client_supports_kind`] plus the vendor's agent-name grammar. Every
+/// per-artifact support decision (materialize set, fetch-before-gate,
+/// expected outputs, `status` drift) asks this one, so a name the client
+/// rejects is a skip everywhere rather than drift nothing can clear.
+pub fn client_hosts(
+    client: crate::install::client_target::ClientTarget,
+    kind: ArtifactKind,
+    name: &str,
+    workspace: &Path,
+    scope: ConfigScope,
+) -> bool {
+    client_supports_kind(client, kind, workspace, scope) && name_fits(client, kind, name)
+}
+
+/// Whether `name` fits `client`'s agent-name grammar. Only agents are
+/// checked; a vendor without a narrower grammar accepts every grim name.
+pub fn name_fits(client: crate::install::client_target::ClientTarget, kind: ArtifactKind, name: &str) -> bool {
+    kind != ArtifactKind::Agent
+        || client
+            .vendor()
+            .agent_name_grammar()
+            .is_none_or(|g| super::render::agent_name_fits(name, g))
+}
+
+/// The selected clients that host `kind` but reject `name` under their
+/// agent-name grammar, with that grammar.
+fn name_rejecting_clients(
+    target: &InstallTarget,
+    kind: ArtifactKind,
+    name: &str,
+) -> Vec<(crate::install::client_target::ClientTarget, super::render::NameGrammar)> {
+    target
+        .clients()
+        .iter()
+        .filter(|c| client_supports_kind(**c, kind, target.workspace(), target.scope()))
+        .filter_map(|c| {
+            c.vendor()
+                .agent_name_grammar()
+                .filter(|g| !super::render::agent_name_fits(name, *g))
+                .map(|g| (*c, g))
+        })
+        .collect()
+}
+
+/// The one user-facing line for a name-grammar skip.
+fn warn_name_rejected(
+    kind: ArtifactKind,
+    name: &str,
+    client: crate::install::client_target::ClientTarget,
+    grammar: super::render::NameGrammar,
+) {
+    tracing::warn!(
+        "{kind} '{name}' skipped for {client}: {client} only accepts agent names matching {}, \
+         and grim never renames an agent",
+        grammar.pattern()
+    );
+}
+
+/// Why an artifact installed nowhere: a name-grammar rejection when that is
+/// what stopped a client that hosts the kind, else the kind decline.
+fn skipped_reason(target: &InstallTarget, kind: ArtifactKind, name: &str) -> String {
+    let rejected = name_rejecting_clients(target, kind, name);
+    if rejected.is_empty() {
+        return format!("no selected client has a native target for {kind}");
+    }
+    let patterns = rejected
+        .iter()
+        .map(|(client, grammar)| format!("{client} ({})", grammar.pattern()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("the {kind} name '{name}' does not fit the agent-name grammar of {patterns}")
 }
 
 /// The set of clients able to host `kind` at all (plan C3.3): the current
@@ -1209,7 +1296,7 @@ fn refuse_uninstallable_fallback(
     for artifact in lock.iter_artifacts() {
         declared = true;
         let recorded = state.get(artifact.kind, &artifact.name);
-        if !effective_supporting_clients(target, artifact.kind, recorded, roots).is_empty() {
+        if !effective_supporting_clients(target, artifact.kind, &artifact.name, recorded, roots).is_empty() {
             return Ok(());
         }
     }
@@ -1277,6 +1364,7 @@ fn preserved_recorded_clients(
 fn effective_supporting_clients(
     target: &InstallTarget,
     kind: ArtifactKind,
+    name: &str,
     recorded: Option<&InstallRecord>,
     roots: &AnchorRoots,
 ) -> Vec<crate::install::client_target::ClientTarget> {
@@ -1284,12 +1372,12 @@ fn effective_supporting_clients(
         .clients()
         .iter()
         .copied()
-        .filter(|c| client_supports_kind(*c, kind, target.workspace(), target.scope()))
+        .filter(|c| client_hosts(*c, kind, name, target.workspace(), target.scope()))
         .collect();
     if let Some(rec) = recorded {
         for out in &rec.outputs {
             if let Ok(client) = out.client.parse::<crate::install::client_target::ClientTarget>()
-                && client_supports_kind(client, kind, target.workspace(), target.scope())
+                && client_hosts(client, kind, name, target.workspace(), target.scope())
                 && out.target.anchor.root(roots).is_some()
                 && !set.contains(&client)
             {
@@ -1319,6 +1407,7 @@ fn integrity_gate(
     target: &InstallTarget,
     roots: &AnchorRoots,
     force: bool,
+    mcp: Option<&crate::oci::mcp::McpDescriptor>,
 ) -> Result<Option<InstallOutcome>, crate::error::Error> {
     let Some(rec) = recorded else {
         return Ok(None);
@@ -1393,8 +1482,8 @@ fn integrity_gate(
     // cover", nothing about what is on disk. A deleted output is caught by
     // `all_intact` here and by the footprint comparison in `grim status`, so
     // an empty `outputs_pending` does not promise "nothing to install".
-    let covers_targets = !expected_clients(rec.kind, target).is_empty()
-        && pending_outputs(Some(rec), rec.kind, &rec.name, target, roots).is_empty();
+    let covers_targets = !expected_clients(rec.kind, &rec.name, target).is_empty()
+        && pending_outputs(Some(rec), rec.kind, &rec.name, target, roots, mcp).is_empty();
     if all_intact && covers_targets && rec.source.eq_content(source) {
         return Ok(Some(InstallOutcome::AlreadyInstalled));
     }
@@ -1584,8 +1673,8 @@ fn overlaps_live_footprint(old_footprint: &[PathBuf], new_footprint: &[PathBuf])
     })
 }
 
-/// Vendor roots **this release** moved, each paired with the root the previous
-/// release wrote under. Three rows, and the set is deliberately closed:
+/// Vendor roots a release moved, each paired with the root the release before
+/// it wrote under. The set is deliberately closed:
 ///
 /// - `kiro` / `gemini` — grim started honoring `$KIRO_HOME` /
 ///   `$GEMINI_CLI_HOME`. Before that, a global install with the variable set
@@ -1597,28 +1686,42 @@ fn overlaps_live_footprint(old_footprint: &[PathBuf], new_footprint: &[PathBuf])
 ///   Windows resolution is unchanged, so their legacy root *is* their current
 ///   one and guard 1 of [`reap_relocated_roots`] drops the row for free — the
 ///   same reason an override set to the default path reaps nothing.
+/// - `junie` / `openclaw` — grim started honoring `$JUNIE_HOME` and
+///   `$OPENCLAW_STATE_DIR` / `$OPENCLAW_HOME` (2026-09-27).
+/// - `claude` plus [`CLAUDE_USER_DIR_ROW`] — grim started reading
+///   `CLAUDE_CONFIG_DIR` from Claude's own settings `env`. The legacy root is
+///   the **shell-only** resolution, which grim always honored, so a row is
+///   minted only when the settings value differs from it; both of Claude's
+///   roots move together (`~/.claude` and the dir holding `.claude.json`).
 ///
 /// In every case the record names the *same* `(anchor, relative)` pair the
 /// current layout produces; only the root resolution moved.
 ///
-/// **Never add a row for a variable grim always honored** (`CLAUDE_CONFIG_DIR`,
-/// `COPILOT_HOME`, `CODEX_HOME`, `OPENCODE_CONFIG_DIR`). Those roots never
-/// moved, and the pre-override location is not empty — it is the *default*
-/// root, which grim itself very likely populated in an earlier session before
-/// the user set the variable. Those copies hash-match, so a row would delete
-/// them. A row is minted only by a release that *changes* how a root resolves.
+/// **Never add a row for a variable grim always honored** (the shell
+/// `CLAUDE_CONFIG_DIR`, `COPILOT_HOME`, `CODEX_HOME`, `OPENCODE_CONFIG_DIR`).
+/// Those roots never moved, and the pre-override location is not empty — it
+/// is the *default* root, which grim itself very likely populated in an
+/// earlier session before the user set the variable. Those copies hash-match,
+/// so a row would delete them. A row is minted only by a release that
+/// *changes* how a root resolves.
 ///
 /// Pure in its inputs, platform included, so every arm is exercised on every
 /// host — the macOS row cannot rot unnoticed on a Linux dev box. Same reason
 /// `zed_root_from` takes its `ZedRootKind` as a parameter, and the same reason
 /// this takes env values rather than reading them: `std::env::set_var` is
 /// `unsafe` in edition 2024 and this crate is `forbid(unsafe_code)`.
-fn relocated_vendor_roots(
-    kiro_home: Option<PathBuf>,
-    gemini_cli_home: Option<PathBuf>,
-    zed_legacy_root: Option<PathBuf>,
-    home: Option<PathBuf>,
-) -> Vec<(&'static str, PathBuf)> {
+fn relocated_vendor_roots(inputs: RelocationInputs) -> Vec<(&'static str, PathBuf)> {
+    let RelocationInputs {
+        kiro_home,
+        gemini_cli_home,
+        junie_home,
+        openclaw_state_dir,
+        openclaw_home,
+        claude_shell_config_dir,
+        claude_config_dir,
+        zed_legacy_root,
+        home,
+    } = inputs;
     let mut rows = Vec::new();
     if kiro_home.is_some()
         && let Some(legacy) = super::vendor_kiro::kiro_root(None, home.clone())
@@ -1626,14 +1729,56 @@ fn relocated_vendor_roots(
         rows.push(("kiro", legacy));
     }
     if gemini_cli_home.is_some()
-        && let Some(legacy) = super::vendor_gemini::gemini_root(None, home)
+        && let Some(legacy) = super::vendor_gemini::gemini_root(None, home.clone())
     {
         rows.push(("gemini", legacy));
     }
     if let Some(legacy) = zed_legacy_root {
         rows.push(("zed", legacy));
     }
+    if junie_home.is_some()
+        && let Some(legacy) = super::vendor_junie::junie_root(None, home.clone())
+    {
+        rows.push(("junie", legacy));
+    }
+    if (openclaw_state_dir.is_some() || openclaw_home.is_some())
+        && let Some(legacy) = super::vendor_openclaw::openclaw_root(None, None, home.clone())
+    {
+        rows.push(("openclaw", legacy));
+    }
+    if claude_config_dir != claude_shell_config_dir {
+        use super::vendor_claude::{global_root, user_config_dir};
+        if let Some(legacy) = global_root(claude_shell_config_dir.clone(), home.clone()) {
+            rows.push(("claude", legacy));
+        }
+        if let Some(legacy) = user_config_dir(claude_shell_config_dir, home) {
+            rows.push((CLAUDE_USER_DIR_ROW, legacy));
+        }
+    }
     rows
+}
+
+/// The [`relocated_vendor_roots`] row naming Claude's
+/// [`PathAnchor::ClaudeUserDir`] root — a fixed anchor, not a
+/// [`PathAnchor::VendorRoot`], so it cannot share a `VENDOR_ROOTS` name.
+/// Spelled as that anchor's serde tag so the two cannot be confused.
+const CLAUDE_USER_DIR_ROW: &str = "claude-user-dir";
+
+/// The environment [`relocated_vendor_roots`] reads, injected. Every field is
+/// the raw value that variable resolves to (`None` = unset), except the two
+/// Claude fields: `claude_shell_config_dir` is the shell export alone,
+/// `claude_config_dir` the value after Claude's settings `env` layers.
+#[derive(Default)]
+struct RelocationInputs {
+    kiro_home: Option<PathBuf>,
+    gemini_cli_home: Option<PathBuf>,
+    junie_home: Option<PathBuf>,
+    openclaw_state_dir: Option<PathBuf>,
+    openclaw_home: Option<PathBuf>,
+    claude_shell_config_dir: Option<PathBuf>,
+    claude_config_dir: Option<PathBuf>,
+    zed_legacy_root: Option<PathBuf>,
+    home: Option<PathBuf>,
 }
 
 /// [`relocated_vendor_roots`] resolved against the ambient environment — the
@@ -1648,12 +1793,17 @@ pub(crate) fn relocated_vendor_roots_from_env() -> Vec<(&'static str, PathBuf)> 
         .then(xdg_config_dir)
         .flatten()
         .map(|c| c.join("zed"));
-    relocated_vendor_roots(
-        env_dir("KIRO_HOME"),
-        env_dir("GEMINI_CLI_HOME"),
+    relocated_vendor_roots(RelocationInputs {
+        kiro_home: env_dir("KIRO_HOME"),
+        gemini_cli_home: env_dir("GEMINI_CLI_HOME"),
+        junie_home: env_dir("JUNIE_HOME"),
+        openclaw_state_dir: env_dir("OPENCLAW_STATE_DIR"),
+        openclaw_home: env_dir("OPENCLAW_HOME"),
+        claude_shell_config_dir: env_dir("CLAUDE_CONFIG_DIR"),
+        claude_config_dir: super::vendor_claude::config_dir_override(),
         zed_legacy_root,
-        home_dir(),
-    )
+        home: home_dir(),
+    })
 }
 
 /// `roots` with every relocated vendor root replaced by its pre-override
@@ -1662,14 +1812,19 @@ pub(crate) fn relocated_vendor_roots_from_env() -> Vec<(&'static str, PathBuf)> 
 /// against the old location instead of reimplementing path joins.
 fn roots_before_relocation(roots: &AnchorRoots, relocated: &[(&'static str, PathBuf)]) -> AnchorRoots {
     let mut vendor_roots = roots.vendor_roots.clone();
+    let mut claude_user_dir = roots.claude_user_dir.clone();
     for (name, legacy) in relocated {
-        vendor_roots.insert(name, legacy.clone());
+        if *name == CLAUDE_USER_DIR_ROW {
+            claude_user_dir = Some(legacy.clone());
+        } else {
+            vendor_roots.insert(name, legacy.clone());
+        }
     }
     AnchorRoots {
         workspace: roots.workspace.clone(),
         grim_home: roots.grim_home.clone(),
         opencode_skills: roots.opencode_skills.clone(),
-        claude_user_dir: roots.claude_user_dir.clone(),
+        claude_user_dir,
         agents_skills: roots.agents_skills.clone(),
         vendor_roots,
     }
@@ -1737,13 +1892,16 @@ fn roots_before_relocation(roots: &AnchorRoots, relocated: &[(&'static str, Path
 /// [`UninstallResult::abandoned_entries`](super::uninstall::UninstallResult::abandoned_entries).
 /// Both are documented as "grim will never remove this; do it by hand", which
 /// is exactly what a preserved edit is — and without them the only signal is a
-/// human-readable warning no automated consumer can see.
+/// human-readable warning no automated consumer can see. An intact but
+/// **adopted** entry is kept and reported the same way unless `force`, which
+/// is `uninstall`'s own rule for a member grim never wrote.
 pub(crate) fn reap_relocated_roots(
     prior: &InstallRecord,
     roots: &AnchorRoots,
     relocated: &[(&'static str, PathBuf)],
     written: &[crate::install::client_target::ClientTarget],
     context: ReapContext,
+    force: bool,
 ) -> (Vec<PathBuf>, Vec<super::uninstall::AbandonedEntry>) {
     let mut preserved = Vec::new();
     let mut abandoned = Vec::new();
@@ -1754,8 +1912,10 @@ pub(crate) fn reap_relocated_roots(
     for out in &prior.outputs {
         // Only an output anchored at a relocated vendor root can be stranded.
         // Project-scope outputs anchor at `Workspace` and are untouched.
-        let PathAnchor::VendorRoot(name) = out.target.anchor else {
-            continue;
+        let name = match out.target.anchor {
+            PathAnchor::VendorRoot(name) => name,
+            PathAnchor::ClaudeUserDir => CLAUDE_USER_DIR_ROW,
+            _ => continue,
         };
         if !relocated.iter().any(|(n, _)| *n == name) {
             continue;
@@ -1845,7 +2005,23 @@ pub(crate) fn reap_relocated_roots(
         // An entry output: splice the managed member out of the OLD config
         // file. Never delete the file — it is the user's, not grim's.
         if let Some(pointer) = &out.entry {
-            match super::uninstall::remove_entry(&old, pointer, out.mcp_format()) {
+            // An ADOPTED member was the user's before grim recorded it, so the
+            // same rule as `uninstall` applies: grim never wrote it, so it is
+            // not grim's to remove unless `--force` says so. Kept, it is
+            // reported — the record naming it is about to be replaced.
+            if out.adopted && !force {
+                tracing::warn!(
+                    "leaving adopted entry '{pointer}' in '{}': grim adopted it rather than writing it, and {} no longer reads that file — remove it by hand, or pass --force",
+                    old.display(),
+                    out.client
+                );
+                abandoned.push(super::uninstall::AbandonedEntry {
+                    path: old,
+                    pointer: pointer.clone(),
+                });
+                continue;
+            }
+            match super::uninstall::remove_entry(&old, pointer, out, &legacy) {
                 Ok(()) => tracing::info!(
                     "removed the '{}' entry stranded in '{}' ({} now reads '{}')",
                     prior.name,
@@ -2115,8 +2291,9 @@ pub(crate) async fn fetch_verified_layer(
 ///
 /// [`install_mcp`] plans every client before it writes any of them, so a
 /// refusal on the last client cannot leave the first client's config already
-/// spliced. `raw` is the config file as read during planning; the write reads
-/// nothing further, so the gate and the splice see identical bytes.
+/// spliced. The write re-reads the file rather than reusing the planning
+/// bytes: two plans can name one physical file, and each must splice onto
+/// what the one before it wrote.
 struct PlannedRegistration {
     client: crate::install::client_target::ClientTarget,
     config_path: PathBuf,
@@ -2129,7 +2306,11 @@ struct PlannedRegistration {
     container: String,
     member: String,
     value: serde_json::Value,
-    raw: String,
+    /// The member the gate judged, vendor-owned keys stripped (`None` when
+    /// absent). Under Cline's lock the write refuses if the file no longer
+    /// holds it: the gate's verdict was about bytes a concurrent writer
+    /// has since replaced.
+    observed: Option<serde_json::Value>,
     /// A semantically identical member already sat at `pointer` — the upsert
     /// is a no-op and the entry is adopted into the record.
     adopted: bool,
@@ -2198,7 +2379,7 @@ async fn install_mcp(
     force: bool,
     intent: InstallIntent,
 ) -> Result<InstallOutcome, crate::error::Error> {
-    use crate::install::install_state::{ClientOutput, entry_value_hash};
+    use crate::install::install_state::{ClientOutput, entry_value_hash, with_vendor_owned, without_vendor_owned};
     use crate::install::json_splice::{self, Splice, split_pointer};
     use crate::install::toml_splice;
     use crate::install::vendor::McpConfigFormat;
@@ -2206,7 +2387,7 @@ async fn install_mcp(
     let kind = ArtifactKind::Mcp;
     let recorded = state.get(kind, &artifact.name).cloned();
 
-    if let Some(outcome) = integrity_gate(recorded.as_ref(), &artifact.source, target, roots, force)? {
+    if let Some(outcome) = integrity_gate(recorded.as_ref(), &artifact.source, target, roots, force, None)? {
         return Ok(outcome);
     }
 
@@ -2216,6 +2397,20 @@ async fn install_mcp(
             "invalid MCP descriptor layer: {e}"
         )))
     })?;
+    // Again with the descriptor: a surface this server cannot be written to
+    // (a `${VAR}` Warp cannot expand, a `ws` transport) is skipped by every
+    // pass, so it must not keep the gate from answering `unchanged`. The
+    // first pass ran without it so a true no-op never fetches.
+    if let Some(outcome) = integrity_gate(
+        recorded.as_ref(),
+        &artifact.source,
+        target,
+        roots,
+        force,
+        Some(&descriptor),
+    )? {
+        return Ok(outcome);
+    }
 
     // Registration set: the target clients plus — on a pin change — every
     // still-resolvable recorded client, so all clients in a record move to
@@ -2241,125 +2436,157 @@ async fn install_mcp(
     for client in &register_set {
         let vendor = client.vendor();
         let format = vendor.mcp_config_format();
-        let Some(config_path) = vendor.mcp_config_path(target.workspace(), target.scope()) else {
+        // Every file the vendor reads gets its own entry and its own
+        // recorded output (Copilot: VS Code Chat's file and the CLI's).
+        let config_paths = vendor.mcp_config_paths(target.workspace(), target.scope());
+        if config_paths.is_empty() {
             tracing::warn!(
                 "mcp server '{}' skipped for {client}: no writable MCP config surface at {} scope",
                 artifact.name,
                 target.scope()
             );
             continue;
-        };
+        }
+        // Each file renders its own entry: a vendor's files may follow
+        // different schemas (Copilot's `.github/mcp.json` vs `.vscode/mcp.json`).
+        let rendered: Vec<_> = config_paths
+            .into_iter()
+            .map(|path| {
+                let entry = vendor.mcp_entry_for(target.scope(), &path, &artifact.name, &descriptor);
+                (path, entry)
+            })
+            .collect();
         // A vendor that cannot represent this descriptor at this scope
         // warns with its own specific reason (e.g. Zed + env references)
         // and is skipped. On a pin change this can strand a
         // prior-tracked client whose OLD pin was representable but whose NEW
-        // one is not (http→ws, oauth added): its recorded entry would drop
-        // from the rebuilt record while its stale member lingered in the
-        // config file, unreachable by a later uninstall. Queue that stale
-        // member for removal so the decline leaves no orphan.
-        let Some((pointer, value)) = vendor.mcp_entry(target.scope(), &artifact.name, &descriptor) else {
-            if pin_changed
-                && let Some(rec) = &recorded
-                && let Some(stale) = rec.outputs.iter().find(|o| o.client == client.as_str())
-                && stale.entry.is_some()
-            {
-                stale_removals.push((*client, stale.clone()));
+        // one is not (http→ws, oauth added): its recorded entries would drop
+        // from the rebuilt record while their stale members lingered in the
+        // config files, unreachable by a later uninstall. Queue those stale
+        // members for removal so the decline leaves no orphan.
+        if rendered.iter().all(|(_, entry)| entry.is_none()) {
+            if pin_changed && let Some(rec) = &recorded {
+                stale_removals.extend(
+                    rec.outputs
+                        .iter()
+                        .filter(|o| o.client == client.as_str() && o.entry.is_some())
+                        .map(|stale| (*client, stale.clone())),
+                );
             }
             continue;
-        };
-        // Anchor BEFORE writing: an unanchorable config path (e.g. an
-        // $OPENCODE_CONFIG override outside every known root) must never
-        // leave an untracked — and therefore unremovable — registration.
-        let anchored = match crate::install::path_anchor::AnchoredPath::from_target(
-            &config_path,
-            target.scope(),
-            *client,
-            kind,
-            roots,
-        ) {
-            Ok(anchored) => anchored,
-            Err(e) => {
+        }
+
+        for (config_path, entry) in rendered {
+            // Anchor BEFORE writing: an unanchorable config path (e.g. an
+            // $OPENCODE_CONFIG override outside every known root) must never
+            // leave an untracked — and therefore unremovable — registration.
+            let anchored = match crate::install::path_anchor::AnchoredPath::from_target(
+                &config_path,
+                target.scope(),
+                *client,
+                kind,
+                roots,
+            ) {
+                Ok(anchored) => anchored,
+                Err(e) => {
+                    tracing::warn!(
+                        "mcp server '{}' skipped for {client}: config path '{}' is not anchorable: {e}",
+                        artifact.name,
+                        config_path.display()
+                    );
+                    continue;
+                }
+            };
+            // One file of several declined (the vendor warned): the same
+            // stranding rule as above, scoped to the member in THIS file.
+            let Some((pointer, value)) = entry else {
+                if pin_changed && let Some(rec) = &recorded {
+                    stale_removals.extend(
+                        rec.outputs
+                            .iter()
+                            .filter(|o| o.client == client.as_str() && o.entry.is_some() && o.target == anchored)
+                            .map(|stale| (*client, stale.clone())),
+                    );
+                }
+                continue;
+            };
+            let Some((container, member)) = split_pointer(&pointer) else {
                 tracing::warn!(
-                    "mcp server '{}' skipped for {client}: config path '{}' is not anchorable: {e}",
-                    artifact.name,
-                    config_path.display()
+                    "mcp server '{}' skipped for {client}: malformed entry pointer '{pointer}'",
+                    artifact.name
                 );
                 continue;
-            }
-        };
-        let Some((container, member)) = split_pointer(&pointer) else {
-            tracing::warn!(
-                "mcp server '{}' skipped for {client}: malformed entry pointer '{pointer}'",
-                artifact.name
-            );
-            continue;
-        };
-        let (container, member) = (container.to_string(), member.to_string());
+            };
+            let (container, member) = (container.to_string(), member.to_string());
 
-        let raw = match std::fs::read_to_string(&config_path) {
-            Ok(raw) => raw,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(e) => return Err(target_io(&config_path, e).into()),
-        };
-        // Untracked-clobber gate (MCP): a pre-existing member the record
-        // does not cover was authored by the user or another tool —
-        // replacing its value would clobber it, so refuse unless forced.
-        // A semantically identical member is adopted into the record
-        // instead (the upsert below is a no-op for it).
-        let existing_value = match format {
-            McpConfigFormat::Json => json_splice::member_value(&raw, &container, &member),
-            McpConfigFormat::Toml => toml_splice::member_value(&raw, &container, &member),
-        };
-        // A client name is not proof grim wrote THIS member of THIS file: a
-        // vendor variable can repoint a config path between runs, and the
-        // recorded client string says nothing about the bytes now sitting at
-        // the pointer. Key on the stored `(anchor, relative)` pair plus the
-        // pointer, and require the member's semantic hash to be the one grim
-        // recorded writing — the same doctrine as the file gate above.
-        let existing_hash = existing_value.as_ref().and_then(|v| entry_value_hash(v).ok());
-        let prior = recorded.as_ref().and_then(|rec| {
-            rec.outputs.iter().find(|out| {
-                out.target == anchored
-                    && out.entry.as_deref() == Some(pointer.as_str())
-                    && existing_hash.as_ref() == Some(&out.content_hash)
-            })
-        });
-        let tracked = prior.is_some();
-        // Carry the adoption flag forward while the member is still the one
-        // grim adopted. Rebuilding the record must not launder a user's own
-        // entry into grim's: the fresh-adoption branch below cannot re-fire
-        // (it needs `!tracked`), so without this any later pass that rebuilds
-        // the record — a widened client set, a pin roll — would drop the flag
-        // and the next uninstall would splice out a member grim never wrote.
-        //
-        // Only while `value` matches what is already there. If this pass is
-        // about to write something different, grim is authoring the member now
-        // and owns it from here.
-        let mut adopted = existing_value.as_ref() == Some(&value) && prior.is_some_and(|out| out.adopted);
-        if !force
-            && !tracked
-            && let Some(existing) = &existing_value
-        {
-            if *existing != value {
-                return Ok(InstallOutcome::RefusedUntracked {
-                    client: client.to_string(),
-                    path: config_path,
-                });
+            let raw = match std::fs::read_to_string(&config_path) {
+                Ok(raw) => raw,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+                Err(e) => return Err(target_io(&config_path, e).into()),
+            };
+            // Untracked-clobber gate (MCP): a pre-existing member the record
+            // does not cover was authored by the user or another tool —
+            // replacing its value would clobber it, so refuse unless forced.
+            // A semantically identical member is adopted into the record
+            // instead (the upsert below is a no-op for it). Keys the client
+            // writes into the member itself (Cline's `autoApprove`, tokens)
+            // are neither an edit nor a difference.
+            let existing_value = match format {
+                McpConfigFormat::Json => json_splice::member_value(&raw, &container, &member),
+                McpConfigFormat::Toml => toml_splice::member_value(&raw, &container, &member),
             }
-            adopted = true;
+            .map(|v| without_vendor_owned(&v, vendor.mcp_entry_vendor_owned_keys()));
+            // A client name is not proof grim wrote THIS member of THIS file: a
+            // vendor variable can repoint a config path between runs, and the
+            // recorded client string says nothing about the bytes now sitting at
+            // the pointer. Key on the stored `(anchor, relative)` pair plus the
+            // pointer, and require the member's semantic hash to be the one grim
+            // recorded writing — the same doctrine as the file gate above.
+            let existing_hash = existing_value.as_ref().and_then(|v| entry_value_hash(v).ok());
+            let prior = recorded.as_ref().and_then(|rec| {
+                rec.outputs.iter().find(|out| {
+                    out.target == anchored
+                        && out.entry.as_deref() == Some(pointer.as_str())
+                        && existing_hash.as_ref() == Some(&out.content_hash)
+                })
+            });
+            let tracked = prior.is_some();
+            // Carry the adoption flag forward while the member is still the one
+            // grim adopted. Rebuilding the record must not launder a user's own
+            // entry into grim's: the fresh-adoption branch below cannot re-fire
+            // (it needs `!tracked`), so without this any later pass that rebuilds
+            // the record — a widened client set, a pin roll — would drop the flag
+            // and the next uninstall would splice out a member grim never wrote.
+            //
+            // Only while `value` matches what is already there. If this pass is
+            // about to write something different, grim is authoring the member now
+            // and owns it from here.
+            let mut adopted = existing_value.as_ref() == Some(&value) && prior.is_some_and(|out| out.adopted);
+            if !force
+                && !tracked
+                && let Some(existing) = &existing_value
+            {
+                if *existing != value {
+                    return Ok(InstallOutcome::RefusedUntracked {
+                        client: client.to_string(),
+                        path: config_path,
+                    });
+                }
+                adopted = true;
+            }
+            plans.push(PlannedRegistration {
+                client: *client,
+                config_path,
+                anchored,
+                format,
+                pointer: pointer.clone(),
+                container: container.clone(),
+                member: member.clone(),
+                value: value.clone(),
+                observed: existing_value,
+                adopted,
+            });
         }
-        plans.push(PlannedRegistration {
-            client: *client,
-            config_path,
-            anchored,
-            format,
-            pointer,
-            container,
-            member,
-            value,
-            raw,
-            adopted,
-        });
     }
 
     // Gate cleared for every client — nothing below can refuse, so the
@@ -2382,7 +2609,7 @@ async fn install_mcp(
                     .current_hash(roots, Containment::Strict)
                     .is_ok_and(|h| h == stale.content_hash);
                 if intact && let Some(stale_pointer) = &stale.entry {
-                    crate::install::uninstall::remove_entry(&recorded_path, stale_pointer, stale.mcp_format())
+                    crate::install::uninstall::remove_entry(&recorded_path, stale_pointer, stale, roots)
                         .map_err(|e| target_io(&recorded_path, e))?;
                     tracing::warn!(
                         "mcp server '{}' is no longer representable for {client} at the new pin; removed its stale entry from '{}'",
@@ -2412,13 +2639,50 @@ async fn install_mcp(
             if plan.adopted {
                 adopted += 1;
             }
+            // Cline rewrites its settings file whole under its own lock: join
+            // it before the read, or a concurrent Cline write is lost.
+            let settings_lock = crate::install::cline_lock::guard(plan.client, &plan.config_path)
+                .map_err(|e| target_io(&plan.config_path, e))?;
+            // Always the current bytes, never the planning read: an earlier
+            // plan may have written this very file through an alias (a
+            // symlinked `.github/mcp.json` → `.vscode/mcp.json`), and
+            // splicing onto the older bytes would erase its member.
+            let raw = match std::fs::read_to_string(&plan.config_path) {
+                Ok(raw) => raw,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+                Err(e) => return Err(target_io(&plan.config_path, e).into()),
+            };
+            let owned_keys = plan.client.vendor().mcp_entry_vendor_owned_keys();
+            let on_disk = match plan.format {
+                McpConfigFormat::Json => json_splice::member_value(&raw, &plan.container, &plan.member),
+                McpConfigFormat::Toml => toml_splice::member_value(&raw, &plan.container, &plan.member),
+            };
+            // Cline changed the member between the gate and the lock: the
+            // gate's verdict no longer describes the file. Retry-safe, so it
+            // is the held-lock refusal (75), not a clobber.
+            if settings_lock.is_some()
+                && !force
+                && on_disk.as_ref().map(|v| without_vendor_owned(v, owned_keys)) != plan.observed
+            {
+                tracing::warn!(
+                    "'{}' in '{}' changed while grim waited for Cline's lock; left untouched — rerun the command",
+                    plan.pointer,
+                    plan.config_path.display()
+                );
+                return Err(target_io(
+                    &plan.config_path,
+                    std::io::Error::other(crate::lock::lock_error::LockError::new(
+                        plan.config_path.clone(),
+                        crate::lock::lock_error::LockErrorKind::Locked,
+                    )),
+                )
+                .into());
+            }
+            // Carry the client's own keys over from the member on disk.
+            let written = with_vendor_owned(&plan.value, on_disk.as_ref(), owned_keys);
             let spliced = match plan.format {
-                McpConfigFormat::Json => {
-                    json_splice::upsert_member(&plan.raw, &plan.container, &plan.member, &plan.value)
-                }
-                McpConfigFormat::Toml => {
-                    toml_splice::upsert_member(&plan.raw, &plan.container, &plan.member, &plan.value)
-                }
+                McpConfigFormat::Json => json_splice::upsert_member(&raw, &plan.container, &plan.member, &written),
+                McpConfigFormat::Toml => toml_splice::upsert_member(&raw, &plan.container, &plan.member, &written),
             };
             match spliced {
                 Ok(Splice::Changed(text)) => {
@@ -2482,6 +2746,7 @@ async fn install_mcp(
             &relocated_vendor_roots_from_env(),
             &registered,
             ReapContext::Reinstalled,
+            force,
         );
     }
 
@@ -4001,39 +4266,99 @@ mod tests {
 
     #[test]
     fn relocated_vendor_roots_lists_only_the_roots_that_moved() {
-        let home = Some(PathBuf::from("/home/u"));
+        let home = || Some(PathBuf::from("/home/u"));
+        let p = |s: &str| Some(PathBuf::from(s));
+        let moved = |inputs: RelocationInputs| relocated_vendor_roots(RelocationInputs { home: home(), ..inputs });
         assert!(
-            relocated_vendor_roots(None, None, None, home.clone()).is_empty(),
+            moved(RelocationInputs::default()).is_empty(),
             "nothing moved ⇒ nothing to probe"
         );
         assert_eq!(
-            relocated_vendor_roots(Some(PathBuf::from("/opt/kiro")), None, None, home.clone()),
+            moved(RelocationInputs {
+                kiro_home: p("/opt/kiro"),
+                ..Default::default()
+            }),
             vec![("kiro", PathBuf::from("/home/u/.kiro"))],
             "the legacy root is the pre-override one, NOT the override value"
         );
         assert_eq!(
-            relocated_vendor_roots(None, Some(PathBuf::from("/opt/g")), None, home.clone()),
+            moved(RelocationInputs {
+                gemini_cli_home: p("/opt/g"),
+                ..Default::default()
+            }),
             vec![("gemini", PathBuf::from("/home/u/.gemini"))],
             "GEMINI_CLI_HOME replaces $HOME, so the legacy root still appends `.gemini`"
         );
         // The macOS Zed row: the caller supplies the pre-move root, so the
         // arm is exercised on every host (the `zed_root_from` precedent).
         assert_eq!(
-            relocated_vendor_roots(None, None, Some(PathBuf::from("/xdg/zed")), home.clone()),
+            moved(RelocationInputs {
+                zed_legacy_root: p("/xdg/zed"),
+                ..Default::default()
+            }),
             vec![("zed", PathBuf::from("/xdg/zed"))]
         );
         assert_eq!(
-            relocated_vendor_roots(
-                Some(PathBuf::from("/opt/kiro")),
-                Some(PathBuf::from("/opt/g")),
-                Some(PathBuf::from("/xdg/zed")),
-                home
-            )
-            .len(),
-            3
+            moved(RelocationInputs {
+                junie_home: p("/opt/j"),
+                ..Default::default()
+            }),
+            vec![("junie", PathBuf::from("/home/u/.junie"))]
+        );
+        for inputs in [
+            RelocationInputs {
+                openclaw_home: p("/opt/oc"),
+                ..Default::default()
+            },
+            RelocationInputs {
+                openclaw_state_dir: p("/opt/state"),
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(moved(inputs), vec![("openclaw", PathBuf::from("/home/u/.openclaw"))]);
+        }
+        // Claude: only a settings value that DIFFERS from the shell-only
+        // resolution moves anything — the shell export was always honored.
+        assert!(
+            moved(RelocationInputs {
+                claude_shell_config_dir: p("/cc"),
+                claude_config_dir: p("/cc"),
+                ..Default::default()
+            })
+            .is_empty(),
+            "a shell-only CLAUDE_CONFIG_DIR is not a relocation"
+        );
+        assert_eq!(
+            moved(RelocationInputs {
+                claude_config_dir: p("/cc"),
+                ..Default::default()
+            }),
+            vec![
+                ("claude", PathBuf::from("/home/u/.claude")),
+                (CLAUDE_USER_DIR_ROW, PathBuf::from("/home/u")),
+            ],
+            "both Claude roots move: `~/.claude` and the dir holding `.claude.json`"
+        );
+        assert_eq!(
+            moved(RelocationInputs {
+                claude_shell_config_dir: p("/shell"),
+                claude_config_dir: p("/settings"),
+                ..Default::default()
+            }),
+            vec![
+                ("claude", PathBuf::from("/shell")),
+                (CLAUDE_USER_DIR_ROW, PathBuf::from("/shell"))
+            ],
+            "the legacy root is what the shell value alone resolved"
         );
         // No `$HOME` ⇒ no pre-override root exists to probe.
-        assert!(relocated_vendor_roots(Some(PathBuf::from("/opt/kiro")), None, None, None).is_empty());
+        assert!(
+            relocated_vendor_roots(RelocationInputs {
+                kiro_home: p("/opt/kiro"),
+                ..Default::default()
+            })
+            .is_empty()
+        );
     }
 
     #[test]
@@ -4051,6 +4376,7 @@ mod tests {
             &relocated,
             &[ClientTarget::Kiro],
             ReapContext::Reinstalled,
+            false,
         );
 
         assert!(
@@ -4075,6 +4401,7 @@ mod tests {
             &relocated,
             &[ClientTarget::Kiro],
             ReapContext::Reinstalled,
+            false,
         );
 
         assert!(
@@ -4106,6 +4433,7 @@ mod tests {
             &relocated,
             &[ClientTarget::Kiro],
             ReapContext::Reinstalled,
+            false,
         );
 
         assert!(!old_index.exists(), "the stranded index must be reaped");
@@ -4146,6 +4474,7 @@ mod tests {
             &relocated,
             &[ClientTarget::Kiro],
             ReapContext::Reinstalled,
+            false,
         );
 
         assert!(
@@ -4180,6 +4509,7 @@ mod tests {
             &relocated,
             &[ClientTarget::Kiro],
             ReapContext::Reinstalled,
+            false,
         );
 
         assert!(live.exists(), "an override naming the default root deletes nothing");
@@ -4208,6 +4538,7 @@ mod tests {
             &relocated,
             &[ClientTarget::Copilot],
             ReapContext::Reinstalled,
+            false,
         );
 
         assert!(project.exists(), "a workspace-anchored output is out of scope");
@@ -4237,6 +4568,7 @@ mod tests {
             &relocated,
             &[ClientTarget::Claude],
             ReapContext::Reinstalled,
+            false,
         );
 
         assert!(
@@ -4269,6 +4601,7 @@ mod tests {
             &relocated,
             &[ClientTarget::Claude],
             ReapContext::Reinstalled,
+            false,
         );
 
         let text: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&old).unwrap()).unwrap();
@@ -4298,6 +4631,7 @@ mod tests {
             &relocated,
             &[ClientTarget::Kiro],
             ReapContext::Reinstalled,
+            false,
         );
 
         assert!(live.exists(), "a symlink alias of the live output must never be reaped");
@@ -4334,6 +4668,7 @@ mod tests {
             &relocated,
             &[ClientTarget::Kiro],
             ReapContext::Reinstalled,
+            false,
         );
 
         assert!(old.is_file(), "the user's config file must never be deleted");
@@ -4377,6 +4712,7 @@ mod tests {
             &relocated,
             &[ClientTarget::Kiro],
             ReapContext::Reinstalled,
+            false,
         );
 
         let text: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&live).unwrap()).unwrap();
@@ -4407,6 +4743,7 @@ mod tests {
             &relocated,
             &[ClientTarget::Kiro],
             ReapContext::Reinstalled,
+            false,
         );
 
         let text: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&old).unwrap()).unwrap();
@@ -5377,7 +5714,8 @@ mod tests {
             }],
         };
 
-        let effective = effective_supporting_clients(&target, ArtifactKind::Rule, Some(&recorded), &roots);
+        let effective =
+            effective_supporting_clients(&target, ArtifactKind::Rule, &recorded.name, Some(&recorded), &roots);
         assert!(
             effective.is_empty(),
             "a forged codex output for a rule (a kind Codex declines) must never be reattached: {effective:?}"

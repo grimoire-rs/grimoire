@@ -1509,6 +1509,11 @@ grim fetch skills/code-review --format json | jq '.files[].path'
 Plain output is the **raw content payload** — exact bytes, no table, no
 added trailing newline — so it pipes.
 
+An MCP server fetched with `--vendor copilot` at project scope previews one
+entry only: the VS Code `.vscode/mcp.json` one. `grim install` also writes
+the Copilot CLI's `.github/mcp.json` entry, in the global
+`mcp-config.json` shape, which `--global --vendor copilot` shows.
+
 `--format json` emits the full fetch report: `{ref, digest, kind, name,
 vendor, path?, content, encoding?, truncated?, files?, pointer?, warnings?}`
 (the MCP payload shape — empty/default fields omitted; `encoding` is present
@@ -1773,8 +1778,8 @@ resolution expands it into its members first.
 | Client | Family | Emits | Omits |
 |---|---|---|---|
 | `claude` | Claude | skill, agent, mcp | rule (`no-format-surface`) |
-| [`droid`][droid] | Claude | skill | agent, mcp (`client-declined`); rule (`no-format-surface`) |
-| [`junie`][junie] | Claude | skill, mcp | agent (`client-declined`); rule (`no-format-surface`) |
+| [`droid`][droid] | Claude | skill, agent, mcp | rule (`no-format-surface`) |
+| [`junie`][junie] | Claude | skill, agent, mcp | rule (`no-format-surface`) |
 | [`openclaw`][openclaw] | Claude | skill | agent, mcp (`client-declined`); rule (`no-format-surface`) |
 | [`copilot`][copilot] | Agent Plugins | skill, mcp | agent (`no-format-surface`); rule (`no-format-surface`) |
 | [`codex`][codex] | Agent Plugins | skill, mcp | agent (`no-format-surface`); rule (`no-format-surface`) |
@@ -1789,19 +1794,27 @@ client regardless of that client's own install-time MCP support: the
 `mcp.json` shape belongs to the family, not the client (`agents` declines
 MCP on install yet still emits it here). Within the Claude family, MCP and
 agent support instead follow the client's own [install-time kind
-support][clients-matrix] — which is why `droid` and `openclaw` drop both,
-while `junie` keeps MCP and drops only agents. An omitted member is never
+support][clients-matrix] — which is why `openclaw` drops both, while `junie`
+and `droid` keep both (Droid translates a Claude-format plugin's `agents/`
+and `.mcp.json` when it installs one). An agent whose name the client's
+grammar rejects is omitted as `not-representable`. An omitted member is never
 an error. It is named in the plugin's `README.md` and in the JSON
 report's `omitted` array. An export whose every member is omitted for a
 given client exits `65` (`EmptyPlugin`) rather than writing an empty
 plugin.
+
+Junie still omits an agent `not-representable` when its name starts with a
+digit or contains a `.`, the same names a Junie install skips.
 
 An MCP descriptor using a transport or field the target shape cannot
 express is omitted `not-representable` rather than silently dropped. For
 an **Agent Plugins** export this covers `oauth`, the `ws` transport, or a
 `${…}` reference inside `command`, `url`, an env key, or a header — the
 spec performs no expansion there. Claude family MCP has its own, narrower
-decline: Junie refuses a descriptor carrying OAuth or an env reference.
+decline: Junie refuses a descriptor carrying OAuth or an env reference, and
+Droid refuses one carrying a `${VAR}` reference in `command`, `args`, or
+`url` (a reference in `env`, `headers`, or a literal oauth `client_id` is
+fine), or an `oauth` block with anything beyond a literal `client_id`.
 The [team-plugin guide](./guides/team-plugin.md) covers the practical
 fallout for stdio servers.
 

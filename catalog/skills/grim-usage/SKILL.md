@@ -28,8 +28,9 @@ client hosts, but a rule needs a per-file scoping surface, an agent needs a
 shipped file format, and an MCP server needs a config file grim can splice —
 and many clients lack one or more of those. Where a client cannot faithfully
 host a kind, grim warns and skips it, writing zero files. Most of the fleet
-declines rules and agents, and the skills-only clients write no MCP config
-at all. The authoritative per-client support matrix is the [Client
+declines rules, but agents are hosted by a majority of clients (12 of the 18
+supported clients), and the skills-only clients mostly write no MCP config
+either — except Cline (global scope only), Droid, and Warp. The authoritative per-client support matrix is the [Client
 Compatibility][clients] docs page — trust it over this summary, and check it
 rather than assuming.
 

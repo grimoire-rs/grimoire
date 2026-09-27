@@ -2,7 +2,7 @@
 // Copyright 2026 The Grimoire Authors
 
 //! Google Antigravity's vendor strategy: pooled project skills, a private
-//! global root, native agents and MCP; rules declined.
+//! global root, native rules, agents and MCP.
 //!
 //! Antigravity 2.0 mapping, verified 2026-07-26 (re-verified 2026-09-27 against 2.17.0) against the doc tree the
 //! antigravity.google nav labels **Antigravity 2.0 (v2.4.2)** — distinct from
@@ -14,7 +14,7 @@
 //! | skills | <https://antigravity.google/docs/skills> |
 //! | agents | <https://antigravity.google/docs/subagents> |
 //! | MCP | <https://antigravity.google/docs/mcp> |
-//! | rules | <https://antigravity.google/docs/rules-workflows> |
+//! | rules | <https://antigravity.google/docs/rules> (fetched 2026-09-27) |
 //!
 //! **Evidence caveat, applying to every quote below.** These pages were read
 //! through a summarizing fetch tool, not retrieved as raw text — the raw
@@ -35,15 +35,16 @@
 //!   `<ws>/.agents/agents/<name>.md`, global `~/.gemini/config/agents/<name>.md`.
 //!   `tools` is a `string[]`, so the canonical comma string is emitted as a
 //!   YAML sequence (the Copilot/Gemini pattern).
-//! - **Rules**: **declined**, but not for lack of a real surface — grim just
-//!   does not render Rule for Antigravity yet. Re-verified 2026-09-27 against
-//!   <https://antigravity.google/docs/rules>: both scopes document a modular,
-//!   per-file directory with real `trigger`/`globs` frontmatter scoping —
-//!   workspace `.agents/rules/*.md` and global `~/.gemini/config/rules/*.md`
-//!   (`trigger` required: `model_decision` \| `always_on` \| `glob` \|
-//!   `manual`; `globs`/`glob` required when `trigger` is `glob`). Antigravity
-//!   separately writes an unscoped `~/.gemini/GEMINI.md`, shared with Gemini
-//!   CLI, but that collision does not extend to `config/rules/*.md`.
+//! - **Rules**: native, per-file, both scopes — workspace
+//!   `.agents/rules/<name>.md`, global `~/.gemini/config/rules/<name>.md`
+//!   (verified 2026-09-27 against <https://antigravity.google/docs/rules>,
+//!   2.17.0). Frontmatter is required (`trigger` = `model_decision` \|
+//!   `always_on` \| `glob` \| `manual`); grim maps non-empty `paths` to
+//!   `trigger: glob` + comma-joined `globs`, empty `paths` to
+//!   `trigger: always_on`, and emits a `description`. Only immediate `.md`
+//!   children of `rules/` load, so a support directory is inert context.
+//!   Antigravity separately writes an unscoped `~/.gemini/GEMINI.md`, shared
+//!   with Gemini CLI; grim never touches it.
 //! - **MCP**: `mcpServers`, project `<ws>/.agents/mcp_config.json`, global
 //!   `~/.gemini/config/mcp_config.json`; remote transports use `serverUrl`
 //!   (not `url`/`httpUrl`). `ws` and `oauth` are declined — see
@@ -65,12 +66,11 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::scope::ConfigScope;
-use crate::oci::ArtifactKind;
 use crate::skill::agent_frontmatter::ParsedAgent;
-use crate::skill::rule_frontmatter::ParsedRule;
+use crate::skill::rule_frontmatter::{ParsedRule, RuleFrontmatter};
 
 use super::render::{self, RenderError, RenderedDoc};
-use super::vendor::{KindSupport, Vendor, home_dir, provenance};
+use super::vendor::{Vendor, home_dir, provenance};
 
 /// Google Antigravity (2.0 desktop).
 pub struct AntigravityVendor;
@@ -81,33 +81,10 @@ impl Vendor for AntigravityVendor {
     }
 
     fn root_dir(&self) -> &'static str {
-        // Every project-scope surface (skills, agents, mcp_config.json) lives
+        // Every project-scope surface (skills, rules, agents, mcp_config.json) lives
         // under `.agents`. It is a weak cross-vendor marker, which is why
         // `detect` does NOT use it — see that method.
         ".agents"
-    }
-
-    fn kind_support(&self, kind: ArtifactKind) -> KindSupport {
-        // Rules declined — re-verified 2026-09-27 against
-        // <https://antigravity.google/docs/rules>, and both flip conditions
-        // that used to block this are now met: a real per-file rule surface
-        // exists at BOTH scopes (workspace `.agents/rules/*.md`, global
-        // `~/.gemini/config/rules/*.md`), and each documents a genuine
-        // frontmatter scoping key (`trigger` = `model_decision` | `always_on`
-        // | `glob` | `manual`, `globs`/`glob` required for `glob`). Antigravity
-        // separately writes an unscoped `~/.gemini/GEMINI.md`, shared with
-        // Gemini CLI (google-gemini/gemini-cli #16058), but that is a
-        // different file from `config/rules/*.md` and does not block it.
-        //
-        // Still declined ONLY because grim does not render Rule for
-        // Antigravity yet — a scoped render is real work (kind enablement),
-        // not this wording fix. Declined is the reversible direction
-        // (decline → support is additive, the reverse is a breaking change).
-        // Watchlisted.
-        match kind {
-            ArtifactKind::Rule => KindSupport::Declined,
-            _ => KindSupport::Native,
-        }
     }
 
     fn detect(&self, _workspace: &Path, scope: ConfigScope) -> bool {
@@ -139,12 +116,9 @@ impl Vendor for AntigravityVendor {
     }
 
     fn rule_path(&self, workspace: &Path, scope: ConfigScope, name: &str) -> PathBuf {
-        // Dead path: `kind_support` declines `Rule`. Defensive location only.
-        //
-        // Both arms ARE documented, re-verified 2026-09-27: PROJECT is
-        // `.agents/rules/*.md`, GLOBAL is `~/.gemini/config/rules/*.md` — this
-        // path already matches it. A future flip can adopt this location as-is
-        // for both scopes; see the module doc for the frontmatter shape.
+        // Workspace `.agents/rules/<name>.md`, global `~/.gemini/config/rules/<name>.md`.
+        // Upstream scans only the immediate `.md` children of `rules/`, so a
+        // rule's sibling support directory is copied but never auto-loaded.
         antigravity_scope_root(workspace, scope)
             .join("rules")
             .join(format!("{name}.md"))
@@ -260,12 +234,41 @@ impl Vendor for AntigravityVendor {
 
     fn rule_index(
         &self,
-        _parsed: &ParsedRule,
+        parsed: &ParsedRule,
         _scope: ConfigScope,
-        _pinned: &str,
+        pinned: &str,
     ) -> Result<Option<RenderedDoc>, RenderError> {
-        // Never called: rules are skipped at the `kind_support` gate.
-        Ok(None)
+        // Always a transform: a `rules/*.md` file without a valid `trigger`
+        // is silently discarded upstream. Non-empty `paths` → `trigger: glob`
+        // plus the comma-joined `globs` string; empty → `trigger: always_on`.
+        // `description` is required for `model_decision` and "recommended for
+        // all" — the page's own `glob` example carries one — so it is emitted
+        // whenever the body yields one. Grim rules have no `description` key,
+        // so the catalog's own derivation is the single source. The registry
+        // is empty; nothing is lifted.
+        let projection = render::project_rule(&parsed.frontmatter, self)?;
+        let mut warnings = projection.warnings;
+
+        // Antigravity reads `globs` as "comma-separated file glob patterns" —
+        // the Cursor hazard.
+        let paths = &parsed.frontmatter.paths;
+        warnings.extend(render::comma_glob_warning(paths, "Antigravity"));
+
+        let mut natives: Vec<(&'static str, serde_yaml::Value)> = Vec::new();
+        if paths.is_empty() {
+            natives.push(("trigger", serde_yaml::Value::String("always_on".into())));
+        } else {
+            natives.push(("trigger", serde_yaml::Value::String("glob".into())));
+            natives.push(("globs", serde_yaml::Value::String(paths.join(","))));
+        }
+        if let Some(d) = RuleFrontmatter::derive_description(&parsed.body) {
+            natives.push(("description", serde_yaml::Value::String(d)));
+        }
+
+        let mut document = render::agent_frontmatter_block(natives, projection.lifted, self.name(), &[], &mut warnings);
+        document.push_str(&provenance(pinned));
+        document.push_str(&parsed.body);
+        Ok(Some(RenderedDoc { document, warnings }))
     }
 
     fn agent_index(&self, parsed: &ParsedAgent, pinned: &str) -> Result<Option<RenderedDoc>, RenderError> {
@@ -337,42 +340,130 @@ pub(crate) fn antigravity_root(home: Option<PathBuf>) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     //! Specification tests for Antigravity 2.0 — pooled project skills, a
-    //! private global root, native agents + MCP, rules declined. Paths verified
+    //! private global root, native rules, agents + MCP. Paths verified
     //! 2026-07-26 (re-verified 2026-09-27) against antigravity.google's 2.0 doc tree, subject to the
     //! summarizer caveat in this module's header.
     use super::*;
+    use crate::install::vendor::KindSupport;
+    use crate::oci::ArtifactKind;
     use crate::oci::mcp::McpDescriptor;
-    use crate::skill::{AgentFrontmatter, RuleFrontmatter};
+    use crate::skill::AgentFrontmatter;
 
     // ── kind_support ──
 
     #[test]
-    fn kind_support_declines_only_rule() {
-        assert_eq!(AntigravityVendor.kind_support(ArtifactKind::Skill), KindSupport::Native);
-        assert_eq!(AntigravityVendor.kind_support(ArtifactKind::Agent), KindSupport::Native);
-        assert_eq!(AntigravityVendor.kind_support(ArtifactKind::Mcp), KindSupport::Native);
+    fn kind_support_is_native_for_every_kind() {
+        for kind in [
+            ArtifactKind::Skill,
+            ArtifactKind::Rule,
+            ArtifactKind::Agent,
+            ArtifactKind::Mcp,
+        ] {
+            assert_eq!(AntigravityVendor.kind_support(kind), KindSupport::Native, "{kind:?}");
+        }
+    }
+
+    // ── rules: `trigger` + `globs` frontmatter ──
+
+    fn rule(doc: &str) -> ParsedRule {
+        RuleFrontmatter::parse_doc(doc, Path::new("r.md")).unwrap()
+    }
+
+    fn frontmatter(document: &str) -> serde_yaml::Value {
+        let inner = document.strip_prefix("---\n").expect("leading fence");
+        let end = inner.find("---\n").expect("closing fence");
+        serde_yaml::from_str(&inner[..end]).expect("frontmatter parses")
+    }
+
+    #[test]
+    fn rule_path_is_rules_md_at_both_scopes() {
+        let w = Path::new("/w");
         assert_eq!(
-            AntigravityVendor.kind_support(ArtifactKind::Rule),
-            KindSupport::Declined,
-            "a real scoped surface exists at both scopes; declined only because grim does \
-             not render Rule for Antigravity yet"
+            AntigravityVendor.rule_path(w, ConfigScope::Project, "r"),
+            w.join(".agents").join("rules").join("r.md")
+        );
+        if let Some(home) = home_dir() {
+            assert_eq!(
+                AntigravityVendor.rule_path(w, ConfigScope::Global, "r"),
+                home.join(".gemini").join("config").join("rules").join("r.md")
+            );
+        }
+    }
+
+    #[test]
+    fn scoped_rule_renders_trigger_glob_and_comma_joined_globs() {
+        let out = AntigravityVendor
+            .rule_index(
+                &rule("---\npaths:\n  - \"src/**/*.rs\"\n  - \"*.toml\"\n---\n# Rust Style\nUse 4 spaces.\n"),
+                ConfigScope::Project,
+                "pin",
+            )
+            .unwrap()
+            .expect("rules always transform: frontmatter is required upstream");
+        let fm = frontmatter(&out.document);
+        assert_eq!(fm["trigger"], "glob", "{}", out.document);
+        assert_eq!(fm["globs"], "src/**/*.rs,*.toml", "{}", out.document);
+        assert_eq!(fm["description"], "Rust Style", "{}", out.document);
+        assert!(
+            fm.get("paths").is_none(),
+            "canonical paths must not leak: {}",
+            out.document
+        );
+        assert!(out.document.contains("generated by grim from pin"), "{}", out.document);
+        assert!(
+            out.document.ends_with("# Rust Style\nUse 4 spaces.\n"),
+            "{}",
+            out.document
+        );
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    }
+
+    #[test]
+    fn unscoped_rule_renders_trigger_always_on_without_globs() {
+        let out = AntigravityVendor
+            .rule_index(&rule("guidance\n"), ConfigScope::Global, "pin")
+            .unwrap()
+            .expect("a bare rule still needs frontmatter upstream");
+        let fm = frontmatter(&out.document);
+        assert_eq!(fm["trigger"], "always_on", "{}", out.document);
+        assert!(fm.get("globs").is_none(), "{}", out.document);
+        assert!(out.document.ends_with("guidance\n"), "{}", out.document);
+    }
+
+    #[test]
+    fn rule_with_no_text_omits_description() {
+        let out = AntigravityVendor
+            .rule_index(&rule("---\npaths: [\"a\"]\n---\n"), ConfigScope::Project, "p")
+            .unwrap()
+            .unwrap();
+        assert!(
+            frontmatter(&out.document).get("description").is_none(),
+            "{}",
+            out.document
         );
     }
 
     #[test]
-    fn declined_rules_render_nothing() {
-        let rule = RuleFrontmatter::parse_doc(
-            "---\nname: r\ndescription: d\npaths: [\"src/**\"]\n---\nbody\n",
-            Path::new("r.md"),
-        )
-        .unwrap();
-        assert!(
-            AntigravityVendor
-                .rule_index(&rule, ConfigScope::Project, "pin")
-                .expect("no registry ⇒ no render error")
-                .is_none(),
-            "a declined kind records zero outputs"
-        );
+    fn comma_in_glob_warns_but_renders_unchanged() {
+        let out = AntigravityVendor
+            .rule_index(
+                &rule("---\npaths: [\"src/*.{rs,toml}\"]\n---\nb\n"),
+                ConfigScope::Project,
+                "p",
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(out.warnings.len(), 1, "{:?}", out.warnings);
+        assert!(out.warnings[0].contains("comma"), "{:?}", out.warnings);
+        assert_eq!(frontmatter(&out.document)["globs"], "src/*.{rs,toml}");
+    }
+
+    #[test]
+    fn rule_index_is_deterministic() {
+        let r = rule("---\npaths: [\"*.rs\"]\n---\nbody\n");
+        let a = AntigravityVendor.rule_index(&r, ConfigScope::Project, "p").unwrap();
+        let b = AntigravityVendor.rule_index(&r, ConfigScope::Project, "p").unwrap();
+        assert_eq!(a, b, "regeneration must be byte-identical");
     }
 
     // ── detect: never on `.agents`, and never at project scope ──

@@ -50,20 +50,25 @@ the summary below is a planning aid that the next client can age:
 - **Skills** are the universal kind — no client declines them, which is why
   a skill is the portable choice. One scope caveat: OpenClaw is
   global-scope-only, so a *project* install for it writes nothing.
-- **Rules** are native for Claude Code, Copilot, Cursor, and Kiro;
+- **Rules** are native for Claude Code, Copilot, Cursor, Kiro, and
+  Antigravity;
   degraded for OpenCode and Junie (the file installs and grim restates the
   scope as prose in the body, but nothing enforces it); and **declined**
   by everyone else — grim warns, skips, and
   writes no file. Most of the fleet cannot scope instructions: when the
   audience is broad, a skill reaches clients a rule never will.
 - **Agents** install for Claude Code, OpenCode, Copilot, Codex, Cursor,
-  Gemini, and Antigravity. Every other client declines them.
+  Gemini, Antigravity, Junie, Droid, Goose, Kilo, and Qoder. Every other
+  client declines them.
 - **MCP servers** register for the clients that ship a config file grim
   can splice — Claude, OpenCode, Copilot, Codex, Cursor, Kiro, Junie,
-  Gemini, Zed, Amp, and Antigravity. Only Claude accepts the `ws`
-  transport and the `[server.oauth]` block; every other client skips such
-  a descriptor with a warning. The skills-only clients (and the
-  vendor-neutral `agents` target) write no MCP config at all.
+  Gemini, Zed, Amp, Antigravity, Cline (global scope only), Droid, Warp,
+  and Qoder. Only Claude accepts the `ws`
+  transport. The `[server.oauth]` block reaches OpenCode (no
+  `auth_server_metadata_url`, no `callback_port = 0`), Zed, Copilot, and
+  Droid (Copilot and Droid: a
+  literal `client_id` only — a `${VAR}` id skips); every other
+  client, or a field it cannot carry, skips the descriptor with a warning.
 
 A declined kind is an honest refusal, not a silent failure — but it is
 still zero files. The enforced matrix and the upstream reason behind

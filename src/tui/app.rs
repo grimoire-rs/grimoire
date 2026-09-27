@@ -1807,7 +1807,7 @@ fn derive_artifact_state(
     // pre-existing behaviour.
     let installed_or_pending = || {
         let pending = target.is_some_and(|t| {
-            !crate::install::expected_outputs::pending_outputs(Some(record), record.kind, &record.name, t, roots)
+            !crate::install::expected_outputs::pending_outputs(Some(record), record.kind, &record.name, t, roots, None)
                 .is_empty()
         });
         if pending {

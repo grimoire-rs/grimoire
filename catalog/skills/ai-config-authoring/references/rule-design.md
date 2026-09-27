@@ -86,7 +86,7 @@ with a tree: always-on root → catalog/index file → scoped leaf rules.
 ## Vendor Differences
 
 **Every client has an always-on file; per-file scoping is the minority
-capability.** Of the clients surveyed below (as of 2026; re-verify), four
+capability.** Of the clients surveyed below (as of 2026; re-verify), six
 support real glob scoping, two host per-file rules without scoping, and the
 rest have no ownable per-file rule surface at all — for those the always-on
 file is the *only* place rule content can live. The survey is a sample, not
@@ -95,7 +95,7 @@ first and rules later, if ever.
 
 | Per-file rule surface | Clients | What you get |
 |---|---|---|
-| Real glob scoping | [Claude Code][cc-mem] `.claude/rules/*.md` + `paths:`; [Copilot][cop-ci] `.github/instructions/*.instructions.md` + `applyTo:`; [Cursor][cur] `.cursor/rules/*.mdc` + a `globs` string; [Kiro][kiro] `.kiro/steering/*.md` + a `fileMatchPattern` list, **IDE/Web project scope only** (see caveats); [Cline][cline] `.clinerules/*.md` + `paths:` | Content loads only when a matching file is in play |
+| Real glob scoping | [Claude Code][cc-mem] `.claude/rules/*.md` + `paths:`; [Copilot][cop-ci] `.github/instructions/*.instructions.md` + `applyTo:`; [Cursor][cur] `.cursor/rules/*.mdc` + a `globs` string; [Kiro][kiro] `.kiro/steering/*.md` + a `fileMatchPattern` list, **IDE/Web project scope only** (see caveats); [Cline][cline] `.clinerules/*.md` + `paths:`; [Antigravity][ag] `.agents/rules/*.md` + `trigger: glob` and a `globs` string | Content loads only when a matching file is in play |
 | Per-file, no scoping | [OpenCode][oc-rules] — rule files load through the always-on `instructions` array; [Junie][junie] — `.junie/rules/*.md`, every Markdown file in the directory concatenated automatically, project scope only (no user-level rules directory exists) | The body loads, the scope does not: permanent cost |
 | None | [Codex][cx-skills], [Gemini CLI][gem], [Zed][zed], [Amp][amp], and most of the newer skills-first clients | Nothing to install — route the content to the always-on file |
 
@@ -185,6 +185,7 @@ session and merely lives in another file.
 [zed]: https://zed.dev
 [amp]: https://ampcode.com
 [cline]: https://cline.bot
+[ag]: https://antigravity.google/docs/rules
 [vsc-ci]: https://code.visualstudio.com/docs/agent-customization/custom-instructions
 [gh-blog]: https://github.blog/ai-and-ml/github-copilot/unlocking-the-full-power-of-copilot-code-review-master-your-instructions-files/
 [humanlayer]: https://humanlayer.dev/blog/writing-a-good-claude-md
