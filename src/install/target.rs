@@ -117,21 +117,7 @@ impl InstallTarget {
         };
         // Both flag and config empty ⇒ reach `new` with an empty list so
         // detection runs (do not inject the literal "claude").
-        let raw: Vec<String> = source
-            .iter()
-            .flat_map(|v| v.split(',').map(|s| s.trim().to_string()))
-            .collect();
-
-        let mut clients = Vec::new();
-        for name in raw {
-            if name.is_empty() {
-                continue;
-            }
-            let client: ClientTarget = name.parse()?;
-            if !clients.contains(&client) {
-                clients.push(client);
-            }
-        }
+        let mut clients = parse_client_list(source)?;
 
         // An unknown client name, or one the capability gate would have
         // refused, is dropped rather than raised: both are already refused at
@@ -215,6 +201,34 @@ impl InstallTarget {
         }
         client.path_for(&self.workspace, self.scope, kind, name)
     }
+}
+
+/// Parse `--client`-style values into client targets: each value may be a
+/// comma list; names are trimmed, empties dropped, duplicates removed in
+/// first-seen order. An empty result is returned as-is — the detection and
+/// generic fallbacks belong to [`InstallTarget::parse`], not to parsing.
+///
+/// # Errors
+///
+/// [`super::install_error::InstallErrorKind::UnsupportedClient`] for an
+/// unknown client name.
+pub(crate) fn parse_client_list(values: &[String]) -> Result<Vec<ClientTarget>, InstallError> {
+    let raw: Vec<String> = values
+        .iter()
+        .flat_map(|v| v.split(',').map(|s| s.trim().to_string()))
+        .collect();
+
+    let mut clients = Vec::new();
+    for name in raw {
+        if name.is_empty() {
+            continue;
+        }
+        let client: ClientTarget = name.parse()?;
+        if !clients.contains(&client) {
+            clients.push(client);
+        }
+    }
+    Ok(clients)
 }
 
 /// The detected AI clients for `workspace` at `scope`, in
@@ -567,5 +581,99 @@ mod tests {
                 "{name} already pools — opting it in must not move anything"
             );
         }
+    }
+
+    // ── parse_client_list (C-015) ──────────────────────────────────
+
+    use crate::install::install_error::InstallErrorKind;
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn c015_parse_client_list_splits_trims_drops_empties_and_dedupes_in_order() {
+        let got = parse_client_list(&strings(&[" copilot , ,claude", "claude,copilot", "", "codex"])).unwrap();
+        assert_eq!(
+            got,
+            vec![ClientTarget::Copilot, ClientTarget::Claude, ClientTarget::Codex]
+        );
+    }
+
+    #[test]
+    fn c015_parse_client_list_returns_empty_as_is_without_fallback() {
+        // Detection and the generic fallback belong to `InstallTarget::parse`,
+        // never to the list parser — even on a workspace with `.claude/`.
+        assert!(parse_client_list(&[]).unwrap().is_empty());
+        assert!(parse_client_list(&strings(&["", " , ,"])).unwrap().is_empty());
+    }
+
+    #[test]
+    fn c015_parse_client_list_unknown_name_is_unsupported_client_78() {
+        let err = parse_client_list(&strings(&["claude, nope ,copilot"])).expect_err("unknown client");
+        assert!(
+            matches!(&err.kind, InstallErrorKind::UnsupportedClient(n) if n == "nope"),
+            "the trimmed unknown name is reported: {err:?}"
+        );
+        assert_eq!(
+            crate::error::classify_error(&anyhow::Error::from(crate::error::Error::from(err))),
+            crate::cli::exit_code::ExitCode::ConfigError
+        );
+        // Names are case-sensitive, as `ClientTarget::from_str` always was.
+        assert!(parse_client_list(&strings(&["Claude"])).is_err());
+    }
+
+    #[test]
+    fn c015_c031_install_target_parse_agrees_with_parse_client_list() {
+        // C-031.5: `InstallTarget::parse` calls the extracted parser, so for
+        // any non-empty selection the two answer identically, flag or config.
+        let tmp = tempfile::tempdir().unwrap();
+        for input in [
+            strings(&["claude"]),
+            strings(&["claude,copilot"]),
+            strings(&[" codex ,, codex", "claude"]),
+            strings(&["agents", "agents,claude"]),
+        ] {
+            let listed = parse_client_list(&input).unwrap();
+            let via_flag =
+                InstallTarget::parse(tmp.path(), ConfigScope::Project, &input, &[], &BTreeMap::new()).unwrap();
+            let via_cfg =
+                InstallTarget::parse(tmp.path(), ConfigScope::Project, &[], &input, &BTreeMap::new()).unwrap();
+            assert_eq!(via_flag.clients(), listed.as_slice(), "flag {input:?}");
+            assert_eq!(via_cfg.clients(), listed.as_slice(), "config {input:?}");
+            assert!(!via_flag.is_generic_fallback());
+        }
+        // Unknown names still refuse through `parse`, with the same kind.
+        let err = InstallTarget::parse(
+            tmp.path(),
+            ConfigScope::Project,
+            &strings(&["claude,nope"]),
+            &[],
+            &BTreeMap::new(),
+        )
+        .expect_err("unknown client");
+        assert!(matches!(&err.kind, InstallErrorKind::UnsupportedClient(n) if n == "nope"));
+        // An all-empty flag list still falls through to config, then detection.
+        let t = InstallTarget::parse(
+            tmp.path(),
+            ConfigScope::Project,
+            &[],
+            &strings(&[" , "]),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(t.clients(), &[ClientTarget::Agents]);
+        assert!(t.is_generic_fallback());
+        // A present-but-blank flag still shadows the config default (the flag
+        // wins on presence, not on content) — pre-extraction behaviour.
+        let t = InstallTarget::parse(
+            tmp.path(),
+            ConfigScope::Project,
+            &strings(&[","]),
+            &strings(&["claude"]),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(t.clients(), &[ClientTarget::Agents]);
     }
 }

@@ -313,11 +313,7 @@ pub async fn fetch_artifact(
         &scope.registries,
         &scope.short_id_default,
     ))?;
-    let id = if id.tag().is_none() && id.digest().is_none() {
-        id.clone_with_tag("latest")
-    } else {
-        id
-    };
+    let id = id.or_latest();
     let name = id.name().to_string();
 
     // `Resolve` (not `Query`) so an offline-uncached miss surfaces as
@@ -725,16 +721,12 @@ pub async fn resolve_digest_only(
     let id = if description {
         companion_reference(scope, reference)?
     } else {
-        let id = wrap(crate::config::resolve_reference(
+        wrap(crate::config::resolve_reference(
             reference,
             &scope.registries,
             &scope.short_id_default,
-        ))?;
-        if id.tag().is_none() && id.digest().is_none() {
-            id.clone_with_tag("latest")
-        } else {
-            id
-        }
+        ))?
+        .or_latest()
     };
 
     // `Resolve` (not `Query`), like `describe`: an offline-uncached ref
@@ -899,11 +891,7 @@ pub async fn describe_artifact(
         &scope.registries,
         &scope.short_id_default,
     ))?;
-    let id = if id.tag().is_none() && id.digest().is_none() {
-        id.clone_with_tag("latest")
-    } else {
-        id
-    };
+    let id = id.or_latest();
     let name = id.name().to_string();
 
     // Tag listing (no blob), sorted for a stable report. `None` (endpoint

@@ -903,11 +903,7 @@ fn parse_artifact_map(
         }
         match Identifier::parse(value) {
             Ok(id) => {
-                let id = if id.tag().is_none() && id.digest().is_none() {
-                    id.clone_with_tag("latest")
-                } else {
-                    id
-                };
+                let id = id.or_latest();
                 out.insert(name.clone(), DeclaredSource::Registry(id));
             }
             Err(e) if matches!(e.kind, IdentifierErrorKind::MissingRegistry) => {
