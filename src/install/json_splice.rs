@@ -59,7 +59,9 @@ pub fn upsert_member(text: &str, container: &str, member: &str, value: &serde_js
         // No document yet: emit the minimal pretty skeleton.
         let rendered = indent_block(&pretty(value)?, "    ");
         return Ok(Splice::Changed(format!(
-            "{{\n  \"{container}\": {{\n    \"{member}\": {rendered}\n  }}\n}}\n"
+            "{{\n  {}: {{\n    {}: {rendered}\n  }}\n}}\n",
+            json_string(container),
+            json_string(member)
         )));
     }
 
@@ -74,7 +76,9 @@ pub fn upsert_member(text: &str, container: &str, member: &str, value: &serde_js
         // Insert the whole container as a new root member.
         let rendered = indent_block(&pretty(value)?, &deeper(&root.member_indent(text)));
         let snippet = format!(
-            "\"{container}\": {{\n{inner}\"{member}\": {rendered}\n{close}}}",
+            "{}: {{\n{inner}{}: {rendered}\n{close}}}",
+            json_string(container),
+            json_string(member),
             inner = deeper(&root.member_indent(text)),
             close = root.member_indent(text),
         );
@@ -108,7 +112,7 @@ pub fn upsert_member(text: &str, container: &str, member: &str, value: &serde_js
         None => {
             let indent = inner.member_indent_or(inner_text, &deeper(&container_member.key_indent(text)));
             let rendered = indent_block(&pretty(value)?, &indent);
-            let snippet = format!("\"{member}\": {rendered}");
+            let snippet = format!("{}: {rendered}", json_string(member));
             let new_inner =
                 insert_member_with_indent(inner_text, &inner, &snippet, &indent, container_member.key_indent(text));
             let mut out = String::with_capacity(text.len() + new_inner.len());
@@ -778,6 +782,23 @@ mod tests {
         let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(doc["mcpServers"]["grim"]["command"], "grim");
         assert!(out.ends_with('\n'));
+    }
+
+    #[test]
+    fn upsert_escapes_a_member_name_on_every_insert_path() {
+        // A hand-edited lock can name an mcp `a"b` (`is_contained_mcp_name`
+        // admits it): the key must stay one JSON string, never break out.
+        let name = "a\"b\u{1}";
+        let value = json!({"command": "x"});
+        for text in ["", "{}\n", "{\n  \"mcpServers\": {\n    \"other\": {}\n  }\n}\n"] {
+            let out = changed(upsert_member(text, "mcpServers", name, &value).unwrap());
+            let parsed: serde_json::Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+            assert_eq!(parsed["mcpServers"][name], value, "{out}");
+            assert_eq!(
+                upsert_member(&out, "mcpServers", name, &value).unwrap(),
+                Splice::Unchanged
+            );
+        }
     }
 
     #[test]
