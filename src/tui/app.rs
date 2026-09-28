@@ -283,7 +283,7 @@ pub async fn run(mut ctx: TuiContext, mut project_init: Option<ProjectInit<'_>>)
     terminal.draw(|f| draw(f, &frame(&state)))?;
     load_into(&ctx, &mut state).await;
     if project_init.as_ref().is_some_and(|p| p.fell_back) {
-        state.set_status("no grimoire.toml here, so this is your global setup · press g to set up a project");
+        state.set_status("no grimoire.toml · g sets one up");
     }
     terminal.draw(|f| draw(f, &frame(&state)))?;
 

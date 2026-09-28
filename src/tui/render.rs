@@ -15,6 +15,7 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap};
+use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
 use crate::config::registry_resolve::RowSource;
 
@@ -85,6 +86,41 @@ fn fit_tail(s: &str, width: usize) -> String {
         format!("…{tail}")
     } else {
         format!("{s:<width$}")
+    }
+}
+
+/// Cut `s` to at most `width` terminal columns, ending in `…` when anything
+/// was dropped. Measures display columns, not chars, so a wide glyph in an
+/// error message cannot push the result past `width`.
+fn ellipsize(s: &str, width: usize) -> String {
+    if s.width() <= width {
+        return s.to_string();
+    }
+    let Some(budget) = width.checked_sub(1) else {
+        return String::new();
+    };
+    let mut used = 0;
+    let mut out = String::new();
+    for c in s.chars() {
+        let w = c.width().unwrap_or(0);
+        if used + w > budget {
+            break;
+        }
+        used += w;
+        out.push(c);
+    }
+    out.push('…');
+    out
+}
+
+/// [`fit_tail`] for a tree row's Repo cell: `prefix` (indent and arrow) stays
+/// put and only `label` is cut, so a long label cannot swallow the structure
+/// that places the row under its parent. Falls back to cutting the whole text
+/// when the prefix alone leaves no room for a label.
+fn fit_label(prefix: &str, label: &str, width: usize) -> String {
+    match width.checked_sub(prefix.chars().count()) {
+        Some(room) if room >= 2 => format!("{prefix}{}", fit_tail(label, room)),
+        _ => fit_tail(&format!("{prefix}{label}"), width),
     }
 }
 
@@ -514,7 +550,7 @@ fn tree_render_rows(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<R
                 } else {
                     label.clone()
                 };
-                let repo_text = format!("{indent}{arrow} {display_label}");
+                let prefix = format!("{indent}{arrow} ");
                 // Col 3 (Status): group status glyph from rollup.worst(), optionally
                 // prefixed with the tri-state mark glyph. The rollup label belongs in
                 // col 2 (Tag) only — NOT duplicated here.
@@ -525,7 +561,7 @@ fn tree_render_rows(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<R
                 };
                 RenderRow {
                     columns: [
-                        fit_tail(&repo_text, W_REPO),
+                        fit_label(&prefix, &display_label, W_REPO),
                         fit("", W_KIND),
                         fit(&rollup_label, W_TAG),
                         fit("", W_RATING),
@@ -560,11 +596,11 @@ fn tree_render_rows(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<R
                 // P3.2: bundle leaves carry an expand/collapse arrow glyph.
                 // F4: use UTF-8 ▸/▾ (same glyphs as group rows) — no ASCII fallback.
                 // Non-bundle leaves are rendered without prefix (unchanged).
-                let repo_text = if *is_bundle {
+                let prefix = if *is_bundle {
                     let arrow = if *collapsed { "▸" } else { "▾" };
-                    format!("{indent}{arrow} {label}")
+                    format!("{indent}{arrow} ")
                 } else {
-                    format!("{indent}{label}")
+                    indent
                 };
                 let tag_cell = r
                     .map(|row| match &row.pinned_version {
@@ -575,7 +611,7 @@ fn tree_render_rows(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<R
                     .unwrap_or_default();
                 RenderRow {
                     columns: [
-                        fit_tail(&repo_text, W_REPO),
+                        fit_label(&prefix, label, W_REPO),
                         fit(r.map(|r| r.kind.as_str()).unwrap_or(""), W_KIND),
                         fit(&tag_cell, W_TAG),
                         count_cell(r.and_then(|r| r.rating).map(u64::from), W_RATING),
@@ -604,7 +640,7 @@ fn tree_render_rows(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<R
                 // F5: removed "(via bundle)" suffix — visual noise; member rows
                 // are structurally distinct (indented child of bundle leaf).
                 let sanitized = sanitize_member_label(label);
-                let repo_text = format!("{indent}  {sanitized}");
+                let prefix = format!("{indent}  ");
                 // Related members are highlighted — the `related` flag drives
                 // any future related-highlight styling at the draw layer.
                 // For now we expose it through `marked: false`; the draw layer
@@ -612,7 +648,7 @@ fn tree_render_rows(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<R
                 let _ = related; // consumed by draw layer, not render layer
                 RenderRow {
                     columns: [
-                        fit_tail(&repo_text, W_REPO),
+                        fit_label(&prefix, &sanitized, W_REPO),
                         fit(&kind.to_string(), W_KIND),
                         fit("", W_TAG),
                         fit("", W_RATING),
@@ -1103,6 +1139,30 @@ pub fn frame(state: &TuiState) -> RenderModel {
     }
 }
 
+/// Split the title row into the room left of the centered title (selected
+/// clients), the title itself, and the room right of it (status), each
+/// separated from the title by one blank column.
+fn title_row_areas(row: Rect, title_width: usize) -> (Rect, Rect, Rect) {
+    let title_w = u16::try_from(title_width).unwrap_or(u16::MAX).min(row.width);
+    let side = (row.width - title_w) / 2;
+    let title = Rect {
+        x: row.x + side,
+        width: title_w,
+        ..row
+    };
+    let left = Rect {
+        width: side.saturating_sub(1),
+        ..row
+    };
+    let right_x = title.right().saturating_add(1).min(row.right());
+    let right = Rect {
+        x: right_x,
+        width: row.right() - right_x,
+        ..row
+    };
+    (left, title, right)
+}
+
 /// Draw `model` into the frame. The *only* ratatui-specific code; it makes
 /// no decisions — every choice was already made in [`frame`].
 pub fn draw(f: &mut Frame, model: &RenderModel) {
@@ -1146,40 +1206,33 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
 
     let accent = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
 
-    // Title row: app title left, transient status right-aligned on the
-    // same line (it used to own a dedicated bottom row).
-    // Title centered across the whole line; transient status right-aligned
-    // over the same row (short, so it never collides with the centered
-    // title in practice).
+    // Title row: the title stays centered; the selected clients and the
+    // transient status each get only the room beside it, measured in display
+    // columns and ellipsized to fit. A status wider than that room used to be
+    // painted over the title.
+    let (clients_area, title_area, status_area) = title_row_areas(chunks[0], model.title.width());
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             model.title.clone(),
             Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
-        )))
-        .alignment(Alignment::Center),
-        chunks[0],
+        ))),
+        title_area,
     );
     f.render_widget(
         Paragraph::new(Span::styled(
-            model.status.clone(),
+            ellipsize(&model.status, status_area.width.into()),
             Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
         ))
         .alignment(Alignment::Right),
-        chunks[0],
+        status_area,
     );
-    // Selected clients: a quiet, persistent span on the left of the title
-    // row (the title is centered, so the left edge is free). Omitted
-    // entirely when no clients are selected.
-    if !model.clients.is_empty() {
-        f.render_widget(
-            Paragraph::new(Span::styled(
-                model.clients.clone(),
-                Style::default().fg(Color::DarkGray),
-            ))
-            .alignment(Alignment::Left),
-            chunks[0],
-        );
-    }
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            ellipsize(&model.clients, clients_area.width.into()),
+            Style::default().fg(Color::DarkGray),
+        )),
+        clients_area,
+    );
 
     // Search row: scope-mode box on the left, query box on the right.
     let search_row = Layout::default()
@@ -2360,6 +2413,96 @@ mod tests {
         let out = fit_tail(long, 10);
         assert_eq!(out, "…tory/path");
         assert_eq!(out.chars().count(), 10);
+    }
+
+    /// Draw `model` at `width` columns and return the title row as text.
+    fn top_row(model: &RenderModel, width: u16) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut term = Terminal::new(TestBackend::new(width, 24)).unwrap();
+        term.draw(|f| draw(f, model)).unwrap();
+        let buf = term.backend().buffer();
+        (0..width).map(|x| buf[(x, 0)].symbol()).collect()
+    }
+
+    // Regression: the status was painted over the whole title row, so a long
+    // message (the global-scope notice is 87 columns) overwrote the centered
+    // title. It now gets only the room beside the title and is ellipsized.
+    #[test]
+    fn long_status_never_overwrites_the_title() {
+        let mut s = TuiState::new();
+        s.set_clients(vec!["claude".to_string(), "codex".to_string()]);
+        let mut model = frame(&s);
+        model.status = "no grimoire.toml here, so this is your global setup · press g to set up a project".to_string();
+        for width in [60, 80, 100, 130, 200] {
+            let row = top_row(&model, width);
+            assert!(row.contains(&model.title), "title lost at width {width}: {row:?}");
+            assert!(
+                row.contains("clients: claude, codex"),
+                "clients lost at width {width}: {row:?}"
+            );
+            let title_end = row.find(&model.title).unwrap() + model.title.len();
+            assert!(
+                row[title_end..].trim().starts_with("no grimoire.toml"),
+                "status must sit right of the title at width {width}: {row:?}"
+            );
+        }
+        // Too long for the room beside the title at 80 columns: cut, not clipped mid-word.
+        assert!(top_row(&model, 80).trim_end().ends_with('…'));
+        // Room to spare at 200 columns: shown whole.
+        assert!(top_row(&model, 200).contains("press g to set up a project"));
+    }
+
+    // Width is display columns, not chars: a wide-glyph status must still
+    // leave the title intact.
+    #[test]
+    fn wide_glyph_status_is_measured_in_columns() {
+        let mut s = TuiState::new();
+        s.set_clients(vec!["claude".to_string()]);
+        let mut model = frame(&s);
+        model.status = "字".repeat(60);
+        let row = top_row(&model, 80);
+        assert!(row.contains(&model.title), "title lost: {row:?}");
+    }
+
+    #[test]
+    fn ellipsize_measures_display_columns() {
+        assert_eq!(ellipsize("abc", 5), "abc");
+        assert_eq!(ellipsize("abcdef", 4), "abc…");
+        assert_eq!(ellipsize("abcdef", 1), "…");
+        assert_eq!(ellipsize("abcdef", 0), "");
+        // Two-column glyphs: 3 fit in 7 columns with the ellipsis, not 6 chars.
+        let out = ellipsize("字字字字字字", 7);
+        assert_eq!(out, "字字字…");
+    }
+
+    // Regression: an over-long tree label was tail-fitted together with its
+    // indent and arrow, so the row lost both and started with `…` in the
+    // first column instead of under its parent.
+    #[test]
+    fn tree_labels_keep_indent_and_arrow_when_truncated() {
+        let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
+        let long = "n".repeat(60);
+        s.set_rows(vec![row(&format!("reg/{long}/{long}/leaf"), ArtifactState::Installed)]);
+        s.set_default_registry(Some("reg".to_string()));
+        s.toggle_view_mode();
+        let m = frame(&s);
+        let cells: Vec<&str> = m.rows.iter().map(|r| r.columns[0].as_str()).collect();
+        assert!(cells.len() >= 2, "expected a group and a leaf: {cells:?}");
+        for r in &m.rows {
+            let cell = r.columns[0].as_str();
+            assert_eq!(cell.chars().count(), W_REPO, "cell width: {cell:?}");
+            if r.group.is_some() {
+                assert!(
+                    cell.starts_with("▾ …") || cell.starts_with("▸ …"),
+                    "group lost its arrow: {cell:?}"
+                );
+            } else {
+                assert!(cell.starts_with("  "), "leaf lost its indent: {cell:?}");
+            }
+        }
     }
 
     #[test]
