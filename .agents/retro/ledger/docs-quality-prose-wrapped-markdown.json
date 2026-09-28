@@ -1,0 +1,23 @@
+{
+  "artifact": "docs-quality",
+  "cost_min": 0,
+  "entries": [
+    "20260928T122649Z-1a982659.json"
+  ],
+  "first_seen": "2026-09-28T12:26:49Z",
+  "fixed": null,
+  "folded_at": "2026-09-28T22:23:08Z",
+  "folds": 1,
+  "id": "docs-quality-prose-wrapped-markdown",
+  "kind": "pitfall",
+  "last_seen": "2026-09-28T12:26:49Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "low",
+  "status": "open",
+  "title": "docs-quality prose.py counts raw markdown fragments when a link or code span wraps a line",
+  "v": 1,
+  "versions": [
+    "ghcr.io/ocx-sh/lore/docs-quality@sha256:d9ab2df9ccff688f98f539ab1f1c3c9cf56fdfefa91b7d190dfca70d0afed09e"
+  ]
+}

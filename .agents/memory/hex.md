@@ -548,3 +548,5 @@ re-arguing settled design while still reporting divergences as information.
   via SendMessage did not help. **Consider making a file drop the contract
   for every reviewer persona**, not just the artifact-producing ones — an
   in-band-only reply is a single point of failure for a whole perspective.
+- Retro candidate (project-context): "Windows harness CI-mirror mode: serial, verify-deep command, stdout to a pipe" — ledger project-windows-harness-ci-mirror, .agents/retro/reports/2026-09-29.md.
+- Retro candidate (project-context): "rtk hook rewrites grep/ls/find; use /usr/bin variants for exact POSIX behaviour" — ledger project-rtk-hook-posix-drift, .agents/retro/reports/2026-09-29.md.

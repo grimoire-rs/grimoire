@@ -1,0 +1,21 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20260928T222255Z-f2c09c0f.json"
+  ],
+  "first_seen": "2026-09-28T22:22:55Z",
+  "fixed": null,
+  "folded_at": "2026-09-28T22:23:08Z",
+  "folds": 1,
+  "id": "project-rtk-hook-posix-drift",
+  "kind": "inconvenient",
+  "last_seen": "2026-09-28T22:22:55Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "low",
+  "status": "deferred",
+  "title": "rtk hook rewrites grep, ls and find into tools with different flags and output",
+  "v": 1,
+  "versions": []
+}

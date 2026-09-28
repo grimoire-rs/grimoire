@@ -1,0 +1,24 @@
+{
+  "artifact": "hex-finalize",
+  "cost_min": 0,
+  "entries": [
+    "20260927T213235Z-412cc127.json",
+    "20260927T221608Z-77b4c4d5.json"
+  ],
+  "first_seen": "2026-09-27T21:32:35Z",
+  "fixed": null,
+  "folded_at": "2026-09-28T22:23:08Z",
+  "folds": 1,
+  "id": "hex-finalize-preflight-halts",
+  "kind": "inconvenient",
+  "last_seen": "2026-09-27T22:16:08Z",
+  "occurrences": 2,
+  "scope": "harness",
+  "severity": "medium",
+  "status": "open",
+  "title": "hex-finalize pre-flight halts 2 and 3 misfire on multi-worktree flows and the untracked retro inbox",
+  "v": 1,
+  "versions": [
+    "ghcr.io/michael-herwig/arcana/hex-finalize@sha256:bfa652655daf2fa13fd6ce02b1c69d9aa230920c6b100182283751e4d16e39d8"
+  ]
+}

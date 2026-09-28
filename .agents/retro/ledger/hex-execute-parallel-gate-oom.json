@@ -1,0 +1,23 @@
+{
+  "artifact": "hex-execute",
+  "cost_min": 0,
+  "entries": [
+    "20260928T071233Z-46e22433.json"
+  ],
+  "first_seen": "2026-09-28T07:12:00Z",
+  "fixed": null,
+  "folded_at": "2026-09-28T22:23:08Z",
+  "folds": 1,
+  "id": "hex-execute-parallel-gate-oom",
+  "kind": "pitfall",
+  "last_seen": "2026-09-28T07:12:00Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "high",
+  "status": "open",
+  "title": "hex-execute runs heavy verify gates in parallel worktrees until the host OOMs",
+  "v": 1,
+  "versions": [
+    "ghcr.io/michael-herwig/arcana/hex-execute@sha256:3fe60f56dec0be1646ab10d76bf222dc51b0ddcf413ba09314e3f80deec21fcd"
+  ]
+}

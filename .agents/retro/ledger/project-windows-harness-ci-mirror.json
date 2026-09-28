@@ -1,0 +1,25 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20260927T181039Z-357df95b.json"
+  ],
+  "first_seen": "2026-09-27T18:10:39Z",
+  "fixed": {
+    "at": "2026-09-28T22:32:07Z",
+    "by": "report .agents/retro/reports/2026-09-29.md P-5",
+    "stale_versions": []
+  },
+  "folded_at": "2026-09-28T22:23:08Z",
+  "folds": 1,
+  "id": "project-windows-harness-ci-mirror",
+  "kind": "pitfall",
+  "last_seen": "2026-09-27T18:10:39Z",
+  "occurrences": 1,
+  "scope": "project",
+  "severity": "medium",
+  "status": "fixed",
+  "title": "Local Windows harness differs from the CI step, so a test id that stalls CI passes locally",
+  "v": 1,
+  "versions": []
+}

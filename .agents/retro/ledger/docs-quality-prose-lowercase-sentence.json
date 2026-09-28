@@ -1,0 +1,23 @@
+{
+  "artifact": "docs-quality",
+  "cost_min": 0,
+  "entries": [
+    "20260927T201120Z-1fad1555.json"
+  ],
+  "first_seen": "2026-09-27T20:11:20Z",
+  "fixed": null,
+  "folded_at": "2026-09-28T22:23:08Z",
+  "folds": 1,
+  "id": "docs-quality-prose-lowercase-sentence",
+  "kind": "pitfall",
+  "last_seen": "2026-09-27T20:11:20Z",
+  "occurrences": 1,
+  "scope": "project",
+  "severity": "low",
+  "status": "open",
+  "title": "docs-quality prose checker merges a sentence starting with lowercase grim into the previous one",
+  "v": 1,
+  "versions": [
+    "ghcr.io/ocx-sh/lore/docs-quality@sha256:d9ab2df9ccff688f98f539ab1f1c3c9cf56fdfefa91b7d190dfca70d0afed09e"
+  ]
+}
