@@ -319,6 +319,7 @@ fn classify_config(err: &ConfigError) -> Classification {
             reason: Some(ErrorReason::NoConfig),
         },
         ConfigErrorKind::ArtifactValueMissingRegistry { .. }
+        | ConfigErrorKind::ArtifactNameInvalid { .. }
         | ConfigErrorKind::ArtifactValueInvalid { .. }
         | ConfigErrorKind::ArtifactValuePathInvalid { .. }
         | ConfigErrorKind::ArtifactValueRelativeInvalid { .. } => Classification::new(ExitCode::DataError),

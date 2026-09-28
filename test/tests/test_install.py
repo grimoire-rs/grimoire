@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
+
+import pytest
 
 from src.assertions import assert_dir_exists, assert_path_exists
 from src.helpers import make_artifact, write_config
@@ -182,3 +185,92 @@ def test_codex_only_rule_install_skips_before_fetch_when_offline_cold(
     rows = json.loads(result.stdout)["items"]
     assert rows[0]["status"] == "skipped", rows
     assert rows[0]["target"] is None, rows
+
+
+
+def _declare(project_dir: Path, table: str, key: str, ref: str) -> None:
+    (project_dir / "grimoire.toml").write_text(
+        f'[options]\nclients = ["claude"]\n\n[{table}]\n"{key}" = "{ref}"\n'
+    )
+
+
+@pytest.mark.parametrize(
+    "key", ["../../../escaped", "a/../../../../escaped", "/abs", "C:\\\\x", "a//b"]
+)
+def test_traversal_declaration_key_is_refused_before_any_write(
+    grim_at, project_dir: Path, registry: str, unique_repo: str, key: str
+) -> None:
+    """Issue #90: a key with a traversal-capable part exits 65 and writes nothing."""
+    sk = make_artifact(
+        f"{unique_repo}/harmless",
+        "skill",
+        {"harmless/SKILL.md": "---\nname: harmless\n---\n# H\n"},
+        tag="1",
+    )
+    _declare(project_dir, "skills", key, sk.fq)
+    runner = grim_at(project_dir)
+
+    for command in (("lock",), ("install", "--client", "claude")):
+        result = runner.run(*command, check=False)
+        assert result.returncode == 65, (command, result.stderr)
+
+    assert not (project_dir.parent / "escaped").exists()
+
+
+NESTED_KEYS = [
+    ("rules", "rule", "team/style", ".claude/rules/team/style.md"),
+    ("skills", "skill", "team/skill", ".claude/skills/team/skill/SKILL.md"),
+]
+if sys.platform != "win32":
+    # `x:y` is drive-relative on Windows, so it is refused there.
+    NESTED_KEYS.append(("skills", "skill", "x:y", ".claude/skills/x:y/SKILL.md"))
+
+
+@pytest.mark.parametrize(("table", "kind", "key", "dest"), NESTED_KEYS)
+def test_keys_released_grim_installs_keep_installing_where_they_did(
+    grim_at, project_dir: Path, registry: str, unique_repo: str,
+    table: str, kind: str, key: str, dest: str,
+) -> None:
+    """Issue #90 review B1 (Principle 9): nested and colon keys install,
+    report, and uninstall exactly as on released grim."""
+    files = (
+        {"style.md": "---\npaths: ['**/*.rs']\n---\n# style\n"}
+        if kind == "rule"
+        else {"leaf/SKILL.md": "---\nname: leaf\n---\n# leaf\n"}
+    )
+    art = make_artifact(f"{unique_repo}/leaf-{kind}", kind, files, tag="1")
+    _declare(project_dir, table, key, art.fq)
+    runner = grim_at(project_dir)
+    runner.run("lock")
+
+    rows = runner.json("install", "--client", "claude")["items"]
+    assert {r["status"] for r in rows} == {"installed"}, rows
+    assert (project_dir / dest).is_file()
+
+    status = {r["name"]: r for r in runner.json("status")["items"]}
+    assert status[key]["state"] == "installed", status
+
+    out = runner.json("uninstall", kind, key)
+    assert out["status"] == "uninstalled", out
+    assert not (project_dir / dest).exists()
+
+
+def test_traversal_lock_entry_name_is_refused_with_78(
+    grim_at, project_dir: Path
+) -> None:
+    """Issue #90: a hand-edited lock naming a traversal is refused on load
+    (78, the lock tier's class) before install writes anything."""
+    (project_dir / "grimoire.toml").write_text('[options]\nclients = ["claude"]\n')
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    lock = project_dir / "grimoire.lock"
+    digest = "sha256:" + "a" * 64
+    entry = f'skill = [{{ name = "../../../escaped", pinned = "localhost:5000/x/y@{digest}" }}]'
+    body = lock.read_text()
+    assert "skill = []" in body, body
+    lock.write_text(body.replace("skill = []", entry, 1))
+
+    result = runner.run("install", "--client", "claude", check=False)
+    assert result.returncode == 78, result.stderr
+    assert "escaped" in result.stderr, result.stderr
+    assert not (project_dir.parent / "escaped").exists()

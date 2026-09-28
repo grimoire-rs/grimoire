@@ -891,6 +891,18 @@ fn parse_artifact_map(
 ) -> Result<BTreeMap<String, DeclaredSource>, ConfigError> {
     let mut out = BTreeMap::new();
     for (name, value) in raw {
+        // Issue #90: the key becomes an install path segment. Refused here, at
+        // the one parse every table routes through, so no kind can reach a
+        // write with a traversal-capable name.
+        if let Some(reason) = crate::path_safety::path_segment_refusal(name) {
+            return Err(ConfigError::new(
+                path.to_path_buf(),
+                ConfigErrorKind::ArtifactNameInvalid {
+                    name: name.clone(),
+                    reason: reason.to_string(),
+                },
+            ));
+        }
         if crate::config::path_source::is_path_value(value) {
             if paths == PathValues::Rejected {
                 return Err(ConfigError::new(
@@ -1911,6 +1923,52 @@ rust-style = "ghcr.io/acme/rust-style:2"
             "mcp path value must be rejected, got {:?}",
             err.kind
         );
+    }
+
+    /// Issue #90: a declaration key is joined under an install root, so a key
+    /// with a traversal-capable part must be refused at parse time,
+    /// in every table, before anything can be written.
+    #[test]
+    fn grimoire_toml_rejects_traversal_capable_declaration_keys() {
+        for table in ["skills", "rules", "agents", "bundles", "mcp"] {
+            for key in [
+                "../../escaped",
+                "..",
+                ".",
+                "...",
+                ".. ",
+                "",
+                "a/../../x",
+                "a//b",
+                "/abs",
+                "C:\\\\x",
+                "c:",
+                "a\\u0000b",
+            ] {
+                let toml = format!("[{table}]\n\"{key}\" = \"ghcr.io/acme/x:1\"\n");
+                let err =
+                    ProjectConfig::from_toml_str(&toml).expect_err(&format!("[{table}] key {key:?} must be refused"));
+                assert!(
+                    matches!(err.kind, ConfigErrorKind::ArtifactNameInvalid { .. }),
+                    "[{table}] key {key:?}: got {:?}",
+                    err.kind
+                );
+            }
+        }
+    }
+
+    /// Principle 9: hand-written keys outside the `SkillName` grammar install
+    /// today and must keep parsing — only traversal-capable keys are refused.
+    #[test]
+    fn grimoire_toml_keeps_accepting_non_skill_name_keys() {
+        let cfg = ProjectConfig::from_toml_str(
+            "[skills]\n\"My_Skill\" = \"ghcr.io/acme/x:1\"\n\"a..b\" = \"ghcr.io/acme/y:1\"\n\
+             \"team/skill\" = \"ghcr.io/acme/z:1\"\n[rules]\n\"team/style\" = \"ghcr.io/acme/r:1\"\n",
+        )
+        .expect("non-grammar and nested keys stay legal");
+        assert!(cfg.set.skills.contains_key("My_Skill"));
+        assert!(cfg.set.skills.contains_key("team/skill"));
+        assert!(cfg.set.rules.contains_key("team/style"));
     }
 
     #[test]
