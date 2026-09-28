@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.3] - 2026-09-28
+
+### Added
+
+- Keep the selection centered while the catalog scrolls *(tui)*
+- Add Qoder as a client *(install)*
+- Drop weak fuzzy hits behind a configurable relevance cutoff *(search)*
+- Confirm before acting on more than one artifact *(tui)*
+- Add -g as the short form of --global *(cli)*
+- Open in global scope when no project config exists *(tui)*
+- Add grim export plugin and grim update --marketplace *(export)*
+- Cap plugin descriptions at 500 characters, add --description and progress *(export)*
+- Keep plugin.json description to the base text, list omissions in README.md *(export)*
+- Ship a plugin logo from --logo or the declared logo *(export)*
+- Fall back to a single reference's published logo *(export)*
+- Share a project as a plugin *(export)*
+- Track upstream harness capability changes *(vendor)*
+- Honour .grimignore when packing and hashing *(install)*
+- Conclude the 2026-09-27 upstream follow-ups *(vendor)*
+- Group index-backed rows by the index layout *(tui)*
+- Translate plugin placeholders per client *(export)*
+
+### Changed
+
+- Extract declare, client-list, staging, rebind and roll-forward seams
+
+### Documentation
+
+- Describe word-prefix matching, the cutoff notice and batch confirmation *(search)*
+- Document grim export plugin, marketplace.toml and update --marketplace
+- Say why --client names the target client, and when agents suffices *(export)*
+- Say why Codex skills get no per-skill icon *(export)*
+
+### Fixed
+
+- Keep the name visible on long repo cells, drop the deprecation reserve *(tui)*
+- Quote the slash in the search placeholder *(tui)*
+- Make the chosen confirm button unmistakable *(tui)*
+- Fill the chosen confirm button and drop the arrow hint *(tui)*
+- Match prose by word prefix and rank exact names first *(search)*
+- Honour the relevance cutoff on every path and say what it hid *(search)*
+- Keep confirm buttons on screen and say what a batch targets *(tui)*
+- Keep both confirm buttons whole on narrow terminals *(tui)*
+- Pad the confirm popup and center its buttons *(tui)*
+- Escape member keys spliced into JSON configs *(install)*
+- Never print the undeclared-name placeholder identity *(update)*
+- Keep host:port tag-cache dirs valid on Windows *(oci)*
+- Report file paths with forward slashes on Windows *(fetch)*
+- Ignore line-ending-only changes in the index clone *(announce)*
+- Unlink directory symlinks on Windows *(install)*
+- Keep the flat view until the search query is cleared *(tui)*
+- Make esc clear the search query before leaving search *(tui)*
+
 ## [0.14.2] - 2026-09-13
 
 ### Added
@@ -822,6 +875,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make release-update.sh executable; add rolling-release regression tests
 - Contact loopback registries over plain HTTP on any port
 
+[0.14.3]: https://github.com/grimoire-rs/grimoire/compare/v0.14.2..v0.14.3
 [0.14.2]: https://github.com/grimoire-rs/grimoire/compare/v0.14.1..v0.14.2
 [0.14.1]: https://github.com/grimoire-rs/grimoire/compare/v0.14.0..v0.14.1
 [0.14.0]: https://github.com/grimoire-rs/grimoire/compare/v0.13.0..v0.14.0
