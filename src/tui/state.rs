@@ -1101,7 +1101,10 @@ impl TuiState {
             self.selected = 0;
             return;
         }
-        if !ranked && self.tree_suspended_by_search {
+        // Only an empty query gives the tree back. Restoring on "no text
+        // terms" flipped the view mid-word: typing `bundle` passes through the
+        // text terms `b`…`bundl` before it parses as a kind-only filter.
+        if self.query.is_empty() && self.tree_suspended_by_search {
             // `selected` means different things in the two views: carry the
             // artifact under the cursor across, as `toggle_view_mode` does.
             let anchor = self.selection_anchor();
@@ -3666,14 +3669,20 @@ mod tests {
         assert!(!s.tree_suspended_by_search);
     }
 
-    // Editing a text search into a kind-only one ends the search's claim on
-    // the view: the tree comes back and the flag clears.
+    // Regression: typing a kind word passes through text-term prefixes
+    // (`s`…`skil`), which flatten the tree; completing the word must not flip
+    // the view back mid-search. Only clearing the query restores the tree.
     #[test]
-    fn text_query_edited_to_kind_only_restores_the_tree() {
+    fn typing_a_kind_word_does_not_flip_back_to_the_tree() {
         let mut s = three_leaf_tree();
-        s.apply_query("alp");
+        let mut q = String::new();
+        for c in "skill".chars() {
+            q.push(c);
+            s.apply_query(q.clone());
+            assert_eq!(s.view_mode, ViewMode::Flat, "after typing {q:?}");
+        }
         assert!(s.tree_suspended_by_search);
-        s.apply_query("skill");
+        s.apply_query("");
         assert_eq!(s.view_mode, ViewMode::Tree);
         assert!(!s.tree_suspended_by_search);
     }
