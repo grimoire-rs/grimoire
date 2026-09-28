@@ -89,7 +89,8 @@ Note the **flat** paths: no `skills/` or `agents/` segment. Kind travels
 in the `com.grimoire.kind` annotation, never in the path, so a kind
 segment only partitions the namespace against a name collision across
 kinds — and if your names are unique, it just lengthens every reference
-your users type and adds a redundant node to the TUI tree. Take it only
+your users type and adds a redundant node to the TUI tree when the
+registry is browsed directly. Take it only
 when you need the partition ([Repository
 Layout](release-checklist.md#flat-layout)). `--version`
 (the CI shape), the skip-existing default, and `push_registry` are all

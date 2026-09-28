@@ -281,10 +281,11 @@ retires the `64` that combination used to produce.
 
 Background: [Voting against a private instance](./ratings.md#voting-host).
 
-## Downgrading to 0.13 after browsing a rated index {#catalog-cache-downgrade}
+## Downgrading to 0.13 after browsing a package index {#catalog-cache-downgrade}
 
 [Artifact ratings][ratings] add one field to the catalog cache
-(`$GRIM_HOME/catalog/<hash>.json`), which parses strictly: a cache written
+(`$GRIM_HOME/catalog/<hash>.json`). So does the tree placement a
+[package index](./package-index.md) gives each row. The cache parses strictly: a cache written
 by a newer grim is refused wholesale by an older one. That is a deliberate,
 cheap trade — a cache is not a contract, and a refusal should cost exactly
 one network rebuild.
@@ -297,17 +298,18 @@ release fixes it going forward: a cache the loader refuses now reads as
 cold while online, so the next browse simply rewrites it. That fix cannot
 reach a binary that already shipped.
 
-**What to do.** Only if you *downgrade*, and only if you browsed an index
-that publishes ratings: delete the cache once.
+**What to do.** Only if you *downgrade* to 0.13 after browsing a package
+index: delete the cache once. From 0.14 this applies to an index that
+publishes ratings. After 0.14.2 it applies to every index.
 
 ```console
 $ rm -rf "${GRIM_HOME:-$HOME/.grimoire}/catalog"
 ```
 
 Upgrading needs nothing — the newer binary rebuilds an older cache
-normally. And a cache whose entries are all unrated is byte-identical to
-what 0.13 wrote, so a user who never browsed a rating-publishing index is
-not affected in either direction.
+normally. A cache whose entries carry no rating and no index placement is
+byte-identical to what 0.13 wrote. A user who never browsed a package
+index is not affected in either direction.
 
 ## Publishing stamps provenance without `--git` {#default-provenance}
 

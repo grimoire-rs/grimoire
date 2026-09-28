@@ -235,6 +235,10 @@ pub struct TuiRow {
     /// Repository path within the registry, segmented below the registry root
     /// by the tree builder (D-TREE).
     pub repository: String,
+    /// Where a package index placed this pointer (`<host>/<namespace…>/<name>`),
+    /// already allowlisted by the index source. When set, the tree groups the
+    /// row by it instead of the OCI path; `None` for an OCI `_catalog` row.
+    pub index_path: Option<String>,
     /// Fully-qualified `registry/repository` reference.
     ///
     /// Kept alongside `registry`/`repository` for compatibility with the many
@@ -2191,6 +2195,7 @@ mod tests {
             kind: "skill".to_string(),
             registry: reg.to_string(),
             repository: repo_path.to_string(),
+            index_path: None,
             repo: repo.to_string(),
             description: desc.to_string(),
             summary: String::new(),
@@ -3556,6 +3561,7 @@ mod tests {
             kind: kind.to_string(),
             registry: reg.to_string(),
             repository: repo_path.to_string(),
+            index_path: None,
             repo: repo.to_string(),
             description: String::new(),
             summary: String::new(),
@@ -4545,6 +4551,7 @@ mod tests {
             kind: "bundle".to_string(),
             registry: "reg".to_string(),
             repository: "acme/bundle-x".to_string(),
+            index_path: None,
             repo: "reg/acme/bundle-x".to_string(),
             description: String::new(),
             summary: String::new(),
@@ -4806,6 +4813,7 @@ mod p2_state_member_node_tests {
             kind: "bundle".to_string(),
             registry: reg.to_string(),
             repository: repo_path.to_string(),
+            index_path: None,
             repo: repo.to_string(),
             description: String::new(),
             summary: String::new(),

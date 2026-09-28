@@ -178,10 +178,11 @@ With names unique across kinds it buys nothing and still costs:
 
 - every reference your users type carries it, and a short reference cannot
   shrink below `skills/x`;
-- the TUI tree nests every artifact under a `skills` / `bundles` node that
-  restates what the row's kind already says — and doubles it when
-  `options.tui.group_by_type` is on, giving a `skill` group holding a
-  `skills` group.
+- browsed straight from the registry, the TUI tree nests every artifact
+  under a `skills` / `bundles` node. That node restates what the row's
+  kind already says. With `options.tui.group_by_type` on, it doubles into
+  a `skill` group holding a `skills` group. (Browsed through a package
+  index, the tree groups by the index namespace instead.)
 
 Publish flat by naming your namespace as the prefix:
 

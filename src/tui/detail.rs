@@ -716,6 +716,7 @@ mod tests {
             kind: "skill".to_string(),
             registry: "localhost:5000".to_string(),
             repository: "acme/code-review".to_string(),
+            index_path: None,
             repo: "localhost:5000/acme/code-review".to_string(),
             description: String::new(),
             summary: "blurb".to_string(),

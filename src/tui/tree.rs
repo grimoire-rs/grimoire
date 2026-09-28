@@ -540,14 +540,24 @@ pub fn build(rows: &[TuiRow], filtered: &[usize], opts: &TreeBuildOptions) -> Tr
         // non-namespaced case and the synthetic full-url test rows).
         // Index-sourced rows root at their source locator instead — see
         // `display_split`.
-        let (registry, repository) = display_split(r, &configured);
+        let (registry, oci_path) = display_split(r, &configured);
+
+        // An index-backed row groups by where the index placed it
+        // (`<host>/<namespace…>/<name>`), not by its OCI path: the index layout
+        // is the one its publishers chose and is shallower. Its segments are
+        // the index's own hierarchy, so the configured separators do not split
+        // them further. The OCI reference stays in the flat list and detail pane.
+        let (repository, seps): (&str, &[char]) = match &r.index_path {
+            Some(index_path) => (index_path, &['/']),
+            None => (&oci_path, &sep_chars),
+        };
 
         // `registry_elided` is the single source of truth from `segments()`.
         // It is true when the full `default_registry` prefix (including any
         // namespace such as "ghcr.io/acme") was stripped. `build()` must NOT
         // re-derive this with a host-only comparison — that was A1's bug.
         let (mut groups, leaf, registry_elided) =
-            segments(&registry, &repository, opts.default_registry.as_deref(), &sep_chars);
+            segments(&registry, repository, opts.default_registry.as_deref(), seps);
 
         // A kept (non-elided) registry root anchors the alias + health line.
         // Registry roots are always depth 0.
@@ -1041,6 +1051,7 @@ mod tests {
             kind: kind.to_string(),
             registry: reg.to_string(),
             repository: repo_path.to_string(),
+            index_path: None,
             repo: repo.to_string(),
             description: String::new(),
             summary: String::new(),
@@ -1074,6 +1085,7 @@ mod tests {
             kind: kind.to_string(),
             registry: registry.to_string(),
             repository: repository.to_string(),
+            index_path: None,
             repo: format!("{registry}/{repository}"),
             description: String::new(),
             summary: String::new(),
@@ -1181,6 +1193,86 @@ mod tests {
                 ("grim-usage".to_string(), 2, false),
             ],
             "index row must root at the source; the OCI host/namespace chain compresses"
+        );
+    }
+
+    // ── Index-backed rows group by the index layout ─────────────────────────
+
+    /// An index row the index placed at `index_path`.
+    fn placed_row(repository: &str, index_path: &str, kind: &str) -> TuiRow {
+        TuiRow {
+            index_path: Some(index_path.to_string()),
+            ..index_row("https://index.example", "ghcr.io", repository, kind)
+        }
+    }
+
+    fn index_opts(separators: &[&str], group_by_type: bool) -> TreeBuildOptions {
+        TreeBuildOptions {
+            default_registry: None,
+            group_by_type,
+            separators: separators.iter().map(|s| s.to_string()).collect(),
+            leaf_order: LeafOrder::Label,
+            registry_locators: Vec::new(),
+            registry_order: vec![source_root("https://index.example")],
+        }
+    }
+
+    #[test]
+    fn index_rows_group_by_index_layout_not_oci_path() {
+        let rows = vec![
+            placed_row(
+                "grimoire-rs/skills/grim-usage",
+                "github.com/grimoire-rs/grim-usage",
+                "skill",
+            ),
+            placed_row(
+                "grimoire-rs/rules/grim-style",
+                "github.com/grimoire-rs/grim-style",
+                "rule",
+            ),
+        ];
+        let t = build(&rows, &[0, 1], &index_opts(&["/"], false));
+        assert_eq!(
+            shape(&t),
+            vec![
+                (source_root("https://index.example"), 0, true),
+                ("github.com/grimoire-rs".to_string(), 1, true),
+                ("grim-style".to_string(), 2, false),
+                ("grim-usage".to_string(), 2, false),
+            ],
+            "the OCI `skills`/`rules` split must not appear; host/namespace compresses"
+        );
+    }
+
+    #[test]
+    fn separators_do_not_split_index_segments_but_still_split_oci_paths() {
+        let rows = vec![
+            placed_row("acme/x", "github.com/acme/grim-usage", "skill"),
+            // A pointer the index source could not place keeps OCI grouping.
+            index_row("https://index.example", "ghcr.io", "acme/foo-bar", "skill"),
+        ];
+        let t = build(&rows, &[0, 1], &index_opts(&["/", "-"], false));
+        let labels: Vec<String> = shape(&t).into_iter().map(|(l, _, _)| l).collect();
+        assert!(labels.contains(&"grim-usage".to_string()), "{labels:?}");
+        assert!(
+            labels.contains(&"bar".to_string()),
+            "OCI path still splits on '-': {labels:?}"
+        );
+    }
+
+    #[test]
+    fn group_by_type_sits_above_the_index_layout() {
+        let rows = vec![placed_row("acme/x", "github.com/acme/x", "skill")];
+        let t = build(&rows, &[0], &index_opts(&["/"], true));
+        let root = source_root("https://index.example");
+        assert_eq!(
+            shape(&t),
+            vec![
+                (root, 0, true),
+                ("skill".to_string(), 1, true),
+                ("github.com/acme".to_string(), 2, true),
+                ("x".to_string(), 3, false),
+            ]
         );
     }
 
@@ -2691,6 +2783,7 @@ mod p2_member_node_tests {
             kind: kind.to_string(),
             registry: reg.to_string(),
             repository: repo_path.to_string(),
+            index_path: None,
             repo: repo.to_string(),
             description: String::new(),
             summary: String::new(),
@@ -3156,6 +3249,7 @@ mod spec_multi_registry_tree_tests {
             kind: kind.to_string(),
             registry: registry.to_string(),
             repository: repository.to_string(),
+            index_path: None,
             repo: format!("{registry}/{repository}"),
             description: String::new(),
             summary: String::new(),

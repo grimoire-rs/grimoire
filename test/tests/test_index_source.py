@@ -1253,3 +1253,48 @@ def test_absent_sort_leaves_the_browse_exactly_as_it_was(
 
     # Queried: relevance descending, with the strongest match first.
     assert _repos(runner, "tool")[0] == "tool-tool"
+
+
+# ---------------------------------------------------------------------------
+# Index placement (the TUI tree groups index-backed rows by it)
+# ---------------------------------------------------------------------------
+
+
+def test_http_index_caches_the_index_placement(
+    grim_at, grim_home: Path, project_dir: Path, http_index
+) -> None:
+    """``all.json`` derives each pointer's ``namespace``; the cache keeps
+    ``<namespace>/<name>`` as ``index_path``. A pointer without one (an index
+    compiled before the field) and one whose segments fail the allowlist
+    carry no ``index_path``, so the tree keeps their OCI grouping."""
+    root, base = http_index
+    placed = _package("grim-usage", "skill", "ghcr.io/acme/skills/grim-usage", "Placed")
+    placed["namespace"] = "github.com/acme"
+    hostile = _package("evil", "skill", "ghcr.io/acme/skills/evil", "Hostile")
+    hostile["namespace"] = "github.com/‮acme"
+    bare = _package("bare", "skill", "ghcr.io/acme/skills/bare", "No namespace")
+    _write_all_json(root, [placed, hostile, bare])
+    _index_config(project_dir, base)
+
+    rows = _search_rows(grim_at(project_dir))
+    assert len(rows) == 3
+    # The JSON interface is unchanged: the placement is TUI-only.
+    assert all("index_path" not in r for r in rows), rows
+    cached = _cached_entries(grim_home)
+    assert cached["ghcr.io/acme/skills/grim-usage"]["index_path"] == "github.com/acme/grim-usage"
+    assert "index_path" not in cached["ghcr.io/acme/skills/evil"]
+    assert "index_path" not in cached["ghcr.io/acme/skills/bare"]
+
+
+def test_git_index_caches_the_index_placement(
+    grim_at, grim_home: Path, project_dir: Path, tmp_path: Path
+) -> None:
+    """A git index has no derived ``namespace`` field; the placement comes
+    from the ``index/<host>/<namespace>/<name>/`` directory instead."""
+    repo = _git_index_repo(
+        tmp_path, [_package("gitpkg", "skill", "ghcr.io/acme/skills/gitpkg", "From git")]
+    )
+    _index_config(project_dir, repo.as_posix())
+
+    _search_rows(grim_at(project_dir))
+    assert _cached_entries(grim_home)["ghcr.io/acme/skills/gitpkg"]["index_path"] == "github.com/acme/gitpkg"
