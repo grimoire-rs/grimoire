@@ -95,13 +95,22 @@ def _catalog_artifacts() -> list[pytest.param]:
     params += [
         pytest.param(p, "bundle", None, id=f"bundle:{p.stem}") for p in bundles
     ]
+    # A hook is a directory holding `hook.toml`; the kind is inferred, so the
+    # rig's bootstrap passes no `--kind` and neither does this.
+    hooks = sorted(d for d in _RIG_CATALOG_DIR.glob("hooks/*") if (d / "hook.toml").is_file())
+    params += [pytest.param(p, "hook", None, id=f"hook:{p.name}") for p in hooks]
     return params
 
 
 def test_rig_catalog_is_not_empty() -> None:
     """The parametrization below must never silently collapse to zero."""
-    assert len(_catalog_artifacts()) >= 4, (
+    assert len(_catalog_artifacts()) >= 5, (
         "expected at least one artifact per kind under test/manual/catalog"
+    )
+    kinds = {kind for _, kind, _ in (p.values for p in _catalog_artifacts())}
+    assert "hook" in kinds, (
+        "the rig's hook examples vanished from the parametrization — the README's "
+        "hook walkthrough publishes them, so it would break with nothing failing"
     )
 
 
