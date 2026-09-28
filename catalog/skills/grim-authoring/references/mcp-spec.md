@@ -151,11 +151,27 @@ is).
 **Plugin portability:** `grim export plugin` renders a descriptor into a
 `.mcp.json`/`mcp.json` entry the same way install does, so the same
 authoring rules apply there. A relative `command` path does not travel
-inside an exported plugin (no project root to resolve it against — use an
-absolute path, a `PATH` command, or Claude's own `${CLAUDE_PLUGIN_ROOT}`),
-and a `${…}` reference inside `command` is declined `not-representable`
-for an Agent Plugins export (Copilot/Codex/Cursor), which performs no
-expansion there.
+inside an exported plugin (no project root to resolve it against). Use an
+absolute path, a `PATH` command, or a plugin placeholder in `args`.
+
+Plugin placeholders are renamed per family, in an export only (`grim
+install` writes the descriptor as is):
+
+| Export for | `${CLAUDE_PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_DATA}` | `${PLUGIN_ROOT}` / `${PLUGIN_DATA}` |
+|---|---|---|
+| `claude` | kept | renamed to Claude's names, in every field incl. `url` and headers |
+| `codex`, `cursor`, `copilot`, `agents` | renamed to the spec's names | kept |
+| `droid`, `junie`, `openclaw` | kept | kept |
+
+**Portable advice:** put `${PLUGIN_ROOT}` / `${PLUGIN_DATA}` (or the
+Claude spelling) in `args` or `env` values. That works for `claude` and
+every Agent Plugins client. The Claude rendering has no `cwd`.
+
+For an Agent Plugins export (`codex`, `cursor`, `copilot`, `agents`), a
+`${…}` reference in `command`, `url`, an env key or a header omits the
+server `not-representable` (the spec expands nothing there). Any other
+`${VAR}` in `args`, env values or `cwd` is exported with a warning: those
+clients may pass it through literally.
 
 ## Example
 

@@ -1080,11 +1080,53 @@ pub(crate) fn mcp_value(
 ) -> Option<serde_json::Value> {
     match family {
         Family::Claude => {
-            let (pointer, value) = client.vendor().mcp_entry(ConfigScope::Global, emitted, descriptor)?;
+            let (pointer, mut value) = client.vendor().mcp_entry(ConfigScope::Global, emitted, descriptor)?;
             let (container, _) = json_splice::split_pointer(&pointer)?;
+            if client == ClientTarget::Claude {
+                // The reverse of the Agent Plugins rename: a descriptor written
+                // with the spec's plugin placeholders gets Claude's own names,
+                // which Claude expands. Claude's placeholders are never stripped
+                // in a Claude rendering; other Claude-family clients keep the
+                // descriptor's spelling (their plugin expansion is unverified).
+                crate::install::mcp_config::translate_env_refs(&mut value, &|var| match var {
+                    "PLUGIN_ROOT" => "${CLAUDE_PLUGIN_ROOT}".to_string(),
+                    "PLUGIN_DATA" => "${CLAUDE_PLUGIN_DATA}".to_string(),
+                    other => format!("${{{other}}}"),
+                });
+            }
             (container == MCP_SERVERS).then_some(value)
         }
-        Family::AgentPlugins => family::agent_plugins_mcp_entry(emitted, descriptor),
+        Family::AgentPlugins => {
+            let value = family::agent_plugins_mcp_entry(descriptor)?;
+            // The spec expands no environment variables, and Codex, Cursor and
+            // Copilot are not documented to either — yet. Warn rather than
+            // decline: the server still ships, and starts working once its
+            // client catches up. Names only, never values.
+            let unexpanded = family::unexpanded_env_refs(descriptor);
+            if !unexpanded.is_empty() {
+                tracing::warn!(
+                    "mcp server '{emitted}' for {client}: {client} may not expand ${{{}}} from the environment yet \
+                     (Agent Plugins expands only ${{PLUGIN_ROOT}} and ${{PLUGIN_DATA}}); use a literal value, \
+                     or have the server read it from its own environment",
+                    unexpanded.join("}, ${")
+                );
+            }
+            // Refinement fields with no Agent Plugins key: the projection
+            // dropped them; the server itself still ships.
+            let s = &descriptor.server;
+            for (field, present) in [
+                ("timeout", s.timeout.is_some()),
+                ("always_load", s.always_load.is_some()),
+                ("headers_helper", s.headers_helper.is_some()),
+            ] {
+                if present {
+                    tracing::warn!(
+                        "mcp server '{emitted}' for {client}: `{field}` has no Agent Plugins mcp.json key; dropped"
+                    );
+                }
+            }
+            Some(value)
+        }
     }
 }
 
@@ -2152,6 +2194,25 @@ mod tests {
     }
 
     #[test]
+    fn claude_export_names_plugin_placeholders_the_claude_way() {
+        let spec = descriptor(
+            "transport = \"stdio\"\ncommand = \"${PLUGIN_ROOT}/srv\"\nenv = { D = \"${PLUGIN_DATA}\", T = \"${TOKEN}\" }",
+        );
+        assert_eq!(
+            mcp_value(Family::Claude, ClientTarget::Claude, "srv", &spec),
+            Some(
+                json!({"command": "${CLAUDE_PLUGIN_ROOT}/srv", "env": {"D": "${CLAUDE_PLUGIN_DATA}", "T": "${TOKEN}"}})
+            )
+        );
+        // Claude's own placeholders pass through a Claude rendering untouched.
+        let native = descriptor("transport = \"stdio\"\ncommand = \"${CLAUDE_PLUGIN_ROOT}/srv\"");
+        assert_eq!(
+            mcp_value(Family::Claude, ClientTarget::Claude, "srv", &native),
+            Some(json!({"command": "${CLAUDE_PLUGIN_ROOT}/srv"}))
+        );
+    }
+
+    #[test]
     fn c020_claude_family_vendor_decline_is_not_representable() {
         // Junie declines env refs (vendor_junie.rs), the design's named None case.
         assert_eq!(
@@ -2179,9 +2240,110 @@ mod tests {
         let d = stdio("grim");
         assert_eq!(
             mcp_value(Family::AgentPlugins, ClientTarget::Codex, "srv", &d),
-            family::agent_plugins_mcp_entry("srv", &d)
+            family::agent_plugins_mcp_entry(&d)
         );
         assert_eq!(mcp_value(Family::AgentPlugins, ClientTarget::Codex, "srv", &ws()), None);
+    }
+
+    /// Both plugin-placeholder spellings plus an ordinary env reference.
+    fn both_spellings() -> McpDescriptor {
+        descriptor(
+            "transport = \"stdio\"\ncommand = \"node\"\nargs = [\"${PLUGIN_ROOT}/a.js\", \"${CLAUDE_PLUGIN_ROOT}/b.js\"]\n\
+             env = { D = \"${PLUGIN_DATA}\", C = \"${CLAUDE_PLUGIN_DATA}\" }",
+        )
+    }
+
+    #[test]
+    fn other_claude_family_clients_keep_the_descriptor_spelling() {
+        // The PLUGIN_* → CLAUDE_PLUGIN_* rename is claude-only. Droid expands
+        // `${…}` in env values, so it carries both spellings — and must get
+        // exactly its vendor's projection, placeholders untouched.
+        let d = descriptor(
+            "transport = \"stdio\"\ncommand = \"node\"\nenv = { R = \"${PLUGIN_ROOT}\", CR = \"${CLAUDE_PLUGIN_ROOT}\", \
+             D = \"${PLUGIN_DATA}\", CD = \"${CLAUDE_PLUGIN_DATA}\" }",
+        );
+        let (pointer, vendor) = ClientTarget::Droid
+            .vendor()
+            .mcp_entry(ConfigScope::Global, "srv", &d)
+            .unwrap();
+        assert!(pointer.starts_with("/mcpServers/"), "fixture premise: {pointer}");
+        let value = mcp_value(Family::Claude, ClientTarget::Droid, "srv", &d).unwrap();
+        assert_eq!(value, vendor);
+        assert_eq!(
+            value["env"],
+            json!({"R": "${PLUGIN_ROOT}", "CR": "${CLAUDE_PLUGIN_ROOT}", "D": "${PLUGIN_DATA}", "CD": "${CLAUDE_PLUGIN_DATA}"})
+        );
+        // OpenClaw has no MCP surface (the vendor declines every server);
+        // Junie declines env references — see the decline test above.
+        assert_eq!(
+            ClientTarget::OpenClaw
+                .vendor()
+                .mcp_entry(ConfigScope::Global, "srv", &d),
+            None
+        );
+        assert_eq!(mcp_value(Family::Claude, ClientTarget::OpenClaw, "srv", &d), None);
+    }
+
+    #[test]
+    fn every_agent_plugins_client_gets_the_spec_placeholder_names() {
+        let d = both_spellings();
+        for client in [
+            ClientTarget::Codex,
+            ClientTarget::Cursor,
+            ClientTarget::Copilot,
+            ClientTarget::Agents,
+        ] {
+            assert_eq!(
+                mcp_value(Family::AgentPlugins, client, "srv", &d),
+                Some(json!({
+                    "type": "stdio",
+                    "command": "node",
+                    "args": ["${PLUGIN_ROOT}/a.js", "${PLUGIN_ROOT}/b.js"],
+                    "env": {"C": "${PLUGIN_DATA}", "D": "${PLUGIN_DATA}"}
+                })),
+                "{client}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_plugins_env_ref_warning_names_the_client_and_a_remedy_never_values() {
+        struct SharedBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for SharedBuf {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        crate::log_switch::tracing_capture::arm();
+        let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let sink = std::sync::Arc::clone(&logs);
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(move || SharedBuf(std::sync::Arc::clone(&sink)))
+                .with_ansi(false)
+                .without_time()
+                .finish(),
+        );
+        let d = descriptor(
+            "transport = \"stdio\"\ncommand = \"grim\"\nargs = [\"--dsn=${DB_DSN}\"]\nenv = { SECRET = \"${TOKEN}\" }\ntimeout = 5",
+        );
+        assert!(mcp_value(Family::AgentPlugins, ClientTarget::Cursor, "db", &d).is_some());
+        drop(guard);
+        let text = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+        assert!(
+            text.contains("mcp server 'db' for cursor: cursor may not expand ${DB_DSN}, ${TOKEN}"),
+            "{text}"
+        );
+        assert!(text.contains("use a literal value"), "{text}");
+        assert!(
+            text.contains("mcp server 'db' for cursor: `timeout` has no Agent Plugins mcp.json key; dropped"),
+            "{text}"
+        );
+        assert!(!text.contains("--dsn"), "names only, never values: {text}");
     }
 
     #[test]
@@ -2358,7 +2520,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(
             parsed,
-            json!({"mcpServers": {"ok": family::agent_plugins_mcp_entry("ok", &stdio("grim")).unwrap()}})
+            json!({"mcpServers": {"ok": family::agent_plugins_mcp_entry(&stdio("grim")).unwrap()}})
         );
         assert!(!root.path().join(".mcp.json").exists());
         assert!(

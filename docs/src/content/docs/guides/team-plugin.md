@@ -76,34 +76,47 @@ plugin** and selects the file. [Upload a plugin][claude-plugin-upload]
 covers this from their side. Nothing else installs: no registry
 credential, no `grim`, no marketplace repository to add.
 
-## Two things that do not travel
+## What does not travel
 
 ### A relative stdio command loses its anchor {#relative-commands}
 
-An MCP descriptor's `command` is often a path relative to the project
-where you first declared it — `./bin/postgres-mcp`, say. Installed by
-grim, that path resolves against your project root. Exported into a
-plugin, there is no project root: Claude Code runs `.claude-plugin`
-content against its own working directory, not the plugin's, so a
-relative `command` is not something to rely on there.
+A plugin has no project root. A relative `command` such as
+`./bin/postgres-mcp` works when grim installs it into your project, but
+not inside a plugin. Use an absolute path, a command on `PATH`, or a
+plugin placeholder in `args` that points at the plugin's own folder:
 
-Two fixes, both stable across an export. Publish the descriptor with an
-absolute path, or a bare command already on `PATH` (`postgres-mcp`, if the
-binary installs itself there). Or use Claude Code's own
-`${CLAUDE_PLUGIN_ROOT}` [path variable][claude-plugin-root] inside
-`command`/`args`/`env`; it expands to the plugin's own root at load time
-and travels with the zip.
+```toml
+[server]
+transport = "stdio"
+command = "node"
+args = ["${CLAUDE_PLUGIN_ROOT}/bin/srv.js"]
+```
 
-Exporting for an **Agent Plugins** client (`codex`, `cursor`, `copilot`)
-is stricter. A `${…}` reference left in `command`, `url`, an env key, or
-a header is omitted `not-representable` there, rather than shipped
-broken — that spec performs no expansion at all. A plain `claude` export
-has no such backstop for a *stray* `${…}` (only Junie declines one
-carrying OAuth or an env reference). An unresolved reference other than
-`${CLAUDE_PLUGIN_ROOT}` ships as literal text there instead, breaking
-silently at runtime. Use one of the two fixes above regardless of target.
-The [admission table](../commands.md#export-plugin-admission) names
-every reason a member can be dropped.
+### Plugin placeholders per client {#plugin-placeholders}
+
+Write [`${CLAUDE_PLUGIN_ROOT}`][claude-plugin-root] or the spec's
+`${PLUGIN_ROOT}`. The data folder is `${CLAUDE_PLUGIN_DATA}` or
+`${PLUGIN_DATA}`. The export writes each client's own names:
+
+| Export for | Names written | Fields where they work |
+|---|---|---|
+| `claude` | `${CLAUDE_PLUGIN_ROOT}`, `${CLAUDE_PLUGIN_DATA}` | `command`, `args`, `env`, `url`, headers. Claude has no `cwd`. |
+| `codex`, `cursor`, `copilot`, `agents` | `${PLUGIN_ROOT}`, `${PLUGIN_DATA}` | `args`, `env` values, `cwd` |
+| `droid`, `junie`, `openclaw` | Your spelling, unchanged | See the [admission table](../commands.md#export-plugin-admission) |
+
+A placeholder in `args` or `env` values works for `claude` and every
+Agent Plugins client. Only an export renames it. `grim install` writes
+the descriptor as is.
+
+### Other environment variables {#plugin-env-vars}
+
+A reference like `${TOKEN}` reads the user's environment:
+
+- `claude` expands it in `command`, `args`, `env`, `url` and headers.
+- `codex`, `cursor`, `copilot` and `agents` may not expand it. In
+  `args`, `env` values or `cwd`, grim exports the server and warns you.
+- For those four clients, any `${…}` in `command`, `url`, an env key or a
+  header leaves the server out as `not-representable`.
 
 ### The same version can mean different bytes {#version-drift}
 

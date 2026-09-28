@@ -473,6 +473,15 @@ Known `None` case: Junie declines a descriptor carrying OAuth
 `upsert_member` assembly under `mcpServers`, written to `root/mcp.json` only
 when ≥1 member was emitted. One assembly routine serves both families.
 
+**Amended 2026-09-28 (review round 1, R1-19):** for `c = claude` only, the
+Claude-family value is post-processed by `mcp_config::translate_env_refs`,
+renaming `${PLUGIN_ROOT}` → `${CLAUDE_PLUGIN_ROOT}` and `${PLUGIN_DATA}` →
+`${CLAUDE_PLUGIN_DATA}` in every string field, `url` and headers included
+(Claude expands its placeholders there). Other Claude-family clients keep
+the descriptor's spelling. This is the one place an export diverges from
+install: `grim install --client claude` writes the descriptor as is, so the
+semantic contract above holds except for these two placeholders.
+
 ### C-021 — Rename: names [G6]
 
 `export::rename::apply(plugin: &str, members: &[LockedArtifact], rule: Option<&RenameRule>) -> Result<Vec<(LockedArtifact, String /*emitted*/)>, ExportError>`
@@ -785,6 +794,22 @@ mapping. Deterministic (object keys sorted by `serde_json::Map`).
   emitted.
 - Unit cases: one per table row; each decline; each dropped field absent from
   the value; byte-identical output across two calls.
+
+**Amended 2026-09-28 (review round 1, R1-19):** three changes to the
+contract above, which stays as written for history.
+
+- **§9.2 fact.** The spec expands only `${PLUGIN_ROOT}` and
+  `${PLUGIN_DATA}` in `args`, `env` values and `cwd`. It expands no
+  environment variables.
+- **Rename.** After projection, `${CLAUDE_PLUGIN_ROOT}` → `${PLUGIN_ROOT}`
+  and `${CLAUDE_PLUGIN_DATA}` → `${PLUGIN_DATA}` in every string field, so
+  one descriptor serves both families. "Pass through verbatim" above now
+  means "verbatim after this rename".
+- **Warn, don't decline.** Any other `${VAR}` in `args`, `env` values or
+  `cwd` is still emitted, with one `tracing::warn!` per server naming the
+  variables (`unexpanded_env_refs`). The declines listed above are
+  unchanged: a `${` in `command`, `url`, an `env` key or a header is still
+  `None`.
 
 ---
 
