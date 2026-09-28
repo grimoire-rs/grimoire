@@ -3,7 +3,7 @@
 
 //! The typed registry of `grim config` dotted keys.
 //!
-//! Single source of truth for the 10 fixed `options.*` keys, the 6
+//! Single source of truth for the 11 fixed `options.*` keys, the 6
 //! per-registry field names, and the per-vendor field
 //! ([`VENDOR_SHARED_SKILLS`]): their [`crate::api::ValueType`] (which
 //! carries the runtime default alongside the type), title, and
@@ -48,7 +48,7 @@ pub struct KeySpec {
     pub constraints: Option<ValueConstraints>,
 }
 
-/// The 10 fixed `options.*` config keys, in listing order.
+/// The 11 fixed `options.*` config keys, in listing order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigKey {
     DefaultRegistry,
@@ -61,15 +61,16 @@ pub enum ConfigKey {
     TuiSort,
     TuiSortOrder,
     SearchMinRelevance,
+    ExperimentalHooks,
 }
 
 impl ConfigKey {
     /// Every fixed key, in the order `grim config list` emits them —
     /// pins today's `collect_entries` order: `default_registry`,
     /// `clients`, `show_deprecated`, then the `tui.*` keys, then
-    /// `search_min_relevance` — **append only**: consumers of
-    /// `grim config list --all` may index by position.
-    pub const ALL: [ConfigKey; 10] = [
+    /// `search_min_relevance`, then the `experimental.*` keys — **append
+    /// only**: consumers of `grim config list --all` may index by position.
+    pub const ALL: [ConfigKey; 11] = [
         ConfigKey::DefaultRegistry,
         ConfigKey::Clients,
         ConfigKey::ShowDeprecated,
@@ -80,6 +81,7 @@ impl ConfigKey {
         ConfigKey::TuiSort,
         ConfigKey::TuiSortOrder,
         ConfigKey::SearchMinRelevance,
+        ConfigKey::ExperimentalHooks,
     ];
 
     /// This key's static metadata.
@@ -207,6 +209,19 @@ impl ConfigKey {
                            Applies to `grim search`, the TUI search and the MCP `grim_search` tool.",
             constraints: None,
         };
+        const EXPERIMENTAL_HOOKS: KeySpec = KeySpec {
+            key: "options.experimental.hooks",
+            // Literal `false` rather than a `config::defaults` const: the
+            // runtime fallback is `bool::default()` on a plain field, and
+            // `experimental_hooks_spec_matches_derived_default` pins this
+            // against `ExperimentalOptions::default()`.
+            value_type: ValueType::Bool { default: false },
+            title: "Experimental hooks",
+            description: "Controls whether `grim install` arms declared hooks in your AI clients. When \
+                           unset, install arms nothing and removes grim's existing hook registrations; \
+                           no environment variable overrides this.",
+            constraints: None,
+        };
         match self {
             Self::DefaultRegistry => &DEFAULT_REGISTRY,
             Self::Clients => &CLIENTS,
@@ -218,6 +233,7 @@ impl ConfigKey {
             Self::TuiSort => &TUI_SORT,
             Self::TuiSortOrder => &TUI_SORT_ORDER,
             Self::SearchMinRelevance => &SEARCH_MIN_RELEVANCE,
+            Self::ExperimentalHooks => &EXPERIMENTAL_HOOKS,
         }
     }
 
@@ -676,8 +692,11 @@ mod tests {
     /// A fully-populated `ConfigOptions` — every field set/non-empty/true so
     /// no serde skip fires, including one `[options.vendors]` entry.
     fn fully_populated_options() -> crate::config::declaration::ConfigOptions {
-        use crate::config::declaration::{ConfigOptions, DefaultView, TuiOptions, VendorOptions};
+        use crate::config::declaration::{ConfigOptions, DefaultView, ExperimentalOptions, TuiOptions, VendorOptions};
         ConfigOptions {
+            // `true`, not `Default::default()`: a defaulted table serde-skips,
+            // and this fixture exists precisely to defeat every skip.
+            experimental: ExperimentalOptions { hooks: true },
             default_registry: Some("ghcr.io/acme".to_string()),
             clients: vec!["claude".to_string()],
             tui: TuiOptions {
@@ -971,6 +990,7 @@ mod tests {
             .expect("config schema must serialize to JSON");
         let config_options = &schema["$defs"]["ConfigOptions"];
         let tui_options = resolve_ref(&schema, &config_options["properties"]["tui"]);
+        let experimental_options = resolve_ref(&schema, &config_options["properties"]["experimental"]);
         let registry_config = &schema["$defs"]["RegistryConfig"];
 
         for key in ConfigKey::ALL {
@@ -986,6 +1006,7 @@ mod tests {
                 ConfigKey::TuiSort => &tui_options["properties"]["sort"],
                 ConfigKey::TuiSortOrder => &tui_options["properties"]["sort_order"],
                 ConfigKey::SearchMinRelevance => &config_options["properties"]["search_min_relevance"],
+                ConfigKey::ExperimentalHooks => &experimental_options["properties"]["hooks"],
             };
             assert_description_prefix(node, spec.description, spec.key);
             let type_node = unwrap_nullable(&schema, node);
@@ -1038,5 +1059,25 @@ mod tests {
             let type_node = unwrap_nullable(&schema, node);
             assert_schema_type_matches(spec.value_type, type_node, spec.key);
         }
+    }
+
+    /// C-153: `options.experimental.hooks` is **appended** — index 10, after
+    /// `options.search_min_relevance` — so `grim config list` gains one row
+    /// at the end and every existing row keeps its position; the description
+    /// is the design record's text verbatim.
+    #[test]
+    fn c153_experimental_hooks_is_the_appended_eleventh_row() {
+        assert_eq!(ConfigKey::ALL.len(), 11);
+        assert_eq!(ConfigKey::ALL[9], ConfigKey::SearchMinRelevance);
+        assert_eq!(ConfigKey::ALL[10], ConfigKey::ExperimentalHooks);
+        let spec = ConfigKey::ExperimentalHooks.spec();
+        assert_eq!(spec.key, "options.experimental.hooks");
+        assert_eq!(spec.title, "Experimental hooks");
+        assert!(matches!(spec.value_type, ValueType::Bool { default: false }));
+        assert_eq!(
+            spec.description,
+            "Controls whether `grim install` arms declared hooks in your AI clients. When unset, install arms \
+             nothing and removes grim's existing hook registrations; no environment variable overrides this."
+        );
     }
 }

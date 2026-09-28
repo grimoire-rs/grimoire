@@ -1797,7 +1797,7 @@ fn derive_artifact_state(
         }
     }
     for out in &outputs {
-        match out.current_hash(roots, Containment::AllowRelocatedAncestor) {
+        match out.current_hash(record.kind, roots, Containment::AllowRelocatedAncestor) {
             Ok(actual) if actual != out.content_hash => return ArtifactState::Modified,
             Ok(_) => {}
             Err(_) => return ArtifactState::IntegrityMissing,
@@ -1980,6 +1980,7 @@ fn direct_declared_repos(set: &DesiredSet) -> std::collections::BTreeSet<(Artifa
         (ArtifactKind::Rule, &set.rules),
         (ArtifactKind::Agent, &set.agents),
         (ArtifactKind::Mcp, &set.mcp),
+        (ArtifactKind::Hook, &set.hooks),
     ] {
         for source in map.values() {
             if let Some(id) = source.identifier() {
@@ -2700,6 +2701,19 @@ fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
             tracing::warn!(client = %client, error = %e, "vendor config sync failed; delete completed, deregistration skipped");
         }
     }
+    // C-104/C-113: a delete converges with an empty declared set, which the
+    // consent record always covers. Every surviving hook converges on the
+    // record exactly as the next plain `grim install` would (the flag pair is
+    // per invocation): a survivor the record names arms — even one an earlier
+    // `--no-trust-hooks` run disarmed — and one only `--trust-hooks` armed
+    // does not.
+    crate::install::hook_registrar::converge_for(
+        Some(&tui_hook_policy(ctx, &std::collections::BTreeSet::new())),
+        &install_state,
+        &ctx.workspace,
+        ctx.scope,
+        &ctx.roots,
+    );
     if let Some(e) = failure {
         return Err(e);
     }
@@ -2739,6 +2753,11 @@ fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
 ///   removed) — there is no declaration to undeclare.
 fn perform_local_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
     let kind = row_kind(&row.kind);
+    // A hook has no path source, so no Local row can carry one. A live refusal
+    // rather than `unreachable!()`: `row_kind` reads a registry-controlled string.
+    if kind == ArtifactKind::Hook {
+        return Err(crate::oci::hook::unsupported_kind().into());
+    }
     let name = row.repo.clone();
 
     // Hold the config flock for the whole read-modify-write (file deletion +
@@ -2777,6 +2796,19 @@ fn perform_local_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()>
             tracing::warn!(client = %client, error = %e, "vendor config sync failed; delete completed, deregistration skipped");
         }
     }
+    // C-104/C-113: a delete converges with an empty declared set, which the
+    // consent record always covers. Every surviving hook converges on the
+    // record exactly as the next plain `grim install` would (the flag pair is
+    // per invocation): a survivor the record names arms — even one an earlier
+    // `--no-trust-hooks` run disarmed — and one only `--trust-hooks` armed
+    // does not.
+    crate::install::hook_registrar::converge_for(
+        Some(&tui_hook_policy(ctx, &std::collections::BTreeSet::new())),
+        &install_state,
+        &ctx.workspace,
+        ctx.scope,
+        &ctx.roots,
+    );
 
     // Undeclare a path declaration from config + lock (a no-op for a bare dev
     // record — nothing declared, and dev installs never write a lock entry). If
@@ -2855,6 +2887,13 @@ async fn perform(
     }
 
     let kind = row_kind(&row.kind);
+    // ⛔ DECISION (WP-H): the TUI does not install or update a hook row in v1.
+    // It has no surface to show what arming consents to; `grim add` /
+    // `grim install` are the supported path, and the error names them. A hook
+    // still reaches the install path as a bundle member, and gates (C-113).
+    if kind == ArtifactKind::Hook {
+        return Err(crate::oci::hook::tui_install_unsupported().into());
+    }
     // The declaration/lock binding name: an explicit override (a bundle member's
     // own name, which is its lock/install key) wins; a catalog row falls back to
     // the repo's last path segment.
@@ -2901,8 +2940,12 @@ async fn perform(
             .ok_or_else(|| anyhow::anyhow!("resolved lock is missing '{name}'"))?,
     };
 
+    // C-113: an install attaches a policy evaluated against the hooks the new
+    // lock declares, so a hook member this action adds is drifted and gates.
+    let hook_policy = tui_hook_policy(ctx, &crate::command::hook_consent::declared_hooks(&new_lock));
     let target = InstallTarget::parse(&ctx.workspace, ctx.scope, &[], &ctx.clients_default, &ctx.vendors)
-        .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
+        .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?
+        .with_hook_policy(hook_policy);
     let mut install_state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
     let materializer = DefaultMaterializer;
 
@@ -2956,6 +2999,10 @@ async fn perform_local(
     force: bool,
 ) -> anyhow::Result<InstallSummary> {
     let kind = row_kind(&row.kind);
+    // No Local row can carry a hook (see `perform_local_uninstall`).
+    if kind == ArtifactKind::Hook {
+        return Err(crate::oci::hook::tui_install_unsupported().into());
+    }
     let name = row.repo.clone();
 
     // A config-declared path dep is a declared install, never a dev install
@@ -2991,6 +3038,7 @@ fn declared_as_path(set: &DesiredSet, kind: ArtifactKind, name: &str) -> bool {
         ArtifactKind::Agent => &set.agents,
         ArtifactKind::Bundle => &set.bundles,
         ArtifactKind::Mcp => &set.mcp,
+        ArtifactKind::Hook => &set.hooks,
     };
     map.get(name).is_some_and(|source| source.path().is_some())
 }
@@ -3039,8 +3087,12 @@ async fn perform_local_declared(
         _ => single_entry_lock(&new_lock, kind, name)
             .ok_or_else(|| anyhow::anyhow!("resolved lock is missing '{name}'"))?,
     };
+    // C-113: an install attaches a policy evaluated against the hooks the new
+    // lock declares, so a hook member this action adds is drifted and gates.
+    let hook_policy = tui_hook_policy(ctx, &crate::command::hook_consent::declared_hooks(&new_lock));
     let target = InstallTarget::parse(&ctx.workspace, ctx.scope, &[], &ctx.clients_default, &ctx.vendors)
-        .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
+        .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?
+        .with_hook_policy(hook_policy);
     let mut install_state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
     let materializer = DefaultMaterializer;
     let outcomes = install_and_persist(
@@ -3121,6 +3173,7 @@ async fn perform_local_dev(
         rules: Vec::new(),
         agents: Vec::new(),
         mcp: Vec::new(),
+        hooks: Vec::new(),
         bundles: Vec::new(),
     };
     match kind {
@@ -3129,15 +3182,21 @@ async fn perform_local_dev(
         ArtifactKind::Agent => synth.agents.push(entry),
         // A dev record is only ever a skill/rule/agent (dev-install rejects the
         // rest); this arm is defensive.
-        ArtifactKind::Bundle | ArtifactKind::Mcp => {
+        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Hook => {
             return Err(anyhow::anyhow!(
                 "dev-install is limited to skill/rule/agent, not {kind}"
             ));
         }
     }
 
+    // C-113: a dev record is never a hook; evaluate against the on-disk lock
+    // so convergence keeps what is already consented armed.
+    let declared = lock_io::load(&ctx.lock_path)
+        .map(|lock| crate::command::hook_consent::declared_hooks(&lock))
+        .unwrap_or_default();
     let target = InstallTarget::parse(&ctx.workspace, ctx.scope, &[], &ctx.clients_default, &ctx.vendors)
-        .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
+        .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?
+        .with_hook_policy(tui_hook_policy(ctx, &declared));
     let mut install_state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
     let materializer = DefaultMaterializer;
     let outcomes = install_and_persist(
@@ -3368,6 +3427,42 @@ fn load_scope_declaration(
             ))
         }
     }
+}
+
+/// C-113: the hook policy a TUI mutating action attaches — resolved without
+/// consent, because the TUI owns the terminal and never prompts.
+///
+/// `declared` is split **by direction**, since `consent::evaluate` grants
+/// whenever `declared ⊆ record`: a delete passes an empty set (the
+/// `grim uninstall` precedent — survivors converge on the record, and only
+/// the hooks it names can arm, so one armed solely by `--trust-hooks` stays
+/// disarmed), an install passes
+/// `declared_hooks(new_lock)`, so a newly added hook member is drifted and
+/// gates rather than arms.
+///
+/// An unreadable declaration or global config yields the **flag-off** policy,
+/// which reaps every grim hook registration for this root: nothing may stay
+/// armed without a readable flag.
+fn tui_hook_policy(ctx: &TuiContext, declared: &std::collections::BTreeSet<String>) -> crate::hook::policy::HookPolicy {
+    let loaded = load_scope_declaration(ctx)
+        .ok()
+        .and_then(|(options, mut registries, _set)| {
+            if ctx.scope == ConfigScope::Project {
+                let global = GlobalConfig::load(&GrimPaths::new(ctx.roots.grim_home.clone()).global_config()).ok()?;
+                registries.extend(global.registries);
+            }
+            Some((options.experimental.hooks_enabled(), registries))
+        });
+    let (feature_enabled, registries) = loaded.unwrap_or_default();
+    crate::command::hook_consent::policy_without_consent(
+        &ctx.roots.grim_home,
+        ctx.scope,
+        &ctx.workspace,
+        feature_enabled,
+        None,
+        &registries,
+        declared,
+    )
 }
 
 /// Whether deleting `(kind, name)` must keep its files because a declared
@@ -3780,6 +3875,17 @@ async fn perform_member_uninstall(
                 tracing::warn!(client = %client, error = %e, "vendor config sync failed; delete completed, deregistration skipped");
             }
         }
+        // C-104/C-113: a delete converges with an empty declared set, which
+        // the consent record always covers — so, like the next plain
+        // `grim install`, it arms exactly the survivors the record names (see
+        // the delete path above).
+        crate::install::hook_registrar::converge_for(
+            Some(&tui_hook_policy(ctx, &std::collections::BTreeSet::new())),
+            &install_state,
+            &ctx.workspace,
+            ctx.scope,
+            &ctx.roots,
+        );
     }
 
     // Undeclare from config + lock, threading notes back to the caller. The
@@ -4225,6 +4331,7 @@ mod tests {
             rules,
             agents: vec![],
             mcp: vec![],
+            hooks: Vec::new(),
             bundles: vec![],
         }
     }
@@ -7729,6 +7836,294 @@ mod tests {
         let lock = lock_io::load(&ctx.lock_path).expect("lock saved");
         assert_eq!(lock.skills.len(), 1, "GAP-B: skill must be recorded in the lock");
         assert_eq!(lock.skills[0].name, "demo", "GAP-B: lock skill name must match");
+    }
+
+    /// C-104 / C-113 / S-113 / S-119: the TUI as a hook-converging seam.
+    mod c113_hooks {
+        use super::*;
+        use crate::install::hook_registrar::test_fixture::{arm_claude_hook, claude_marker_present, dispatch_rows};
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        const HOOK_DECL: &str = "[hooks]\nshell-guard = \"localhost:5000/acme/shell-guard:1\"\n";
+
+        /// A project [`TuiContext`] whose `$GRIM_HOME` sits outside the
+        /// workspace (a nested one refuses to arm, which would make every
+        /// assertion below vacuous), with `config` as its `grimoire.toml`.
+        fn hook_ctx(config: &str, access: Arc<dyn OciAccess>) -> (tempfile::TempDir, tempfile::TempDir, TuiContext) {
+            let ws_dir = tempfile::tempdir().unwrap();
+            let home_dir = tempfile::tempdir().unwrap();
+            let ws = dunce::canonicalize(ws_dir.path()).unwrap();
+            std::fs::write(ws.join("grimoire.toml"), config).unwrap();
+            let mut ctx = test_ctx(&ws, access);
+            ctx.roots.grim_home = dunce::canonicalize(home_dir.path()).unwrap();
+            (ws_dir, home_dir, ctx)
+        }
+
+        fn persist(ctx: &TuiContext, state: &InstallState) {
+            state
+                .persist(ctx.scope, &ctx.workspace, &ctx.roots.grim_home, &ctx.config_path)
+                .unwrap();
+        }
+
+        /// A workspace with hook `shell-guard` armed for claude and recorded.
+        fn armed(config: &str) -> (tempfile::TempDir, tempfile::TempDir, TuiContext) {
+            let (ws, home, ctx) = hook_ctx(config, Arc::new(MemoryRegistry::new()));
+            let mut state = load_state(&ctx).unwrap();
+            arm_claude_hook(&mut state, "shell-guard", &ctx.roots);
+            persist(&ctx, &state);
+            (ws, home, ctx)
+        }
+
+        fn assert_reaped(ctx: &TuiContext) {
+            assert!(
+                !claude_marker_present(&ctx.workspace),
+                "the claude registration must be reaped"
+            );
+            assert_eq!(
+                dispatch_rows(&ctx.roots.grim_home),
+                0,
+                "the dispatch row must be reaped"
+            );
+        }
+
+        fn hook_row() -> TuiRow {
+            let mut row = installed_row("localhost:5000/acme/shell-guard");
+            row.kind = "hook".to_string();
+            row
+        }
+
+        /// S-113, delete site 1 (`perform_uninstall`, a registry row).
+        #[test]
+        fn s113_deleting_a_hook_row_reaps_it_without_a_prompt() {
+            let (_ws, _home, ctx) = armed(HOOK_DECL);
+            perform_uninstall(&ctx, &hook_row()).expect("delete succeeds");
+            assert_reaped(&ctx);
+        }
+
+        /// S-113, delete site 2 (`perform_member_uninstall`).
+        #[tokio::test]
+        async fn s113_deleting_a_hook_bundle_member_reaps_it() {
+            let (_ws, _home, ctx) = armed(HOOK_DECL);
+            perform_member_uninstall(
+                &ctx,
+                "localhost:5000/acme/shell-guard".to_string(),
+                ArtifactKind::Hook,
+                "shell-guard".to_string(),
+            )
+            .await
+            .expect("member delete succeeds");
+            assert_reaped(&ctx);
+        }
+
+        /// C-104, delete site 3 (`perform_local_uninstall`). No Local row can
+        /// carry a hook, so the site is pinned on what it must still do: a
+        /// grim-owned registration whose record has already left state is
+        /// reaped by any delete's convergence.
+        #[test]
+        fn c104_a_local_delete_converges_hooks_too() {
+            let (_ws, _home, ctx) = armed("[skills]\n");
+            let mut state = load_state(&ctx).unwrap();
+            state.remove(ArtifactKind::Hook, "shell-guard");
+            persist(&ctx, &state);
+            let mut row = installed_row("dummy/dev-skill");
+            row.source = RowSource::Local;
+            row.repo = "dev-skill".to_string();
+            perform_uninstall(&ctx, &row).expect("local delete converges");
+            assert_reaped(&ctx);
+        }
+
+        /// C-113: a delete under an unparseable `grimoire.toml` converges with
+        /// the **flag-off** policy and reaps the root's registrations — even a
+        /// hook still recorded in a consented, flag-on workspace.
+        #[test]
+        fn c113_a_delete_with_an_unparseable_config_reaps_with_the_flag_off() {
+            let (_ws, _home, ctx) = armed(&format!("[options.experimental]\nhooks = true\n\n{HOOK_DECL}"));
+            crate::hook::consent::record(
+                &ctx.roots.grim_home,
+                ConfigScope::Project,
+                &ctx.workspace,
+                &std::collections::BTreeSet::new(),
+            )
+            .unwrap();
+            std::fs::write(&ctx.config_path, "[[[ not toml").unwrap();
+            let row = installed_row("localhost:5050/grimoire/skills/other");
+            perform_uninstall(&ctx, &row).expect("delete converges on an unreadable config");
+            assert_reaped(&ctx);
+            assert!(
+                load_state(&ctx)
+                    .unwrap()
+                    .get(ArtifactKind::Hook, "shell-guard")
+                    .is_some(),
+                "the hook's record stays: only its arming is reaped"
+            );
+        }
+
+        /// S-113: a hook row still cannot be installed from the TUI (WP-H).
+        #[tokio::test]
+        async fn s113_a_direct_hook_row_install_stays_refused() {
+            let (_ws, _home, ctx) = hook_ctx(HOOK_DECL, Arc::new(MemoryRegistry::new()));
+            let mut row = hook_row();
+            row.state = ArtifactState::NotInstalled;
+            let err = perform(&ctx, &row, None, &SilentProgress, false)
+                .await
+                .expect_err("a hook row is refused");
+            assert!(!ctx.roots.grim_home.join("hooks").exists(), "{err:#}");
+            assert_eq!(std::fs::read_to_string(&ctx.config_path).unwrap(), HOOK_DECL);
+        }
+
+        /// A registry holding bundle `starter-pack` whose members are skill
+        /// `demo` and hook `g` (the hook every S-119 install adds).
+        async fn registry_with_hook_bundle() -> Arc<dyn OciAccess> {
+            use crate::oci::bundle::{BUNDLE_LAYER_MEDIA_TYPE, BundleManifest, BundleMember};
+            use crate::oci::manifest::{Descriptor, OciManifest};
+
+            async fn push(
+                reg: &MemoryRegistry,
+                repo: &str,
+                kind: ArtifactKind,
+                files: &[(&str, &str)],
+                layer_type: &str,
+            ) {
+                let blob = if kind == ArtifactKind::Bundle {
+                    files[0].1.as_bytes().to_vec()
+                } else {
+                    let mut builder = tar::Builder::new(Vec::new());
+                    for (path, body) in files {
+                        let mut header = tar::Header::new_gnu();
+                        header.set_size(body.len() as u64);
+                        header.set_mode(0o644);
+                        header.set_cksum();
+                        builder.append_data(&mut header, path, body.as_bytes()).unwrap();
+                    }
+                    builder.into_inner().unwrap()
+                };
+                let id = Identifier::new_registry(repo, "localhost:5050");
+                let layer = reg.push_blob(&id, &blob).await.unwrap();
+                let manifest = OciManifest {
+                    media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
+                    artifact_type: Some(kind.artifact_type().to_string()),
+                    config_media_type: Some("application/vnd.oci.empty.v1+json".to_string()),
+                    layers: vec![Descriptor {
+                        digest: layer,
+                        media_type: layer_type.to_string(),
+                        size: blob.len() as u64,
+                    }],
+                    annotations: Default::default(),
+                };
+                let digest = reg.push_manifest(&id, &manifest).await.unwrap();
+                reg.put_tag(&id, "1.0.0", &digest).await.unwrap();
+                reg.put_tag(&id, "latest", &digest).await.unwrap();
+            }
+
+            const TAR: &str = "application/vnd.grimoire.artifact.layer.v1.tar";
+            let reg = MemoryRegistry::new();
+            push(
+                &reg,
+                "grimoire/skills/demo",
+                ArtifactKind::Skill,
+                &[("demo/SKILL.md", "---\nname: demo\ndescription: d\n---\n")],
+                TAR,
+            )
+            .await;
+            push(
+                &reg,
+                "grimoire/hooks/g",
+                ArtifactKind::Hook,
+                &[
+                    (
+                        "g/hook.toml",
+                        "schema = 1\nname = \"g\"\ndescription = \"a guard\"\n\n[[hooks]]\nid = \"guard\"\n\
+                         event = \"PreToolUse\"\ntier = \"observer\"\nmatcher = \"Bash\"\ncommand = \"sh guard.sh\"\n",
+                    ),
+                    ("g/guard.sh", "exit 0\n"),
+                ],
+                TAR,
+            )
+            .await;
+            let members = BundleManifest::new(vec![
+                BundleMember {
+                    kind: ArtifactKind::Skill,
+                    name: "demo".to_string(),
+                    id: "localhost:5050/grimoire/skills/demo:1.0.0".to_string(),
+                },
+                BundleMember {
+                    kind: ArtifactKind::Hook,
+                    name: "g".to_string(),
+                    id: "localhost:5050/grimoire/hooks/g:1.0.0".to_string(),
+                },
+            ]);
+            let members_blob = String::from_utf8(members.to_layer_bytes().unwrap()).unwrap();
+            push(
+                &reg,
+                "grimoire/bundles/starter-pack",
+                ArtifactKind::Bundle,
+                &[("", &members_blob)],
+                BUNDLE_LAYER_MEDIA_TYPE,
+            )
+            .await;
+            Arc::new(reg)
+        }
+
+        /// C-113 / S-119: in a **consented** workspace, a TUI bundle install
+        /// that adds hook member `g` evaluates consent against the new lock's
+        /// hooks, so `g` is drift: gated, nothing armed, and the refusal names
+        /// `grim hook allow`. Fails if the install path passes an empty
+        /// declared set (which would grant and arm).
+        #[tokio::test]
+        async fn s119_a_tui_bundle_install_adding_a_hook_gates_it_in_a_consented_workspace() {
+            let (_ws, _home, ctx) = hook_ctx(
+                "[options.experimental]\nhooks = true\n\n[skills]\n",
+                registry_with_hook_bundle().await,
+            );
+            crate::hook::consent::record(
+                &ctx.roots.grim_home,
+                ConfigScope::Project,
+                &ctx.workspace,
+                &std::collections::BTreeSet::new(),
+            )
+            .unwrap();
+
+            let mut row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
+            row.kind = "bundle".to_string();
+            row.state = ArtifactState::NotInstalled;
+            perform(&ctx, &row, None, &SilentProgress, false)
+                .await
+                .expect("bundle install succeeds");
+
+            assert!(
+                ctx.workspace.join(".claude/skills/demo/SKILL.md").is_file(),
+                "the skill member installs"
+            );
+            assert!(!claude_marker_present(&ctx.workspace), "hook g must not be armed");
+            assert_eq!(dispatch_rows(&ctx.roots.grim_home), 0, "no dispatch row for g");
+            let state = load_state(&ctx).unwrap();
+            let record = state.get(ArtifactKind::Hook, "g").expect("g is recorded as gated");
+            assert!(
+                record.outputs.is_empty(),
+                "a gated hook records zero outputs: {record:?}"
+            );
+
+            let lock = lock_io::load(&ctx.lock_path).unwrap();
+            let policy = tui_hook_policy(&ctx, &crate::command::hook_consent::declared_hooks(&lock));
+            let source = &lock.hooks.iter().find(|h| h.name == "g").expect("g is locked").source;
+            assert!(
+                matches!(
+                    policy.verdict("g", source),
+                    Some(crate::hook::trust::Arming::NotArmed(
+                        crate::hook::trust::NotArmedReason::ConsentDrifted
+                    )) | Some(crate::hook::trust::Arming::ConsentRequired)
+                ),
+                "drift, never a grant: {:?}",
+                policy.verdict("g", source)
+            );
+            assert!(
+                policy
+                    .refusal_reason("g", source)
+                    .is_some_and(|r| r.contains("grim hook allow")),
+                "{:?}",
+                policy.refusal_reason("g", source)
+            );
+        }
     }
 }
 

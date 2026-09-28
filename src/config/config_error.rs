@@ -94,10 +94,12 @@ pub enum ConfigErrorKind {
         source: IdentifierError,
     },
 
-    /// A declaration key is not one plain path component (issue #90). The key
-    /// becomes an install path segment, so `..`, a separator, a drive prefix,
-    /// an empty or all-dot key, or NUL would let a committed `grimoire.toml`
-    /// write outside its anchor root.
+    /// A declaration key is traversal-capable (issue #90). The key becomes an
+    /// install path segment, so `..`, a leading `/` or drive prefix, an empty
+    /// or all-dot key, or NUL would let a committed `grimoire.toml` write
+    /// outside its anchor root. A bare separator is **not** refused — a
+    /// nested key like `"team/skill"` is a legal, single path component
+    /// underneath the kind's directory, and traversal needs `..`, not `/`.
     #[error(
         "artifact '{}' is not a usable name: {reason}",
         .name.escape_debug()

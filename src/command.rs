@@ -18,6 +18,8 @@ pub mod context;
 pub mod describe;
 pub mod export;
 pub mod fetch;
+pub mod hook;
+pub mod hook_consent;
 pub mod init;
 pub mod install;
 pub mod lock;
@@ -565,6 +567,14 @@ pub fn config_usage(msg: impl Into<String>) -> anyhow::Error {
     anyhow::Error::from(crate::error::Error::from(command_error::CommandError::ConfigUsage(
         msg.into(),
     )))
+}
+
+/// Build a classifiable usage error (exit 64) for `grim hook allow` /
+/// `grim hook revoke` acting on a scope that carries no consent record.
+pub fn hook_consent_usage(msg: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::from(crate::error::Error::from(
+        command_error::CommandError::HookConsentUsage(msg.into()),
+    ))
 }
 
 /// Build a classifiable data error (exit 65) for `grim config set`: a

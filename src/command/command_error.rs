@@ -87,6 +87,17 @@ pub enum CommandError {
     /// semantically rejected (exit 65).
     #[error("{0}")]
     ConfigValue(String),
+
+    /// `grim hook allow` / `grim hook revoke` was asked to act on a scope
+    /// that carries no consent record (exit 64).
+    ///
+    /// Global scope is permanently consented — `$GRIM_HOME/grimoire.toml` is
+    /// the user's own file on their own machine, so there is no third party's
+    /// checkout to gate. Reporting that as success would claim a record that
+    /// does not exist, and reporting it as an I/O failure would blame the
+    /// filesystem for a decision; it is a usage error, and it says so.
+    #[error("{0}")]
+    HookConsentUsage(String),
 }
 
 #[cfg(test)]

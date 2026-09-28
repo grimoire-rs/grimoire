@@ -104,8 +104,19 @@ class GrimRunner:
         format: str | None = None,
         check: bool = True,
         log_level: str | None = None,
+        stdin: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        """Run ``grim`` with the given arguments."""
+        """Run ``grim`` with the given arguments.
+
+        ``stdin``, when given, is piped to the child as text (e.g. a
+        password for ``--password-stdin``). When omitted, stdin is
+        ``subprocess.DEVNULL`` so a command that unexpectedly waits on a
+        prompt fails fast instead of hanging the test run. Promoted from
+        ``test_login.py``'s private ``_login()`` helper, which predates
+        this parameter and still builds its own ``subprocess.run`` call
+        (it also injects a per-test ``DOCKER_CONFIG``, which this method
+        has no reason to know about).
+        """
         if HOST_MANAGED_CLAUDE_CONFIG_DIR and "--global" in args:
             pytest.skip(
                 "HOST ISOLATION: this machine's managed Claude settings set "
@@ -120,6 +131,8 @@ class GrimRunner:
         cmd += list(args)
         result = subprocess.run(
             cmd,
+            input=stdin,
+            stdin=subprocess.DEVNULL if stdin is None else None,
             capture_output=True,
             text=True,
             # grim writes UTF-8; the locale codepage (cp1252 on Windows) mangles it.

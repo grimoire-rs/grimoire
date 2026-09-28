@@ -450,6 +450,15 @@ fn fixed_value(key: ConfigKey, options: &ConfigOptions) -> Option<String> {
         ConfigKey::TuiSort => options.tui.sort.map(|m| m.as_str().to_string()),
         ConfigKey::TuiSortOrder => options.tui.sort_order.map(|o| o.as_str().to_string()),
         ConfigKey::SearchMinRelevance => options.search_min_relevance.map(|n| n.to_string()),
+        ConfigKey::ExperimentalHooks => {
+            // `false` is the default and indistinguishable from unset on disk —
+            // the same collapse `show_deprecated` and `tui.group_by_type` use.
+            if options.experimental.hooks {
+                Some("true".to_string())
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -694,6 +703,31 @@ fn has_bare_comma(pattern: &str) -> bool {
     false
 }
 
+/// Warn that clearing the feature flag does not itself disarm anything.
+///
+/// **This replaces a refusal, and the reversal is the point.** `config set
+/// options.experimental.hooks false` and `config unset` were both rejected
+/// (65) on the reasoning that a config write cannot run convergence, so the
+/// config would claim the feature was off while every armed hook stayed
+/// armed (plan S-012 / C-010). The refusal was correct about the mechanism
+/// and wrong about the remedy: with `set … false` and `unset` both refused,
+/// a `true` already on disk had **no CLI route back at all**, and the
+/// message named `grim install` — which converges but cannot clear the flag.
+/// So the only supported way out was hand-editing `grimoire.toml`, which is
+/// exactly what a config CLI exists to avoid.
+///
+/// The write is now permitted and the user is told the remaining step. That
+/// keeps the honest half of the original reasoning — **a config write is not
+/// a disarm** — without leaving a one-way door. `grim config` stays a config
+/// editor: giving it authority to converge would hand a config command the
+/// installer's privileges, which is a larger change than the problem needs.
+fn warn_config_write_does_not_disarm(attempted: &str) {
+    tracing::warn!(
+        "`grim config {attempted}` cleared the feature flag, but hooks already armed stay armed \
+         until convergence runs — run `grim install` to disarm them"
+    );
+}
+
 // ── Value setters ─────────────────────────────────────────────────────────────
 
 fn apply_set(
@@ -770,6 +804,21 @@ fn apply_set(
                 }
                 options.search_min_relevance = Some(percent);
                 Ok(percent.to_string())
+            }
+            // Enabling is a plain write — nothing is armed yet, so there is
+            // nothing to converge. Disabling is **permitted and warns**: a config
+            // write cannot run the installer, and silently leaving hooks armed
+            // while the config says they are off is the failure S-012 names — so
+            // the write is allowed and the remaining step is stated, rather than
+            // refused (see `warn_config_write_does_not_disarm` for why the
+            // earlier refusal was reversed).
+            ConfigKey::ExperimentalHooks => {
+                let enabled = parse_bool(value_str, "options.experimental.hooks")?;
+                if !enabled {
+                    warn_config_write_does_not_disarm("set options.experimental.hooks false");
+                }
+                options.experimental.hooks = enabled;
+                Ok(value_str.to_string())
             }
         },
         ParsedKey::VendorField { vendor } => {
@@ -929,6 +978,13 @@ fn apply_unset(
                 ConfigKey::TuiSort => options.tui.sort = None,
                 ConfigKey::TuiSortOrder => options.tui.sort_order = None,
                 ConfigKey::SearchMinRelevance => options.search_min_relevance = None,
+                // `unset` is the other spelling of "turn hooks off", so it warns
+                // exactly as `set … false` does — clearing the key silently would
+                // disarm nothing while claiming to (S-012).
+                ConfigKey::ExperimentalHooks => {
+                    warn_config_write_does_not_disarm("unset options.experimental.hooks");
+                    options.experimental.hooks = false;
+                }
             }
             Ok(())
         }
@@ -2578,8 +2634,8 @@ mod tests {
         let with_all = collect_entries(true, &options, &registries);
         assert_eq!(
             with_all.len(),
-            10,
-            "--all on empty config must emit exactly the 10 fixed keys"
+            11,
+            "--all on empty config must emit exactly the 11 fixed keys"
         );
         for e in &with_all {
             assert_eq!(
@@ -2815,6 +2871,7 @@ mod tests {
     fn apply_set_clients_rejects_whitespace_segment() {
         use crate::config::declaration::{ConfigOptions, TuiOptions};
         let mut options = ConfigOptions {
+            experimental: Default::default(),
             clients: vec![],
             default_registry: None,
             show_deprecated: false,
@@ -2843,6 +2900,7 @@ mod tests {
     fn fresh_options() -> ConfigOptions {
         use crate::config::declaration::TuiOptions;
         ConfigOptions {
+            experimental: Default::default(),
             clients: vec![],
             default_registry: None,
             show_deprecated: false,
