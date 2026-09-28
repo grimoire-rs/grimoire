@@ -43,6 +43,20 @@ def _host_reachable(host: str, timeout: float = 2.0) -> bool:
         return False
 
 
+# A parametrize id that embeds a large payload passed a local run but stalled
+# the CI Windows job (PYTEST_CURRENT_TEST overflow, megabyte report lines).
+_MAX_TEST_ID = 1000
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Refuse to run when a test id is long enough to bloat CI output."""
+    long_ids = [i.nodeid[:80] + "…" for i in items if len(i.nodeid) > _MAX_TEST_ID]
+    if long_ids:
+        raise pytest.UsageError(
+            f"test ids over {_MAX_TEST_ID} chars (give the parameter an explicit id): {long_ids}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Pre-session hook: resolve the registry host BEFORE src.registry is imported
 # ---------------------------------------------------------------------------
