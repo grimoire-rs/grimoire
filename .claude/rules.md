@@ -170,5 +170,6 @@ Eight rules under `.claude/rules/` come from upstream bundles: their prose is **
 | AI config maintenance | `meta-maintain-config`, `meta-validate-context` |
 | Commits (working phase) | `commit` |
 | Finalize branch for merge onto main | `finalize` |
+| Site changelog page for a release | `changelog` |
 | Suggest next slash command from current state | `next` |
 | Upstream freshness sweep | `upstream-refresh` |

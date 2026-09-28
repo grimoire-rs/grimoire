@@ -78,11 +78,19 @@ Release ceremony is a human-driven process with tooling support:
 
 ```bash
 task release:prepare    # run verify, bump Cargo.toml (git-cliff --bumped-version), regenerate CHANGELOG.md
+/changelog              # write the release up on the site changelog (docs/src/content/docs/changelog.md)
 # Human reviews the changes
 git add -A && git commit -m "release: vX.Y.Z"
 git tag vX.Y.Z
 git push --atomic origin main vX.Y.Z   # human-run — never auto-push
 ```
+
+`CHANGELOG.md` is the commit-level record; the site page `/changelog.html`
+is the user-facing one — features by outcome, linked to their docs. The
+`changelog` skill adds each release to it, and the page change rides in the
+same `release: vX.Y.Z` commit. **An AI performing a release (rare) runs
+`/changelog` before the release commit — the release is incomplete without
+it.**
 
 The final push is always the human's call; `release:prepare` only prints
 it. After the tag is pushed, CI takes over: build → test → GitHub Release,

@@ -62,6 +62,7 @@ tasks:
       - |
         echo ""
         echo "Release prepared ({{.NEXT_VERSION}}). Review changes, then:"
+        echo "  /changelog   # add the release to the site changelog (docs/src/content/docs/changelog.md)"
         echo "  git add -A && git commit -m 'release: {{.NEXT_VERSION}}'"
         echo "  git tag {{.NEXT_VERSION}}"
         echo "  git push --atomic origin main {{.NEXT_VERSION}}"

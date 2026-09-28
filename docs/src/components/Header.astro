@@ -5,18 +5,19 @@
 // Starlight's own header is title / search / right-group, in that DOM order,
 // with the right group holding social icons, the theme picker and the language
 // picker. None of those three exist here (no `social` config, dark-only, one
-// language), so the right slot carries the four site links instead. The order
+// language), so the right slot carries the five site links instead. The order
 // is unchanged, which is what keeps the tab order sane: brand, search, links.
 import Search from 'virtual:starlight/components/Search';
 
-const { siteTitleHref, hasSidebar } = Astro.locals.starlightRoute;
+const { siteTitleHref, hasSidebar, id } = Astro.locals.starlightRoute;
+const onChangelog = id === 'changelog';
 
 // Same source as the landing's version span: `taskfiles/docs.taskfile.yml`
 // exports GRIM_VERSION from Cargo.toml for docs:build and docs:serve alike.
 // The fallback keeps a bare `astro dev` from rendering `undefined`.
 const version = import.meta.env.GRIM_VERSION ?? 'dev';
 
-// ponytail: the four links and the mark are duplicated from
+// ponytail: the five links and the mark are duplicated from
 // `src/pages/index.astro`'s header rather than extracted into a shared
 // component. Two call sites, one of which is a `splash` page that styles its
 // own bar — a shared `Brand.astro` would need to be parameterised on almost
@@ -27,7 +28,10 @@ const links = [
   // marks the docs section current on the 34 pages that are in it and not on
   // the one that is not. It was a hardcoded `true`, which told a screen
   // reader the landing was the docs page.
-  { href: '/introduction.html', label: 'docs', current: hasSidebar },
+  // The changelog carries the sidebar too, so it would otherwise mark docs
+  // current while its own link sits next to it.
+  { href: '/introduction.html', label: 'docs', current: hasSidebar && !onChangelog },
+  { href: '/changelog.html', label: 'changelog', current: onChangelog },
   {
     href: 'https://marketplace.visualstudio.com/items?itemName=grimoire-rs.grimoire-vscode',
     label: 'vscode',
@@ -166,16 +170,18 @@ const links = [
 
      The canvas draws a flat 320px, which leaves a short field stranded in a
      long bar on a wide monitor, so it tracks the viewport up to 480px. The
-     floor is below the canvas's number on purpose: the outer tracks floor at
-     0, so at the 800px where this grid starts the search would otherwise
-     squeeze the brand and the links rather than let them wrap. */
+     outer tracks floor at their max-content width, so the brand and the
+     links never shrink under their text: when the bar is short of room the
+     search track gives way instead. With a floor of 0 on the outer tracks the
+     links overflowed their track and drew over the search field once a fifth
+     link was added. */
   @media (min-width: 50rem) {
     .header {
       display: grid;
       grid-template-columns:
-        minmax(0, 1fr)
-        clamp(280px, 26vw, 480px)
-        minmax(0, 1fr);
+        minmax(max-content, 1fr)
+        minmax(0, clamp(280px, 26vw, 480px))
+        minmax(max-content, 1fr);
       align-content: center;
     }
 

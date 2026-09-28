@@ -149,6 +149,7 @@ export default defineConfig({
             { slug: 'browse', label: 'Browse the index' },
             { slug: 'first-skill', label: 'Your first skill' },
             { slug: 'concepts', label: 'Concepts' },
+            { slug: 'changelog', label: 'Changelog' },
           ],
         },
         {

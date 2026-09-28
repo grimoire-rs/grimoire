@@ -1040,6 +1040,9 @@ class TestAiConfigOverhaulPhase2:
         # through the Skill tool with no human in the loop — the `finalize`
         # precedent above. Re-flip both together if that changes.
         "upstream-refresh": False,
+        # Edits one docs page, never commits — left model-invocable so an AI
+        # performing a release reaches it without a human in the loop.
+        "changelog": False,
         # Pure analysis / advisory — auto-invocation safe
         "bugfix": False,
         "builder": False,
