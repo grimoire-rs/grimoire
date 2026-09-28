@@ -44,6 +44,8 @@ durable; update the numbers, keep the spine.
 - `warp skills directory site:warp.dev`
 - `kilo modes skills site:kilo.ai`
 - `agents skills shared pool which clients scan`
+- `codex hooks.json lifecycle events site:developers.openai.com`
+- `copilot hooks reference declarative json events site:docs.github.com`
 - `AGENTS.md standard adoption nearest file precedence`
 - `skills not activating subagent headless`
 - `anthropic effective context engineering attention budget`
@@ -57,7 +59,10 @@ durable; update the numbers, keep the spine.
 - [Copilot: instructions support matrix][cop-matrix] /
   [agent skills][cop-skills] — surface support changes often.
 - [Codex: skills][cx-skills] / [subagents][cx-agents] — AGENTS.md-only
-  always-on surface, no rule mechanism; re-verify both claims here.
+  always-on surface, no rule mechanism; re-verify both claims here. Codex
+  *does* have a hook surface (a committed `hooks.json`), which is why it now
+  sits in the hook row of the vendor-disagreement table; re-verify the file
+  location and its event vocabulary.
 - [Cursor: subagents][cur-agents] / [Kiro][kiro] — the newer clients with
   both rule scoping and (Cursor only) an agent file; re-verify the
   comma-in-glob split and Kiro's user-scope steering bug.

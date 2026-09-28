@@ -1,22 +1,22 @@
 ---
 name: grim-authoring
-description: Author, validate, and package grim-publishable artifacts — skill directories, rule files, agent definitions, MCP server descriptors, and bundle TOMLs. Use when creating or editing an artifact for grim build or grim release; when choosing frontmatter or catalog metadata fields; when adding a vendor-namespaced metadata key for any client grim supports (claude, opencode, copilot, codex, cursor, kiro, junie, gemini, zed, amp, antigravity, cline, droid, goose, warp, openclaw, kilo, qoder — one namespace per client name); or when grim build fails validation with exit code 65.
+description: Author, validate, and package grim-publishable artifacts — skill directories, rule files, agent definitions, MCP server descriptors, hook manifests, and bundle TOMLs. Use when creating or editing an artifact for grim build or grim release; when choosing frontmatter or catalog metadata fields; when writing a hook.toml with its events, tiers, matchers, and handlers; when adding a vendor-namespaced metadata key for any client grim supports (claude, opencode, copilot, codex, cursor, kiro, junie, gemini, zed, amp, antigravity, cline, droid, goose, warp, openclaw, kilo, qoder — one namespace per client name); or when grim build fails validation with exit code 65.
 license: Apache-2.0
 compatibility: grim>=0.14
 metadata:
-  summary: Deep authoring guide for grim skill, rule, agent, mcp, and bundle artifacts
-  keywords: grim,grimoire,authoring,frontmatter,validation,vendor-metadata,skill,rule,agent,mcp,bundle,packaging
+  summary: Deep authoring guide for grim skill, rule, agent, mcp, hook, and bundle artifacts
+  keywords: grim,grimoire,authoring,frontmatter,validation,vendor-metadata,skill,rule,agent,mcp,hook,bundle,packaging
   repository: https://github.com/grimoire-rs/grimoire
 ---
 
 # Grim Artifact Authoring
 
-Grim publishes five artifact kinds to OCI registries. Each has its own
+Grim publishes six artifact kinds to OCI registries. Each has its own
 source shape, frontmatter schema, and validation gates. This root file
 holds the invariants that apply to every kind; per-kind depth lives in
 `references/`, loaded via the routing table below.
 
-## The Five Kinds
+## The Six Kinds
 
 `grim build` and `grim release` infer the kind from the path — except
 agents (always `--kind agent`, or they silently pack as rules) and MCP
@@ -29,16 +29,32 @@ servers (always `--kind mcp`, or the `.toml` is treated as a bundle).
 | Rule + support dir | `<name>.md` + sibling `<name>/` dir | sibling dir auto-discovered | Index file + `rules/<name>/…` side by side |
 | Agent | Single `.md`, frontmatter required | **never — `--kind agent` mandatory** | One agent file per client, per-client render |
 | MCP server | `.toml` descriptor with a `[server]` table | **never — `--kind mcp` mandatory** | Entry in each client's MCP config file, per-client render |
+| Hook | Directory with a `hook.toml` manifest + its payload files | directory with `hook.toml` → hook | Payload tree materialized once per scope, one recorded output per client. **Arming is gated and off by default** — see [hook-spec.md](references/hook-spec.md) |
 | Bundle | `.toml` member list | `.toml` → bundle | Never materializes — expands to its members |
 
 A skill directory or a rule's support directory can drop a `.grimignore`
 at its root (gitignore syntax) to keep runtime junk — `__pycache__/`,
 `.venv/`, `.DS_Store` — out of the pack and out of drift detection; a
 built-in default list already covers the common cases and `.grimignore`
-lines extend it; a `!pattern` line re-includes a default. `SKILL.md`, a rule's index, and `.grimignore` itself
-are never ignorable. Agents get no `.grimignore` — their companion
+lines extend it; a `!pattern` line re-includes a default. `SKILL.md`, a rule's index, a hook's `hook.toml`, and `.grimignore`
+itself are never ignorable. A hook handler naming an ignored file fails
+`grim build` (65) — it would never be packed; its runtime byproducts
+beyond the defaults belong in `.grimignore`, or they read as drift. Agents get no `.grimignore` — their companion
 directory is already an allowlist. Full default list and semantics:
 [Artifact Reference § .grimignore][grimignore].
+
+Two directory kinds share one inference arm, and the order is
+load-bearing: `detect_kind` checks `SKILL.md` **first**, so a directory
+carrying both `SKILL.md` and `hook.toml` is a **skill** — a shipped skill
+that later gains a stray `hook.toml` keeps building as a skill on every
+release, with no flag needed to hold that (Principle 9). The mistake to
+watch for runs the other way: a hook author with a stray `SKILL.md` in
+their hook tree must pass `--kind hook` explicitly, or the build silently
+re-kinds the payload as a skill. `--kind hook` is accepted on `build` and
+`release` but is never *required* when no `SKILL.md` is present —
+`grim build ./hooks/shell-guard` already reports `hook`. Pass it anyway
+in scripted loops, the way the other kinds are passed, so a manifest
+rename cannot silently reclassify the artifact.
 
 ## Which Clients Host Which Kind
 
@@ -69,12 +85,76 @@ the summary below is a planning aid that the next client can age:
   Droid (Copilot and Droid: a
   literal `client_id` only — a `${VAR}` id skips); every other
   client, or a field it cannot carry, skips the descriptor with a warning.
+- **Hooks** are the narrowest kind by far. Only four clients name a hook
+  registration surface at all — Claude, Codex, Copilot, and Qoder — and of
+  those only **Claude** hosts a hook at *project* scope; Codex, Copilot, and
+  Qoder are global-scope-only, Codex's and Copilot's because their
+  registration files are tracked repository files, Qoder's by policy (A1).
+  Qoder additionally declines the `mutator` tier outright, at every scope —
+  its own hook schema carries no rewrite field, so a `PreToolUse` mutator
+  reports declined there whatever the scope. Every other client declines
+  hooks outright. On top of that, arming is gated (see below), so authoring
+  a hook means accepting that most of the fleet will report it and never
+  fire it.
 
 A declined kind is an honest refusal, not a silent failure — but it is
 still zero files. The enforced matrix and the upstream reason behind
 every degrade and decline: [Client Compatibility][clients]. A
 `compatibility:` frontmatter field is a human-facing hint only and never
 overrides it.
+
+## Hooks Ship Disarmed
+
+Publishing a hook is not shipping something that runs. Hooks are behind an
+experimental flag that is **off by default**:
+
+```sh
+grim config get options.experimental.hooks    # prints nothing, exit 1, unless someone set it true
+```
+
+The flag is config-only — no environment variable overrides it — and it is
+only the **first of two gates** grim keeps deliberately
+separate:
+
+1. **Is the feature on?** `options.experimental.hooks`, off by default.
+2. **Has this workspace consented?** A machine-local consent record under
+   `$GRIM_HOME/hooks/consent/`, one file per workspace, naming the checkout
+   by absolute path and listing the hooks it covers as
+   `<binding>@<registry>/<repository>`. Global scope is always consented and
+   carries no record.
+
+Gate 2 has three satisfiers, and they are the *only* three things that write
+a record: `grim hook allow`, `grim add` (typing a reference is the
+declaration gesture), or an accepted prompt (asked once per workspace, TTY
+only). `grim install`, `update`, `lock`, `status`, `context`, `hook list`,
+the TUI and the MCP server never write one — a consumer who clones a
+repository declaring your hook gets a declaration and a lock pin, and
+nothing armed. `--trust-hooks` on `grim install` / `update` / `add` arms a
+single invocation and writes nothing; its `--no-trust-hooks` counterpart
+refuses one. Neither turns the feature on — gate 1 must already be open —
+and the pair beats the record in **both** directions.
+
+They are **flags only: there is no `GRIM_ALLOW_HOOKS`, no
+`GRIM_HOOK_CONSENT`, and no environment form of the record's path**, and
+that absence is what makes the pair safe to rank above the record. The
+environment is repo-carried — `.envrc`, `.mise.toml` and a devcontainer's
+`containerEnv` are ordinary files in a repository — so an environment form
+would let a cloned repository consent on its cloner's behalf. A file cannot
+type a flag.
+
+One condition sits outside both gates and answers to no file at all: a hook
+whose pinned registry host is not loopback and is reached over plain HTTP
+never arms, because the first resolution that produces the digest pin is
+itself attacker-influenceable on the wire.
+
+Enabling the feature is not consent to run any particular hook.
+
+What this means for you as a publisher: a consumer who runs `grim add` on
+your hook gets a real declaration, a real lock pin, and a materialized
+payload tree — and by default nothing armed. Write the hook's
+`description` so it reads honestly under those terms, and do not document
+your hook to consumers as something that fires on install. Consumers
+inspect what they have with `grim hook list`.
 
 ## Universal Invariants
 
@@ -106,7 +186,8 @@ errors, they just silently never reach the catalog:
 | Skill | inside the `metadata:` map of `SKILL.md` frontmatter |
 | Agent | inside the `metadata:` map of the agent frontmatter |
 | Rule | at the **top level** of the rule frontmatter (not in `metadata`) |
-| MCP server | as **top-level TOML keys**, above the `[server]` table |
+| MCP server | as **top-level TOML keys**, above the `[server]` table (`replaced-by` not read for MCP) |
+| Hook | **nowhere — a hook has no catalog metadata surface.** `hook.toml` is strict (`deny_unknown_fields`): its only top-level keys are `schema`, `name`, `description`, and `[[hooks]]`, so `summary`, `keywords`, `repository`, `deprecated`, and `replaced-by` are each a hard parse error (exit 65), not silent loss. `description` is the one catalog-facing field. Write it to carry the whole blurb — `grim search` has nothing else to show |
 | Bundle | as **top-level TOML keys**, above the member tables |
 
 In every kind, `keywords` is one comma-separated string and `repository`
@@ -179,6 +260,15 @@ relative member against. Typical loop: edit → `grim build <path>`
 (validation) → `grim install <path>` (see it in a real client) →
 repeat → release. Confirm flags with `grim install --help`.
 
+**A hook has no local-path loop at all**, and this is deliberate rather
+than unfinished: the config parser rejects a path value under `[hooks]`,
+and there is no dev-install for the kind. A dev-install's source is a
+working-tree path, so the natural "edit the hook in the repo, re-install"
+loop would put something armable inside a repository — exactly what grim
+refuses to do. The hook loop is therefore `grim build` to validate, then
+`grim release` (a local registry works fine for iterating), then
+`grim add` from that reference.
+
 ## Routing Table
 
 | Read… | …when |
@@ -187,6 +277,7 @@ repeat → release. Confirm flags with `grim install --help`.
 | [references/rule-spec.md](references/rule-spec.md) | Authoring a rule file, its globs, or a support directory |
 | [references/agent-spec.md](references/agent-spec.md) | Authoring an agent definition or its vendor overrides |
 | [references/mcp-spec.md](references/mcp-spec.md) | Authoring an MCP server descriptor or its env references |
+| [references/hook-spec.md](references/hook-spec.md) | Authoring a `hook.toml`, choosing an event and tier, writing a matcher, or fixing the payload-not-executable refusal |
 | [references/bundle-spec.md](references/bundle-spec.md) | Authoring a bundle TOML or choosing pinning strategy |
 | [references/vendor-metadata.md](references/vendor-metadata.md) | Adding a key in a reserved `<vendor>.*` namespace — one per client name (`claude.*`, `opencode.*`, `copilot.*`, `codex.*`, `cursor.*`, `kiro.*`, `junie.*`, `gemini.*`, `zed.*`, `amp.*`, `antigravity.*`, `cline.*`, `droid.*`, `goose.*`, `warp.*`, `openclaw.*`, `kilo.*`, `qoder.*`) |
 | [references/release-checklist.md](references/release-checklist.md) | Before `grim release`/`grim publish`, the metadata every package should set, repository-path layout, batch manifests, description companions, or triaging an exit-65 failure |
@@ -201,9 +292,11 @@ incomplete, the docs page is the source of truth:
 [Artifact Reference][artifacts] · [Vendor-Specific Metadata][vendor] ·
 [Publishing][publishing] · [Agent Artifacts][agents] ·
 [Client Compatibility][clients]. For the TOML
-surfaces, `grim schema --kind <config|publish|lock|mcp>` prints the JSON
-Schema generated from grim's own parsers — bind it in your editor to
-catch manifest typos before any command runs.
+surfaces, `grim schema --kind <config|publish|lock|mcp|hook>` prints the
+JSON Schema generated from grim's own parsers — bind it in your editor to
+catch manifest typos before any command runs. `--kind hook` is the fastest
+way to read the authoritative `hook.toml` shape, because the schema
+carries grim's own doc comments for every event, tier, and field.
 
 ## Verify Before Acting
 
