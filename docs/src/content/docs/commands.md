@@ -2099,10 +2099,10 @@ way — additionally dropping the `[skills]` / `[rules]` / `[agents]` entry
 for a declared-path row, or just the install record for a dev row (which
 was never declared).
 
-An active search (started with `/`) switches the tree to the flat list for
-as long as the query holds a text term. Ranked results then read as one list
-instead of scattering across groups. A kind-only query like `skill` keeps
-the tree, since it filters but ranks nothing.
+An active search (started with `/`) switches the tree to the flat list once
+the query holds a text term. Ranked results then read as one list instead of
+scattering across groups. The list stays flat until the query is cleared, so
+finishing a kind word like `bundle` does not flip the view back.
 
 Clearing the query returns to the tree. Pressing `t` during a search is
 honoured and sticks. Clearing the query then leaves the view as you chose
