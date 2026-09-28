@@ -365,9 +365,20 @@ fn handle_search(state: &mut TuiState, input: TuiInput) -> TuiAction {
             });
             TuiAction::None
         }
-        // Commit the query and return to the list.
-        TuiInput::Enter | TuiInput::Esc => {
+        // Enter commits the query and returns to the list.
+        TuiInput::Enter => {
             state.back();
+            TuiAction::None
+        }
+        // Esc steps out one level: a non-empty query is cleared (which also
+        // gives back a tree the search flattened) and the box stays open for a
+        // new one; an already-empty query leaves search for the list.
+        TuiInput::Esc => {
+            if state.query.is_empty() {
+                state.back();
+            } else {
+                state.apply_query(String::new());
+            }
             TuiAction::None
         }
         TuiInput::Quit => TuiAction::Quit,
@@ -1388,6 +1399,26 @@ mod tests {
         assert_eq!(s.query, "v");
     }
 
+    // Regression: Esc in the search box first clears the query (staying in
+    // the box), then, on an empty query, leaves search. Enter keeps the query.
+    #[test]
+    fn search_esc_clears_then_leaves_and_enter_keeps_the_query() {
+        let mut s = seeded();
+        handle(&mut s, TuiInput::Char('/'));
+        handle(&mut s, TuiInput::Char('x'));
+        assert_eq!(handle(&mut s, TuiInput::Esc), TuiAction::None);
+        assert_eq!(s.query, "", "the first Esc clears the query");
+        assert_eq!(s.mode, Mode::Search, "…and keeps the search box open");
+        assert_eq!(handle(&mut s, TuiInput::Esc), TuiAction::None);
+        assert_eq!(s.mode, Mode::List, "Esc on an empty query leaves search");
+
+        handle(&mut s, TuiInput::Char('/'));
+        handle(&mut s, TuiInput::Char('x'));
+        handle(&mut s, TuiInput::Enter);
+        assert_eq!(s.mode, Mode::List);
+        assert_eq!(s.query, "x", "Enter commits the search");
+    }
+
     #[test]
     fn picker_esc_cancels_without_pinning() {
         let mut s = seeded();
@@ -2375,6 +2406,60 @@ mod tree_event_tests {
             TuiAction::None,
             "Expand must emit TuiAction::None"
         );
+    }
+
+    /// Tree view with the cursor on the `acme/beta` leaf.
+    fn tree_on_beta() -> TuiState {
+        let mut s = two_leaf_state();
+        handle(&mut s, TuiInput::ViewToggle);
+        while s.selected_row().map(|r| r.repository.as_str()) != Some("acme/beta") {
+            let before = s.selected;
+            handle(&mut s, TuiInput::Down);
+            assert_ne!(s.selected, before, "the beta leaf is reachable");
+        }
+        s
+    }
+
+    // R1-07: a text search flattens the tree; the first Esc clears the query
+    // and gives the tree back on the leaf under the cursor (the search's best
+    // hit, here the leaf the tree cursor started on), the second leaves search.
+    #[test]
+    fn esc_after_a_search_restores_the_tree_on_the_same_leaf() {
+        let mut s = tree_on_beta();
+        for c in ['/', 'b', 'e'] {
+            handle(&mut s, TuiInput::Char(c));
+        }
+        assert_eq!(s.view_mode, ViewMode::Flat, "a text search flattens the tree");
+        assert_eq!(handle(&mut s, TuiInput::Esc), TuiAction::None);
+        assert_eq!(s.mode, Mode::Search);
+        assert_eq!(s.query, "");
+        assert_eq!(s.view_mode, ViewMode::Tree);
+        assert!(!s.tree_suspended_by_search);
+        assert_eq!(s.selected_row().map(|r| r.repository.as_str()), Some("acme/beta"));
+        assert_eq!(handle(&mut s, TuiInput::Esc), TuiAction::None);
+        assert_eq!(s.mode, Mode::List);
+    }
+
+    // R1-07 variant: `t` pressed on a committed search is the user's choice —
+    // clearing the query with Esc must not flip the view back.
+    #[test]
+    fn esc_keeps_a_view_chosen_during_a_search() {
+        let mut s = tree_on_beta();
+        for c in ['/', 'a', 'l'] {
+            handle(&mut s, TuiInput::Char(c));
+        }
+        handle(&mut s, TuiInput::Enter);
+        handle(&mut s, TuiInput::Char('t'));
+        assert_eq!(s.view_mode, ViewMode::Tree, "the user asked for the tree");
+        assert!(!s.tree_suspended_by_search, "an explicit toggle ends the suspension");
+        // Toggle back: the user's choice is now Flat, which a stale
+        // suspension flag would override with the tree on clear.
+        handle(&mut s, TuiInput::Char('t'));
+        assert_eq!(s.view_mode, ViewMode::Flat, "the user asked for the flat list");
+        handle(&mut s, TuiInput::Char('/'));
+        handle(&mut s, TuiInput::Esc);
+        assert_eq!(s.query, "", "Esc clears the query");
+        assert_eq!(s.view_mode, ViewMode::Flat, "the chosen view stays");
     }
 
     // Step 3.3: `i`/`u`/`d` on a group emit Batch over descendant rows.
