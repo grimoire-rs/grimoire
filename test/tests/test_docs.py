@@ -181,3 +181,49 @@ def test_link_escaping_the_docs_root_is_rejected(tmp_path: Path, monkeypatch) ->
 
     monkeypatch.setitem(globals(), "_DOCS_DIR", root)
     assert _link_problems(page) == [f"'](../../OUTSIDE.md': resolves outside {root}"]
+
+
+def test_every_hook_arming_cause_is_documented() -> None:
+    """The ``cause`` → ``state`` table lists every ``HookArmingCause`` variant.
+
+    Round 1 of review found `not-registered` missing from it -- the reporting
+    half of the audit's P-1 fix, and the one cause whose meaning a reader cannot
+    guess from the token. Two frozen-contract claims made the omission
+    load-bearing: the table is introduced as a substitute for the consumer's own
+    mapping, and `stability.md` tells consumers to branch on `cause` because it
+    is frozen. So a consumer following the docs exactly could not recognize the
+    state that fix exists to make legible.
+
+    A forgotten member of a hand-maintained enumeration was the single most
+    common defect the panel found across this feature. This test is that class
+    made mechanical for the one enumeration a consumer is told to rely on.
+    """
+    display = (PROJECT_ROOT / "src" / "api" / "artifact_status.rs").read_text(
+        encoding="utf-8"
+    )
+    impl = display.split("impl std::fmt::Display for HookArmingCause")[1]
+    tokens = set(re.findall(r'=> "([a-z][a-z0-9-]*)"', impl.split("}\n}")[0]))
+    assert len(tokens) >= 9, f"failed to parse the cause tokens: {sorted(tokens)}"
+
+    table = (_DOCS_DIR / "json-interface.md").read_text(encoding="utf-8")
+    undocumented = sorted(token for token in tokens if f"`{token}`" not in table)
+    assert not undocumented, (
+        "docs/src/content/docs/json-interface.md's cause table omits "
+        f"{undocumented} — the table is documented as complete, and "
+        "stability.md tells consumers to branch on the frozen `cause` enum, so a "
+        "missing row is a contract gap and not a typo"
+    )
+
+
+# ---------------------------------------------------------------------------
+# S-118 — the hook pages are reachable from the sidebar. The guide's commands
+# run end to end in test_guide_agent_hooks.py, bound to the page by key.
+# ---------------------------------------------------------------------------
+
+
+def test_hooks_page_is_in_the_sidebar() -> None:
+    """S-118: a reader reaches docs/src/content/docs/hooks.md from the sidebar."""
+    config = (PROJECT_ROOT / "docs" / "astro.config.mjs").read_text(encoding="utf-8")
+    assert "slug: 'hooks'" in config, (
+        "hooks.md has no sidebar entry in docs/astro.config.mjs"
+    )

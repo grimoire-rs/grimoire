@@ -207,6 +207,50 @@ Before 2026-09-27 grim wrote only `.vscode/mcp.json`, so an existing install
 reports `.github/mcp.json` under `outputs_pending` until the next
 `grim install` writes it.
 
+### Codex, Copilot, Qoder: hooks arm at global scope only {#gap-codex-hooks}
+
+[Hooks](./hooks.md) (experimental) arm on Codex, Copilot, and Qoder at
+**global scope only**. Each one's project-scope hook file is a tracked
+repository file, so a project declaration is skipped, with a warning
+pointing at `--global`.
+
+This matrix marks Codex's Hook cell `✓` rather than `◐`. The scope
+restriction is real and code-verified (`vendor_codex.rs`). It is flagged
+here for the matrix owner to reconcile, since the parity test that pins
+the cell values is out of this page's scope.
+
+### Copilot: event set, mutator field, and declines {#gap-copilot-hooks}
+
+Copilot projects `PreToolUse`, `PostToolUse`, and `SessionStart`. A
+mutator rewrites the call through `hookSpecificOutput.updatedInput`,
+live-probed against Copilot CLI 1.0.88 on 2026-09-28. The top-level
+`modifiedArgs` spelling some early research expected is never emitted.
+`SessionStart` context reaches Copilot through a flat top-level
+`additionalContext`, not the Claude-shaped
+`hookSpecificOutput.additionalContext`.
+
+Two things decline. A `gatekeeper` hook at `PostToolUse` declines, because
+there is no verdict channel there. So does a `mutator` hook aimed at a
+shell-command tool (ADR decision K).
+
+GitHub's **cloud agent** hook mechanism is a different, deliberate
+exclusion. It reads `.github/hooks/*.json` from the pushed branch it was
+asked to work on, so a committed registration there would run unattended
+and server-side. That is the clone-to-RCE shape (attacker class A1) grim
+refuses outright everywhere else. Grim writes nothing under
+`.github/hooks/` for it. See
+[Copilot: cloud agent excluded](./hooks.md#copilot-cloud-agent).
+
+### Qoder: hooks unverified by a live run {#gap-qoder-hooks}
+
+[Qoder]'s registration and grim's [Qoder MCP entry](./mcp-servers.md#install-order-hooks)
+coexist in the same `settings.json`, at global scope.
+
+The handler shape (extra-key tolerance, the declined `mutator` tier) was
+verified by reading `qodercli` **1.1.64**'s own bundled source on
+2026-09-28. It was not verified by a live, logged-in invocation that
+actually triggered a tool call through it.
+
 ### Cursor: a comma inside a glob splits the pattern {#gap-cursor-globs}
 
 [Cursor] rules are fully supported (a `.mdc` file with a comma-joined `globs`

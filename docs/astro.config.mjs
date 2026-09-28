@@ -108,6 +108,9 @@ export default defineConfig({
         ThemeProvider: './src/components/ThemeProvider.astro',
         ThemeSelect: './src/components/ThemeSelect.astro',
       },
+      // A `bash-run` fence is a shell example a pytest binds by key (DOC-EX-01);
+      // without the alias Shiki cannot highlight it and the build warns.
+      expressiveCode: { shiki: { langAlias: { 'bash-run': 'bash' } } },
       // C-011
       plugins: [starlightLinksValidator()],
       head: [
@@ -165,6 +168,10 @@ export default defineConfig({
               label: 'MCP servers everywhere',
             },
             { slug: 'clients', label: 'Client Compatibility' },
+            {
+              slug: 'guides/agent-hooks',
+              label: 'Control agent commands with hooks',
+            },
           ],
         },
         {
@@ -197,6 +204,8 @@ export default defineConfig({
             { slug: 'vendor-metadata', label: 'Vendor-Specific Metadata' },
             { slug: 'package-index', label: 'The Package Index' },
             { slug: 'json-interface', label: 'The JSON Interface' },
+            { slug: 'hooks', label: 'Hooks (experimental)' },
+            { slug: 'hooks-troubleshooting', label: 'When a hook does not arm' },
             { slug: 'stability', label: 'Stability and Versioning' },
             { slug: 'upgrading', label: 'Upgrading' },
           ],
