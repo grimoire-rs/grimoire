@@ -988,6 +988,7 @@ mod tests {
             kind: Some("skill".to_string()),
             registry: registry.to_string(),
             repository: repository.to_string(),
+            index_path: None,
             summary: None,
             description: None,
             keywords: Vec::new(),

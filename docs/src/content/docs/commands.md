@@ -2043,10 +2043,16 @@ such row, never a `0`.
 
 **Tree view** — pressing `t` switches the catalog between flat list mode and
 a collapsible tree grouped by browse source and repository path. Rows from an
-OCI registry group under that registry (host plus configured namespace); rows
-from a [package index](./package-index.md) group under the index source, with
-the full OCI reference folded below it (an unbranched host/namespace chain
-like `ghcr.io/grimoire-rs` renders as one joined node). In tree mode:
+OCI registry group under that registry (host plus configured namespace).
+Rows from a [package index](./package-index.md) group under the index
+source, by where the index placed them: `<host>/<namespace>`, then the
+package name. An unbranched chain like `github.com/grimoire-rs` renders as one
+joined node. The OCI reference stays in the flat list and the detail pane.
+
+Some pointers fall back to their OCI reference in the tree. That happens
+when the index did not place the pointer, or placed it under a bad path.
+A bad path has an empty, `.` or `..` segment, a character outside
+`[A-Za-z0-9._:-]`, or too many or too long segments. In tree mode:
 
 | Key | Action |
 |-----|--------|

@@ -1042,11 +1042,13 @@ thing: room for the same name to exist as two kinds, a skill `foo` and a
 bundle `foo` side by side. If your names are unique across kinds, it buys
 nothing and costs a segment in every reference your users type.
 
-It also adds a `skills` or `bundles` node in the
-[TUI tree](./commands.md#tui) that restates what the row's kind column
-already says. That node doubles into a `skill` group holding a `skills`
-group when [`options.tui.group_by_type`](./configuration.md#options-tui)
-is on.
+Browsed straight from the registry, it also adds a `skills` or `bundles`
+node in the [TUI tree](./commands.md#tui). That node restates what the
+row's kind column already says. It doubles into a `skill` group holding a
+`skills` group when
+[`options.tui.group_by_type`](./configuration.md#options-tui) is on.
+Browsed through a [package index](./package-index.md), the tree groups by
+the index namespace instead.
 
 Publish flat by setting `repository_prefix` to your namespace:
 

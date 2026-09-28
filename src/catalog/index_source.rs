@@ -47,10 +47,14 @@ const STATS_SCHEMA_VERSION: u32 = 1;
 struct IndexPackage {
     /// Metadata schema version; only `1` is consumed today.
     schema: u32,
-    /// Package name (equals the index directory name; unused here — the
-    /// repository path from `ref` names the row).
-    #[allow(dead_code)]
+    /// Package name (equals the index directory name). With `namespace` it
+    /// forms the entry's [`CatalogEntry::index_path`], the tree's grouping.
     name: String,
+    /// `<host>/<namespace…>` the pointer sits under. Derived by the index
+    /// compiler into `all.json`; absent from a raw `metadata.json`, where the
+    /// git walk fills it from the directory path instead.
+    #[serde(default)]
+    namespace: Option<String>,
     /// `skill` / `rule` / `agent` / `bundle`.
     kind: String,
     /// OCI reference (`registry/repository`, no tag) grim resolves against.
@@ -107,9 +111,20 @@ impl IndexPackage {
         if registry.is_empty() || repository.is_empty() {
             return None;
         }
+        let index_path = self.namespace.as_deref().and_then(|ns| {
+            let path = index_path(ns, &self.name);
+            if path.is_none() {
+                tracing::debug!(
+                    "index entry '{}': namespace placement rejected, grouping by OCI path",
+                    self.r#ref
+                );
+            }
+            path
+        });
         Some(CatalogEntry {
             registry: registry.to_string(),
             repository: repository.to_string(),
+            index_path,
             kind: Some(self.kind),
             description: self.description,
             summary: self.summary,
@@ -147,6 +162,28 @@ impl IndexPackage {
             fetched_at: fetched_at.to_string(),
         })
     }
+}
+
+/// `<namespace>/<name>` when every segment is a plain identifier, else `None`.
+///
+/// The index is untrusted and these segments become tree labels verbatim, so
+/// the check is an allowlist (`[A-Za-z0-9._:-]`, never `.`/`..`) rather than a
+/// sanitizer: a pointer that fails it keeps its OCI-path grouping instead.
+/// Depth and segment length are capped for the same reason.
+fn index_path(namespace: &str, name: &str) -> Option<String> {
+    const MAX_SEGMENTS: usize = 16;
+    const MAX_SEGMENT_LEN: usize = 128;
+    let valid = |seg: &str| {
+        !seg.is_empty()
+            && seg.len() <= MAX_SEGMENT_LEN
+            && seg != "."
+            && seg != ".."
+            && seg
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'))
+    };
+    (namespace.split('/').count() < MAX_SEGMENTS && namespace.split('/').all(valid) && valid(name))
+        .then(|| format!("{namespace}/{name}"))
 }
 
 /// The `stats.json` sidecar — per-ref publisher statistics beside `all.json`.
@@ -635,7 +672,12 @@ fn walk_metadata(root: &Path, cache_path: &Path, locator: &str) -> Result<Vec<In
         for entry in entries {
             let entry = entry.map_err(|e| CatalogError::io(cache_path, e))?;
             let path = entry.path();
-            if path.is_dir() {
+            // `file_type` does not follow links: a link in the checkout could
+            // loop the walk or reach outside the index root, so skip them all.
+            let file_type = entry.file_type().map_err(|e| CatalogError::io(cache_path, e))?;
+            if file_type.is_symlink() {
+                tracing::debug!("skipping symlink in index checkout: {}", path.display());
+            } else if file_type.is_dir() {
                 stack.push(path);
             } else if path.file_name().is_some_and(|n| n == "metadata.json") {
                 match std::fs::read(&path)
@@ -644,7 +686,36 @@ fn walk_metadata(root: &Path, cache_path: &Path, locator: &str) -> Result<Vec<In
                         serde_json::from_slice::<IndexPackage>(&bytes)
                             .map_err(|e| CatalogError::index_fetch(cache_path, locator, e))
                     }) {
-                    Ok(pkg) => packages.push(pkg),
+                    Ok(mut pkg) => {
+                        // `index/<host>/<namespace…>/<name>/metadata.json`: the
+                        // namespace is the package directory's parent, relative
+                        // to `index/`. `all.json` carries it as a field instead.
+                        // Always overwritten: the directory is what the index's
+                        // review gate checks, a declared field is not. The spec
+                        // requires `name` to equal the package directory; a
+                        // mismatch gets no placement rather than a mixed path.
+                        let pkg_dir = path.parent();
+                        let name_matches = pkg_dir
+                            .and_then(Path::file_name)
+                            .is_some_and(|d| d == pkg.name.as_str());
+                        if !name_matches {
+                            tracing::debug!(
+                                "index entry name `{}` differs from its directory: {}",
+                                pkg.name,
+                                path.display()
+                            );
+                        }
+                        pkg.namespace = pkg_dir
+                            .filter(|_| name_matches)
+                            .and_then(Path::parent)
+                            .and_then(|ns| ns.strip_prefix(root).ok())
+                            .and_then(|ns| {
+                                // Join components with `/` on every platform.
+                                let segs: Option<Vec<&str>> = ns.components().map(|c| c.as_os_str().to_str()).collect();
+                                segs.filter(|s| !s.is_empty()).map(|s| s.join("/"))
+                            });
+                        packages.push(pkg);
+                    }
                     Err(e) => tracing::warn!("skipping unreadable index entry {}: {e}", path.display()),
                 }
             }
@@ -686,6 +757,168 @@ mod tests {
         // Pre-keywords index files carry neither field → defaults.
         assert!(e.keywords.is_empty(), "missing keywords → []");
         assert_eq!(e.summary, None, "missing summary → None");
+    }
+
+    #[test]
+    fn all_json_namespace_forms_the_index_path() {
+        let p = pkg(r#"{
+            "schema": 1,
+            "name": "grim-usage",
+            "namespace": "github.com/grimoire-rs",
+            "kind": "skill",
+            "ref": "ghcr.io/grimoire-rs/skills/grim-usage"
+        }"#);
+        let e = p.into_entry("t").expect("maps");
+        assert_eq!(e.index_path.as_deref(), Some("github.com/grimoire-rs/grim-usage"));
+    }
+
+    #[test]
+    fn a_pointer_without_namespace_has_no_index_path() {
+        let p = pkg(r#"{"schema": 1, "name": "x", "kind": "skill", "ref": "ghcr.io/acme/x"}"#);
+        assert_eq!(p.into_entry("t").expect("maps").index_path, None);
+    }
+
+    #[test]
+    fn index_path_rejects_anything_but_plain_segments() {
+        assert_eq!(
+            index_path("gitlab.com/a/b", "pkg_1").as_deref(),
+            Some("gitlab.com/a/b/pkg_1")
+        );
+        assert_eq!(
+            index_path("localhost:5050/acme", "x").as_deref(),
+            Some("localhost:5050/acme/x")
+        );
+        for (ns, name) in [
+            ("", "x"),
+            ("github.com//acme", "x"),
+            ("github.com/..", "x"),
+            ("github.com/.", "x"),
+            ("github.com/acme", ".."),
+            ("github.com/acme", "a/b"),
+            ("github.com/ac me", "x"),
+            ("github.com/acme", "x\u{202e}"),
+            ("github.com/acme", "x\u{1b}[31m"),
+            ("github.com/acmé", "x"),
+            ("github.com/acme/", "x"),
+            ("/github.com/acme", "x"),
+            ("github.com/acme", ""),
+            ("github.com/acme", "x y"),
+        ] {
+            assert_eq!(index_path(ns, name), None, "{ns:?} / {name:?}");
+        }
+    }
+
+    #[test]
+    fn index_path_caps_depth_and_segment_length() {
+        let ns15 = vec!["a"; 15].join("/");
+        assert!(index_path(&ns15, "x").is_some(), "16 segments is the limit");
+        assert_eq!(index_path(&format!("{ns15}/a"), "x"), None, "17 segments");
+        let long = "a".repeat(128);
+        assert!(index_path("github.com", &long).is_some(), "128 chars is the limit");
+        assert_eq!(index_path("github.com", &format!("{long}a")), None);
+        assert_eq!(index_path(&format!("github.com/{long}a"), "x"), None);
+    }
+
+    #[test]
+    fn git_walk_directory_namespace_wins_over_declared_field() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("index");
+        let path = root.join("github.com/acme/tool/metadata.json");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(
+            &path,
+            r#"{"schema": 1, "name": "tool", "namespace": "github.com/grimoire-rs", "kind": "skill", "ref": "ghcr.io/acme/tool"}"#,
+        )
+        .expect("write");
+        // A pointer outside any namespace directory carries none, whatever it declares.
+        let lone = root.join("lone/metadata.json");
+        std::fs::create_dir_all(lone.parent().expect("parent")).expect("mkdir");
+        std::fs::write(
+            &lone,
+            r#"{"schema": 1, "name": "lone", "namespace": "github.com/acme", "kind": "skill", "ref": "ghcr.io/acme/lone"}"#,
+        )
+        .expect("write");
+        // `name` must equal the package directory; a mismatch gets no placement.
+        let renamed = root.join("github.com/acme/dir-name/metadata.json");
+        std::fs::create_dir_all(renamed.parent().expect("parent")).expect("mkdir");
+        std::fs::write(
+            &renamed,
+            r#"{"schema": 1, "name": "other-name", "kind": "skill", "ref": "ghcr.io/acme/other-name"}"#,
+        )
+        .expect("write");
+        let mut paths: Vec<_> = walk_metadata(&root, dir.path(), "git+https://example.invalid/i")
+            .expect("walk")
+            .into_iter()
+            .filter_map(|p| p.into_entry("t"))
+            .map(|e| e.index_path)
+            .collect();
+        paths.sort();
+        assert_eq!(paths, vec![None, None, Some("github.com/acme/tool".to_string())]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_walk_skips_symlinks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("index");
+        let real = root.join("github.com/acme/tool/metadata.json");
+        std::fs::create_dir_all(real.parent().expect("parent")).expect("mkdir");
+        std::fs::write(
+            &real,
+            r#"{"schema": 1, "name": "tool", "kind": "skill", "ref": "ghcr.io/acme/tool"}"#,
+        )
+        .expect("write");
+        // A pointer outside the index root, reachable only through a link.
+        let outside = dir.path().join("outside/evil");
+        std::fs::create_dir_all(&outside).expect("mkdir");
+        std::fs::write(
+            outside.join("metadata.json"),
+            r#"{"schema": 1, "name": "evil", "kind": "skill", "ref": "ghcr.io/acme/evil"}"#,
+        )
+        .expect("write");
+        std::os::unix::fs::symlink(".", root.join("loop")).expect("loop link");
+        std::os::unix::fs::symlink(dir.path().join("outside"), root.join("github.com/escape")).expect("dir link");
+        std::os::unix::fs::symlink(&real, root.join("github.com/acme/metadata.json")).expect("file link");
+        let names: Vec<_> = walk_metadata(&root, dir.path(), "git+https://example.invalid/i")
+            .expect("walk terminates")
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(names, vec!["tool".to_string()]);
+    }
+
+    #[test]
+    fn git_walk_derives_the_namespace_from_the_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("index");
+        let write = |rel: &str, body: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            std::fs::write(path, body).expect("write");
+        };
+        write(
+            "github.com/grimoire-rs/grim-usage/metadata.json",
+            r#"{"schema": 1, "name": "grim-usage", "kind": "skill", "ref": "ghcr.io/grimoire-rs/grim-usage"}"#,
+        );
+        // Nested GitLab group namespace keeps every segment.
+        write(
+            "gitlab.com/a/b/tool/metadata.json",
+            r#"{"schema": 1, "name": "tool", "kind": "rule", "ref": "registry.gitlab.com/a/b/tool"}"#,
+        );
+        let mut paths: Vec<_> = walk_metadata(&root, dir.path(), "git+https://example.invalid/i")
+            .expect("walk")
+            .into_iter()
+            .filter_map(|p| p.into_entry("t"))
+            .map(|e| e.index_path)
+            .collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![
+                Some("github.com/grimoire-rs/grim-usage".to_string()),
+                Some("gitlab.com/a/b/tool".to_string()),
+            ]
+        );
     }
 
     #[test]

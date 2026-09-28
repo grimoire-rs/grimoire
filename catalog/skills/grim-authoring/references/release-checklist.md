@@ -72,10 +72,11 @@ thing — room for a skill and a bundle to share a name.
 
 With names unique across kinds it buys nothing and still costs: every
 reference your users type carries it (a short reference cannot shrink
-below `skills/x`), and the TUI tree nests every artifact under a `skills`
-/ `bundles` node restating what the row's kind already says — doubled
-when `options.tui.group_by_type` is on, giving a `skill` group holding a
-`skills` group.
+below `skills/x`), and, browsed straight from the registry, the TUI tree
+nests every artifact under a `skills` / `bundles` node restating what the
+row's kind already says — doubled when `options.tui.group_by_type` is on,
+giving a `skill` group holding a `skills` group. (Browsed through a package
+index, the tree groups by the index namespace instead.)
 
 Publish flat by naming your namespace as the prefix in `publish.toml`:
 

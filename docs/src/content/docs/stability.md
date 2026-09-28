@@ -393,12 +393,16 @@ It was **not** true before this release. In 0.13.0 and earlier the parse
 error was raised above the rebuild decision, so a refused cache degraded
 that registry to an empty browse *without* overwriting the file — on every
 subsequent run, `--refresh` included, until someone deleted it by hand.
-This release cannot reach a binary that already shipped, so a user who
-browses a [rating-publishing index][ratings] on 0.14 and then downgrades to
-0.13 has to delete `$GRIM_HOME/catalog/` once; see
-[Upgrading][upgrading-catalog-downgrade]. An entry with no rating still
-serializes byte-identically to what 0.13 wrote, so only a user who actually
-browsed a rated index is exposed at all.
+This release cannot reach a binary that already shipped.
+
+Say you browse a [package index](./package-index.md) and then downgrade
+to 0.13. From 0.14 this matters for an index that publishes ratings. After
+0.14.2 it matters for every index. Then delete `$GRIM_HOME/catalog/` once.
+
+See [Upgrading][upgrading-catalog-downgrade]. Both a rating and the tree
+placement a package index gives each row add a field to the cache. An
+entry with neither still serializes byte-identically to what 0.13 wrote.
+So a user who only browsed OCI registries directly is not exposed.
 
 A lock's **size** cuts the same way, for one release boundary. Builds up
 to and including 0.12.0 read `grimoire.toml`, `grimoire.lock`, and

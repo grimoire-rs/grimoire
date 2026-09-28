@@ -413,6 +413,7 @@ mod tests {
             kind: "skill".to_string(),
             registry: reg.to_string(),
             repository: repo_path.to_string(),
+            index_path: None,
             repo: repo.to_string(),
             description: String::new(),
             summary: String::new(),

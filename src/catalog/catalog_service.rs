@@ -101,6 +101,10 @@ pub struct CatalogRow {
     pub registry: String,
     /// The repository path within the registry.
     pub repository: String,
+    /// Where a package index placed the pointer
+    /// ([`crate::catalog::registry_catalog::CatalogEntry::index_path`]);
+    /// `None` for an OCI `_catalog` source.
+    pub index_path: Option<String>,
     /// The short catalog summary, if any.
     pub summary: Option<String>,
     /// The catalog description, if any.
@@ -444,6 +448,7 @@ pub async fn load_catalog(
                         kind: e.kind.clone(),
                         registry: e.registry.clone(),
                         repository: e.repository.clone(),
+                        index_path: e.index_path.clone(),
                         summary: e.summary.clone(),
                         description: e.description.clone(),
                         keywords: e.keywords.clone(),
@@ -1072,6 +1077,46 @@ mod tests {
             .find(|r| r.repository == "acme/unrated")
             .expect("unrated row");
         assert_eq!(unrated.rating, None, "unrated is absent, never a zero-vote record");
+    }
+
+    #[tokio::test]
+    async fn a_cached_index_path_reaches_the_row() {
+        // R1-05: the tree's grouping key survives CatalogEntry → CatalogRow.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = GrimPaths::new(tmp.path().to_path_buf());
+        let path = paths.catalog_file_for("https://index.example");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "registry": "https://index.example",
+                "scope": "",
+                "truncated": false,
+                "built_at": chrono::Utc::now().to_rfc3339(),
+                "entries": {
+                    "ghcr.io/acme/x": {
+                        "registry": "ghcr.io", "repository": "acme/x", "kind": "skill",
+                        "index_path": "github.com/acme/x",
+                        "fetched_at": "2026-08-18T00:00:00Z",
+                    },
+                },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let (results, _) = browse_capturing(
+            tmp.path(),
+            &[index_source("https://index.example", None, &[], &[])],
+            "",
+            CatalogScope::Browse,
+        )
+        .await;
+        assert_eq!(
+            results.groups[0].rows[0].index_path.as_deref(),
+            Some("github.com/acme/x")
+        );
     }
 
     #[tokio::test]

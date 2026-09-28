@@ -1520,6 +1520,7 @@ fn project_group_rows(group: &catalog_service::CatalogGroup, ctx: &BadgeContext)
                 // never re-derived by splitting `repo`.
                 registry: e.registry.clone(),
                 repository: e.repository.clone(),
+                index_path: e.index_path.clone(),
                 repo: e.repo(),
                 description: e.description.clone().unwrap_or_default(),
                 summary: e.summary.clone().unwrap_or_default(),
@@ -1582,6 +1583,7 @@ fn rows_from_catalog(catalog: &Catalog, ctx: &BadgeContext) -> Vec<TuiRow> {
                 // never re-derived by splitting `repo`.
                 registry: e.registry.clone(),
                 repository: e.repository.clone(),
+                index_path: e.index_path.clone(),
                 repo: e.repo(),
                 description: e.description.clone().unwrap_or_default(),
                 summary: e.summary.clone().unwrap_or_default(),
@@ -2250,6 +2252,7 @@ fn local_row(
         kind: kind.to_string(),
         registry: String::new(),
         repository: path.to_string(),
+        index_path: None,
         repo: name.to_string(),
         description: String::new(),
         summary: String::new(),
@@ -3690,6 +3693,7 @@ async fn perform_member(
         kind: kind.to_string(),
         registry,
         repository,
+        index_path: None,
         repo,
         description: String::new(),
         summary: String::new(),
@@ -3922,6 +3926,7 @@ mod tests {
                 kind: Some("skill".to_string()),
                 registry: "ghcr.io/acme".to_string(),
                 repository: "tools/code-review".to_string(),
+                index_path: None,
                 summary: Some("a summary".to_string()),
                 description: Some("a description".to_string()),
                 keywords: vec!["lint".to_string()],
@@ -4022,6 +4027,7 @@ mod tests {
             kind: "skill".to_string(),
             registry: reg.to_string(),
             repository: repo_path.to_string(),
+            index_path: None,
             repo: repo.to_string(),
             description: String::new(),
             summary: String::new(),
@@ -4267,6 +4273,7 @@ mod tests {
             kind: "skill".to_string(),
             registry: "ghcr.io/acme".to_string(),
             repository: "skills/demo".to_string(),
+            index_path: None,
             repo: "ghcr.io/acme/skills/demo".to_string(),
             description: String::new(),
             summary: String::new(),
@@ -4899,6 +4906,7 @@ mod tests {
                 .map(|i| CatalogRow {
                     kind: Some("skill".to_string()),
                     registry: url.to_string(),
+                    index_path: None,
                     repository: format!("platform/skill-{i}"),
                     summary: None,
                     description: None,
@@ -5328,6 +5336,43 @@ mod tests {
         let rows = project_group_rows(&g, &badge);
         assert_eq!(rows[0].rating, Some(7), "the count reaches the row");
         assert_eq!(rows[1].rating, None, "an unrated entry stays unrated, never 0");
+    }
+
+    /// R1-05: the tree groups an index-backed row by `index_path`, so both
+    /// producers must carry it onto the `TuiRow` — a dropped clone would
+    /// silently regroup every row by OCI path and no tree test would notice.
+    #[test]
+    fn both_projections_carry_the_index_path() {
+        let (tmp, install_state, roots, bundle_repos, repos) = empty_badge_scope();
+        let badge = BadgeContext {
+            lock: None,
+            state: &install_state,
+            roots: &roots,
+            active: &ClientTarget::ALL,
+            declared_bundle_repos: &bundle_repos,
+            direct_repos: &repos,
+            snapshot_repos: &repos,
+            target: None,
+        };
+        let mut g = group("ghcr.io/acme", 2);
+        g.rows[0].index_path = Some("github.com/acme/skill-0".into());
+        let rows = project_group_rows(&g, &badge);
+        assert_eq!(rows[0].index_path.as_deref(), Some("github.com/acme/skill-0"));
+        assert_eq!(rows[1].index_path, None);
+
+        let path = tmp.path().join("catalog.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"registry":"https://index.example","scope":"","truncated":false,
+            "built_at":"2026-01-01T00:00:00Z","entries":{"ghcr.io/acme/x":{"registry":"ghcr.io",
+            "repository":"acme/x","index_path":"github.com/acme/x","fetched_at":"t"}}}"#,
+        )
+        .unwrap();
+        let catalog = Catalog::load(&path, "https://index.example")
+            .unwrap()
+            .expect("cache for the url");
+        let rows = rows_from_catalog(&catalog, &badge);
+        assert_eq!(rows[0].index_path.as_deref(), Some("github.com/acme/x"));
     }
 
     /// S-021: the producer-to-tree-root path, composed. `project_group_rows`
@@ -7291,6 +7336,7 @@ mod tests {
             kind: "bundle".to_string(),
             registry: reg.to_string(),
             repository: repo_path.to_string(),
+            index_path: None,
             repo: repo.to_string(),
             description: String::new(),
             summary: String::new(),
@@ -7432,6 +7478,7 @@ mod tests {
                 kind: "skill".to_string(),
                 registry: "reg.example.io".to_string(),
                 repository: "acme/my-skill".to_string(),
+                index_path: None,
                 repo: skill_repo.to_string(),
                 description: String::new(),
                 summary: String::new(),
@@ -7635,6 +7682,7 @@ mod tests {
             kind: "skill".to_string(),
             registry: "localhost:5050".to_string(),
             repository: "grimoire/skills/demo".to_string(),
+            index_path: None,
             repo: "localhost:5050/grimoire/skills/demo".to_string(),
             description: String::new(),
             summary: String::new(),
@@ -7701,6 +7749,7 @@ mod p2_app_member_node_tests {
             kind: "skill".to_string(),
             registry: reg.to_string(),
             repository: repo_path.to_string(),
+            index_path: None,
             repo: repo.to_string(),
             description: String::new(),
             summary: String::new(),

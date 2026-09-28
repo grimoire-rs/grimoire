@@ -247,6 +247,15 @@ pub struct CatalogEntry {
     pub registry: String,
     /// The repository path within the registry.
     pub repository: String,
+    /// Where a package index placed this pointer: `<host>/<namespace…>/<name>`
+    /// (e.g. `github.com/grimoire-rs/grim-usage`). The TUI tree groups an
+    /// index-backed row by it instead of the OCI path. `None` for an OCI
+    /// `_catalog` source, and for a pointer whose segments failed the index
+    /// source's allowlist. (Like [`Self::replaced_by`], adding a field to the
+    /// `deny_unknown_fields` on-disk shape means an older grim rejects a cache
+    /// a newer grim wrote and rebuilds it.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_path: Option<String>,
     /// The artifact kind (`skill`/`rule`/`agent`/`bundle`/`mcp`) as read
     /// from the manifest — the `com.grimoire.kind` annotation, or the
     /// legacy `artifactType`/config media type — if the manifest declared
@@ -930,6 +939,7 @@ impl Catalog {
         let bare = |latest_tag: Option<String>, version: Option<String>| CatalogEntry {
             registry: registry.to_string(),
             repository: repository.to_string(),
+            index_path: None,
             kind: None,
             description: None,
             summary: None,
@@ -1012,6 +1022,7 @@ impl Catalog {
                 CatalogEntry {
                     registry: registry.to_string(),
                     repository: repository.to_string(),
+                    index_path: None,
                     kind,
                     description,
                     summary,
@@ -1250,6 +1261,7 @@ mod tests {
             CatalogEntry {
                 registry: "localhost:5000".to_string(),
                 repository: "acme/code-review".to_string(),
+                index_path: None,
                 kind: Some("skill".to_string()),
                 description: Some("Review code.".to_string()),
                 summary: Some("review skill".to_string()),
@@ -1690,6 +1702,44 @@ mod tests {
         // …and predates the git provenance fields ⇒ both default to None.
         assert_eq!(e.revision, None);
         assert_eq!(e.created, None);
+        // …and `index_path`: an old index-backed cache groups by OCI path
+        // until its next refresh.
+        assert_eq!(e.index_path, None);
+    }
+
+    #[test]
+    fn index_path_round_trips_and_is_omitted_when_absent() {
+        let json = r#"{"registry":"ghcr.io","repository":"acme/x","index_path":"github.com/acme/x","fetched_at":"t"}"#;
+        let e: CatalogEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(e.index_path.as_deref(), Some("github.com/acme/x"));
+        assert_eq!(serde_json::to_string(&e).unwrap(), json);
+        let bare = CatalogEntry { index_path: None, ..e };
+        assert!(!serde_json::to_string(&bare).unwrap().contains("index_path"));
+    }
+
+    #[test]
+    fn an_older_grim_rejects_an_entry_carrying_index_path() {
+        // Downgrade direction of S-015 for `index_path`: an older binary's
+        // strict entry shape (no `index_path`) refuses what this one writes
+        // for an index-backed row, which `load_or_cold` turns into one
+        // rebuild (pinned by `a_newer_cache_is_rebuilt_not_surfaced_as_an_error_s015`).
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct OlderEntry {
+            registry: String,
+            repository: String,
+            fetched_at: String,
+        }
+        let e = CatalogEntry {
+            index_path: Some("github.com/acme/x".into()),
+            ..serde_json::from_str(r#"{"registry":"ghcr.io","repository":"acme/x","fetched_at":"t"}"#).unwrap()
+        };
+        let written = serde_json::to_string(&e).unwrap();
+        assert!(serde_json::from_str::<OlderEntry>(&written).is_err(), "{written}");
+        // An OCI-backed row (no placement) stays readable by the older shape.
+        let oci = serde_json::to_string(&CatalogEntry { index_path: None, ..e }).unwrap();
+        assert!(serde_json::from_str::<OlderEntry>(&oci).is_ok(), "{oci}");
     }
 
     #[tokio::test]
@@ -2160,6 +2210,7 @@ mod tests {
         let e = CatalogEntry {
             registry: "localhost:5000".to_string(),
             repository: "acme/code-review".to_string(),
+            index_path: None,
             kind: Some("skill".to_string()),
             description: Some("Review code quality".to_string()),
             summary: Some("terse blurb".to_string()),
