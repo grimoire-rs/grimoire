@@ -100,6 +100,18 @@ research-axes:
 
 ## Memory
 
+- **Landed plan (2026-09-28):** `.agents/plans/plan_hooks_pr98_revival.md`
+  — State `done` (L3 `/hex-review` approved 2026-09-28; next `/hex-finalize`;
+  no Spec Deltas, no fold), tier xhigh, branch `hex/hooks-pr-98-revival`.
+  Source: discussion `.agents/discussions/hooks-pr-98-revival.md` (→ loop,
+  goal `.agents/goals/hooks-pr-98-revival.md`). Revives PR #98 (hooks kind)
+  squash-applied once onto main; 10 WPs incl. WP-09 (fixes #88 #90 #93 #94).
+  Design record `.agents/specs/design_hooks_pr98_revival.md`.
+  **Pitfall:** parallel WP worktrees each running `task --force verify` plus a
+  Windows cross-compile OOM'd the WSL host — run heavy gates one at a time.
+  **Adversary:** direct `codex exec --sandbox read-only` found Blocks the panel
+  missed on both plan and code (consent + integrity bypass).
+
 - **Landed plan (2026-09-27):** `.agents/plans/plan_harness_plugin_export.md`
   — State `done` (L3 `/hex-review` approved 2026-09-27; next `/hex-finalize`; fold target: none, the plan has no Spec Deltas block), tier xhigh, branch `hex/harness-native-marketplaces`
   (worktree `grimoire-duo`). Phase 1 of harness plugin export: 9 WPs in 4
