@@ -255,11 +255,11 @@ fn pretty_json_line(value: &impl Serialize) -> Vec<u8> {
 
 /// The Agent Plugins `mcp.json` `mcpServers` value for one server (C-036);
 /// `None` when the descriptor cannot be represented.
-pub fn agent_plugins_mcp_entry(name: &str, d: &McpDescriptor) -> Option<serde_json::Value> {
+pub fn agent_plugins_mcp_entry(d: &McpDescriptor) -> Option<serde_json::Value> {
     let s = &d.server;
-    // The spec expands `${…}` only in args, env values and cwd; anywhere
-    // else a reference would be sent literally, and it has no auth or
-    // websocket surface — decline rather than emit a broken server.
+    // The spec expands placeholders only in args, env values and cwd;
+    // anywhere else a reference would be sent literally, and it has no auth
+    // or websocket surface — decline rather than emit a broken server.
     let unexpanded = |v: &str| v.contains("${");
     if s.oauth.is_some()
         || s.command.as_deref().is_some_and(unexpanded)
@@ -300,18 +300,35 @@ pub fn agent_plugins_mcp_entry(name: &str, d: &McpDescriptor) -> Option<serde_js
             }
         }
     }
-    // Refinement fields with no Agent Plugins key — dropped, as every
-    // vendor projection does; the server itself is still emitted.
-    for (field, present) in [
-        ("timeout", s.timeout.is_some()),
-        ("always_load", s.always_load.is_some()),
-        ("headers_helper", s.headers_helper.is_some()),
-    ] {
-        if present {
-            tracing::warn!("mcp server '{name}': `{field}` has no Agent Plugins mcp.json key; dropped");
-        }
-    }
-    Some(serde_json::Value::Object(entry))
+    // Claude's plugin placeholders have spec equivalents (§9.2): rename them,
+    // so one descriptor works in both plugin families.
+    let mut entry = serde_json::Value::Object(entry);
+    crate::install::mcp_config::translate_env_refs(&mut entry, &|var| match var {
+        "CLAUDE_PLUGIN_ROOT" => "${PLUGIN_ROOT}".to_string(),
+        "CLAUDE_PLUGIN_DATA" => "${PLUGIN_DATA}".to_string(),
+        other => format!("${{{other}}}"),
+    });
+    // Refinement fields (timeout, always_load, headers_helper) have no Agent
+    // Plugins key and are dropped, as every vendor projection does; the
+    // per-client warning lives in `stage::mcp_value`.
+    Some(entry)
+}
+
+/// The environment variables an Agent Plugins entry for `d` would still
+/// reference after the placeholder rename — every `${VAR}` in args, env
+/// values and cwd that is not a plugin placeholder. Sorted, deduplicated.
+pub(crate) fn unexpanded_env_refs(d: &McpDescriptor) -> Vec<&str> {
+    const PLACEHOLDERS: [&str; 4] = ["PLUGIN_ROOT", "PLUGIN_DATA", "CLAUDE_PLUGIN_ROOT", "CLAUDE_PLUGIN_DATA"];
+    let s = &d.server;
+    let names: std::collections::BTreeSet<&str> = s
+        .args
+        .iter()
+        .chain(s.env.values())
+        .chain(s.cwd.iter())
+        .flat_map(|v| crate::oci::mcp::env_ref_names(v))
+        .filter(|n| !PLACEHOLDERS.contains(n))
+        .collect();
+    names.into_iter().collect()
 }
 
 #[cfg(test)]
@@ -689,7 +706,7 @@ mod tests {
     fn c036_stdio_minimal() {
         let d = desc("transport = \"stdio\"\ncommand = \"grim\"");
         assert_eq!(
-            agent_plugins_mcp_entry("m", &d),
+            agent_plugins_mcp_entry(&d),
             Some(json!({"type": "stdio", "command": "grim"})),
             "empty args/env omitted, no cwd"
         );
@@ -702,7 +719,7 @@ mod tests {
              env = { TOKEN = \"${TOKEN}\" }\ncwd = \"${HOME}/srv\"",
         );
         assert_eq!(
-            agent_plugins_mcp_entry("m", &d),
+            agent_plugins_mcp_entry(&d),
             Some(json!({
                 "type": "stdio",
                 "command": "grim",
@@ -714,15 +731,45 @@ mod tests {
     }
 
     #[test]
+    fn claude_plugin_placeholders_become_the_spec_placeholders() {
+        let d = desc(
+            "transport = \"stdio\"\ncommand = \"node\"\nargs = [\"${CLAUDE_PLUGIN_ROOT}/srv.js\"]\n\
+             env = { CACHE = \"${CLAUDE_PLUGIN_DATA}/c\" }\ncwd = \"${CLAUDE_PLUGIN_ROOT}\"",
+        );
+        assert_eq!(
+            agent_plugins_mcp_entry(&d),
+            Some(json!({
+                "type": "stdio",
+                "command": "node",
+                "args": ["${PLUGIN_ROOT}/srv.js"],
+                "env": {"CACHE": "${PLUGIN_DATA}/c"},
+                "cwd": "${PLUGIN_ROOT}",
+            }))
+        );
+    }
+
+    #[test]
+    fn environment_refs_are_reported_but_still_shipped() {
+        let d = desc(
+            "transport = \"stdio\"\ncommand = \"grim\"\nargs = [\"${CLAUDE_PLUGIN_ROOT}\", \"--dsn\", \"${DB_DSN}\"]\n\
+             env = { TOKEN = \"${TOKEN}\" }\ncwd = \"${PLUGIN_DATA}\"",
+        );
+        assert_eq!(unexpanded_env_refs(&d), vec!["DB_DSN", "TOKEN"]);
+        assert!(agent_plugins_mcp_entry(&d).is_some(), "still shipped");
+        let plain = desc("transport = \"stdio\"\ncommand = \"grim\"\nargs = [\"${PLUGIN_ROOT}\"]");
+        assert!(unexpanded_env_refs(&plain).is_empty());
+    }
+
+    #[test]
     fn c036_http_is_streamable_http() {
         let d = desc("transport = \"http\"\nurl = \"https://x/mcp\"\nheaders = { \"X-Team\" = \"core\" }");
         assert_eq!(
-            agent_plugins_mcp_entry("web", &d),
+            agent_plugins_mcp_entry(&d),
             Some(json!({"type": "streamable-http", "url": "https://x/mcp", "headers": {"X-Team": "core"}}))
         );
         let bare = desc("transport = \"http\"\nurl = \"https://x/mcp\"");
         assert_eq!(
-            agent_plugins_mcp_entry("web", &bare),
+            agent_plugins_mcp_entry(&bare),
             Some(json!({"type": "streamable-http", "url": "https://x/mcp"})),
             "empty headers omitted"
         );
@@ -732,12 +779,12 @@ mod tests {
     fn c036_sse() {
         let d = desc("transport = \"sse\"\nurl = \"https://x/sse\"");
         assert_eq!(
-            agent_plugins_mcp_entry("feed", &d),
+            agent_plugins_mcp_entry(&d),
             Some(json!({"type": "sse", "url": "https://x/sse"}))
         );
         let h = desc("transport = \"sse\"\nurl = \"https://x/sse\"\nheaders = { A = \"b\" }");
         assert_eq!(
-            agent_plugins_mcp_entry("feed", &h),
+            agent_plugins_mcp_entry(&h),
             Some(json!({"type": "sse", "url": "https://x/sse", "headers": {"A": "b"}}))
         );
     }
@@ -745,9 +792,9 @@ mod tests {
     #[test]
     fn c036_declines_ws_and_oauth() {
         let ws = desc("transport = \"ws\"\nurl = \"wss://x/socket\"");
-        assert_eq!(agent_plugins_mcp_entry("sock", &ws), None);
+        assert_eq!(agent_plugins_mcp_entry(&ws), None);
         let oauth = desc("transport = \"http\"\nurl = \"https://x\"\n[server.oauth]\nclient_id = \"c\"");
-        assert_eq!(agent_plugins_mcp_entry("authd", &oauth), None);
+        assert_eq!(agent_plugins_mcp_entry(&oauth), None);
     }
 
     #[test]
@@ -771,7 +818,7 @@ mod tests {
             }),
         ];
         for (what, d) in cases {
-            assert_eq!(agent_plugins_mcp_entry("m", &d), None, "`${{` in {what}");
+            assert_eq!(agent_plugins_mcp_entry(&d), None, "`${{` in {what}");
         }
     }
 
@@ -779,12 +826,12 @@ mod tests {
     fn c036_drops_refinement_fields() {
         let stdio = desc("transport = \"stdio\"\ncommand = \"grim\"\ntimeout = 7000\nalways_load = true");
         assert_eq!(
-            agent_plugins_mcp_entry("m", &stdio),
+            agent_plugins_mcp_entry(&stdio),
             Some(json!({"type": "stdio", "command": "grim"}))
         );
         let http = desc("transport = \"http\"\nurl = \"https://x/mcp\"\ntimeout = 7000\nheaders_helper = \"./h.sh\"");
         assert_eq!(
-            agent_plugins_mcp_entry("web", &http),
+            agent_plugins_mcp_entry(&http),
             Some(json!({"type": "streamable-http", "url": "https://x/mcp"}))
         );
     }
@@ -793,8 +840,8 @@ mod tests {
     fn c036_byte_identical_across_calls() {
         let d =
             desc("transport = \"stdio\"\ncommand = \"grim\"\nargs = [\"a\", \"b\"]\nenv = { Z = \"1\", A = \"2\" }");
-        let a = serde_json::to_vec(&agent_plugins_mcp_entry("m", &d).unwrap()).unwrap();
-        let b = serde_json::to_vec(&agent_plugins_mcp_entry("m", &d).unwrap()).unwrap();
+        let a = serde_json::to_vec(&agent_plugins_mcp_entry(&d).unwrap()).unwrap();
+        let b = serde_json::to_vec(&agent_plugins_mcp_entry(&d).unwrap()).unwrap();
         assert_eq!(a, b);
     }
 }

@@ -275,7 +275,9 @@ Reversibility: one-way (CLI, frozen at 1.0).
   outside `/mcpServers/`, or C-036 declining ws / oauth / an unexpandable
   `${…}`). Agent Plugins `mcp.json`: `http` → `streamable-http`, `sse` and
   `stdio` copied, refinement fields (`timeout`, `always_load`,
-  `headers_helper`) dropped as every vendor projection does.
+  `headers_helper`) dropped as every vendor projection does. Plugin
+  placeholders are renamed per family and other `${VAR}` references warn
+  rather than decline (see Amendment 2026-09-28).
 - **Paths** (export-computed, never `path_for`): `skills/<name>/`,
   `agents/<name>.md`, `.mcp.json` (Claude family); `skills/<name>/`,
   `mcp.json` (Agent Plugins).
@@ -475,7 +477,8 @@ one; the Claude-app zip upload works with no grim on the consumer.
 
 **Negative:** `marketplace.lock` carries a marketplace-only `[[plugin]]`
 table; Agent Plugins MCP drops ws / oauth / unexpandable-reference servers
-(named); identifier-strict
+(named), and exports other `${VAR}` references with a warning though a
+client may pass them literally (Amendment 2026-09-28); identifier-strict
 member conflicts reject some digest-equal duplicates; strict content scan
 stops today's `hex` bundle until its cross-links are removed (intended).
 
@@ -575,6 +578,31 @@ rather than a second lock system (plan: `.agents/plans/plan_export_project.md`):
   `grim update --marketplace`; naming one there → 64). Metadata falls back
   per field: flag > `[plugins.x]` > project `[plugin]` > none.
 
+## Amendment 2026-09-28 — plugin placeholders and env references in MCP
+
+Review round 1 of the export branch (R1-19). Contracts: design record
+C-020 and C-036, amendments of the same date.
+
+- **§9.2 fact.** The Agent Plugins spec expands only `${PLUGIN_ROOT}` and
+  `${PLUGIN_DATA}`, in `args`, `env` values and `cwd`. It expands no
+  environment variables.
+- **Rename to the spec.** An Agent Plugins export (`codex`, `cursor`,
+  `copilot`, `agents`) renames `${CLAUDE_PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_DATA}`
+  to `${PLUGIN_ROOT}` / `${PLUGIN_DATA}`.
+- **Rename to Claude.** A `claude` export does the reverse, in every field
+  including `url` and headers, where Claude expands its placeholders.
+  Export-only: `grim install` writes the descriptor as is. This is the one
+  install/export divergence in MCP rendering. Droid, Junie and OpenClaw
+  keep the descriptor's spelling.
+- **Warn, don't decline.** In an Agent Plugins export, any other `${VAR}`
+  in `args`, `env` values or `cwd` is exported with a warning, so the
+  server works once its client expands environment variables. A `${…}` in
+  `command`, `url`, an env key or a header still omits the server
+  `not-representable`. Reversibility: one-way once released. Tightening to
+  decline later removes output, a breaking change under Principle 9.
+  Chosen because a server that works for its placeholder parts, and works
+  fully once its client adds expansion, beats omitting it.
+
 ## Links
 
 - `.agents/adr/adr_render_layout_stability.md` (D12)
@@ -594,3 +622,4 @@ rather than a second lock system (plan: `.agents/plans/plan_export_project.md`):
 | 2026-09-27 | hex-plan re-validation | R1–R9: `grim context` keeps exit 0 with `lock_error`; MCP lock/emitted names use a containment check, not `SkillName`; part metadata copies top-level `[metadata]`; `DeclareError` → exit mapping with explicit offline check; `.toml`-stem and absolute manifest path; D4 atomicity order |
 | 2026-09-27 | meta-orchestrator decision | D5 → option i: Agent Plugins `mcp.json` emitter (C-036, S-031); `not-yet-supported` reason removed; Agent Plugins MCP admitted per family, not gated on client `kind_support` |
 | 2026-09-27 | owner review | Amendment: `--project`, `[plugin]` in `grimoire.toml`, marketplace `project` plugins |
+| 2026-09-28 | review round 1 (R1-19) | Amendment: MCP plugin placeholders renamed per family (claude export reverses the Agent Plugins rename, export-only); other `${VAR}` in args/env values/cwd warn instead of decline; D5 bullet and Negative consequence point to it |

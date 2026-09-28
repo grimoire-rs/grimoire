@@ -1809,13 +1809,23 @@ digit or contains a `.`, the same names a Junie install skips.
 An MCP descriptor using a transport or field the target shape cannot
 express is omitted `not-representable` rather than silently dropped. For
 an **Agent Plugins** export this covers `oauth`, the `ws` transport, or a
-`${…}` reference inside `command`, `url`, an env key, or a header — the
-spec performs no expansion there. Claude family MCP has its own, narrower
-decline: Junie refuses a descriptor carrying OAuth or an env reference, and
-Droid refuses one carrying a `${VAR}` reference in `command`, `args`, or
-`url` (a reference in `env`, `headers`, or a literal oauth `client_id` is
-fine), or an `oauth` block with anything beyond a literal `client_id`.
-The [team-plugin guide](./guides/team-plugin.md) covers the practical
+`${…}` reference inside `command`, `url`, an env key, or a header. The
+spec performs no expansion there. In `args`, env values and `cwd` the
+spec expands only `${PLUGIN_ROOT}` and `${PLUGIN_DATA}`. grim renames
+`${CLAUDE_PLUGIN_ROOT}` and `${CLAUDE_PLUGIN_DATA}` to them. Any other
+`${VAR}` there is exported with a warning, because a client may pass it
+through literally.
+
+A `claude` export does the reverse. It renames `${PLUGIN_ROOT}` and
+`${PLUGIN_DATA}` to `${CLAUDE_PLUGIN_ROOT}` and `${CLAUDE_PLUGIN_DATA}` in
+every field, `url` and headers included. Claude expands its placeholders
+there. `grim install` never renames.
+
+Claude family MCP has its own, narrower decline. Junie refuses a
+descriptor carrying OAuth or an env reference. Droid refuses a `${VAR}`
+reference in `command`, `args` or `url`, and an `oauth` block with
+anything beyond a literal `client_id`. A reference in `env` or `headers`
+is fine for Droid. The [team-plugin guide](./guides/team-plugin.md) covers the practical
 fallout for stdio servers.
 
 ### Output naming and placement {#export-plugin-output}
