@@ -2104,7 +2104,7 @@ the query holds a text term. Ranked results then read as one list instead of
 scattering across groups. The list stays flat until the query is cleared, so
 finishing a kind word like `bundle` does not flip the view back.
 
-Clearing the query returns to the tree. Pressing `t` during a search is
+Clearing the query (`esc`) returns to the tree. Pressing `t` during a search is
 honoured and sticks. Clearing the query then leaves the view as you chose
 it.
 
@@ -2146,9 +2146,9 @@ status stay on the catalog row).
 
 There is **no detail focus to enter or leave.** `↑`/`↓` always move the
 selection, the pane scrolls with `j`/`k` (line by line) and `pgup`/`pgdn` (a
-page), `tab` switches its panel — every one of them from wherever you are, and
-`esc` quits on the first press. Scrolling is clamped at both ends: it saturates
-at the top and stops when the content's last line reaches the pane's bottom
+page), `tab` switches its panel. Every one of them works from wherever you
+are. Outside a search, `esc` quits on the first press. Scrolling is clamped
+at both ends: it saturates at the top and stops when the content's last line reaches the pane's bottom
 edge.
 
 ### Detail tabs and repository docs {#tui-detail-tabs}

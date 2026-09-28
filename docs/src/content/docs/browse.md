@@ -70,8 +70,8 @@ app. The website and the VS Code extension have no key map.
 | `tab` / `shift-tab` | Switch the detail panel between overview, readme and changelog |
 | `h` | Show or hide deprecated artifacts |
 | `r` | Refresh the catalog |
-| `/` | Start a search |
-| `esc` | Quit, on the first press |
+| `/` | Start a search. `enter` keeps the query. `esc` clears it, and a second `esc` leaves the search |
+| `esc` | Quit, on the first press outside a search |
 | `?` | Open this help |
 | `q` | Quit |
 
