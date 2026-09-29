@@ -8,6 +8,8 @@ use std::fs;
 use std::io::{self, BufWriter, ErrorKind};
 use std::path::{Component, Path, PathBuf};
 
+use crate::oci::Algorithm;
+
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, DateTime, System, ZipWriter};
 
@@ -90,6 +92,66 @@ fn collect(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> io::Res
         }
     }
     Ok(())
+}
+
+/// One regular file of a plugin tree, as the version hash sees it (C-001).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InventoryEntry {
+    /// `/`-joined name, as [`entry_name`] returns it.
+    pub name: String,
+    /// Any execute bit set (always `false` on Windows).
+    pub exec: bool,
+    /// Lowercase hex SHA-256 of the contents (64 digits).
+    pub sha256: String,
+}
+
+/// Every regular file under `root`, sorted by name bytes (C-001, strict):
+/// a symlink or special file fails `InvalidInput`, an unsafe name
+/// `InvalidData`, exactly as [`write_zip`] would.
+pub fn tree_inventory(root: &Path) -> io::Result<Vec<InventoryEntry>> {
+    let mut files = Vec::new();
+    collect(root, root, &mut files)?;
+    files.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    files
+        .into_iter()
+        .map(|(name, path)| {
+            let sha256 = Algorithm::Sha256.hash_file(&path)?.hex().to_string();
+            Ok(InventoryEntry {
+                name,
+                exec: is_exec(&fs::symlink_metadata(&path)?),
+                sha256,
+            })
+        })
+        .collect()
+}
+
+/// [`tree_inventory`] of an existing output (C-001, tolerant): `None`
+/// ("differs") when `root` is missing, a symlink, not a directory, or holds
+/// a symlink, special file or unsafe name; `root` is never followed.
+#[allow(dead_code, reason = "first caller is `export marketplace` (WP-D)")]
+pub fn disk_inventory(root: &Path) -> io::Result<Option<Vec<InventoryEntry>>> {
+    match fs::symlink_metadata(root) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => return Ok(None),
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    match tree_inventory(root) {
+        Ok(inventory) => Ok(Some(inventory)),
+        Err(e) if e.kind() == ErrorKind::InvalidInput || unsafe_entry(&e).is_some() => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(unix)]
+fn is_exec(meta: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    meta.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn is_exec(_: &fs::Metadata) -> bool {
+    false
 }
 
 /// The payload of [`entry_name`]'s `InvalidData` error: the refused path,
@@ -479,5 +541,132 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let out = zip_at(root.path(), dir.path());
         assert_eq!(names(&out), ["..notes.md", "skills/x..y/SKILL.md"]);
+    }
+
+    // ── C-001 inventories ──
+
+    fn inv(root: &Path) -> Vec<(String, bool)> {
+        tree_inventory(root)
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.name, e.exec))
+            .collect()
+    }
+
+    #[test]
+    fn c001_tree_inventory_is_sorted_bytewise_with_lowercase_sha256() {
+        let root = tempfile::tempdir().unwrap();
+        write_tree(root.path(), TREE);
+        fs::create_dir_all(root.path().join("empty/inner")).unwrap();
+        let got = tree_inventory(root.path()).unwrap();
+        let names: Vec<&str> = got.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, SORTED);
+        for e in &got {
+            assert_eq!(e.sha256.len(), 64, "{}", e.name);
+            assert!(
+                e.sha256.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+                "{}",
+                e.name
+            );
+        }
+        // Empty file: the well-known SHA-256 of zero bytes.
+        let empty = got.iter().find(|e| e.name == "skills/x/refs/deep/note.txt").unwrap();
+        assert_eq!(
+            empty.sha256,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn c001_empty_dir_is_an_empty_inventory() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(tree_inventory(root.path()).unwrap(), vec![]);
+        assert_eq!(disk_inventory(root.path()).unwrap(), Some(vec![]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn c001_exec_is_any_execute_bit() {
+        let root = tempfile::tempdir().unwrap();
+        write_tree(root.path(), &[("plain", b"a"), ("x", b"b"), ("g", b"c")]);
+        set_mode(&root.path().join("x"), 0o755);
+        set_mode(&root.path().join("g"), 0o610);
+        assert_eq!(
+            inv(root.path()),
+            [
+                ("g".to_string(), true),
+                ("plain".to_string(), false),
+                ("x".to_string(), true)
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn c001_strict_refuses_symlink_fifo_and_unsafe_name() {
+        let root = tempfile::tempdir().unwrap();
+        write_tree(root.path(), &[("a.md", b"a\n")]);
+        std::os::unix::fs::symlink(root.path().join("a.md"), root.path().join("link")).unwrap();
+        let err = tree_inventory(root.path()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        fs::remove_file(root.path().join("link")).unwrap();
+
+        let fifo = root.path().join("pipe");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let err = tree_inventory(root.path()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        fs::remove_file(&fifo).unwrap();
+
+        fs::write(root.path().join("bad\\name"), b"x").unwrap();
+        let err = tree_inventory(root.path()).unwrap_err();
+        assert!(unsafe_entry(&err).is_some(), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn c001_tolerant_reports_differs_instead_of_failing() {
+        let base = tempfile::tempdir().unwrap();
+        // Missing root.
+        assert_eq!(disk_inventory(&base.path().join("nope")).unwrap(), None);
+        // Regular file as root.
+        fs::write(base.path().join("file"), b"x").unwrap();
+        assert_eq!(disk_inventory(&base.path().join("file")).unwrap(), None);
+        // Symlinked root, even to a valid directory: never followed.
+        let real = base.path().join("real");
+        write_tree(&real, &[("a.md", b"a")]);
+        std::os::unix::fs::symlink(&real, base.path().join("alias")).unwrap();
+        assert_eq!(disk_inventory(&base.path().join("alias")).unwrap(), None);
+        // Symlink, fifo and unsafe name inside.
+        assert!(disk_inventory(&real).unwrap().is_some());
+        std::os::unix::fs::symlink(real.join("a.md"), real.join("link")).unwrap();
+        assert_eq!(disk_inventory(&real).unwrap(), None);
+        fs::remove_file(real.join("link")).unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(real.join("pipe"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(disk_inventory(&real).unwrap(), None);
+        fs::remove_file(real.join("pipe")).unwrap();
+        fs::write(real.join("bad\\name"), b"x").unwrap();
+        assert_eq!(disk_inventory(&real).unwrap(), None);
+    }
+
+    #[test]
+    fn c001_tolerant_equals_strict_on_a_clean_tree() {
+        let root = tempfile::tempdir().unwrap();
+        write_tree(root.path(), TREE);
+        assert_eq!(
+            disk_inventory(root.path()).unwrap(),
+            Some(tree_inventory(root.path()).unwrap())
+        );
     }
 }

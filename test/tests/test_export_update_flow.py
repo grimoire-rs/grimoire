@@ -3,7 +3,7 @@
 """Export → update → re-export flow (design record S-019, C-023, C-011–C-013).
 
 A declared plugin exported under `--version v1.2.0` carries `1.2.0+<h>`,
-where `h` hashes the pinned member digests. A patch published under the same
+where `h` hashes the rendered tree. A patch published under the same
 floating tag reaches the plugin only through `grim update --marketplace`;
 the re-export then carries a new suffix and differs only in the patched
 member's files and the manifest.
@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import tomllib
@@ -38,10 +39,23 @@ def _plan_files(notes: str) -> dict[str, str]:
     }
 
 
-def _suffix(digests: dict[tuple[str, str], str]) -> str:
-    """C-023: first 12 hex of SHA-256 over sorted `kind\\temitted\\tdigest\\n` lines."""
-    lines = sorted(f"{k}\t{n}\t{d}\n" for (k, n), d in digests.items())
-    return hashlib.sha256("".join(lines).encode()).hexdigest()[:12]
+def _suffix(root: Path, base: str) -> str:
+    """C-002/C-003: 12 hex of SHA-256 over the compact JSON `[name, exec, sha256]` triples
+    of the produced tree, its manifest's version put back to `base`."""
+    inventory = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(root).as_posix()
+        data = path.read_bytes()
+        if rel == _CLAUDE_MANIFEST:
+            version = json.loads(data)["version"]
+            data = data.replace(f'"version": "{version}"'.encode(), f'"version": "{base}"'.encode())
+        exec_bit = sys.platform != "win32" and bool(path.stat().st_mode & 0o111)
+        inventory.append((rel, exec_bit, hashlib.sha256(data).hexdigest()))
+    inventory.sort(key=lambda entry: entry[0].encode())
+    blob = json.dumps([list(t) for t in inventory], separators=(",", ":"), ensure_ascii=False).encode()
+    return hashlib.sha256(blob).hexdigest()[:12]
 
 
 def _lock_digests(lock_path: Path, plugin: str) -> dict[tuple[str, str], str]:
@@ -141,7 +155,7 @@ def test_s019_version_override_bumps_suffix_after_update(
         ("agent", "team-reviewer"),
     }
     assert pins_v1[("skill", "team-plan")] == plan_v1
-    h = _suffix(pins_v1)
+    h = _suffix(root, "1.2.0")
     assert v1 == f"1.2.0+{h}"
     tree_v1 = _tree(root)
 
@@ -177,7 +191,7 @@ def test_s019_version_override_bumps_suffix_after_update(
     assert pins_v2 == {**pins_v1, ("skill", "team-plan"): plan_v2}
 
     v2 = _version(_export(runner, "--version", "v1.2.0", "--force"), root)
-    h2 = _suffix(pins_v2)
+    h2 = _suffix(root, "1.2.0")
     assert h2 != h
     assert v2 == f"1.2.0+{h2}"
 

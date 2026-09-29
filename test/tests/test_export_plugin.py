@@ -168,11 +168,53 @@ def _annotated_stack(runner: GrimRunner, tmp_path: Path, registry: str, unique_r
     )
 
 
-def _suffix(members: dict[tuple[str, str], str], rename: dict[str, str] | None = None) -> str:
-    """C-023: first 12 hex of SHA-256 over sorted `kind\\temitted\\tdigest\\n` lines."""
-    rename = rename or {}
-    lines = sorted(f"{k}\t{rename.get(n, n)}\t{d}\n" for (k, n), d in members.items())
-    return hashlib.sha256("".join(lines).encode()).hexdigest()[:12]
+_VERSIONED_MANIFESTS = (
+    ".claude-plugin/plugin.json",
+    ".qoder-plugin/plugin.json",
+    ".cursor-plugin/plugin.json",
+    "plugin.json",
+)
+# C-002 golden vector, the same literal as `family.rs` `GOLDEN_SUFFIX`.
+GOLDEN_SUFFIX = "338bda8ec321"
+
+
+def _inventory_suffix(inventory: list[tuple[str, bool, str]]) -> str:
+    """C-002: 12 hex of SHA-256 over the compact JSON array of `[name, exec, sha256]` triples."""
+    blob = json.dumps([list(t) for t in inventory], separators=(",", ":"), ensure_ascii=False).encode()
+    return hashlib.sha256(blob).hexdigest()[:12]
+
+
+def _suffix(root: Path, base: str) -> str:
+    """C-003: the tree hash of a produced plugin root, every manifest's version put back to `base`."""
+    inventory = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(root).as_posix()
+        data = path.read_bytes()
+        if rel in _VERSIONED_MANIFESTS:
+            version = json.loads(data)["version"]
+            data = data.replace(f'"version": "{version}"'.encode(), f'"version": "{base}"'.encode())
+        exec_bit = sys.platform != "win32" and bool(path.stat().st_mode & 0o111)
+        inventory.append((rel, exec_bit, hashlib.sha256(data).hexdigest()))
+    inventory.sort(key=lambda entry: entry[0].encode())
+    return _inventory_suffix(inventory)
+
+
+def test_suffix_helper_matches_the_rust_golden_vector() -> None:
+    """S-021: the pytest derivation and `plugin_version` agree on one fixed inventory."""
+    alpha = hashlib.sha256(b"alpha\n").hexdigest()
+    beta = hashlib.sha256(b"beta\n").hexdigest()
+    assert _inventory_suffix([("a.md", False, alpha), ("scripts/run.sh", True, beta)]) == GOLDEN_SUFFIX
+
+
+def test_suffix_helper_reads_a_tree(tmp_path: Path) -> None:
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "a.md").write_bytes(b"alpha\n")
+    (tmp_path / "scripts" / "run.sh").write_bytes(b"beta\n")
+    (tmp_path / "scripts" / "run.sh").chmod(0o755)
+    if sys.platform != "win32":
+        assert _suffix(tmp_path, "1.2.0") == GOLDEN_SUFFIX
 
 
 def _export(runner: GrimRunner, *args: str, fmt: str | None = "json") -> subprocess.CompletedProcess[str]:
@@ -280,8 +322,9 @@ def test_s001_claude_zip_from_one_bundle_ref(grim_at, tmp_path: Path, work: Path
     assert _entries(work / "dist") == ["team-stack.claude.zip"]
     with zipfile.ZipFile(zpath) as z:
         names = z.namelist()
-        manifest_bytes = z.read(".claude-plugin/plugin.json")
         readme = z.read("README.md").decode()
+        unpacked = tmp_path / "unpacked"
+        z.extractall(unpacked)
     for expected in (
         ".claude-plugin/plugin.json",
         "README.md",
@@ -296,14 +339,10 @@ def test_s001_claude_zip_from_one_bundle_ref(grim_at, tmp_path: Path, work: Path
     assert not any(n.endswith("/") for n in names), "C-026: no directory entries"
     assert names == sorted(names), "C-026: entries sorted bytewise"
 
-    unpacked = tmp_path / "unpacked"
-    unpacked.mkdir()
-    (unpacked / ".claude-plugin").mkdir()
-    (unpacked / ".claude-plugin" / "plugin.json").write_bytes(manifest_bytes)
     doc = _manifest(unpacked)
     assert doc["name"] == "team-stack"
-    # C-023: the pinned bundle's version annotation, leading `v` stripped.
-    assert doc["version"] == f"1.4.0+{_suffix(stack.digests)}"
+    # C-003: the pinned bundle's version annotation (leading `v` stripped) plus the tree hash.
+    assert doc["version"] == f"1.4.0+{_suffix(unpacked, '1.4.0')}"
     assert doc["description"] == "The team stack."
     assert readme == f"# team-stack\n\nThe team stack.\n\nOmitted for claude: rule team-style.\n\n{ONRAMP}\n"
 
@@ -346,7 +385,7 @@ def test_s002_agent_plugins_directory_for_codex(grim_at, tmp_path: Path, work: P
     root = work / "out" / "team-stack.codex"
     doc = _manifest(root)
     assert doc["name"] == "team-stack"
-    assert doc["version"] == f"1.4.0+{_suffix(stack.digests)}"
+    assert doc["version"] == f"1.4.0+{_suffix(root, '1.4.0')}"
     assert doc["description"] == "The team stack."
     assert "Omitted for codex: rule team-style, agent team-reviewer." in _readme(root)
     assert (root / "skills" / "team-plan" / "SKILL.md").is_file()
@@ -386,8 +425,8 @@ def test_s003_two_refs_with_name_merge_into_one_plugin(grim_at, work: Path, regi
     runner = grim_at(work)
     # The annotation is ignored: only a single-ref export reads it (C-023).
     ann = {"org.opencontainers.image.version": "9.9.9"}
-    da = _skill(f"{unique_repo}/a", "a", annotations=ann)
-    db = _skill(f"{unique_repo}/b", "b", annotations=ann)
+    _skill(f"{unique_repo}/a", "a", annotations=ann)
+    _skill(f"{unique_repo}/b", "b", annotations=ann)
 
     out = _ok(
         _export(runner, f"{registry}/{unique_repo}/a:1", f"{registry}/{unique_repo}/b:1", "--name", "duo", "--client", "claude")
@@ -398,7 +437,7 @@ def test_s003_two_refs_with_name_merge_into_one_plugin(grim_at, work: Path, regi
     assert (root / "skills" / "b" / "SKILL.md").is_file()
     doc = _manifest(root)
     assert doc["name"] == "duo"
-    assert doc["version"] == f"0.0.0+{_suffix({('skill', 'a'): da, ('skill', 'b'): db})}"
+    assert doc["version"] == f"0.0.0+{_suffix(root, '0.0.0')}"
     assert [(m["kind"], m["name"]) for m in out["items"][0]["members"]] == [("skill", "a"), ("skill", "b")]
 
 
@@ -510,7 +549,7 @@ def test_s005_declared_plugin_writes_lock_and_is_stable_on_rerun(
     doc = _manifest(root)
     assert doc["name"] == "team"
     # Declared mode reads no annotation: no declared version → 0.0.0.
-    assert doc["version"] == f"0.0.0+{_suffix(stack.digests)}"
+    assert doc["version"] == f"0.0.0+{_suffix(root, '0.0.0')}"
     assert out["items"][0]["version"] == doc["version"]
 
     lock = tomllib.loads(lock_path.read_text())
@@ -574,7 +613,7 @@ def test_c010_changed_local_member_exits_65_until_update_marketplace(grim_at, wo
 # ── S-006 — Stale lock after an edit (C-004, C-033) ─────────────────────────
 
 
-def test_s006_description_edit_keeps_lock_and_version(
+def test_s006_description_edit_changes_the_version_and_keeps_the_lock(
     grim_at, tmp_path: Path, work: Path, registry: str, unique_repo: str
 ) -> None:
     runner = grim_at(work)
@@ -591,7 +630,9 @@ def test_s006_description_edit_keeps_lock_and_version(
 
     doc = _manifest(work / "dist" / "team.claude")
     assert lock_path.read_bytes() == lock_before
-    assert doc["version"] == version_before
+    # S-004 / D7: the description is in the manifest, so it is in the tree hash.
+    assert doc["version"] != version_before
+    assert doc["version"] == f"0.0.0+{_suffix(work / 'dist' / 'team.claude', '0.0.0')}"
     assert doc["description"] == "Second."
 
 
@@ -915,8 +956,7 @@ def test_s013_strip_prefix_renames_every_member(grim_at, tmp_path: Path, work: P
     assert set(json.loads((root / ".mcp.json").read_text())["mcpServers"]) == {"srv"}
 
     doc = _manifest(root)
-    assert doc["version"] == f"0.0.0+{_suffix(stack.digests, RENAMED)}"
-    assert _suffix(stack.digests, RENAMED) != _suffix(stack.digests)
+    assert doc["version"] == f"0.0.0+{_suffix(root, '0.0.0')}"
     assert doc["description"] == ONRAMP, "no base text: the on-ramp stands in"
     assert f"Omitted for claude: rule style.\n\n{ONRAMP}\n" in _readme(root)
     plan = next(m for m in out["items"][0]["members"] if m["name"] == "plan")
