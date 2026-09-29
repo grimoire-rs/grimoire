@@ -22,15 +22,21 @@ import re
 import subprocess
 import sys
 import zipfile
-from collections.abc import Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 import tomllib
 
-from src.helpers import make_artifact, make_bundle, make_description, write_config
+from src.helpers import (
+    held_flock as _held_flock,
+    inventory_suffix as _inventory_suffix,
+    make_artifact,
+    make_bundle,
+    make_description,
+    tree_suffix as _suffix,
+    write_config,
+)
 from src.registry import push_artifact, retag
 from src.runner import GrimRunner
 
@@ -168,37 +174,8 @@ def _annotated_stack(runner: GrimRunner, tmp_path: Path, registry: str, unique_r
     )
 
 
-_VERSIONED_MANIFESTS = (
-    ".claude-plugin/plugin.json",
-    ".qoder-plugin/plugin.json",
-    ".cursor-plugin/plugin.json",
-    "plugin.json",
-)
 # C-002 golden vector, the same literal as `family.rs` `GOLDEN_SUFFIX`.
 GOLDEN_SUFFIX = "338bda8ec321"
-
-
-def _inventory_suffix(inventory: list[tuple[str, bool, str]]) -> str:
-    """C-002: 12 hex of SHA-256 over the compact JSON array of `[name, exec, sha256]` triples."""
-    blob = json.dumps([list(t) for t in inventory], separators=(",", ":"), ensure_ascii=False).encode()
-    return hashlib.sha256(blob).hexdigest()[:12]
-
-
-def _suffix(root: Path, base: str) -> str:
-    """C-003: the tree hash of a produced plugin root, every manifest's version put back to `base`."""
-    inventory = []
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
-        rel = path.relative_to(root).as_posix()
-        data = path.read_bytes()
-        if rel in _VERSIONED_MANIFESTS:
-            version = json.loads(data)["version"]
-            data = data.replace(f'"version": "{version}"'.encode(), f'"version": "{base}"'.encode())
-        exec_bit = sys.platform != "win32" and bool(path.stat().st_mode & 0o111)
-        inventory.append((rel, exec_bit, hashlib.sha256(data).hexdigest()))
-    inventory.sort(key=lambda entry: entry[0].encode())
-    return _inventory_suffix(inventory)
 
 
 def test_suffix_helper_matches_the_rust_golden_vector() -> None:
@@ -293,20 +270,6 @@ def _lock_part(lock_path: Path, plugin: str) -> tuple[list[dict], dict]:
     entries = [dict(e, kind=k) for k in LOCK_KINDS for e in lock.get(k, []) if e.get("plugin") == plugin]
     row = next(r for r in lock.get("plugin", []) if r["name"] == plugin)
     return entries, row
-
-
-@contextmanager
-def _held_flock(sidecar: Path) -> Iterator[None]:
-    """Hold grim's advisory lock on ``sidecar`` (same lock space as fs4's flock)."""
-    import fcntl
-
-    fd = os.open(sidecar, os.O_RDWR | os.O_CREAT, 0o644)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        yield
-    finally:
-        os.close(fd)
-        sidecar.unlink(missing_ok=True)
 
 
 # ── S-001 — Claude-app zip from one bundle ref (C-014, C-016, C-023–C-026) ──
