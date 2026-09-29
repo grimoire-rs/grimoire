@@ -196,7 +196,7 @@ pub fn load(path: &Path) -> Result<MarketplaceManifest, ExportError> {
 }
 
 /// The clients a marketplace file exists for (C-009, ADR D2).
-const MARKETPLACE_CLIENTS: [&str; 5] = ["claude", "copilot", "codex", "qoder", "cursor"];
+pub(crate) const MARKETPLACE_CLIENTS: [&str; 5] = ["claude", "copilot", "codex", "qoder", "cursor"];
 
 /// Clients that read Claude's marketplace file rather than owning one.
 const SERVED_BY_CLAUDE: [&str; 3] = ["junie", "openclaw", "droid"];

@@ -615,6 +615,7 @@ async fn install_one<M: ArtifactMaterializer>(
         dir: staging,
         canonical,
         support_dir: staged_support,
+        ..
     } = stage_locked_artifact(artifact, kind, access, anchor, materializer, &std::env::temp_dir()).await?;
     // A rebound multi-file rule installs its support dir under the BINDING
     // name (consistent footprint for uninstall), but the index body's
@@ -2232,6 +2233,10 @@ pub(crate) struct StagedArtifact {
     pub canonical: PathBuf,
     /// A rule's sibling support directory, keyed by the index file's stem.
     pub support_dir: Option<PathBuf>,
+    /// Every archive entry the materializer wrote, relative to
+    /// `canonical`'s parent, as spelled in the archive — on a
+    /// case-insensitive filesystem two of them may name one file on disk.
+    pub entries: Vec<PathBuf>,
 }
 
 /// Fetch (registry) or pack (path source) `artifact`, verify it against its
@@ -2264,7 +2269,7 @@ pub(crate) async fn stage_locked_artifact(
         .tempdir_in(staging_parent)
         .map_err(|e| target_io(staging_parent, e))?;
     let materialized_root = dir.path().join("content");
-    materializer.materialize(kind, &artifact.name, &blob, &materialized_root)?;
+    let entries = materializer.materialize(kind, &artifact.name, &blob, &materialized_root)?;
 
     let canonical = locate_canonical(&materialized_root, kind, &artifact.name)?;
 
@@ -2285,6 +2290,7 @@ pub(crate) async fn stage_locked_artifact(
         dir,
         canonical,
         support_dir,
+        entries,
     })
 }
 
