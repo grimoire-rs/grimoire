@@ -214,6 +214,7 @@ pub(crate) async fn run(
                 }
             };
             let m = MarketplaceManifest {
+                marketplace: None,
                 path: cwd.join(format!("{key}.toml")),
                 plugins: BTreeMap::from([(
                     key.clone(),
