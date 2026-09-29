@@ -128,7 +128,6 @@ pub fn tree_inventory(root: &Path) -> io::Result<Vec<InventoryEntry>> {
 /// [`tree_inventory`] of an existing output (C-001, tolerant): `None`
 /// ("differs") when `root` is missing, a symlink, not a directory, or holds
 /// a symlink, special file or unsafe name; `root` is never followed.
-#[allow(dead_code, reason = "first caller is `export marketplace` (WP-D)")]
 pub fn disk_inventory(root: &Path) -> io::Result<Option<Vec<InventoryEntry>>> {
     match fs::symlink_metadata(root) {
         Ok(meta) if meta.is_dir() => {}
@@ -152,6 +151,86 @@ fn is_exec(meta: &fs::Metadata) -> bool {
 #[cfg(not(unix))]
 fn is_exec(_: &fs::Metadata) -> bool {
     false
+}
+
+/// Why [`check_portable_names`] refused a tree.
+#[derive(Debug, PartialEq, Eq)]
+pub struct UnportableName {
+    /// The refused entry, relative to the tree root, `/`-joined.
+    pub path: String,
+    /// What is wrong with it.
+    pub reason: String,
+}
+
+/// Device names Windows reserves, with or without an extension.
+const WINDOWS_DEVICES: [&str; 22] = [
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2",
+    "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// Characters Windows refuses in a file name.
+const WINDOWS_FORBIDDEN: [char; 7] = [':', '*', '?', '"', '<', '>', '|'];
+
+/// Refuse a rendered tree a repository cannot carry to every OS (C-015,
+/// marketplace export only — a repo is checked out on Windows and macOS too):
+/// two entries whose names collide when case is folded (`str::to_lowercase`,
+/// per directory level, files and directories alike), or any component that
+/// is a Windows device name (`CON`, `aux.md`, `COM1`…), ends in a dot or a
+/// space, or holds one of `: * ? " < > |`. `names` (`/`-joined) come sorted
+/// bytewise, so the first offender in byte order is the one reported.
+///
+/// # Errors
+///
+/// The first offending entry.
+// ponytail: Unicode simple lowercase only — no NFC or NTFS upcase table;
+// covers ASCII and the common cases, extend if a real collision slips by.
+pub fn check_portable_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Result<(), UnportableName> {
+    // Case-folded path prefix -> the spelling that claimed it first.
+    let mut claimed: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for name in names {
+        let (mut prefix, mut folded) = (String::new(), String::new());
+        for part in name.split('/') {
+            if let Some(reason) = unportable_component(part) {
+                return Err(UnportableName {
+                    path: name.to_string(),
+                    reason: format!("'{part}' {reason}"),
+                });
+            }
+            if !prefix.is_empty() {
+                prefix.push('/');
+                folded.push('/');
+            }
+            prefix.push_str(part);
+            folded.push_str(&part.to_lowercase());
+            match claimed.get(&folded) {
+                Some(first) if *first != prefix => {
+                    return Err(UnportableName {
+                        path: name.to_string(),
+                        reason: format!("'{prefix}' collides with '{first}' when case is folded"),
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    claimed.insert(folded.clone(), prefix.clone());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// What is wrong with one path component on Windows, if anything.
+pub(crate) fn unportable_component(part: &str) -> Option<&'static str> {
+    if part.ends_with('.') || part.ends_with(' ') {
+        return Some("ends in a dot or a space, which Windows strips");
+    }
+    if part.contains(WINDOWS_FORBIDDEN) {
+        return Some("holds a character Windows refuses in a name (: * ? \" < > |)");
+    }
+    let device = part.split('.').next().unwrap_or_default().to_ascii_uppercase();
+    WINDOWS_DEVICES
+        .contains(&device.as_str())
+        .then_some("is a reserved Windows device name")
 }
 
 /// The payload of [`entry_name`]'s `InvalidData` error: the refused path,
@@ -668,5 +747,92 @@ mod tests {
             disk_inventory(root.path()).unwrap(),
             Some(tree_inventory(root.path()).unwrap())
         );
+    }
+
+    // ── check_portable_names (C-015, S-013 unit) ───────────────────────
+
+    fn check_sorted(names: &[&str]) -> Result<(), UnportableName> {
+        let mut names = names.to_vec();
+        names.sort_unstable();
+        check_portable_names(names)
+    }
+
+    #[test]
+    fn s013_ordinary_names_pass() {
+        let ok = check_sorted(&[
+            ".claude-plugin/plugin.json",
+            "skills/plan/SKILL.md",
+            "skills/plan/refs/console.md",
+            "assets/logo.png",
+            "com10.txt",
+            "CONFIG",
+            "auxiliary/nullable.md",
+            "a.b.c",
+            ".hidden",
+            "Same/x",
+            "Same/y",
+        ]);
+        assert_eq!(ok, Ok(()));
+        assert_eq!(check_sorted(&[]), Ok(()));
+    }
+
+    #[test]
+    fn s013_names_that_collide_when_case_is_folded_are_refused() {
+        for names in [
+            &["a.md", "A.md"][..],
+            &["skills/Plan/SKILL.md", "skills/plan/SKILL.md"][..],
+            &["Skills/x/a", "skills/y/b"][..],
+            &["dir/file", "DIR"][..],
+            &["stra\u{df}e/a", "STRA\u{df}E/b"][..],
+        ] {
+            let err = check_sorted(names).unwrap_err();
+            assert!(err.reason.contains("collides"), "{names:?}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn s013_the_collision_names_the_entry_that_lost() {
+        let err = check_sorted(&["skills/Plan/a.md", "skills/plan/a.md"]).unwrap_err();
+        assert_eq!(err.path, "skills/plan/a.md");
+        assert!(
+            err.reason.contains("'skills/plan' collides with 'skills/Plan'"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn s013_windows_device_names_are_refused_with_or_without_an_extension() {
+        for name in [
+            "CON",
+            "con",
+            "Prn.txt",
+            "aux.md",
+            "NUL",
+            "nul.tar.gz",
+            "COM1",
+            "com9.md",
+            "LPT1",
+            "lpt9.x",
+            "skills/aux.md",
+            "skills/nul/SKILL.md",
+            "a/b/COM5",
+        ] {
+            let err = check_sorted(&[name]).unwrap_err();
+            assert!(err.reason.contains("device name"), "{name}: {err:?}");
+            assert_eq!(err.path, name);
+        }
+    }
+
+    #[test]
+    fn s013_trailing_dot_or_space_and_forbidden_characters_are_refused() {
+        for name in [
+            "a.", "dir./x", "a ", "dir /x", "a:b", "a*", "q?", "a\"b", "<x", "x>", "p|q", "d/a:b/c",
+        ] {
+            let err = check_sorted(&[name]).unwrap_err();
+            assert!(
+                err.reason.contains("dot or a space") || err.reason.contains("refuses"),
+                "{name}: {err:?}"
+            );
+        }
     }
 }
