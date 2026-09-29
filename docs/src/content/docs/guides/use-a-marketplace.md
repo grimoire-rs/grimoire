@@ -1,6 +1,6 @@
 ---
 title: Use a plugin marketplace without grim
-description: Add a grim-generated marketplace repository straight from Claude Code, Copilot, Codex, Qoder or Cursor, pin it for a team, and roll it out to an organization or to customers, with no grim install.
+description: Add a grim-generated marketplace repository straight from Claude Code, Claude Desktop, Copilot, ChatGPT or Codex, Qoder or Cursor, pin it for a team, and roll it out to an organization or to customers, with no grim install.
 ---
 <!-- doc_type: how-to -->
 <!-- doc_tier: integration -->
@@ -25,7 +25,7 @@ each pointing at that tool's own plugin trees:
 |---|---|---|
 | Claude Code | `.claude-plugin/marketplace.json` | `claude/<plugin>/` |
 | Copilot | `.github/plugin/marketplace.json` | `copilot/<plugin>/` |
-| Codex | `.agents/plugins/marketplace.json` | `codex/<plugin>/` |
+| ChatGPT / Codex | `.agents/plugins/marketplace.json` | `codex/<plugin>/` |
 | Qoder | `.qoder-plugin/marketplace.json` | `qoder/<plugin>/` |
 | Cursor | `.cursor-plugin/marketplace.json` | `cursor/<plugin>/` |
 
@@ -68,6 +68,19 @@ other tools. The add command's `--sparse` option, and the `sparsePaths`
 field in settings, restrict the clone to the `.claude-plugin` and
 `claude` folders.
 
+### Claude Desktop and claude.ai {#claude-desktop}
+
+*Verified 2026-09-29 against Anthropic's [Use plugins in
+Claude][claude-gui] help article.*
+
+No terminal is needed. In claude.ai, the Chat tab of Claude Desktop or
+Claude Cowork, open **Customize**, then **Plugins**, then **Add** and
+**Add marketplace**. Choose **Add from a repository** and enter
+`grimoire-rs/e2e-marketplace` or a full repository URL. GitHub works, and
+so do public repositories on gitlab.com and bitbucket.org. Every paid
+plan can do this. This surface loads skills, commands and remote
+connectors only. It ignores agents, hooks and local MCP servers.
+
 ### Copilot CLI and VS Code {#copilot}
 
 *Verified 2026-09-29 against the [Copilot CLI plugin
@@ -97,7 +110,7 @@ The `#ref` form needs VS Code 1.123 or later. VS Code documents no
 preference between a Copilot file and a Claude file in one repository.
 Check that the plugin you see is the one you expect.
 
-### Codex {#codex}
+### ChatGPT / Codex {#codex}
 
 *Verified 2026-09-29 against the [Codex plugin build guide][codex-build]
 and the [command reference][codex-cli].*
@@ -111,6 +124,24 @@ Start a new Codex session after the install. Codex reads
 `.agents/plugins/marketplace.json` first, so it ignores the Claude file.
 To fetch less, repeat `--sparse` on the marketplace add with the paths
 `.agents/plugins` and `codex`.
+
+Codex now lives inside the ChatGPT desktop app, which OpenAI merged
+with the standalone Codex app on 9 July 2026. The Codex CLI keeps its
+name and its commands. Two other routes reach the same marketplace file:
+
+- **ChatGPT desktop app.** OpenAI documents no in-app control to add a
+  marketplace. The app reads `.agents/plugins/marketplace.json` from
+  the current repository root, and from `~/.agents/plugins/` for a
+  personal one. Put the file there, restart the app, and the
+  marketplace appears as a source in the Plugins Directory. See
+  [OpenAI's plugin packaging guide][chatgpt-desktop].
+- **ChatGPT workspace admin.** An administrator opens **Admin**, then
+  **Plugins**, then **Add** and **Import marketplace**, enters the
+  repository URL with an optional subdirectory and ref, and authorizes
+  GitHub. The import reads `.agents/plugins/marketplace.json`, or
+  `.claude-plugin/marketplace.json` when that is the file present. Members then install
+  from the workspace directory. See [Plugin management][codex-admin] and
+  [importing and syncing marketplaces from GitHub][chatgpt-import].
 
 ### Qoder {#qoder}
 
@@ -241,7 +272,7 @@ nothing. The mechanism differs by vendor.
 | Claude Code | Managed settings: server-managed, device policy or `managed-settings.json` | Only server-managed |
 | Claude.ai and Cowork | Organization settings, Plugins and skills, **Sync from GitHub** | Not documented |
 | Copilot | `managed-settings.json` in the enterprise `.github-private` repository | Yes, including the cloud agent |
-| Codex | ChatGPT workspace settings, Plugins, **Import marketplace** | Not documented |
+| ChatGPT / Codex | ChatGPT workspace, **Admin**, **Plugins**, **Add**, **Import marketplace** | Not documented |
 | Cursor | Dashboard, Team Marketplaces, **Import from Repo** | Not documented |
 
 *Verified 2026-09-29 against these sources.*
@@ -265,7 +296,7 @@ Points to know before you choose:
   themselves.
 - **Copilot** applies the enterprise file at sign-in and propagates it
   within about an hour. Managed values cannot be overridden locally.
-- **Codex** syncs an imported marketplace daily, and a manual sync
+- **ChatGPT / Codex** syncs an imported marketplace daily, and a manual sync
   forces one. OpenAI does not state whether the import also reaches the Codex CLI.
 - **Cursor** offers Default Off, Default On and Required per marketplace,
   and an administrator can limit access to organization groups. Team
@@ -276,10 +307,9 @@ Points to know before you choose:
 To give customers a marketplace, make the repository public, then send
 each audience the one command for their tool from
 [Install on one machine](#one-machine). Claude.ai and Claude Desktop
-users have a click path instead: **Customize**, **Plugins**, **Add**,
-**Add marketplace**, then the repository address. That surface loads
-skills, commands and remote connectors. It ignores agents, hooks and
-local MCP servers.
+users have a click path instead, described under [Claude Desktop and
+claude.ai](#claude-desktop). ChatGPT users get the desktop app route
+under [ChatGPT / Codex](#codex).
 
 Tell customers which tag to pin. A pinned `#ref` keeps their install
 stable while you keep working on the default branch. A customer who
@@ -296,7 +326,7 @@ tool, except where an administrator or a setting turns them on.
 | Claude Code | `#ref` | `claude plugin marketplace update grimoire-e2e` | `claude plugin update grim-essentials@grimoire-e2e` |
 | Copilot CLI | `#ref` | `copilot plugin marketplace update` | `copilot plugin update grim-essentials` |
 | VS Code | `#ref` in the setting | Check for Extension Updates | Same, or every 24 hours with auto-update on |
-| Codex | `--ref` | `codex plugin marketplace upgrade grimoire-e2e` | No separate command documented |
+| ChatGPT / Codex CLI | `--ref` | `codex plugin marketplace upgrade grimoire-e2e` | No separate command documented |
 | Qoder | None documented | `qoder plugins marketplace update` | `qoder plugins update grim-essentials` |
 | Cursor | None, tracks a branch | Administrator refresh | Automatic after a refresh |
 
@@ -376,6 +406,9 @@ credential that works without a prompt.
 [codex-build]: https://developers.openai.com/codex/plugins/build
 [codex-cli]: https://learn.chatgpt.com/docs/developer-commands?surface=cli
 [codex-admin]: https://learn.chatgpt.com/docs/enterprise/plugin-management
+[chatgpt-import]: https://help.openai.com/en/articles/20001504-importing-and-syncing-plugin-marketplaces-from-github
+[chatgpt-desktop]: https://developers.openai.com/plugins/build/plugins
+[claude-gui]: https://support.claude.com/en/articles/13837440-use-plugins-in-claude
 [codex-18115]: https://github.com/openai/codex/issues/18115
 [codex-19372]: https://github.com/openai/codex/issues/19372
 [qoder-plugins]: https://docs.qoder.com/cli/plugins.md
