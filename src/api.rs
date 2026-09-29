@@ -47,7 +47,10 @@ pub use context_report::{ContextRegistry, ContextRegistryKind, ContextReport, Of
 #[allow(unused_imports)]
 pub use describe_report::DescribeCliReport;
 #[allow(unused_imports)]
-pub use export_report::{ExportItem, ExportMember, ExportOmission, ExportReport, OutputFormatKind};
+pub use export_report::{
+    ExportAction, ExportItem, ExportMember, ExportOmission, ExportReport, FileAction, MarketplaceExportReport,
+    MarketplaceFileRow, MarketplaceItem, OutputFormatKind,
+};
 #[allow(unused_imports)]
 pub use fetch_report::FetchCliReport;
 #[allow(unused_imports)]

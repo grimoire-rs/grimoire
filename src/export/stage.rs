@@ -453,7 +453,8 @@ pub(crate) async fn resolve_declared(
 }
 
 /// [`contain_input`] over what `resolve_declared` is about to read for the
-/// `selected` plugins: `project` dirs and `path:` includes.
+/// `selected` plugins: `project` dirs (and their config and lock) and `path:`
+/// includes.
 fn contain_declared_inputs(
     root: &Path,
     manifest: &MarketplaceManifest,
@@ -469,6 +470,16 @@ fn contain_declared_inputs(
         if let Some(project) = &decl.project {
             contain_input(root, anchor, project)
                 .map_err(|reason| refuse(name, format!("project directory '{}'", project.display()), reason))?;
+            // The project's config and lock are read too (`ProjectLock::load`).
+            let config = if anchor.join(project).is_dir() {
+                project.join("grimoire.toml")
+            } else {
+                project.clone()
+            };
+            for leaf in [crate::config::project_config::lock_path_for(&config), config] {
+                contain_input(root, anchor, &leaf)
+                    .map_err(|reason| refuse(name, format!("project file '{}'", leaf.display()), reason))?;
+            }
         }
         for include in decl.include.iter().filter(|i| is_path_value(i)) {
             let Ok(source) = crate::config::PathSource::parse(include) else {
@@ -768,7 +779,6 @@ pub(crate) struct StagedOutput {
 /// A `(plugin, client)` that has nothing the client's format can carry
 /// (R2-20): reported, never staged or placed.
 #[derive(Debug)]
-#[cfg_attr(not(test), expect(dead_code, reason = "wired by export marketplace (WP-D)"))]
 pub(crate) struct EmptyOutput {
     pub plugin: String,
     pub client: ClientTarget,
@@ -822,7 +832,6 @@ pub(crate) struct StagedRun {
     pub items: Vec<ExportItem>,
     /// `(plugin, client)` pairs that rendered empty ([`Layout::Repo`] only),
     /// in the same order.
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired by export marketplace (WP-D)"))]
     pub empties: Vec<EmptyOutput>,
 }
 
@@ -898,6 +907,9 @@ async fn stage_all(req: &ExportRequest<'_>, access: &Arc<dyn OciAccess>) -> Resu
         let staged = stage_members(&plugin.members, &clients, access, anchor, staging.path(), progress)
             .await
             .map_err(|e| local_drift_hint(e, req.manifest, plugin))?;
+        if req.layout == Layout::Repo {
+            check_skill_names(&staged)?;
+        }
         let mut rendered = Vec::with_capacity(clients.len());
         for &(client, fam) in &clients {
             let root = contained(staging.path(), Path::new(&format!("{}.{client}", plugin.name)))?;
@@ -997,10 +1009,42 @@ async fn stage_all(req: &ExportRequest<'_>, access: &Arc<dyn OciAccess>) -> Resu
     })
 }
 
+/// C-015 on each staged skill's own archive spelling, laid out as it
+/// renders (`skills/<emitted>/…`). The rendered-tree check cannot see a case
+/// collision on a case-insensitive filesystem (Windows, default macOS): by
+/// then the second entry has overwritten the first in the staged tree.
+fn check_skill_names(staged: &[StagedMember<'_>]) -> Result<(), ExportError> {
+    for member in staged {
+        let MemberContent::Tree(tree) = &member.content else {
+            continue;
+        };
+        if member.locked.kind != ArtifactKind::Skill {
+            continue;
+        }
+        let Some(dir) = tree.canonical.file_name() else {
+            continue;
+        };
+        let mut names: Vec<String> = tree
+            .entries
+            .iter()
+            .filter_map(|e| e.strip_prefix(dir).ok())
+            .filter_map(|rest| archive::entry_name(&Path::new("skills").join(member.emitted).join(rest)).ok())
+            .collect();
+        names.sort_unstable();
+        archive::check_portable_names(names.iter().map(String::as_str)).map_err(|e| {
+            tracing::warn!("plugin member '{}': {}", member.emitted, e.reason);
+            ExportError::UnsafeEntry {
+                path: PathBuf::from(e.path),
+            }
+        })?;
+    }
+    Ok(())
+}
+
 /// Maps an `archive` I/O error to `ExportError` (C-026, C-035): an unsafe
 /// entry name is `UnsafeEntry` (65) naming that entry; anything else — a
 /// symlink under the root included — is `Io` on `path` (74).
-fn archive_error(path: &Path, e: io::Error) -> ExportError {
+pub(crate) fn archive_error(path: &Path, e: io::Error) -> ExportError {
     match archive::unsafe_entry(&e) {
         Some(entry) => ExportError::UnsafeEntry {
             path: entry.to_path_buf(),
@@ -1017,7 +1061,7 @@ fn zip_plugin(root: &Path, zip: &Path) -> Result<(), ExportError> {
 /// [`place`] every output in order, stopping at the first failure. The
 /// staging dir is dropped on return — unless a failed `--force` replace
 /// left the user's old output aside in it, which is then kept (decision 40).
-fn place_all(
+pub(crate) fn place_all(
     outputs: &[StagedOutput],
     force: bool,
     staging: tempfile::TempDir,
@@ -1756,7 +1800,7 @@ fn place(
 }
 
 /// An export-owned I/O failure on `path` (74 / 77 via `classify_io`).
-fn io_error(path: &Path, source: io::Error) -> ExportError {
+pub(crate) fn io_error(path: &Path, source: io::Error) -> ExportError {
     ExportError::Io {
         path: path.to_path_buf(),
         source,
@@ -2837,6 +2881,7 @@ mod tests {
             dir,
             canonical,
             support_dir: None,
+            entries: vec![PathBuf::from(name).join("SKILL.md")],
         }
     }
 
@@ -2852,6 +2897,7 @@ mod tests {
             dir,
             canonical,
             support_dir: None,
+            entries: vec![PathBuf::from(format!("{name}.md"))],
         }
     }
 
@@ -2985,6 +3031,31 @@ mod tests {
                 (ArtifactKind::Mcp, "socket".into(), OmitReason::NotRepresentable),
             ]
         );
+    }
+
+    /// S-013 on a case-insensitive filesystem: the staged tree holds one
+    /// file, but the archive named two that collide under case folding.
+    #[test]
+    fn s013_a_case_collision_the_staged_tree_lost_is_still_refused() {
+        let skill = registry_member("hex-plan", ArtifactKind::Skill, sha('a'));
+        let mut tree = staged_skill("hex-plan");
+        tree.entries.push(PathBuf::from("hex-plan/Notes.md"));
+        tree.entries.push(PathBuf::from("hex-plan/notes.md"));
+        let members = [StagedMember {
+            locked: &skill,
+            emitted: "plan",
+            content: MemberContent::Tree(tree),
+        }];
+        match check_skill_names(&members) {
+            Err(ExportError::UnsafeEntry { path }) => assert_eq!(path, Path::new("skills/plan/notes.md")),
+            other => panic!("expected UnsafeEntry, got {other:?}"),
+        }
+        let clean = [StagedMember {
+            locked: &skill,
+            emitted: "plan",
+            content: MemberContent::Tree(staged_skill("hex-plan")),
+        }];
+        assert!(check_skill_names(&clean).is_ok());
     }
 
     #[test]

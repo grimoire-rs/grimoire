@@ -101,6 +101,144 @@ impl Printable for ExportReport {
     }
 }
 
+/// What `grim export marketplace` did to one `(plugin, client)` tree (C-034).
+/// Serializes lowercase; the literals are frozen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExportAction {
+    Written,
+    Unchanged,
+    Removed,
+    Empty,
+}
+
+impl ExportAction {
+    /// The serialized literal, for the plain table.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Written => "written",
+            Self::Unchanged => "unchanged",
+            Self::Removed => "removed",
+            Self::Empty => "empty",
+        }
+    }
+}
+
+/// What `grim export marketplace` did to one marketplace document (C-034).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FileAction {
+    Written,
+    Unchanged,
+    Removed,
+}
+
+/// One `(plugin, client)` row of `grim export marketplace` (C-034, R2-13).
+///
+/// `removed` row: `path` is the deleted tree, `version` null, `members` and
+/// `omitted` empty. `empty` row: `path` is the would-be tree, `version` null,
+/// `members` empty, `omitted` every member with its reason.
+#[derive(Debug, Serialize)]
+pub struct MarketplaceItem {
+    pub plugin: String,
+    pub client: String,
+    pub family: Family,
+    pub path: PathBuf,
+    /// Always-present-null: null on `removed` and `empty` rows.
+    pub version: Option<String>,
+    pub action: ExportAction,
+    pub members: Vec<ExportMember>,
+    pub omitted: Vec<ExportOmission>,
+}
+
+/// One marketplace document row (C-034). `plugins` is `[]` on a `removed` row.
+#[derive(Debug, Serialize)]
+pub struct MarketplaceFileRow {
+    pub client: String,
+    pub path: PathBuf,
+    pub action: FileAction,
+    pub plugins: Vec<String>,
+}
+
+/// The result of `grim export marketplace` (C-034): `{"items", "files"}`.
+#[derive(Debug, Serialize)]
+pub struct MarketplaceExportReport {
+    items: Vec<MarketplaceItem>,
+    files: Vec<MarketplaceFileRow>,
+}
+
+impl MarketplaceExportReport {
+    /// Build from operation results. The caller orders the live rows (current
+    /// plugins by name bytes, then client selection order; files in selection
+    /// order) — that order needs the client selection, which the report does
+    /// not see, so it is preserved. The report owns what it can derive alone:
+    /// `removed` rows go after every live row, sorted `(client, plugin)` bytes
+    /// (files: by client), and each item's `members` / `omitted` are sorted
+    /// `(kind, name)` like [`ExportReport::new`].
+    pub fn new(mut items: Vec<MarketplaceItem>, mut files: Vec<MarketplaceFileRow>) -> Self {
+        for item in &mut items {
+            item.members.sort_by(|a, b| (a.kind, &a.name).cmp(&(b.kind, &b.name)));
+            item.omitted.sort_by(|a, b| (a.kind, &a.name).cmp(&(b.kind, &b.name)));
+        }
+        // Stable: live rows compare Equal, so their caller order survives.
+        items.sort_by(|a, b| match (a.action, b.action) {
+            (ExportAction::Removed, ExportAction::Removed) => (&a.client, &a.plugin).cmp(&(&b.client, &b.plugin)),
+            (ExportAction::Removed, _) => std::cmp::Ordering::Greater,
+            (_, ExportAction::Removed) => std::cmp::Ordering::Less,
+            _ => std::cmp::Ordering::Equal,
+        });
+        files.sort_by(|a, b| match (a.action, b.action) {
+            (FileAction::Removed, FileAction::Removed) => a.client.cmp(&b.client),
+            (FileAction::Removed, _) => std::cmp::Ordering::Greater,
+            (_, FileAction::Removed) => std::cmp::Ordering::Less,
+            _ => std::cmp::Ordering::Equal,
+        });
+        Self { items, files }
+    }
+
+    /// One line per file row for stderr (R2-19); plain wording is Unstable.
+    pub fn file_lines(&self) -> Vec<String> {
+        self.files
+            .iter()
+            .map(|f| {
+                let path = f.path.display();
+                match f.action {
+                    FileAction::Written => {
+                        let n = f.plugins.len();
+                        format!("wrote {path} ({n} plugin{})", if n == 1 { "" } else { "s" })
+                    }
+                    FileAction::Unchanged => format!("unchanged {path}"),
+                    FileAction::Removed => format!("removed {path}"),
+                }
+            })
+            .collect()
+    }
+}
+
+impl Printable for MarketplaceExportReport {
+    /// One table on stdout; the per-file lines are [`Self::file_lines`].
+    fn print_plain(&self, w: &mut impl Write) -> io::Result<()> {
+        let rows: Vec<Vec<String>> = self
+            .items
+            .iter()
+            .map(|i| {
+                vec![
+                    i.plugin.clone(),
+                    i.client.clone(),
+                    i.version.clone().unwrap_or_else(|| "-".to_string()),
+                    i.action.label().to_string(),
+                    i.omitted.len().to_string(),
+                ]
+            })
+            .collect();
+        print_table(w, &["Plugin", "Client", "Version", "Action", "Omitted"], &rows)
+    }
+
+    fn print_json(&self, w: &mut impl Write) -> io::Result<()> {
+        crate::cli::printer::write_json_pretty(w, self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,6 +513,248 @@ mod tests {
         assert_eq!(
             plain(&ExportReport::new(vec![])).lines().collect::<Vec<_>>(),
             ["Plugin  Client  Version  Path  Omitted"]
+        );
+    }
+
+    // ---- C-034 marketplace report ----
+
+    fn mitem(plugin: &str, client: &str, action: ExportAction) -> MarketplaceItem {
+        let live = matches!(action, ExportAction::Written | ExportAction::Unchanged);
+        MarketplaceItem {
+            plugin: plugin.to_string(),
+            client: client.to_string(),
+            family: Family::Claude,
+            path: abs(&format!("{client}/{plugin}")),
+            version: live.then(|| "1.4.0+3f9a0c12b7de".to_string()),
+            action,
+            members: if live {
+                vec![member(ArtifactKind::Skill, "s")]
+            } else {
+                vec![]
+            },
+            omitted: vec![],
+        }
+    }
+
+    fn frow(client: &str, action: FileAction, plugins: &[&str]) -> MarketplaceFileRow {
+        MarketplaceFileRow {
+            client: client.to_string(),
+            path: abs(&format!(".{client}-plugin/marketplace.json")),
+            action,
+            plugins: plugins.iter().map(|p| p.to_string()).collect(),
+        }
+    }
+
+    fn mjson(r: &MarketplaceExportReport) -> (String, serde_json::Value) {
+        let mut buf = Vec::new();
+        r.print_json(&mut buf).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        let v = serde_json::from_str(&text).unwrap();
+        (text, v)
+    }
+
+    fn mplain(r: &MarketplaceExportReport) -> String {
+        let mut buf = Vec::new();
+        r.print_plain(&mut buf).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    fn order(v: &serde_json::Value, key: &str, f: impl Fn(&serde_json::Value) -> String) -> Vec<String> {
+        v[key].as_array().unwrap().iter().map(f).collect()
+    }
+
+    fn item_order(v: &serde_json::Value) -> Vec<String> {
+        order(v, "items", |i| {
+            format!("{}/{}", i["client"].as_str().unwrap(), i["plugin"].as_str().unwrap())
+        })
+    }
+
+    #[test]
+    fn c034_envelope_is_items_then_files() {
+        let (text, v) = mjson(&MarketplaceExportReport::new(vec![], vec![]));
+        assert_eq!(keys_at(&text, 2), ["items", "files"]);
+        assert_eq!(v, serde_json::json!({"items": [], "files": []}));
+    }
+
+    #[test]
+    fn c034_item_and_file_key_order() {
+        let r = MarketplaceExportReport::new(
+            vec![mitem("team", "claude", ExportAction::Written)],
+            vec![frow("claude", FileAction::Written, &["team"])],
+        );
+        let (text, _) = mjson(&r);
+        // Item row keys, then the file row keys (both sit at 6 spaces).
+        assert_eq!(
+            keys_at(&text, 6),
+            [
+                "plugin", "client", "family", "path", "version", "action", "members", "omitted", "client", "path",
+                "action", "plugins"
+            ]
+        );
+        assert_eq!(keys_at(&text, 10), ["kind", "name", "lock_name", "pinned"]);
+    }
+
+    #[test]
+    fn c034_null_and_empty_rules_are_always_present() {
+        let mut empty = mitem("e", "claude", ExportAction::Empty);
+        empty.omitted = vec![omission(ArtifactKind::Rule, "r", OmitReason::NoFormatSurface)];
+        let r = MarketplaceExportReport::new(
+            vec![
+                mitem("gone", "codex", ExportAction::Removed),
+                empty,
+                mitem("live", "claude", ExportAction::Unchanged),
+            ],
+            vec![frow("codex", FileAction::Removed, &[])],
+        );
+        let (text, v) = mjson(&r);
+        let by = |p: &str| {
+            v["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|i| i["plugin"] == p)
+                .unwrap()
+                .clone()
+        };
+        for p in ["gone", "e"] {
+            assert!(by(p)["version"].is_null(), "{p}");
+            assert_eq!(by(p)["members"], serde_json::json!([]), "{p}");
+        }
+        assert_eq!(by("gone")["omitted"], serde_json::json!([]));
+        assert_eq!(by("e")["omitted"][0]["name"], "r");
+        assert_eq!(by("live")["version"], "1.4.0+3f9a0c12b7de");
+        assert_eq!(v["files"][0]["plugins"], serde_json::json!([]));
+        assert!(text.contains("\"version\": null"));
+    }
+
+    #[test]
+    fn c034_action_literals() {
+        let items: Vec<_> = [
+            ExportAction::Written,
+            ExportAction::Unchanged,
+            ExportAction::Removed,
+            ExportAction::Empty,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(n, a)| mitem(&format!("p{n}"), "claude", a))
+        .collect();
+        let files = vec![
+            frow("a", FileAction::Written, &["p0"]),
+            frow("b", FileAction::Unchanged, &["p0"]),
+            frow("c", FileAction::Removed, &[]),
+        ];
+        let (_, v) = mjson(&MarketplaceExportReport::new(items, files));
+        let acts = |k: &str| order(&v, k, |i| i["action"].as_str().unwrap().to_string());
+        // `removed` rows sort last; the rest keep caller order.
+        assert_eq!(acts("items"), ["written", "unchanged", "empty", "removed"]);
+        assert_eq!(acts("files"), ["written", "unchanged", "removed"]);
+    }
+
+    #[test]
+    fn c034_live_rows_keep_caller_order_removed_rows_sort_last_by_client_plugin() {
+        let r = MarketplaceExportReport::new(
+            vec![
+                mitem("zz", "codex", ExportAction::Removed),
+                mitem("b", "codex", ExportAction::Written),
+                mitem("a", "codex", ExportAction::Removed),
+                mitem("b", "claude", ExportAction::Empty),
+                mitem("z", "claude", ExportAction::Removed),
+                mitem("B", "codex", ExportAction::Removed),
+            ],
+            vec![
+                frow("zed", FileAction::Removed, &[]),
+                frow("codex", FileAction::Written, &["b"]),
+                frow("amp", FileAction::Removed, &[]),
+                frow("claude", FileAction::Unchanged, &["b"]),
+            ],
+        );
+        let (_, v) = mjson(&r);
+        assert_eq!(
+            item_order(&v),
+            ["codex/b", "claude/b", "claude/z", "codex/B", "codex/a", "codex/zz"]
+        );
+        assert_eq!(
+            order(&v, "files", |f| f["client"].as_str().unwrap().to_string()),
+            ["codex", "claude", "amp", "zed"]
+        );
+    }
+
+    #[test]
+    fn c034_new_sorts_members_and_omitted() {
+        let mut it = mitem("team", "claude", ExportAction::Written);
+        it.members = vec![
+            member(ArtifactKind::Mcp, "a"),
+            member(ArtifactKind::Skill, "b"),
+            member(ArtifactKind::Skill, "B"),
+        ];
+        it.omitted = vec![
+            omission(ArtifactKind::Rule, "z", OmitReason::NoFormatSurface),
+            omission(ArtifactKind::Rule, "y", OmitReason::NoFormatSurface),
+        ];
+        let (_, v) = mjson(&MarketplaceExportReport::new(vec![it], vec![]));
+        assert_eq!(pairs(&v["items"][0]["members"]), ["skill B", "skill b", "mcp a"]);
+        assert_eq!(pairs(&v["items"][0]["omitted"]), ["rule y", "rule z"]);
+    }
+
+    #[test]
+    fn c034_plain_is_one_table_with_action_column() {
+        let mut empty = mitem("e", "codex", ExportAction::Empty);
+        empty.omitted = vec![
+            omission(ArtifactKind::Rule, "r", OmitReason::NoFormatSurface),
+            omission(ArtifactKind::Agent, "a", OmitReason::NoFormatSurface),
+        ];
+        let r = MarketplaceExportReport::new(
+            vec![
+                mitem("team", "claude", ExportAction::Written),
+                empty,
+                mitem("old", "claude", ExportAction::Removed),
+            ],
+            vec![frow("claude", FileAction::Written, &["team"])],
+        );
+        let out = mplain(&r);
+        let rows: Vec<Vec<&str>> = out.lines().map(|l| l.split_whitespace().collect()).collect();
+        assert_eq!(
+            rows,
+            [
+                vec!["Plugin", "Client", "Version", "Action", "Omitted"],
+                vec!["team", "claude", "1.4.0+3f9a0c12b7de", "written", "0"],
+                vec!["e", "codex", "-", "empty", "2"],
+                vec!["old", "claude", "-", "removed", "0"],
+            ]
+        );
+    }
+
+    #[test]
+    fn c034_plain_empty_report_is_header_only() {
+        assert_eq!(
+            mplain(&MarketplaceExportReport::new(vec![], vec![]))
+                .lines()
+                .collect::<Vec<_>>(),
+            ["Plugin  Client  Version  Action  Omitted"]
+        );
+    }
+
+    #[test]
+    fn c034_file_lines() {
+        let r = MarketplaceExportReport::new(
+            vec![],
+            vec![
+                frow("claude", FileAction::Written, &["a", "b", "c"]),
+                frow("codex", FileAction::Written, &["a"]),
+                frow("cursor", FileAction::Unchanged, &["a"]),
+                frow("droid", FileAction::Removed, &[]),
+            ],
+        );
+        let p = |c: &str| abs(&format!(".{c}-plugin/marketplace.json")).display().to_string();
+        assert_eq!(
+            r.file_lines(),
+            [
+                format!("wrote {} (3 plugins)", p("claude")),
+                format!("wrote {} (1 plugin)", p("codex")),
+                format!("unchanged {}", p("cursor")),
+                format!("removed {}", p("droid")),
+            ]
         );
     }
 }
