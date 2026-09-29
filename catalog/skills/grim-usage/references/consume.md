@@ -235,8 +235,9 @@ pruned — see [Installing](#installing).
 only through that flag: it rolls a declared plugin's own lockfile forward
 — the same re-resolution as above, scoped to a `marketplace.toml` — and
 **installs nothing**. It exists to keep a plugin you shipped with `grim
-export plugin` (see [publish.md](publish.md#export)) pinned to fresh
-digests between exports, without touching your own project's
+export plugin` or `grim export marketplace` (see
+[publish.md](publish.md#export)) pinned to fresh digests between exports,
+without touching your own project's
 `grimoire.toml`/`grimoire.lock` at all. Confirm the exact selector
 grammar and flags with `grim update --help`.
 
