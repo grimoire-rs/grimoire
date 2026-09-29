@@ -340,6 +340,66 @@ author's name — the two values that name infrastructure and a person rather
 than the artifact — remain behind `--git`. `--no-git` suppresses every derived
 annotation and restores the 0.13.0 manifest shape exactly.
 
+## A plugin's version now hashes the rendered tree {#plugin-version-move}
+
+[`grim export plugin`][export-plugin] appends `+<12 hex>` to every plugin
+version. Through 0.14 that suffix hashed each member's kind, emitted name and
+digest. From 0.15.0 it hashes the plugin tree grim renders for that client:
+every file's path, executable bit and SHA-256, with the manifests written at
+the base version. The `<base>+<12 hex>` grammar and the report shape are
+unchanged.
+
+**What you will see.** Every plugin you exported before gets a new suffix
+the first time you export it again, even when its members are the same. After
+that, edits that never moved the suffix now do. They are a change to a
+plugin's `description`, a new logo, and a grim release that renders a skill
+differently. One plugin can also carry a different suffix for each client.
+Each client's tree has its own manifest path and README.
+
+**What to do.** Nothing needs migrating. Hand out the re-exported plugin as
+usual. Compare exported versions for equality, never for order, since the
+suffix is build metadata. A script that pinned an old suffix needs the new
+one. To change the base a consumer sees, set `--version` or the declared
+`version`. What feeds the hash is [not frozen][unstable].
+
+## Qoder plugins export, and change a default {#qoder-plugin-export}
+
+[`grim export plugin`][export-plugin] now knows Qoder. A `qoder` plugin is a
+Claude-family plugin with its manifest at `.qoder-plugin/plugin.json`. Two
+behaviours change:
+
+- **`--client qoder` succeeds.** It used to exit `78` (`NoPluginFormat`). It
+  now writes `<plugin>.qoder`, or `<plugin>.qoder.zip` with `--zip`.
+- **A configured `qoder` is no longer skipped.** With no `--client`, export
+  reads `[options].clients`. A list naming `qoder` used to skip it with a
+  warning, and a list naming only `qoder` fell back to `agents`. Now
+  `<plugin>.qoder` is written beside the other clients' output, or alone.
+
+**What you will see.** A new `<plugin>.qoder` output next to your existing
+ones. It is a new path, so it replaces nothing. If a file or directory of that
+name already exists, export refuses it at exit `65` as it always does, and
+`--force` replaces it.
+
+**What to do.** To keep the old output, pass `--client` with the clients you
+want, or take `qoder` out of `[options].clients`. A script that treated exit
+`78` for `--client qoder` as expected needs updating.
+
+## `[marketplace]` needs grim 0.15.0 {#marketplace-table-needs-new-grim}
+
+[`grim export marketplace`][export-marketplace] reads a new
+[`[marketplace]` table][marketplace-table] from `marketplace.toml`. A manifest
+without it works everywhere, exactly as before. A manifest with it works only
+from 0.15.0.
+
+**What you will see.** An older grim rejects the file with an unknown-field
+error, exit `65`, on every command that reads it. That includes `grim export
+plugin` and `grim update --marketplace`, which never needed the table. Adding
+the table changes no lock bytes and re-pins nothing.
+
+**What to do.** Upgrade every machine and CI job that reads the manifest
+before you add the table. Nothing else changes: a lock written by an older
+grim is read as is.
+
 ## Smaller notes {#smaller-notes}
 
 - **A live symlink at an install destination now exits 65, not 74.** A
@@ -548,6 +608,9 @@ annotation and restores the 0.13.0 manifest shape exactly.
 [stability]: ./stability.md
 [unstable]: ./stability.md#unstable
 [status]: ./commands.md#status
+[export-plugin]: ./commands.md#export-plugin
+[export-marketplace]: ./commands.md#export-marketplace
+[marketplace-table]: ./configuration.md#marketplace-table
 [install]: ./commands.md#install
 [update]: ./commands.md#update
 [remove]: ./commands.md#remove

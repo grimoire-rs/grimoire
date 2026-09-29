@@ -28,9 +28,10 @@ Breaking any guarantee below is a major-version change, not a minor one.
 | CLI surface | Subcommand names, arguments, flags, and the [documented exit codes][exit-codes] |
 | `--format json` reports | The report shape for every command that offers one, and the [error document][json-interface] — see [Additive fields](#frozen-additive-fields) and the [JSON interface reference][json-interface] |
 | `grimoire.toml` / `grimoire.lock` | The [config and lock schema][configuration] |
-| `marketplace.toml` / `marketplace.lock` | The [manifest and lock wire shape][marketplace-toml], including the `plugin` field and `[[plugin]]` table — under the same additive rule as `grimoire.lock`, and never sharing a file with it (a `plugin`-bearing entry in `grimoire.lock`, or vice versa, is a rejected scope mismatch, not a migration path) |
+| `marketplace.toml` / `marketplace.lock` | The [manifest and lock wire shape][marketplace-toml], including the `plugin` field, the `[[plugin]]` table and the [`[marketplace]` table][marketplace-table] — under the same additive rule as `grimoire.lock`, and never sharing a file with it (a `plugin`-bearing entry in `grimoire.lock`, or vice versa, is a rejected scope mismatch, not a migration path) |
 | `publish.toml` | The [batch-publish manifest schema][batch-publish], including every spelling a key has ever accepted — see [Additive fields](#frozen-additive-fields) |
-| [`grim export plugin`][export-plugin] | The `--format json` [export report shape][json-shapes-items], and the `<base>+<12-hex>` [version grammar][export-plugin-output] a rendered `plugin.json`'s `version` follows |
+| [`grim export plugin`][export-plugin] | The `--format json` [export report shape][json-shapes-items], and the `<base>+<12-hex>` [version grammar][export-plugin-output] a rendered `plugin.json`'s `version` follows. Only the grammar is frozen, not what feeds the hash |
+| [`grim export marketplace`][export-marketplace] | The command's flags and [exit codes][export-marketplace-exit]; the `{items, files}` [report shape][export-marketplace-json] and its `action` literals; the [`[marketplace]` keys and grammars][marketplace-table]; the client-to-file table and the `./<client>/<plugin>` [tree paths][export-marketplace-layout]; the default client set (`claude`, `copilot`, `codex`, `qoder`); the [ownership convention][export-marketplace-ownership]; the document guarantees (each plugin entry's `source` is `./`-relative inside the repository, and its `name`, `version` and `description` equal the tree's manifest); and the version grammar above |
 | Bundle source manifest | The [bundle member declaration schema][bundles], under the same widening rule as the manifests above |
 | [MCP descriptor][mcp-descriptor] (`mcp/<name>.toml`) | The published descriptor schema, including which fields an older grim rejects rather than drops |
 | Install state (`state.json`) | Schema V2, governed by the same additive-field policy as JSON reports |
@@ -142,7 +143,7 @@ recoverable the same way any local edit is: `grim install --force` /
 
 ## Unstable — may change in any minor {#unstable}
 
-Four things are deliberately excluded from the guarantee above, because
+Five things are deliberately excluded from the guarantee above, because
 freezing them would block improving Grimoire without a major version bump —
 the exclusions are what keep 1.x able to move at all:
 
@@ -192,17 +193,23 @@ the exclusions are what keep 1.x able to move at all:
   nobody has exercised buys a guarantee no one asked for at the cost of
   never being able to fix it. It freezes in a later minor, once a real
   consumer has shaped it. Anything you script against it today may move.
-- **[`grim export plugin`][export-plugin] member bytes.** The report shape
-  and version grammar are frozen under the table row above. Its [exit
-  codes][exit-codes] are frozen the same as every other command's. The
+- **[`grim export plugin`][export-plugin] and [`grim export
+  marketplace`][export-marketplace] tree bytes.** The report shape and
+  version grammar are frozen under the table rows above. The commands'
+  [exit codes][exit-codes] are frozen the same as every other command's. The
   exact bytes rendered under `skills/`, `agents/`, `.mcp.json`, or
   `mcp.json` inside an exported plugin are not. That is the same rule as
   [vendor render layout](#unstable) above, because export reuses the same
-  per-client materializer `grim install` does. A minor release that
-  changes how a client renders a skill changes an exported plugin's bytes
-  identically, without bumping the plugin's own `version`. Re-export (or
-  bump `--version` by hand) if that matters to a consumer of the exported
-  artifact.
+  per-client materializer `grim install` does. The same goes for a tree's
+  manifests and `README.md`, including Cursor's second manifest
+  `.cursor-plugin/plugin.json`. The `version` suffix hashes the rendered
+  tree, so a minor release that changes how a client renders a skill also
+  changes the suffix of every affected plugin. What feeds the hash is not
+  frozen either. A later minor may change it, and every suffix moves once
+  when it does. That only ever changes a suffix, never the grammar.
+  Consumers that pin an exact plugin version should expect it.
+  `export marketplace`'s plain output, the table on stdout and the per-file
+  lines on stderr, carries no promise. Only its JSON report does.
 
 ### The supported discovery channel {#unstable-discovery}
 
@@ -503,6 +510,12 @@ unaffected — they read straight from disk and never touch a manifest.
 [marketplace-toml]: ./configuration.md#marketplace-toml
 [export-plugin]: ./commands.md#export-plugin
 [export-plugin-output]: ./commands.md#export-plugin-output
+[export-marketplace]: ./commands.md#export-marketplace
+[export-marketplace-exit]: ./commands.md#export-marketplace-exit
+[export-marketplace-json]: ./commands.md#export-marketplace-json
+[export-marketplace-layout]: ./commands.md#export-marketplace-layout
+[export-marketplace-ownership]: ./commands.md#export-marketplace-ownership
+[marketplace-table]: ./configuration.md#marketplace-table
 [json-shapes-items]: ./json-interface.md#shapes-items
 
 <!-- external -->
