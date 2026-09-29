@@ -1172,7 +1172,8 @@ pub(crate) fn assemble_mcp_file(entries: &[(String, serde_json::Value)]) -> io::
 }
 
 /// Write `client`'s `plugin.json` under `root` at [`family::manifest_rel`]
-/// (C-025, C-005).
+/// (C-025, C-005), plus Cursor's second manifest `.cursor-plugin/plugin.json`
+/// (C-006): the Claude-format bytes beside the Agent Plugins root manifest.
 ///
 /// # Errors
 ///
@@ -1188,8 +1189,18 @@ pub(crate) fn write_manifest(
         Family::AgentPlugins => family::agent_plugins_plugin_json(name, version, description, logo),
     };
     write_staged(root, family::manifest_rel(client), &bytes)?;
+    if client == ClientTarget::Cursor {
+        write_staged(
+            root,
+            CURSOR_MANIFEST,
+            &family::claude_plugin_json(name, version, description),
+        )?;
+    }
     Ok(())
 }
+
+/// Cursor's own plugin manifest path (C-006).
+const CURSOR_MANIFEST: &str = ".cursor-plugin/plugin.json";
 
 /// Write `bytes` to `root/rel` through [`contained`], creating parents.
 fn write_staged(root: &Path, rel: &str, bytes: &[u8]) -> Result<(), ExportError> {
@@ -2209,6 +2220,34 @@ mod tests {
         assert!(!tmp.path().join("plugin.json").exists());
     }
 
+    /// C-006: Cursor keeps the Agent Plugins root manifest and gains a
+    /// Claude-format `.cursor-plugin/plugin.json`, three keys, same version.
+    #[test]
+    fn c006_write_manifest_cursor_adds_dot_cursor_plugin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cursor = (ClientTarget::Cursor, Family::AgentPlugins);
+        write_manifest(
+            tmp.path(),
+            cursor,
+            ("team-stack", "1.0.0+abc", "D"),
+            Some("assets/logo.png"),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(tmp.path().join("plugin.json")).unwrap(),
+            family::agent_plugins_plugin_json("team-stack", "1.0.0+abc", "D", Some("assets/logo.png"))
+        );
+        let second = std::fs::read(tmp.path().join(".cursor-plugin/plugin.json")).unwrap();
+        assert_eq!(second, family::claude_plugin_json("team-stack", "1.0.0+abc", "D"));
+        let v: serde_json::Value = serde_json::from_slice(&second).unwrap();
+        assert_eq!(v.as_object().unwrap().len(), 3);
+        // Codex (same family) gets no second manifest.
+        let other = tempfile::tempdir().unwrap();
+        let codex = (ClientTarget::Codex, Family::AgentPlugins);
+        write_manifest(other.path(), codex, ("team-stack", "1.0.0+abc", "D"), None).unwrap();
+        assert!(!other.path().join(".cursor-plugin").exists());
+    }
+
     // ── C-020 MCP projection and assembly ─────────────────────────
 
     #[test]
@@ -3094,6 +3133,27 @@ mod tests {
             );
         }
         let _ = out;
+    }
+
+    #[tokio::test]
+    async fn c003_c006_every_manifest_of_a_tree_carries_the_same_final_version() {
+        let reg = MemoryRegistry::new();
+        let srv = publish_mcp(&reg, "srv", &stdio("grim")).await;
+        let plugins = [input("team", vec![srv])];
+        let cursor = (ClientTarget::Cursor, Family::AgentPlugins);
+        let (items, _out) = export_to_dir(reg, &plugins, &[cursor]).await;
+        let root = &items[0].path;
+        let read = |rel: &str| -> serde_json::Value {
+            serde_json::from_slice(&std::fs::read(root.join(rel)).unwrap()).unwrap()
+        };
+        assert_eq!(read("plugin.json")["version"], items[0].version.as_str());
+        let second = read(".cursor-plugin/plugin.json");
+        assert_eq!(second["version"], items[0].version.as_str());
+        assert_eq!(second.as_object().unwrap().len(), 3);
+        assert_eq!(
+            std::fs::read(root.join(".cursor-plugin/plugin.json")).unwrap(),
+            family::claude_plugin_json("team", &items[0].version, &family::plugin_description(Some("Base")).0)
+        );
     }
 
     /// The version moves with the description (it is in the manifest, in the
