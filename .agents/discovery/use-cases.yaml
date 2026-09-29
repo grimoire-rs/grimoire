@@ -723,6 +723,46 @@ tasks:
     action: write
     note: "the VS Code surface of browse.md under Getting started: install the extension, add an index, install one artifact, see status; deep reference stays in the extension's repo"
 
+  - id: T33
+    task: "host a plugin marketplace repository that Claude Code, Copilot, Codex, Qoder and Cursor users add by address, and keep it current without hand edits"
+    source: maintainer-request
+    signal: friction-log-severity
+    rank: 33
+    tier: integration
+    depends_on: [T34]
+    friction_log: not-run
+    friction_note: "owner, 2026-09-29 (goal rule of plan_harness_marketplace_export): the curator half of the marketplace feature; without a page the scheduled regenerate job, the required check, the token choice and the trust residual of a pull_request verifier stay folklore"
+    user_need:
+      as_a: "a curator or platform engineer who wants one address for a set of plugins"
+      i_need_to: "declare the plugins once, regenerate and verify the repository on a schedule, and protect the branch it publishes from"
+      so_that: "consumers add one address in their own tool and the repository never drifts from a fresh export"
+    solution_shaped: false
+    existing_page: docs/src/content/docs/guides/hosting-a-marketplace.md
+    page_word_count: 1795
+    page_status: adequate
+    action: write
+    note: "lands in guides/hosting-a-marketplace.md under Teams and automation after use-a-marketplace: repository layout, the [marketplace] table, the ownership convention, both GitHub workflows and their scripts carried verbatim from grimoire-rs/e2e-marketplace, the release-plus-sha256 install step, App token against GITHUB_TOKEN, required check and CODEOWNERS, publish and removal effects, push mode, the GitLab component. Links back to T34"
+
+  - id: T34
+    task: "use a plugin marketplace that someone else generated with grim, from my own coding tool, a team repository, an organization rollout or Claude Code on the web, without installing grim"
+    source: maintainer-request
+    signal: friction-log-severity
+    rank: 34
+    tier: integration
+    depends_on: []
+    friction_log: not-run
+    friction_note: "owner, 2026-09-29 (goal rule of plan_harness_marketplace_export): a use-case-centric page on native consumption without grim, for Claude and web environments and for customers; research_marketplace_native_consumption.md found that Claude Code cloud sessions ignore repo plugin config, Cursor has no individual add flow and Codex has no repo-scoped registration, so the page must state each limit plainly"
+    user_need:
+      as_a: "a developer, a customer or an administrator who was pointed at a plugin marketplace repository"
+      i_need_to: "add it in my own tool, pin a version, and roll it out to a team or an organization"
+      so_that: "I get the plugins without installing grim and know which surfaces cannot use them"
+    solution_shaped: false
+    existing_page: docs/src/content/docs/guides/use-a-marketplace.md
+    page_word_count: 2050
+    page_status: adequate
+    action: write
+    note: "lands in guides/use-a-marketplace.md under Teams and automation: per-tool add and install (Claude Code, Copilot, Codex, Qoder, Cursor), private repositories, repository pinning, the Claude Code on the web limits, organization rollout table, customers, a pin-and-update cheat sheet, troubleshooting. Every harness claim carries a verified date and an upstream link. The curator half (hosting a marketplace) is T33 and links back"
+
 # Coverage table — the same rows for a human reviewer.
 #
 # | Task | Page | Verdict |
@@ -759,6 +799,8 @@ tasks:
 # | T30 write my first skill | missing | write first-skill.md |
 # | T31 repo-local shared directory | missing | write guides/shared-skills.md |
 # | T32 from VS Code | missing | folded into browse.md |
+# | T33 host a plugin marketplace | docs/src/content/docs/guides/hosting-a-marketplace.md | write guides/hosting-a-marketplace.md |
+# | T34 use a marketplace without grim | docs/src/content/docs/guides/use-a-marketplace.md | write guides/use-a-marketplace.md |
 #
 # Unmapped pages: none. introduction.md (landing, routes T01), artifacts.md
 # (reference for T25/T27), package-index.md (reference for T10/T06) and
@@ -788,6 +830,8 @@ inventory:
   - {path: docs/src/json-interface.md,    prose_words: 4233,  doc_type: reference,       type_source: content-read, doc_tier: none, serves: [T24, T07], action: keep}
   - {path: docs/src/stability.md,         prose_words: 3527,  doc_type: explanation,     type_source: content-read, doc_tier: none, serves: [T08, T23], action: keep}
   - {path: docs/src/upgrading.md,         prose_words: 2550,  doc_type: troubleshooting, type_source: content-read, doc_tier: none, serves: [T23], action: keep, note: "symptom-keyed 'what you will see / what to do' sections"}
+  - {path: docs/src/content/docs/guides/use-a-marketplace.md, prose_words: 2050, doc_type: how-to, type_source: content-read, doc_tier: integration, serves: [T34], action: write}
+  - {path: docs/src/content/docs/guides/hosting-a-marketplace.md, prose_words: 1795, doc_type: how-to, type_source: content-read, doc_tier: integration, serves: [T33], action: write}
 inventory_note: >-
   The mdBook nav (docs/src/SUMMARY.md) is a flat list with no group labels, so
   nav seeding proposed nothing (doc_declaration.py --seed printed no rows) and
@@ -860,6 +904,8 @@ ia_plan:
       pages:
         - {path: docs/src/tutorials/own-index.md,   doc_type: tutorial, doc_tier: integration, action: write,  serves: [T10, T21, T27], note: "golden path: skill on disk -> local dev-install -> publish -> announce to own index -> colleague installs; one non-branching path, every step shows a result"}
         - {path: docs/src/guides/team-ci.md,        doc_type: how-to,   doc_tier: integration, action: write,  serves: [T09], note: "what to commit, the frozen install, the stale-lock gate, exit codes"}
+        - {path: docs/src/guides/use-a-marketplace.md, doc_type: how-to, doc_tier: integration, action: write, serves: [T34], note: "native consumption of a grim-generated marketplace: per-tool add, team pin, Claude Code on the web limits, organization rollout, customers; sits after team-plugin in the sidebar"}
+        - {path: docs/src/guides/hosting-a-marketplace.md, doc_type: how-to, doc_tier: integration, action: write, serves: [T33], note: "curator side of a grim-generated marketplace: layout, ownership, the regenerate and verify workflows, tokens, branch protection, publish and removal; sits after use-a-marketplace in the sidebar"}
         - {path: docs/src/guides/registries.md,     doc_type: how-to,   doc_tier: integration, action: write,  serves: [T06, T11], note: "company index beside the public one; filters as a use case; short-id expansion; login pointer"}
         - {path: docs/src/guides/catalog-best-practices.md, doc_type: how-to, doc_tier: integration, action: write, serves: [T29], note: "flat layout, one manifest, naming, what the index is; reconcile with the first-party skills/ prefix"}
         - {path: docs/src/publishing.md,            doc_type: how-to,   doc_tier: integration, action: expand, serves: [T27]}

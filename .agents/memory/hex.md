@@ -100,6 +100,21 @@ research-axes:
 
 ## Memory
 
+- **Landing plan (2026-09-29, hex-plan xhigh, goal loop):**
+  `.agents/plans/plan_harness_marketplace_export.md` — State `landing` (Phase V /hex-review approved after 2 rounds; fold target: none, no Spec Deltas; next: Windows rig, then remote acts),
+  branch `hex/adr-harness-marketplace-export` (worktree `grimoire-duo`).
+  12 WPs in 6 waves across 4 repos (grimoire, grimoire-indexer,
+  grimoire-components, new grimoire-rs/e2e-marketplace), all builders
+  sonnet, one bounded opus review ⇄ execute loop at the end (Phase V).
+  Critical path WP-A → WP-BC → WP-D → WP-E → WP-J → WP-G2. ADR now Accepted
+  with Round-2 amendments (R2-n) that supersede body text; Qoder pulled in
+  as a default client. Remote acts (push, dev.ocx.sh deploy, e2e repo
+  creation, PRs, deep verify) belong to the meta-orchestrator.
+  Upkeep: file-first worker reports proved necessary again (workers idle
+  before replying). The "harness plugin/marketplace manifest schemas" axis
+  drove this run's research too (Qoder, Cursor, native consumption) —
+  still worth a Preferences hint at the next `/hex-init`.
+
 - **Landed plan (2026-09-27):** `.agents/plans/plan_harness_plugin_export.md`
   — State `done` (L3 `/hex-review` approved 2026-09-27; next `/hex-finalize`; fold target: none, the plan has no Spec Deltas block), tier xhigh, branch `hex/harness-native-marketplaces`
   (worktree `grimoire-duo`). Phase 1 of harness plugin export: 9 WPs in 4
@@ -115,6 +130,36 @@ research-axes:
   12 Blocks the native panel partly missed (lock-path/advisory-sidecar
   collision, overwrite race, path-include duplicates). It reads the live
   working tree, so uncommitted artifacts are visible — unlike `nox-review`.
+
+- **ADR proposed (2026-09-29, hex-architect xhigh; since Accepted, see active plan above):**
+  `.agents/adr/adr_harness_marketplace_export.md` (Proposed) + system design
+  `.agents/specs/design_harness_marketplace_export.md`, from dossier
+  `.agents/discussions/marketplace-phase-2.md`. v1 stateless full
+  regeneration (incremental skip deferred — owner decision pending), default
+  clients claude/copilot/codex (Cursor behind a probe spike), rendered-tree
+  version hash over canonical JSON tuples, Qoder family mapping deferred.
+  Research: `research_marketplace_manifest_schemas.md`,
+  `research_derived_version_compat.md`, `research_marketplace_ci_write_path.md`.
+  Review cap hit with 1 Block + 12 Warn outstanding (verification-job temp
+  copy, landing-page client rows, pruning/first-run/rename edge cases).
+  Axis worth a Preferences hint at next `/hex-init`: "harness plugin/marketplace
+  manifest schemas" (drove D2/D4 and caught the Cursor gap).
+
+- **Discussion handed off → architect (2026-09-28):**
+  `.agents/discussions/marketplace-phase-2.md` — marketplace phase 2: a
+  separate git marketplace repo written by `grim export marketplace`, one
+  marketplace file per harness (`.claude-plugin/`, `.github/plugin/`,
+  `.agents/plugins/`, `.cursor-plugin/`; Droid/Junie if cheap) pointing at
+  per-client trees `./<client>/<plugin>/`; incremental export; plugin
+  version hashes the rendered tree; floating entries, removal on drop;
+  commands deferred; only the marketplace repo's CI writes to it. Indexer
+  stream: HEAD digest probes against seeded `enrich.json`, worker pool,
+  `/marketplace` landing page. Research: `research_marketplace_phase2_recon.md`,
+  `research_marketplace_hosting_prior_art.md`,
+  `research_incremental_pages_builds.md`, `research_url_marketplace_trust.md`,
+  `research_marketplace_multi_harness_root.md`,
+  `research_marketplace_multi_version.md`. Next: `/hex-architect` on it
+  (tier high+), then a `grimoire-indexer` plan.
 
 - **Discussion handed off → loop (2026-09-27):**
   `.agents/discussions/harness-native-marketplaces.md` — ratified phase 1
@@ -440,6 +485,7 @@ re-arguing settled design while still reporting divergences as information.
   `../grimoire-vscode/.claude/artifacts/handover_registry_filters.md`.
   Owner chose the extension repo over this repo's `.agents/handover_*.md`
   precedent so the VS Code design can be driven there interactively.
+- **Disk, not CPU, bounds grimoire worktree fan-out (2026-09-29).** At 98% disk a second cold cargo target does not fit; the warm main-checkout `target/` is 17 GB. Run the one cargo-heavy WP per wave in the main checkout on the integration branch; give light WPs worktrees with `CARGO_INCREMENTAL=0` and delete their `target/` after merge.
 ### Convergence-round learnings, 2026-08-09 (10 WPs, `/hex-execute` on review findings)
 
 - **Group review-fix WPs by FILE OWNERSHIP, never by theme.** The first
