@@ -1281,8 +1281,21 @@ fn read_logo(path: &Path) -> Result<(&'static str, Vec<u8>), ExportError> {
     if meta.len() > MAX_LOGO_BYTES {
         return Err(invalid("larger than 1 MiB"));
     }
-    let bytes = std::fs::read(path).map_err(|e| io_error(path, e))?;
+    let file = std::fs::File::open(path).map_err(|e| io_error(path, e))?;
+    let bytes = read_capped(file, MAX_LOGO_BYTES).map_err(|e| io_error(path, e))?;
+    if bytes.len() as u64 > MAX_LOGO_BYTES {
+        return Err(invalid("larger than 1 MiB"));
+    }
     Ok((ext, bytes))
+}
+
+/// Read at most `cap + 1` bytes: one over the cap proves the source is
+/// larger, whatever its metadata claimed (C-007).
+fn read_capped(reader: impl io::Read, cap: u64) -> io::Result<Vec<u8>> {
+    use io::Read as _;
+    let mut bytes = Vec::new();
+    reader.take(cap + 1).read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// The containment assertion every staged write passes (C-035): `rel`
@@ -2246,6 +2259,32 @@ mod tests {
         let codex = (ClientTarget::Codex, Family::AgentPlugins);
         write_manifest(other.path(), codex, ("team-stack", "1.0.0+abc", "D"), None).unwrap();
         assert!(!other.path().join(".cursor-plugin").exists());
+    }
+
+    // ── C-007 logo read cap ───────────────────────────────────────
+
+    /// A reader that reports no size and yields more than the cap: only a
+    /// bounded read can refuse it by bytes read.
+    #[test]
+    fn c007_read_capped_stops_one_byte_past_the_cap() {
+        let endless = io::repeat(b'x');
+        assert_eq!(read_capped(endless, 8).unwrap().len(), 9);
+        let short = io::Cursor::new(vec![b'y'; 5]);
+        assert_eq!(read_capped(short, 8).unwrap().len(), 5);
+        let exact = io::Cursor::new(vec![b'z'; 8]);
+        assert_eq!(read_capped(exact, 8).unwrap().len(), 8);
+    }
+
+    #[test]
+    fn c007_logo_over_the_cap_and_at_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let cap = usize::try_from(MAX_LOGO_BYTES).unwrap();
+        let at = dir.path().join("at.png");
+        std::fs::write(&at, vec![0u8; cap]).unwrap();
+        assert_eq!(read_logo(&at).unwrap().1.len(), cap);
+        let over = dir.path().join("over.png");
+        std::fs::write(&over, vec![0u8; cap + 1]).unwrap();
+        assert!(matches!(read_logo(&over), Err(ExportError::InvalidLogo { .. })));
     }
 
     // ── C-020 MCP projection and assembly ─────────────────────────
