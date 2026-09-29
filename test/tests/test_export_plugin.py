@@ -844,7 +844,7 @@ def test_s010_per_client_declines(grim_at, tmp_path: Path, work: Path, registry:
     assert "Omitted for droid: rule team-style." in _readme(droid)
 
 
-# ── S-019 — Qoder plugin tree (C-005) ───────────────────────────────────────
+# ── S-019 / S-020 — Qoder and Cursor plugin trees (C-005, C-006) ────────────
 
 
 def test_s019_qoder_export_renders_the_claude_family_under_dot_qoder_plugin(
@@ -882,6 +882,25 @@ def test_s019b_config_clients_naming_qoder_export_a_qoder_tree(
     assert result.returncode == 0, result.stderr
     assert _entries(work / "dist") == ["team.qoder"]
     assert "no plugin format" not in result.stderr
+
+
+def test_s020_cursor_export_adds_a_second_manifest_with_the_same_version(
+    grim_at, tmp_path: Path, work: Path, registry: str, unique_repo: str
+) -> None:
+    runner = grim_at(work)
+    stack = _publish_stack(runner, tmp_path, registry, unique_repo)
+
+    _ok(_export(runner, stack.bundle, "--client", "cursor", "-o", "dist"))
+
+    root = work / "dist" / "team-stack.cursor"
+    agent_plugins = _manifest(root)
+    second_raw = (root / ".cursor-plugin" / "plugin.json").read_bytes()
+    second = json.loads(second_raw)
+    assert list(second) == ["name", "version", "description"], "three keys, Claude format"
+    assert second_raw.endswith(b"}\n") and not second_raw.endswith(b"\n\n")
+    assert second["version"] == agent_plugins["version"]
+    assert agent_plugins["version"] == f"0.0.0+{_suffix(root, '0.0.0')}"
+    assert (root / "mcp.json").is_file() and not (root / ".mcp.json").exists()
 
 
 # ── S-011 — Rendered like install (C-017, C-018, C-020) ─────────────────────
