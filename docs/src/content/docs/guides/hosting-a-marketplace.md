@@ -37,7 +37,7 @@ the automation. grim owns everything it generates.
 | `marketplace.lock` | grim | Pinned digests, written by `grim update --marketplace` and `grim export marketplace` |
 | `.claude-plugin/marketplace.json`, `claude/<plugin>/` | grim | Claude Code |
 | `.github/plugin/marketplace.json`, `copilot/<plugin>/` | grim | Copilot CLI and VS Code |
-| `.agents/plugins/marketplace.json`, `codex/<plugin>/` | grim | Codex |
+| `.agents/plugins/marketplace.json`, `codex/<plugin>/` | grim | ChatGPT / Codex |
 | `.qoder-plugin/marketplace.json`, `qoder/<plugin>/` | grim | Qoder |
 | `.cursor-plugin/marketplace.json`, `cursor/<plugin>/` | grim | Cursor, only when you select it |
 | `.github/workflows/marketplace.yml` | curator | Regenerate, deliver, keepalive |
@@ -82,7 +82,7 @@ description = "Tiered multi-agent swarm orchestration: plan, execute, review, ar
 ```
 
 The [`[marketplace]` table](../configuration.md#marketplace-table) also
-takes a `clients` list. Without it grim serves Claude Code, Copilot, Codex
+takes a `clients` list. Without it grim serves Claude Code, Copilot, ChatGPT / Codex
 and Qoder. Cursor is opt-in. The name is what consumers type after the
 `@` in `<plugin>@<marketplace>`.
 
