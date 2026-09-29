@@ -173,6 +173,11 @@ export default defineConfig({
             { slug: 'tutorials/own-index', label: 'Publish to your own index' },
             { slug: 'guides/team-ci', label: 'Team and CI' },
             { slug: 'guides/team-plugin', label: 'Hand a team a plugin' },
+            { slug: 'guides/use-a-marketplace', label: 'Use a marketplace' },
+            {
+              slug: 'guides/hosting-a-marketplace',
+              label: 'Host a marketplace',
+            },
             { slug: 'guides/registries', label: 'Company registries' },
             {
               slug: 'guides/catalog-best-practices',
