@@ -650,6 +650,7 @@ mod tests {
 
     fn market(path: &Path, plugins: &[(&str, &[&str])]) -> MarketplaceManifest {
         MarketplaceManifest {
+            marketplace: None,
             path: path.to_path_buf(),
             plugins: plugins
                 .iter()

@@ -952,7 +952,9 @@ leave `[plugin]` as authored.
 what you hand to someone else: one or more named **plugins**, each a set
 of already-published references. [`grim export
 plugin`](./commands.md#export-plugin) renders a plugin as a Claude-family
-or [Agent Plugins][agent-plugins] directory or zip. This is a separate,
+or [Agent Plugins][agent-plugins] directory or zip, and [`grim export
+marketplace`](./commands.md#export-marketplace) turns the same declarations
+into a marketplace repository. This is a separate,
 optional file — a project with no `marketplace.toml` behaves exactly as
 it does today. `grim export plugin` also works with no manifest at all,
 taking references straight on the command line.
@@ -1012,9 +1014,55 @@ common prefix. That is useful when your registry namespaces artifacts
 name. A rename that would collide two members is refused. So is one that
 would leave a stale reference to the old name inside a rendered file —
 neither is ever silently applied. A top-level `name`, `owner`, or
-`description` (outside
-`[plugins.<name>]`) is **reserved** and rejected — a plugin-of-plugins is
-not supported.
+`description` (outside `[plugins.<name>]`) is **reserved** and rejected. The
+marketplace's own identity lives in the [`[marketplace]`
+table](#marketplace-table) instead.
+
+### The `[marketplace]` table {#marketplace-table}
+
+```toml
+[marketplace]
+name = "acme-tools"
+description = "Acme's shared plugins"
+clients = ["claude", "copilot", "codex", "qoder"]
+
+[marketplace.owner]
+name = "Acme Platform Team"
+email = "platform@acme.example"
+```
+
+[`grim export marketplace`](./commands.md#export-marketplace) needs this
+table. It names the marketplace and its owner in every client's marketplace
+file. Every other command that reads the manifest only validates it, and a
+manifest without it behaves exactly as before. The table sits outside the
+declaration hashes, so adding or editing it re-pins nothing.
+
+| Key | Required | Meaning |
+|---|---|---|
+| `name` | yes | The marketplace's name; consumers install as `<plugin>@<name>` |
+| `owner.name` | yes | The owner's name; not empty |
+| `owner.email` | no | An email address, `name@host.tld` |
+| `description` | no | Free text, at most 500 UTF-16 code units; written to `metadata.description` |
+| `clients` | no | Which clients get a marketplace file: any of `claude`, `copilot`, `codex`, `qoder`, `cursor` (default `claude`, `copilot`, `codex`, `qoder`) |
+
+A `name` uses lowercase letters, digits and hyphens. It starts and ends with
+a letter or a digit and has at most 64 characters. It may not contain
+`anthropic`, `claude`, `official` or `qoder`, and these names are reserved:
+`agent-skills`, `knowledge-work-plugins`, `inline`, `builtin`, `skills-dir`,
+`synced`, `github`, `gh`, `npm`, `pip`, `uv` and `cargo`. A malformed value
+exits `65` and names the key.
+
+`clients` lists each client once; a repeat is dropped. An empty list exits
+`65`: name a client or leave the key out. `junie`, `openclaw` and `droid`
+read Claude's marketplace file and own none, so naming one exits `65` with
+the hint to select `claude`. Any other name exits `65` and lists the five
+valid ones. The order of `clients` is the order of the rows in the export
+report.
+
+**Requires grim 0.15.0 or later.** An older grim rejects a manifest that
+carries `[marketplace]`, with exit `65`, on every command that reads it,
+`grim export plugin` and `grim update --marketplace` included. See [the
+upgrade note](./upgrading.md#marketplace-table-needs-new-grim).
 
 `marketplace.lock` is `marketplace.toml`'s lockfile, generated the first
 time any command resolves the manifest. It is named `<stem>.lock` beside

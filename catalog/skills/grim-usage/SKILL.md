@@ -72,7 +72,8 @@ full reference is `--help` plus the docs site linked below.
 | `grim fetch` | Print an artifact's content without installing | [consume](references/consume.md) |
 | `grim describe` | Report an artifact's metadata (kind, annotations, tags) without downloading content | [consume](references/consume.md) |
 | `grim remove` / `uninstall` | Undeclare vs full inverse of install | [consume](references/consume.md) |
-| `grim export plugin` | Render already-locked artifacts as a Claude Code or Agent Plugins plugin (directory or `--zip`), for a client with no grim install | [publish](references/publish.md) |
+| `grim export plugin` | Render already-locked artifacts as a Claude Code (or Qoder) or Agent Plugins plugin (directory or `--zip`), for a client with no grim install | [publish](references/publish.md) |
+| `grim export marketplace` | Regenerate a git marketplace repository from a `marketplace.toml`'s `[marketplace]` table: one marketplace file and one plugin tree per client, for consumers with no grim install | [publish](references/publish.md) |
 | `grim search` / `tui` | Browse your declared registries' catalogs | [registries](references/registries.md) |
 | `grim rate` | Vote on an artifact through the index's rating forge | [registries](references/registries.md) |
 | `grim mcp` | Run a local STDIO MCP server for AI agent integration | [registries](references/registries.md) |

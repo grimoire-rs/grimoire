@@ -563,6 +563,33 @@ a `marketplace.toml` plugin can declare `project = "<dir>"` instead of
 a plugin without grim][team-plugin] and the [command
 reference][commands-export].
 
+### Serving a marketplace repository {#export-marketplace}
+
+`grim export marketplace` hands a whole audience one address instead of one
+folder. From a `marketplace.toml` that carries a `[marketplace]` table (a
+`name`, an `owner`, optionally `clients`), it regenerates a git repository
+holding one marketplace file per client and one plugin tree per plugin and
+client at `./<client>/<plugin>`. The default clients are Claude Code,
+Copilot, Codex and Qoder, and Cursor is opt-in. Commit the result. A
+consumer adds the repository with their own client's commands, no grim
+needed; the [consumer guide][use-a-marketplace] shows each client, and
+the [curator guide][hosting-a-marketplace] covers the regenerate workflow,
+the required check and the token setup.
+
+```sh
+grim export marketplace -o ../acme-marketplace
+```
+
+Ownership is a convention, not recorded state. grim rewrites only
+`./<client>/` and that client's marketplace file, and refuses a foreign one
+at exit 65 (`untracked-destination`) unless `--force` adopts it.
+`--force` deletes whatever else sits in an adopted `./<client>/`, and after
+you rename the marketplace it means consumers must re-add it under the new
+name. A manifest carrying `[marketplace]` needs grim 0.15.0 or later: an
+older grim rejects it. Confirm the current flag set with `grim export
+marketplace --help`, and see the [command reference][commands-export-marketplace]
+for the layout, ownership rules, JSON report and exit codes.
+
 ## Further Reading
 
 - [Publishing][publishing] — the full workflow: support directories,
@@ -572,6 +599,7 @@ reference][commands-export].
 - [Authentication][auth] — credential resolution, storage tiers, CI.
 - [Command reference: build, release, login, logout][commands].
 - [Command reference: export plugin][commands-export].
+- [Command reference: export marketplace][commands-export-marketplace].
 - [Publishing from CI][ci] — wiring publish/announce into GitHub or
   GitLab CI.
 
@@ -583,6 +611,9 @@ reference][commands-export].
 [auth]: https://grimoire.rs/authentication.html
 [commands]: https://grimoire.rs/commands.html#build
 [commands-export]: https://grimoire.rs/commands.html#export-plugin
+[commands-export-marketplace]: https://grimoire.rs/commands.html#export-marketplace
+[use-a-marketplace]: https://grimoire.rs/guides/use-a-marketplace.html
+[hosting-a-marketplace]: https://grimoire.rs/guides/hosting-a-marketplace.html
 [team-plugin]: https://grimoire.rs/guides/team-plugin.html
 [agent-plugins]: https://agent-plugins.org/
 [artifacts-readme]: https://grimoire.rs/artifacts.html#well-known-assets

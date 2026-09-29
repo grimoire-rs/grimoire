@@ -4,9 +4,10 @@
 //! `marketplace.toml`: the plugin declaration file (design record C-001,
 //! C-002, C-004).
 //!
-//! Wire shape is top-level `[plugins.<name>]` tables only, every level
-//! `deny_unknown_fields`. Top-level `name`, `owner` and `description` are
-//! reserved for a later marketplace manifest and rejected today.
+//! Wire shape is a top-level `[marketplace]` table (the marketplace's own
+//! identity, C-008) and `[plugins.<name>]` tables, every level
+//! `deny_unknown_fields`. Top-level `name`, `owner` and `description` stay
+//! rejected: the marketplace's identity lives under `[marketplace]`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -27,6 +28,35 @@ pub struct MarketplaceManifest {
     pub path: PathBuf,
     /// Declared plugins, iterated in byte order of the name.
     pub plugins: BTreeMap<String, PluginDecl>,
+    /// The `[marketplace]` table, validated at load (C-009); `None` when
+    /// absent (always for the ad-hoc manifest).
+    pub marketplace: Option<MarketplaceMeta>,
+}
+
+/// The `[marketplace]` table (C-008): the identity `grim export marketplace`
+/// writes into every client's marketplace file. Outside the declaration
+/// hash, so adding it re-pins nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MarketplaceMeta {
+    /// The marketplace name users type after `@` (C-009 grammar).
+    pub name: String,
+    pub owner: MarketplaceOwner,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Marketplace clients, deduplicated in first-mention order at load;
+    /// empty = the key was absent (an explicit `[]` is refused).
+    #[serde(default)]
+    pub clients: Vec<String>,
+}
+
+/// `[marketplace.owner]`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MarketplaceOwner {
+    pub name: String,
+    #[serde(default)]
+    pub email: Option<String>,
 }
 
 /// One `[plugins.<name>]` table: exactly one of `include` (references
@@ -59,6 +89,7 @@ pub struct PluginDecl {
     pub logo: Option<PathBuf>,
 }
 
+use crate::config::plugin_meta::{MAX_DESCRIPTION_LEN, description_len};
 pub use crate::config::plugin_meta::{RenameRule, normalize_version, validate_plugin_name};
 
 /// Declaration hashes of a manifest (C-004): `sha256:<hex>` over the JCS
@@ -84,6 +115,7 @@ impl MarketplaceManifest {
                 .filter(|(_, d)| d.project.is_none())
                 .map(|(n, d)| (n.clone(), d.clone()))
                 .collect(),
+            marketplace: self.marketplace.clone(),
         }
     }
 }
@@ -94,6 +126,8 @@ impl MarketplaceManifest {
 struct RawManifest {
     #[serde(default)]
     plugins: BTreeMap<String, PluginDecl>,
+    #[serde(default)]
+    marketplace: Option<MarketplaceMeta>,
 }
 
 /// The [`ExportError::Manifest`] message of a manifest that does not exist
@@ -135,7 +169,7 @@ pub fn load(path: &Path) -> Result<MarketplaceManifest, ExportError> {
     let table: toml::Table = text.parse().map_err(|e: toml::de::Error| fail(e.to_string()))?;
     if let Some(key) = RESERVED_KEYS.iter().find(|k| table.contains_key(**k)) {
         return Err(fail(format!(
-            "top-level key '{key}' is reserved (reserved keys: {}); declare plugins under [plugins.<name>]",
+            "top-level key '{key}' is reserved (reserved keys: {}); declare plugins under [plugins.<name>], and the marketplace's own name, owner and description under [marketplace]",
             RESERVED_KEYS.join(", ")
         )));
     }
@@ -145,7 +179,134 @@ pub fn load(path: &Path) -> Result<MarketplaceManifest, ExportError> {
     for (name, decl) in &mut plugins {
         validate_plugin(name, decl).map_err(|m| fail(format!("plugin '{name}': {m}")))?;
     }
-    Ok(MarketplaceManifest { path, plugins })
+    let mut marketplace = raw.marketplace;
+    if let Some(meta) = &mut marketplace {
+        let explicit_empty = table
+            .get("marketplace")
+            .and_then(|t| t.get("clients"))
+            .and_then(toml::Value::as_array)
+            .is_some_and(Vec::is_empty);
+        validate_marketplace(meta, explicit_empty).map_err(|m| fail(format!("[marketplace]: {m}")))?;
+    }
+    Ok(MarketplaceManifest {
+        path,
+        plugins,
+        marketplace,
+    })
+}
+
+/// The clients a marketplace file exists for (C-009, ADR D2).
+pub(crate) const MARKETPLACE_CLIENTS: [&str; 5] = ["claude", "copilot", "codex", "qoder", "cursor"];
+
+/// Clients that read Claude's marketplace file rather than owning one.
+const SERVED_BY_CLAUDE: [&str; 3] = ["junie", "openclaw", "droid"];
+
+/// Marketplace names that would shadow a name a client resolves itself.
+const RESERVED_NAMES: [&str; 12] = [
+    "agent-skills",
+    "knowledge-work-plugins",
+    "inline",
+    "builtin",
+    "skills-dir",
+    "synced",
+    "github",
+    "gh",
+    "npm",
+    "pip",
+    "uv",
+    "cargo",
+];
+
+/// Substrings no marketplace name may contain: Claude Code refuses names
+/// that impersonate its vendor, and `qoder` follows for the same reason.
+const RESERVED_SUBSTRINGS: [&str; 4] = ["anthropic", "claude", "official", "qoder"];
+
+/// Longest marketplace name.
+const MAX_NAME_LEN: usize = 64;
+
+/// Validate the `[marketplace]` table and deduplicate its clients in place
+/// (C-009). `explicit_empty_clients` is a written `clients = []`, which the
+/// typed table cannot tell from an absent key.
+fn validate_marketplace(meta: &mut MarketplaceMeta, explicit_empty_clients: bool) -> Result<(), String> {
+    validate_marketplace_name(&meta.name)?;
+    if meta.owner.name.trim().is_empty() {
+        return Err("owner.name must not be empty".to_string());
+    }
+    if let Some(email) = &meta.owner.email
+        && !is_email(email)
+    {
+        return Err(format!(
+            "owner.email '{email}' is not an email address (expected name@host.tld)"
+        ));
+    }
+    if let Some(text) = &meta.description {
+        let len = description_len(text.trim());
+        if len > MAX_DESCRIPTION_LEN {
+            return Err(format!(
+                "description is {len} characters; at most {MAX_DESCRIPTION_LEN} UTF-16 units are allowed"
+            ));
+        }
+    }
+    if explicit_empty_clients {
+        return Err("clients is empty: select at least one client or omit the key".to_string());
+    }
+    let mut seen: Vec<String> = Vec::with_capacity(meta.clients.len());
+    for client in std::mem::take(&mut meta.clients) {
+        if SERVED_BY_CLAUDE.contains(&client.as_str()) {
+            return Err(format!(
+                "client '{client}' reads .claude-plugin/marketplace.json; select claude"
+            ));
+        }
+        if !MARKETPLACE_CLIENTS.contains(&client.as_str()) {
+            return Err(format!(
+                "unknown client '{client}'; marketplace clients: {}",
+                MARKETPLACE_CLIENTS.join(", ")
+            ));
+        }
+        if !seen.contains(&client) {
+            seen.push(client);
+        }
+    }
+    meta.clients = seen;
+    Ok(())
+}
+
+/// `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`, at most [`MAX_NAME_LEN`], and not
+/// reserved.
+fn validate_marketplace_name(name: &str) -> Result<(), String> {
+    let edge = |c: Option<char>| c.is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+    let well_formed = name.len() <= MAX_NAME_LEN
+        && edge(name.chars().next())
+        && edge(name.chars().next_back())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if !well_formed {
+        return Err(format!(
+            "name '{name}' is invalid: use lowercase letters, digits and hyphens, starting and ending with a letter or digit, at most {MAX_NAME_LEN} characters"
+        ));
+    }
+    if let Some(part) = RESERVED_SUBSTRINGS.iter().find(|r| name.contains(**r)) {
+        return Err(format!("name '{name}' is reserved: it must not contain '{part}'"));
+    }
+    if RESERVED_NAMES.contains(&name) {
+        return Err(format!("name '{name}' is reserved"));
+    }
+    Ok(())
+}
+
+/// `^[^@\s]+@[^@\s]+\.[^@\s]+$`: one `@`, no whitespace, and a dot with
+/// something on both sides of it in the host part.
+fn is_email(text: &str) -> bool {
+    let Some((local, host)) = text.split_once('@') else {
+        return false;
+    };
+    let plain = |part: &str| !part.is_empty() && !part.contains('@') && !part.chars().any(char::is_whitespace);
+    plain(local)
+        && plain(host)
+        && host
+            .char_indices()
+            .any(|(i, c)| c == '.' && i > 0 && i + 1 < host.len())
 }
 
 /// The file-name rules of C-001, checked before the file is read: a
@@ -626,6 +787,7 @@ mod tests {
 
     fn manifest(dir: &str, plugins: &[(&str, PluginDecl)]) -> MarketplaceManifest {
         MarketplaceManifest {
+            marketplace: None,
             path: PathBuf::from(dir).join("market.toml"),
             plugins: plugins.iter().map(|(n, d)| ((*n).to_string(), d.clone())).collect(),
         }
@@ -833,5 +995,237 @@ mod tests {
         let got = hashes(&manifest("/w", &[("team", decl(&[inc.as_str()]))]));
         let want = vec![format!("ghcr.io/grimoire-rs/x/a@{digest}")];
         assert_eq!(got.per_plugin["team"], sha(&serde_json::to_string(&want).unwrap()));
+    }
+
+    // ── C-008 / C-009 `[marketplace]` ─────────────────────────────────────
+
+    /// A manifest with `[marketplace]` lines `market`, `[marketplace.owner]`
+    /// lines `owner`, and one valid plugin.
+    fn with_meta(market: &str, owner: &str) -> String {
+        format!("{VALID}[marketplace]\n{market}\n[marketplace.owner]\n{owner}\n")
+    }
+
+    const OWNER: &str = "name = \"Acme\"";
+
+    fn meta_err(market: &str, owner: &str) -> String {
+        load_err_body(&with_meta(market, owner))
+    }
+
+    fn meta_ok(market: &str, owner: &str) -> MarketplaceMeta {
+        load_ok_body(&with_meta(market, owner)).marketplace.unwrap()
+    }
+
+    #[test]
+    fn c008_full_table_parses_every_field() {
+        let meta = meta_ok(
+            "name = \"acme-tools\"\ndescription = \"Acme's plugins\"\nclients = [\"cursor\", \"claude\"]",
+            "name = \"Acme\"\nemail = \"dev@acme.example\"",
+        );
+        assert_eq!(
+            meta,
+            MarketplaceMeta {
+                name: "acme-tools".into(),
+                owner: MarketplaceOwner {
+                    name: "Acme".into(),
+                    email: Some("dev@acme.example".into()),
+                },
+                description: Some("Acme's plugins".into()),
+                clients: vec!["cursor".into(), "claude".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn c008_the_table_is_optional_and_its_optionals_default() {
+        assert_eq!(load_ok_body(VALID).marketplace, None);
+        let meta = meta_ok("name = \"acme\"", OWNER);
+        assert_eq!(meta.description, None);
+        assert_eq!(meta.owner.email, None);
+        assert_eq!(
+            meta.clients,
+            Vec::<String>::new(),
+            "absent = default set, decided later"
+        );
+    }
+
+    #[test]
+    fn c008_the_table_needs_name_and_owner_and_denies_unknown_keys() {
+        for body in [
+            format!("{VALID}[marketplace]\n[marketplace.owner]\n{OWNER}\n"),
+            format!("{VALID}[marketplace]\nname = \"acme\"\n"),
+            format!("{VALID}[marketplace]\nname = \"acme\"\nbogus = 1\n[marketplace.owner]\n{OWNER}\n"),
+            format!("{VALID}[marketplace]\nname = \"acme\"\n[marketplace.owner]\n{OWNER}\nbogus = 1\n"),
+            format!("{VALID}[marketplace]\nname = \"acme\"\n[marketplace.owner]\nemail = \"a@b.co\"\n"),
+        ] {
+            load_err_body(&body);
+        }
+    }
+
+    #[test]
+    fn c008_top_level_identity_keys_point_at_the_marketplace_table() {
+        for key in ["name", "owner", "description"] {
+            let msg = load_err_body(&format!("{key} = \"x\"\n{VALID}"));
+            assert!(msg.contains("[marketplace]"), "'{key}' hint names the table: {msg}");
+        }
+    }
+
+    #[test]
+    fn c008_the_table_is_outside_the_declaration_hashes() {
+        let plain = load_ok_body(VALID);
+        let described = load_ok_body(&with_meta("name = \"acme\"", OWNER));
+        assert_eq!(
+            hashes(&plain),
+            hashes(&described),
+            "adding [marketplace] re-pins nothing"
+        );
+    }
+
+    #[test]
+    fn c009_name_grammar_and_length() {
+        let long_ok = "a".repeat(64);
+        assert_eq!(meta_ok(&format!("name = \"{long_ok}\""), OWNER).name, long_ok);
+        for name in ["a", "a1", "a-b", "9lives", "my-tools-2"] {
+            assert_eq!(meta_ok(&format!("name = \"{name}\""), OWNER).name, name);
+        }
+        let too_long = "a".repeat(65);
+        for name in ["", "-a", "a-", "A", "Acme", "a_b", "a b", "a.b", "é", too_long.as_str()] {
+            let msg = meta_err(&format!("name = \"{name}\""), OWNER);
+            assert!(msg.contains("[marketplace]") && msg.contains("name"), "'{name}': {msg}");
+            assert!(msg.contains("lowercase"), "'{name}' states the grammar: {msg}");
+        }
+    }
+
+    #[test]
+    fn c009_reserved_substrings_are_refused_anywhere_in_the_name() {
+        for name in [
+            "anthropic",
+            "claude",
+            "official",
+            "qoder",
+            "my-claude-tools",
+            "claudeplugins",
+            "unofficial",
+            "officially-yours",
+            "acme-qoder",
+            "qoders",
+            "x-anthropic-x",
+        ] {
+            let msg = meta_err(&format!("name = \"{name}\""), OWNER);
+            assert!(msg.contains("reserved"), "'{name}': {msg}");
+        }
+        // The qoder substring is the one the client list does not imply.
+        assert!(meta_err("name = \"qoder-kit\"", OWNER).contains("'qoder'"));
+    }
+
+    #[test]
+    fn c009_reserved_names_are_refused_only_when_equal() {
+        for name in [
+            "agent-skills",
+            "knowledge-work-plugins",
+            "inline",
+            "builtin",
+            "skills-dir",
+            "synced",
+            "github",
+            "gh",
+            "npm",
+            "pip",
+            "uv",
+            "cargo",
+        ] {
+            let msg = meta_err(&format!("name = \"{name}\""), OWNER);
+            assert!(msg.contains("reserved") && msg.contains(name), "'{name}': {msg}");
+        }
+        for name in [
+            "agent-skills-extra",
+            "my-github",
+            "ghost",
+            "cargo-kit",
+            "uv2",
+            "inline-x",
+        ] {
+            assert_eq!(meta_ok(&format!("name = \"{name}\""), OWNER).name, name);
+        }
+    }
+
+    #[test]
+    fn c009_owner_name_must_not_be_empty() {
+        for owner in ["name = \"\"", "name = \"   \""] {
+            let msg = meta_err("name = \"acme\"", owner);
+            assert!(msg.contains("owner.name"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn c009_owner_email_shape() {
+        for email in ["a@b.co", "first.last@sub.acme.example", "a+tag@b.c"] {
+            let meta = meta_ok("name = \"acme\"", &format!("{OWNER}\nemail = \"{email}\""));
+            assert_eq!(meta.owner.email.as_deref(), Some(email));
+        }
+        for email in [
+            "", "a", "a@b", "@b.c", "a@", "a@b.", "a@.c", "a b@c.d", "a@b .c", "a@@b.c", "a@b@c.d",
+        ] {
+            let msg = meta_err("name = \"acme\"", &format!("{OWNER}\nemail = \"{email}\""));
+            assert!(msg.contains("owner.email") && msg.contains("email"), "'{email}': {msg}");
+        }
+    }
+
+    #[test]
+    fn c009_description_is_capped_in_utf16_units() {
+        let ok = |text: &str| meta_ok(&format!("name = \"acme\"\ndescription = \"{text}\""), OWNER).description;
+        assert_eq!(ok(&"a".repeat(500)).unwrap().len(), 500);
+        // 250 astral characters are 500 UTF-16 units: at the cap.
+        assert_eq!(ok(&"😀".repeat(250)).unwrap().chars().count(), 250);
+        // 251 are 502 units although only 251 characters: over it.
+        for text in ["a".repeat(501), "😀".repeat(251)] {
+            let msg = meta_err(&format!("name = \"acme\"\ndescription = \"{text}\""), OWNER);
+            assert!(msg.contains("description") && msg.contains("500"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn c009_clients_are_validated_and_deduplicated_in_first_mention_order() {
+        let clients = |list: &str| meta_ok(&format!("name = \"acme\"\nclients = {list}"), OWNER).clients;
+        assert_eq!(
+            clients("[\"cursor\", \"claude\", \"cursor\", \"qoder\", \"claude\"]"),
+            ["cursor", "claude", "qoder"]
+        );
+        assert_eq!(
+            clients("[\"claude\", \"copilot\", \"codex\", \"qoder\", \"cursor\"]").len(),
+            5
+        );
+        let msg = meta_err("name = \"acme\"\nclients = [\"claude\", \"vscode\"]", OWNER);
+        assert!(
+            msg.contains("vscode") && msg.contains("claude, copilot, codex, qoder, cursor"),
+            "{msg}"
+        );
+        assert!(meta_err("name = \"acme\"\nclients = [\"Claude\"]", OWNER).contains("Claude"));
+    }
+
+    #[test]
+    fn c009_an_empty_clients_list_is_refused_but_an_absent_key_is_not() {
+        let msg = meta_err("name = \"acme\"\nclients = []", OWNER);
+        assert!(msg.contains("clients") && msg.contains("omit the key"), "{msg}");
+        assert!(meta_ok("name = \"acme\"", OWNER).clients.is_empty());
+    }
+
+    #[test]
+    fn c009_clients_that_read_the_claude_file_get_a_served_by_hint() {
+        for client in ["junie", "openclaw", "droid"] {
+            let msg = meta_err(&format!("name = \"acme\"\nclients = [\"{client}\"]"), OWNER);
+            assert!(
+                msg.contains(client)
+                    && msg.contains(".claude-plugin/marketplace.json")
+                    && msg.contains("select claude"),
+                "{client}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn c009_validation_runs_without_any_plugin_declared() {
+        // `load` is the one validation point for every caller.
+        let msg = load_err_body("[marketplace]\nname = \"Bad Name\"\n[marketplace.owner]\nname = \"Acme\"\n");
+        assert!(msg.contains("name"), "{msg}");
     }
 }

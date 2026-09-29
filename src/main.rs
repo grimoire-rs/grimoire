@@ -124,8 +124,8 @@ pub enum Command {
     /// Report an artifact's metadata (kind, annotations, tags) without
     /// downloading its content.
     Describe(DescribeArgs),
-    /// Package locked artifacts as a plugin for Claude-family or Agent
-    /// Plugins clients.
+    /// Package locked artifacts as a plugin, or regenerate a plugin
+    /// marketplace repository, for Claude-family or Agent Plugins clients.
     Export(ExportArgs),
     /// Print the JSON Schema for grimoire.toml, publish.toml, or grimoire.lock.
     Schema(SchemaArgs),

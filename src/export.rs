@@ -15,6 +15,7 @@ pub mod archive;
 pub mod export_error;
 pub mod family;
 pub mod marketplace;
+pub mod marketplace_export;
 pub mod rename;
 pub mod resolve;
 pub mod stage;

@@ -23,7 +23,7 @@ These apply to every subcommand:
 | `--config <path>` | Use an explicit project config file. |
 | `--registry <ref>` | Registry for short identifiers and the browse set. Repeatable / comma-separated (`--registry a,b`); the first value is the default. |
 | `--offline` | Disable all network access; work from the cache only and fail rather than reach a registry. |
-| `--progress <auto\|json\|none>` | Progress rendering for long-running passes (default `auto` = tty-gated stderr bar on `install` and `export plugin`, silent elsewhere; `export plugin` counts every member fetched, across all plugins). `json` emits NDJSON events on **stderr** — `{"event":"start","total":N}`, `{"event":"advance","position":i,"total":N,"label":"…"}` (`label` is display-only), `{"event":"finish"}` — while stdout keeps the normal report. **Experimental pre-1.0**; see [Stability](./stability.md#unstable). |
+| `--progress <auto\|json\|none>` | Progress rendering for long-running passes (default `auto` = tty-gated stderr bar on `install`, `export plugin` and `export marketplace`, silent elsewhere; the two exports count every member fetched, across all plugins). `json` emits NDJSON events on **stderr** — `{"event":"start","total":N}`, `{"event":"advance","position":i,"total":N,"label":"…"}` (`label` is display-only), `{"event":"finish"}` — while stdout keeps the normal report. **Experimental pre-1.0**; see [Stability](./stability.md#unstable). |
 | `--log-level <level>` | Override the tracing log level (`warn`, `info`, `debug`). |
 
 A downstream reader that closes the pipe early — `grim status --format
@@ -47,6 +47,8 @@ printing noise; see [Broken pipe][json-broken-pipe] for the full contract.
 | [`grim rate`](#rate) | Vote on an artifact through the index's rating forge. |
 | [`grim fetch`](#fetch) | Print an artifact's content without installing. |
 | [`grim describe`](#describe) | Show an artifact's manifest metadata without downloading it. |
+| [`grim export plugin`](#export-plugin) | Render locked artifacts as a plugin for a client without grim. |
+| [`grim export marketplace`](#export-marketplace) | Regenerate a plugin marketplace repository from declared plugins. |
 | [`grim tui`](#tui) | Browse the catalog interactively. |
 | [`grim build`](#build) | Validate and pack a local artifact. |
 | [`grim release`](#release) | Validate, pack, and push an artifact. |
@@ -1749,8 +1751,8 @@ Export renders into one of two on-disk shapes, never a client's own
 
 | Family | Clients | Manifest | Members |
 |---|---|---|---|
-| Claude | `claude`, [`droid`][droid], [`junie`][junie], [`openclaw`][openclaw] | `.claude-plugin/plugin.json` | `skills/<name>/`, `agents/<name>.md`, `.mcp.json` |
-| Agent Plugins | [`copilot`][copilot], [`codex`][codex], [`cursor`][cursor], `agents` | `plugin.json` (with a `$schema`) | `skills/<name>/`, `mcp.json` |
+| Claude | `claude`, [`droid`][droid], [`junie`][junie], [`openclaw`][openclaw], [`qoder`][qoder] | `.claude-plugin/plugin.json`; Qoder: `.qoder-plugin/plugin.json` | `skills/<name>/`, `agents/<name>.md`, `.mcp.json` |
+| Agent Plugins | [`copilot`][copilot], [`codex`][codex], [`cursor`][cursor], `agents` | `plugin.json` (with a `$schema`); Cursor also `.cursor-plugin/plugin.json` | `skills/<name>/`, `mcp.json` |
 
 A client outside both families, or a client with no plugin surface at all
 (explicitly named with `--client`), exits `78`. `--client` left unset falls
@@ -1762,10 +1764,14 @@ through the named client's own [`grim install`](#install) path. A plugin
 for `claude` therefore gets the same file bytes an install for `claude`
 would, including any vendor-specific rendering such as `claude.*` metadata
 lifted to native keys. Name the client the plugin is for. Today `copilot`,
-`codex`, `cursor`, and `agents` render the same bytes, so `--client agents`
-gives one plugin all four can load. Only the output name and the README's
-omitted-members line differ. Claude-family clients differ from each other
-in what they admit (table below).
+`codex`, `cursor`, and `agents` render the same member bytes. They differ in
+the output name, the README's omitted-members line, and one file: a `cursor`
+plugin also carries `.cursor-plugin/plugin.json`, a second manifest in the
+Claude format, at the path Cursor's own plugin format looks for. A `qoder`
+plugin is a Claude plugin whose manifest sits under `.qoder-plugin/`, and it
+is built as a `claude` export is, MCP placeholder renames included.
+Claude-family clients differ from each other in what they admit (table
+below).
 
 ### What each client admits {#export-plugin-admission}
 
@@ -1781,6 +1787,7 @@ resolution expands it into its members first.
 | [`droid`][droid] | Claude | skill, agent, mcp | rule (`no-format-surface`) |
 | [`junie`][junie] | Claude | skill, agent, mcp | rule (`no-format-surface`) |
 | [`openclaw`][openclaw] | Claude | skill | agent, mcp (`client-declined`); rule (`no-format-surface`) |
+| [`qoder`][qoder] | Claude | skill, agent, mcp | rule (`no-format-surface`) |
 | [`copilot`][copilot] | Agent Plugins | skill, mcp | agent (`no-format-surface`); rule (`no-format-surface`) |
 | [`codex`][codex] | Agent Plugins | skill, mcp | agent (`no-format-surface`); rule (`no-format-surface`) |
 | [`cursor`][cursor] | Agent Plugins | skill, mcp | agent (`no-format-surface`); rule (`no-format-surface`) |
@@ -1794,8 +1801,8 @@ client regardless of that client's own install-time MCP support: the
 `mcp.json` shape belongs to the family, not the client (`agents` declines
 MCP on install yet still emits it here). Within the Claude family, MCP and
 agent support instead follow the client's own [install-time kind
-support][clients-matrix] — which is why `openclaw` drops both, while `junie`
-and `droid` keep both (Droid translates a Claude-format plugin's `agents/`
+support][clients-matrix] — which is why `openclaw` drops both, while `junie`,
+`qoder` and `droid` keep both (Droid translates a Claude-format plugin's `agents/`
 and `.mcp.json` when it installs one). An agent whose name the client's
 grammar rejects is omitted as `not-representable`. An omitted member is never
 an error. It is named in the plugin's `README.md` and in the JSON
@@ -1816,12 +1823,13 @@ spec expands only `${PLUGIN_ROOT}` and `${PLUGIN_DATA}`. grim renames
 `${VAR}` there is exported with a warning, because a client may pass it
 through literally.
 
-A `claude` export does the reverse. It renames `${PLUGIN_ROOT}` and
+A `claude` export does the reverse, and so does a `qoder` export. It renames `${PLUGIN_ROOT}` and
 `${PLUGIN_DATA}` to `${CLAUDE_PLUGIN_ROOT}` and `${CLAUDE_PLUGIN_DATA}` in
 every field, `url` and headers included. Claude expands its placeholders
 there. `grim install` never renames.
 
-Claude family MCP has its own, narrower decline. Junie refuses a
+Claude family MCP has its own, narrower decline. A `qoder` export declines
+nothing here, because it builds each entry as `claude` does. Junie refuses a
 descriptor carrying OAuth or an env reference. Droid refuses a `${VAR}`
 reference in `command`, `args` or `url`, and an `oauth` block with
 anything beyond a literal `client_id`. A reference in `env` or `headers`
@@ -1856,13 +1864,20 @@ The `version` grim assembles is `<base>+<12 hex>`. `base` is `--version`,
 else the declared `version`. Failing both, an ad-hoc single reference
 falls back to its own version annotation, else `0.0.0`.
 
-The suffix is a content hash over every plugin member's kind, its
-**emitted name**, and its digest. It changes when a member's digest
-changes. It also changes when a rename changes a member's emitted name.
-It does **not** change when a `description` edit, or a grim release,
-changes how a client renders a skill. Those alter the plugin's actual
-bytes without touching the hash inputs. Bump `--version` by hand when
-either of those should be visible to a consumer.
+The suffix is a content hash of the plugin tree as rendered for one client:
+every file's path, its executable bit, and its SHA-256, taken with each
+manifest written at `base`. It changes whenever any file of the tree does.
+That covers a member's digest, a rename, a `description` or logo edit, and a
+grim release that renders a skill differently. It can also differ between
+clients for the same plugin, because each client's tree has its own manifest
+path, README and omitted members. The same tree always gets the same
+version, so a re-export that changes nothing changes no version.
+
+Only the `<base>+<12 hex>` grammar is frozen. What feeds the hash is not: a
+later release may change the inputs, and every plugin's suffix moves with it
+(see [Stability](./stability.md#unstable)). The suffix moved once already,
+when it stopped hashing member digests
+([upgrading](./upgrading.md#plugin-version-move)).
 
 ### JSON report {#export-plugin-json}
 
@@ -1966,6 +1981,230 @@ a worked, end-to-end handoff is the [team-plugin guide](./guides/team-plugin.md)
 forward without exporting anything. It is the way to keep a shipped
 plugin's *next* export current, without re-running `grim export plugin`
 by hand first.
+
+To serve the same plugins from a git repository that clients add once, see
+[`grim export marketplace`](#export-marketplace).
+
+## grim export marketplace {#export-marketplace}
+
+[`grim export plugin`](#export-plugin) hands one plugin over as a folder or a
+zip. A team or a public audience wants a standing address instead. They add
+it once and receive updates. Every plugin-aware client reads such an address
+as a git repository. The repository holds that client's marketplace file, at
+a path it chose and in its own dialect.
+
+`grim export marketplace` regenerates that repository from the plugins a
+[`marketplace.toml`](./configuration.md#marketplace-toml) declares. It writes
+one marketplace file per client and one plugin tree per plugin and client.
+You commit the result. A consumer adds the repository with their client's own
+commands and needs no grim. The [consumer guide](./guides/use-a-marketplace.md)
+walks through each client.
+
+```sh
+grim export marketplace
+grim export marketplace --marketplace tools/marketplace.toml -o ../acme-marketplace
+```
+
+Each run resolves the declared plugins the way [`grim export plugin`
+--marketplace](#export-plugin-modes) does. Only the plugins whose declaration
+has drifted are re-resolved, and `marketplace.lock` is written beside the
+manifest. Then every tree is rendered and the output is made to match. grim
+keeps no record of earlier runs. It decides what it owns from the repository
+itself ([ownership](#export-marketplace-ownership)).
+
+The manifest must carry a [`[marketplace]`](./configuration.md#marketplace-table)
+table naming the marketplace and its owner. Without one the command exits
+`65` and names the table.
+
+### Flags {#export-marketplace-flags}
+
+| Flag | Effect |
+|------|--------|
+| `--marketplace <PATH>` | The manifest declaring `[marketplace]` and the plugins (default `./marketplace.toml`); its file name must not start with `.grim-export` |
+| `-o, --output <DIR>` | The repository root written into (default: the manifest's directory, created if absent); the manifest's lock stays beside the manifest |
+| `--force` | Adopt paths grim does not own yet — see [ownership](#export-marketplace-ownership) |
+
+Everything else the plugin export takes is declared in the manifest, so clap
+rejects it with exit `64`: positional references, `--name`, `--project`,
+`--plugin`, `--zip`, `--version`, `--description`, `--logo` and `--client`.
+The clients come from `[marketplace].clients`. Every other global flag
+behaves as documented under [Global options](#global-options).
+
+### Output layout {#export-marketplace-layout}
+
+Each selected client gets one marketplace file, at the path its client reads,
+and one tree per plugin at `./<client>/<plugin>`:
+
+| Client | Marketplace file | Plugin tree | In the default set |
+|---|---|---|---|
+| `claude` | `.claude-plugin/marketplace.json` | `./claude/<plugin>` | yes |
+| [`copilot`][copilot] | `.github/plugin/marketplace.json` | `./copilot/<plugin>` | yes |
+| [`codex`][codex] | `.agents/plugins/marketplace.json` | `./codex/<plugin>` | yes |
+| [`qoder`][qoder] | `.qoder-plugin/marketplace.json` | `./qoder/<plugin>` | yes |
+| [`cursor`][cursor] | `.cursor-plugin/marketplace.json` | `./cursor/<plugin>` | no, opt-in only |
+
+A table without `clients` selects the four defaults. Cursor is never in the
+default set. [`droid`][droid], [`junie`][junie] and [`openclaw`][openclaw]
+own no marketplace file, because they read Claude's. Naming one in `clients`
+exits `65` and says to select `claude`.
+
+A Droid user is served by the Claude file unless the repository also holds
+`.factory-plugin/marketplace.json`, which Droid reads first. grim warns when
+that file exists. Qoder likewise reads `.qoder-plugin/marketplace.json`
+before Claude's. grim warns about a foreign copy of it in a repository that
+does not select `qoder`.
+
+Each tree is what [`grim export plugin`](#export-plugin) renders for that
+client: the same [families](#export-plugin-families), the same
+[admission](#export-plugin-admission) rules, the same
+[version](#export-plugin-output). The marketplace file lists every plugin the
+client can carry as `{name, source, version, description}`. `source` is
+`./<client>/<plugin>`, and `version` and `description` equal the tree's own
+manifest. The file's own keys are `name`, `owner` (`name` and an optional
+`email`), `metadata.description` when the table sets one, and `plugins`. It is
+pretty-printed JSON with a trailing newline and no `$schema`.
+
+A plugin with no member a client's format can carry is left out of that
+client's file and reported as an `empty` row, with a warning. A plugin that no
+selected client can carry exits `65`.
+
+### Ownership and `--force` {#export-marketplace-ownership}
+
+The repository holds files grim does not write, so grim decides what it may
+change by convention, not from a recorded state:
+
+- A selected client owns `./<client>/` and its marketplace file. The file is
+  grim's when it is absent or its `name` equals `[marketplace].name`.
+- Inside an owned `./<client>/`, anything that is not a declared plugin is
+  removed. A stray file is named on stderr. A declared plugin that becomes
+  `empty` for a client loses its existing `./<client>/<plugin>` tree the
+  same way, and the `empty` row is the only report of that deletion.
+- A client that left `clients` is dropped when its file is grim's: the
+  directory goes first, the file last. Its empty parent directories are
+  pruned, except the top-level `.github/` and `.agents/`, which hold other
+  tooling's files.
+- Every other path in the repository is left alone, including the
+  directory and file of an unselected client that grim does not own.
+
+Without `--force`, a run **refuses** at exit `65` (`untracked-destination`)
+and writes nothing in two cases. One is a selected client's marketplace file
+that belongs to another marketplace or is not a marketplace document. The
+other is a non-empty `./<client>/` with no marketplace file.
+
+`--force` adopts those paths. It overwrites the foreign file and deletes
+everything else in `./<client>/`, so read the refusal's path list first.
+Renaming `[marketplace].name` is the common way into this refusal: every
+existing file now names the old marketplace. grim warns about this before it
+refuses, and `--force` adopts the files under the new name. Consumers who
+added the marketplace before the rename must then re-add it under the new
+name.
+
+grim writes marketplace files first, then trees, then removals, then the
+lock. A crash in between leaves a layout the next run owns and repairs. A
+re-run with unchanged inputs and the same grim build rewrites nothing. Every
+tree and file it wrote before reports `unchanged`, and a plugin and client pair
+that is `empty` stays `empty`.
+
+A symlink, a non-directory, or on Windows a reparse point, anywhere on the way
+to an owned path, exits `65` before anything is written. grim never follows
+one while removing. A `logo`, a `path:` member or a `project` directory must
+lie inside the manifest's directory and may not be a symlink (`65`). A
+project's `grimoire.toml` and `grimoire.lock` may not be symlinks either
+(`65`), and neither may the manifest or its lock.
+
+Nothing the export reads may lie under a path it owns, or export would
+replace its own input (`65`). That covers the manifest and its lock, a
+plugin's `project` directory, a `path:` include, a logo, and the `path:`
+members and logo a `project` plugin reads from its own project. The owned
+paths are `./<client>/` and each client's marketplace file.
+The match ignores ASCII case, so `Claude/` counts as `claude/`.
+
+A plugin name becomes a directory name, so it must be portable. A Windows
+reserved device name such as `con`, `aux`, `nul` or `com1` exits `65` as an
+unsafe entry.
+
+Two runs cannot overlap. grim locks the manifest's lock file and a sidecar
+`.grim-export.lock` in the output root. A contended lock exits `75`. Keep the
+sidecar out of git.
+
+Every tree stages in a hidden `<root>/.grim-export-*` directory before it is
+placed. One left behind by an interrupted run, or kept as the recovery
+backup of a failed replace, is never swept. Each run warns and names it. Look
+for a `.replaced-<plugin>.<client>` entry inside before you delete it.
+
+### Plain output {#export-marketplace-plain}
+
+`stdout` carries one table, `Plugin | Client | Version | Action | Omitted`,
+with one row per plugin and client. `stderr` carries one line per marketplace
+file, `wrote <path> (2 plugins)`, `unchanged <path>` or `removed <path>`. The
+wording of both is not a contract. The JSON report is.
+
+### JSON report {#export-marketplace-json}
+
+`--format json` emits `{"items": [...], "files": [...]}`. `items` has one row
+per plugin and client. `files` has one row per marketplace file.
+
+```json
+{
+  "items": [
+    {
+      "plugin": "team",
+      "client": "claude",
+      "family": "claude",
+      "path": "/abs/repo/claude/team",
+      "version": "1.4.0+3f9a0c12b7de",
+      "action": "unchanged",
+      "members": [
+        {"kind": "skill", "name": "plan", "lock_name": "team-plan", "pinned": "ghcr.io/acme/team-plan@sha256:…"}
+      ],
+      "omitted": []
+    }
+  ],
+  "files": [
+    {
+      "client": "claude",
+      "path": "/abs/repo/.claude-plugin/marketplace.json",
+      "action": "written",
+      "plugins": ["team"]
+    }
+  ]
+}
+```
+
+- `items[].action` is `written`, `unchanged`, `removed` or `empty`.
+  `files[].action` is `written`, `unchanged` or `removed`. These literals are
+  frozen, and every key is always present.
+- `members` and `omitted` follow the
+  [plugin export's](#export-plugin-json) shape and sort. `family` is `claude`
+  or `agent-plugins`. Unlike a plugin export's item, there is no `format` key.
+- A `removed` row is a tree grim deleted. Its `path` is that tree, `version`
+  is `null`, and `members` and `omitted` are `[]`. A removed file's `plugins`
+  is `[]`.
+- An `empty` row is a plugin a client cannot carry. Its `path` is the tree
+  that would have been written, `version` is `null`, `members` is `[]`, and
+  `omitted` names every member with its reason.
+- Rows are ordered by plugin name, then client in the order `clients` lists
+  them. `removed` rows follow, ordered by client and plugin. Files follow the
+  client order, with removed files last.
+
+The report is emitted only when the run succeeds. See [the enveloped reports
+table][json-shapes-items] for the field reference of the shared members.
+
+### Exit codes {#export-marketplace-exit}
+
+| Situation | Code |
+|-----------|------|
+| Success | `0` |
+| A flag or positional the command does not take | `64` |
+| A missing `[marketplace]` table, or an invalid name (reserved, malformed), owner, email, description or client; a plugin name that is not portable (a Windows reserved device name such as `con`, `aux`, `nul` or `com1`, reported as an unsafe entry); a manifest or lock inside an owned path or itself a symlink; a logo, `path:` member or `project` directory outside the manifest directory, behind a symlink, or under a directory the export owns (matched ignoring ASCII case); a project's `grimoire.toml` or `grimoire.lock` that is a symlink | `65` |
+| A plugin that no selected client can carry | `65` |
+| A symlink, non-directory or reparse point on an owned path; a case collision or reserved name in a rendered tree | `65` |
+| A foreign owned path without `--force` (`untracked-destination`), including a renamed marketplace | `65` |
+| The manifest's lock or the output-root lock is held | `75` |
+| Everything else, including the offline and network failures | as [`grim export plugin`](#export-plugin-exit-codes) |
+
+`grim export plugin` keeps its own table above. From 0.15.0 it succeeds for
+`--client qoder`, which exited `78` before.
 
 ## grim tui {#tui}
 
@@ -2589,6 +2828,7 @@ registers the same entry — in every detected client, not just Claude Code
 [cursor]: https://cursor.com
 [junie]: https://www.jetbrains.com/junie/
 [droid]: https://factory.ai
+[qoder]: https://qoder.com
 [openclaw]: https://github.com/openclaw/openclaw
 [opencode]: https://opencode.ai/
 [json-rpc]: https://www.jsonrpc.org/specification

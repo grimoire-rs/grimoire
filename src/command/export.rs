@@ -9,16 +9,19 @@
 //! placement, lock write — is [`crate::export::stage::run`]
 //! (ADR § Module placement).
 
+use std::io::Write;
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
 
-use crate::api::export_report::ExportReport;
+use crate::api::export_report::{ExportReport, MarketplaceExportReport};
 use crate::cli::exit_code::ExitCode;
+use crate::cli::printer::Printable;
 use crate::context::Context;
 use crate::export::export_error::ExportError;
 use crate::export::family::{Family, family_of};
 use crate::export::marketplace::validate_plugin_name;
+use crate::export::marketplace_export::{MarketplaceRequest, export_marketplace};
 use crate::export::stage::{self, ExportMode, ExportOptions, ProjectLock};
 use crate::install::ClientTarget;
 use crate::install::target::parse_client_list;
@@ -36,6 +39,57 @@ pub enum ExportCommand {
     /// Package artifacts as a plugin for Claude-family or Agent Plugins
     /// clients, as a directory or a zip.
     Plugin(ExportPluginArgs),
+    /// Regenerate a marketplace repository from the plugins the manifest
+    /// declares: one marketplace file per client and one plugin tree per
+    /// plugin and client, ready to commit.
+    Marketplace(ExportMarketplaceArgs),
+}
+
+/// `grim export marketplace` arguments (C-012). No positional references,
+/// `--name`, `--project`, `--plugin`, `--zip`, `--version`, `--description`,
+/// `--logo` or `--client`: the manifest's `[marketplace]` table declares all
+/// of it, so clap rejects each with a usage error (64).
+#[derive(Debug, Args)]
+pub struct ExportMarketplaceArgs {
+    /// The marketplace manifest declaring the plugins and the
+    /// `[marketplace]` table. Defaults to `./marketplace.toml`.
+    #[arg(long, value_name = "PATH")]
+    pub marketplace: Option<PathBuf>,
+
+    /// Repository root the marketplace is written into (created if absent).
+    /// Defaults to the manifest's directory.
+    #[arg(long, short = 'o', value_name = "DIR")]
+    pub output: Option<PathBuf>,
+
+    /// Adopt paths the marketplace does not own yet (a foreign
+    /// `./<client>/` directory, or a marketplace file naming another
+    /// marketplace) instead of refusing them.
+    #[arg(long)]
+    pub force: bool,
+}
+
+/// What `grim export` returns: one arm per subcommand, so `app.rs` keeps a
+/// single `render` call.
+#[derive(Debug)]
+pub enum ExportOutput {
+    Plugin(ExportReport),
+    Marketplace(MarketplaceExportReport),
+}
+
+impl Printable for ExportOutput {
+    fn print_plain(&self, w: &mut impl Write) -> std::io::Result<()> {
+        match self {
+            Self::Plugin(r) => r.print_plain(w),
+            Self::Marketplace(r) => r.print_plain(w),
+        }
+    }
+
+    fn print_json(&self, w: &mut impl Write) -> std::io::Result<()> {
+        match self {
+            Self::Plugin(r) => r.print_json(w),
+            Self::Marketplace(r) => r.print_json(w),
+        }
+    }
 }
 
 /// `grim export plugin` arguments (C-014).
@@ -76,9 +130,9 @@ pub struct ExportPluginArgs {
     pub marketplace: Option<PathBuf>,
 
     /// Client(s) to export for (comma-separated, repeatable): `claude`,
-    /// `droid`, `junie`, `openclaw` (Claude plugin format); `copilot`,
-    /// `codex`, `cursor`, `agents` (Agent Plugins format). Defaults to the
-    /// config `clients` option, then `agents`.
+    /// `droid`, `junie`, `openclaw`, `qoder` (Claude plugin format);
+    /// `copilot`, `codex`, `cursor`, `agents` (Agent Plugins format).
+    /// Defaults to the config `clients` option, then `agents`.
     #[arg(long = "client")]
     pub client: Vec<String>,
 
@@ -118,10 +172,73 @@ pub struct ExportPluginArgs {
 /// # Errors
 ///
 /// As [`run_plugin`].
-pub async fn run(ctx: &Context, args: &ExportArgs) -> anyhow::Result<(ExportReport, ExitCode)> {
+pub async fn run(ctx: &Context, args: &ExportArgs) -> anyhow::Result<(ExportOutput, ExitCode)> {
     match &args.command {
-        ExportCommand::Plugin(plugin_args) => run_plugin(ctx, plugin_args).await,
+        ExportCommand::Plugin(plugin_args) => {
+            let (report, code) = run_plugin(ctx, plugin_args).await?;
+            Ok((ExportOutput::Plugin(report), code))
+        }
+        ExportCommand::Marketplace(marketplace_args) => {
+            let (report, code) = run_marketplace(ctx, marketplace_args).await?;
+            Ok((ExportOutput::Marketplace(report), code))
+        }
     }
+}
+
+/// Run `grim export marketplace` (C-012): anchor the fetch scope and access
+/// seam at the manifest's directory (decision 35, as the declared
+/// `export plugin` does), hand the rest to
+/// [`crate::export::marketplace_export::export_marketplace`], and print the
+/// per-file lines on stderr (R2-19) — the report itself goes to stdout.
+///
+/// # Errors
+///
+/// A missing `[marketplace]` table, unsafe or overlapping paths, foreign
+/// owned paths without `--force`, and empty plugins (65); lock contention
+/// (75); every resolver, access and staging failure with its existing
+/// classification.
+pub async fn run_marketplace(
+    ctx: &Context,
+    args: &ExportMarketplaceArgs,
+) -> anyhow::Result<(MarketplaceExportReport, ExitCode)> {
+    let manifest = args
+        .marketplace
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("marketplace.toml"));
+    let anchor = std::path::absolute(&manifest)
+        .ok()
+        .and_then(|m| m.parent().map(std::path::Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let scope = super::resolve_fetch_scope(ctx, false, None, Some(&anchor))?;
+    let access = super::access_seam_scoped(ctx, false, None, Some(&anchor))?;
+    let progress = crate::cli::progress::select_progress(ctx.progress(), true);
+    let request = MarketplaceRequest {
+        manifest: &manifest,
+        output: args.output.as_deref(),
+        force: args.force,
+        progress: progress.as_ref(),
+    };
+    let report = super::grim(export_marketplace(&request, &scope, &access, ctx.offline()).await)?;
+    let mut stderr = std::io::stderr().lock();
+    for line in report.file_lines() {
+        // A closed stderr is not worth failing a finished export for.
+        let _ = writeln!(stderr, "{}", escape_controls(&line));
+    }
+    Ok((report, ExitCode::Success))
+}
+
+/// `line` with every control character spelled out (`\u{1b}`): a path is
+/// user-controlled text on its way to a terminal.
+fn escape_controls(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    for c in line.chars() {
+        if c.is_control() {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Run `grim export plugin` (C-014): check the input matrix (the 64 rows
@@ -320,6 +437,15 @@ mod tests {
     use crate::export::export_error::ExportError;
     use crate::oci::access::memory_registry::MemoryRegistry;
 
+    #[test]
+    fn escape_controls_spells_out_terminal_control_characters() {
+        assert_eq!(
+            escape_controls("written /r/\u{1b}[31mred\n/x"),
+            "written /r/\\u{1b}[31mred\\n/x"
+        );
+        assert_eq!(escape_controls("plain ünïcode /a b"), "plain ünïcode /a b");
+    }
+
     const HELLO: &str = "localhost:5000/team/hello:1.0";
     const WORLD: &str = "localhost:5000/team/world:1.0";
 
@@ -493,7 +619,129 @@ mod tests {
         full.extend_from_slice(argv);
         Harness::try_parse_from(full).map(|h| match h.export.command {
             ExportCommand::Plugin(a) => a,
+            ExportCommand::Marketplace(_) => unreachable!("the plugin subcommand was named"),
         })
+    }
+
+    fn parse_marketplace(argv: &[&str]) -> Result<ExportMarketplaceArgs, clap::Error> {
+        let mut full = vec!["grim", "marketplace"];
+        full.extend_from_slice(argv);
+        Harness::try_parse_from(full).map(|h| match h.export.command {
+            ExportCommand::Marketplace(a) => a,
+            ExportCommand::Plugin(_) => unreachable!("the marketplace subcommand was named"),
+        })
+    }
+
+    // ── C-012 export marketplace CLI ──────────────────────────────
+
+    #[test]
+    fn c012_marketplace_takes_only_manifest_output_and_force() {
+        let bare = parse_marketplace(&[]).unwrap();
+        assert_eq!((bare.marketplace, bare.output, bare.force), (None, None, false));
+        let full = parse_marketplace(&["--marketplace", "m.toml", "-o", "out", "--force"]).unwrap();
+        assert_eq!(full.marketplace, Some(PathBuf::from("m.toml")));
+        assert_eq!(full.output, Some(PathBuf::from("out")));
+        assert!(full.force);
+        let long = parse_marketplace(&["--output", "out"]).unwrap();
+        assert_eq!(long.output, Some(PathBuf::from("out")));
+    }
+
+    #[test]
+    fn c012_marketplace_rejects_every_export_plugin_input() {
+        for argv in [
+            &[HELLO][..],
+            &["--name", "team"][..],
+            &["--project"][..],
+            &["--plugin", "team"][..],
+            &["--zip"][..],
+            &["--version", "1.0.0"][..],
+            &["--description", "d"][..],
+            &["--logo", "l.svg"][..],
+            &["--client", "claude"][..],
+        ] {
+            let err = parse_marketplace(argv).expect_err("clap rejection");
+            assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument, "{argv:?}");
+        }
+    }
+
+    // ── C-021 Principle 9 proofs ──────────────────────────────────
+
+    /// The enumerations `main` shipped before `export marketplace`. Each is
+    /// an exhaustive `match`, so a variant added to either enum stops this
+    /// module compiling until it is added here — and, deliberately, to the
+    /// frozen contract with it.
+    #[test]
+    fn c021_exit_codes_and_reasons_equal_main() {
+        use crate::error::ErrorReason;
+
+        fn number(code: ExitCode) -> u8 {
+            match code {
+                ExitCode::Success => 0,
+                ExitCode::Failure => 1,
+                ExitCode::UsageError => 64,
+                ExitCode::DataError => 65,
+                ExitCode::Unavailable => 69,
+                ExitCode::IoError => 74,
+                ExitCode::TempFail => 75,
+                ExitCode::NoPermission => 77,
+                ExitCode::ConfigError => 78,
+                ExitCode::NotFound => 79,
+                ExitCode::AuthError => 80,
+                ExitCode::OfflineBlocked => 81,
+            }
+        }
+        fn literal(reason: ErrorReason) -> &'static str {
+            match reason {
+                ErrorReason::StaleLock => "stale-lock",
+                ErrorReason::LocalModified => "modified",
+                ErrorReason::UntrackedDestination => "untracked-destination",
+                ErrorReason::NoConfig => "no-config",
+                ErrorReason::Locked => "locked",
+                ErrorReason::AnchorEscape => "anchor-escape",
+            }
+        }
+        for code in [
+            ExitCode::Success,
+            ExitCode::Failure,
+            ExitCode::UsageError,
+            ExitCode::DataError,
+            ExitCode::Unavailable,
+            ExitCode::IoError,
+            ExitCode::TempFail,
+            ExitCode::NoPermission,
+            ExitCode::ConfigError,
+            ExitCode::NotFound,
+            ExitCode::AuthError,
+            ExitCode::OfflineBlocked,
+        ] {
+            assert_eq!(number(code), code as u8, "{code:?}");
+        }
+        for reason in [
+            ErrorReason::StaleLock,
+            ErrorReason::LocalModified,
+            ErrorReason::UntrackedDestination,
+            ErrorReason::NoConfig,
+            ErrorReason::Locked,
+            ErrorReason::AnchorEscape,
+        ] {
+            assert_eq!(literal(reason), reason.to_string(), "{reason:?}");
+        }
+    }
+
+    #[test]
+    fn c021_export_output_prints_the_report_it_wraps() {
+        let plugin = ExportReport::new(Vec::new());
+        let (mut direct, mut wrapped) = (Vec::new(), Vec::new());
+        plugin.print_json(&mut direct).unwrap();
+        ExportOutput::Plugin(plugin).print_json(&mut wrapped).unwrap();
+        assert_eq!(direct, wrapped, "the export plugin JSON shape is unchanged");
+        assert_eq!(String::from_utf8(wrapped).unwrap().trim(), "{\n  \"items\": []\n}");
+
+        let market = MarketplaceExportReport::new(Vec::new(), Vec::new());
+        let mut out = Vec::new();
+        ExportOutput::Marketplace(market).print_json(&mut out).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(json, serde_json::json!({"items": [], "files": []}));
     }
 
     #[test]

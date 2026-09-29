@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
+import os
+import sys
 import tarfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from src.registry import PublishedArtifact, push_artifact
@@ -124,3 +129,53 @@ def make_artifact(
     """
     tar_bytes = _tar_of(files)
     return push_artifact(repo, tag, tar_bytes, kind, annotations)
+
+
+# ---------------------------------------------------------------------------
+# Export plugin trees (shared by the export acceptance suites)
+# ---------------------------------------------------------------------------
+
+# Every manifest a rendered plugin carries its `version` in.
+VERSIONED_MANIFESTS = (
+    ".claude-plugin/plugin.json",
+    ".qoder-plugin/plugin.json",
+    ".cursor-plugin/plugin.json",
+    "plugin.json",
+)
+
+
+def inventory_suffix(inventory: list[tuple[str, bool, str]]) -> str:
+    """C-002: 12 hex of SHA-256 over the compact JSON array of `[name, exec, sha256]` triples."""
+    blob = json.dumps([list(t) for t in inventory], separators=(",", ":"), ensure_ascii=False).encode()
+    return hashlib.sha256(blob).hexdigest()[:12]
+
+
+def tree_suffix(root: Path, base: str) -> str:
+    """C-003: the tree hash of a produced plugin root, every manifest's version put back to `base`."""
+    inventory = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(root).as_posix()
+        data = path.read_bytes()
+        if rel in VERSIONED_MANIFESTS:
+            version = json.loads(data)["version"]
+            data = data.replace(f'"version": "{version}"'.encode(), f'"version": "{base}"'.encode())
+        exec_bit = sys.platform != "win32" and bool(path.stat().st_mode & 0o111)
+        inventory.append((rel, exec_bit, hashlib.sha256(data).hexdigest()))
+    inventory.sort(key=lambda entry: entry[0].encode())
+    return inventory_suffix(inventory)
+
+
+@contextmanager
+def held_flock(sidecar: Path) -> Iterator[None]:
+    """Hold grim's advisory lock on ``sidecar`` (same lock space as fs4's flock)."""
+    import fcntl
+
+    fd = os.open(sidecar, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+    finally:
+        os.close(fd)
+        sidecar.unlink(missing_ok=True)

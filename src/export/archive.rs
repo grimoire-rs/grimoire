@@ -8,6 +8,8 @@ use std::fs;
 use std::io::{self, BufWriter, ErrorKind};
 use std::path::{Component, Path, PathBuf};
 
+use crate::oci::Algorithm;
+
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, DateTime, System, ZipWriter};
 
@@ -90,6 +92,145 @@ fn collect(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> io::Res
         }
     }
     Ok(())
+}
+
+/// One regular file of a plugin tree, as the version hash sees it (C-001).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InventoryEntry {
+    /// `/`-joined name, as [`entry_name`] returns it.
+    pub name: String,
+    /// Any execute bit set (always `false` on Windows).
+    pub exec: bool,
+    /// Lowercase hex SHA-256 of the contents (64 digits).
+    pub sha256: String,
+}
+
+/// Every regular file under `root`, sorted by name bytes (C-001, strict):
+/// a symlink or special file fails `InvalidInput`, an unsafe name
+/// `InvalidData`, exactly as [`write_zip`] would.
+pub fn tree_inventory(root: &Path) -> io::Result<Vec<InventoryEntry>> {
+    let mut files = Vec::new();
+    collect(root, root, &mut files)?;
+    files.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    files
+        .into_iter()
+        .map(|(name, path)| {
+            let sha256 = Algorithm::Sha256.hash_file(&path)?.hex().to_string();
+            Ok(InventoryEntry {
+                name,
+                exec: is_exec(&fs::symlink_metadata(&path)?),
+                sha256,
+            })
+        })
+        .collect()
+}
+
+/// [`tree_inventory`] of an existing output (C-001, tolerant): `None`
+/// ("differs") when `root` is missing, a symlink, not a directory, or holds
+/// a symlink, special file or unsafe name; `root` is never followed.
+pub fn disk_inventory(root: &Path) -> io::Result<Option<Vec<InventoryEntry>>> {
+    match fs::symlink_metadata(root) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => return Ok(None),
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    match tree_inventory(root) {
+        Ok(inventory) => Ok(Some(inventory)),
+        Err(e) if e.kind() == ErrorKind::InvalidInput || unsafe_entry(&e).is_some() => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(unix)]
+fn is_exec(meta: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    meta.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn is_exec(_: &fs::Metadata) -> bool {
+    false
+}
+
+/// Why [`check_portable_names`] refused a tree.
+#[derive(Debug, PartialEq, Eq)]
+pub struct UnportableName {
+    /// The refused entry, relative to the tree root, `/`-joined.
+    pub path: String,
+    /// What is wrong with it.
+    pub reason: String,
+}
+
+/// Device names Windows reserves, with or without an extension.
+const WINDOWS_DEVICES: [&str; 22] = [
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2",
+    "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// Characters Windows refuses in a file name.
+const WINDOWS_FORBIDDEN: [char; 7] = [':', '*', '?', '"', '<', '>', '|'];
+
+/// Refuse a rendered tree a repository cannot carry to every OS (C-015,
+/// marketplace export only — a repo is checked out on Windows and macOS too):
+/// two entries whose names collide when case is folded (`str::to_lowercase`,
+/// per directory level, files and directories alike), or any component that
+/// is a Windows device name (`CON`, `aux.md`, `COM1`…), ends in a dot or a
+/// space, or holds one of `: * ? " < > |`. `names` (`/`-joined) come sorted
+/// bytewise, so the first offender in byte order is the one reported.
+///
+/// # Errors
+///
+/// The first offending entry.
+// ponytail: Unicode simple lowercase only — no NFC or NTFS upcase table;
+// covers ASCII and the common cases, extend if a real collision slips by.
+pub fn check_portable_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Result<(), UnportableName> {
+    // Case-folded path prefix -> the spelling that claimed it first.
+    let mut claimed: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for name in names {
+        let (mut prefix, mut folded) = (String::new(), String::new());
+        for part in name.split('/') {
+            if let Some(reason) = unportable_component(part) {
+                return Err(UnportableName {
+                    path: name.to_string(),
+                    reason: format!("'{part}' {reason}"),
+                });
+            }
+            if !prefix.is_empty() {
+                prefix.push('/');
+                folded.push('/');
+            }
+            prefix.push_str(part);
+            folded.push_str(&part.to_lowercase());
+            match claimed.get(&folded) {
+                Some(first) if *first != prefix => {
+                    return Err(UnportableName {
+                        path: name.to_string(),
+                        reason: format!("'{prefix}' collides with '{first}' when case is folded"),
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    claimed.insert(folded.clone(), prefix.clone());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// What is wrong with one path component on Windows, if anything.
+pub(crate) fn unportable_component(part: &str) -> Option<&'static str> {
+    if part.ends_with('.') || part.ends_with(' ') {
+        return Some("ends in a dot or a space, which Windows strips");
+    }
+    if part.contains(WINDOWS_FORBIDDEN) {
+        return Some("holds a character Windows refuses in a name (: * ? \" < > |)");
+    }
+    let device = part.split('.').next().unwrap_or_default().to_ascii_uppercase();
+    WINDOWS_DEVICES
+        .contains(&device.as_str())
+        .then_some("is a reserved Windows device name")
 }
 
 /// The payload of [`entry_name`]'s `InvalidData` error: the refused path,
@@ -479,5 +620,219 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let out = zip_at(root.path(), dir.path());
         assert_eq!(names(&out), ["..notes.md", "skills/x..y/SKILL.md"]);
+    }
+
+    // ── C-001 inventories ──
+
+    fn inv(root: &Path) -> Vec<(String, bool)> {
+        tree_inventory(root)
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.name, e.exec))
+            .collect()
+    }
+
+    #[test]
+    fn c001_tree_inventory_is_sorted_bytewise_with_lowercase_sha256() {
+        let root = tempfile::tempdir().unwrap();
+        write_tree(root.path(), TREE);
+        fs::create_dir_all(root.path().join("empty/inner")).unwrap();
+        let got = tree_inventory(root.path()).unwrap();
+        let names: Vec<&str> = got.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, SORTED);
+        for e in &got {
+            assert_eq!(e.sha256.len(), 64, "{}", e.name);
+            assert!(
+                e.sha256.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+                "{}",
+                e.name
+            );
+        }
+        // Empty file: the well-known SHA-256 of zero bytes.
+        let empty = got.iter().find(|e| e.name == "skills/x/refs/deep/note.txt").unwrap();
+        assert_eq!(
+            empty.sha256,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn c001_empty_dir_is_an_empty_inventory() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(tree_inventory(root.path()).unwrap(), vec![]);
+        assert_eq!(disk_inventory(root.path()).unwrap(), Some(vec![]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn c001_exec_is_any_execute_bit() {
+        let root = tempfile::tempdir().unwrap();
+        write_tree(root.path(), &[("plain", b"a"), ("x", b"b"), ("g", b"c")]);
+        set_mode(&root.path().join("x"), 0o755);
+        set_mode(&root.path().join("g"), 0o610);
+        assert_eq!(
+            inv(root.path()),
+            [
+                ("g".to_string(), true),
+                ("plain".to_string(), false),
+                ("x".to_string(), true)
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn c001_strict_refuses_symlink_fifo_and_unsafe_name() {
+        let root = tempfile::tempdir().unwrap();
+        write_tree(root.path(), &[("a.md", b"a\n")]);
+        std::os::unix::fs::symlink(root.path().join("a.md"), root.path().join("link")).unwrap();
+        let err = tree_inventory(root.path()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        fs::remove_file(root.path().join("link")).unwrap();
+
+        let fifo = root.path().join("pipe");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let err = tree_inventory(root.path()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        fs::remove_file(&fifo).unwrap();
+
+        fs::write(root.path().join("bad\\name"), b"x").unwrap();
+        let err = tree_inventory(root.path()).unwrap_err();
+        assert!(unsafe_entry(&err).is_some(), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn c001_tolerant_reports_differs_instead_of_failing() {
+        let base = tempfile::tempdir().unwrap();
+        // Missing root.
+        assert_eq!(disk_inventory(&base.path().join("nope")).unwrap(), None);
+        // Regular file as root.
+        fs::write(base.path().join("file"), b"x").unwrap();
+        assert_eq!(disk_inventory(&base.path().join("file")).unwrap(), None);
+        // Symlinked root, even to a valid directory: never followed.
+        let real = base.path().join("real");
+        write_tree(&real, &[("a.md", b"a")]);
+        std::os::unix::fs::symlink(&real, base.path().join("alias")).unwrap();
+        assert_eq!(disk_inventory(&base.path().join("alias")).unwrap(), None);
+        // Symlink, fifo and unsafe name inside.
+        assert!(disk_inventory(&real).unwrap().is_some());
+        std::os::unix::fs::symlink(real.join("a.md"), real.join("link")).unwrap();
+        assert_eq!(disk_inventory(&real).unwrap(), None);
+        fs::remove_file(real.join("link")).unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(real.join("pipe"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(disk_inventory(&real).unwrap(), None);
+        fs::remove_file(real.join("pipe")).unwrap();
+        fs::write(real.join("bad\\name"), b"x").unwrap();
+        assert_eq!(disk_inventory(&real).unwrap(), None);
+    }
+
+    #[test]
+    fn c001_tolerant_equals_strict_on_a_clean_tree() {
+        let root = tempfile::tempdir().unwrap();
+        write_tree(root.path(), TREE);
+        assert_eq!(
+            disk_inventory(root.path()).unwrap(),
+            Some(tree_inventory(root.path()).unwrap())
+        );
+    }
+
+    // ── check_portable_names (C-015, S-013 unit) ───────────────────────
+
+    fn check_sorted(names: &[&str]) -> Result<(), UnportableName> {
+        let mut names = names.to_vec();
+        names.sort_unstable();
+        check_portable_names(names)
+    }
+
+    #[test]
+    fn s013_ordinary_names_pass() {
+        let ok = check_sorted(&[
+            ".claude-plugin/plugin.json",
+            "skills/plan/SKILL.md",
+            "skills/plan/refs/console.md",
+            "assets/logo.png",
+            "com10.txt",
+            "CONFIG",
+            "auxiliary/nullable.md",
+            "a.b.c",
+            ".hidden",
+            "Same/x",
+            "Same/y",
+        ]);
+        assert_eq!(ok, Ok(()));
+        assert_eq!(check_sorted(&[]), Ok(()));
+    }
+
+    #[test]
+    fn s013_names_that_collide_when_case_is_folded_are_refused() {
+        for names in [
+            &["a.md", "A.md"][..],
+            &["skills/Plan/SKILL.md", "skills/plan/SKILL.md"][..],
+            &["Skills/x/a", "skills/y/b"][..],
+            &["dir/file", "DIR"][..],
+            &["stra\u{df}e/a", "STRA\u{df}E/b"][..],
+        ] {
+            let err = check_sorted(names).unwrap_err();
+            assert!(err.reason.contains("collides"), "{names:?}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn s013_the_collision_names_the_entry_that_lost() {
+        let err = check_sorted(&["skills/Plan/a.md", "skills/plan/a.md"]).unwrap_err();
+        assert_eq!(err.path, "skills/plan/a.md");
+        assert!(
+            err.reason.contains("'skills/plan' collides with 'skills/Plan'"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn s013_windows_device_names_are_refused_with_or_without_an_extension() {
+        for name in [
+            "CON",
+            "con",
+            "Prn.txt",
+            "aux.md",
+            "NUL",
+            "nul.tar.gz",
+            "COM1",
+            "com9.md",
+            "LPT1",
+            "lpt9.x",
+            "skills/aux.md",
+            "skills/nul/SKILL.md",
+            "a/b/COM5",
+        ] {
+            let err = check_sorted(&[name]).unwrap_err();
+            assert!(err.reason.contains("device name"), "{name}: {err:?}");
+            assert_eq!(err.path, name);
+        }
+    }
+
+    #[test]
+    fn s013_trailing_dot_or_space_and_forbidden_characters_are_refused() {
+        for name in [
+            "a.", "dir./x", "a ", "dir /x", "a:b", "a*", "q?", "a\"b", "<x", "x>", "p|q", "d/a:b/c",
+        ] {
+            let err = check_sorted(&[name]).unwrap_err();
+            assert!(
+                err.reason.contains("dot or a space") || err.reason.contains("refuses"),
+                "{name}: {err:?}"
+            );
+        }
     }
 }

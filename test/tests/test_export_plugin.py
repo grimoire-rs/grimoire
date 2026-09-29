@@ -22,15 +22,21 @@ import re
 import subprocess
 import sys
 import zipfile
-from collections.abc import Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 import tomllib
 
-from src.helpers import make_artifact, make_bundle, make_description, write_config
+from src.helpers import (
+    held_flock as _held_flock,
+    inventory_suffix as _inventory_suffix,
+    make_artifact,
+    make_bundle,
+    make_description,
+    tree_suffix as _suffix,
+    write_config,
+)
 from src.registry import push_artifact, retag
 from src.runner import GrimRunner
 
@@ -168,11 +174,24 @@ def _annotated_stack(runner: GrimRunner, tmp_path: Path, registry: str, unique_r
     )
 
 
-def _suffix(members: dict[tuple[str, str], str], rename: dict[str, str] | None = None) -> str:
-    """C-023: first 12 hex of SHA-256 over sorted `kind\\temitted\\tdigest\\n` lines."""
-    rename = rename or {}
-    lines = sorted(f"{k}\t{rename.get(n, n)}\t{d}\n" for (k, n), d in members.items())
-    return hashlib.sha256("".join(lines).encode()).hexdigest()[:12]
+# C-002 golden vector, the same literal as `family.rs` `GOLDEN_SUFFIX`.
+GOLDEN_SUFFIX = "338bda8ec321"
+
+
+def test_suffix_helper_matches_the_rust_golden_vector() -> None:
+    """S-021: the pytest derivation and `plugin_version` agree on one fixed inventory."""
+    alpha = hashlib.sha256(b"alpha\n").hexdigest()
+    beta = hashlib.sha256(b"beta\n").hexdigest()
+    assert _inventory_suffix([("a.md", False, alpha), ("scripts/run.sh", True, beta)]) == GOLDEN_SUFFIX
+
+
+def test_suffix_helper_reads_a_tree(tmp_path: Path) -> None:
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "a.md").write_bytes(b"alpha\n")
+    (tmp_path / "scripts" / "run.sh").write_bytes(b"beta\n")
+    (tmp_path / "scripts" / "run.sh").chmod(0o755)
+    if sys.platform != "win32":
+        assert _suffix(tmp_path, "1.2.0") == GOLDEN_SUFFIX
 
 
 def _export(runner: GrimRunner, *args: str, fmt: str | None = "json") -> subprocess.CompletedProcess[str]:
@@ -190,9 +209,9 @@ def _error(result: subprocess.CompletedProcess[str]) -> dict:
 
 def _manifest(root: Path) -> dict:
     """Read a plugin's `plugin.json`, checking C-025's key order and name pattern."""
-    claude = root / ".claude-plugin" / "plugin.json"
-    if claude.exists():
-        raw = claude.read_bytes()
+    claude = next((m for m in (".claude-plugin", ".qoder-plugin") if (root / m / "plugin.json").exists()), None)
+    if claude:
+        raw = (root / claude / "plugin.json").read_bytes()
         keys = ["name", "version", "description"]
     else:
         raw = (root / "plugin.json").read_bytes()
@@ -253,20 +272,6 @@ def _lock_part(lock_path: Path, plugin: str) -> tuple[list[dict], dict]:
     return entries, row
 
 
-@contextmanager
-def _held_flock(sidecar: Path) -> Iterator[None]:
-    """Hold grim's advisory lock on ``sidecar`` (same lock space as fs4's flock)."""
-    import fcntl
-
-    fd = os.open(sidecar, os.O_RDWR | os.O_CREAT, 0o644)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        yield
-    finally:
-        os.close(fd)
-        sidecar.unlink(missing_ok=True)
-
-
 # ── S-001 — Claude-app zip from one bundle ref (C-014, C-016, C-023–C-026) ──
 
 
@@ -280,8 +285,9 @@ def test_s001_claude_zip_from_one_bundle_ref(grim_at, tmp_path: Path, work: Path
     assert _entries(work / "dist") == ["team-stack.claude.zip"]
     with zipfile.ZipFile(zpath) as z:
         names = z.namelist()
-        manifest_bytes = z.read(".claude-plugin/plugin.json")
         readme = z.read("README.md").decode()
+        unpacked = tmp_path / "unpacked"
+        z.extractall(unpacked)
     for expected in (
         ".claude-plugin/plugin.json",
         "README.md",
@@ -296,14 +302,10 @@ def test_s001_claude_zip_from_one_bundle_ref(grim_at, tmp_path: Path, work: Path
     assert not any(n.endswith("/") for n in names), "C-026: no directory entries"
     assert names == sorted(names), "C-026: entries sorted bytewise"
 
-    unpacked = tmp_path / "unpacked"
-    unpacked.mkdir()
-    (unpacked / ".claude-plugin").mkdir()
-    (unpacked / ".claude-plugin" / "plugin.json").write_bytes(manifest_bytes)
     doc = _manifest(unpacked)
     assert doc["name"] == "team-stack"
-    # C-023: the pinned bundle's version annotation, leading `v` stripped.
-    assert doc["version"] == f"1.4.0+{_suffix(stack.digests)}"
+    # C-003: the pinned bundle's version annotation (leading `v` stripped) plus the tree hash.
+    assert doc["version"] == f"1.4.0+{_suffix(unpacked, '1.4.0')}"
     assert doc["description"] == "The team stack."
     assert readme == f"# team-stack\n\nThe team stack.\n\nOmitted for claude: rule team-style.\n\n{ONRAMP}\n"
 
@@ -346,7 +348,7 @@ def test_s002_agent_plugins_directory_for_codex(grim_at, tmp_path: Path, work: P
     root = work / "out" / "team-stack.codex"
     doc = _manifest(root)
     assert doc["name"] == "team-stack"
-    assert doc["version"] == f"1.4.0+{_suffix(stack.digests)}"
+    assert doc["version"] == f"1.4.0+{_suffix(root, '1.4.0')}"
     assert doc["description"] == "The team stack."
     assert "Omitted for codex: rule team-style, agent team-reviewer." in _readme(root)
     assert (root / "skills" / "team-plan" / "SKILL.md").is_file()
@@ -386,8 +388,8 @@ def test_s003_two_refs_with_name_merge_into_one_plugin(grim_at, work: Path, regi
     runner = grim_at(work)
     # The annotation is ignored: only a single-ref export reads it (C-023).
     ann = {"org.opencontainers.image.version": "9.9.9"}
-    da = _skill(f"{unique_repo}/a", "a", annotations=ann)
-    db = _skill(f"{unique_repo}/b", "b", annotations=ann)
+    _skill(f"{unique_repo}/a", "a", annotations=ann)
+    _skill(f"{unique_repo}/b", "b", annotations=ann)
 
     out = _ok(
         _export(runner, f"{registry}/{unique_repo}/a:1", f"{registry}/{unique_repo}/b:1", "--name", "duo", "--client", "claude")
@@ -398,7 +400,7 @@ def test_s003_two_refs_with_name_merge_into_one_plugin(grim_at, work: Path, regi
     assert (root / "skills" / "b" / "SKILL.md").is_file()
     doc = _manifest(root)
     assert doc["name"] == "duo"
-    assert doc["version"] == f"0.0.0+{_suffix({('skill', 'a'): da, ('skill', 'b'): db})}"
+    assert doc["version"] == f"0.0.0+{_suffix(root, '0.0.0')}"
     assert [(m["kind"], m["name"]) for m in out["items"][0]["members"]] == [("skill", "a"), ("skill", "b")]
 
 
@@ -510,7 +512,7 @@ def test_s005_declared_plugin_writes_lock_and_is_stable_on_rerun(
     doc = _manifest(root)
     assert doc["name"] == "team"
     # Declared mode reads no annotation: no declared version → 0.0.0.
-    assert doc["version"] == f"0.0.0+{_suffix(stack.digests)}"
+    assert doc["version"] == f"0.0.0+{_suffix(root, '0.0.0')}"
     assert out["items"][0]["version"] == doc["version"]
 
     lock = tomllib.loads(lock_path.read_text())
@@ -574,7 +576,7 @@ def test_c010_changed_local_member_exits_65_until_update_marketplace(grim_at, wo
 # ── S-006 — Stale lock after an edit (C-004, C-033) ─────────────────────────
 
 
-def test_s006_description_edit_keeps_lock_and_version(
+def test_s006_description_edit_changes_the_version_and_keeps_the_lock(
     grim_at, tmp_path: Path, work: Path, registry: str, unique_repo: str
 ) -> None:
     runner = grim_at(work)
@@ -591,7 +593,9 @@ def test_s006_description_edit_keeps_lock_and_version(
 
     doc = _manifest(work / "dist" / "team.claude")
     assert lock_path.read_bytes() == lock_before
-    assert doc["version"] == version_before
+    # S-004 / D7: the description is in the manifest, so it is in the tree hash.
+    assert doc["version"] != version_before
+    assert doc["version"] == f"0.0.0+{_suffix(work / 'dist' / 'team.claude', '0.0.0')}"
     assert doc["description"] == "Second."
 
 
@@ -803,6 +807,65 @@ def test_s010_per_client_declines(grim_at, tmp_path: Path, work: Path, registry:
     assert "Omitted for droid: rule team-style." in _readme(droid)
 
 
+# ── S-019 / S-020 — Qoder and Cursor plugin trees (C-005, C-006) ────────────
+
+
+def test_s019_qoder_export_renders_the_claude_family_under_dot_qoder_plugin(
+    grim_at, tmp_path: Path, work: Path, registry: str, unique_repo: str
+) -> None:
+    runner = grim_at(work)
+    stack = _publish_stack(runner, tmp_path, registry, unique_repo)
+
+    out = _ok(_export(runner, stack.bundle, "--client", "claude,qoder", "-o", "dist"))
+
+    claude, qoder = work / "dist" / "team-stack.claude", work / "dist" / "team-stack.qoder"
+    assert (qoder / ".qoder-plugin" / "plugin.json").is_file()
+    assert not (qoder / ".claude-plugin").exists()
+    doc = _manifest(qoder)
+    assert doc["version"] == f"0.0.0+{_suffix(qoder, '0.0.0')}"
+    assert doc["version"] != _manifest(claude)["version"], "one version per tree"
+    assert (qoder / "skills" / "team-plan" / "SKILL.md").is_file()
+    assert (qoder / "agents" / "team-reviewer.md").is_file()
+    assert (qoder / ".mcp.json").read_bytes() == (claude / ".mcp.json").read_bytes()
+    assert not list(qoder.rglob("*team-style*")), "rules have no plugin surface"
+    by_client = {i["client"]: i for i in out["items"]}
+    assert by_client["qoder"]["family"] == "claude"
+    assert by_client["qoder"]["version"] == doc["version"]
+    assert by_client["qoder"]["omitted"] == [{"kind": "rule", "name": "team-style", "reason": "no-format-surface"}]
+
+
+def test_s019b_config_clients_naming_qoder_export_a_qoder_tree(
+    grim_at, work: Path, registry: str, unique_repo: str
+) -> None:
+    runner = grim_at(work)
+    _team_of_one_skill(work, registry, unique_repo)
+    (work / "grimoire.toml").write_text('[options]\nclients = ["qoder"]\n')
+
+    result = _export(runner, "--plugin", "team", "-o", "dist", fmt=None)
+    assert result.returncode == 0, result.stderr
+    assert _entries(work / "dist") == ["team.qoder"]
+    assert "no plugin format" not in result.stderr
+
+
+def test_s020_cursor_export_adds_a_second_manifest_with_the_same_version(
+    grim_at, tmp_path: Path, work: Path, registry: str, unique_repo: str
+) -> None:
+    runner = grim_at(work)
+    stack = _publish_stack(runner, tmp_path, registry, unique_repo)
+
+    _ok(_export(runner, stack.bundle, "--client", "cursor", "-o", "dist"))
+
+    root = work / "dist" / "team-stack.cursor"
+    agent_plugins = _manifest(root)
+    second_raw = (root / ".cursor-plugin" / "plugin.json").read_bytes()
+    second = json.loads(second_raw)
+    assert list(second) == ["name", "version", "description"], "three keys, Claude format"
+    assert second_raw.endswith(b"}\n") and not second_raw.endswith(b"\n\n")
+    assert second["version"] == agent_plugins["version"]
+    assert agent_plugins["version"] == f"0.0.0+{_suffix(root, '0.0.0')}"
+    assert (root / "mcp.json").is_file() and not (root / ".mcp.json").exists()
+
+
 # ── S-011 — Rendered like install (C-017, C-018, C-020) ─────────────────────
 
 
@@ -915,8 +978,7 @@ def test_s013_strip_prefix_renames_every_member(grim_at, tmp_path: Path, work: P
     assert set(json.loads((root / ".mcp.json").read_text())["mcpServers"]) == {"srv"}
 
     doc = _manifest(root)
-    assert doc["version"] == f"0.0.0+{_suffix(stack.digests, RENAMED)}"
-    assert _suffix(stack.digests, RENAMED) != _suffix(stack.digests)
+    assert doc["version"] == f"0.0.0+{_suffix(root, '0.0.0')}"
     assert doc["description"] == ONRAMP, "no base text: the on-ramp stands in"
     assert f"Omitted for claude: rule style.\n\n{ONRAMP}\n" in _readme(root)
     plan = next(m for m in out["items"][0]["members"] if m["name"] == "plan")

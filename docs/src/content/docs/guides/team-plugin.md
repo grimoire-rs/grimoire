@@ -1,6 +1,6 @@
 ---
 title: Hand a team a plugin without grim
-description: Package a shared skill, agent, and MCP set as a Claude Code or Agent Plugins plugin and hand it to a teammate directly — no grim install required on their end.
+description: Package a shared skill, agent, and MCP set as a plugin for Claude Code, Copilot, Codex, Qoder or Cursor and hand it to a teammate directly — no grim install required on their end.
 ---
 <!-- doc_type: how-to -->
 <!-- doc_tier: integration -->
@@ -52,10 +52,11 @@ team    claude  0.0.0+c2cfaefc6f09  /home/alex/acme-team/dist/team.claude.zip  1
 ```
 
 `--client claude` targets [Claude Code][claude-code]'s plugin shape (a
-`.claude-plugin/plugin.json` manifest). Swap it for `--client codex` or
-`--client cursor` instead, to target the [Agent Plugins][agent-plugins]
-specification. That is the shape [Copilot][copilot], [Codex][codex], and
-[Cursor][cursor] share — see the [client families
+`.claude-plugin/plugin.json` manifest). `--client qoder` writes the same
+shape with the manifest under `.qoder-plugin/`. Swap in `--client copilot`,
+`codex` or `cursor` to target the [Agent Plugins][agent-plugins]
+specification, the shape [Copilot][copilot], [Codex][codex], and
+[Cursor][cursor] share. See the [client families
 table](../commands.md#export-plugin-families). `--zip` writes one archive
 instead of a directory, matching what an upload flow expects.
 This same run writes `marketplace.lock` beside `marketplace.toml`,
@@ -74,7 +75,9 @@ shared drive, a repository release asset. In Claude Code or the Claude
 desktop app, your teammate opens **Customize > Plugins > Add > Upload
 plugin** and selects the file. [Upload a plugin][claude-plugin-upload]
 covers this from their side. Nothing else installs: no registry
-credential, no `grim`, no marketplace repository to add.
+credential and no `grim`. A file handoff needs no marketplace repository.
+To serve a whole team or the public from one address instead, follow
+[Host a plugin marketplace](./hosting-a-marketplace.md).
 
 ## What does not travel
 
@@ -100,7 +103,7 @@ Write [`${CLAUDE_PLUGIN_ROOT}`][claude-plugin-root] or the spec's
 
 | Export for | Names written | Fields where they work |
 |---|---|---|
-| `claude` | `${CLAUDE_PLUGIN_ROOT}`, `${CLAUDE_PLUGIN_DATA}` | `command`, `args`, `env`, `url`, headers. Claude has no `cwd`. |
+| `claude`, `qoder` | `${CLAUDE_PLUGIN_ROOT}`, `${CLAUDE_PLUGIN_DATA}` | `command`, `args`, `env`, `url`, headers. Claude has no `cwd`. |
 | `codex`, `cursor`, `copilot`, `agents` | `${PLUGIN_ROOT}`, `${PLUGIN_DATA}` | `args`, `env` values, `cwd` |
 | `droid`, `junie`, `openclaw` | Your spelling, unchanged | See the [admission table](../commands.md#export-plugin-admission) |
 
@@ -112,26 +115,30 @@ the descriptor as is.
 
 A reference like `${TOKEN}` reads the user's environment:
 
-- `claude` expands it in `command`, `args`, `env`, `url` and headers.
+- `claude` and `qoder` expand it in `command`, `args`, `env`, `url` and
+  headers.
 - `codex`, `cursor`, `copilot` and `agents` may not expand it. In
   `args`, `env` values or `cwd`, grim exports the server and warns you.
 - For those four clients, any `${…}` in `command`, `url`, an env key or a
   header leaves the server out as `not-representable`.
 
-### The same version can mean different bytes {#version-drift}
+### The version follows the bytes {#version-drift}
 
-`plugin.json`'s `version` is not a hash of every byte in the plugin, only
-of each member's own content. Editing `marketplace.toml`'s `description`
-can change the plugin's bytes without moving `version` at all. So can
-re-exporting after a grim release changes how a client renders a skill
-(see [export member bytes](../stability.md#unstable)). That is fine for a
-private handoff where you re-export and re-send the file.
+`plugin.json`'s `version` is `<base>+<12 hex>`. The suffix is a hash of
+the plugin tree grim rendered for that client: every file's path,
+executable bit and content. Editing `marketplace.toml`'s `description`,
+changing the logo, or re-exporting after a grim release renders a skill
+differently all move the suffix. A re-export that changes nothing changes
+nothing (see [export member bytes](../stability.md#unstable)).
 
-Publishing this plugin somewhere versions are expected to be immutable is
-different. Bump `--version` (or `marketplace.toml`'s `version`) by hand
-whenever you re-export on purpose. That is the same discipline an
-[immutable release tag](../publishing.md#dry-runs-and-overwrites) asks of
-a registry release.
+The suffix can differ between clients for the same plugin, because each
+client's tree has its own manifest path and README. Compare versions for
+equality, never for order. To change the base a consumer sees, bump
+`--version` (or `marketplace.toml`'s `version`) by hand. That is the same
+discipline an [immutable release
+tag](../publishing.md#dry-runs-and-overwrites) asks of a registry release.
+Exports made before grim 0.15.0 carry a different suffix; see [the
+upgrade note](../upgrading.md#plugin-version-move).
 
 ## Keep it current
 
