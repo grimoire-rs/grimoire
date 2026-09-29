@@ -78,11 +78,23 @@ pub fn logo_path(ext: &str) -> String {
 /// The plugin family of `client`, or `None` when it has no plugin format
 /// (C-015).
 pub fn family_of(client: ClientTarget) -> Option<Family> {
-    use ClientTarget::{Agents, Claude, Codex, Copilot, Cursor, Droid, Junie, OpenClaw};
+    use ClientTarget::{Agents, Claude, Codex, Copilot, Cursor, Droid, Junie, OpenClaw, Qoder};
     match client {
-        Claude | Droid | Junie | OpenClaw => Some(Family::Claude),
+        Claude | Droid | Junie | OpenClaw | Qoder => Some(Family::Claude),
         Copilot | Codex | Cursor | Agents => Some(Family::AgentPlugins),
         _ => None,
+    }
+}
+
+/// The manifest path of `client`'s plugin tree (C-005): `.qoder-plugin/plugin.json`
+/// for Qoder, `.claude-plugin/plugin.json` for every other Claude-family
+/// client, `plugin.json` for Agent Plugins. A client with no plugin format
+/// gets the Claude path; export never renders one.
+pub fn manifest_rel(client: ClientTarget) -> &'static str {
+    match (client, family_of(client)) {
+        (ClientTarget::Qoder, _) => ".qoder-plugin/plugin.json",
+        (_, Some(Family::AgentPlugins)) => "plugin.json",
+        _ => ".claude-plugin/plugin.json",
     }
 }
 
@@ -343,7 +355,7 @@ mod tests {
         use ClientTarget::*;
         for client in ClientTarget::ALL {
             let expected = match client {
-                Claude | Droid | Junie | OpenClaw => Some(Family::Claude),
+                Claude | Droid | Junie | OpenClaw | Qoder => Some(Family::Claude),
                 Copilot | Codex | Cursor | Agents => Some(Family::AgentPlugins),
                 _ => None,
             };
@@ -387,6 +399,7 @@ mod tests {
             (Family::Claude, ClientTarget::Droid, ok, ok, ok, Err(Nfs)),
             (Family::Claude, ClientTarget::Junie, ok, ok, ok, Err(Nfs)),
             (Family::Claude, ClientTarget::OpenClaw, ok, Err(Cd), Err(Cd), Err(Nfs)),
+            (Family::Claude, ClientTarget::Qoder, ok, ok, ok, Err(Nfs)),
             // Agent Plugins: agents have no format surface (not client-declined,
             // even where the client would install them); MCP is the family's
             // file, admitted even for `agents`, which declines MCP on install.
@@ -466,6 +479,33 @@ mod tests {
         let b = entry("b", false, "y");
         let forged = entry(&format!("a\n{}  b", a.sha256), false, "y");
         assert_ne!(plugin_version("0.0.0", &[a, b]), plugin_version("0.0.0", &[forged]),);
+    }
+
+    // ── C-005 Qoder ──
+
+    #[test]
+    fn c005_manifest_rel_per_client() {
+        for client in ClientTarget::ALL {
+            let expected = match (client, family_of(client)) {
+                (ClientTarget::Qoder, _) => ".qoder-plugin/plugin.json",
+                (_, Some(Family::Claude)) => ".claude-plugin/plugin.json",
+                (_, Some(Family::AgentPlugins)) => "plugin.json",
+                (_, None) => continue,
+            };
+            assert_eq!(manifest_rel(client), expected, "{client}");
+        }
+    }
+
+    #[test]
+    fn c005_qoder_admits_skills_agents_and_mcp_but_no_rules() {
+        use ArtifactKind::{Agent, Mcp, Rule, Skill};
+        for kind in [Skill, Agent, Mcp] {
+            assert_eq!(admits(Family::Claude, ClientTarget::Qoder, kind), Ok(()), "{kind}");
+        }
+        assert_eq!(
+            admits(Family::Claude, ClientTarget::Qoder, Rule),
+            Err(OmitReason::NoFormatSurface)
+        );
     }
 
     // ── C-024 description and README ──

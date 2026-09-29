@@ -232,9 +232,9 @@ def _error(result: subprocess.CompletedProcess[str]) -> dict:
 
 def _manifest(root: Path) -> dict:
     """Read a plugin's `plugin.json`, checking C-025's key order and name pattern."""
-    claude = root / ".claude-plugin" / "plugin.json"
-    if claude.exists():
-        raw = claude.read_bytes()
+    claude = next((m for m in (".claude-plugin", ".qoder-plugin") if (root / m / "plugin.json").exists()), None)
+    if claude:
+        raw = (root / claude / "plugin.json").read_bytes()
         keys = ["name", "version", "description"]
     else:
         raw = (root / "plugin.json").read_bytes()
@@ -842,6 +842,46 @@ def test_s010_per_client_declines(grim_at, tmp_path: Path, work: Path, registry:
     assert (claude / "agents" / "team-reviewer.md").is_file()
     assert "team-srv" in json.loads((claude / ".mcp.json").read_text())["mcpServers"]
     assert "Omitted for droid: rule team-style." in _readme(droid)
+
+
+# ── S-019 — Qoder plugin tree (C-005) ───────────────────────────────────────
+
+
+def test_s019_qoder_export_renders_the_claude_family_under_dot_qoder_plugin(
+    grim_at, tmp_path: Path, work: Path, registry: str, unique_repo: str
+) -> None:
+    runner = grim_at(work)
+    stack = _publish_stack(runner, tmp_path, registry, unique_repo)
+
+    out = _ok(_export(runner, stack.bundle, "--client", "claude,qoder", "-o", "dist"))
+
+    claude, qoder = work / "dist" / "team-stack.claude", work / "dist" / "team-stack.qoder"
+    assert (qoder / ".qoder-plugin" / "plugin.json").is_file()
+    assert not (qoder / ".claude-plugin").exists()
+    doc = _manifest(qoder)
+    assert doc["version"] == f"0.0.0+{_suffix(qoder, '0.0.0')}"
+    assert doc["version"] != _manifest(claude)["version"], "one version per tree"
+    assert (qoder / "skills" / "team-plan" / "SKILL.md").is_file()
+    assert (qoder / "agents" / "team-reviewer.md").is_file()
+    assert (qoder / ".mcp.json").read_bytes() == (claude / ".mcp.json").read_bytes()
+    assert not list(qoder.rglob("*team-style*")), "rules have no plugin surface"
+    by_client = {i["client"]: i for i in out["items"]}
+    assert by_client["qoder"]["family"] == "claude"
+    assert by_client["qoder"]["version"] == doc["version"]
+    assert by_client["qoder"]["omitted"] == [{"kind": "rule", "name": "team-style", "reason": "no-format-surface"}]
+
+
+def test_s019b_config_clients_naming_qoder_export_a_qoder_tree(
+    grim_at, work: Path, registry: str, unique_repo: str
+) -> None:
+    runner = grim_at(work)
+    _team_of_one_skill(work, registry, unique_repo)
+    (work / "grimoire.toml").write_text('[options]\nclients = ["qoder"]\n')
+
+    result = _export(runner, "--plugin", "team", "-o", "dist", fmt=None)
+    assert result.returncode == 0, result.stderr
+    assert _entries(work / "dist") == ["team.qoder"]
+    assert "no plugin format" not in result.stderr
 
 
 # ── S-011 — Rendered like install (C-017, C-018, C-020) ─────────────────────

@@ -76,9 +76,9 @@ pub struct ExportPluginArgs {
     pub marketplace: Option<PathBuf>,
 
     /// Client(s) to export for (comma-separated, repeatable): `claude`,
-    /// `droid`, `junie`, `openclaw` (Claude plugin format); `copilot`,
-    /// `codex`, `cursor`, `agents` (Agent Plugins format). Defaults to the
-    /// config `clients` option, then `agents`.
+    /// `droid`, `junie`, `openclaw`, `qoder` (Claude plugin format);
+    /// `copilot`, `codex`, `cursor`, `agents` (Agent Plugins format).
+    /// Defaults to the config `clients` option, then `agents`.
     #[arg(long = "client")]
     pub client: Vec<String>,
 

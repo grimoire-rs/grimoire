@@ -716,8 +716,14 @@ async fn export_staged(
         }
         for (client, fam, root, r) in rendered {
             let omitted: Vec<(ArtifactKind, String)> = r.omitted.iter().map(|o| (o.kind, o.name.clone())).collect();
-            let manifest =
-                |version: &str| write_manifest(&root, fam, &plugin.name, version, &description, logo_rel.as_deref());
+            let manifest = |version: &str| {
+                write_manifest(
+                    &root,
+                    (client, fam),
+                    (&plugin.name, version, &description),
+                    logo_rel.as_deref(),
+                )
+            };
             // C-003: the tree is hashed with every manifest at the base
             // version; the final version is then written into each.
             manifest(&plugin.version_base)?;
@@ -1087,9 +1093,18 @@ pub(crate) fn mcp_value(
 ) -> Option<serde_json::Value> {
     match family {
         Family::Claude => {
-            let (pointer, mut value) = client.vendor().mcp_entry(ConfigScope::Global, emitted, descriptor)?;
+            // Qoder's plugin `.mcp.json` is Claude's byte for byte (C-005):
+            // build it with the Claude vendor's entry and placeholders.
+            let vendor_client = if client == ClientTarget::Qoder {
+                ClientTarget::Claude
+            } else {
+                client
+            };
+            let (pointer, mut value) = vendor_client
+                .vendor()
+                .mcp_entry(ConfigScope::Global, emitted, descriptor)?;
             let (container, _) = json_splice::split_pointer(&pointer)?;
-            if client == ClientTarget::Claude {
+            if vendor_client == ClientTarget::Claude {
                 // The reverse of the Agent Plugins rename: a descriptor written
                 // with the spec's plugin placeholders gets Claude's own names,
                 // which Claude expands. Claude's placeholders are never stripped
@@ -1156,31 +1171,24 @@ pub(crate) fn assemble_mcp_file(entries: &[(String, serde_json::Value)]) -> io::
     Ok(text)
 }
 
-/// Write the family's `plugin.json` under `root` (C-025):
-/// `.claude-plugin/plugin.json` (Claude) or `plugin.json` (Agent Plugins).
+/// Write `client`'s `plugin.json` under `root` at [`family::manifest_rel`]
+/// (C-025, C-005).
 ///
 /// # Errors
 ///
 /// `UnsafeEntry` (65) or `Io` (74 / 77).
 pub(crate) fn write_manifest(
     root: &Path,
-    family: Family,
-    name: &str,
-    version: &str,
-    description: &str,
+    (client, family): (ClientTarget, Family),
+    (name, version, description): (&str, &str, &str),
     logo: Option<&str>,
 ) -> Result<(), ExportError> {
-    let (rel, bytes) = match family {
-        Family::Claude => (
-            ".claude-plugin/plugin.json",
-            family::claude_plugin_json(name, version, description),
-        ),
-        Family::AgentPlugins => (
-            "plugin.json",
-            family::agent_plugins_plugin_json(name, version, description, logo),
-        ),
+    let bytes = match family {
+        Family::Claude => family::claude_plugin_json(name, version, description),
+        Family::AgentPlugins => family::agent_plugins_plugin_json(name, version, description, logo),
     };
-    write_staged(root, rel, &bytes)
+    write_staged(root, family::manifest_rel(client), &bytes)?;
+    Ok(())
 }
 
 /// Write `bytes` to `root/rel` through [`contained`], creating parents.
@@ -2166,7 +2174,8 @@ mod tests {
     #[test]
     fn c025_write_manifest_claude_goes_under_dot_claude_plugin() {
         let tmp = tempfile::tempdir().unwrap();
-        write_manifest(tmp.path(), Family::Claude, "team-stack", "1.0.0+abc", "D", None).unwrap();
+        let claude = (ClientTarget::Claude, Family::Claude);
+        write_manifest(tmp.path(), claude, ("team-stack", "1.0.0+abc", "D"), None).unwrap();
         assert_eq!(
             std::fs::read(tmp.path().join(".claude-plugin/plugin.json")).unwrap(),
             family::claude_plugin_json("team-stack", "1.0.0+abc", "D")
@@ -2177,12 +2186,27 @@ mod tests {
     #[test]
     fn c025_write_manifest_agent_plugins_goes_at_the_root() {
         let tmp = tempfile::tempdir().unwrap();
-        write_manifest(tmp.path(), Family::AgentPlugins, "team-stack", "1.0.0+abc", "D", None).unwrap();
+        let codex = (ClientTarget::Codex, Family::AgentPlugins);
+        write_manifest(tmp.path(), codex, ("team-stack", "1.0.0+abc", "D"), None).unwrap();
         assert_eq!(
             std::fs::read(tmp.path().join("plugin.json")).unwrap(),
             family::agent_plugins_plugin_json("team-stack", "1.0.0+abc", "D", None)
         );
         assert!(!tmp.path().join(".claude-plugin").exists());
+    }
+
+    /// C-005: Qoder's manifest is Claude's bytes at `.qoder-plugin/`.
+    #[test]
+    fn c005_write_manifest_qoder_goes_under_dot_qoder_plugin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let qoder = (ClientTarget::Qoder, Family::Claude);
+        write_manifest(tmp.path(), qoder, ("team-stack", "1.0.0+abc", "D"), None).unwrap();
+        assert_eq!(
+            std::fs::read(tmp.path().join(".qoder-plugin/plugin.json")).unwrap(),
+            family::claude_plugin_json("team-stack", "1.0.0+abc", "D")
+        );
+        assert!(!tmp.path().join(".claude-plugin").exists());
+        assert!(!tmp.path().join("plugin.json").exists());
     }
 
     // ── C-020 MCP projection and assembly ─────────────────────────
@@ -3088,6 +3112,26 @@ mod tests {
             assert_ne!(x.version, y.version, "{}", x.client);
         }
         assert_ne!(a[0].version, a[1].version, "one version per client tree");
+    }
+
+    /// C-005 / S-019: Qoder renders the Claude family under
+    /// `.qoder-plugin/`, and its `.mcp.json` is Claude's byte for byte.
+    #[tokio::test]
+    async fn c005_qoder_tree_shape_and_mcp_equal_to_claude() {
+        let reg = MemoryRegistry::new();
+        let srv = publish_mcp(&reg, "srv", &with_env_ref()).await;
+        let plugins = [input("team", vec![srv])];
+        let qoder = (ClientTarget::Qoder, Family::Claude);
+        let (items, _out) = export_to_dir(reg, &plugins, &[claude(), qoder]).await;
+        let (c, q) = (&items[0].path, &items[1].path);
+        assert_eq!(q.file_name().unwrap(), "team.qoder");
+        assert!(q.join(".qoder-plugin/plugin.json").is_file());
+        assert!(!q.join(".claude-plugin").exists());
+        assert_eq!(
+            std::fs::read(q.join(".mcp.json")).unwrap(),
+            std::fs::read(c.join(".mcp.json")).unwrap()
+        );
+        assert_eq!(items[1].family, Family::Claude);
     }
 
     #[tokio::test]
