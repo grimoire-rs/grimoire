@@ -11,7 +11,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use crate::api::export_report::{ExportItem, ExportMember, ExportOmission, ExportReport, OutputFormatKind};
@@ -196,6 +196,8 @@ pub(crate) async fn run(
         manifest,
         progress: opts.progress,
         logo: opts.logo,
+        layout: Layout::Flat,
+        contain: None,
     };
     match mode {
         ExportMode::AdHoc { refs, name } => {
@@ -296,6 +298,7 @@ pub(crate) async fn run(
                 manifest,
                 select,
                 (opts.version, opts.description),
+                None,
                 scope,
                 access,
                 offline,
@@ -361,7 +364,9 @@ impl DeclaredPlan {
 /// network) when nothing is stale. `project` plugins take their pins from
 /// the project's own lock; the lock and the resolver only ever see the
 /// `include` plugins. `flags` are the `--version` / `--description`
-/// overrides.
+/// overrides. With `contain` (R2-22, the canonical manifest directory) every
+/// selected plugin's `project` dir and `path:` include is checked by
+/// [`contain_input`] before anything reads it: `Manifest` (65).
 ///
 /// # Errors
 ///
@@ -371,6 +376,7 @@ pub(crate) async fn resolve_declared(
     manifest: &Path,
     select: impl FnOnce(&MarketplaceManifest) -> Result<BTreeSet<String>, ExportError>,
     flags: (Option<&str>, Option<&str>),
+    contain: Option<&Path>,
     scope: &FetchScope,
     access: &Arc<dyn OciAccess>,
     offline: bool,
@@ -382,6 +388,9 @@ pub(crate) async fn resolve_declared(
     let all_selected = select(&full)?;
     let m = full.include_plugins();
     let anchor = full.path.parent().unwrap_or(Path::new("."));
+    if let Some(root) = contain {
+        contain_declared_inputs(root, &full, &all_selected)?;
+    }
     let mut projects: BTreeMap<String, ProjectLock> = BTreeMap::new();
     for name in all_selected.iter().filter(|p| !m.plugins.contains_key(*p)) {
         let rel = full.plugins[name].project.clone().unwrap_or_default();
@@ -441,6 +450,35 @@ pub(crate) async fn resolve_declared(
         lock_write,
         guard,
     })
+}
+
+/// [`contain_input`] over what `resolve_declared` is about to read for the
+/// `selected` plugins: `project` dirs and `path:` includes.
+fn contain_declared_inputs(
+    root: &Path,
+    manifest: &MarketplaceManifest,
+    selected: &BTreeSet<String>,
+) -> Result<(), ExportError> {
+    let anchor = manifest.path.parent().unwrap_or(Path::new("."));
+    let refuse = |plugin: &str, what: String, reason: String| ExportError::Manifest {
+        path: manifest.path.clone(),
+        message: format!("plugin '{plugin}': {what} {reason}"),
+    };
+    for name in selected {
+        let decl = &manifest.plugins[name];
+        if let Some(project) = &decl.project {
+            contain_input(root, anchor, project)
+                .map_err(|reason| refuse(name, format!("project directory '{}'", project.display()), reason))?;
+        }
+        for include in decl.include.iter().filter(|i| is_path_value(i)) {
+            let Ok(source) = crate::config::PathSource::parse(include) else {
+                continue;
+            };
+            contain_input(root, anchor, &source.resolve(anchor))
+                .map_err(|reason| refuse(name, format!("path include '{include}'"), reason))?;
+        }
+    }
+    Ok(())
 }
 
 /// Load a marketplace `project` plugin's project. A stale project lock
@@ -657,6 +695,18 @@ pub(crate) struct PluginInput {
     pub project_dir: Option<PathBuf>,
 }
 
+/// Where a run's trees land under its output directory (C-011).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Layout {
+    /// `export plugin`: `<dir>/<plugin>.<client>[.zip]`. A plugin with
+    /// nothing a client can carry fails the run (65 `EmptyPlugin`).
+    Flat,
+    /// `export marketplace`: `<root>/<client>/<plugin>`, directories only.
+    /// A plugin empty for a client is reported in [`StagedRun::empties`]
+    /// instead of failing (R2-20).
+    Repo,
+}
+
 /// One export run: what to stage, for whom, and where it lands (C-027).
 pub(crate) struct ExportRequest<'a> {
     /// Plugins in byte order of name.
@@ -677,6 +727,11 @@ pub(crate) struct ExportRequest<'a> {
     /// `--logo`, absolute; wins over the declared `logo`, which resolves
     /// against `anchor`.
     pub logo: Option<&'a Path>,
+    pub layout: Layout,
+    /// R2-22 (`export marketplace` only): the canonical manifest directory
+    /// every `project` dir, declared logo and `path:` member must stay
+    /// under, symlink-free. `None` for `export plugin`.
+    pub contain: Option<&'a Path>,
 }
 
 /// A member fetched and verified once per run, rendered for every client.
@@ -707,6 +762,21 @@ pub(crate) struct StagedOutput {
     /// `<DIR>/<P>.<c>` or `<DIR>/<P>.<c>.zip`.
     pub final_path: PathBuf,
     pub format: OutputFormatKind,
+    pub layout: Layout,
+}
+
+/// A `(plugin, client)` that has nothing the client's format can carry
+/// (R2-20): reported, never staged or placed.
+#[derive(Debug)]
+#[cfg_attr(not(test), expect(dead_code, reason = "wired by export marketplace (WP-D)"))]
+pub(crate) struct EmptyOutput {
+    pub plugin: String,
+    pub client: ClientTarget,
+    pub family: Family,
+    /// Where the tree would have been placed.
+    pub path: PathBuf,
+    /// Every member of the plugin, with its reason.
+    pub omitted: Vec<ExportOmission>,
 }
 
 /// What rendering one client's plugin tree produced (C-016, C-018, C-020).
@@ -714,6 +784,32 @@ pub(crate) struct StagedOutput {
 pub(crate) struct RenderedPlugin {
     pub members: Vec<ExportMember>,
     pub omitted: Vec<ExportOmission>,
+}
+
+/// The result of [`render_members`]: a tree, or the soft-empty outcome
+/// (R2-20) when the client's format carries no member of the plugin.
+#[derive(Debug)]
+pub(crate) enum RenderOutcome {
+    Rendered(RenderedPlugin),
+    /// Every member omitted, sorted as in [`RenderedPlugin::omitted`].
+    Empty(Vec<ExportOmission>),
+}
+
+impl RenderOutcome {
+    /// `export plugin`'s reading: an empty outcome is `EmptyPlugin` (65).
+    ///
+    /// # Errors
+    ///
+    /// `EmptyPlugin` naming `plugin` and `client`.
+    pub(crate) fn or_refuse(self, plugin: &str, client: ClientTarget) -> Result<RenderedPlugin, ExportError> {
+        match self {
+            Self::Rendered(rendered) => Ok(rendered),
+            Self::Empty(_) => Err(ExportError::EmptyPlugin {
+                plugin: plugin.to_string(),
+                client,
+            }),
+        }
+    }
 }
 
 /// One export's staged outputs, not yet placed (C-011). Dropping `staging`
@@ -724,6 +820,10 @@ pub(crate) struct StagedRun {
     pub outputs: Vec<StagedOutput>,
     /// The report items, in (plugin, client-selection) order.
     pub items: Vec<ExportItem>,
+    /// `(plugin, client)` pairs that rendered empty ([`Layout::Repo`] only),
+    /// in the same order.
+    #[cfg_attr(not(test), expect(dead_code, reason = "wired by export marketplace (WP-D)"))]
+    pub empties: Vec<EmptyOutput>,
 }
 
 /// Run one export (C-027, C-011): [`stage_plugins`], refuse existing outputs
@@ -743,6 +843,7 @@ pub(crate) async fn export_plugins(
         staging,
         outputs,
         items,
+        ..
     } = stage_plugins(req, access).await?;
     check_existing(&outputs, req.force)?;
     place_all(&outputs, req.force, staging, &mut |from, to| std::fs::rename(from, to))?;
@@ -787,9 +888,13 @@ async fn stage_all(req: &ExportRequest<'_>, access: &Arc<dyn OciAccess>) -> Resu
 
     let mut outputs = Vec::new();
     let mut items = Vec::new();
+    let mut empties = Vec::new();
     for plugin in req.plugins {
         let progress = (req.progress, &mut position, plugin.name.as_str());
         let anchor = plugin.project_dir.as_deref().unwrap_or(req.anchor);
+        if let Some(root) = req.contain {
+            contain_plugin_inputs(root, req, plugin)?;
+        }
         let staged = stage_members(&plugin.members, &clients, access, anchor, staging.path(), progress)
             .await
             .map_err(|e| local_drift_hint(e, req.manifest, plugin))?;
@@ -797,14 +902,31 @@ async fn stage_all(req: &ExportRequest<'_>, access: &Arc<dyn OciAccess>) -> Resu
         for &(client, fam) in &clients {
             let root = contained(staging.path(), Path::new(&format!("{}.{client}", plugin.name)))?;
             std::fs::create_dir(&root).map_err(|e| io_error(&root, e))?;
-            let r = render_members(&plugin.name, &staged, client, fam, &root)?;
-            rendered.push((client, fam, root, r));
+            match render_members(&staged, client, fam, &root)? {
+                RenderOutcome::Empty(omitted) if req.layout == Layout::Repo => empties.push(EmptyOutput {
+                    plugin: plugin.name.clone(),
+                    client,
+                    family: fam,
+                    path: final_path(req.layout, req.output_dir, &plugin.name, client, false),
+                    omitted,
+                }),
+                outcome => rendered.push((client, fam, root, outcome.or_refuse(&plugin.name, client)?)),
+            }
         }
         stale_scan(plugin, &rendered)?;
 
         let logo = match (req.logo, &plugin.logo) {
             (Some(flag), _) => Some(read_logo(flag)?),
-            (None, Some(declared)) => Some(read_logo(&req.anchor.join(declared))?),
+            (None, Some(declared)) => {
+                let path = req.anchor.join(declared);
+                if let Some(root) = req.contain {
+                    contain_input(root, req.anchor, &path).map_err(|reason| ExportError::InvalidLogo {
+                        path: path.clone(),
+                        reason,
+                    })?;
+                }
+                Some(read_logo(&path)?)
+            }
             (None, None) => plugin.fallback_logo.clone(),
         };
         let logo_rel = logo.as_ref().map(|(ext, _)| family::logo_path(ext));
@@ -839,7 +961,7 @@ async fn stage_all(req: &ExportRequest<'_>, access: &Arc<dyn OciAccess>) -> Resu
             let inventory = archive::tree_inventory(&root).map_err(|e| archive_error(&root, e))?;
             let version = family::plugin_version(&plugin.version_base, &inventory);
             manifest(&version)?;
-            let final_path = final_path(req.output_dir, &plugin.name, client, req.zip);
+            let final_path = final_path(req.layout, req.output_dir, &plugin.name, client, req.zip);
             let (staged_path, format) = if req.zip {
                 let zip = root.with_extension(format!("{client}.zip"));
                 zip_plugin(&root, &zip)?;
@@ -862,6 +984,7 @@ async fn stage_all(req: &ExportRequest<'_>, access: &Arc<dyn OciAccess>) -> Resu
                 staged: staged_path,
                 final_path,
                 format,
+                layout: req.layout,
             });
         }
     }
@@ -870,6 +993,7 @@ async fn stage_all(req: &ExportRequest<'_>, access: &Arc<dyn OciAccess>) -> Resu
         staging,
         outputs,
         items,
+        empties,
     })
 }
 
@@ -901,7 +1025,7 @@ fn place_all(
 ) -> Result<(), ExportError> {
     for output in outputs {
         if let Err(e) = place(output, force, staging.path(), rename) {
-            if std::fs::symlink_metadata(aside_path(staging.path(), &output.final_path)).is_ok() {
+            if std::fs::symlink_metadata(aside_path(staging.path(), &output.final_path, output.layout)).is_ok() {
                 // The error message already names the backup path.
                 let _ = staging.keep();
             }
@@ -912,13 +1036,20 @@ fn place_all(
 }
 
 /// Where `--force` moves the existing output at `final_path` before
-/// placing the new one.
-fn aside_path(staging: &Path, final_path: &Path) -> PathBuf {
-    let name = final_path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    staging.join(format!(".replaced-{name}"))
+/// placing the new one. Always `.replaced-<plugin>.<client>` (R2-21): the
+/// repo layout's `claude/team` and `copilot/team` share a file name, so the
+/// client comes from the parent directory there.
+fn aside_path(staging: &Path, final_path: &Path, layout: Layout) -> PathBuf {
+    let name = |path: Option<&Path>| {
+        path.and_then(Path::file_name)
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let leaf = match layout {
+        Layout::Flat => name(Some(final_path)),
+        Layout::Repo => format!("{}.{}", name(Some(final_path)), name(final_path.parent())),
+    };
+    staging.join(format!(".replaced-{leaf}"))
 }
 
 /// Re-point a drifted local source's hint (decision 42). The installer's
@@ -1048,22 +1179,25 @@ pub(crate) async fn stage_members<'a>(
 /// MCP member was emitted. Every write goes through [`contained`]. No
 /// manifest — that follows the scan.
 ///
+/// A client whose format carries no member of the plugin (after MCP
+/// projection declines) is [`RenderOutcome::Empty`], not an error (R2-20):
+/// `export plugin` maps it to `EmptyPlugin` (65), `export marketplace` to an
+/// `empty` row.
+///
 /// # Errors
 ///
-/// `EmptyPlugin` (65) when no member was emitted for this client after
-/// MCP projection declines, `UnsafeEntry` (65),
-/// `Io` (74 / 77), and materialize failures with their classification.
+/// `UnsafeEntry` (65), `Io` (74 / 77), and materialize failures with their
+/// classification.
 #[allow(
     clippy::result_large_err,
     reason = "sync sibling of the async staging fns that return this same error untripped (the lint skips Future signatures); reshaping the shared error type is out of scope"
 )]
 pub(crate) fn render_members(
-    plugin: &str,
     members: &[StagedMember<'_>],
     client: ClientTarget,
     family: Family,
     root: &Path,
-) -> Result<RenderedPlugin, crate::error::Error> {
+) -> Result<RenderOutcome, crate::error::Error> {
     let mut emitted = Vec::new();
     let mut omitted = Vec::new();
     let mut mcp_entries = Vec::new();
@@ -1120,11 +1254,8 @@ pub(crate) fn render_members(
         });
     }
     if emitted.is_empty() {
-        return Err(ExportError::EmptyPlugin {
-            plugin: plugin.to_string(),
-            client,
-        }
-        .into());
+        omitted.sort_by(|a, b| (a.kind, &a.name).cmp(&(b.kind, &b.name)));
+        return Ok(RenderOutcome::Empty(omitted));
     }
     if !mcp_entries.is_empty() {
         let file = match family {
@@ -1137,10 +1268,10 @@ pub(crate) fn render_members(
     }
     emitted.sort_by(|a, b| (a.kind, &a.name).cmp(&(b.kind, &b.name)));
     omitted.sort_by(|a, b| (a.kind, &a.name).cmp(&(b.kind, &b.name)));
-    Ok(RenderedPlugin {
+    Ok(RenderOutcome::Rendered(RenderedPlugin {
         members: emitted,
         omitted,
-    })
+    }))
 }
 
 /// `ClientTarget::materialize` at global scope (C-018): scope reaches only
@@ -1403,6 +1534,94 @@ fn read_capped(reader: impl io::Read, cap: u64) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// R2-22 input containment: `path` (relative to `anchor`, or absolute) must
+/// stay under `anchor` — the manifest directory, the same place as `root`,
+/// its canonical spelling — and no component below `root` may be a symlink.
+/// A `..` that would climb above the manifest directory is a refusal even
+/// when a later component climbs back in. A component that does not exist
+/// ends the link check for what hangs below it: the read that follows
+/// reports it missing. Links above `root` are the user's layout and are not
+/// inspected.
+///
+/// # Errors
+///
+/// The reason, phrased to follow the input's name (`… escapes …`).
+pub(crate) fn contain_input(root: &Path, anchor: &Path, path: &Path) -> Result<(), String> {
+    let escapes = || "escapes the manifest directory".to_string();
+    // The components below the manifest dir, as spelled: a `..` is folded
+    // only after the component before it has been checked, because after a
+    // symlink it does not mean what it says lexically.
+    let tail = if path.is_absolute() {
+        [anchor, root]
+            .iter()
+            .find_map(|base| path.strip_prefix(base).ok())
+            .ok_or_else(escapes)?
+    } else {
+        path
+    };
+    let mut walked = root.to_path_buf();
+    let mut depth = 0usize;
+    // Depth of the first missing component, until a `..` climbs back over it.
+    let mut missing_at: Option<usize> = None;
+    for component in tail.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir if depth == 0 => return Err(escapes()),
+            Component::ParentDir => {
+                walked.pop();
+                depth -= 1;
+                if missing_at.is_some_and(|at| depth < at) {
+                    missing_at = None;
+                }
+            }
+            Component::Normal(_) => {
+                walked.push(component);
+                depth += 1;
+                if missing_at.is_some() {
+                    continue;
+                }
+                match std::fs::symlink_metadata(&walked) {
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        return Err(format!(
+                            "passes through the symbolic link '{}'; a marketplace repository holds no links",
+                            walked.display()
+                        ));
+                    }
+                    Ok(_) => {}
+                    // Nothing below a missing component can be a link; the
+                    // read that follows reports it missing.
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => missing_at = Some(depth),
+                    Err(e) => return Err(format!("cannot be inspected ('{}': {e})", walked.display())),
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => return Err(escapes()),
+        }
+    }
+    Ok(())
+}
+
+/// [`contain_input`] over a plugin's project dir and `path:` members, each
+/// a `Manifest` failure (65) naming the plugin and the input.
+fn contain_plugin_inputs(root: &Path, req: &ExportRequest<'_>, plugin: &PluginInput) -> Result<(), ExportError> {
+    let manifest = req.manifest.unwrap_or(req.anchor);
+    let refuse = |what: String, reason: String| ExportError::Manifest {
+        path: manifest.to_path_buf(),
+        message: format!("plugin '{}': {what} {reason}", plugin.name),
+    };
+    if let Some(dir) = &plugin.project_dir {
+        contain_input(root, req.anchor, dir)
+            .map_err(|reason| refuse(format!("project directory '{}'", dir.display()), reason))?;
+    }
+    let base = plugin.project_dir.as_deref().unwrap_or(req.anchor);
+    for (member, _) in &plugin.members {
+        if let Some(source) = member.source.path() {
+            contain_input(root, req.anchor, &source.resolve(base))
+                .map_err(|reason| refuse(format!("path member '{source}'"), reason))?;
+        }
+    }
+    Ok(())
+}
+
 /// The containment assertion every staged write passes (C-035): `rel`
 /// must be a name `archive::entry_name` accepts (the rule's one home);
 /// returns `root.join(rel)`.
@@ -1417,11 +1636,16 @@ pub(crate) fn contained(root: &Path, rel: &Path) -> Result<PathBuf, ExportError>
     Ok(root.join(rel))
 }
 
-/// The final path of `(plugin, client)` in `dir` (C-027): `<P>.<c>`, or
-/// `<P>.<c>.zip` with `zip`.
-pub(crate) fn final_path(dir: &Path, plugin: &str, client: ClientTarget, zip: bool) -> PathBuf {
-    let ext = if zip { ".zip" } else { "" };
-    dir.join(format!("{plugin}.{client}{ext}"))
+/// The final path of `(plugin, client)` in `dir` (C-027, C-011): flat
+/// `<P>.<c>`, or `<P>.<c>.zip` with `zip`; repo `<c>/<P>` (never zipped).
+pub(crate) fn final_path(layout: Layout, dir: &Path, plugin: &str, client: ClientTarget, zip: bool) -> PathBuf {
+    match layout {
+        Layout::Flat => {
+            let ext = if zip { ".zip" } else { "" };
+            dir.join(format!("{plugin}.{client}{ext}"))
+        }
+        Layout::Repo => dir.join(client.as_str()).join(plugin),
+    }
 }
 
 /// Refuse the run before any placement when an output already exists and
@@ -1478,7 +1702,7 @@ fn place(
             matches!(output.format, OutputFormatKind::Zip) && existing.as_ref().is_some_and(|m| m.is_file());
         if existing.is_some() && !replace_in_place {
             // Moved, never followed; removed with the staging dir.
-            let aside = aside_path(staging, final_path);
+            let aside = aside_path(staging, final_path, output.layout);
             rename(final_path, &aside).map_err(|e| io_error(final_path, e))?;
             return rename(&output.staged, final_path).map_err(|e| {
                 // Put the old output back: a failed replace must not lose it.
@@ -1833,6 +2057,7 @@ mod tests {
             staged,
             final_path,
             format: OutputFormatKind::Dir,
+            layout: Layout::Flat,
         }
     }
 
@@ -1841,6 +2066,7 @@ mod tests {
             staged,
             final_path,
             format: OutputFormatKind::Zip,
+            layout: Layout::Flat,
         }
     }
 
@@ -1861,6 +2087,17 @@ mod tests {
     /// [`super::place`] with the real `std::fs::rename`.
     fn place(output: &StagedOutput, force: bool, staging: &Path) -> Result<(), ExportError> {
         super::place(output, force, staging, &mut |from, to| std::fs::rename(from, to))
+    }
+
+    /// [`render_members`] read the way `export plugin` does: empty is 65.
+    #[expect(clippy::result_large_err, reason = "as render_members")]
+    fn render_or_refuse(
+        members: &[StagedMember<'_>],
+        client: ClientTarget,
+        family: Family,
+        root: &Path,
+    ) -> Result<RenderedPlugin, Error> {
+        Ok(render_members(members, client, family, root)?.or_refuse("team", client)?)
     }
 
     fn assert_output_exists(err: ExportError, expected: &[PathBuf]) {
@@ -1972,15 +2209,15 @@ mod tests {
     fn c027_final_path_is_plugin_dot_client_with_optional_zip() {
         let dir = Path::new("/out");
         assert_eq!(
-            final_path(dir, "team-stack", ClientTarget::Claude, false),
+            final_path(Layout::Flat, dir, "team-stack", ClientTarget::Claude, false),
             PathBuf::from("/out/team-stack.claude")
         );
         assert_eq!(
-            final_path(dir, "team-stack", ClientTarget::Codex, true),
+            final_path(Layout::Flat, dir, "team-stack", ClientTarget::Codex, true),
             PathBuf::from("/out/team-stack.codex.zip")
         );
         assert_eq!(
-            final_path(dir, "hex", ClientTarget::OpenClaw, false),
+            final_path(Layout::Flat, dir, "hex", ClientTarget::OpenClaw, false),
             PathBuf::from("/out/hex.openclaw")
         );
     }
@@ -2243,7 +2480,7 @@ mod tests {
         };
         let err = place_all(&[dir_output(staged, final_path.clone())], true, staging, &mut rename).unwrap_err();
 
-        let aside = aside_path(&staging_path, &final_path);
+        let aside = aside_path(&staging_path, &final_path, Layout::Flat);
         assert!(matches!(err, ExportError::Io { .. }), "{err:?}");
         let cause = std::error::Error::source(&err).unwrap().to_string();
         assert!(
@@ -2663,7 +2900,7 @@ mod tests {
             },
         ];
         let root = tempfile::tempdir().unwrap();
-        let r = render_members("team", &members, ClientTarget::Claude, Family::Claude, root.path()).unwrap();
+        let r = render_or_refuse(&members, ClientTarget::Claude, Family::Claude, root.path()).unwrap();
 
         let skill_md = std::fs::read_to_string(root.path().join("skills/plan/SKILL.md")).unwrap();
         assert!(skill_md.contains("name: plan"), "renamed skill rebound: {skill_md}");
@@ -2728,7 +2965,7 @@ mod tests {
             },
         ];
         let root = tempfile::tempdir().unwrap();
-        let r = render_members("team", &members, ClientTarget::Codex, Family::AgentPlugins, root.path()).unwrap();
+        let r = render_or_refuse(&members, ClientTarget::Codex, Family::AgentPlugins, root.path()).unwrap();
 
         let text = std::fs::read_to_string(root.path().join("mcp.json")).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -2759,7 +2996,7 @@ mod tests {
             content: MemberContent::Mcp(Box::new(ws())),
         }];
         let root = tempfile::tempdir().unwrap();
-        let err = render_members("team", &members, ClientTarget::Codex, Family::AgentPlugins, root.path()).unwrap_err();
+        let err = render_or_refuse(&members, ClientTarget::Codex, Family::AgentPlugins, root.path()).unwrap_err();
         assert!(
             matches!(export_error(&err), ExportError::EmptyPlugin { plugin, client }
                 if plugin == "team" && *client == ClientTarget::Codex),
@@ -2791,7 +3028,7 @@ mod tests {
             },
         ];
         let root = tempfile::tempdir().unwrap();
-        let r = render_members("team", &members, ClientTarget::OpenClaw, Family::Claude, root.path()).unwrap();
+        let r = render_or_refuse(&members, ClientTarget::OpenClaw, Family::Claude, root.path()).unwrap();
         assert!(root.path().join("skills/plan/SKILL.md").is_file());
         assert!(!root.path().join(".mcp.json").exists() && !root.path().join("agents").exists());
         assert_eq!(
@@ -2820,7 +3057,7 @@ mod tests {
             },
         ];
         let root = tempfile::tempdir().unwrap();
-        let r = render_members("team", &members, ClientTarget::Junie, Family::Claude, root.path()).unwrap();
+        let r = render_or_refuse(&members, ClientTarget::Junie, Family::Claude, root.path()).unwrap();
         assert!(root.path().join("agents/review.md").is_file());
         assert!(!root.path().join("agents/2fa-review.md").exists());
         assert_eq!(
@@ -2852,7 +3089,7 @@ mod tests {
             },
         ];
         let root = tempfile::tempdir().unwrap();
-        let r = render_members("team", &members, ClientTarget::Droid, Family::Claude, root.path()).unwrap();
+        let r = render_or_refuse(&members, ClientTarget::Droid, Family::Claude, root.path()).unwrap();
         // Droid translates a Claude-format plugin's `agents/` and `.mcp.json`
         // on install, so both carry Droid's own shapes.
         assert!(root.path().join("agents/reviewer.md").is_file());
@@ -3171,6 +3408,8 @@ mod tests {
             manifest: None,
             progress: &crate::install::SilentProgress,
             logo: None,
+            layout: Layout::Flat,
+            contain: None,
         };
         let items = export_plugins(&req, &access).await.unwrap();
 
@@ -3231,6 +3470,8 @@ mod tests {
             manifest: None,
             progress: &crate::install::SilentProgress,
             logo: None,
+            layout: Layout::Flat,
+            contain: None,
         };
         let items = export_plugins(&req, &access).await.unwrap();
         (items, out)
@@ -3356,6 +3597,8 @@ mod tests {
             manifest: None,
             progress: &crate::install::SilentProgress,
             logo: None,
+            layout: Layout::Flat,
+            contain: None,
         };
         let items = export_plugins(&req, &access).await.unwrap();
         assert_eq!(entries(out.path()), vec!["team.claude.zip"]);
@@ -3387,6 +3630,8 @@ mod tests {
             manifest: None,
             progress: &crate::install::SilentProgress,
             logo: None,
+            layout: Layout::Flat,
+            contain: None,
         };
         let err = export_plugins(&req, &access).await.unwrap_err();
         match export_error(&err) {
@@ -3420,6 +3665,8 @@ mod tests {
             manifest: None,
             progress: &crate::install::SilentProgress,
             logo: None,
+            layout: Layout::Flat,
+            contain: None,
         };
         export_plugins(&req, &access).await.unwrap();
         assert_eq!(entries(out.path()), vec!["team.claude"]);
@@ -3447,6 +3694,8 @@ mod tests {
             manifest: None,
             progress: &crate::install::SilentProgress,
             logo: None,
+            layout: Layout::Flat,
+            contain: None,
         };
         let err = export_plugins(&req, &access).await.unwrap_err();
         assert!(
@@ -3483,5 +3732,587 @@ mod tests {
         assert_eq!(staged[1].emitted, "style");
         assert!(matches!(staged[1].content, MemberContent::Unfetched));
         assert_eq!(counting.manifests.load(Ordering::SeqCst), 1);
+    }
+
+    // ── C-011 layout, soft-empty; R2-21 aside; R2-22 containment ──────────
+
+    fn fetch_scope() -> FetchScope {
+        FetchScope {
+            registries: Vec::new(),
+            short_id_default: "ghcr.io/grimoire-rs".to_string(),
+            scope: ConfigScope::Project,
+            warnings: Vec::new(),
+        }
+    }
+
+    /// A canonical `(guard, manifest dir, sibling dir outside it)`.
+    fn manifest_dir() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let guard = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(guard.path()).unwrap();
+        let (root, outside) = (base.join("repo"), base.join("outside"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        (guard, root, outside)
+    }
+
+    /// A registry holding one MCP member and a plugin `team` made of it.
+    async fn team_with_server() -> (MemoryRegistry, PluginInput) {
+        let reg = MemoryRegistry::new();
+        let srv = publish_mcp(&reg, "srv", &stdio("grim")).await;
+        (reg, input("team", vec![srv]))
+    }
+
+    /// `stage_plugins` in the given layout, manifest at `<anchor>/marketplace.toml`.
+    async fn stage_in(
+        reg: MemoryRegistry,
+        plugins: &[PluginInput],
+        clients: &[(ClientTarget, Family)],
+        (layout, contain): (Layout, Option<&Path>),
+        (anchor, out): (&Path, &Path),
+    ) -> Result<StagedRun, Error> {
+        let access: Arc<dyn OciAccess> = Arc::new(reg);
+        let manifest = anchor.join("marketplace.toml");
+        let req = ExportRequest {
+            plugins,
+            clients,
+            output_dir: out,
+            zip: false,
+            force: false,
+            anchor,
+            manifest: Some(&manifest),
+            progress: &crate::install::SilentProgress,
+            logo: None,
+            layout,
+            contain,
+        };
+        stage_plugins(&req, &access).await
+    }
+
+    fn staged_err(result: Result<StagedRun, Error>) -> Error {
+        match result {
+            Ok(_) => panic!("expected the run to be refused"),
+            Err(e) => e,
+        }
+    }
+
+    fn qoder() -> (ClientTarget, Family) {
+        (ClientTarget::Qoder, Family::Claude)
+    }
+
+    #[test]
+    fn c011_final_path_follows_the_layout() {
+        let dir = Path::new("/r");
+        assert_eq!(
+            final_path(Layout::Flat, dir, "team", ClientTarget::Claude, false),
+            Path::new("/r/team.claude")
+        );
+        assert_eq!(
+            final_path(Layout::Flat, dir, "team", ClientTarget::Claude, true),
+            Path::new("/r/team.claude.zip")
+        );
+        assert_eq!(
+            final_path(Layout::Repo, dir, "team", ClientTarget::Claude, false),
+            Path::new("/r/claude/team")
+        );
+        assert_eq!(
+            final_path(Layout::Repo, dir, "hex", ClientTarget::Qoder, false),
+            Path::new("/r/qoder/hex")
+        );
+    }
+
+    #[test]
+    fn r221_aside_path_names_the_client_in_the_repo_layout() {
+        let staging = Path::new("/s");
+        let claude = aside_path(staging, Path::new("/r/claude/team"), Layout::Repo);
+        let copilot = aside_path(staging, Path::new("/r/copilot/team"), Layout::Repo);
+        assert_ne!(claude, copilot, "one plugin, two clients, two asides");
+        assert!(claude.starts_with(staging));
+        assert_eq!(claude, Path::new("/s/.replaced-team.claude"));
+        assert_eq!(
+            aside_path(staging, Path::new("/r/team.claude"), Layout::Flat),
+            Path::new("/s/.replaced-team.claude"),
+            "the flat layout keeps its phase-1 name"
+        );
+    }
+
+    #[test]
+    fn r221_force_replaces_the_same_plugin_for_two_clients() {
+        let tmp = tempfile::tempdir().unwrap();
+        let staging_dir = tempfile::Builder::new()
+            .prefix(".grim-export-")
+            .tempdir_in(tmp.path())
+            .unwrap();
+        let mut outputs = Vec::new();
+        for client in ["claude", "copilot"] {
+            let staged = staged_dir(staging_dir.path(), &format!("team.{client}"), "new");
+            let final_path = staged_dir(&tmp.path().join(client), "team", "old");
+            outputs.push(StagedOutput {
+                staged,
+                final_path,
+                format: OutputFormatKind::Dir,
+                layout: Layout::Repo,
+            });
+        }
+        place_all(&outputs, true, staging_dir, &mut |from, to| std::fs::rename(from, to)).unwrap();
+        for client in ["claude", "copilot"] {
+            let marker = tmp.path().join(client).join("team/skills/a/SKILL.md");
+            assert_eq!(std::fs::read_to_string(marker).unwrap(), "new", "{client}");
+        }
+    }
+
+    #[tokio::test]
+    async fn c011_repo_layout_stages_one_tree_per_client_and_places_nothing() {
+        let (reg, plugin) = team_with_server().await;
+        let out = tempfile::tempdir().unwrap();
+        let clients = [claude(), codex(), qoder()];
+        let run = stage_in(reg, &[plugin], &clients, (Layout::Repo, None), (out.path(), out.path()))
+            .await
+            .unwrap();
+        let paths: Vec<PathBuf> = run.items.iter().map(|i| i.path.clone()).collect();
+        let want: Vec<PathBuf> = ["claude", "codex", "qoder"]
+            .iter()
+            .map(|c| out.path().join(c).join("team"))
+            .collect();
+        assert_eq!(paths, want);
+        let finals: Vec<PathBuf> = run.outputs.iter().map(|o| o.final_path.clone()).collect();
+        assert_eq!(finals, want, "outputs and items agree");
+        assert!(
+            run.outputs
+                .iter()
+                .all(|o| o.layout == Layout::Repo && o.staged.is_dir())
+        );
+        assert!(run.empties.is_empty());
+        assert_eq!(
+            entries(out.path()).len(),
+            1,
+            "only the staging dir exists before placement: {:?}",
+            entries(out.path())
+        );
+    }
+
+    #[tokio::test]
+    async fn c011_flat_layout_paths_are_unchanged() {
+        let (reg, plugin) = team_with_server().await;
+        let out = tempfile::tempdir().unwrap();
+        let clients = [claude()];
+        let run = stage_in(reg, &[plugin], &clients, (Layout::Flat, None), (out.path(), out.path()))
+            .await
+            .unwrap();
+        assert_eq!(run.items[0].path, out.path().join("team.claude"));
+        assert_eq!(run.outputs[0].layout, Layout::Flat);
+    }
+
+    /// A plugin of one websocket MCP server: Claude carries it, the Agent
+    /// Plugins family cannot.
+    async fn websocket_only() -> (MemoryRegistry, PluginInput) {
+        let reg = MemoryRegistry::new();
+        let socket = publish_mcp(&reg, "socket", &ws()).await;
+        (reg, input("team", vec![socket]))
+    }
+
+    #[test]
+    fn r220_render_members_reports_every_member_when_nothing_is_carried() {
+        let socket = registry_member("socket", ArtifactKind::Mcp, sha('e'));
+        let members = vec![StagedMember {
+            locked: &socket,
+            emitted: "socket",
+            content: MemberContent::Mcp(Box::new(ws())),
+        }];
+        let root = tempfile::tempdir().unwrap();
+        let outcome = render_members(&members, ClientTarget::Codex, Family::AgentPlugins, root.path()).unwrap();
+        let RenderOutcome::Empty(omitted) = outcome else {
+            panic!("expected the soft-empty outcome, got {outcome:?}");
+        };
+        assert_eq!(
+            omitted
+                .iter()
+                .map(|o| (o.kind, o.name.as_str(), o.reason))
+                .collect::<Vec<_>>(),
+            [(ArtifactKind::Mcp, "socket", OmitReason::NotRepresentable)]
+        );
+        assert!(
+            std::fs::read_dir(root.path()).unwrap().next().is_none(),
+            "an empty outcome writes nothing"
+        );
+        let err = RenderOutcome::Empty(omitted)
+            .or_refuse("team", ClientTarget::Codex)
+            .unwrap_err();
+        assert!(
+            matches!(err, ExportError::EmptyPlugin { ref plugin, client }
+                if plugin == "team" && client == ClientTarget::Codex),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn r220_flat_layout_still_refuses_an_empty_client_with_65() {
+        let (reg, plugin) = websocket_only().await;
+        let out = tempfile::tempdir().unwrap();
+        let clients = [claude(), codex()];
+        let err = staged_err(stage_in(reg, &[plugin], &clients, (Layout::Flat, None), (out.path(), out.path())).await);
+        assert!(
+            matches!(export_error(&err), ExportError::EmptyPlugin { client, .. } if *client == ClientTarget::Codex),
+            "{err:?}"
+        );
+        assert_eq!(exit_of(err), ExitCode::DataError);
+    }
+
+    #[tokio::test]
+    async fn r220_repo_layout_reports_the_empty_client_and_stages_the_rest() {
+        let (reg, plugin) = websocket_only().await;
+        let out = tempfile::tempdir().unwrap();
+        let clients = [claude(), codex()];
+        let run = stage_in(reg, &[plugin], &clients, (Layout::Repo, None), (out.path(), out.path()))
+            .await
+            .unwrap();
+        assert_eq!(run.items.len(), 1);
+        assert_eq!(run.items[0].client, "claude");
+        assert_eq!(run.outputs.len(), 1, "an empty client has nothing to place");
+        let [empty] = run.empties.as_slice() else {
+            panic!("expected one empty pair, got {:?}", run.empties);
+        };
+        assert_eq!((empty.plugin.as_str(), empty.client), ("team", ClientTarget::Codex));
+        assert_eq!(empty.family, Family::AgentPlugins);
+        assert_eq!(empty.path, out.path().join("codex/team"));
+        assert_eq!(
+            empty.omitted.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(),
+            ["socket"]
+        );
+    }
+
+    #[tokio::test]
+    async fn r220_repo_layout_with_every_client_empty_stages_nothing() {
+        let (reg, plugin) = websocket_only().await;
+        let out = tempfile::tempdir().unwrap();
+        let clients = [codex()];
+        let run = stage_in(reg, &[plugin], &clients, (Layout::Repo, None), (out.path(), out.path()))
+            .await
+            .unwrap();
+        assert!((run.items.is_empty() && run.outputs.is_empty()) && run.empties.len() == 1);
+    }
+
+    // R2-22: `contain_input` itself.
+
+    #[test]
+    fn r222_paths_inside_the_manifest_dir_pass() {
+        let (_guard, root, _) = manifest_dir();
+        std::fs::create_dir_all(root.join("a/b")).unwrap();
+        std::fs::write(root.join("a/b/f.png"), b"x").unwrap();
+        for path in ["a", "a/b/f.png", "a/missing/deeper", ".", "./a", "a/../a/b"] {
+            assert_eq!(contain_input(&root, &root, Path::new(path)), Ok(()), "{path}");
+        }
+        assert_eq!(
+            contain_input(&root, &root, &root.join("a/b")),
+            Ok(()),
+            "absolute, inside"
+        );
+    }
+
+    #[test]
+    fn r222_a_path_that_leaves_the_manifest_dir_is_refused() {
+        let (_guard, root, outside) = manifest_dir();
+        let evil_sibling = root.with_file_name("repo-evil");
+        for path in [
+            PathBuf::from(".."),
+            PathBuf::from("../outside"),
+            PathBuf::from("a/../../outside/x"),
+            outside.join("f.png"),
+            evil_sibling.join("x"),
+        ] {
+            let reason = contain_input(&root, &root, &path).unwrap_err();
+            assert!(reason.contains("manifest directory"), "{}: {reason}", path.display());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r222_a_symlink_below_the_manifest_dir_is_refused_wherever_it_sits() {
+        let (_guard, root, outside) = manifest_dir();
+        std::fs::write(root.join("real.png"), b"x").unwrap();
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        std::fs::write(outside.join("f.png"), b"x").unwrap();
+        for (link, target) in [
+            ("leaf.png", root.join("real.png")),
+            ("out", outside.clone()),
+            ("alias", root.join("real")),
+            ("dangling", root.join("nowhere")),
+        ] {
+            std::os::unix::fs::symlink(target, root.join(link)).unwrap();
+        }
+        for path in ["leaf.png", "out", "out/f.png", "alias", "alias/x", "dangling"] {
+            let reason = contain_input(&root, &root, Path::new(path)).unwrap_err();
+            assert!(reason.contains("symbolic link"), "{path}: {reason}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r222_dotdot_after_a_symlink_cannot_launder_the_path() {
+        // Physically `out/..` is the link target's parent, lexically the
+        // manifest dir: the walk must meet the link before it folds the `..`.
+        let (_guard, root, outside) = manifest_dir();
+        std::os::unix::fs::symlink(&outside, root.join("out")).unwrap();
+        for path in ["out/../a", "out/../../repo/a", "missing/../out/f"] {
+            let reason = contain_input(&root, &root, Path::new(path)).unwrap_err();
+            assert!(reason.contains("symbolic link"), "{path}: {reason}");
+        }
+    }
+
+    #[test]
+    fn r222_dotdot_that_would_climb_out_is_refused_even_after_a_missing_component() {
+        let (_guard, root, _) = manifest_dir();
+        for path in ["missing/../../x", "a/b/../../../x"] {
+            let reason = contain_input(&root, &root, Path::new(path)).unwrap_err();
+            assert!(reason.contains("manifest directory"), "{path}: {reason}");
+        }
+        assert_eq!(contain_input(&root, &root, Path::new("missing/../a")), Ok(()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r222_links_above_the_manifest_dir_are_the_users_layout_not_inspected() {
+        let (guard, root, _) = manifest_dir();
+        let via = guard.path().join("via");
+        std::os::unix::fs::symlink(&root, &via).unwrap();
+        assert_eq!(contain_input(&root, &via, Path::new("a/f")), Ok(()));
+        assert_eq!(
+            contain_input(&root, &via, &via.join("a")),
+            Ok(()),
+            "absolute, spelled via the link"
+        );
+    }
+
+    // R2-22 at the read sites.
+
+    #[tokio::test]
+    async fn r222_a_declared_logo_outside_the_manifest_dir_is_invalid_logo_65() {
+        let (guard, root, outside) = manifest_dir();
+        std::fs::write(outside.join("logo.png"), b"png").unwrap();
+        let (reg, mut plugin) = team_with_server().await;
+        plugin.logo = Some(PathBuf::from("../outside/logo.png"));
+        let out = guard.path().join("out");
+        let clients = [claude()];
+        let err = staged_err(
+            stage_in(
+                reg,
+                std::slice::from_ref(&plugin),
+                &clients,
+                (Layout::Repo, Some(&root)),
+                (&root, &out),
+            )
+            .await,
+        );
+        assert!(
+            matches!(export_error(&err), ExportError::InvalidLogo { reason, .. } if reason.contains("manifest directory")),
+            "{err:?}"
+        );
+        assert_eq!(exit_of(err), ExitCode::DataError);
+    }
+
+    #[tokio::test]
+    async fn r222_without_a_containment_root_the_same_logo_is_accepted() {
+        // `export plugin` passes no root: its inputs stay wherever the user put them.
+        let (guard, root, outside) = manifest_dir();
+        std::fs::write(outside.join("logo.png"), b"png").unwrap();
+        let (reg, mut plugin) = team_with_server().await;
+        plugin.logo = Some(PathBuf::from("../outside/logo.png"));
+        let out = guard.path().join("out");
+        let clients = [claude()];
+        let run = stage_in(reg, &[plugin], &clients, (Layout::Repo, None), (&root, &out))
+            .await
+            .unwrap();
+        assert!(run.outputs[0].staged.join("assets/logo.png").is_file());
+    }
+
+    #[tokio::test]
+    async fn r222_a_logo_inside_the_manifest_dir_is_read() {
+        let (guard, root, _) = manifest_dir();
+        std::fs::create_dir_all(root.join("assets")).unwrap();
+        std::fs::write(root.join("assets/logo.png"), b"png").unwrap();
+        let (reg, mut plugin) = team_with_server().await;
+        plugin.logo = Some(PathBuf::from("assets/logo.png"));
+        let out = guard.path().join("out");
+        let clients = [claude()];
+        let run = stage_in(reg, &[plugin], &clients, (Layout::Repo, Some(&root)), (&root, &out))
+            .await
+            .unwrap();
+        assert!(run.outputs[0].staged.join("assets/logo.png").is_file());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn r222_a_symlinked_logo_or_logo_ancestor_is_invalid_logo_65() {
+        let (guard, root, outside) = manifest_dir();
+        std::fs::write(outside.join("logo.png"), b"png").unwrap();
+        std::fs::write(root.join("real.png"), b"png").unwrap();
+        std::os::unix::fs::symlink(root.join("real.png"), root.join("leaf.png")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("out")).unwrap();
+        for logo in ["leaf.png", "out/logo.png"] {
+            let (reg, mut plugin) = team_with_server().await;
+            plugin.logo = Some(PathBuf::from(logo));
+            let out = guard.path().join("out-dir");
+            let clients = [claude()];
+            let err = staged_err(stage_in(reg, &[plugin], &clients, (Layout::Repo, Some(&root)), (&root, &out)).await);
+            assert!(
+                matches!(export_error(&err), ExportError::InvalidLogo { reason, .. } if reason.contains("symbolic link")),
+                "{logo}: {err:?}"
+            );
+            assert_eq!(exit_of(err), ExitCode::DataError, "{logo}");
+        }
+    }
+
+    fn skill_at(name: &str, rel: &str) -> LockedArtifact {
+        LockedArtifact {
+            name: name.to_string(),
+            kind: ArtifactKind::Skill,
+            source: LockedSource::Path {
+                path: PathSource::parse(rel).unwrap(),
+                hash: sha('c'),
+            },
+            bundles: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn r222_a_path_member_outside_the_manifest_dir_is_manifest_65() {
+        let (guard, root, _) = manifest_dir();
+        let plugin = input("team", vec![skill_at("evil", "../outside/evil")]);
+        let out = guard.path().join("out");
+        let clients = [claude()];
+        let err = staged_err(
+            stage_in(
+                MemoryRegistry::new(),
+                &[plugin],
+                &clients,
+                (Layout::Repo, Some(&root)),
+                (&root, &out),
+            )
+            .await,
+        );
+        let ExportError::Manifest { path, message } = export_error(&err) else {
+            panic!("expected Manifest, got {err:?}");
+        };
+        assert_eq!(path, &root.join("marketplace.toml"));
+        assert!(
+            message.contains("plugin 'team'")
+                && message.contains("../outside/evil")
+                && message.contains("manifest directory"),
+            "{message}"
+        );
+        assert_eq!(exit_of(err), ExitCode::DataError);
+    }
+
+    #[tokio::test]
+    async fn r222_a_path_member_inside_the_manifest_dir_reaches_the_read() {
+        // Containment passes; the missing source then fails as the install
+        // layer's own error, not as a containment refusal.
+        let (guard, root, _) = manifest_dir();
+        let plugin = input("team", vec![skill_at("plan", "./skills/plan")]);
+        let out = guard.path().join("out");
+        let clients = [claude()];
+        let err = staged_err(
+            stage_in(
+                MemoryRegistry::new(),
+                &[plugin],
+                &clients,
+                (Layout::Repo, Some(&root)),
+                (&root, &out),
+            )
+            .await,
+        );
+        assert!(!matches!(err, Error::Export(_)), "{err:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn r222_a_symlinked_path_member_or_ancestor_is_manifest_65() {
+        let (guard, root, outside) = manifest_dir();
+        std::fs::create_dir_all(outside.join("skill")).unwrap();
+        std::os::unix::fs::symlink(outside.join("skill"), root.join("linked")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("out")).unwrap();
+        for rel in ["./linked", "./out/skill"] {
+            let plugin = input("team", vec![skill_at("skill", rel)]);
+            let out = guard.path().join("out-dir");
+            let clients = [claude()];
+            let err = staged_err(
+                stage_in(
+                    MemoryRegistry::new(),
+                    &[plugin],
+                    &clients,
+                    (Layout::Repo, Some(&root)),
+                    (&root, &out),
+                )
+                .await,
+            );
+            assert!(
+                matches!(export_error(&err), ExportError::Manifest { message, .. } if message.contains("symbolic link")),
+                "{rel}: {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn r222_a_project_dir_outside_the_manifest_dir_is_manifest_65() {
+        let (guard, root, _) = manifest_dir();
+        let mut plugin = input("team", Vec::new());
+        plugin.project_dir = Some(root.join("../outside"));
+        let out = guard.path().join("out");
+        let clients = [claude()];
+        let err = staged_err(
+            stage_in(
+                MemoryRegistry::new(),
+                &[plugin],
+                &clients,
+                (Layout::Repo, Some(&root)),
+                (&root, &out),
+            )
+            .await,
+        );
+        assert!(
+            matches!(export_error(&err), ExportError::Manifest { message, .. }
+                if message.contains("project directory") && message.contains("manifest directory")),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn r222_resolve_declared_refuses_escaping_inputs_before_reading_them() {
+        let (_guard, root, outside) = manifest_dir();
+        let manifest = root.join("marketplace.toml");
+        let access: Arc<dyn OciAccess> = Arc::new(NoNetwork::default());
+        let mut cases = vec![
+            ("[plugins.team]\nproject = \"../outside\"\n", "project directory"),
+            ("[plugins.team]\ninclude = [\"../outside/skill\"]\n", "path include"),
+        ];
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, root.join("out")).unwrap();
+            cases.push(("[plugins.team]\nproject = \"out\"\n", "symbolic link"));
+            cases.push(("[plugins.team]\ninclude = [\"./out/skill\"]\n", "symbolic link"));
+        }
+        let _ = &outside;
+        for (body, needle) in cases {
+            std::fs::write(&manifest, body).unwrap();
+            let select = |m: &MarketplaceManifest| Ok(m.plugins.keys().cloned().collect());
+            let result = resolve_declared(
+                &manifest,
+                select,
+                (None, None),
+                Some(&root),
+                &fetch_scope(),
+                &access,
+                false,
+            )
+            .await;
+            let Err(err) = result else {
+                panic!("expected a refusal for {body:?}");
+            };
+            assert!(
+                matches!(export_error(&err), ExportError::Manifest { message, .. }
+                    if message.contains(needle) && message.contains("plugin 'team'")),
+                "{body:?}: {err:?}"
+            );
+            assert_eq!(exit_of(err), ExitCode::DataError);
+        }
     }
 }
