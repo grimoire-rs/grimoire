@@ -30,6 +30,7 @@ use crate::fetch::FetchScope;
 use crate::install::client_target::MaterializeRequest;
 use crate::install::installer::{StagedArtifact, fetch_verified_layer, stage_locked_artifact};
 use crate::install::{ClientTarget, DefaultMaterializer, InstallError, InstallErrorKind, InstallProgress, json_splice};
+use crate::lock::grimoire_lock::MarketplaceLock;
 use crate::lock::{ConfigFileLock, LockedArtifact, lock_io};
 use crate::oci::access::OciAccess;
 use crate::oci::mcp::McpDescriptor;
@@ -276,95 +277,169 @@ pub(crate) async fn run(
             Ok(ExportReport::new(items))
         }
         ExportMode::Declared { manifest, plugins } => {
-            let full = marketplace::load(manifest).map_err(missing_manifest_hint)?;
-            let _guard = ConfigFileLock::try_acquire(&full.path)?;
-            let lock_path = resolve::lock_path(&full.path);
-            let previous = resolve::load_lock(&lock_path)?;
-            if full.plugins.is_empty() {
-                return Err(ExportError::NoneDeclared {
-                    path: full.path.clone(),
+            let select = |full: &MarketplaceManifest| -> Result<BTreeSet<String>, ExportError> {
+                if full.plugins.is_empty() {
+                    return Err(ExportError::NoneDeclared {
+                        path: full.path.clone(),
+                    });
                 }
-                .into());
-            }
-            let all_selected: BTreeSet<String> = if plugins.is_empty() {
-                full.plugins.keys().cloned().collect()
-            } else {
+                if plugins.is_empty() {
+                    return Ok(full.plugins.keys().cloned().collect());
+                }
                 if let Some(missing) = plugins.iter().find(|p| !full.plugins.contains_key(*p)) {
-                    return Err(ExportError::PluginNotFound { name: missing.clone() }.into());
+                    return Err(ExportError::PluginNotFound { name: missing.clone() });
                 }
-                plugins.iter().cloned().collect()
+                Ok(plugins.iter().cloned().collect())
             };
-            // `project` plugins take their pins from the project's own lock;
-            // L and the resolver only ever see the `include` plugins.
-            let m = full.include_plugins();
-            let anchor = full.path.parent().unwrap_or(Path::new("."));
-            let mut projects: BTreeMap<String, ProjectLock> = BTreeMap::new();
-            for name in all_selected.iter().filter(|p| !m.plugins.contains_key(*p)) {
-                let rel = full.plugins[name].project.clone().unwrap_or_default();
-                projects.insert(
-                    name.clone(),
-                    load_project_plugin(&full.path, name, &anchor.join(&rel), &rel)?,
-                );
-            }
-            let selected: BTreeSet<String> = all_selected
-                .iter()
-                .filter(|p| m.plugins.contains_key(*p))
-                .cloned()
-                .collect();
-            let hashes = declaration_hashes(&m, scope)?;
-            let stale: BTreeMap<String, PluginPick> = selected
-                .iter()
-                .filter(|p| is_stale(p, previous.as_ref(), &hashes))
-                .map(|p| (p.clone(), PluginPick::Whole))
-                .collect();
-            let res = resolve_marketplace(
-                &m,
-                previous.as_ref(),
-                &PluginSelection::Some(stale.clone()),
+            let plan = resolve_declared(
+                manifest,
+                select,
+                (opts.version, opts.description),
                 scope,
                 access,
-                IncludeOrigin::Declared,
                 offline,
             )
-            .await?;
-            let mut inputs = Vec::with_capacity(all_selected.len());
-            for p in &all_selected {
-                let input = match projects.get(p) {
-                    Some(project) => {
-                        let decl = merged_decl(&full.plugins[p], project);
-                        let mut input = plugin_input(
-                            p,
-                            &project.members(),
-                            Some(&decl),
-                            (opts.version, opts.description),
-                            (None, None),
-                        )?;
-                        input.project_dir = Some(project.dir.clone());
-                        input
-                    }
-                    None => plugin_input(
-                        p,
-                        &part_members(&res, p),
-                        m.plugins.get(p),
-                        (opts.version, opts.description),
-                        (None, None),
-                    )?,
-                };
-                inputs.push(input);
-            }
-            let items = export_plugins(&request(&inputs, anchor, Some(&full.path)), access).await?;
-
-            // After placement (C-027): a fresh lock is never rewritten.
-            let dropped = previous
-                .as_ref()
-                .is_some_and(|l| l.plugins.keys().any(|p| !m.plugins.contains_key(p)));
-            // A manifest of project plugins only never grows an empty L.
-            if (previous.is_none() && !m.plugins.is_empty()) || !stale.is_empty() || dropped {
-                lock_io::save_marketplace(&lock_path, &res.lock, previous.as_ref())?;
-            }
+            .await
+            .map_err(|e| match e {
+                crate::error::Error::Export(e) => missing_manifest_hint(e).into(),
+                other => other,
+            })?;
+            let anchor = plan.manifest.path.parent().unwrap_or(Path::new("."));
+            let items = export_plugins(&request(&plan.inputs, anchor, Some(&plan.manifest.path)), access).await?;
+            plan.commit_lock()?;
             Ok(ExportReport::new(items))
         }
     }
+}
+
+/// A declared manifest resolved into plugins ready to stage (C-010): what
+/// `grim export plugin` and `grim export marketplace` share up to the
+/// export itself.
+pub(crate) struct DeclaredPlan {
+    /// The manifest as loaded, `project` plugins included.
+    pub manifest: MarketplaceManifest,
+    /// The selected plugins, in byte order of name.
+    pub inputs: Vec<PluginInput>,
+    /// The marketplace lock to save after placement; `None` when nothing
+    /// about it changed.
+    lock_write: Option<LockWrite>,
+    /// The manifest's advisory lock, held until the plan is consumed.
+    guard: ConfigFileLock,
+}
+
+/// A marketplace lock waiting to be saved once its plugins are placed.
+struct LockWrite {
+    path: PathBuf,
+    lock: MarketplaceLock,
+    previous: Option<MarketplaceLock>,
+}
+
+impl DeclaredPlan {
+    /// Save the marketplace lock when the resolution changed it (C-027: a
+    /// fresh lock is never rewritten), then release the manifest lock.
+    /// Called after placement.
+    ///
+    /// # Errors
+    ///
+    /// A lock serialization or I/O failure.
+    pub(crate) fn commit_lock(self) -> Result<(), crate::lock::lock_error::LockError> {
+        let Self { lock_write, guard, .. } = self;
+        let saved = lock_write
+            .map(|w| lock_io::save_marketplace(&w.path, &w.lock, w.previous.as_ref()))
+            .transpose();
+        drop(guard);
+        saved.map(|_| ())
+    }
+}
+
+/// Load `manifest`, take its advisory lock, and resolve the plugins `select`
+/// names into [`PluginInput`]s (C-010): `marketplace::load`,
+/// `ConfigFileLock::try_acquire`, `resolve::load_lock`, `select` (the
+/// caller's own emptiness and `--plugin` checks), then `resolve_marketplace`
+/// always — `Some{stale → Whole}`, or `Some{}` (carry and drop only, no
+/// network) when nothing is stale. `project` plugins take their pins from
+/// the project's own lock; the lock and the resolver only ever see the
+/// `include` plugins. `flags` are the `--version` / `--description`
+/// overrides.
+///
+/// # Errors
+///
+/// Every failure of the steps above with its existing classification,
+/// lock contention (75) included.
+pub(crate) async fn resolve_declared(
+    manifest: &Path,
+    select: impl FnOnce(&MarketplaceManifest) -> Result<BTreeSet<String>, ExportError>,
+    flags: (Option<&str>, Option<&str>),
+    scope: &FetchScope,
+    access: &Arc<dyn OciAccess>,
+    offline: bool,
+) -> Result<DeclaredPlan, crate::error::Error> {
+    let full = marketplace::load(manifest)?;
+    let guard = ConfigFileLock::try_acquire(&full.path)?;
+    let lock_path = resolve::lock_path(&full.path);
+    let previous = resolve::load_lock(&lock_path)?;
+    let all_selected = select(&full)?;
+    let m = full.include_plugins();
+    let anchor = full.path.parent().unwrap_or(Path::new("."));
+    let mut projects: BTreeMap<String, ProjectLock> = BTreeMap::new();
+    for name in all_selected.iter().filter(|p| !m.plugins.contains_key(*p)) {
+        let rel = full.plugins[name].project.clone().unwrap_or_default();
+        projects.insert(
+            name.clone(),
+            load_project_plugin(&full.path, name, &anchor.join(&rel), &rel)?,
+        );
+    }
+    let selected: BTreeSet<String> = all_selected
+        .iter()
+        .filter(|p| m.plugins.contains_key(*p))
+        .cloned()
+        .collect();
+    let hashes = declaration_hashes(&m, scope)?;
+    let stale: BTreeMap<String, PluginPick> = selected
+        .iter()
+        .filter(|p| is_stale(p, previous.as_ref(), &hashes))
+        .map(|p| (p.clone(), PluginPick::Whole))
+        .collect();
+    let res = resolve_marketplace(
+        &m,
+        previous.as_ref(),
+        &PluginSelection::Some(stale.clone()),
+        scope,
+        access,
+        IncludeOrigin::Declared,
+        offline,
+    )
+    .await?;
+    let mut inputs = Vec::with_capacity(all_selected.len());
+    for p in &all_selected {
+        let input = match projects.get(p) {
+            Some(project) => {
+                let decl = merged_decl(&full.plugins[p], project);
+                let mut input = plugin_input(p, &project.members(), Some(&decl), flags, (None, None))?;
+                input.project_dir = Some(project.dir.clone());
+                input
+            }
+            None => plugin_input(p, &part_members(&res, p), m.plugins.get(p), flags, (None, None))?,
+        };
+        inputs.push(input);
+    }
+    // A fresh lock is never rewritten.
+    let dropped = previous
+        .as_ref()
+        .is_some_and(|l| l.plugins.keys().any(|p| !m.plugins.contains_key(p)));
+    // A manifest of project plugins only never grows an empty L.
+    let lock_write =
+        ((previous.is_none() && !m.plugins.is_empty()) || !stale.is_empty() || dropped).then_some(LockWrite {
+            path: lock_path,
+            lock: res.lock,
+            previous,
+        });
+    Ok(DeclaredPlan {
+        manifest: full,
+        inputs,
+        lock_write,
+        guard,
+    })
 }
 
 /// Load a marketplace `project` plugin's project. A stale project lock
@@ -640,11 +715,19 @@ pub(crate) struct RenderedPlugin {
     pub omitted: Vec<ExportOmission>,
 }
 
-/// Run one export (C-027): dedupe `(P, c)` pairs, create `<DIR>`, open the
-/// `.grim-export-` staging dir in it, stage every output ([`stage_members`],
-/// [`render_members`], the C-022 scan across all clients, [`write_manifest`],
-/// the zip), refuse existing outputs without `force`, then [`place`] each.
-/// Returns the report items in (plugin, client-selection) order.
+/// One export's staged outputs, not yet placed (C-011). Dropping `staging`
+/// removes every unplaced tree.
+pub(crate) struct StagedRun {
+    /// The `.grim-export-` dir inside the output root that holds `outputs`.
+    pub staging: tempfile::TempDir,
+    pub outputs: Vec<StagedOutput>,
+    /// The report items, in (plugin, client-selection) order.
+    pub items: Vec<ExportItem>,
+}
+
+/// Run one export (C-027, C-011): [`stage_plugins`], refuse existing outputs
+/// without `force`, then [`place_all`]. Returns the report items in
+/// (plugin, client-selection) order.
 ///
 /// # Errors
 ///
@@ -655,18 +738,37 @@ pub(crate) async fn export_plugins(
     req: &ExportRequest<'_>,
     access: &Arc<dyn OciAccess>,
 ) -> Result<Vec<ExportItem>, crate::error::Error> {
+    let StagedRun {
+        staging,
+        outputs,
+        items,
+    } = stage_plugins(req, access).await?;
+    check_existing(&outputs, req.force)?;
+    place_all(&outputs, req.force, staging, &mut |from, to| std::fs::rename(from, to))?;
+    Ok(items)
+}
+
+/// Stage every output of `req` (C-011): dedupe `(P, c)` pairs, create
+/// `<DIR>`, open the `.grim-export-` staging dir in it, stage every output
+/// ([`stage_members`], [`render_members`], the C-022 scan across all
+/// clients, [`write_manifest`], the zip). Places nothing.
+///
+/// # Errors
+///
+/// As [`export_plugins`], up to the first placement.
+pub(crate) async fn stage_plugins(
+    req: &ExportRequest<'_>,
+    access: &Arc<dyn OciAccess>,
+) -> Result<StagedRun, crate::error::Error> {
     req.progress.start(req.plugins.iter().map(|p| p.members.len()).sum());
-    let result = export_staged(req, access).await;
+    let result = stage_all(req, access).await;
     // Cleared on every exit, so an error message never lands mid-bar.
     req.progress.finish();
     result
 }
 
-/// [`export_plugins`] between the progress `start` and `finish`.
-async fn export_staged(
-    req: &ExportRequest<'_>,
-    access: &Arc<dyn OciAccess>,
-) -> Result<Vec<ExportItem>, crate::error::Error> {
+/// [`stage_plugins`] between the progress `start` and `finish`.
+async fn stage_all(req: &ExportRequest<'_>, access: &Arc<dyn OciAccess>) -> Result<StagedRun, crate::error::Error> {
     let mut position = 0;
     let mut clients: Vec<(ClientTarget, Family)> = Vec::with_capacity(req.clients.len());
     for pair in req.clients {
@@ -763,9 +865,11 @@ async fn export_staged(
         }
     }
 
-    check_existing(&outputs, req.force)?;
-    place_all(&outputs, req.force, staging, &mut |from, to| std::fs::rename(from, to))?;
-    Ok(items)
+    Ok(StagedRun {
+        staging,
+        outputs,
+        items,
+    })
 }
 
 /// Maps an `archive` I/O error to `ExportError` (C-026, C-035): an unsafe
