@@ -491,8 +491,9 @@ pub(crate) async fn pinned_annotations(
 }
 
 /// Assemble one plugin's [`PluginInput`]: `rename::apply` over its lock
-/// part members (C-021), then `family::plugin_version` with base
-/// `version_flag` → `decl.version` → `annotation_version` (C-023), and the
+/// part members (C-021), then the version base `version_flag` →
+/// `decl.version` → `annotation_version`, normalized (C-003; the final
+/// version needs the rendered tree, so it is derived at staging), and the
 /// description base `description_flag` → `decl.description` →
 /// `annotation_description` (C-024). `decl` is `None` ad-hoc. An
 /// author-written base (flag or declared) must fit
@@ -529,7 +530,12 @@ pub(crate) fn plugin_input(
         .map(str::to_string)
         .or_else(|| decl.and_then(|d| d.version.clone()))
         .or(annotation_version);
-    let version = family::plugin_version(base.as_deref(), &members)?;
+    let version_base = match base.as_deref() {
+        Some(raw) => {
+            marketplace::normalize_version(raw).ok_or_else(|| ExportError::InvalidVersion { value: raw.to_string() })?
+        }
+        None => "0.0.0".to_string(),
+    };
     let renamed = members
         .iter()
         .filter(|(locked, emitted)| locked.name != *emitted)
@@ -538,7 +544,7 @@ pub(crate) fn plugin_input(
     Ok(PluginInput {
         name: name.to_string(),
         members,
-        version,
+        version_base,
         description_base: authored.or(annotation_description),
         logo: decl.and_then(|d| d.logo.clone()),
         fallback_logo: None,
@@ -554,8 +560,9 @@ pub(crate) struct PluginInput {
     pub name: String,
     /// `(locked member, emitted name)`, every member of the plugin.
     pub members: Vec<(LockedArtifact, String)>,
-    /// C-023 version, computed over all members (client-independent).
-    pub version: String,
+    /// The normalized version base (default `0.0.0`, C-003); every client's
+    /// final version is `plugin_version(base, its rendered tree)` (C-002).
+    pub version_base: String,
     /// C-024 base description (flag, declared or annotation); the per-client
     /// omissions and the on-ramp go to `README.md`.
     pub description_base: Option<String>,
@@ -709,20 +716,20 @@ async fn export_staged(
         }
         for (client, fam, root, r) in rendered {
             let omitted: Vec<(ArtifactKind, String)> = r.omitted.iter().map(|o| (o.kind, o.name.clone())).collect();
-            write_manifest(
-                &root,
-                fam,
-                &plugin.name,
-                &plugin.version,
-                &description,
-                logo_rel.as_deref(),
-            )?;
+            let manifest =
+                |version: &str| write_manifest(&root, fam, &plugin.name, version, &description, logo_rel.as_deref());
+            // C-003: the tree is hashed with every manifest at the base
+            // version; the final version is then written into each.
+            manifest(&plugin.version_base)?;
             let readme = contained(&root, Path::new("README.md"))?;
             let readme_bytes = family::plugin_readme(&plugin.name, client, base, &omitted, logo_rel.as_deref());
             std::fs::write(&readme, readme_bytes).map_err(|e| io_error(&readme, e))?;
             if let (Some((_, bytes)), Some(rel)) = (&logo, &logo_rel) {
                 write_staged(&root, rel, bytes)?;
             }
+            let inventory = archive::tree_inventory(&root).map_err(|e| archive_error(&root, e))?;
+            let version = family::plugin_version(&plugin.version_base, &inventory);
+            manifest(&version)?;
             let final_path = final_path(req.output_dir, &plugin.name, client, req.zip);
             let (staged_path, format) = if req.zip {
                 let zip = root.with_extension(format!("{client}.zip"));
@@ -738,7 +745,7 @@ async fn export_staged(
                 family: fam,
                 format,
                 path: final_path.clone(),
-                version: plugin.version.clone(),
+                version,
                 members: r.members,
                 omitted: r.omitted,
             });
@@ -2655,7 +2662,7 @@ mod tests {
     // ── C-021 / C-023 / C-024 plugin input ────────────────────────
 
     #[test]
-    fn c021_c023_rename_applies_before_the_version_is_computed() {
+    fn c021_rename_applies_to_the_members() {
         let members = vec![registry_member("hex-plan", ArtifactKind::Skill, sha('a'))];
         let d = decl(Some("1.0.0"), None, Some("hex-"));
         let input = plugin_input("hex", &members, Some(&d), (None, None), (None, None)).unwrap();
@@ -2663,13 +2670,7 @@ mod tests {
         assert_eq!(input.members.len(), 1);
         assert_eq!(input.members[0].1, "plan");
         assert_eq!(input.renamed, vec![("hex-plan".to_string(), "plan".to_string())]);
-        let renamed = vec![(members[0].clone(), "plan".to_string())];
-        let unrenamed = vec![(members[0].clone(), "hex-plan".to_string())];
-        assert_eq!(input.version, family::plugin_version(Some("1.0.0"), &renamed).unwrap());
-        assert_ne!(
-            input.version,
-            family::plugin_version(Some("1.0.0"), &unrenamed).unwrap()
-        );
+        assert_eq!(input.version_base, "1.0.0");
     }
 
     #[test]
@@ -2692,29 +2693,26 @@ mod tests {
     }
 
     #[test]
-    fn c023_version_precedence_flag_then_declared_then_annotation_then_zero() {
+    fn c003_version_base_precedence_flag_then_declared_then_annotation_then_zero() {
         let members = vec![registry_member("plan", ArtifactKind::Skill, sha('a'))];
-        let pairs = vec![(members[0].clone(), "plan".to_string())];
-        let v = |base: Option<&str>| family::plugin_version(base, &pairs).unwrap();
         let ann = || (Some("0.5.0".to_string()), None);
         let declared = decl(Some("1.0.0"), None, None);
         let bare = decl(None, None, None);
 
         let all = plugin_input("p", &members, Some(&declared), (Some("v2.0.0"), None), ann()).unwrap();
-        assert_eq!(all.version, v(Some("2.0.0")), "--version wins, leading v stripped");
+        assert_eq!(all.version_base, "2.0.0", "--version wins, leading v stripped");
         let no_flag = plugin_input("p", &members, Some(&declared), (None, None), ann()).unwrap();
-        assert_eq!(no_flag.version, v(Some("1.0.0")), "declared beats annotation");
+        assert_eq!(no_flag.version_base, "1.0.0", "declared beats annotation");
         let ann_only = plugin_input("p", &members, Some(&bare), (None, None), ann()).unwrap();
-        assert_eq!(ann_only.version, v(Some("0.5.0")));
+        assert_eq!(ann_only.version_base, "0.5.0");
         let ad_hoc = plugin_input("p", &members, None, (None, None), ann()).unwrap();
-        assert_eq!(ad_hoc.version, v(Some("0.5.0")));
+        assert_eq!(ad_hoc.version_base, "0.5.0");
         let none = plugin_input("p", &members, None, (None, None), (None, None)).unwrap();
-        assert_eq!(none.version, v(None));
-        assert!(none.version.starts_with("0.0.0+"));
+        assert_eq!(none.version_base, "0.0.0");
     }
 
     #[test]
-    fn c023_invalid_version_flag_is_invalid_version_65() {
+    fn c003_invalid_version_flag_is_invalid_version_65() {
         let members = vec![registry_member("plan", ArtifactKind::Skill, sha('a'))];
         for bad in ["latest", "1.0.0+x"] {
             let err = plugin_input("p", &members, None, (Some(bad), None), (None, None)).unwrap_err();
@@ -2925,11 +2923,10 @@ mod tests {
 
     fn input(name: &str, members: Vec<LockedArtifact>) -> PluginInput {
         let members: Vec<(LockedArtifact, String)> = members.into_iter().map(|m| (m.clone(), m.name)).collect();
-        let version = family::plugin_version(Some("1.0.0"), &members).unwrap();
         PluginInput {
             name: name.to_string(),
             members,
-            version,
+            version_base: "1.0.0".to_string(),
             description_base: Some("Base".to_string()),
             renamed: Vec::new(),
             logo: None,
@@ -2986,14 +2983,13 @@ mod tests {
             vec![("team".into(), "claude".into()), ("team".into(), "codex".into())]
         );
         assert_eq!(items[0].path, dir.join("team.claude"));
-        assert_eq!(items[0].version, plugins[0].version);
         assert_eq!(items[0].family, Family::Claude);
         assert_eq!(items[1].family, Family::AgentPlugins);
 
         let claude_root = dir.join("team.claude");
         assert_eq!(
             std::fs::read(claude_root.join(".claude-plugin/plugin.json")).unwrap(),
-            family::claude_plugin_json("team", &plugins[0].version, &family::plugin_description(Some("Base")).0)
+            family::claude_plugin_json("team", &items[0].version, &family::plugin_description(Some("Base")).0)
         );
         assert!(claude_root.join(".mcp.json").is_file());
         let codex_root = dir.join("team.codex");
@@ -3001,12 +2997,97 @@ mod tests {
             std::fs::read(codex_root.join("plugin.json")).unwrap(),
             family::agent_plugins_plugin_json(
                 "team",
-                &plugins[0].version,
+                &items[1].version,
                 &family::plugin_description(Some("Base")).0,
                 None
             )
         );
         assert!(codex_root.join("mcp.json").is_file());
+    }
+
+    /// Export `plugins` for `clients` into a fresh dir; returns the items
+    /// and the output dir guard.
+    async fn export_to_dir(
+        reg: MemoryRegistry,
+        plugins: &[PluginInput],
+        clients: &[(ClientTarget, Family)],
+    ) -> (Vec<ExportItem>, tempfile::TempDir) {
+        let out = tempfile::tempdir().unwrap();
+        let access: Arc<dyn OciAccess> = Arc::new(reg);
+        let req = ExportRequest {
+            plugins,
+            clients,
+            output_dir: out.path(),
+            zip: false,
+            force: false,
+            anchor: out.path(),
+            manifest: None,
+            progress: &crate::install::SilentProgress,
+            logo: None,
+        };
+        let items = export_plugins(&req, &access).await.unwrap();
+        (items, out)
+    }
+
+    /// C-003 witness: re-derive the version from the produced tree the way
+    /// the pytest `_suffix` does — every manifest carrying `version` gets the
+    /// base back, then the tree is hashed.
+    fn rederive(root: &Path, base: &str, final_version: &str) -> String {
+        for manifest in [
+            ".claude-plugin/plugin.json",
+            ".qoder-plugin/plugin.json",
+            ".cursor-plugin/plugin.json",
+            "plugin.json",
+        ] {
+            let path = root.join(manifest);
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                std::fs::write(&path, text.replace(final_version, base)).unwrap();
+            }
+        }
+        let inventory = archive::tree_inventory(root).unwrap();
+        family::plugin_version(base, &inventory)
+    }
+
+    #[tokio::test]
+    async fn c003_version_is_the_hash_of_the_tree_with_base_manifests() {
+        let reg = MemoryRegistry::new();
+        let srv = publish_mcp(&reg, "srv", &stdio("grim")).await;
+        let plugins = [input("team", vec![srv])];
+        let qoder = (ClientTarget::Qoder, Family::Claude);
+        let cursor = (ClientTarget::Cursor, Family::AgentPlugins);
+        let clients = [claude(), codex(), qoder, cursor];
+        let (items, out) = export_to_dir(reg, &plugins, &clients).await;
+        assert_eq!(items.len(), 4);
+        for item in &items {
+            let (b, suffix) = item.version.split_once('+').unwrap();
+            assert_eq!(b, "1.0.0");
+            assert_eq!(suffix.len(), 12, "{}", item.version);
+            assert_eq!(
+                rederive(&item.path, "1.0.0", &item.version),
+                item.version,
+                "{}: manifest bytes carry the final version",
+                item.client
+            );
+        }
+        let _ = out;
+    }
+
+    /// The version moves with the description (it is in the manifest, in the
+    /// tree) and differs across formats; the lock is not involved.
+    #[tokio::test]
+    async fn c003_description_edit_changes_the_version_per_client() {
+        let reg = MemoryRegistry::new();
+        let srv = publish_mcp(&reg, "srv", &stdio("grim")).await;
+        let plain = input("team", vec![srv.clone()]);
+        let mut edited = input("team", vec![srv]);
+        edited.description_base = Some("Other".to_string());
+        let clients = [claude(), codex()];
+        let (a, _da) = export_to_dir(reg.clone(), &[plain], &clients).await;
+        let (b, _db) = export_to_dir(reg, &[edited], &clients).await;
+        for (x, y) in a.iter().zip(&b) {
+            assert_ne!(x.version, y.version, "{}", x.client);
+        }
+        assert_ne!(a[0].version, a[1].version, "one version per client tree");
     }
 
     #[tokio::test]

@@ -8,15 +8,13 @@
 
 use serde::Serialize;
 
-use crate::export::export_error::ExportError;
-use crate::export::marketplace::normalize_version;
+use crate::export::archive::InventoryEntry;
 use crate::install::ClientTarget;
 use crate::install::vendor::KindSupport;
-use crate::lock::LockedArtifact;
 use crate::oci::mcp::{McpDescriptor, McpTransport};
 use crate::oci::{Algorithm, ArtifactKind};
 
-/// Hex digits of the member digest hash appended to a plugin version.
+/// Hex digits of the tree hash appended to a plugin version.
 const VERSION_SUFFIX_LEN: usize = 12;
 
 /// The on-ramp sentence closing every plugin `README.md`, and the
@@ -118,22 +116,19 @@ pub fn admits(family: Family, client: ClientTarget, kind: ArtifactKind) -> Resul
     }
 }
 
-/// The plugin version (C-023): `base` (`--version`, declared or annotation
-/// version, else `0.0.0`) with one leading `v` stripped, plus `+` and 12 hex
-/// of the member digest hash. `members` are `(locked member, emitted name)`.
-pub fn plugin_version(base: Option<&str>, members: &[(LockedArtifact, String)]) -> Result<String, ExportError> {
-    let base = match base {
-        Some(raw) => normalize_version(raw).ok_or_else(|| ExportError::InvalidVersion { value: raw.to_string() })?,
-        None => "0.0.0".to_string(),
-    };
-    let mut lines: Vec<String> = members
+/// The plugin version (C-002): `base` (already normalized) plus `+` and 12
+/// hex of the SHA-256 over the compact JSON array of `[name, exec, sha256]`
+/// triples of the rendered tree. JSON, not a joined text, so no file name can
+/// forge a neighbouring entry.
+pub fn plugin_version(base: &str, inventory: &[InventoryEntry]) -> String {
+    let triples: Vec<(&str, bool, &str)> = inventory
         .iter()
-        .map(|(member, emitted)| format!("{}\t{emitted}\t{}\n", member.kind, member.source.content_digest()))
+        .map(|e| (e.name.as_str(), e.exec, e.sha256.as_str()))
         .collect();
-    lines.sort();
-    let digest = Algorithm::Sha256.hash(lines.concat());
+    let json = serde_json::to_vec(&triples).unwrap_or_default();
+    let digest = Algorithm::Sha256.hash(json);
     let suffix = digest.hex().get(..VERSION_SUFFIX_LEN).unwrap_or(digest.hex());
-    Ok(format!("{base}+{suffix}"))
+    format!("{base}+{suffix}")
 }
 
 pub use crate::config::plugin_meta::{MAX_DESCRIPTION_LEN, description_len};
@@ -340,9 +335,6 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::config::PathSource;
-    use crate::lock::LockedSource;
-    use crate::oci::{Digest, Identifier, PinnedIdentifier};
 
     // ── C-015 family map ──
 
@@ -414,103 +406,66 @@ mod tests {
         }
     }
 
-    // ── C-023 version ──
+    // ── C-002 version ──
 
-    fn sha(byte: char) -> Digest {
-        Digest::Sha256(std::iter::repeat_n(byte, 64).collect())
-    }
-
-    fn registry_member(name: &str, kind: ArtifactKind, byte: char) -> LockedArtifact {
-        let id = Identifier::new_registry(name, "localhost:5000").clone_with_digest(sha(byte));
-        LockedArtifact::direct(name.to_string(), kind, PinnedIdentifier::try_from(id).unwrap())
-    }
-
-    /// Three members over both source kinds, deliberately not in hash-line
-    /// order: skill `team-plan`→`plan` (a…), mcp `srv` (b…), path agent
-    /// `reviewer` (c…).
-    fn members(plan_emitted: &str, plan_byte: char) -> Vec<(LockedArtifact, String)> {
-        let agent = LockedArtifact {
-            name: "reviewer".into(),
-            kind: ArtifactKind::Agent,
-            source: LockedSource::Path {
-                path: PathSource::parse("./agents/reviewer.md").unwrap(),
-                hash: sha('c'),
-            },
-            bundles: Vec::new(),
-        };
-        vec![
-            (
-                registry_member("team-plan", ArtifactKind::Skill, plan_byte),
-                plan_emitted.into(),
-            ),
-            (registry_member("srv", ArtifactKind::Mcp, 'b'), "srv".into()),
-            (agent, "reviewer".into()),
-        ]
-    }
-
-    /// Independently computed (`printf … | sha256sum`) over
-    /// `agent\treviewer\tsha256:c…\nmcp\tsrv\tsha256:b…\nskill\tplan\tsha256:a…\n`.
-    const SUFFIX: &str = "c5a5324c93a6";
-
-    #[test]
-    fn c023_suffix_is_12_hex_of_sha256_over_sorted_member_lines() {
-        assert_eq!(
-            plugin_version(Some("1.2.0"), &members("plan", 'a')).unwrap(),
-            format!("1.2.0+{SUFFIX}")
-        );
-    }
-
-    #[test]
-    fn c023_same_pins_twice_same_version_regardless_of_member_order() {
-        let a = plugin_version(Some("1.2.0"), &members("plan", 'a')).unwrap();
-        let mut reversed = members("plan", 'a');
-        reversed.reverse();
-        assert_eq!(a, plugin_version(Some("1.2.0"), &members("plan", 'a')).unwrap());
-        assert_eq!(a, plugin_version(Some("1.2.0"), &reversed).unwrap());
-    }
-
-    #[test]
-    fn c023_digest_change_changes_suffix() {
-        let a = plugin_version(None, &members("plan", 'a')).unwrap();
-        let d = plugin_version(None, &members("plan", 'd')).unwrap();
-        assert_ne!(a, d);
-    }
-
-    #[test]
-    fn c023_rename_changes_suffix_and_hashes_emitted_not_lock_name() {
-        // Unrenamed: the skill line carries `team-plan` (sha256sum-computed).
-        assert_eq!(
-            plugin_version(None, &members("team-plan", 'a')).unwrap(),
-            "0.0.0+d4c3184adf04"
-        );
-        assert_eq!(
-            plugin_version(None, &members("plan", 'a')).unwrap(),
-            format!("0.0.0+{SUFFIX}")
-        );
-    }
-
-    #[test]
-    fn c023_base_normalization() {
-        let m = members("plan", 'a');
-        assert_eq!(plugin_version(None, &m).unwrap(), format!("0.0.0+{SUFFIX}"));
-        assert_eq!(plugin_version(Some("v2.0.0"), &m).unwrap(), format!("2.0.0+{SUFFIX}"));
-        // Pre-release is allowed; only build metadata is refused.
-        assert_eq!(
-            plugin_version(Some("1.0.0-rc.1"), &m).unwrap(),
-            format!("1.0.0-rc.1+{SUFFIX}")
-        );
-    }
-
-    #[test]
-    fn c023_invalid_base_is_invalid_version_carrying_the_input() {
-        let m = members("plan", 'a');
-        // `vv1.0.0`: only one leading `v` is stripped.
-        for bad in ["1.0.0+x", "latest", "vv1.0.0", "1.0", ""] {
-            match plugin_version(Some(bad), &m) {
-                Err(ExportError::InvalidVersion { value }) => assert_eq!(value, bad),
-                other => panic!("{bad:?}: expected InvalidVersion, got {other:?}"),
-            }
+    fn entry(name: &str, exec: bool, body: &str) -> InventoryEntry {
+        InventoryEntry {
+            name: name.to_string(),
+            exec,
+            sha256: Algorithm::Sha256.hash(body).hex().to_string(),
         }
+    }
+
+    /// The golden inventory: `alpha\n` / `beta\n` file contents.
+    fn golden() -> Vec<InventoryEntry> {
+        vec![entry("a.md", false, "alpha\n"), entry("scripts/run.sh", true, "beta\n")]
+    }
+
+    /// Independently computed (Python `hashlib` over
+    /// `json.dumps(…, separators=(",", ":"))` of the same two triples); the
+    /// pytest `_suffix` self-test asserts the same literal.
+    const GOLDEN_SUFFIX: &str = "338bda8ec321";
+
+    #[test]
+    fn c002_golden_vector() {
+        assert_eq!(plugin_version("1.2.0", &golden()), format!("1.2.0+{GOLDEN_SUFFIX}"));
+    }
+
+    #[test]
+    fn c002_grammar_is_base_plus_12_lowercase_hex() {
+        for base in ["0.0.0", "2.0.0-rc.1"] {
+            let v = plugin_version(base, &golden());
+            let (b, suffix) = v.split_once('+').unwrap();
+            assert_eq!(b, base);
+            assert_eq!(suffix.len(), 12);
+            assert!(suffix.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f')), "{v}");
+        }
+        assert!(plugin_version("0.0.0", &[]).starts_with("0.0.0+"));
+    }
+
+    #[test]
+    fn c002_same_inventory_same_version_and_any_change_differs() {
+        let v = plugin_version("1.0.0", &golden());
+        assert_eq!(v, plugin_version("1.0.0", &golden()));
+        let mut byte = golden();
+        byte[0] = entry("a.md", false, "alpha!\n");
+        let mut name = golden();
+        name[0] = entry("b.md", false, "alpha\n");
+        let mut exec = golden();
+        exec[0].exec = true;
+        for changed in [byte, name, exec] {
+            assert_ne!(v, plugin_version("1.0.0", &changed));
+        }
+    }
+
+    /// Codex-B2: a text framing would let a file named after another entry's
+    /// line forge its neighbour; the JSON framing cannot.
+    #[test]
+    fn c002_counterexample_two_files_differ_from_one_forged_name() {
+        let a = entry("a", false, "x");
+        let b = entry("b", false, "y");
+        let forged = entry(&format!("a\n{}  b", a.sha256), false, "y");
+        assert_ne!(plugin_version("0.0.0", &[a, b]), plugin_version("0.0.0", &[forged]),);
     }
 
     // ── C-024 description and README ──
@@ -638,6 +593,41 @@ mod tests {
         );
         let bare = plugin_readme("team", ClientTarget::Claude, None, &[], None);
         assert_eq!(String::from_utf8(bare).unwrap(), format!("# team\n\n{ONRAMP}\n"));
+    }
+
+    /// C-004: literal bytes, so a wording change is a deliberate edit here.
+    #[test]
+    fn c004_readme_and_onramp_golden_bytes() {
+        let onramp = "Packaged by grim (https://grimoire.rs); install grim for pinned, updatable installs.";
+        assert_eq!(ONRAMP, onramp);
+        let omitted = [(ArtifactKind::Rule, "style".to_string())];
+        let cases: [(Vec<u8>, String); 4] = [
+            (
+                plugin_readme("team", ClientTarget::Claude, None, &[], None),
+                format!("# team\n\n{onramp}\n"),
+            ),
+            (
+                plugin_readme(
+                    "team",
+                    ClientTarget::Claude,
+                    Some("Tools"),
+                    &[],
+                    Some("assets/logo.png"),
+                ),
+                format!("# team\n\n![team](assets/logo.png)\n\nTools\n\n{onramp}\n"),
+            ),
+            (
+                plugin_readme("team", ClientTarget::Codex, Some("Tools"), &omitted, None),
+                format!("# team\n\nTools\n\nOmitted for codex: rule style.\n\n{onramp}\n"),
+            ),
+            (
+                plugin_readme("team", ClientTarget::Qoder, None, &omitted, Some("assets/logo.svg")),
+                format!("# team\n\n![team](assets/logo.svg)\n\nOmitted for qoder: rule style.\n\n{onramp}\n"),
+            ),
+        ];
+        for (got, want) in cases {
+            assert_eq!(String::from_utf8(got).unwrap(), want);
+        }
     }
 
     // ── C-025 plugin.json emitters ──
