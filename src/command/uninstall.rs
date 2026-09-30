@@ -33,8 +33,8 @@ use super::scope_resolution;
 /// `grim uninstall` arguments.
 #[derive(Debug, Args)]
 pub struct UninstallArgs {
-    /// `skill`, `rule`, `agent`, or `mcp`.
-    #[arg(value_parser = ["skill", "rule", "agent", "mcp"])]
+    /// `skill`, `rule`, `agent`, `mcp`, or `hook`.
+    #[arg(value_parser = ["skill", "rule", "agent", "mcp", "hook"])]
     pub kind: String,
 
     /// The config binding name to uninstall.
@@ -59,13 +59,26 @@ pub struct UninstallArgs {
 /// entry that is neither installed nor declared is reported, not an
 /// error.
 pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(UninstallReport, ExitCode)> {
-    // The value_parser above constrains the string to known kinds.
-    let kind = match args.kind.as_str() {
-        "skill" => ArtifactKind::Skill,
-        "agent" => ArtifactKind::Agent,
-        "mcp" => ArtifactKind::Mcp,
-        _ => ArtifactKind::Rule,
-    };
+    // Parsed through `ArtifactKind::from_kind_str`, the single source of truth
+    // for the spelling, rather than a local `match` with a `_ => Rule`
+    // catch-all. That catch-all was a live defect: the `value_parser` above
+    // gained `"hook"` (Principle 9's additive widening) while the arm list did
+    // not, so `grim uninstall hook <name>` silently resolved to
+    // `ArtifactKind::Rule` — reporting `rule … not-installed`, leaving the hook
+    // payload and its record in place, and, when a rule of the same binding
+    // name existed, deleting *that* instead. Derived from the enum, this can no
+    // longer drift when a kind is added.
+    //
+    // The `value_parser` already constrains the string, so `None` is a
+    // programming error rather than user input; it still refuses (64) instead
+    // of panicking, because a panic exits 101, bypasses `classify_error`, and
+    // emits no JSON error document (invariant I3).
+    let kind = ArtifactKind::from_kind_str(&args.kind).ok_or_else(|| {
+        crate::error::Error::from(super::command_error::CommandError::ConfigUsage(format!(
+            "unknown artifact kind '{}'",
+            args.kind
+        )))
+    })?;
 
     let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
 
@@ -148,6 +161,49 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
                 );
             }
         }
+
+        // S-008's deregistration half: converge hooks against the now-shrunken
+        // state, which drops the uninstalled hook's dispatch rows and reaps its
+        // registration from every client that carried one.
+        //
+        // The policy is resolved **without** the consent prompt reachable —
+        // `grim uninstall` takes no `--trust-hooks` and must never ask a
+        // question in order to *remove* something. Survivors converge on the
+        // consent record, exactly as the next plain `grim install` would: a
+        // survivor the record names stays armed — and re-arms after an earlier
+        // `--no-trust-hooks` run, since that flag is per invocation — while one
+        // the record does not name stays unarmed, including one armed only by
+        // an earlier `--trust-hooks`. Passing a gated policy instead
+        // would silently disarm every *surviving* hook as a side effect of
+        // removing an unrelated skill.
+        //
+        // The files are already gone by here, so a global config that cannot
+        // be loaded must not abort the uninstall halfway (main's uninstall never
+        // read it). Fail closed instead: converge with the feature forced off,
+        // which reaps this root's registrations rather than leaving them armed.
+        let no_declared = std::collections::BTreeSet::new();
+        let hook_policy = match super::hook_consent::resolve_without_consent(ctx, &scope, None, &no_declared) {
+            Ok(policy) => policy,
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "hook policy unavailable; disarming this root's hooks");
+                super::hook_consent::policy_without_consent(
+                    ctx.grim_home(),
+                    scope.scope,
+                    &scope.workspace,
+                    false,
+                    None,
+                    &[],
+                    &no_declared,
+                )
+            }
+        };
+        crate::install::hook_registrar::converge_for(
+            Some(&hook_policy),
+            &state,
+            &scope.workspace,
+            scope.scope,
+            &scope.roots,
+        );
     }
 
     // 2. Undeclare from the config + lock (the `remove` half), so a later
@@ -208,6 +264,13 @@ pub(crate) fn undeclare_and_unlock(
 ) -> anyhow::Result<(bool, Vec<String>)> {
     let set_before = set.clone();
     let declared = match kind {
+        // `uninstall` is the full inverse of install and is therefore the ONLY
+        // command that disarms a hook: it deletes the payload, drops the record,
+        // and — through the registrar's derive-never-record convergence — removes
+        // the registration from the client's own config. Refusing a hook here
+        // would leave an armed registration with no supported way to remove it,
+        // which is a worse posture than any refusal buys.
+        ArtifactKind::Hook => set.hooks.remove(name).is_some(),
         ArtifactKind::Skill => set.skills.remove(name).is_some(),
         ArtifactKind::Rule => set.rules.remove(name).is_some(),
         ArtifactKind::Agent => set.agents.remove(name).is_some(),
@@ -283,6 +346,7 @@ mod tests {
 
     fn lock_with_skills(declaration_hash: &str, entries: &[(&str, char)]) -> GrimoireLock {
         GrimoireLock {
+            hooks: vec![],
             metadata: LockMetadata {
                 lock_version: LockVersion::V1,
                 declaration_hash_version: 1,
@@ -506,5 +570,62 @@ mod tests {
             set.declaration_hash_cached(),
             "the lock hash must be reconciled to the declaration"
         );
+    }
+
+    /// Every string the `<kind>` positional accepts must resolve to the kind it
+    /// names. **Regression guard, and it caught a live defect:** the
+    /// `value_parser` gained `"hook"` while `run`'s local arm list kept a
+    /// `_ => ArtifactKind::Rule` catch-all, so `grim uninstall hook <name>` silently
+    /// acted on a *rule*. Deriving the kind from `ArtifactKind::from_kind_str`
+    /// makes the two sides one source of truth; this test pins the accepted set
+    /// against it so appending a kind to the parser and forgetting the mapping
+    /// is a test failure rather than a wrong-target action.
+    #[test]
+    fn every_accepted_kind_string_resolves_to_that_kind() {
+        for accepted in ["skill", "rule", "agent", "mcp", "hook"] {
+            let kind = ArtifactKind::from_kind_str(accepted)
+                .unwrap_or_else(|| panic!("the `uninstall` parser accepts '{accepted}' but no kind parses it"));
+            assert_eq!(kind.kind_str(), accepted, "'{accepted}' must not resolve to {kind}");
+        }
+    }
+
+    /// C-104 (behavioural ordering, `grim uninstall` seam): uninstalling an
+    /// armed hook leaves no grim-owned element in claude `settings.local.json`
+    /// and no dispatch row. Fails if the seam's `converge_for` is handed `None`.
+    #[tokio::test]
+    async fn c104_uninstalling_an_armed_hook_reaps_its_registration_and_dispatch_row() {
+        use crate::install::hook_registrar::test_fixture::{arm_claude_hook, claude_marker_present, dispatch_rows};
+        let ws_dir = tempfile::tempdir().unwrap();
+        let home_dir = tempfile::tempdir().unwrap();
+        let ws = dunce::canonicalize(ws_dir.path()).unwrap();
+        let home = dunce::canonicalize(home_dir.path()).unwrap();
+        let config = ws.join("grimoire.toml");
+        std::fs::write(
+            &config,
+            "[options.experimental]\nhooks = true\n\n[hooks]\nshell-guard = \"localhost:5000/acme/shell-guard:1\"\n",
+        )
+        .unwrap();
+        let ctx = Context::hermetic_scoped(home.clone(), false, Some(config.clone()));
+        let scope = scope_resolution::resolve(&ctx, false, Some(&config)).unwrap();
+        let mut state = scope_resolution::load_state(&scope).unwrap();
+        arm_claude_hook(&mut state, "shell-guard", &scope.roots);
+        state
+            .persist(
+                scope.scope,
+                &scope.workspace,
+                &scope.roots.grim_home,
+                &scope.config_path,
+            )
+            .unwrap();
+
+        let args = UninstallArgs {
+            kind: "hook".to_string(),
+            name: "shell-guard".to_string(),
+            force: false,
+        };
+        let (_report, exit) = run(&ctx, &args).await.expect("uninstall succeeds");
+        assert_eq!(exit, ExitCode::Success);
+        assert!(!claude_marker_present(&ws), "the registration must be reaped");
+        assert_eq!(dispatch_rows(&home), 0, "the dispatch row must be reaped");
     }
 }

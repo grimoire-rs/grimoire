@@ -238,7 +238,7 @@ pub fn uninstall(
             if !force
                 && out.adopted
                 && out
-                    .current_hash(roots, Containment::Strict)
+                    .current_hash(kind, roots, Containment::Strict)
                     .is_ok_and(|actual| actual == out.content_hash)
             {
                 tracing::warn!(
@@ -351,7 +351,7 @@ pub fn uninstall(
 fn refuse_drifted_entries(record: &InstallRecord, roots: &AnchorRoots) -> Result<(), UninstallError> {
     for out in &record.outputs {
         let Some(pointer) = &out.entry else { continue };
-        let Ok(actual) = out.current_hash(roots, Containment::Strict) else {
+        let Ok(actual) = out.current_hash(record.kind, roots, Containment::Strict) else {
             continue;
         };
         if actual == out.content_hash {

@@ -1,0 +1,100 @@
+{
+  "items": [
+    {
+      "kind": "skill",
+      "name": "reg-skill",
+      "source": "direct",
+      "pinned": "localhost:5000/grim-golden/pre-hooks-03e59b0/reg-skill@sha256:9f9ab08bc759e57f4b3f98b70ce953819bec42c09a7e195c2bc25df67473c637",
+      "state": "installed",
+      "outputs": [
+        {
+          "client": "claude",
+          "path": "<ENVROOT>/home/.claude/skills/reg-skill"
+        }
+      ],
+      "outputs_pending": [
+        {
+          "client": "codex",
+          "path": "<ENVROOT>/home/.agents/skills/reg-skill"
+        }
+      ],
+      "clients_missing": [],
+      "clients_extra": [],
+      "clients_unresolved": [],
+      "deprecated": null,
+      "replaced_by": null,
+      "update_available": null
+    },
+    {
+      "kind": "rule",
+      "name": "reg-rule",
+      "source": "direct",
+      "pinned": "localhost:5000/grim-golden/pre-hooks-03e59b0/reg-rule@sha256:657ed7566e927d6850b8b993ab883d8f1aef26455f51d3d2e63ae332970fb748",
+      "state": "installed",
+      "outputs": [
+        {
+          "client": "claude",
+          "path": "<ENVROOT>/home/.claude/rules/reg-rule.md"
+        }
+      ],
+      "outputs_pending": [],
+      "clients_missing": [],
+      "clients_extra": [],
+      "clients_unresolved": [],
+      "deprecated": null,
+      "replaced_by": null,
+      "update_available": null
+    },
+    {
+      "kind": "agent",
+      "name": "reg-agent",
+      "source": "direct",
+      "pinned": "localhost:5000/grim-golden/pre-hooks-03e59b0/reg-agent@sha256:74d332f2c53b1c256df2a6a51814e4faae70a08795b02f4db71d99a92424305a",
+      "state": "installed",
+      "outputs": [
+        {
+          "client": "claude",
+          "path": "<ENVROOT>/home/.claude/agents/reg-agent.md"
+        }
+      ],
+      "outputs_pending": [
+        {
+          "client": "codex",
+          "path": "<ENVROOT>/home/.codex/agents/reg-agent.toml"
+        }
+      ],
+      "clients_missing": [],
+      "clients_extra": [],
+      "clients_unresolved": [],
+      "deprecated": null,
+      "replaced_by": null,
+      "update_available": null
+    },
+    {
+      "kind": "mcp",
+      "name": "reg-mcp",
+      "source": "direct",
+      "pinned": "localhost:5000/grim-golden/pre-hooks-03e59b0/reg-mcp@sha256:3499d7c5f5ceaabdfc627c7f336b4bed736f44dd4bebdceda02d33a586b46de1",
+      "state": "installed",
+      "outputs": [
+        {
+          "client": "claude",
+          "path": "<ENVROOT>/home/.claude.json"
+        }
+      ],
+      "outputs_pending": [
+        {
+          "client": "codex",
+          "path": "<ENVROOT>/home/.codex/config.toml"
+        }
+      ],
+      "clients_missing": [],
+      "clients_extra": [],
+      "clients_unresolved": [],
+      "deprecated": null,
+      "replaced_by": null,
+      "update_available": null
+    }
+  ],
+  "checked": false
+}

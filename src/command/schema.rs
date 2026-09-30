@@ -41,6 +41,9 @@ const LOCK_SCHEMA_FILE: &str = "grimoire-lock.schema.json";
 /// Published filename of the MCP descriptor (`mcp/<name>.toml`) schema.
 const MCP_SCHEMA_FILE: &str = "grim-mcp.schema.json";
 
+/// Published filename of the hook manifest (`hook.toml`) schema.
+const HOOK_SCHEMA_FILE: &str = "grim-hook.schema.json";
+
 /// Which author-facing TOML format to emit a JSON Schema for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum SchemaKind {
@@ -54,6 +57,8 @@ pub enum SchemaKind {
     Lock,
     /// The MCP server descriptor (`mcp/<name>.toml`).
     Mcp,
+    /// The hook manifest (`hook.toml`).
+    Hook,
 }
 
 /// `grim schema` arguments.
@@ -72,6 +77,7 @@ impl SchemaKind {
             SchemaKind::Publish => PUBLISH_SCHEMA_FILE,
             SchemaKind::Lock => LOCK_SCHEMA_FILE,
             SchemaKind::Mcp => MCP_SCHEMA_FILE,
+            SchemaKind::Hook => HOOK_SCHEMA_FILE,
         };
         format!("{SCHEMA_BASE_URL}/{file}")
     }
@@ -83,6 +89,7 @@ impl SchemaKind {
             SchemaKind::Publish => "publish.toml — Grimoire publish manifest",
             SchemaKind::Lock => "grimoire.lock — Grimoire lockfile",
             SchemaKind::Mcp => "mcp/<name>.toml — Grimoire MCP server descriptor",
+            SchemaKind::Hook => "hook.toml — Grimoire hook manifest",
         }
     }
 }
@@ -111,6 +118,7 @@ pub fn generate(kind: SchemaKind) -> anyhow::Result<String> {
         SchemaKind::Publish => schemars::schema_for!(crate::command::publish::PublishManifest),
         SchemaKind::Lock => crate::lock::grimoire_lock::lock_json_schema(),
         SchemaKind::Mcp => schemars::schema_for!(crate::oci::mcp::McpDescriptor),
+        SchemaKind::Hook => schemars::schema_for!(crate::oci::hook::HookManifest),
     };
     decorate(&schema, &kind.id(), kind.title())
 }
@@ -329,6 +337,47 @@ mod tests {
         // The bundle cache section round-trips through the real structs.
         assert!(v["$defs"]["LockedBundle"].is_object());
         assert!(v["$defs"]["BundleMember"].is_object());
+    }
+
+    /// C-153: `grim schema --kind hook` is a new CLI literal with its own
+    /// schema — distinct `$id`, strict object, the manifest's three required
+    /// fields and the `hooks` array.
+    #[test]
+    fn c153_hook_schema_is_a_new_distinct_schema() {
+        let v = parsed(SchemaKind::Hook);
+        assert_eq!(v["$id"], "https://grimoire.rs/schemas/grim-hook.schema.json");
+        assert_eq!(v["$schema"], SCHEMA_DRAFT);
+        assert_eq!(v["title"], "hook.toml — Grimoire hook manifest");
+        assert_eq!(v["required"], serde_json::json!(["schema", "name", "description"]));
+        assert!(v["properties"]["hooks"].is_object(), "{v:#}");
+        for other in [
+            SchemaKind::Config,
+            SchemaKind::Publish,
+            SchemaKind::Lock,
+            SchemaKind::Mcp,
+        ] {
+            assert_ne!(SchemaKind::Hook.id(), other.id());
+        }
+    }
+
+    /// C-153: the config schema gains exactly an optional `hooks` table
+    /// (binding → reference string) and `options.experimental.hooks`; the
+    /// root's required set is unchanged (nothing required), so every existing
+    /// `grimoire.toml` still validates.
+    #[test]
+    fn c153_config_schema_adds_hooks_and_experimental_additively() {
+        let v = parsed(SchemaKind::Config);
+        assert!(v.get("required").is_none(), "no root key may become required: {v:#}");
+        assert_eq!(v["properties"]["hooks"]["type"], "object");
+        assert_eq!(v["properties"]["hooks"]["additionalProperties"]["type"], "string");
+        assert_eq!(
+            v["$defs"]["ConfigOptions"]["properties"]["experimental"]["$ref"],
+            "#/$defs/ExperimentalOptions"
+        );
+        let experimental = &v["$defs"]["ExperimentalOptions"];
+        assert_eq!(experimental["additionalProperties"], serde_json::Value::Bool(false));
+        assert_eq!(experimental["properties"]["hooks"]["type"], "boolean");
+        assert!(experimental.get("required").is_none(), "{experimental:#}");
     }
 
     #[test]

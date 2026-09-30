@@ -31,6 +31,45 @@
 
 use std::path::{Component, Path, PathBuf};
 
+/// Why declaration key `name` cannot be joined under an anchor root, or `None`
+/// when it can.
+///
+/// A declaration key and a lock entry name are joined onto an anchor root
+/// (issue #90), so the refusal is by *traversal capability*, not by the
+/// `SkillName` grammar. Keys that install on released grim must keep
+/// installing (Principle 9): `My_Skill`, `a..b`, and **nested** keys such as
+/// `team/style`, which lay out as `.claude/rules/team/style.md`. So the key is
+/// split on `/` and `\` and each part is judged. Refused:
+///
+/// - NUL anywhere;
+/// - a leading separator (absolute or rooted);
+/// - a first part that is a bare drive (`C:` alone or before a separator) —
+///   and on Windows any `X:` start, because `Path::join("x:y")` is
+///   drive-relative there and replaces the base;
+/// - an empty part (`a//b`, a trailing separator, the empty key);
+/// - a part that is only dots and spaces (`.`, `..`, and the Win32 forms
+///   `...`/`.. ` that normalize onto them).
+pub fn path_segment_refusal(name: &str) -> Option<&'static str> {
+    if name.contains('\0') {
+        return Some("it contains a NUL byte");
+    }
+    if name.starts_with(['/', '\\']) {
+        return Some("it is an absolute path");
+    }
+    let first = name.split(['/', '\\']).next().unwrap_or_default().as_bytes();
+    let drive = first.len() >= 2 && first[0].is_ascii_alphabetic() && first[1] == b':';
+    if drive && (first.len() == 2 || cfg!(windows)) {
+        return Some("it starts with a drive prefix");
+    }
+    if name
+        .split(['/', '\\'])
+        .any(|part| part.trim_end_matches(['.', ' ']).is_empty())
+    {
+        return Some("it has an empty part or one naming the current or parent directory");
+    }
+    None
+}
+
 /// Why a `relative` path failed containment under its base directory.
 #[derive(Debug, thiserror::Error)]
 pub enum ContainmentError {
@@ -118,6 +157,39 @@ pub fn contain(base: &Path, relative: &Path) -> Result<PathBuf, ContainmentError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #90 review B1: nested keys main installs stay legal; traversal
+    /// shapes are refused per part.
+    #[test]
+    fn path_segment_refusal_judges_each_part() {
+        for ok in ["team/style", "team/skill", "team\\skill", "My_Skill", "a..b", "a/b.c/d"] {
+            assert_eq!(path_segment_refusal(ok), None, "{ok:?} must stay legal");
+        }
+        #[cfg(not(windows))]
+        assert_eq!(path_segment_refusal("x:y"), None, "x:y installs on unix today");
+        #[cfg(windows)]
+        assert!(path_segment_refusal("x:y").is_some(), "drive-relative on Windows");
+        for bad in [
+            "",
+            "..",
+            ".",
+            "...",
+            ".. ",
+            "../x",
+            "a/../../x",
+            "a/..",
+            "/abs",
+            "\\abs",
+            "C:\\x",
+            "C:/x",
+            "C:",
+            "a//b",
+            "a/",
+            "a\0b",
+        ] {
+            assert!(path_segment_refusal(bad).is_some(), "{bad:?} must be refused");
+        }
+    }
 
     #[test]
     fn accepts_plain_in_tree_path() {

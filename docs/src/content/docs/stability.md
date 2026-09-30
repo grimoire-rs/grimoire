@@ -39,7 +39,7 @@ Breaking any guarantee below is a major-version change, not a minor one.
 | [MCP server][mcp-server] tool surface | Tool names (`grim_search`, `grim_status`, `grim_fetch`, `grim_describe`, `grim_render`) and their argument names — the payloads are covered by the reports row |
 | Published schema URLs | `https://grimoire.rs/schemas/{grimoire-config,grim-publish,grimoire-lock}.schema.json` keep resolving — [`grim init`][init] writes the first into every generated `grimoire.toml` |
 | Environment variables | The documented [`GRIM_*` set and honored vendor overrides][env-vars] |
-| [`.grimignore`][grimignore] | gitignore syntax, defaults-extend-not-replace semantics, and the three never-ignored names (`SKILL.md`, a rule's index, `.grimignore` itself) — see [Additive fields](#frozen-additive-fields) for what growing the built-in default list does and does not cover |
+| [`.grimignore`][grimignore] | gitignore syntax, defaults-extend-not-replace semantics, and the three never-ignored names (`SKILL.md`, a rule's index, `.grimignore` itself) — see [Additive fields](#frozen-additive-fields) for what growing the built-in default list does and does not cover. One kind-scoped exception: for a [hook](./hooks.md) root only, `hook.toml` is never ignored even when a `.grimignore` entry names it — its `hook.toml` is still packed and hashed |
 
 ### Additive fields {#frozen-additive-fields}
 
@@ -142,9 +142,38 @@ recoverable the same way any local edit is: `grim install --force` /
 
 ## Unstable — may change in any minor {#unstable}
 
-Four things are deliberately excluded from the guarantee above, because
-freezing them would block improving Grimoire without a major version bump —
-the exclusions are what keep 1.x able to move at all:
+Several things are deliberately excluded from the guarantee above. Freezing
+them would block improving Grimoire without a major version bump. The
+exclusions are what keep 1.x able to move at all:
+
+- **The experimental parts of the [hook](./hooks.md) artifact kind.** Hooks
+  are **experimental pre-1.0**. These may change in any minor release, in
+  ways that are not always additive:
+  - the `hook.toml` manifest schema and its `[[hooks]]` source table,
+  - the `grimoire.lock` `[[hook]]` array and the `[options.experimental] hooks` key,
+  - every `grim hook` verb and its report JSON, and `grim schema --kind hook`,
+  - the dispatch table's on-disk shape, and every hook-only CLI flag
+    (`--trust-hooks`, `--no-trust-hooks`).
+
+  What is **not** exempted: the hook literals already shipped inside
+  otherwise-frozen reports. These follow the same
+  [additive-field policy](#frozen-additive-fields) as every other report
+  field, and stop changing meaning once shipped:
+  - the `install` row's `armed` field,
+  - the `status`/`hook list` row's `state` and `cause` tokens,
+  - the `export plugin` row's hook-admission `reason` literals.
+
+  See [Hook arming][json-hook-arming-stability] for the full list.
+
+  The OCI wire format is frozen too. `grim build`/`grim release --kind
+  hook` are not flag-gated, and a hook pushed today stays readable by
+  every future grim.
+
+  A hook does not run anything until the `[options.experimental] hooks`
+  flag is on and the workspace has consented. See [Arming
+  gates](./hooks.md#why-gated). It graduates to a
+  frozen contract once real consumers have shaped it, the same path
+  `--progress json` is on below.
 
 - **Vendor render layout.** The exact files and paths grim writes under
   any client's own configuration root, and where an MCP entry lands
@@ -355,6 +384,16 @@ This only triggers when the feature is actually in use: a registry-only
 lock or state file stays byte-identical across the version boundary, so a
 project that never declares a path source is unaffected either way.
 
+The same `deny_unknown_fields` stance covers a [hook](./hooks.md)-bearing
+lock. A `grim` build that predates the `hook` artifact kind refuses to
+load a lock declaring one, exiting **78** the same as any other unknown
+field. It never silently drops the entry and runs the rest of the
+project's artifacts as if the hook did not exist.
+
+A project that later drops its only hook declaration and re-locks
+downgrades cleanly. The lock carries no `hook` entry any more, so a
+`grim` build that predates the kind reads it exactly as it always has.
+
 The [MCP descriptor](./mcp-servers.md) layer holds the same line: a
 descriptor published with fields an older grim predates (the refinement
 fields, the `ws` transport, the `oauth` block) fails to parse there —
@@ -504,6 +543,7 @@ unaffected — they read straight from disk and never touch a manifest.
 [export-plugin]: ./commands.md#export-plugin
 [export-plugin-output]: ./commands.md#export-plugin-output
 [json-shapes-items]: ./json-interface.md#shapes-items
+[json-hook-arming-stability]: ./json-interface.md#hook-arming
 
 <!-- external -->
 [gnu-make]: https://www.gnu.org/software/make/manual/make.html

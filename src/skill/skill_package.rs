@@ -197,12 +197,28 @@ fn reject_symlinked_index(file: &Path) -> Result<(), SkillError> {
 ///
 /// [`SkillErrorKind::Io`] for a walk/read failure.
 pub fn pack_skill_dir(dir: &Path) -> Result<Vec<u8>, SkillError> {
-    pack_skill_dir_limited(dir, &PackLimits::DEFAULT)
+    pack_tree_limited(dir, &PackLimits::DEFAULT, crate::oci::ArtifactKind::Skill)
+}
+
+/// [`pack_skill_dir`] for a **hook** payload tree: the same walk, sort order
+/// and bounds, except `hook.toml` is never ignored (C-160) — a hook whose
+/// `.grimignore` says `*.toml` still packs its manifest.
+///
+/// # Errors
+///
+/// As [`pack_skill_dir`].
+pub fn pack_hook_payload_dir(dir: &Path) -> Result<Vec<u8>, SkillError> {
+    pack_tree_limited(dir, &PackLimits::DEFAULT, crate::oci::ArtifactKind::Hook)
+}
+
+#[cfg(test)]
+fn pack_skill_dir_limited(dir: &Path, limits: &PackLimits) -> Result<Vec<u8>, SkillError> {
+    pack_tree_limited(dir, limits, crate::oci::ArtifactKind::Skill)
 }
 
 /// [`pack_skill_dir`] with injectable packing bounds (see [`PackLimits`]),
 /// so a test can drive the real walk with low caps.
-fn pack_skill_dir_limited(dir: &Path, limits: &PackLimits) -> Result<Vec<u8>, SkillError> {
+fn pack_tree_limited(dir: &Path, limits: &PackLimits, kind: crate::oci::ArtifactKind) -> Result<Vec<u8>, SkillError> {
     let name = dir
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -214,8 +230,11 @@ fn pack_skill_dir_limited(dir: &Path, limits: &PackLimits) -> Result<Vec<u8>, Sk
         })?;
 
     let mut state = WalkState::default();
-    let ignore = ignore_set(dir)?;
+    let ignore = ignore_set(dir, kind)?;
     collect_files(dir, dir, &name, &ignore, &mut state, 0, limits)?;
+    if kind == crate::oci::ArtifactKind::Hook {
+        warn_left_behind_dependencies(&name, &state.pruned_dirs);
+    }
     let mut files = state.out;
     files.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -229,6 +248,25 @@ fn pack_skill_dir_limited(dir: &Path, limits: &PackLimits) -> Result<Vec<u8>, Sk
     builder
         .into_inner()
         .map_err(|e| SkillError::new(dir, SkillErrorKind::Io(e)))
+}
+
+/// A hook handler runs from its installed payload, so an ignored dependency
+/// directory in the source tree (`node_modules/`, `.venv/`) is one the handler
+/// may import from and will not find. Not provable from `hook.toml`, so a
+/// warning rather than a refusal (a handler *naming* such a file is rule 11's 65).
+fn warn_left_behind_dependencies(name: &str, pruned_dirs: &[PathBuf]) {
+    const DEPENDENCY_DIRS: &[&str] = &["node_modules", ".venv", "venv"];
+    for dir in pruned_dirs {
+        if dir.file_name().is_some_and(|n| DEPENDENCY_DIRS.iter().any(|d| n == *d)) {
+            let rel: Vec<String> = dir.iter().map(|c| c.to_string_lossy().into_owned()).collect();
+            tracing::warn!(
+                "hook '{name}': '{}/' is excluded by the ignore rules and will not be packed; a handler that \
+                 loads dependencies from it will fail at run time — vendor them into a shipped path or \
+                 re-include the directory with a '!' line in .grimignore",
+                rel.join("/")
+            );
+        }
+    }
 }
 
 /// Pack the rule file at `file` into an uncompressed tar.
@@ -254,6 +292,7 @@ pub fn pack_rule_file(file: &Path) -> Result<Vec<u8>, SkillError> {
         out: vec![(format!("{name}.md"), file.to_path_buf())],
         total_bytes: index_meta.len(),
         nodes: 0,
+        pruned_dirs: Vec::new(),
     };
     check_pack_bounds(file, state.total_bytes, state.out.len(), limits)?;
 
@@ -263,7 +302,7 @@ pub fn pack_rule_file(file: &Path) -> Result<Vec<u8>, SkillError> {
     // single-file case untouched.
     let support = file.with_extension("");
     if support.is_dir() {
-        let ignore = ignore_set(&support)?;
+        let ignore = ignore_set(&support, crate::oci::ArtifactKind::Rule)?;
         collect_files(&support, &support, &name, &ignore, &mut state, 0, limits)?;
     }
     let mut files = state.out;
@@ -532,8 +571,8 @@ fn check_pack_bounds(root: &Path, total_bytes: u64, file_count: usize, limits: &
 
 /// Strict [`IgnoreSet`] for a pack walk root: an invalid `.grimignore` line
 /// is a data error (exit 65) naming the file and line.
-fn ignore_set(root: &Path) -> Result<IgnoreSet, SkillError> {
-    IgnoreSet::for_root(root).map_err(|err| match err {
+fn ignore_set(root: &Path, kind: crate::oci::ArtifactKind) -> Result<IgnoreSet, SkillError> {
+    IgnoreSet::for_root(root, kind).map_err(|err| match err {
         IgnoreSetError::Io { path, source } => SkillError::new(path, SkillErrorKind::Io(source)),
         IgnoreSetError::InvalidLine { path, line, message } => SkillError::new(
             path,
@@ -566,6 +605,8 @@ struct WalkState {
     total_bytes: u64,
     /// Filesystem entries visited so far (files + directories).
     nodes: usize,
+    /// Root-relative directories the ignore set pruned, in walk order.
+    pruned_dirs: Vec<PathBuf>,
 }
 
 /// Recursively collect `(tar_entry_path, absolute_path)` for every regular
@@ -633,6 +674,9 @@ fn collect_files(
         // Ignored directories are pruned here: their children are never read,
         // so a large `node_modules/` cannot trip the node/byte caps.
         if ignore.is_ignored(rel, meta.is_dir()) {
+            if meta.is_dir() {
+                state.pruned_dirs.push(rel.to_path_buf());
+            }
             continue;
         }
         if meta.is_dir() {
@@ -1205,6 +1249,33 @@ mod tests {
             .unwrap()
             .map(|e| e.unwrap().path().unwrap().to_string_lossy().into_owned())
             .collect()
+    }
+
+    /// C-160: a hook whose `.grimignore` says `*.toml` still packs its
+    /// manifest; a skill whose `.grimignore` lists `hook.toml` omits it,
+    /// byte-identical to packing the tree without that file.
+    #[test]
+    fn hook_toml_is_never_ignored_for_hooks_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hook = tmp.path().join("guard");
+        write(&hook.join("hook.toml"), "schema = 1\n");
+        write(&hook.join("guard.sh"), "exit 0\n");
+        write(&hook.join("extra.toml"), "x = 1\n");
+        write(&hook.join(".grimignore"), "*.toml\n");
+        let names = tar_names(&pack_hook_payload_dir(&hook).unwrap());
+        assert!(names.contains(&"guard/hook.toml".to_string()), "{names:?}");
+        assert!(!names.contains(&"guard/extra.toml".to_string()), "{names:?}");
+
+        let skill = tmp.path().join("s");
+        write(&skill.join("SKILL.md"), "---\nname: s\ndescription: d\n---\n");
+        write(&skill.join(".grimignore"), "hook.toml\n");
+        let without = pack_skill_dir(&skill).unwrap();
+        write(&skill.join("hook.toml"), "schema = 1\n");
+        let with = pack_skill_dir(&skill).unwrap();
+        assert_eq!(
+            with, without,
+            "an ignored hook.toml must not move a skill's packed bytes"
+        );
     }
 
     #[test]

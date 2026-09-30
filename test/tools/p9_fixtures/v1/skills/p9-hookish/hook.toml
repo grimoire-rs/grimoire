@@ -1,0 +1,3 @@
+# Ignored by .grimignore: a hook-free package must pack identical bytes.
+event = "PreToolUse"
+command = "echo v1"

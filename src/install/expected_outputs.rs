@@ -290,6 +290,102 @@ mod tests {
         assert_eq!(pending[0].0, ClientTarget::Claude);
     }
 
+    /// A hook's expected-client set is read off the hook surface, not
+    /// `kind_support` — so the clients with no hook mechanism are never
+    /// expected targets and never report pending drift (C-103, C-107).
+    #[test]
+    fn only_hook_capable_clients_are_expected_hook_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = InstallTarget::new(
+            dir.path(),
+            ConfigScope::Global,
+            vec![ClientTarget::Claude, ClientTarget::Warp, ClientTarget::Zed],
+        )
+        .with_grim_home(dir.path());
+        assert_eq!(
+            expected_clients(ArtifactKind::Hook, "shell-guard", &target),
+            vec![ClientTarget::Claude],
+            "warp and zed have no hook surface at all"
+        );
+
+        let pending = pending_outputs(
+            None,
+            ArtifactKind::Hook,
+            "shell-guard",
+            &target,
+            &roots(dir.path()),
+            None,
+        );
+        assert_eq!(pending.len(), 1, "{pending:?}");
+        assert_eq!(pending[0].0, ClientTarget::Claude);
+        assert_eq!(
+            pending[0].1,
+            dir.path().join("hooks/shell-guard"),
+            "the shared payload dir, not a per-client path (S-003)"
+        );
+    }
+
+    /// Codex and Copilot host hooks at global scope only (amendment A1): their
+    /// registration file is a tracked repository file. A project-scope pass
+    /// must not report them pending — nothing could clear it. Qoder follows the
+    /// same rule (A8, D-2) now that C-121 passed.
+    #[test]
+    fn the_own_file_hook_clients_are_expected_at_global_scope_only() {
+        let dir = tempfile::tempdir().unwrap();
+        for client in [ClientTarget::Codex, ClientTarget::Copilot, ClientTarget::Qoder] {
+            let global = InstallTarget::new(dir.path(), ConfigScope::Global, vec![client]);
+            assert_eq!(
+                expected_clients(ArtifactKind::Hook, "shell-guard", &global),
+                vec![client],
+                "{client}"
+            );
+
+            let project = InstallTarget::new(dir.path(), ConfigScope::Project, vec![client]);
+            assert!(
+                expected_clients(ArtifactKind::Hook, "shell-guard", &project).is_empty(),
+                "{client} has no project-scope hook surface"
+            );
+            assert!(
+                pending_outputs(
+                    None,
+                    ArtifactKind::Hook,
+                    "shell-guard",
+                    &project,
+                    &roots(dir.path()),
+                    None
+                )
+                .is_empty(),
+                "{client}"
+            );
+        }
+    }
+
+    /// C-103 / C-107 over every client: with all of `ClientTarget::ALL`
+    /// selected, the expected hook targets are exactly claude at project
+    /// scope and claude, codex, copilot and qoder at global scope (C-121
+    /// passed, WP-02).
+    #[test]
+    fn c107_expected_hook_clients_over_every_client() {
+        let dir = tempfile::tempdir().unwrap();
+        for (scope, expected) in [
+            (ConfigScope::Project, vec![ClientTarget::Claude]),
+            (
+                ConfigScope::Global,
+                vec![
+                    ClientTarget::Claude,
+                    ClientTarget::Codex,
+                    ClientTarget::Copilot,
+                    ClientTarget::Qoder,
+                ],
+            ),
+        ] {
+            let target = InstallTarget::new(dir.path(), scope, ClientTarget::ALL.to_vec()).with_grim_home(dir.path());
+            let mut got = expected_clients(ArtifactKind::Hook, "shell-guard", &target);
+            got.sort_by_key(ToString::to_string);
+            assert_eq!(got, expected, "{scope:?}");
+        }
+    }
+
     #[test]
     fn a_covered_client_is_not_pending() {
         let dir = tempfile::tempdir().unwrap();

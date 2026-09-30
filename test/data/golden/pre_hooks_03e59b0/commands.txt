@@ -1,0 +1,4 @@
+$ grim lock   # cwd=project 
+$ grim install --client claude   # cwd=project 
+$ grim lock --global   # cwd=grim-home 
+$ grim install --global --client claude   # cwd=grim-home 

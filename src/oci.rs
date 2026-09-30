@@ -11,6 +11,7 @@ pub mod bundle;
 pub mod description;
 pub mod digest;
 pub mod git_provenance;
+pub mod hook;
 pub mod identifier;
 pub mod manifest;
 pub mod mcp;

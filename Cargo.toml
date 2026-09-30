@@ -26,13 +26,22 @@ tracing-subscriber = { version = "0.3.22", features = [
     "registry",
 ] }
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 schemars = "1"
 serde_repr = "0.1"
 serde_yaml = "0.9"
 semver = "1"
 thiserror = "2"
 sha2 = "0.11"
+# Keyed MAC for the hook dispatch table's root token — HMAC-SHA256 of the root
+# under a machine-local key (src/install/hook_dispatch.rs). RustCrypto, so it
+# shares `digest` with `sha2` above: 0.13 is the line that pairs with sha2 0.11
+# / digest 0.11 (0.12 is the digest-0.10 line and does not compose with it).
+# Never hand-roll RFC 2104; a prefix-keyed SHA-256 is length-extendable.
+hmac = "0.13"
+# OS CSPRNG for that machine-local key. A guessable key defeats the whole
+# point of the token, so a non-cryptographic source is not an option.
+getrandom = "0.3"
 hex = "0.4"
 toml = "1.1"
 # Span-preserving TOML edits for Codex's `config.toml` MCP registration —

@@ -1,0 +1,65 @@
+[metadata]
+lock_version = 1
+declaration_hash_version = 1
+declaration_hash = "sha256:191fd3b4f3511a51b98e59cb3ab551f04c8006b83ade13e678c79b4ef8886aa3"
+generated_by = "grim 0.13.0"
+generated_at = "2026-08-17T07:14:44Z"
+
+[[skill]]
+name = "bundled-skill"
+pinned = "localhost:5000/grim-golden/pre-hooks-03e59b0/reg-skill@sha256:9f9ab08bc759e57f4b3f98b70ce953819bec42c09a7e195c2bc25df67473c637"
+bundle = "localhost:5000/grim-golden/pre-hooks-03e59b0/reg-bundle"
+bundle_tag = "1.0.0"
+
+[[skill]]
+name = "local-skill"
+path = "./skills/local-skill"
+hash = "sha256:869a92fabc5e314644b75911a778b88cc82fcb4963dc53d9269f045bf5e0eed5"
+
+[[skill]]
+name = "reg-skill"
+pinned = "localhost:5000/grim-golden/pre-hooks-03e59b0/reg-skill@sha256:9f9ab08bc759e57f4b3f98b70ce953819bec42c09a7e195c2bc25df67473c637"
+
+[[rule]]
+name = "bundled-rule"
+pinned = "localhost:5000/grim-golden/pre-hooks-03e59b0/reg-rule@sha256:657ed7566e927d6850b8b993ab883d8f1aef26455f51d3d2e63ae332970fb748"
+bundle = "localhost:5000/grim-golden/pre-hooks-03e59b0/reg-bundle"
+bundle_tag = "1.0.0"
+
+[[rule]]
+name = "local-rule"
+path = "./rules/local-rule.md"
+hash = "sha256:918d7985175180ab471835be0865116b27be4865d1f5b0697306c774d91cd467"
+
+[[rule]]
+name = "reg-rule"
+pinned = "localhost:5000/grim-golden/pre-hooks-03e59b0/reg-rule@sha256:657ed7566e927d6850b8b993ab883d8f1aef26455f51d3d2e63ae332970fb748"
+
+[[agent]]
+name = "local-agent"
+path = "./agents/local-agent.md"
+hash = "sha256:2295253f14f9227e690b735dc1a515b019e1dbb364b43d5c70d306ba1ccb7799"
+
+[[agent]]
+name = "reg-agent"
+pinned = "localhost:5000/grim-golden/pre-hooks-03e59b0/reg-agent@sha256:74d332f2c53b1c256df2a6a51814e4faae70a08795b02f4db71d99a92424305a"
+
+[[mcp]]
+name = "reg-mcp"
+pinned = "localhost:5000/grim-golden/pre-hooks-03e59b0/reg-mcp@sha256:3499d7c5f5ceaabdfc627c7f336b4bed736f44dd4bebdceda02d33a586b46de1"
+
+[[bundle]]
+name = "reg-bundle"
+repo = "localhost:5000/grim-golden/pre-hooks-03e59b0/reg-bundle"
+tag = "1.0.0"
+pinned = "localhost:5000/grim-golden/pre-hooks-03e59b0/reg-bundle@sha256:6d4bb9c0b91364bde837c1d452bf40793ba2ec7f3008fce512cc67cb01c34e4e"
+
+[[bundle.member]]
+kind = "skill"
+name = "bundled-skill"
+id = "localhost:5000/grim-golden/pre-hooks-03e59b0/reg-skill:1.0.0"
+
+[[bundle.member]]
+kind = "rule"
+name = "bundled-rule"
+id = "localhost:5000/grim-golden/pre-hooks-03e59b0/reg-rule:1.0.0"

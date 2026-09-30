@@ -1,0 +1,66 @@
+{
+  "version": 2,
+  "records": [
+    {
+      "kind": "agent",
+      "name": "reg-agent",
+      "pinned": "localhost:5000/grim-golden/pre-hooks-03e59b0/reg-agent@sha256:74d332f2c53b1c256df2a6a51814e4faae70a08795b02f4db71d99a92424305a",
+      "outputs": [
+        {
+          "client": "claude",
+          "target": {
+            "anchor": "claude-root",
+            "relative": "agents/reg-agent.md"
+          },
+          "content_hash": "sha256:df117b6e3f9e69dcb3720a6de577b8457ce9ef0d29c1181881850346d7fcbb2f"
+        }
+      ]
+    },
+    {
+      "kind": "mcp",
+      "name": "reg-mcp",
+      "pinned": "localhost:5000/grim-golden/pre-hooks-03e59b0/reg-mcp@sha256:3499d7c5f5ceaabdfc627c7f336b4bed736f44dd4bebdceda02d33a586b46de1",
+      "outputs": [
+        {
+          "client": "claude",
+          "target": {
+            "anchor": "claude-user-dir",
+            "relative": ".claude.json"
+          },
+          "content_hash": "sha256:58707bebbe1a05467f7c01809e040ec1a295f38463138c739dea74f8dcd14e32",
+          "entry": "/mcpServers/reg-mcp"
+        }
+      ]
+    },
+    {
+      "kind": "rule",
+      "name": "reg-rule",
+      "pinned": "localhost:5000/grim-golden/pre-hooks-03e59b0/reg-rule@sha256:657ed7566e927d6850b8b993ab883d8f1aef26455f51d3d2e63ae332970fb748",
+      "outputs": [
+        {
+          "client": "claude",
+          "target": {
+            "anchor": "claude-root",
+            "relative": "rules/reg-rule.md"
+          },
+          "content_hash": "sha256:92540cf3a482e59f1d323d2ab6f1573f53ab55c68030199bb87c2e8d3f37b240"
+        }
+      ]
+    },
+    {
+      "kind": "skill",
+      "name": "reg-skill",
+      "pinned": "localhost:5000/grim-golden/pre-hooks-03e59b0/reg-skill@sha256:9f9ab08bc759e57f4b3f98b70ce953819bec42c09a7e195c2bc25df67473c637",
+      "outputs": [
+        {
+          "client": "claude",
+          "target": {
+            "anchor": "claude-root",
+            "relative": "skills/reg-skill"
+          },
+          "content_hash": "sha256:32e20e650b2d2f56c8a3e735791893b3faf872da02a5c6353ecb856c60279097"
+        }
+      ]
+    }
+  ]
+}
