@@ -107,10 +107,7 @@ pub fn resolve_in(
         let discovered = ProjectConfig::discover_from(config, workspace)?;
         let config_path = discovered.config_path().to_path_buf();
         let lock_path = discovered.lock_path();
-        let workspace = config_path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
+        let workspace = workspace_of(&config_path)?;
         warn_untrusted_path_sources(&discovered.config.set, &workspace);
         let roots = AnchorRoots::resolve(workspace.clone(), ctx);
         Ok(ResolvedScope {
@@ -125,6 +122,50 @@ pub fn resolve_in(
             config_path,
         })
     }
+}
+
+/// The workspace a project config file names — **always absolute**.
+///
+/// `config_path.parent()` alone is not enough, and the gap is a security one
+/// rather than a tidiness one. An explicit `--config` is used verbatim, so
+/// `grim --config grimoire.toml` gives a parent of `""` and
+/// `--config ./grimoire.toml` gives `"."` — *the same value in every checkout
+/// on the machine*. Everything that keys on the workspace then collapses:
+/// the hook consent record, the hook payload directory, and the project
+/// install-state path. Two unrelated repositories would share one consent
+/// key, which is `direnv/direnv#83` reproduced inside grim — the exact defect
+/// workspace consent exists to prevent (`adr_hook_workspace_consent.md`).
+///
+/// Resolved against the process CWD rather than canonicalized: canonicalizing
+/// needs I/O, fails on a path that does not exist yet, and resolves symlinks,
+/// which would make two spellings of one directory *agree*. Two spellings
+/// disagreeing merely re-gates, which is the fail-safe direction; two
+/// different directories agreeing is the dangerous one, and that is what this
+/// closes.
+///
+/// # Errors
+///
+/// The process CWD cannot be read while `config_path` is relative. There is
+/// no safe fallback: `"."` is the one value every checkout on the machine
+/// shares, which is the collapse this function exists to prevent.
+fn workspace_of(config_path: &Path) -> Result<PathBuf, ConfigError> {
+    workspace_from(config_path, std::env::current_dir)
+}
+
+/// [`workspace_of`] with the CWD read injected, so the unreadable-CWD arm is
+/// testable without changing the test process's own directory.
+fn workspace_from(config_path: &Path, cwd: impl FnOnce() -> std::io::Result<PathBuf>) -> Result<PathBuf, ConfigError> {
+    let parent = config_path.parent().unwrap_or(Path::new(""));
+    if parent.is_absolute() {
+        return Ok(parent.to_path_buf());
+    }
+    // `""` and `"."` both mean "the directory grim was run from".
+    let cwd = cwd().map_err(|e| ConfigError::new(config_path.to_path_buf(), ConfigErrorKind::Io(e)))?;
+    Ok(if parent.as_os_str().is_empty() || parent == Path::new(".") {
+        cwd
+    } else {
+        cwd.join(parent)
+    })
 }
 
 /// Warn about untrusted-boundary path sources in a PROJECT-scope config.
@@ -295,6 +336,56 @@ mod tests {
             global: false,
             registry: Vec::new(),
         }
+    }
+
+    /// **A relative `--config` must not collapse every checkout into one
+    /// workspace.** (T3, `direnv/direnv#83`)
+    ///
+    /// An explicit `--config` is used verbatim, so `--config grimoire.toml`
+    /// leaves `parent()` empty and `--config ./grimoire.toml` leaves it `"."`
+    /// — identical in every repository on the machine. The hook consent
+    /// record, the hook payload directory and the project install-state path
+    /// all key on the workspace, so two unrelated checkouts would share one
+    /// consent key and arm each other's hooks. Asserted as a *pair* of
+    /// different results rather than "is absolute", because absolute-and-equal
+    /// would satisfy the weaker assertion while still being the bug.
+    #[test]
+    fn a_relative_config_path_never_collapses_two_checkouts_into_one_workspace() {
+        for relative in ["grimoire.toml", "./grimoire.toml", "sub/grimoire.toml"] {
+            let resolved = workspace_of(Path::new(relative)).unwrap();
+            assert!(
+                resolved.is_absolute(),
+                "`--config {relative}` resolved to the relative workspace {resolved:?}"
+            );
+        }
+        assert_ne!(
+            workspace_of(Path::new("/a/grimoire.toml")).unwrap(),
+            workspace_of(Path::new("/b/grimoire.toml")).unwrap(),
+            "two directories must never resolve to one workspace"
+        );
+        // An absolute config is already unambiguous and passes through
+        // untouched — the CWD must not be prepended to it.
+        assert_eq!(
+            workspace_of(Path::new("/a/b/grimoire.toml")).unwrap(),
+            PathBuf::from("/a/b")
+        );
+    }
+
+    /// **WP-01 security review S5.** An unreadable CWD must be an error, never
+    /// `"."`: that relative key is shared by every checkout on the machine, so
+    /// falling back to it re-opens the consent collapse C-118 closed.
+    #[test]
+    fn an_unreadable_cwd_is_an_error_not_a_shared_relative_workspace() {
+        let gone = || Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+        for relative in ["grimoire.toml", "./grimoire.toml", "sub/grimoire.toml"] {
+            let err = workspace_from(Path::new(relative), gone).expect_err(relative);
+            assert!(matches!(err.kind, ConfigErrorKind::Io(_)), "{relative}: {err}");
+        }
+        // An absolute config never reads the CWD, so it still resolves.
+        assert_eq!(
+            workspace_from(Path::new("/a/grimoire.toml"), gone).unwrap(),
+            PathBuf::from("/a")
+        );
     }
 
     #[test]
