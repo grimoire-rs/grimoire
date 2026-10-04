@@ -114,10 +114,10 @@ surfaces, OWASP/STRIDE checklist) before any security review.
 ## First-Party Catalog
 
 `catalog/` holds grim-publishable packages (skills `grim-usage`,
-`ai-config-authoring`, `grim-authoring`, bundle `grim-essentials`, mcp `grim`).
-**CLI (`src/command/**`) or docs-page changes require a drift review of
-these skills** — duty + procedure: [catalog/README.md](./catalog/README.md).
-Hooks remind on matching edits; `task catalog:verify` gates CI.
+`ai-config-authoring`, `grim-authoring`; bundle `grim-essentials`; mcp `grim`;
+hooks `command-guard`, `tool-call-logger`). **CLI (`src/command/**`) or
+docs-page changes need a drift review of these skills**
+([catalog/README.md](./catalog/README.md)). Hooks remind; `task catalog:verify` gates CI.
 
 ## Core Principles
 

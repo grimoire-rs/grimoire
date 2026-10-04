@@ -17,7 +17,8 @@ first:
 2. **The docs site** — [Artifact Reference][artifacts],
    [Vendor-Specific Metadata][vendor], [Publishing][publishing],
    [Agent Artifacts][agents], [MCP Server Artifacts][mcp],
-   [Client Compatibility][clients], [The Package Index][index].
+   [Client Compatibility][clients], [The Package Index][index],
+   [Hooks][hooks], [Hook Troubleshooting][hooks-ts], [Agent Hooks guide][agent-hooks].
 3. **The source** — frontmatter structs in [`src/skill/`][src-skill]
    (skill/rule/agent frontmatter, name rules), the hook manifest and its
    validation rules in [`src/oci/hook.rs`][src-hook], and the vendor
@@ -77,6 +78,9 @@ On every grim **minor** release:
 [agents]: https://grimoire.rs/agents.html
 [mcp]: https://grimoire.rs/mcp-servers.html
 [clients]: https://grimoire.rs/clients.html
+[hooks]: https://grimoire.rs/hooks.html
+[hooks-ts]: https://grimoire.rs/hooks-troubleshooting.html
+[agent-hooks]: https://grimoire.rs/guides/agent-hooks.html
 [index]: https://grimoire.rs/package-index.html
 [src-skill]: https://github.com/grimoire-rs/grimoire/tree/main/src/skill
 [src-hook]: https://github.com/grimoire-rs/grimoire/blob/main/src/oci/hook.rs
