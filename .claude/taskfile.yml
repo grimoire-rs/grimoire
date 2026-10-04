@@ -67,12 +67,15 @@ tasks:
         #     that exists only in its upstream repo. Fix it upstream; a local
         #     edit is lost on sync. Scoped to the one file so the rest of that
         #     rule's links stay checked.
+        #   skills/DESIGN.md — the vendored hex-execute skill cites its bundle's
+        #     design doc, which grim does not install. Same fix-upstream rule.
         lychee --offline --no-progress --include-verbatim \
           --exclude-path templates/artifacts \
           --exclude-path tests/.venv \
           --exclude-path worktrees \
           --exclude-path rules/docs-quality/checks/fixtures \
           --exclude-path rules/rust-cargo/crates-of-record.md \
+          --exclude 'skills/DESIGN\.md$' \
           --format json --output {{.REPORTS_DIR}}/lint-links.json \
           ../CLAUDE.md ../AGENTS.md .
     sources: *claude-sources
