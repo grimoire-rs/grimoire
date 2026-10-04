@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
+use crate::oci::ArtifactKind;
+
 /// File name of the per-root ignore file.
 pub const GRIMIGNORE: &str = ".grimignore";
 
@@ -47,6 +49,11 @@ pub const DEFAULT_PATTERNS: &[&str] = &[
 /// ignore rules themselves. (A rule's index `<name>.md` sits beside its
 /// support dir, outside the walked root, so it never reaches the matcher.)
 const NEVER_IGNORED: &[&str] = &["SKILL.md", GRIMIGNORE];
+
+/// The one extra never-ignored name for a [`ArtifactKind::Hook`] root: its
+/// manifest (C-160). Deliberately **not** in [`NEVER_IGNORED`] — a skill that
+/// ships an ignored `hook.toml` must pack, lock and hash exactly as before.
+const HOOK_NEVER_IGNORED: &str = crate::oci::hook::HOOK_MANIFEST_FILE;
 
 /// Largest `.grimignore` read; a bigger one is refused before parsing so a
 /// hostile published file cannot blow up matcher compilation.
@@ -81,6 +88,9 @@ pub enum IgnoreSetError {
 /// Defaults plus the walk root's `.grimignore`.
 pub struct IgnoreSet {
     matcher: Gitignore,
+    /// The artifact kind the walk root belongs to; only [`ArtifactKind::Hook`]
+    /// changes anything (its manifest is never ignored, C-160).
+    kind: ArtifactKind,
 }
 
 impl IgnoreSet {
@@ -90,8 +100,8 @@ impl IgnoreSet {
     /// # Errors
     ///
     /// [`IgnoreSetError`] naming the file (and line).
-    pub fn for_root(root: &Path) -> Result<Self, IgnoreSetError> {
-        let (set, mut invalid) = Self::build(root)?;
+    pub fn for_root(root: &Path, kind: ArtifactKind) -> Result<Self, IgnoreSetError> {
+        let (set, mut invalid) = Self::build(root, kind)?;
         match invalid.drain(..).next() {
             Some(err) => Err(err),
             None => Ok(set),
@@ -102,8 +112,8 @@ impl IgnoreSet {
     /// unreadable file) are skipped with a warning, never fatal. The file is
     /// hashed anyway, so tampering with it still reads as drift.
     #[must_use]
-    pub fn for_root_lenient(root: &Path) -> Self {
-        match Self::build(root) {
+    pub fn for_root_lenient(root: &Path, kind: ArtifactKind) -> Self {
+        match Self::build(root, kind) {
             Ok((set, invalid)) => {
                 for err in invalid {
                     tracing::warn!("{err}; line skipped");
@@ -116,7 +126,9 @@ impl IgnoreSet {
                     clippy::expect_used,
                     reason = "constant defaults, pinned by defaults_match_runtime_junk"
                 )]
-                Self::build_lines(root, &[]).expect("default ignore patterns compile").0
+                Self::build_lines(root, &[], kind)
+                    .expect("default ignore patterns compile")
+                    .0
             }
         }
     }
@@ -138,15 +150,31 @@ impl IgnoreSet {
         if rel.is_empty() || NEVER_IGNORED.contains(&rel.as_str()) {
             return false;
         }
+        if self.kind == ArtifactKind::Hook && rel == HOOK_NEVER_IGNORED {
+            return false;
+        }
         // Relative input never has a root, so the crate's
         // under-the-root assertion cannot fire (and the `.` matcher root
         // strips nothing from it).
         self.matcher.matched(Path::new(&rel), is_dir).is_ignore()
     }
 
+    /// Whether a walk from the root skips `rel`: it or one of its ancestor
+    /// directories is ignored. Both walks prune an ignored directory, so a `!`
+    /// line cannot reach a file inside one — [`is_ignored`](Self::is_ignored)
+    /// alone would miss `.venv/lib/x.py`.
+    #[must_use]
+    pub fn excludes(&self, rel: &Path, is_dir: bool) -> bool {
+        rel.ancestors()
+            .skip(1)
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .any(|dir| self.is_ignored(dir, true))
+            || self.is_ignored(rel, is_dir)
+    }
+
     /// Read `<root>/.grimignore` (if a regular file) and build the set,
     /// returning the invalid lines separately.
-    fn build(root: &Path) -> Result<(Self, Vec<IgnoreSetError>), IgnoreSetError> {
+    fn build(root: &Path, kind: ArtifactKind) -> Result<(Self, Vec<IgnoreSetError>), IgnoreSetError> {
         let path = root.join(GRIMIGNORE);
         let text = match std::fs::symlink_metadata(&path) {
             Ok(meta) if meta.is_file() && meta.len() > MAX_GRIMIGNORE_BYTES => {
@@ -162,10 +190,14 @@ impl IgnoreSet {
         };
         // Git strips a leading BOM; Windows editors write one.
         let lines: Vec<&str> = text.trim_start_matches('\u{feff}').lines().collect();
-        Self::build_lines(root, &lines)
+        Self::build_lines(root, &lines, kind)
     }
 
-    fn build_lines(root: &Path, lines: &[&str]) -> Result<(Self, Vec<IgnoreSetError>), IgnoreSetError> {
+    fn build_lines(
+        root: &Path,
+        lines: &[&str],
+        kind: ArtifactKind,
+    ) -> Result<(Self, Vec<IgnoreSetError>), IgnoreSetError> {
         // Only relative paths are queried, so the matcher root is `.`, the
         // one root `Gitignore::matched` never byte-strips from a query (a
         // real root `s` would turn `scripts/x` into `cripts/x`).
@@ -197,7 +229,7 @@ impl IgnoreSet {
             path: file,
             message: err.to_string(),
         })?;
-        Ok((Self { matcher }, invalid))
+        Ok((Self { matcher, kind }, invalid))
     }
 }
 
@@ -210,7 +242,7 @@ mod tests {
         if let Some(body) = grimignore {
             std::fs::write(dir.path().join(GRIMIGNORE), body).unwrap();
         }
-        let set = IgnoreSet::for_root(dir.path()).unwrap();
+        let set = IgnoreSet::for_root(dir.path(), ArtifactKind::Skill).unwrap();
         (dir, set)
     }
 
@@ -245,6 +277,21 @@ mod tests {
         assert!(set.is_ignored(Path::new("other.md"), false));
     }
 
+    /// C-160: `hook.toml` is never ignored for a Hook root, and only there —
+    /// a skill's `.grimignore` may still drop a file of that name.
+    #[test]
+    fn hook_manifest_is_never_ignored_for_hooks_only() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(GRIMIGNORE), "*.toml\n").unwrap();
+        let hook = IgnoreSet::for_root(dir.path(), ArtifactKind::Hook).unwrap();
+        assert!(!hook.is_ignored(Path::new(HOOK_NEVER_IGNORED), false));
+        assert!(hook.is_ignored(Path::new("other.toml"), false));
+        for kind in [ArtifactKind::Skill, ArtifactKind::Rule, ArtifactKind::Agent] {
+            let set = IgnoreSet::for_root(dir.path(), kind).unwrap();
+            assert!(set.is_ignored(Path::new(HOOK_NEVER_IGNORED), false), "{kind:?}");
+        }
+    }
+
     #[test]
     fn dir_only_pattern_does_not_match_a_file() {
         let (_d, set) = set_with(Some("build/\n"));
@@ -266,7 +313,9 @@ mod tests {
     fn relative_root_does_not_eat_query_prefix() {
         // Root `s` is a byte-prefix of `scripts/…`; the matcher must not
         // strip it (`grim build s`).
-        let set = IgnoreSet::build_lines(Path::new("s"), &["scripts/x", "/sy"]).unwrap().0;
+        let set = IgnoreSet::build_lines(Path::new("s"), &["scripts/x", "/sy"], ArtifactKind::Skill)
+            .unwrap()
+            .0;
         assert!(set.is_ignored(Path::new("scripts/x"), false));
         assert!(set.is_ignored(Path::new("sy"), false));
         assert!(!set.is_ignored(Path::new("y"), false));
@@ -279,10 +328,12 @@ mod tests {
         let mut body = "secret.txt\n".to_owned();
         body.push_str(&"#".repeat(MAX_GRIMIGNORE_BYTES as usize));
         std::fs::write(dir.path().join(GRIMIGNORE), body).unwrap();
-        let err = IgnoreSet::for_root(dir.path()).err().expect("oversized must fail");
+        let err = IgnoreSet::for_root(dir.path(), ArtifactKind::Skill)
+            .err()
+            .expect("oversized must fail");
         assert!(matches!(err, IgnoreSetError::TooLarge { .. }), "{err}");
         assert!(err.to_string().contains(GRIMIGNORE), "{err}");
-        let set = IgnoreSet::for_root_lenient(dir.path());
+        let set = IgnoreSet::for_root_lenient(dir.path(), ArtifactKind::Skill);
         assert!(!set.is_ignored(Path::new("secret.txt"), false), "defaults only");
         assert!(set.is_ignored(Path::new("__pycache__"), true));
     }
@@ -296,7 +347,7 @@ mod tests {
             .map(|i| format!("**/a{i}*b?c[0-9]*/**/d{i}*"))
             .collect();
         let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
-        let err = IgnoreSet::build_lines(Path::new("."), &refs)
+        let err = IgnoreSet::build_lines(Path::new("."), &refs, ArtifactKind::Skill)
             .err()
             .expect("NFA limit must fail");
         assert!(matches!(err, IgnoreSetError::Build { .. }), "{err}");
@@ -321,7 +372,9 @@ mod tests {
     fn invalid_line_is_an_error_naming_file_and_line() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(GRIMIGNORE), "ok.txt\n{unclosed\n").unwrap();
-        let err = IgnoreSet::for_root(dir.path()).err().expect("invalid line must fail");
+        let err = IgnoreSet::for_root(dir.path(), ArtifactKind::Skill)
+            .err()
+            .expect("invalid line must fail");
         let msg = err.to_string();
         assert!(matches!(err, IgnoreSetError::InvalidLine { line: 2, .. }), "{msg}");
         assert!(msg.contains(GRIMIGNORE) && msg.contains("line 2"), "{msg}");
@@ -331,7 +384,7 @@ mod tests {
     fn lenient_build_skips_invalid_lines() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(GRIMIGNORE), "{unclosed\nsecret.txt\n").unwrap();
-        let set = IgnoreSet::for_root_lenient(dir.path());
+        let set = IgnoreSet::for_root_lenient(dir.path(), ArtifactKind::Skill);
         assert!(set.is_ignored(Path::new("secret.txt"), false));
         assert!(set.is_ignored(Path::new("__pycache__"), true));
     }
@@ -340,7 +393,7 @@ mod tests {
     fn leading_bom_does_not_break_first_pattern() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(GRIMIGNORE), "\u{feff}secret.txt\n").unwrap();
-        let set = IgnoreSet::for_root_lenient(dir.path());
+        let set = IgnoreSet::for_root_lenient(dir.path(), ArtifactKind::Skill);
         assert!(set.is_ignored(Path::new("secret.txt"), false));
     }
 }

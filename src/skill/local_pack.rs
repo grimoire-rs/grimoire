@@ -49,6 +49,15 @@ pub fn pack_local_artifact(kind: ArtifactKind, path: &Path) -> Result<(String, V
     let metadata_invalid =
         |e: crate::install::render::RenderError| SkillError::new(path, SkillErrorKind::MetadataInvalid(Box::new(e)));
     match kind {
+        // A hook has no path source: `grim add` refuses `--kind hook` on a path
+        // and dev-install refuses hooks (`command::install`), and `grim build
+        // --kind hook` packs through `build::pack_hook_dir`. The one way here is
+        // a hand-edited `state.json` carrying `dev = true` on a hook record —
+        // external input, so an error rather than a panic (C-111).
+        ArtifactKind::Hook => Err(SkillError::new(
+            path,
+            SkillErrorKind::ValidationFailed("hooks have no path source and cannot be packed from one".to_string()),
+        )),
         ArtifactKind::Skill => {
             let fm = validate_skill_dir(path)?;
             let warnings = crate::install::render::validate_namespaced_metadata(&fm).map_err(metadata_invalid)?;
@@ -113,6 +122,16 @@ mod tests {
     fn write(p: &Path, body: &str) {
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, body).unwrap();
+    }
+
+    /// C-111: a tampered `state.json` can name a dev hook record; packing it
+    /// is an error, never a panic.
+    #[test]
+    fn a_hook_is_refused_not_panicked_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(&tmp.path().join("guard/hook.toml"), "schema = 1\n");
+        let err = pack_local_artifact(ArtifactKind::Hook, &tmp.path().join("guard")).expect_err("no path source");
+        assert!(matches!(err.kind, SkillErrorKind::ValidationFailed(_)), "{err:?}");
     }
 
     #[test]

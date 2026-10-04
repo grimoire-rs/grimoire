@@ -3,14 +3,36 @@
 
 //! `grim install` output.
 //!
-//! Plain format: 4-column table (Kind | Name | Target | Status). The
-//! Target cell is `—` when nothing was written (every selected client
-//! declined the kind).
+//! Plain format: 4-column table (Kind | Name | Target | Status), plus a fifth
+//! `Armed` column only when a `hook` row is present — so hook-free output is
+//! unchanged. The Target cell is `—` when nothing was written (every selected
+//! client declined the kind); the Armed cell is `—` for every kind but `hook`.
 //!
 //! JSON format: `{"items": [...]}` where each item is a
-//! `{kind, name, target, status}` object (uniform `items` envelope, per
+//! `{kind, name, target, status, armed}` object (uniform `items` envelope, per
 //! subsystem-cli-api.md). `target` is `null` when no client wrote a file
 //! (every selected client declined the kind).
+//!
+//! ## Why the row names what a hook armed (S-002)
+//!
+//! Arming a hook is the most consequential thing `grim install` does: it grants
+//! a published artifact the ability to run on every matching tool call. The
+//! generic `installed` row said only that a file appeared, so the single moment
+//! the user is told about that grant did not say **what** gained it, **on which
+//! client**, or **at which tier** — and tier is the whole vocabulary of how much
+//! the hook may do (`observer` cannot alter anything; `mutator` rewrites the
+//! call).
+//!
+//! `armed` is **always present and `null`** for every non-hook kind rather than
+//! skipped: `skip_serializing_if` is banned in `src/api/` because an absent key
+//! cannot be told apart from an older grim. For a hook it is a possibly-empty
+//! array — `[]` means the hook installed but armed nowhere, which is a different
+//! fact from `null` (not applicable).
+//!
+//! The values come from the dispatch table, the same machine-local arming
+//! authority `grim status` and `grim hook list` read. That is deliberate: a
+//! third *derivation* of the arming gates is how three commands come to
+//! disagree about one hook, so this is a third *consumer* of one source.
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -32,6 +54,23 @@ pub struct InstallEntry {
     /// declined the kind (serialized as `null`, rendered as `—`).
     pub target: Option<PathBuf>,
     pub status: InstallStatus,
+    /// For a `hook`: every `(client, tier)` this install left armed, sorted.
+    /// `Some([])` means the artifact installed and armed nowhere. `None` for
+    /// every other kind — the question does not apply.
+    pub armed: Option<Vec<ArmedEntry>>,
+}
+
+/// One `(client, tier)` pair a hook is armed for after this install.
+///
+/// Read off the dispatch table rather than re-derived from the trust gates —
+/// see the module doc.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ArmedEntry {
+    /// grim's name for the client whose registration now invokes the hook.
+    pub client: String,
+    /// How much the entry may do at the moment it fires: `observer`,
+    /// `gatekeeper`, or `mutator`.
+    pub tier: String,
 }
 
 fn serialize_kind<S: Serializer>(kind: &ArtifactKind, s: S) -> Result<S::Ok, S::Error> {
@@ -53,21 +92,51 @@ impl InstallReport {
 
 impl Printable for InstallReport {
     fn print_plain(&self, w: &mut impl Write) -> io::Result<()> {
+        // The `Armed` column appears only when a hook row is present, so a
+        // hook-free table stays byte-identical to what it was before hooks
+        // existed (WP-01 review W4).
+        let has_hook = self.items.iter().any(|e| e.armed.is_some());
         let rows: Vec<Vec<String>> = self
             .items
             .iter()
             .map(|e| {
-                vec![
+                let mut row = vec![
                     e.kind.to_string(),
                     e.name.clone(),
                     e.target
                         .as_ref()
                         .map_or_else(|| "—".to_string(), |p| p.display().to_string()),
                     e.status.to_string(),
-                ]
+                ];
+                if !has_hook {
+                    return row;
+                }
+                row.push(
+                    // `—` covers both "not a hook" and "armed nowhere". The two
+                    // are distinguishable in JSON (`null` vs `[]`); the plain
+                    // table is a human summary and a hook that armed nowhere
+                    // already says so through its `Skipped`/`Refused` status.
+                    e.armed.as_ref().map_or_else(
+                        || "—".to_string(),
+                        |armed| {
+                            if armed.is_empty() {
+                                "—".to_string()
+                            } else {
+                                armed
+                                    .iter()
+                                    .map(|a| format!("{} ({})", a.client, a.tier))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            }
+                        },
+                    ),
+                );
+                row
             })
             .collect();
-        print_table(w, &["Kind", "Name", "Target", "Status"], &rows)
+        const HEADERS: [&str; 4] = ["Kind", "Name", "Target", "Status"];
+        const HOOK_HEADERS: [&str; 5] = ["Kind", "Name", "Target", "Status", "Armed"];
+        print_table(w, if has_hook { &HOOK_HEADERS } else { &HEADERS }, &rows)
     }
 
     fn print_json(&self, w: &mut impl Write) -> io::Result<()> {
@@ -86,6 +155,7 @@ mod tests {
             name: "code-review".to_string(),
             target: Some(PathBuf::from("/w/.claude/skills/code-review")),
             status: InstallStatus::Installed,
+            armed: None,
         }]);
         let mut buf = Vec::new();
         r.print_plain(&mut buf).unwrap();
@@ -95,6 +165,47 @@ mod tests {
         assert!(out.contains("installed"));
     }
 
+    /// WP-01 review W4: the `Armed` column appears only beside a hook row, so
+    /// a hook-free table keeps main's four columns byte for byte.
+    #[test]
+    fn the_armed_column_appears_only_with_a_hook_row() {
+        let skill = || InstallEntry {
+            kind: ArtifactKind::Skill,
+            name: "code-review".to_string(),
+            target: Some(PathBuf::from("/w/.claude/skills/code-review")),
+            status: InstallStatus::Installed,
+            armed: None,
+        };
+        let plain = |r: InstallReport| {
+            let mut buf = Vec::new();
+            r.print_plain(&mut buf).unwrap();
+            String::from_utf8(buf).unwrap()
+        };
+        let hook_free = plain(InstallReport::new(vec![skill()]));
+        assert_eq!(
+            hook_free.lines().next().unwrap().split_whitespace().collect::<Vec<_>>(),
+            ["Kind", "Name", "Target", "Status"],
+            "{hook_free}"
+        );
+        assert!(!hook_free.contains('—'), "no placeholder cell: {hook_free}");
+
+        let hook = InstallEntry {
+            kind: ArtifactKind::Hook,
+            name: "guard".to_string(),
+            armed: Some(vec![ArmedEntry {
+                client: "claude".to_string(),
+                tier: "observer".to_string(),
+            }]),
+            ..skill()
+        };
+        let with_hook = plain(InstallReport::new(vec![skill(), hook]));
+        assert!(
+            with_hook.lines().next().unwrap().trim_end().ends_with("Armed"),
+            "{with_hook}"
+        );
+        assert!(with_hook.contains("claude (observer)"), "{with_hook}");
+    }
+
     #[test]
     fn json_is_items_envelope() {
         let r = InstallReport::new(vec![InstallEntry {
@@ -102,6 +213,7 @@ mod tests {
             name: "rust-style".to_string(),
             target: Some(PathBuf::from("/w/.claude/rules/rust-style.md")),
             status: InstallStatus::Refused,
+            armed: None,
         }]);
         let mut buf = Vec::new();
         r.print_json(&mut buf).unwrap();
@@ -121,6 +233,7 @@ mod tests {
             name: "rust-style".to_string(),
             target: None,
             status: InstallStatus::Skipped,
+            armed: None,
         }]);
         let mut plain = Vec::new();
         r.print_plain(&mut plain).unwrap();

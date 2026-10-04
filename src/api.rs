@@ -17,6 +17,7 @@ pub mod context_report;
 pub mod describe_report;
 pub mod export_report;
 pub mod fetch_report;
+pub mod hook_report;
 pub mod init_report;
 pub mod install_report;
 pub mod lock_report;
@@ -33,7 +34,7 @@ pub mod update_report;
 #[allow(unused_imports)]
 pub use add_report::{AddReport, AddStatus};
 #[allow(unused_imports)]
-pub use artifact_status::{ArtifactStatus, InitStatus, InstallStatus, LockAction, UpdateAction};
+pub use artifact_status::{ArtifactStatus, HookArmingCause, InitStatus, InstallStatus, LockAction, UpdateAction};
 #[allow(unused_imports)]
 pub use build_report::{BuildReport, BuildStatus};
 #[allow(unused_imports)]
@@ -50,6 +51,8 @@ pub use describe_report::DescribeCliReport;
 pub use export_report::{ExportItem, ExportMember, ExportOmission, ExportReport, OutputFormatKind};
 #[allow(unused_imports)]
 pub use fetch_report::FetchCliReport;
+#[allow(unused_imports)]
+pub use hook_report::{HookConsentAction, HookConsentReport, HookListEntry, HookListReport};
 #[allow(unused_imports)]
 pub use init_report::InitReport;
 #[allow(unused_imports)]
@@ -69,6 +72,6 @@ pub use remove_report::{RemoveReport, RemoveStatus};
 #[allow(unused_imports)]
 pub use search_report::{SearchEntry, SearchReport, SearchSourceStatus};
 #[allow(unused_imports)]
-pub use status_report::{StatusEntry, StatusReport};
+pub use status_report::{HookArming, StatusEntry, StatusReport};
 #[allow(unused_imports)]
 pub use update_report::{UpdateEntry, UpdateReport};

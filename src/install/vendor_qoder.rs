@@ -25,6 +25,15 @@
 //!   `clientSecret`/`tokenUrl`, no metadata URL), env-ref-bearing descriptors
 //!   (no `${VAR}` expansion documented — the Junie precedent).
 //!
+//! - **Hooks** (ADR amendment A8, global scope only): spliced into
+//!   `<root>/settings.json` — the file the MCP writer above also edits — as
+//!   Claude-shaped `hooks.<Event>[{matcher, hooks:[…]}]` elements carrying
+//!   grim's marker. Verified against `qodercli` 1.1.64 on 2026-09-28
+//!   (`research_hooks_qoder_copilot_schemas.md` § 5): the settings validator
+//!   compiles the hook element as a passthrough object and the loader checks
+//!   only `type`/`command`/`args`, so the marker key raises no diagnostic
+//!   while a type-invalid field on the same element does.
+//!
 //! The global root is `$QODER_CONFIG_DIR` when set, else `~/.qoder` — the
 //! variable replaces the root outright (the `KIRO_HOME`/`CODEX_HOME` shape).
 //! The Qoder IDE sharing `.qoder/` with the CLI is inferred, not stated
@@ -33,11 +42,14 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::scope::ConfigScope;
+use crate::oci::ArtifactKind;
+use crate::oci::hook::{HookRegistration, HookSurface};
 use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
 use super::render::{self, RenderError, RenderedDoc};
-use super::vendor::{Vendor, env_dir, home_dir};
+use super::vendor::{HookSpliceShape, SplicedHandler, Vendor, env_dir, home_dir};
+use super::vendor_claude::ClaudeVendor;
 
 /// Qoder.
 pub struct QoderVendor;
@@ -142,6 +154,38 @@ impl Vendor for QoderVendor {
         Some((format!("/mcpServers/{name}"), serde_json::Value::Object(entry)))
     }
 
+    /// A splice surface in the user's own `settings.json`, never a whole file:
+    /// that file also holds the user's hooks and grim's MCP entries, so grim
+    /// owns only the marked elements it wrote (D-16 does not apply — there is
+    /// no file to own by digest).
+    fn hook_surface(&self) -> Option<HookSurface> {
+        Some(HookSurface::SpliceConfig)
+    }
+
+    fn hook_config_path(&self, _workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
+        match scope {
+            // A1: `.qoder/settings.json` is a tracked repository file.
+            ConfigScope::Project => None,
+            ConfigScope::Global => qoder_root(env_dir("QODER_CONFIG_DIR"), home_dir()).map(|r| r.join("settings.json")),
+        }
+    }
+
+    // ponytail: Qoder's CLI hook schema is Claude's, so the address and the
+    // element (incl. `*` as match-all and `timeout` in seconds) are Claude's
+    // verbatim; fork them here the day the two diverge.
+    fn hook_splice_shape(&self) -> Option<HookSpliceShape> {
+        ClaudeVendor.hook_splice_shape()
+    }
+
+    fn hook_spliced_handler(&self, registration: &HookRegistration) -> Option<SplicedHandler> {
+        ClaudeVendor.hook_spliced_handler(registration)
+    }
+
+    fn kind_surface(&self, kind: ArtifactKind, scope: ConfigScope) -> bool {
+        // A1 (D-2): hooks at global scope only, the codex/copilot reasoning.
+        !matches!((kind, scope), (ArtifactKind::Hook, ConfigScope::Project))
+    }
+
     fn skill_index(&self, doc: &str) -> Result<Option<RenderedDoc>, RenderError> {
         render::render_skill_doc(doc, self)
     }
@@ -186,7 +230,6 @@ pub(crate) fn qoder_root(config_dir: Option<PathBuf>, home: Option<PathBuf>) -> 
 mod tests {
     use super::*;
     use crate::install::vendor::KindSupport;
-    use crate::oci::ArtifactKind;
     use crate::oci::mcp::McpDescriptor;
 
     fn mcp(toml: &str) -> McpDescriptor {

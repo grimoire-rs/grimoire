@@ -46,6 +46,21 @@ pub struct InstallTarget {
     /// Derived in [`Self::parse`] from the resolved scope's `[options.vendors]`
     /// table — never merged across scopes, never overridable by a flag.
     shared_skills: Vec<ClientTarget>,
+    /// The resolved hook arming policy, or `None` when this target was not
+    /// built by a mutating command. Attached by [`Self::with_hook_policy`] at
+    /// the mutating boundary, never by [`Self::parse`] (shared with the
+    /// read-only `status`/`search`/`context`), so a read-only command can
+    /// neither arm nor prompt.
+    hook_policy: Option<crate::hook::policy::HookPolicy>,
+    /// `$GRIM_HOME`, the one input a hook destination needs that a client
+    /// layout does not (C-106): a hook payload is machine-local at both scopes
+    /// (invariant I1), so [`Self::path_for`] routes `Hook` under it.
+    ///
+    /// Resolved at construction through [`crate::env::grim_home`], the same
+    /// resolution [`crate::context::Context`] (and therefore
+    /// [`AnchorRoots`](super::path_anchor::AnchorRoots)) uses, so the three-
+    /// argument `path_for` keeps main's signature at every hook-free call site.
+    grim_home: PathBuf,
 }
 
 impl InstallTarget {
@@ -76,6 +91,8 @@ impl InstallTarget {
             clients,
             generic_fallback: false,
             shared_skills: Vec::new(),
+            hook_policy: None,
+            grim_home: crate::env::grim_home(),
         }
     }
 
@@ -142,6 +159,8 @@ impl InstallTarget {
                     clients: vec![ClientTarget::Agents],
                     generic_fallback: true,
                     shared_skills,
+                    hook_policy: None,
+                    grim_home: crate::env::grim_home(),
                 });
             }
             clients = detected;
@@ -149,6 +168,34 @@ impl InstallTarget {
         let mut target = Self::new(workspace, scope, clients);
         target.shared_skills = shared_skills;
         Ok(target)
+    }
+
+    /// Attach the resolved hook arming policy — **mutating commands only**.
+    #[must_use]
+    pub fn with_hook_policy(mut self, policy: crate::hook::policy::HookPolicy) -> Self {
+        self.hook_policy = Some(policy);
+        self
+    }
+
+    /// The resolved hook arming policy, or `None` when no mutating boundary
+    /// attached one: this invocation neither arms nor reaps.
+    pub fn hook_policy(&self) -> Option<&crate::hook::policy::HookPolicy> {
+        self.hook_policy.as_ref()
+    }
+
+    /// The `$GRIM_HOME` a hook destination resolves under (C-106).
+    pub fn grim_home(&self) -> &Path {
+        &self.grim_home
+    }
+
+    /// Replace the resolved `$GRIM_HOME` — hermetic tests only, whose
+    /// [`AnchorRoots`](super::path_anchor::AnchorRoots) point at a temp dir
+    /// rather than the ambient environment.
+    #[cfg(test)]
+    #[must_use]
+    pub fn with_grim_home(mut self, grim_home: &Path) -> Self {
+        self.grim_home = grim_home.to_path_buf();
+        self
     }
 
     /// The client targets, in declared order (deduplicated).
@@ -195,7 +242,20 @@ impl InstallTarget {
     /// newly pool-capable, so `[options.vendors.goose].shared_skills = true`
     /// is an accepted config today — and it is this no-op, not a second write
     /// path.
+    ///
+    /// A **hook** payload never lands in the workspace, at either scope, and
+    /// never depends on the client (S-003, invariant I1): it resolves under
+    /// [`Self::grim_home`] via
+    /// [`hook_dispatch::payload_dir`](super::hook_dispatch::payload_dir).
+    /// Every other kind returns exactly what main's form returns (C-106).
     pub fn path_for(&self, client: ClientTarget, kind: ArtifactKind, name: &str) -> PathBuf {
+        if kind == ArtifactKind::Hook {
+            return super::hook_dispatch::payload_dir(
+                &self.grim_home,
+                super::hook_registrar::root_scope_for(&self.workspace, self.scope),
+                name,
+            );
+        }
         if kind == ArtifactKind::Skill && self.shared_skills.contains(&client) {
             return ClientTarget::Agents.path_for(&self.workspace, self.scope, kind, name);
         }
@@ -453,6 +513,168 @@ mod tests {
                 &BTreeMap::new()
             )
             .is_err()
+        );
+    }
+
+    /// ⛔ The negative the policy/consent split exists to guarantee: `parse`
+    /// is also the seam `grim status`, `grim search` and `grim context` use, so
+    /// it must never derive a hook policy — a read-only command must be unable
+    /// to arm, reap or prompt.
+    #[test]
+    fn parse_never_attaches_a_hook_policy_so_a_read_only_command_cannot_arm_or_prompt() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (flag, cfg) in [
+            (vec![], vec![]),
+            (vec!["claude".to_string()], vec![]),
+            (vec![], vec!["claude,codex".to_string()]),
+        ] {
+            let t = InstallTarget::parse(tmp.path(), ConfigScope::Project, &flag, &cfg, &BTreeMap::new()).unwrap();
+            assert!(
+                t.hook_policy().is_none(),
+                "InstallTarget::parse must never derive a hook policy"
+            );
+        }
+        assert!(
+            InstallTarget::new(tmp.path(), ConfigScope::Project, vec![ClientTarget::Claude])
+                .hook_policy()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn with_hook_policy_is_the_only_way_a_target_gains_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let policy = crate::hook::policy::HookPolicy::new(
+            true,
+            None,
+            crate::hook::trust::Interactivity::NonInteractive,
+            ConfigScope::Project,
+            tmp.path(),
+            &[],
+            crate::hook::consent::Consent::Granted,
+        );
+        let t = InstallTarget::parse(tmp.path(), ConfigScope::Project, &[], &[], &BTreeMap::new())
+            .unwrap()
+            .with_hook_policy(policy);
+        assert!(
+            t.hook_policy()
+                .is_some_and(crate::hook::policy::HookPolicy::feature_enabled)
+        );
+    }
+
+    /// C-106 (a): main's `path_for` body, frozen. Every hook-free
+    /// `(client, kind, scope)` — with and without the shared-skills pool —
+    /// must resolve exactly as main did, so the `grim_home` field moves no
+    /// hook-free byte.
+    #[test]
+    fn path_for_matches_mains_body_for_every_hook_free_kind() {
+        fn mains_path_for(t: &InstallTarget, client: ClientTarget, kind: ArtifactKind, name: &str) -> PathBuf {
+            if kind == ArtifactKind::Skill && t.shared_skills.contains(&client) {
+                return ClientTarget::Agents.path_for(&t.workspace, t.scope, kind, name);
+            }
+            client.path_for(&t.workspace, t.scope, kind, name)
+        }
+        let pooled: BTreeMap<String, VendorOptions> = ClientTarget::ALL
+            .iter()
+            .map(|c| (c.as_str().to_string(), VendorOptions { shared_skills: true }))
+            .collect();
+        for scope in [ConfigScope::Project, ConfigScope::Global] {
+            for vendors in [BTreeMap::new(), pooled.clone()] {
+                let names: Vec<String> = ClientTarget::ALL.iter().map(|c| c.as_str().to_string()).collect();
+                let t = InstallTarget::parse(Path::new("/w"), scope, &names, &[], &vendors)
+                    .unwrap()
+                    .with_grim_home(Path::new("/grim"));
+                for client in ClientTarget::ALL {
+                    for kind in [
+                        ArtifactKind::Skill,
+                        ArtifactKind::Rule,
+                        ArtifactKind::Agent,
+                        ArtifactKind::Mcp,
+                    ] {
+                        assert_eq!(
+                            t.path_for(client, kind, "x"),
+                            mains_path_for(&t, client, kind, "x"),
+                            "{client} {kind:?} {scope:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// C-106 (b): a hook never reaches `ClientTarget::path_for` (whose `Hook`
+    /// arm is `unreachable!`) — for every client, at both scopes.
+    #[test]
+    fn install_target_path_for_never_delegates_a_hook() {
+        for scope in [ConfigScope::Project, ConfigScope::Global] {
+            let t = InstallTarget::new(Path::new("/w"), scope, ClientTarget::ALL.to_vec())
+                .with_grim_home(Path::new("/grim"));
+            for client in ClientTarget::ALL {
+                let dest = t.path_for(client, ArtifactKind::Hook, "shell-guard");
+                assert!(
+                    dest.starts_with("/grim/hooks"),
+                    "{client} {scope:?}: {}",
+                    dest.display()
+                );
+            }
+        }
+    }
+
+    /// C-106 (c): the target's `$GRIM_HOME` is the one `Context` — and so
+    /// `AnchorRoots` — resolves, because both read `env::grim_home`.
+    #[test]
+    fn a_target_resolves_grim_home_like_the_context_does() {
+        let tmp = tempfile::tempdir().unwrap();
+        // `Context::new` sets its `grim_home` from `env::grim_home()`, and
+        // `AnchorRoots::resolve` copies `ctx.grim_home()`.
+        let resolved = crate::env::grim_home();
+        let t = InstallTarget::new(tmp.path(), ConfigScope::Project, vec![ClientTarget::Claude]);
+        assert_eq!(t.grim_home(), resolved);
+        let parsed = InstallTarget::parse(tmp.path(), ConfigScope::Project, &[], &[], &BTreeMap::new()).unwrap();
+        assert_eq!(parsed.grim_home(), resolved);
+    }
+
+    /// ⛔ **SEC-1.** A hook payload never lands in the workspace, at either
+    /// scope, and never depends on which client armed it.
+    #[test]
+    fn a_hook_payload_is_machine_local_at_both_scopes() {
+        let project = InstallTarget::new(Path::new("/w"), ConfigScope::Project, vec![ClientTarget::Claude])
+            .with_grim_home(Path::new("/grim"));
+        let dest = project.path_for(ClientTarget::Claude, ArtifactKind::Hook, "shell-guard");
+        assert!(dest.starts_with("/grim"), "{}", dest.display());
+        assert!(
+            !dest.starts_with("/w"),
+            "a repo-resident payload is I1 / SEC-1 — got {}",
+            dest.display()
+        );
+        assert_eq!(
+            dest,
+            PathBuf::from("/grim").join(crate::install::hook_dispatch::payload_relative(
+                crate::install::hook_dispatch::RootScope::Workspace(Path::new("/w")),
+                "shell-guard",
+            ))
+        );
+
+        // Two workspaces, one `$GRIM_HOME`, two directories.
+        let other = InstallTarget::new(Path::new("/other"), ConfigScope::Project, vec![ClientTarget::Claude])
+            .with_grim_home(Path::new("/grim"));
+        assert_ne!(
+            dest,
+            other.path_for(ClientTarget::Claude, ArtifactKind::Hook, "shell-guard")
+        );
+
+        // Client-independent (S-003).
+        assert_eq!(
+            dest,
+            project.path_for(ClientTarget::Codex, ArtifactKind::Hook, "shell-guard")
+        );
+
+        // Global scope keeps the flat `$GRIM_HOME/hooks/<name>` layout.
+        let global = InstallTarget::new(Path::new("/w"), ConfigScope::Global, vec![ClientTarget::Claude])
+            .with_grim_home(Path::new("/grim"));
+        assert_eq!(
+            global.path_for(ClientTarget::Claude, ArtifactKind::Hook, "shell-guard"),
+            PathBuf::from("/grim/hooks/shell-guard")
         );
     }
 

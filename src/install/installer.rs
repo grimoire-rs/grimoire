@@ -26,7 +26,9 @@ use crate::oci::mcp::MCP_LAYER_SIZE_LIMIT;
 use crate::oci::reference::ArtifactRef;
 use crate::oci::{ArtifactKind, Digest, Identifier};
 
-use super::content_hash::{footprint_hash, footprint_hash_for_record};
+#[cfg(test)]
+use super::content_hash::footprint_hash;
+use super::content_hash::{footprint_hash_for_kind, footprint_hash_for_record};
 use super::expected_outputs::{expected_clients, output_at_current_layout, pending_outputs};
 use super::install_error::{InstallError, InstallErrorKind};
 use super::install_state::{ClientOutput, InstallRecord, InstallState, PersistError};
@@ -405,6 +407,12 @@ pub async fn install_and_persist<M: ArtifactMaterializer>(
     intent: InstallIntent,
     progress: &dyn InstallProgress,
 ) -> Result<Vec<ArtifactInstall>, InstallError> {
+    // C-101: once every mutating seam attaches a policy, a missing one here is
+    // a seam that forgot to — caught in tests, skipped (C-101 step 2) in release.
+    debug_assert!(
+        target.hook_policy().is_some() || lock.hooks.is_empty(),
+        "install_and_persist installs hooks without a hook policy"
+    );
     refuse_uninstallable_fallback(lock, target, state, roots)?;
     // The fallback is the right default for the pool-reading clients, but a
     // Claude Code user on a bare workspace gets an `installed` row and a
@@ -475,8 +483,71 @@ pub async fn install_and_persist<M: ArtifactMaterializer>(
             );
         }
     }
+    // C-104: hook convergence right after the sync loop — a separate pass,
+    // because it needs the policy `sync_config` cannot see and writes the
+    // dispatch table once with the union over every hook-capable client.
+    crate::install::hook_registrar::converge_for(target.hook_policy(), state, workspace, scope, roots);
 
     Ok(outcomes)
+}
+
+/// C-101: the hook gates, in fixed order, ahead of the integrity gate — each
+/// refusal happens before any fetch. `None` means "fall through to main's
+/// unchanged install path".
+///
+/// 1. A reserved or malformed **binding** name never materializes: the payload
+///    dir is named by it, so `bin` would land in grim's own
+///    `$GRIM_HOME/hooks/bin/`. No record is written — there is nothing for
+///    `grim uninstall` to reach.
+/// 2. **No policy** means this invocation neither arms, reaps, nor
+///    materializes hooks. The existing record is left untouched. Mutating seams
+///    `debug_assert!` a policy, so this is the release-build belt.
+/// 3. A policy that will **not arm** this hook skips it; a zero-output record
+///    is written only when none exists (S-001), so a flag flip never orphans a
+///    payload a previous install wrote.
+///
+/// A fourth, fail-closed guard (not in the design, recorded as a deviation):
+/// the target's `$GRIM_HOME` must be the one `roots` anchors against, or the
+/// payload would be written somewhere the record cannot name.
+fn hook_gate(
+    artifact: &LockedArtifact,
+    target: &InstallTarget,
+    state: &mut InstallState,
+    roots: &AnchorRoots,
+    intent: InstallIntent,
+) -> Option<InstallOutcome> {
+    if let Some(reason) = crate::oci::hook::binding_name_refusal(&artifact.name) {
+        tracing::warn!("hook '{}' not installed: {reason}", artifact.name);
+        return Some(InstallOutcome::Skipped(reason));
+    }
+    let Some(policy) = target.hook_policy() else {
+        let reason = "no hook policy was resolved for this command; run `grim install` to arm hooks".to_string();
+        tracing::warn!("hook '{}' not installed: {reason}", artifact.name);
+        return Some(InstallOutcome::Skipped(reason));
+    };
+    if let Some(reason) = policy.refusal_reason(&artifact.name, &artifact.source) {
+        tracing::warn!("hook '{}' not installed: {reason}", artifact.name);
+        if state.get(ArtifactKind::Hook, &artifact.name).is_none() {
+            state.record(InstallRecord {
+                kind: ArtifactKind::Hook,
+                name: artifact.name.clone(),
+                source: artifact.source.clone(),
+                dev: intent.is_dev(),
+                outputs: Vec::new(),
+            });
+        }
+        return Some(InstallOutcome::Skipped(reason));
+    }
+    if target.grim_home() != roots.grim_home {
+        let reason = format!(
+            "the install target's $GRIM_HOME ({}) differs from the anchor root ({}); nothing written",
+            target.grim_home().display(),
+            roots.grim_home.display()
+        );
+        tracing::warn!("hook '{}' not installed: {reason}", artifact.name);
+        return Some(InstallOutcome::Skipped(reason));
+    }
+    None
 }
 
 /// Install one artifact into every selected client through the integrity
@@ -500,6 +571,12 @@ async fn install_one<M: ArtifactMaterializer>(
     // client MCP configs on a dedicated path.
     if kind == ArtifactKind::Mcp {
         return install_mcp(artifact, access, target, state, roots, force, intent).await;
+    }
+
+    if kind == ArtifactKind::Hook
+        && let Some(skip) = hook_gate(artifact, target, state, roots, intent)
+    {
+        return Ok(skip);
     }
 
     let recorded = state.get(kind, &artifact.name).cloned();
@@ -588,19 +665,29 @@ async fn install_one<M: ArtifactMaterializer>(
             // fidelity-loss warning at render). This per-client skip is
             // expected and logged at debug only, so a rule installed into a
             // default set that merely *includes* Codex stays quiet on stderr.
-            if client.vendor().kind_support(kind) == crate::install::vendor::KindSupport::Declined {
+            if kind_is_permanently_declined(*client, kind) {
                 tracing::debug!("{client} has no native target for {kind} '{}'; skipping", artifact.name);
             } else {
                 // The client DOES host this kind — it just has no surface for
                 // it at this scope. Silence would be misleading here: the user
                 // selected a client the matrix says supports the kind, and it
                 // is about to write nothing.
-                tracing::warn!(
-                    "{kind} '{}' skipped for {client}: {client} has no {kind} directory at {} scope, \
-                     so grim wrote nothing rather than install where it is never read",
-                    artifact.name,
-                    target.scope()
-                );
+                // S-104: a hook scope gap is A1's tracked project file, not a
+                // surface the client never reads, so it gets its own wording.
+                if kind == ArtifactKind::Hook {
+                    tracing::warn!(
+                        "hook '{}' skipped for {client}: {client} hooks are global-only (its project hook file \
+                         is tracked in the repository); install with --global",
+                        artifact.name
+                    );
+                } else {
+                    tracing::warn!(
+                        "{kind} '{}' skipped for {client}: {client} has no {kind} directory at {} scope, \
+                         so grim wrote nothing rather than install where it is never read",
+                        artifact.name,
+                        target.scope()
+                    );
+                }
             }
             return false;
         }
@@ -692,7 +779,7 @@ async fn install_one<M: ArtifactMaterializer>(
                     // symlink shapes below — counts as untracked and falls
                     // through to their dedicated refusal.
                     (!dest.exists() && !dest.is_symlink())
-                        || footprint_hash_for_record(&dest, existing_support.as_deref(), &out.content_hash)
+                        || footprint_hash_for_record(kind, &dest, existing_support.as_deref(), &out.content_hash)
                             .is_ok_and(|h| h == out.content_hash)
                 });
             if tracked {
@@ -744,9 +831,10 @@ async fn install_one<M: ArtifactMaterializer>(
                 })
                 .map_err(crate::error::Error::from)?;
             let preview_support = staged_support.as_ref().map(|_| preview_root.join(&artifact.name));
-            let would =
-                footprint_hash(&preview_dest, preview_support.as_deref()).map_err(|e| target_io(&preview_dest, e))?;
-            let current = footprint_hash(&dest, existing_support.as_deref()).map_err(|e| target_io(&dest, e))?;
+            let would = footprint_hash_for_kind(kind, &preview_dest, preview_support.as_deref())
+                .map_err(|e| target_io(&preview_dest, e))?;
+            let current =
+                footprint_hash_for_kind(kind, &dest, existing_support.as_deref()).map_err(|e| target_io(&dest, e))?;
             if current != would {
                 return Ok(InstallOutcome::RefusedUntracked {
                     client: client.to_string(),
@@ -885,6 +973,13 @@ async fn install_one<M: ArtifactMaterializer>(
                     .parent()
                     .filter(|p| !p.as_os_str().is_empty())
                     .unwrap_or_else(|| Path::new("."));
+                // A hook payload lives under `$GRIM_HOME/hooks`, and this
+                // `create_dir_all` may be the first thing to create it — at the
+                // umask. Narrow it to owner-only first (issue #88).
+                if kind == ArtifactKind::Hook {
+                    let grim_home = target.grim_home();
+                    crate::install::hook_dispatch::ensure_hooks_dir(grim_home).map_err(|e| target_io(grim_home, e))?;
+                }
                 std::fs::create_dir_all(parent).map_err(|e| target_io(parent, e))?;
                 let swap = tempfile::Builder::new()
                     .prefix(".grim-swap-")
@@ -949,7 +1044,8 @@ async fn install_one<M: ArtifactMaterializer>(
                 std::fs::File::open(parent)
                     .and_then(|f| f.sync_all())
                     .map_err(|e| target_io(parent, e))?;
-                let hash = footprint_hash(&dest, support_dest.as_deref()).map_err(|e| target_io(&dest, e))?;
+                let hash =
+                    footprint_hash_for_kind(kind, &dest, support_dest.as_deref()).map_err(|e| target_io(&dest, e))?;
                 materialized.push((dest.clone(), hash.clone()));
                 hash
             };
@@ -1030,7 +1126,7 @@ async fn install_one<M: ArtifactMaterializer>(
             // fold the surviving dir in, mismatch, and refuse (65) over grim's
             // own wreckage. The recorded `support_dir` shape still comes from
             // `support_dest`, so a version with no support dir records none.
-            if let Ok(content_hash) = footprint_hash(&dest, cleanup.as_deref()) {
+            if let Ok(content_hash) = footprint_hash_for_kind(kind, &dest, cleanup.as_deref()) {
                 outputs.push(ClientOutput {
                     client: client.to_string(),
                     target: anchored,
@@ -1168,6 +1264,13 @@ pub fn client_supports_kind(
         // ever records an output for one. The installer never asks (it returns
         // early for bundles); the report side does, for bundle declaration rows.
         ArtifactKind::Bundle => false,
+        // A hook resolves through the opt-in hook surface, **never**
+        // `kind_support` (ADR decision A / D-1): `kind_support` defaults to
+        // `Native`, so the catch-all below would answer `true` for every
+        // client, including the ones with no hook mechanism. `kind_surface`
+        // still applies on top — codex and copilot host hooks at global scope
+        // only, their hook file being a tracked repository file (A1, I1).
+        ArtifactKind::Hook => !client.vendor().declines_hooks_everywhere() && client.vendor().kind_surface(kind, scope),
         // Every other kind gets the same scope-aware second half: a vendor may
         // host the kind and still have no directory for it at THIS scope
         // (Junie has `.junie/rules/` but no global one; OpenClaw has global
@@ -1178,6 +1281,19 @@ pub fn client_supports_kind(
             client.vendor().kind_support(kind) != crate::install::vendor::KindSupport::Declined
                 && client.vendor().kind_surface(kind, scope)
         }
+    }
+}
+
+/// Whether `client` declines `kind` **at every scope** — the permanence half of
+/// a per-client skip, deciding whether the skip is a `debug!` or a `warn!`.
+///
+/// `Hook` cannot ask `kind_support` (it defaults to `Native`), so a surfaceless
+/// client would be classified a *scope* gap and warn the user to try the other
+/// scope, where the answer is identically no.
+fn kind_is_permanently_declined(client: crate::install::client_target::ClientTarget, kind: ArtifactKind) -> bool {
+    match kind {
+        ArtifactKind::Hook => client.vendor().declines_hooks_everywhere(),
+        _ => client.vendor().kind_support(kind) == crate::install::vendor::KindSupport::Declined,
     }
 }
 
@@ -1353,7 +1469,7 @@ fn preserved_recorded_clients(
             continue;
         }
         let drifted = out
-            .current_hash(roots, Containment::AllowRelocatedAncestor)
+            .current_hash(rec.kind, roots, Containment::AllowRelocatedAncestor)
             .is_ok_and(|actual| actual != out.content_hash);
         if drifted && !target.clients().contains(&client) {
             preserved.push(client);
@@ -1428,7 +1544,7 @@ fn integrity_gate(
             Err(e) => return Err(e.into()),
         };
         if present {
-            let actual = out.current_hash(roots, Containment::AllowRelocatedAncestor)?;
+            let actual = out.current_hash(rec.kind, roots, Containment::AllowRelocatedAncestor)?;
             if actual != out.content_hash {
                 // Refuse only when this pass would actually OVERWRITE the
                 // drifted file. Two kinds of drifted output are never written
@@ -1551,7 +1667,7 @@ fn reap_moved_outputs(prior: &InstallRecord, new_outputs: &[ClientOutput], roots
         // disappearing. `reap_relocated_roots` warns unconditionally for the
         // same reason.
         let intact = out
-            .current_hash(roots, Containment::Strict)
+            .current_hash(prior.kind, roots, Containment::Strict)
             .is_ok_and(|actual| actual == out.content_hash);
         if !intact {
             if let Ok(old) = out.target.resolve(roots, Containment::Strict) {
@@ -1957,7 +2073,7 @@ pub(crate) fn reap_relocated_roots(
         //   so "X now reads <new path> instead" would tell the user the
         //   artifact is still installed when grim just removed it.
         let intact = out
-            .current_hash(&legacy, Containment::Strict)
+            .current_hash(prior.kind, &legacy, Containment::Strict)
             .is_ok_and(|actual| actual == out.content_hash);
         if !intact {
             let remedy = match (context, out.entry.is_some()) {
@@ -2609,7 +2725,7 @@ async fn install_mcp(
         match stale.resolved_target(roots, Containment::Strict) {
             Ok(recorded_path) => {
                 let intact = stale
-                    .current_hash(roots, Containment::Strict)
+                    .current_hash(ArtifactKind::Mcp, roots, Containment::Strict)
                     .is_ok_and(|h| h == stale.content_hash);
                 if intact && let Some(stale_pointer) = &stale.entry {
                     crate::install::uninstall::remove_entry(&recorded_path, stale_pointer, stale, roots)
@@ -2817,7 +2933,8 @@ fn locate_canonical(
     name: &str,
 ) -> Result<std::path::PathBuf, crate::error::Error> {
     let exact = match kind {
-        ArtifactKind::Skill => materialized_root.join(name),
+        // A hook payload is a directory tree, exactly like a skill (C-102).
+        ArtifactKind::Skill | ArtifactKind::Hook => materialized_root.join(name),
         ArtifactKind::Rule | ArtifactKind::Agent => materialized_root.join(format!("{name}.md")),
         // Bundles expand into members at resolve time and never enter the
         // lock, so the installer never sees one.
@@ -2833,7 +2950,7 @@ fn locate_canonical(
     for entry in std::fs::read_dir(materialized_root).map_err(|e| target_io(materialized_root, e))? {
         let path = entry.map_err(|e| target_io(materialized_root, e))?.path();
         let matches = match kind {
-            ArtifactKind::Skill => path.is_dir(),
+            ArtifactKind::Skill | ArtifactKind::Hook => path.is_dir(),
             ArtifactKind::Rule | ArtifactKind::Agent => {
                 path.is_file() && path.extension() == Some(std::ffi::OsStr::new("md"))
             }
@@ -3222,6 +3339,7 @@ mod tests {
             rules,
             agents: vec![],
             mcp: vec![],
+            hooks: Vec::new(),
             bundles: vec![],
         }
     }
@@ -3237,6 +3355,7 @@ mod tests {
             rules: vec![],
             agents: vec![],
             mcp,
+            hooks: Vec::new(),
             bundles: vec![],
         }
     }
@@ -3263,6 +3382,7 @@ mod tests {
             rules: vec![],
             agents: vec![],
             mcp: vec![],
+            hooks: Vec::new(),
             bundles: vec![],
         }
     }
@@ -6239,6 +6359,846 @@ mod tests {
         assert!(!support.is_symlink(), "the link itself is unlinked, never its target");
         assert_eq!(std::fs::read(support.join("examples.md")).unwrap(), b"# ex\n");
         assert!(!ws.join("nowhere").exists(), "the link's target must never be created");
+    }
+
+    // ── Hook install orchestration (C-101…C-105) ─────────────────
+
+    /// A hook payload tar: `<name>/hook.toml` plus one handler, every entry
+    /// `0o644` — the mode `grim release` stamps (C-019's premise).
+    fn hook_tar(name: &str, handler: &str) -> Vec<u8> {
+        let manifest = format!(
+            "schema = 1\nname = \"{name}\"\ndescription = \"a guard\"\n\n\
+             [[hooks]]\nid = \"guard\"\nevent = \"PreToolUse\"\ntier = \"observer\"\n\
+             command = \"sh guard.sh\"\n"
+        );
+        let mut b = tar::Builder::new(Vec::new());
+        let mut push = |path: String, body: &[u8]| {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(body.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            b.append_data(&mut h, path, body).unwrap();
+        };
+        push(
+            format!("{name}/{}", crate::oci::hook::HOOK_MANIFEST_FILE),
+            manifest.as_bytes(),
+        );
+        push(format!("{name}/guard.sh"), handler.as_bytes());
+        b.into_inner().unwrap()
+    }
+
+    fn locked_hook(name: &str, blob: &[u8]) -> LockedArtifact {
+        locked_of(name, blob, ArtifactKind::Hook)
+    }
+
+    fn lock_of_hooks(hooks: Vec<LockedArtifact>) -> GrimoireLock {
+        GrimoireLock {
+            hooks,
+            metadata: test_lock_metadata(),
+            skills: vec![],
+            rules: vec![],
+            agents: vec![],
+            mcp: vec![],
+            bundles: vec![],
+        }
+    }
+
+    /// A policy that arms: feature on, `--trust-hooks` (the fixture registry
+    /// is plain-HTTP `localhost:5000`).
+    fn arming_policy(scope: ConfigScope, workspace: &Path) -> crate::hook::policy::HookPolicy {
+        crate::hook::policy::HookPolicy::new(
+            true,
+            Some(true),
+            crate::hook::trust::Interactivity::NonInteractive,
+            scope,
+            workspace,
+            &[],
+            crate::hook::consent::Consent::Absent,
+        )
+    }
+
+    /// The resting state: feature off, nothing arms.
+    fn gated_policy(scope: ConfigScope, workspace: &Path) -> crate::hook::policy::HookPolicy {
+        crate::hook::policy::HookPolicy::new(
+            false,
+            None,
+            crate::hook::trust::Interactivity::NonInteractive,
+            scope,
+            workspace,
+            &[],
+            crate::hook::consent::Consent::Absent,
+        )
+    }
+
+    /// An arming global-scope hook target over `home` (workspace IS `$GRIM_HOME`).
+    fn global_hook_target(home: &Path, clients: Vec<ClientTarget>) -> InstallTarget {
+        InstallTarget::new(home, ConfigScope::Global, clients)
+            .with_grim_home(home)
+            .with_hook_policy(arming_policy(ConfigScope::Global, home))
+    }
+
+    /// [`roots`] with `$GRIM_HOME` separated from the workspace — the honest
+    /// fixture for a project-scope hook, whose payload is machine-local.
+    fn roots_with_home(workspace: &Path, grim_home: &Path) -> AnchorRoots {
+        AnchorRoots {
+            grim_home: grim_home.to_path_buf(),
+            ..roots(workspace)
+        }
+    }
+
+    /// [`BlobMock`] that counts `fetch_blob` calls — C-101's "no fetch".
+    struct CountingMock {
+        blob: Vec<u8>,
+        fetches: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl OciAccess for CountingMock {
+        async fn resolve_digest(&self, _id: &Identifier, _op: Operation) -> Result<Option<Digest>, AccessError> {
+            Ok(None)
+        }
+        async fn fetch_manifest(&self, _id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
+            Ok(Some(manifest_for(&self.blob)))
+        }
+        async fn fetch_blob(
+            &self,
+            _repo: &Identifier,
+            _digest: &Digest,
+            _max_bytes: u64,
+        ) -> Result<Option<Vec<u8>>, AccessError> {
+            self.fetches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Some(self.blob.clone()))
+        }
+        async fn list_tags(&self, _id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
+            Ok(None)
+        }
+        async fn list_catalog(&self, _registry: &str) -> Result<Vec<String>, AccessError> {
+            Ok(Vec::new())
+        }
+        async fn push_blob(&self, _repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {
+            Ok(Algorithm::Sha256.hash(bytes))
+        }
+        async fn push_manifest(&self, _repo: &Identifier, _m: &OciManifest) -> Result<Digest, AccessError> {
+            Ok(Algorithm::Sha256.hash(b"m"))
+        }
+        async fn put_tag(&self, _repo: &Identifier, _t: &str, _d: &Digest) -> Result<(), AccessError> {
+            Ok(())
+        }
+    }
+
+    /// Run one hook through `install_all` with a counting mock; returns the
+    /// outcome and the number of blob fetches.
+    async fn gate_run(
+        name: &str,
+        target: &InstallTarget,
+        state: &mut InstallState,
+        roots: &AnchorRoots,
+    ) -> (InstallOutcome, usize) {
+        let blob = hook_tar(name, "#!/bin/sh\nexit 0\n");
+        let lock = lock_of_hooks(vec![locked_hook(name, &blob)]);
+        let fetches = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let access = arc(CountingMock {
+            blob,
+            fetches: fetches.clone(),
+        });
+        let r = install_all(
+            &lock,
+            &access,
+            &DefaultMaterializer,
+            target,
+            state,
+            roots,
+            Path::new("."),
+            false,
+        )
+        .await;
+        let outcome = r[0].result.as_ref().unwrap().clone();
+        (outcome, fetches.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    /// C-101 step 1: a reserved binding never fetches and writes no record.
+    #[tokio::test]
+    async fn c101_a_reserved_hook_binding_is_skipped_before_any_fetch_or_record() {
+        let home = tempfile::tempdir().unwrap();
+        let target = global_hook_target(home.path(), vec![ClientTarget::Claude]);
+        let mut state = InstallState::load(&home.path().join("state.json")).unwrap();
+        let (outcome, fetches) = gate_run("bin", &target, &mut state, &roots(home.path())).await;
+        assert!(matches!(outcome, InstallOutcome::Skipped(_)), "{outcome:?}");
+        assert_eq!(fetches, 0);
+        assert!(
+            state.get(ArtifactKind::Hook, "bin").is_none(),
+            "no record for a reserved binding"
+        );
+        assert!(!home.path().join("hooks").exists());
+    }
+
+    /// C-101 step 2: no policy ⇒ no fetch, no record written, an existing
+    /// record left untouched.
+    #[tokio::test]
+    async fn c101_no_policy_skips_without_fetch_and_leaves_the_record_alone() {
+        let home = tempfile::tempdir().unwrap();
+        let target = InstallTarget::new(home.path(), ConfigScope::Global, vec![ClientTarget::Claude])
+            .with_grim_home(home.path());
+        let mut state = InstallState::load(&home.path().join("state.json")).unwrap();
+        let (outcome, fetches) = gate_run("shell-guard", &target, &mut state, &roots(home.path())).await;
+        assert!(matches!(outcome, InstallOutcome::Skipped(_)), "{outcome:?}");
+        assert_eq!(fetches, 0);
+        assert!(
+            state.get(ArtifactKind::Hook, "shell-guard").is_none(),
+            "None writes no record"
+        );
+
+        // An existing record (a previous armed install) survives verbatim.
+        let armed = global_hook_target(home.path(), vec![ClientTarget::Claude]);
+        let (first, _) = gate_run("shell-guard", &armed, &mut state, &roots(home.path())).await;
+        assert_eq!(first, InstallOutcome::Installed);
+        let before = state.get(ArtifactKind::Hook, "shell-guard").unwrap().clone();
+        let (outcome, fetches) = gate_run("shell-guard", &target, &mut state, &roots(home.path())).await;
+        assert!(matches!(outcome, InstallOutcome::Skipped(_)), "{outcome:?}");
+        assert_eq!(fetches, 0);
+        assert_eq!(state.get(ArtifactKind::Hook, "shell-guard"), Some(&before));
+    }
+
+    /// C-101 step 3: a policy that will not arm ⇒ no fetch; a zero-output
+    /// record only when none exists, an existing one untouched.
+    #[tokio::test]
+    async fn c101_a_gated_policy_skips_without_fetch_and_records_only_when_absent() {
+        let home = tempfile::tempdir().unwrap();
+        let gated = InstallTarget::new(home.path(), ConfigScope::Global, vec![ClientTarget::Claude])
+            .with_grim_home(home.path())
+            .with_hook_policy(gated_policy(ConfigScope::Global, home.path()));
+        let mut state = InstallState::load(&home.path().join("state.json")).unwrap();
+        let (outcome, fetches) = gate_run("shell-guard", &gated, &mut state, &roots(home.path())).await;
+        assert!(matches!(outcome, InstallOutcome::Skipped(_)), "{outcome:?}");
+        assert_eq!(fetches, 0);
+        let rec = state
+            .get(ArtifactKind::Hook, "shell-guard")
+            .expect("S-001 zero-output record");
+        assert!(rec.outputs.is_empty());
+        assert!(!home.path().join("hooks").exists());
+
+        let armed = global_hook_target(home.path(), vec![ClientTarget::Claude]);
+        let (first, _) = gate_run("shell-guard", &armed, &mut state, &roots(home.path())).await;
+        assert!(
+            matches!(first, InstallOutcome::Installed | InstallOutcome::Updated),
+            "{first:?}"
+        );
+        let before = state.get(ArtifactKind::Hook, "shell-guard").unwrap().clone();
+        let (outcome, fetches) = gate_run("shell-guard", &gated, &mut state, &roots(home.path())).await;
+        assert!(matches!(outcome, InstallOutcome::Skipped(_)), "{outcome:?}");
+        assert_eq!(fetches, 0);
+        assert_eq!(
+            state.get(ArtifactKind::Hook, "shell-guard"),
+            Some(&before),
+            "a flag flip must not orphan the payload"
+        );
+    }
+
+    /// C-101's seam assert: `install_and_persist` with a hook and no policy is
+    /// a seam that forgot to attach one.
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    #[should_panic(expected = "without a hook policy")]
+    async fn c101_install_and_persist_without_a_policy_panics_in_tests() {
+        let home = tempfile::tempdir().unwrap();
+        let blob = hook_tar("shell-guard", "#!/bin/sh\nexit 0\n");
+        let lock = lock_of_hooks(vec![locked_hook("shell-guard", &blob)]);
+        let access = arc(BlobMock { blob });
+        let target = InstallTarget::new(home.path(), ConfigScope::Global, vec![ClientTarget::Claude])
+            .with_grim_home(home.path());
+        let mut state = InstallState::load(&home.path().join("state.json")).unwrap();
+        let _ = install_and_persist(
+            &lock,
+            &access,
+            &DefaultMaterializer,
+            &target,
+            &mut state,
+            &roots(home.path()),
+            ConfigScope::Global,
+            home.path(),
+            &home.path().join("grimoire.toml"),
+            false,
+            InstallIntent::Declared,
+            &crate::install::progress::SilentProgress,
+        )
+        .await;
+    }
+
+    /// C-103: `Hook` reads the hook surface, never `kind_support`. Qoder is
+    /// global-only (C-121 passed, WP-02): `true` global, `false` project.
+    #[test]
+    fn client_supports_kind_reads_hook_from_the_hook_surface() {
+        let ws = Path::new("/ws");
+        for scope in [ConfigScope::Project, ConfigScope::Global] {
+            for client in ClientTarget::ALL {
+                let expected =
+                    client.vendor().hook_surface().is_some() && client.vendor().kind_surface(ArtifactKind::Hook, scope);
+                assert_eq!(
+                    client_supports_kind(client, ArtifactKind::Hook, ws, scope),
+                    expected,
+                    "{client} at {scope:?}"
+                );
+            }
+        }
+        assert!(client_supports_kind(
+            ClientTarget::Claude,
+            ArtifactKind::Hook,
+            ws,
+            ConfigScope::Project
+        ));
+        assert!(client_supports_kind(
+            ClientTarget::Claude,
+            ArtifactKind::Hook,
+            ws,
+            ConfigScope::Global
+        ));
+        for client in [ClientTarget::Codex, ClientTarget::Copilot, ClientTarget::Qoder] {
+            assert!(
+                client_supports_kind(client, ArtifactKind::Hook, ws, ConfigScope::Global),
+                "{client}"
+            );
+            assert!(
+                !client_supports_kind(client, ArtifactKind::Hook, ws, ConfigScope::Project),
+                "{client}'s hook file is a TRACKED repository file (A1, I1)"
+            );
+        }
+        let armable = [
+            ClientTarget::Claude,
+            ClientTarget::Codex,
+            ClientTarget::Copilot,
+            ClientTarget::Qoder,
+        ];
+        let surfaceless: Vec<ClientTarget> = ClientTarget::ALL.into_iter().filter(|c| !armable.contains(c)).collect();
+        assert_eq!(surfaceless.len(), 15, "{surfaceless:?}");
+        assert!(!kind_is_permanently_declined(ClientTarget::Qoder, ArtifactKind::Hook));
+        for client in surfaceless {
+            for scope in [ConfigScope::Project, ConfigScope::Global] {
+                assert!(
+                    !client_supports_kind(client, ArtifactKind::Hook, ws, scope),
+                    "{client} has no hook mechanism ({scope:?})"
+                );
+                assert!(kind_is_permanently_declined(client, ArtifactKind::Hook), "{client}");
+            }
+        }
+    }
+
+    /// Install-side support and anchor classification must agree per client.
+    #[test]
+    fn hook_support_and_hook_anchoring_agree_for_every_client() {
+        let home = tempfile::tempdir().unwrap();
+        let roots = roots(home.path());
+        let target = InstallTarget::new(home.path(), ConfigScope::Global, vec![ClientTarget::Claude])
+            .with_grim_home(home.path());
+        for client in ClientTarget::ALL {
+            let dest = target.path_for(client, ArtifactKind::Hook, "shell-guard");
+            let anchored = crate::install::path_anchor::AnchoredPath::from_target(
+                &dest,
+                ConfigScope::Global,
+                client,
+                ArtifactKind::Hook,
+                &roots,
+            );
+            assert_eq!(
+                client_supports_kind(client, ArtifactKind::Hook, home.path(), ConfigScope::Global),
+                anchored.is_ok(),
+                "{client}: install-side support and anchor classification must agree ({anchored:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn locate_canonical_finds_the_hook_payload_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("shell-guard")).unwrap();
+        std::fs::write(
+            tmp.path()
+                .join("shell-guard")
+                .join(crate::oci::hook::HOOK_MANIFEST_FILE),
+            "schema = 1\n",
+        )
+        .unwrap();
+        let found = locate_canonical(tmp.path(), ArtifactKind::Hook, "shell-guard").unwrap();
+        assert_eq!(found, tmp.path().join("shell-guard"));
+        let rebound = locate_canonical(tmp.path(), ArtifactKind::Hook, "sg").unwrap();
+        assert_eq!(rebound, tmp.path().join("shell-guard"));
+    }
+
+    /// C-102: staging a hook tar yields `<root>/<name>/` and no support dir.
+    #[tokio::test]
+    async fn staging_a_hook_yields_its_directory_and_no_support_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blob = hook_tar("shell-guard", "#!/bin/sh\nexit 0\n");
+        let artifact = locked_hook("shell-guard", &blob);
+        let access = arc(BlobMock { blob });
+        let staged = stage_locked_artifact(
+            &artifact,
+            ArtifactKind::Hook,
+            &access,
+            Path::new("."),
+            &DefaultMaterializer,
+            tmp.path(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            staged.canonical.ends_with("shell-guard"),
+            "{}",
+            staged.canonical.display()
+        );
+        assert!(staged.canonical.join(crate::oci::hook::HOOK_MANIFEST_FILE).is_file());
+        assert!(staged.support_dir.is_none());
+    }
+
+    /// **S-003 / C-108.** One payload dir per scope, one output per client.
+    #[tokio::test]
+    async fn a_hook_materializes_one_shared_payload_dir_with_one_output_per_client() {
+        let home = tempfile::tempdir().unwrap();
+        let blob = hook_tar("shell-guard", "#!/bin/sh\nexit 0\n");
+        let lock = lock_of_hooks(vec![locked_hook("shell-guard", &blob)]);
+        let access = arc(BlobMock { blob: blob.clone() });
+        let target = global_hook_target(home.path(), vec![ClientTarget::Claude, ClientTarget::Codex]);
+        let mut state = InstallState::load(&home.path().join("state.json")).unwrap();
+        let roots = roots(home.path());
+        let r = install_all(
+            &lock,
+            &access,
+            &DefaultMaterializer,
+            &target,
+            &mut state,
+            &roots,
+            Path::new("."),
+            false,
+        )
+        .await;
+        assert_eq!(
+            *r[0].result.as_ref().unwrap(),
+            InstallOutcome::Installed,
+            "{:?}",
+            r[0].result
+        );
+
+        let payload = home.path().join("hooks/shell-guard");
+        assert!(payload.join(crate::oci::hook::HOOK_MANIFEST_FILE).is_file());
+        assert!(payload.join("guard.sh").is_file());
+        let rec = state.get(ArtifactKind::Hook, "shell-guard").expect("recorded");
+        let mut clients: Vec<&str> = rec.outputs.iter().map(|o| o.client.as_str()).collect();
+        clients.sort_unstable();
+        assert_eq!(clients, vec!["claude", "codex"]);
+        for out in &rec.outputs {
+            assert_eq!(
+                out.target,
+                AnchoredPath {
+                    anchor: PathAnchor::GrimHome,
+                    relative: "hooks/shell-guard".to_string(),
+                }
+            );
+            assert_eq!(out.support_dir, None);
+            assert_eq!(out.entry, None);
+        }
+        assert_eq!(rec.outputs[0].content_hash, rec.outputs[1].content_hash);
+    }
+
+    /// **C-019, install side.** A registry payload never gains an exec bit.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_installed_hook_payload_carries_no_exec_bit() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let home = tempfile::tempdir().unwrap();
+        let blob = hook_tar("shell-guard", "#!/bin/sh\nexit 0\n");
+        let lock = lock_of_hooks(vec![locked_hook("shell-guard", &blob)]);
+        let access = arc(BlobMock { blob });
+        let target = global_hook_target(home.path(), vec![ClientTarget::Claude]);
+        let mut state = InstallState::load(&home.path().join("state.json")).unwrap();
+        let r = install_all(
+            &lock,
+            &access,
+            &DefaultMaterializer,
+            &target,
+            &mut state,
+            &roots(home.path()),
+            Path::new("."),
+            false,
+        )
+        .await;
+        assert_eq!(
+            *r[0].result.as_ref().unwrap(),
+            InstallOutcome::Installed,
+            "{:?}",
+            r[0].result
+        );
+        let mode = std::fs::metadata(home.path().join("hooks/shell-guard/guard.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o111, 0, "{mode:o}");
+    }
+
+    /// **Principle 9 self-heal.** A re-materialize is `AlreadyInstalled` and
+    /// leaves the record byte-identical.
+    #[tokio::test]
+    async fn re_materializing_a_hook_leaves_the_record_not_modified() {
+        let home = tempfile::tempdir().unwrap();
+        let blob = hook_tar("shell-guard", "#!/bin/sh\nexit 0\n");
+        let lock = lock_of_hooks(vec![locked_hook("shell-guard", &blob)]);
+        let access = arc(BlobMock { blob });
+        let target = global_hook_target(home.path(), vec![ClientTarget::Claude]);
+        let mut state = InstallState::load(&home.path().join("state.json")).unwrap();
+        let roots = roots(home.path());
+        let first = install_all(
+            &lock,
+            &access,
+            &DefaultMaterializer,
+            &target,
+            &mut state,
+            &roots,
+            Path::new("."),
+            false,
+        )
+        .await;
+        assert_eq!(*first[0].result.as_ref().unwrap(), InstallOutcome::Installed);
+        let before = state.get(ArtifactKind::Hook, "shell-guard").unwrap().clone();
+        let second = install_all(
+            &lock,
+            &access,
+            &DefaultMaterializer,
+            &target,
+            &mut state,
+            &roots,
+            Path::new("."),
+            false,
+        )
+        .await;
+        assert_eq!(*second[0].result.as_ref().unwrap(), InstallOutcome::AlreadyInstalled);
+        assert_eq!(&before, state.get(ArtifactKind::Hook, "shell-guard").unwrap());
+    }
+
+    /// **S-013.** A client with no hook mechanism is skipped, never armed.
+    #[tokio::test]
+    async fn a_surfaceless_client_is_reported_as_skipped_never_armed() {
+        let home = tempfile::tempdir().unwrap();
+        let blob = hook_tar("shell-guard", "#!/bin/sh\nexit 0\n");
+        let lock = lock_of_hooks(vec![locked_hook("shell-guard", &blob)]);
+        let access = arc(BlobMock { blob });
+        let target = global_hook_target(home.path(), vec![ClientTarget::Warp, ClientTarget::Zed]);
+        let mut state = InstallState::load(&home.path().join("state.json")).unwrap();
+        let r = install_all(
+            &lock,
+            &access,
+            &DefaultMaterializer,
+            &target,
+            &mut state,
+            &roots(home.path()),
+            Path::new("."),
+            false,
+        )
+        .await;
+        assert!(
+            matches!(r[0].result.as_ref().unwrap(), InstallOutcome::Skipped(_)),
+            "{:?}",
+            r[0].result
+        );
+        assert!(!home.path().join("hooks").exists());
+        let rec = state.get(ArtifactKind::Hook, "shell-guard").expect("still recorded");
+        assert!(rec.outputs.is_empty(), "{:?}", rec.outputs);
+    }
+
+    /// **A1.** Codex hosts hooks at global scope only.
+    #[tokio::test]
+    async fn a_codex_hook_at_project_scope_is_skipped() {
+        let ws = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let blob = hook_tar("shell-guard", "#!/bin/sh\nexit 0\n");
+        let lock = lock_of_hooks(vec![locked_hook("shell-guard", &blob)]);
+        let access = arc(BlobMock { blob });
+        let target = InstallTarget::new(ws.path(), ConfigScope::Project, vec![ClientTarget::Codex])
+            .with_grim_home(home.path())
+            .with_hook_policy(arming_policy(ConfigScope::Project, ws.path()));
+        let mut state = InstallState::load(&ws.path().join("state.json")).unwrap();
+        let r = install_all(
+            &lock,
+            &access,
+            &DefaultMaterializer,
+            &target,
+            &mut state,
+            &roots_with_home(ws.path(), home.path()),
+            Path::new("."),
+            false,
+        )
+        .await;
+        assert!(
+            matches!(r[0].result.as_ref().unwrap(), InstallOutcome::Skipped(_)),
+            "{:?}",
+            r[0].result
+        );
+        assert!(!home.path().join("hooks").exists());
+    }
+
+    /// Issue #88: a machine whose first hook operation is an install reaches
+    /// `$GRIM_HOME/hooks` through the payload's `create_dir_all`, which leaves
+    /// it at the process umask. The install must leave it owner-only.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_first_hook_install_leaves_the_hooks_dir_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let ws = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let blob = hook_tar("shell-guard", "#!/bin/sh\nexit 0\n");
+        let lock = lock_of_hooks(vec![locked_hook("shell-guard", &blob)]);
+        let access = arc(BlobMock { blob });
+        let target = InstallTarget::new(ws.path(), ConfigScope::Project, vec![ClientTarget::Claude])
+            .with_grim_home(home.path())
+            .with_hook_policy(arming_policy(ConfigScope::Project, ws.path()));
+        let mut state = InstallState::load(&home.path().join("state.json")).unwrap();
+        let roots = roots_with_home(ws.path(), home.path());
+        let r = install_all(
+            &lock,
+            &access,
+            &DefaultMaterializer,
+            &target,
+            &mut state,
+            &roots,
+            Path::new("."),
+            false,
+        )
+        .await;
+        assert_eq!(*r[0].result.as_ref().unwrap(), InstallOutcome::Installed);
+        let hooks = crate::install::hook_dispatch::hooks_dir(home.path());
+        let mode = std::fs::metadata(&hooks).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, crate::install::hook_dispatch::HOOKS_DIR_MODE, "{mode:o}");
+    }
+
+    /// **S-010 + I1 (SEC-1).** A project-scope hook install writes nothing
+    /// into the workspace — not the registration, not the payload.
+    #[tokio::test]
+    async fn a_project_hook_install_writes_nothing_armable_into_the_workspace() {
+        let ws = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let blob = hook_tar("shell-guard", "#!/bin/sh\nexit 0\n");
+        let lock = lock_of_hooks(vec![locked_hook("shell-guard", &blob)]);
+        let access = arc(BlobMock { blob });
+        let target = InstallTarget::new(ws.path(), ConfigScope::Project, vec![ClientTarget::Claude])
+            .with_grim_home(home.path())
+            .with_hook_policy(arming_policy(ConfigScope::Project, ws.path()));
+        let mut state = InstallState::load(&home.path().join("state.json")).unwrap();
+        let roots = roots_with_home(ws.path(), home.path());
+        let r = install_all(
+            &lock,
+            &access,
+            &DefaultMaterializer,
+            &target,
+            &mut state,
+            &roots,
+            Path::new("."),
+            false,
+        )
+        .await;
+        assert_eq!(
+            *r[0].result.as_ref().unwrap(),
+            InstallOutcome::Installed,
+            "{:?}",
+            r[0].result
+        );
+
+        let root = crate::install::hook_dispatch::RootScope::Workspace(ws.path());
+        let payload = crate::install::hook_dispatch::payload_dir(home.path(), root, "shell-guard");
+        assert!(payload.join(crate::oci::hook::HOOK_MANIFEST_FILE).is_file());
+        let rec = state.get(ArtifactKind::Hook, "shell-guard").unwrap();
+        assert_eq!(
+            rec.outputs[0].target,
+            AnchoredPath {
+                anchor: PathAnchor::GrimHome,
+                relative: crate::install::hook_dispatch::payload_relative(root, "shell-guard"),
+            }
+        );
+        let mut stray = Vec::new();
+        let mut stack = vec![ws.path().to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                if entry.path().is_dir() {
+                    stack.push(entry.path());
+                } else {
+                    stray.push(entry.path());
+                }
+            }
+        }
+        stray.retain(|p| !p.ends_with(".grimoire/.gitignore")); // grim bookkeeping; arms nothing
+        assert!(
+            stray.is_empty(),
+            "a project-scope hook install left files in the workspace: {stray:?}"
+        );
+    }
+
+    /// **S-007, install side.** A digest change re-materializes and moves the pin.
+    #[tokio::test]
+    async fn a_new_hook_digest_re_materializes_and_moves_the_recorded_pin() {
+        let home = tempfile::tempdir().unwrap();
+        let v1 = hook_tar("shell-guard", "#!/bin/sh\nexit 0\n");
+        let v2 = hook_tar("shell-guard", "#!/bin/sh\necho hi\nexit 0\n");
+        let target = global_hook_target(home.path(), vec![ClientTarget::Claude]);
+        let mut state = InstallState::load(&home.path().join("state.json")).unwrap();
+        let roots = roots(home.path());
+        let lock1 = lock_of_hooks(vec![locked_hook("shell-guard", &v1)]);
+        let r1 = install_all(
+            &lock1,
+            &arc(BlobMock { blob: v1 }),
+            &DefaultMaterializer,
+            &target,
+            &mut state,
+            &roots,
+            Path::new("."),
+            false,
+        )
+        .await;
+        assert_eq!(*r1[0].result.as_ref().unwrap(), InstallOutcome::Installed);
+        let pin1 = state.get(ArtifactKind::Hook, "shell-guard").unwrap().source.clone();
+        let lock2 = lock_of_hooks(vec![locked_hook("shell-guard", &v2)]);
+        let r2 = install_all(
+            &lock2,
+            &arc(BlobMock { blob: v2 }),
+            &DefaultMaterializer,
+            &target,
+            &mut state,
+            &roots,
+            Path::new("."),
+            false,
+        )
+        .await;
+        assert_eq!(
+            *r2[0].result.as_ref().unwrap(),
+            InstallOutcome::Updated,
+            "{:?}",
+            r2[0].result
+        );
+        let rec = state.get(ArtifactKind::Hook, "shell-guard").unwrap();
+        assert!(!rec.source.eq_content(&pin1));
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("hooks/shell-guard/guard.sh")).unwrap(),
+            "#!/bin/sh\necho hi\nexit 0\n"
+        );
+    }
+
+    /// I5 tamper evidence over the payload directory.
+    #[tokio::test]
+    async fn a_locally_modified_hook_payload_is_refused_until_forced() {
+        let home = tempfile::tempdir().unwrap();
+        let blob = hook_tar("shell-guard", "#!/bin/sh\nexit 0\n");
+        let lock = lock_of_hooks(vec![locked_hook("shell-guard", &blob)]);
+        let access = arc(BlobMock { blob });
+        let target = global_hook_target(home.path(), vec![ClientTarget::Claude]);
+        let mut state = InstallState::load(&home.path().join("state.json")).unwrap();
+        let roots = roots(home.path());
+        let r1 = install_all(
+            &lock,
+            &access,
+            &DefaultMaterializer,
+            &target,
+            &mut state,
+            &roots,
+            Path::new("."),
+            false,
+        )
+        .await;
+        assert_eq!(*r1[0].result.as_ref().unwrap(), InstallOutcome::Installed);
+        std::fs::write(home.path().join("hooks/shell-guard/guard.sh"), "#!/bin/sh\nrm -rf /\n").unwrap();
+        let r2 = install_all(
+            &lock,
+            &access,
+            &DefaultMaterializer,
+            &target,
+            &mut state,
+            &roots,
+            Path::new("."),
+            false,
+        )
+        .await;
+        assert!(
+            matches!(r2[0].result.as_ref().unwrap(), InstallOutcome::Refused { .. }),
+            "{:?}",
+            r2[0].result
+        );
+        let r3 = install_all(
+            &lock,
+            &access,
+            &DefaultMaterializer,
+            &target,
+            &mut state,
+            &roots,
+            Path::new("."),
+            true,
+        )
+        .await;
+        assert_eq!(
+            *r3[0].result.as_ref().unwrap(),
+            InstallOutcome::Updated,
+            "{:?}",
+            r3[0].result
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("hooks/shell-guard/guard.sh")).unwrap(),
+            "#!/bin/sh\nexit 0\n"
+        );
+    }
+
+    /// An install that refuses a locally modified hook (exit 65) must not arm
+    /// the modified manifest either: convergence runs after the refusal and
+    /// would otherwise read the edited `hook.toml` into the dispatch table.
+    #[tokio::test]
+    async fn an_integrity_refused_hook_never_arms_its_edited_manifest() {
+        let home = tempfile::tempdir().unwrap();
+        let blob = hook_tar("shell-guard", "#!/bin/sh\nexit 0\n");
+        let lock = lock_of_hooks(vec![locked_hook("shell-guard", &blob)]);
+        let access = arc(BlobMock { blob });
+        let target = global_hook_target(home.path(), vec![ClientTarget::Claude]);
+        let mut state = InstallState::load(&home.path().join("state.json")).unwrap();
+        let roots = roots(home.path());
+        let table = || std::fs::read_to_string(crate::install::hook_dispatch::dispatch_path(home.path())).unwrap();
+        let run = |state: &mut InstallState| {
+            let (lock, access, target, roots) = (&lock, &access, &target, &roots);
+            let home = home.path().to_path_buf();
+            let mut owned = state.clone();
+            async move {
+                let r = install_and_persist(
+                    lock,
+                    access,
+                    &DefaultMaterializer,
+                    target,
+                    &mut owned,
+                    roots,
+                    ConfigScope::Global,
+                    &home,
+                    &home.join("grimoire.toml"),
+                    false,
+                    InstallIntent::Declared,
+                    &crate::install::progress::SilentProgress,
+                )
+                .await
+                .unwrap();
+                (r, owned)
+            }
+        };
+
+        let (r1, next) = run(&mut state).await;
+        state = next;
+        assert_eq!(*r1[0].result.as_ref().unwrap(), InstallOutcome::Installed);
+        assert!(table().contains("sh guard.sh"), "precondition: armed — {}", table());
+
+        let manifest = home.path().join("hooks/shell-guard/hook.toml");
+        let edited = std::fs::read_to_string(&manifest)
+            .unwrap()
+            .replace("sh guard.sh", "sh evil.sh");
+        std::fs::write(&manifest, edited).unwrap();
+
+        let (r2, _) = run(&mut state).await;
+        assert!(
+            matches!(r2[0].result.as_ref().unwrap(), InstallOutcome::Refused { .. }),
+            "{:?}",
+            r2[0].result
+        );
+        assert!(
+            !table().contains("evil.sh"),
+            "a refused hook must not arm its edited manifest — {}",
+            table()
+        );
     }
 
     #[test]

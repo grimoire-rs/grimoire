@@ -15,6 +15,9 @@ pub mod client_target;
 pub mod cline_lock;
 pub mod content_hash;
 pub mod expected_outputs;
+pub mod hook_dispatch;
+pub mod hook_launcher;
+pub mod hook_registrar;
 pub mod ignore_set;
 pub mod install_error;
 pub mod install_state;
@@ -59,6 +62,7 @@ pub use client_target::{ClientTarget, MaterializedFile};
 #[cfg(test)]
 #[allow(unused_imports)]
 pub use content_hash::content_hash;
+#[cfg(test)]
 #[allow(unused_imports)]
 pub use content_hash::footprint_hash;
 #[allow(unused_imports)]

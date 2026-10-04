@@ -19,6 +19,18 @@
 //! `container`/`member` and the [`Splice`] result type are shared verbatim
 //! with [`super::json_splice`] — the pointer shape and "did the text
 //! change" question are format-independent.
+//!
+//! **Key escaping (audited against GitHub #56).** This module builds no
+//! TOML by string interpolation: `container` and `member` reach the
+//! document only as arguments to `Table::entry`/`Table::insert`, which
+//! quote and escape a key that needs it, and values go through
+//! [`json_to_toml_value`] into typed [`toml_edit`] nodes. The only
+//! `format!` calls here compose *error messages*. #56's defect therefore
+//! has no analogue on this side, and the invariant is pinned by
+//! `upsert_member_name_injection_is_confined_to_one_key` and
+//! `upsert_value_escaping_matrix_round_trips_and_confines_to_one_key`
+//! below. **Never introduce a `format!`-built TOML fragment here** — that
+//! is the one edit that would reopen the class.
 
 use std::io;
 

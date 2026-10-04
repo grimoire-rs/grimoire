@@ -75,6 +75,11 @@ pub struct UpdateArgs {
     /// PATH); installs nothing.
     #[arg(long, value_name = "PATH", conflicts_with_all = ["force", "client"])]
     pub marketplace: Option<PathBuf>,
+
+    /// `--trust-hooks` / `--no-trust-hooks`: the per-invocation half of the
+    /// same question the workspace consent record answers durably.
+    #[command(flatten)]
+    pub hook_trust: crate::cli::options::HookTrustOpts,
 }
 
 /// Run `grim update`.
@@ -116,6 +121,11 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
         .await,
     )?;
 
+    // C-112: the hook policy is resolved against the **new** lock, after
+    // `roll_forward` — and before the lock is saved, so a failure here (an
+    // unloadable global config, 78) leaves nothing on disk changed.
+    let hook_policy = super::hook_consent::resolve(ctx, &scope, &new_lock, args.hook_trust.flag())?;
+
     super::grim(lock_io::save(&scope.lock_path, &new_lock, previous.as_ref()))?;
 
     // Re-materialize through the SAME integrity gate `grim install` runs:
@@ -138,7 +148,8 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
         &args.client,
         &scope.options.clients,
         &scope.options.vendors,
-    ))?;
+    ))?
+    .with_hook_policy(hook_policy);
     // `install_and_persist` runs this same check; `update` calls
     // `install_all_with_progress` directly and would otherwise never warn
     // about the Copilot pool gap (the docs promise it on both `install` and
@@ -154,6 +165,12 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     // `--progress auto` stays silent here (update never rendered a bar);
     // `--progress json` emits the NDJSON events on stderr.
     let progress = crate::cli::progress::select_progress(ctx.progress(), false);
+    // A mutating seam that forgot to attach a policy would skip every hook
+    // silently (C-101 step 2); tests catch the next forked seam here.
+    debug_assert!(
+        target.hook_policy().is_some() || new_lock.hooks.is_empty(),
+        "grim update installs hooks without a hook policy"
+    );
     let outcomes = install_all_with_progress(
         &new_lock,
         &access,
@@ -282,6 +299,17 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
             );
         }
     }
+    // C-104/C-112: hook convergence right after the sync loop. Its client set
+    // is derived from the hook-capable roster, never `sync_clients`: the
+    // dispatch table is replaced wholesale, so a narrowed set would drop a
+    // sibling client's rows from the union.
+    crate::install::hook_registrar::converge_for(
+        target.hook_policy(),
+        &state,
+        &scope.workspace,
+        scope.scope,
+        &scope.roots,
+    );
 
     // Build the report before surfacing any failure so it reflects the new
     // lock.
@@ -484,6 +512,17 @@ async fn refresh_dev_installs(
         let LockedSource::Path { path, hash } = &rec.source else {
             continue;
         };
+        // C-111: a hook has no path source, so a `dev = true` hook record can
+        // only come from a hand-edited state file — never pack it (the packer
+        // refuses a hook with a typed error rather than panicking; see
+        // `skill::local_pack::a_hook_is_refused_not_panicked_on`).
+        if rec.kind == ArtifactKind::Hook {
+            tracing::warn!(
+                "dev-install record for hook '{}' ignored: hooks have no path source",
+                rec.name
+            );
+            continue;
+        }
         let abs = path.resolve(scope.config_dir());
         let packed =
             crate::skill::pack_local_artifact_blocking(rec.kind, abs, "dev-install refresh packing task panicked")
@@ -509,6 +548,7 @@ async fn refresh_dev_installs(
             rules: Vec::new(),
             agents: Vec::new(),
             mcp: Vec::new(),
+            hooks: Vec::new(),
             bundles: Vec::new(),
         };
         let entry = LockedArtifact {
@@ -524,7 +564,7 @@ async fn refresh_dev_installs(
             ArtifactKind::Skill => synth.skills.push(entry),
             ArtifactKind::Rule => synth.rules.push(entry),
             ArtifactKind::Agent => synth.agents.push(entry),
-            ArtifactKind::Mcp | ArtifactKind::Bundle => continue,
+            ArtifactKind::Mcp | ArtifactKind::Bundle | ArtifactKind::Hook => continue,
         }
         let outcomes = install_all_with_progress(
             &synth,
@@ -652,6 +692,7 @@ mod tests {
             rules: vec![],
             agents: vec![],
             mcp: vec![],
+            hooks: Vec::new(),
             bundles: vec![],
         }
     }
@@ -921,5 +962,108 @@ mod tests {
         let v = serde_json::to_value(build_report(Some("a"), &new, Some(&prev), &[], &[])).unwrap();
         assert!(v["items"][0]["old"].is_null(), "{v}");
         assert_eq!(v["items"][0]["action"], "updated");
+    }
+
+    /// A hermetic project workspace with `config` as its `grimoire.toml`, plus a
+    /// `$GRIM_HOME` outside it (a `$GRIM_HOME` inside the workspace refuses to arm).
+    fn hook_workspace(
+        config: &str,
+    ) -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        Context,
+        scope_resolution::ResolvedScope,
+    ) {
+        let ws_dir = tempfile::tempdir().unwrap();
+        let home_dir = tempfile::tempdir().unwrap();
+        let config_path = dunce::canonicalize(ws_dir.path()).unwrap().join("grimoire.toml");
+        std::fs::write(&config_path, config).unwrap();
+        let ctx = Context::hermetic_scoped(
+            dunce::canonicalize(home_dir.path()).unwrap(),
+            false,
+            Some(config_path.clone()),
+        );
+        let scope = scope_resolution::resolve(&ctx, false, Some(&config_path)).unwrap();
+        (ws_dir, home_dir, ctx, scope)
+    }
+
+    fn update_all() -> UpdateArgs {
+        UpdateArgs {
+            names: Vec::new(),
+            force: false,
+            client: Vec::new(),
+            marketplace: None,
+            hook_trust: crate::cli::options::HookTrustOpts {
+                trust_hooks: false,
+                no_trust_hooks: false,
+            },
+        }
+    }
+
+    /// C-104/C-112 (behavioural ordering, `grim update` seam): an armed hook
+    /// the declaration no longer carries, with the feature flag off, is
+    /// reaped by `grim update` — registration and dispatch row. Fails if the
+    /// seam's `converge_for` is handed `None`.
+    #[tokio::test]
+    async fn c104_update_reaps_an_armed_hook_the_declaration_dropped() {
+        use crate::install::hook_registrar::test_fixture::{arm_claude_hook, claude_marker_present, dispatch_rows};
+        let (_ws, _home, ctx, scope) = hook_workspace("[skills]\n");
+        let mut state = scope_resolution::load_state(&scope).unwrap();
+        arm_claude_hook(&mut state, "shell-guard", &scope.roots);
+        state
+            .persist(
+                scope.scope,
+                &scope.workspace,
+                &scope.roots.grim_home,
+                &scope.config_path,
+            )
+            .unwrap();
+
+        let (_report, exit) = run(&ctx, &update_all()).await.expect("update succeeds");
+        assert_eq!(exit, ExitCode::Success);
+        assert!(
+            !claude_marker_present(&scope.workspace),
+            "the registration must be reaped"
+        );
+        assert_eq!(
+            dispatch_rows(&scope.roots.grim_home),
+            0,
+            "the dispatch row must be reaped"
+        );
+    }
+
+    /// C-111 / S-115: a tampered `state.json` carrying `dev = true` on a hook
+    /// record reaches `refresh_dev_installs`; `grim update` warns, never packs
+    /// it, never panics, and exits 0 with the record left as it was.
+    #[tokio::test]
+    async fn s115_a_tampered_dev_hook_record_does_not_panic_update() {
+        use crate::install::install_state::InstallRecord;
+        use crate::lock::locked_source::LockedSource;
+        let (_ws, _home, ctx, scope) = hook_workspace("[skills]\n");
+        let mut state = scope_resolution::load_state(&scope).unwrap();
+        let tampered = InstallRecord {
+            kind: ArtifactKind::Hook,
+            name: "shell-guard".to_string(),
+            source: LockedSource::Path {
+                path: crate::config::path_source::PathSource::parse("./shell-guard").unwrap(),
+                hash: Digest::Sha256("a".repeat(64)),
+            },
+            dev: true,
+            outputs: Vec::new(),
+        };
+        state.record(tampered.clone());
+        state
+            .persist(
+                scope.scope,
+                &scope.workspace,
+                &scope.roots.grim_home,
+                &scope.config_path,
+            )
+            .unwrap();
+
+        let (_report, exit) = run(&ctx, &update_all()).await.expect("update succeeds");
+        assert_eq!(exit, ExitCode::Success);
+        let after = scope_resolution::load_state(&scope).unwrap();
+        assert_eq!(after.get(ArtifactKind::Hook, "shell-guard"), Some(&tampered));
     }
 }

@@ -61,10 +61,15 @@ pub struct AddArgs {
     /// the artifact verbatim and pins it by content hash.
     pub reference: String,
 
-    /// The artifact kind (`skill`, `rule`, `agent`, `bundle`, or `mcp`).
-    /// Inferred from the published manifest's kind annotation when
+    /// The artifact kind (`skill`, `rule`, `agent`, `bundle`, `mcp`, or
+    /// `hook`). Inferred from the published manifest's kind annotation when
     /// omitted.
-    #[arg(long, short = 'k', value_parser = ["skill", "rule", "agent", "bundle", "mcp"])]
+    //
+    // `hook` is appended, never inserted — the accepted value set is a frozen
+    // CLI surface and widening it is the additive direction (Principle 9). A
+    // hook may be declared with the feature flag off: declaring and locking are
+    // not arming, and the install step is what gates.
+    #[arg(long, short = 'k', value_parser = ["skill", "rule", "agent", "bundle", "mcp", "hook"])]
     pub kind: Option<String>,
 
     /// The config binding name. Defaults to the reference's last path
@@ -77,6 +82,11 @@ pub struct AddArgs {
     /// (nothing is materialized).
     #[arg(long)]
     pub force: bool,
+
+    /// `--trust-hooks` / `--no-trust-hooks`: the per-invocation half of the
+    /// same question the workspace consent record answers durably.
+    #[command(flatten)]
+    pub hook_trust: crate::cli::options::HookTrustOpts,
 
     /// Whether to materialize the artifact after declaring it.
     #[command(flatten)]
@@ -176,6 +186,12 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     // overwrites idempotently, as does re-declaring the identical
     // reference. The check runs on the local clone before any write, so a
     // refusal leaves the on-disk config and lock untouched.
+    // Reserved hook bindings (`bin`, `payload`, `consent`, …) are refused here,
+    // after the shared declare seam, as a scope-bound check (C-109): refusing
+    // inside the seam would make `grim export` error on a hook it omits
+    // anyway. `installer::install_one` stays the belt for a hand-edited
+    // `grimoire.toml` or a bundle member, which never pass through `add`.
+    refuse_bad_binding_name(kind, &name)?;
     // Keep the dev-record keyspace disjoint from declared bindings (C2).
     reject_dev_install_collision(&scope, kind, &name)?;
 
@@ -203,7 +219,7 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     // acted-on entry (or, for a bundle, its members) is projected out and
     // installed, so the rest of a shared lock stays for `grim install`.
     if args.install.enabled() {
-        install_added(ctx, &scope, kind, &name, &new_lock, &access, args.force).await?;
+        install_added(ctx, &scope, kind, &name, &new_lock, &access, args).await?;
     }
 
     // A bundle has no single pinned member to report; surface the bundle
@@ -389,6 +405,7 @@ async fn add_path_source(
     // carries no tag, so there is no "same source, new version" to admit
     // here. Re-declaring the identical path is idempotent, anything else
     // refuses loudly.
+    refuse_bad_binding_name(kind, &name)?;
     // Keep the dev-record keyspace disjoint from declared bindings (C2).
     reject_dev_install_collision(scope, kind, &name)?;
 
@@ -410,7 +427,7 @@ async fn add_path_source(
     let new_lock = write_config_and_relock(scope, &set, kind, &name, &access).await?;
 
     if args.install.enabled() {
-        install_added(ctx, scope, kind, &name, &new_lock, &access, args.force).await?;
+        install_added(ctx, scope, kind, &name, &new_lock, &access, args).await?;
     }
 
     let pinned = new_lock
@@ -448,7 +465,9 @@ async fn install_added(
     name: &str,
     new_lock: &GrimoireLock,
     access: &Arc<dyn OciAccess>,
-    force: bool,
+    // `--force` and `--trust-hooks` travel as the parsed args rather than as
+    // two more bare booleans at the end of a seven-argument list.
+    args: &AddArgs,
 ) -> anyhow::Result<()> {
     // Project the acted-on entry out of the (now complete) lock.
     let single = match kind {
@@ -468,13 +487,19 @@ async fn install_added(
             .ok_or_else(|| anyhow::anyhow!("resolved lock is missing '{name}'"))?,
     };
 
+    // C-110: `grim add <hook>` is where the feature flag and consent are
+    // answered. The declaration gesture is the consent (`resolve_for_add`),
+    // and `single` is the freshly-declared projection only, so adding `B`
+    // cannot consent to an unconsented `A` already in the workspace.
+    let hook_policy = super::hook_consent::resolve_for_add(ctx, scope, &single, args.hook_trust.flag())?;
     let target = super::grim(InstallTarget::parse(
         &scope.workspace,
         scope.scope,
         &[],
         &scope.options.clients,
         &scope.options.vendors,
-    ))?;
+    ))?
+    .with_hook_policy(hook_policy);
     let mut state = super::grim(
         super::scope_resolution::load_state(scope).map_err(|e| super::install::state_io(&scope.state_path, e)),
     )?;
@@ -495,7 +520,7 @@ async fn install_added(
             scope.scope,
             &scope.workspace,
             &scope.config_path,
-            force,
+            args.force,
             InstallIntent::Declared,
             // `--progress auto` stays silent here (add never rendered a
             // bar); `--progress json` emits the NDJSON events on stderr.
@@ -506,8 +531,32 @@ async fn install_added(
 
     // Surface the first refusal / hard error (the report is discarded — the
     // add report already names what was declared).
-    super::install::finish(outcomes)?;
+    super::install::finish(outcomes, &Default::default())?;
     Ok(())
+}
+
+/// Refuse a binding name `grim add` must not accept: one that is not a plain
+/// name (skill/rule/agent/hook — each becomes a directory or file stem), or a
+/// hook binding reserved for grim's own `$GRIM_HOME/hooks/` entries. Both
+/// route through [`CommandError::InvalidBindingName`] (exit 64, C-109).
+///
+/// Called by `run` (both source forms) after the declare seam returns, and by
+/// `oci::hook`'s agreement test.
+pub fn refuse_bad_binding_name(kind: ArtifactKind, name: &str) -> anyhow::Result<()> {
+    let reason = if matches!(
+        kind,
+        ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent | ArtifactKind::Hook
+    ) && let Err(reason) = crate::skill::SkillName::parse(name)
+    {
+        reason
+    } else if kind == ArtifactKind::Hook && crate::oci::hook::is_reserved_binding_name(name) {
+        format!("'{name}' is reserved for grim's own hook entries under $GRIM_HOME/hooks/")
+    } else {
+        return Ok(());
+    };
+    Err(anyhow::Error::from(crate::error::Error::from(
+        CommandError::InvalidBindingName { kind, reason },
+    )))
 }
 
 /// Project the single `kind`/`name` entry out of `lock` as a one-artifact
@@ -523,21 +572,24 @@ pub(crate) fn single_entry_lock(lock: &GrimoireLock, kind: ArtifactKind, name: &
         .iter_artifacts()
         .find(|a| a.kind == kind && a.name == name)
         .cloned()?;
-    let (skills, rules, agents, mcp) = match kind {
-        ArtifactKind::Skill => (vec![entry], Vec::new(), Vec::new(), Vec::new()),
-        ArtifactKind::Rule => (Vec::new(), vec![entry], Vec::new(), Vec::new()),
-        ArtifactKind::Agent => (Vec::new(), Vec::new(), vec![entry], Vec::new()),
-        ArtifactKind::Mcp => (Vec::new(), Vec::new(), Vec::new(), vec![entry]),
-        ArtifactKind::Bundle => return None,
-    };
-    Some(GrimoireLock {
+    let mut single = GrimoireLock {
         metadata: lock.metadata.clone(),
-        skills,
-        rules,
-        agents,
-        mcp,
+        skills: Vec::new(),
+        rules: Vec::new(),
+        agents: Vec::new(),
+        mcp: Vec::new(),
+        hooks: Vec::new(),
         bundles: Vec::new(),
-    })
+    };
+    match kind {
+        ArtifactKind::Skill => single.skills.push(entry),
+        ArtifactKind::Rule => single.rules.push(entry),
+        ArtifactKind::Agent => single.agents.push(entry),
+        ArtifactKind::Mcp => single.mcp.push(entry),
+        ArtifactKind::Hook => single.hooks.push(entry),
+        ArtifactKind::Bundle => return None,
+    }
+    Some(single)
 }
 
 /// Project the members the bundle `bundle_repo:bundle_tag` contributed out
@@ -562,6 +614,7 @@ pub(crate) fn bundle_members_lock(lock: &GrimoireLock, bundle_repo: &str, bundle
         // freshly-added bundle's server unregistered and `missing` in
         // `status` until an unrelated `grim install` picked it up.
         mcp: lock.mcp.iter().filter(|a| is_member(a)).cloned().collect(),
+        hooks: lock.hooks.iter().filter(|a| is_member(a)).cloned().collect(),
         // A projection feeds the installer only — the bundle cache is not
         // consulted there, so it is not carried over.
         bundles: Vec::new(),
@@ -593,6 +646,7 @@ pub(crate) fn declare(
         ArtifactKind::Agent => set.agents.insert(name, source),
         ArtifactKind::Bundle => set.bundles.insert(name, source),
         ArtifactKind::Mcp => set.mcp.insert(name, source),
+        ArtifactKind::Hook => set.hooks.insert(name, source),
     };
     set.invalidate_declaration_hash_cache();
     previous
@@ -966,7 +1020,13 @@ async fn declare_path(
 /// An `Option` rather than a `Result` so the large [`DeclareError`] does not
 /// trip `clippy::result_large_err` on this sync helper.
 fn invalid_binding(kind: ArtifactKind, binding: &str) -> Option<DeclareError> {
-    if !matches!(kind, ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent) {
+    // `Hook` joins the guarded set (C-109): its binding names a directory under
+    // `$GRIM_HOME/hooks/`, a traversal surface. Reserved names are not refused
+    // here — see `refuse_bad_binding_name` — so `export` never errors on them.
+    if !matches!(
+        kind,
+        ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent | ArtifactKind::Hook
+    ) {
         return None;
     }
     crate::skill::SkillName::parse(binding)
@@ -1195,7 +1255,11 @@ pub(crate) fn write_config_with_plugin(
         || options.show_deprecated
         || options.search_min_relevance.is_some();
     let has_tui_options = !options.tui.is_empty();
-    if has_base_options || has_tui_options {
+    // `experimental` joins the header gate like `tui` (a fixed sub-table). An
+    // unset table contributes nothing, so a config that never opts in is
+    // byte-identical to one written before the table existed (C-110).
+    let has_experimental_options = !options.experimental.is_empty();
+    if has_base_options || has_tui_options || has_experimental_options {
         out.push_str("[options]\n");
         if let Some(r) = &options.default_registry {
             let _ = writeln!(out, "default_registry = {}", toml::Value::String(r.clone()));
@@ -1276,6 +1340,17 @@ pub(crate) fn write_config_with_plugin(
         let _ = writeln!(out, "[options.vendors.{}]", toml_key(name));
         if vendor.shared_skills {
             let _ = writeln!(out, "shared_skills = true");
+        }
+        out.push('\n');
+    }
+    // `[options.experimental]`, last of the `[options]` sub-tables, matching
+    // the field's position in `ConfigOptions`. Destructured without `..` for
+    // the `[options.tui]` reason: a new field fails to compile here.
+    if has_experimental_options {
+        let crate::config::declaration::ExperimentalOptions { hooks } = &options.experimental;
+        out.push_str("[options.experimental]\n");
+        if *hooks {
+            let _ = writeln!(out, "hooks = true");
         }
         out.push('\n');
     }
@@ -1368,6 +1443,15 @@ pub(crate) fn write_config_with_plugin(
     if !set.mcp.is_empty() {
         out.push_str("\n[mcp]\n");
         for (name, id) in &set.mcp {
+            let _ = writeln!(out, "{} = {}", toml_key(name), toml::Value::String(id.to_string()));
+        }
+    }
+    // `[hooks]` last, emitted only when declared: a hook-free config stays
+    // byte-identical, and a hand-written `[hooks]` table survives the next
+    // mutating command instead of silently changing the declaration hash.
+    if !set.hooks.is_empty() {
+        out.push_str("\n[hooks]\n");
+        for (name, id) in &set.hooks {
             let _ = writeln!(out, "{} = {}", toml_key(name), toml::Value::String(id.to_string()));
         }
     }
@@ -1569,6 +1653,7 @@ mod tests {
             default_registry: Some("ghcr.io/acme".to_string()),
             clients: vec!["claude".to_string(), "opencode".to_string()],
             tui: Default::default(),
+            experimental: Default::default(),
         };
         write_config(&path, &opts, &[], &set).unwrap();
 
@@ -1602,6 +1687,7 @@ mod tests {
             default_registry: None,
             clients: vec![],
             tui: Default::default(),
+            experimental: Default::default(),
         };
         write_config(&path, &opts, &[], &set).unwrap();
 
@@ -1628,6 +1714,7 @@ mod tests {
             default_registry: None,
             clients: vec!["cursor".to_string()],
             tui: Default::default(),
+            experimental: Default::default(),
         };
         opts.vendors
             .insert("cursor".to_string(), VendorOptions { shared_skills: true });
@@ -1762,6 +1849,77 @@ mod tests {
     }
 
     #[test]
+    fn write_config_round_trips_experimental_options() {
+        // The `[options.experimental]` half of B1: `grim config set
+        // options.experimental.hooks true` reaches this emitter through
+        // `commit_config`, so without an arm here the write exits 0 and stores
+        // nothing — the flag would be unsettable through its own CLI.
+        use crate::config::declaration::ExperimentalOptions;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("grimoire.toml");
+        let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
+        let opts = ConfigOptions {
+            experimental: ExperimentalOptions { hooks: true },
+            ..Default::default()
+        };
+        write_config(&path, &opts, &[], &set).unwrap();
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        let cfg = ProjectConfig::from_toml_str(&body).expect("[options.experimental] round-trip must parse");
+        assert!(
+            cfg.options.experimental.hooks,
+            "options.experimental.hooks must survive write → parse: {body}"
+        );
+    }
+
+    #[test]
+    fn write_config_omits_experimental_table_and_hooks_when_unset() {
+        // The companion byte-identity assertion, mirroring
+        // `write_config_omits_filters_and_insecure_when_unset`: a project that
+        // opts into neither the flag nor a hook must grow no new bytes, which
+        // is what keeps the hooks kind additive under Principle 9 (plan C-015).
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("grimoire.toml");
+        let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
+        write_config(&path, &ConfigOptions::default(), &[], &set).unwrap();
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !body.contains("experimental"),
+            "an unset [options.experimental] must emit nothing: {body}"
+        );
+        assert!(
+            !body.contains("[hooks]"),
+            "a hook-free declaration must emit no [hooks] table: {body}"
+        );
+        assert!(ProjectConfig::from_toml_str(&body).is_ok());
+    }
+
+    #[test]
+    fn write_config_round_trips_declared_hooks() {
+        // The `[hooks]` half of B1. Without the emitter arm a hand-written
+        // `[hooks]` table is deleted by the next `grim add` / `remove` /
+        // `config set`, and the declaration hash changes with it.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("grimoire.toml");
+        let mut set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
+        set.hooks.insert(
+            "guard".to_string(),
+            crate::config::declaration::DeclaredSource::Registry(
+                crate::oci::Identifier::parse("ghcr.io/acme/hooks/guard:1.0.0").expect("valid identifier"),
+            ),
+        );
+        write_config(&path, &ConfigOptions::default(), &[], &set).unwrap();
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        let cfg = ProjectConfig::from_toml_str(&body).expect("[hooks] round-trip must parse");
+        assert_eq!(
+            cfg.set.hooks, set.hooks,
+            "every declared hook must survive write → parse: {body}"
+        );
+    }
+
+    #[test]
     fn write_config_omits_options_when_empty() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("grimoire.toml");
@@ -1783,6 +1941,7 @@ mod tests {
         let path = tmp.path().join("grimoire.toml");
         let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
         let opts = ConfigOptions {
+            experimental: Default::default(),
             vendors: Default::default(),
             show_deprecated: false,
             // Explicit `0` (cutoff off) must survive, and as a base
@@ -1836,6 +1995,7 @@ mod tests {
         // Provide a non-empty base options so [options] itself appears, but
         // leave tui at its Default.
         let opts = ConfigOptions {
+            experimental: Default::default(),
             vendors: Default::default(),
             show_deprecated: false,
             search_min_relevance: None,
@@ -1872,6 +2032,7 @@ mod tests {
             ..Default::default()
         }];
         let opts = ConfigOptions {
+            experimental: Default::default(),
             vendors: Default::default(),
             show_deprecated: false,
             search_min_relevance: None,
@@ -1920,6 +2081,7 @@ mod tests {
         let path = tmp.path().join("grimoire.toml");
         let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
         let opts = ConfigOptions {
+            experimental: Default::default(),
             vendors: Default::default(),
             show_deprecated: false,
             search_min_relevance: None,
@@ -1979,6 +2141,7 @@ tree_separators_typo = 1
             default_registry: Some("ghcr.io/acme".to_string()),
             clients: vec![],
             tui: Default::default(),
+            experimental: Default::default(),
         };
         write_config(&path, &opts, &[], &set).unwrap();
 
@@ -2095,6 +2258,7 @@ tree_separators_typo = 1
             default_registry: Some("legacy.example".to_string()),
             clients: vec![],
             tui: Default::default(),
+            experimental: Default::default(),
         };
         let registries = vec![RegistryConfig {
             insecure: false,
@@ -2177,6 +2341,13 @@ tree_separators_typo = 1
                         reason: "bad".to_string(),
                     },
                     "invalid rule binding name: bad (allowed: lowercase letters, digits, hyphens, periods)",
+                ),
+                (
+                    DeclareError::InvalidBindingName {
+                        kind: ArtifactKind::Hook,
+                        reason: "bad".to_string(),
+                    },
+                    "invalid hook binding name: bad",
                 ),
                 (DeclareError::LocalBundle, "a local bundle is declared in [bundles]"),
                 (
@@ -2680,6 +2851,101 @@ tree_separators_typo = 1
                     "{reference}: {err:?}"
                 );
             }
+        }
+
+        /// C-109: `declare_registry` infers `Hook` from the manifest with no
+        /// feature gate (the flag controls arming, not declaring); the charset
+        /// guard covers a hook binding; a reserved binding is NOT refused in
+        /// the shared seam (so `grim export` never errors on it).
+        #[tokio::test]
+        async fn c109_hooks_declare_ungated_charset_guarded_reserved_passed_through() {
+            let reg = MemoryRegistry::new();
+            publish(&reg, "localhost:5000/acme/guard:1.0", &[(KIND_ANNOTATION, "hook")]).await;
+            let access = Access::over(reg);
+            let tmp = tempfile::tempdir().unwrap();
+            let named = |name: &str| DeclareOverrides {
+                kind: None,
+                name: Some(name.to_string()),
+            };
+
+            let d = declare_with(
+                "localhost:5000/acme/guard:1.0",
+                no_overrides(),
+                anchors_at(tmp.path()),
+                &access,
+            )
+            .await
+            .expect("a hook declares with no gate");
+            assert_eq!(d.kind, ArtifactKind::Hook);
+
+            let err = declare_with(
+                "localhost:5000/acme/guard:1.0",
+                named("../x"),
+                anchors_at(tmp.path()),
+                &access,
+            )
+            .await
+            .expect_err("traversal binding");
+            assert!(
+                matches!(
+                    &err,
+                    DeclareError::InvalidBindingName {
+                        kind: ArtifactKind::Hook,
+                        ..
+                    }
+                ),
+                "{err:?}"
+            );
+
+            let d = declare_with(
+                "localhost:5000/acme/guard:1.0",
+                named("bin"),
+                anchors_at(tmp.path()),
+                &access,
+            )
+            .await
+            .expect("reserved names are refused by `grim add`, not the shared seam");
+            assert_eq!(d.binding, "bin");
+            let (exit, msg) = {
+                let err = refuse_bad_binding_name(ArtifactKind::Hook, &d.binding).expect_err("reserved");
+                (crate::error::classify_error(&err), format!("{err:#}"))
+            };
+            assert_eq!(exit, ExitCode::UsageError, "{msg}");
+        }
+
+        /// C-109: hooks have no path-source form — `--kind hook` is the
+        /// existing `UnsupportedPathKind`, and a bare `hook.toml` directory
+        /// is the existing `UninferablePathKind`.
+        #[tokio::test]
+        async fn c109_hooks_have_no_path_source_form() {
+            let tmp = tempfile::tempdir().unwrap();
+            let project = dunce::canonicalize(tmp.path()).unwrap().join("project");
+            let hook_dir = project.join("guard");
+            std::fs::create_dir_all(&hook_dir).unwrap();
+            std::fs::write(hook_dir.join(crate::oci::hook::HOOK_MANIFEST_FILE), "schema = 1\n").unwrap();
+            let access = Access::over(DeniedAccess);
+
+            let err = declare_with(
+                "./guard",
+                DeclareOverrides {
+                    kind: Some(ArtifactKind::Hook),
+                    name: None,
+                },
+                anchors_at(&project),
+                &access,
+            )
+            .await
+            .expect_err("hook path");
+            assert!(
+                matches!(err, DeclareError::UnsupportedPathKind(ArtifactKind::Hook)),
+                "{err:?}"
+            );
+
+            let err = declare_with("./guard", no_overrides(), anchors_at(&project), &access)
+                .await
+                .expect_err("no inferable shape");
+            assert!(matches!(&err, DeclareError::UninferablePathKind { .. }), "{err:?}");
+            assert_eq!(access.calls(), 0);
         }
 
         // ── path branch ────────────────────────────────────────────
