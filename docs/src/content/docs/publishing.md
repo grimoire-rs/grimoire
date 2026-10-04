@@ -950,6 +950,11 @@ Merging is field by field, not wholesale. The `[skills.legacy-helper.metadata]`
 table above changes only `authors` and still inherits the catalog's license,
 repository, and vendor.
 
+This holds for every kind, [hooks](./hooks.md) included. A `hook.toml` has no
+catalog fields of its own, so for a hook the `[metadata]` values and the
+[flags](#metadata-flags) are the only source of license, source, authors,
+vendor, URL, and documentation annotations.
+
 ### Repository support channels {#support-channels}
 
 Who maintains this repository, and where do I reach them? That answer belongs
