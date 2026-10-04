@@ -60,6 +60,12 @@ pub struct GrimoireLock {
     /// when non-empty so an mcp-free lock stays byte-identical to one
     /// written before the kind existed).
     pub mcp: Vec<LockedArtifact>,
+    /// Locked hooks (`[[hook]]` on the wire, emitted only when non-empty so
+    /// a hook-free lock stays byte-identical to one written before the kind
+    /// existed — plan C-015). A hook-BEARING lock is a hard parse error on
+    /// an older `grim`, which is the recorded Principle 9 trade: the break
+    /// is opt-in on first use.
+    pub hooks: Vec<LockedArtifact>,
     /// Cached expansion result per declared bundle (`[[bundle]]` on the
     /// wire, emitted only when non-empty). Enables offline effective-set
     /// computation for declaration mutations — see
@@ -89,6 +95,9 @@ struct RawLock {
     /// Locked MCP server descriptors (`[[mcp]]`).
     #[serde(default, rename = "mcp")]
     mcp: Vec<ScopedEntry>,
+    /// Locked hooks (`[[hook]]`).
+    #[serde(default, rename = "hook")]
+    hooks: Vec<ScopedEntry>,
     /// Cached bundle expansions (`[[bundle]]`).
     #[serde(default, rename = "bundle")]
     bundles: Vec<crate::lock::locked_bundle::LockedBundle>,
@@ -122,12 +131,13 @@ impl RawLock {
 
     /// Every entry, grouped by kind in wire order, with the list selector
     /// its kind lands in.
-    fn into_kind_lists(self) -> [(ArtifactKind, Vec<ScopedEntry>, KindList); 4] {
+    fn into_kind_lists(self) -> [(ArtifactKind, Vec<ScopedEntry>, KindList); 5] {
         [
             (ArtifactKind::Skill, self.skills, |l| &mut l.skills),
             (ArtifactKind::Rule, self.rules, |l| &mut l.rules),
             (ArtifactKind::Agent, self.agents, |l| &mut l.agents),
             (ArtifactKind::Mcp, self.mcp, |l| &mut l.mcp),
+            (ArtifactKind::Hook, self.hooks, |l| &mut l.hooks),
         ]
     }
 }
@@ -214,6 +224,13 @@ impl MarketplaceLock {
     /// or [`LockErrorKind::ScopeMismatch`].
     pub fn from_toml_str(s: &str) -> Result<Self, LockError> {
         let raw = RawLock::parse(s)?;
+        // Export declines hooks (they need grim at run time), so a
+        // marketplace part never holds one; refuse rather than drop it.
+        if !raw.hooks.is_empty() {
+            return Err(scope_mismatch(
+                "a marketplace.lock carries no `[[hook]]` table".to_string(),
+            ));
+        }
         if !raw.bundles.is_empty() {
             return Err(scope_mismatch(
                 "a marketplace.lock carries no `[[bundle]]` table".to_string(),
@@ -341,7 +358,7 @@ impl GrimoireLock {
     pub fn from_toml_str(s: &str) -> Result<Self, LockError> {
         let mut raw = RawLock::parse(s)?;
         let scoped = raw.plugins.is_some()
-            || [&raw.skills, &raw.rules, &raw.agents, &raw.mcp]
+            || [&raw.skills, &raw.rules, &raw.agents, &raw.mcp, &raw.hooks]
                 .into_iter()
                 .flatten()
                 .any(|e| e.plugin.is_some());
@@ -380,13 +397,14 @@ impl GrimoireLock {
             rules: Vec::new(),
             agents: Vec::new(),
             mcp: Vec::new(),
+            hooks: Vec::new(),
             bundles: Vec::new(),
         }
     }
 
     /// Iterate every locked artifact across all kind lists (skills, then
-    /// rules, then agents, then mcp), each entry carrying its re-stamped
-    /// `kind`.
+    /// rules, then agents, then mcp, then hooks), each entry carrying its
+    /// re-stamped `kind`.
     ///
     /// The single chaining seam: consumers that walk "all locked
     /// artifacts" go through here so a future kind cannot be forgotten at
@@ -397,6 +415,7 @@ impl GrimoireLock {
             .chain(self.rules.iter())
             .chain(self.agents.iter())
             .chain(self.mcp.iter())
+            .chain(self.hooks.iter())
     }
 
     /// Serialize to deterministic, byte-stable TOML.
@@ -416,6 +435,8 @@ impl GrimoireLock {
         agents.sort_by(|a, b| a.name.cmp(&b.name));
         let mut mcp: Vec<&LockedArtifact> = self.mcp.iter().collect();
         mcp.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut hooks: Vec<&LockedArtifact> = self.hooks.iter().collect();
+        hooks.sort_by(|a, b| a.name.cmp(&b.name));
         // Bundles sort by binding name; the advisory tag is stripped from the
         // registry-arm `pinned` inside the `LockedBundle` serialize projection
         // (`From<LockedBundle> for RawLockedBundle`), so output stays
@@ -429,6 +450,7 @@ impl GrimoireLock {
             rule: &rules,
             agent: &agents,
             mcp: &mcp,
+            hook: &hooks,
             bundle: &bundles,
         };
         toml::to_string_pretty(&view)
@@ -457,6 +479,16 @@ struct SerializableView<'a> {
         skip_serializing_if = "<[_]>::is_empty"
     )]
     mcp: &'a [&'a LockedArtifact],
+    /// Emitted only when non-empty so a hook-free lock stays
+    /// byte-identical to one written before the kind existed. Positioned
+    /// after `mcp` and before `bundle`: with the list empty the field
+    /// vanishes, so no existing lock's byte order moves either way.
+    #[serde(
+        rename = "hook",
+        serialize_with = "serialize_artifact_views",
+        skip_serializing_if = "<[_]>::is_empty"
+    )]
+    hook: &'a [&'a LockedArtifact],
     /// Emitted only when non-empty so a bundle-free lock stays
     /// byte-identical to one written before the cache existed.
     #[serde(rename = "bundle", skip_serializing_if = "<[_]>::is_empty")]
@@ -678,7 +710,7 @@ pinned = "ghcr.io/acme/rust-style@sha256:{b}"
     /// hand-edited or committed lock naming a traversal is refused on load.
     #[test]
     fn reject_traversal_capable_entry_names() {
-        for table in ["skill", "rule", "agent", "mcp"] {
+        for table in ["skill", "rule", "agent", "mcp", "hook"] {
             for name in ["../../escaped", "a/../../x", "..", "", "a//b", "/abs"] {
                 let toml = format!(
                     "[metadata]\nlock_version = 1\ndeclaration_hash_version = 1\n\
@@ -749,6 +781,7 @@ generated_at = "2099-01-01T00:00:00Z"
     #[test]
     fn serialize_sorts_by_name_and_strips_advisory_tag() {
         let lock = GrimoireLock {
+            hooks: vec![],
             metadata: metadata(),
             skills: vec![
                 artifact("zeta", ArtifactKind::Skill, pinned("acme/zeta", Some("v9"), '2')),
@@ -770,6 +803,7 @@ generated_at = "2099-01-01T00:00:00Z"
     #[test]
     fn round_trip_byte_stable() {
         let lock = GrimoireLock {
+            hooks: vec![],
             metadata: metadata(),
             skills: vec![artifact(
                 "code-review",
@@ -823,6 +857,7 @@ pinned = "ghcr.io/acme/code-reviewer@sha256:{a}"
         // No `[[agent]]` noise for agent-free locks — byte-identical to a
         // pre-agents lock document.
         let lock = GrimoireLock {
+            hooks: vec![],
             metadata: metadata(),
             skills: vec![artifact("s", ArtifactKind::Skill, pinned("acme/s", None, 'a'))],
             rules: vec![],
@@ -838,17 +873,24 @@ pinned = "ghcr.io/acme/code-reviewer@sha256:{a}"
     #[test]
     fn iter_artifacts_chains_all_kinds_in_order() {
         let lock = GrimoireLock {
+            hooks: vec![artifact("h", ArtifactKind::Hook, pinned("acme/h", None, 'e'))],
             metadata: metadata(),
             skills: vec![artifact("s", ArtifactKind::Skill, pinned("acme/s", None, 'a'))],
             rules: vec![artifact("r", ArtifactKind::Rule, pinned("acme/r", None, 'b'))],
             agents: vec![artifact("a", ArtifactKind::Agent, pinned("acme/a", None, 'c'))],
-            mcp: vec![],
+            mcp: vec![artifact("m", ArtifactKind::Mcp, pinned("acme/m", None, 'd'))],
             bundles: vec![],
         };
         let kinds: Vec<ArtifactKind> = lock.iter_artifacts().map(|a| a.kind).collect();
         assert_eq!(
             kinds,
-            vec![ArtifactKind::Skill, ArtifactKind::Rule, ArtifactKind::Agent]
+            vec![
+                ArtifactKind::Skill,
+                ArtifactKind::Rule,
+                ArtifactKind::Agent,
+                ArtifactKind::Mcp,
+                ArtifactKind::Hook,
+            ]
         );
     }
 
@@ -857,6 +899,7 @@ pinned = "ghcr.io/acme/code-reviewer@sha256:{a}"
         // Empty mcp list: the wire form must stay byte-identical to a
         // pre-mcp lock (no `[[mcp]]` array at all).
         let without = GrimoireLock {
+            hooks: vec![],
             metadata: metadata(),
             skills: vec![artifact("s", ArtifactKind::Skill, pinned("acme/s", None, 'a'))],
             rules: vec![],
@@ -866,6 +909,10 @@ pinned = "ghcr.io/acme/code-reviewer@sha256:{a}"
         };
         let out = without.to_toml_string().expect("serialize");
         assert!(!out.contains("[[mcp]]"), "empty mcp list emits nothing: {out}");
+        // The same assertion for hooks, in the same fixture: without it this
+        // test passes whether or not an empty `hook` array is emitted, so it
+        // could not detect the byte-drift it is cited for (review W3).
+        assert!(!out.contains("[[hook]]"), "empty hook list emits nothing: {out}");
 
         // A locked mcp entry round-trips through `[[mcp]]` with its kind
         // re-stamped on parse.
@@ -895,9 +942,49 @@ pinned = "ghcr.io/acme/code-reviewer@sha256:{a}"
     }
 
     #[test]
+    fn hook_array_round_trips_and_is_omitted_when_empty() {
+        // The `[[hook]]` twin of the mcp case above: a locked hook survives
+        // write → parse with its kind re-stamped from the array name, and the
+        // hook-free direction is asserted in that test's own fixture.
+        let base = GrimoireLock {
+            hooks: vec![],
+            metadata: metadata(),
+            skills: vec![artifact("s", ArtifactKind::Skill, pinned("acme/s", None, 'a'))],
+            rules: vec![],
+            agents: vec![],
+            mcp: vec![],
+            bundles: vec![],
+        };
+        let with = GrimoireLock {
+            hooks: vec![artifact(
+                "guard",
+                ArtifactKind::Hook,
+                pinned("acme/hooks/guard", Some("1"), 'c'),
+            )],
+            ..base
+        };
+        let out = with.to_toml_string().expect("serialize");
+        assert!(out.contains("[[hook]]"), "{out}");
+        let reparsed = GrimoireLock::from_toml_str(&out).expect("reparse");
+        assert_eq!(reparsed.hooks.len(), 1);
+        assert_eq!(reparsed.hooks[0].kind, ArtifactKind::Hook, "kind re-stamped on parse");
+        assert_eq!(reparsed.hooks[0].name, "guard");
+        assert_eq!(
+            reparsed
+                .iter_artifacts()
+                .filter(|a| a.kind == ArtifactKind::Hook)
+                .count(),
+            1,
+            "iter_artifacts chains the hook list"
+        );
+        assert_eq!(out, reparsed.to_toml_string().expect("second"), "byte-stable");
+    }
+
+    #[test]
     fn round_trip_preserves_bundle_provenance() {
         use crate::lock::locked_artifact::BundleProvenance;
         let lock = GrimoireLock {
+            hooks: vec![],
             metadata: metadata(),
             skills: vec![LockedArtifact {
                 name: "code-review".to_string(),
@@ -942,6 +1029,7 @@ pinned = "ghcr.io/acme/code-reviewer@sha256:{a}"
             .clone_with_tag("1")
             .clone_with_digest(Digest::Sha256(sha('e')));
         let lock = GrimoireLock {
+            hooks: vec![],
             metadata: metadata(),
             skills: vec![artifact("s", ArtifactKind::Skill, pinned("acme/s", None, 'a'))],
             rules: vec![],
@@ -982,7 +1070,9 @@ pinned = "ghcr.io/acme/code-reviewer@sha256:{a}"
         // C-031.1 / C-005: the golden is `grim schema --kind lock` stdout of
         // main at v0.14.0 (byte-equal, `cmp`, to released grim 0.14.0) —
         // before the wire-only `plugin` fields existed; `schema::run` prints
-        // `generate` + "\n".
+        // `generate` + "\n". Regenerated once for hooks (C-153): the only
+        // structural deltas are the appended `hook` kind literal and the
+        // optional top-level `hook` array — additive.
         let stdout = format!(
             "{}\n",
             crate::command::schema::generate(crate::command::schema::SchemaKind::Lock).expect("generate")
@@ -998,6 +1088,7 @@ pinned = "ghcr.io/acme/code-reviewer@sha256:{a}"
             BundleProvenance::new("ghcr.io/acme/stack-b", "2.0.0"),
         ];
         let lock = GrimoireLock {
+            hooks: vec![],
             metadata: metadata(),
             skills: vec![LockedArtifact {
                 name: "code-review".to_string(),

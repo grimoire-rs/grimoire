@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use sha2::Digest as _;
 
 use crate::install::ignore_set::IgnoreSet;
-use crate::oci::Digest;
+use crate::oci::{ArtifactKind, Digest};
 
 /// Compute the deterministic SHA-256 over the tree (or single file) at
 /// `root`.
@@ -35,7 +35,7 @@ use crate::oci::Digest;
 // shorthand for a support-less footprint.
 #[cfg(test)]
 pub fn content_hash(root: &Path) -> io::Result<Digest> {
-    content_hash_with(root, Filter::Ignore)
+    content_hash_with(root, Filter::Ignore, ArtifactKind::Skill)
 }
 
 /// Whether a directory walk applies the root's [`IgnoreSet`] (`Ignore`) or
@@ -47,12 +47,12 @@ enum Filter {
     All,
 }
 
-fn content_hash_with(root: &Path, filter: Filter) -> io::Result<Digest> {
+fn content_hash_with(root: &Path, filter: Filter, kind: ArtifactKind) -> io::Result<Digest> {
     let meta = std::fs::symlink_metadata(root)?;
 
     let mut entries: Vec<(PathBuf, PathBuf)> = Vec::new();
     if meta.is_dir() {
-        walk(root, filter, &mut entries)?;
+        walk(root, filter, kind, &mut entries)?;
     } else {
         // Single-file artifact (a rule): key on the file name so the hash
         // is location-independent, matching the directory case where keys
@@ -82,8 +82,23 @@ fn content_hash_with(root: &Path, filter: Filter) -> io::Result<Digest> {
 /// # Errors
 ///
 /// Returns any I/O error from walking or reading the footprint.
+// Production callers pass the output's kind through `footprint_hash_for_kind`;
+// this stays the tests' non-hook shorthand.
+#[cfg(test)]
 pub fn footprint_hash(target: &Path, support_dir: Option<&Path>) -> io::Result<Digest> {
-    footprint_hash_with(target, support_dir, Filter::Ignore)
+    footprint_hash_for_kind(ArtifactKind::Skill, target, support_dir)
+}
+
+/// [`footprint_hash`] for an output of `kind`. Only [`ArtifactKind::Hook`]
+/// hashes differently: its payload root never ignores `hook.toml` (C-160), so
+/// a hook whose `.grimignore` says `*.toml` still reads an edited manifest as
+/// drift. Every other kind hashes exactly as [`footprint_hash`].
+///
+/// # Errors
+///
+/// Returns any I/O error from walking or reading the footprint.
+pub fn footprint_hash_for_kind(kind: ArtifactKind, target: &Path, support_dir: Option<&Path>) -> io::Result<Digest> {
+    footprint_hash_with(target, support_dir, Filter::Ignore, kind)
 }
 
 /// The footprint hash to compare against `recorded`: the current (filtered)
@@ -96,12 +111,17 @@ pub fn footprint_hash(target: &Path, support_dir: Option<&Path>) -> io::Result<D
 /// # Errors
 ///
 /// Returns any I/O error from walking or reading the footprint.
-pub fn footprint_hash_for_record(target: &Path, support_dir: Option<&Path>, recorded: &Digest) -> io::Result<Digest> {
-    let filtered = footprint_hash(target, support_dir)?;
+pub fn footprint_hash_for_record(
+    kind: ArtifactKind,
+    target: &Path,
+    support_dir: Option<&Path>,
+    recorded: &Digest,
+) -> io::Result<Digest> {
+    let filtered = footprint_hash_for_kind(kind, target, support_dir)?;
     if &filtered == recorded {
         return Ok(filtered);
     }
-    let unfiltered = footprint_hash_with(target, support_dir, Filter::All)?;
+    let unfiltered = footprint_hash_with(target, support_dir, Filter::All, kind)?;
     Ok(if &unfiltered == recorded { unfiltered } else { filtered })
 }
 
@@ -109,16 +129,21 @@ pub fn footprint_hash_for_record(target: &Path, support_dir: Option<&Path>, reco
 /// record.
 #[cfg(test)]
 pub(crate) fn footprint_hash_unfiltered(target: &Path, support_dir: Option<&Path>) -> io::Result<Digest> {
-    footprint_hash_with(target, support_dir, Filter::All)
+    footprint_hash_with(target, support_dir, Filter::All, ArtifactKind::Skill)
 }
 
-fn footprint_hash_with(target: &Path, support_dir: Option<&Path>, filter: Filter) -> io::Result<Digest> {
+fn footprint_hash_with(
+    target: &Path,
+    support_dir: Option<&Path>,
+    filter: Filter,
+    kind: ArtifactKind,
+) -> io::Result<Digest> {
     // No support dir — or a recorded one the user has since deleted — hashes
     // the index alone. A deleted dir therefore yields a digest that differs
     // from the recorded combined one: detected as drift (not surfaced as an
     // I/O error by the integrity readers), consistent across every reader.
     let Some(dir) = support_dir.filter(|d| d.is_dir()) else {
-        return content_hash_with(target, filter);
+        return content_hash_with(target, filter, kind);
     };
 
     let mut entries: Vec<(PathBuf, PathBuf)> = Vec::new();
@@ -135,7 +160,8 @@ fn footprint_hash_with(target: &Path, support_dir: Option<&Path>, filter: Filter
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("support"));
     let mut support: Vec<(PathBuf, PathBuf)> = Vec::new();
-    walk(dir, filter, &mut support)?;
+    // A support dir only ever belongs to a multi-file rule.
+    walk(dir, filter, ArtifactKind::Rule, &mut support)?;
     for (rel, abs) in support {
         entries.push((dir_key.join(rel), abs));
     }
@@ -162,9 +188,9 @@ fn hash_entries(entries: &[(PathBuf, PathBuf)]) -> io::Result<Digest> {
 /// Collect the files under `root`, honouring its [`IgnoreSet`] unless
 /// `filter` is [`Filter::All`]. An invalid installed `.grimignore` line is
 /// skipped with a warning — never fatal here.
-fn walk(root: &Path, filter: Filter, out: &mut Vec<(PathBuf, PathBuf)>) -> io::Result<()> {
+fn walk(root: &Path, filter: Filter, kind: ArtifactKind, out: &mut Vec<(PathBuf, PathBuf)>) -> io::Result<()> {
     let ignore = match filter {
-        Filter::Ignore => Some(IgnoreSet::for_root_lenient(root)),
+        Filter::Ignore => Some(IgnoreSet::for_root_lenient(root, kind)),
         Filter::All => None,
     };
     collect_files(root, root, ignore.as_ref(), out)
@@ -219,6 +245,37 @@ fn path_to_bytes(path: &Path) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// C-160, hash side: a hook payload whose `.grimignore` says `*.toml`
+    /// still reads an edited `hook.toml` as drift; the same tree hashed as a
+    /// skill does not (main's behaviour for every non-hook kind).
+    #[test]
+    fn a_hook_payload_hashes_its_manifest_whatever_grimignore_says() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("guard");
+        std::fs::create_dir_all(root.join("__pycache__")).unwrap();
+        std::fs::write(root.join("hook.toml"), "schema = 1\n").unwrap();
+        std::fs::write(root.join(".grimignore"), "*.toml\n").unwrap();
+        let hook_before = footprint_hash_for_kind(ArtifactKind::Hook, &root, None).unwrap();
+        let skill_before = footprint_hash_for_kind(ArtifactKind::Skill, &root, None).unwrap();
+
+        // Runtime junk a Python handler writes stays invisible.
+        std::fs::write(root.join("__pycache__/guard.cpython-313.pyc"), b"junk").unwrap();
+        assert_eq!(
+            footprint_hash_for_kind(ArtifactKind::Hook, &root, None).unwrap(),
+            hook_before
+        );
+
+        std::fs::write(root.join("hook.toml"), "schema = 1\n# edited\n").unwrap();
+        assert_ne!(
+            footprint_hash_for_kind(ArtifactKind::Hook, &root, None).unwrap(),
+            hook_before
+        );
+        assert_eq!(
+            footprint_hash_for_kind(ArtifactKind::Skill, &root, None).unwrap(),
+            skill_before
+        );
+    }
 
     #[test]
     fn single_file_hash_is_stable_and_location_independent() {
@@ -440,16 +497,22 @@ mod tests {
         let (_d, root) = skill_tree();
         std::fs::create_dir_all(root.join("__pycache__")).unwrap();
         std::fs::write(root.join("__pycache__/x.pyc"), b"shipped").unwrap();
-        let legacy = footprint_hash_with(&root, None, Filter::All).unwrap();
+        let legacy = footprint_hash_with(&root, None, Filter::All, ArtifactKind::Skill).unwrap();
         assert_ne!(
             legacy,
             footprint_hash(&root, None).unwrap(),
             "fixture must exercise the fallback"
         );
-        assert_eq!(footprint_hash_for_record(&root, None, &legacy).unwrap(), legacy);
+        assert_eq!(
+            footprint_hash_for_record(ArtifactKind::Skill, &root, None, &legacy).unwrap(),
+            legacy
+        );
 
         std::fs::write(root.join("scripts/foo.py"), b"edited\n").unwrap();
-        assert_ne!(footprint_hash_for_record(&root, None, &legacy).unwrap(), legacy);
+        assert_ne!(
+            footprint_hash_for_record(ArtifactKind::Skill, &root, None, &legacy).unwrap(),
+            legacy
+        );
     }
 
     #[test]

@@ -1502,6 +1502,7 @@ mod tests {
             rules: vec![],
             agents: vec![],
             mcp: vec![],
+            hooks: Vec::new(),
             bundles: vec![],
         };
         for m in members {
@@ -1510,6 +1511,7 @@ mod tests {
                 ArtifactKind::Rule => part.rules.push(m),
                 ArtifactKind::Agent => part.agents.push(m),
                 ArtifactKind::Mcp => part.mcp.push(m),
+                ArtifactKind::Hook => part.hooks.push(m),
                 ArtifactKind::Bundle => unreachable!("bundles are not lock members here"),
             }
         }

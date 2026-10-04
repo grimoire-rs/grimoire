@@ -213,6 +213,7 @@ def test_traversal_declaration_key_is_refused_before_any_write(
     for command in (("lock",), ("install", "--client", "claude")):
         result = runner.run(*command, check=False)
         assert result.returncode == 65, (command, result.stderr)
+        assert "is not a usable name" in result.stderr, result.stderr
 
     assert not (project_dir.parent / "escaped").exists()
 

@@ -57,6 +57,7 @@ pub fn effective_set(set: &DesiredSet, cached: &[LockedBundle]) -> Option<BTreeM
         (ArtifactKind::Rule, &set.rules),
         (ArtifactKind::Agent, &set.agents),
         (ArtifactKind::Mcp, &set.mcp),
+        (ArtifactKind::Hook, &set.hooks),
     ] {
         for (name, id) in map {
             out.insert((kind, name.clone()), Origin::Direct(id.clone()));
@@ -189,6 +190,15 @@ pub fn declared_bundle_provides(set: &DesiredSet, cached: &[LockedBundle], kind:
     // bundle provide it" — both must keep the files.
     let mut after = set.clone();
     match kind {
+        // A real drop, not a marker: `DesiredSet` now HAS a hooks map, so the
+        // "unreachable" gate this arm used to rest on (no map to drop from) is
+        // gone, and the total arm is correct whether or not `remove`/`uninstall`/
+        // the TUI keep refusing Hook upstream — dropping the direct declaration
+        // and asking whether a bundle still provides it is the same question for
+        // every kind.
+        ArtifactKind::Hook => {
+            after.hooks.remove(name);
+        }
         ArtifactKind::Skill => {
             after.skills.remove(name);
         }

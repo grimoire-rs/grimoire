@@ -27,6 +27,11 @@
           "const": "mcp",
           "description": "An MCP server descriptor: a vendor-agnostic definition of a Model\nContext Protocol server (transport, command/url, env). Installs by\nregistering an entry in each client's native MCP config file —\nnever as a materialized file of its own.",
           "type": "string"
+        },
+        {
+          "const": "hook",
+          "description": "A hook: a directory artifact whose `hook.toml` manifest declares\nlifecycle handlers (see [`crate::oci::hook`]). The payload\nmaterializes once per scope; activation is a grim-owned dispatcher\nentry registered in each client's own hook surface, never a\nper-client copy of the payload.",
+          "type": "string"
         }
       ]
     },
@@ -292,6 +297,13 @@
       "description": "Cached bundle expansions (`[[bundle]]`).",
       "items": {
         "$ref": "#/$defs/LockedBundle"
+      },
+      "type": "array"
+    },
+    "hook": {
+      "description": "Locked hooks (`[[hook]]`).",
+      "items": {
+        "$ref": "#/$defs/LockedArtifact"
       },
       "type": "array"
     },

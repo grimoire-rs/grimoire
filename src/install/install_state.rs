@@ -123,7 +123,14 @@ impl ClientOutput {
     ///
     /// [`AnchorError`] from resolving/validating the anchored target or
     /// support dir, or an I/O error from walking the footprint.
-    pub fn current_hash(&self, roots: &AnchorRoots, containment: Containment) -> Result<Digest, AnchorError> {
+    /// `kind` is the owning record's kind: a hook payload root never ignores
+    /// its `hook.toml` (C-160), so the walk has to know it.
+    pub fn current_hash(
+        &self,
+        kind: ArtifactKind,
+        roots: &AnchorRoots,
+        containment: Containment,
+    ) -> Result<Digest, AnchorError> {
         let target = self.resolved_target(roots, containment)?;
         if let Some(pointer) = &self.entry {
             return current_entry_hash(&target, pointer, self.mcp_format(), self.mcp_vendor_owned_keys())
@@ -132,7 +139,7 @@ impl ClientOutput {
         let support = self.resolved_support_dir(roots, containment)?;
         // A record from before `.grimignore` hashed ignored files too; the
         // fallback returns that legacy digest when it still matches.
-        footprint_hash_for_record(&target, support.as_deref(), &self.content_hash)
+        footprint_hash_for_record(kind, &target, support.as_deref(), &self.content_hash)
             .map_err(|source| AnchorError::Io { path: target, source })
     }
 
@@ -1480,6 +1487,65 @@ mod tests {
             sync_client_set(&[ClientTarget::Claude], &[]),
             vec![ClientTarget::Claude],
             "a pure install retires nothing and syncs exactly what it targeted"
+        );
+    }
+
+    // ── Hook records on the wire (WP-J2) ────────────────────────────
+
+    /// A hook record round-trips through `state.json` with the on-disk kind
+    /// tag `"hook"` and **one output per arming client onto one shared payload
+    /// directory** (S-003). Principle 9: the tag and the several-outputs-one-
+    /// path shape are on-disk contracts — the reap-after-uninstall path and
+    /// the prune refcount both key on them, so a change here is a breaking
+    /// change, not a refactor.
+    #[test]
+    fn a_hook_record_round_trips_with_one_output_per_arming_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let payload = AnchoredPath {
+            anchor: PathAnchor::GrimHome,
+            relative: "hooks/shell-guard".to_string(),
+        };
+        let mut st = InstallState::empty(&path);
+        st.record(InstallRecord {
+            kind: ArtifactKind::Hook,
+            name: "shell-guard".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned("shell-guard", 'a')),
+            dev: false,
+            outputs: ["claude", "codex"]
+                .into_iter()
+                .map(|client| ClientOutput {
+                    client: client.to_string(),
+                    target: payload.clone(),
+                    content_hash: Algorithm::Sha256.hash(b"payload"),
+                    support_dir: None,
+                    entry: None,
+                    adopted: false,
+                })
+                .collect(),
+        });
+        st.save().unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        // The file is pretty-printed, so match the token pair rather than a
+        // compact spelling.
+        assert!(
+            raw.contains(r#""kind""#) && raw.contains(r#""hook""#),
+            "the frozen on-disk kind tag: {raw}"
+        );
+        assert!(raw.contains(r#""grim-home""#), "the frozen anchor tag: {raw}");
+
+        let reloaded = InstallState::load(&path).unwrap();
+        let got = reloaded.get(ArtifactKind::Hook, "shell-guard").expect("present");
+        assert_eq!(got.kind, ArtifactKind::Hook);
+        assert_eq!(got.outputs.len(), 2);
+        assert!(
+            got.outputs.iter().all(|o| o.target == payload),
+            "the payload is client-independent — every output names the ONE directory"
+        );
+        assert!(
+            got.outputs.iter().all(|o| o.entry.is_none() && o.support_dir.is_none()),
+            "a hook payload is a plain directory: no config entry, no support dir"
         );
     }
 
@@ -3155,7 +3221,11 @@ mod tests {
             out.is_present(&roots, Containment::Strict).unwrap(),
             "the entry must be read through the link"
         );
-        assert_eq!(out.current_hash(&roots, Containment::Strict).unwrap(), out.content_hash);
+        assert_eq!(
+            out.current_hash(ArtifactKind::Skill, &roots, Containment::Strict)
+                .unwrap(),
+            out.content_hash
+        );
         assert_eq!(
             out.resolved_target(&roots, Containment::Strict).unwrap(),
             dunce::canonicalize(&real).unwrap(),
@@ -3177,7 +3247,11 @@ mod tests {
         )
         .unwrap();
         assert!(out.is_present(&roots, Containment::Strict).unwrap());
-        assert_eq!(out.current_hash(&roots, Containment::Strict).unwrap(), out.content_hash);
+        assert_eq!(
+            out.current_hash(ArtifactKind::Skill, &roots, Containment::Strict)
+                .unwrap(),
+            out.content_hash
+        );
 
         // A real value change flips the hash.
         std::fs::write(
@@ -3186,7 +3260,11 @@ mod tests {
         )
         .unwrap();
         assert!(out.is_present(&roots, Containment::Strict).unwrap());
-        assert_ne!(out.current_hash(&roots, Containment::Strict).unwrap(), out.content_hash);
+        assert_ne!(
+            out.current_hash(ArtifactKind::Skill, &roots, Containment::Strict)
+                .unwrap(),
+            out.content_hash
+        );
     }
 
     #[test]
@@ -3201,7 +3279,8 @@ mod tests {
         std::fs::write(tmp.path().join(".mcp.json"), "{\"mcpServers\": {\"other\": {}}}").unwrap();
         assert!(!out.is_present(&roots, Containment::Strict).unwrap());
         assert!(
-            out.current_hash(&roots, Containment::Strict).is_err(),
+            out.current_hash(ArtifactKind::Skill, &roots, Containment::Strict)
+                .is_err(),
             "absent entry has no current hash"
         );
         // Unparseable file: absent, not an error (read-side degradation).
@@ -3306,7 +3385,8 @@ mod tests {
         .unwrap();
         assert!(out.is_present(&roots, Containment::Strict).unwrap());
         assert_eq!(
-            out.current_hash(&roots, Containment::Strict).unwrap(),
+            out.current_hash(ArtifactKind::Skill, &roots, Containment::Strict)
+                .unwrap(),
             out.content_hash,
             "reordered TOML keys/foreign content must still match semantically"
         );
@@ -3316,7 +3396,11 @@ mod tests {
             "[mcp_servers.grim]\ncommand = \"evil\"\n",
         )
         .unwrap();
-        assert_ne!(out.current_hash(&roots, Containment::Strict).unwrap(), out.content_hash);
+        assert_ne!(
+            out.current_hash(ArtifactKind::Skill, &roots, Containment::Strict)
+                .unwrap(),
+            out.content_hash
+        );
     }
 
     #[test]
@@ -3337,7 +3421,11 @@ mod tests {
             out.is_present(&roots, Containment::Strict).unwrap(),
             "JSON fallback must parse the file"
         );
-        assert_eq!(out.current_hash(&roots, Containment::Strict).unwrap(), out.content_hash);
+        assert_eq!(
+            out.current_hash(ArtifactKind::Skill, &roots, Containment::Strict)
+                .unwrap(),
+            out.content_hash
+        );
     }
 
     /// A record written before `.grimignore` existed hashed every file,
@@ -3357,9 +3445,17 @@ mod tests {
         out.entry = None;
         out.content_hash = footprint_hash_unfiltered(&skill, None).unwrap();
 
-        assert_eq!(out.current_hash(&roots, Containment::Strict).unwrap(), out.content_hash);
+        assert_eq!(
+            out.current_hash(ArtifactKind::Skill, &roots, Containment::Strict)
+                .unwrap(),
+            out.content_hash
+        );
 
         std::fs::write(skill.join("SKILL.md"), "---\nname: s\n---\nedited\n").unwrap();
-        assert_ne!(out.current_hash(&roots, Containment::Strict).unwrap(), out.content_hash);
+        assert_ne!(
+            out.current_hash(ArtifactKind::Skill, &roots, Containment::Strict)
+                .unwrap(),
+            out.content_hash
+        );
     }
 }

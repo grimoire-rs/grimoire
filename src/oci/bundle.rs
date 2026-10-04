@@ -4,7 +4,8 @@
 //! The bundle artifact format.
 //!
 //! A bundle is a standard single-layer OCI artifact whose layer blob is a
-//! JSON document listing the members it groups. It is typed
+//! JSON document listing the members it groups — any installable kind
+//! (skill, rule, agent, mcp, hook), never a nested bundle. It is typed
 //! `bundle` on the wire like any other Grimoire artifact (the
 //! `com.grimoire.kind` annotation; legacy readers may still see the
 //! pre-empty-config `artifactType` `application/vnd.grimoire.bundle.v1`).
@@ -34,6 +35,9 @@ pub const BUNDLE_LAYER_SIZE_LIMIT: u64 = 512 * 1024;
 /// of resolution tasks.
 pub const MAX_BUNDLE_MEMBERS: usize = 512;
 
+// C-153: the doc text below is published verbatim in `lock.schema.json`, so it
+// keeps main's wording; `hook` is a valid member kind as well (only a nested
+// `bundle` is rejected).
 /// One member of a bundle: a reference to another artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]

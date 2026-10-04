@@ -105,9 +105,11 @@ pub fn plugin_client_names() -> String {
 /// [`ArtifactKind::Bundle`] returns [`OmitReason::NoFormatSurface`]
 /// defensively.
 pub fn admits(family: Family, client: ClientTarget, kind: ArtifactKind) -> Result<(), OmitReason> {
-    use ArtifactKind::{Agent, Bundle, Mcp, Rule, Skill};
+    use ArtifactKind::{Agent, Bundle, Hook, Mcp, Rule, Skill};
     match (family, kind) {
-        (_, Rule | Bundle) | (Family::AgentPlugins, Agent) => Err(OmitReason::NoFormatSurface),
+        // A hook needs grim at run time, which an exported plugin runs without
+        // (C-140).
+        (_, Rule | Bundle | Hook) | (Family::AgentPlugins, Agent) => Err(OmitReason::NoFormatSurface),
         // The Agent Plugins `mcp.json` shape is the family's, not the
         // client's: no install-time `kind_support` gate.
         (Family::AgentPlugins, Mcp) => Ok(()),
