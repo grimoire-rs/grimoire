@@ -355,6 +355,17 @@ impl GrimoireLock {
         let mut lock = Self::empty(raw.metadata.clone());
         lock.bundles = std::mem::take(&mut raw.bundles);
         for (kind, entries, list) in raw.into_kind_lists() {
+            // Issue #90: an entry name becomes an install path segment, and a
+            // committed lock is as untrusted as the config beside it.
+            if let Some((name, reason)) = entries
+                .iter()
+                .find_map(|e| crate::path_safety::path_segment_refusal(&e.artifact.name).map(|r| (&e.artifact.name, r)))
+            {
+                return Err(scope_mismatch(format!(
+                    "invalid {kind} name `{}`: {reason}",
+                    name.escape_default()
+                )));
+            }
             // Re-stamp the kind that `#[serde(skip)]` left at its default.
             list(&mut lock).extend(entries.into_iter().map(|e| LockedArtifact { kind, ..e.artifact }));
         }
@@ -661,6 +672,29 @@ pinned = "ghcr.io/acme/rust-style@sha256:{b}"
         assert_eq!(lock.skills[0].kind, ArtifactKind::Skill);
         assert_eq!(lock.rules.len(), 1);
         assert_eq!(lock.rules[0].kind, ArtifactKind::Rule);
+    }
+
+    /// Issue #90: a lock entry name becomes an install path segment, so a
+    /// hand-edited or committed lock naming a traversal is refused on load.
+    #[test]
+    fn reject_traversal_capable_entry_names() {
+        for table in ["skill", "rule", "agent", "mcp"] {
+            for name in ["../../escaped", "a/../../x", "..", "", "a//b", "/abs"] {
+                let toml = format!(
+                    "[metadata]\nlock_version = 1\ndeclaration_hash_version = 1\n\
+                     declaration_hash = \"sha256:{a}\"\ngenerated_by = \"grim 0.1.0\"\n\
+                     generated_at = \"2026-04-19T00:00:00Z\"\n\n[[{table}]]\nname = \"{name}\"\n\
+                     pinned = \"ghcr.io/acme/x@sha256:{a}\"\n",
+                    a = sha('a')
+                );
+                let err = GrimoireLock::from_toml_str(&toml).expect_err(&format!("{table} {name:?} must be refused"));
+                assert!(
+                    matches!(err.kind, LockErrorKind::ScopeMismatch { .. }),
+                    "{:?}",
+                    err.kind
+                );
+            }
+        }
     }
 
     #[test]

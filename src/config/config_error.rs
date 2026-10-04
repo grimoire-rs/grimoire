@@ -94,6 +94,16 @@ pub enum ConfigErrorKind {
         source: IdentifierError,
     },
 
+    /// A declaration key is not one plain path component (issue #90). The key
+    /// becomes an install path segment, so `..`, a separator, a drive prefix,
+    /// an empty or all-dot key, or NUL would let a committed `grimoire.toml`
+    /// write outside its anchor root.
+    #[error(
+        "artifact '{}' is not a usable name: {reason}",
+        .name.escape_debug()
+    )]
+    ArtifactNameInvalid { name: String, reason: String },
+
     /// A path-shaped artifact value (`./`/`../`-prefixed or absolute) is
     /// invalid: malformed (backslashes), or declared under a table that
     /// does not support path sources (`[mcp]`).

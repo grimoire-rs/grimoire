@@ -835,6 +835,25 @@ async fn install_one<M: ArtifactMaterializer>(
             };
             let support_dest = staged_support.as_ref().and(cleanup.clone());
 
+            // Classified BEFORE the write (issue #90): an unanchorable
+            // destination is refused here, never after it already landed
+            // outside its root. `dest` / `support_dest` are the non-canonicalized (pre-symlink)
+            // forms — the `from_target` caller invariant (§1.5). Computed per
+            // client so pool siblings resolving to one path each record their own
+            // (identical) output — the several-outputs-one-path refcount shape.
+            let anchored_target =
+                crate::install::path_anchor::AnchoredPath::from_target(&dest, target.scope(), *client, kind, roots)?;
+            let anchored_support = match &support_dest {
+                Some(sd) => Some(crate::install::path_anchor::AnchoredPath::from_target(
+                    sd,
+                    target.scope(),
+                    *client,
+                    kind,
+                    roots,
+                )?),
+                None => None,
+            };
+
             // Reuse a sibling pool client's footprint hash when this exact dest was
             // already materialized this pass; otherwise do the stage + swap + hash.
             let installed_hash = if let Some((_, hash)) = materialized.iter().find(|(d, _)| *d == dest) {
@@ -933,22 +952,6 @@ async fn install_one<M: ArtifactMaterializer>(
                 let hash = footprint_hash(&dest, support_dest.as_deref()).map_err(|e| target_io(&dest, e))?;
                 materialized.push((dest.clone(), hash.clone()));
                 hash
-            };
-            // `dest` / `support_dest` are the non-canonicalized (pre-symlink)
-            // forms — the `from_target` caller invariant (§1.5). Computed per
-            // client so pool siblings resolving to one path each record their own
-            // (identical) output — the several-outputs-one-path refcount shape.
-            let anchored_target =
-                crate::install::path_anchor::AnchoredPath::from_target(&dest, target.scope(), *client, kind, roots)?;
-            let anchored_support = match &support_dest {
-                Some(sd) => Some(crate::install::path_anchor::AnchoredPath::from_target(
-                    sd,
-                    target.scope(),
-                    *client,
-                    kind,
-                    roots,
-                )?),
-                None => None,
             };
             client_records.push(ClientOutput {
                 client: client.to_string(),
@@ -3319,6 +3322,44 @@ mod tests {
         )
         .await;
         assert_eq!(*r2[0].result.as_ref().unwrap(), InstallOutcome::AlreadyInstalled);
+    }
+
+    /// Issue #90, second half: the anchor classification is a *pre*-write
+    /// gate. A name that slipped past parse-time validation (here built in
+    /// memory, bypassing the lock loader) must be refused before anything is
+    /// written, never classified after the file already landed outside.
+    #[tokio::test]
+    async fn an_unanchorable_destination_is_refused_before_anything_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("proj");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let blob = skill_tar("harmless", b"# harmless\n");
+        let lock = lock_of_skills(vec![locked_skill("../../../escaped", &blob)]);
+        let access = arc(BlobMock { blob: blob.clone() });
+        let target = InstallTarget::new(&workspace, crate::config::scope::ConfigScope::Project, vec![]);
+        let mut state = InstallState::load(&workspace.join("state.json")).unwrap();
+        let roots = roots(&workspace);
+
+        let r = install_all(
+            &lock,
+            &access,
+            &DefaultMaterializer,
+            &target,
+            &mut state,
+            &roots,
+            std::path::Path::new("."),
+            false,
+        )
+        .await;
+        assert!(
+            r[0].result.is_err(),
+            "an escaping destination must fail: {:?}",
+            r[0].result
+        );
+        assert!(
+            !dir.path().join("escaped").exists(),
+            "nothing may be written outside the workspace"
+        );
     }
 
     #[tokio::test]
