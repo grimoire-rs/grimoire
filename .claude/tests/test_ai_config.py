@@ -84,6 +84,7 @@ def is_vendored_path(md: Path) -> bool:
 # of silently opting out of the authoring gates. Enforced by
 # `TestVendoredArtifacts`; update it in the same commit as the sync.
 VENDORED_RULES = frozenset({
+    "code-docs.md",
     "docs-quality.md",
     "hex-state.md",
     "python-packaging.md",
@@ -95,6 +96,7 @@ VENDORED_RULES = frozenset({
 })
 
 VENDORED_SKILLS = frozenset({
+    "code-docs-cleanup",
     "docs-instrument",
     "docs-plan",
     "docs-review",
@@ -1047,6 +1049,8 @@ class TestAiConfigOverhaulPhase2:
         "bugfix": False,
         "builder": False,
         "code-check": False,
+        # Vendored (grimoire-lore); edits comments, never commits.
+        "code-docs-cleanup": False,
         "docs": False,
         "meta-validate-context": False,
         "next": True,

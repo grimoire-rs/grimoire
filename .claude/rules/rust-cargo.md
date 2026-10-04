@@ -5,6 +5,12 @@ paths:
   - "**/rustfmt.toml"
   - "**/deny.toml"
   - "**/rust-toolchain.toml"
+  - "**/rust-toolchain"
+  - "**/.clippy.toml"
+  - "**/.rustfmt.toml"
+  - "**/.cargo/config.toml"
+  - "**/.cargo/config"
+  - "**/Cargo.lock"
 summary: Lint policy, toolchain pinning, dependency gates, CI and release settings for Rust
 keywords: rust,cargo,clippy,lints,msrv,toolchain,ci,cargo-deny,release,supply-chain
 license: Apache-2.0

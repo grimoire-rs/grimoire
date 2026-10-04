@@ -46,6 +46,7 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 | Plan progress tracking (Status block + `.claude/state/current_plan.md`) | [meta-ai-config.md](./rules/meta-ai-config.md) "Plan Status Protocol", `/hex-plan`, `/hex-execute`, `/hex-review`, skills `commit`, `finalize`, `next` |
 | Multi-agent orchestration | [workflow-feature.md](./rules/workflow-feature.md) — the **hex** bundle (`/hex-plan`, `/hex-execute`, `/hex-review`, `/hex-architect`), installed at user level; swarm memory `.agents/memory/hex.md` |
 | Code quality audit | [quality-core.md](./rules/quality-core.md), `quality-{lang}.md`, skill `code-check` |
+| Source comments, doc comments, help/schema text | [code-docs.md](./rules/code-docs.md) (vendored), skill `code-docs-cleanup` for bulk shortening |
 | Error type design (Rust) | [quality-rust.md](./rules/quality-rust.md), [quality-rust-errors.md](./rules/quality-rust-errors.md) |
 | CLI exit code design (Rust) | [quality-rust.md](./rules/quality-rust.md), [quality-rust-exit_codes.md](./rules/quality-rust-exit_codes.md) |
 | Taskfiles / build pipeline / caching | [subsystem-taskfiles.md](./rules/subsystem-taskfiles.md) |
@@ -140,11 +141,12 @@ Exempt from overlap detection (intended broad coupling):
 | `docs-quality.md` + `workflow-git.md` + `workflow-release.md` | `CHANGELOG.md` (vendored rule carries changelog conventions; the other two carry the release process) |
 | `subsystem-cli.md` + `subsystem-cli-api.md` + `subsystem-cli-commands.md` + `subsystem-file-structure.md` | `src/**` (single provisional binary crate) |
 | `arch-threat-model.md` + `arch-principles.md` + the four `src/**` subsystem rules | `src/oci/**`, `src/install/**`, `src/command/hook*`, `src/command/{login,logout,publish,release}*` — the security-sensitive subset of `src/**`; the threat model co-fires with them by design, since a boundary question is always also a design question. `src/command/hook*` joined when the dispatcher runtime landed: it executes code a client runs automatically, which is the sharpest edge of the boundary |
+| `code-docs.md` + `rust-quality.md` / `python-quality.md` / `typescript-quality.md` | `**/*.rs`, `**/*.py`, `**/*.pyi`, `**/*.ts`, `**/*.tsx`, `**/*.mts`, `**/*.cts` (vendored comment rule co-fires with each language set; it owns what a comment keeps, they own syntax) |
 | `arch-threat-model.md` + `quality-security.md` | `catalog/**` (published artifacts — the boundary scopes the checklist) |
 
 ## Vendored rules — installed, not authored here
 
-Eight rules under `.claude/rules/` come from upstream bundles: their prose is **not authored here**, and a local edit to it is reverted by the next sync. (Two local edits exist, both lost on sync and re-applied after every one: a shebang on three shell fixtures under `rules/docs-quality/checks/`, which `task shell:verify` requires; and the Starlight branch of `rules/docs-quality/checks/nav_depth.py` plus its `fixtures/nav_depth/pass-nav-starlight/` fixture, which the docs-site tests require — upstream `ocx-sh/grimoire-lore` never had it.) They declare provenance in frontmatter (`license:`, `repository:`), which is the marker `.claude/tests/test_ai_config.py::is_vendored` uses to exempt them from this repo's *authoring* standards (dead-glob detection, catalog authorship, skill description and body budgets). Fix upstream, then re-sync. The same holds for the 14 vendored skills under `.claude/skills/` (`docs-instrument`, `docs-plan`, `docs-review`, `hex-*`, `nox-review`).
+Nine rules under `.claude/rules/` come from upstream bundles: their prose is **not authored here**, and a local edit to it is reverted by the next sync. (Two local edits exist, both lost on sync and re-applied after every one: a shebang on three shell fixtures under `rules/docs-quality/checks/`, which `task shell:verify` requires; and the Starlight branch of `rules/docs-quality/checks/nav_depth.py` plus its `fixtures/nav_depth/pass-nav-starlight/` fixture, which the docs-site tests require — upstream `ocx-sh/grimoire-lore` never had it.) They declare provenance in frontmatter (`license:`, `repository:`), which is the marker `.claude/tests/test_ai_config.py::is_vendored` uses to exempt them from this repo's *authoring* standards (dead-glob detection, catalog authorship, skill description and body budgets). Fix upstream, then re-sync. The same holds for the 15 vendored skills under `.claude/skills/` (`code-docs-cleanup`, `docs-instrument`, `docs-plan`, `docs-review`, `hex-*`, `nox-review`).
 
 | Rule | Upstream |
 |---|---|
@@ -152,6 +154,7 @@ Eight rules under `.claude/rules/` come from upstream bundles: their prose is **
 | [rust-quality.md](./rules/rust-quality.md), [rust-cargo.md](./rules/rust-cargo.md) | `ocx-sh/grimoire-lore` |
 | [python-quality.md](./rules/python-quality.md), [python-packaging.md](./rules/python-packaging.md) | `ocx-sh/grimoire-lore` |
 | [typescript-quality.md](./rules/typescript-quality.md), [typescript-packaging.md](./rules/typescript-packaging.md) | `ocx-sh/grimoire-lore` |
+| [code-docs.md](./rules/code-docs.md) (+ `rules/code-docs/` references and checks) | `ocx-sh/grimoire-lore` |
 | [hex-state.md](./rules/hex-state.md) (global) | `michael-herwig/arcana` |
 
 **Open**: the vendored `rust-quality.md` / `python-quality.md` duplicate the first-party `quality-rust.md` / `quality-python.md` on the same globs — two rule sets now load for the same edit. Which set is authoritative is a decision for the owner, not for a sync.
@@ -164,6 +167,7 @@ Eight rules under `.claude/rules/` come from upstream bundles: their prose is **
 | Security review | `security-auditor` |
 | Architecture decision | `/hex-architect` (hex bundle) |
 | Code quality audit | `code-check` |
+| Shortening source comments in bulk | `code-docs-cleanup` |
 | Implementation / debugging | `builder` |
 | Test strategy | `qa-engineer` |
 | Fixing a bug (guided, failing-test-first) | `bugfix` |
