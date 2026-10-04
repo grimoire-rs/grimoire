@@ -94,6 +94,26 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
         "the publishing docs — review catalog skills for drift",
     ),
     (
+        "src/oci/hook.rs",
+        "- catalog/skills/grim-authoring/references/hook-spec.md\n- docs/src/content/docs/hooks.md",
+        "the hook manifest schema — review the hook docs and grim-authoring skill for drift",
+    ),
+    (
+        "docs/src/content/docs/hooks.md",
+        "- catalog/skills/grim-authoring/references/hook-spec.md\n- catalog/skills/grim-usage (hook commands)",
+        "the hooks docs — review catalog skills for drift",
+    ),
+    (
+        "docs/src/content/docs/hooks-troubleshooting.md",
+        "- catalog/skills/grim-usage (hook commands)",
+        "the hooks troubleshooting docs — review grim-usage skill for drift",
+    ),
+    (
+        "docs/src/content/docs/guides/agent-hooks.md",
+        "- catalog/skills/grim-usage (hook commands)",
+        "the agent-hooks guide — review grim-usage skill for drift",
+    ),
+    (
         "src/install/vendor_*.rs",
         (
             "- docs/src/content/docs/clients.md (support matrix — code-mirrored; the table-parity test in client_target.rs fails on drift)\n"

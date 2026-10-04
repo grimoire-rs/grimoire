@@ -15,6 +15,7 @@ catalog/
 ├── skills/<name>/      # one dir per skill package (SKILL.md + references/)
 ├── bundles/<name>.toml # one file per bundle package
 ├── mcp/<name>.toml     # one file per MCP server descriptor package
+├── hooks/<name>/       # one dir per hook package (hook.toml + payload)
 ├── rules/<name>.md     # (when the first rule package lands)
 └── agents/<name>.md    # (when the first agent package lands)
 ```
@@ -67,7 +68,7 @@ package whose version is new).
 
 Registry refs are kind-segmented: `ghcr.io/grimoire-rs/skills/<name>:<version>`,
 `ghcr.io/grimoire-rs/bundles/<name>:<version>` (per-entry `repository`
-overrides in `publish.toml` set the `skills/`/`bundles/` segment — see
+overrides in `publish.toml` set the `skills/`/`bundles/`/`hooks/` segment — see
 [Batch publishing with a manifest][batch-publish]). That layout is
 **historical, not the recommendation**: these paths were published before
 the flat guidance and every consumer lockfile pins them, so they stay.
@@ -80,6 +81,11 @@ reference the floating major tag (`:0` while on the 0.x line, relative to
 the bundle's own deployment — `../skills/<name>:0`) and bundles publish
 without `--pin`, so skill patches reach bundle consumers via plain
 `grim update`.
+
+Hooks follow the same kind-segmented layout on purpose
+(`ghcr.io/grimoire-rs/hooks/<name>:<version>`): they are new, so there is no
+historical flat path to preserve, and the segment keeps a hook and a skill of
+the same name apart.
 
 ## Local loop
 
