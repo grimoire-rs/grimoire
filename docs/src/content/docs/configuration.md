@@ -86,6 +86,30 @@ reported on stderr:
 Under `--registry`, a config that fails to load falls back to the default
 `50` with a warning, rather than failing the search.
 
+### `[options.experimental]` {#options-experimental}
+
+The optional `[options.experimental]` sub-table gates features whose shape
+is not frozen yet (see [Unstable surfaces](./stability.md#unstable)). Today
+it holds exactly one key:
+
+```toml
+[options.experimental]
+hooks = true
+```
+
+`hooks` (boolean, default `false`) turns on the [hook](./hooks.md) artifact
+kind for this scope. Set it with
+`grim config set options.experimental.hooks true`, at project or global
+scope. It is deliberately **config-only**. No environment variable can set
+it, so nothing in a cloned repository can turn it on for you.
+
+It is only one of three gates a hook still has to clear before it runs.
+See [Arming gates](./hooks.md#why-gated).
+Turning it back off and re-running `grim install` reaps every armed
+registration and dispatch row. It keeps the payload, the launcher, and the
+workspace's consent record. See
+[Feature flag off](./hooks.md#flag-off-retention).
+
 ### `[options.tui]` {#options-tui}
 
 The optional `[options.tui]` sub-table tunes the interactive catalog browser

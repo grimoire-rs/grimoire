@@ -1199,6 +1199,7 @@ kind, relative to the manifest's directory:
 | rule | `rules/{name}.md` |
 | agent | `agents/{name}.md` |
 | mcp | `mcp/{name}.toml` |
+| hook | `hooks/{name}/` (experimental — see [Hooks](./hooks.md)) |
 | bundle | `bundles/{name}.toml` |
 
 The `path` field overrides this convention for entries whose source lives
@@ -1207,8 +1208,10 @@ elsewhere.
 ### Kind ordering {#batch-publish-ordering}
 
 Entries publish in a fixed kind order: skills, then rules, then agents,
-then [MCP servers](./mcp-servers.md), then bundles. Ordering is alphabetical
-within each kind. Bundle entries land last by design, because a bundle holds
+then [MCP servers](./mcp-servers.md), then [hooks](./hooks.md) (experimental),
+then bundles. Ordering is alphabetical within each kind. Hooks were
+appended after MCP servers and before bundles. No existing kind's relative
+position moved. Bundle entries land last by design, because a bundle holds
 references to already-published members, and consumers resolve those members
 at lock time. Publishing a bundle before its members would produce a bundle
 that references artifacts that do not exist.

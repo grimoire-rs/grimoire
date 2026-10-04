@@ -489,6 +489,17 @@ identical to what the install would write, it is **adopted** into the
 install record and reported `unchanged` — so deleting the state file while
 leaving rendered files intact repairs itself on the next install.
 
+A locked [hook](./hooks.md) is experimental. See
+[Stability](./stability.md#unstable). It arms only past the
+`[options.experimental] hooks` flag and the resolved workspace's consent
+record. Everywhere else it is skipped, with a warning naming the cause, at
+exit 0.
+
+`--trust-hooks` / `--no-trust-hooks` (also on `add` and `update`) answers
+the consent question for this one invocation, with no record written. It
+outranks a stored consent record in both directions. See
+[Control agent commands with hooks](./guides/agent-hooks.md) for a worked example.
+
 Before any of that, install checks that the lock still describes the config
 it was resolved from. `grimoire.lock` records a `declaration_hash` of the
 declarations it was built from; a hand-edited `grimoire.toml`, or a merge
@@ -846,12 +857,17 @@ grim status --check --format json
 ## Artifact states {#artifact-states}
 
 One artifact, three renderers, three word lists. [`grim status`](#status)
-reports five states, the [TUI](#tui) seven, and [`grim search`](#search)'s
-install badge five again. The badge's five are a strict subset of the
-TUI's seven. `grim status` is the one that stands apart: it shares only
-`installed`, `outdated` and `modified` with the other two, and its
-`missing` and `stale` appear in neither. This section is where every one
-of those words is defined.
+reports five states for every non-hook kind, the [TUI](#tui) seven, and
+[`grim search`](#search)'s install badge five again. The badge's five are a
+strict subset of the TUI's seven. `grim status` is the one that stands
+apart: it shares only `installed`, `outdated` and `modified` with the
+other two, and its `missing` and `stale` appear in neither. This section
+is where every one of those words is defined.
+
+A [hook](./hooks.md) (experimental) row adds three more tokens, none of
+which any other kind can carry: `gated`, `not-armed`, and `untrusted`. See
+[Hook arming][json-hook-arming] for what each one means and the full
+`cause` table behind it.
 
 `grim status` derives exactly one state per declared artifact, testing in
 this order and taking the first that matches: `stale`, `missing`,
@@ -1056,6 +1072,54 @@ install record and never a declaration, the file-deletion half behaves
 exactly like a registry artifact's uninstall — same addressing, same
 deleted files, same dropped record — and the undeclare half is a no-op
 (there was nothing declared to drop).
+
+## grim hook {#hook}
+
+Four subcommands manage [hooks](./hooks.md). The kind is experimental. See
+[Stability](./stability.md#unstable). Declaring one is still
+`grim add --kind hook <reference>`, exactly like any other kind.
+
+- **`grim hook list`**. Declared hooks with their tier, events, and
+  per-client arming state (`installed`, `gated`, `untrusted`, `not-armed`).
+  Each carries an `arming` array of `{client, cause, message, transient}`
+  for every client that did not arm. See [Hook arming][json-hook-arming]
+  for the full cause table.
+
+  A hook never materialized contributes no items, only one warning naming
+  it. A hook reaped by flag-off keeps its payload and shows up `gated`
+  like any other.
+- **`grim hook allow [path]`**. Records this **workspace's** consent to
+  arming the hooks its declaration names. The record lives at
+  `$GRIM_HOME/hooks/consent/<workspace-key>.json`, machine-local and keyed
+  by the resolved workspace path. `--global` exits **64**: global scope is
+  already consented and carries no record.
+- **`grim hook revoke [path]`** (alias `deny`). Removes the workspace
+  consent record. It is idempotent, so revoking a never-consented workspace
+  exits `0` and reports `not-consented`. There is no fourth "explicitly
+  denied" state, only absent, granted, or drifted. `--global` needs no
+  refusal: global scope never writes a consent record, so there is nothing
+  to remove, and it exits `0` reporting `not-consented` like any other
+  never-consented workspace.
+- **`grim hook run`**. The dispatcher the generated launcher invokes on
+  every matching tool call. **Not for direct invocation.** It resolves no
+  scope and reads no config, only the `--table` dispatch file its caller
+  names.
+
+  It exits **0** on every path grim controls. A client that fails closed
+  on a non-zero hook exit must never be denied a tool call by grim's own
+  internals.
+
+```sh
+grim hook allow
+grim hook list --format json
+grim hook revoke
+```
+
+Neither the feature flag nor a workspace's consent record has an
+environment-variable form. That is deliberate, so nothing in a cloned
+repository can flip either one. The only per-invocation override is the
+`--trust-hooks` / `--no-trust-hooks` flag pair on `add`, `install`, and
+`update`.
 
 ## grim search {#search}
 
@@ -2445,14 +2509,18 @@ grim logout ghcr.io
 
 ## grim schema {#schema}
 
-`grim schema --kind <config|publish|lock|mcp>` prints a [JSON
+`grim schema --kind <config|publish|lock|mcp|hook>` prints a [JSON
 Schema](https://json-schema.org/) for one of grim's TOML files to stdout.
-`--kind config` describes `grimoire.toml`; `--kind publish` describes
-`publish.toml`; `--kind lock` describes `grimoire.lock` (generated by grim,
-published so tooling can validate or introspect it); `--kind mcp` describes
-the [MCP server descriptor](./mcp-servers.md) (`mcp/<name>.toml`). Each
-schema is generated from grim's own parser, so it accepts exactly what grim
-accepts.
+`--kind config` describes `grimoire.toml`. Its schema carries the
+`[options.experimental]` table additively. `--kind publish` describes
+`publish.toml`, additively gaining the `hooks` source table.
+
+`--kind lock` describes `grimoire.lock`, generated by grim and published
+so tooling can validate or introspect it, additively gaining a `hooks`
+array. `--kind mcp` describes the [MCP server descriptor](./mcp-servers.md)
+(`mcp/<name>.toml`). `--kind hook` describes [`hook.toml`](./hooks.md)
+(experimental). Each schema is generated from grim's own parser, so it
+accepts exactly what grim accepts.
 
 ```sh
 grim schema --kind config > grimoire-config.schema.json
@@ -2575,6 +2643,7 @@ registers the same entry — in every detected client, not just Claude Code
 [json-shapes-items]: ./json-interface.md#shapes-items
 [path-source-trust]: ./stability.md#limitations-path-source-trust
 [clients-matrix]: ./clients.md#matrix
+[json-hook-arming]: ./json-interface.md#hook-arming
 
 <!-- external -->
 [git-config]: https://git-scm.com/docs/git-config

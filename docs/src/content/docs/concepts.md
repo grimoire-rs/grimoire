@@ -29,6 +29,13 @@ registers it as an entry in each client's own MCP config file rather than
 writing anything of its own. See [MCP Server Artifacts](./mcp-servers.md)
 for the full format and per-client behavior.
 
+A sixth kind, the **hook**, is experimental pre-1.0. It is a directory with
+a `hook.toml` index describing a handler that runs before or after an
+agent's tool calls. It is the only kind that does not arm on install
+alone. It also needs a feature flag and a per-workspace consent gesture.
+See [Use hooks](./guides/agent-hooks.md) for a worked example, the [hooks reference](./hooks.md) for the gates, and
+[Stability](./stability.md#unstable) for the experimental carve-out.
+
 ### Rules with a support directory {#rule-support-dir}
 
 A rule is often an *index* that points at extra context — a worked example, a

@@ -244,6 +244,24 @@ user did not ask grim to touch.
 selected, one server can register twice in Warp. Warp starts a project-scoped
 server only after you approve it (see [Warp: MCP][clients-warp-mcp]).
 
+### Install order alongside a hook {#install-order-hooks}
+
+[Qoder][qoder-mcp-docs] is the one client where an MCP entry and a
+[hook](./hooks.md) registration land in the **same** file, at **global
+scope**. Hooks arm on Qoder at global scope only, and hooks are
+experimental. See [Stability](./stability.md#unstable).
+
+Both entries land in Qoder's own `settings.json`, beside the user's own
+hand-written keys.
+
+`grim install` splices both independently of order. Arming a hook touches
+only the marked hook element it owns. An MCP install touches only
+`mcpServers`. Neither pass rewrites bytes the other wrote or the user did.
+
+Re-running either in either order writes zero additional bytes once both
+are already current. Removing one, through `grim uninstall` or the hook
+feature flag going back off, leaves the other exactly as it was.
+
 Codex is the one **TOML** target — every other client above writes
 JSON/JSONC — so its splice runs through a separate span-preserving
 engine built on [`toml_edit`][toml-edit-crate] instead of grim's own

@@ -18,7 +18,7 @@ looks like. This page is that reference. Narrative background stays in
 reference lives in its own chapter,
 [MCP Server Artifacts](./mcp-servers.md).
 
-## The five kinds {#kinds}
+## The six kinds {#kinds}
 
 Every artifact carries its kind in a `com.grimoire.kind` manifest
 annotation, so registries and tooling can distinguish kinds without
@@ -31,6 +31,7 @@ downloading layers.
 | **Agent** | Single `.md` file | `agent` | One agent file per client, per-client rendering |
 | **MCP server** | `mcp/<name>.toml` | `mcp` | Entry registered in each client's own MCP config file — never a materialized file |
 | **Bundle** | `.toml` member list | `bundle` | Never materializes itself — expands to its members |
+| **Hook** (experimental) | Directory with a `hook.toml` index | `hook` | Payload on disk plus a client-native registration, gated behind a feature flag and workspace consent — see [Hooks](./hooks.md) |
 
 The manifest's config descriptor is the OCI empty config
 (`application/vnd.oci.empty.v1+json`) — universally allow-listed, including
@@ -48,6 +49,52 @@ an agent `.md` is indistinguishable from a rule, so `--kind agent` is
 required (see [Agent Artifacts](./agents.md#publishing)); an MCP
 descriptor `.toml` is indistinguishable from a bundle, so `--kind mcp`
 is required (see [MCP Server Artifacts](./mcp-servers.md#publishing)).
+
+A third directory shape, `hook.toml`, needs no flag. Inference checks for
+`SKILL.md` before `hook.toml`. So a skill that happens to ship a
+`hook.toml` alongside it stays a skill. A bare hook directory with no
+`SKILL.md` is unambiguous on its own.
+
+### Hooks (experimental) {#hooks}
+
+A **hook** is a directory with a `hook.toml` index describing one or more
+handlers. See [Control agent commands with hooks](./guides/agent-hooks.md) for a worked example:
+
+```toml
+schema = 1
+name = "shell-guard"
+description = "Observes Bash tool calls before they run."
+
+[[hooks]]
+id = "guard"
+event = "PreToolUse"
+tier = "observer"
+matcher = "Bash"
+command = "sh guard.sh"
+timeout = 5
+```
+
+`event` names the point in an agent's tool-call lifecycle the hook
+attaches to. It is vendor-neutral, and grim translates it into each
+client's own event vocabulary.
+
+`tier` is one of three. `observer` cannot change the call. `gatekeeper`
+can allow, ask, or deny it, where the client's own format admits a
+verdict at that event. `mutator` can rewrite it, where the client's own
+format supports that. `matcher` scopes which tool names the hook applies
+to.
+
+The handler is exactly one of two forms. `command` is a string handed to
+`/bin/sh -c`, the common case shown above. `argv` is an exec-form
+argument vector, with no shell involved.
+
+`timeout` is the handler's limit in seconds, 30 when unset, and at least 1.
+`grim build` refuses a smaller value with exit code 65. [Exit code and
+timeout][hooks-exit] says how the limits combine across handlers.
+
+Unlike every other kind, a hook never arms on its own. See [Hooks](./hooks.md#why-gated)
+for the feature-flag and consent gates every installed hook still has to
+clear before anything runs.
 
 ## Names {#names}
 
@@ -246,8 +293,8 @@ accidentally widen what gets published — the opposite of npm's
 defaults. Only the walk root's `.grimignore` counts — one nested inside a
 subdirectory is an ordinary file, packed like any other.
 
-`SKILL.md`, a rule's index file, and `.grimignore` itself are never
-ignored, however a pattern is written, so a stray `*.md` or `.*` line
+`SKILL.md`, a rule's index file, a hook's `hook.toml`, and `.grimignore`
+itself are never ignored, however a pattern is written, so a stray `*.md` or `.*` line
 cannot strip the artifact's own identity. `.grimignore` is itself packed,
 installed, and hashed, so a publisher's ignore rules travel with the
 artifact — editing them after install is itself drift. An invalid line
@@ -269,6 +316,17 @@ drift detection, it does not protect it. This holds for *every* path the
 artifact's `.grimignore` ignores, not just the defaults: a hand edit there
 is never reported as drift and `grim update` wipes it without the
 `--force` refusal, so keep no hand-edited files under an ignored path.
+
+A [hook](./hooks.md) handler runs with its installed payload directory as
+the working directory. So anything it writes there, such as a
+`__pycache__/` or a state file, lands inside the artifact. The defaults
+already hide Python and Node caches. Add any other runtime byproduct to
+`.grimignore`, or `grim status` reports the hook as modified and the next
+install declines to arm it. The ignore rules cut the other way too. A
+handler that names an ignored file, such as `.venv/lib/dep.py`, fails
+`grim build` at exit 65, because the file would never be packed. An
+ignored `node_modules/`, `.venv/` or `venv/` that no handler names only
+draws a build warning.
 
 [Agents](#agents) get no `.grimignore`: their companion directory is
 already an allowlist of exactly `README.md`, `logo.png`, and `logo.svg`,
@@ -627,6 +685,9 @@ Repository-level support channels
 map: they live on the mutable
 [description companion](./publishing.md#support-channels) so they can be
 updated without re-releasing every published version.
+
+<!-- internal -->
+[hooks-exit]: ./hooks.md#handler-exit
 
 <!-- external -->
 [agentskills-spec]: https://agentskills.io/specification
