@@ -1,0 +1,73 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+#
+# Principle 9 differential run (C-151): origin/main's grim against this
+# branch's grim over one hook-free scenario list, byte-compared after every
+# command. Deep verify only — deliberately NOT part of `task verify`.
+#
+# `task p9:diff` refuses a vacuous run (identical binaries, or no source
+# change against origin/main) with exit 2; `task p9:diff -- --allow-identical`
+# runs it anyway (the baseline). Fetch origin first: MAIN_SHA is the local
+# origin/main ref.
+
+version: '3'
+
+vars:
+  P9_DIR: '{{.ROOT_DIR}}/target/p9'
+
+tasks:
+  diff:
+    desc: Principle 9 differential run — origin/main's grim vs this branch's, hook-free scenarios (deep verify only)
+    vars:
+      MAIN_SHA:
+        sh: git rev-parse origin/main
+      # rustup resolves the toolchain from the cwd (ROOT_DIR), not from
+      # --manifest-path, so main is built with the branch's pinned toolchain
+      # (C-151: same toolchain for both). The cache key carries it.
+      TOOLCHAIN:
+        sh: sha256sum rust-toolchain.toml | cut -c1-12
+    cmds:
+      - task: build-main
+        vars: { MAIN_SHA: '{{.MAIN_SHA}}', TOOLCHAIN: '{{.TOOLCHAIN}}' }
+      - cargo build --release --locked
+      - task: compare
+        vars: { MAIN_BIN: '{{.P9_DIR}}/bin/grim-{{.MAIN_SHA}}-{{.TOOLCHAIN}}', MAIN_SHA: '{{.MAIN_SHA}}', CLI_ARGS: '{{.CLI_ARGS}}' }
+
+  compare:
+    internal: true
+    dir: '{{.ROOT_DIR}}/test'
+    cmds:
+      # ocx exec puts zot (pinned in the root ocx.toml) on PATH.
+      - >-
+        ocx exec -- uv run python tools/p9_diff.py
+        --main-sha {{.MAIN_SHA}}
+        --main-bin {{.MAIN_BIN}}
+        --branch-bin {{.ROOT_DIR}}/target/release/grim
+        --root {{.P9_DIR}}/run {{.CLI_ARGS}}
+
+  self-test:
+    desc: Prove the p9 differ reports planted differences and failed scenarios
+    dir: '{{.ROOT_DIR}}/test'
+    cmds:
+      - uv run python tools/p9_diff.py --self-test --root {{.P9_DIR}}/self-test
+
+  build-main:
+    internal: true
+    desc: Build origin/main's grim from a git archive, cached by SHA and toolchain
+    dir: '{{.ROOT_DIR}}'
+    status:
+      - test -x {{.P9_DIR}}/bin/grim-{{.MAIN_SHA}}-{{.TOOLCHAIN}}
+    cmds:
+      - rm -rf {{.P9_DIR}}/src && mkdir -p {{.P9_DIR}}/src {{.P9_DIR}}/bin
+      # `git archive` skips submodules: export each at main's pinned commit
+      # from the local submodule checkout (fails loudly if not fetched).
+      - |
+        set -euo pipefail
+        git archive {{.MAIN_SHA}} | tar -x -C {{.P9_DIR}}/src
+        git ls-tree -r {{.MAIN_SHA}} | awk '$2 == "commit" { print $3, $4 }' > {{.P9_DIR}}/submodules
+        while read -r sha path; do
+          mkdir -p "{{.P9_DIR}}/src/$path"
+          git -C "$path" archive "$sha" | tar -x -C "{{.P9_DIR}}/src/$path"
+        done < {{.P9_DIR}}/submodules
+      # One shared target dir across SHAs keeps rebuilds incremental.
+      - cargo build --release --locked --manifest-path {{.P9_DIR}}/src/Cargo.toml --target-dir {{.P9_DIR}}/cargo-target
+      - cp -f {{.P9_DIR}}/cargo-target/release/grim {{.P9_DIR}}/bin/grim-{{.MAIN_SHA}}-{{.TOOLCHAIN}}
