@@ -893,6 +893,12 @@ pub(crate) async fn stage_members<'a>(
         let kind = locked.kind;
         *position += 1;
         progress.advance(*position, &format!("{plugin}: {kind} {emitted}"));
+        if kind == ArtifactKind::Hook {
+            // C-141: once per hook per plugin, not per client.
+            tracing::warn!(
+                "hook '{emitted}' omitted from plugin '{plugin}': exported plugins run without grim, and hooks need grim's hook runtime"
+            );
+        }
         let admitted = clients.iter().any(|&(c, f)| family::admits(f, c, kind).is_ok());
         let content = if !admitted {
             MemberContent::Unfetched
@@ -3156,5 +3162,29 @@ mod tests {
         assert_eq!(staged[1].emitted, "style");
         assert!(matches!(staged[1].content, MemberContent::Unfetched));
         assert_eq!(counting.manifests.load(Ordering::SeqCst), 1);
+    }
+
+    /// C-140: a hook member is never fetched, whichever family is selected.
+    #[tokio::test]
+    async fn c140_stage_members_never_fetches_a_hook() {
+        let counter = Arc::new(NoNetwork::default());
+        let access: Arc<dyn OciAccess> = counter.clone();
+        let members = vec![(
+            registry_member("guard", ArtifactKind::Hook, sha('f')),
+            "guard".to_string(),
+        )];
+        let tmp = tempfile::tempdir().unwrap();
+        let staged = stage_members(
+            &members,
+            &[claude(), codex()],
+            &access,
+            tmp.path(),
+            tmp.path(),
+            (&crate::install::SilentProgress, &mut 0, "p"),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(staged[0].content, MemberContent::Unfetched));
+        assert_eq!(counter.calls.load(Ordering::SeqCst), 0, "hooks are never fetched");
     }
 }
