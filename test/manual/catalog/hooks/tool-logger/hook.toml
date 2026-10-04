@@ -1,0 +1,19 @@
+# Manual-rig `observer` example. Read `test/manual/README.md` § Hooks.
+#
+# An observer's response changes nothing — grim drops any verdict it returns.
+# This one appends a line per tool call so you can watch the dispatcher fire.
+
+schema = 1
+name = "tool-logger"
+description = "Observer example for the manual rig: appends one line per Bash or Write tool call to $GRIM_HOOK_DIR/../tool-calls.log so you can watch the dispatcher fire. Reads its input and writes nothing a client acts on — an observer's response is dropped by design."
+
+[[hooks]]
+id = "log-tool-calls"
+event = "PreToolUse"
+tier = "observer"
+# An alternation, which is one of the three matcher forms that translate
+# losslessly to every v1 client. Both alternatives fire.
+matcher = "Bash|Write"
+argv = ["sh", "${GRIM_HOOK_DIR}/log.sh"]
+timeout = 5
+payload = "stdin"
