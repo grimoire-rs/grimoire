@@ -202,6 +202,7 @@ fn pack_hook_dir(
     version: &str,
     fallback_source: Option<&str>,
     git: Option<&GitProvenance>,
+    defaults: &crate::oci::annotations::MetadataDefaults,
 ) -> anyhow::Result<PackedArtifact> {
     let manifest_path = path.join(crate::oci::hook::HOOK_MANIFEST_FILE);
     // A read failure — absent `hook.toml`, unreadable directory — is attributed
@@ -228,7 +229,7 @@ fn pack_hook_dir(
     // packing bounds and a second sort order to keep byte-identical.
     // `pack_hook_payload_dir` differs only in never ignoring `hook.toml` (C-160).
     let tar = super::grim(crate::skill::skill_package::pack_hook_payload_dir(path))?;
-    let annotations = annotations_for_hook(&manifest, version, fallback_source, git);
+    let annotations = annotations_for_hook(&manifest, version, fallback_source, git, defaults);
     Ok(PackedArtifact {
         kind: ArtifactKind::Hook,
         // The manifest `name`, which `validate` has just proven equal to the
@@ -267,7 +268,7 @@ pub fn validate_and_pack(
         // It reaches this shared validator rather than a dedicated path (the
         // shape `Bundle` and `Mcp` take) because it genuinely is a directory
         // tree in a tar layer, so `PackedArtifact` describes it exactly.
-        ArtifactKind::Hook => pack_hook_dir(path, version, fallback_source, git),
+        ArtifactKind::Hook => pack_hook_dir(path, version, fallback_source, git, defaults),
         // Bundles are packed on a dedicated path (`pack_bundle`); the
         // skill/rule validator never receives one.
         ArtifactKind::Bundle => unreachable!("bundles are packed via the bundle path, not validate_and_pack"),

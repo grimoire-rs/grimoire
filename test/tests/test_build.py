@@ -237,3 +237,17 @@ def test_build_rejects_oversized_grimignore(grim_at, project_dir: Path) -> None:
     result = grim_at(project_dir).run("build", str(skill), check=False)
     assert result.returncode == 65, result.stderr
     assert ".grimignore" in result.stderr, result.stderr
+
+
+def test_build_hook_applies_metadata_flags(grim_at, project_dir: Path) -> None:
+    """A hook has no catalog fields of its own, so the metadata flags fill them."""
+    hook = project_dir / "guard"
+    _write(
+        hook / "hook.toml",
+        'schema = 1\nname = "guard"\ndescription = "Guard."\n',
+    )
+    runner = grim_at(project_dir)
+    bare = runner.json("build", str(hook))
+    withmeta = runner.json("build", str(hook), "--authors", "Acme", "--vendor", "Acme Inc")
+    assert bare["kind"] == "hook"
+    assert withmeta["annotation_count"] == bare["annotation_count"] + 2
