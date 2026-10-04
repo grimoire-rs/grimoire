@@ -1,11 +1,11 @@
 ---
 title: "Artifact Reference"
-description: "Grimoire ships five artifact kinds — skills, rules, agents, MCP servers, and bundles — each with its own file layout and install target."
+description: "Grimoire ships six artifact kinds — skills, rules, agents, MCP servers, bundles, and experimental hooks — each with its own file layout and install target."
 ---
 <!-- doc_type: reference -->
 
-Grimoire ships five artifact kinds — skills, rules, agents, MCP servers,
-and bundles. Each has its own source shape, frontmatter schema, and
+Grimoire ships six artifact kinds — skills, rules, agents, MCP servers,
+bundles, and (experimental) [hooks](./hooks.md). Each has its own source shape, frontmatter schema, and
 validation rules, and until now those details lived scattered across the
 publishing, agents, and vendor-metadata chapters.
 

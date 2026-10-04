@@ -158,8 +158,8 @@ grim uninstall skill code-review
 `grim uninstall` deletes the files, drops the install record, and
 undeclares the artifact.
 
-Both take a kind and a name. The kind is `skill`, `rule`, `agent`, `bundle`
-or `mcp`, and `grim uninstall` accepts every one of those but `bundle`.
+Both take a kind and a name. The kind is `skill`, `rule`, `agent`, `bundle`,
+`mcp`, or the experimental `hook`, and `grim uninstall` accepts every one of those but `bundle`.
 
 ## See it run
 

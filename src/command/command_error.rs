@@ -40,7 +40,7 @@ pub enum CommandError {
     /// `com.grimoire.kind` annotation, or the legacy `artifactType`/config
     /// media type on older artifacts (a non-Grimoire image, or an offline
     /// cache miss). The user must pass `--kind`.
-    #[error("could not infer the kind of '{reference}'; pass --kind skill|rule|agent|bundle|mcp")]
+    #[error("could not infer the kind of '{reference}'; pass --kind skill|rule|agent|bundle|mcp|hook")]
     KindInferenceFailed { reference: String },
 
     /// `add` declared a `(kind, name)` that already exists in the config

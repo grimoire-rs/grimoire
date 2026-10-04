@@ -59,7 +59,7 @@ pub struct SearchToolArgs {
     /// Results come back ranked by relevance, best match first, and hits
     /// scoring below `options.search_min_relevance` percent of the best
     /// (default 50) are dropped. A bare kind keyword
-    /// (`skill`/`rule`/`bundle`/`agent`/`mcp`, singular or plural) filters
+    /// (`skill`/`rule`/`bundle`/`agent`/`mcp`/`hook`, singular or plural) filters
     /// by kind. Omit to list the whole catalog, unranked, in registry order.
     #[serde(default)]
     pub query: Option<String>,

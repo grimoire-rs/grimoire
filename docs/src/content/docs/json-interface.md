@@ -101,9 +101,10 @@ One row object per item inside `{"items": [...]}`:
 | `config registry fields` | `{key, type, title, description}` — `key` is the short field name (`oci`, `index`, `default`, `include`, `exclude`, `insecure`), deliberately diverging from `config list`'s dotted `registry.<alias>.<field>` keys; no `value`/`set`/`default`, since a field pattern (not a resolved alias) has no runtime value | — |
 | `publish` | `{ref, kind, digest, tags, status, pushed_to}` (`ref` is the pull name; `pushed_to` is the push-side reference under a [push/pull registry split](./publishing.md#batch-publish-push-registry), `null` when inactive) + sibling envelope keys `descriptions` (`{"items": [...]}` of published/planned [description companion](./publishing.md#description-companion) pushes, `{ref, repository, digest, files}`, `digest` `null` under `--dry-run`; empty `items` when no companion was resolved) and `announce` (`{outcome, branch, url, fork}` or `null`; `fork` is itself `{repo, created}` or `null` — populated only when the announce branch landed on an automatically created or reused fork rather than the index repository directly) — see [publish report][publishing-report] | `status`: `pushed`, `skipped`, `dry-run`, `failed` |
 
-`kind` is one of `skill`, `rule`, `agent`, `bundle`, `mcp` for every
+`kind` is one of `skill`, `rule`, `agent`, `bundle`, `mcp`, `hook`
+(experimental, see [Hooks](./hooks.md)) for every
 enveloped report except `search`: the other reports resolve a locked or
-otherwise real artifact, so their `kind` is always one of those five
+otherwise real artifact, so their `kind` is always one of those six
 values, while `search` reports a catalog row whose manifest may declare
 no kind at all, in which case `kind` is `null`.
 
