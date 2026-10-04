@@ -1,0 +1,5 @@
+summary = "Principle 9 fixture bundle (v2)"
+description = "Bundles one member skill by a deployment-relative reference."
+
+[skills]
+p9-member = "../skills/p9-member:1"

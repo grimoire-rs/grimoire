@@ -1,0 +1,7 @@
+description = "Principle 9 differential fixture MCP server (v2)."
+summary = "p9 fixture mcp"
+
+[server]
+transport = "stdio"
+command = "p9-server"
+args = ["--mode", "v2"]

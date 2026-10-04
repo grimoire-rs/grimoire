@@ -14,6 +14,7 @@ includes:
   schema: ./taskfiles/schema.taskfile.yml
   docs: ./taskfiles/docs.taskfile.yml
   upstream: ./taskfiles/upstream.taskfile.yml
+  p9: ./taskfiles/p9.taskfile.yml
   claude:
     taskfile: ./.claude/taskfile.yml
     dir: ./.claude

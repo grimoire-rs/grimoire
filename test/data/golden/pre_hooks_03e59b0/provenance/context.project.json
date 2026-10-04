@@ -1,0 +1,30 @@
+{
+  "version": "0.13.0",
+  "scope": "project",
+  "workspace": "<ENVROOT>/project",
+  "config_path": "<ENVROOT>/project/grimoire.toml",
+  "config_exists": true,
+  "lock_path": "<ENVROOT>/project/grimoire.lock",
+  "lock_exists": true,
+  "lock_error": null,
+  "state_path": "<ENVROOT>/project/.grimoire/state.json",
+  "grim_home": "<ENVROOT>/grim-home",
+  "offline": false,
+  "offline_source": null,
+  "clients": [
+    "claude"
+  ],
+  "registries": [
+    {
+      "alias": null,
+      "url": "https://index.grimoire.rs",
+      "kind": "index",
+      "default": true,
+      "authenticated": false,
+      "include": [],
+      "exclude": [],
+      "insecure": false
+    }
+  ],
+  "default_registry": "ghcr.io/grimoire-rs"
+}
