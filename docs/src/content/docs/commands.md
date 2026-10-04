@@ -318,9 +318,9 @@ string.
 
 ## grim add {#add}
 
-`grim add [--kind <skill|rule|agent|bundle|mcp>] [--name <name>] [--no-install] [--force] <reference>`
+`grim add [--kind <skill|rule|agent|bundle|mcp|hook>] [--name <name>] [--no-install] [--force] <reference>`
 declares a skill, rule, [agent](./agents.md), [MCP server](./mcp-servers.md),
-or bundle, pins it in the lock, and — by default — materializes it into your
+bundle, or (experimental) [hook](./hooks.md), pins it in the lock, and — by default — materializes it into your
 detected AI clients in one step. `<reference>` is the only required argument —
 `registry/repo:tag` or `registry/repo@sha256:…`.
 
@@ -1016,7 +1016,7 @@ project without `--global` it exits `79` like every other scope command.
 ## grim remove {#remove}
 
 `grim remove <kind> <name>` (`<kind>` is `skill`, `rule`, `agent`, `bundle`,
-or `mcp`) undeclares an artifact from `grimoire.toml` and the lock. It
+`mcp`, or the experimental [`hook`](./hooks.md)) undeclares an artifact from `grimoire.toml` and the lock. It
 leaves already-installed files (or, for an [MCP server](./mcp-servers.md),
 the registered config entry) in place — use [`grim uninstall`](#uninstall)
 to remove those too.
@@ -1034,8 +1034,8 @@ nothing to undeclare for it — use `grim uninstall` to drop one instead.
 
 ## grim uninstall {#uninstall}
 
-`grim uninstall <kind> <name>` (`<kind>` is `skill`, `rule`, `agent`, or
-`mcp`) is the full inverse of install: it deletes the materialized files,
+`grim uninstall <kind> <name>` (`<kind>` is `skill`, `rule`, `agent`, `mcp`, or
+`hook`) is the full inverse of install: it deletes the materialized files,
 drops the install record, and undeclares the artifact from the config and
 lock. The interactive TUI's delete action reuses the same seam. For an
 [MCP server](./mcp-servers.md#modification-detection), there is no
@@ -1127,8 +1127,8 @@ repository can flip either one. The only per-invocation override is the
 the whole catalog. The query is whitespace-split and the terms are ANDed.
 Every term must match somewhere.
 
-A bare kind keyword (`skill`, `rule`, `agent`, `mcp`, `bundle`, singular or
-plural) filters by kind instead of matching as text. For example, `grim
+A bare kind keyword (`skill`, `rule`, `agent`, `mcp`, `bundle`, or the
+experimental [`hook`](./hooks.md), singular or plural) filters by kind instead of matching as text. For example, `grim
 search skill review` finds skills matching "review". When
 `[[registries]]` are configured, all of them are browsed and the results
 are flattened into one table.
@@ -2343,7 +2343,7 @@ grim tui --registry ghcr.io/acme
 `grim build <path>` validates and packs a local skill directory, rule `.md`
 file, [agent](./agents.md) `.md` file, [MCP server](./mcp-servers.md)
 `.toml` file, or bundle `.toml` file without pushing it — a dry run for
-authors. `--kind <skill|rule|agent|bundle|mcp>` forces the artifact kind
+authors. `--kind <skill|rule|agent|bundle|mcp|hook>` forces the artifact kind
 instead of auto-detecting it from the path. An agent always needs `--kind
 agent` — a bare `.md` packs as a rule; an MCP server always needs `--kind
 mcp` — a bare `.toml` packs as a bundle. [Build provenance](./publishing.md#git-provenance) (commit revision and

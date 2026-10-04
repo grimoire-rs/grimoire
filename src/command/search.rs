@@ -69,7 +69,7 @@ pub struct SearchArgs {
     /// Results are ranked by relevance, best match first, and hits scoring
     /// below `options.search_min_relevance` percent of the best (default 50)
     /// are dropped, with a note on stderr saying how many. A bare kind
-    /// keyword (`skill`/`rule`/`bundle`/`agent`/`mcp`, singular or plural)
+    /// keyword (`skill`/`rule`/`bundle`/`agent`/`mcp`/`hook`, singular or plural)
     /// filters by kind instead of matching as text. Empty ⇒ list the whole
     /// catalog, unranked, in registry order. Results are narrowed further by
     /// each source's
@@ -732,7 +732,7 @@ mod tests {
             "--help must name the setting, not a hard-coded half; got:\n{collapsed}"
         );
         assert!(
-            collapsed.contains("(`skill`/`rule`/`bundle`/`agent`/`mcp`, singular or plural)"),
+            collapsed.contains("(`skill`/`rule`/`bundle`/`agent`/`mcp`/`hook`, singular or plural)"),
             "--help must list every kind keyword the parser accepts; got:\n{collapsed}"
         );
     }

@@ -2082,7 +2082,7 @@ mod tests {
 
     /// Every non-hook kind reports `[]`, and the row keeps its lifecycle state.
     /// Guards the cheap early return that keeps C-017 off the hot path for the
-    /// five kinds that arm nothing.
+    /// five other kinds that arm nothing.
     #[test]
     fn non_hook_kinds_report_no_arming_verdicts() {
         for kind in [

@@ -75,7 +75,7 @@ content is stored once and is immutable: a `sha256:…` digest always names the
 same bytes.
 
 Each artifact declares its kind through a `com.grimoire.kind` manifest
-annotation — `skill`, `rule`, `agent`, `mcp`, or `bundle` — so `grim` (or any
+annotation — `skill`, `rule`, `agent`, `mcp`, `bundle`, or the experimental `hook` — so `grim` (or any
 OCI-aware tool that reads manifest annotations) can tell a Grimoire artifact
 apart without unpacking it. The manifest's config descriptor is the OCI empty
 config, which keeps the wire format acceptable to every registry, including
