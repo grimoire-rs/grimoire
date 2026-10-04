@@ -62,6 +62,7 @@ surface_map:
   schema: X01
   completions: X02
   help: X03
+  hook: T33
 
 out_of_scope:
   - id: X01
@@ -79,9 +80,6 @@ out_of_scope:
   - id: X05
     surface: "README: Community, License"
     why: "not tasks"
-  - id: X06
-    surface: "hooks (issues #85-#97, PR #98)"
-    why: "unlanded feature; document when it merges"
   - id: X07
     surface: "managed context block (issues #52, #53)"
     why: "unlanded feature"
@@ -722,6 +720,26 @@ tasks:
     page_status: missing
     action: write
     note: "the VS Code surface of browse.md under Getting started: install the extension, add an index, install one artifact, see status; deep reference stays in the extension's repo"
+
+  - id: T33
+    task: "run a small script before or after an agent's tool calls, and know when it will not run"
+    source: pr-title
+    signal: friction-log-severity
+    rank: 30
+    tier: integration
+    depends_on: [T02]
+    friction_log: not-run
+    friction_note: "issues #85-#97, PR #98; landed as an experimental artifact kind gated behind options.experimental.hooks and per-workspace consent"
+    user_need:
+      as_a: "a developer who wants a guard or a notifier around an agent's tool calls"
+      i_need_to: "declare a hook, turn the feature on, consent to arming it, and read back which clients actually armed it and why one did not"
+      so_that: "I can observe or gate tool calls without wiring each client's own hook format by hand"
+    solution_shaped: false
+    existing_page: missing
+    page_word_count: 0
+    page_status: missing
+    action: write
+    note: "was X06 (unlanded feature); promoted to a task row now that the hook artifact kind has shipped (experimental pre-1.0, see docs/src/content/docs/stability.md#unstable)"
 
 # Coverage table — the same rows for a human reviewer.
 #

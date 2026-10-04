@@ -617,6 +617,7 @@ C-020 and C-036, amendments of the same date.
 
 | Date | Author | Change |
 |------|--------|--------|
+| 2026-09-28 | WP-07 (`hex/plan_hooks_pr98_revival--wp07`) | **Hook joins the admission list, noted for cross-reference (`plan_hooks_pr98_revival.md` C-140…C-142, ADR `adr_hooks_support.md` A7).** No family admits `Hook` — the omission reasons above are exactly the two this ADR already names: `not-representable` (Claude family, which has a native hook file the plugin format still cannot carry) and `no-format-surface` (families with no hook file at all). No new omission-reason literal, no admission-gate code change here; a hook-only export still exits 65 via `EmptyPlugin`, same as any other all-omitted export. |
 | 2026-09-27 | Architect (hex-plan xhigh) | Initial proposal |
 | 2026-09-27 | hex-plan review round 1 | Amendments A1–A20: `MarketplaceLock` map with wire-only `plugin`; per-plugin staleness; strict member conflicts; path containment; error channels; pinned version source; selection model; manifest-anchored registry context; `declare_reference`/`roll_forward` seams; atomic placement; D13 supersessions. Status → Accepted |
 | 2026-09-27 | hex-plan re-validation | R1–R9: `grim context` keeps exit 0 with `lock_error`; MCP lock/emitted names use a containment check, not `SkillName`; part metadata copies top-level `[metadata]`; `DeclareError` → exit mapping with explicit offline check; `.toml`-stem and absolute manifest path; D4 atomicity order |
