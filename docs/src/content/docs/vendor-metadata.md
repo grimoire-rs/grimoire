@@ -246,7 +246,10 @@ mapping from the `CLAUDE_AGENT_FIELDS` constant in
 fields that cannot be expressed as a single string metadata value. This
 exclusion is unchanged; an MCP server is registered as its own
 distributable artifact kind instead — see
-[MCP Server Artifacts](./mcp-servers.md).
+[MCP Server Artifacts](./mcp-servers.md). Claude's agent-frontmatter
+`hooks` key is unrelated to grim's experimental [hook](./hooks.md) kind,
+which is its own artifact, installed and armed independently of any
+agent.
 
 ## The opencode.* agent registry {#opencode-agent-registry}
 
