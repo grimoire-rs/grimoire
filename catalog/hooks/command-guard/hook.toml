@@ -1,0 +1,22 @@
+# A `gatekeeper` DEMONSTRATION. Read `catalog/hooks/README.md` before
+# installing it, and read the description below before relying on it.
+#
+# The gatekeeper tier is explicitly NOT a security boundary in this design.
+# It shows how a verdict reaches the client; it does not stop a determined
+# agent, and this example's own check is a substring match that any
+# rewording evades. Copy it to learn the shape, never as a control.
+
+schema = 1
+name = "command-guard"
+description = "Gatekeeper example: refuses a Bash tool call whose text contains the literal `rm -rf /`, and returns the refusal as a JSON verdict rather than an exit code. NOT a security control — the gatekeeper tier is not a security boundary and this check is a substring match that trivial rewording evades. Reads its input, writes a verdict, changes nothing on disk."
+
+[[hooks]]
+id = "refuse-recursive-root-delete"
+# `PreToolUse` is the only moment at which refusing a tool call is
+# meaningful — a verdict at `PostToolUse` arrives after the damage.
+event = "PreToolUse"
+tier = "gatekeeper"
+matcher = "Bash"
+argv = ["sh", "guard.sh"]
+timeout = 5
+payload = "stdin"

@@ -1,0 +1,34 @@
+# The reference `observer` example. Read `catalog/hooks/README.md` first —
+# it carries the end-to-end walkthrough, including how to disarm again.
+#
+# Two entries, one payload tree: a pre/post-style pair sharing one script is
+# the common case the `[[hooks]]` array-of-tables exists for. Both are
+# `observer`, the tier whose response cannot change what happens.
+
+schema = 1
+name = "tool-call-logger"
+description = "Observer example: appends one line per tool call and per session start to a log file outside the repository. Cannot block, alter, or delay anything — the observer tier's response is discarded by design. Writes only to $GRIM_EXAMPLE_LOG (default: a file under $TMPDIR)."
+
+[[hooks]]
+id = "log-tool-call"
+event = "PreToolUse"
+tier = "observer"
+# `*` is one of the three matcher forms that translate losslessly to every
+# v1 client. An exact tool name (`Bash`) and an alternation (`Bash|Write`)
+# are the other two.
+matcher = "*"
+# The interpreter form, not `./log.sh`: a payload delivered through an OCI
+# registry arrives without an exec bit, so a handler whose first token is a
+# payload-relative file is refused at `grim build`.
+argv = ["sh", "log.sh"]
+timeout = 5
+payload = "stdin"
+
+[[hooks]]
+id = "log-session-start"
+event = "SessionStart"
+tier = "observer"
+# No `matcher`: SessionStart carries no tool to match on.
+argv = ["sh", "log.sh"]
+timeout = 5
+payload = "stdin"
