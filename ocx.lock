@@ -1,9 +1,22 @@
 [metadata]
 lock_version = 3
 declaration_hash_version = 1
-declaration_hash = "sha256:bafc9d24adeb2db3399a5a8aeb60c052a4e3fb346176e97deaa9cb26fdf690ea"
-generated_by = "ocx 0.6.3"
-generated_at = "2026-09-27T16:39:47Z"
+declaration_hash = "sha256:e7476eb7b7bc99c0b5608003b24062f65bf2ac81919c48b3338cf356fee1712e"
+generated_by = "ocx 0.6.4"
+generated_at = "2026-10-06T09:18:29Z"
+
+[[tool]]
+name = "node"
+group = "default"
+repository = "ocx.sh/nodejs/node"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:6eeb00b315b7b6a08327d036d816fd2f7ad753851fae7c796f5b5e2de047c862"
+"darwin/arm64" = "sha256:c25372df1ee5d2764f027193d70cd46fdf01f5506d98b0aeb52c07792d0849c9"
+"linux/amd64+libc.glibc" = "sha256:21f942839c3f9367c5ce0f5dda804621b945f48777d6e35598004ad0c9727dc7"
+"linux/arm64+libc.glibc" = "sha256:76aaeb829ea9d40c4092d1c176da35edd1260b75d1bf911f48829da392347a69"
+"windows/amd64" = "sha256:737687a6e9eb4fa7d168529eae2eb291d5c0dee76e02e5758b2d27f6f1b48aa6"
+"windows/arm64" = "sha256:af5f53029aa40b512e7e795adfbdeada4a7d1db362b312982cea58348ad901c2"
 
 [[tool]]
 name = "zot"

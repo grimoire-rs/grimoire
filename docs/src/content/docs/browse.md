@@ -141,12 +141,12 @@ source to the extension instead of a single artifact.
 
 ## Browse in VS Code
 
-The extension is `grimoire-rs.grimoire` on the marketplace. Its **Browse** tab
+The extension is [`grimoire-rs.grimoire-vscode`](https://marketplace.visualstudio.com/items?itemName=grimoire-rs.grimoire-vscode) on the marketplace. Its **Browse** tab
 searches every configured source and puts a chip row of kinds above the
 results. **Installed** lists what this workspace already has, and **Updates**
 lists what has moved ahead of your lock.
 
-1. Install `grimoire-rs.grimoire` from the marketplace.
+1. Install [`grimoire-rs.grimoire-vscode`](https://marketplace.visualstudio.com/items?itemName=grimoire-rs.grimoire-vscode) from the marketplace.
 2. Trust the workspace, because install actions run `grim`.
 3. Open the **Browse** tab and search for an artifact.
 4. Narrow the results with a kind chip.

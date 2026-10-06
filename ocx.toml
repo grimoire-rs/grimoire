@@ -3,3 +3,4 @@
 
 [tools]
 zot = "ocx.sh/project-zot/zot:2"
+node = "ocx.sh/nodejs/node:24"

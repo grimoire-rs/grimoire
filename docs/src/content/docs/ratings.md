@@ -501,4 +501,4 @@ which is the honest answer.
 [spec-compiled]: ./package-index.md#spec-compiled
 
 <!-- grimoire -->
-[vscode]: https://marketplace.visualstudio.com/items?itemName=grimoire-rs.grimoire
+[vscode]: https://marketplace.visualstudio.com/items?itemName=grimoire-rs.grimoire-vscode
