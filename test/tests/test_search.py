@@ -670,7 +670,7 @@ def test_search_json_reports_a_healthy_source(
     doc = runner.json("search", unique_repo, "--registry", locator, "--refresh")
 
     assert doc["sources"] == [
-        {"alias": None, "locator": locator, "ok": True, "error": None}
+        {"alias": None, "locator": locator, "ok": True, "error": None, "capped": False}
     ], f"a healthy `--registry` browse reports exactly one clean source: {doc['sources']!r}"
     # Each row's `source` is the same alias/locator pair, so the join is direct.
     for row in doc["items"]:

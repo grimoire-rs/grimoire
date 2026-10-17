@@ -1903,6 +1903,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_capped_cache_with_a_full_window_is_flagged_truncated() {
+        // `seed_catalog` only ever passed `false`, so nothing proved the flag
+        // a build writes survives the load into the group. 600 rows is more
+        // than the cap lists, as a cache an earlier build kept would be.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = GrimPaths::new(tmp.path().to_path_buf());
+        let repos: Vec<(String, String)> = (0..600)
+            .map(|i| ("ghcr.io".to_string(), format!("acme/pkg-{i:03}")))
+            .collect();
+        let repos: Vec<(&str, &str)> = repos.iter().map(|(r, p)| (r.as_str(), p.as_str())).collect();
+        seed_catalog(&paths, "ghcr.io", &repos, true);
+        let (results, _) = browse_capturing(
+            tmp.path(),
+            &[source("ghcr.io", None, &[], &[])],
+            "",
+            CatalogScope::Browse,
+        )
+        .await;
+        assert!(results.groups[0].truncated);
+        assert!(results.any_truncated());
+        assert_eq!(results.groups[0].rows.len(), 600, "a read never re-applies the cap");
+    }
+
+    #[tokio::test]
     async fn any_rows_listed_counts_before_the_query() {
         // A query that matches nothing in a populated catalog still reports
         // the source as listing rows — the signal `grim search` needs to keep

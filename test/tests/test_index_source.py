@@ -242,7 +242,13 @@ def test_search_json_names_the_failed_index_source(grim_at, project_dir: Path) -
 
     assert doc["items"] == [], f"unreachable index yields no rows, got {doc['items']!r}"
     assert doc["sources"] == [
-        {"alias": "hub", "locator": locator, "ok": False, "error": doc["sources"][0]["error"]}
+        {
+            "alias": "hub",
+            "locator": locator,
+            "ok": False,
+            "error": doc["sources"][0]["error"],
+            "capped": False,
+        }
     ], f"the failed index source is named: {doc['sources']!r}"
     assert doc["sources"][0]["error"], "a failed source carries a non-null error"
 

@@ -235,6 +235,7 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
             locator: g.registry.clone(),
             ok: g.error.is_none(),
             error: g.error.clone(),
+            capped: g.truncated,
         })
         .collect();
 
@@ -1241,6 +1242,77 @@ mod tests {
         let mut rows: Vec<usize> = Vec::new();
         assert_eq!(apply_page(&mut rows, 5, None, false), (0, false));
         assert_eq!(apply_page(&mut rows, 5, None, true), (0, true));
+    }
+
+    /// Write a fresh cache for `ghcr.io` holding `count` rows that a build
+    /// capped (`truncated`), the file a `--registry ghcr.io` browse reads.
+    fn seed_capped_cache(home: &std::path::Path, count: usize) {
+        let paths = crate::store::paths::GrimPaths::new(home.to_path_buf());
+        let path = paths.catalog_file_for("ghcr.io");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let entries: serde_json::Map<String, serde_json::Value> = (0..count)
+            .map(|i| {
+                let repository = format!("acme/pkg-{i:03}");
+                (
+                    format!("ghcr.io/{repository}"),
+                    serde_json::json!({
+                        "registry": "ghcr.io",
+                        "repository": repository,
+                        "kind": "skill",
+                        "fetched_at": "2026-08-09T00:00:00Z",
+                    }),
+                )
+            })
+            .collect();
+        let file = serde_json::json!({
+            "version": 1,
+            "registry": "ghcr.io",
+            "scope": "",
+            "truncated": true,
+            "built_at": chrono::Utc::now().to_rfc3339(),
+            "entries": entries,
+        });
+        std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_capped_source_reports_a_lower_bound_on_every_page_through_run() {
+        // The cap is applied while a listing is built, so `run` only ever sees
+        // it as the cache's `truncated` flag. Seed one with 600 rows: `total`
+        // counts them all and `truncated` stays true at offset 0 and at an
+        // offset equal to the old window's end, where `offset + len < total`
+        // alone could not tell the caller anything.
+        use crate::cli::printer::Printable as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        seed_capped_cache(tmp.path(), 600);
+        let ctx = Context::with_access(
+            tmp.path().to_path_buf(),
+            crate::oci::access::memory_registry::MemoryRegistry::new(),
+        );
+        for (offset, shown) in [(0, 2), (500, 2), (600, 0)] {
+            let mut a = args();
+            a.registry = vec!["ghcr.io".to_string()];
+            a.config = Some(tmp.path().join("no-such/grimoire.toml"));
+            a.workspace = Some(tmp.path().to_path_buf());
+            a.offset = offset;
+            a.limit = NonZeroUsize::new(2);
+            let (report, code) = run(&ctx, &a).await.expect("a seeded browse never fails");
+            assert_eq!(code, ExitCode::Success);
+            let mut buf = Vec::new();
+            report.print_json(&mut buf).unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+            assert_eq!(v["items"].as_array().unwrap().len(), shown, "offset {offset}");
+            assert_eq!(v["total"], 600, "offset {offset}");
+            assert_eq!(v["truncated"], true, "offset {offset}");
+            assert_eq!(v["sources"][0]["capped"], true, "offset {offset}");
+        }
+    }
+
+    #[test]
+    fn apply_page_a_capped_source_is_truncated_at_any_offset() {
+        let mut rows = ids(3);
+        assert_eq!(apply_page(&mut rows, 0, None, true), (3, true));
     }
 
     /// A row for `ghcr.io/acme/tool` served by the named source: the same
