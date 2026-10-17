@@ -266,8 +266,10 @@ A failed call exits the script instead of reading as the last page.
 
 With one unchanged catalog, pages concatenate to the unpaged list exactly,
 with no gaps and no duplicates. Equal relevance scores break ties on
-registry-declaration order, then the fully-qualified reference. The order
-never depends on how the catalog was read.
+registry-declaration order, then the fully-qualified reference. `--sort`
+breaks the ties of its own keys on the fully-qualified reference, then on
+registry-declaration order, because two sources can serve the same reference.
+The order never depends on how the catalog was read.
 
 Two things can still shift pages between calls. A cache refresh can add or
 remove rows, so pass `--offline` on every call after the first. Even then,

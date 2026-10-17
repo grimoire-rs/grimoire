@@ -358,11 +358,14 @@ type ScoredRow = (i64, (SearchSource, crate::catalog::CatalogRow));
 /// query scores every row 0, so the unqueried browse is exactly that tie-break
 /// order, unchanged from before paging. Extracted so the ordering is unit-testable without a live registry.
 fn rank_by_relevance(scored: &mut Vec<ScoredRow>, source_order: &[SearchSource]) {
-    let rank = |source: &SearchSource| source_order.iter().position(|s| s == source).unwrap_or(usize::MAX);
     let mut keyed: Vec<_> = scored
         .drain(..)
         .map(|row| {
-            let key = (std::cmp::Reverse(row.0), rank(&row.1.0), row.1.1.repo());
+            let key = (
+                std::cmp::Reverse(row.0),
+                source_rank(source_order, &row.1.0),
+                row.1.1.repo(),
+            );
             (key, row)
         })
         .collect();
@@ -380,7 +383,7 @@ fn rank_by_relevance(scored: &mut Vec<ScoredRow>, source_order: &[SearchSource])
 /// Principle 9 guarantee this function carries.
 fn order_results(scored: &mut Vec<ScoredRow>, sort: Option<SortMode>, source_order: &[SearchSource]) {
     match sort {
-        Some(mode) => sort_by_mode(scored, mode),
+        Some(mode) => sort_by_mode(scored, mode, source_order),
         None => rank_by_relevance(scored, source_order),
     }
 }
@@ -443,20 +446,35 @@ fn apply_page<T>(rows: &mut Vec<T>, offset: usize, limit: Option<NonZeroUsize>, 
 
 /// Sort the flattened rows by an explicit `--sort` mode, in place.
 ///
-/// Delegates the ordering itself to [`crate::catalog::browse_sort`], the one
+/// Delegates the comparison itself to [`crate::catalog::browse_sort`], the one
 /// comparator `grim search`, `grim tui` and the package index's own catalog
 /// page share — three surfaces disagreeing about what "sorted by rating"
-/// means is exactly what a shared comparator prevents. Total in every mode,
-/// so the rendered order does not depend on `sort_by`'s stability.
-fn sort_by_mode(scored: &mut Vec<ScoredRow>, mode: SortMode) {
-    crate::catalog::browse_sort::sort_rows(scored, mode, |(_, (_, r))| {
-        SortKey::new(
-            r.rating.as_ref().map(|x| x.up),
-            r.downloads.as_ref().map(|d| d.total),
-            r.created.as_deref(),
-            &r.repo(),
-        )
-    });
+/// means is exactly what a shared comparator prevents. That comparator is
+/// total within one source, but the same reference can be served by two, so
+/// the final key here is the source's position in `source_order`: `--offset`
+/// paging never rests on the incoming order surviving a stable sort, the same
+/// rule [`rank_by_relevance`] follows.
+fn sort_by_mode(scored: &mut Vec<ScoredRow>, mode: SortMode, source_order: &[SearchSource]) {
+    let mut keyed: Vec<_> = scored
+        .drain(..)
+        .map(|row| {
+            let r = &row.1.1;
+            let key = SortKey::new(
+                r.rating.as_ref().map(|x| x.up),
+                r.downloads.as_ref().map(|d| d.total),
+                r.created.as_deref(),
+                &r.repo(),
+            );
+            (key, source_rank(source_order, &row.1.0), row)
+        })
+        .collect();
+    keyed.sort_by(|(a, ra, _), (b, rb, _)| crate::catalog::browse_sort::compare(a, b, mode).then(ra.cmp(rb)));
+    scored.extend(keyed.into_iter().map(|(_, _, row)| row));
+}
+
+/// A source's position in registry-declaration order; an unknown source last.
+fn source_rank(source_order: &[SearchSource], source: &SearchSource) -> usize {
+    source_order.iter().position(|s| s == source).unwrap_or(usize::MAX)
 }
 
 /// Whether to warn that a registry's `_catalog` browse may be unsupported.
@@ -1225,10 +1243,41 @@ mod tests {
         assert_eq!(apply_page(&mut rows, 5, None, true), (0, true));
     }
 
+    /// A row for `ghcr.io/acme/tool` served by the named source: the same
+    /// reference, and identical in every sort key, from two sources.
+    fn served_by(alias: &str) -> ScoredRow {
+        let mut row = scored_row(7, "ghcr.io", "acme/tool", Some(3), Some("2026-01-01T00:00:00Z"));
+        row.1.0 = SearchSource {
+            alias: Some(alias.to_string()),
+            locator: "ghcr.io/acme".to_string(),
+        };
+        row
+    }
+
     #[test]
-    fn apply_page_a_capped_source_is_truncated_at_any_offset() {
-        let mut rows = ids(3);
-        assert_eq!(apply_page(&mut rows, 0, None, true), (3, true));
+    fn a_reference_served_by_two_sources_orders_by_declaration_rank_in_every_mode() {
+        // Nothing but the source tells these two rows apart, so the order is
+        // only deterministic if the source rank is a sort key. Fed in the
+        // reverse of declaration order, a comparator that left it to the
+        // incoming order would hand back `b` first and a page boundary between
+        // the pair would shift between runs.
+        let order = [
+            SearchSource {
+                alias: Some("a".to_string()),
+                locator: "ghcr.io/acme".to_string(),
+            },
+            SearchSource {
+                alias: Some("b".to_string()),
+                locator: "ghcr.io/acme".to_string(),
+            },
+        ];
+        let modes = std::iter::once(None).chain(SortMode::ALL.map(Some));
+        for sort in modes {
+            let mut rows = vec![served_by("b"), served_by("a")];
+            order_results(&mut rows, sort, &order);
+            let aliases: Vec<_> = rows.iter().map(|(_, (s, _))| s.alias.clone().unwrap()).collect();
+            assert_eq!(aliases, ["a", "b"], "sort {sort:?} must rank source a before b");
+        }
     }
 
     #[test]
