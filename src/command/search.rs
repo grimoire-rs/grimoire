@@ -188,6 +188,7 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     // what tells an empty table caused by a query, a browse filter or the
     // relevance cutoff apart from one caused by a `_catalog`-gated registry.
     let any_rows_listed = results.any_rows_listed();
+    let capped = results.any_truncated();
     // A plain OCI source that actually loaded. Index sources never touch
     // `_catalog`, and a source that failed (unreachable, 401) already
     // reports its own error — the hint would misdiagnose both. Groups are
@@ -294,7 +295,11 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
         );
     }
 
-    Ok((SearchReport::new(entries, sources), ExitCode::Success))
+    let total = entries.len();
+    Ok((
+        SearchReport::new(entries, sources).with_completeness(total, capped),
+        ExitCode::Success,
+    ))
 }
 
 /// Sort the flattened rows by relevance, descending, in place.
