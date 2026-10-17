@@ -1779,7 +1779,7 @@ def test_search_json_reports_per_source_status(
 
     The envelope now carries an always-present ``sources`` sibling, one entry
     per browsed source in declaration order, each ``{alias, locator, ok,
-    error}``. The unreachable entry uses ``localhost:9999`` (nothing
+    error, capped}``. The unreachable entry uses ``localhost:9999`` (nothing
     listening), which refuses the connection immediately, so the test stays
     fast and hermetic.
     """

@@ -30,10 +30,10 @@
 //! `versions`, the per-release breakdown ordered highest release first.
 //!
 //! `sources` is the always-present sibling naming every browsed source in
-//! registry-declaration order — `{alias, locator, ok, error}` — so a consumer
-//! reading only stdout can tell "no results" from "some of your registries
-//! did not load". Its `alias`/`locator` are the same two halves each item's
-//! own `source` carries, so rows join to sources directly.
+//! registry-declaration order — `{alias, locator, ok, error, capped}` — so a
+//! consumer reading only stdout can tell "no results" from "some of your
+//! registries did not load". Its `alias`/`locator` are the same two halves
+//! each item's own `source` carries, so rows join to sources directly.
 
 use std::io::{self, Write};
 
@@ -98,6 +98,13 @@ pub struct SearchSourceStatus {
     /// The same message the `catalog for source '<x>' unavailable` warning
     /// carries on stderr.
     pub error: Option<String>,
+    /// Whether this source's listing hit a build-time cap, so rows past it
+    /// were never seen and `total` is a lower bound. Always present. It is
+    /// the per-source answer to "capped or just paged?": the envelope's
+    /// `truncated` is also `true` on every page past the first. An `index`
+    /// source is not capped by this grim; `true` there is a cache an earlier
+    /// grim wrote, and `--refresh` rebuilds it.
+    pub capped: bool,
 }
 
 /// One release's share of a row's pull count.
@@ -1018,12 +1025,14 @@ mod tests {
                 locator: "ghcr.io/acme".to_string(),
                 ok: true,
                 error: None,
+                capped: true,
             },
             SearchSourceStatus {
                 alias: None,
                 locator: "https://index.example".to_string(),
                 ok: false,
                 error: Some("invalid catalog file".to_string()),
+                capped: false,
             },
         ];
         let e = entry("localhost:5000/acme/x", StatusBadge::Installed);
@@ -1042,13 +1051,15 @@ mod tests {
         assert_eq!(good["ok"], true);
         assert!(good.contains_key("error"), "key present even when healthy");
         assert!(good["error"].is_null());
-        assert_eq!(good.len(), 4, "exactly the four halves a consumer acts on: {good:?}");
+        assert_eq!(good["capped"], true, "a capped source says so: {good:?}");
+        assert_eq!(good.len(), 5, "exactly the five fields a consumer acts on: {good:?}");
         // A failed source: named, marked, and carrying its cause.
         let bad = listed[1].as_object().unwrap();
         assert!(bad["alias"].is_null(), "an unaliased entry is null, never absent");
         assert_eq!(bad["locator"], "https://index.example");
         assert_eq!(bad["ok"], false);
         assert_eq!(bad["error"], "invalid catalog file");
+        assert_eq!(bad["capped"], false, "capped is a bool on every source, never absent");
 
         // The item shape is untouched — this is a sibling key, not a row field.
         assert_eq!(v["items"][0].as_object().unwrap().len(), 16);

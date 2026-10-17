@@ -168,7 +168,8 @@ per browsed source, in the order [`grim context`][commands-context] lists
   "alias": "acme",
   "locator": "ghcr.io/acme",
   "ok": false,
-  "error": "invalid catalog file"
+  "error": "invalid catalog file",
+  "capped": false
 }
 ```
 
@@ -176,7 +177,9 @@ per browsed source, in the order [`grim context`][commands-context] lists
 carries, so `items[].source` joins to this array directly. `ok` is the
 field to branch on; `error` is the cause when `ok` is `false` and an
 explicit `null` otherwise. It is the same text the `catalog for source
-'<locator>' unavailable` warning carries on stderr.
+'<locator>' unavailable` warning carries on stderr. `capped` is always a
+boolean: `true` when that source's listing hit a build-time cap, so rows past
+it were never seen (see [the `total` and `truncated` fields](#search-total)).
 
 The array exists because **the browse never fails**. A refresh fails
 when the source is unreachable, answers `5xx`, sends a body over the size or
@@ -234,6 +237,11 @@ filter, deprecated visibility, the query and the relevance cutoff, and
 at the same time, which a capped-source warning on stderr reports. An `index`
 source is never truncated. It lists every entry, and an index past the abuse
 bounds fails its fetch with `ok: false` instead.
+
+`truncated` is also `true` on every page past the first, so on its own it does
+not say whether an `oci` cap applies. Read `sources[].capped` for that: it is
+`true` on every page, whatever the offset, for each source whose listing was
+capped.
 
 Both fields are present on every document. A query that matches nothing
 reports `total: 0`. Its `truncated` is still `true` when an `oci` source's

@@ -1263,6 +1263,9 @@ source prints one warning per source:
 catalog for source 'acme' capped at 500 repositories; a narrower query cannot reach past the cap — use a package index or a narrower oci locator
 ```
 
+In JSON the source reads `capped: true` in `sources` on every page, which a
+paging script can branch on.
+
 A cached index listing that an earlier grim capped at 500 entries is rebuilt
 on the next command, not served until its TTL expires. If that rebuild
 fails, grim serves the capped rows and warns:
@@ -1310,7 +1313,7 @@ url for an `index` one — and one index serves rows from many hosts. Like
 `repository`, `source` is JSON-only; the plain table keeps its five columns.
 
 Beside `items`, the JSON document carries a `sources` array — one
-`{alias, locator, ok, error}` object per browsed source, in declaration
+`{alias, locator, ok, error, capped}` object per browsed source, in declaration
 order. A source whose refresh fails serves its cached catalog when one
 exists, and degrades to an empty group when none does. Either way the
 reachable sources still answer, and the exit code stays `0` whether one
@@ -1323,7 +1326,7 @@ catalog:
 {
   "items": [],
   "sources": [
-    { "alias": "acme", "locator": "ghcr.io/acme", "ok": false, "error": "invalid catalog file" }
+    { "alias": "acme", "locator": "ghcr.io/acme", "ok": false, "error": "invalid catalog file", "capped": false }
   ],
   "total": 0,
   "truncated": false
