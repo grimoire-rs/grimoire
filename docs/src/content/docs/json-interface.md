@@ -72,8 +72,9 @@ Every multi-item report therefore wraps its rows in a uniform envelope:
 envelope object may gain sibling fields in a minor release — `grim
 publish` carries `announce`, `grim status` carries `checked`, `grim
 export marketplace` carries `files`, `grim
-search` carries `sources` (see the [status row](#shapes-items) below and
-[the `sources` array](#search-sources)). Commands with enveloped
+search` carries `sources`, `total` and `truncated` (see the [status
+row](#shapes-items) below, [the `sources` array](#search-sources) and [the
+`total` and `truncated` fields](#search-total)). Commands with enveloped
 reports: `lock`, `install`, `status`, `update`, `search`,
 `config list`, `config registry list`, `config registry fields`,
 `publish`, `export plugin`, and `export marketplace`.
@@ -96,7 +97,7 @@ One row object per item inside `{"items": [...]}`:
 | `update` | `{kind, name, old, new, action, reaped_clients, kept_modified_clients, retained, abandoned_entries, refused, plugin}` — `old` null for a first lock, `new` null for a pruned row; `reaped_clients`/`kept_modified_clients` are sorted client-name arrays (`[]` when no client left the configured set on this row) naming, respectively, the [dropped clients](./commands.md#update) whose unmodified output was deleted and whose locally-modified output was preserved; reap is only attempted against an *explicitly set* `[options].clients` — when it is unset (autodetect), both stay `[]` on every row rather than being verified against live client detection; `retained` is an always-present array of absolute paths (`[]` normally) naming the on-disk footprint the containment guard refused to delete while the pruned record — or the reaped dropped-client output — was dropped anyway, the same reported-divergence contract as [`uninstall`](#shapes-single)'s `retained`, and distinct from `kept_modified_clients` (a user edit grim preserved and left *recorded*); `abandoned_entries` is `retained`'s counterpart for a managed MCP entry inside a shared, user-owned config file grim never intended to delete — an always-present array of `{path, pointer}` objects (`[]` normally), `path` the config file and `pointer` the two-level JSON pointer of the un-spliced member, sorted and deduplicated; `refused` is an always-present bool, `true` only on a row whose on-disk bytes drifted from the recorded hash so the [integrity gate](./commands.md#update) left it untouched (rerun with `--force`, which on `update` also authorizes its prune and reap deletions). **A refusal does not suppress the report:** every other artifact still reconciles and the report is emitted on stdout as usual, alongside exit `65` — so a refused `grim update` carries a normal report rather than an [error document](#error-document) (see [exit codes and JSON together](#exit-interplay)), and `refused` is what identifies the offending row. Each refusal is also named on stderr; the plain table has no `refused` column; `plugin` is an always-present string-or-null naming the [declared plugin](./commands.md#update-marketplace) a row belongs to under [`--marketplace`](./commands.md#update-marketplace) — `null` on every row of a plain `grim update`, since that mode knows no plugins — serialized last so every pre-existing key keeps its wire position; the plain table has no `Plugin` column either, prefixing `Name` with `<plugin>:` instead | `action`: `updated`, `unchanged`, `removed`, `kept-modified` — the lock diff, unaffected by a refusal (the pin rolled forward; only the materialization was refused) |
 | [`export plugin`][commands-export] | `{plugin, client, family, format, path, version, members, omitted}` — `client` may be `qoder`, a `claude`-family plugin; `family` is `claude` or `agent-plugins`; `format` is `dir` or `zip`; `path` is the absolute final output path; `version` is the rendered `plugin.json`'s `<base>+<12-hex-content-hash>` string (see [export's version grammar](./commands.md#export-plugin-output)); `members` is an always-present array of `{kind, name, lock_name, pinned}` — `name` is the emitted (post-rename) name, `lock_name` the name it carries in the lock, and `pinned` its resolved pin or path source — sorted by `(kind, name)`; `omitted` is an always-present array of `{kind, name, reason}`, same sort, `reason` one of the kebab literals `client-declined`, `no-format-surface`, `not-representable` (a [hook](./hooks.md) member is always omitted, `not-representable` for the Claude family and `no-format-surface` for Agent Plugins — an exported plugin runs without grim, which a hook needs at run time) (see the [per-client admission table](./commands.md#export-plugin-admission)); one item per `(plugin, client)` pair actually written, ordered by plugin (byte order) then by `--client`'s selection order; emitted only on success — a refusal (an existing output without `--force`, an empty admitted set, …) is an [error document](#error-document) instead, never a partial report | — |
 | [`export marketplace`][commands-export-marketplace] | `{plugin, client, family, path, version, action, members, omitted}` + sibling envelope key `files` — `client` is one of `claude`, `copilot`, `codex`, `qoder`, `cursor`; `family` is `claude` or `agent-plugins`; `path` is the absolute path of the plugin tree; `version` is the tree's `<base>+<12-hex>` string, or `null` on a `removed` or `empty` row; `members` and `omitted` are the [`export plugin`][commands-export] arrays, `[]` on a `removed` row, and on an `empty` row `omitted` names every member; a [hook](./hooks.md#export-declines) member always appears in `omitted`, with the same `reason` as in `export plugin`; one item per `(plugin, client)` pair, ordered by plugin (byte order) then by the selected clients' order, then the `removed` rows by client and plugin. `files` is an always-present array of `{client, path, action, plugins}`, one per marketplace file, in client order, then the root `README.md` row, with removed files last: `client` is `null` on the README row, `path` is the absolute file path and `plugins` lists the plugins the file carries (`[]` on a `removed` row). Emitted only on success; see [the report](./commands.md#export-marketplace-json) | `action`: `written`, `unchanged`, `removed`, `empty` on an item; `written`, `unchanged`, `removed` on a file |
-| `search` | `{kind, repo, source, summary, description, version, latest_tag, repository, revision, created, deprecated, replaced_by, rating, downloads, oci, status}` — `oci` is the curated `{licenses, authors, url, documentation, vendor, compatibility}` object read off the manifest (the same one the TUI detail pane renders), every field `null` when the manifest carried none and `licenses` the only one an index-backed row can supply; `compatibility` is a skill's authored editor/runtime hint and is `null` for every other kind. Repository-level support channels are **not** here — they live on the mutable description companion and are read live by [`grim describe`](./commands.md#describe), never off the disk-cached browse catalog; `kind` is `null` when the catalog row's manifest declares none; `source` is the `{alias, locator}` attribution of the configured [`[[registries]]`](./configuration.md#multiple-registries) entry the row was browsed from — `alias` is `null` when that entry declares none (also under `--registry` and the legacy single-registry fallback), `locator` is byte-identical to the configured value and is **not** derivable from `repo`, which names the artifact's own registry host; `replaced_by` is the successor reference or `null`; `rating` is the [artifact rating](./ratings.md) object or `null` — see [the `rating` object](#search-rating) below; `downloads` is the pull-count object or `null` — see [the `downloads` object](#search-downloads) below. Sibling envelope key `sources` (always present) names every browsed source and whether its catalog loaded — see [the `sources` array](#search-sources) below; see [grim search][commands-search] | `status`: install badge (`installed`, `not-installed`, `outdated`, `modified`, `pending`) |
+| `search` | `{kind, repo, source, summary, description, version, latest_tag, repository, revision, created, deprecated, replaced_by, rating, downloads, oci, status}` — `oci` is the curated `{licenses, authors, url, documentation, vendor, compatibility}` object read off the manifest (the same one the TUI detail pane renders), every field `null` when the manifest carried none and `licenses` the only one an index-backed row can supply; `compatibility` is a skill's authored editor/runtime hint and is `null` for every other kind. Repository-level support channels are **not** here — they live on the mutable description companion and are read live by [`grim describe`](./commands.md#describe), never off the disk-cached browse catalog; `kind` is `null` when the catalog row's manifest declares none; `source` is the `{alias, locator}` attribution of the configured [`[[registries]]`](./configuration.md#multiple-registries) entry the row was browsed from — `alias` is `null` when that entry declares none (also under `--registry` and the legacy single-registry fallback), `locator` is byte-identical to the configured value and is **not** derivable from `repo`, which names the artifact's own registry host; `replaced_by` is the successor reference or `null`; `rating` is the [artifact rating](./ratings.md) object or `null` — see [the `rating` object](#search-rating) below; `downloads` is the pull-count object or `null` — see [the `downloads` object](#search-downloads) below. Sibling envelope keys `sources`, `total` and `truncated` (always present) name every browsed source and whether its catalog loaded, how many rows matched, and whether `items` is the whole answer — see [the `sources` array](#search-sources) and [the `total` and `truncated` fields](#search-total) below; see [grim search][commands-search] | `status`: install badge (`installed`, `not-installed`, `outdated`, `modified`, `pending`) |
 | [`hook list`][cmd-hook] | `{artifact, id, tier, events, state, arming}` (experimental — see [Stability](./stability.md#unstable)) — one item per declared `[[hooks]]` entry, `arming` nested rather than flattened; `state` and `arming` are the same tokens and shape [`grim status`](#report-shapes) uses for a hook row, never a second derivation of the same gates | `state`: `installed`, `gated`, `not-armed`, `untrusted` |
 | `config list` | `{key, value, set, type, title, description, default, values, constraints}` — `constraints` is `null` except for keys whose list items carry a shape rule beyond closed-set membership | — |
 | `config registry list` | `{alias, oci, index, include, exclude, default, insecure}` — both locator keys present, exactly one non-null; `include`/`exclude` are the entry's authored [browse-filter](./configuration.md#browse-filters) globs in declaration order, always-present arrays, `[]` when unfiltered; `insecure` is the entry's authored [plain-HTTP](./configuration.md#plain-http-registries) opt-in, not the effective transport (a host reached over HTTP through the loopback default or `GRIM_INSECURE_REGISTRIES` reports `false`) | — |
@@ -110,15 +111,19 @@ otherwise real artifact, so their `kind` is always one of those six
 values, while `search` reports a catalog row whose manifest may declare
 no kind at all, in which case `kind` is `null`.
 
-`search`'s `items` carries no signal for *why* it might be short — with
-one exception, the [`sources` array](#search-sources), which names a source
-whose catalog failed to load. Two other causes of a short result are still
-stderr-only. A registry that gates its `_catalog` endpoint and a registry
-whose own [browse filter][browse-filters] admits nothing both render as
-fewer or zero rows, and no report field distinguishes them — the diagnostic
-that does (`registry '<alias>': filter admitted <M> of <N> repositories`)
-is a `tracing::warn!` on stderr, invisible to a consumer that reads just
-the JSON document. Cross-reference [`grim context`][commands-context]'s
+`search`'s `items` can be short for five reasons, and the report names
+three. [`total` and `truncated`](#search-total) say when `--limit` cut the
+list or an `oci` source's listing hit the 500-repository cap. The
+[`sources` array](#search-sources) names a source whose catalog failed to
+refresh.
+
+Two other causes of a short result are still stderr-only. A registry that
+gates its `_catalog` endpoint and a registry whose own
+[browse filter][browse-filters] admits nothing both render as fewer or zero
+rows. No report field distinguishes them. The diagnostic that does
+(`registry '<alias>': filter admitted <M> of <N> repositories`) is a
+`tracing::warn!` on stderr, invisible to a consumer that reads just the JSON
+document. Cross-reference [`grim context`][commands-context]'s
 `registries[].include`/`.exclude` to tell a gated registry from a filtered
 one; no field is planned on `search` for those two.
 
@@ -170,24 +175,68 @@ per browsed source, in the order [`grim context`][commands-context] lists
 `alias` and `locator` are the same two halves each row's own `source`
 carries, so `items[].source` joins to this array directly. `ok` is the
 field to branch on; `error` is the cause when `ok` is `false` and an
-explicit `null` otherwise — the same text the `catalog for source '<x>'
-unavailable` warning carries on stderr.
+explicit `null` otherwise. It is the same text the `catalog for source
+'<locator>' unavailable` warning carries on stderr.
 
-The array exists because **the browse never fails**. A source grim cannot
-read degrades to an empty group so the reachable ones still answer, and the
-[exit code stays `0`](#exit-interplay) whether one source failed or all of
-them did. Without `sources`, that left a partial browse and an empty
-catalog producing the same document: a well-formed envelope, exit `0`, and
-a plausible-looking list that silently omitted most of the catalog. A
-consumer reading only stdout can now say "2 of 3 registries unavailable"
-and name them. Reading it is not optional for a UI that renders `items` as
-the catalog — an empty `items` with every source `ok: false` means *nothing
-loaded*, which is a different thing to show the user than *nothing
+The array exists because **the browse never fails**. A refresh fails
+when the source is unreachable, answers `5xx`, sends a body over the size or
+entry bound, or sends an unparsable file. Such a source serves its
+cached catalog when one exists, with its rows in `items` and its entry
+reading `ok: false` with `error` set. With no cache the source degrades to an
+empty group instead, so the reachable ones still answer. The [exit
+code stays `0`](#exit-interplay) whether one source failed or all of them
+did.
+
+Without `sources`, a partial browse and an empty catalog produced the same
+document. It was a well-formed envelope, exit `0`, and a plausible-looking
+list that silently omitted most of the catalog. A consumer reading only stdout can
+say "2 of 3 registries unavailable" and name them. Reading it is not
+optional for a UI that renders `items` as the catalog. An empty `items` with
+every source `ok: false` means *nothing loaded*, which differs from *nothing
 published*.
+
+Rows from an `ok: false` source come from a cache and can be stale. A failed
+refresh does not restamp the cache. The next command retries only when the
+cache has expired, or with `--refresh`. A still-fresh cache is served with
+`ok: true`.
 
 `ok: true` on a source whose rows are absent from `items` is meaningful and
 not a contradiction: that source answered and had nothing to offer, or a
 [browse filter][browse-filters] hid what it did offer.
+
+#### The `search` total and truncated fields {#search-total}
+
+`search`'s `total` and `truncated` are always-present siblings of `items`,
+next to [`sources`](#search-sources). Together they say whether `items` is
+the whole answer.
+
+```json
+{
+  "items": [ … ],
+  "sources": [ … ],
+  "total": 212,
+  "truncated": true
+}
+```
+
+`total` is an integer: every row that matched, counted **after** the browse
+filter, deprecated visibility, the query and the relevance cutoff, and
+**before** `--limit`. `truncated` is a boolean, `true` when `items` is not
+the complete answer. Two causes set it:
+
+- `--limit` cut the list, so `items.length < total`.
+- An `oci` source's `_catalog` walk hit the 500-repository cap when its
+  listing was built. Rows past the cap were never seen, so `total` is then a
+  lower bound.
+
+`items.length < total` means `--limit` cut the list. An `oci` cap may apply
+at the same time, which a capped-source warning on stderr reports. An `index`
+source is never truncated. It lists every entry, and an index past the abuse
+bounds fails its fetch with `ok: false` instead.
+
+Both fields are present on every document. A query that matches nothing
+reports `total: 0`. Its `truncated` is still `true` when an `oci` source's
+listing was capped, because rows past the cap were never seen.
 
 #### The `search` rating object {#search-rating}
 
@@ -268,14 +317,15 @@ use an [`items` envelope](#items-envelope): a scalar could never have grown
 [`--check`](./commands.md#status-check). `checked == false` (no `--check`,
 or `--check --offline`) forces all three to `null` on every item.
 
-`deprecated` / `replaced_by` come from the freshly-loaded catalog, matched
-by `(registry, repository)`:
+`deprecated` / `replaced_by` come from each registry's catalog, matched by
+`(registry, repository)`. When a refresh fails over a warm cache, the cached
+rows are used. A registry reads `null` only when it failed with no cache:
 
 | `checked` | Item condition | `deprecated` / `replaced_by` |
 |-----------|-----------------|-------------------------------|
 | `false` | any | `null` |
 | `true` | no registry pin (declared-bundle row, dev-install row, [path source](./commands.md#add-path)) | `null` |
-| `true` | registry pin (direct or bundle member), no catalog match (dropped repo, or that item's registry degraded) | `null` |
+| `true` | registry pin (direct or bundle member), no catalog match (dropped repo, or that item's registry failed with no cache) | `null` |
 | `true` | registry pin, catalog match, not deprecated | `null` |
 | `true` | registry pin, catalog match, deprecated | notice / successor (`replaced_by` still `null` if the publisher named none) |
 
@@ -309,7 +359,8 @@ the bundle (`stack:1.0.0` listing `code-review:stable`).
 fields is `null` on every item, full stop — never conditional on the
 item.** `checked == true` means the check ran online across the scope's
 registries; it does not guarantee every item resolved. A single
-registry's catalog refresh failing degrades only that registry's rows'
+registry's catalog refresh failing falls back to its cached catalog, and
+with none cached degrades only that registry's rows'
 `deprecated`/`replaced_by` (same as `grim search`); a single artifact's
 re-resolution failing leaves just that row's `update_available` `null`. A
 completed re-resolution that finds nothing newer reports `false` — only a
@@ -885,7 +936,8 @@ with its ordinary error handling — only a downstream reader closing
 The [MCP server][commands-mcp] tools return the same payloads:
 `grim_search` and `grim_status` results have the same shape, envelope,
 and field values as `grim search --format json` / `grim status --format
-json` for the same scope — parsed, the two documents compare equal. They
+json` for the same scope, `total` and `truncated` included, and parsed, the
+two documents compare equal. They
 are **not byte-identical**: the MCP server serializes compact JSON
 (`serde_json::to_string`) while the CLI pretty-prints
 (`to_string_pretty`), so whitespace differs. `grim_fetch` returns the

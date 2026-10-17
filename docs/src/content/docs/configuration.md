@@ -593,20 +593,30 @@ Either way the exit code stays `0` — a filter matching nothing is legal —
 and the source's tree root still renders, at a `0/0` rollup rather than
 disappearing.
 
-**A filter narrows the view, never the listing.** Each source's browse
-window is built first and capped at **500 repositories**, and only then are
-the patterns consulted, so a narrow filter cannot widen what grim looked at
-— it can only show less of the same 500. This matters because it is the
-opposite of the intuition a server-side filter creates: `include =
-["acme/platform/**"]` does not make grim walk deeper into a large registry
-looking for `acme/platform` matches, it discards non-matches from the window
-it already had. On a registry big enough to hit the cap, the honest fix is a
-narrower `oci` locator (`ghcr.io/acme/platform` rather than `ghcr.io`),
-which moves the cut-line itself. `grim search <query>` also reports the cap
-when a query's results may be incomplete:
+**A filter narrows the view, never the listing.** Each source's listing is
+built first, and only then are the patterns consulted. A narrow filter
+cannot widen what grim looked at. That is the opposite of the intuition a
+server-side filter creates.
+
+`include = ["acme/platform/**"]` does not make grim walk deeper into a large
+registry looking for `acme/platform` matches. It discards non-matches from
+the listing it already had.
+
+For an `index` source that listing is every entry the index publishes, so a
+filter, a query, `grim rate` and `grim status --check` reach every row. An
+`index` is never windowed.
+
+An `oci` source is different, because the registry's `_catalog` walk stops at
+**500 repositories** when the listing is built. A filter can only show less
+of the same 500. On a registry big enough to hit that cap, the honest fix is
+a narrower `oci` locator (`ghcr.io/acme/platform` rather than `ghcr.io`).
+That moves the cut-line itself. A [package index](./package-index.md) has no
+such window.
+
+`grim search <query>` reports a capped `oci` source, one line per source:
 
 ```text
-catalog listing capped at 500 repositories; results may be incomplete — narrow the query or use a more specific term
+catalog for source 'acme' capped at 500 repositories; a narrower query cannot reach past the cap — use a package index or a narrower oci locator
 ```
 
 **Writing the patterns.** Hand-editing `grimoire.toml` is one way;

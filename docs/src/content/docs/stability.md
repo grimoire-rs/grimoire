@@ -109,7 +109,7 @@ appended and nothing else moved. The `rating` object emits `up` and `url`
 only; the forge's opaque vote target is deliberately kept out of the frozen
 document, so no forge's node-id format is frozen with it.
 
-The newest instance is the sibling half of the same rule. [`grim
+A later instance is the sibling half of the same rule. [`grim
 search`][search] grew a `sources` array beside `items`, naming every
 browsed source and whether its catalog loaded — the reason the
 [`items` envelope][json-items] exists at all, since a bare top-level array
@@ -117,6 +117,13 @@ could never have grown it. It is always present (`[]` when nothing was
 browsed), so a consumer reads it unconditionally, and a pre-existing client
 that ignores unknown keys is unaffected. See [the `sources`
 array][json-sources].
+
+A third instance is the same shape again. `grim search` gained `total`
+and `truncated` beside `items` and `sources`, so a consumer can tell a
+`--limit` cut or a capped `oci` listing from a complete answer. Both are
+always present, so a pre-existing client that ignores unknown keys is
+unaffected. See [the `total` and
+`truncated` fields][json-total].
 
 Manifest *inputs* are covered by the mirror image of that rule. A minor
 release may widen what a key accepts — a new optional key, a new accepted
@@ -540,6 +547,7 @@ unaffected — they read straight from disk and never touch a manifest.
 [search]: ./commands.md#search
 [json-items]: ./json-interface.md#items-envelope
 [json-sources]: ./json-interface.md#search-sources
+[json-total]: ./json-interface.md#search-total
 [upgrading-catalog-downgrade]: ./upgrading.md#catalog-cache-downgrade
 [init]: ./commands.md#init
 [configuration]: ./configuration.md

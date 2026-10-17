@@ -452,6 +452,33 @@ you add the keys.
   `options.search_min_relevance` key is appended at the end, with the usual
   type, title, description, and default metadata. Existing rows keep their
   positions.
+- **An `index` source with more than 500 entries lists every entry.** The
+  500-repository cap used to window index sources as well. A query, a
+  [browse filter][browse-filters], `grim rate` and `grim status --check`
+  reached only the first 500 rows. The cap applies to an `oci` source's
+  `_catalog` walk alone, so `grim search` over a large index returns more rows.
+  An index past 100,000 entries or 128 MiB decoded fails its fetch.
+- **A cached index listing capped at 500 rebuilds on first use.** An earlier
+  grim cached such a listing with `truncated: true`. This grim rebuilds it on
+  the next command instead of serving it until the one-hour TTL expires. If
+  that rebuild fails, it serves the capped rows with a warning.
+  `grim search --refresh` forces the rebuild.
+- **`grim search` gains `total`, `truncated` and `--limit`.** The search
+  document carries `total` and `truncated` beside `items` and `sources`. The
+  `--limit` flag cuts the printed rows, and the MCP `grim_search` tool takes
+  the same `limit`. All three are additive.
+- **A failed refresh serves the cached catalog.** A source that was
+  unreachable, answered `5xx`, sent a body over the size cap or sent an
+  unparsable file used to return an empty group. When a cached catalog
+  exists, grim serves its rows and warns with the error and the time the
+  cache was built. `grim rate` resolves against those cached rows instead of
+  exiting `79`.
+- **`ok: false` no longer means no rows.** A consumer that read it that way
+  will see rows beside it, because the `sources` array still reports the
+  failure while `items` carries the cached rows. `grim status --check` uses
+  the cached rows too, and reads `null` only when no cache exists. With no
+  cache the source degrades to an empty group, and the exit code stays `0`
+  either way.
 - **Codex MCP servers pick up a shorter startup wait.** A descriptor's
   `timeout` (milliseconds) now renders as `startup_timeout_ms` in Codex's
   `config.toml`, so a short `timeout` actually shortens Codex's startup
