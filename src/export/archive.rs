@@ -341,7 +341,9 @@ mod tests {
     /// map, so it cannot witness order).
     fn names(out: &Path) -> Vec<String> {
         let mut z = open(out);
-        (0..z.len()).map(|i| z.by_index(i).unwrap().name().to_owned()).collect()
+        (0..z.len())
+            .map(|i| z.by_index(i).unwrap().name().unwrap().into_owned())
+            .collect()
     }
 
     fn sha256(p: &Path) -> Vec<u8> {
@@ -384,7 +386,7 @@ mod tests {
         let f = z.by_name(".claude-plugin/plugin.json").unwrap();
         assert!(f.is_file());
         // Archive root = plugin root: no wrapping top-level directory.
-        assert_eq!(f.name().split('/').count(), 2);
+        assert_eq!(f.name().unwrap().split('/').count(), 2);
     }
 
     #[test]
@@ -400,14 +402,14 @@ mod tests {
         let mut last_header = None;
         for i in 0..z.len() {
             let f = z.by_index(i).unwrap();
-            let name = f.name().to_owned();
+            let name = f.name().unwrap().into_owned();
             assert!(!f.is_dir() && !name.ends_with('/'), "{name}: directory entry");
             assert_eq!(f.compression(), CompressionMethod::Stored, "{name}");
             assert_eq!(f.last_modified(), Some(DateTime::default()), "{name}: 1980-01-01 00:00");
             assert_eq!(f.unix_mode().map(|m| m & 0o7777), Some(0o644), "{name}");
             assert!(f.comment().is_empty(), "{name}: entry comment");
             assert!(
-                f.extra_data().is_none_or(<[u8]>::is_empty),
+                f.extra_data().is_none_or(|e| e.is_empty()),
                 "{name}: central extra field"
             );
             // Local header: extra-field length is the u16 at offset 28.
