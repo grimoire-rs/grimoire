@@ -246,3 +246,32 @@ def held_flock(sidecar: Path) -> Iterator[None]:
     finally:
         os.close(fd)
         sidecar.unlink(missing_ok=True)
+
+
+def make_repos(namespace: str, count: int, description: str = "Generic helper") -> list[str]:
+    """Push ``count`` single-skill repos ``<namespace>/pkg-000``… and return
+    their repository paths (no registry host), in listing order.
+
+    One tar is shared by every repo; each push still uploads its own blobs, as
+    a registry scopes blobs per repository. ~4 ms a repo against zot.
+    """
+    tar_bytes = _tar_of({"pkg/SKILL.md": "---\nname: pkg\n---\n# P\n"})
+    annotations = {"org.opencontainers.image.description": description}
+    repos = [f"{namespace}/pkg-{i:03d}" for i in range(count)]
+    for repo in repos:
+        push_artifact(repo, "latest", tar_bytes, "skill", annotations)
+    return repos
+
+
+def paged_namespace(count: int) -> str:
+    """A namespace of ``count`` repos that every test and xdist worker shares.
+
+    The name depends only on ``count`` and ``make_repos`` is deterministic, so
+    concurrent pushes from several workers write the same repos again instead
+    of adding their own copies. A per-worker copy grows the shared registry
+    toward the 8000-repo host-wide ``_catalog`` ceiling, past which a
+    namespace sorting late lists nothing.
+    """
+    namespace = f"grim-test/paged-{count}"
+    make_repos(namespace, count)
+    return namespace
