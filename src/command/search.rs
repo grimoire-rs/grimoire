@@ -18,8 +18,10 @@
 //!
 //! That table is then ranked **globally by relevance** — see
 //! [`rank_by_relevance`] — because fuzzy matching admits far more rows than
-//! the substring matching it replaced. The unqueried browse is never sorted,
-//! so it still reads in registry-declaration order.
+//! the substring matching it replaced. Ties break on registry-declaration
+//! order and then the fully-qualified reference, so the unqueried browse still
+//! reads in the order the catalog hands over and `--offset` pages slice one
+//! stable list.
 //!
 //! State is data: `search` always exits 0 on the *browse* — no results, a
 //! filter that admits nothing, and an unreachable registry are all exit 0.
@@ -91,12 +93,21 @@ pub struct SearchArgs {
     #[arg(long, value_name = "ORDER")]
     pub sort: Option<crate::catalog::SortMode>,
 
-    /// Cap the rows printed to the first N of the ranked (or `--sort`ed)
-    /// result; N must be at least 1. `total` in the JSON output still counts
-    /// every match, and `truncated` says whether `items` is the complete
-    /// answer. Omitted, every match is listed.
+    /// Cap the rows printed to N of the ranked (or `--sort`ed) result,
+    /// counted from `--offset`; N must be at least 1. `total` in the JSON
+    /// output still counts every match, and `truncated` says whether `items`
+    /// is the complete answer. Omitted, every match is listed.
     #[arg(long, value_name = "N")]
     pub limit: Option<NonZeroUsize>,
+
+    /// Skip the first N rows of the ranked (or `--sort`ed) result before
+    /// `--limit` applies, to read the next page; N may be 0 (the default).
+    /// An `--offset` at or past the end lists nothing and still exits 0.
+    /// `total` in the JSON output is unaffected, so `offset + items.length <
+    /// total` means more rows remain. Add `--offline` to later page calls so
+    /// a cache refresh cannot shift the rows between pages.
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    pub offset: usize,
 
     /// Force a catalog rebuild even if the cache is fresh.
     #[arg(long)]
@@ -233,7 +244,7 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     // many hosts). Base order is `CatalogResults::into_flat_rows`': groups in
     // declaration/precedence order, each group's rows already sorted by
     // repository.
-    let mut scored: Vec<(i64, (SearchSource, crate::catalog::CatalogRow))> = results
+    let mut scored: Vec<ScoredRow> = results
         .groups
         .into_iter()
         .flat_map(|g| {
@@ -258,8 +269,15 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     if let Some(notice) = hidden_rows_notice(hidden) {
         tracing::warn!("{notice}");
     }
-    order_results(&mut scored, args.sort, &parsed);
-    let (total, truncated) = apply_limit(&mut scored, args.limit, capped);
+    let source_order: Vec<SearchSource> = sources
+        .iter()
+        .map(|s| SearchSource {
+            alias: s.alias.clone(),
+            locator: s.locator.clone(),
+        })
+        .collect();
+    order_results(&mut scored, args.sort, &source_order);
+    let (total, truncated) = apply_page(&mut scored, args.offset, args.limit, capped);
 
     let entries: Vec<SearchEntry> = scored
         .into_iter()
@@ -310,12 +328,18 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     }
 
     Ok((
-        SearchReport::new(entries, sources).with_completeness(total, truncated),
+        SearchReport::new(entries, sources)
+            .with_completeness(total, truncated)
+            .with_offset(args.offset),
         ExitCode::Success,
     ))
 }
 
-/// Sort the flattened rows by relevance, descending, in place.
+/// One flattened, scored row: relevance score plus its source and catalog row.
+type ScoredRow = (i64, (SearchSource, crate::catalog::CatalogRow));
+
+/// Sort the flattened rows by relevance, descending, in place, in a **total**
+/// order.
 ///
 /// Fuzzy matching admits far more rows than the substring matching it
 /// replaced, so ranking is what keeps the best hit visible — and it is
@@ -324,19 +348,26 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
 /// `[[registries]]` entry that served it, so leaving declaration order behind
 /// loses no information.
 ///
-/// `sort_by` is stable, so equal scores keep the incoming order (groups in
-/// declaration/precedence order, repository-sorted within each) and identical
-/// inputs render identically.
-///
-/// An **empty** query is skipped outright rather than sorted on its all-zero
-/// scores: the unqueried browse listing must stay byte-for-byte what it was
-/// before ranking existed. Extracted so the ordering is unit-testable without
-/// a live registry.
-fn rank_by_relevance<T>(scored: &mut [(i64, T)], query: &SearchQuery) {
-    if query.is_empty() {
-        return;
-    }
-    scored.sort_by(|(a, _), (b, _)| b.cmp(a));
+/// Equal scores tie-break on the source's position in `source_order`
+/// (registry-declaration order), then the fully-qualified reference
+/// (`registry/repository`). That is the order the catalog already hands over —
+/// groups in declaration order, each keyed by the qualified reference, which
+/// for an `index` source spans several hosts — written out so `--offset`
+/// paging never rests on the incoming order surviving a stable sort: two
+/// requests for different pages must slice one and the same list. An empty
+/// query scores every row 0, so the unqueried browse is exactly that tie-break
+/// order, unchanged from before paging. Extracted so the ordering is unit-testable without a live registry.
+fn rank_by_relevance(scored: &mut Vec<ScoredRow>, source_order: &[SearchSource]) {
+    let rank = |source: &SearchSource| source_order.iter().position(|s| s == source).unwrap_or(usize::MAX);
+    let mut keyed: Vec<_> = scored
+        .drain(..)
+        .map(|row| {
+            let key = (std::cmp::Reverse(row.0), rank(&row.1.0), row.1.1.repo());
+            (key, row)
+        })
+        .collect();
+    keyed.sort_by(|(a, _), (b, _)| a.cmp(b));
+    scored.extend(keyed.into_iter().map(|(_, row)| row));
 }
 
 /// Order the flattened rows: an explicit `--sort` mode, else relevance.
@@ -347,14 +378,10 @@ fn rank_by_relevance<T>(scored: &mut [(i64, T)], query: &SearchQuery) {
 /// score dominate, so `--sort rating` would appear not to sort at all.
 /// Absent the flag nothing about today's ordering changes, which is the
 /// Principle 9 guarantee this function carries.
-fn order_results(
-    scored: &mut Vec<(i64, (SearchSource, crate::catalog::CatalogRow))>,
-    sort: Option<SortMode>,
-    query: &SearchQuery,
-) {
+fn order_results(scored: &mut Vec<ScoredRow>, sort: Option<SortMode>, source_order: &[SearchSource]) {
     match sort {
         Some(mode) => sort_by_mode(scored, mode),
-        None => rank_by_relevance(scored, query),
+        None => rank_by_relevance(scored, source_order),
     }
 }
 
@@ -395,15 +422,19 @@ fn capped_catalog_warning(alias: Option<&str>, locator: &str, kind: SourceKind) 
     }
 }
 
-/// Cut the ordered rows to `--limit`, returning `(total, truncated)`.
+/// Cut the ordered rows to the `--offset`/`--limit` page, returning
+/// `(total, truncated)`.
 ///
 /// `total` is the row count before the cut — the ranked, sorted list the
 /// browse filter, deprecated visibility, query and relevance cutoff left.
-/// `truncated` is `true` when the rows are not the complete answer: the limit
-/// removed some, or `capped` says a source's listing hit its build-time cap.
-/// The cut comes after [`order_results`] so `--limit` keeps the best rows.
-fn apply_limit<T>(rows: &mut Vec<T>, limit: Option<NonZeroUsize>, capped: bool) -> (usize, bool) {
+/// `truncated` is `true` when the rows are not the complete answer: the page
+/// skipped or removed at least one, or `capped` says a source's listing hit its
+/// build-time cap. The skip precedes the limit, both after [`order_results`],
+/// so `offset..offset + limit` is a slice of the one ordered list; an offset
+/// at or past the end leaves no rows and is not an error.
+fn apply_page<T>(rows: &mut Vec<T>, offset: usize, limit: Option<NonZeroUsize>, capped: bool) -> (usize, bool) {
     let total = rows.len();
+    rows.drain(..offset.min(total));
     if let Some(limit) = limit {
         rows.truncate(limit.get());
     }
@@ -417,7 +448,7 @@ fn apply_limit<T>(rows: &mut Vec<T>, limit: Option<NonZeroUsize>, capped: bool) 
 /// page share — three surfaces disagreeing about what "sorted by rating"
 /// means is exactly what a shared comparator prevents. Total in every mode,
 /// so the rendered order does not depend on `sort_by`'s stability.
-fn sort_by_mode(scored: &mut Vec<(i64, (SearchSource, crate::catalog::CatalogRow))>, mode: SortMode) {
+fn sort_by_mode(scored: &mut Vec<ScoredRow>, mode: SortMode) {
     crate::catalog::browse_sort::sort_rows(scored, mode, |(_, (_, r))| {
         SortKey::new(
             r.rating.as_ref().map(|x| x.up),
@@ -673,6 +704,7 @@ mod tests {
             query: None,
             sort: None,
             limit: None,
+            offset: 0,
             refresh: false,
             show_deprecated: false,
             registry: Vec::new(),
@@ -863,35 +895,74 @@ mod tests {
     fn rank_by_relevance_sorts_descending_across_registry_groups() {
         // Ranking is global: a strong hit from the second registry outranks a
         // weak hit from the first, which declaration order would have put on
-        // top. The payload stands in for (source, row) — only the ordering is
-        // under test.
-        let mut scored = vec![(10, "reg-a/weak"), (90, "reg-b/strong"), (50, "reg-a/mid")];
-        rank_by_relevance(&mut scored, &SearchQuery::parse("review"));
-        let order: Vec<&str> = scored.iter().map(|(_, r)| *r).collect();
-        assert_eq!(order, vec!["reg-b/strong", "reg-a/mid", "reg-a/weak"]);
+        // top.
+        let rows = vec![
+            scored_row(10, "reg-a", "weak", None, None),
+            scored_row(90, "reg-b", "strong", None, None),
+            scored_row(50, "reg-a", "mid", None, None),
+        ];
+        assert_eq!(
+            ordered_repos(rows, None),
+            vec!["reg-b/strong", "reg-a/mid", "reg-a/weak"]
+        );
     }
 
     #[test]
-    fn rank_by_relevance_is_stable_on_ties() {
-        // Equal scores must keep the incoming order — groups in declaration
-        // order, repository-sorted within each — so identical inputs render
-        // identically run to run.
-        let mut scored = vec![(7, "reg-a/alpha"), (7, "reg-a/beta"), (7, "reg-b/gamma")];
-        rank_by_relevance(&mut scored, &SearchQuery::parse("review"));
-        let order: Vec<&str> = scored.iter().map(|(_, r)| *r).collect();
-        assert_eq!(order, vec!["reg-a/alpha", "reg-a/beta", "reg-b/gamma"]);
+    fn rank_by_relevance_breaks_ties_on_declaration_order_then_repository() {
+        // Equal scores: the source declared first leads whatever the input
+        // order, then the repository path orders within a source.
+        let rows = vec![
+            scored_row(7, "reg-b", "gamma", None, None),
+            scored_row(7, "reg-a", "beta", None, None),
+            scored_row(7, "reg-a", "alpha", None, None),
+        ];
+        let order = [source("reg-a"), source("reg-b")];
+        let mut scored = rows;
+        order_results(&mut scored, None, &order);
+        let got: Vec<String> = scored.into_iter().map(|(_, (_, r))| r.repo()).collect();
+        assert_eq!(got, vec!["reg-a/alpha", "reg-a/beta", "reg-b/gamma"]);
     }
 
     #[test]
-    fn rank_by_relevance_leaves_the_unqueried_browse_untouched() {
-        // The empty-query browse listing must be byte-for-byte what it was
-        // before ranking existed. Scores are all 0 there, so a sort would be a
-        // no-op *today* — but this pins the skip so a future non-zero baseline
-        // score cannot silently reorder the browse.
-        let mut scored = vec![(0, "z/last"), (0, "a/first")];
-        rank_by_relevance(&mut scored, &SearchQuery::parse("   "));
-        let order: Vec<&str> = scored.iter().map(|(_, r)| *r).collect();
-        assert_eq!(order, vec!["z/last", "a/first"]);
+    fn rank_by_relevance_keeps_the_unqueried_browse_in_declaration_order() {
+        // The empty-query browse scores every row 0, so it reads source by
+        // source in declaration order, repository-sorted within each — even
+        // though `reg-z` sorts after `reg-a` alphabetically.
+        let rows = vec![
+            scored_row(0, "reg-z", "last", Some(1), None),
+            scored_row(0, "reg-a", "first", Some(99), None),
+        ];
+        let order = [source("reg-z"), source("reg-a")];
+        let mut scored = rows;
+        order_results(&mut scored, None, &order);
+        let got: Vec<String> = scored.into_iter().map(|(_, (_, r))| r.repo()).collect();
+        assert_eq!(got, vec!["reg-z/last", "reg-a/first"]);
+    }
+
+    #[test]
+    fn rank_by_relevance_keeps_a_multi_host_index_source_in_qualified_reference_order() {
+        // One `index` source serves several hosts and the catalog hands its rows
+        // over keyed by `registry/repository`. Host order and path order
+        // disagree here, so a tie-break on the bare repository path would flip
+        // the unqueried browse and every equal-score tie.
+        let idx = source("https://index.example");
+        let row = |score, registry: &str, repository: &str| {
+            let (_, (_, r)) = scored_row(score, registry, repository, None, None);
+            (score, (idx.clone(), r))
+        };
+        for score in [0, 7] {
+            let mut scored = vec![row(score, "ghcr.io", "zzz/x"), row(score, "quay.io", "aaa/x")];
+            order_results(&mut scored, None, std::slice::from_ref(&idx));
+            let got: Vec<String> = scored.into_iter().map(|(_, (_, r))| r.repo()).collect();
+            assert_eq!(got, vec!["ghcr.io/zzz/x", "quay.io/aaa/x"], "score {score}");
+        }
+    }
+
+    fn source(registry: &str) -> SearchSource {
+        SearchSource {
+            alias: None,
+            locator: registry.to_string(),
+        }
     }
 
     /// One scored row: a relevance score plus a rated/dated catalog row.
@@ -937,14 +1008,18 @@ mod tests {
     }
 
     /// The repository order the command's real dispatch produces for a given
-    /// `--sort` value and query — the same call `run` makes, so a dispatch
-    /// that stopped honouring the flag fails here and not only end-to-end.
-    fn ordered_repos(
-        mut scored: Vec<(i64, (SearchSource, crate::catalog::CatalogRow))>,
-        sort: Option<SortMode>,
-        query: &str,
-    ) -> Vec<String> {
-        order_results(&mut scored, sort, &SearchQuery::parse(query));
+    /// `--sort` value — the same call `run` makes, so a dispatch that stopped
+    /// honouring the flag fails here and not only end-to-end. The source order
+    /// is each source's first appearance, which is what `run` hands over
+    /// (groups concatenated in registry-declaration order).
+    fn ordered_repos(mut scored: Vec<ScoredRow>, sort: Option<SortMode>) -> Vec<String> {
+        let mut order: Vec<SearchSource> = Vec::new();
+        for (_, (s, _)) in &scored {
+            if !order.contains(s) {
+                order.push(s.clone());
+            }
+        }
+        order_results(&mut scored, sort, &order);
         scored.into_iter().map(|(_, (_, r))| r.repo()).collect()
     }
 
@@ -962,7 +1037,7 @@ mod tests {
             scored_row(0, "ghcr.io", "acme/new-five", Some(5), Some("2026-01-01T00:00:00Z")),
         ];
         assert_eq!(
-            ordered_repos(rows, Some(SortMode::Rating), ""),
+            ordered_repos(rows, Some(SortMode::Rating)),
             vec![
                 "ghcr.io/acme/new-five",
                 "ghcr.io/acme/old-five",
@@ -987,7 +1062,7 @@ mod tests {
             ]
         };
         assert_eq!(
-            ordered_repos(rows(), Some(SortMode::Rating), "acme"),
+            ordered_repos(rows(), Some(SortMode::Rating)),
             vec!["ghcr.io/acme/most-upvotes", "ghcr.io/acme/best-match"],
             "--sort rating must ignore the relevance score entirely"
         );
@@ -997,7 +1072,7 @@ mod tests {
         // and not a regression, and neither assertion can pass by agreeing
         // with the other.
         assert_eq!(
-            ordered_repos(rows(), None, "acme"),
+            ordered_repos(rows(), None),
             vec!["ghcr.io/acme/best-match", "ghcr.io/acme/most-upvotes"]
         );
     }
@@ -1016,16 +1091,16 @@ mod tests {
             scored_row(0, "reg-z", "last", Some(1), None),
             scored_row(0, "reg-a", "first", Some(99), None),
         ];
-        for (rows, query, expected) in [
-            (queried, "review", vec!["reg-b/strong", "reg-a/weak"]),
+        for (rows, label, expected) in [
+            (queried, "queried", vec!["reg-b/strong", "reg-a/weak"]),
             // An empty query keeps the browse listing byte-for-byte as the
             // registries declared it — the rating would have reordered it.
-            (browse, "   ", vec!["reg-z/last", "reg-a/first"]),
+            (browse, "browse", vec!["reg-z/last", "reg-a/first"]),
         ] {
             assert_eq!(
-                ordered_repos(rows, None, query),
+                ordered_repos(rows, None),
                 expected,
-                "query {query:?} must be untouched by the new flag"
+                "the {label} run must be untouched by the new flag"
             );
         }
     }
@@ -1060,14 +1135,14 @@ mod tests {
     #[test]
     fn total_counts_every_row_before_the_limit() {
         let mut rows = vec![1, 2, 3, 4, 5];
-        let (total, truncated) = apply_limit(&mut rows, limit(2), false);
+        let (total, truncated) = apply_page(&mut rows, 0, limit(2), false);
         assert_eq!((total, truncated), (5, true));
         assert_eq!(rows, vec![1, 2]);
 
         // A limit at or above the row count cuts nothing and is not truncation.
         let mut rows = vec![1, 2, 3];
-        assert_eq!(apply_limit(&mut rows, limit(3), false), (3, false));
-        assert_eq!(apply_limit(&mut rows, limit(9), false), (3, false));
+        assert_eq!(apply_page(&mut rows, 0, limit(3), false), (3, false));
+        assert_eq!(apply_page(&mut rows, 0, limit(9), false), (3, false));
         assert_eq!(rows, vec![1, 2, 3]);
     }
 
@@ -1081,8 +1156,8 @@ mod tests {
             scored_row(0, "ghcr.io", "acme/mid", Some(5), None),
             scored_row(0, "ghcr.io", "acme/high", Some(9), None),
         ];
-        order_results(&mut scored, Some(SortMode::Rating), &SearchQuery::parse(""));
-        let (total, truncated) = apply_limit(&mut scored, limit(2), false);
+        order_results(&mut scored, Some(SortMode::Rating), &[source("ghcr.io")]);
+        let (total, truncated) = apply_page(&mut scored, 0, limit(2), false);
         let kept: Vec<String> = scored.into_iter().map(|(_, (_, r))| r.repo()).collect();
         assert_eq!(kept, vec!["ghcr.io/acme/high", "ghcr.io/acme/mid"]);
         assert_eq!((total, truncated), (3, true));
@@ -1091,9 +1166,188 @@ mod tests {
     #[test]
     fn a_capped_source_truncates_even_without_a_limit() {
         let mut rows = vec![1, 2, 3];
-        assert_eq!(apply_limit(&mut rows, None, true), (3, true));
-        assert_eq!(apply_limit(&mut rows, None, false), (3, false));
+        assert_eq!(apply_page(&mut rows, 0, None, true), (3, true));
+        assert_eq!(apply_page(&mut rows, 0, None, false), (3, false));
         assert_eq!(rows, vec![1, 2, 3], "no limit leaves every row in place");
+    }
+
+    fn ids(n: usize) -> Vec<usize> {
+        (0..n).collect()
+    }
+
+    #[test]
+    fn apply_page_skips_before_it_limits() {
+        let mut rows = ids(10);
+        assert_eq!(apply_page(&mut rows, 3, limit(4), false), (10, true));
+        assert_eq!(rows, vec![3, 4, 5, 6]);
+
+        // Offset alone skips and keeps the rest.
+        let mut rows = ids(5);
+        assert_eq!(apply_page(&mut rows, 2, None, false), (5, true));
+        assert_eq!(rows, vec![2, 3, 4]);
+
+        // A limit reaching past the end is just the tail.
+        let mut rows = ids(5);
+        assert_eq!(apply_page(&mut rows, 3, limit(9), false), (5, true));
+        assert_eq!(rows, vec![3, 4]);
+    }
+
+    #[test]
+    fn apply_page_offset_zero_is_the_old_limit_behaviour() {
+        let mut rows = ids(5);
+        assert_eq!(apply_page(&mut rows, 0, None, false), (5, false));
+        assert_eq!(rows, ids(5));
+        assert_eq!(apply_page(&mut rows, 0, limit(5), false), (5, false));
+        assert_eq!(apply_page(&mut rows, 0, limit(2), false), (5, true));
+    }
+
+    #[test]
+    fn apply_page_offset_at_or_past_the_end_is_empty_not_an_error() {
+        for offset in [5, 6, 10_000, usize::MAX] {
+            let mut rows = ids(5);
+            assert_eq!(
+                apply_page(&mut rows, offset, limit(2), false),
+                (5, true),
+                "offset {offset}"
+            );
+            assert!(rows.is_empty(), "offset {offset}");
+        }
+        let mut rows: Vec<usize> = Vec::new();
+        assert_eq!(apply_page(&mut rows, 0, None, false), (0, false));
+    }
+
+    #[test]
+    fn apply_page_an_offset_over_no_rows_skipped_nothing_so_is_not_truncated() {
+        // Nothing matched, so `items` is the complete (empty) answer however
+        // far the caller offset; only a source cap can make it partial.
+        let mut rows: Vec<usize> = Vec::new();
+        assert_eq!(apply_page(&mut rows, 5, None, false), (0, false));
+        assert_eq!(apply_page(&mut rows, 5, None, true), (0, true));
+    }
+
+    #[test]
+    fn apply_page_a_capped_source_is_truncated_at_any_offset() {
+        let mut rows = ids(3);
+        assert_eq!(apply_page(&mut rows, 0, None, true), (3, true));
+    }
+
+    #[test]
+    fn relevance_order_is_independent_of_the_input_order() {
+        // Equal scores across two sources and several repositories, shuffled
+        // every which way: the output must be the one list, or two page
+        // requests could slice different lists.
+        let order = [source("reg-a"), source("reg-b")];
+        let base = || {
+            vec![
+                scored_row(7, "reg-a", "m", None, None),
+                scored_row(7, "reg-a", "c", None, None),
+                scored_row(7, "reg-b", "a", None, None),
+                scored_row(7, "reg-b", "z", None, None),
+                scored_row(9, "reg-b", "top", None, None),
+                scored_row(7, "reg-a", "x", None, None),
+            ]
+        };
+        let expected = vec!["reg-b/top", "reg-a/c", "reg-a/m", "reg-a/x", "reg-b/a", "reg-b/z"];
+        let n = base().len();
+        // Every rotation and every reversal of the input is a distinct shuffle.
+        for rot in 0..n {
+            for reverse in [false, true] {
+                let mut rows = base();
+                rows.rotate_left(rot);
+                if reverse {
+                    rows.reverse();
+                }
+                order_results(&mut rows, None, &order);
+                let got: Vec<String> = rows.into_iter().map(|(_, (_, r))| r.repo()).collect();
+                assert_eq!(got, expected, "rotation {rot}, reversed {reverse}");
+            }
+        }
+    }
+
+    #[test]
+    fn pages_of_any_size_concatenate_to_the_unpaged_list_in_every_mode() {
+        let order = [source("reg-a"), source("reg-b")];
+        let mk = || {
+            let mut rows = Vec::new();
+            for i in 0..23 {
+                // Few distinct scores, ratings and dates, so ties are everywhere.
+                let registry = if i % 3 == 0 { "reg-b" } else { "reg-a" };
+                let date = ["2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z"][i % 2];
+                rows.push(scored_row(
+                    (i % 4) as i64,
+                    registry,
+                    &format!("acme/r{i:02}"),
+                    if i % 5 == 0 { None } else { Some((i % 3) as u32) },
+                    if i % 7 == 0 { None } else { Some(date) },
+                ));
+            }
+            rows
+        };
+        let modes = [
+            None,
+            Some(SortMode::Name),
+            Some(SortMode::Updated),
+            Some(SortMode::Rating),
+            Some(SortMode::Downloads),
+        ];
+        for mode in modes {
+            let mut full = mk();
+            order_results(&mut full, mode, &order);
+            let unpaged: Vec<String> = full.into_iter().map(|(_, (_, r))| r.repo()).collect();
+            assert_eq!(unpaged.len(), 23);
+
+            for k in [1, 2, 3, 5, 7, 22, 23, 40] {
+                let mut stitched: Vec<String> = Vec::new();
+                let mut offset = 0;
+                loop {
+                    // A fresh, differently-shuffled input per request: pages
+                    // come from separate invocations in real use.
+                    let mut rows = mk();
+                    rows.rotate_left(offset % 23);
+                    order_results(&mut rows, mode, &order);
+                    let (total, _) = apply_page(&mut rows, offset, limit(k), false);
+                    assert_eq!(total, 23);
+                    if rows.is_empty() {
+                        break;
+                    }
+                    offset += rows.len();
+                    stitched.extend(rows.into_iter().map(|(_, (_, r))| r.repo()));
+                }
+                assert_eq!(stitched, unpaged, "mode {mode:?}, page size {k}");
+            }
+        }
+    }
+
+    #[test]
+    fn offset_flag_accepts_zero_and_rejects_negatives_and_text() {
+        #[derive(clap::Parser)]
+        struct Harness {
+            #[command(flatten)]
+            args: SearchArgs,
+        }
+        use clap::Parser as _;
+
+        assert_eq!(Harness::try_parse_from(["search"]).unwrap().args.offset, 0);
+        for (arg, want) in [("0", 0), ("100", 100)] {
+            let parsed = Harness::try_parse_from(["search", "--offset", arg]).expect("a valid offset");
+            assert_eq!(parsed.args.offset, want);
+        }
+        for bad in ["-1", "abc", "1.5", ""] {
+            assert!(
+                Harness::try_parse_from(["search", "--offset", bad]).is_err(),
+                "--offset {bad:?} must be a usage error"
+            );
+        }
+    }
+
+    #[test]
+    fn search_help_documents_offset_and_paging() {
+        let collapsed = search_help().split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(collapsed.contains("--offset <N>"), "got:\n{collapsed}");
+        assert!(
+            collapsed.contains("`offset + items.length < total` means more rows remain"),
+            "--offset must state the has-more recipe; got:\n{collapsed}"
+        );
     }
 
     #[test]

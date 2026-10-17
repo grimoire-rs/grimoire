@@ -5,7 +5,8 @@
 Index sources are no longer capped at 500 entries (the OCI ``_catalog``
 walk keeps its cap). The search envelope reports ``total`` (every matching
 row, counted before ``--limit``) and ``truncated`` (``items`` is not the
-full answer), and ``--limit <N>`` cuts the ranked or ``--sort``ed result.
+full answer), ``--limit <N>`` cuts the ranked or ``--sort``ed result, and
+``--offset <N>`` skips rows first so a consumer can read the next page.
 """
 
 from __future__ import annotations
@@ -239,3 +240,195 @@ def test_limit_zero_is_a_usage_error(grim_at, project_dir: Path, http_index) -> 
     # Positive control: a binary without the flag also exits 64 above, so the
     # flag must be accepted at its lower bound.
     assert len(search_envelope(runner, "--limit", "1")["items"]) == 1
+
+
+def _pages(runner, size: int, *extra: str) -> list[dict]:
+    """Read the whole result ``size`` rows at a time, the documented recipe:
+    ``offset += len(items)`` while ``offset < total``."""
+    pages: list[dict] = []
+    offset = 0
+    while True:
+        page = search_envelope(
+            runner, *extra, "--offset", str(offset), "--limit", str(size)
+        )
+        pages.append(page)
+        offset += len(page["items"])
+        if not page["items"] or offset >= page["total"]:
+            return pages
+
+
+def test_pages_of_100_cover_the_whole_index_disjointly_in_the_unpaged_order(
+    grim_at, project_dir: Path, http_index
+) -> None:
+    root, base = http_index
+    _write_big_index(root)
+    index_config(project_dir, base)
+    runner = grim_at(project_dir)
+
+    full = search_envelope(runner)
+    pages = _pages(runner, 100)
+
+    assert len(pages) == COUNT // 100
+    assert all(len(p["items"]) == 100 for p in pages)
+    assert all(p["total"] == COUNT and p["truncated"] is True for p in pages)
+    stitched = [repo for p in pages for repo in _repos(p)]
+    assert len(set(stitched)) == COUNT, "no row may appear on two pages"
+    assert stitched == _repos(full), "pages concatenate to the unpaged order"
+
+
+def test_pages_are_sound_under_a_sort_and_under_a_query(
+    grim_at, project_dir: Path, http_index
+) -> None:
+    root, base = http_index
+    _write_big_index(root)
+    write_stats(root, {_ref(i): _rating(i % 4) for i in range(0, COUNT, 3)})
+    index_config(project_dir, base)
+    runner = grim_at(project_dir)
+
+    for extra in (("--sort", "rating"), ("--sort", "name"), ("generic",)):
+        full = search_envelope(runner, *extra)
+        stitched = [repo for p in _pages(runner, 70, *extra) for repo in _repos(p)]
+        assert stitched == _repos(full), f"paging {extra} must match the unpaged list"
+
+
+def test_offset_at_or_past_the_end_lists_nothing_and_exits_zero(
+    grim_at, project_dir: Path, http_index
+) -> None:
+    root, base = http_index
+    _write_big_index(root)
+    index_config(project_dir, base)
+    runner = grim_at(project_dir)
+
+    for offset in (COUNT, 10000):
+        envelope = search_envelope(runner, "--offset", str(offset))
+        assert envelope["items"] == []
+        assert envelope["total"] == COUNT
+        assert envelope["truncated"] is True
+
+
+def test_offset_without_limit_skips_rows_and_keeps_the_rest(
+    grim_at, project_dir: Path, http_index
+) -> None:
+    root, base = http_index
+    _write_big_index(root)
+    index_config(project_dir, base)
+    runner = grim_at(project_dir)
+
+    full = search_envelope(runner)
+    skipped = search_envelope(runner, "--offset", "595")
+
+    assert _repos(skipped) == _repos(full)[595:]
+    assert skipped["total"] == COUNT
+    assert skipped["truncated"] is True
+    zero = search_envelope(runner, "--offset", "0")
+    assert zero == full, "--offset 0 is the unpaged answer"
+
+
+def test_offset_rejects_negative_and_non_integer_values(
+    grim_at, project_dir: Path, http_index
+) -> None:
+    root, base = http_index
+    write_all_json(root, [package("one", "skill", "ghcr.io/acme/skills/one", "First")])
+    index_config(project_dir, base)
+    runner = grim_at(project_dir)
+
+    for bad in ("-1", "abc", "1.5"):
+        result = runner.run("search", "--refresh", "--offset", bad, check=False)
+        assert result.returncode == 64, (
+            f"--offset {bad} must exit 64, got {result.returncode}; stderr: {result.stderr}"
+        )
+    assert search_envelope(runner, "--offset", "0")["total"] == 1
+
+
+def test_plain_output_hints_the_next_page_on_stderr_only_for_a_partial_page(
+    grim_at, project_dir: Path, http_index
+) -> None:
+    root, base = http_index
+    _write_big_index(root)
+    index_config(project_dir, base)
+    runner = grim_at(project_dir)
+
+    middle = runner.run("search", "--refresh", "--offset", "100", "--limit", "100")
+    assert "showing 101-200 of 600; next page: --offset 200" in middle.stderr
+    assert "showing" not in middle.stdout
+
+    last = runner.run("search", "--refresh", "--offset", "500", "--limit", "100")
+    assert "showing 501-600 of 600" in last.stderr
+    assert "next page" not in last.stderr
+
+    past = runner.run("search", "--refresh", "--offset", "700")
+    assert "no rows at --offset 700; 600 match in total" in past.stderr
+
+    complete = runner.run("search", "--refresh", "--limit", "600")
+    assert "showing" not in complete.stderr and "next page" not in complete.stderr
+    unpaged = runner.run("search", "--refresh")
+    assert "showing" not in unpaged.stderr and "next page" not in unpaged.stderr
+
+
+def test_json_output_prints_no_paging_hint(
+    grim_at, project_dir: Path, http_index
+) -> None:
+    root, base = http_index
+    _write_big_index(root)
+    index_config(project_dir, base)
+    runner = grim_at(project_dir)
+
+    result = runner.run(
+        "--format", "json", "search", "--refresh", "--offset", "100", "--limit", "100"
+    )
+
+    assert "showing" not in result.stderr and "next page" not in result.stderr
+    assert "offset" not in json.loads(result.stdout), "no new JSON field"
+
+
+def test_a_multi_host_index_keeps_its_qualified_reference_order(
+    grim_at, project_dir: Path, http_index
+) -> None:
+    """The unqueried browse and an equal-score query list rows by
+    ``registry/repository``, as before paging existed. Host order and path order
+    disagree here, so a tie-break on the bare repository path would flip it."""
+    root, base = http_index
+    write_all_json(
+        root,
+        [
+            package("tool", "skill", "quay.io/aaa/tool", "Same words"),
+            package("tool", "skill", "ghcr.io/zzz/tool", "Same words"),
+        ],
+    )
+    index_config(project_dir, base)
+    runner = grim_at(project_dir)
+
+    expected = ["ghcr.io/zzz/tool", "quay.io/aaa/tool"]
+    assert _repos(search_envelope(runner)) == expected
+    assert _repos(search_envelope(runner, "tool")) == expected
+    assert _repos(search_envelope(runner, "--offset", "1")) == expected[1:]
+
+
+def test_later_pages_read_the_cache_with_offline_after_a_refreshing_first_call(
+    grim_at, project_dir: Path, http_index
+) -> None:
+    root, base = http_index
+    _write_big_index(root)
+    index_config(project_dir, base)
+    runner = grim_at(project_dir)
+
+    first = search_envelope(runner, "--offset", "0", "--limit", "100")
+    stitched = _repos(first)
+    offset = len(first["items"])
+    while offset < first["total"]:
+        result = runner.run(
+            "--format",
+            "json",
+            "--offline",
+            "search",
+            "--offset",
+            str(offset),
+            "--limit",
+            "100",
+        )
+        page = json.loads(result.stdout)
+        assert page["total"] == COUNT and page["items"], "an offline page is served"
+        stitched += _repos(page)
+        offset += len(page["items"])
+
+    assert stitched == _repos(search_envelope(runner))

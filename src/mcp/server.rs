@@ -58,7 +58,7 @@ impl GrimMcpServer {
     /// query and annotated with each repository's install status. Returns the
     /// same JSON payload as `grim search --format json`.
     #[tool(
-        description = "Search the configured Grimoire registries for installable skills, rules, agents, and bundles. Returns a JSON object with an `items` array of matches with kind, repo, summary, version, and install status, plus `total` (every match, counted before `limit`) and `truncated` (true when `items` is not the complete answer). Matches are ranked by relevance when a `query` is given; without one the whole catalog is listed unranked, in registry order. Set `limit` to return only the first N of those results. Results may be narrowed by each registry's configured browse filter; a package absent from these results can still be fetched or installed by direct reference."
+        description = "Search the configured Grimoire registries for installable skills, rules, agents, and bundles. Returns a JSON object with an `items` array of matches with kind, repo, summary, version, and install status, plus `total` (every match, counted before `offset` and `limit`) and `truncated` (true when `items` is not the complete answer). Matches are ranked by relevance when a `query` is given; without one the whole catalog is listed unranked, in registry order. Set `limit` to return only N of those results and `offset` to skip the first M before it applies; read the next page at `offset + items.length` while that is below `total`. Pages read the cached catalog, so a refresh between calls can shift them. Results may be narrowed by each registry's configured browse filter; a package absent from these results can still be fetched or installed by direct reference."
     )]
     async fn grim_search(&self, Parameters(args): Parameters<SearchToolArgs>) -> Result<String, ErrorData> {
         let search_args = crate::command::search::SearchArgs {
@@ -69,6 +69,7 @@ impl GrimMcpServer {
             // not a behaviour this tool changes on its own.
             sort: None,
             limit: args.limit,
+            offset: args.offset.unwrap_or(0),
             refresh: args.refresh.unwrap_or(false),
             // No tool param: defer to the resolved scope's config default
             // (`options.show_deprecated`) for whether deprecated rows show.
@@ -261,8 +262,8 @@ mod tests {
             .and_then(|tool| tool.description.as_deref())
             .expect("grim_search must be routed with a description");
         assert!(
-            description.contains("`limit`") && description.contains("`total`"),
-            "grim_search description must name `limit` and `total`: {description:?}"
+            description.contains("`limit`") && description.contains("`offset`") && description.contains("`total`"),
+            "grim_search description must name `limit`, `offset` and `total`: {description:?}"
         );
         assert!(
             description.contains("without one the whole catalog is listed unranked"),

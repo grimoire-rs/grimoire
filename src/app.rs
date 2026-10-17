@@ -136,6 +136,14 @@ pub async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Search(args) => {
             let (r, c) = crate::command::search::run(&ctx, &args).await?;
             render(&r, format)?;
+            // After the table so a terminal shows it below the rows it
+            // describes. JSON consumers read `total` and their own offset;
+            // the hint is for a person paging a plain table.
+            if matches!(format, crate::cli::options::OutputFormat::Plain)
+                && let Some(hint) = r.page_hint()
+            {
+                tracing::warn!("{hint}");
+            }
             c
         }
         Command::Rate(args) => {

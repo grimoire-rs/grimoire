@@ -66,11 +66,19 @@ pub struct SearchToolArgs {
     pub query: Option<String>,
 
     /// Return at most this many results (at least 1): the best matches under
-    /// a `query`, the first rows in registry order without one. `total` in the
-    /// result still counts every match and `truncated` says whether `items` is
-    /// the complete answer. Omit to return every match.
+    /// a `query`, the first rows in registry order without one, counted from
+    /// `offset`. `total` in the result still counts every match and
+    /// `truncated` says whether `items` is the complete answer. Omit to return
+    /// every match.
     #[serde(default)]
     pub limit: Option<NonZeroUsize>,
+
+    /// Skip this many results (0 or more) before `limit` applies, to read the
+    /// next page. An offset at or past the end returns no `items`. `total`
+    /// still counts every match, so `offset + items.length < total` means more
+    /// remain. Omit to start at the first result.
+    #[serde(default)]
+    pub offset: Option<usize>,
 
     /// Force a fresh catalog rebuild even if the cache is still warm.
     #[serde(default)]
@@ -299,6 +307,34 @@ mod tests {
             .and_then(|props| props.get("limit"))
             .unwrap_or_else(|| panic!("missing limit property in {schema}"));
         assert_eq!(limit.get("minimum"), Some(&serde_json::json!(1)), "got {limit}");
+    }
+
+    #[test]
+    fn search_args_offset_deserializes_and_rejects_negatives_and_non_integers() {
+        let bare: SearchToolArgs = serde_json::from_str("{}").unwrap();
+        assert!(bare.offset.is_none());
+
+        for (json, want) in [(r#"{"offset": 0}"#, 0), (r#"{"offset": 200}"#, 200)] {
+            let args: SearchToolArgs = serde_json::from_str(json).unwrap();
+            assert_eq!(args.offset, Some(want), "{json}");
+        }
+        for bad in ["-1", "1.5", r#""ten""#] {
+            let json = format!(r#"{{"offset": {bad}}}"#);
+            assert!(
+                serde_json::from_str::<SearchToolArgs>(&json).is_err(),
+                "offset {bad} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn search_args_expose_offset_in_json_schema_with_a_minimum_of_zero() {
+        let schema = serde_json::to_value(schemars::schema_for!(SearchToolArgs)).unwrap();
+        let offset = schema
+            .get("properties")
+            .and_then(|props| props.get("offset"))
+            .unwrap_or_else(|| panic!("missing offset property in {schema}"));
+        assert_eq!(offset.get("minimum"), Some(&serde_json::json!(0)), "got {offset}");
     }
 
     #[test]

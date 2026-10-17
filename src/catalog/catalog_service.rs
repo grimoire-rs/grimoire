@@ -227,7 +227,8 @@ pub struct CatalogGroup {
     /// [`CatalogResults::any_rows_listed`]. A failed or offline-degraded
     /// source reports `0`.
     pub rows_before_filter: usize,
-    /// The matching rows, already filtered and badged, sorted by repository.
+    /// The matching rows, already filtered and badged, sorted by their
+    /// fully-qualified reference (`registry/repository`).
     pub rows: Vec<CatalogRow>,
 }
 
