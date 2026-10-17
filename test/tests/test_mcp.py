@@ -810,3 +810,69 @@ def test_mcp_search_limit_matches_cli_json(
     assert mcp_payload["total"] == 3
     assert mcp_payload["truncated"] is True
     assert mcp_payload == runner.json("search", "--refresh", "--limit", "1")
+
+
+def test_mcp_search_offset_matches_cli_json(
+    grim_at: Callable[[Path], GrimRunner], project_dir: Path, http_index
+) -> None:
+    """``grim_search`` takes the CLI's ``--offset``: with ``limit`` it pages
+    exactly as ``grim search --offset N --limit M`` does, byte for byte."""
+    root, base = http_index
+    write_all_json(
+        root,
+        [
+            package(f"pkg-{i}", "skill", f"ghcr.io/acme/skills/pkg-{i}", "Helper")
+            for i in range(5)
+        ],
+    )
+    index_config(project_dir, base)
+    runner = grim_at(project_dir)
+
+    call = _call_search(runner, project_dir, {"refresh": True, "offset": 2, "limit": 2})
+    assert call["isError"] is False, f"grim_search with an offset must not error, got: {call!r}"
+    mcp_payload = json.loads(call["content"][0]["text"])
+
+    assert [r["repo"] for r in mcp_payload["items"]] == [
+        "ghcr.io/acme/skills/pkg-2",
+        "ghcr.io/acme/skills/pkg-3",
+    ]
+    assert mcp_payload["total"] == 5
+    assert mcp_payload["truncated"] is True
+    assert mcp_payload == runner.json("search", "--refresh", "--offset", "2", "--limit", "2")
+
+    past = _call_search(runner, project_dir, {"refresh": True, "offset": 99})
+    assert past["isError"] is False
+    empty = json.loads(past["content"][0]["text"])
+    assert empty["items"] == [] and empty["total"] == 5
+
+
+def test_mcp_search_rejects_a_negative_or_non_integer_offset(
+    grim_at: Callable[[Path], GrimRunner], project_dir: Path, http_index
+) -> None:
+    root, base = http_index
+    write_all_json(root, [package("one", "skill", "ghcr.io/acme/skills/one", "First")])
+    index_config(project_dir, base)
+    runner = grim_at(project_dir)
+
+    for bad in (-1, 1.5, "ten"):
+        responses = _drive(
+            runner,
+            project_dir,
+            [
+                _initialize(1),
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "grim_search",
+                        "arguments": {"refresh": True, "offset": bad},
+                    },
+                },
+            ],
+            offline=False,
+        )
+        reply = responses[2]
+        failed = "error" in reply or reply.get("result", {}).get("isError") is True
+        assert failed, f"offset {bad!r} must be an invalid-params failure, got: {reply!r}"

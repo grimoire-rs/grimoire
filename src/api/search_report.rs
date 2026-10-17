@@ -57,7 +57,7 @@ use crate::install::status_badge::StatusBadge;
 /// is documented display-forbidden and internal to the tree, and emitting it
 /// would freeze it into the JSON contract. A client that wants a root key
 /// builds its own from these two halves.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SearchSource {
     /// The configured alias, or `null` when the entry declared none (an
     /// unaliased `[[registries]]` entry, a `--registry` flag, or the legacy
@@ -248,6 +248,7 @@ impl Serialize for SearchEntry {
 /// the rows are the whole answer.
 ///
 /// Plain format: the five-column table; `total` and `truncated` are JSON-only.
+/// A partial page adds one stderr hint ([`SearchReport::page_hint`]).
 ///
 /// JSON format: `{"items": [...], "sources": [...], "total": N, "truncated": bool}`.
 #[derive(Debug, Serialize)]
@@ -259,11 +260,16 @@ pub struct SearchReport {
     /// make.
     sources: Vec<SearchSourceStatus>,
     /// Every matching row, counted after the browse filter, deprecated
-    /// visibility, query and relevance cutoff but before `--limit` cut `items`.
+    /// visibility, query and relevance cutoff but before `--offset` and
+    /// `--limit` cut `items`.
     total: usize,
-    /// `true` when `items` is not the complete answer: `--limit` cut it, or a
-    /// source's listing was capped at build time.
+    /// `true` when `items` is not the complete answer: `--offset` skipped
+    /// rows, `--limit` cut it, or a source's listing was capped at build time.
     truncated: bool,
+    /// The `--offset` that produced `items`. Plain-output hint only: the
+    /// caller sent it, so it is never serialized.
+    #[serde(skip)]
+    offset: usize,
 }
 
 impl SearchReport {
@@ -277,6 +283,7 @@ impl SearchReport {
             sources,
             total,
             truncated: false,
+            offset: 0,
         }
     }
 
@@ -290,6 +297,37 @@ impl SearchReport {
         self.total = total;
         self.truncated = truncated;
         self
+    }
+
+    /// Record the `--offset` the rows were paged from, for [`Self::page_hint`].
+    #[must_use]
+    pub fn with_offset(mut self, offset: usize) -> Self {
+        self.offset = offset;
+        self
+    }
+
+    /// The one-line stderr hint for a partial page, or `None` when `items`
+    /// holds every matching row. Names the row range, the total and — while
+    /// rows remain — the `--offset` of the next page.
+    pub fn page_hint(&self) -> Option<String> {
+        let shown = self.items.len();
+        if shown >= self.total {
+            return None;
+        }
+        if shown == 0 {
+            return Some(format!(
+                "no rows at --offset {}; {} match in total",
+                self.offset, self.total
+            ));
+        }
+        let first = self.offset + 1;
+        let last = self.offset + shown;
+        let next = if last < self.total {
+            format!("; next page: --offset {last}")
+        } else {
+            String::new()
+        };
+        Some(format!("showing {first}-{last} of {}{next}", self.total))
     }
 }
 
@@ -397,6 +435,58 @@ mod tests {
             oci: Default::default(),
             status,
         }
+    }
+
+    fn paged(shown: usize, offset: usize, total: usize) -> SearchReport {
+        let items = (0..shown).map(|i| entry(&format!("localhost:5000/acme/r{i}"), StatusBadge::NotInstalled));
+        SearchReport::new(items.collect(), vec![])
+            .with_completeness(total, shown < total)
+            .with_offset(offset)
+    }
+
+    #[test]
+    fn page_hint_names_the_range_the_total_and_the_next_offset() {
+        assert_eq!(
+            paged(100, 100, 600).page_hint().as_deref(),
+            Some("showing 101-200 of 600; next page: --offset 200")
+        );
+        assert_eq!(
+            paged(5, 0, 600).page_hint().as_deref(),
+            Some("showing 1-5 of 600; next page: --offset 5")
+        );
+    }
+
+    #[test]
+    fn page_hint_on_the_last_page_offers_no_next_offset() {
+        assert_eq!(
+            paged(100, 500, 600).page_hint().as_deref(),
+            Some("showing 501-600 of 600")
+        );
+    }
+
+    #[test]
+    fn page_hint_past_the_end_says_so() {
+        assert_eq!(
+            paged(0, 700, 600).page_hint().as_deref(),
+            Some("no rows at --offset 700; 600 match in total")
+        );
+    }
+
+    #[test]
+    fn page_hint_is_silent_for_a_complete_page() {
+        assert_eq!(paged(600, 0, 600).page_hint(), None);
+        assert_eq!(paged(0, 0, 0).page_hint(), None);
+        assert_eq!(paged(0, 5, 0).page_hint(), None);
+    }
+
+    #[test]
+    fn json_never_carries_the_offset() {
+        let mut buf = Vec::new();
+        paged(2, 4, 9).print_json(&mut buf).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert!(v.get("offset").is_none(), "no new JSON field: {v}");
+        assert_eq!(v["total"], 9);
+        assert_eq!(v["truncated"], true);
     }
 
     #[test]
