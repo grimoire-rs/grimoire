@@ -812,9 +812,10 @@ ran: `true` only when `--check` was passed and the invocation is online.
 Combined with `--offline` (or `$GRIM_OFFLINE`), the check is skipped
 entirely — one stderr warning explains why, `checked` stays `false`, every
 `deprecated`/`replaced_by` stays `null`, and the command still exits `0`. A
-single registry's catalog refresh failing (offline cache, transport error)
-degrades only that registry's rows to `null`; `checked` still reports `true`
-— the attempt was made online, it just came back partial for that source.
+single registry's catalog refresh failing (transport error) falls back to
+that registry's cached catalog. With none cached, it degrades only that
+registry's rows to `null`. `checked` still reports `true`, because the
+attempt was made online and it just came back partial for that source.
 
 `update_available` is populated by a **fresh per-artifact re-resolution**,
 independent of that one catalog lookup: for each registry-locked row grim
@@ -1195,6 +1196,15 @@ first value given is primary.
 short-id resolution default. It does not restrict the browse set when
 `[[registries]]` is configured.
 
+`--limit <N>` prints at most the first `N` rows. It cuts the list after
+ranking and `--sort`, so the rows kept are the first `N` in result order. `N` is a
+positive integer. `--limit 0` is a usage error that exits `64`. Omitted,
+every match is printed.
+
+The JSON `total` field still counts every match, so a script can tell a cut
+list from a complete one. See [the `total` and `truncated`
+fields](./json-interface.md#search-total).
+
 A `[[registries]]` entry carrying an `include` / `exclude`
 [browse filter](./configuration.md#browse-filters) contributes only the
 repositories its patterns admit. The filter is applied at read time, after
@@ -1219,13 +1229,28 @@ The exit code stays `0`. `--registry <ref>` browses **unfiltered** — a
 forced browse set is exactly what the flag names, with no config filter
 applied to it.
 
-The filter runs **after** the per-source browse window is built and capped at
-500 repositories, so it can only show less of that window, never reach past
-it. A separate warning reports the cap when a query's results may be
-incomplete:
+The filter runs at read time, after each source's listing is built. An
+`index` source lists every entry it publishes, so a query, a filter,
+[`grim rate`](#rate) and [`grim status --check`](#status) reach every row of
+a large index. An index is never truncated. One past the
+[abuse bounds](./package-index.md#consuming) fails its fetch instead.
+
+Only the `oci` walk of a registry's `_catalog` endpoint is capped. It stops
+at 500 repositories when the listing is built, before the query and the
+filter run. A filter can only show less of that window, never reach past it.
+Narrowing the `oci` locator is the remedy. A queried search over a capped
+source prints one warning per source:
 
 ```text
-catalog listing capped at 500 repositories; results may be incomplete — narrow the query or use a more specific term
+catalog for source 'acme' capped at 500 repositories; a narrower query cannot reach past the cap — use a package index or a narrower oci locator
+```
+
+A cached index listing that an earlier grim capped at 500 entries is rebuilt
+on the next command, not served until its TTL expires. If that rebuild
+fails, grim serves the capped rows and warns:
+
+```text
+catalog for source '<name>' was capped at 500 entries by an earlier grim; run grim search --refresh to rebuild it
 ```
 
 A registry that gates its `_catalog` browse endpoint (GitLab SaaS, GHCR,
@@ -1268,24 +1293,47 @@ url for an `index` one — and one index serves rows from many hosts. Like
 
 Beside `items`, the JSON document carries a `sources` array — one
 `{alias, locator, ok, error}` object per browsed source, in declaration
-order. A source grim cannot read degrades to an empty group so the reachable
-ones still answer, and the exit code stays `0` whether one source failed or
-all of them did; `sources` is where that shows up. `ok` is `false` and
-`error` names the cause for a source whose catalog failed to load, so a
-short or empty `items` is never mistaken for a small or empty catalog:
+order. A source whose refresh fails serves its cached catalog when one
+exists, and degrades to an empty group when none does. Either way the
+reachable sources still answer, and the exit code stays `0` whether one
+source failed or all of them did. `sources` is where that shows up. `ok` is
+`false` and `error` names the cause for a source whose catalog failed to
+refresh, so a short or empty `items` is never mistaken for a small or empty
+catalog:
 
 ```json
 {
   "items": [],
   "sources": [
     { "alias": "acme", "locator": "ghcr.io/acme", "ok": false, "error": "invalid catalog file" }
-  ]
+  ],
+  "total": 0,
+  "truncated": false
 }
 ```
 
-The same failure is still reported on stderr — `catalog for source '<x>'
-unavailable: …` — for anyone reading the plain output, which keeps its five
-columns. Full contract: [the `sources` array](./json-interface.md#search-sources).
+The same failure is still reported on stderr for anyone reading the plain
+output, which keeps its five columns. The line names the source by its
+locator, escaped, never by its alias. With no cached catalog it reads
+`catalog for source '<locator>' unavailable: …`. With one, grim serves the
+cached rows and says so, and the source still reads `ok: false` in JSON:
+
+```text
+catalog for source 'https://index.example.org' unavailable: package index fetch failed for 'https://index.example.org'; serving the cached catalog built 2026-10-16T09:12:40Z
+```
+
+A failed refresh does not restamp the cache. The next command retries only
+when the cache has expired, or when you pass `--refresh`. A still-fresh cache
+is served with `ok: true`.
+Full contract: [the `sources` array](./json-interface.md#search-sources).
+
+Two more always-present siblings say whether `items` is the whole answer.
+`total` counts every matching row before `--limit` cut the list. `truncated`
+is `true` when `items` is not complete: `--limit` cut it, or an `oci`
+source's listing was capped when it was built and `total` is a lower bound.
+`items.length < total` means `--limit` cut the list, and an `oci` cap may
+apply as well, which a capped-source warning on stderr reports. Full
+contract: [the `total` and `truncated` fields](./json-interface.md#search-total).
 
 A [deprecated](./publishing.md#metadata-deprecated) entry is **hidden by
 default** — unless it is installed in the active scope (directly or via a
@@ -1304,6 +1352,7 @@ artifact. It is JSON-only; the plain table keeps its five columns.
 grim search review
 grim search --show-deprecated review
 grim search --refresh --registry ghcr.io/acme
+grim search --sort rating --limit 10
 ```
 
 ### Ordering the results (--sort) {#search-sort}
@@ -1363,7 +1412,9 @@ grim rate <ref> [--up | --remove] [--yes] [--dry-run]
 The reference resolves through the same catalog seam
 [`grim search`](#search) uses, so a short identifier expands against the
 resolved default registry and the global [`--registry`](#global-options)
-flag selects the browse set. The vote applies to the *repository*, so a tag
+flag selects the browse set. A source whose refresh failed resolves against
+its stale-served cached rows, so `rate` still finds the row instead of
+exiting `79`. The vote applies to the *repository*, so a tag
 or digest suffix parses and is then ignored. A [browse
 filter](./configuration.md#browse-filters) hiding a row from a listing does
 not make it unvotable.
@@ -2386,6 +2437,9 @@ aliased entry, the bare locator for one without an alias. The tree root and
 the flat list's Registry column show the same alias on its own (a locator
 rarely fits a table cell); the group's detail pane spells the locator out.
 
+The `truncated:` clause names only `oci` sources whose `_catalog` walk hit
+the 500-repository cap. An `index` source is never truncated.
+
 That clause is what explains a `0/0` root without leaving the TUI. It names
 a source only when its own filter can be shown to have caused the empty
 result — the source had rows before the filter ran, and none after, the
@@ -2892,7 +2946,7 @@ down when the client closes stdin (EOF).
 
 | Tool | Description | Gate |
 |------|-------------|------|
-| `grim_search` | Browse/search the resolved scope's registries (no registry override — the configured set is the boundary). Each source's [browse filter](./configuration.md#browse-filters) narrows the results, exactly as for `grim search`; the tool's own description says so, and says that an absent package is still fetchable and installable by direct reference — a filter is a view, never a boundary. Args: `query?`, `refresh?`, scope. Same shape as `grim search --format json` (not byte-identical — see [MCP parity][json-mcp-parity]). | always |
+| `grim_search` | Browse/search the resolved scope's registries (no registry override — the configured set is the boundary). Each source's [browse filter](./configuration.md#browse-filters) narrows the results, exactly as for `grim search`; the tool's own description says so, and says that an absent package is still fetchable and installable by direct reference — a filter is a view, never a boundary. Args: `query?`, `refresh?`, `limit?` (positive integer, the same cap as `grim search --limit`; the payload still carries `total` and `truncated`), scope. Same shape as `grim search --format json` (not byte-identical — see [MCP parity][json-mcp-parity]). | always |
 | `grim_status` | Install status of every declared artifact in the requested scope. `check` (optional, default `false`) re-checks the live catalog for deprecation/replacement and re-resolves update availability — same semantics as CLI `grim status --check` (network read; the report's `checked` field says whether it ran). Args: `check?`, scope. Same shape as `grim status --format json` (not byte-identical — see [MCP parity][json-mcp-parity]). | always |
 | `grim_fetch` | Return an artifact's content in the tool result — no install. Canonical bytes by default; `vendor` (any supported client name — see the [client compatibility matrix][clients-matrix]) returns that client's projection; `path` fetches one support file (base64 with `encoding: "base64"` for a binary file); a `files` listing is always included. `description` fetches the repository's [description companion](./publishing.md#description-companion) instead (every member inline); `digest_only` resolves to `{ref, digest}` with no download and composes with `description` to probe the companion tag. Content caps at 256 KiB (truncated content carries a marker); layers over 8 MiB are refused before download, and a registry that streams more bytes than its declared layer size aborts mid-transfer into a data error rather than buffering an unbounded body. Args: `ref`, `vendor?`, `path?`, `description?`, `digest_only?`, scope. | always |
 | `grim_describe` | Report an artifact's manifest-level metadata — kind, curated annotations, tags, `has_description`, and the verbatim annotation map — without downloading its content. Same shape as `grim describe --format json`. Args: `ref`, scope. | always |

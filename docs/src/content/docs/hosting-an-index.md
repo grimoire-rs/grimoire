@@ -149,8 +149,15 @@ That writes a [`[[registries]]`][config] entry, which is
 per-project — so a repository can browse your internal index and the
 public one side by side. Listings are cached under `$GRIM_HOME/catalog/`
 with a one-hour TTL, `--refresh` forces a re-fetch, and `--offline`
-serves the cache without touching the network. The rest of the transport
+serves the cache without touching the network. A refresh that fails serves
+the cached listing instead of an empty one. The rest of the transport
 behavior is in [Consuming an Index][consuming].
+
+> **Tip:** serve `all.json` gzip-compressed if your host can. grim sends
+> `Accept-Encoding: gzip` for the index files and decodes the answer. A
+> compressed file saves transfer, and nothing is required of the host. grim
+> caps the decoded body at 128 MiB and an index at 100,000 entries. A fetch
+> past either limit fails.
 
 ## Fill It {#packages}
 

@@ -59,7 +59,27 @@ Two transports, chosen by the locator's shape:
 Both transports share the regular catalog machinery: the per-source
 cache under `$GRIM_HOME/catalog/`, the 1-hour TTL, `--refresh`, and
 offline degradation (`--offline` serves the cached listing and never
-touches the network).
+touches the network). A refresh that fails serves the cached listing too,
+with a warning naming when it was built. That covers an unreachable host, a
+`5xx`, and an oversized or unparsable body. With no cache, the source reads
+as an empty group.
+
+A cached listing that an earlier grim capped at 500 entries is rebuilt on
+the next command instead of served until its TTL expires. If that rebuild
+fails, grim serves the capped rows with a warning that points at
+`grim search --refresh`.
+
+The static transport sends `Accept-Encoding: gzip` on its requests for
+`all.json` and `stats.json`, and on no other request. It decodes a gzip
+body. A host that serves those files compressed saves transfer, and nothing
+is required of the host. Any other `Content-Encoding` on an index response is
+a failed fetch.
+
+A decoded body is capped at 128 MiB, and an index at 100,000 entries. Past
+either limit the fetch fails, so a listing is never silently truncated, and
+grim warns naming the source. The connect step waits 10 seconds, a transfer
+that delivers no bytes for 30 seconds is abandoned, and 300 seconds is the
+ceiling for the whole request.
 
 CLI equivalent of the config above:
 
