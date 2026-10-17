@@ -477,11 +477,10 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
     }
 
     // `--check`: one coordinated catalog load, then populate `deprecated` /
-    // `replaced_by` on every registry-sourced row. `checked` is `true` iff
-    // the check ran online — a single degraded registry (offline cache,
-    // transport failure) still counts, since `load_catalog` degrades that
-    // registry's group to empty rather than failing the whole browse; only
-    // a fully offline invocation flips `checked` back to `false`.
+    // `replaced_by` on every registry-sourced row. `checked` is `true` iff the
+    // check ran online — a registry whose refresh failed still counts, since
+    // `load_catalog` serves its cached catalog (empty when none) rather than
+    // failing the browse; only a fully offline run flips it to `false`.
     let checked = should_check(args.check, ctx.offline());
     if args.check && !checked {
         tracing::warn!("`--check` requires network access; skipped because grim is running offline");

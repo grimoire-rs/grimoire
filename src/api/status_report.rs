@@ -48,9 +48,10 @@
 //! catalog-derived item fields below: **`checked == false` implies every one
 //! of them is `null` on every item.** `checked == true` means the check ran
 //! online across the scope's registries — one registry's catalog refresh
-//! failing degrades only *that* registry's rows to `null`, `checked` still
-//! reports `true` (the attempt was made online; see
-//! [`crate::catalog::load_catalog`]'s per-registry degrade).
+//! failing falls back to *that* registry's cached catalog, so its rows carry
+//! the cached values and read `null` only when nothing is cached; `checked`
+//! still reports `true` (the attempt was made online; see
+//! [`crate::catalog::load_catalog`]'s per-registry fallback).
 //!
 //! `deprecated` / `replaced_by` mirror `grim search`'s fields of the same
 //! name: the publisher's deprecation notice and named successor, matched
