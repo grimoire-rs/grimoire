@@ -370,6 +370,21 @@ the docs.
 > wording had to be originated; no comparable tool documents this, because
 > they all filter server-side and have no client-side window to cap.
 
+> **Amended 2026-10-17 (index scale).** The cap is now OCI-only.
+> `MAX_CATALOG_REPOS` applies to the `_catalog` walk of an `oci` source and
+> to nothing else. An `index` source lists every entry, so a filter, a query,
+> `grim rate` and `grim status --check` reach every index row. For `oci`
+> sources everything above stands: cap first, filter second, `truncated`
+> reporting build-time truncation verbatim, and a narrower `oci` locator as
+> the remedy. What changes is where `truncated` is visible. It now reaches the
+> `grim search` / `grim_search` JSON document, beside `total`, where before it
+> fed only the stderr warning and the TUI status clause. The motivation is
+> indexes with more than 500 entries, which the old window cut. An `index`
+> source is still bounded against abuse at 128 MiB decoded and 100,000
+> entries. Past either bound the fetch fails (`ok: false`) and never
+> truncates, so an index needs no `truncated` flag. A cached index listing
+> that an earlier grim capped at 500 is rebuilt on the next command.
+
 ### D7. The TUI tree-root label is derived from the include list's literal prefix
 
 The label is a pure function of config:
@@ -681,6 +696,12 @@ nothing on screen explains.
   caller, so a filtered build poisons `status --check` across processes;
   and it re-opens the summary/keyword-match loss `catalog_service.rs`
   already documents avoiding.
+
+  > **Amended 2026-10-17 (index scale).** The cap this alternative would have
+  > relaxed now binds `oci` sources only. An `index` source has no cap to fit
+  > under, so a build-time prefilter is moot for it. The grounds for
+  > rejecting the prefilter on the `oci` walk are unchanged.
+
 > **The next two rejections are SUPERSEDED 2026-08-11 by
 > [`adr_registry_filter_match_candidate.md`](./adr_registry_filter_match_candidate.md),
 > which is named in that ADR's `Supersedes:` field.** Each is now **one half

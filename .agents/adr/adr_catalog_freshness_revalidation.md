@@ -2,7 +2,7 @@
 
 ## Metadata
 
-**Status:** Proposed
+**Status:** Accepted in part — the body cap (at 128 MiB, not 32 MiB) and the failed-rebuild fallback shipped with `plan_index_scale_pre500.md`; every other decision remains proposed
 **Date:** 2026-08-11
 **Deciders:** Michael Herwig (maintainer)
 **Tech Strategy Alignment:**

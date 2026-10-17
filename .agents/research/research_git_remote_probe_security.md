@@ -364,7 +364,7 @@ use std::time::Duration;
 
 /// Wall-clock cap for the tip probe — git has no built-in equivalent
 /// (see research doc §4). Sized like the sibling HTTP index fetch's
-/// own timeout (`index_source.rs::HTTP_TIMEOUT`).
+/// own deadlines (`index_source.rs::INDEX_READ_TIMEOUT` and `INDEX_TOTAL_TIMEOUT`).
 const LS_REMOTE_TIMEOUT: Duration = Duration::from_secs(15);
 
 let mut cmd = tokio::process::Command::new("git");
