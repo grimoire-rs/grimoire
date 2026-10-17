@@ -10,7 +10,8 @@
 //! representative tag. A deprecated row carries a comma-suffixed `deprecated`
 //! in its `Status` cell (e.g. `installed,deprecated`).
 //!
-//! JSON format: `{"items": [...], "sources": [...]}` where each item is a
+//! JSON format: `{"items": [...], "sources": [...], "total": N,
+//! "truncated": bool}` where each item is a
 //! `{kind, repo, source, summary, description, version, latest_tag,
 //! repository, revision, created, deprecated, replaced_by, rating,
 //! downloads, status}` object (uniform `items` envelope, per
@@ -34,6 +35,11 @@
 //! reading only stdout can tell "no results" from "some of your registries
 //! did not load". Its `alias`/`locator` are the same two halves each item's
 //! own `source` carries, so rows join to sources directly.
+//!
+//! `total` is the always-present count of every matching row, taken after the
+//! browse filter, deprecated visibility, query and relevance cutoff but before
+//! `--limit`. `truncated` is `true` when `items` is not the complete answer: a
+//! `--limit` cut it, or a source's listing was capped when it was built.
 
 use std::io::{self, Write};
 
@@ -242,7 +248,12 @@ impl Serialize for SearchEntry {
 }
 
 /// The result of a catalog search: one row per matching repository, plus the
-/// load status of every source that was browsed to produce them.
+/// load status of every source that was browsed to produce them and whether
+/// the rows are the whole answer.
+///
+/// Plain format: the five-column table; `total` and `truncated` are JSON-only.
+///
+/// JSON format: `{"items": [...], "sources": [...], "total": N, "truncated": bool}`.
 #[derive(Debug, Serialize)]
 pub struct SearchReport {
     items: Vec<SearchEntry>,
@@ -251,12 +262,33 @@ pub struct SearchReport {
     /// *older grim*, which is exactly the distinction the field exists to
     /// make.
     sources: Vec<SearchSourceStatus>,
+    /// Every matching row, counted before `--limit` cut `items`.
+    total: usize,
+    /// `true` when `items` is not the complete answer: `--limit` cut it, or a
+    /// source's listing was capped at build time.
+    truncated: bool,
 }
 
 impl SearchReport {
-    /// Build from operation results.
+    /// Build from operation results; assumes `items` is the complete answer
+    /// (`total == items.len()`, `truncated == false`) until
+    /// [`Self::with_completeness`] says otherwise.
     pub fn new(items: Vec<SearchEntry>, sources: Vec<SearchSourceStatus>) -> Self {
-        Self { items, sources }
+        let total = items.len();
+        Self {
+            items,
+            sources,
+            total,
+            truncated: false,
+        }
+    }
+
+    /// Record that `items` is a cut or capped view of `total` matches.
+    #[must_use]
+    pub fn with_completeness(mut self, total: usize, truncated: bool) -> Self {
+        self.total = total;
+        self.truncated = truncated;
+        self
     }
 }
 
@@ -837,7 +869,51 @@ mod tests {
         let mut buf = Vec::new();
         r.print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
-        assert_eq!(v, serde_json::json!({"items": [], "sources": []}));
+        assert_eq!(
+            v,
+            serde_json::json!({"items": [], "sources": [], "total": 0, "truncated": false})
+        );
+    }
+
+    #[test]
+    fn completeness_siblings_serialize_always_present() {
+        // Defaults: a report built without the builder claims the items are
+        // the whole answer, and `total` is their count.
+        let two = vec![
+            entry("localhost:5000/acme/x", StatusBadge::Installed),
+            entry("localhost:5000/acme/y", StatusBadge::Installed),
+        ];
+        let mut buf = Vec::new();
+        SearchReport::new(two.clone(), vec![]).print_json(&mut buf).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["total"], 2);
+        assert_eq!(v["truncated"], false);
+
+        // The builder overrides both, and `total` may exceed `items.len()`.
+        let mut buf = Vec::new();
+        SearchReport::new(two.clone(), vec![])
+            .with_completeness(600, true)
+            .print_json(&mut buf)
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["items"].as_array().unwrap().len(), 2);
+        assert_eq!(v["total"], 600);
+        assert_eq!(v["truncated"], true);
+        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["items", "sources", "total", "truncated"]);
+
+        // The plain table never carries either sibling.
+        let mut buf = Vec::new();
+        SearchReport::new(two, vec![])
+            .with_completeness(600, true)
+            .print_plain(&mut buf)
+            .unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            !out.contains("600") && !out.contains("truncated"),
+            "plain table unchanged: {out}"
+        );
     }
 
     #[test]
