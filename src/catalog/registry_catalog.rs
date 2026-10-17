@@ -3,14 +3,15 @@
 
 //! The persisted registry catalog.
 //!
-//! One entry per repository in a *bounded, query-scoped* window: its
-//! kind, a short description, keywords, the chosen "latest"-ish tag, and
-//! when it was fetched. Built exclusively through the [`OciAccess`] seam —
+//! One entry per repository: its kind, a short description, keywords, the
+//! chosen "latest"-ish tag, and when it was fetched. A registry source is
+//! built through the [`OciAccess`] seam as a *bounded, query-scoped* window —
 //! list the catalog, prefilter the repository names cheaply (no network),
 //! cap at [`MAX_CATALOG_REPOS`], then for each survivor list its tags,
 //! pick a representative tag, and read the Grimoire/OCI annotations off
 //! that tag's manifest. No blob is ever pulled (catalog is metadata-only).
 //! Walking an entire (potentially huge) registry is an explicit cut-line.
+//! An index source lists from its package index and is never capped.
 //!
 //! The per-registry cache file at `$GRIM_HOME/catalog/<hash>.json` is
 //! version-enveloped via
@@ -38,15 +39,18 @@ use super::search_match::SearchQuery;
 /// rebuilt on the next online `search`/`tui` (offline still serves it).
 pub const CATALOG_TTL_SECONDS: i64 = 3600;
 
-/// Hard cap on repositories metadata-fetched in one catalog build.
+/// Hard cap on repositories metadata-fetched in one `_catalog` walk.
 ///
 /// A registry's `_catalog` can list tens of thousands of repositories;
 /// fetching three round-trips of metadata for every one is infeasible (a
-/// real registry, not just the shared test one). The catalog is therefore
+/// real registry, not just the shared test one). The walk is therefore
 /// *bounded*: a targeted query first prefilters the repository list by
 /// name (cheap, no network) so a search stays O(matches); an empty query
 /// (browse / TUI) caps to the first `MAX_CATALOG_REPOS` lexicographic
 /// repositories. Walking the entire registry is an explicit cut-line.
+///
+/// Applies to registry sources only: an index source lists from one
+/// document and is never capped.
 pub const MAX_CATALOG_REPOS: usize = 500;
 
 /// Registries that gate the host-level OCI `_catalog` browse endpoint, so a
@@ -797,9 +801,13 @@ impl Catalog {
 
     /// Build an index-backed catalog: fetch the package index (HTTP static
     /// files or a git shallow clone), apply the same lowercased name
-    /// prefilter and [`MAX_CATALOG_REPOS`] cap as the `_catalog` walk, and
-    /// key entries by their full `registry/repository` ref (index entries
-    /// span registries, so the bare repository path is not unique).
+    /// prefilter as the `_catalog` walk, and key entries by their full
+    /// `registry/repository` ref (index entries span registries, so the bare
+    /// repository path is not unique).
+    ///
+    /// Never capped and never [`Self::truncated`]: [`MAX_CATALOG_REPOS`]
+    /// bounds the `_catalog` walk's per-repo round-trips, and an index lists
+    /// every entry from the one document already fetched.
     ///
     /// `previous` is the cache this rebuild replaces, keyed the same way.
     /// Unlike the `_catalog` walk, an index build reads one field — the
@@ -825,19 +833,15 @@ impl Catalog {
         )
         .await?;
 
-        let mut selected: Vec<CatalogEntry> = fetched
+        let entries: BTreeMap<String, CatalogEntry> = fetched
             .into_iter()
             .filter(|e| scope.is_empty() || e.repo().to_lowercase().contains(scope))
-            .take(MAX_CATALOG_REPOS + 1)
+            .map(|e| (e.repo(), e))
             .collect();
-        let truncated = selected.len() > MAX_CATALOG_REPOS;
-        selected.truncate(MAX_CATALOG_REPOS);
-
-        let entries: BTreeMap<String, CatalogEntry> = selected.into_iter().map(|e| (e.repo(), e)).collect();
         Ok(Self {
             registry: locator.to_string(),
             scope: scope.to_string(),
-            truncated,
+            truncated: false,
             built_at: fetched_at,
             entries,
         })
@@ -2059,6 +2063,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn build_from_index_keeps_every_entry_past_the_walk_cap() {
+        // The cap bounds the `_catalog` walk's per-repo round-trips; an index
+        // lists from one document, so rows past it must stay reachable.
+        let dir = tempfile::tempdir().unwrap();
+        let count = MAX_CATALOG_REPOS + 100;
+        let base = spawn_index_host_with(count).await;
+        let kind = crate::config::registry_resolve::SourceKind::IndexHttp;
+        let cat = Catalog::build_from_index(
+            &base,
+            kind,
+            "",
+            &dir.path().join("git"),
+            &dir.path().join("catalog.json"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(cat.entries().count(), count, "every index entry is kept");
+        assert!(!cat.truncated(), "an index build is never truncated");
+    }
+
+    #[tokio::test]
     async fn build_under_cap_is_not_truncated() {
         // A candidate set that fits within the cap leaves the window
         // exhaustive, so a non-empty query can be read as complete.
@@ -2257,21 +2283,21 @@ mod tests {
 
     const RATED_REF: &str = "ghcr.io/acme/skills/rated";
 
-    /// Spawn a throwaway static index host. `all.json` always serves one
-    /// package pointer; `stats.json` serves that pointer's rating until
-    /// `degraded` is set, and answers with `degraded_response` after.
-    /// A real socket is the only way to exercise the status branch the
-    /// build reads the sidecar through.
-    async fn spawn_index_host(degraded: std::sync::Arc<AtomicBool>, degraded_response: &'static str) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    const NOT_FOUND: &str = "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
 
-        fn ok(body: &str) -> String {
-            format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            )
-        }
+    fn json_ok(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+    }
+
+    /// Spawn a throwaway HTTP host that answers each request with whatever
+    /// `respond` returns for its request head. A real socket is the only way
+    /// to exercise the status branches the index fetch reads through.
+    async fn spawn_host(respond: impl Fn(&str) -> String + Send + 'static) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
@@ -2289,23 +2315,54 @@ mod tests {
                         Ok(n) => request.extend_from_slice(&buf[..n]),
                     }
                 }
-                let request = String::from_utf8_lossy(&request).to_string();
-                let response = if !request.contains("stats.json") {
-                    ok(&format!(
-                        r#"[{{"schema":1,"name":"rated","kind":"skill","ref":"{RATED_REF}","description":"Rated"}}]"#
-                    ))
-                } else if degraded.load(Ordering::SeqCst) {
-                    degraded_response.to_string()
-                } else {
-                    ok(&format!(
-                        r#"{{"schema_version":1,"providers":{{"rating":"github"}},"entries":{{"{RATED_REF}":{{"rating":{{"up":12,"target":"t","url":"u"}}}}}}}}"#
-                    ))
-                };
+                let response = respond(&String::from_utf8_lossy(&request));
                 let _ = sock.write_all(response.as_bytes()).await;
                 let _ = sock.shutdown().await;
             }
         });
         base
+    }
+
+    /// Spawn a throwaway static index host. `all.json` always serves one
+    /// package pointer; `stats.json` serves that pointer's rating until
+    /// `degraded` is set, and answers with `degraded_response` after.
+    async fn spawn_index_host(degraded: std::sync::Arc<AtomicBool>, degraded_response: &'static str) -> String {
+        spawn_host(move |request| {
+            if !request.contains("stats.json") {
+                json_ok(&format!(
+                    r#"[{{"schema":1,"name":"rated","kind":"skill","ref":"{RATED_REF}","description":"Rated"}}]"#
+                ))
+            } else if degraded.load(Ordering::SeqCst) {
+                degraded_response.to_string()
+            } else {
+                json_ok(&format!(
+                    r#"{{"schema_version":1,"providers":{{"rating":"github"}},"entries":{{"{RATED_REF}":{{"rating":{{"up":12,"target":"t","url":"u"}}}}}}}}"#
+                ))
+            }
+        })
+        .await
+    }
+
+    /// Spawn an index host serving `count` distinct skill pointers in `all.json`
+    /// and no sidecar.
+    async fn spawn_index_host_with(count: usize) -> String {
+        let body = format!(
+            "[{}]",
+            (0..count)
+                .map(|i| format!(
+                    r#"{{"schema":1,"name":"skill-{i:04}","kind":"skill","ref":"ghcr.io/acme/skill-{i:04}"}}"#
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        spawn_host(move |request| {
+            if request.contains("stats.json") {
+                NOT_FOUND.to_string()
+            } else {
+                json_ok(&body)
+            }
+        })
+        .await
     }
 
     /// Build the index catalog once against a healthy sidecar, then again

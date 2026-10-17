@@ -482,9 +482,10 @@ pub async fn load_catalog(
                     registry: reg.url.clone(),
                     alias: reg.alias.clone(),
                     // Plan C-008 / ADR D6: **build-time** truncation, reported
-                    // verbatim. The cap is applied while listing, before the
-                    // filter is ever consulted, so a narrow filter can never
-                    // rescue a browse from `MAX_CATALOG_REPOS`.
+                    // verbatim. For a registry source the cap is applied while
+                    // listing, before the filter is ever consulted, so a narrow
+                    // filter can never rescue a browse from `MAX_CATALOG_REPOS`;
+                    // an index source is never capped and never truncated.
                     truncated: catalog.truncated(),
                     built_at: catalog.built_at().to_string(),
                     served_offline: offline,
