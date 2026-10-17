@@ -943,6 +943,15 @@ description = "The acme platform team's shared skills"
 version = "1.2.0"
 logo = "assets/team.svg"
 
+homepage = "https://acme.example/team"
+license = "Apache-2.0"
+keywords = ["review", "quality"]
+category = "developer-tools"
+
+[plugin.author]
+name = "Acme Platform Team"
+email = "platform@acme.example"
+
 [plugin.rename]
 strip_prefix = "acme-"
 ```
@@ -955,11 +964,13 @@ A value that breaks a rule fails the config load with exit `78`, like any
 other invalid `grimoire.toml` key. The table sits outside the declaration
 hash, so editing it never makes `grimoire.lock` stale.
 
-`name`, `description`, `version` and `logo` are also
+The metadata keys described under [plugin metadata](#plugin-metadata)
+work here too. `name`, `description`, `version`, `logo`, `homepage`,
+`repository`, `documentation`, `support`, `license` and `category` are also
 [`grim config`](./commands.md#config-settings) keys (`plugin.name` and so
 on) at project scope. `grim config set` checks a value against the same
-rules and exits `65` on a bad one. `rename.strip_prefix` is edited in the
-file only.
+rules and exits `65` on a bad one. `rename.strip_prefix`, `author`,
+`keywords` and `tags` are edited in the file only.
 
 ```sh
 grim config set plugin.version v1.2.0   # stored as 1.2.0
@@ -1014,6 +1025,64 @@ OCI-annotation fallback
 described there belongs only to an **ad-hoc, single-reference** export,
 never to a declared plugin.
 
+### Plugin metadata {#plugin-metadata}
+
+```toml
+[plugins.team]
+include = ["ghcr.io/acme/skills/code-review:1"]
+homepage = "https://acme.example/team"
+repository = "https://github.com/acme/team"
+documentation = "https://acme.example/docs"
+support = "https://github.com/acme/team/issues"
+license = "Apache-2.0"
+keywords = ["review", "quality"]
+tags = ["team"]
+category = "developer-tools"
+
+[plugins.team.author]
+name = "Acme Platform Team"
+email = "platform@acme.example"
+url = "https://acme.example"
+```
+
+Each plugin can describe its author, links, license and keywords. Every key
+is optional, and a manifest that sets none renders the same files as before.
+The keys sit outside the declaration hash, so adding them re-pins nothing.
+
+| Key | Rule |
+|---|---|
+| `author.name` | Not empty, at most 128 characters |
+| `author.email` | An email address, `name@host.tld` |
+| `author.url`, `homepage`, `repository`, `documentation`, `support` | An `https://` link without embedded credentials |
+| `license` | Free text, at most 128 characters; an SPDX identifier such as `Apache-2.0` is the convention |
+| `keywords`, `tags` | At most 20 distinct entries each, up to 40 characters, no commas |
+| `category` | A lowercase slug of letters, digits and single hyphens, at most 32 characters |
+
+A value that breaks a rule exits `65` and names the plugin and the key. An
+unknown key under `author` exits `65` too.
+
+Each harness's files carry only what its own format defines. A field the
+format lacks is left out rather than guessed.
+
+| Field | Claude | Copilot | Codex | Qoder | Cursor |
+|---|---|---|---|---|---|
+| `category` in the marketplace entry | yes | yes | yes | yes | yes |
+| `author`, `homepage`, `repository`, `license`, `keywords`, `tags` in the entry | yes | yes | no | yes | yes, `author` without `url` |
+| `documentation`, `support` and `owner.url` | yes | no | no | yes | no |
+| `author`, `homepage`, `repository`, `license`, `keywords` in `plugin.json` | yes | yes | yes | yes | yes, `author` without `url` |
+
+Codex also reads an `interface` block in `plugin.json`. grim fills its
+`category`, `websiteURL` (from `homepage`) and `developerName` (from
+`author.name`) from the same keys. The block lands in every Agent Plugins
+tree, and only Codex reads it.
+
+A project plugin falls back to the project's [`[plugin]`](#plugin-table)
+table field by field. An ad-hoc `grim export plugin <ref>` with no
+declaration fills unset fields from the reference's published annotations
+(`licenses`, `source`, `url`, `documentation`, `authors` and the keywords),
+and drops a value that fails the rules above. A declared plugin reads no
+annotations.
+
 ### Project plugins {#marketplace-project}
 
 ```toml
@@ -1066,6 +1135,7 @@ declaration hashes, so adding or editing it re-pins nothing.
 | `name` | yes | The marketplace's name; consumers install as `<plugin>@<name>` |
 | `owner.name` | yes | The owner's name; not empty |
 | `owner.email` | no | An email address, `name@host.tld` |
+| `owner.url` | no | An `https://` link to the owner's page; written for Claude and Qoder only |
 | `description` | no | Free text, at most 500 UTF-16 code units; written to `metadata.description` |
 | `clients` | no | Which clients get a marketplace file: any of `claude`, `copilot`, `codex`, `qoder`, `cursor` (default `claude`, `copilot`, `codex`, `qoder`) |
 

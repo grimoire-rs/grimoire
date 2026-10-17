@@ -617,8 +617,13 @@ Ownership is a convention, not recorded state. grim rewrites only
 at exit 65 (`untracked-destination`) unless `--force` adopts it.
 `--force` deletes whatever else sits in an adopted `./<client>/`, and after
 you rename the marketplace it means consumers must re-add it under the new
-name. A manifest carrying `[marketplace]` needs grim 0.15.0 or later: an
-older grim rejects it. Confirm the current flag set with `grim export
+name. A plugin can also declare `author = { name, email?, url? }`,
+`homepage`, `repository`, `documentation`, `support`, `license`, `keywords`,
+`tags` and `category`, and `[marketplace.owner]` can declare `url`. grim
+writes each into the files of the harnesses whose format defines it, see
+[plugin metadata][plugin-metadata]; a bad value exits 65. A manifest
+carrying `[marketplace]` or these keys needs grim 0.15.0 or later: an older
+grim rejects it. Confirm the current flag set with `grim export
 marketplace --help`, and see the [command reference][commands-export-marketplace]
 for the layout, ownership rules, JSON report and exit codes.
 
@@ -645,6 +650,7 @@ for the layout, ownership rules, JSON report and exit codes.
 [commands-export]: https://grimoire.rs/commands.html#export-plugin
 [commands-export-marketplace]: https://grimoire.rs/commands.html#export-marketplace
 [use-a-marketplace]: https://grimoire.rs/guides/use-a-marketplace.html
+[plugin-metadata]: https://grimoire.rs/configuration.html#plugin-metadata
 [hosting-a-marketplace]: https://grimoire.rs/guides/hosting-a-marketplace.html
 [team-plugin]: https://grimoire.rs/guides/team-plugin.html
 [agent-plugins]: https://agent-plugins.org/

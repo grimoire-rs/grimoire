@@ -340,6 +340,84 @@ def test_s001_table_metadata_reaches_every_document(grim_at, work: Path, registr
         assert doc["metadata"] == {"description": "Acme plugins."}
 
 
+def test_s001_every_profile_key_reaches_the_files_its_harness_defines(
+    grim_at, work: Path, registry: str, unique_repo: str
+) -> None:
+    refs = _refs(registry, unique_repo, "a")
+    (work / "marketplace.toml").write_text(
+        '[marketplace]\nname = "acme"\nclients = ["claude", "codex", "cursor"]\n\n'
+        '[marketplace.owner]\nname = "Acme"\nurl = "https://acme.example"\n\n'
+        f'[plugins.alpha]\ninclude = ["{refs["a"]}"]\n'
+        'homepage = "https://acme.example/alpha"\n'
+        'repository = "https://github.com/acme/alpha"\n'
+        'documentation = "https://acme.example/docs"\n'
+        'support = "https://github.com/acme/alpha/issues"\n'
+        'license = "Apache-2.0"\nkeywords = ["review", "quality"]\ntags = ["team"]\n'
+        'category = "developer-tools"\n\n'
+        '[plugins.alpha.author]\nname = "Acme Team"\nemail = "dev@acme.example"\nurl = "https://acme.example/team"\n'
+    )
+
+    _ok(_run(grim_at(work)))
+
+    author = {"name": "Acme Team", "email": "dev@acme.example", "url": "https://acme.example/team"}
+    claude = _doc(work, "claude")
+    assert claude["owner"] == {"name": "Acme", "url": "https://acme.example"}
+    entry = claude["plugins"][0]
+    assert list(entry) == [
+        "name", "source", "version", "description", "author", "homepage", "repository", "license",
+        "keywords", "tags", "category", "documentationUrl", "supportUrl",
+    ]  # fmt: skip
+    assert entry["author"] == author
+    assert (entry["documentationUrl"], entry["supportUrl"]) == (
+        "https://acme.example/docs",
+        "https://github.com/acme/alpha/issues",
+    )
+    tree = _tree_manifest(work, "claude", "alpha")
+    assert list(tree) == [
+        "name", "version", "description", "author", "homepage", "repository", "license", "keywords"
+    ]  # fmt: skip
+    for key in ("author", "homepage", "repository", "license", "keywords"):
+        assert entry[key] == tree[key], key
+
+    codex = _doc(work, "codex")
+    assert "url" not in codex["owner"]
+    assert list(codex["plugins"][0]) == ["name", "source", "version", "description", "category"]
+    interface = _tree_manifest(work, "codex", "alpha")["extensions"]["com.openai"]["interface"]
+    assert interface == {
+        "category": "developer-tools",
+        "developerName": "Acme Team",
+        "websiteURL": "https://acme.example/alpha",
+    }
+
+    cursor = _doc(work, "cursor")
+    cursor_author = {"name": "Acme Team", "email": "dev@acme.example"}
+    assert "url" not in cursor["owner"]
+    assert cursor["plugins"][0]["author"] == cursor_author
+    assert "documentationUrl" not in cursor["plugins"][0]
+    assert _tree_manifest(work, "cursor", "alpha")["author"] == cursor_author
+    second = json.loads((work / "cursor" / "alpha" / ".cursor-plugin" / "plugin.json").read_text())
+    assert second["author"] == cursor_author
+
+    rerun = _ok(_run(grim_at(work)))
+    assert set(_actions(rerun).values()) == {"unchanged"}
+    assert set(_file_actions(rerun).values()) == {"unchanged"}
+
+
+def test_s001_a_bad_profile_value_is_65_naming_the_plugin_and_key(
+    grim_at, work: Path, registry: str, unique_repo: str
+) -> None:
+    refs = _refs(registry, unique_repo, "a")
+    (work / "marketplace.toml").write_text(
+        '[marketplace]\nname = "acme"\n\n[marketplace.owner]\nname = "Acme"\n\n'
+        f'[plugins.alpha]\ninclude = ["{refs["a"]}"]\nhomepage = "http://acme.example"\n'
+    )
+
+    error = _refuse(_run(grim_at(work)))
+
+    assert "alpha" in error["message"] and "homepage" in error["message"]
+    assert not (work / "claude").exists()
+
+
 # ── S-002 — quiet re-run (C-020) ──────────────────────────────────────────
 
 

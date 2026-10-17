@@ -161,6 +161,12 @@ def test_c153_config_list_adds_the_experimental_hooks_row(grim_at, project_dir: 
         "plugin.description",
         "plugin.version",
         "plugin.logo",
+        "plugin.homepage",
+        "plugin.repository",
+        "plugin.documentation",
+        "plugin.support",
+        "plugin.license",
+        "plugin.category",
     ], keys
     row = items[10]
     assert row["key"] == "options.experimental.hooks"

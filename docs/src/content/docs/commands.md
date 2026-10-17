@@ -2130,11 +2130,13 @@ Each tree is what [`grim export plugin`](#export-plugin) renders for that
 client: the same [families](#export-plugin-families), the same
 [admission](#export-plugin-admission) rules, the same
 [version](#export-plugin-output). The marketplace file lists every plugin the
-client can carry as `{name, source, version, description}`. `source` is
+client can carry as `{name, source, version, description}` plus the
+[profile fields][plugin-metadata] that harness's format defines. `source` is
 `./<client>/<plugin>`, and `version` and `description` equal the tree's own
-manifest. The file's own keys are `name`, `owner` (`name` and an optional
-`email`), `metadata.description` when the table sets one, and `plugins`. It is
-pretty-printed JSON with a trailing newline and no `$schema`.
+manifest. The file's own keys are `name`, `owner` (`name`, an optional
+`email`, and for Claude and Qoder an optional `url`), `metadata.description`
+when the table sets one, and `plugins`. It is pretty-printed JSON with a
+trailing newline and no `$schema`.
 
 A plugin with no member a client's format can carry is left out of that
 client's file and reported as an `empty` row, with a warning. A plugin that no
@@ -2885,6 +2887,7 @@ registers the same entry — in every detected client, not just Claude Code
 <!-- internal -->
 [global-options]: #global-options
 [options-tui]: ./configuration.md#options-tui
+[plugin-metadata]: ./configuration.md#plugin-metadata
 [json-mcp-parity]: ./json-interface.md#mcp-parity
 [json-broken-pipe]: ./json-interface.md#broken-pipe
 [json-shapes-items]: ./json-interface.md#shapes-items

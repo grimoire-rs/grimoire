@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::config::plugin_meta::{PluginAuthor, PluginProfile, check_https_url, is_email};
 use crate::config::{PathSource, is_path_value, resolve_reference};
 use crate::export::export_error::ExportError;
 use crate::fetch::FetchScope;
@@ -57,12 +58,15 @@ pub struct MarketplaceOwner {
     pub name: String,
     #[serde(default)]
     pub email: Option<String>,
+    /// An `https://` link to the owner's page.
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 /// One `[plugins.<name>]` table: exactly one of `include` (references
 /// resolved into `marketplace.lock`) or `project` (a grim project whose
 /// own lock supplies the pins).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginDecl {
     /// Registry refs or local paths; empty when `project` is set.
@@ -87,6 +91,55 @@ pub struct PluginDecl {
     /// `description`.
     #[serde(default)]
     pub logo: Option<PathBuf>,
+    /// Plugin author. Outside the declaration hash, like `description`.
+    #[serde(default)]
+    pub author: Option<PluginAuthor>,
+    #[serde(default)]
+    pub homepage: Option<String>,
+    #[serde(default)]
+    pub repository: Option<String>,
+    #[serde(default)]
+    pub documentation: Option<String>,
+    #[serde(default)]
+    pub support: Option<String>,
+    #[serde(default)]
+    pub license: Option<String>,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub category: Option<String>,
+}
+
+impl PluginDecl {
+    /// The author, link and keyword fields.
+    pub fn profile(&self) -> PluginProfile {
+        PluginProfile {
+            author: self.author.clone(),
+            homepage: self.homepage.clone(),
+            repository: self.repository.clone(),
+            documentation: self.documentation.clone(),
+            support: self.support.clone(),
+            license: self.license.clone(),
+            keywords: self.keywords.clone(),
+            tags: self.tags.clone(),
+            category: self.category.clone(),
+        }
+    }
+
+    /// Replace the author, link and keyword fields.
+    pub fn set_profile(&mut self, profile: PluginProfile) {
+        self.author = profile.author;
+        self.homepage = profile.homepage;
+        self.repository = profile.repository;
+        self.documentation = profile.documentation;
+        self.support = profile.support;
+        self.license = profile.license;
+        self.keywords = profile.keywords;
+        self.tags = profile.tags;
+        self.category = profile.category;
+    }
 }
 
 use crate::config::plugin_meta::{MAX_DESCRIPTION_LEN, description_len};
@@ -239,6 +292,9 @@ fn validate_marketplace(meta: &mut MarketplaceMeta, explicit_empty_clients: bool
             "owner.email '{email}' is not an email address (expected name@host.tld)"
         ));
     }
+    if let Some(url) = &meta.owner.url {
+        check_https_url("owner.url", url)?;
+    }
     if let Some(text) = &meta.description {
         let len = description_len(text.trim());
         if len > MAX_DESCRIPTION_LEN {
@@ -295,20 +351,6 @@ fn validate_marketplace_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// `^[^@\s]+@[^@\s]+\.[^@\s]+$`: one `@`, no whitespace, and a dot with
-/// something on both sides of it in the host part.
-fn is_email(text: &str) -> bool {
-    let Some((local, host)) = text.split_once('@') else {
-        return false;
-    };
-    let plain = |part: &str| !part.is_empty() && !part.contains('@') && !part.chars().any(char::is_whitespace);
-    plain(local)
-        && plain(host)
-        && host
-            .char_indices()
-            .any(|(i, c)| c == '.' && i > 0 && i + 1 < host.len())
-}
-
 /// The file-name rules of C-001, checked before the file is read: a
 /// `.toml` extension, a stem not itself ending in `.toml`, and never
 /// `grimoire.toml` — so the lock path (`with_extension("lock")`) stays
@@ -347,7 +389,7 @@ fn validate_plugin(name: &str, decl: &mut PluginDecl) -> Result<(), String> {
             format!("invalid version '{raw}': expected a semver version without build metadata (e.g. 1.2.0)")
         })?);
     }
-    Ok(())
+    decl.profile().validate()
 }
 
 /// Compute the declaration hashes of `m` (C-004) — local only, no network.
@@ -479,6 +521,7 @@ mod tests {
             }),
             logo: None,
             project: None,
+            ..PluginDecl::default()
         };
         assert_eq!(m.plugins, BTreeMap::from([("team".to_string(), decl)]));
     }
@@ -777,11 +820,7 @@ mod tests {
     fn decl(include: &[&str]) -> PluginDecl {
         PluginDecl {
             include: include.iter().map(|s| (*s).to_string()).collect(),
-            description: None,
-            version: None,
-            rename: None,
-            logo: None,
-            project: None,
+            ..PluginDecl::default()
         }
     }
 
@@ -897,6 +936,17 @@ mod tests {
             strip_prefix: "x-".into(),
         });
         d.logo = Some("assets/logo.svg".into());
+        d.set_profile(PluginProfile {
+            author: Some(PluginAuthor {
+                name: "Acme".into(),
+                email: None,
+                url: None,
+            }),
+            homepage: Some("https://acme.example".into()),
+            keywords: vec!["team".into()],
+            category: Some("tools".into()),
+            ..PluginProfile::default()
+        });
         assert_eq!(hashes(&base), hashes(&decorated));
     }
 
@@ -1028,6 +1078,7 @@ mod tests {
                 owner: MarketplaceOwner {
                     name: "Acme".into(),
                     email: Some("dev@acme.example".into()),
+                    url: None,
                 },
                 description: Some("Acme's plugins".into()),
                 clients: vec!["cursor".into(), "claude".into()],
@@ -1227,5 +1278,73 @@ mod tests {
         // `load` is the one validation point for every caller.
         let msg = load_err_body("[marketplace]\nname = \"Bad Name\"\n[marketplace.owner]\nname = \"Acme\"\n");
         assert!(msg.contains("name"), "{msg}");
+    }
+    // ── plugin author, links, license, keywords ──────────────────────────
+
+    const FULL_PLUGIN: &str = "[plugins.team]\ninclude = [\"ghcr.io/acme/a:1\"]\n\
+        homepage = \"https://acme.example/team\"\n\
+        repository = \"https://github.com/acme/team\"\n\
+        documentation = \"https://acme.example/docs\"\n\
+        support = \"https://github.com/acme/team/issues\"\n\
+        license = \"Apache-2.0\"\n\
+        keywords = [\"review\", \"quality\"]\n\
+        tags = [\"team\"]\n\
+        category = \"developer-tools\"\n\
+        [plugins.team.author]\n\
+        name = \"Acme\"\n\
+        email = \"dev@acme.example\"\n\
+        url = \"https://acme.example\"\n";
+
+    #[test]
+    fn every_new_plugin_key_parses_into_the_profile() {
+        let profile = load_ok_body(FULL_PLUGIN).plugins["team"].profile();
+        assert_eq!(profile.homepage.as_deref(), Some("https://acme.example/team"));
+        assert_eq!(profile.repository.as_deref(), Some("https://github.com/acme/team"));
+        assert_eq!(profile.documentation.as_deref(), Some("https://acme.example/docs"));
+        assert_eq!(profile.support.as_deref(), Some("https://github.com/acme/team/issues"));
+        assert_eq!(profile.license.as_deref(), Some("Apache-2.0"));
+        assert_eq!(profile.keywords, ["review", "quality"]);
+        assert_eq!(profile.tags, ["team"]);
+        assert_eq!(profile.category.as_deref(), Some("developer-tools"));
+        let author = profile.author.unwrap();
+        assert_eq!(
+            (author.name.as_str(), author.email.as_deref(), author.url.as_deref()),
+            ("Acme", Some("dev@acme.example"), Some("https://acme.example"))
+        );
+        assert_eq!(load_ok_body(VALID).plugins["team"].profile(), PluginProfile::default());
+    }
+
+    #[test]
+    fn each_bad_new_plugin_value_is_a_manifest_error_naming_the_plugin_and_key() {
+        let cases = [
+            ("homepage = \"http://acme.example\"", "homepage"),
+            ("repository = \"https://u:p@github.com/a/b\"", "repository"),
+            ("documentation = \"docs\"", "documentation"),
+            ("support = \"\"", "support"),
+            ("license = \" MIT\"", "license"),
+            ("keywords = [\"a\", \"a\"]", "keywords"),
+            ("tags = [\"a,b\"]", "tags"),
+            ("category = \"Dev Tools\"", "category"),
+            ("author = { name = \"\" }", "author.name"),
+            ("author = { name = \"A\", email = \"nope\" }", "author.email"),
+            ("author = { name = \"A\", url = \"http://a.example\" }", "author.url"),
+        ];
+        for (line, key) in cases {
+            let msg = load_err_body(&format!("{VALID}{line}\n"));
+            assert!(msg.contains("plugin 'team'") && msg.contains(key), "{line}: {msg}");
+        }
+        let msg = load_err_body(&format!("{VALID}author = {{ name = \"A\", bogus = 1 }}\n"));
+        assert!(msg.contains("bogus"), "{msg}");
+    }
+
+    #[test]
+    fn marketplace_owner_url_must_be_https() {
+        let meta = meta_ok("name = \"acme\"", &format!("{OWNER}\nurl = \"https://acme.example\""));
+        assert_eq!(meta.owner.url.as_deref(), Some("https://acme.example"));
+        assert_eq!(meta_ok("name = \"acme\"", OWNER).owner.url, None);
+        for url in ["http://acme.example", "acme.example", "https://u@acme.example"] {
+            let msg = meta_err("name = \"acme\"", &format!("{OWNER}\nurl = \"{url}\""));
+            assert!(msg.contains("owner.url"), "{url}: {msg}");
+        }
     }
 }

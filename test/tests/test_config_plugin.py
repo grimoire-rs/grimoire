@@ -2,8 +2,8 @@
 # Copyright 2026 The Grimoire Authors
 """``grim config`` over the project-only ``[plugin]`` table.
 
-``plugin.name``, ``plugin.description``, ``plugin.version`` and
-``plugin.logo`` are get/set/unset/list-able like any other key; values are
+``plugin.name``, ``plugin.description``, ``plugin.version``,
+``plugin.logo`` and the link, license and category keys are get/set/unset/list-able like any other key; values are
 checked with the same rules ``grimoire.toml`` load applies (65 at set, 78
 at load). ``[plugin]`` is outside the declaration hash, so editing it never
 makes the lock stale, and every other config rewrite keeps it.
@@ -17,7 +17,18 @@ import pytest
 
 from src.helpers import make_artifact, write_config
 
-PLUGIN_KEYS = ["plugin.name", "plugin.description", "plugin.version", "plugin.logo"]
+PLUGIN_KEYS = [
+    "plugin.name",
+    "plugin.description",
+    "plugin.version",
+    "plugin.logo",
+    "plugin.homepage",
+    "plugin.repository",
+    "plugin.documentation",
+    "plugin.support",
+    "plugin.license",
+    "plugin.category",
+]
 
 
 def _plugin_table(project_dir: Path) -> dict | None:
@@ -31,6 +42,9 @@ def _plugin_table(project_dir: Path) -> dict | None:
         ("plugin.description", "Team tools for everyone", "Team tools for everyone"),
         ("plugin.version", "v1.2.0", "1.2.0"),
         ("plugin.logo", "assets/team.svg", "assets/team.svg"),
+        ("plugin.homepage", "https://acme.example", "https://acme.example"),
+        ("plugin.license", "Apache-2.0", "Apache-2.0"),
+        ("plugin.category", "developer-tools", "developer-tools"),
     ],
 )
 def test_set_get_unset_round_trip(grim_at, project_dir: Path, key: str, value: str, stored: str) -> None:
@@ -54,6 +68,9 @@ def test_set_get_unset_round_trip(grim_at, project_dir: Path, key: str, value: s
         ("plugin.description", "x" * 501, "at most 500"),
         ("plugin.version", "1.0.0+build", "invalid version"),
         ("plugin.logo", "", "must not be empty"),
+        ("plugin.homepage", "http://acme.example", "https://"),
+        ("plugin.support", "help", "https://"),
+        ("plugin.category", "Dev Tools", "category"),
     ],
 )
 def test_invalid_value_exits_65_and_leaves_the_file_unchanged(
@@ -83,14 +100,14 @@ def test_dry_run_writes_nothing(grim_at, project_dir: Path) -> None:
     assert runner.run("config", "set", "plugin.name", "Bad", "--dry-run", check=False).returncode == 65
 
 
-def test_list_all_appends_the_four_plugin_rows_with_metadata(grim_at, project_dir: Path) -> None:
+def test_list_all_appends_the_plugin_rows_with_metadata(grim_at, project_dir: Path) -> None:
     write_config(project_dir)
     runner = grim_at(project_dir)
     runner.run("config", "set", "plugin.name", "team")
 
     items = runner.json("config", "list", "--all")["items"]
 
-    assert [i["key"] for i in items[-4:]] == PLUGIN_KEYS, "plugin rows come last"
+    assert [i["key"] for i in items[-len(PLUGIN_KEYS):]] == PLUGIN_KEYS, "plugin rows come last"
     rows = {i["key"]: i for i in items}
     for key in PLUGIN_KEYS:
         assert rows[key]["type"] == "string"

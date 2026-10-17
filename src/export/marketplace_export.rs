@@ -39,6 +39,7 @@ use serde::Serialize;
 use crate::api::export_report::{
     ExportAction, ExportItem, FileAction, MarketplaceExportReport, MarketplaceFileRow, MarketplaceItem,
 };
+use crate::config::plugin_meta::{PluginAuthor, PluginProfile};
 use crate::export::archive;
 use crate::export::export_error::ExportError;
 use crate::export::family::{self, Family};
@@ -76,7 +77,33 @@ struct TableClient {
     family: Family,
     /// The harness's own marketplace file, `/`-joined, relative to the root.
     file: &'static str,
+    /// What the harness's entry defines beyond `category`, which all five do.
+    fields: EntryFields,
 }
+
+/// The optional entry and owner fields a harness's marketplace format
+/// defines (`vendor-capability-watchlist.md`); a field it does not define is
+/// never written.
+#[derive(Clone, Copy)]
+struct EntryFields {
+    /// `author`, `homepage`, `repository`, `license`, `keywords`, `tags`.
+    descriptive: bool,
+    /// `documentationUrl`, `supportUrl` and `owner.url`.
+    links: bool,
+}
+
+const NO_FIELDS: EntryFields = EntryFields {
+    descriptive: false,
+    links: false,
+};
+const DESCRIPTIVE: EntryFields = EntryFields {
+    descriptive: true,
+    links: false,
+};
+const ALL_FIELDS: EntryFields = EntryFields {
+    descriptive: true,
+    links: true,
+};
 
 impl TableClient {
     /// The client name: the `./<client>/` directory and the `--client` value.
@@ -107,26 +134,31 @@ static TABLE: [TableClient; 5] = [
         client: ClientTarget::Claude,
         family: Family::Claude,
         file: ".claude-plugin/marketplace.json",
+        fields: ALL_FIELDS,
     },
     TableClient {
         client: ClientTarget::Copilot,
         family: Family::AgentPlugins,
         file: ".github/plugin/marketplace.json",
+        fields: DESCRIPTIVE,
     },
     TableClient {
         client: ClientTarget::Codex,
         family: Family::AgentPlugins,
         file: ".agents/plugins/marketplace.json",
+        fields: NO_FIELDS,
     },
     TableClient {
         client: ClientTarget::Qoder,
         family: Family::Claude,
         file: ".qoder-plugin/marketplace.json",
+        fields: ALL_FIELDS,
     },
     TableClient {
         client: ClientTarget::Cursor,
         family: Family::AgentPlugins,
         file: ".cursor-plugin/marketplace.json",
+        fields: DESCRIPTIVE,
     },
 ];
 
@@ -284,6 +316,7 @@ async fn export_marketplace_with(
             .map(|p| PluginSummary {
                 name: p.name.clone(),
                 description: family::plugin_description(p.description_base.as_deref()).0,
+                profile: p.profile.clone(),
             })
             .collect();
         let repo = Repo {
@@ -727,6 +760,8 @@ struct OwnerDoc<'a> {
     name: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     email: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -734,23 +769,74 @@ struct MetadataDoc<'a> {
     description: &'a str,
 }
 
-/// One plugin entry: `name`, `version` and `description` are byte-equal to
-/// that tree's manifest.
+/// One plugin entry: `name`, `version`, `description` and the profile fields
+/// the harness defines are byte-equal to that tree's manifest.
 #[derive(Serialize)]
 struct EntryDoc {
     name: String,
     source: String,
     version: String,
     description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author: Option<PluginAuthor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    homepage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repository: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    license: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    keywords: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    category: Option<String>,
+    #[serde(rename = "documentationUrl", skip_serializing_if = "Option::is_none")]
+    documentation_url: Option<String>,
+    #[serde(rename = "supportUrl", skip_serializing_if = "Option::is_none")]
+    support_url: Option<String>,
 }
 
-/// The pretty-printed document plus one trailing `\n` (D3).
-fn document_bytes(meta: &MarketplaceMeta, plugins: Vec<EntryDoc>) -> Vec<u8> {
+impl EntryDoc {
+    /// `profile` as `client`'s entry carries it: what the harness defines,
+    /// with the author cut the way its `plugin.json` cuts it.
+    fn new(
+        name: &str,
+        source: String,
+        version: &str,
+        description: &str,
+        client: &TableClient,
+        profile: &PluginProfile,
+    ) -> Self {
+        let profile = family::manifest_profile(client.client, profile);
+        let EntryFields { descriptive, links } = client.fields;
+        EntryDoc {
+            name: name.to_string(),
+            source,
+            version: version.to_string(),
+            description: description.to_string(),
+            author: profile.author.filter(|_| descriptive),
+            homepage: profile.homepage.filter(|_| descriptive),
+            repository: profile.repository.filter(|_| descriptive),
+            license: profile.license.filter(|_| descriptive),
+            keywords: if descriptive { profile.keywords } else { Vec::new() },
+            tags: if descriptive { profile.tags } else { Vec::new() },
+            category: profile.category,
+            documentation_url: profile.documentation.filter(|_| links),
+            support_url: profile.support.filter(|_| links),
+        }
+    }
+}
+
+/// The pretty-printed document plus one trailing `\n` (D3). `owner_url` is
+/// set for harnesses whose `owner` defines `url`.
+fn document_bytes(meta: &MarketplaceMeta, plugins: Vec<EntryDoc>, owner_url: bool) -> Vec<u8> {
     let document = Document {
         name: &meta.name,
         owner: OwnerDoc {
             name: &meta.owner.name,
             email: meta.owner.email.as_deref(),
+            url: meta.owner.url.as_deref().filter(|_| owner_url),
         },
         metadata: meta
             .description
@@ -771,6 +857,7 @@ fn document_bytes(meta: &MarketplaceMeta, plugins: Vec<EntryDoc>) -> Vec<u8> {
 struct PluginSummary {
     name: String,
     description: String,
+    profile: PluginProfile,
 }
 
 /// The repository a run makes true.
@@ -872,16 +959,18 @@ fn commit(
             let mut listed = Vec::new();
             for plugin in plugins {
                 if let Some(Slot::Tree { item, .. }) = slots.get(&slot_of(&plugin.name, client)) {
-                    entries.push(EntryDoc {
-                        name: plugin.name.clone(),
-                        source: tree_rel(client.name(), &plugin.name),
-                        version: item.version.clone(),
-                        description: plugin.description.clone(),
-                    });
+                    entries.push(EntryDoc::new(
+                        &plugin.name,
+                        tree_rel(client.name(), &plugin.name),
+                        &item.version,
+                        &plugin.description,
+                        client,
+                        &plugin.profile,
+                    ));
                     listed.push(plugin.name.clone());
                 }
             }
-            (client, document_bytes(repo.meta, entries), listed)
+            (client, document_bytes(repo.meta, entries, client.fields.links), listed)
         })
         .collect();
 
@@ -1146,6 +1235,7 @@ mod tests {
             owner: MarketplaceOwner {
                 name: "Acme".to_string(),
                 email: None,
+                url: None,
             },
             description: None,
             clients: clients.iter().map(|c| (*c).to_string()).collect(),
@@ -1276,6 +1366,7 @@ mod tests {
             .map(|n| PluginSummary {
                 name: (*n).to_string(),
                 description: format!("{n} plugin"),
+                profile: PluginProfile::default(),
             })
             .collect()
     }
@@ -1353,12 +1444,97 @@ mod tests {
     // ── C-019 the document ─────────────────────────────────────────────
 
     fn entry(name: &str, version: &str, description: &str) -> EntryDoc {
-        EntryDoc {
-            name: name.to_string(),
-            source: tree_rel("claude", name),
-            version: version.to_string(),
-            description: description.to_string(),
+        EntryDoc::new(
+            name,
+            tree_rel("claude", name),
+            version,
+            description,
+            table_row("claude").unwrap(),
+            &PluginProfile::default(),
+        )
+    }
+
+    fn full_profile() -> PluginProfile {
+        PluginProfile {
+            author: Some(PluginAuthor {
+                name: "Acme".into(),
+                email: Some("dev@acme.example".into()),
+                url: Some("https://acme.example".into()),
+            }),
+            homepage: Some("https://acme.example/team".into()),
+            repository: Some("https://github.com/acme/team".into()),
+            documentation: Some("https://acme.example/docs".into()),
+            support: Some("https://github.com/acme/team/issues".into()),
+            license: Some("Apache-2.0".into()),
+            keywords: vec!["review".into()],
+            tags: vec!["team".into()],
+            category: Some("developer-tools".into()),
         }
+    }
+
+    /// The keys of `client`'s entry for a fully profiled plugin, in order.
+    fn entry_keys(client: &str) -> Vec<String> {
+        let row = table_row(client).unwrap();
+        let doc = EntryDoc::new("team", tree_rel(client, "team"), "1.0.0+abc", "D", row, &full_profile());
+        let value = serde_json::to_value(doc).unwrap();
+        let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        keys
+    }
+
+    #[test]
+    fn each_harness_entry_carries_only_the_fields_its_format_defines() {
+        let base = ["description", "name", "source", "version"];
+        let descriptive = ["author", "homepage", "keywords", "license", "repository", "tags"];
+        let expect = |extra: &[&[&str]]| {
+            let mut all: Vec<String> = base.iter().map(|s| (*s).to_string()).collect();
+            all.extend(extra.iter().flat_map(|e| e.iter().map(|s| (*s).to_string())));
+            all.sort();
+            all
+        };
+        let category: &[&str] = &["category"];
+        let links: &[&str] = &["documentationUrl", "supportUrl"];
+        assert_eq!(entry_keys("claude"), expect(&[&descriptive, category, links]));
+        assert_eq!(entry_keys("qoder"), expect(&[&descriptive, category, links]));
+        assert_eq!(entry_keys("copilot"), expect(&[&descriptive, category]));
+        assert_eq!(entry_keys("cursor"), expect(&[&descriptive, category]));
+        assert_eq!(entry_keys("codex"), expect(&[category]));
+    }
+
+    #[test]
+    fn the_cursor_entry_author_has_no_url_and_the_others_keep_it() {
+        for (client, url) in [
+            ("cursor", None),
+            ("claude", Some("https://acme.example")),
+            ("copilot", Some("https://acme.example")),
+        ] {
+            let row = table_row(client).unwrap();
+            let doc = EntryDoc::new("t", tree_rel(client, "t"), "1.0.0+abc", "D", row, &full_profile());
+            let value = serde_json::to_value(doc).unwrap();
+            assert_eq!(value["author"]["email"], "dev@acme.example", "{client}");
+            assert_eq!(value["author"]["url"].as_str(), url, "{client}");
+        }
+    }
+
+    #[test]
+    fn owner_url_is_written_only_where_the_harness_defines_it() {
+        let mut m = meta(&[]);
+        m.owner.url = Some("https://acme.example".to_string());
+        let with = String::from_utf8(document_bytes(&m, Vec::new(), true)).unwrap();
+        assert!(with.contains("\"url\": \"https://acme.example\""), "{with}");
+        let without = String::from_utf8(document_bytes(&m, Vec::new(), false)).unwrap();
+        assert!(!without.contains("url"), "{without}");
+        assert_eq!(
+            [
+                ("claude", true),
+                ("qoder", true),
+                ("copilot", false),
+                ("codex", false),
+                ("cursor", false)
+            ]
+            .map(|(c, want)| table_row(c).unwrap().fields.links == want),
+            [true; 5]
+        );
     }
 
     #[test]
@@ -1366,19 +1542,19 @@ mod tests {
         let mut m = meta(&[]);
         m.owner.email = Some("team@example.org".to_string());
         m.description = Some("Curated".to_string());
-        let bytes = document_bytes(&m, vec![entry("team", "1.4.0+3f9a0c12b7de", "Team skills")]);
+        let bytes = document_bytes(&m, vec![entry("team", "1.4.0+3f9a0c12b7de", "Team skills")], true);
         let expected = "{\n  \"name\": \"acme\",\n  \"owner\": {\n    \"name\": \"Acme\",\n    \"email\": \"team@example.org\"\n  },\n  \"metadata\": {\n    \"description\": \"Curated\"\n  },\n  \"plugins\": [\n    {\n      \"name\": \"team\",\n      \"source\": \"./claude/team\",\n      \"version\": \"1.4.0+3f9a0c12b7de\",\n      \"description\": \"Team skills\"\n    }\n  ]\n}\n";
         assert_eq!(String::from_utf8(bytes).unwrap(), expected);
     }
 
     #[test]
     fn c019_email_and_metadata_appear_only_when_declared_and_plugins_may_be_empty() {
-        let text = String::from_utf8(document_bytes(&meta(&[]), Vec::new())).unwrap();
+        let text = String::from_utf8(document_bytes(&meta(&[]), Vec::new(), true)).unwrap();
         assert_eq!(
             text,
             "{\n  \"name\": \"acme\",\n  \"owner\": {\n    \"name\": \"Acme\"\n  },\n  \"plugins\": []\n}\n"
         );
-        for banned in ["$schema", "pluginRoot", "email", "metadata"] {
+        for banned in ["$schema", "pluginRoot", "email", "metadata", "url"] {
             assert!(!text.contains(banned), "{banned}");
         }
     }
@@ -2214,6 +2390,101 @@ mod tests {
             before,
             "inventories, mtimes and the lock bytes are identical"
         );
+    }
+
+    /// `fixture` plus every profile key on `team` and an owner url.
+    fn rich_fixture() -> (tempfile::TempDir, PathBuf) {
+        let (g, dir) = fixture("clients = [\"claude\", \"codex\", \"cursor\"]", &[("team", "plan")]);
+        let path = dir.join("marketplace.toml");
+        let text = std::fs::read_to_string(&path).unwrap().replace(
+            "owner = { name = \"Acme\" }",
+            "owner = { name = \"Acme\", url = \"https://acme.example\" }",
+        );
+        let rich = format!(
+            "{text}homepage = \"https://acme.example/team\"\nrepository = \"https://github.com/acme/team\"\n\
+             documentation = \"https://acme.example/docs\"\nsupport = \"https://github.com/acme/team/issues\"\n\
+             license = \"Apache-2.0\"\nkeywords = [\"review\"]\ntags = [\"team\"]\ncategory = \"developer-tools\"\n\
+             [plugins.team.author]\nname = \"Acme\"\nemail = \"dev@acme.example\"\nurl = \"https://acme.example\"\n"
+        );
+        std::fs::write(&path, rich).unwrap();
+        (g, dir)
+    }
+
+    fn json_of(path: &Path) -> serde_json::Value {
+        serde_json::from_str(&read(path)).unwrap()
+    }
+
+    fn plugin_entry(doc: &serde_json::Value) -> &serde_json::Value {
+        &doc["plugins"][0]
+    }
+
+    #[tokio::test]
+    async fn e2e_profile_keys_reach_each_harness_files_and_a_rerun_changes_nothing() {
+        let (_g, dir) = rich_fixture();
+        export(&dir, None, false).await.unwrap();
+
+        let claude = json_of(&dir.join(".claude-plugin/marketplace.json"));
+        assert_eq!(claude["owner"]["url"], "https://acme.example");
+        let entry = plugin_entry(&claude);
+        assert_eq!(entry["documentationUrl"], "https://acme.example/docs");
+        assert_eq!(entry["supportUrl"], "https://github.com/acme/team/issues");
+        assert_eq!(entry["category"], "developer-tools");
+        assert_eq!(entry["tags"], serde_json::json!(["team"]));
+        let manifest = json_of(&dir.join("claude/team/.claude-plugin/plugin.json"));
+        for key in ["author", "homepage", "repository", "license", "keywords"] {
+            assert_eq!(entry[key], manifest[key], "claude entry and manifest agree on {key}");
+        }
+        assert_eq!(manifest["author"]["url"], "https://acme.example");
+
+        let codex = json_of(&dir.join(".agents/plugins/marketplace.json"));
+        let mut keys: Vec<&String> = plugin_entry(&codex).as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["category", "description", "name", "source", "version"]);
+        assert!(codex["owner"].get("url").is_none());
+        let interface = &json_of(&dir.join("codex/team/plugin.json"))["extensions"]["com.openai"]["interface"];
+        assert_eq!(interface["websiteURL"], "https://acme.example/team");
+        assert_eq!(interface["developerName"], "Acme");
+        assert_eq!(interface["category"], "developer-tools");
+
+        let cursor = json_of(&dir.join(".cursor-plugin/marketplace.json"));
+        let author = &plugin_entry(&cursor)["author"];
+        assert_eq!(author["email"], "dev@acme.example");
+        assert!(author.get("url").is_none(), "cursor never gets author.url");
+        for rel in ["cursor/team/plugin.json", "cursor/team/.cursor-plugin/plugin.json"] {
+            let m = json_of(&dir.join(rel));
+            assert_eq!(m["author"], *author, "{rel}");
+            assert_eq!(m["homepage"], "https://acme.example/team", "{rel}");
+        }
+        assert!(plugin_entry(&cursor).get("documentationUrl").is_none());
+
+        let before = owned_snapshot(&dir);
+        let again = export(&dir, None, false).await.unwrap();
+        assert!(rows(&again).iter().all(|r| r.2 == "unchanged"), "{:?}", rows(&again));
+        assert!(file_rows(&again).iter().all(|r| r.1 == "unchanged"));
+        assert_eq!(owned_snapshot(&dir), before);
+    }
+
+    #[tokio::test]
+    async fn e2e_a_manifest_without_profile_keys_renders_the_original_bytes() {
+        let (_g, dir) = fixture("", &[("team", "plan")]);
+        export(&dir, None, false).await.unwrap();
+        let doc = json_of(&dir.join(".claude-plugin/marketplace.json"));
+        let keys = |v: &serde_json::Value| -> Vec<String> { v.as_object().unwrap().keys().cloned().collect() };
+        assert_eq!(keys(&doc), ["name", "owner", "plugins"]);
+        assert_eq!(keys(&doc["owner"]), ["name"]);
+        assert_eq!(keys(plugin_entry(&doc)), ["description", "name", "source", "version"]);
+        for rel in [
+            "claude/team/.claude-plugin/plugin.json",
+            "codex/team/plugin.json",
+            "qoder/team/.qoder-plugin/plugin.json",
+        ] {
+            let manifest = json_of(&dir.join(rel));
+            let found = keys(&manifest);
+            assert!(
+                !found.iter().any(|k| k == "author" || k == "extensions"),
+                "{rel}: {found:?}"
+            );
+        }
     }
 
     #[tokio::test]

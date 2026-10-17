@@ -8,6 +8,7 @@
 
 use serde::Serialize;
 
+use crate::config::plugin_meta::{PluginAuthor, PluginProfile};
 use crate::export::archive::InventoryEntry;
 use crate::install::ClientTarget;
 use crate::install::vendor::KindSupport;
@@ -49,12 +50,23 @@ pub enum OmitReason {
     NotRepresentable,
 }
 
-/// Claude-family `plugin.json`: exactly these keys, in this order.
+/// Claude-family `plugin.json`: exactly these keys, in this order; the
+/// profile keys only when set.
 #[derive(Serialize)]
 struct ClaudeManifest<'a> {
     name: &'a str,
     version: &'a str,
     description: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author: Option<&'a PluginAuthor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    homepage: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repository: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    license: Option<&'a str>,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    keywords: &'a [String],
 }
 
 /// Agent Plugins `plugin.json`: exactly these keys, in this order;
@@ -67,7 +79,30 @@ struct AgentPluginsManifest<'a> {
     version: &'a str,
     description: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
+    author: Option<&'a PluginAuthor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    homepage: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repository: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    license: Option<&'a str>,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    keywords: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
     extensions: Option<serde_json::Value>,
+}
+
+/// `profile` as `client`'s `plugin.json` carries it: Cursor's native schema
+/// has no `author.url`, so it is dropped there; the marketplace entry draws
+/// from the same value, which keeps entry and manifest byte-equal.
+pub fn manifest_profile(client: ClientTarget, profile: &PluginProfile) -> PluginProfile {
+    let mut out = profile.clone();
+    if client == ClientTarget::Cursor
+        && let Some(author) = &mut out.author
+    {
+        author.url = None;
+    }
+    out
 }
 
 /// Where a plugin logo lands in every exported tree, by file extension.
@@ -227,11 +262,16 @@ pub fn plugin_readme(
 /// Serializing a struct of `&str` cannot fail, so this returns bytes, not a
 /// `Result`; the body uses a non-panicking form (no `unwrap`/`expect`, per
 /// the crate lints).
-pub fn claude_plugin_json(name: &str, version: &str, description: &str) -> Vec<u8> {
+pub fn claude_plugin_json(name: &str, version: &str, description: &str, profile: &PluginProfile) -> Vec<u8> {
     pretty_json_line(&ClaudeManifest {
         name,
         version,
         description,
+        author: profile.author.as_ref(),
+        homepage: profile.homepage.as_deref(),
+        repository: profile.repository.as_deref(),
+        license: profile.license.as_deref(),
+        keywords: &profile.keywords,
     })
 }
 
@@ -244,14 +284,40 @@ pub fn claude_plugin_json(name: &str, version: &str, description: &str) -> Vec<u
 ///
 /// `logo` is the plugin-root-relative logo path ([`logo_path`]); it is
 /// declared under the Codex namespace (`extensions."com.openai".interface.logo`,
-/// `./`-prefixed), the one Agent Plugins client that reads a logo.
-pub fn agent_plugins_plugin_json(name: &str, version: &str, description: &str, logo: Option<&str>) -> Vec<u8> {
+/// `./`-prefixed), the one Agent Plugins client that reads a logo. The same
+/// interface block carries the profile's `category`, `websiteURL` (the
+/// homepage) and `developerName` (the author's name), which Codex reads.
+pub fn agent_plugins_plugin_json(
+    name: &str,
+    version: &str,
+    description: &str,
+    logo: Option<&str>,
+    profile: &PluginProfile,
+) -> Vec<u8> {
+    let mut interface = serde_json::Map::new();
+    if let Some(l) = logo {
+        interface.insert("logo".into(), format!("./{l}").into());
+    }
+    if let Some(category) = &profile.category {
+        interface.insert("category".into(), category.clone().into());
+    }
+    if let Some(homepage) = &profile.homepage {
+        interface.insert("websiteURL".into(), homepage.clone().into());
+    }
+    if let Some(author) = &profile.author {
+        interface.insert("developerName".into(), author.name.clone().into());
+    }
     pretty_json_line(&AgentPluginsManifest {
         schema: AGENT_PLUGINS_SCHEMA,
         name,
         version,
         description,
-        extensions: logo.map(|l| serde_json::json!({"com.openai": {"interface": {"logo": format!("./{l}")}}})),
+        author: profile.author.as_ref(),
+        homepage: profile.homepage.as_deref(),
+        repository: profile.repository.as_deref(),
+        license: profile.license.as_deref(),
+        keywords: &profile.keywords,
+        extensions: (!interface.is_empty()).then(|| serde_json::json!({"com.openai": {"interface": interface}})),
     })
 }
 
@@ -630,7 +696,13 @@ mod tests {
 
     #[test]
     fn c025_agent_plugins_logo_goes_under_the_codex_namespace() {
-        let got = agent_plugins_plugin_json("team", "1.0.0+c5a5324c93a6", "Team tools", Some("assets/logo.png"));
+        let got = agent_plugins_plugin_json(
+            "team",
+            "1.0.0+c5a5324c93a6",
+            "Team tools",
+            Some("assets/logo.png"),
+            &PluginProfile::default(),
+        );
         let v: serde_json::Value = serde_json::from_slice(&got).unwrap();
         assert_eq!(
             top_level_keys(&got),
@@ -701,7 +773,7 @@ mod tests {
 
     #[test]
     fn c025_claude_plugin_json_exact_bytes() {
-        let got = claude_plugin_json("team", "1.0.0+c5a5324c93a6", "Team tools");
+        let got = claude_plugin_json("team", "1.0.0+c5a5324c93a6", "Team tools", &PluginProfile::default());
         assert_eq!(
             String::from_utf8(got).unwrap(),
             "{\n  \"name\": \"team\",\n  \"version\": \"1.0.0+c5a5324c93a6\",\n  \"description\": \"Team tools\"\n}\n"
@@ -710,7 +782,13 @@ mod tests {
 
     #[test]
     fn c025_agent_plugins_plugin_json_exact_bytes_schema_first() {
-        let got = agent_plugins_plugin_json("team", "1.0.0+c5a5324c93a6", "Team tools", None);
+        let got = agent_plugins_plugin_json(
+            "team",
+            "1.0.0+c5a5324c93a6",
+            "Team tools",
+            None,
+            &PluginProfile::default(),
+        );
         assert_eq!(
             String::from_utf8(got).unwrap(),
             "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \
@@ -732,8 +810,8 @@ mod tests {
     #[test]
     fn c025_key_lists_order_and_single_trailing_newline() {
         let desc = "Say \"hi\" — é\nnext";
-        let claude = claude_plugin_json("team", "0.0.0+c5a5324c93a6", desc);
-        let agent = agent_plugins_plugin_json("team", "0.0.0+c5a5324c93a6", desc, None);
+        let claude = claude_plugin_json("team", "0.0.0+c5a5324c93a6", desc, &PluginProfile::default());
+        let agent = agent_plugins_plugin_json("team", "0.0.0+c5a5324c93a6", desc, None, &PluginProfile::default());
         assert_eq!(top_level_keys(&claude), ["name", "version", "description"]);
         assert_eq!(top_level_keys(&agent), ["$schema", "name", "version", "description"]);
         for bytes in [&claude, &agent] {
@@ -743,6 +821,95 @@ mod tests {
         }
         let v: serde_json::Value = serde_json::from_slice(&agent).unwrap();
         assert_eq!(v["$schema"], AGENT_PLUGINS_SCHEMA);
+    }
+
+    fn profile() -> PluginProfile {
+        PluginProfile {
+            author: Some(PluginAuthor {
+                name: "Acme".into(),
+                email: Some("dev@acme.example".into()),
+                url: Some("https://acme.example".into()),
+            }),
+            homepage: Some("https://acme.example/team".into()),
+            repository: Some("https://github.com/acme/team".into()),
+            license: Some("Apache-2.0".into()),
+            keywords: vec!["review".into(), "quality".into()],
+            category: Some("developer-tools".into()),
+            ..PluginProfile::default()
+        }
+    }
+
+    #[test]
+    fn profile_keys_follow_the_fixed_order_in_both_manifests() {
+        let claude = claude_plugin_json("team", "1.0.0+abc", "D", &profile());
+        assert_eq!(
+            top_level_keys(&claude),
+            [
+                "name",
+                "version",
+                "description",
+                "author",
+                "homepage",
+                "repository",
+                "license",
+                "keywords"
+            ]
+        );
+        let v: serde_json::Value = serde_json::from_slice(&claude).unwrap();
+        assert_eq!(v["author"]["email"], "dev@acme.example");
+        assert_eq!(v["keywords"], serde_json::json!(["review", "quality"]));
+
+        let agent = agent_plugins_plugin_json("team", "1.0.0+abc", "D", Some("assets/logo.png"), &profile());
+        assert_eq!(
+            top_level_keys(&agent),
+            [
+                "$schema",
+                "name",
+                "version",
+                "description",
+                "author",
+                "homepage",
+                "repository",
+                "license",
+                "keywords",
+                "extensions"
+            ]
+        );
+        let v: serde_json::Value = serde_json::from_slice(&agent).unwrap();
+        assert_eq!(
+            v["extensions"]["com.openai"]["interface"],
+            serde_json::json!({
+                "logo": "./assets/logo.png",
+                "category": "developer-tools",
+                "websiteURL": "https://acme.example/team",
+                "developerName": "Acme"
+            })
+        );
+    }
+
+    #[test]
+    fn an_empty_profile_adds_no_key_and_no_extensions() {
+        let agent = agent_plugins_plugin_json("team", "1.0.0+abc", "D", None, &PluginProfile::default());
+        assert_eq!(top_level_keys(&agent), ["$schema", "name", "version", "description"]);
+    }
+
+    #[test]
+    fn only_cursor_drops_author_url_from_the_manifest_profile() {
+        for client in [
+            ClientTarget::Claude,
+            ClientTarget::Copilot,
+            ClientTarget::Codex,
+            ClientTarget::Qoder,
+        ] {
+            assert_eq!(manifest_profile(client, &profile()), profile(), "{client:?}");
+        }
+        let cursor = manifest_profile(ClientTarget::Cursor, &profile());
+        let author = cursor.author.as_ref().unwrap();
+        assert_eq!(
+            (author.email.as_deref(), author.url.as_deref()),
+            (Some("dev@acme.example"), None)
+        );
+        assert_eq!(cursor.homepage, profile().homepage);
     }
 
     // ── C-036 Agent Plugins mcp.json entry (S-031 unit half) ──

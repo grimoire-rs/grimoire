@@ -1412,6 +1412,28 @@ fn plugin_value(field: PluginField, plugin: Option<&PluginMeta>) -> Option<Strin
             .as_deref()
             .map(|v| plugin_meta::normalize_version(v).unwrap_or_else(|| v.to_string())),
         PluginField::Logo => meta.logo.as_ref().map(|l| l.to_string_lossy().into_owned()),
+        PluginField::Homepage => meta.homepage.clone(),
+        PluginField::Repository => meta.repository.clone(),
+        PluginField::Documentation => meta.documentation.clone(),
+        PluginField::Support => meta.support.clone(),
+        PluginField::License => meta.license.clone(),
+        PluginField::Category => meta.category.clone(),
+    }
+}
+
+/// Store an already-validated `value` in `field`.
+fn store_plugin_field(meta: &mut PluginMeta, field: PluginField, value: String) {
+    match field {
+        PluginField::Name => meta.name = Some(value),
+        PluginField::Description => meta.description = Some(value),
+        PluginField::Version => meta.version = Some(value),
+        PluginField::Logo => meta.logo = Some(value.into()),
+        PluginField::Homepage => meta.homepage = Some(value),
+        PluginField::Repository => meta.repository = Some(value),
+        PluginField::Documentation => meta.documentation = Some(value),
+        PluginField::Support => meta.support = Some(value),
+        PluginField::License => meta.license = Some(value),
+        PluginField::Category => meta.category = Some(value),
     }
 }
 
@@ -1435,15 +1457,21 @@ fn apply_plugin_set(field: PluginField, value: &str, plugin: &mut Option<PluginM
         PluginField::Version => plugin_meta::checked_version(value),
         PluginField::Logo if value.is_empty() => Err("must not be empty".to_string()),
         PluginField::Logo => Ok(value.to_string()),
+        // The link, license and category rules are the load-time ones: run
+        // them over a table holding just this value.
+        PluginField::Homepage
+        | PluginField::Repository
+        | PluginField::Documentation
+        | PluginField::Support
+        | PluginField::License
+        | PluginField::Category => {
+            let mut scratch = PluginMeta::default();
+            store_plugin_field(&mut scratch, field, value.to_string());
+            scratch.profile().validate().map(|()| value.to_string())
+        }
     }
     .map_err(invalid)?;
-    let meta = plugin.get_or_insert_with(PluginMeta::default);
-    match field {
-        PluginField::Name => meta.name = Some(stored.clone()),
-        PluginField::Description => meta.description = Some(stored.clone()),
-        PluginField::Version => meta.version = Some(stored.clone()),
-        PluginField::Logo => meta.logo = Some(stored.clone().into()),
-    }
+    store_plugin_field(plugin.get_or_insert_with(PluginMeta::default), field, stored.clone());
     Ok(stored)
 }
 
@@ -1456,6 +1484,12 @@ fn apply_plugin_unset(field: PluginField, plugin: &mut Option<PluginMeta>) {
         PluginField::Description => meta.description = None,
         PluginField::Version => meta.version = None,
         PluginField::Logo => meta.logo = None,
+        PluginField::Homepage => meta.homepage = None,
+        PluginField::Repository => meta.repository = None,
+        PluginField::Documentation => meta.documentation = None,
+        PluginField::Support => meta.support = None,
+        PluginField::License => meta.license = None,
+        PluginField::Category => meta.category = None,
     }
     if *meta == PluginMeta::default() {
         *plugin = None;
@@ -5511,6 +5545,35 @@ mod tests {
     }
 
     #[test]
+    fn plugin_set_covers_the_link_license_and_category_fields() {
+        let mut plugin = None;
+        for (field, value) in [
+            (PluginField::Homepage, "https://acme.example"),
+            (PluginField::Repository, "https://github.com/acme/team"),
+            (PluginField::Documentation, "https://acme.example/docs"),
+            (PluginField::Support, "https://acme.example/help"),
+            (PluginField::License, "Apache-2.0"),
+            (PluginField::Category, "developer-tools"),
+        ] {
+            assert_eq!(apply_plugin_set(field, value, &mut plugin).unwrap(), value);
+            assert_eq!(plugin_value(field, plugin.as_ref()).as_deref(), Some(value));
+        }
+        let before = plugin.clone();
+        for (field, value) in [
+            (PluginField::Homepage, "http://acme.example"),
+            (PluginField::Support, "help"),
+            (PluginField::License, ""),
+            (PluginField::Category, "Dev Tools"),
+        ] {
+            let err = apply_plugin_set(field, value, &mut plugin).expect_err(value);
+            assert_eq!(crate::error::classify_error(&err), ExitCode::DataError, "{field:?}");
+        }
+        assert_eq!(plugin, before, "a rejected value changes nothing");
+        apply_plugin_unset(PluginField::Homepage, &mut plugin);
+        assert_eq!(plugin_value(PluginField::Homepage, plugin.as_ref()), None);
+    }
+
+    #[test]
     fn plugin_set_error_escapes_a_bidi_override() {
         let err = apply_plugin_set(PluginField::Name, "a\u{202e}b", &mut None).unwrap_err();
         assert!(!format!("{err:#}").contains('\u{202e}'), "{err:#}");
@@ -5537,7 +5600,7 @@ mod tests {
     }
 
     #[test]
-    fn plugin_entries_list_set_rows_and_all_four_under_all() {
+    fn plugin_entries_list_set_rows_and_every_field_under_all() {
         let plugin = PluginMeta {
             version: Some("v2.0.0".into()),
             ..PluginMeta::default()
@@ -5549,7 +5612,18 @@ mod tests {
         let keys: Vec<String> = plugin_entries(true, None).into_iter().map(|e| e.key).collect();
         assert_eq!(
             keys,
-            ["plugin.name", "plugin.description", "plugin.version", "plugin.logo"]
+            [
+                "plugin.name",
+                "plugin.description",
+                "plugin.version",
+                "plugin.logo",
+                "plugin.homepage",
+                "plugin.repository",
+                "plugin.documentation",
+                "plugin.support",
+                "plugin.license",
+                "plugin.category",
+            ]
         );
     }
 }
