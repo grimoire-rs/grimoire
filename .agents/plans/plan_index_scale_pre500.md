@@ -67,16 +67,37 @@ Measured on a large synthetic index (2026-10-17):
 
 **D2 — Search envelope**
 `{"items": [...], "sources": [...], "total": <int>, "truncated": <bool>}`.
-- `total` counts every matching row before `--limit`. The browse filter, deprecated
-  visibility, the query and the relevance cutoff all apply first.
+- `total` counts every matching row before `--offset` and `--limit`. The browse filter,
+  deprecated visibility, the query and the relevance cutoff all apply first.
 - `truncated` is `true` when `items` is not the complete answer. That happens when
-  `--limit` cut it (`items.len() < total`), or when an OCI source's listing was capped
-  at build time (then `total` is a lower bound).
+  `--offset` skipped rows or `--limit` cut it (`items.len() < total`; an offset over no
+  rows skipped nothing, so it is not truncated),
+  or when an OCI source's listing was capped at build time (then `total` is a lower
+  bound).
 - Both fields are always present. `skip_serializing_if` is banned in `src/api/`.
 - `--limit <N>` takes a `NonZeroUsize`; `0` or a non-integer is a clap usage error,
   exit 64. It applies after ranking and `--sort`.
-- MCP `grim_search` takes an optional `limit`. Its payload stays byte-identical to the
-  CLI's.
+- `--offset <N>` takes a `usize` (default 0; `0` is valid). A negative or non-integer
+  value is a clap usage error, exit 64. The page is `ordered[offset..offset + limit]`,
+  built by one pure helper, `apply_page(rows, offset, limit, capped)`. An offset at or
+  past `total` gives `items: []`, `total` intact and exit 0.
+  *Added in review:* a `--limit` without a way to read the next page was an unusable
+  interface, so the offset ships in this PR and not as a follow-up.
+- No new JSON field. The caller sent the offset, so it knows it; `has_more` is
+  `offset + items.len() < total`. A consumer pages with `offset += items.len()` while
+  `offset < total`, adding `--offline` after the first call so a refresh cannot shift
+  rows between pages.
+- Paging is sound only over a total order. Sort modes already end on the unique
+  reference. Relevance ties now break explicitly on source declaration order, then the
+  fully-qualified `registry/repository` (the order the catalog already hands over,
+  including for an index source that spans hosts), so pages from separate invocations
+  slice one list.
+- Plain output prints one stderr hint for a partial page (`showing 101-200 of 600; next
+  page: --offset 200`). JSON prints none. It is emitted from `app.rs`, which knows the
+  format; `search::run` does not.
+- MCP `grim_search` takes an optional `limit` and `offset` (non-negative integer;
+  negative or non-integer is an invalid-params error). Its payload stays byte-identical
+  to the CLI's.
 - `SearchReport::new(items, sources)` keeps its signature, defaulting to
   `total = items.len()` and `truncated = false`. One builder method sets both from
   `search::run`, which avoids touching 33 test call sites. `CatalogGroup` gains no
@@ -135,14 +156,16 @@ Measured on a large synthetic index (2026-10-17):
 |---|---|
 | New grim + cache from old grim | `CatalogFile` format unchanged. A capped index cache heals within the 1 h TTL or with `--refresh`. |
 | Old grim + cache from new grim | Format unchanged. Old grim renders the uncapped rows, because the cap runs only at build time. |
-| JSON consumers | `total` and `truncated` are additive. The extension ignores unknown keys. `--limit` is opt-in. |
-| MCP | `limit` is optional. MCP and CLI payloads stay identical. |
+| JSON consumers | `total` and `truncated` are additive. The extension ignores unknown keys. `--limit` and `--offset` are opt-in. |
+| MCP | `limit` and `offset` are optional. MCP and CLI payloads stay identical. |
 | Index hosts | Nothing is required of them. A host that ignores `Accept-Encoding` still gets plain JSON. |
 | Failed refresh | Before: an empty group with `ok: false`. After: cached rows with `ok: false`. Exit 0 both ways. Noted in `upgrading.md`. |
 
 **Exit codes — none added.**
 - `--limit 0` exits 64 (clap usage error).
-- MCP `limit: 0` returns an invalid-params tool error.
+- MCP `limit: 0` returns an invalid-params tool error, as does a negative or
+  non-integer `offset`.
+- `--offset -1` and `--offset abc` exit 64 (clap usage error).
 - Over-cap, decode and stall failures are `IndexFetch` (the 69 class). A browse still
   degrades them to `ok: false` and exit 0.
 
