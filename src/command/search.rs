@@ -45,8 +45,10 @@ use crate::api::search_report::{
     SearchDownloadVersion, SearchDownloads, SearchEntry, SearchRating, SearchReport, SearchSource, SearchSourceStatus,
 };
 use crate::catalog::registry_catalog::{CATALOG_GATED_REGISTRIES, REGISTRY_COMPAT_DOCS_URL};
-use crate::catalog::{BadgeContext, SearchQuery, SortKey, SortMode};
+use crate::catalog::{BadgeContext, CatalogGroup, SearchQuery, SortKey, SortMode};
 use crate::cli::exit_code::ExitCode;
+use crate::config::ResolvedRegistry;
+use crate::config::registry_resolve::SourceKind;
 use crate::context::Context;
 use crate::install::client_target::ClientTarget;
 use crate::install::install_state::InstallState;
@@ -174,15 +176,19 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
         .await,
     )?;
 
-    // A non-empty query against a build that hit the repository cap may be
-    // missing matches past the window. Surface it so a short or empty result
-    // set is not read as exhaustive. (An empty query is an explicit browse
-    // and the cap is the documented cut-line — no warning.)
-    if results.any_truncated() && !parsed.is_empty() {
-        tracing::warn!(
-            "catalog listing capped at {} repositories; results may be incomplete — narrow the query or use a more specific term",
-            crate::catalog::registry_catalog::MAX_CATALOG_REPOS
-        );
+    // Read before the groups are consumed below: whether any source's listing
+    // hit the build-time repository cap, which makes `items` an incomplete
+    // answer whatever `--limit` says.
+    let capped = results.any_truncated();
+
+    // A non-empty query against a capped build may be missing matches past the
+    // window. Surface it so a short or empty result set is not read as
+    // exhaustive. (An empty query is an explicit browse and the cap is the
+    // documented cut-line — no warning.)
+    if capped && !parsed.is_empty() {
+        for warning in capped_catalog_warnings(&results.groups, &registries) {
+            tracing::warn!("{warning}");
+        }
     }
 
     // Deprecated artifacts are hidden by default. The effective show flag is
@@ -196,7 +202,6 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     // what tells an empty table caused by a query, a browse filter or the
     // relevance cutoff apart from one caused by a `_catalog`-gated registry.
     let any_rows_listed = results.any_rows_listed();
-    let capped = results.any_truncated();
     // A plain OCI source that actually loaded. Index sources never touch
     // `_catalog`, and a source that failed (unreachable, 401) already
     // reports its own error — the hint would misdiagnose both. Groups are
@@ -350,6 +355,43 @@ fn order_results(
     match sort {
         Some(mode) => sort_by_mode(scored, mode),
         None => rank_by_relevance(scored, query),
+    }
+}
+
+/// The cap warning for every truncated group, in group order.
+///
+/// Groups are one per resolved registry, in order, so zipping with the
+/// registries pairs each group with the kind that decides the wording.
+fn capped_catalog_warnings(groups: &[CatalogGroup], registries: &[ResolvedRegistry]) -> Vec<String> {
+    groups
+        .iter()
+        .zip(registries)
+        .filter(|(g, _)| g.truncated)
+        .map(|(g, r)| capped_catalog_warning(g.alias.as_deref(), &g.registry, r.kind))
+        .collect()
+}
+
+/// The warning for one source whose listing hit the repository cap.
+///
+/// An `oci` source applies the cap when the listing is built, before the query
+/// runs, so advice to narrow the query would be false: only a package index or
+/// a narrower `oci` locator changes what is listed. An index source is never
+/// capped by this grim; a truncated index cache was written by an earlier one
+/// and a rebuild replaces it, so pointing its user at "a package index" would
+/// be wrong. The source is named the way the browse filter's per-source
+/// warning names it — the alias when one is declared, else the locator — and
+/// escaped, since both are authored TOML echoed to a terminal.
+fn capped_catalog_warning(alias: Option<&str>, locator: &str, kind: SourceKind) -> String {
+    let name = alias.unwrap_or(locator).escape_debug();
+    let cap = crate::catalog::registry_catalog::MAX_CATALOG_REPOS;
+    if kind.is_index() {
+        format!(
+            "catalog for source '{name}' was capped at {cap} entries by an earlier grim; run grim search --refresh to rebuild it"
+        )
+    } else {
+        format!(
+            "catalog for source '{name}' capped at {cap} repositories; a narrower query cannot reach past the cap — use a package index or a narrower oci locator"
+        )
     }
 }
 
@@ -1081,6 +1123,98 @@ mod tests {
         assert!(
             collapsed.contains("`total` in the JSON output still counts every match"),
             "--limit must say it caps the rows printed and not the JSON total; got:\n{collapsed}"
+        );
+    }
+
+    #[test]
+    fn capped_catalog_warning_pins_the_oci_wording_and_names_the_source() {
+        assert_eq!(
+            capped_catalog_warning(Some("acme"), "ghcr.io/acme", SourceKind::Registry),
+            "catalog for source 'acme' capped at 500 repositories; a narrower query cannot reach past the cap — use a package index or a narrower oci locator"
+        );
+        // An unaliased entry is named by its locator, the way the browse
+        // filter's own per-source warning names it.
+        assert!(
+            capped_catalog_warning(None, "registry.example/team", SourceKind::Registry)
+                .starts_with("catalog for source 'registry.example/team' capped at 500 repositories;")
+        );
+        // The cap runs before the query, so the old advice would mislead.
+        assert!(!capped_catalog_warning(None, "r", SourceKind::Registry).contains("narrow the query"));
+        // A bidi override in an authored alias is escaped, not echoed raw.
+        assert!(!capped_catalog_warning(Some("a\u{202e}b"), "r", SourceKind::Registry).contains('\u{202e}'));
+    }
+
+    #[test]
+    fn capped_catalog_warning_pins_the_index_wording_without_package_index_advice() {
+        for kind in [SourceKind::IndexHttp, SourceKind::IndexGit] {
+            let warning = capped_catalog_warning(Some("team"), "https://index.example", kind);
+            assert_eq!(
+                warning,
+                "catalog for source 'team' was capped at 500 entries by an earlier grim; run grim search --refresh to rebuild it"
+            );
+            assert!(!warning.contains("package index"), "an index user is already on one");
+        }
+        // The same escaping applies: the name is authored TOML.
+        assert!(!capped_catalog_warning(Some("a\u{202e}b"), "r", SourceKind::IndexHttp).contains('\u{202e}'));
+    }
+
+    fn resolved(url: &str, alias: Option<&str>, kind: SourceKind) -> ResolvedRegistry {
+        ResolvedRegistry {
+            url: url.to_string(),
+            alias: alias.map(str::to_string),
+            is_default: false,
+            kind,
+            filter: crate::config::registry_filter::RegistryFilter::default(),
+            insecure: false,
+        }
+    }
+
+    fn group(url: &str, alias: Option<&str>, truncated: bool) -> CatalogGroup {
+        CatalogGroup {
+            registry: url.to_string(),
+            alias: alias.map(str::to_string),
+            truncated,
+            built_at: String::new(),
+            served_offline: false,
+            error: None,
+            rows_before_filter: 0,
+            rows: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn capped_catalog_warnings_word_each_truncated_group_by_its_source_kind() {
+        let registries = [
+            resolved("ghcr.io/acme", Some("oci"), SourceKind::Registry),
+            resolved("https://index.example", Some("idx"), SourceKind::IndexHttp),
+            resolved("ghcr.io/other", None, SourceKind::Registry),
+            resolved("git+https://git.example/idx.git", Some("git"), SourceKind::IndexGit),
+        ];
+        let groups = [
+            group("ghcr.io/acme", Some("oci"), true),
+            group("https://index.example", Some("idx"), true),
+            // Not truncated: no warning, whatever its kind.
+            group("ghcr.io/other", None, false),
+            group("git+https://git.example/idx.git", Some("git"), true),
+        ];
+        let warnings = capped_catalog_warnings(&groups, &registries);
+        assert_eq!(
+            warnings,
+            vec![
+                capped_catalog_warning(Some("oci"), "ghcr.io/acme", SourceKind::Registry),
+                capped_catalog_warning(Some("idx"), "https://index.example", SourceKind::IndexHttp),
+                capped_catalog_warning(Some("git"), "git+https://git.example/idx.git", SourceKind::IndexGit),
+            ]
+        );
+        assert!(warnings[0].contains("use a package index"), "oci keeps its advice");
+        assert!(
+            warnings[1].contains("run grim search --refresh"),
+            "index gets the rebuild hint"
+        );
+        assert!(warnings[2].contains("run grim search --refresh"));
+        assert!(
+            capped_catalog_warnings(&groups[2..3], &registries[2..3]).is_empty(),
+            "an untruncated group warns nothing"
         );
     }
 
