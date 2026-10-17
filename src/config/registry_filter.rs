@@ -115,12 +115,11 @@ const MAX_BRACE_DEPTH: usize = 32;
 /// most CI tiers default to. The same file under this cap peaks at
 /// **27 MB**.
 ///
-/// 64 KiB is far above any authored list. A source can only ever render
-/// `MAX_CATALOG_REPOS` (500) rows, so enumerating one pattern per visible
-/// repository at a realistic ~40 bytes each is 23 KiB expanded; the budget is
-/// nearly three times that, and still admits 64 maximal-length patterns that
-/// already carry glob syntax (63 wildcard-free ones). Its own worst
-/// case costs 69 MB (measured, same rig).
+/// 64 KiB is far above any authored list. Enumerating one pattern per
+/// repository at a realistic ~40 bytes each (about 46 expanded) fits over a
+/// thousand repositories, and the budget still admits 64 maximal-length
+/// patterns that already carry glob syntax (63 wildcard-free ones). Its own
+/// worst case costs 69 MB (measured, same rig).
 ///
 /// It bounds one list, not the file — the residual is every entry's two
 /// lists, itself bounded by `config::FILE_SIZE_LIMIT_BYTES` (8 MiB). The
