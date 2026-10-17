@@ -321,15 +321,17 @@ When scripting against it, treat `update_available: null` as "could not
 determine", never as "up to date": it is `null` (not `false`) for a row
 with no lock pin (dev-install, path source, path-sourced bundle), or a row
 whose own re-resolution failed. And even under
-`checked == true`, one registry's catalog refresh failing degrades just
-that registry's rows' `deprecated`/`replaced_by` to `null` — partial
-data, not a failed check. Confirm the current flag set with
+`checked == true`, one registry's catalog refresh failing falls back to
+its cached catalog, and with none cached degrades just that registry's rows'
+`deprecated`/`replaced_by` to `null` — partial data, not a failed check. Confirm the current flag set with
 `grim status --help`.
 
 Multi-item reports (`status`, `install`, `lock`, `update`, `search`,
 `config list`, `config registry list`, `config registry fields`, `publish`)
 wrap their rows in a uniform `{"items": [...]}` envelope under
 `--format json` — read the array from `items`, never the top level.
+`search` also carries the siblings `sources`, `total` and `truncated`;
+check them before treating a short `items` as the whole catalog.
 Failures under `--format json`
 emit a structured `{"error": {code, exit, message}}` document on stdout;
 some failures add a machine-readable `reason` (e.g. `stale-lock` when a
