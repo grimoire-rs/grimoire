@@ -188,25 +188,25 @@ pub struct CatalogGroup {
     )]
     pub built_at: String,
     /// Whether this group lacks freshly-built network data this call: `true`
-    /// when the browse ran in `--offline` mode, or the registry was
-    /// unavailable (a transport failure degrades the group to empty). A stale
-    /// catalog served because a peer held the refresh lock is *not* currently
-    /// distinguished here — no front-end consumes that finer signal yet
-    /// (YAGNI); thread it through [`Catalog::load_or_refresh_coordinated`]'s
+    /// when the browse ran in `--offline` mode, or the registry's refresh
+    /// failed (the group is then empty, or its cached rows served stale). A
+    /// stale catalog served because a peer held the refresh lock is *not*
+    /// currently distinguished here — no front-end consumes that finer signal
+    /// yet (YAGNI); thread it through [`Catalog::load_or_refresh_coordinated`]'s
     /// return when one does.
     pub served_offline: bool,
-    /// Why this source's catalog failed to load, when it did; `None` when it
-    /// loaded (an empty group is then a source that genuinely listed nothing).
+    /// Why this source's refresh failed, when it did. `None` means the refresh
+    /// did not fail; an empty group is then a source that listed nothing. With
+    /// cached rows present they were served stale, else nothing was cached.
     ///
     /// The failure *kind* — never a message carrying the local cache-file
     /// path, which is what `CatalogError`'s own `Display` prepends.
     ///
-    /// This is the honest failure discriminator, and
-    /// [`Self::served_offline`] is not: that flag is `true` both for a
-    /// `--offline` browse and for a source that blew up, so nothing
-    /// downstream could tell a degraded group from a deliberately cached one.
-    /// The cause used to reach only `tracing::warn!` and be dropped, which is
-    /// what made `grim search --format json` render a partial browse
+    /// This is the honest failure discriminator, and [`Self::served_offline`]
+    /// is not: that flag is `true` both for a `--offline` browse and for a
+    /// source that blew up, so nothing downstream could tell a degraded group
+    /// from a deliberately cached one. The cause used to reach only
+    /// `tracing::warn!` and be dropped, which made a partial browse
     /// indistinguishable from an empty catalog (grimoire-rs/grimoire#108).
     ///
     /// Sibling views of one locator share a load, so they share this value.
@@ -301,18 +301,18 @@ const TASK_FAILED: &str = "catalog refresh task failed";
 /// browse filter narrows its group as well (plan C-007/C-008); under
 /// [`CatalogScope::Complete`] no row is ever hidden.
 ///
-/// A single registry's transport failure degrades **that group** to empty
-/// (logged, marked `served_offline`) rather than failing the whole browse —
-/// the other registries still return. The per-registry refresh is
-/// coordinated across processes (advisory lock, serve-stale-on-contention)
-/// so a long-lived MCP server and ad-hoc CLI/TUI runs sharing one
-/// `$GRIM_HOME` never stampede the network.
+/// A single registry's transport failure degrades **that group** to its
+/// cached rows, else to empty (logged, marked `served_offline`, failure in
+/// `error`), rather than failing the whole browse — the other registries
+/// still return. The per-registry refresh is coordinated across processes
+/// (advisory lock, serve-stale-on-contention) so a long-lived MCP server and
+/// ad-hoc CLI/TUI runs sharing one `$GRIM_HOME` never stampede the network.
 ///
 /// # Errors
 ///
-/// Currently infallible per registry (failures degrade to an empty group);
-/// the `Result` is retained for forward compatibility with hard failures
-/// that should abort the whole browse.
+/// Currently infallible per registry (a failure degrades to its cached rows,
+/// else an empty group); the `Result` is retained for forward compatibility
+/// with hard failures that should abort the whole browse.
 #[allow(
     clippy::too_many_arguments,
     reason = "plan C-007 / ADR D5: the 8th parameter is the CatalogScope, and collapsing this shipped seam into a params struct is deliberately deferred — mixing a refactor of a shipped signature into a feature diff violates the Two Hats Rule (quality-core.md). Recorded as a follow-up in the ADR, not an oversight"
@@ -371,12 +371,30 @@ pub async fn load_catalog(
                 Catalog::load_or_refresh_coordinated(&path, &registry, "", &access, offline, force).await
             };
             match result {
-                Ok(catalog) => (idx, Ok(catalog)),
+                Ok(catalog) => {
+                    if let Some(error) = catalog.refresh_error() {
+                        // The kind embeds the locator for an index source, so
+                        // both are escaped: a bidi override must not reach
+                        // the terminal raw (CWE-150).
+                        tracing::warn!(
+                            "catalog for source '{}' unavailable: {}; serving the cached catalog built {}",
+                            registry.escape_debug(),
+                            error.escape_debug(),
+                            catalog.built_at()
+                        );
+                    }
+                    (idx, Ok(catalog))
+                }
                 Err(e) => {
                     // Logged as before — the stderr line is a shipped signal
                     // consumers already read — *and* carried, so a caller
                     // rendering only stdout can name the source too (#108).
-                    tracing::warn!("catalog for source '{registry}' unavailable: {e}");
+                    let detail = e.to_string();
+                    tracing::warn!(
+                        "catalog for source '{}' unavailable: {}",
+                        registry.escape_debug(),
+                        detail.escape_debug()
+                    );
                     // The *kind* only, never `CatalogError`'s `Display`: that
                     // prefixes the absolute cache-file path, which is a local
                     // artifact of this machine that no consumer can act on and
@@ -409,19 +427,27 @@ pub async fn load_catalog(
         }
     }
 
+    let mut views_left = vec![0usize; loads.len()];
+    for &l in &load_of {
+        views_left[l] += 1;
+    }
     let mut groups = Vec::with_capacity(registries.len());
     let mut any_rows_listed = false;
     for (idx, reg) in registries.iter().enumerate() {
-        // Cloned, not removed: sibling views of one locator read the same
-        // load, and each narrows it through its own filter below.
-        // Cloned, not removed: sibling views of one locator read the same
-        // load, and each narrows it through its own filter below. An absent
+        // Sibling views of one locator read the same load, each narrowing it
+        // through its own filter below: all but the last clone it. An absent
         // entry is a task that failed to join, which is a failure — never a
         // source that answered with nothing.
         let catalog = load_of
             .get(idx)
-            .and_then(|l| by_load.get(l))
-            .cloned()
+            .and_then(|&l| {
+                views_left[l] -= 1;
+                if views_left[l] == 0 {
+                    by_load.remove(&l)
+                } else {
+                    by_load.get(&l).cloned()
+                }
+            })
             .unwrap_or_else(|| Err(TASK_FAILED.to_string()));
         let group = match catalog {
             Ok(catalog) => {
@@ -488,8 +514,8 @@ pub async fn load_catalog(
                     // an index source is never capped and never truncated.
                     truncated: catalog.truncated(),
                     built_at: catalog.built_at().to_string(),
-                    served_offline: offline,
-                    error: None,
+                    served_offline: offline || catalog.refresh_error().is_some(),
+                    error: catalog.refresh_error().map(str::to_owned),
                     rows_before_filter: considered,
                     rows,
                 }
@@ -826,6 +852,138 @@ mod tests {
             "a source that answered carries no error: {:?}",
             results.groups[0].error
         );
+    }
+
+    #[tokio::test]
+    async fn a_failed_refresh_over_a_warm_cache_serves_its_rows() {
+        // One transient outage must not erase the browse: both source kinds
+        // keep their cached rows, carry the failure, and warn once each.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+        let paths = GrimPaths::new(tmp.path().to_path_buf());
+        let state = InstallState::empty(tmp.path());
+        let roots = AnchorRoots::resolve(PathBuf::new(), &ctx);
+        let badges = BadgeContext {
+            lock: None,
+            state: &state,
+            roots: &roots,
+            active: &ClientTarget::ALL,
+            target: None,
+        };
+        // Port 1 refuses the connection, so the index fetch fails fast.
+        let index_url = "http://127.0.0.1:1";
+        seed_catalog(&paths, "registry.one", &[("registry.one", "ns/alpha")], false);
+        seed_catalog(&paths, index_url, &[("ghcr.io", "acme/beta")], false);
+        let registries = vec![
+            source("registry.one", None, &[], &[]),
+            index_source(index_url, None, &[], &[]),
+        ];
+        let access: Arc<dyn OciAccess> = Arc::new(FailingAccess);
+
+        crate::log_switch::tracing_capture::arm();
+        let logs = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let sink = Arc::clone(&logs);
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(move || SharedBuf(Arc::clone(&sink)))
+                .with_ansi(false)
+                .without_time()
+                .finish(),
+        );
+        let results = load_catalog(
+            &paths,
+            &registries,
+            "",
+            &access,
+            &badges,
+            false,
+            true,
+            CatalogScope::Browse,
+        )
+        .await
+        .expect("a failed refresh never fails the browse");
+        drop(guard);
+        let captured = String::from_utf8(logs.lock().expect("log buffer is never poisoned").clone())
+            .expect("tracing writes UTF-8");
+
+        assert_eq!(group_repos(&results, 0), ["registry.one/ns/alpha"]);
+        assert_eq!(group_repos(&results, 1), ["ghcr.io/acme/beta"]);
+        assert_eq!(
+            results.groups[0].error.as_deref(),
+            Some("registry access failed"),
+            "the failure stays visible next to the rows"
+        );
+        assert_eq!(
+            results.groups[1].error.as_deref(),
+            Some(format!("package index fetch failed for '{index_url}'").as_str())
+        );
+        for g in &results.groups {
+            assert!(g.served_offline, "stale rows are not freshly built data");
+            assert_eq!(g.rows_before_filter, 1);
+        }
+        assert_eq!(
+            captured.matches("serving the cached catalog built").count(),
+            2,
+            "one stale-serve warning per source: {captured}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_warnings_escape_the_source_locator() {
+        // U+202E is not `char::is_control`, so the locator reaches the
+        // warning verbatim; both arms embed it in the failure kind.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+        let paths = GrimPaths::new(tmp.path().to_path_buf());
+        let state = InstallState::empty(tmp.path());
+        let roots = AnchorRoots::resolve(PathBuf::new(), &ctx);
+        let badges = BadgeContext {
+            lock: None,
+            state: &state,
+            roots: &roots,
+            active: &ClientTarget::ALL,
+            target: None,
+        };
+        let warm = "http://127.0.0.1:1/warm\u{202e}";
+        let cold = "http://127.0.0.1:1/cold\u{202e}";
+        seed_catalog(&paths, warm, &[("ghcr.io", "acme/beta")], false);
+        let registries = vec![index_source(warm, None, &[], &[]), index_source(cold, None, &[], &[])];
+        let access: Arc<dyn OciAccess> = Arc::new(FailingAccess);
+
+        crate::log_switch::tracing_capture::arm();
+        let logs = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let sink = Arc::clone(&logs);
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(move || SharedBuf(Arc::clone(&sink)))
+                .with_ansi(false)
+                .without_time()
+                .finish(),
+        );
+        load_catalog(
+            &paths,
+            &registries,
+            "",
+            &access,
+            &badges,
+            false,
+            true,
+            CatalogScope::Browse,
+        )
+        .await
+        .expect("a failed refresh never fails the browse");
+        drop(guard);
+        let captured = String::from_utf8(logs.lock().expect("log buffer is never poisoned").clone())
+            .expect("tracing writes UTF-8");
+
+        assert!(
+            !captured.contains('\u{202e}'),
+            "a bidi override must never reach the terminal raw: {captured:?}"
+        );
+        for line in ["serving the cached catalog built", "cold\\u{202e}"] {
+            assert!(captured.contains(line), "{line:?} missing from {captured:?}");
+        }
+        assert_eq!(captured.matches("warm\\u{202e}").count(), 2, "{captured:?}");
     }
 
     // ── C-007 / C-008 / C-019: the browse filter at the shared seam ─────────

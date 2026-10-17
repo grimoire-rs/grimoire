@@ -10,8 +10,7 @@
 //! cap at [`MAX_CATALOG_REPOS`], then for each survivor list its tags,
 //! pick a representative tag, and read the Grimoire/OCI annotations off
 //! that tag's manifest. No blob is ever pulled (catalog is metadata-only).
-//! Walking an entire (potentially huge) registry is an explicit cut-line.
-//! An index source lists from its package index and is never capped.
+//! An index source lists from one document and is never capped.
 //!
 //! The per-registry cache file at `$GRIM_HOME/catalog/<hash>.json` is
 //! version-enveloped via
@@ -47,10 +46,7 @@ pub const CATALOG_TTL_SECONDS: i64 = 3600;
 /// *bounded*: a targeted query first prefilters the repository list by
 /// name (cheap, no network) so a search stays O(matches); an empty query
 /// (browse / TUI) caps to the first `MAX_CATALOG_REPOS` lexicographic
-/// repositories. Walking the entire registry is an explicit cut-line.
-///
-/// Applies to registry sources only: an index source lists from one
-/// document and is never capped.
+/// repositories. Walking the entire registry is an explicit cut-line; index sources are never capped.
 pub const MAX_CATALOG_REPOS: usize = 500;
 
 /// Registries that gate the host-level OCI `_catalog` browse endpoint, so a
@@ -369,7 +365,7 @@ struct CatalogFile {
     registry: String,
     /// The lowercased name-prefilter this catalog was built under (empty
     /// = a capped browse window). A cache built for a different scope is
-    /// rebuilt online, but still served (filtered) offline.
+    /// rebuilt online (served stale if that fails), and served as-is offline.
     #[serde(default)]
     scope: String,
     /// Whether the build hit [`MAX_CATALOG_REPOS`] with candidates left over
@@ -394,16 +390,20 @@ pub struct Catalog {
     truncated: bool,
     built_at: String,
     entries: BTreeMap<String, CatalogEntry>,
+    /// Why the refresh that should have replaced this cache failed. In-memory
+    /// only: never written to [`CatalogFile`], so the next run retries the
+    /// refresh instead of reading a failure back off disk.
+    refresh_error: Option<String>,
 }
 
 /// The outcome of the coordinated refresh's blocking pre-flight: either a
-/// catalog ready to serve, or a decision to rebuild (with the advisory lock
-/// when one was won — `None` is the uncoordinated fallback after a lock I/O
-/// fault).
+/// catalog to serve, or a decision to rebuild (with the advisory lock when
+/// one was won — `None` is the uncoordinated fallback after a lock I/O fault).
 ///
-/// `Rebuild` carries the cache it decided against as well: the index build
-/// needs the prior entries to carry ratings forward over a sidecar it could
-/// not observe (`None` on a cold cache).
+/// `Serve` is not always fresh: offline, or while a peer holds the refresh
+/// lock, it is whatever is cached. `Rebuild` carries the cache it decided
+/// against too: the index build seeds ratings from it, and a failed rebuild
+/// serves it stale (`None` on a cold cache).
 enum PreFlight {
     Serve(Catalog),
     Rebuild {
@@ -437,6 +437,7 @@ impl Catalog {
             truncated: false,
             built_at: now_rfc3339(),
             entries: BTreeMap::new(),
+            refresh_error: None,
         }
     }
 
@@ -452,6 +453,20 @@ impl Catalog {
     /// When this catalog was last fully built (RFC3339).
     pub fn built_at(&self) -> &str {
         &self.built_at
+    }
+
+    /// Why the refresh failed when this is the cached catalog served in its
+    /// place, `None` for a catalog that was built or loaded fresh.
+    pub fn refresh_error(&self) -> Option<&str> {
+        self.refresh_error.as_deref()
+    }
+
+    /// This catalog, marked as the stale fallback for a failed refresh.
+    fn with_refresh_error(self, error: String) -> Self {
+        Self {
+            refresh_error: Some(error),
+            ..self
+        }
     }
 
     /// Whether the build hit [`MAX_CATALOG_REPOS`] with more candidates left
@@ -502,6 +517,7 @@ impl Catalog {
             truncated: file.truncated,
             built_at: file.built_at,
             entries: file.entries,
+            refresh_error: None,
         }))
     }
 
@@ -626,8 +642,9 @@ impl Catalog {
     ///
     /// # Errors
     ///
-    /// [`CatalogError`] for a cache parse/version failure, or a genuine
-    /// registry transport/auth failure during a rebuild this process owns.
+    /// [`CatalogError`] for a cache parse/version failure, or a registry
+    /// transport/auth failure during a rebuild; with a cache already read that
+    /// cache is served instead, marked via [`Self::refresh_error`].
     pub async fn load_or_refresh_coordinated(
         path: &Path,
         registry: &str,
@@ -637,11 +654,11 @@ impl Catalog {
         force: bool,
     ) -> Result<Self, CatalogError> {
         let scope = query.to_lowercase();
-        let guard = match Self::coordinate(path, registry, &scope, offline, force).await? {
+        let (guard, previous) = match Self::coordinate(path, registry, &scope, offline, force, false).await? {
             PreFlight::Serve(catalog) => return Ok(catalog),
             // An OCI `_catalog` walk reads every field it writes from the
-            // registry, so it inherits nothing from the prior cache.
-            PreFlight::Rebuild { guard, .. } => guard,
+            // registry, so the prior cache is only a fallback, never a seed.
+            PreFlight::Rebuild { guard, previous } => (guard, previous),
         };
 
         // Phase 2 — the network rebuild, the only genuinely async work, runs on
@@ -651,7 +668,7 @@ impl Catalog {
             Ok(rebuilt) => rebuilt,
             Err(build_err) => {
                 Self::dispose_guard(path, guard).await;
-                return Err(CatalogError::access(path, build_err));
+                return Self::stale_or_err(previous, CatalogError::access(path, build_err));
             }
         };
 
@@ -664,10 +681,13 @@ impl Catalog {
     /// fetched over HTTP or a git shallow clone instead of walking the
     /// registry's `_catalog`). The cache is keyed by the index `locator`.
     ///
+    /// A cache an earlier grim capped (`truncated`) is rebuilt however young.
+    ///
     /// # Errors
     ///
     /// [`CatalogError`] for a cache parse/version failure, or an index
-    /// fetch/parse failure during a rebuild this process owns.
+    /// fetch/parse failure during a rebuild; with a cache already read that
+    /// cache is served instead, marked via [`Self::refresh_error`].
     pub async fn load_or_refresh_index_coordinated(
         path: &Path,
         locator: &str,
@@ -678,17 +698,17 @@ impl Catalog {
         force: bool,
     ) -> Result<Self, CatalogError> {
         let scope = query.to_lowercase();
-        let (guard, previous) = match Self::coordinate(path, locator, &scope, offline, force).await? {
+        let (guard, previous) = match Self::coordinate(path, locator, &scope, offline, force, true).await? {
             PreFlight::Serve(catalog) => return Ok(catalog),
             PreFlight::Rebuild { guard, previous } => (guard, previous),
         };
 
-        let previous = previous.as_ref().map(|c| &c.entries);
-        let rebuilt = match Self::build_from_index(locator, kind, &scope, git_dir, path, previous).await {
+        let seed = previous.as_ref().map(|c| &c.entries);
+        let rebuilt = match Self::build_from_index(locator, kind, &scope, git_dir, path, seed).await {
             Ok(rebuilt) => rebuilt,
             Err(build_err) => {
                 Self::dispose_guard(path, guard).await;
-                return Err(build_err);
+                return Self::stale_or_err(previous, build_err);
             }
         };
 
@@ -702,19 +722,25 @@ impl Catalog {
     /// run on a Tokio worker (quality-rust: no blocking I/O in async).
     ///
     /// `key` is the cache identity — the registry url for `_catalog`
-    /// sources, the index locator for index sources.
+    /// sources, the index locator for index sources. `rebuild_truncated`
+    /// makes a `truncated` cache stale however young: an earlier grim capped
+    /// index caches, which no current build produces.
     async fn coordinate(
         path: &Path,
         key: &str,
         scope: &str,
         offline: bool,
         force: bool,
+        rebuild_truncated: bool,
     ) -> Result<PreFlight, CatalogError> {
         let path = path.to_path_buf();
         let key = key.to_string();
         let scope = scope.to_string();
         run_blocking(path.clone(), move || {
-            let cached = Catalog::load_or_cold(&path, &key, offline)?;
+            let mut cached = Catalog::load_or_cold(&path, &key, offline)?;
+            let reusable = |c: &Catalog| {
+                !(force || (rebuild_truncated && c.truncated)) && c.scope == scope && c.is_fresh(chrono::Utc::now())
+            };
 
             // Offline: serve whatever is cached (any scope), never lock or
             // reach the network. A cold cache is empty.
@@ -724,12 +750,8 @@ impl Catalog {
 
             // Fast path: a fresh, same-scope cache serves with no lock
             // taken, so the common case never contends.
-            if !force
-                && let Some(c) = &cached
-                && c.scope == scope
-                && c.is_fresh(chrono::Utc::now())
-            {
-                return Ok(PreFlight::Serve(c.clone()));
+            if let Some(c) = cached.take_if(|c| reusable(c)) {
+                return Ok(PreFlight::Serve(c));
             }
 
             // The cache file's parent (the per-registry `catalog/` dir)
@@ -743,10 +765,8 @@ impl Catalog {
                     // Double-check: a peer may have rebuilt while we
                     // contended for the lock. Serve their fresh build
                     // instead of redoing it.
-                    if !force
-                        && let Some(c) = Catalog::load_or_cold(&path, &key, false)?
-                        && c.scope == scope
-                        && c.is_fresh(chrono::Utc::now())
+                    if let Some(c) = Catalog::load_or_cold(&path, &key, false)?
+                        && reusable(&c)
                     {
                         return Ok(PreFlight::Serve(c));
                     }
@@ -769,6 +789,26 @@ impl Catalog {
             }
         })
         .await
+    }
+
+    /// A failed rebuild serves the cache pre-flight already read, marked with
+    /// the failure, so one transient outage does not erase the browse. The
+    /// stale file is neither restamped nor rewritten: the next run retries.
+    /// With no cache there is nothing to serve and the failure surfaces.
+    fn stale_or_err(previous: Option<Self>, err: CatalogError) -> Result<Self, CatalogError> {
+        match previous {
+            Some(stale) => {
+                // `refresh_error` keeps the kind only; the cause chain is
+                // logged here or it is gone.
+                let chain = std::iter::successors(Some(&err as &dyn std::error::Error), |e| e.source())
+                    .map(|e| e.to_string())
+                    .collect::<Vec<_>>()
+                    .join(": ");
+                tracing::debug!("catalog refresh failed, serving the cached catalog: {chain}");
+                Ok(stale.with_refresh_error(err.kind.to_string()))
+            }
+            None => Err(err),
+        }
     }
 
     /// Dispose the advisory-lock guard on the blocking pool — its `Drop`
@@ -802,12 +842,8 @@ impl Catalog {
     /// Build an index-backed catalog: fetch the package index (HTTP static
     /// files or a git shallow clone), apply the same lowercased name
     /// prefilter as the `_catalog` walk, and key entries by their full
-    /// `registry/repository` ref (index entries span registries, so the bare
-    /// repository path is not unique).
-    ///
-    /// Never capped and never [`Self::truncated`]: [`MAX_CATALOG_REPOS`]
-    /// bounds the `_catalog` walk's per-repo round-trips, and an index lists
-    /// every entry from the one document already fetched.
+    /// `registry/repository` ref (entries span registries, so the bare path
+    /// is not unique). Never capped: one fetched document lists every entry.
     ///
     /// `previous` is the cache this rebuild replaces, keyed the same way.
     /// Unlike the `_catalog` walk, an index build reads one field — the
@@ -844,6 +880,7 @@ impl Catalog {
             truncated: false,
             built_at: fetched_at,
             entries,
+            refresh_error: None,
         })
     }
 
@@ -928,6 +965,7 @@ impl Catalog {
             truncated,
             built_at: now_rfc3339(),
             entries,
+            refresh_error: None,
         })
     }
 
@@ -1303,6 +1341,7 @@ mod tests {
             truncated: true,
             built_at: ts(10),
             entries,
+            refresh_error: None,
         };
         cat.save(&path).unwrap();
         let loaded = Catalog::load(&path, "localhost:5000").unwrap().expect("present");
@@ -1977,6 +2016,157 @@ mod tests {
         AdvisoryFileLock::try_acquire(&path).expect("lock must be released after a build error");
     }
 
+    /// Rewrite the cache at `path` with a `built_at` far past the TTL and
+    /// return that timestamp, so a test can tell a restamp from an untouched file.
+    fn age_cache(path: &Path, registry: &str) -> String {
+        let mut cached = Catalog::load(path, registry).unwrap().expect("a warm cache");
+        cached.built_at = "2020-01-01T00:00:00Z".to_string();
+        cached.save(path).unwrap();
+        cached.built_at
+    }
+
+    #[tokio::test]
+    async fn coordinated_serves_the_cache_when_the_rebuild_fails() {
+        // A refresh that fails must not discard the catalog pre-flight already
+        // read: it is served with the failure attached, the lock is released,
+        // and the file is left alone so the next run retries.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog").join("reg.json");
+        let healthy: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(seed().await);
+        Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "", &healthy, false, true)
+            .await
+            .unwrap();
+        let aged = age_cache(&path, "localhost:5000");
+
+        let failing: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(FailingAccess);
+        let cat = Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "", &failing, false, false)
+            .await
+            .expect("a failed rebuild with a cache serves the cache");
+
+        assert_eq!(cat.entries().count(), 1, "the cached entries are served");
+        assert_eq!(cat.refresh_error(), Some("registry access failed"));
+        assert_eq!(cat.built_at(), aged, "the stale catalog keeps its own build time");
+        AdvisoryFileLock::try_acquire(&path).expect("lock must be released after a failed rebuild");
+        assert!(
+            !std::fs::read_to_string(&path).unwrap().contains("refresh_error"),
+            "the failure is never persisted"
+        );
+        assert_eq!(
+            Catalog::load(&path, "localhost:5000").unwrap().unwrap().built_at(),
+            aged,
+            "the stale cache is not restamped"
+        );
+    }
+
+    #[tokio::test]
+    async fn index_coordinated_serves_the_cache_when_the_fetch_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("catalog").join("idx.json");
+        let git_dir = dir.path().join("git");
+        let failing = std::sync::Arc::new(AtomicBool::new(false));
+        let base = spawn_flaky_index_host(failing.clone()).await;
+        let kind = crate::config::registry_resolve::SourceKind::IndexHttp;
+        Catalog::load_or_refresh_index_coordinated(&cache, &base, kind, "", &git_dir, false, true)
+            .await
+            .unwrap();
+        let aged = age_cache(&cache, &base);
+        let before = std::fs::read(&cache).unwrap();
+
+        failing.store(true, Ordering::SeqCst);
+        let cat = Catalog::load_or_refresh_index_coordinated(&cache, &base, kind, "", &git_dir, false, false)
+            .await
+            .expect("a failed fetch with a cache serves the cache");
+
+        let expected = format!("package index fetch failed for '{base}'");
+        assert_eq!(cat.entries().count(), 1, "the cached entries are served");
+        assert_eq!(cat.refresh_error(), Some(expected.as_str()));
+        assert_eq!(cat.built_at(), aged, "the stale catalog keeps its own build time");
+        assert_eq!(
+            std::fs::read(&cache).unwrap(),
+            before,
+            "a stale serve leaves the cache file untouched"
+        );
+        AdvisoryFileLock::try_acquire(&cache).expect("lock must be released after a failed fetch");
+
+        failing.store(false, Ordering::SeqCst);
+        let healed = Catalog::load_or_refresh_index_coordinated(&cache, &base, kind, "", &git_dir, false, false)
+            .await
+            .unwrap();
+        assert_eq!(healed.refresh_error(), None, "the next run retries and succeeds");
+        assert_ne!(healed.built_at(), aged, "the retry rebuilt the catalog");
+    }
+
+    #[tokio::test]
+    async fn index_coordinated_rebuilds_a_fresh_cache_an_earlier_grim_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("catalog").join("idx.json");
+        let git_dir = dir.path().join("git");
+        let count = MAX_CATALOG_REPOS + 5;
+        let base = spawn_index_host_with(count).await;
+        let kind = crate::config::registry_resolve::SourceKind::IndexHttp;
+        let mut capped = Catalog::build_from_index(&base, kind, "", &git_dir, &cache, None)
+            .await
+            .unwrap();
+        capped.entries = std::mem::take(&mut capped.entries)
+            .into_iter()
+            .take(MAX_CATALOG_REPOS)
+            .collect();
+        capped.truncated = true;
+        capped.save(&cache).unwrap();
+        assert!(capped.is_fresh(chrono::Utc::now()), "the capped cache is fresh by TTL");
+
+        let cat = Catalog::load_or_refresh_index_coordinated(&cache, &base, kind, "", &git_dir, false, false)
+            .await
+            .unwrap();
+        assert_eq!(cat.entries().count(), count, "the rebuild keeps every row");
+        assert!(!cat.truncated());
+        assert_eq!(cat.refresh_error(), None);
+        let on_disk = Catalog::load(&cache, &base).unwrap().unwrap();
+        assert_eq!(on_disk.entries().count(), count, "the rebuild is persisted");
+        assert!(!on_disk.truncated());
+    }
+
+    #[tokio::test]
+    async fn oci_coordinated_serves_a_fresh_truncated_cache() {
+        // A capped `_catalog` window is what the walk legitimately produces,
+        // so only index caches are rebuilt for it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let reg: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(seed_many(MAX_CATALOG_REPOS + 1).await);
+        let built = Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "", &reg, false, true)
+            .await
+            .unwrap();
+        assert!(built.truncated());
+
+        let failing: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(FailingAccess);
+        let served = Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "", &failing, false, false)
+            .await
+            .unwrap();
+        assert!(served.truncated());
+        assert_eq!(served.refresh_error(), None, "a fresh capped OCI cache is not rebuilt");
+    }
+
+    #[tokio::test]
+    async fn index_coordinated_without_a_cache_still_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("catalog").join("idx.json");
+        let failing = std::sync::Arc::new(AtomicBool::new(true));
+        let base = spawn_flaky_index_host(failing).await;
+        let kind = crate::config::registry_resolve::SourceKind::IndexHttp;
+        let err =
+            Catalog::load_or_refresh_index_coordinated(&cache, &base, kind, "", &dir.path().join("git"), false, true)
+                .await
+                .expect_err("with nothing cached the failure surfaces");
+        assert!(
+            matches!(
+                err.kind,
+                super::super::catalog_error::CatalogErrorKind::IndexFetch { .. }
+            ),
+            "a fetch failure must surface as an index-fetch error"
+        );
+        AdvisoryFileLock::try_acquire(&cache).expect("lock must be released after a failed fetch");
+    }
+
     #[tokio::test]
     async fn coordinated_fast_path_serves_fresh_cache_without_locking() {
         // A fresh, same-scope cache is served by the fast path with no lock
@@ -2284,6 +2474,7 @@ mod tests {
     const RATED_REF: &str = "ghcr.io/acme/skills/rated";
 
     const NOT_FOUND: &str = "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+    const SERVER_ERROR: &str = "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
 
     fn json_ok(body: &str) -> String {
         format!(
@@ -2338,6 +2529,21 @@ mod tests {
                 json_ok(&format!(
                     r#"{{"schema_version":1,"providers":{{"rating":"github"}},"entries":{{"{RATED_REF}":{{"rating":{{"up":12,"target":"t","url":"u"}}}}}}}}"#
                 ))
+            }
+        })
+        .await
+    }
+
+    /// Spawn an index host serving one package pointer until `failing` is set,
+    /// then answering `all.json` with a 500.
+    async fn spawn_flaky_index_host(failing: std::sync::Arc<AtomicBool>) -> String {
+        spawn_host(move |request| {
+            if request.contains("stats.json") {
+                NOT_FOUND.to_string()
+            } else if failing.load(Ordering::SeqCst) {
+                SERVER_ERROR.to_string()
+            } else {
+                json_ok(r#"[{"schema":1,"name":"x","kind":"skill","ref":"ghcr.io/acme/x"}]"#)
             }
         })
         .await

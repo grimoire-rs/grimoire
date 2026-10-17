@@ -247,9 +247,10 @@ impl UpdateChecker {
 
     /// Spawn a background catalog refresh (force-rebuild of the empty-query
     /// browse window) and report the result as [`CheckMsg::CatalogReady`].
-    /// A refresh failure is swallowed: the existing rows stay, and the next
-    /// `r`/`--refresh` retries. The catalog write-through is handled inside
-    /// [`Catalog::load_or_refresh`].
+    /// A refresh failure with no cache is swallowed: the existing rows stay,
+    /// and the next `r`/`--refresh` retries. With a cache it is a stale `Ok`
+    /// carrying [`Catalog::refresh_error`], reported like any other result.
+    /// The write-through is handled inside [`Catalog::load_or_refresh_coordinated`].
     #[allow(
         dead_code,
         reason = "single-registry background-refresh seam adr_multi_registry_mcp.md leaves as a follow-up; not yet called from app::run's event loop"

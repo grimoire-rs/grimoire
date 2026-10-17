@@ -1396,12 +1396,12 @@ fn aggregate_registry_health(
 ///    a reason no filter caused (a failed or offline-degraded load considers
 ///    nothing), and `catalog_service::zero_match_warning` stays silent too.
 ///
-/// `served_offline` is deliberately **not** a gate (W-2). It is the offline
-/// *flag*, not a degradation signal — `catalog_service` sets it from the
-/// caller's `offline` argument — so gating on it emptied this clause by
-/// construction in every offline session and left `offline: <source>` naming
-/// a source whose cache was served fine and whose rows a pattern removed. A
-/// source can be both; `render::frame` joins the clauses with ` · `.
+/// `served_offline` is deliberately **not** a gate (W-2). It is true for any
+/// offline session and for a refresh that failed over a warm cache
+/// (`catalog_service`), so gating on it emptied this clause by construction
+/// in every offline session and left `offline: <source>` naming a source
+/// whose cache was served fine and whose rows a pattern removed. A source can
+/// be both; `render::frame` joins the clauses with ` · `.
 ///
 /// **This gate is deliberately wider than the CLI's.** `zero_match_warning`
 /// has exactly one shape — a non-empty `include` that admitted nothing
@@ -5159,8 +5159,8 @@ mod tests {
         );
     }
 
-    /// W-2: `CatalogGroup::served_offline` is the offline **flag**, not a
-    /// degradation signal (`catalog_service`: `served_offline: offline`), so
+    /// W-2: `CatalogGroup::served_offline` is true for any offline session and
+    /// for a failed refresh (`catalog_service`: `offline || refresh_error`), so
     /// gating on it left `health.filtered` empty by construction in every
     /// offline session while `health.offline` named every source. Same config
     /// and same cache, `grim search --offline` reported
