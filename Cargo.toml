@@ -101,7 +101,7 @@ fuzzy-matcher = "0.3"
 # Byte-reproducible zip writer for `grim export plugin --zip`
 # (export::archive::write_zip, design record C-026). No extra features
 # needed: entries are stored (uncompressed), not deflated.
-zip = { version = "8.6", default-features = false }
+zip = { version = "9", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
