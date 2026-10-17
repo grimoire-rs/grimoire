@@ -405,29 +405,42 @@ pub const VENDOR_SHARED_SKILLS: KeySpec = KeySpec {
 /// unknown-field error message.
 pub const VENDOR_FIELD_NAME: &str = "shared_skills";
 
-/// The four addressable `[plugin]` fields, `plugin.<field>`.
+/// The addressable `[plugin]` fields, `plugin.<field>`.
 ///
 /// A registry of its own rather than `ConfigKey` arms: `[plugin]` is a
 /// project-only table outside `[options]`, so it has no place in the
 /// `ConfigOptions` drift tests or in a global-scope listing.
-/// `plugin.rename.strip_prefix` is deliberately not addressable — a rename
-/// rule is authored in `grimoire.toml` by hand.
+/// `plugin.rename.strip_prefix`, `plugin.author`, `plugin.keywords` and
+/// `plugin.tags` are deliberately not addressable — a rule, an object and
+/// two lists are authored in `grimoire.toml` by hand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginField {
     Name,
     Description,
     Version,
     Logo,
+    Homepage,
+    Repository,
+    Documentation,
+    Support,
+    License,
+    Category,
 }
 
 impl PluginField {
     /// Every plugin field, in the order `grim config list` emits them
     /// (after every other row) — **append only**, like [`ConfigKey::ALL`].
-    pub const ALL: [PluginField; 4] = [
+    pub const ALL: [PluginField; 10] = [
         PluginField::Name,
         PluginField::Description,
         PluginField::Version,
         PluginField::Logo,
+        PluginField::Homepage,
+        PluginField::Repository,
+        PluginField::Documentation,
+        PluginField::Support,
+        PluginField::License,
+        PluginField::Category,
     ];
 
     /// This field's static metadata.
@@ -466,11 +479,60 @@ impl PluginField {
                            by the `--logo` flag when given.",
             constraints: None,
         };
+        const HOMEPAGE: KeySpec = KeySpec {
+            key: "plugin.homepage",
+            value_type: ValueType::String { default: None },
+            title: "Plugin home page",
+            description: "Sets the plugin's home page, an `https://` link.",
+            constraints: None,
+        };
+        const REPOSITORY: KeySpec = KeySpec {
+            key: "plugin.repository",
+            value_type: ValueType::String { default: None },
+            title: "Plugin repository",
+            description: "Sets the plugin's source repository, an `https://` link.",
+            constraints: None,
+        };
+        const DOCUMENTATION: KeySpec = KeySpec {
+            key: "plugin.documentation",
+            value_type: ValueType::String { default: None },
+            title: "Plugin documentation",
+            description: "Sets the plugin's documentation, an `https://` link.",
+            constraints: None,
+        };
+        const SUPPORT: KeySpec = KeySpec {
+            key: "plugin.support",
+            value_type: ValueType::String { default: None },
+            title: "Plugin support link",
+            description: "Sets where users get help, an `https://` link.",
+            constraints: None,
+        };
+        const LICENSE: KeySpec = KeySpec {
+            key: "plugin.license",
+            value_type: ValueType::String { default: None },
+            title: "Plugin license",
+            description: "Sets the plugin's license, preferably an SPDX identifier such as `Apache-2.0`; at most 128 \
+                           characters.",
+            constraints: None,
+        };
+        const CATEGORY: KeySpec = KeySpec {
+            key: "plugin.category",
+            value_type: ValueType::String { default: None },
+            title: "Plugin category",
+            description: "Sets the plugin's category, a lowercase slug of at most 32 characters.",
+            constraints: None,
+        };
         match self {
             Self::Name => &NAME,
             Self::Description => &DESCRIPTION,
             Self::Version => &VERSION,
             Self::Logo => &LOGO,
+            Self::Homepage => &HOMEPAGE,
+            Self::Repository => &REPOSITORY,
+            Self::Documentation => &DOCUMENTATION,
+            Self::Support => &SUPPORT,
+            Self::License => &LICENSE,
+            Self::Category => &CATEGORY,
         }
     }
 
@@ -784,10 +846,12 @@ mod tests {
     }
 
     #[test]
-    fn plugin_fields_parse_and_match_plugin_meta_minus_rename() {
+    fn plugin_fields_parse_and_match_plugin_meta_minus_the_structured_fields() {
         // DRIFT TEST: every scalar `[plugin]` field has exactly one spec;
-        // `rename` is the one table deliberately left unaddressable.
-        use crate::config::plugin_meta::{PluginMeta, RenameRule};
+        // the rename rule, the author object and the two lists are
+        // deliberately left unaddressable.
+        use crate::config::plugin_meta::{PluginAuthor, PluginMeta, RenameRule};
+        let text = || Some("x".to_string());
         let meta = PluginMeta {
             name: Some("team".into()),
             description: Some("d".into()),
@@ -796,6 +860,19 @@ mod tests {
             rename: Some(RenameRule {
                 strip_prefix: "x-".into(),
             }),
+            author: Some(PluginAuthor {
+                name: "A".into(),
+                email: None,
+                url: None,
+            }),
+            homepage: text(),
+            repository: text(),
+            documentation: text(),
+            support: text(),
+            license: text(),
+            keywords: vec!["k".into()],
+            tags: vec!["t".into()],
+            category: text(),
         };
         let mut fields: BTreeSet<String> = serde_json::to_value(meta)
             .expect("PluginMeta must serialize")
@@ -804,7 +881,9 @@ mod tests {
             .keys()
             .cloned()
             .collect();
-        assert!(fields.remove("rename"));
+        for structured in ["rename", "author", "keywords", "tags"] {
+            assert!(fields.remove(structured), "{structured}");
+        }
         let expected: BTreeSet<String> = PluginField::ALL
             .iter()
             .map(|f| {
@@ -820,7 +899,10 @@ mod tests {
             assert_eq!(PluginField::parse(f.spec().key), Some(f));
         }
         assert_eq!(PluginField::parse("plugin.rename.strip_prefix"), None);
-        assert!(valid_keys().ends_with("plugin.name, plugin.description, plugin.version, plugin.logo"));
+        assert!(valid_keys().ends_with(
+            "plugin.name, plugin.description, plugin.version, plugin.logo, plugin.homepage, plugin.repository, \
+             plugin.documentation, plugin.support, plugin.license, plugin.category"
+        ));
     }
 
     #[test]

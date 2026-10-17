@@ -660,11 +660,7 @@ mod tests {
                         (*name).to_string(),
                         PluginDecl {
                             include: include.iter().map(|s| (*s).to_string()).collect(),
-                            description: None,
-                            version: None,
-                            rename: None,
-                            logo: None,
-                            project: None,
+                            ..PluginDecl::default()
                         },
                     )
                 })

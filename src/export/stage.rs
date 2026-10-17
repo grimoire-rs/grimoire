@@ -17,7 +17,7 @@ use std::sync::Arc;
 use crate::api::export_report::{ExportItem, ExportMember, ExportOmission, ExportReport, OutputFormatKind};
 use crate::cli::exit_code::ExitCode;
 use crate::config::is_path_value;
-use crate::config::plugin_meta::PluginMeta;
+use crate::config::plugin_meta::{PluginMeta, PluginProfile};
 use crate::config::scope::ConfigScope;
 use crate::export::export_error::ExportError;
 use crate::export::family::{self, Family, OmitReason};
@@ -115,14 +115,15 @@ impl ProjectLock {
 /// The export-side declaration of a project's `[plugin]` table, its logo
 /// kept relative to the project directory.
 fn project_decl(meta: &PluginMeta) -> PluginDecl {
-    PluginDecl {
-        include: Vec::new(),
-        project: None,
+    let mut decl = PluginDecl {
         description: meta.description.clone(),
         version: meta.version.clone(),
         rename: meta.rename.clone(),
         logo: meta.logo.clone(),
-    }
+        ..PluginDecl::default()
+    };
+    decl.set_profile(meta.profile());
+    decl
 }
 
 /// A marketplace `project` plugin's effective declaration: every field
@@ -131,14 +132,19 @@ fn project_decl(meta: &PluginMeta) -> PluginDecl {
 /// the manifest).
 fn merged_decl(decl: &PluginDecl, project: &ProjectLock) -> PluginDecl {
     let meta = project.meta.clone().unwrap_or_default();
-    PluginDecl {
-        include: Vec::new(),
+    let mut merged = PluginDecl {
         project: decl.project.clone(),
-        description: decl.description.clone().or(meta.description),
-        version: decl.version.clone().or(meta.version),
-        rename: decl.rename.clone().or(meta.rename),
-        logo: decl.logo.clone().or_else(|| meta.logo.map(|l| project.dir.join(l))),
-    }
+        description: decl.description.clone().or(meta.description.clone()),
+        version: decl.version.clone().or(meta.version.clone()),
+        rename: decl.rename.clone().or(meta.rename.clone()),
+        logo: decl
+            .logo
+            .clone()
+            .or_else(|| meta.logo.clone().map(|l| project.dir.join(l))),
+        ..PluginDecl::default()
+    };
+    merged.set_profile(decl.profile().or(meta.profile()));
+    merged
 }
 
 /// The per-run output options of `grim export plugin`.
@@ -222,11 +228,7 @@ pub(crate) async fn run(
                     key.clone(),
                     PluginDecl {
                         include: refs.clone(),
-                        description: None,
-                        version: None,
-                        rename: None,
-                        logo: None,
-                        project: None,
+                        ..PluginDecl::default()
                     },
                 )]),
             };
@@ -248,12 +250,19 @@ pub(crate) async fn run(
                 key.clone()
             };
             // C-023: only a single ref's own annotations describe the plugin.
-            let annotations = if refs.len() == 1 {
+            let (version, description, profile) = if refs.len() == 1 {
                 pinned_annotations(access, &res, &key).await?
             } else {
-                (None, None)
+                (None, None, PluginProfile::default())
             };
-            let mut input = plugin_input(&name, &members, None, (opts.version, opts.description), annotations)?;
+            let mut input = plugin_input(
+                &name,
+                &members,
+                None,
+                (opts.version, opts.description),
+                (version, description),
+            )?;
+            input.profile = profile;
             if let ([single], None) = (refs.as_slice(), opts.logo) {
                 input.fallback_logo = companion_logo(scope, access, single).await;
             }
@@ -577,7 +586,9 @@ fn checked_derived_name(name: String, include: &str) -> Result<String, ExportErr
 /// for a bundle ref, else the single lock entry's pin — never the floating
 /// tag. A path source → `(None, None)`; an absent annotation → `None`;
 /// the version is filtered through `marketplace::normalize_version`, an
-/// invalid one → `None`.
+/// invalid one → `None`. The third element is the plugin profile the
+/// annotations describe (`PluginProfile::from_annotations`), empty when
+/// there is no pin.
 ///
 /// # Errors
 ///
@@ -587,7 +598,7 @@ pub(crate) async fn pinned_annotations(
     access: &Arc<dyn OciAccess>,
     resolution: &MarketplaceResolution,
     plugin: &str,
-) -> Result<(Option<String>, Option<String>), crate::error::Error> {
+) -> Result<(Option<String>, Option<String>, PluginProfile), crate::error::Error> {
     let pin: Option<&PinnedIdentifier> = match resolution.bundle_pins.get(plugin).map(Vec::as_slice) {
         Some([bundle]) => Some(bundle),
         _ => match resolution
@@ -602,17 +613,21 @@ pub(crate) async fn pinned_annotations(
         },
     };
     let Some(pin) = pin else {
-        return Ok((None, None));
+        return Ok((None, None, PluginProfile::default()));
     };
     let Some(manifest) = access.fetch_manifest(pin).await? else {
-        return Ok((None, None));
+        return Ok((None, None, PluginProfile::default()));
     };
     let version = manifest
         .annotations
         .get(VERSION_ANNOTATION)
         .and_then(|v| marketplace::normalize_version(v));
     let description = manifest.annotations.get(DESCRIPTION_ANNOTATION).cloned();
-    Ok((version, description))
+    Ok((
+        version,
+        description,
+        PluginProfile::from_annotations(&manifest.annotations),
+    ))
 }
 
 /// Assemble one plugin's [`PluginInput`]: `rename::apply` over its lock
@@ -672,6 +687,7 @@ pub(crate) fn plugin_input(
         version_base,
         description_base: authored.or(annotation_description),
         logo: decl.and_then(|d| d.logo.clone()),
+        profile: decl.map(PluginDecl::profile).unwrap_or_default(),
         fallback_logo: None,
         project_dir: None,
         renamed,
@@ -696,6 +712,9 @@ pub(crate) struct PluginInput {
     pub renamed: Vec<(String, String)>,
     /// Declared `logo`, as written (relative to the manifest's directory).
     pub logo: Option<PathBuf>,
+    /// Author, links, license, keywords and category: declared, else the
+    /// ad-hoc reference's annotations.
+    pub profile: PluginProfile,
     /// `(extension, bytes)` of the single ad-hoc reference's published
     /// logo (its repository description companion); used only when neither
     /// `--logo` nor a declared `logo` names one.
@@ -959,6 +978,7 @@ async fn stage_all(req: &ExportRequest<'_>, access: &Arc<dyn OciAccess>) -> Resu
                     (client, fam),
                     (&plugin.name, version, &description),
                     logo_rel.as_deref(),
+                    &plugin.profile,
                 )
             };
             // C-003: the tree is hashed with every manifest at the base
@@ -1469,17 +1489,19 @@ pub(crate) fn write_manifest(
     (client, family): (ClientTarget, Family),
     (name, version, description): (&str, &str, &str),
     logo: Option<&str>,
+    profile: &PluginProfile,
 ) -> Result<(), ExportError> {
+    let profile = family::manifest_profile(client, profile);
     let bytes = match family {
-        Family::Claude => family::claude_plugin_json(name, version, description),
-        Family::AgentPlugins => family::agent_plugins_plugin_json(name, version, description, logo),
+        Family::Claude => family::claude_plugin_json(name, version, description, &profile),
+        Family::AgentPlugins => family::agent_plugins_plugin_json(name, version, description, logo, &profile),
     };
     write_staged(root, family::manifest_rel(client), &bytes)?;
     if client == ClientTarget::Cursor {
         write_staged(
             root,
             CURSOR_MANIFEST,
-            &family::claude_plugin_json(name, version, description),
+            &family::claude_plugin_json(name, version, description, &profile),
         )?;
     }
     Ok(())
@@ -1880,8 +1902,7 @@ mod tests {
             rename: strip_prefix.map(|p| RenameRule {
                 strip_prefix: p.to_string(),
             }),
-            logo: None,
-            project: None,
+            ..PluginDecl::default()
         }
     }
 
@@ -2593,10 +2614,17 @@ mod tests {
     fn c025_write_manifest_claude_goes_under_dot_claude_plugin() {
         let tmp = tempfile::tempdir().unwrap();
         let claude = (ClientTarget::Claude, Family::Claude);
-        write_manifest(tmp.path(), claude, ("team-stack", "1.0.0+abc", "D"), None).unwrap();
+        write_manifest(
+            tmp.path(),
+            claude,
+            ("team-stack", "1.0.0+abc", "D"),
+            None,
+            &PluginProfile::default(),
+        )
+        .unwrap();
         assert_eq!(
             std::fs::read(tmp.path().join(".claude-plugin/plugin.json")).unwrap(),
-            family::claude_plugin_json("team-stack", "1.0.0+abc", "D")
+            family::claude_plugin_json("team-stack", "1.0.0+abc", "D", &PluginProfile::default())
         );
         assert!(!tmp.path().join("plugin.json").exists());
     }
@@ -2605,10 +2633,17 @@ mod tests {
     fn c025_write_manifest_agent_plugins_goes_at_the_root() {
         let tmp = tempfile::tempdir().unwrap();
         let codex = (ClientTarget::Codex, Family::AgentPlugins);
-        write_manifest(tmp.path(), codex, ("team-stack", "1.0.0+abc", "D"), None).unwrap();
+        write_manifest(
+            tmp.path(),
+            codex,
+            ("team-stack", "1.0.0+abc", "D"),
+            None,
+            &PluginProfile::default(),
+        )
+        .unwrap();
         assert_eq!(
             std::fs::read(tmp.path().join("plugin.json")).unwrap(),
-            family::agent_plugins_plugin_json("team-stack", "1.0.0+abc", "D", None)
+            family::agent_plugins_plugin_json("team-stack", "1.0.0+abc", "D", None, &PluginProfile::default())
         );
         assert!(!tmp.path().join(".claude-plugin").exists());
     }
@@ -2618,10 +2653,17 @@ mod tests {
     fn c005_write_manifest_qoder_goes_under_dot_qoder_plugin() {
         let tmp = tempfile::tempdir().unwrap();
         let qoder = (ClientTarget::Qoder, Family::Claude);
-        write_manifest(tmp.path(), qoder, ("team-stack", "1.0.0+abc", "D"), None).unwrap();
+        write_manifest(
+            tmp.path(),
+            qoder,
+            ("team-stack", "1.0.0+abc", "D"),
+            None,
+            &PluginProfile::default(),
+        )
+        .unwrap();
         assert_eq!(
             std::fs::read(tmp.path().join(".qoder-plugin/plugin.json")).unwrap(),
-            family::claude_plugin_json("team-stack", "1.0.0+abc", "D")
+            family::claude_plugin_json("team-stack", "1.0.0+abc", "D", &PluginProfile::default())
         );
         assert!(!tmp.path().join(".claude-plugin").exists());
         assert!(!tmp.path().join("plugin.json").exists());
@@ -2638,20 +2680,37 @@ mod tests {
             cursor,
             ("team-stack", "1.0.0+abc", "D"),
             Some("assets/logo.png"),
+            &PluginProfile::default(),
         )
         .unwrap();
         assert_eq!(
             std::fs::read(tmp.path().join("plugin.json")).unwrap(),
-            family::agent_plugins_plugin_json("team-stack", "1.0.0+abc", "D", Some("assets/logo.png"))
+            family::agent_plugins_plugin_json(
+                "team-stack",
+                "1.0.0+abc",
+                "D",
+                Some("assets/logo.png"),
+                &PluginProfile::default()
+            )
         );
         let second = std::fs::read(tmp.path().join(".cursor-plugin/plugin.json")).unwrap();
-        assert_eq!(second, family::claude_plugin_json("team-stack", "1.0.0+abc", "D"));
+        assert_eq!(
+            second,
+            family::claude_plugin_json("team-stack", "1.0.0+abc", "D", &PluginProfile::default())
+        );
         let v: serde_json::Value = serde_json::from_slice(&second).unwrap();
         assert_eq!(v.as_object().unwrap().len(), 3);
         // Codex (same family) gets no second manifest.
         let other = tempfile::tempdir().unwrap();
         let codex = (ClientTarget::Codex, Family::AgentPlugins);
-        write_manifest(other.path(), codex, ("team-stack", "1.0.0+abc", "D"), None).unwrap();
+        write_manifest(
+            other.path(),
+            codex,
+            ("team-stack", "1.0.0+abc", "D"),
+            None,
+            &PluginProfile::default(),
+        )
+        .unwrap();
         assert!(!other.path().join(".cursor-plugin").exists());
     }
 
@@ -3346,8 +3405,127 @@ mod tests {
         let access: Arc<dyn OciAccess> = PinOnly::new(reg);
         assert_eq!(
             pinned_annotations(&access, &res, "plan").await.unwrap(),
-            (Some("1.4.0".to_string()), Some("Team plan".to_string()))
+            (
+                Some("1.4.0".to_string()),
+                Some("Team plan".to_string()),
+                PluginProfile::default()
+            )
         );
+    }
+
+    #[tokio::test]
+    async fn an_ad_hoc_ref_reads_its_profile_from_the_pinned_annotations_and_drops_invalid_values() {
+        let reg = MemoryRegistry::new();
+        let pinned = publish_skill(
+            &reg,
+            &format!("{REG}/team/plan:1.0"),
+            &[
+                ("org.opencontainers.image.licenses", "Apache-2.0"),
+                ("org.opencontainers.image.source", "https://github.com/acme/plan"),
+                ("org.opencontainers.image.url", "http://insecure.example"),
+                ("org.opencontainers.image.documentation", "https://acme.example/docs"),
+                ("org.opencontainers.image.authors", "Acme <dev@acme.example>, Other"),
+                ("com.grimoire.keywords", "review, quality"),
+            ],
+        )
+        .await;
+        let res = resolution(
+            "plan",
+            vec![LockedArtifact::direct("plan".into(), ArtifactKind::Skill, pinned)],
+            vec![],
+        );
+        let access: Arc<dyn OciAccess> = PinOnly::new(reg);
+        let (_, _, profile) = pinned_annotations(&access, &res, "plan").await.unwrap();
+        assert_eq!(profile.license.as_deref(), Some("Apache-2.0"));
+        assert_eq!(profile.repository.as_deref(), Some("https://github.com/acme/plan"));
+        assert_eq!(profile.homepage, None, "an http link is dropped, not an error");
+        assert_eq!(profile.documentation.as_deref(), Some("https://acme.example/docs"));
+        assert_eq!(profile.author.map(|a| a.name).as_deref(), Some("Acme"));
+        assert_eq!(profile.keywords, ["review", "quality"]);
+        assert_eq!(profile.support, None);
+    }
+
+    fn profiled(homepage: &str) -> PluginProfile {
+        PluginProfile {
+            homepage: Some(homepage.to_string()),
+            ..PluginProfile::default()
+        }
+    }
+
+    #[test]
+    fn plugin_input_carries_the_declared_profile_and_an_undeclared_one_is_empty() {
+        let members = vec![path_member("a", ArtifactKind::Skill)];
+        let mut declared = decl(None, None, None);
+        declared.set_profile(profiled("https://acme.example"));
+        let input = plugin_input("p", &members, Some(&declared), (None, None), (None, None)).unwrap();
+        assert_eq!(input.profile, profiled("https://acme.example"));
+        let bare = plugin_input("p", &members, None, (None, None), (None, None)).unwrap();
+        assert_eq!(bare.profile, PluginProfile::default());
+    }
+
+    #[test]
+    fn a_project_plugin_profile_is_overridden_field_by_field_by_the_declaration() {
+        let meta = PluginMeta {
+            homepage: Some("https://project.example".into()),
+            license: Some("MIT".into()),
+            ..PluginMeta::default()
+        };
+        assert_eq!(project_decl(&meta).profile().license.as_deref(), Some("MIT"));
+        let project = ProjectLock {
+            dir: PathBuf::from("/p"),
+            lock: part(Vec::new()),
+            meta: Some(meta),
+        };
+        let mut declared = decl(None, None, None);
+        declared.set_profile(profiled("https://decl.example"));
+        let merged = merged_decl(&declared, &project).profile();
+        assert_eq!(
+            merged.homepage.as_deref(),
+            Some("https://decl.example"),
+            "declaration wins"
+        );
+        assert_eq!(merged.license.as_deref(), Some("MIT"), "the rest comes from [plugin]");
+    }
+
+    #[test]
+    fn cursor_manifests_both_drop_author_url_while_other_clients_keep_it() {
+        let profile = PluginProfile {
+            author: Some(crate::config::plugin_meta::PluginAuthor {
+                name: "Acme".into(),
+                email: Some("dev@acme.example".into()),
+                url: Some("https://acme.example".into()),
+            }),
+            ..PluginProfile::default()
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        write_manifest(
+            tmp.path(),
+            (ClientTarget::Cursor, Family::AgentPlugins),
+            ("team", "1.0.0+abc", "D"),
+            None,
+            &profile,
+        )
+        .unwrap();
+        for rel in ["plugin.json", ".cursor-plugin/plugin.json"] {
+            let v: serde_json::Value = serde_json::from_slice(&std::fs::read(tmp.path().join(rel)).unwrap()).unwrap();
+            assert_eq!(
+                v["author"],
+                serde_json::json!({"name": "Acme", "email": "dev@acme.example"}),
+                "{rel}"
+            );
+        }
+        let other = tempfile::tempdir().unwrap();
+        write_manifest(
+            other.path(),
+            (ClientTarget::Copilot, Family::AgentPlugins),
+            ("team", "1.0.0+abc", "D"),
+            None,
+            &profile,
+        )
+        .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(other.path().join("plugin.json")).unwrap()).unwrap();
+        assert_eq!(v["author"]["url"], "https://acme.example");
     }
 
     #[tokio::test]
@@ -3375,7 +3553,11 @@ mod tests {
         let access: Arc<dyn OciAccess> = PinOnly::new(reg);
         assert_eq!(
             pinned_annotations(&access, &res, "stack").await.unwrap(),
-            (Some("2.0.0".to_string()), Some("Stack".to_string()))
+            (
+                Some("2.0.0".to_string()),
+                Some("Stack".to_string()),
+                PluginProfile::default()
+            )
         );
     }
 
@@ -3389,7 +3571,10 @@ mod tests {
             vec![],
         );
         let access: Arc<dyn OciAccess> = Arc::new(reg);
-        assert_eq!(pinned_annotations(&access, &res, "plan").await.unwrap(), (None, None));
+        assert_eq!(
+            pinned_annotations(&access, &res, "plan").await.unwrap(),
+            (None, None, PluginProfile::default())
+        );
     }
 
     #[tokio::test]
@@ -3409,7 +3594,7 @@ mod tests {
         let access: Arc<dyn OciAccess> = Arc::new(reg);
         assert_eq!(
             pinned_annotations(&access, &res, "plan").await.unwrap(),
-            (None, Some("Kept".to_string()))
+            (None, Some("Kept".to_string()), PluginProfile::default())
         );
     }
 
@@ -3418,7 +3603,10 @@ mod tests {
         let counter = Arc::new(NoNetwork::default());
         let access: Arc<dyn OciAccess> = counter.clone();
         let res = resolution("plan", vec![path_member("plan", ArtifactKind::Skill)], vec![]);
-        assert_eq!(pinned_annotations(&access, &res, "plan").await.unwrap(), (None, None));
+        assert_eq!(
+            pinned_annotations(&access, &res, "plan").await.unwrap(),
+            (None, None, PluginProfile::default())
+        );
         assert_eq!(counter.calls.load(Ordering::SeqCst), 0);
     }
 
@@ -3453,6 +3641,7 @@ mod tests {
             description_base: Some("Base".to_string()),
             renamed: Vec::new(),
             logo: None,
+            profile: PluginProfile::default(),
             fallback_logo: None,
             project_dir: None,
         }
@@ -3514,7 +3703,12 @@ mod tests {
         let claude_root = dir.join("team.claude");
         assert_eq!(
             std::fs::read(claude_root.join(".claude-plugin/plugin.json")).unwrap(),
-            family::claude_plugin_json("team", &items[0].version, &family::plugin_description(Some("Base")).0)
+            family::claude_plugin_json(
+                "team",
+                &items[0].version,
+                &family::plugin_description(Some("Base")).0,
+                &PluginProfile::default()
+            )
         );
         assert!(claude_root.join(".mcp.json").is_file());
         let codex_root = dir.join("team.codex");
@@ -3524,7 +3718,8 @@ mod tests {
                 "team",
                 &items[1].version,
                 &family::plugin_description(Some("Base")).0,
-                None
+                None,
+                &PluginProfile::default()
             )
         );
         assert!(codex_root.join("mcp.json").is_file());
@@ -3616,7 +3811,12 @@ mod tests {
         assert_eq!(second.as_object().unwrap().len(), 3);
         assert_eq!(
             std::fs::read(root.join(".cursor-plugin/plugin.json")).unwrap(),
-            family::claude_plugin_json("team", &items[0].version, &family::plugin_description(Some("Base")).0)
+            family::claude_plugin_json(
+                "team",
+                &items[0].version,
+                &family::plugin_description(Some("Base")).0,
+                &PluginProfile::default()
+            )
         );
     }
 

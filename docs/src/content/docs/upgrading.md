@@ -400,6 +400,26 @@ the table changes no lock bytes and re-pins nothing.
 before you add the table. Nothing else changes: a lock written by an older
 grim is read as is.
 
+## Plugin metadata keys need grim 0.15.0 {#plugin-metadata-needs-new-grim}
+
+[`marketplace.toml` plugins and `grimoire.toml`'s `[plugin]` table][plugin-metadata]
+accept optional `author`, `homepage`, `repository`, `documentation`,
+`support`, `license`, `keywords`, `tags` and `category` keys, and
+`[marketplace.owner]` accepts `url`. A manifest without them works
+everywhere and renders the same files as before. One that sets them works
+only from 0.15.0.
+
+**What you will see.** An older grim rejects the file with an unknown-field
+error, exit `65` for `marketplace.toml` and `78` for `grimoire.toml`. The new
+keys change no lock bytes and re-pin nothing. They do change the files grim
+renders, so a plugin's `<base>+<12-hex>` version changes once after you add
+them. An ad-hoc `grim export plugin <ref>` now also reads the pinned
+manifest's annotations, so its `plugin.json` and version suffix change once for
+annotated references.
+
+**What to do.** Upgrade every machine and CI job that reads the file before
+you add the keys.
+
 ## Smaller notes {#smaller-notes}
 
 - **A live symlink at an install destination now exits 65, not 74.** A
@@ -611,6 +631,7 @@ grim is read as is.
 [export-plugin]: ./commands.md#export-plugin
 [export-marketplace]: ./commands.md#export-marketplace
 [marketplace-table]: ./configuration.md#marketplace-table
+[plugin-metadata]: ./configuration.md#plugin-metadata
 [install]: ./commands.md#install
 [update]: ./commands.md#update
 [remove]: ./commands.md#remove

@@ -1139,6 +1139,37 @@ conflicting text above. Plan: `.agents/plans/plan_harness_marketplace_export.md`
 | R2-27 | Plan cross-model review | Containment covers the `.grim-export` lock path; manifests named `.grim-export*` and manifests/locks under an owned path are refused (65); leftover `.grim-export-*` dirs are never swept (they may be phase-1 recovery backups), only warned. The verification job also fails on tracked content for any table client not selected. The verifier's own pin (workflow file, `ocx.toml`/`ocx.lock`, release digest) comes from the PR head under `pull_request`; accepted residual, mitigated by CODEOWNERS with required code-owner review on those paths — never `pull_request_target`. Gate allow-list paths derive from the run (manifest may sit in a subdir) |
 | R2-25 | Harness smoke | Local throwaway-config smoke for Claude Code, Copilot CLI and Codex (installed locally); Qoder rests on the research bundle probe; Codex ≥0.157 double-listing stays deferred (local Codex is 0.153.4) |
 
+## Amendment 2026-10-17 — plugin metadata in documents (D3, D13)
+
+Supersedes D3's "no `category`, `tags`, `author` or `homepage`" bullet and
+the matching D13 deferral, before any release carries the four-key entry.
+All keys are optional, so a `marketplace.toml` that sets none renders the
+same bytes.
+
+- `[plugins.<name>]` and `[plugin]` gain `author {name, email?, url?}`,
+  `homepage`, `repository`, `documentation`, `support`, `license`,
+  `keywords`, `tags` and `category`; `[marketplace.owner]` gains `url`. A
+  bad value is `ExportError::Manifest` (65), the `https` and email rules
+  being the artifact ones. None of it is hashed.
+- Each harness's entry carries only what its format defines. Claude and
+  Qoder: every field, plus `documentationUrl`, `supportUrl` and `owner.url`.
+  Copilot and Cursor: `author`, `homepage`, `repository`, `license`,
+  `keywords`, `tags`, `category`. Codex: `category`. Cursor's `author` is
+  name and email only, in its entry and in both its manifests, so entry and
+  manifest stay byte-equal.
+- `plugin.json` carries `author`, `homepage`, `repository`, `license` and
+  `keywords` after `description`. The Codex `interface` block under
+  `extensions."com.openai"` gains `category`, `websiteURL` (the homepage)
+  and `developerName` (the author's name). The block lands in every Agent
+  Plugins tree, and only Codex reads it.
+- An ad-hoc `grim export plugin <ref>` falls back to the pinned manifest's
+  `licenses`, `source`, `url`, `documentation`, `authors` and keywords
+  annotations, dropping any invalid value. Declared and marketplace plugins
+  read no annotations, so they do not. `support` has no fallback: those
+  channels sit on the mutable companion manifest.
+- Still deferred: Codex `policy.*`, `displayName`, `strict`,
+  `defaultEnabled`, `minClientVersions` and `metadata.version`.
+
 ## Links
 
 - `.agents/adr/adr_harness_plugin_export.md` (phase 1; D6, D11 amended on acceptance)
@@ -1155,4 +1186,5 @@ conflicting text above. Plan: `.agents/plans/plan_harness_marketplace_export.md`
 |------|--------|--------|
 | 2026-09-28 | Architect (hex-architect xhigh) | Initial proposal |
 | 2026-09-29 | Architect (review-fix round 1) | Amendments 1–33 |
+| 2026-10-17 | owner review | Amendment: plugin metadata in documents (D3, D13) |
 | 2026-09-29 | hex-plan (planning pass, goal loop) | Round-2 amendments R2-1…R2-27; Block + 13 Warns resolved; Qoder pulled in; open questions resolved; status Accepted |

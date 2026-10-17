@@ -30,10 +30,10 @@ surface, which [Unstable](#unstable) lists by name.
 | CLI surface | Subcommand names, arguments, flags, and the [documented exit codes][exit-codes] |
 | `--format json` reports | The report shape for every command that offers one, and the [error document][json-interface] — see [Additive fields](#frozen-additive-fields) and the [JSON interface reference][json-interface] |
 | `grimoire.toml` / `grimoire.lock` | The [config and lock schema][configuration] |
-| `marketplace.toml` / `marketplace.lock` | The [manifest and lock wire shape][marketplace-toml], including the `plugin` field, the `[[plugin]]` table and the [`[marketplace]` table][marketplace-table] — under the same additive rule as `grimoire.lock`, and never sharing a file with it (a `plugin`-bearing entry in `grimoire.lock`, or vice versa, is a rejected scope mismatch, not a migration path) |
+| `marketplace.toml` / `marketplace.lock` | The [manifest and lock wire shape][marketplace-toml], including the `plugin` field, the `[[plugin]]` table and the [`[marketplace]` table][marketplace-table] and the [plugin metadata keys][plugin-metadata] — under the same additive rule as `grimoire.lock`, and never sharing a file with it (a `plugin`-bearing entry in `grimoire.lock`, or vice versa, is a rejected scope mismatch, not a migration path) |
 | `publish.toml` | The [batch-publish manifest schema][batch-publish], including every spelling a key has ever accepted — see [Additive fields](#frozen-additive-fields) |
 | [`grim export plugin`][export-plugin] | The `--format json` [export report shape][json-shapes-items], and the `<base>+<12-hex>` [version grammar][export-plugin-output] a rendered `plugin.json`'s `version` follows. Only the grammar is frozen, not what feeds the hash |
-| [`grim export marketplace`][export-marketplace] | The command's flags and [exit codes][export-marketplace-exit]; the `{items, files}` [report shape][export-marketplace-json] and its `action` literals; the [`[marketplace]` keys and grammars][marketplace-table]; the client-to-file table and the `./<client>/<plugin>` [tree paths][export-marketplace-layout]; the default client set (`claude`, `copilot`, `codex`, `qoder`); the [ownership convention][export-marketplace-ownership]; the document guarantees (each plugin entry's `source` is `./`-relative inside the repository, and its `name`, `version` and `description` equal the tree's manifest); and the version grammar above |
+| [`grim export marketplace`][export-marketplace] | The command's flags and [exit codes][export-marketplace-exit]; the `{items, files}` [report shape][export-marketplace-json] and its `action` literals; the [`[marketplace]` keys and grammars][marketplace-table]; the client-to-file table and the `./<client>/<plugin>` [tree paths][export-marketplace-layout]; the default client set (`claude`, `copilot`, `codex`, `qoder`); the [ownership convention][export-marketplace-ownership]; the document guarantees (each plugin entry's `source` is `./`-relative inside the repository, and its `name`, `version`, `description` and any profile field the harness defines equal the tree's manifest); and the version grammar above |
 | Bundle source manifest | The [bundle member declaration schema][bundles], under the same widening rule as the manifests above |
 | [MCP descriptor][mcp-descriptor] (`mcp/<name>.toml`) | The published descriptor schema, including which fields an older grim rejects rather than drops |
 | Install state (`state.json`) | Schema V2, governed by the same additive-field policy as JSON reports |
@@ -562,6 +562,7 @@ unaffected — they read straight from disk and never touch a manifest.
 [export-marketplace-layout]: ./commands.md#export-marketplace-layout
 [export-marketplace-ownership]: ./commands.md#export-marketplace-ownership
 [marketplace-table]: ./configuration.md#marketplace-table
+[plugin-metadata]: ./configuration.md#plugin-metadata
 [json-shapes-items]: ./json-interface.md#shapes-items
 [json-hook-arming-stability]: ./json-interface.md#hook-arming
 

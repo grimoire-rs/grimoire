@@ -86,6 +86,34 @@ takes a `clients` list. Without it grim serves Claude Code, Copilot, ChatGPT / C
 and Qoder. Cursor is opt-in. The name is what consumers type after the
 `@` in `<plugin>@<marketplace>`.
 
+### Describe the plugins {#describe}
+
+Add an author, links, a license and keywords so the marketplace page and
+each harness can show who maintains a plugin. Every key is optional.
+
+```toml
+[marketplace.owner]
+name = "Grimoire"
+url = "https://grimoire.rs"
+
+[plugins.hex]
+include = ["ghcr.io/michael-herwig/arcana/hex:0"]
+homepage = "https://github.com/michael-herwig/arcana"
+license = "Apache-2.0"
+keywords = ["swarm", "review"]
+category = "workflow"
+
+[plugins.hex.author]
+name = "Michael Herwig"
+url = "https://github.com/michael-herwig"
+```
+
+grim writes each field only into the files whose harness defines it. Claude
+and Qoder get everything, Copilot and Cursor get the author and link fields,
+and Codex gets the category. The full table and the validation rules are in
+[plugin metadata](../configuration.md#plugin-metadata). A manifest that sets
+none of these keys renders the same files as before.
+
 Generate the repository once by hand, then commit the result:
 
 ```sh

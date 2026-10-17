@@ -1397,6 +1397,15 @@ pub(crate) fn write_config_with_plugin(
             version,
             logo,
             rename,
+            author,
+            homepage,
+            repository,
+            documentation,
+            support,
+            license,
+            keywords,
+            tags,
+            category,
         } = plugin;
         out.push_str("[plugin]\n");
         let logo = logo.as_ref().map(|l| l.to_string_lossy().into_owned());
@@ -1405,9 +1414,38 @@ pub(crate) fn write_config_with_plugin(
             ("description", description),
             ("version", version),
             ("logo", &logo),
+            ("homepage", homepage),
+            ("repository", repository),
+            ("documentation", documentation),
+            ("support", support),
+            ("license", license),
+            ("category", category),
         ] {
             if let Some(value) = value {
                 let _ = writeln!(out, "{key} = {}", toml::Value::String(value.clone()));
+            }
+        }
+        // Arrays are plain keys: they stay above the sub-tables.
+        for (key, words) in [("keywords", keywords), ("tags", tags)] {
+            if !words.is_empty() {
+                let list = words
+                    .iter()
+                    .map(|w| toml::Value::String(w.clone()).to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let _ = writeln!(out, "{key} = [{list}]");
+            }
+        }
+        if let Some(author) = author {
+            let _ = writeln!(
+                out,
+                "\n[plugin.author]\nname = {}",
+                toml::Value::String(author.name.clone())
+            );
+            for (key, value) in [("email", &author.email), ("url", &author.url)] {
+                if let Some(value) = value {
+                    let _ = writeln!(out, "{key} = {}", toml::Value::String(value.clone()));
+                }
             }
         }
         if let Some(rename) = rename {
@@ -2198,6 +2236,42 @@ tree_separators_typo = 1
             let body = std::fs::read_to_string(&path).unwrap();
             assert!(!body.contains("[plugin]"), "{body}");
         }
+    }
+
+    #[test]
+    fn write_config_with_plugin_round_trips_every_field() {
+        use crate::config::plugin_meta::{PluginAuthor, PluginMeta, RenameRule};
+        // Struct literal without `..`: a new field fails to compile here until
+        // the round trip covers it.
+        let full = PluginMeta {
+            name: Some("team".into()),
+            description: Some("Team \"tools\"".into()),
+            version: Some("v1.2.0".into()),
+            logo: Some("assets/team.svg".into()),
+            rename: Some(RenameRule {
+                strip_prefix: "acme-".into(),
+            }),
+            author: Some(PluginAuthor {
+                name: "Ada".into(),
+                email: Some("ada@example.com".into()),
+                url: Some("https://example.com/ada".into()),
+            }),
+            homepage: Some("https://example.com".into()),
+            repository: Some("https://example.com/repo".into()),
+            documentation: Some("https://example.com/docs".into()),
+            support: Some("https://example.com/help".into()),
+            license: Some("Apache-2.0".into()),
+            keywords: vec!["one".into(), "two".into()],
+            tags: vec!["alpha".into(), "beta".into()],
+            category: Some("tools".into()),
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("grimoire.toml");
+        let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
+        write_config_with_plugin(&path, &ConfigOptions::default(), &[], &set, Some(&full)).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        let back = crate::config::plugin_meta::PluginMeta::from_config_toml(&body).unwrap();
+        assert_eq!(back.as_ref(), Some(&full), "round trip lost a field: {body}");
     }
 
     #[test]

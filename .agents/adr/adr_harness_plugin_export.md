@@ -603,6 +603,21 @@ C-020 and C-036, amendments of the same date.
   Chosen because a server that works for its placeholder parts, and works
   fully once its client adds expansion, beats omitting it.
 
+## Amendment 2026-10-17 — plugin author, links, license and keywords
+
+`[plugin]` in `grimoire.toml` and `[plugins.<name>]` in `marketplace.toml`
+gain the optional keys `author`, `homepage`, `repository`, `documentation`,
+`support`, `license`, `keywords`, `tags` and `category`; a declaration wins
+over the project's `[plugin]` field by field. They sit outside the
+declaration hash, so no lock goes stale. Both manifests write `author`,
+`homepage`, `repository`, `license` and `keywords` after `description` when
+set; Agent Plugins keeps its closed `author` object, and Cursor's two
+manifests omit `author.url`. The Codex `interface` block gains `category`,
+`websiteURL` and `developerName`. `grim export plugin <ref>` fills unset
+fields from the pinned manifest's annotations. Invalid values exit 65 with
+the existing manifest error. See `adr_harness_marketplace_export.md`
+(amendment 2026-10-17) for the per-harness marketplace entry.
+
 ## Links
 
 - `.agents/adr/adr_render_layout_stability.md` (D12)
@@ -624,3 +639,4 @@ C-020 and C-036, amendments of the same date.
 | 2026-09-27 | meta-orchestrator decision | D5 → option i: Agent Plugins `mcp.json` emitter (C-036, S-031); `not-yet-supported` reason removed; Agent Plugins MCP admitted per family, not gated on client `kind_support` |
 | 2026-09-27 | owner review | Amendment: `--project`, `[plugin]` in `grimoire.toml`, marketplace `project` plugins |
 | 2026-09-28 | review round 1 (R1-19) | Amendment: MCP plugin placeholders renamed per family (claude export reverses the Agent Plugins rename, export-only); other `${VAR}` in args/env values/cwd warn instead of decline; D5 bullet and Negative consequence point to it |
+| 2026-10-17 | owner review | Amendment: plugin author, links, license and keywords |
