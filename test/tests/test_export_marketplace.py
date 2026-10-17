@@ -981,10 +981,6 @@ def test_c140_hooks_only_plugin_is_65_and_writes_nothing(
     assert _written_paths(work) == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="the lock holds no hook, so a lock-backed rerun renders without the Omitted line and re-versions the tree",
-)
 def test_c140_hook_export_rerun_is_unchanged(grim_at, work: Path, registry: str, unique_repo: str) -> None:
     refs = _refs(registry, unique_repo, "a")
     make_hook(f"{unique_repo}/g", "g", tag="1")

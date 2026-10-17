@@ -749,7 +749,7 @@ mod tests {
             rules: of(ArtifactKind::Rule),
             agents: of(ArtifactKind::Agent),
             mcp: of(ArtifactKind::Mcp),
-            hooks: Vec::new(),
+            hooks: of(ArtifactKind::Hook),
             bundles: vec![],
         }
     }
@@ -1245,6 +1245,17 @@ pinned = \"{p6}\"
                     ),
                     ("three", '3', vec![entry_of("srv", ArtifactKind::Mcp, "acme/srv", 'c')]),
                 ],
+            ),
+            mkt(
+                T1,
+                vec![(
+                    "hooky",
+                    '4',
+                    vec![
+                        entry_of("a", ArtifactKind::Skill, "acme/a", 'a'),
+                        entry_of("guard", ArtifactKind::Hook, "acme/guard", 'b'),
+                    ],
+                )],
             ),
         ];
         for x in cases {

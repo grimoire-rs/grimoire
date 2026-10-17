@@ -224,13 +224,6 @@ impl MarketplaceLock {
     /// or [`LockErrorKind::ScopeMismatch`].
     pub fn from_toml_str(s: &str) -> Result<Self, LockError> {
         let raw = RawLock::parse(s)?;
-        // Export declines hooks (they need grim at run time), so a
-        // marketplace part never holds one; refuse rather than drop it.
-        if !raw.hooks.is_empty() {
-            return Err(scope_mismatch(
-                "a marketplace.lock carries no `[[hook]]` table".to_string(),
-            ));
-        }
         if !raw.bundles.is_empty() {
             return Err(scope_mismatch(
                 "a marketplace.lock carries no `[[bundle]]` table".to_string(),
@@ -300,6 +293,7 @@ impl MarketplaceLock {
             rule: Vec::new(),
             agent: Vec::new(),
             mcp: Vec::new(),
+            hook: Vec::new(),
         };
         // `plugins` iterates by name, so appending each part's name-sorted
         // lists yields `(plugin, name)` order.
@@ -319,6 +313,7 @@ impl MarketplaceLock {
                 (ArtifactKind::Rule, &part.rules, &mut view.rule),
                 (ArtifactKind::Agent, &part.agents, &mut view.agent),
                 (ArtifactKind::Mcp, &part.mcp, &mut view.mcp),
+                (ArtifactKind::Hook, &part.hooks, &mut view.hook),
             ] {
                 let mut sorted: Vec<&LockedArtifact> = list.iter().collect();
                 sorted.sort_by(|a, b| a.name.cmp(&b.name));
@@ -572,6 +567,10 @@ struct MarketplaceView<'a> {
     agent: Vec<ScopedArtifactView<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     mcp: Vec<ScopedArtifactView<'a>>,
+    /// Pinned so a lock-backed rerun still knows the member and re-derives
+    /// its omission; export never fetches or renders it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    hook: Vec<ScopedArtifactView<'a>>,
 }
 
 /// One `[[plugin]]` row on the wire.
