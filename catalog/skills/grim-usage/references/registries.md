@@ -684,7 +684,7 @@ value verbatim, which `repo` does not carry — `repo` names the artifact's own
 registry host, and one index source serves rows from many hosts.
 
 Beside `items`, the JSON document carries a `sources` array — one
-`{alias, locator, ok, error}` object per browsed source, in declaration
+`{alias, locator, ok, error, capped}` object per browsed source, in declaration
 order. A source whose refresh fails (unreachable, 5xx, a body over the size
 cap, an unparsable file) serves its cached catalog when one exists, and
 degrades to an empty group when none does, so the reachable ones still
@@ -717,7 +717,10 @@ the relevance cutoff) before `--offset` and `--limit` cut the list, and
 when `--offset` or `--limit` removed rows, or when an `oci` source's listing
 was capped at build time and `total` is only a lower bound. `items.length < total` means the
 page is partial, and an `oci` cap may apply as well. Branch on `truncated`
-before treating `items` as the whole answer.
+before treating `items` as the whole answer. `truncated` is also true on every
+page past the first, so tell a cap from an ordinary page with
+`sources[].capped`, a boolean on every source that is `true` when its listing
+was capped, whatever the offset.
 
 To read every page, loop `offset += items.length` while `offset < total`
 (and stop on an empty `items`). No field echoes the offset. Pages of any
