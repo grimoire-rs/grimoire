@@ -10,8 +10,7 @@
 //! representative tag. A deprecated row carries a comma-suffixed `deprecated`
 //! in its `Status` cell (e.g. `installed,deprecated`).
 //!
-//! JSON format: `{"items": [...], "sources": [...], "total": N,
-//! "truncated": bool}` where each item is a
+//! JSON format: `{items, sources, total, truncated}` where each item is a
 //! `{kind, repo, source, summary, description, version, latest_tag,
 //! repository, revision, created, deprecated, replaced_by, rating,
 //! downloads, status}` object (uniform `items` envelope, per
@@ -35,11 +34,6 @@
 //! reading only stdout can tell "no results" from "some of your registries
 //! did not load". Its `alias`/`locator` are the same two halves each item's
 //! own `source` carries, so rows join to sources directly.
-//!
-//! `total` is the always-present count of every matching row, taken after the
-//! browse filter, deprecated visibility, query and relevance cutoff but before
-//! `--limit`. `truncated` is `true` when `items` is not the complete answer: a
-//! `--limit` cut it, or a source's listing was capped when it was built.
 
 use std::io::{self, Write};
 
@@ -76,13 +70,14 @@ pub struct SearchSource {
 
 /// One browsed source and whether its catalog loaded.
 ///
-/// A source that fails to load degrades to an empty group inside
-/// [`crate::catalog::load_catalog`] — the browse never fails as a whole, and
-/// the exit code stays 0. That is right for the CLI and wrong for a consumer
-/// reading only stdout: before this, the sole trace was a `tracing::warn!` on
-/// stderr, so a partial browse and an empty catalog produced the same
-/// document (grimoire-rs/grimoire#108). Naming every source and its status
-/// makes "2 of 3 registries unavailable" readable from the document alone.
+/// A source whose refresh fails serves its cached catalog, or degrades to an
+/// empty group when nothing is cached, inside [`crate::catalog::load_catalog`]
+/// — the browse never fails as a whole, and the exit code stays 0. That is
+/// right for the CLI and wrong for a consumer reading only stdout: before
+/// this, the sole trace was a `tracing::warn!` on stderr, so a partial browse
+/// and an empty catalog produced the same document (grimoire-rs/grimoire#108).
+/// Naming every source and its status makes "2 of 3 registries unavailable"
+/// readable from the document alone.
 ///
 /// `alias` and `locator` are deliberately the same two halves as
 /// [`SearchSource`], which rides every row: a consumer joins `items[].source`
@@ -95,8 +90,9 @@ pub struct SearchSourceStatus {
     /// The entry's locator, byte-identical to the configured `[[registries]]`
     /// value it was resolved from.
     pub locator: String,
-    /// Whether this source's catalog loaded. `false` means its rows are
-    /// missing from `items` — not that it published nothing.
+    /// Whether this source's catalog loaded. `false` means the refresh
+    /// failed: its cached rows are in `items` when a cache existed and absent
+    /// when none did — never that it published nothing.
     pub ok: bool,
     /// Why the load failed, when it did; `None` on a source that loaded.
     /// The same message the `catalog for source '<x>' unavailable` warning
@@ -262,7 +258,8 @@ pub struct SearchReport {
     /// *older grim*, which is exactly the distinction the field exists to
     /// make.
     sources: Vec<SearchSourceStatus>,
-    /// Every matching row, counted before `--limit` cut `items`.
+    /// Every matching row, counted after the browse filter, deprecated
+    /// visibility, query and relevance cutoff but before `--limit` cut `items`.
     total: usize,
     /// `true` when `items` is not the complete answer: `--limit` cut it, or a
     /// source's listing was capped at build time.
@@ -286,6 +283,10 @@ impl SearchReport {
     /// Record that `items` is a cut or capped view of `total` matches.
     #[must_use]
     pub fn with_completeness(mut self, total: usize, truncated: bool) -> Self {
+        debug_assert!(
+            total >= self.items.len(),
+            "total counts rows before the cut, never fewer than items"
+        );
         self.total = total;
         self.truncated = truncated;
         self

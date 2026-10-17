@@ -58,7 +58,7 @@ impl GrimMcpServer {
     /// query and annotated with each repository's install status. Returns the
     /// same JSON payload as `grim search --format json`.
     #[tool(
-        description = "Search the configured Grimoire registries for installable skills, rules, agents, and bundles. Returns a JSON object with an `items` array of matches with kind, repo, summary, version, and install status. Results may be narrowed by each registry's configured browse filter; a package absent from these results can still be fetched or installed by direct reference."
+        description = "Search the configured Grimoire registries for installable skills, rules, agents, and bundles. Returns a JSON object with an `items` array of matches with kind, repo, summary, version, and install status, plus `total` (every match, counted before `limit`) and `truncated` (true when `items` is not the complete answer). Matches are ranked by relevance when a `query` is given; without one the whole catalog is listed unranked, in registry order. Set `limit` to return only the first N of those results. Results may be narrowed by each registry's configured browse filter; a package absent from these results can still be fetched or installed by direct reference."
     )]
     async fn grim_search(&self, Parameters(args): Parameters<SearchToolArgs>) -> Result<String, ErrorData> {
         let search_args = crate::command::search::SearchArgs {
@@ -68,6 +68,7 @@ impl GrimMcpServer {
             // `grim search`. Adding a sort param is an additive follow-up,
             // not a behaviour this tool changes on its own.
             sort: None,
+            limit: args.limit,
             refresh: args.refresh.unwrap_or(false),
             // No tool param: defer to the resolved scope's config default
             // (`options.show_deprecated`) for whether deprecated rows show.
@@ -246,6 +247,30 @@ mod tests {
             "grim_search description must warn that results may be narrowed by a registry \
              browse filter and that an excluded package still resolves by direct reference: \
              {description:?}"
+        );
+    }
+
+    /// An agent reading only the tool schema must learn that `limit` caps the
+    /// rows, that `total` still counts every match, and that an unqueried
+    /// browse has no relevance order for `limit` to keep the best of.
+    #[test]
+    fn grim_search_description_names_limit_and_total_without_overstating_the_browse() {
+        let router = build_router(false);
+        let description = router
+            .get("grim_search")
+            .and_then(|tool| tool.description.as_deref())
+            .expect("grim_search must be routed with a description");
+        assert!(
+            description.contains("`limit`") && description.contains("`total`"),
+            "grim_search description must name `limit` and `total`: {description:?}"
+        );
+        assert!(
+            description.contains("without one the whole catalog is listed unranked"),
+            "the description must say an unqueried browse is not ranked: {description:?}"
+        );
+        assert!(
+            !description.contains("best N"),
+            "`limit` keeps the best matches only under a query: {description:?}"
         );
     }
 }

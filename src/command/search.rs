@@ -39,6 +39,7 @@
 
 use crate::config::defaults;
 use clap::Args;
+use std::num::NonZeroUsize;
 
 use crate::api::search_report::{
     SearchDownloadVersion, SearchDownloads, SearchEntry, SearchRating, SearchReport, SearchSource, SearchSourceStatus,
@@ -87,6 +88,13 @@ pub struct SearchArgs {
     /// otherwise).
     #[arg(long, value_name = "ORDER")]
     pub sort: Option<crate::catalog::SortMode>,
+
+    /// Cap the rows printed to the first N of the ranked (or `--sort`ed)
+    /// result; N must be at least 1. `total` in the JSON output still counts
+    /// every match, and `truncated` says whether `items` is the complete
+    /// answer. Omitted, every match is listed.
+    #[arg(long, value_name = "N")]
+    pub limit: Option<NonZeroUsize>,
 
     /// Force a catalog rebuild even if the cache is fresh.
     #[arg(long)]
@@ -246,6 +254,7 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
         tracing::warn!("{notice}");
     }
     order_results(&mut scored, args.sort, &parsed);
+    let (total, truncated) = apply_limit(&mut scored, args.limit, capped);
 
     let entries: Vec<SearchEntry> = scored
         .into_iter()
@@ -295,9 +304,8 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
         );
     }
 
-    let total = entries.len();
     Ok((
-        SearchReport::new(entries, sources).with_completeness(total, capped),
+        SearchReport::new(entries, sources).with_completeness(total, truncated),
         ExitCode::Success,
     ))
 }
@@ -343,6 +351,21 @@ fn order_results(
         Some(mode) => sort_by_mode(scored, mode),
         None => rank_by_relevance(scored, query),
     }
+}
+
+/// Cut the ordered rows to `--limit`, returning `(total, truncated)`.
+///
+/// `total` is the row count before the cut — the ranked, sorted list the
+/// browse filter, deprecated visibility, query and relevance cutoff left.
+/// `truncated` is `true` when the rows are not the complete answer: the limit
+/// removed some, or `capped` says a source's listing hit its build-time cap.
+/// The cut comes after [`order_results`] so `--limit` keeps the best rows.
+fn apply_limit<T>(rows: &mut Vec<T>, limit: Option<NonZeroUsize>, capped: bool) -> (usize, bool) {
+    let total = rows.len();
+    if let Some(limit) = limit {
+        rows.truncate(limit.get());
+    }
+    (total, capped || rows.len() < total)
 }
 
 /// Sort the flattened rows by an explicit `--sort` mode, in place.
@@ -607,6 +630,7 @@ mod tests {
         SearchArgs {
             query: None,
             sort: None,
+            limit: None,
             refresh: false,
             show_deprecated: false,
             registry: Vec::new(),
@@ -984,6 +1008,79 @@ mod tests {
         assert!(
             collapsed.contains("Given together with a query this replaces relevance ranking"),
             "--sort must say it overrides relevance; got:\n{collapsed}"
+        );
+    }
+
+    fn limit(n: usize) -> Option<std::num::NonZeroUsize> {
+        std::num::NonZeroUsize::new(n)
+    }
+
+    #[test]
+    fn total_counts_every_row_before_the_limit() {
+        let mut rows = vec![1, 2, 3, 4, 5];
+        let (total, truncated) = apply_limit(&mut rows, limit(2), false);
+        assert_eq!((total, truncated), (5, true));
+        assert_eq!(rows, vec![1, 2]);
+
+        // A limit at or above the row count cuts nothing and is not truncation.
+        let mut rows = vec![1, 2, 3];
+        assert_eq!(apply_limit(&mut rows, limit(3), false), (3, false));
+        assert_eq!(apply_limit(&mut rows, limit(9), false), (3, false));
+        assert_eq!(rows, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn limit_applies_after_the_order_is_settled() {
+        // The rows arrive in the opposite order to their ratings, so a limit
+        // applied before the sort would keep the first two arrivals instead of
+        // the two most-upvoted.
+        let mut scored = vec![
+            scored_row(0, "ghcr.io", "acme/low", Some(1), None),
+            scored_row(0, "ghcr.io", "acme/mid", Some(5), None),
+            scored_row(0, "ghcr.io", "acme/high", Some(9), None),
+        ];
+        order_results(&mut scored, Some(SortMode::Rating), &SearchQuery::parse(""));
+        let (total, truncated) = apply_limit(&mut scored, limit(2), false);
+        let kept: Vec<String> = scored.into_iter().map(|(_, (_, r))| r.repo()).collect();
+        assert_eq!(kept, vec!["ghcr.io/acme/high", "ghcr.io/acme/mid"]);
+        assert_eq!((total, truncated), (3, true));
+    }
+
+    #[test]
+    fn a_capped_source_truncates_even_without_a_limit() {
+        let mut rows = vec![1, 2, 3];
+        assert_eq!(apply_limit(&mut rows, None, true), (3, true));
+        assert_eq!(apply_limit(&mut rows, None, false), (3, false));
+        assert_eq!(rows, vec![1, 2, 3], "no limit leaves every row in place");
+    }
+
+    #[test]
+    fn limit_flag_rejects_zero_and_non_integers() {
+        #[derive(clap::Parser)]
+        struct Harness {
+            #[command(flatten)]
+            args: SearchArgs,
+        }
+        use clap::Parser as _;
+
+        let parsed = Harness::try_parse_from(["search", "--limit", "3"]).expect("3 is a valid limit");
+        assert_eq!(parsed.args.limit, limit(3));
+        assert_eq!(Harness::try_parse_from(["search"]).unwrap().args.limit, None);
+        for bad in ["0", "-1", "many", "1.5"] {
+            assert!(
+                Harness::try_parse_from(["search", "--limit", bad]).is_err(),
+                "--limit {bad} must be a usage error"
+            );
+        }
+    }
+
+    #[test]
+    fn search_help_documents_limit_and_the_json_total() {
+        let collapsed = search_help().split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(collapsed.contains("--limit <N>"), "got:\n{collapsed}");
+        assert!(
+            collapsed.contains("`total` in the JSON output still counts every match"),
+            "--limit must say it caps the rows printed and not the JSON total; got:\n{collapsed}"
         );
     }
 
