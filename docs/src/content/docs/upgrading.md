@@ -463,10 +463,11 @@ you add the keys.
   the next command instead of serving it until the one-hour TTL expires. If
   that rebuild fails, it serves the capped rows with a warning.
   `grim search --refresh` forces the rebuild.
-- **`grim search` gains `total`, `truncated` and `--limit`.** The search
-  document carries `total` and `truncated` beside `items` and `sources`. The
-  `--limit` flag cuts the printed rows, and the MCP `grim_search` tool takes
-  the same `limit`. All three are additive.
+- **`grim search` gains `total`, `truncated`, `--limit` and `--offset`.** The
+  search document carries `total` and `truncated` beside `items` and
+  `sources`. The `--limit` flag cuts the printed rows and `--offset` skips
+  rows first, so a script can read every page. The MCP `grim_search` tool
+  takes the same `limit` and `offset`. All four are additive.
 - **A failed refresh serves the cached catalog.** A source that was
   unreachable, answered `5xx`, sent a body over the size cap or sent an
   unparsable file used to return an empty group. When a cached catalog
