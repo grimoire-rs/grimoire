@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 
 use crate::lock::advisory_lock::AdvisoryFileLock;
-use crate::oci::access::OciAccess;
+use crate::oci::access::{CATALOG_LIST_CEILING, OciAccess};
 use crate::oci::{Identifier, PinnedIdentifier};
 use crate::store::atomic_write::atomic_write;
 
@@ -909,7 +909,9 @@ impl Catalog {
     /// When the post-prefilter candidate list exceeds the cap the window is
     /// only a prefix of the matches; the build records that on
     /// [`Self::truncated`] so a non-empty query can warn that results past the
-    /// cap are not shown.
+    /// cap are not shown. The same flag is set when the `_catalog` walk itself
+    /// stopped at [`CATALOG_LIST_CEILING`] before the namespace ended, since
+    /// repositories past it were never listed.
     async fn build(
         registry: &str,
         scope: &str,
@@ -925,6 +927,10 @@ impl Catalog {
         // identifiers parse `registry/repository`).
         let (host, namespace) = split_host_namespace(registry);
         let repos = access.list_catalog(registry).await?;
+        let walk_cut_short = listing_stops_inside_namespace(&repos, namespace);
+        if walk_cut_short {
+            tracing::warn!("{}", ceiling_warning(host, registry));
+        }
         // Namespace scope (no network) + cheap name prefilter, then the hard
         // cap. Take one past the cap so an overflow is detectable without
         // materializing a (potentially 60k-repo) list.
@@ -936,7 +942,7 @@ impl Catalog {
             .collect();
         // More candidates than the cap ⇒ the window is a prefix; drop the
         // probe element and flag the build as truncated.
-        let truncated = selected.len() > MAX_CATALOG_REPOS;
+        let truncated = selected.len() > MAX_CATALOG_REPOS || walk_cut_short;
         selected.truncate(MAX_CATALOG_REPOS);
 
         let mut entries = BTreeMap::new();
@@ -1099,6 +1105,34 @@ fn split_host_namespace(registry: &str) -> (&str, Option<&str>) {
         Some((host, ns)) if !ns.is_empty() => (host, Some(ns)),
         _ => (registry, None),
     }
+}
+
+/// Whether a `_catalog` listing that hit [`CATALOG_LIST_CEILING`] may be
+/// missing repositories of `namespace`.
+///
+/// The registry lists repositories in lexicographic order, so a namespace is
+/// one contiguous run. A full-length listing whose last repository sorts past
+/// that run saw all of it; one that ends before or inside the run did not, and
+/// without this the namespace would read as "nothing published" with no
+/// truncation flag. The run `ns/…` ends just before `ns0` (`0` is the byte
+/// after `/`); a sibling such as `ns-tools` or `ns.io` sorts before `ns/`, so
+/// it still leaves the run unlisted. With no namespace the whole host is the
+/// scope, so any full-length listing is cut short.
+fn listing_stops_inside_namespace(repos: &[String], namespace: Option<&str>) -> bool {
+    if repos.len() < CATALOG_LIST_CEILING {
+        return false;
+    }
+    let (Some(ns), Some(last)) = (namespace, repos.last()) else {
+        return true;
+    };
+    last.as_str() < format!("{ns}0").as_str()
+}
+
+/// The warning for a `_catalog` listing cut short at [`CATALOG_LIST_CEILING`].
+fn ceiling_warning(host: &str, registry: &str) -> String {
+    format!(
+        "registry '{host}' lists at least {CATALOG_LIST_CEILING} repositories and the listing stops at that ceiling; the catalog for '{registry}' may be missing repositories past it"
+    )
 }
 
 /// Pick the representative tag from `tags`: prefer `latest`, else the
@@ -2238,6 +2272,80 @@ mod tests {
             registry: reg.to_string(),
             blob_pulled: std::sync::Arc::new(Mutex::new(false)),
         }
+    }
+
+    /// A registry listing `repos` verbatim, none of them with a manifest, so
+    /// every entry the build keeps is a bare record.
+    fn listing_only(repos: Vec<String>, registry: &str) -> std::sync::Arc<dyn OciAccess> {
+        std::sync::Arc::new(CatalogRegistry {
+            inner: MemoryRegistry::new(),
+            repos,
+            registry: registry.to_string(),
+            blob_pulled: std::sync::Arc::new(Mutex::new(false)),
+        })
+    }
+
+    fn names(prefix: &str, n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("{prefix}/pkg-{i:04}")).collect()
+    }
+
+    #[test]
+    fn ceiling_warning_names_the_8000_repository_ceiling() {
+        let warning = ceiling_warning("localhost:5000", "localhost:5000/zzz");
+        assert!(warning.contains("8000"), "{warning}");
+        assert!(warning.contains("localhost:5000/zzz"), "{warning}");
+    }
+
+    #[test]
+    fn a_listing_cut_short_before_or_inside_the_namespace_is_flagged() {
+        let full = |last: &str| {
+            let mut v = names("aaa", CATALOG_LIST_CEILING - 1);
+            v.push(last.to_string());
+            v
+        };
+        // Short of the ceiling the listing is whole, whatever the namespace.
+        assert!(!listing_stops_inside_namespace(&names("aaa", 10), Some("zzz")));
+        // At the ceiling: ends before, inside, or past the namespace's run.
+        assert!(listing_stops_inside_namespace(&full("aaa/z"), Some("zzz")));
+        assert!(listing_stops_inside_namespace(&full("zzz/a"), Some("zzz")));
+        assert!(listing_stops_inside_namespace(&full("zzz"), Some("zzz")));
+        // A sibling sorting between `zzz` and `zzz/` (`-` and `.` precede `/`)
+        // still leaves the whole run unlisted.
+        assert!(listing_stops_inside_namespace(&full("zzz-tools"), Some("zzz")));
+        assert!(listing_stops_inside_namespace(&full("zzz.io"), Some("zzz")));
+        assert!(!listing_stops_inside_namespace(&full("zzz0"), Some("zzz")));
+        assert!(!listing_stops_inside_namespace(&full("zzzz/a"), Some("zzz")));
+        assert!(!listing_stops_inside_namespace(&full("bbb/a"), Some("aaa")));
+        // No namespace: the whole host is the scope.
+        assert!(listing_stops_inside_namespace(&full("zzz/a"), None));
+    }
+
+    #[tokio::test]
+    async fn a_walk_that_ends_before_the_namespace_marks_the_build_truncated() {
+        // Every listed repository sorts before `zzz`, so the namespace is
+        // empty here because the walk stopped, not because nothing is published.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let reg = listing_only(names("aaa", CATALOG_LIST_CEILING), "localhost:5000/zzz");
+        let cat = Catalog::load_or_refresh(&path, "localhost:5000/zzz", "", &reg, false, true)
+            .await
+            .unwrap();
+        assert_eq!(cat.entries().count(), 0);
+        assert!(cat.truncated(), "an empty namespace past the ceiling must say so");
+    }
+
+    #[tokio::test]
+    async fn a_full_walk_that_passed_the_namespace_is_not_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let mut repos = names("aaa", 100);
+        repos.extend(names("bbb", CATALOG_LIST_CEILING - 100));
+        let reg = listing_only(repos, "localhost:5000/aaa");
+        let cat = Catalog::load_or_refresh(&path, "localhost:5000/aaa", "", &reg, false, true)
+            .await
+            .unwrap();
+        assert_eq!(cat.entries().count(), 100, "the whole namespace was listed");
+        assert!(!cat.truncated(), "the walk went past the namespace, so it is complete");
     }
 
     #[tokio::test]

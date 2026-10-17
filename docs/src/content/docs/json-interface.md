@@ -241,7 +241,9 @@ bounds fails its fetch with `ok: false` instead.
 `truncated` is also `true` on every page past the first, so on its own it does
 not say whether an `oci` cap applies. Read `sources[].capped` for that: it is
 `true` on every page, whatever the offset, for each source whose listing was
-capped.
+capped. A `_catalog` walk that stops at its 8000-repository ceiling before
+the source's namespace ends sets the same flag, because the repositories past
+it were never listed.
 
 Both fields are present on every document. A query that matches nothing
 reports `total: 0`. Its `truncated` is still `true` when an `oci` source's

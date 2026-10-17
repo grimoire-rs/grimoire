@@ -27,6 +27,13 @@ use super::manifest::OciManifest;
 use super::{Digest, Identifier, PinnedIdentifier};
 use error::AccessError;
 
+/// The most repositories [`OciAccess::list_catalog`] returns for one registry.
+///
+/// A registry can advertise tens of thousands, so the `_catalog` walk is
+/// bounded: 8 pages of 1000, host-wide, before any namespace filter runs. A
+/// listing this long may be a prefix of what the registry holds.
+pub const CATALOG_LIST_CEILING: usize = 8000;
+
 /// Cache/source routing policy, derived once per invocation from the
 /// environment (and the equivalent CLI flags).
 ///
@@ -104,6 +111,9 @@ pub trait OciAccess: Send + Sync {
 
     /// List the repository catalog for `registry`. An unsupported or
     /// missing catalog endpoint yields an empty list, not an error.
+    ///
+    /// The walk stops at [`CATALOG_LIST_CEILING`] repositories host-wide; a
+    /// list that long is a prefix of the registry, not all of it.
     async fn list_catalog(&self, registry: &str) -> Result<Vec<String>, AccessError>;
 
     /// Push a blob into `repo`'s registry, returning its content digest.

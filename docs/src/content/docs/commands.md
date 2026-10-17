@@ -1264,7 +1264,10 @@ catalog for source 'acme' capped at 500 repositories; a narrower query cannot re
 ```
 
 In JSON the source reads `capped: true` in `sources` on every page, which a
-paging script can branch on.
+paging script can branch on. The `_catalog` walk itself also stops at 8000
+repositories host-wide, before the namespace filter. When that ceiling ends
+the walk before an `oci` locator's namespace does, the source reads
+`capped: true` too, and a build-time warning names the ceiling.
 
 A cached index listing that an earlier grim capped at 500 entries is rebuilt
 on the next command, not served until its TTL expires. If that rebuild
