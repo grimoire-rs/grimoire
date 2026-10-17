@@ -112,7 +112,7 @@ values, while `search` reports a catalog row whose manifest may declare
 no kind at all, in which case `kind` is `null`.
 
 `search`'s `items` can be short for five reasons, and the report names
-three. [`total` and `truncated`](#search-total) say when `--limit` cut the
+three. [`total` and `truncated`](#search-total) say when `--offset` or `--limit` cut the
 list or an `oci` source's listing hit the 500-repository cap. The
 [`sources` array](#search-sources) names a source whose catalog failed to
 refresh.
@@ -221,15 +221,16 @@ the whole answer.
 
 `total` is an integer: every row that matched, counted **after** the browse
 filter, deprecated visibility, the query and the relevance cutoff, and
-**before** `--limit`. `truncated` is a boolean, `true` when `items` is not
-the complete answer. Two causes set it:
+**before** `--offset` and `--limit`. `truncated` is a boolean, `true` when
+`items` is not the complete answer. Three causes set it:
 
+- `--offset` skipped rows, so the page starts past the first match.
 - `--limit` cut the list, so `items.length < total`.
 - An `oci` source's `_catalog` walk hit the 500-repository cap when its
   listing was built. Rows past the cap were never seen, so `total` is then a
   lower bound.
 
-`items.length < total` means `--limit` cut the list. An `oci` cap may apply
+`items.length < total` means the page is partial. An `oci` cap may apply
 at the same time, which a capped-source warning on stderr reports. An `index`
 source is never truncated. It lists every entry, and an index past the abuse
 bounds fails its fetch with `ok: false` instead.
@@ -237,6 +238,46 @@ bounds fails its fetch with `ok: false` instead.
 Both fields are present on every document. A query that matches nothing
 reports `total: 0`. Its `truncated` is still `true` when an `oci` source's
 listing was capped, because rows past the cap were never seen.
+
+#### Paging `search` results {#search-paging}
+
+`--offset <N>` skips the first `N` rows of the ranked or `--sort`ed list.
+`--limit <M>` then keeps at most `M` of what is left. The MCP `grim_search`
+tool takes the same two arguments as `offset` and `limit`. The offset is not
+echoed back, because the caller sent it. No field is added to the document.
+
+`items` holds rows `offset` to `offset + items.length`, and more rows remain
+while `offset + items.length < total`. An offset at or past `total` returns
+`items: []` with `total` intact and exit `0`. It is not an error.
+
+```bash
+offset=0 offline=
+while :; do
+  page=$(grim $offline --format json search --offset "$offset" --limit 100 review) || exit 1
+  offline=--offline  # later pages read the cache the first call built
+  n=$(jq '.items | length' <<<"$page")
+  # …use .items…
+  offset=$((offset + n))
+  [ "$n" -gt 0 ] && [ "$offset" -lt "$(jq .total <<<"$page")" ] || break
+done
+```
+
+A failed call exits the script instead of reading as the last page.
+
+With one unchanged catalog, pages concatenate to the unpaged list exactly,
+with no gaps and no duplicates. Equal relevance scores break ties on
+registry-declaration order, then the fully-qualified reference. The order
+never depends on how the catalog was read.
+
+Two things can still shift pages between calls. A cache refresh can add or
+remove rows, so pass `--offline` on every call after the first. Even then,
+another grim process refreshing the shared cache, or installing or
+uninstalling a deprecated artifact, can change the list. The loop stops on an
+empty `items` in case the list shrank under you.
+
+The `--offline` advice is CLI-only, because `grim_search` has no offline
+argument. An MCP caller should page promptly: a catalog refresh between two
+calls can shift the pages.
 
 #### The `search` rating object {#search-rating}
 

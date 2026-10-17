@@ -1196,14 +1196,32 @@ first value given is primary.
 short-id resolution default. It does not restrict the browse set when
 `[[registries]]` is configured.
 
-`--limit <N>` prints at most the first `N` rows. It cuts the list after
+`--limit <N>` prints at most `N` rows. It cuts the list after
 ranking and `--sort`, so the rows kept are the first `N` in result order. `N` is a
 positive integer. `--limit 0` is a usage error that exits `64`. Omitted,
 every match is printed.
 
+`--offset <N>` skips the first `N` rows before `--limit` applies, so
+`--offset 100 --limit 100` prints rows 101 to 200. `N` is a non-negative integer
+and defaults to `0`. A negative or non-numeric `N` is a usage error that exits
+`64`. An offset at or past the last row prints only the table header, adds a
+note on stderr and still exits `0`.
+
 The JSON `total` field still counts every match, so a script can tell a cut
 list from a complete one. See [the `total` and `truncated`
-fields](./json-interface.md#search-total).
+fields](./json-interface.md#search-total). To read every page, follow the
+[paging recipe][json-search-paging].
+
+In plain output, a partial page adds one line on stderr, after the table. It
+names the row range, the total and, while rows remain, the next offset:
+
+```text
+showing 101-200 of 600; next page: --offset 200
+```
+
+The last page reads `showing 501-600 of 600` with no next offset. An offset
+past the end reads `no rows at --offset 700; 600 match in total`. A complete
+page prints no extra line, and neither does `--format json`.
 
 A `[[registries]]` entry carrying an `include` / `exclude`
 [browse filter](./configuration.md#browse-filters) contributes only the
@@ -1328,12 +1346,13 @@ is served with `ok: true`.
 Full contract: [the `sources` array](./json-interface.md#search-sources).
 
 Two more always-present siblings say whether `items` is the whole answer.
-`total` counts every matching row before `--limit` cut the list. `truncated`
-is `true` when `items` is not complete: `--limit` cut it, or an `oci`
-source's listing was capped when it was built and `total` is a lower bound.
-`items.length < total` means `--limit` cut the list, and an `oci` cap may
-apply as well, which a capped-source warning on stderr reports. Full
-contract: [the `total` and `truncated` fields](./json-interface.md#search-total).
+`total` counts every matching row before `--offset` and `--limit` cut the
+list. `truncated` is `true` when `items` is not complete: `--offset` or
+`--limit` cut it, or an `oci` source's listing was capped when it was built
+and `total` is a lower bound. `items.length < total` means the page is partial,
+and an `oci` cap may apply as well, which a capped-source warning on stderr
+reports. Full contract: [the `total` and `truncated`
+fields](./json-interface.md#search-total).
 
 A [deprecated](./publishing.md#metadata-deprecated) entry is **hidden by
 default** — unless it is installed in the active scope (directly or via a
@@ -1353,6 +1372,7 @@ grim search review
 grim search --show-deprecated review
 grim search --refresh --registry ghcr.io/acme
 grim search --sort rating --limit 10
+grim search --sort rating --limit 10 --offset 10
 ```
 
 ### Ordering the results (--sort) {#search-sort}
@@ -2946,7 +2966,7 @@ down when the client closes stdin (EOF).
 
 | Tool | Description | Gate |
 |------|-------------|------|
-| `grim_search` | Browse/search the resolved scope's registries (no registry override — the configured set is the boundary). Each source's [browse filter](./configuration.md#browse-filters) narrows the results, exactly as for `grim search`; the tool's own description says so, and says that an absent package is still fetchable and installable by direct reference — a filter is a view, never a boundary. Args: `query?`, `refresh?`, `limit?` (positive integer, the same cap as `grim search --limit`; the payload still carries `total` and `truncated`), scope. Same shape as `grim search --format json` (not byte-identical — see [MCP parity][json-mcp-parity]). | always |
+| `grim_search` | Browse/search the resolved scope's registries (no registry override — the configured set is the boundary). Each source's [browse filter](./configuration.md#browse-filters) narrows the results, exactly as for `grim search`; the tool's own description says so, and says that an absent package is still fetchable and installable by direct reference — a filter is a view, never a boundary. Args: `query?`, `refresh?`, `limit?` (positive integer, the same cap as `grim search --limit`), `offset?` (non-negative integer, the same skip as `grim search --offset`; a negative or non-integer value is an invalid-params error), scope. The payload still carries `total` and `truncated`; page with the [recipe][json-search-paging]. Same shape as `grim search --format json` (not byte-identical — see [MCP parity][json-mcp-parity]). | always |
 | `grim_status` | Install status of every declared artifact in the requested scope. `check` (optional, default `false`) re-checks the live catalog for deprecation/replacement and re-resolves update availability — same semantics as CLI `grim status --check` (network read; the report's `checked` field says whether it ran). Args: `check?`, scope. Same shape as `grim status --format json` (not byte-identical — see [MCP parity][json-mcp-parity]). | always |
 | `grim_fetch` | Return an artifact's content in the tool result — no install. Canonical bytes by default; `vendor` (any supported client name — see the [client compatibility matrix][clients-matrix]) returns that client's projection; `path` fetches one support file (base64 with `encoding: "base64"` for a binary file); a `files` listing is always included. `description` fetches the repository's [description companion](./publishing.md#description-companion) instead (every member inline); `digest_only` resolves to `{ref, digest}` with no download and composes with `description` to probe the companion tag. Content caps at 256 KiB (truncated content carries a marker); layers over 8 MiB are refused before download, and a registry that streams more bytes than its declared layer size aborts mid-transfer into a data error rather than buffering an unbounded body. Args: `ref`, `vendor?`, `path?`, `description?`, `digest_only?`, scope. | always |
 | `grim_describe` | Report an artifact's manifest-level metadata — kind, curated annotations, tags, `has_description`, and the verbatim annotation map — without downloading its content. Same shape as `grim describe --format json`. Args: `ref`, scope. | always |
@@ -2996,6 +3016,7 @@ registers the same entry — in every detected client, not just Claude Code
 [options-tui]: ./configuration.md#options-tui
 [plugin-metadata]: ./configuration.md#plugin-metadata
 [json-mcp-parity]: ./json-interface.md#mcp-parity
+[json-search-paging]: ./json-interface.md#search-paging
 [json-broken-pipe]: ./json-interface.md#broken-pipe
 [json-shapes-items]: ./json-interface.md#shapes-items
 [path-source-trust]: ./stability.md#limitations-path-source-trust

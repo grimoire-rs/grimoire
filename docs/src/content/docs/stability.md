@@ -120,7 +120,7 @@ array][json-sources].
 
 A third instance is the same shape again. `grim search` gained `total`
 and `truncated` beside `items` and `sources`, so a consumer can tell a
-`--limit` cut or a capped `oci` listing from a complete answer. Both are
+`--offset` or `--limit` cut or a capped `oci` listing from a complete answer. Both are
 always present, so a pre-existing client that ignores unknown keys is
 unaffected. See [the `total` and
 `truncated` fields][json-total].
