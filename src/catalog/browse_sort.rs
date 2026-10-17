@@ -3,9 +3,12 @@
 
 //! Browse ordering shared by `grim search --sort` and `grim tui --sort`.
 //!
-//! One comparator, four modes, and a **total** order in every one of them:
-//! the last tiebreak is always the fully-qualified reference, which is
-//! unique, so no two distinct rows ever compare equal. A browse order that
+//! One comparator, four modes, and a **total** order in every one of them
+//! over the rows of one source: the last tiebreak is always the
+//! fully-qualified reference, which is unique within a source, so no two
+//! distinct rows of it compare equal. The same reference can be served by
+//! two sources, so a caller browsing several adds the source's declaration
+//! position as its own final key (`grim search` does). A browse order that
 //! is not total is a browse order that reshuffles between runs and between
 //! sort implementations — and no test asserting "the top row is X" catches
 //! it.
@@ -129,7 +132,8 @@ pub struct SortKey {
     updated: Option<i64>,
     /// Case-folded leaf name (the segment after the last `/`).
     name: String,
-    /// The fully-qualified reference — unique, so it makes every mode total.
+    /// The fully-qualified reference — unique within a source, so it makes
+    /// every mode total over one source's rows.
     reference: String,
 }
 
