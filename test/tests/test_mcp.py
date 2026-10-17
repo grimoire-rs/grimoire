@@ -17,6 +17,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from src.helpers import make_artifact, make_description
+from src.index_fixture import index_config, package, write_all_json
 from src.registry import REGISTRY_HOST
 from src.runner import GrimRunner
 
@@ -783,3 +784,29 @@ def test_mcp_search_partial_registry_failure_degrades(
     assert any("mcp-reachable" in repo for repo in repos), (
         f"grim_search must still surface the reachable registry's artifact, got repos: {repos}"
     )
+
+
+def test_mcp_search_limit_matches_cli_json(
+    grim_at: Callable[[Path], GrimRunner], project_dir: Path, http_index
+) -> None:
+    """``grim_search`` takes the CLI's ``--limit``: it caps ``items`` and
+    reports ``total``/``truncated`` exactly as ``grim search --limit`` does."""
+    root, base = http_index
+    write_all_json(
+        root,
+        [
+            package(f"pkg-{i}", "skill", f"ghcr.io/acme/skills/pkg-{i}", "Helper")
+            for i in range(3)
+        ],
+    )
+    index_config(project_dir, base)
+    runner = grim_at(project_dir)
+
+    call = _call_search(runner, project_dir, {"refresh": True, "limit": 1})
+    assert call["isError"] is False, f"grim_search with a limit must not error, got: {call!r}"
+    mcp_payload = json.loads(call["content"][0]["text"])
+
+    assert len(mcp_payload["items"]) == 1, f"limit must cap items; got {mcp_payload['items']}"
+    assert mcp_payload["total"] == 3
+    assert mcp_payload["truncated"] is True
+    assert mcp_payload == runner.json("search", "--refresh", "--limit", "1")

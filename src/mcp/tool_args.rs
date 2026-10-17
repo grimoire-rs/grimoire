@@ -9,6 +9,7 @@
 //! (flattened [`ScopeToolArgs`]) rather than server launch state — see
 //! `adr_mcp_percall_scope_fetch_render.md`.
 
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 use rmcp::schemars;
@@ -63,6 +64,13 @@ pub struct SearchToolArgs {
     /// by kind. Omit to list the whole catalog, unranked, in registry order.
     #[serde(default)]
     pub query: Option<String>,
+
+    /// Return at most this many results (at least 1): the best matches under
+    /// a `query`, the first rows in registry order without one. `total` in the
+    /// result still counts every match and `truncated` says whether `items` is
+    /// the complete answer. Omit to return every match.
+    #[serde(default)]
+    pub limit: Option<NonZeroUsize>,
 
     /// Force a fresh catalog rebuild even if the cache is still warm.
     #[serde(default)]
@@ -264,6 +272,33 @@ mod tests {
         for key in ["global", "config", "workspace"] {
             assert!(props.get(key).is_some(), "missing flattened property {key} in {schema}");
         }
+    }
+
+    #[test]
+    fn search_args_limit_deserializes_and_rejects_zero() {
+        let bare: SearchToolArgs = serde_json::from_str("{}").unwrap();
+        assert!(bare.limit.is_none());
+
+        let limited: SearchToolArgs = serde_json::from_str(r#"{"query": "x", "limit": 5}"#).unwrap();
+        assert_eq!(limited.limit.map(std::num::NonZeroUsize::get), Some(5));
+
+        for bad in ["0", "-1", r#""five""#] {
+            let json = format!(r#"{{"limit": {bad}}}"#);
+            assert!(
+                serde_json::from_str::<SearchToolArgs>(&json).is_err(),
+                "limit {bad} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn search_args_expose_limit_in_json_schema_with_a_minimum_of_one() {
+        let schema = serde_json::to_value(schemars::schema_for!(SearchToolArgs)).unwrap();
+        let limit = schema
+            .get("properties")
+            .and_then(|props| props.get("limit"))
+            .unwrap_or_else(|| panic!("missing limit property in {schema}"));
+        assert_eq!(limit.get("minimum"), Some(&serde_json::json!(1)), "got {limit}");
     }
 
     #[test]
