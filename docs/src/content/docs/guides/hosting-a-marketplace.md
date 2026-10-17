@@ -108,6 +108,16 @@ name = "Michael Herwig"
 url = "https://github.com/michael-herwig"
 ```
 
+Point `readme` and `changelog` at Markdown files next to the manifest to
+write the plugin's page yourself. grim lists the members under a `Contents`
+heading either way.
+
+```toml
+[plugins.hex]
+readme = "plugins/hex/README.md"
+changelog = "plugins/hex/CHANGELOG.md"
+```
+
 grim writes each field only into the files whose harness defines it. Claude
 and Qoder get everything, Copilot and Cursor get the author and link fields,
 and Codex gets the category. The full table and the validation rules are in

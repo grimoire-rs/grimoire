@@ -1061,6 +1061,14 @@ The keys sit outside the declaration hash, so adding them re-pins nothing.
 A value that breaks a rule exits `65` and names the plugin and the key. An
 unknown key under `author` exits `65` too.
 
+Two more optional keys, `readme` and `changelog`, name Markdown files
+relative to the manifest's directory (relative to `grimoire.toml` in
+`[plugin]`). Each is UTF-8 text of at most 1 MiB, and a missing or larger
+file exits `65`. `readme` replaces the generated title and description at
+the top of every exported `README.md`. `changelog` is copied to
+`CHANGELOG.md` beside it. Both sit outside the declaration hash, and `grim
+config` does not address them.
+
 Each harness's files carry only what its own format defines. A field the
 format lacks is left out rather than guessed.
 

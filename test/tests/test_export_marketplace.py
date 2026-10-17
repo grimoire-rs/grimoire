@@ -101,7 +101,7 @@ def _toml(
         parts.append(head + table_extra + f"\n[marketplace.owner]\n{owner}\n")
     for plugin, decl in plugins.items():
         lines = [f"[plugins.{plugin}]"]
-        for key in ("include", "description", "version", "logo", "project"):
+        for key in ("include", "description", "version", "logo", "project", "readme", "changelog"):
             if key in decl:
                 lines.append(f"{key} = {json.dumps(decl[key])}")
         parts.append("\n".join(lines) + "\n")
@@ -1206,6 +1206,48 @@ def test_s022_unowned_qoder_file_with_qoder_unselected_warns(
 
     _ok(result)
     assert str(Path(".qoder-plugin/marketplace.json")) in result.stderr, result.stderr
+
+
+# ── readme and changelog ──────────────────────────────────────────────────
+
+
+def test_a_declared_readme_and_changelog_ship_with_a_contents_list(
+    grim_at, work: Path, registry: str, unique_repo: str
+) -> None:
+    refs = _refs(registry, unique_repo, "a")
+    (work / "PLUGIN.md").write_text("# Alpha kit\n\nHand written.\n")
+    (work / "CHANGES.md").write_text("## 1.0.0\n\n- first\n")
+    _write(work, {"alpha": {"include": [refs["a"]], "readme": "PLUGIN.md", "changelog": "CHANGES.md"}})
+
+    _ok(_run(grim_at(work)))
+
+    for client in DEFAULT_CLIENTS:
+        tree = work / client / "alpha"
+        readme = (tree / "README.md").read_text()
+        assert readme.startswith("# Alpha kit\n\nHand written.\n\n## Contents\n\n- skill `a`"), readme
+        assert f"`{registry}/{unique_repo}/a`" in readme, readme
+        assert (tree / "CHANGELOG.md").read_text() == "## 1.0.0\n\n- first\n"
+
+
+def test_an_undeclared_readme_keeps_the_generated_header_and_adds_contents(
+    grim_at, work: Path, registry: str, unique_repo: str
+) -> None:
+    _two_plugins(work, registry, unique_repo, clients=["claude"])
+
+    _ok(_run(grim_at(work)))
+
+    readme = (work / "claude" / "alpha" / "README.md").read_text()
+    assert readme.startswith("# alpha\n\n## Contents\n\n- skill `a`"), readme
+    assert not (work / "claude" / "alpha" / "CHANGELOG.md").exists()
+
+
+def test_a_missing_changelog_is_65_and_writes_nothing(grim_at, work: Path, registry: str, unique_repo: str) -> None:
+    refs = _refs(registry, unique_repo, "a")
+    _write(work, {"alpha": {"include": [refs["a"]], "changelog": "NOPE.md"}})
+
+    _refuse(_run(grim_at(work)))
+
+    assert _written_paths(work) == []
 
 
 # ── S-030 — offline ───────────────────────────────────────────────────────

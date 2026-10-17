@@ -307,7 +307,10 @@ def test_s001_claude_zip_from_one_bundle_ref(grim_at, tmp_path: Path, work: Path
     # C-003: the pinned bundle's version annotation (leading `v` stripped) plus the tree hash.
     assert doc["version"] == f"1.4.0+{_suffix(unpacked, '1.4.0')}"
     assert doc["description"] == "The team stack."
-    assert readme == f"# team-stack\n\nThe team stack.\n\nOmitted for claude: rule team-style.\n\n{ONRAMP}\n"
+    assert readme.startswith("# team-stack\n\nThe team stack.\n\n## Contents\n\n- "), readme
+    for member in ("skill `team-plan`", "skill `team-review`", "agent `team-reviewer`", "rule `team-style`"):
+        assert f"- {member}" in readme, readme
+    assert readme.endswith(f"\n\nOmitted for claude: rule team-style.\n\n{ONRAMP}\n"), readme
 
     (item,) = out["items"]
     assert item["family"] == "claude" and item["format"] == "zip"

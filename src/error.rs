@@ -378,6 +378,7 @@ fn classify_export(err: &ExportError) -> Classification {
         | ExportError::InvalidVersion { .. }
         | ExportError::DescriptionTooLong { .. }
         | ExportError::InvalidLogo { .. }
+        | ExportError::InvalidDoc { .. }
         | ExportError::RenameInvalid { .. }
         | ExportError::RenameCollision { .. }
         | ExportError::RenameStaleReference { .. }
@@ -1247,6 +1248,7 @@ mod tests {
             ExportError::InvalidVersion { .. } => "InvalidVersion",
             ExportError::DescriptionTooLong { .. } => "DescriptionTooLong",
             ExportError::InvalidLogo { .. } => "InvalidLogo",
+            ExportError::InvalidDoc { .. } => "InvalidDoc",
             ExportError::RenameInvalid { .. } => "RenameInvalid",
             ExportError::RenameCollision { .. } => "RenameCollision",
             ExportError::RenameStaleReference { .. } => "RenameStaleReference",
@@ -1299,6 +1301,14 @@ mod tests {
             (
                 ExportError::InvalidLogo {
                     path: PathBuf::from("/w/logo.gif"),
+                    reason: s("r"),
+                },
+                ExitCode::DataError,
+                None,
+            ),
+            (
+                ExportError::InvalidDoc {
+                    path: PathBuf::from("/w/README.md"),
                     reason: s("r"),
                 },
                 ExitCode::DataError,
@@ -1404,7 +1414,7 @@ mod tests {
         ];
 
         let covered: std::collections::BTreeSet<&str> = cases.iter().map(|(e, ..)| export_variant(e)).collect();
-        assert_eq!(covered.len(), 18, "every ExportError variant has a row: {covered:?}");
+        assert_eq!(covered.len(), 19, "every ExportError variant has a row: {covered:?}");
 
         for (inner, exit, reason) in cases {
             let variant = export_variant(&inner);

@@ -52,6 +52,11 @@ pub enum ExportError {
     #[error("plugin logo {}: {reason}", path.display())]
     InvalidLogo { path: PathBuf, reason: String },
 
+    /// A declared plugin `readme` or `changelog` is missing, not a regular
+    /// file, not UTF-8, or larger than the cap (65).
+    #[error("plugin document {}: {reason}", path.display())]
+    InvalidDoc { path: PathBuf, reason: String },
+
     /// A rename produced an empty or invalid member name (65).
     #[error("plugin '{plugin}': renaming '{from}' yields invalid name '{to}'")]
     RenameInvalid { plugin: String, from: String, to: String },
