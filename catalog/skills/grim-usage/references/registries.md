@@ -185,9 +185,14 @@ a locator that matches neither transport shape is a data error (exit 65).
 Both transports share the regular catalog cache (`$GRIM_HOME/catalog/`,
 1-hour TTL, `--refresh`, offline degradation) and browse exactly like an
 `oci` entry — search, TUI, and MCP treat index and registry sources
-alike. `grim publish --announce` is the write side: it publishes
-pointers into an index repository rather than reading them — see
-[references/publish.md](publish.md#announce).
+alike. An index is never capped at 500 entries (only the `oci` `_catalog`
+walk is), and a refresh that fails serves the cached listing. The static
+transport decodes a gzip response for the index files only, and bounds the
+decoded size and the entry count so an oversized index fails its fetch
+instead of truncating. Nothing is required of the host. Limits and timeouts:
+[Consuming an Index][package-index-consuming]. `grim publish --announce` is
+the write side: it publishes pointers into an index repository rather than
+reading them — see [references/publish.md](publish.md#announce).
 
 ### Plain HTTP {#plain-http}
 
@@ -367,12 +372,15 @@ else:
   trigger would cry wolf on every correct config forever. An
   **exclude-only** filter that empties a source stays silent too: that is
   intent, not a mistake.
-- **The filter narrows the view, never the listing.** Each source's browse
-  window is built and capped at **500 repositories** first; the patterns run
-  afterwards. A narrow filter can never widen what grim looked at — on a
-  registry big enough to hit the cap, narrow the `oci` locator instead
-  (`ghcr.io/acme/platform`, not `ghcr.io`). Never tell a user a filter will
-  surface packages a plain browse missed.
+- **The filter narrows the view, never the listing.** Each source's listing
+  is built first; the patterns run afterwards. An `index` source lists every
+  entry, so a filter reaches every row of it. An `oci` source's `_catalog`
+  walk is capped at **500 repositories** when the listing is built, and a
+  narrow filter can never widen what grim looked at — on a registry big
+  enough to hit the cap, narrow the `oci` locator instead
+  (`ghcr.io/acme/platform`, not `ghcr.io`) or point at a package index.
+  Never tell a user a filter will surface packages a plain browse of a capped
+  `oci` source missed.
 
 ### Writing filters {#writing-filters}
 
@@ -659,7 +667,8 @@ When `[[registries]]` are configured, all of them are browsed and flattened
 into one table. The catalog is cached under `$GRIM_HOME` — pass `--refresh`
 to rebuild it from the registry, `--registry` to collapse the browse to
 exactly the registries it names (repeatable / comma-separated for several at
-once). Plain output shows the one-line summary (truncated to the terminal);
+once), and `--limit <N>` to print only the first N rows after ranking and
+`--sort` (a positive integer; `--limit 0` is a usage error, exit 64). Plain output shows the one-line summary (truncated to the terminal);
 piped output and `--format json` keep the full description, and JSON adds a
 `repository` URL field for tooling.
 
@@ -673,10 +682,13 @@ registry host, and one index source serves rows from many hosts.
 
 Beside `items`, the JSON document carries a `sources` array — one
 `{alias, locator, ok, error}` object per browsed source, in declaration
-order. A source grim cannot read degrades to an empty group so the reachable
-ones still answer, and the browse still exits `0` whether one source failed
-or all of them did — `sources` is the only place in the document that says
-so. Check it before treating a short or empty `items` as the catalog:
+order. A source whose refresh fails (unreachable, 5xx, a body over the size
+cap, an unparsable file) serves its cached catalog when one exists, and
+degrades to an empty group when none does, so the reachable ones still
+answer. The browse exits `0` whether one source failed or all of them did,
+and `sources` is the only place in the document that says so: the failed
+source reads `ok: false` with `error` set even when its cached rows are in
+`items`. Check it before treating a short or empty `items` as the catalog:
 
 ```sh
 grim search review
@@ -688,8 +700,27 @@ grim search --format json | jq '.sources[] | select(.ok | not)'
 
 `ok: true` on a source whose rows are missing is not a contradiction: that
 source answered and had nothing, or a browse filter hid what it had. The
-same failure is still logged on stderr as `catalog for source '<x>'
-unavailable: …`.
+same failure is still logged on stderr as `catalog for source '<locator>'
+unavailable: <error>`, naming the source by its locator rather than its alias.
+When cached rows were served it ends with
+`; serving the cached catalog built <built_at>`. A failed refresh does not
+restamp the cache, so the next command retries only once the cache has
+expired or with `--refresh`. A still-fresh cache is served with `ok: true`.
+
+Two more siblings of `items` are always present. `total` counts every
+matching row (after the browse filter, deprecated visibility, the query and
+the relevance cutoff) before `--limit` cut the list, and `truncated` is
+`true` when `items` is not the complete answer: `--limit` cut it, or an
+`oci` source's listing was capped at build time, in which case `total` is
+only a lower bound. `items.length < total` means `--limit` cut the
+list, and an `oci` cap may apply as well. Branch on `truncated` before
+treating `items` as the whole answer. An `index` source is never truncated:
+an index past the abuse bounds fails its fetch instead. A queried search over
+a capped `oci` source warns once per source on stderr: `catalog for source
+'<name>' capped at 500 repositories; a
+narrower query cannot reach past the cap — use a package index or a narrower
+oci locator`. The advice in that line is literal: a narrower query cannot
+reach past the cap, so move to a package index or narrow the `oci` locator.
 
 A registry declaring a [browse filter](#browse-filters) contributes only the
 repositories its patterns admit — to `grim search`, the TUI, and
@@ -702,7 +733,8 @@ comes back thinner than expected, there are two things to check before
 blaming the registry: the entry's `include`/`exclude` (`grim context
 --format json` reports the resolved patterns per source), and the relevance
 cutoff (`options.search_min_relevance`, default 50) — set it to `0` to rule
-it out.
+it out. In JSON, `truncated: true` says a `--limit` or a capped `oci`
+listing cut the list.
 
 A package the publisher has marked deprecated is **hidden by default** from
 both `grim search` and the TUI — unless it is installed in the active scope
@@ -795,7 +827,7 @@ and can call these tools:
 
 | Tool | What it returns | Gate |
 |------|-----------------|------|
-| `grim_search` | Same JSON as `grim search --format json`, over the resolved scope's registries (no registry override). Args: `query?`, `refresh?`, scope | always |
+| `grim_search` | Same JSON as `grim search --format json`, over the resolved scope's registries (no registry override), `total` and `truncated` included. Args: `query?`, `refresh?`, `limit?` (positive integer, as `--limit`), scope | always |
 | `grim_status` | Same JSON as `grim status --format json` for the requested scope. Optional `check` forwards to the same live catalog re-check as CLI `--check` (deprecated/replaced_by/update_available; the report's `checked` field says whether it ran). Args: `check?`, scope | always |
 | `grim_fetch` | An artifact's content in the tool result — no install. Canonical bytes, or a `vendor` (claude/opencode/copilot) projection, or one support file via `path` (binary → base64 with `encoding: "base64"`); a `files` listing is always included. `description` fetches the repository's description companion instead (every member inline); `digest_only` resolves `{ref, digest}` with no download and composes with `description`. Content caps at 256 KiB (marked truncation); needs network. Args: `ref`, `vendor?`, `path?`, `description?`, `digest_only?`, scope | always |
 | `grim_describe` | Same JSON as `grim describe --format json` — manifest-level metadata (kind, curated annotations, tags, `has_description`) without downloading content. Args: `ref`, scope | always |
@@ -933,6 +965,7 @@ rate][rate] and [Artifact Ratings][ratings-doc].
 [registry-compat]: https://grimoire.rs/configuration.html#registry-compatibility
 [browse-filters]: https://grimoire.rs/configuration.html#browse-filters
 [package-index]: https://grimoire.rs/package-index.html
+[package-index-consuming]: https://grimoire.rs/package-index.html#consuming
 [hosting]: https://grimoire.rs/hosting-an-index.html
 [index-repo]: https://github.com/grimoire-rs/index
 [config-cmd]: https://grimoire.rs/commands.html#config
