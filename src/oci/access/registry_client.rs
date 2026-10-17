@@ -462,7 +462,7 @@ impl OciAccess for RegistryClient {
         // a truncated listing is an explicit cut-line, the catalog is a
         // best-effort index, not a mirror.
         const PAGE_SIZE: usize = 1000;
-        const MAX_PAGES: usize = 8;
+        const MAX_PAGES: usize = super::CATALOG_LIST_CEILING / PAGE_SIZE;
 
         // The `_catalog` endpoint lives on the bare registry HOST. A
         // configured default registry may carry a namespace
@@ -695,6 +695,7 @@ impl RegistryClient {
 
 #[cfg(test)]
 mod tests {
+    use super::super::CATALOG_LIST_CEILING;
     use super::*;
 
     /// Regression: the production client config must seed the embedded CA
@@ -905,6 +906,89 @@ mod tests {
         let client = RegistryClient::with_plain_http(&host);
         let repos = client.list_catalog(&host).await.expect("catalog listing");
         assert_eq!(repos, vec!["glab".to_string(), "acme/code-review".to_string()]);
+        handle.abort();
+    }
+
+    /// A token-gated registry holding `total` repositories `repo-00000`…,
+    /// served `n` at a time after the `last` cursor, as a real `_catalog`
+    /// does. [`spawn_token_gated_registry`] serves one short page only.
+    async fn spawn_paged_catalog_registry(total: usize) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = format!("127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let realm = format!("http://{host}/token");
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut req = Vec::new();
+                let mut buf = [0u8; 1024];
+                loop {
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    req.extend_from_slice(&buf[..n]);
+                    if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let req = String::from_utf8_lossy(&req).to_ascii_lowercase();
+                let first = req.lines().next().unwrap_or("").to_string();
+                let has_bearer = req.contains("authorization: bearer ");
+                let ok_json = |body: &str| {
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                };
+                let response = if first.contains("/token") {
+                    ok_json(r#"{"token":"test-token"}"#)
+                } else if first.contains("/v2/_catalog") && has_bearer {
+                    let start = first
+                        .split("last=repo-")
+                        .nth(1)
+                        .and_then(|rest| rest.get(..5))
+                        .and_then(|n| n.parse::<usize>().ok())
+                        .map_or(0, |n| n + 1);
+                    let page: Vec<String> = (start..total.min(start + 1000))
+                        .map(|i| format!("\"repo-{i:05}\""))
+                        .collect();
+                    ok_json(&format!(r#"{{"repositories":[{}]}}"#, page.join(",")))
+                } else {
+                    format!(
+                        "HTTP/1.1 401 Unauthorized\r\nwww-authenticate: Bearer realm=\"{realm}\",service=\"reg\"\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                    )
+                };
+                let _ = sock.write_all(response.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        (host, handle)
+    }
+
+    /// The walk is bounded at [`CATALOG_LIST_CEILING`] repositories however
+    /// many the registry advertises, and the list it hands back is the prefix
+    /// the catalog layer reads as "cut short".
+    #[tokio::test]
+    async fn list_catalog_stops_at_the_ceiling_on_a_longer_registry() {
+        let (host, handle) = spawn_paged_catalog_registry(CATALOG_LIST_CEILING + 1500).await;
+        let client = RegistryClient::with_plain_http(&host);
+        let repos = client.list_catalog(&host).await.expect("catalog listing");
+        assert_eq!(repos.len(), CATALOG_LIST_CEILING, "the walk is bounded");
+        assert_eq!(repos.first().map(String::as_str), Some("repo-00000"));
+        assert_eq!(repos.last().map(String::as_str), Some("repo-07999"));
+        handle.abort();
+    }
+
+    /// A registry shorter than the ceiling is listed whole across pages.
+    #[tokio::test]
+    async fn list_catalog_walks_every_page_below_the_ceiling() {
+        let (host, handle) = spawn_paged_catalog_registry(2500).await;
+        let client = RegistryClient::with_plain_http(&host);
+        let repos = client.list_catalog(&host).await.expect("catalog listing");
+        assert_eq!(repos.len(), 2500);
         handle.abort();
     }
 
