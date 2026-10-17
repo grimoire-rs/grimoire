@@ -2011,9 +2011,14 @@ instead, and grim warns on stderr. The cut ends at the last whole sentence
 when that keeps at least half the text, otherwise at a word boundary
 followed by `…`.
 
-Each plugin also carries a generated `README.md`: the plugin name, the
-logo when there is one, the full uncut base text, the members omitted for
-that client, and the pointer sentence.
+Each plugin also carries a generated `README.md`. It opens with the
+declared `readme` file, or else the plugin name, the logo when there is
+one and the full uncut base text. A `## Contents` list follows with one
+line per member in lock order: its kind, its name, its own description and
+its `registry/repo` reference (a local path member has neither). Then come
+the members omitted for that client and the pointer sentence. A declared
+`changelog` file is copied to `CHANGELOG.md`. Both files are Markdown, UTF-8
+and at most 1 MiB, else the export exits `65`.
 
 ### Logo {#export-plugin-logo}
 

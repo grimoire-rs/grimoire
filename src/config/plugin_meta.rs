@@ -295,6 +295,17 @@ pub struct PluginMeta {
     /// exported plugin. Overridden by the `--logo` flag when given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logo: Option<PathBuf>,
+    /// Sets the plugin README, a Markdown file relative to the
+    /// `grimoire.toml` directory, at most 1 MiB. It replaces the generated
+    /// title and description at the top of each exported plugin's
+    /// `README.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readme: Option<PathBuf>,
+    /// Sets the plugin changelog, a Markdown file relative to the
+    /// `grimoire.toml` directory, at most 1 MiB, shipped as `CHANGELOG.md`
+    /// in every exported plugin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changelog: Option<PathBuf>,
     /// Member rename rule applied on export.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rename: Option<RenameRule>,
@@ -368,6 +379,11 @@ impl PluginMeta {
         }
         if self.logo.as_ref().is_some_and(|l| l.as_os_str().is_empty()) {
             return Err("`logo` must not be empty".to_string());
+        }
+        for (key, path) in [("readme", &self.readme), ("changelog", &self.changelog)] {
+            if path.as_ref().is_some_and(|p| p.as_os_str().is_empty()) {
+                return Err(format!("`{key}` must not be empty"));
+            }
         }
         if self.rename.as_ref().is_some_and(|r| r.strip_prefix.is_empty()) {
             return Err("`rename.strip_prefix` must not be empty".to_string());
@@ -444,6 +460,8 @@ mod tests {
             description: Some("Team tools".into()),
             version: Some("v1.2.0".into()),
             logo: Some("assets/team.svg".into()),
+            readme: Some("docs/README.md".into()),
+            changelog: Some("CHANGELOG.md".into()),
             rename: Some(RenameRule {
                 strip_prefix: "acme-".into(),
             }),
@@ -479,11 +497,13 @@ mod tests {
     #[test]
     fn each_bad_field_is_rejected_with_its_reason() {
         type Breaker = fn(&mut PluginMeta);
-        let cases: [(Breaker, &str); 5] = [
+        let cases: [(Breaker, &str); 7] = [
             (|m| m.name = Some("Team".into()), "invalid plugin name 'Team'"),
             (|m| m.description = Some("x".repeat(501)), "at most 500"),
             (|m| m.version = Some("1.0.0+b".into()), "invalid version '1.0.0+b'"),
             (|m| m.logo = Some(PathBuf::new()), "`logo` must not be empty"),
+            (|m| m.readme = Some(PathBuf::new()), "`readme` must not be empty"),
+            (|m| m.changelog = Some(PathBuf::new()), "`changelog` must not be empty"),
             (
                 |m| {
                     m.rename = Some(RenameRule {

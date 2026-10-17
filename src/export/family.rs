@@ -230,22 +230,46 @@ pub fn plugin_description(base: Option<&str>) -> (String, bool) {
     }
 }
 
-/// The plugin root's `README.md` (C-024): the name, the logo image when
-/// there is one, the full uncut base, the members omitted for `client`, then
-/// [`ONRAMP`]. `omitted` is `(kind, emitted name)` in C-016 order.
+/// One member line of a plugin README's `## Contents` section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentsEntry {
+    pub kind: ArtifactKind,
+    /// The emitted member name.
+    pub name: String,
+    /// The member's own description; `None` for a path source.
+    pub description: Option<String>,
+    /// `registry/repo` without tag or digest; `None` for a path source.
+    pub reference: Option<String>,
+}
+
+/// The plugin root's `README.md` (C-024): the authored `readme` text, else
+/// the name, the logo image when there is one and the full uncut base; then
+/// a `## Contents` list of `contents`, the members omitted for `client`,
+/// and [`ONRAMP`]. `omitted` is `(kind, emitted name)` in C-016 order.
 pub fn plugin_readme(
     name: &str,
     client: ClientTarget,
     base: Option<&str>,
     omitted: &[(ArtifactKind, String)],
     logo: Option<&str>,
+    readme: Option<&str>,
+    contents: &[ContentsEntry],
 ) -> Vec<u8> {
-    let mut parts = vec![format!("# {name}")];
-    if let Some(logo) = logo {
-        parts.push(format!("![{name}]({logo})"));
+    let mut parts = Vec::new();
+    if let Some(readme) = readme.map(str::trim).filter(|r| !r.is_empty()) {
+        parts.push(readme.to_string());
+    } else {
+        parts.push(format!("# {name}"));
+        if let Some(logo) = logo {
+            parts.push(format!("![{name}]({logo})"));
+        }
+        if let Some(base) = base.map(str::trim).filter(|b| !b.is_empty()) {
+            parts.push(base.to_string());
+        }
     }
-    if let Some(base) = base.map(str::trim).filter(|b| !b.is_empty()) {
-        parts.push(base.to_string());
+    if !contents.is_empty() {
+        let lines: Vec<String> = contents.iter().map(contents_line).collect();
+        parts.push(format!("## Contents\n\n{}", lines.join("\n")));
     }
     if !omitted.is_empty() {
         let list: Vec<String> = omitted.iter().map(|(kind, name)| format!("{kind} {name}")).collect();
@@ -255,6 +279,37 @@ pub fn plugin_readme(
     let mut text = parts.join("\n\n");
     text.push('\n');
     text.into_bytes()
+}
+
+fn contents_line(entry: &ContentsEntry) -> String {
+    let mut line = format!("- {} `{}`", entry.kind, entry.name);
+    if let Some(description) = &entry.description {
+        let one_line = description.split_whitespace().collect::<Vec<_>>().join(" ");
+        // A registry-supplied annotation lands in a README the indexer renders: bound it
+        // and neutralise link, code and HTML syntax so it stays plain text.
+        let one_line = if description_len(&one_line) > MAX_DESCRIPTION_LEN {
+            cut_at_word(&one_line, MAX_DESCRIPTION_LEN)
+        } else {
+            one_line
+        };
+        let one_line: String = one_line
+            .chars()
+            .flat_map(|c| {
+                ['\\', '`', '[', ']', '<', '>']
+                    .contains(&c)
+                    .then_some('\\')
+                    .into_iter()
+                    .chain([c])
+            })
+            .collect();
+        if !one_line.is_empty() {
+            line.push_str(&format!(": {one_line}"));
+        }
+    }
+    if let Some(reference) = &entry.reference {
+        line.push_str(&format!(" (`{reference}`)"));
+    }
+    line
 }
 
 /// Bytes of `.claude-plugin/plugin.json` (C-025): pretty JSON plus one `\n`.
@@ -687,6 +742,8 @@ mod tests {
             Some("Tools"),
             &[],
             Some("assets/logo.svg"),
+            None,
+            &[],
         );
         assert_eq!(
             String::from_utf8(readme).unwrap(),
@@ -717,13 +774,104 @@ mod tests {
             (ArtifactKind::Rule, "style".to_string()),
             (ArtifactKind::Agent, "reviewer".to_string()),
         ];
-        let readme = plugin_readme("team", ClientTarget::Codex, Some(" Team tools "), &omitted, None);
+        let readme = plugin_readme(
+            "team",
+            ClientTarget::Codex,
+            Some(" Team tools "),
+            &omitted,
+            None,
+            None,
+            &[],
+        );
         assert_eq!(
             String::from_utf8(readme).unwrap(),
             format!("# team\n\nTeam tools\n\nOmitted for codex: rule style, agent reviewer.\n\n{ONRAMP}\n")
         );
-        let bare = plugin_readme("team", ClientTarget::Claude, None, &[], None);
+        let bare = plugin_readme("team", ClientTarget::Claude, None, &[], None, None, &[]);
         assert_eq!(String::from_utf8(bare).unwrap(), format!("# team\n\n{ONRAMP}\n"));
+    }
+
+    fn content_entry(
+        kind: ArtifactKind,
+        name: &str,
+        description: Option<&str>,
+        reference: Option<&str>,
+    ) -> ContentsEntry {
+        ContentsEntry {
+            kind,
+            name: name.to_string(),
+            description: description.map(str::to_string),
+            reference: reference.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn readme_lists_contents_after_the_header_and_before_omissions() {
+        let contents = [
+            content_entry(
+                ArtifactKind::Skill,
+                "review",
+                Some("Reviews\n code"),
+                Some("ghcr.io/acme/review"),
+            ),
+            content_entry(ArtifactKind::Mcp, "local", None, None),
+        ];
+        let omitted = [(ArtifactKind::Rule, "style".to_string())];
+        let got = plugin_readme(
+            "team",
+            ClientTarget::Codex,
+            Some("Tools"),
+            &omitted,
+            None,
+            None,
+            &contents,
+        );
+        assert_eq!(
+            String::from_utf8(got).unwrap(),
+            format!(
+                "# team\n\nTools\n\n## Contents\n\n- skill `review`: Reviews code (`ghcr.io/acme/review`)\n- mcp `local`\n\nOmitted for codex: rule style.\n\n{ONRAMP}\n"
+            )
+        );
+    }
+
+    #[test]
+    fn a_member_description_is_bounded_and_markdown_inert() {
+        let long = "w ".repeat(MAX_DESCRIPTION_LEN);
+        let contents = [
+            content_entry(ArtifactKind::Skill, "a", Some("see [x](http://e) <b>`c`"), None),
+            content_entry(ArtifactKind::Skill, "b", Some(&long), None),
+        ];
+        let got = String::from_utf8(plugin_readme(
+            "t",
+            ClientTarget::Claude,
+            None,
+            &[],
+            None,
+            None,
+            &contents,
+        ))
+        .unwrap();
+        assert!(got.contains(r"- skill `a`: see \[x\](http://e) \<b\>\`c\`"), "{got}");
+        let line = got.lines().find(|l| l.starts_with("- skill `b`")).unwrap();
+        assert!(description_len(line) <= MAX_DESCRIPTION_LEN + 20, "{line}");
+    }
+
+    #[test]
+    fn an_authored_readme_replaces_the_generated_header() {
+        let contents = [content_entry(ArtifactKind::Skill, "review", None, None)];
+        let got = plugin_readme(
+            "team",
+            ClientTarget::Claude,
+            Some("Tools"),
+            &[],
+            Some("assets/logo.svg"),
+            Some("\n# Team kit\n\nHand written.\n\n"),
+            &contents,
+        );
+        assert_eq!(
+            String::from_utf8(got).unwrap(),
+            format!("# Team kit\n\nHand written.\n\n## Contents\n\n- skill `review`\n\n{ONRAMP}\n")
+        );
     }
 
     /// C-004: literal bytes, so a wording change is a deliberate edit here.
@@ -734,7 +882,7 @@ mod tests {
         let omitted = [(ArtifactKind::Rule, "style".to_string())];
         let cases: [(Vec<u8>, String); 4] = [
             (
-                plugin_readme("team", ClientTarget::Claude, None, &[], None),
+                plugin_readme("team", ClientTarget::Claude, None, &[], None, None, &[]),
                 format!("# team\n\n{onramp}\n"),
             ),
             (
@@ -744,15 +892,25 @@ mod tests {
                     Some("Tools"),
                     &[],
                     Some("assets/logo.png"),
+                    None,
+                    &[],
                 ),
                 format!("# team\n\n![team](assets/logo.png)\n\nTools\n\n{onramp}\n"),
             ),
             (
-                plugin_readme("team", ClientTarget::Codex, Some("Tools"), &omitted, None),
+                plugin_readme("team", ClientTarget::Codex, Some("Tools"), &omitted, None, None, &[]),
                 format!("# team\n\nTools\n\nOmitted for codex: rule style.\n\n{onramp}\n"),
             ),
             (
-                plugin_readme("team", ClientTarget::Qoder, None, &omitted, Some("assets/logo.svg")),
+                plugin_readme(
+                    "team",
+                    ClientTarget::Qoder,
+                    None,
+                    &omitted,
+                    Some("assets/logo.svg"),
+                    None,
+                    &[],
+                ),
                 format!("# team\n\n![team](assets/logo.svg)\n\nOmitted for qoder: rule style.\n\n{onramp}\n"),
             ),
         ];

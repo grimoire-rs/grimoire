@@ -91,6 +91,14 @@ pub struct PluginDecl {
     /// `description`.
     #[serde(default)]
     pub logo: Option<PathBuf>,
+    /// Plugin README (Markdown), relative to the manifest's directory. Top
+    /// of every exported `README.md`; outside the declaration hash.
+    #[serde(default)]
+    pub readme: Option<PathBuf>,
+    /// Plugin changelog (Markdown), relative to the manifest's directory,
+    /// shipped as `CHANGELOG.md`. Outside the declaration hash.
+    #[serde(default)]
+    pub changelog: Option<PathBuf>,
     /// Plugin author. Outside the declaration hash, like `description`.
     #[serde(default)]
     pub author: Option<PluginAuthor>,
@@ -936,6 +944,8 @@ mod tests {
             strip_prefix: "x-".into(),
         });
         d.logo = Some("assets/logo.svg".into());
+        d.readme = Some("README.md".into());
+        d.changelog = Some("CHANGELOG.md".into());
         d.set_profile(PluginProfile {
             author: Some(PluginAuthor {
                 name: "Acme".into(),

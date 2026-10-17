@@ -449,7 +449,7 @@ fn refuse_if_owned(root: &Path, manifest: &Path, path: &Path, what: &str) -> Res
 
 /// R2-22 inputs the run reads — every selected plugin's `project` dir, every
 /// lock member's `path:` source (a project's, resolved against the project)
-/// and its merged `logo` — must not lie under an owned path either:
+/// and its merged `logo`, `readme` and `changelog` — must not lie under an owned path either:
 /// `remove_children` would delete them as strays in the same run. Runs on
 /// the resolved `plan`, so a project's own lock and `[plugin]` logo are
 /// covered too; before any mutation.
@@ -462,8 +462,11 @@ fn check_input_overlap(root: &Path, anchor: &Path, plan: &stage::DeclaredPlan) -
             .iter()
             .filter_map(|(member, _)| member.source.path())
             .map(|source| source.resolve(base));
-        let logo = plugin.logo.as_ref().map(|logo| anchor.join(logo));
-        for input in project.iter().cloned().chain(members).chain(logo) {
+        let docs = [&plugin.logo, &plugin.readme, &plugin.changelog]
+            .into_iter()
+            .flatten()
+            .map(|doc| anchor.join(doc));
+        for input in project.iter().cloned().chain(members).chain(docs) {
             // `root` is canonical; an input built from a symlinked manifest
             // directory spells the link, so a lexical compare would miss it.
             let input = dunce::canonicalize(&input).unwrap_or_else(|_| lexical(&input));

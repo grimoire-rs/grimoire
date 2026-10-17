@@ -857,6 +857,8 @@ mod tests {
             description: Some("d".into()),
             version: Some("1.0.0".into()),
             logo: Some("logo.svg".into()),
+            readme: Some("README.md".into()),
+            changelog: Some("CHANGELOG.md".into()),
             rename: Some(RenameRule {
                 strip_prefix: "x-".into(),
             }),
@@ -881,7 +883,7 @@ mod tests {
             .keys()
             .cloned()
             .collect();
-        for structured in ["rename", "author", "keywords", "tags"] {
+        for structured in ["rename", "author", "keywords", "tags", "readme", "changelog"] {
             assert!(fields.remove(structured), "{structured}");
         }
         let expected: BTreeSet<String> = PluginField::ALL

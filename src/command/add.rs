@@ -1396,6 +1396,8 @@ pub(crate) fn write_config_with_plugin(
             description,
             version,
             logo,
+            readme,
+            changelog,
             rename,
             author,
             homepage,
@@ -1408,12 +1410,15 @@ pub(crate) fn write_config_with_plugin(
             category,
         } = plugin;
         out.push_str("[plugin]\n");
-        let logo = logo.as_ref().map(|l| l.to_string_lossy().into_owned());
+        let path_text = |p: &Option<std::path::PathBuf>| p.as_ref().map(|p| p.to_string_lossy().into_owned());
+        let (logo, readme, changelog) = (path_text(logo), path_text(readme), path_text(changelog));
         for (key, value) in [
             ("name", name),
             ("description", description),
             ("version", version),
             ("logo", &logo),
+            ("readme", &readme),
+            ("changelog", &changelog),
             ("homepage", homepage),
             ("repository", repository),
             ("documentation", documentation),
@@ -2248,6 +2253,8 @@ tree_separators_typo = 1
             description: Some("Team \"tools\"".into()),
             version: Some("v1.2.0".into()),
             logo: Some("assets/team.svg".into()),
+            readme: Some("docs/README.md".into()),
+            changelog: Some("CHANGELOG.md".into()),
             rename: Some(RenameRule {
                 strip_prefix: "acme-".into(),
             }),

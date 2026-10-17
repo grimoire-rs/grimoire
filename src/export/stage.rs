@@ -120,6 +120,8 @@ fn project_decl(meta: &PluginMeta) -> PluginDecl {
         version: meta.version.clone(),
         rename: meta.rename.clone(),
         logo: meta.logo.clone(),
+        readme: meta.readme.clone(),
+        changelog: meta.changelog.clone(),
         ..PluginDecl::default()
     };
     decl.set_profile(meta.profile());
@@ -141,6 +143,14 @@ fn merged_decl(decl: &PluginDecl, project: &ProjectLock) -> PluginDecl {
             .logo
             .clone()
             .or_else(|| meta.logo.clone().map(|l| project.dir.join(l))),
+        readme: decl
+            .readme
+            .clone()
+            .or_else(|| meta.readme.clone().map(|p| project.dir.join(p))),
+        changelog: decl
+            .changelog
+            .clone()
+            .or_else(|| meta.changelog.clone().map(|p| project.dir.join(p))),
         ..PluginDecl::default()
     };
     merged.set_profile(decl.profile().or(meta.profile()));
@@ -687,6 +697,8 @@ pub(crate) fn plugin_input(
         version_base,
         description_base: authored.or(annotation_description),
         logo: decl.and_then(|d| d.logo.clone()),
+        readme: decl.and_then(|d| d.readme.clone()),
+        changelog: decl.and_then(|d| d.changelog.clone()),
         profile: decl.map(PluginDecl::profile).unwrap_or_default(),
         fallback_logo: None,
         project_dir: None,
@@ -712,6 +724,10 @@ pub(crate) struct PluginInput {
     pub renamed: Vec<(String, String)>,
     /// Declared `logo`, as written (relative to the manifest's directory).
     pub logo: Option<PathBuf>,
+    /// Declared `readme` and `changelog`, as written (relative to the
+    /// manifest's directory).
+    pub readme: Option<PathBuf>,
+    pub changelog: Option<PathBuf>,
     /// Author, links, license, keywords and category: declared, else the
     /// ad-hoc reference's annotations.
     pub profile: PluginProfile,
@@ -960,6 +976,17 @@ async fn stage_all(req: &ExportRequest<'_>, access: &Arc<dyn OciAccess>) -> Resu
             }
             (None, None) => plugin.fallback_logo.clone(),
         };
+        let readme_text = plugin
+            .readme
+            .as_deref()
+            .map(|d| read_declared_doc(req, d))
+            .transpose()?;
+        let changelog_text = plugin
+            .changelog
+            .as_deref()
+            .map(|d| read_declared_doc(req, d))
+            .transpose()?;
+        let contents = member_contents(plugin, access).await;
         let logo_rel = logo.as_ref().map(|(ext, _)| family::logo_path(ext));
         let base = plugin.description_base.as_deref();
         let (description, cut) = family::plugin_description(base);
@@ -985,8 +1012,19 @@ async fn stage_all(req: &ExportRequest<'_>, access: &Arc<dyn OciAccess>) -> Resu
             // version; the final version is then written into each.
             manifest(&plugin.version_base)?;
             let readme = contained(&root, Path::new("README.md"))?;
-            let readme_bytes = family::plugin_readme(&plugin.name, client, base, &omitted, logo_rel.as_deref());
+            let readme_bytes = family::plugin_readme(
+                &plugin.name,
+                client,
+                base,
+                &omitted,
+                logo_rel.as_deref(),
+                readme_text.as_deref(),
+                &contents,
+            );
             std::fs::write(&readme, readme_bytes).map_err(|e| io_error(&readme, e))?;
+            if let Some(changelog) = &changelog_text {
+                write_staged(&root, "CHANGELOG.md", changelog.as_bytes())?;
+            }
             if let (Some((_, bytes)), Some(rel)) = (&logo, &logo_rel) {
                 write_staged(&root, rel, bytes)?;
             }
@@ -1555,6 +1593,77 @@ async fn companion_logo(
 
 /// Largest plugin logo accepted, in bytes.
 const MAX_LOGO_BYTES: u64 = 1024 * 1024;
+
+/// Largest plugin `readme` or `changelog` accepted, in bytes.
+const MAX_DOC_BYTES: u64 = MAX_LOGO_BYTES;
+
+/// A declared `readme`/`changelog`, resolved against the manifest directory
+/// and held to the same containment as a declared `logo`.
+fn read_declared_doc(req: &ExportRequest<'_>, declared: &Path) -> Result<String, ExportError> {
+    let path = req.anchor.join(declared);
+    if let Some(root) = req.contain {
+        contain_input(root, req.anchor, &path).map_err(|reason| ExportError::InvalidDoc {
+            path: path.clone(),
+            reason,
+        })?;
+    }
+    read_doc(&path)
+}
+
+/// Read a plugin `readme`/`changelog`: a regular file (a symlink is
+/// followed) of UTF-8 text, at most [`MAX_DOC_BYTES`].
+///
+/// # Errors
+///
+/// `InvalidDoc` (65) for each rule; `Io` for any other read failure.
+fn read_doc(path: &Path) -> Result<String, ExportError> {
+    let invalid = |reason: &str| ExportError::InvalidDoc {
+        path: path.to_path_buf(),
+        reason: reason.to_string(),
+    };
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(invalid("not found")),
+        Err(e) => return Err(io_error(path, e)),
+    };
+    if !meta.is_file() {
+        return Err(invalid("not a regular file"));
+    }
+    let file = std::fs::File::open(path).map_err(|e| io_error(path, e))?;
+    let bytes = read_capped(file, MAX_DOC_BYTES).map_err(|e| io_error(path, e))?;
+    if bytes.len() as u64 > MAX_DOC_BYTES {
+        return Err(invalid("larger than 1 MiB"));
+    }
+    String::from_utf8(bytes).map_err(|_| invalid("not valid UTF-8"))
+}
+
+/// One README `Contents` entry per member, in lock order: its own
+/// description from the pinned manifest and its `registry/repo`. A path
+/// source has neither.
+async fn member_contents(plugin: &PluginInput, access: &Arc<dyn OciAccess>) -> Vec<family::ContentsEntry> {
+    let mut entries = Vec::with_capacity(plugin.members.len());
+    for (locked, emitted) in &plugin.members {
+        let pin = locked.source.pinned();
+        let description = match pin {
+            // The description is cosmetic: a failed read must not abort the export.
+            Some(pin) => access
+                .fetch_manifest(pin)
+                .await
+                .inspect_err(|e| tracing::warn!("no description for {} in the README: {e}", locked.name))
+                .ok()
+                .flatten()
+                .and_then(|m| m.annotations.get(DESCRIPTION_ANNOTATION).cloned()),
+            None => None,
+        };
+        entries.push(family::ContentsEntry {
+            kind: locked.kind,
+            name: emitted.clone(),
+            description,
+            reference: pin.map(|p| p.as_identifier().registry_repository()),
+        });
+    }
+    entries
+}
 
 /// Read and check a plugin logo: a regular file (a symlink is followed),
 /// `.png` or `.svg` (case-insensitive), at most [`MAX_LOGO_BYTES`].
@@ -3641,6 +3750,8 @@ mod tests {
             description_base: Some("Base".to_string()),
             renamed: Vec::new(),
             logo: None,
+            readme: None,
+            changelog: None,
             profile: PluginProfile::default(),
             fallback_logo: None,
             project_dir: None,
@@ -3683,8 +3794,8 @@ mod tests {
 
         assert_eq!(
             counting.manifests.load(Ordering::SeqCst),
-            1,
-            "C-017: fetched once per run"
+            2,
+            "C-017: one fetch for the layer and one for the README description, whatever the client count"
         );
         assert_eq!(
             entries(&dir),
@@ -4440,6 +4551,72 @@ mod tests {
             .await
             .unwrap();
         assert!(run.outputs[0].staged.join("assets/logo.png").is_file());
+    }
+
+    #[tokio::test]
+    async fn a_declared_readme_and_changelog_ship_with_the_contents_list() {
+        let (guard, root, _) = manifest_dir();
+        std::fs::write(root.join("PLUGIN.md"), "# Team kit\n\nHand written.\n").unwrap();
+        std::fs::write(root.join("CHANGES.md"), "## 1.0.0\n\n- first\n").unwrap();
+        let (reg, mut plugin) = team_with_server().await;
+        plugin.readme = Some(PathBuf::from("PLUGIN.md"));
+        plugin.changelog = Some(PathBuf::from("CHANGES.md"));
+        let out = guard.path().join("out");
+        let clients = [claude()];
+        let run = stage_in(reg, &[plugin], &clients, (Layout::Repo, Some(&root)), (&root, &out))
+            .await
+            .unwrap();
+        let tree = &run.outputs[0].staged;
+        let readme = std::fs::read_to_string(tree.join("README.md")).unwrap();
+        assert!(
+            readme.starts_with("# Team kit\n\nHand written.\n\n## Contents\n\n- mcp `srv`"),
+            "{readme}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tree.join("CHANGELOG.md")).unwrap(),
+            "## 1.0.0\n\n- first\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_declared_readme_the_generated_header_gains_contents_and_no_changelog_ships() {
+        let (guard, root, _) = manifest_dir();
+        let (reg, plugin) = team_with_server().await;
+        let out = guard.path().join("out");
+        let clients = [claude()];
+        let run = stage_in(reg, &[plugin], &clients, (Layout::Repo, Some(&root)), (&root, &out))
+            .await
+            .unwrap();
+        let tree = &run.outputs[0].staged;
+        let readme = std::fs::read_to_string(tree.join("README.md")).unwrap();
+        assert!(
+            readme.starts_with("# team\n\nBase\n\n## Contents\n\n- mcp `srv`"),
+            "{readme}"
+        );
+        assert!(!tree.join("CHANGELOG.md").exists());
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_readme_or_changelog_is_invalid_doc_65() {
+        let (guard, root, outside) = manifest_dir();
+        std::fs::write(root.join("bad.md"), [0xff, 0xfe]).unwrap();
+        std::fs::write(root.join("big.md"), vec![b'a'; MAX_DOC_BYTES as usize + 1]).unwrap();
+        std::fs::write(outside.join("out.md"), "x").unwrap();
+        for declared in ["missing.md", "bad.md", "big.md", "../outside/out.md"] {
+            let (reg, mut plugin) = team_with_server().await;
+            plugin.changelog = Some(PathBuf::from(declared));
+            let out = guard.path().join("out");
+            let clients = [claude()];
+            let err = stage_in(reg, &[plugin], &clients, (Layout::Repo, Some(&root)), (&root, &out))
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{declared} must be refused"));
+            assert!(
+                matches!(export_error(&err), ExportError::InvalidDoc { .. }),
+                "{declared}: {err:?}"
+            );
+            assert_eq!(exit_of(err), ExitCode::DataError, "{declared}");
+        }
     }
 
     #[cfg(unix)]

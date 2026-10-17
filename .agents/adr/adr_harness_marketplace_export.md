@@ -1187,4 +1187,5 @@ same bytes.
 | 2026-09-28 | Architect (hex-architect xhigh) | Initial proposal |
 | 2026-09-29 | Architect (review-fix round 1) | Amendments 1–33 |
 | 2026-10-17 | owner review | Amendment: plugin metadata in documents (D3, D13) |
+| 2026-10-17 | owner review | Amendment: optional `readme` and `changelog` plugin keys; the generated `README.md` gains a `Contents` member list, so a consumer renders the plugin page without resolving members |
 | 2026-09-29 | hex-plan (planning pass, goal loop) | Round-2 amendments R2-1…R2-27; Block + 13 Warns resolved; Qoder pulled in; open questions resolved; status Accepted |
