@@ -16,7 +16,7 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 
-from src.helpers import make_artifact, make_description
+from src.helpers import make_artifact, make_description, paged_namespace
 from src.index_fixture import index_config, package, write_all_json
 from src.registry import REGISTRY_HOST
 from src.runner import GrimRunner
@@ -876,3 +876,30 @@ def test_mcp_search_rejects_a_negative_or_non_integer_offset(
         reply = responses[2]
         failed = "error" in reply or reply.get("result", {}).get("isError") is True
         assert failed, f"offset {bad!r} must be an invalid-params failure, got: {reply!r}"
+
+
+def test_grim_search_pages_an_oci_scope_like_the_cli(
+    grim_at: Callable[[Path], GrimRunner], project_dir: Path, registry: str
+) -> None:
+    """``grim_search`` offset/limit over a configured ``oci`` source (not an
+    index) return the CLI's pages byte for byte."""
+    ns = paged_namespace(150)
+    (project_dir / "grimoire.toml").write_text(
+        f'[[registries]]\nalias = "reg"\noci = "{REGISTRY_HOST}/{ns}"\n\n[skills]\n\n[rules]\n'
+    )
+    runner = grim_at(project_dir)
+
+    seen: list[str] = []
+    for offset, limit in ((0, 100), (100, 100)):
+        call = _call_search(
+            runner, project_dir, {"refresh": True, "offset": offset, "limit": limit}
+        )
+        assert call["isError"] is False, f"oci page at {offset} errored: {call!r}"
+        payload = json.loads(call["content"][0]["text"])
+        assert payload == runner.json(
+            "search", "--refresh", "--offset", str(offset), "--limit", str(limit)
+        )
+        assert payload["total"] == 150
+        seen += [r["repo"] for r in payload["items"]]
+
+    assert len(seen) == 150 and len(set(seen)) == 150
