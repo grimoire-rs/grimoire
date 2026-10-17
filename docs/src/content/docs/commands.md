@@ -1874,6 +1874,10 @@ report's `omitted` array. An export whose every member is omitted for a
 given client exits `65` (`EmptyPlugin`) rather than writing an empty
 plugin.
 
+A hook is never exported, because it needs grim at run time. It is omitted
+`not-representable` for the Claude family and `no-format-surface` for Agent
+Plugins, with one warning per hook per plugin. See [hooks](./hooks.md#export-declines).
+
 Junie still omits an agent `not-representable` when its name starts with a
 digit or contains a `.`, the same names a Junie install skips.
 
@@ -2079,6 +2083,10 @@ itself ([ownership](#export-marketplace-ownership)).
 The manifest must carry a [`[marketplace]`](./configuration.md#marketplace-table)
 table naming the marketplace and its owner. Without one the command exits
 `65` and names the table.
+
+Each plugin tree follows the [`grim export plugin`](#export-plugin) admission
+rules, so a [hook](./hooks.md#export-declines) member is omitted from every
+tree. A plugin left with only hook members exits `65`.
 
 ### Flags {#export-marketplace-flags}
 

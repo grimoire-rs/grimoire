@@ -303,12 +303,14 @@ whatever a contributor pushed.
 ## Plugin export {#export-declines}
 
 [`grim export plugin`][cmd-export-plugin] renders locked artifacts into a
-plugin a client installs without grim. A hook needs grim at run time, because
-its launcher runs `grim hook run`.
+plugin a client installs without grim, and `grim export marketplace` renders
+the same trees for a marketplace repository. A hook needs grim at run time,
+because its launcher runs `grim hook run`.
 
 Every hook member is therefore left out of an export. Each gets a warning, a
 line in the plugin's README, and a row in the export report, at exit 0. An
-export with nothing but hooks has nothing to render, and exits 65.
+export with nothing but hooks has nothing to render, and exits 65. In a
+marketplace, that applies to each plugin on its own.
 
 ## See also
 
