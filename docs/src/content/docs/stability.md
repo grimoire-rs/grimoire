@@ -167,7 +167,8 @@ exclusions are what keep 1.x able to move at all:
   field, and stop changing meaning once shipped:
   - the `install` row's `armed` field,
   - the `status`/`hook list` row's `state` and `cause` tokens,
-  - the `export plugin` row's hook-admission `reason` literals.
+  - the `export plugin` and `export marketplace` rows' hook-admission
+    `reason` literals.
 
   See [Hook arming][json-hook-arming-stability] for the full list.
 

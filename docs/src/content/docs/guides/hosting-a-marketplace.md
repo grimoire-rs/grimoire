@@ -114,6 +114,9 @@ the repository itself, by a convention you can rely on:
 The full rules, including what a refusal looks like, are under
 [`grim export marketplace`](../commands.md#export-marketplace).
 
+Hooks are never exported. They appear in the README `Omitted` line and the
+JSON `omitted` array, and a plugin with nothing else left exits `65`.
+
 ### Files that shadow yours {#shadowing}
 
 Two clients read a file of their own before they read Claude's. A Droid
