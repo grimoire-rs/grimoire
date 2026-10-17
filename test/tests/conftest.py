@@ -11,10 +11,12 @@ import json
 import stat
 from collections.abc import Callable
 from dataclasses import dataclass
+from http.server import SimpleHTTPRequestHandler
 from pathlib import Path, PurePosixPath
 
 import pytest
 
+from src.index_fixture import serve
 from src.runner import GrimRunner
 
 
@@ -35,6 +37,15 @@ def project_dir(tmp_path: Path) -> Path:
     d = tmp_path / "project"
     (d / ".claude").mkdir(parents=True)
     return d
+
+
+@pytest.fixture()
+def http_index(tmp_path: Path):
+    """A local static webserver serving an index dist dir (all.json)."""
+    root = tmp_path / "index-dist"
+    root.mkdir()
+    with serve(root, SimpleHTTPRequestHandler) as base:
+        yield root, base
 
 
 @pytest.fixture()

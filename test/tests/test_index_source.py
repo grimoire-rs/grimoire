@@ -18,65 +18,24 @@ from __future__ import annotations
 import json
 import subprocess
 import threading
-from functools import partial
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from http.server import SimpleHTTPRequestHandler
 from pathlib import Path
 
 import pytest
+
+from src.index_fixture import (
+    filtered_index_config,
+    index_config,
+    package,
+    serve,
+    write_all_json,
+    write_stats,
+)
 
 
 # ---------------------------------------------------------------------------
 # Helpers / fixtures
 # ---------------------------------------------------------------------------
-
-
-def _package(
-    name: str,
-    kind: str,
-    ref: str,
-    description: str,
-    keywords: list[str] | None = None,
-    summary: str | None = None,
-    deprecated: str | None = None,
-    replaced_by: str | None = None,
-) -> dict:
-    pkg = {
-        "schema": 1,
-        "name": name,
-        "kind": kind,
-        "ref": ref,
-        "description": description,
-        "repository": "https://github.com/acme/skills",
-        "owner": {"github": "acme", "id": 1},
-    }
-    # Omit-empty, mirroring the announce writer: pre-search-metadata
-    # pointers carry neither key.
-    if keywords:
-        pkg["keywords"] = keywords
-    if summary is not None:
-        pkg["summary"] = summary
-    if deprecated is not None:
-        pkg["deprecated"] = deprecated
-    if replaced_by is not None:
-        pkg["replaced_by"] = replaced_by
-    return pkg
-
-
-@pytest.fixture()
-def http_index(tmp_path: Path):
-    """A local static webserver serving an index dist dir (all.json)."""
-    root = tmp_path / "index-dist"
-    root.mkdir()
-    handler = partial(SimpleHTTPRequestHandler, directory=str(root))
-    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield root, f"http://127.0.0.1:{server.server_address[1]}"
-    server.shutdown()
-
-
-def _write_all_json(root: Path, packages: list[dict]) -> None:
-    (root / "all.json").write_text(json.dumps(packages))
 
 
 def _git_index_repo(tmp_path: Path, packages: list[dict]) -> Path:
@@ -100,20 +59,6 @@ def _git_index_repo(tmp_path: Path, packages: list[dict]) -> Path:
     return repo
 
 
-def _index_config(project_dir: Path, locator: str) -> None:
-    # `locator` goes into a TOML basic string, so callers passing a local
-    # path must forward-slash it (`Path.as_posix()`): a Windows `str(path)`
-    # embeds backslashes, which are invalid TOML escapes. git clones a
-    # forward-slash path fine on every platform.
-    (project_dir / "grimoire.toml").write_text(
-        f'[[registries]]\n'
-        f'alias = "hub"\n'
-        f'index = "{locator}"\n'
-        f'default = true\n'
-        f'\n[skills]\n\n[rules]\n'
-    )
-
-
 def _search_rows(runner) -> list[dict]:
     result = runner.run("--format", "json", "search", "--refresh", check=False)
     assert result.returncode == 0, (
@@ -133,14 +78,14 @@ def test_search_http_index_lists_packages(grim_at, project_dir: Path, http_index
     """``grim search`` against an ``index = http://…`` source lists the
     packages from ``all.json`` — no OCI registry involved at all."""
     root, base = http_index
-    _write_all_json(
+    write_all_json(
         root,
         [
-            _package("idx-skill", "skill", "ghcr.io/acme/skills/idx-skill", "From the index"),
-            _package("idx-rule", "rule", "registry.example/acme/rules/idx-rule", "Rule pointer"),
+            package("idx-skill", "skill", "ghcr.io/acme/skills/idx-skill", "From the index"),
+            package("idx-rule", "rule", "registry.example/acme/rules/idx-rule", "Rule pointer"),
         ],
     )
-    _index_config(project_dir, base)
+    index_config(project_dir, base)
 
     rows = _search_rows(grim_at(project_dir))
     repos = [r.get("repo", "") for r in rows]
@@ -156,14 +101,14 @@ def test_search_http_index_lists_packages(grim_at, project_dir: Path, http_index
 
 def test_search_http_index_filters_by_query(grim_at, project_dir: Path, http_index) -> None:
     root, base = http_index
-    _write_all_json(
+    write_all_json(
         root,
         [
-            _package("alpha-skill", "skill", "ghcr.io/acme/skills/alpha-skill", "Alpha"),
-            _package("beta-rule", "rule", "ghcr.io/acme/rules/beta-rule", "Beta"),
+            package("alpha-skill", "skill", "ghcr.io/acme/skills/alpha-skill", "Alpha"),
+            package("beta-rule", "rule", "ghcr.io/acme/rules/beta-rule", "Beta"),
         ],
     )
-    _index_config(project_dir, base)
+    index_config(project_dir, base)
 
     runner = grim_at(project_dir)
     result = runner.run("--format", "json", "search", "--refresh", "alpha", check=False)
@@ -177,10 +122,10 @@ def test_search_http_index_matches_by_keyword(grim_at, project_dir: Path, http_i
     the repo name or description) still matches — the index now carries the
     search metadata the phone book used to drop."""
     root, base = http_index
-    _write_all_json(
+    write_all_json(
         root,
         [
-            _package(
+            package(
                 "grim",
                 "mcp",
                 "ghcr.io/grimoire-rs/mcp/grim",
@@ -188,10 +133,10 @@ def test_search_http_index_matches_by_keyword(grim_at, project_dir: Path, http_i
                 keywords=["catalog", "fetch", "render"],
                 summary="Drive grim from an agent",
             ),
-            _package("other", "skill", "ghcr.io/acme/skills/other", "Unrelated"),
+            package("other", "skill", "ghcr.io/acme/skills/other", "Unrelated"),
         ],
     )
-    _index_config(project_dir, base)
+    index_config(project_dir, base)
 
     runner = grim_at(project_dir)
     result = runner.run("--format", "json", "search", "--refresh", "fetch", check=False)
@@ -205,10 +150,10 @@ def test_search_http_index_summary_reaches_search_row(grim_at, project_dir: Path
     search row (``row["summary"]``) — the index now carries the catalog blurb
     the phone book used to drop."""
     root, base = http_index
-    _write_all_json(
+    write_all_json(
         root,
         [
-            _package(
+            package(
                 "sum-skill",
                 "skill",
                 "ghcr.io/acme/skills/sum-skill",
@@ -217,7 +162,7 @@ def test_search_http_index_summary_reaches_search_row(grim_at, project_dir: Path
             ),
         ],
     )
-    _index_config(project_dir, base)
+    index_config(project_dir, base)
 
     rows = _search_rows(grim_at(project_dir))
     row = next(r for r in rows if r.get("repo") == "ghcr.io/acme/skills/sum-skill")
@@ -233,11 +178,11 @@ def test_search_http_index_hides_and_marks_deprecated(grim_at, project_dir: Path
     dropping its ``deprecated`` field made the row render as verified-healthy
     (grimoire#58)."""
     root, base = http_index
-    _write_all_json(
+    write_all_json(
         root,
         [
-            _package("fresh-skill", "skill", "ghcr.io/acme/skills/fresh-skill", "A current one"),
-            _package(
+            package("fresh-skill", "skill", "ghcr.io/acme/skills/fresh-skill", "A current one"),
+            package(
                 "old-skill",
                 "skill",
                 "ghcr.io/acme/skills/old-skill",
@@ -247,7 +192,7 @@ def test_search_http_index_hides_and_marks_deprecated(grim_at, project_dir: Path
             ),
         ],
     )
-    _index_config(project_dir, base)
+    index_config(project_dir, base)
     runner = grim_at(project_dir)
 
     repos = [r.get("repo", "") for r in _search_rows(runner)]
@@ -274,7 +219,7 @@ def test_search_http_index_hides_and_marks_deprecated(grim_at, project_dir: Path
 def test_search_unreachable_http_index_degrades_to_empty(grim_at, project_dir: Path) -> None:
     """An unreachable index degrades that source to an empty group — the
     browse still exits 0 (same contract as an unreachable registry)."""
-    _index_config(project_dir, "http://127.0.0.1:1/absent")
+    index_config(project_dir, "http://127.0.0.1:1/absent")
     rows = _search_rows(grim_at(project_dir))
     assert rows == [], f"unreachable index must yield no rows, got {rows}"
 
@@ -288,7 +233,7 @@ def test_search_json_names_the_failed_index_source(grim_at, project_dir: Path) -
     mistaken for an empty index.
     """
     locator = "http://127.0.0.1:1/absent"
-    _index_config(project_dir, locator)
+    index_config(project_dir, locator)
     runner = grim_at(project_dir)
 
     result = runner.run("--format", "json", "search", "--refresh", check=False)
@@ -314,11 +259,11 @@ def test_search_git_index_lists_packages(grim_at, project_dir: Path, tmp_path: P
     repo = _git_index_repo(
         tmp_path,
         [
-            _package("git-skill", "skill", "ghcr.io/acme/skills/git-skill", "Cloned pointer"),
-            _package("git-bundle", "bundle", "gitlab.example/acme/bundles/git-bundle", "Bundle pointer"),
+            package("git-skill", "skill", "ghcr.io/acme/skills/git-skill", "Cloned pointer"),
+            package("git-bundle", "bundle", "gitlab.example/acme/bundles/git-bundle", "Bundle pointer"),
         ],
     )
-    _index_config(project_dir, repo.as_posix())
+    index_config(project_dir, repo.as_posix())
 
     rows = _search_rows(grim_at(project_dir))
     repos = [r.get("repo", "") for r in rows]
@@ -330,9 +275,9 @@ def test_git_index_refresh_picks_up_new_packages(grim_at, project_dir: Path, tmp
     """A second ``--refresh`` re-clones and surfaces newly announced packages."""
     repo = _git_index_repo(
         tmp_path,
-        [_package("first", "skill", "ghcr.io/acme/skills/first", "First")],
+        [package("first", "skill", "ghcr.io/acme/skills/first", "First")],
     )
-    _index_config(project_dir, repo.as_posix())
+    index_config(project_dir, repo.as_posix())
     runner = grim_at(project_dir)
 
     assert any("first" in r.get("repo", "") for r in _search_rows(runner))
@@ -340,7 +285,7 @@ def test_git_index_refresh_picks_up_new_packages(grim_at, project_dir: Path, tmp
     d = repo / "index" / "github.com" / "acme" / "second"
     d.mkdir(parents=True)
     (d / "metadata.json").write_text(
-        json.dumps(_package("second", "rule", "ghcr.io/acme/rules/second", "Second"))
+        json.dumps(package("second", "rule", "ghcr.io/acme/rules/second", "Second"))
     )
     subprocess.run(
         ["git", "-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"],
@@ -368,9 +313,9 @@ def test_search_outside_project_browses_global_index_source(
     no-scope path browsed the push-side GHCR fallback (ignoring the global
     config tiers entirely) and mis-warned about ``_catalog`` gating."""
     root, base = http_index
-    _write_all_json(
+    write_all_json(
         root,
-        [_package("outside-skill", "skill", "ghcr.io/acme/skills/outside-skill", "From the index")],
+        [package("outside-skill", "skill", "ghcr.io/acme/skills/outside-skill", "From the index")],
     )
     (grim_home / "grimoire.toml").write_text(
         f'[[registries]]\nalias = "hub"\nindex = "{base}"\ndefault = true\n'
@@ -411,9 +356,9 @@ def test_index_and_registry_sources_combine(
     )
 
     root, base = http_index
-    _write_all_json(
+    write_all_json(
         root,
-        [_package("hub-skill", "skill", "ghcr.io/acme/skills/hub-skill", "From the index")],
+        [package("hub-skill", "skill", "ghcr.io/acme/skills/hub-skill", "From the index")],
     )
 
     (project_dir / "grimoire.toml").write_text(
@@ -452,28 +397,9 @@ def test_index_and_registry_sources_combine(
 
 
 _TWO_HOST_PACKAGES = [
-    _package("tools", "skill", "ghcr.io/acme/tools", "Tools on ghcr"),
-    _package("tools", "skill", "quay.io/acme/tools", "Tools on quay"),
+    package("tools", "skill", "ghcr.io/acme/tools", "Tools on ghcr"),
+    package("tools", "skill", "quay.io/acme/tools", "Tools on quay"),
 ]
-
-
-def _filtered_index_config(
-    project_dir: Path,
-    locator: str,
-    include: tuple[str, ...] = (),
-    exclude: tuple[str, ...] = (),
-) -> None:
-    """`_index_config` plus a browse filter on the same single entry."""
-    lines = [
-        "[[registries]]",
-        'alias = "hub"',
-        f'index = "{locator}"',
-    ]
-    for key, patterns in (("include", include), ("exclude", exclude)):
-        if patterns:
-            lines.append(f"{key} = [" + ", ".join(f'"{p}"' for p in patterns) + "]")
-    lines += ["default = true", "", "[skills]", "", "[rules]", ""]
-    (project_dir / "grimoire.toml").write_text("\n".join(lines))
 
 
 @pytest.mark.parametrize(
@@ -534,8 +460,8 @@ def test_browse_filter_addresses_either_candidate(
     throughout — a filter is never an error.
     """
     root, base = http_index
-    _write_all_json(root, _TWO_HOST_PACKAGES)
-    _filtered_index_config(project_dir, base, include=include, exclude=exclude)
+    write_all_json(root, _TWO_HOST_PACKAGES)
+    filtered_index_config(project_dir, base, include=include, exclude=exclude)
 
     rows = _search_rows(grim_at(project_dir))
     assert {r.get("repo", "") for r in rows} == expected
@@ -654,10 +580,10 @@ def test_install_from_http_index_lands_in_claude_config_dir(
         },
     )
     # Tagless: exactly what `grim publish --announce` writes into a pointer.
-    _write_all_json(
+    write_all_json(
         root,
         [
-            _package(
+            package(
                 "index-installed",
                 "skill",
                 f"{registry}/{art.repo}",
@@ -699,30 +625,6 @@ def test_install_from_http_index_lands_in_claude_config_dir(
 # ---------------------------------------------------------------------------
 
 
-def _write_stats(
-    root: Path,
-    entries: dict,
-    schema_version: int = 1,
-    rating_host: str | None = None,
-    downloads_provider: str | None = None,
-) -> None:
-    providers: dict = {"rating": "github"}
-    if rating_host is not None:
-        providers["rating_host"] = rating_host
-    if downloads_provider is not None:
-        providers["downloads"] = downloads_provider
-    (root / "stats.json").write_text(
-        json.dumps(
-            {
-                "schema_version": schema_version,
-                "generated_at": "2026-08-18T00:00:00Z",
-                "providers": providers,
-                "entries": entries,
-            }
-        )
-    )
-
-
 def _cached_entries(grim_home: Path) -> dict:
     """Every cached catalog entry across the per-registry cache files, keyed
     by ref — the read path's only observable surface until the display
@@ -740,14 +642,14 @@ def test_http_index_joins_the_ratings_sidecar_by_ref(
     """S-001: an index publishing ``stats.json`` beside ``all.json`` has its
     ratings joined onto the catalog **by ref** — the rated pointer only."""
     root, base = http_index
-    _write_all_json(
+    write_all_json(
         root,
         [
-            _package("rated", "skill", "ghcr.io/acme/skills/rated", "Rated"),
-            _package("unrated", "skill", "ghcr.io/acme/skills/unrated", "Unrated"),
+            package("rated", "skill", "ghcr.io/acme/skills/rated", "Rated"),
+            package("unrated", "skill", "ghcr.io/acme/skills/unrated", "Unrated"),
         ],
     )
-    _write_stats(
+    write_stats(
         root,
         {
             "ghcr.io/acme/skills/rated": {
@@ -762,7 +664,7 @@ def test_http_index_joins_the_ratings_sidecar_by_ref(
             "ghcr.io/acme/skills/ghost": {"rating": {"up": 99, "target": "t", "url": "u"}},
         },
     )
-    _index_config(project_dir, base)
+    index_config(project_dir, base)
 
     rows = _search_rows(grim_at(project_dir))
     assert len(rows) == 2, f"both pointers still list; got {rows}"
@@ -788,15 +690,15 @@ def test_http_index_joins_the_downloads_sidecar_by_ref(
     rule as `rating`, independently of it: a ref may be counted and unrated,
     rated and uncounted, or both."""
     root, base = http_index
-    _write_all_json(
+    write_all_json(
         root,
         [
-            _package("counted", "skill", "ghcr.io/acme/skills/counted", "Counted"),
-            _package("rated", "skill", "ghcr.io/acme/skills/rated", "Rated"),
-            _package("plain", "skill", "ghcr.io/acme/skills/plain", "Plain"),
+            package("counted", "skill", "ghcr.io/acme/skills/counted", "Counted"),
+            package("rated", "skill", "ghcr.io/acme/skills/rated", "Rated"),
+            package("plain", "skill", "ghcr.io/acme/skills/plain", "Plain"),
         ],
     )
-    _write_stats(
+    write_stats(
         root,
         {
             "ghcr.io/acme/skills/counted": {
@@ -815,7 +717,7 @@ def test_http_index_joins_the_downloads_sidecar_by_ref(
         },
         downloads_provider="artifactory",
     )
-    _index_config(project_dir, base)
+    index_config(project_dir, base)
 
     rows = _search_rows(grim_at(project_dir))
     by_repo = {r["repo"]: r for r in rows}
@@ -861,13 +763,13 @@ def test_a_declared_rating_host_lands_in_the_cache_normalised(
     onto every rated entry, already normalised, so what the cache holds is
     what `grim rate` would dial."""
     root, base = http_index
-    _write_all_json(root, [_package("rated", "skill", "ghcr.io/acme/skills/rated", "Rated")])
-    _write_stats(
+    write_all_json(root, [package("rated", "skill", "ghcr.io/acme/skills/rated", "Rated")])
+    write_stats(
         root,
         {"ghcr.io/acme/skills/rated": {"rating": {"up": 1, "target": "t", "url": "u"}}},
         rating_host="GitLab.Corp.Example.",
     )
-    _index_config(project_dir, base)
+    index_config(project_dir, base)
     _search_rows(grim_at(project_dir))
 
     rating = _cached_entries(grim_home)["ghcr.io/acme/skills/rated"]["rating"]
@@ -881,13 +783,13 @@ def test_a_rejected_rating_host_leaves_the_entry_hostless(
     row stays readable and the vote falls back to the provider default,
     the same degradation an unrecognised `providers.rating` gets."""
     root, base = http_index
-    _write_all_json(root, [_package("rated", "skill", "ghcr.io/acme/skills/rated", "Rated")])
-    _write_stats(
+    write_all_json(root, [package("rated", "skill", "ghcr.io/acme/skills/rated", "Rated")])
+    write_stats(
         root,
         {"ghcr.io/acme/skills/rated": {"rating": {"up": 1, "target": "t", "url": "u"}}},
         rating_host="https://evil.tld/path",
     )
-    _index_config(project_dir, base)
+    index_config(project_dir, base)
     _search_rows(grim_at(project_dir))
 
     rating = _cached_entries(grim_home)["ghcr.io/acme/skills/rated"]["rating"]
@@ -901,8 +803,8 @@ def test_http_index_without_a_sidecar_reads_unrated_and_warns_nothing(
     has not enabled ratings — the catalog builds, rows are unrated, and
     nothing is said above ``debug``."""
     root, base = http_index
-    _write_all_json(root, [_package("plain", "skill", "ghcr.io/acme/skills/plain", "Plain")])
-    _index_config(project_dir, base)
+    write_all_json(root, [package("plain", "skill", "ghcr.io/acme/skills/plain", "Plain")])
+    index_config(project_dir, base)
 
     runner = grim_at(project_dir)
     result = runner.run("--format", "json", "search", "--refresh", check=False)
@@ -929,19 +831,14 @@ def test_http_index_sidecar_server_error_reads_unrated(
 
     root = tmp_path / "index-dist-500"
     root.mkdir()
-    _write_all_json(root, [_package("plain", "skill", "ghcr.io/acme/skills/plain", "Plain")])
-    handler = partial(FailingStats, directory=str(root))
-    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    try:
-        _index_config(project_dir, f"http://127.0.0.1:{server.server_address[1]}")
+    write_all_json(root, [package("plain", "skill", "ghcr.io/acme/skills/plain", "Plain")])
+    with serve(root, FailingStats) as base:
+        index_config(project_dir, base)
         runner = grim_at(project_dir)
         result = runner.run("--format", "json", "search", "--refresh", check=False)
         assert result.returncode == 0, f"a failing sidecar must not fail the build: {result.stderr}"
         assert len(json.loads(result.stdout)["items"]) == 1
         assert "rating" not in _cached_entries(grim_home)["ghcr.io/acme/skills/plain"]
-    finally:
-        server.shutdown()
 
 
 def test_sidecar_503_leaves_a_warm_cache_rated(
@@ -963,16 +860,13 @@ def test_sidecar_503_leaves_a_warm_cache_rated(
 
     root = tmp_path / "index-dist-flaky"
     root.mkdir()
-    _write_all_json(root, [_package("rated", "skill", "ghcr.io/acme/skills/rated", "Rated")])
-    _write_stats(
+    write_all_json(root, [package("rated", "skill", "ghcr.io/acme/skills/rated", "Rated")])
+    write_stats(
         root,
         {"ghcr.io/acme/skills/rated": {"rating": {"up": 12, "target": "t", "url": "u"}}},
     )
-    handler = partial(FlakyStats, directory=str(root))
-    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    try:
-        _index_config(project_dir, f"http://127.0.0.1:{server.server_address[1]}")
+    with serve(root, FlakyStats) as base:
+        index_config(project_dir, base)
         runner = grim_at(project_dir)
 
         # A warm cache: one successful build that saw the rating.
@@ -993,8 +887,6 @@ def test_sidecar_503_leaves_a_warm_cache_rated(
         # is the contract consumers read.
         row = next(r for r in rows if r["repo"] == "ghcr.io/acme/skills/rated")
         assert row["rating"]["up"] == 12, f"the served row keeps the rating too; got {row['rating']}"
-    finally:
-        server.shutdown()
 
 
 def test_git_index_reads_unrated(grim_at, grim_home: Path, project_dir: Path, tmp_path: Path) -> None:
@@ -1002,9 +894,9 @@ def test_git_index_reads_unrated(grim_at, grim_home: Path, project_dir: Path, tm
     tree of ``metadata.json`` files with no sidecar — unrated, not an
     error."""
     repo = _git_index_repo(
-        tmp_path, [_package("gitpkg", "skill", "ghcr.io/acme/skills/gitpkg", "From git")]
+        tmp_path, [package("gitpkg", "skill", "ghcr.io/acme/skills/gitpkg", "From git")]
     )
-    _index_config(project_dir, repo.as_posix())
+    index_config(project_dir, repo.as_posix())
 
     rows = _search_rows(grim_at(project_dir))
     assert [r.get("repo") for r in rows] == ["ghcr.io/acme/skills/gitpkg"]
@@ -1018,9 +910,9 @@ def test_offline_browse_is_unchanged_by_the_sidecar(
     cached rating is served, and no sidecar request is made because no
     rebuild happens at all."""
     root, base = http_index
-    _write_all_json(root, [_package("rated", "skill", "ghcr.io/acme/skills/rated", "Rated")])
-    _write_stats(root, {"ghcr.io/acme/skills/rated": {"rating": {"up": 3, "target": "t", "url": "u"}}})
-    _index_config(project_dir, base)
+    write_all_json(root, [package("rated", "skill", "ghcr.io/acme/skills/rated", "Rated")])
+    write_stats(root, {"ghcr.io/acme/skills/rated": {"rating": {"up": 3, "target": "t", "url": "u"}}})
+    index_config(project_dir, base)
 
     runner = grim_at(project_dir)
     _search_rows(runner)
@@ -1047,10 +939,10 @@ def _sorted_index(root: Path, project_dir: Path, base: str) -> None:
     """A four-package index whose ratings, download totals, names, and
     relevance to the query ``tool`` all disagree — so any single ordering the
     CLI applies is distinguishable from every other."""
-    _write_all_json(
+    write_all_json(
         root,
         [
-            _package(name, "skill", f"ghcr.io/acme/skills/{name}", desc, keywords=kw)
+            package(name, "skill", f"ghcr.io/acme/skills/{name}", desc, keywords=kw)
             for name, desc, kw in [
                 # Scores highest on `tool`: the term appears in the leaf name
                 # AND the description.
@@ -1064,7 +956,7 @@ def _sorted_index(root: Path, project_dir: Path, base: str) -> None:
             ]
         ],
     )
-    _write_stats(
+    write_stats(
         root,
         {
             # Download totals run OPPOSITE to the ratings, so a downloads sort
@@ -1085,7 +977,7 @@ def _sorted_index(root: Path, project_dir: Path, base: str) -> None:
             # uncounted.
         },
     )
-    _index_config(project_dir, base)
+    index_config(project_dir, base)
 
 
 def _repos(runner, *args: str) -> list[str]:
@@ -1158,15 +1050,15 @@ def test_description_only_mentions_drop_below_a_name_hit(grim_at, project_dir: P
     the best one (default 50). With no name hit the description mentions are
     the best there is and all of them stay."""
     root, base = http_index
-    _write_all_json(
+    write_all_json(
         root,
         [
-            _package("grim-usage", "skill", "ghcr.io/acme/skills/grim-usage", "how to use grim"),
-            _package("hex", "skill", "ghcr.io/acme/skills/hex", "a swarm, installed with grim"),
-            _package("nox", "skill", "ghcr.io/acme/skills/nox", "a reviewer, installed with grim"),
+            package("grim-usage", "skill", "ghcr.io/acme/skills/grim-usage", "how to use grim"),
+            package("hex", "skill", "ghcr.io/acme/skills/hex", "a swarm, installed with grim"),
+            package("nox", "skill", "ghcr.io/acme/skills/nox", "a reviewer, installed with grim"),
         ],
     )
-    _index_config(project_dir, base)
+    index_config(project_dir, base)
     runner = grim_at(project_dir)
     assert _repos(runner, "grim") == ["grim-usage"]
     assert sorted(_repos(runner, "installed")) == ["hex", "nox"]
@@ -1183,15 +1075,15 @@ def test_sort_does_not_widen_the_relevance_set(grim_at, project_dir: Path, http_
     rows those are. The relevance cutoff still drops the description-only
     mentions of ``grim`` before the rating order is applied."""
     root, base = http_index
-    _write_all_json(
+    write_all_json(
         root,
         [
-            _package("grim-usage", "skill", "ghcr.io/acme/skills/grim-usage", "how to use grim"),
-            _package("hex", "skill", "ghcr.io/acme/skills/hex", "a swarm, installed with grim"),
-            _package("nox", "skill", "ghcr.io/acme/skills/nox", "a reviewer, installed with grim"),
+            package("grim-usage", "skill", "ghcr.io/acme/skills/grim-usage", "how to use grim"),
+            package("hex", "skill", "ghcr.io/acme/skills/hex", "a swarm, installed with grim"),
+            package("nox", "skill", "ghcr.io/acme/skills/nox", "a reviewer, installed with grim"),
         ],
     )
-    _index_config(project_dir, base)
+    index_config(project_dir, base)
     assert _repos(grim_at(project_dir), "grim", "--sort", "rating") == ["grim-usage"]
 
 
@@ -1203,14 +1095,14 @@ def test_prose_and_namespace_match_whole_word_prefixes_only(
     only letter-matches the org path ``michael-herwig/arcana`` — neither is a
     hit. A namespace word still finds the artifacts living under it."""
     root, base = http_index
-    _write_all_json(
+    write_all_json(
         root,
         [
-            _package("nox", "skill", "ghcr.io/michael-herwig/arcana/nox", "the latest release"),
-            _package("other", "skill", "ghcr.io/acme/skills/other", "the latest release"),
+            package("nox", "skill", "ghcr.io/michael-herwig/arcana/nox", "the latest release"),
+            package("other", "skill", "ghcr.io/acme/skills/other", "the latest release"),
         ],
     )
-    _index_config(project_dir, base)
+    index_config(project_dir, base)
     runner = grim_at(project_dir)
     assert _repos(runner, "test") == []
     assert _repos(runner, "hex") == []
@@ -1268,13 +1160,13 @@ def test_http_index_caches_the_index_placement(
     compiled before the field) and one whose segments fail the allowlist
     carry no ``index_path``, so the tree keeps their OCI grouping."""
     root, base = http_index
-    placed = _package("grim-usage", "skill", "ghcr.io/acme/skills/grim-usage", "Placed")
+    placed = package("grim-usage", "skill", "ghcr.io/acme/skills/grim-usage", "Placed")
     placed["namespace"] = "github.com/acme"
-    hostile = _package("evil", "skill", "ghcr.io/acme/skills/evil", "Hostile")
+    hostile = package("evil", "skill", "ghcr.io/acme/skills/evil", "Hostile")
     hostile["namespace"] = "github.com/‮acme"
-    bare = _package("bare", "skill", "ghcr.io/acme/skills/bare", "No namespace")
-    _write_all_json(root, [placed, hostile, bare])
-    _index_config(project_dir, base)
+    bare = package("bare", "skill", "ghcr.io/acme/skills/bare", "No namespace")
+    write_all_json(root, [placed, hostile, bare])
+    index_config(project_dir, base)
 
     rows = _search_rows(grim_at(project_dir))
     assert len(rows) == 3
@@ -1292,9 +1184,9 @@ def test_git_index_caches_the_index_placement(
     """A git index has no derived ``namespace`` field; the placement comes
     from the ``index/<host>/<namespace>/<name>/`` directory instead."""
     repo = _git_index_repo(
-        tmp_path, [_package("gitpkg", "skill", "ghcr.io/acme/skills/gitpkg", "From git")]
+        tmp_path, [package("gitpkg", "skill", "ghcr.io/acme/skills/gitpkg", "From git")]
     )
-    _index_config(project_dir, repo.as_posix())
+    index_config(project_dir, repo.as_posix())
 
     _search_rows(grim_at(project_dir))
     assert _cached_entries(grim_home)["ghcr.io/acme/skills/gitpkg"]["index_path"] == "github.com/acme/gitpkg"
