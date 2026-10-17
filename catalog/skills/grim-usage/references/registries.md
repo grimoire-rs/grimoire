@@ -667,8 +667,11 @@ When `[[registries]]` are configured, all of them are browsed and flattened
 into one table. The catalog is cached under `$GRIM_HOME` — pass `--refresh`
 to rebuild it from the registry, `--registry` to collapse the browse to
 exactly the registries it names (repeatable / comma-separated for several at
-once), and `--limit <N>` to print only the first N rows after ranking and
-`--sort` (a positive integer; `--limit 0` is a usage error, exit 64). Plain output shows the one-line summary (truncated to the terminal);
+once), and `--limit <N>` to print only N rows after ranking and
+`--sort` (a positive integer; `--limit 0` is a usage error, exit 64).
+`--offset <N>` skips the first N rows before `--limit` applies. It takes 0 or
+more; a negative or non-numeric value is a usage error, exit 64. Past the end
+it prints only the table header, warns on stderr and exits 0. Plain output shows the one-line summary (truncated to the terminal);
 piped output and `--format json` keep the full description, and JSON adds a
 `repository` URL field for tooling.
 
@@ -709,12 +712,19 @@ expired or with `--refresh`. A still-fresh cache is served with `ok: true`.
 
 Two more siblings of `items` are always present. `total` counts every
 matching row (after the browse filter, deprecated visibility, the query and
-the relevance cutoff) before `--limit` cut the list, and `truncated` is
-`true` when `items` is not the complete answer: `--limit` cut it, or an
-`oci` source's listing was capped at build time, in which case `total` is
-only a lower bound. `items.length < total` means `--limit` cut the
-list, and an `oci` cap may apply as well. Branch on `truncated` before
-treating `items` as the whole answer. An `index` source is never truncated:
+the relevance cutoff) before `--offset` and `--limit` cut the list, and
+`truncated` is `true` when `items` is not the complete answer. That happens
+when `--offset` or `--limit` removed rows, or when an `oci` source's listing
+was capped at build time and `total` is only a lower bound. `items.length < total` means the
+page is partial, and an `oci` cap may apply as well. Branch on `truncated`
+before treating `items` as the whole answer.
+
+To read every page, loop `offset += items.length` while `offset < total`
+(and stop on an empty `items`). No field echoes the offset. Pages of any
+size concatenate to the unpaged list, because ties break deterministically.
+Add `--offline` to every call after the first so a cache refresh cannot shift
+rows between pages; the MCP tool has no such flag, so page promptly there. A plain partial page also prints `showing 101-200 of 600; next
+page: --offset 200` on stderr; JSON prints no such line. An `index` source is never truncated:
 an index past the abuse bounds fails its fetch instead. A queried search over
 a capped `oci` source warns once per source on stderr: `catalog for source
 '<name>' capped at 500 repositories; a
@@ -733,8 +743,8 @@ comes back thinner than expected, there are two things to check before
 blaming the registry: the entry's `include`/`exclude` (`grim context
 --format json` reports the resolved patterns per source), and the relevance
 cutoff (`options.search_min_relevance`, default 50) — set it to `0` to rule
-it out. In JSON, `truncated: true` says a `--limit` or a capped `oci`
-listing cut the list.
+it out. In JSON, `truncated: true` says an `--offset`, a `--limit` or a capped
+`oci` listing cut the list.
 
 A package the publisher has marked deprecated is **hidden by default** from
 both `grim search` and the TUI — unless it is installed in the active scope
@@ -827,7 +837,7 @@ and can call these tools:
 
 | Tool | What it returns | Gate |
 |------|-----------------|------|
-| `grim_search` | Same JSON as `grim search --format json`, over the resolved scope's registries (no registry override), `total` and `truncated` included. Args: `query?`, `refresh?`, `limit?` (positive integer, as `--limit`), scope | always |
+| `grim_search` | Same JSON as `grim search --format json`, over the resolved scope's registries (no registry override), `total` and `truncated` included. Args: `query?`, `refresh?`, `limit?` (positive integer, as `--limit`), `offset?` (non-negative integer, as `--offset`), scope | always |
 | `grim_status` | Same JSON as `grim status --format json` for the requested scope. Optional `check` forwards to the same live catalog re-check as CLI `--check` (deprecated/replaced_by/update_available; the report's `checked` field says whether it ran). Args: `check?`, scope | always |
 | `grim_fetch` | An artifact's content in the tool result — no install. Canonical bytes, or a `vendor` (claude/opencode/copilot) projection, or one support file via `path` (binary → base64 with `encoding: "base64"`); a `files` listing is always included. `description` fetches the repository's description companion instead (every member inline); `digest_only` resolves `{ref, digest}` with no download and composes with `description`. Content caps at 256 KiB (marked truncation); needs network. Args: `ref`, `vendor?`, `path?`, `description?`, `digest_only?`, scope | always |
 | `grim_describe` | Same JSON as `grim describe --format json` — manifest-level metadata (kind, curated annotations, tags, `has_description`) without downloading content. Args: `ref`, scope | always |
