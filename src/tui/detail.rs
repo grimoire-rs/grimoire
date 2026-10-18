@@ -936,6 +936,7 @@ mod tests {
             documentation: Some("https://docs.acme.example".to_string()),
             vendor: Some("Acme Inc".to_string()),
             compatibility: Some("claude>=2".to_string()),
+            ..Default::default()
         };
         let lines = detail_lines(Some(&row), None);
         assert_eq!(meta_value(&lines, "License:"), Some("Apache-2.0"));
