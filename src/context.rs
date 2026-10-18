@@ -397,6 +397,12 @@ impl Context {
         self
     }
 
+    /// Mark a hermetic context `--offline`, so a test reads the cache only.
+    pub fn with_offline(mut self) -> Self {
+        self.offline = true;
+        self
+    }
+
     /// Every plain-HTTP exception list [`Self::access`] was handed, in call
     /// order. The observable that makes the config→transport wiring
     /// testable — see the field docs.
