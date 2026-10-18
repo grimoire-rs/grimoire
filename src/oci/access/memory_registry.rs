@@ -91,8 +91,8 @@ impl OciAccess for MemoryRegistry {
         Ok(if tags.is_empty() { None } else { Some(tags) })
     }
 
-    async fn list_catalog(&self, _registry: &str) -> Result<Vec<String>, AccessError> {
-        Ok(Vec::new())
+    async fn list_catalog(&self, _registry: &str) -> Result<crate::oci::access::CatalogListing, AccessError> {
+        Ok(Vec::new().into())
     }
 
     async fn push_blob(&self, _repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {

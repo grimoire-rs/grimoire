@@ -682,7 +682,7 @@ mod tests {
         async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
             unreachable!()
         }
-        async fn list_catalog(&self, _: &str) -> Result<Vec<String>, AccessError> {
+        async fn list_catalog(&self, _: &str) -> Result<crate::oci::access::CatalogListing, AccessError> {
             Err(AccessError::without_identifier(AccessErrorKind::Registry(
                 std::io::Error::other("simulated registry outage").into(),
             )))
@@ -721,8 +721,8 @@ mod tests {
         async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
             unreachable!()
         }
-        async fn list_catalog(&self, _: &str) -> Result<Vec<String>, AccessError> {
-            Ok(Vec::new())
+        async fn list_catalog(&self, _: &str) -> Result<crate::oci::access::CatalogListing, AccessError> {
+            Ok(Vec::new().into())
         }
         async fn push_blob(&self, _: &Identifier, _: &[u8]) -> Result<Digest, AccessError> {
             unreachable!()

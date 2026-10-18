@@ -538,8 +538,8 @@ mod tests {
             // dedup / generation / in-flight machinery, not tag selection).
             Ok(Some(vec!["latest".to_string()]))
         }
-        async fn list_catalog(&self, _registry: &str) -> Result<Vec<String>, AccessError> {
-            Ok(Vec::new())
+        async fn list_catalog(&self, _registry: &str) -> Result<crate::oci::access::CatalogListing, AccessError> {
+            Ok(Vec::new().into())
         }
         async fn push_blob(&self, _r: &Identifier, b: &[u8]) -> Result<Digest, AccessError> {
             Ok(Algorithm::Sha256.hash(b))
@@ -827,8 +827,8 @@ mod tests {
             // The registry now carries a higher tag than the cached catalog saw.
             Ok(Some(vec!["1.0.0".to_string(), "2.0.0".to_string()]))
         }
-        async fn list_catalog(&self, _registry: &str) -> Result<Vec<String>, AccessError> {
-            Ok(Vec::new())
+        async fn list_catalog(&self, _registry: &str) -> Result<crate::oci::access::CatalogListing, AccessError> {
+            Ok(Vec::new().into())
         }
         async fn push_blob(&self, _r: &Identifier, b: &[u8]) -> Result<Digest, AccessError> {
             Ok(Algorithm::Sha256.hash(b))
