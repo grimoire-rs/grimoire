@@ -508,11 +508,10 @@ pub async fn load_catalog(
                 CatalogGroup {
                     registry: reg.url.clone(),
                     alias: reg.alias.clone(),
-                    // Plan C-008 / ADR D6: **build-time** truncation, reported
-                    // verbatim. For a registry source the cap is applied while
-                    // listing, before the filter is ever consulted, so a narrow
-                    // filter can never rescue a browse from `MAX_CATALOG_REPOS`;
-                    // an index source is never capped and never truncated.
+                    // Plan C-008 / ADR D6: **build-time** listing incompleteness,
+                    // reported verbatim. It is a property of the listing, fixed
+                    // before the filter is ever consulted, so a filter never
+                    // changes it.
                     truncated: catalog.truncated(),
                     built_at: catalog.built_at().to_string(),
                     served_offline: offline || catalog.refresh_error().is_some(),
@@ -1903,10 +1902,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_capped_cache_with_a_full_window_is_flagged_truncated() {
+    async fn a_truncated_cache_is_flagged_on_its_group() {
         // `seed_catalog` only ever passed `false`, so nothing proved the flag
-        // a build writes survives the load into the group. 600 rows is more
-        // than the cap lists, as a cache an earlier build kept would be.
+        // a build writes survives the load into the group. The failing access
+        // keeps the truncated cache from being rebuilt, so it is served as is.
         let tmp = tempfile::tempdir().unwrap();
         let paths = GrimPaths::new(tmp.path().to_path_buf());
         let repos: Vec<(String, String)> = (0..600)
@@ -1923,7 +1922,11 @@ mod tests {
         .await;
         assert!(results.groups[0].truncated);
         assert!(results.any_truncated());
-        assert_eq!(results.groups[0].rows.len(), 600, "a read never re-applies the cap");
+        assert_eq!(
+            results.groups[0].rows.len(),
+            600,
+            "a read never narrows the cached rows"
+        );
     }
 
     #[tokio::test]

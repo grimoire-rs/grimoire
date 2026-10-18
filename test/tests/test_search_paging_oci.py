@@ -2,12 +2,10 @@
 # Copyright 2026 The Grimoire Authors
 """Paging ``grim search`` over ``oci`` sources and mixed oci + index scopes.
 
-``test_index_scale.py`` pages an index. An ``oci`` source differs in two
-ways a paging consumer feels: its ``_catalog`` listing is capped at 500
-repositories when the catalog is built, so ``total`` is then a lower bound
-and ``truncated`` is true on every page, and its rows come from a different
-code path than an index's. These tests pin that the pages still partition
-the one ordered list.
+``test_index_scale.py`` pages an index. An ``oci`` source's rows come from a
+different code path than an index's: its ``_catalog`` is walked to the end
+and every repository is listed, past 500 included. These tests pin that the
+pages still partition the one ordered list and that no source reads capped.
 """
 
 from __future__ import annotations
@@ -30,7 +28,6 @@ from src.index_fixture import (
 )
 from src.registry import REGISTRY_HOST
 
-CAP = 500
 UNDER = 150
 OVER = 600
 
@@ -47,7 +44,7 @@ def ns_under(registry: str) -> str:
 
 @pytest.fixture(scope="module")
 def ns_over(registry: str) -> str:
-    """A namespace of 600 repos, past the 500 cap (~2.5 s to push)."""
+    """A namespace of 600 repos, past the 500 an earlier grim capped at (~2.5 s to push)."""
     return paged_namespace(OVER)
 
 
@@ -137,54 +134,53 @@ def test_oci_pages_partition_the_unpaged_list(grim_at, project_dir, ns_under) ->
         )
 
 
-def test_oci_over_the_cap_reports_a_lower_bound_on_every_page(
+def test_an_oci_scope_past_500_pages_to_the_full_count(
     grim_at, project_dir, ns_over
 ) -> None:
     runner = grim_at(project_dir)
     scope = ("--registry", _locator(ns_over))
 
     full = _envelope(runner, *scope)
-    assert len(full["items"]) == CAP
-    assert full["total"] == CAP
-    assert full["truncated"] is True
+    assert len(full["items"]) == OVER
+    assert full["total"] == OVER
+    assert full["truncated"] is False
     assert full["sources"][0]["ok"] is True
+    assert full["sources"][0]["capped"] is False
 
     for size in (100, 70):
         pages = _walk(runner, size, *scope)
-        assert len(pages) == -(-CAP // size)
-        assert all(p["total"] == CAP and p["truncated"] is True for p in pages)
+        assert len(pages) == -(-OVER // size)
+        assert all(p["total"] == OVER for p in pages)
+        assert all(p["sources"][0]["capped"] is False for p in pages)
         assert _rows(pages) == full["items"], f"pages of {size} must stitch"
         repos = [r["repo"] for r in _rows(pages)]
-        assert len(set(repos)) == CAP
-        assert repos[-1] == f"{_locator(ns_over)}/pkg-499"
+        assert len(set(repos)) == OVER
+        assert repos[-1] == f"{_locator(ns_over)}/pkg-599"
 
     past = runner.run(
         "--format", "json", "search", "--offline", *scope,
-        "--offset", str(CAP), "--limit", "100", check=False,
+        "--offset", str(OVER), "--limit", "100", check=False,
     )
     assert past.returncode == 0, past.stderr
     empty = json.loads(past.stdout)
     assert empty["items"] == []
-    assert empty["total"] == CAP
-    assert empty["truncated"] is True
+    assert empty["total"] == OVER
+    assert empty["sources"][0]["capped"] is False
 
 
-def test_a_query_cannot_reach_past_the_oci_cap(grim_at, project_dir, ns_over) -> None:
+def test_a_query_reaches_every_oci_repository(grim_at, project_dir, ns_over) -> None:
     runner = grim_at(project_dir)
     scope = ("--registry", _locator(ns_over))
 
-    inside = _envelope(runner, *scope, "pkg-499")
-    assert [r["repo"] for r in inside["items"]] == [f"{_locator(ns_over)}/pkg-499"]
-
-    result = runner.run(
-        "--format", "json", "search", "--refresh", *scope, "pkg-550", check=False
-    )
-    assert result.returncode == 0, result.stderr
-    past = json.loads(result.stdout)
-    assert past["items"] == []
-    assert past["total"] == 0
-    assert past["truncated"] is True, "rows past the cap were never seen"
-    assert "capped at 500" in result.stderr
+    for leaf in ("pkg-499", "pkg-550", "pkg-599"):
+        result = runner.run(
+            "--format", "json", "search", "--refresh", *scope, leaf, check=False
+        )
+        assert result.returncode == 0, result.stderr
+        found = json.loads(result.stdout)
+        assert f"{_locator(ns_over)}/{leaf}" in [r["repo"] for r in found["items"]]
+        assert found["truncated"] is False
+        assert "is incomplete" not in result.stderr
 
 
 def _index_rows(count: int) -> list[dict]:
@@ -229,7 +225,7 @@ def test_mixed_oci_and_index_pages_partition_the_unpaged_list(
         assert all(p["total"] == unpaged["total"] for p in pages)
 
 
-def test_mixed_scope_with_a_capped_oci_source(
+def test_mixed_scope_with_a_past_500_oci_source(
     grim_at, project_dir, http_index, ns_over
 ) -> None:
     root, base = http_index
@@ -238,15 +234,16 @@ def test_mixed_scope_with_a_capped_oci_source(
     runner = grim_at(project_dir)
 
     full = _envelope(runner)
-    assert len(full["items"]) == CAP + 150
-    assert full["total"] == CAP + 150
-    assert full["truncated"] is True
+    assert len(full["items"]) == OVER + 150
+    assert full["total"] == OVER + 150
+    assert full["truncated"] is False
     assert [s["ok"] for s in full["sources"]] == [True, True]
+    assert [s["capped"] for s in full["sources"]] == [False, False]
 
     for size in (100, 70, 333):
         pages = _walk(runner, size)
         assert _rows(pages) == full["items"], f"pages of {size} must stitch"
-        assert all(p["truncated"] for p in pages), "the cap taints every page"
+        assert all(p["total"] == OVER + 150 for p in pages)
 
 
 def test_duplicate_refs_across_two_sources_page_deterministically(
@@ -353,7 +350,7 @@ def test_offline_pages_after_a_stale_first_page(grim_at, project_dir, tmp_path) 
     assert first["total"] == second["total"] == 6
 
 
-def test_sources_report_which_oci_listing_was_capped(
+def test_no_walked_oci_listing_is_capped(
     grim_at, project_dir, http_index, ns_over, ns_under
 ) -> None:
     root, base = http_index
@@ -368,7 +365,6 @@ def test_sources_report_which_oci_listing_was_capped(
 
     for page in _walk(runner, 200):
         capped = {s["alias"]: s["capped"] for s in page["sources"]}
-        assert capped == {"big": True, "small": False, "hub": False}, (
-            "every page names the capped source, so a consumer can tell a cap "
-            f"from an ordinary page: {page['sources']}"
+        assert capped == {"big": False, "small": False, "hub": False}, (
+            f"a fully walked listing is never capped: {page['sources']}"
         )

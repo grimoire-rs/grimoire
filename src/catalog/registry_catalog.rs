@@ -5,12 +5,11 @@
 //!
 //! One entry per repository: its kind, a short description, keywords, the
 //! chosen "latest"-ish tag, and when it was fetched. A registry source is
-//! built through the [`OciAccess`] seam as a *bounded, query-scoped* window —
-//! list the catalog, prefilter the repository names cheaply (no network),
-//! cap at [`MAX_CATALOG_REPOS`], then for each survivor list its tags,
-//! pick a representative tag, and read the Grimoire/OCI annotations off
-//! that tag's manifest. No blob is ever pulled (catalog is metadata-only).
-//! An index source lists from one document and is never capped.
+//! built through the [`OciAccess`] seam over *every* repository — list the
+//! catalog, prefilter the repository names cheaply (no network), then for
+//! each survivor list its tags, pick a representative tag, and read the
+//! Grimoire/OCI annotations off that tag's manifest. No blob is ever pulled
+//! (catalog is metadata-only). An index source lists from one document.
 //!
 //! The per-registry cache file at `$GRIM_HOME/catalog/<hash>.json` is
 //! version-enveloped via
@@ -37,17 +36,6 @@ use super::search_match::SearchQuery;
 /// Catalog freshness window: a catalog older than this is stale and is
 /// rebuilt on the next online `search`/`tui` (offline still serves it).
 pub const CATALOG_TTL_SECONDS: i64 = 3600;
-
-/// Hard cap on repositories metadata-fetched in one `_catalog` walk.
-///
-/// A registry's `_catalog` can list tens of thousands of repositories;
-/// fetching three round-trips of metadata for every one is infeasible (a
-/// real registry, not just the shared test one). The walk is therefore
-/// *bounded*: a targeted query first prefilters the repository list by
-/// name (cheap, no network) so a search stays O(matches); an empty query
-/// (browse / TUI) caps to the first `MAX_CATALOG_REPOS` lexicographic
-/// repositories. Walking the entire registry is an explicit cut-line; index sources are never capped.
-pub const MAX_CATALOG_REPOS: usize = 500;
 
 /// Registries that gate the host-level OCI `_catalog` browse endpoint, so a
 /// `grim search` browse against them legitimately returns nothing. Single
@@ -364,13 +352,14 @@ struct CatalogFile {
     /// The registry the catalog was built for.
     registry: String,
     /// The lowercased name-prefilter this catalog was built under (empty
-    /// = a capped browse window). A cache built for a different scope is
+    /// = the whole browse set). A cache built for a different scope is
     /// rebuilt online (served stale if that fails), and served as-is offline.
     #[serde(default)]
     scope: String,
-    /// Whether the build hit [`MAX_CATALOG_REPOS`] with candidates left over
-    /// — i.e. this window is incomplete and a non-empty query may be missing
-    /// matches past the cap. Persisted so an offline-served cache still warns.
+    /// Whether the listing is incomplete: the `_catalog` walk could not finish
+    /// (or ended before the namespace did), or the build is still running or
+    /// was interrupted. A non-empty query may be missing matches. Persisted so
+    /// an offline-served cache still warns.
     #[serde(default)]
     truncated: bool,
     /// RFC3339 UTC timestamp of the last (re)build.
@@ -385,8 +374,7 @@ pub struct Catalog {
     registry: String,
     /// The lowercased name-prefilter this catalog was built under.
     scope: String,
-    /// Whether the build was truncated at [`MAX_CATALOG_REPOS`] (see
-    /// [`Self::truncated`]).
+    /// Whether the listing is incomplete (see [`Self::truncated`]).
     truncated: bool,
     built_at: String,
     entries: BTreeMap<String, CatalogEntry>,
@@ -469,12 +457,13 @@ impl Catalog {
         }
     }
 
-    /// Whether the build hit [`MAX_CATALOG_REPOS`] with more candidates left
-    /// unwalked. When `true` the window is a *prefix* of the matching
-    /// repositories, so a non-empty query filtered in memory may be missing
-    /// matches that live past the cap — callers should surface a truncation
-    /// hint (the `search` report / TUI status line) so results are not read as
-    /// exhaustive. `false` means the whole candidate set fit within the cap.
+    /// Whether the listing is incomplete: the `_catalog` walk could not finish,
+    /// or this is a checkpoint of a build still running or interrupted. When
+    /// `true` the entries are a *prefix* of the matching repositories, so a
+    /// non-empty query filtered in memory may be missing matches and `total` is
+    /// a lower bound — callers should surface a hint (the `search` report / TUI
+    /// status line) so results are not read as exhaustive. `false` means every
+    /// candidate repository was listed.
     pub fn truncated(&self) -> bool {
         self.truncated
     }
@@ -654,10 +643,8 @@ impl Catalog {
         force: bool,
     ) -> Result<Self, CatalogError> {
         let scope = query.to_lowercase();
-        let (guard, previous) = match Self::coordinate(path, registry, &scope, offline, force, false).await? {
+        let (guard, previous) = match Self::coordinate(path, registry, &scope, offline, force).await? {
             PreFlight::Serve(catalog) => return Ok(catalog),
-            // An OCI `_catalog` walk reads every field it writes from the
-            // registry, so the prior cache is only a fallback, never a seed.
             PreFlight::Rebuild { guard, previous } => (guard, previous),
         };
 
@@ -681,8 +668,6 @@ impl Catalog {
     /// fetched over HTTP or a git shallow clone instead of walking the
     /// registry's `_catalog`). The cache is keyed by the index `locator`.
     ///
-    /// A cache an earlier grim capped (`truncated`) is rebuilt however young.
-    ///
     /// # Errors
     ///
     /// [`CatalogError`] for a cache parse/version failure, or an index
@@ -698,7 +683,7 @@ impl Catalog {
         force: bool,
     ) -> Result<Self, CatalogError> {
         let scope = query.to_lowercase();
-        let (guard, previous) = match Self::coordinate(path, locator, &scope, offline, force, true).await? {
+        let (guard, previous) = match Self::coordinate(path, locator, &scope, offline, force).await? {
             PreFlight::Serve(catalog) => return Ok(catalog),
             PreFlight::Rebuild { guard, previous } => (guard, previous),
         };
@@ -722,25 +707,22 @@ impl Catalog {
     /// run on a Tokio worker (quality-rust: no blocking I/O in async).
     ///
     /// `key` is the cache identity — the registry url for `_catalog`
-    /// sources, the index locator for index sources. `rebuild_truncated`
-    /// makes a `truncated` cache stale however young: an earlier grim capped
-    /// index caches, which no current build produces.
+    /// sources, the index locator for index sources. A `truncated` cache is
+    /// stale however young: it is an incomplete listing, and the next online
+    /// run finishes it.
     async fn coordinate(
         path: &Path,
         key: &str,
         scope: &str,
         offline: bool,
         force: bool,
-        rebuild_truncated: bool,
     ) -> Result<PreFlight, CatalogError> {
         let path = path.to_path_buf();
         let key = key.to_string();
         let scope = scope.to_string();
         run_blocking(path.clone(), move || {
             let mut cached = Catalog::load_or_cold(&path, &key, offline)?;
-            let reusable = |c: &Catalog| {
-                !(force || (rebuild_truncated && c.truncated)) && c.scope == scope && c.is_fresh(chrono::Utc::now())
-            };
+            let reusable = |c: &Catalog| !(force || c.truncated) && c.scope == scope && c.is_fresh(chrono::Utc::now());
 
             // Offline: serve whatever is cached (any scope), never lock or
             // reach the network. A cold cache is empty.
@@ -775,10 +757,15 @@ impl Catalog {
                         previous: cached,
                     })
                 }
-                // A peer owns the refresh — serve stale (or empty) and move
-                // on rather than walking the registry redundantly.
+                // A peer owns the refresh — serve stale and move on rather than
+                // walking the registry redundantly. With no cache the peer is
+                // building a cold one: the empty answer is a lower bound, not
+                // "0 total".
                 Err(e) if matches!(e.kind, crate::lock::lock_error::LockErrorKind::Locked) => {
-                    Ok(PreFlight::Serve(cached.unwrap_or_else(|| Catalog::empty(&key))))
+                    Ok(PreFlight::Serve(cached.unwrap_or_else(|| Catalog {
+                        truncated: true,
+                        ..Catalog::empty(&key)
+                    })))
                 }
                 // A real lock I/O fault: fall back to an uncoordinated
                 // rebuild (the atomic write still prevents corruption).
@@ -884,15 +871,12 @@ impl Catalog {
         })
     }
 
-    /// Build a bounded, query-scoped catalog over the access seam.
+    /// Build the catalog over the access seam, for every repository.
     ///
     /// `scope` is a lowercased repository-name prefilter applied *before*
     /// any per-repo network call: only repositories whose name contains it
     /// are metadata-fetched, so a targeted `search <kw>` is O(matches),
-    /// not O(registry). An empty scope (browse / TUI) takes the first
-    /// [`MAX_CATALOG_REPOS`] lexicographic repositories. Either way the
-    /// number of repos walked is capped — walking an entire (potentially
-    /// 60k-repo) registry is an explicit cut-line.
+    /// not O(registry).
     ///
     /// For each selected repository: list its tags, pick a representative
     /// tag, fetch that tag's manifest, read the annotations. No blob is
@@ -901,17 +885,14 @@ impl Catalog {
     /// transient) degrades that one entry to a bare record.
     ///
     /// Per-repository metadata is fetched in bounded parallel via a
-    /// [`tokio::task::JoinSet`] (capped repos × three round-trips each —
+    /// [`tokio::task::JoinSet`] (repos × three round-trips each —
     /// sequential is unusable). Output is keyed by repository in a
     /// `BTreeMap`, so the result is deterministic regardless of completion
     /// order (quality-rust `JoinSet` rule).
     ///
-    /// When the post-prefilter candidate list exceeds the cap the window is
-    /// only a prefix of the matches; the build records that on
-    /// [`Self::truncated`] so a non-empty query can warn that results past the
-    /// cap are not shown. The same flag is set when the `_catalog` walk itself
-    /// ended incomplete before the namespace did, since repositories past it
-    /// were never listed.
+    /// The build records on [`Self::truncated`] when the `_catalog` walk
+    /// itself ended incomplete before the namespace did, since repositories
+    /// past it were never listed.
     async fn build(
         registry: &str,
         scope: &str,
@@ -928,21 +909,14 @@ impl Catalog {
         let (host, namespace) = split_host_namespace(registry);
         let listing = access.list_catalog(registry).await?;
         // The access layer already warned about an unfinished walk.
-        let walk_cut_short = listing_misses_namespace(&listing, namespace);
-        // Namespace scope (no network) + cheap name prefilter, then the hard
-        // cap. Take one past the cap so an overflow is detectable without
-        // materializing a (potentially 60k-repo) list.
-        let mut selected: Vec<String> = listing
+        let truncated = listing_misses_namespace(&listing, namespace);
+        // Namespace scope (no network) + cheap name prefilter.
+        let selected: Vec<String> = listing
             .repositories
             .into_iter()
             .filter(|r| namespace.is_none_or(|ns| r == ns || r.starts_with(&format!("{ns}/"))))
             .filter(|r| scope.is_empty() || r.to_lowercase().contains(scope))
-            .take(MAX_CATALOG_REPOS + 1)
             .collect();
-        // More candidates than the cap ⇒ the window is a prefix; drop the
-        // probe element and flag the build as truncated.
-        let truncated = selected.len() > MAX_CATALOG_REPOS || walk_cut_short;
-        selected.truncate(MAX_CATALOG_REPOS);
 
         let mut entries = BTreeMap::new();
         let mut iter = selected.into_iter();
@@ -2149,7 +2123,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = dir.path().join("catalog").join("idx.json");
         let git_dir = dir.path().join("git");
-        let count = MAX_CATALOG_REPOS + 5;
+        // The cap an earlier grim applied to index caches.
+        const EARLIER_CAP: usize = 500;
+        let count = EARLIER_CAP + 5;
         let base = spawn_index_host_with(count).await;
         let kind = crate::config::registry_resolve::SourceKind::IndexHttp;
         let mut capped = Catalog::build_from_index(&base, kind, "", &git_dir, &cache, None)
@@ -2157,7 +2133,7 @@ mod tests {
             .unwrap();
         capped.entries = std::mem::take(&mut capped.entries)
             .into_iter()
-            .take(MAX_CATALOG_REPOS)
+            .take(EARLIER_CAP)
             .collect();
         capped.truncated = true;
         capped.save(&cache).unwrap();
@@ -2175,23 +2151,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oci_coordinated_serves_a_fresh_truncated_cache() {
-        // A capped `_catalog` window is what the walk legitimately produces,
-        // so only index caches are rebuilt for it.
+    async fn a_truncated_oci_cache_is_rebuilt_however_young() {
+        // A truncated cache is an incomplete listing: the next online run
+        // finishes it, however fresh it is by TTL.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("catalog.json");
-        let reg: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(seed_many(MAX_CATALOG_REPOS + 1).await);
-        let built = Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "", &reg, false, true)
+        let unfinished = unfinished_listing(vec!["acme/skill-0000".to_string()], "localhost:5000");
+        let first = Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "", &unfinished, false, true)
             .await
             .unwrap();
-        assert!(built.truncated());
+        assert!(first.truncated());
+        assert!(
+            first.is_fresh(chrono::Utc::now()),
+            "the truncated cache is fresh by TTL"
+        );
 
+        let whole: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(seed_many(3).await);
+        let rebuilt = Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "", &whole, false, false)
+            .await
+            .unwrap();
+        assert!(!rebuilt.truncated());
+        assert_eq!(rebuilt.entries().count(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_peer_building_a_cold_cache_serves_empty_flagged_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let _peer = AdvisoryFileLock::try_acquire(&path).expect("the peer's build lock");
         let failing: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(FailingAccess);
         let served = Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "", &failing, false, false)
             .await
             .unwrap();
-        assert!(served.truncated());
-        assert_eq!(served.refresh_error(), None, "a fresh capped OCI cache is not rebuilt");
+        assert_eq!(served.entries().count(), 0);
+        assert!(
+            served.truncated(),
+            "an empty answer while a peer builds is a lower bound"
+        );
+
+        // Offline with no cache is the plain empty answer.
+        let offline = Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "", &failing, true, false)
+            .await
+            .unwrap();
+        assert!(!offline.truncated());
     }
 
     #[tokio::test]
@@ -2366,23 +2368,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_caps_repository_count() {
+    async fn build_keeps_every_repository_past_500() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("catalog.json");
-        let reg: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(seed_many(MAX_CATALOG_REPOS + 25).await);
+        let reg: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(seed_many(600).await);
         let cat = Catalog::load_or_refresh(&path, "localhost:5000", "", &reg, false, true)
             .await
             .unwrap();
-        assert_eq!(cat.entries().count(), MAX_CATALOG_REPOS, "build is capped");
-        assert!(cat.truncated(), "a build that hit the cap reports truncation");
+        assert_eq!(cat.entries().count(), 600);
+        assert!(!cat.truncated());
     }
 
     #[tokio::test]
-    async fn build_from_index_keeps_every_entry_past_the_walk_cap() {
-        // The cap bounds the `_catalog` walk's per-repo round-trips; an index
-        // lists from one document, so rows past it must stay reachable.
+    async fn build_flags_an_incomplete_listing_truncated() {
         let dir = tempfile::tempdir().unwrap();
-        let count = MAX_CATALOG_REPOS + 100;
+        let path = dir.path().join("catalog.json");
+        let reg = unfinished_listing(names("acme", 5), "localhost:5000");
+        let cat = Catalog::load_or_refresh(&path, "localhost:5000", "", &reg, false, true)
+            .await
+            .unwrap();
+        assert!(cat.truncated(), "an unfinished _catalog walk is a prefix");
+    }
+
+    #[tokio::test]
+    async fn build_from_index_keeps_every_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let count = 600;
         let base = spawn_index_host_with(count).await;
         let kind = crate::config::registry_resolve::SourceKind::IndexHttp;
         let cat = Catalog::build_from_index(
@@ -2397,52 +2408,6 @@ mod tests {
         .unwrap();
         assert_eq!(cat.entries().count(), count, "every index entry is kept");
         assert!(!cat.truncated(), "an index build is never truncated");
-    }
-
-    #[tokio::test]
-    async fn build_under_cap_is_not_truncated() {
-        // A candidate set that fits within the cap leaves the window
-        // exhaustive, so a non-empty query can be read as complete.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("catalog.json");
-        let reg: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(seed_many(MAX_CATALOG_REPOS - 1).await);
-        let cat = Catalog::load_or_refresh(&path, "localhost:5000", "", &reg, false, true)
-            .await
-            .unwrap();
-        assert_eq!(cat.entries().count(), MAX_CATALOG_REPOS - 1);
-        assert!(!cat.truncated(), "an under-cap build is not truncated");
-    }
-
-    #[tokio::test]
-    async fn build_exactly_at_cap_is_not_truncated() {
-        // Boundary: exactly MAX_CATALOG_REPOS candidates fit — the probe
-        // element (cap + 1) never materializes, so this is not truncation.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("catalog.json");
-        let reg: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(seed_many(MAX_CATALOG_REPOS).await);
-        let cat = Catalog::load_or_refresh(&path, "localhost:5000", "", &reg, false, true)
-            .await
-            .unwrap();
-        assert_eq!(cat.entries().count(), MAX_CATALOG_REPOS);
-        assert!(
-            !cat.truncated(),
-            "a build whose candidate count equals the cap is exhaustive, not truncated"
-        );
-    }
-
-    #[tokio::test]
-    async fn prefilter_scope_keeps_build_within_cap_untruncated() {
-        // A name prefilter that selects a small candidate set must not flag
-        // truncation even when the registry holds far more than the cap.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("catalog.json");
-        let reg: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(seed_many(MAX_CATALOG_REPOS + 50).await);
-        // Only `skill-0007` contains "0007".
-        let cat = Catalog::load_or_refresh(&path, "localhost:5000", "0007", &reg, false, true)
-            .await
-            .unwrap();
-        assert_eq!(cat.entries().count(), 1);
-        assert!(!cat.truncated(), "a narrow prefilter is not truncated");
     }
 
     #[test]
