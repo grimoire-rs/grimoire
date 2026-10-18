@@ -98,12 +98,13 @@ pub struct SearchSourceStatus {
     /// The same message the `catalog for source '<x>' unavailable` warning
     /// carries on stderr.
     pub error: Option<String>,
-    /// Whether this source's listing hit a build-time cap, so rows past it
-    /// were never seen and `total` is a lower bound. Always present. It is
-    /// the per-source answer to "capped or just paged?": the envelope's
+    /// Whether this source's listing is incomplete (its `_catalog` walk could
+    /// not finish, or the build is still running), so rows past it were never
+    /// seen and `total` is a lower bound. Always present. It is the
+    /// per-source answer to "incomplete or just paged?": the envelope's
     /// `truncated` is also `true` on every page past the first. An `index`
-    /// source is not capped by this grim; `true` there is a cache an earlier
-    /// grim wrote, and `--refresh` rebuilds it.
+    /// source is never incomplete in this grim; `true` there is a cache an
+    /// earlier grim wrote, and `--refresh` rebuilds it.
     pub capped: bool,
 }
 
@@ -271,7 +272,7 @@ pub struct SearchReport {
     /// `--limit` cut `items`.
     total: usize,
     /// `true` when `items` is not the complete answer: `--offset` skipped
-    /// rows, `--limit` cut it, or a source's listing was capped at build time.
+    /// rows, `--limit` cut it, or a source's listing is incomplete.
     truncated: bool,
     /// The `--offset` that produced `items`. Plain-output hint only: the
     /// caller sent it, so it is never serialized.

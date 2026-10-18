@@ -19,7 +19,7 @@
 //! cached catalog is served as-is (marked stale by its age), and a cold
 //! cache yields an empty catalog rather than a failure.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -564,8 +564,8 @@ impl Catalog {
 
     /// Load a fresh, query-scoped cached catalog, or (re)build it.
     ///
-    /// `query` is a case-insensitive repository-name prefilter (empty =
-    /// capped browse window). The cache records the scope it was built
+    /// `query` is a case-insensitive repository-name prefilter (empty = every
+    /// repository). The cache records the scope it was built
     /// under; reuse requires the same registry AND scope AND freshness.
     ///
     /// Resolution policy:
@@ -610,7 +610,7 @@ impl Catalog {
             return Ok(cached.unwrap_or_else(|| Self::empty(registry)));
         }
 
-        let rebuilt = Self::build(registry, &scope, access, cached.as_ref())
+        let rebuilt = Self::build(registry, &scope, access, cached.as_ref(), force, path)
             .await
             .map_err(|e| CatalogError::access(path, e))?;
         rebuilt.save(path)?;
@@ -659,7 +659,7 @@ impl Catalog {
         // Phase 2 — the network rebuild, the only genuinely async work, runs on
         // the async executor. The advisory lock (an OS file handle, not a
         // `MutexGuard`) is held across this await: sound to hold across `.await`.
-        let rebuilt = match Self::build(registry, &scope, access, previous.as_ref()).await {
+        let rebuilt = match Self::build(registry, &scope, access, previous.as_ref(), force, path).await {
             Ok(rebuilt) => rebuilt,
             Err(build_err) => {
                 Self::dispose_guard(path, guard).await;
@@ -751,20 +751,7 @@ impl Catalog {
             }
 
             match AdvisoryFileLock::try_acquire(&path) {
-                Ok(guard) => {
-                    // Double-check: a peer may have rebuilt while we
-                    // contended for the lock. Serve their fresh build
-                    // instead of redoing it.
-                    if let Some(c) = Catalog::load_or_cold(&path, &key, false)?
-                        && reusable(&c)
-                    {
-                        return Ok(PreFlight::Serve(c));
-                    }
-                    Ok(PreFlight::Rebuild {
-                        guard: Some(guard),
-                        previous: cached,
-                    })
-                }
+                Ok(guard) => Catalog::recheck(&path, &key, Some(guard), cached, reusable),
                 // A peer owns the refresh — serve stale and move on rather than
                 // walking the registry redundantly. With no cache the peer is
                 // building a cold one: the empty answer is a lower bound, not
@@ -784,6 +771,26 @@ impl Catalog {
             }
         })
         .await
+    }
+
+    /// With the lock held: serve a peer's fresh build, else rebuild over the
+    /// file as it is now. The pre-lock read can be older than the file, and a
+    /// rebuild taking it as `previous` could replace a peer's complete cache
+    /// with a checkpoint built from stale rows.
+    fn recheck(
+        path: &Path,
+        key: &str,
+        guard: Option<AdvisoryFileLock>,
+        cached: Option<Self>,
+        reusable: impl Fn(&Self) -> bool,
+    ) -> Result<PreFlight, CatalogError> {
+        match Self::load_or_cold(path, key, false)? {
+            Some(current) if reusable(&current) => Ok(PreFlight::Serve(current)),
+            current => Ok(PreFlight::Rebuild {
+                guard,
+                previous: current.or(cached),
+            }),
+        }
     }
 
     /// A failed rebuild serves the cache pre-flight already read, marked with
@@ -901,14 +908,26 @@ impl Catalog {
     /// The build records on [`Self::truncated`] when the `_catalog` walk
     /// itself ended incomplete before the namespace did, since repositories
     /// past it were never listed.
+    ///
+    /// With no complete cache on disk (`previous` absent or truncated) the
+    /// build checkpoints partial progress into `cache_path`, flagged
+    /// truncated, so other processes serve it while this one keeps going. A
+    /// truncated `previous` makes the build a resume: rows fetched within the
+    /// TTL are kept without network. `force` turns the resume off. A refresh
+    /// of a complete cache writes no checkpoint, so readers keep the complete
+    /// old catalog until the commit.
     async fn build(
         registry: &str,
         scope: &str,
         access: &std::sync::Arc<dyn OciAccess>,
         previous: Option<&Self>,
+        force: bool,
+        cache_path: &Path,
     ) -> Result<Self, crate::oci::access::error::AccessError> {
         /// Concurrent per-repository metadata lookups.
         const CONCURRENCY: usize = 16;
+        /// Rows a cold build gathers before its first checkpoint.
+        const CHECKPOINT_FIRST: usize = 64;
 
         // A configured default registry may carry a namespace
         // (`ghcr.io/acme`). The OCI `_catalog` endpoint lives on the bare
@@ -920,16 +939,34 @@ impl Catalog {
         // The access layer already warned about an unfinished walk.
         let truncated = listing_misses_namespace(&listing, namespace);
         // Namespace scope (no network) + cheap name prefilter.
-        let selected: Vec<String> = listing
-            .repositories
-            .into_iter()
-            .filter(|r| namespace.is_none_or(|ns| r == ns || r.starts_with(&format!("{ns}/"))))
-            .filter(|r| scope.is_empty() || r.to_lowercase().contains(scope))
-            .collect();
+        let in_scope = |r: &str| {
+            namespace.is_none_or(|ns| r == ns || r.starts_with(&format!("{ns}/")))
+                && (scope.is_empty() || r.to_lowercase().contains(scope))
+        };
+        let selected: Vec<String> = listing.repositories.into_iter().filter(|r| in_scope(r)).collect();
 
-        // The previous build's rows are what a refresh revalidates by digest
-        // and what a transient failure falls back to.
+        // Resuming an interrupted or faulted build trusts rows younger than
+        // the TTL; a forced refresh or an expired complete cache revalidates
+        // every row (by digest, see `build_entry`).
+        let resume = !force && previous.is_some_and(|p| p.truncated);
+        // Checkpoint only when nothing complete is on disk: a refresh keeps
+        // serving the complete stale catalog to other processes until it
+        // commits.
+        let checkpoint = previous.is_none_or(|p| p.truncated);
+        // The previous rows still to be revalidated: what a refresh compares
+        // digests against, what a transient failure falls back to, and what a
+        // checkpoint keeps serving so the served list never shrinks.
         let mut prior = previous.map(|p| p.entries.clone()).unwrap_or_default();
+        {
+            let wanted: HashSet<&str> = selected.iter().map(String::as_str).collect();
+            // An unfinished listing says nothing about the rows it never
+            // reached: they stay, unrevalidated, so the catalog never shrinks.
+            prior.retain(|repository, _| wanted.contains(repository.as_str()) || (truncated && in_scope(repository)));
+        }
+        // First checkpoint past what is already on disk, then on each
+        // doubling: O(n) bytes written in total.
+        let mut next_checkpoint = CHECKPOINT_FIRST.max(prior.len() + 1);
+
         let mut entries = BTreeMap::new();
         let mut iter = selected.into_iter();
         let mut set: tokio::task::JoinSet<(String, CatalogEntry)> = tokio::task::JoinSet::new();
@@ -937,21 +974,43 @@ impl Catalog {
         // Prime the window.
         for _ in 0..CONCURRENCY {
             let Some(repository) = iter.next() else { break };
-            let prior = prior.remove(&repository);
-            spawn_entry(&mut set, host, repository, prior, access);
+            let row = prior.get(&repository).cloned();
+            spawn_entry(&mut set, host, repository, row, resume, access);
         }
         while let Some(joined) = set.join_next().await {
             // A task panic is a bug, not a registry condition; surface it
             // by skipping that repo rather than poisoning the whole walk.
             if let Ok((repository, entry)) = joined {
+                prior.remove(&repository);
                 entries.insert(repository, entry);
             }
             if let Some(repository) = iter.next() {
-                let prior = prior.remove(&repository);
-                spawn_entry(&mut set, host, repository, prior, access);
+                let row = prior.get(&repository).cloned();
+                spawn_entry(&mut set, host, repository, row, resume, access);
+            }
+            let served = entries.len() + prior.len();
+            if checkpoint && !set.is_empty() && served >= next_checkpoint {
+                next_checkpoint = served * 2;
+                let mut rows = prior.clone();
+                rows.extend(entries.clone());
+                let partial = Self {
+                    registry: registry.to_string(),
+                    scope: scope.to_string(),
+                    truncated: true,
+                    built_at: now_rfc3339(),
+                    entries: rows,
+                    refresh_error: None,
+                };
+                let path = cache_path.to_path_buf();
+                // A failed checkpoint only delays what other processes see;
+                // the final commit still runs.
+                if let Err(e) = run_blocking(path.clone(), move || partial.save(&path)).await {
+                    tracing::debug!("catalog checkpoint not written: {e}");
+                }
             }
         }
 
+        entries.extend(prior);
         Ok(Self {
             registry: registry.to_string(),
             scope: scope.to_string(),
@@ -972,7 +1031,9 @@ impl Catalog {
     /// manifest fetch) keeps the `prior` row when there is one, rather than
     /// downgrading real metadata to a bare record.
     ///
-    /// `prior` is this repository's row from the previous build. When the
+    /// `prior` is this repository's row from the previous build. A `resume`
+    /// (continuing an interrupted build) keeps one fetched within the TTL
+    /// without touching the network. Otherwise, when the
     /// chosen tag still resolves to the digest that row was read from, the row
     /// is kept as is and the manifest is not downloaded: two round trips
     /// instead of three.
@@ -981,7 +1042,12 @@ impl Catalog {
         repository: &str,
         access: &dyn OciAccess,
         mut prior: Option<CatalogEntry>,
+        resume: bool,
     ) -> CatalogEntry {
+        // A resumed build trusts a row fetched within the TTL: no network.
+        if resume && let Some(fresh) = prior.take_if(|p| is_fresh_at(&p.fetched_at, chrono::Utc::now())) {
+            return fresh;
+        }
         let fetched_at = now_rfc3339();
         let bare = |latest_tag: Option<String>, version: Option<String>, digest: Option<Digest>| CatalogEntry {
             registry: registry.to_string(),
@@ -1049,7 +1115,11 @@ impl Catalog {
         };
 
         let manifest = match access.fetch_manifest(&pinned).await {
-            Ok(m) => m,
+            Ok(Some(m)) => Some(m),
+            // A resolved digest with no manifest behind it (replication lag,
+            // a GC race) may heal: record no digest so the next refresh
+            // looks again.
+            Ok(None) => return bare(Some(tag), version, None),
             // A foreign repo (image index, unparseable manifest) is a bare
             // entry that still records its digest, so the next refresh reuses
             // it instead of re-reading a manifest that will not parse.
@@ -1230,12 +1300,13 @@ fn spawn_entry(
     registry: &str,
     repository: String,
     prior: Option<CatalogEntry>,
+    resume: bool,
     access: &std::sync::Arc<dyn OciAccess>,
 ) {
     let registry = registry.to_string();
     let access = std::sync::Arc::clone(access);
     set.spawn(async move {
-        let entry = Catalog::build_entry(&registry, &repository, access.as_ref(), prior).await;
+        let entry = Catalog::build_entry(&registry, &repository, access.as_ref(), prior, resume).await;
         (repository, entry)
     });
 }
@@ -1600,9 +1671,16 @@ mod tests {
         incomplete: std::sync::atomic::AtomicBool,
         /// `list_tags` fails, as a transient registry fault would.
         fail_tags: std::sync::atomic::AtomicBool,
+        /// Every resolved digest has no manifest behind it (`Ok(None)`).
+        manifest_missing: std::sync::atomic::AtomicBool,
+        /// The listing stops after this many repositories (0 = all).
+        list_limit: std::sync::atomic::AtomicUsize,
         tags: std::sync::atomic::AtomicUsize,
         digests: std::sync::atomic::AtomicUsize,
         manifests: std::sync::atomic::AtomicUsize,
+        /// The N-th `list_tags` call (1-based; 0 = never) waits for `gate`.
+        hold_at: std::sync::atomic::AtomicUsize,
+        gate: tokio::sync::Notify,
     }
 
     impl Knobs {
@@ -1635,6 +1713,9 @@ mod tests {
             id: &PinnedIdentifier,
         ) -> Result<Option<OciManifest>, crate::oci::access::error::AccessError> {
             Knobs::bump(&self.knobs.manifests);
+            if self.knobs.manifest_missing.load(std::sync::atomic::Ordering::SeqCst) {
+                return Ok(None);
+            }
             self.inner.fetch_manifest(id).await
         }
         async fn fetch_blob(
@@ -1650,7 +1731,10 @@ mod tests {
             &self,
             id: &Identifier,
         ) -> Result<Option<Vec<String>>, crate::oci::access::error::AccessError> {
-            Knobs::bump(&self.knobs.tags);
+            let call = self.knobs.tags.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if call == self.knobs.hold_at.load(std::sync::atomic::Ordering::SeqCst) {
+                self.knobs.gate.notified().await;
+            }
             if self.knobs.fail_tags.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(crate::oci::access::error::AccessError::without_identifier(
                     crate::oci::access::error::AccessErrorKind::Registry(std::io::Error::other("transient").into()),
@@ -1663,8 +1747,14 @@ mod tests {
             registry: &str,
         ) -> Result<crate::oci::access::CatalogListing, crate::oci::access::error::AccessError> {
             if registry == self.registry {
+                let limit = Knobs::count(&self.knobs.list_limit);
                 Ok(crate::oci::access::CatalogListing {
-                    repositories: self.repos.clone(),
+                    repositories: self
+                        .repos
+                        .iter()
+                        .take(if limit == 0 { usize::MAX } else { limit })
+                        .cloned()
+                        .collect(),
                     complete: !self.knobs.incomplete.load(std::sync::atomic::Ordering::SeqCst),
                 })
             } else {
@@ -2539,6 +2629,202 @@ mod tests {
         assert!(serde_json::from_str::<OciMeta>(with_unknown).is_ok());
         assert!(!OciMeta::default().eq(&meta));
         assert!(OciMeta::default().is_empty() && !meta.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_cold_build_checkpoints_partial_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let (reg, access) = counted(150).await;
+        // Hold one lookup open so the build is mid-flight, as a long one is.
+        reg.knobs.hold_at.store(100, std::sync::atomic::Ordering::SeqCst);
+
+        let build = tokio::spawn({
+            let path = path.clone();
+            async move { Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "", &access, false, false).await }
+        });
+        let partial = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                if let Ok(Some(c)) = Catalog::load(&path, "localhost:5000")
+                    && c.entries().count() >= 64
+                {
+                    return c;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("a checkpoint reaches the disk while the build is still running");
+        assert!(partial.truncated(), "a checkpoint is flagged incomplete");
+        assert!(partial.entries().count() < 150);
+
+        // Another process serves that checkpoint at once, online or offline.
+        let failing: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(FailingAccess);
+        let served = Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "", &failing, false, false)
+            .await
+            .unwrap();
+        assert!(served.truncated() && served.entries().count() >= 64);
+
+        reg.knobs.gate.notify_one();
+        let done = build.await.unwrap().unwrap();
+        assert_eq!(done.entries().count(), 150);
+        assert!(!done.truncated());
+        let on_disk = Catalog::load(&path, "localhost:5000").unwrap().unwrap();
+        assert!(!on_disk.truncated() && on_disk.entries().count() == 150);
+    }
+
+    #[tokio::test]
+    async fn a_refresh_of_a_complete_cache_writes_no_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let (reg, access) = counted(250).await;
+        // The first build sees 150 of the 250 repositories.
+        reg.knobs.list_limit.store(150, std::sync::atomic::Ordering::SeqCst);
+        Catalog::load_or_refresh(&path, "localhost:5000", "", &access, false, true)
+            .await
+            .unwrap();
+        // The refresh lists 100 more, so the rows served by a checkpoint
+        // would cross its threshold and grow past what the cache holds.
+        reg.knobs.list_limit.store(0, std::sync::atomic::Ordering::SeqCst);
+        reg.knobs.hold_at.store(200, std::sync::atomic::Ordering::SeqCst);
+        reg.knobs.tags.store(0, std::sync::atomic::Ordering::SeqCst);
+
+        let rebuild = tokio::spawn({
+            let path = path.clone();
+            async move { Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "", &access, false, true).await }
+        });
+        while Knobs::count(&reg.knobs.tags) < 250 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let seen = Catalog::load(&path, "localhost:5000").unwrap().unwrap();
+        assert!(!seen.truncated(), "the complete old catalog is served until the commit");
+        assert_eq!(seen.entries().count(), 150);
+        reg.knobs.gate.notify_one();
+        let done = rebuild.await.unwrap().unwrap();
+        assert_eq!(done.entries().count(), 250);
+    }
+
+    #[tokio::test]
+    async fn an_unfinished_listing_never_shrinks_a_complete_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let (reg, access) = counted(5).await;
+        Catalog::load_or_refresh(&path, "localhost:5000", "", &access, false, true)
+            .await
+            .unwrap();
+
+        // The refresh's `_catalog` walk dies after two repositories.
+        reg.knobs.incomplete.store(true, std::sync::atomic::Ordering::SeqCst);
+        reg.knobs.list_limit.store(2, std::sync::atomic::Ordering::SeqCst);
+        let after = Catalog::load_or_refresh(&path, "localhost:5000", "", &access, false, true)
+            .await
+            .unwrap();
+        assert!(after.truncated(), "the listing did not finish");
+        assert_eq!(after.entries().count(), 5, "unlisted rows are kept, not dropped");
+        assert!(after.entries().all(|e| e.description.as_deref() == Some("desc")));
+    }
+
+    #[tokio::test]
+    async fn a_missing_manifest_is_retried_not_remembered() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let (reg, access) = counted(3).await;
+        reg.knobs
+            .manifest_missing
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let bare = Catalog::load_or_refresh(&path, "localhost:5000", "", &access, false, true)
+            .await
+            .unwrap();
+        assert!(
+            bare.entries()
+                .all(|e| e.description.is_none() && e.oci.digest.is_none()),
+            "a manifest that 404s leaves no digest to reuse"
+        );
+
+        // Once it appears, even a forced refresh must read it.
+        reg.knobs
+            .manifest_missing
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let healed = Catalog::load_or_refresh(&path, "localhost:5000", "", &access, false, true)
+            .await
+            .unwrap();
+        assert!(healed.entries().all(|e| e.description.as_deref() == Some("desc")));
+    }
+
+    /// The lock holder rebuilds over the file as it is now: a checkpoint read
+    /// before the lock must not stand in for the complete cache a peer
+    /// committed meanwhile, even when `force` stops that cache being served.
+    #[tokio::test]
+    async fn recheck_under_the_lock_rebuilds_over_the_current_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let (_reg, access) = counted(4).await;
+        let complete = Catalog::load_or_refresh(&path, "localhost:5000", "", &access, false, true)
+            .await
+            .unwrap();
+        let stale_checkpoint = Catalog {
+            truncated: true,
+            entries: complete
+                .entries
+                .iter()
+                .take(1)
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            ..complete.clone()
+        };
+
+        let forced = |_: &Catalog| false;
+        let Ok(PreFlight::Rebuild { previous, .. }) =
+            Catalog::recheck(&path, "localhost:5000", None, Some(stale_checkpoint), forced)
+        else {
+            panic!("a forced run rebuilds");
+        };
+        let previous = previous.expect("the file on disk is the previous cache");
+        assert!(!previous.truncated() && previous.entries().count() == 4);
+    }
+
+    #[tokio::test]
+    async fn resume_reuses_fresh_rows_without_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let (reg, access) = counted(8).await;
+        // An interrupted build left a truncated cache behind.
+        reg.knobs.incomplete.store(true, std::sync::atomic::Ordering::SeqCst);
+        let interrupted = Catalog::load_or_refresh(&path, "localhost:5000", "", &access, false, true)
+            .await
+            .unwrap();
+        assert!(interrupted.truncated());
+        reg.knobs.incomplete.store(false, std::sync::atomic::Ordering::SeqCst);
+
+        // One row aged past the TTL; the rest are fresh.
+        let mut aged = Catalog::load(&path, "localhost:5000").unwrap().unwrap();
+        aged.entries.get_mut("acme/skill-0003").unwrap().fetched_at = ts(CATALOG_TTL_SECONDS + 60);
+        aged.save(&path).unwrap();
+        let tags_before = Knobs::count(&reg.knobs.tags);
+
+        let resumed = Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "", &access, false, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            Knobs::count(&reg.knobs.tags) - tags_before,
+            1,
+            "only the aged row touches the network"
+        );
+        assert_eq!(resumed.entries().count(), 8);
+        assert!(!resumed.truncated(), "the resumed build finished");
+
+        // A forced refresh is not a resume: every row is revalidated.
+        reg.knobs.incomplete.store(true, std::sync::atomic::Ordering::SeqCst);
+        Catalog::load_or_refresh(&path, "localhost:5000", "", &access, false, true)
+            .await
+            .unwrap();
+        reg.knobs.incomplete.store(false, std::sync::atomic::Ordering::SeqCst);
+        let tags_before = Knobs::count(&reg.knobs.tags);
+        Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "", &access, false, true)
+            .await
+            .unwrap();
+        assert_eq!(Knobs::count(&reg.knobs.tags) - tags_before, 8);
     }
 
     #[tokio::test]

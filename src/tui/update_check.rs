@@ -246,7 +246,7 @@ impl UpdateChecker {
     }
 
     /// Spawn a background catalog refresh (force-rebuild of the empty-query
-    /// browse window) and report the result as [`CheckMsg::CatalogReady`].
+    /// browse) and report the result as [`CheckMsg::CatalogReady`].
     /// A refresh failure with no cache is swallowed: the existing rows stay,
     /// and the next `r`/`--refresh` retries. With a cache it is a stale `Ok`
     /// carrying [`Catalog::refresh_error`], reported like any other result.

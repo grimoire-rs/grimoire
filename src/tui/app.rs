@@ -1202,9 +1202,9 @@ fn drain_catalog_ready(ctx: &TuiContext, state: &mut TuiState, catalog: &Catalog
     };
     let fresh = rows_from_catalog(catalog, &badge);
     state.merge_catalog_rows(fresh);
-    // The background refresh re-walks the same browse window, so its
-    // truncation verdict supersedes the initial load's (the cap may now be
-    // hit or cleared as the registry grows/shrinks).
+    // The background refresh re-walks the same listing, so its truncation
+    // verdict supersedes the initial load's (an unfinished walk may now
+    // finish).
     state.set_truncated(catalog.truncated());
 }
 

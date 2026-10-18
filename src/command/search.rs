@@ -407,7 +407,7 @@ fn capped_catalog_warnings(groups: &[CatalogGroup]) -> Vec<String> {
 fn capped_catalog_warning(alias: Option<&str>, locator: &str) -> String {
     let name = alias.unwrap_or(locator).escape_debug();
     format!(
-        "catalog for source '{name}' is incomplete: its listing has not finished, so results and the total are a lower bound; a later grim search continues it"
+        "catalog for source '{name}' is incomplete: its listing has not finished, so results and the total are a lower bound; the next online grim search retries it"
     )
 }
 
@@ -1489,7 +1489,7 @@ mod tests {
     fn capped_catalog_warning_pins_the_wording_and_names_the_source() {
         assert_eq!(
             capped_catalog_warning(Some("acme"), "ghcr.io/acme"),
-            "catalog for source 'acme' is incomplete: its listing has not finished, so results and the total are a lower bound; a later grim search continues it"
+            "catalog for source 'acme' is incomplete: its listing has not finished, so results and the total are a lower bound; the next online grim search retries it"
         );
         // An unaliased entry is named by its locator, the way the browse
         // filter's own per-source warning names it.
