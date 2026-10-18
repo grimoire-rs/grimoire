@@ -1146,6 +1146,7 @@ declaration hashes, so adding or editing it re-pins nothing.
 | `owner.url` | no | An `https://` link to the owner's page; written for Claude and Qoder only |
 | `description` | no | Free text, at most 500 UTF-16 code units; written to `metadata.description` |
 | `clients` | no | Which clients get a marketplace file: any of `claude`, `copilot`, `codex`, `qoder`, `cursor` (default `claude`, `copilot`, `codex`, `qoder`) |
+| `repository` | no | The `https://` clone URL consumers add, without credentials; used only in the generated root `README.md` |
 
 A `name` uses lowercase letters, digits and hyphens. It starts and ends with
 a letter or a digit and has at most 64 characters. It may not contain
@@ -1153,6 +1154,13 @@ a letter or a digit and has at most 64 characters. It may not contain
 `agent-skills`, `knowledge-work-plugins`, `inline`, `builtin`, `skills-dir`,
 `synced`, `github`, `gh`, `npm`, `pip`, `uv` and `cargo`. A malformed value
 exits `65` and names the key.
+
+`repository` is the address a consumer passes to their client's `marketplace
+add`. `grim export marketplace` prints it in the [root
+`README.md`](./commands.md#export-marketplace-readme) beside each client's
+commands. It writes the address nowhere else. Leave it out and the README
+shows a placeholder instead. An `http://` URL, an SSH address or a URL with
+embedded credentials exits `65`, naming `repository`.
 
 `clients` lists each client once; a repeat is dropped. An empty list exits
 `65`: name a client or leave the key out. `junie`, `openclaw` and `droid`

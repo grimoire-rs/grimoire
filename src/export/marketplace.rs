@@ -49,6 +49,10 @@ pub struct MarketplaceMeta {
     /// empty = the key was absent (an explicit `[]` is refused).
     #[serde(default)]
     pub clients: Vec<String>,
+    /// The https clone URL consumers add; read only by the root `README.md`,
+    /// never written into a harness file.
+    #[serde(default)]
+    pub repository: Option<String>,
 }
 
 /// `[marketplace.owner]`.
@@ -311,6 +315,10 @@ fn validate_marketplace(meta: &mut MarketplaceMeta, explicit_empty_clients: bool
             ));
         }
     }
+    if let Some(url) = &meta.repository {
+        check_https_url("repository", url)?;
+        check_clone_url(url)?;
+    }
     if explicit_empty_clients {
         return Err("clients is empty: select at least one client or omit the key".to_string());
     }
@@ -333,6 +341,27 @@ fn validate_marketplace(meta: &mut MarketplaceMeta, explicit_empty_clients: bool
     }
     meta.clients = seen;
     Ok(())
+}
+
+/// The README prints `[marketplace].repository` as a clone URL: it must parse
+/// to a real host with no userinfo, query or fragment. A query would take the
+/// `.git` suffix the README appends for Qoder.
+fn check_clone_url(url: &str) -> Result<(), String> {
+    let clean = reqwest::Url::parse(url).is_ok_and(|u| {
+        u.host_str().is_some_and(|host| !host.is_empty())
+            && u.username().is_empty()
+            && u.password().is_none()
+            && u.query().is_none()
+            && u.fragment().is_none()
+    });
+    if clean {
+        Ok(())
+    } else {
+        Err(
+            "`repository` must be an https:// clone URL with a host and without credentials, query or fragment"
+                .to_string(),
+        )
+    }
 }
 
 /// `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`, at most [`MAX_NAME_LEN`], and not
@@ -1092,6 +1121,7 @@ mod tests {
                 },
                 description: Some("Acme's plugins".into()),
                 clients: vec!["cursor".into(), "claude".into()],
+                repository: None,
             }
         );
     }
@@ -1355,6 +1385,30 @@ mod tests {
         for url in ["http://acme.example", "acme.example", "https://u@acme.example"] {
             let msg = meta_err("name = \"acme\"", &format!("{OWNER}\nurl = \"{url}\""));
             assert!(msg.contains("owner.url"), "{url}: {msg}");
+        }
+    }
+
+    #[test]
+    fn marketplace_repository_is_an_https_clone_url_without_credentials() {
+        let url = "https://gitlab.example/acme/marketplace.git";
+        let meta = meta_ok(&format!("name = \"acme\"\nrepository = \"{url}\""), OWNER);
+        assert_eq!(meta.repository.as_deref(), Some(url));
+        assert_eq!(meta_ok("name = \"acme\"", OWNER).repository, None);
+        for bad in [
+            "http://gitlab.example/acme/m",
+            "git@gitlab.example:acme/m.git",
+            "gitlab.example/acme/m",
+            "https://user:token@gitlab.example/acme/m",
+            "https://gitlab.example/acme m",
+            "https:///user:token@gitlab.example/acme/m",
+            "https://",
+            "https://gitlab.example/acme/m?ref=main",
+            "https://gitlab.example/acme/m#frag",
+            "https://gitlab.example/acme/m?",
+            "",
+        ] {
+            let msg = meta_err(&format!("name = \"acme\"\nrepository = \"{bad}\""), OWNER);
+            assert!(msg.contains("repository"), "{bad}: {msg}");
         }
     }
 }

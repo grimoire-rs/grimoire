@@ -281,6 +281,20 @@ pub fn plugin_readme(
     text.into_bytes()
 }
 
+/// `text` with the characters that open a link, code span or HTML escaped,
+/// so registry- or manifest-supplied text stays plain text in a README.
+pub(crate) fn escape_markdown(text: &str) -> String {
+    text.chars()
+        .flat_map(|c| {
+            ['\\', '`', '[', ']', '<', '>']
+                .contains(&c)
+                .then_some('\\')
+                .into_iter()
+                .chain([c])
+        })
+        .collect()
+}
+
 fn contents_line(entry: &ContentsEntry) -> String {
     let mut line = format!("- {} `{}`", entry.kind, entry.name);
     if let Some(description) = &entry.description {
@@ -292,16 +306,7 @@ fn contents_line(entry: &ContentsEntry) -> String {
         } else {
             one_line
         };
-        let one_line: String = one_line
-            .chars()
-            .flat_map(|c| {
-                ['\\', '`', '[', ']', '<', '>']
-                    .contains(&c)
-                    .then_some('\\')
-                    .into_iter()
-                    .chain([c])
-            })
-            .collect();
+        let one_line = escape_markdown(&one_line);
         if !one_line.is_empty() {
             line.push_str(&format!(": {one_line}"));
         }

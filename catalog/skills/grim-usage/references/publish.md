@@ -601,7 +601,10 @@ reference][commands-export].
 folder. From a `marketplace.toml` that carries a `[marketplace]` table (a
 `name`, an `owner`, optionally `clients`), it regenerates a git repository
 holding one marketplace file per client and one plugin tree per plugin and
-client at `./<client>/<plugin>`. The default clients are Claude Code,
+client at `./<client>/<plugin>`, plus a root `README.md` with each client's
+add and install commands (set `[marketplace].repository` to the clone URL
+they use). A hand-written `README.md` is left alone with a warning. The
+default clients are Claude Code,
 Copilot, Codex and Qoder, and Cursor is opt-in. Commit the result. A
 consumer adds the repository with their own client's commands, no grim
 needed; the [consumer guide][use-a-marketplace] shows each client, and

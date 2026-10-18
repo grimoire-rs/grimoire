@@ -152,9 +152,10 @@ pub struct MarketplaceItem {
 }
 
 /// One marketplace document row (C-034). `plugins` is `[]` on a `removed` row.
+/// `client` is `null` on the root `README.md` row, which no client owns.
 #[derive(Debug, Serialize)]
 pub struct MarketplaceFileRow {
-    pub client: String,
+    pub client: Option<String>,
     pub path: PathBuf,
     pub action: FileAction,
     pub plugins: Vec<String>,
@@ -553,7 +554,7 @@ mod tests {
 
     fn frow(client: &str, action: FileAction, plugins: &[&str]) -> MarketplaceFileRow {
         MarketplaceFileRow {
-            client: client.to_string(),
+            client: Some(client.to_string()),
             path: abs(&format!(".{client}-plugin/marketplace.json")),
             action,
             plugins: plugins.iter().map(|p| p.to_string()).collect(),
@@ -607,6 +608,26 @@ mod tests {
             ]
         );
         assert_eq!(keys_at(&text, 10), ["kind", "name", "lock_name", "pinned"]);
+    }
+
+    #[test]
+    fn c034_the_readme_row_has_a_null_client_and_keeps_the_file_row_keys() {
+        let readme = MarketplaceFileRow {
+            client: None,
+            path: abs("README.md"),
+            action: FileAction::Written,
+            plugins: vec!["team".to_string()],
+        };
+        let r = MarketplaceExportReport::new(vec![], vec![frow("claude", FileAction::Written, &["team"]), readme]);
+        let (text, v) = mjson(&r);
+        assert!(v["files"][1]["client"].is_null());
+        assert_eq!(v["files"][0]["client"], "claude");
+        assert_eq!(
+            keys_at(&text, 6),
+            [
+                "client", "path", "action", "plugins", "client", "path", "action", "plugins"
+            ]
+        );
     }
 
     #[test]
