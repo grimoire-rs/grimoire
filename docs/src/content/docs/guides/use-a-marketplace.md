@@ -174,20 +174,50 @@ repository as a marketplace. You have three routes:
   `~/.cursor/plugins/local/<name>` and restart Cursor. An administrator
   can block this with the "Allow Local Plugin Imports" toggle.
 
-### Private repositories {#private}
+### Private repositories {#private-repositories}
 
-Claude Code clones with `git` on your machine and suppresses prompts.
-A private marketplace therefore needs credentials that work without
-typing: a credential helper for HTTPS, or an SSH key loaded in an
-agent. Codex and Qoder document no private-repository authentication,
-so assume the same git credentials but treat it as unverified. For GitHub, run `gh auth login` and then `gh auth setup-git`.
-Claude Code accepts `CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1` to force HTTPS.
+*Verified 2026-09-29 against the [Claude plugin docs][claude-install] and
+the [Cursor plugin docs][cursor-plugins]. Checked on 2026-10-18: the
+[Claude plugins overview][claude-plugins-overview], the [Copilot CLI issue
+tracker][copilot-4103] and the [JFrog VCS repository
+docs][artifactory-vcs].*
 
-A token in `GITHUB_TOKEN` alone does not authenticate a background
-update unless a credential helper reads it. Copilot CLI's private-clone
-behavior has regressed before ([github/copilot-cli#4103][copilot-4103]).
-If it fails, clone the repository yourself and add the local directory
-as the marketplace.
+A marketplace repository can be private, for example when it is
+deployed from a department's index. No marketplace file carries a
+credential. Each tool clones with whatever access your machine already
+has, so the question is only which tools do that without prompting.
+
+| Tool | Private repository |
+|---|---|
+| Claude Code | Documented. Clones with the machine's `git` and suppresses prompts. Use a credential helper for HTTPS or an SSH key in an agent |
+| Claude Desktop and claude.ai | Documented. Connect your GitHub account and give the Claude GitHub App access to the repository ([Claude plugins overview][claude-plugins-overview]) |
+| Copilot CLI | Not documented. A credential-helper regression in 1.0.70 was closed as resolved in 1.0.88 ([github/copilot-cli#4103][copilot-4103]). Clone it yourself if it fails |
+| VS Code | Falls back to a clone when the public lookup fails. Since 1.140.0 it reuses your VS Code GitHub session |
+| Codex | Not documented. Assume the machine's git credentials. Unverified |
+| Qoder | Not documented. Assume the machine's git credentials. Unverified |
+| Cursor | No individual route. An administrator imports the repository as a Team Marketplace, and Cursor reads a private GitHub repository through its GitHub App |
+
+For Claude Code and Copilot CLI on GitHub, run `gh auth login`, then
+`gh auth setup-git`. Claude Code accepts
+`CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1` to force HTTPS. A token in
+`GITHUB_TOKEN` alone does not authenticate a background update unless a
+credential helper reads it.
+
+Copilot CLI release 1.0.70 stopped using credential helpers when git
+needed a terminal prompt, which broke private HTTPS clones
+([github/copilot-cli#4103][copilot-4103], opened 2026-07-12). The issue was
+closed as completed on 2026-09-25, and the closing comment says it appears
+resolved as of release 1.0.88. We have not re-tested a private clone on a
+current build. On an older build, update Copilot CLI or use a local clone.
+
+When no tool can authenticate, clone the repository yourself and add the
+local directory as the marketplace. Run `git pull` to update it.
+
+The marketplace must live on a git host. Artifactory's VCS repositories
+only proxy and cache archives from a remote Git provider, and it has no
+local or virtual VCS repository ([JFrog docs][artifactory-vcs]). A client
+has no git repository there to add, so Artifactory cannot host a
+marketplace.
 
 ## Pin a repository for a team {#team-pin}
 
@@ -380,7 +410,7 @@ behavior, not a grim one.
 
 ### A private clone fails {#ts-private}
 
-See [Private repositories](#private). The fix is almost always a
+See [Private repositories](#private-repositories). The fix is almost always a
 credential that works without a prompt.
 
 ## Related guides {#related}
@@ -394,6 +424,8 @@ credential that works without a prompt.
 
 <!-- external -->
 [claude-install]: https://code.claude.com/docs/en/plugins/install
+[claude-plugins-overview]: https://claude.com/docs/plugins/overview#find-and-add-a-plugin
+[artifactory-vcs]: https://docs.jfrog.com/artifactory/docs/vcs-repositories
 [claude-reference]: https://code.claude.com/docs/en/plugins/marketplace-reference
 [claude-cloud]: https://code.claude.com/docs/en/cloud-environments#what-carries-over-from-your-setup
 [claude-org]: https://code.claude.com/docs/en/plugins/org
