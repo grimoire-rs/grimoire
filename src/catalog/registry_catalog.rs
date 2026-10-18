@@ -27,7 +27,7 @@ use serde_repr::{Deserialize_repr, Serialize_repr};
 
 use crate::lock::advisory_lock::AdvisoryFileLock;
 use crate::oci::access::{CatalogListing, OciAccess};
-use crate::oci::{Identifier, PinnedIdentifier};
+use crate::oci::{Digest, Identifier, PinnedIdentifier};
 use crate::store::atomic_write::atomic_write;
 
 use super::catalog_error::CatalogError;
@@ -100,6 +100,12 @@ pub struct OciMeta {
     /// Always `None` for every other kind, which has no such field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compatibility: Option<String>,
+    /// Manifest digest this row was read from: the refresh reuse key, never
+    /// displayed. Lives here, not on [`CatalogEntry`], because this is the one
+    /// cache struct an older grim parses tolerantly (no `deny_unknown_fields`);
+    /// a new `CatalogEntry` field would make it discard the whole cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<Digest>,
 }
 
 impl OciMeta {
@@ -114,6 +120,7 @@ impl OciMeta {
             documentation: get("org.opencontainers.image.documentation"),
             vendor: get("org.opencontainers.image.vendor"),
             compatibility: get(crate::oci::annotations::COMPATIBILITY_ANNOTATION),
+            digest: None,
         }
     }
 
@@ -126,6 +133,7 @@ impl OciMeta {
             && self.documentation.is_none()
             && self.vendor.is_none()
             && self.compatibility.is_none()
+            && self.digest.is_none()
     }
 }
 
@@ -602,7 +610,7 @@ impl Catalog {
             return Ok(cached.unwrap_or_else(|| Self::empty(registry)));
         }
 
-        let rebuilt = Self::build(registry, &scope, access)
+        let rebuilt = Self::build(registry, &scope, access, cached.as_ref())
             .await
             .map_err(|e| CatalogError::access(path, e))?;
         rebuilt.save(path)?;
@@ -651,7 +659,7 @@ impl Catalog {
         // Phase 2 — the network rebuild, the only genuinely async work, runs on
         // the async executor. The advisory lock (an OS file handle, not a
         // `MutexGuard`) is held across this await: sound to hold across `.await`.
-        let rebuilt = match Self::build(registry, &scope, access).await {
+        let rebuilt = match Self::build(registry, &scope, access, previous.as_ref()).await {
             Ok(rebuilt) => rebuilt,
             Err(build_err) => {
                 Self::dispose_guard(path, guard).await;
@@ -897,6 +905,7 @@ impl Catalog {
         registry: &str,
         scope: &str,
         access: &std::sync::Arc<dyn OciAccess>,
+        previous: Option<&Self>,
     ) -> Result<Self, crate::oci::access::error::AccessError> {
         /// Concurrent per-repository metadata lookups.
         const CONCURRENCY: usize = 16;
@@ -918,6 +927,9 @@ impl Catalog {
             .filter(|r| scope.is_empty() || r.to_lowercase().contains(scope))
             .collect();
 
+        // The previous build's rows are what a refresh revalidates by digest
+        // and what a transient failure falls back to.
+        let mut prior = previous.map(|p| p.entries.clone()).unwrap_or_default();
         let mut entries = BTreeMap::new();
         let mut iter = selected.into_iter();
         let mut set: tokio::task::JoinSet<(String, CatalogEntry)> = tokio::task::JoinSet::new();
@@ -925,7 +937,8 @@ impl Catalog {
         // Prime the window.
         for _ in 0..CONCURRENCY {
             let Some(repository) = iter.next() else { break };
-            spawn_entry(&mut set, host, repository, access);
+            let prior = prior.remove(&repository);
+            spawn_entry(&mut set, host, repository, prior, access);
         }
         while let Some(joined) = set.join_next().await {
             // A task panic is a bug, not a registry condition; surface it
@@ -934,7 +947,8 @@ impl Catalog {
                 entries.insert(repository, entry);
             }
             if let Some(repository) = iter.next() {
-                spawn_entry(&mut set, host, repository, access);
+                let prior = prior.remove(&repository);
+                spawn_entry(&mut set, host, repository, prior, access);
             }
         }
 
@@ -951,13 +965,25 @@ impl Catalog {
     /// Build one repository's entry: pick a tag, read its manifest
     /// annotations (no blob pull).
     ///
-    /// Infallible by design — every failure mode (no tags, unresolvable
-    /// tag, a foreign / image-index / unparseable manifest, a per-repo
-    /// transport or auth fault) degrades to a metadata-less entry so a
+    /// Infallible by design — every failure mode degrades to an entry so a
     /// shared registry full of non-Grimoire repos still yields a catalog.
-    async fn build_entry(registry: &str, repository: &str, access: &dyn OciAccess) -> CatalogEntry {
+    /// A repository with no tags, or a foreign / image-index manifest, is a
+    /// metadata-less entry. A transient fault (tag listing, digest lookup,
+    /// manifest fetch) keeps the `prior` row when there is one, rather than
+    /// downgrading real metadata to a bare record.
+    ///
+    /// `prior` is this repository's row from the previous build. When the
+    /// chosen tag still resolves to the digest that row was read from, the row
+    /// is kept as is and the manifest is not downloaded: two round trips
+    /// instead of three.
+    async fn build_entry(
+        registry: &str,
+        repository: &str,
+        access: &dyn OciAccess,
+        mut prior: Option<CatalogEntry>,
+    ) -> CatalogEntry {
         let fetched_at = now_rfc3339();
-        let bare = |latest_tag: Option<String>, version: Option<String>| CatalogEntry {
+        let bare = |latest_tag: Option<String>, version: Option<String>, digest: Option<Digest>| CatalogEntry {
             registry: registry.to_string(),
             repository: repository.to_string(),
             index_path: None,
@@ -970,7 +996,10 @@ impl Catalog {
             created: None,
             deprecated: None,
             replaced_by: None,
-            oci: OciMeta::default(),
+            oci: OciMeta {
+                digest,
+                ..OciMeta::default()
+            },
             latest_tag,
             version,
             // Ratings ride the index sidecar; an OCI `_catalog` walk has no
@@ -984,13 +1013,13 @@ impl Catalog {
 
         let tags = match access.list_tags(&base).await {
             Ok(t) => t.unwrap_or_default(),
-            Err(_) => return bare(None, None),
+            Err(_) => return prior.unwrap_or_else(|| bare(None, None, None)),
         };
         // Highest concrete semver (never the moving `latest`); reused for
         // every degraded path below now that the tag list is known.
         let version = pick_highest_version(&tags);
         let Some(tag) = pick_latest_tag(&tags) else {
-            return bare(None, None);
+            return bare(None, None, None);
         };
 
         let tagged = base.clone_with_tag(tag.clone());
@@ -1000,20 +1029,34 @@ impl Catalog {
             .await
         {
             Ok(Some(d)) => d,
-            Ok(None) | Err(_) => return bare(Some(tag), version.clone()),
+            Ok(None) => return bare(Some(tag), version, None),
+            Err(_) => return prior.unwrap_or_else(|| bare(Some(tag), version, None)),
         };
-        let pinned = match PinnedIdentifier::try_from(tagged.clone_with_digest(digest)) {
+        if let Some(unchanged) =
+            prior.take_if(|p| p.latest_tag.as_deref() == Some(tag.as_str()) && p.oci.digest.as_ref() == Some(&digest))
+        {
+            return CatalogEntry {
+                version,
+                fetched_at,
+                ..unchanged
+            };
+        }
+        let pinned = match PinnedIdentifier::try_from(tagged.clone_with_digest(digest.clone())) {
             Ok(p) => p,
             // Unreachable in practice (we just attached a digest); be
             // defensive rather than panic in a catalog walk.
-            Err(_) => return bare(Some(tag), version.clone()),
+            Err(_) => return bare(Some(tag), version, None),
         };
 
-        // A foreign repo (image index, private, transient) ⇒ bare entry,
-        // never a hard catalog failure.
         let manifest = match access.fetch_manifest(&pinned).await {
             Ok(m) => m,
-            Err(_) => return bare(Some(tag), version.clone()),
+            // A foreign repo (image index, unparseable manifest) is a bare
+            // entry that still records its digest, so the next refresh reuses
+            // it instead of re-reading a manifest that will not parse.
+            Err(e) if matches!(e.kind, crate::oci::access::error::AccessErrorKind::InvalidManifest(_)) => None,
+            // Private, transient: never a hard catalog failure, and no digest
+            // is recorded so the next refresh retries it.
+            Err(_) => return prior.unwrap_or_else(|| bare(Some(tag), version, None)),
         };
         manifest
             .map(|m| {
@@ -1039,7 +1082,10 @@ impl Catalog {
                 let replaced_by = crate::oci::annotations::replacement_ref(&m.annotations);
                 // Curated standard OCI keys (license/authors/url/…) for the
                 // detail pane; absent on artifacts that don't carry them.
-                let oci = OciMeta::from_annotations(&m.annotations);
+                let oci = OciMeta {
+                    digest: Some(digest.clone()),
+                    ..OciMeta::from_annotations(&m.annotations)
+                };
                 CatalogEntry {
                     registry: registry.to_string(),
                     repository: repository.to_string(),
@@ -1061,7 +1107,7 @@ impl Catalog {
                     fetched_at: fetched_at.clone(),
                 }
             })
-            .unwrap_or_else(|| bare(Some(tag), version))
+            .unwrap_or_else(|| bare(Some(tag), version, Some(digest)))
     }
 }
 
@@ -1183,12 +1229,13 @@ fn spawn_entry(
     set: &mut tokio::task::JoinSet<(String, CatalogEntry)>,
     registry: &str,
     repository: String,
+    prior: Option<CatalogEntry>,
     access: &std::sync::Arc<dyn OciAccess>,
 ) {
     let registry = registry.to_string();
     let access = std::sync::Arc::clone(access);
     set.spawn(async move {
-        let entry = Catalog::build_entry(&registry, &repository, access.as_ref()).await;
+        let entry = Catalog::build_entry(&registry, &repository, access.as_ref(), prior).await;
         (repository, entry)
     });
 }
@@ -1551,6 +1598,20 @@ mod tests {
     struct Knobs {
         /// The listing reports that the walk did not finish.
         incomplete: std::sync::atomic::AtomicBool,
+        /// `list_tags` fails, as a transient registry fault would.
+        fail_tags: std::sync::atomic::AtomicBool,
+        tags: std::sync::atomic::AtomicUsize,
+        digests: std::sync::atomic::AtomicUsize,
+        manifests: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Knobs {
+        fn count(counter: &std::sync::atomic::AtomicUsize) -> usize {
+            counter.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn bump(counter: &std::sync::atomic::AtomicUsize) {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     impl CatalogRegistry {
@@ -1566,12 +1627,14 @@ mod tests {
             id: &Identifier,
             op: crate::oci::access::Operation,
         ) -> Result<Option<crate::oci::Digest>, crate::oci::access::error::AccessError> {
+            Knobs::bump(&self.knobs.digests);
             self.inner.resolve_digest(id, op).await
         }
         async fn fetch_manifest(
             &self,
             id: &PinnedIdentifier,
         ) -> Result<Option<OciManifest>, crate::oci::access::error::AccessError> {
+            Knobs::bump(&self.knobs.manifests);
             self.inner.fetch_manifest(id).await
         }
         async fn fetch_blob(
@@ -1587,6 +1650,12 @@ mod tests {
             &self,
             id: &Identifier,
         ) -> Result<Option<Vec<String>>, crate::oci::access::error::AccessError> {
+            Knobs::bump(&self.knobs.tags);
+            if self.knobs.fail_tags.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(crate::oci::access::error::AccessError::without_identifier(
+                    crate::oci::access::error::AccessErrorKind::Registry(std::io::Error::other("transient").into()),
+                ));
+            }
             self.inner.list_tags(id).await
         }
         async fn list_catalog(
@@ -2365,6 +2434,111 @@ mod tests {
             .unwrap();
         assert_eq!(cat.entries().count(), 100, "the whole namespace was listed");
         assert!(!cat.truncated(), "the walk went past the namespace, so it is complete");
+    }
+
+    /// A registry of `n` repositories, kept as a concrete handle so a test can
+    /// move a tag under it, and the same registry as the access seam.
+    async fn counted(n: usize) -> (std::sync::Arc<CatalogRegistry>, std::sync::Arc<dyn OciAccess>) {
+        let reg = std::sync::Arc::new(seed_many(n).await);
+        let access: std::sync::Arc<dyn OciAccess> = reg.clone();
+        (reg, access)
+    }
+
+    #[tokio::test]
+    async fn refresh_skips_the_manifest_when_the_digest_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let (reg, access) = counted(5).await;
+        let first = Catalog::load_or_refresh(&path, "localhost:5000", "", &access, false, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            Knobs::count(&reg.knobs.manifests),
+            5,
+            "a cold build reads every manifest"
+        );
+        assert!(
+            first.entries().all(|e| e.oci.digest.is_some()),
+            "every row records the digest it was read from"
+        );
+
+        // A forced refresh still asks the registry about every row, but a row
+        // whose tag and digest are unchanged is not downloaded again.
+        let again = Catalog::load_or_refresh(&path, "localhost:5000", "", &access, false, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            Knobs::count(&reg.knobs.manifests),
+            5,
+            "no manifest was downloaded again"
+        );
+        assert_eq!(Knobs::count(&reg.knobs.digests), 10, "every row was revalidated");
+        assert_eq!(again.entries().count(), 5);
+        assert!(again.entries().all(|e| e.description.as_deref() == Some("desc")));
+
+        // Move one tag: only that row is read again.
+        let moved = Identifier::new_registry("acme/skill-0002".to_string(), "localhost:5000".to_string());
+        let d = reg
+            .inner
+            .push_manifest(&moved, &skill_manifest("kw", "new desc"))
+            .await
+            .unwrap();
+        reg.inner.put_tag(&moved, "latest", &d).await.unwrap();
+        let after = Catalog::load_or_refresh(&path, "localhost:5000", "", &access, false, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            Knobs::count(&reg.knobs.manifests),
+            6,
+            "only the moved tag costs a manifest"
+        );
+        let described = |repo: &str| {
+            after
+                .entries()
+                .find(|e| e.repository == repo)
+                .and_then(|e| e.description.clone())
+        };
+        assert_eq!(described("acme/skill-0002").as_deref(), Some("new desc"));
+        assert_eq!(described("acme/skill-0001").as_deref(), Some("desc"));
+    }
+
+    #[tokio::test]
+    async fn a_transient_failure_keeps_the_prior_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let (reg, access) = counted(3).await;
+        Catalog::load_or_refresh(&path, "localhost:5000", "", &access, false, true)
+            .await
+            .unwrap();
+
+        reg.knobs.fail_tags.store(true, std::sync::atomic::Ordering::SeqCst);
+        let after = Catalog::load_or_refresh(&path, "localhost:5000", "", &access, false, true)
+            .await
+            .unwrap();
+        assert_eq!(after.entries().count(), 3);
+        assert!(
+            after
+                .entries()
+                .all(|e| e.description.as_deref() == Some("desc") && e.oci.digest.is_some()),
+            "a registry fault must not downgrade real metadata to a bare row"
+        );
+    }
+
+    #[test]
+    fn a_digest_round_trips_and_an_older_grim_ignores_it() {
+        let digest = Algorithm::Sha256.hash(b"manifest");
+        let meta = OciMeta {
+            digest: Some(digest.clone()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        assert_eq!(serde_json::from_str::<OciMeta>(&json).unwrap(), meta);
+        // The cache shape an older grim reads: `OciMeta` there has no
+        // `digest` field and no `deny_unknown_fields`, so this is dropped.
+        let with_unknown = r#"{"licenses":"MIT","some_future_key":"x"}"#;
+        assert!(serde_json::from_str::<OciMeta>(with_unknown).is_ok());
+        assert!(!OciMeta::default().eq(&meta));
+        assert!(OciMeta::default().is_empty() && !meta.is_empty());
     }
 
     #[tokio::test]
