@@ -269,8 +269,7 @@ def paged_namespace(count: int) -> str:
     The name depends only on ``count`` and ``make_repos`` is deterministic, so
     concurrent pushes from several workers write the same repos again instead
     of adding their own copies. A per-worker copy grows the shared registry
-    toward the 8000-repo host-wide ``_catalog`` ceiling, past which a
-    namespace sorting late lists nothing.
+    needlessly and slows every ``_catalog`` walk in the session.
     """
     namespace = f"grim-test/paged-{count}"
     make_repos(namespace, count)

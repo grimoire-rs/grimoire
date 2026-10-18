@@ -335,7 +335,7 @@ pub struct TuiRow {
 pub struct RegistryHealth {
     /// Root keys of sources that were served from offline / stale cache.
     pub offline: Vec<String>,
-    /// Root keys of sources whose browse window was truncated at the cap.
+    /// Root keys of sources whose listing is incomplete.
     pub truncated: Vec<String>,
     /// Root keys of sources showing nothing while a browse filter is configured —
     /// the TUI's channel for the plan C-019 diagnostic, which the CLI emits
@@ -1013,8 +1013,8 @@ impl TuiState {
         self.offline = offline;
     }
 
-    /// Set the catalog-truncated indicator (the browse window hit the cap,
-    /// so the row list / search may be incomplete).
+    /// Set the catalog-truncated indicator (a listing is incomplete, so the
+    /// row list / search may be too).
     pub fn set_truncated(&mut self, truncated: bool) {
         self.truncated = truncated;
     }

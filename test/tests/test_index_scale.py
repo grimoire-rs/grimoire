@@ -2,8 +2,8 @@
 # Copyright 2026 The Grimoire Authors
 """An index with more than 500 entries is listed whole.
 
-Index sources are no longer capped at 500 entries (the OCI ``_catalog``
-walk keeps its cap). The search envelope reports ``total`` (every matching
+Index sources are no longer capped at 500 entries (nor is the OCI
+``_catalog`` walk). The search envelope reports ``total`` (every matching
 row, counted before ``--limit``) and ``truncated`` (``items`` is not the
 full answer), ``--limit <N>`` cuts the ranked or ``--sort``ed result, and
 ``--offset <N>`` skips rows first so a consumer can read the next page.

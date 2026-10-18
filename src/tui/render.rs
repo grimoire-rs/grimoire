@@ -401,9 +401,8 @@ pub struct RenderModel {
     /// `legend_entries` (it measured six glyphs against seven plus the
     /// deprecation span) and the legend rendered clipped.
     pub legend: String,
-    /// A short, unobtrusive hint shown when the browse window was truncated
-    /// at the cap (the row list / search may be incomplete); empty when the
-    /// window is exhaustive. Rendered as a quiet span on the legend line.
+    /// A short, unobtrusive hint shown when a listing is incomplete (the row
+    /// list / search may be too); empty when the listing is exhaustive. Rendered as a quiet span on the legend line.
     pub truncation_hint: String,
     /// Whether the help overlay is showing.
     pub show_help: bool,
@@ -1099,8 +1098,8 @@ pub fn frame(state: &TuiState) -> RenderModel {
         format!("clients: {}", state.clients.join(", "))
     };
 
-    // A truncated browse window gets a quiet hint so the list is not read as
-    // exhaustive; omitted entirely when the window is complete.
+    // An incomplete listing gets a quiet hint so the list is not read as
+    // exhaustive; omitted entirely when the listing is complete.
     let truncation_hint = if state.truncated {
         "(list truncated)".to_string()
     } else {
@@ -1785,8 +1784,8 @@ fn draw_picker(f: &mut Frame, p: &PickerView) {
 
 /// The status-glyph legend as colored spans (each glyph in its state
 /// color), so the legend itself demonstrates the palette. A non-empty
-/// `truncation_hint` is appended as a quiet trailing span so a capped
-/// browse window is flagged without crowding the title-row status.
+/// `truncation_hint` is appended as a quiet trailing span so an incomplete
+/// listing is flagged without crowding the title-row status.
 fn legend_line(truncation_hint: &str) -> Line<'static> {
     // Built from [`legend_entries`] through [`status_view`], never restated:
     // this list was previously hand-written and silently fell behind, missing

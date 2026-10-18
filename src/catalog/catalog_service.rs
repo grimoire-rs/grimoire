@@ -179,7 +179,7 @@ pub struct CatalogGroup {
     pub registry: String,
     /// The configured alias for this registry, if any.
     pub alias: Option<String>,
-    /// Whether this registry's browse window hit the repository cap.
+    /// Whether this registry's listing is incomplete (unfinished walk or a build still running).
     pub truncated: bool,
     /// RFC3339 timestamp of this registry's catalog build.
     #[allow(
@@ -257,7 +257,7 @@ pub struct CatalogResults {
 }
 
 impl CatalogResults {
-    /// Whether any registry's browse window was truncated at the cap.
+    /// Whether any registry's listing is incomplete.
     pub fn any_truncated(&self) -> bool {
         self.groups.iter().any(|g| g.truncated)
     }
@@ -500,7 +500,10 @@ pub async fn load_catalog(
                         ),
                     })
                     .collect();
+                // A partial listing has not reached the rows the include list
+                // names yet, so zero matches cannot yet blame the pattern.
                 if scope == CatalogScope::Browse
+                    && !catalog.truncated()
                     && let Some(warning) = zero_match_warning(reg, &parsed, considered, rows.len())
                 {
                     tracing::warn!("{warning}");
@@ -1873,6 +1876,28 @@ mod tests {
                 FIXTURE_REPOS.len()
             )),
             "the C-019 line must reach tracing verbatim; captured:\n{logs}"
+        );
+    }
+
+    #[tokio::test]
+    async fn browse_stays_silent_while_the_listing_is_still_partial() {
+        // A cold build serves its first rows alphabetically; an include list
+        // naming a later namespace admits none of them yet. Dropping the
+        // `truncated` gate reinstates the line and turns this red.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = GrimPaths::new(tmp.path().to_path_buf());
+        seed_catalog(&paths, "ghcr.io", FIXTURE_REPOS, true);
+        let (results, logs) = browse_capturing(
+            tmp.path(),
+            &[source("ghcr.io", Some("acme"), &["nothing/matches/this"], &[])],
+            "",
+            CatalogScope::Browse,
+        )
+        .await;
+        assert!(group_repos(&results, 0).is_empty());
+        assert!(
+            !logs.contains("filter admitted"),
+            "a partial listing must not blame the patterns; captured:\n{logs}"
         );
     }
 
