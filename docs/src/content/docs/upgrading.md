@@ -455,14 +455,30 @@ you add the keys.
 - **An `index` source with more than 500 entries lists every entry.** The
   500-repository cap used to window index sources as well. A query, a
   [browse filter][browse-filters], `grim rate` and `grim status --check`
-  reached only the first 500 rows. The cap applies to an `oci` source's
-  `_catalog` walk alone, so `grim search` over a large index returns more rows.
-  An index past 100,000 entries or 128 MiB decoded fails its fetch.
+  reached only the first 500 rows, so `grim search` over a large index returns
+  more rows. An index past 100,000 entries or 128 MiB decoded fails its fetch.
+- **An `oci` source lists every repository.** The `_catalog` walk follows the
+  registry's own paging to the end and no longer stops at 500. The first
+  browse of a large registry takes longer. While it builds, other `grim`
+  commands serve the rows built so far, and the source reads `capped: true`
+  until the build finishes. An interrupted build resumes on the next command,
+  and a refresh downloads a manifest again only when its digest changed. An
+  `oci` cache an earlier grim capped at 500 rebuilds on first use, reusing the
+  rows it already has.
+- **The `oci` cap warning has one new wording.** A source whose listing is
+  incomplete now warns `catalog for source '<name>' is incomplete: its listing
+  has not finished, so results and the total are a lower bound; the next online grim search retries it`. The JSON `capped` and `truncated` fields keep their
+  meaning, a lower bound on `total`, and no field is added or removed.
+- **An older grim shows a build in progress with its 500 wording.** Run
+  against the same `$GRIM_HOME`, 0.12 through 0.14 read a cache that is still
+  being built as capped and warn `capped at 500 repositories` until the
+  cache's one-hour lifetime expires. Nothing breaks. If it rebuilds the cache
+  itself, it writes a 500-row cache that this grim then continues.
 - **A cached index listing capped at 500 rebuilds on first use.** An earlier
   grim cached such a listing with `truncated: true`. This grim rebuilds it on
   the next command instead of serving it until the one-hour TTL expires. If
-  that rebuild fails, it serves the capped rows with a warning.
-  `grim search --refresh` forces the rebuild.
+  that rebuild fails, it serves the capped rows with the incomplete-listing
+  warning. `grim search --refresh` forces the rebuild.
 - **`grim search` gains `total`, `truncated`, `--limit` and `--offset`.** The
   search document carries `total` and `truncated` beside `items` and
   `sources`. The `--limit` flag cuts the printed rows and `--offset` skips

@@ -1250,32 +1250,44 @@ applied to it.
 The filter runs at read time, after each source's listing is built. An
 `index` source lists every entry it publishes, so a query, a filter,
 [`grim rate`](#rate) and [`grim status --check`](#status) reach every row of
-a large index. An index is never truncated. One past the
-[abuse bounds](./package-index.md#consuming) fails its fetch instead.
+a large index. One past the [abuse bounds](./package-index.md#consuming)
+fails its fetch instead.
 
-Only the `oci` walk of a registry's `_catalog` endpoint is capped. It stops
-at 500 repositories when the listing is built, before the query and the
-filter run. A filter can only show less of that window, never reach past it.
-Narrowing the `oci` locator is the remedy. A queried search over a capped
-source prints one warning per source:
+An `oci` source lists every repository its registry's `_catalog` endpoint
+returns, following the registry's own paging to the end. The first browse of a
+large registry reads each repository's metadata and takes a while. While that
+build runs, any other `grim` command serves the rows built so far, in the
+terminal and with `--offline` alike, and reads `capped: true` for the source
+until the build finishes. Rows are served only with their full metadata, so a
+repository not yet read is absent, not shown bare. A build that is interrupted
+resumes on the next command and does not re-read rows younger than the
+catalog's one-hour lifetime. A later refresh asks the registry for each
+repository's tag digest and downloads a manifest again only when it changed.
 
-```text
-catalog for source 'acme' capped at 500 repositories; a narrower query cannot reach past the cap — use a package index or a narrower oci locator
-```
-
-In JSON the source reads `capped: true` in `sources` on every page, which a
-paging script can branch on. The `_catalog` walk itself also stops at 8000
-repositories host-wide, before the namespace filter. When that ceiling ends
-the walk before an `oci` locator's namespace does, the source reads
-`capped: true` too, and a build-time warning names the ceiling.
-
-A cached index listing that an earlier grim capped at 500 entries is rebuilt
-on the next command, not served until its TTL expires. If that rebuild
-fails, grim serves the capped rows and warns:
+An `oci` source reads `capped: true` while its listing is incomplete: the
+build is still running or was interrupted, or the `_catalog` walk could not
+finish (the registry repeated a paging cursor, failed part-way, or listed
+more repository names than grim keeps). A queried search over such a source
+prints one warning per source:
 
 ```text
-catalog for source '<name>' was capped at 500 entries by an earlier grim; run grim search --refresh to rebuild it
+catalog for source 'acme' is incomplete: its listing has not finished, so results and the total are a lower bound; the next online grim search retries it
 ```
+
+An incomplete listing is never served as fresh: every online command retries
+it, and a `_catalog` walk that cannot finish is walked again each time.
+
+Reading `capped` in JSON is how a paging script tells "still loading" from
+done. Run one `grim search --format json --limit 1` to drive the build and read
+pages with `--offline` while it runs. That run builds only when no other grim
+process holds the build lock; otherwise it serves the newest checkpoint and
+exits at once with `capped: true`. Repeat the run until `capped` reads `false`.
+
+A cached listing that an earlier grim capped at 500 rows is rebuilt on the
+next command, not served until its catalog lifetime expires. An `oci` build
+resumes from its rows, so only the repositories it lacks are read. If the
+rebuild fails, grim serves the capped rows with the incomplete-listing
+warning.
 
 A registry that gates its `_catalog` browse endpoint (GitLab SaaS, GHCR,
 Docker Hub) lists nothing at all, whatever the query. That looks like an
@@ -1354,9 +1366,9 @@ Full contract: [the `sources` array](./json-interface.md#search-sources).
 Two more always-present siblings say whether `items` is the whole answer.
 `total` counts every matching row before `--offset` and `--limit` cut the
 list. `truncated` is `true` when `items` is not complete: `--offset` or
-`--limit` cut it, or an `oci` source's listing was capped when it was built
-and `total` is a lower bound. `items.length < total` means the page is partial,
-and an `oci` cap may apply as well, which a capped-source warning on stderr
+`--limit` cut it, or a source's listing is incomplete and `total` is a lower
+bound. `items.length < total` means the page is partial, and an incomplete
+listing may apply as well, which an incomplete-listing warning on stderr
 reports. Full contract: [the `total` and `truncated`
 fields](./json-interface.md#search-total).
 
@@ -2463,8 +2475,9 @@ aliased entry, the bare locator for one without an alias. The tree root and
 the flat list's Registry column show the same alias on its own (a locator
 rarely fits a table cell); the group's detail pane spells the locator out.
 
-The `truncated:` clause names only `oci` sources whose `_catalog` walk hit
-the 500-repository cap. An `index` source is never truncated.
+The `truncated:` clause names the sources whose listing is incomplete: an
+`oci` build that is still running or was interrupted, or a `_catalog` walk
+that could not finish.
 
 That clause is what explains a `0/0` root without leaving the TUI. It names
 a source only when its own filter can be shown to have caused the empty
