@@ -100,6 +100,16 @@ research-axes:
 
 ## Memory
 
+- **Active plan (2026-10-18, hex-plan high):**
+  `.agents/plans/plan_marketplace_render_deploy.md` — State `review` (executed 2026-10-18: gates green, r2 review 0 Block; next `/hex-finalize`);
+  2 repos (grimoire docs, indexer worktree `.agents/worktrees/indexer-mkt`),
+  revised same day: contract wave + 7 pipelines (G1 G2 I1–I5) in 2 waves,
+  critical path CW → I2 → I5. Owner model: department index repo holds
+  `marketplace.toml`; indexer enrich runs `grim export` on it; CI pushes the
+  export to a sibling git marketplace repo (default branch; no branches, no
+  HTTP); members must be indexed packages (gate); export writes a root README
+  with per-harness add commands.
+
 - **Landed plan (2026-09-28):** `.agents/plans/plan_hooks_pr98_revival.md`
   — State `done` (L3 `/hex-review` approved 2026-09-28; next `/hex-finalize`;
   no Spec Deltas, no fold), tier xhigh, branch `hex/hooks-pr-98-revival`.
