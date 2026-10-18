@@ -606,17 +606,19 @@ For an `index` source that listing is every entry the index publishes, so a
 filter, a query, `grim rate` and `grim status --check` reach every row. An
 `index` is never windowed.
 
-An `oci` source is different, because the registry's `_catalog` walk stops at
-**500 repositories** when the listing is built. A filter can only show less
-of the same 500. On a registry big enough to hit that cap, the honest fix is
-a narrower `oci` locator (`ghcr.io/acme/platform` rather than `ghcr.io`).
-That moves the cut-line itself. A [package index](./package-index.md) has no
-such window.
+An `oci` source lists every repository its registry's `_catalog` endpoint
+returns, so a filter, a query, `grim rate` and `grim status --check` reach all
+of them. The first browse of a large registry reads each repository's metadata
+and takes a while. Meanwhile other `grim` commands serve the rows built so far
+and read `capped: true` for the source, and a build that is interrupted resumes
+on the next command. A filter still only narrows the listing. A narrower `oci`
+locator (`ghcr.io/acme/platform` rather than `ghcr.io`) reads less of the
+registry in the first place.
 
-`grim search <query>` reports a capped `oci` source, one line per source:
+`grim search <query>` reports an incomplete `oci` source, one line per source:
 
 ```text
-catalog for source 'acme' capped at 500 repositories; a narrower query cannot reach past the cap — use a package index or a narrower oci locator
+catalog for source 'acme' is incomplete: its listing has not finished, so results and the total are a lower bound; the next online grim search retries it
 ```
 
 **Writing the patterns.** Hand-editing `grimoire.toml` is one way;

@@ -113,7 +113,7 @@ no kind at all, in which case `kind` is `null`.
 
 `search`'s `items` can be short for five reasons, and the report names
 three. [`total` and `truncated`](#search-total) say when `--offset` or `--limit` cut the
-list or an `oci` source's listing hit the 500-repository cap. The
+list or a source's listing is incomplete. The
 [`sources` array](#search-sources) names a source whose catalog failed to
 refresh.
 
@@ -178,8 +178,9 @@ carries, so `items[].source` joins to this array directly. `ok` is the
 field to branch on; `error` is the cause when `ok` is `false` and an
 explicit `null` otherwise. It is the same text the `catalog for source
 '<locator>' unavailable` warning carries on stderr. `capped` is always a
-boolean: `true` when that source's listing hit a build-time cap, so rows past
-it were never seen (see [the `total` and `truncated` fields](#search-total)).
+boolean: `true` when that source's listing is incomplete, so rows may be
+missing and `total` is a lower bound (see [the `total` and `truncated`
+fields](#search-total)).
 
 The array exists because **the browse never fails**. A refresh fails
 when the source is unreachable, answers `5xx`, sends a body over the size or
@@ -229,25 +230,31 @@ filter, deprecated visibility, the query and the relevance cutoff, and
 
 - `--offset` skipped rows, so the page starts past the first match.
 - `--limit` cut the list, so `items.length < total`.
-- An `oci` source's `_catalog` walk hit the 500-repository cap when its
-  listing was built. Rows past the cap were never seen, so `total` is then a
+- A source's listing is incomplete. Rows may be missing, so `total` is a
   lower bound.
 
-`items.length < total` means the page is partial. An `oci` cap may apply
-at the same time, which a capped-source warning on stderr reports. An `index`
-source is never truncated. It lists every entry, and an index past the abuse
-bounds fails its fetch with `ok: false` instead.
+`items.length < total` means the page is partial. An incomplete listing may
+apply at the same time, which a warning on stderr reports. An `index` source
+lists every entry, and an index past the abuse bounds fails its fetch with
+`ok: false` instead.
 
 `truncated` is also `true` on every page past the first, so on its own it does
-not say whether an `oci` cap applies. Read `sources[].capped` for that: it is
-`true` on every page, whatever the offset, for each source whose listing was
-capped. A `_catalog` walk that stops at its 8000-repository ceiling before
-the source's namespace ends sets the same flag, because the repositories past
-it were never listed.
+not say whether a listing is incomplete. Read `sources[].capped` for that: it
+is `true` on every page, whatever the offset, for each source whose listing is
+incomplete. An `oci` listing is incomplete while its build is still running
+(any grim process serves the rows built so far) or was interrupted, and when
+the `_catalog` walk could not finish: the registry repeated a paging cursor,
+failed part-way through, or listed more repository names than grim keeps.
+A running build finishes without any action, and the next online command
+resumes an interrupted one. To wait for it, run `grim search --format json
+--limit 1` and read pages with `--offline` while it runs. That run builds only
+when no other grim process holds the build lock; otherwise it serves the newest
+checkpoint and exits at once with `capped: true`. Repeat the run until `capped`
+reads `false`.
 
 Both fields are present on every document. A query that matches nothing
 reports `total: 0`. Its `truncated` is still `true` when an `oci` source's
-listing was capped, because rows past the cap were never seen.
+listing is incomplete, because rows may be missing.
 
 #### Paging `search` results {#search-paging}
 

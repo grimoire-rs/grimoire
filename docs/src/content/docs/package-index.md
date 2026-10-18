@@ -66,8 +66,8 @@ as an empty group.
 
 A cached listing that an earlier grim capped at 500 entries is rebuilt on
 the next command instead of served until its TTL expires. If that rebuild
-fails, grim serves the capped rows with a warning that points at
-`grim search --refresh`.
+fails, grim serves the capped rows with the incomplete-listing warning
+(`grim search --refresh` forces the rebuild).
 
 The static transport sends `Accept-Encoding: gzip` on its requests for
 `all.json` and `stats.json`, and on no other request. It decodes a gzip
