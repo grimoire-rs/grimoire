@@ -2164,7 +2164,7 @@ mod tests {
         async fn list_tags(&self, _id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
             Err(self.refuse())
         }
-        async fn list_catalog(&self, _registry: &str) -> Result<Vec<String>, AccessError> {
+        async fn list_catalog(&self, _registry: &str) -> Result<crate::oci::access::CatalogListing, AccessError> {
             Err(self.refuse())
         }
         async fn push_blob(&self, _repo: &Identifier, _bytes: &[u8]) -> Result<Digest, AccessError> {
@@ -2209,7 +2209,7 @@ mod tests {
         async fn list_tags(&self, id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
             self.inner.list_tags(id).await
         }
-        async fn list_catalog(&self, registry: &str) -> Result<Vec<String>, AccessError> {
+        async fn list_catalog(&self, registry: &str) -> Result<crate::oci::access::CatalogListing, AccessError> {
             self.inner.list_catalog(registry).await
         }
         async fn push_blob(&self, repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {

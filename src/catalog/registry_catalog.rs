@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 
 use crate::lock::advisory_lock::AdvisoryFileLock;
-use crate::oci::access::{CATALOG_LIST_CEILING, OciAccess};
+use crate::oci::access::{CatalogListing, OciAccess};
 use crate::oci::{Identifier, PinnedIdentifier};
 use crate::store::atomic_write::atomic_write;
 
@@ -910,8 +910,8 @@ impl Catalog {
     /// only a prefix of the matches; the build records that on
     /// [`Self::truncated`] so a non-empty query can warn that results past the
     /// cap are not shown. The same flag is set when the `_catalog` walk itself
-    /// stopped at [`CATALOG_LIST_CEILING`] before the namespace ended, since
-    /// repositories past it were never listed.
+    /// ended incomplete before the namespace did, since repositories past it
+    /// were never listed.
     async fn build(
         registry: &str,
         scope: &str,
@@ -926,15 +926,14 @@ impl Catalog {
         // namespace prefix. Entries are keyed by the host (matching how
         // identifiers parse `registry/repository`).
         let (host, namespace) = split_host_namespace(registry);
-        let repos = access.list_catalog(registry).await?;
-        let walk_cut_short = listing_stops_inside_namespace(&repos, namespace);
-        if walk_cut_short {
-            tracing::warn!("{}", ceiling_warning(host, registry));
-        }
+        let listing = access.list_catalog(registry).await?;
+        // The access layer already warned about an unfinished walk.
+        let walk_cut_short = listing_misses_namespace(&listing, namespace);
         // Namespace scope (no network) + cheap name prefilter, then the hard
         // cap. Take one past the cap so an overflow is detectable without
         // materializing a (potentially 60k-repo) list.
-        let mut selected: Vec<String> = repos
+        let mut selected: Vec<String> = listing
+            .repositories
             .into_iter()
             .filter(|r| namespace.is_none_or(|ns| r == ns || r.starts_with(&format!("{ns}/"))))
             .filter(|r| scope.is_empty() || r.to_lowercase().contains(scope))
@@ -1107,32 +1106,25 @@ fn split_host_namespace(registry: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// Whether a `_catalog` listing that hit [`CATALOG_LIST_CEILING`] may be
-/// missing repositories of `namespace`.
+/// Whether an incomplete `_catalog` listing may be missing repositories of
+/// `namespace`.
 ///
 /// The registry lists repositories in lexicographic order, so a namespace is
-/// one contiguous run. A full-length listing whose last repository sorts past
+/// one contiguous run. An incomplete listing whose last repository sorts past
 /// that run saw all of it; one that ends before or inside the run did not, and
 /// without this the namespace would read as "nothing published" with no
 /// truncation flag. The run `ns/…` ends just before `ns0` (`0` is the byte
 /// after `/`); a sibling such as `ns-tools` or `ns.io` sorts before `ns/`, so
 /// it still leaves the run unlisted. With no namespace the whole host is the
-/// scope, so any full-length listing is cut short.
-fn listing_stops_inside_namespace(repos: &[String], namespace: Option<&str>) -> bool {
-    if repos.len() < CATALOG_LIST_CEILING {
+/// scope, so any incomplete listing is cut short.
+fn listing_misses_namespace(listing: &CatalogListing, namespace: Option<&str>) -> bool {
+    if listing.complete {
         return false;
     }
-    let (Some(ns), Some(last)) = (namespace, repos.last()) else {
+    let (Some(ns), Some(last)) = (namespace, listing.repositories.last()) else {
         return true;
     };
     last.as_str() < format!("{ns}0").as_str()
-}
-
-/// The warning for a `_catalog` listing cut short at [`CATALOG_LIST_CEILING`].
-fn ceiling_warning(host: &str, registry: &str) -> String {
-    format!(
-        "registry '{host}' lists at least {CATALOG_LIST_CEILING} repositories and the listing stops at that ceiling; the catalog for '{registry}' may be missing repositories past it"
-    )
 }
 
 /// Pick the representative tag from `tags`: prefer `latest`, else the
@@ -1577,6 +1569,14 @@ mod tests {
         repos: Vec<String>,
         registry: String,
         blob_pulled: std::sync::Arc<Mutex<bool>>,
+        knobs: std::sync::Arc<Knobs>,
+    }
+
+    /// Test knobs and call counters shared with the test body.
+    #[derive(Default)]
+    struct Knobs {
+        /// The listing reports that the walk did not finish.
+        incomplete: std::sync::atomic::AtomicBool,
     }
 
     impl CatalogRegistry {
@@ -1615,11 +1615,17 @@ mod tests {
         ) -> Result<Option<Vec<String>>, crate::oci::access::error::AccessError> {
             self.inner.list_tags(id).await
         }
-        async fn list_catalog(&self, registry: &str) -> Result<Vec<String>, crate::oci::access::error::AccessError> {
+        async fn list_catalog(
+            &self,
+            registry: &str,
+        ) -> Result<crate::oci::access::CatalogListing, crate::oci::access::error::AccessError> {
             if registry == self.registry {
-                Ok(self.repos.clone())
+                Ok(crate::oci::access::CatalogListing {
+                    repositories: self.repos.clone(),
+                    complete: !self.knobs.incomplete.load(std::sync::atomic::Ordering::SeqCst),
+                })
             } else {
-                Ok(Vec::new())
+                Ok(Vec::new().into())
             }
         }
         async fn push_blob(
@@ -1660,6 +1666,7 @@ mod tests {
             repos: vec!["acme/code-review".to_string()],
             registry: reg.to_string(),
             blob_pulled: std::sync::Arc::new(Mutex::new(false)),
+            knobs: Default::default(),
         }
     }
 
@@ -1718,6 +1725,7 @@ mod tests {
             repos: vec!["acme/legacy".to_string()],
             registry: reg.to_string(),
             blob_pulled: std::sync::Arc::new(Mutex::new(false)),
+            knobs: Default::default(),
         });
         let cat = Catalog::load_or_refresh(&path, reg, "", &access, false, true)
             .await
@@ -1751,6 +1759,7 @@ mod tests {
             repos: vec!["acme/traced".to_string()],
             registry: reg.to_string(),
             blob_pulled: std::sync::Arc::new(Mutex::new(false)),
+            knobs: Default::default(),
         });
         let cat = Catalog::load_or_refresh(&path, reg, "", &access, false, true)
             .await
@@ -1840,6 +1849,7 @@ mod tests {
             repos: vec!["acme/old-skill".to_string()],
             registry: reg.to_string(),
             blob_pulled: std::sync::Arc::new(Mutex::new(false)),
+            knobs: Default::default(),
         });
         let cat = Catalog::load_or_refresh(&path, reg, "", &access, false, true)
             .await
@@ -1859,6 +1869,7 @@ mod tests {
                 repos: vec!["acme/fresh".to_string()],
                 registry: reg.to_string(),
                 blob_pulled: std::sync::Arc::new(Mutex::new(false)),
+                knobs: Default::default(),
             });
             let dir2 = tempfile::tempdir().unwrap();
             Catalog::load_or_refresh(&dir2.path().join("c.json"), reg, "", &access, false, true)
@@ -2003,7 +2014,10 @@ mod tests {
         ) -> Result<Option<Vec<String>>, crate::oci::access::error::AccessError> {
             unreachable!()
         }
-        async fn list_catalog(&self, _: &str) -> Result<Vec<String>, crate::oci::access::error::AccessError> {
+        async fn list_catalog(
+            &self,
+            _: &str,
+        ) -> Result<crate::oci::access::CatalogListing, crate::oci::access::error::AccessError> {
             Err(crate::oci::access::error::AccessError::without_identifier(
                 crate::oci::access::error::AccessErrorKind::Registry(std::io::Error::other("simulated outage").into()),
             ))
@@ -2271,53 +2285,53 @@ mod tests {
             repos,
             registry: reg.to_string(),
             blob_pulled: std::sync::Arc::new(Mutex::new(false)),
+            knobs: Default::default(),
         }
-    }
-
-    /// A registry listing `repos` verbatim, none of them with a manifest, so
-    /// every entry the build keeps is a bare record.
-    fn listing_only(repos: Vec<String>, registry: &str) -> std::sync::Arc<dyn OciAccess> {
-        std::sync::Arc::new(CatalogRegistry {
-            inner: MemoryRegistry::new(),
-            repos,
-            registry: registry.to_string(),
-            blob_pulled: std::sync::Arc::new(Mutex::new(false)),
-        })
     }
 
     fn names(prefix: &str, n: usize) -> Vec<String> {
         (0..n).map(|i| format!("{prefix}/pkg-{i:04}")).collect()
     }
 
-    #[test]
-    fn ceiling_warning_names_the_8000_repository_ceiling() {
-        let warning = ceiling_warning("localhost:5000", "localhost:5000/zzz");
-        assert!(warning.contains("8000"), "{warning}");
-        assert!(warning.contains("localhost:5000/zzz"), "{warning}");
+    fn incomplete(last: &str) -> CatalogListing {
+        let mut repositories = names("aaa", 10);
+        repositories.push(last.to_string());
+        CatalogListing {
+            repositories,
+            complete: false,
+        }
     }
 
     #[test]
     fn a_listing_cut_short_before_or_inside_the_namespace_is_flagged() {
-        let full = |last: &str| {
-            let mut v = names("aaa", CATALOG_LIST_CEILING - 1);
-            v.push(last.to_string());
-            v
-        };
-        // Short of the ceiling the listing is whole, whatever the namespace.
-        assert!(!listing_stops_inside_namespace(&names("aaa", 10), Some("zzz")));
-        // At the ceiling: ends before, inside, or past the namespace's run.
-        assert!(listing_stops_inside_namespace(&full("aaa/z"), Some("zzz")));
-        assert!(listing_stops_inside_namespace(&full("zzz/a"), Some("zzz")));
-        assert!(listing_stops_inside_namespace(&full("zzz"), Some("zzz")));
+        // A finished walk is whole, whatever the namespace.
+        assert!(!listing_misses_namespace(&names("aaa", 10).into(), Some("zzz")));
+        // Unfinished: ends before, inside, or past the namespace's run.
+        assert!(listing_misses_namespace(&incomplete("aaa/z"), Some("zzz")));
+        assert!(listing_misses_namespace(&incomplete("zzz/a"), Some("zzz")));
+        assert!(listing_misses_namespace(&incomplete("zzz"), Some("zzz")));
         // A sibling sorting between `zzz` and `zzz/` (`-` and `.` precede `/`)
         // still leaves the whole run unlisted.
-        assert!(listing_stops_inside_namespace(&full("zzz-tools"), Some("zzz")));
-        assert!(listing_stops_inside_namespace(&full("zzz.io"), Some("zzz")));
-        assert!(!listing_stops_inside_namespace(&full("zzz0"), Some("zzz")));
-        assert!(!listing_stops_inside_namespace(&full("zzzz/a"), Some("zzz")));
-        assert!(!listing_stops_inside_namespace(&full("bbb/a"), Some("aaa")));
+        assert!(listing_misses_namespace(&incomplete("zzz-tools"), Some("zzz")));
+        assert!(listing_misses_namespace(&incomplete("zzz.io"), Some("zzz")));
+        assert!(!listing_misses_namespace(&incomplete("zzz0"), Some("zzz")));
+        assert!(!listing_misses_namespace(&incomplete("zzzz/a"), Some("zzz")));
+        assert!(!listing_misses_namespace(&incomplete("bbb/a"), Some("aaa")));
         // No namespace: the whole host is the scope.
-        assert!(listing_stops_inside_namespace(&full("zzz/a"), None));
+        assert!(listing_misses_namespace(&incomplete("zzz/a"), None));
+    }
+
+    /// A registry whose walk stopped after `repos`, so the listing is a prefix.
+    fn unfinished_listing(repos: Vec<String>, registry: &str) -> std::sync::Arc<dyn OciAccess> {
+        let reg = CatalogRegistry {
+            inner: MemoryRegistry::new(),
+            repos,
+            registry: registry.to_string(),
+            blob_pulled: std::sync::Arc::new(Mutex::new(false)),
+            knobs: Default::default(),
+        };
+        reg.knobs.incomplete.store(true, std::sync::atomic::Ordering::SeqCst);
+        std::sync::Arc::new(reg)
     }
 
     #[tokio::test]
@@ -2326,21 +2340,24 @@ mod tests {
         // empty here because the walk stopped, not because nothing is published.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("catalog.json");
-        let reg = listing_only(names("aaa", CATALOG_LIST_CEILING), "localhost:5000/zzz");
+        let reg = unfinished_listing(names("aaa", 100), "localhost:5000/zzz");
         let cat = Catalog::load_or_refresh(&path, "localhost:5000/zzz", "", &reg, false, true)
             .await
             .unwrap();
         assert_eq!(cat.entries().count(), 0);
-        assert!(cat.truncated(), "an empty namespace past the ceiling must say so");
+        assert!(
+            cat.truncated(),
+            "an empty namespace past an unfinished walk must say so"
+        );
     }
 
     #[tokio::test]
-    async fn a_full_walk_that_passed_the_namespace_is_not_truncated() {
+    async fn a_walk_that_passed_the_namespace_is_not_truncated() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("catalog.json");
         let mut repos = names("aaa", 100);
-        repos.extend(names("bbb", CATALOG_LIST_CEILING - 100));
-        let reg = listing_only(repos, "localhost:5000/aaa");
+        repos.extend(names("bbb", 50));
+        let reg = unfinished_listing(repos, "localhost:5000/aaa");
         let cat = Catalog::load_or_refresh(&path, "localhost:5000/aaa", "", &reg, false, true)
             .await
             .unwrap();
@@ -2456,6 +2473,7 @@ mod tests {
             repos: vec!["acme/code-review".to_string(), "other/foo".to_string()],
             registry: "localhost:5000/acme".to_string(),
             blob_pulled: std::sync::Arc::new(Mutex::new(false)),
+            knobs: Default::default(),
         }
     }
 

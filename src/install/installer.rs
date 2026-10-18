@@ -3150,8 +3150,8 @@ mod tests {
         async fn list_tags(&self, _id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
             Ok(None)
         }
-        async fn list_catalog(&self, _registry: &str) -> Result<Vec<String>, AccessError> {
-            Ok(Vec::new())
+        async fn list_catalog(&self, _registry: &str) -> Result<crate::oci::access::CatalogListing, AccessError> {
+            Ok(Vec::new().into())
         }
         async fn push_blob(&self, _repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {
             Ok(Algorithm::Sha256.hash(bytes))
@@ -3188,8 +3188,8 @@ mod tests {
         async fn list_tags(&self, _id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
             Ok(None)
         }
-        async fn list_catalog(&self, _registry: &str) -> Result<Vec<String>, AccessError> {
-            Ok(Vec::new())
+        async fn list_catalog(&self, _registry: &str) -> Result<crate::oci::access::CatalogListing, AccessError> {
+            Ok(Vec::new().into())
         }
         async fn push_blob(&self, _repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {
             Ok(Algorithm::Sha256.hash(bytes))
@@ -3228,8 +3228,8 @@ mod tests {
         async fn list_tags(&self, _id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
             Ok(None)
         }
-        async fn list_catalog(&self, _registry: &str) -> Result<Vec<String>, AccessError> {
-            Ok(Vec::new())
+        async fn list_catalog(&self, _registry: &str) -> Result<crate::oci::access::CatalogListing, AccessError> {
+            Ok(Vec::new().into())
         }
         async fn push_blob(&self, _repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {
             Ok(Algorithm::Sha256.hash(bytes))
@@ -3272,8 +3272,8 @@ mod tests {
         async fn list_tags(&self, _id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
             Ok(None)
         }
-        async fn list_catalog(&self, _registry: &str) -> Result<Vec<String>, AccessError> {
-            Ok(Vec::new())
+        async fn list_catalog(&self, _registry: &str) -> Result<crate::oci::access::CatalogListing, AccessError> {
+            Ok(Vec::new().into())
         }
         async fn push_blob(&self, _repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {
             Ok(Algorithm::Sha256.hash(bytes))
@@ -6478,8 +6478,8 @@ mod tests {
         async fn list_tags(&self, _id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
             Ok(None)
         }
-        async fn list_catalog(&self, _registry: &str) -> Result<Vec<String>, AccessError> {
-            Ok(Vec::new())
+        async fn list_catalog(&self, _registry: &str) -> Result<crate::oci::access::CatalogListing, AccessError> {
+            Ok(Vec::new().into())
         }
         async fn push_blob(&self, _repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {
             Ok(Algorithm::Sha256.hash(bytes))
@@ -7253,8 +7253,8 @@ mod tests {
         async fn list_tags(&self, _id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
             Ok(None)
         }
-        async fn list_catalog(&self, _registry: &str) -> Result<Vec<String>, AccessError> {
-            Ok(Vec::new())
+        async fn list_catalog(&self, _registry: &str) -> Result<crate::oci::access::CatalogListing, AccessError> {
+            Ok(Vec::new().into())
         }
         async fn push_blob(&self, _repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {
             Ok(Algorithm::Sha256.hash(bytes))

@@ -157,10 +157,10 @@ impl<A: OciAccess> OciAccess for CachedAccess<A> {
         }
     }
 
-    async fn list_catalog(&self, registry: &str) -> Result<Vec<String>, AccessError> {
+    async fn list_catalog(&self, registry: &str) -> Result<crate::oci::access::CatalogListing, AccessError> {
         if self.mode == AccessMode::Offline {
             // No persistent catalog cache in Phase 3 — degrade to empty.
-            return Ok(Vec::new());
+            return Ok(Vec::new().into());
         }
         self.inner.list_catalog(registry).await
     }
@@ -228,8 +228,8 @@ mod tests {
         async fn list_tags(&self, _id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
             Ok(Some(vec!["stable".to_string()]))
         }
-        async fn list_catalog(&self, _registry: &str) -> Result<Vec<String>, AccessError> {
-            Ok(vec!["acme/x".to_string()])
+        async fn list_catalog(&self, _registry: &str) -> Result<crate::oci::access::CatalogListing, AccessError> {
+            Ok(vec!["acme/x".to_string()].into())
         }
         async fn push_blob(&self, _repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {
             Ok(Algorithm::Sha256.hash(bytes))

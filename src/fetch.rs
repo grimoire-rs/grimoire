@@ -1210,8 +1210,8 @@ mod tests {
             Ok(None)
         }
 
-        async fn list_catalog(&self, _registry: &str) -> Result<Vec<String>, AccessError> {
-            Ok(Vec::new())
+        async fn list_catalog(&self, _registry: &str) -> Result<crate::oci::access::CatalogListing, AccessError> {
+            Ok(Vec::new().into())
         }
 
         async fn push_blob(&self, _repo: &Identifier, bytes: &[u8]) -> Result<crate::oci::Digest, AccessError> {

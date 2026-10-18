@@ -2609,7 +2609,7 @@ tree_separators_typo = 1
             async fn list_tags(&self, _id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
                 Err(denied())
             }
-            async fn list_catalog(&self, _registry: &str) -> Result<Vec<String>, AccessError> {
+            async fn list_catalog(&self, _registry: &str) -> Result<crate::oci::access::CatalogListing, AccessError> {
                 Err(denied())
             }
             async fn push_blob(&self, _repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {

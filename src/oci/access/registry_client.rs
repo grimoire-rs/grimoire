@@ -9,13 +9,15 @@
 //! Docker credentials (`~/.docker/config.json` / credential helpers) via
 //! the `docker_credential` crate, the same approach OCX uses.
 //!
-//! The registry-catalog listing delegates to `oci-client`'s `catalog`
+//! The registry-catalog listing delegates to `oci-client`'s `catalog_page`
 //! endpoint (added in 0.17), which runs the same `WWW-Authenticate` token
 //! handshake as every other call — most registries gate `_catalog` behind
 //! a token, and without one it 401s and the catalog comes back empty. We
-//! only add bounded pagination over the spec `last` cursor; an unsupported
-//! or forbidden endpoint degrades to an empty list rather than an error.
+//! only add pagination (the registry's `Link`, else the spec `last` cursor);
+//! an unsupported or forbidden endpoint degrades to an empty list rather
+//! than an error.
 
+use std::collections::HashSet;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context as TaskContext, Poll};
@@ -27,7 +29,7 @@ use super::error::{AccessError, AccessErrorKind};
 use crate::oci::manifest::OciManifest;
 use crate::oci::{Digest, Identifier, PinnedIdentifier};
 
-use super::super::access::{OciAccess, Operation};
+use super::super::access::{CatalogListing, OciAccess, Operation};
 
 use oci_client::Reference;
 use oci_client::client::{Client, ClientConfig, ClientProtocol};
@@ -456,64 +458,8 @@ impl OciAccess for RegistryClient {
         }
     }
 
-    async fn list_catalog(&self, registry: &str) -> Result<Vec<String>, AccessError> {
-        // Bound the walk: a registry can advertise tens of thousands of
-        // repositories, and the catalog layer caps and prefilters anyway —
-        // a truncated listing is an explicit cut-line, the catalog is a
-        // best-effort index, not a mirror.
-        const PAGE_SIZE: usize = 1000;
-        const MAX_PAGES: usize = super::CATALOG_LIST_CEILING / PAGE_SIZE;
-
-        // The `_catalog` endpoint lives on the bare registry HOST. A
-        // configured default registry may carry a namespace
-        // (`ghcr.io/acme`); the namespace is filtered upstream, so list
-        // against the host. The reference's repository is unused by the
-        // catalog request itself — it only drives oci-client's
-        // `repository:…:pull` token scope, and the token a registry mints
-        // carries the caller's read access, which covers `_catalog`.
-        let host = registry_host(registry);
-        let auth = Self::auth_for(host);
-        let reference = Reference::with_tag(host.to_string(), "_catalog".to_string(), "latest".to_string());
-
-        // `oci-client`'s `catalog` runs the WWW-Authenticate token handshake
-        // (so a private registry resolves) but returns one page with no
-        // cursor, so paginate over the distribution-spec `last` marker.
-        let mut all: Vec<String> = Vec::new();
-        let mut last: Option<String> = None;
-        for _ in 0..MAX_PAGES {
-            let page = match self
-                .client
-                .catalog(&reference, &auth, Some(PAGE_SIZE), last.as_deref())
-                .await
-            {
-                Ok(page) => page.repositories,
-                // Degrade vs. abort, mirroring the rest of this seam: an
-                // unsupported (404) or forbidden/auth-gated catalog yields
-                // whatever was collected (empty on page 1); only a genuine
-                // transport fault aborts an otherwise-empty walk.
-                Err(e) => match classify(e) {
-                    Classified::NotFound | Classified::Auth(_) => break,
-                    Classified::Registry(e) => {
-                        if all.is_empty() {
-                            return Err(AccessError::without_identifier(AccessErrorKind::Registry(Box::new(e))));
-                        }
-                        break;
-                    }
-                },
-            };
-            // A short page is the last page: the spec returns up to
-            // PAGE_SIZE repositories, so fewer than that means the registry
-            // has none left. When the total is an exact multiple of PAGE_SIZE
-            // the final request comes back empty (0 < PAGE_SIZE) and this same
-            // check terminates on it — no separate empty-page case needed.
-            let is_last_page = page.len() < PAGE_SIZE;
-            last = page.last().cloned();
-            all.extend(page);
-            if is_last_page {
-                break;
-            }
-        }
-        Ok(all)
+    async fn list_catalog(&self, registry: &str) -> Result<CatalogListing, AccessError> {
+        self.walk_catalog(registry, super::CATALOG_LISTING_BYTE_LIMIT).await
     }
 
     async fn push_blob(&self, repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {
@@ -693,9 +639,127 @@ impl RegistryClient {
     }
 }
 
+impl RegistryClient {
+    /// Walk the registry's `_catalog` to the end of its own pagination: the
+    /// `rel="next"` `Link` (what Quay needs; it ignores `last`), else the spec
+    /// `last` cursor after an exactly-full page. A walk that cannot finish
+    /// (repeated cursor, failure after the first page, more than `byte_limit`
+    /// bytes of names) returns what it has, flagged incomplete.
+    async fn walk_catalog(&self, registry: &str, byte_limit: usize) -> Result<CatalogListing, AccessError> {
+        const PAGE_SIZE: usize = 1000;
+        /// Fixed memory charged per page against the byte limit.
+        const PAGE_COST: usize = 256;
+
+        // The `_catalog` endpoint lives on the bare registry HOST. A
+        // configured default registry may carry a namespace
+        // (`ghcr.io/acme`); the namespace is filtered upstream, so list
+        // against the host. The reference's repository is unused by the
+        // catalog request itself: it only drives oci-client's
+        // `repository:…:pull` token scope, and the token a registry mints
+        // carries the caller's read access, which covers `_catalog`.
+        let host = registry_host(registry);
+        let auth = Self::auth_for(host);
+        let reference = Reference::with_tag(host.to_string(), "_catalog".to_string(), "latest".to_string());
+        let first_page = || vec![("n".to_string(), PAGE_SIZE.to_string())];
+
+        let mut query = first_page();
+        let mut seen = HashSet::new();
+        let mut repositories: Vec<String> = Vec::new();
+        let mut bytes = 0usize;
+        let complete = loop {
+            // Sending a cursor twice would replay the same pages forever.
+            if !seen.insert(query.clone()) {
+                tracing::warn!(
+                    "registry '{host}' repeated a _catalog page cursor; its listing stops after {} repositories",
+                    repositories.len()
+                );
+                break false;
+            }
+            let page = match self.client.catalog_page(&reference, &auth, &query).await {
+                Ok(page) => page,
+                // Degrade vs. abort, mirroring the rest of this seam: an
+                // unsupported (404) or auth-gated catalog is an empty listing;
+                // only a transport fault aborts an otherwise-empty walk.
+                Err(e) => match (classify(e), repositories.is_empty()) {
+                    (Classified::NotFound | Classified::Auth(_), true) => break true,
+                    (Classified::Registry(e), true) => {
+                        return Err(AccessError::without_identifier(AccessErrorKind::Registry(Box::new(e))));
+                    }
+                    (_, false) => {
+                        tracing::warn!(
+                            "registry '{host}' failed part-way through its _catalog listing; it stops after {} repositories",
+                            repositories.len()
+                        );
+                        break false;
+                    }
+                },
+            };
+            // An empty page that still points on is a registry minting cursors
+            // forever: no name ever grows `bytes`, so it must end here.
+            if page.repositories.is_empty() && page.next.is_some() {
+                tracing::warn!(
+                    "registry '{host}' sent an empty _catalog page with a next link; its listing stops there"
+                );
+                break false;
+            }
+            // Charge what a name and a cursor cost in memory, not only their
+            // text, so the limit bounds a hostile registry's allocations.
+            bytes += page
+                .repositories
+                .iter()
+                .map(|r| r.len() + size_of::<String>())
+                .sum::<usize>()
+                + query.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>()
+                + PAGE_COST;
+            let full = page.repositories.len() == PAGE_SIZE;
+            let last = page.repositories.last().cloned();
+            repositories.extend(page.repositories);
+            if bytes > byte_limit {
+                tracing::warn!(
+                    "registry '{host}' listed more than {} MiB of repository names; its listing stops there",
+                    byte_limit >> 20
+                );
+                break false;
+            }
+            query = match page.next.as_deref().and_then(next_page_query) {
+                Some(next) => next,
+                // No usable Link: an exactly-full page continues after its last
+                // name; a short or oversized one (the registry ignored `n`) is the end.
+                None => match last {
+                    Some(last) if full => {
+                        let mut next = first_page();
+                        next.push(("last".to_string(), last));
+                        next
+                    }
+                    _ => break true,
+                },
+            };
+        };
+        Ok(CatalogListing { repositories, complete })
+    }
+}
+
+/// The query of the `rel="next"` target in a `_catalog` `Link` header.
+///
+/// Only the query is used: every request goes to this registry's own
+/// `_catalog` endpoint, so a Link naming another host can neither redirect the
+/// walk nor leak a token.
+fn next_page_query(link: &str) -> Option<Vec<(String, String)>> {
+    // ponytail: splitting on ',' breaks only on a raw comma inside the link URI; add a real RFC 8288 parser if a registry sends one.
+    let part = link.split(',').find(|part| {
+        let part = part.to_ascii_lowercase();
+        part.contains("rel=\"next\"") || part.contains("rel=next")
+    })?;
+    let uri = part.split_once('<')?.1.split_once('>')?.0.trim();
+    let url = reqwest::Url::parse("http://registry.invalid/v2/_catalog")
+        .ok()?
+        .join(uri)
+        .ok()?;
+    (url.path() == "/v2/_catalog").then(|| url.query_pairs().into_owned().collect())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::super::CATALOG_LIST_CEILING;
     use super::*;
 
     /// Regression: the production client config must seed the embedded CA
@@ -904,19 +968,42 @@ mod tests {
     async fn list_catalog_authenticates_via_oci_client_token() {
         let (host, handle) = spawn_token_gated_registry(r#""glab","acme/code-review""#).await;
         let client = RegistryClient::with_plain_http(&host);
-        let repos = client.list_catalog(&host).await.expect("catalog listing");
-        assert_eq!(repos, vec!["glab".to_string(), "acme/code-review".to_string()]);
+        let listing = client.list_catalog(&host).await.expect("catalog listing");
+        assert_eq!(
+            listing.repositories,
+            vec!["glab".to_string(), "acme/code-review".to_string()]
+        );
+        assert!(listing.complete);
         handle.abort();
     }
 
+    /// How a fake `_catalog` server paginates.
+    #[derive(Clone, Copy)]
+    enum Paging {
+        /// Honours the spec `last` cursor and sends no `Link`.
+        Last,
+        /// Quay-style: ignores `last`, pages only through the `Link` it sends.
+        Link,
+        /// Always serves page 1 with a `Link` to the same cursor.
+        Repeat,
+        /// Spec `last` paging, but answers 503 once this many pages were served.
+        FailAfter(usize),
+        /// Endless empty pages, each with a fresh `Link` cursor.
+        EmptyLinks,
+        /// `Link`-only paging where `rel="prev"` and `rel="next"` arrive as
+        /// two separate headers, `prev` first.
+        SplitLinks,
+    }
+
     /// A token-gated registry holding `total` repositories `repo-00000`…,
-    /// served `n` at a time after the `last` cursor, as a real `_catalog`
-    /// does. [`spawn_token_gated_registry`] serves one short page only.
-    async fn spawn_paged_catalog_registry(total: usize) -> (String, tokio::task::JoinHandle<()>) {
+    /// served 1000 at a time as `mode` dictates.
+    /// [`spawn_token_gated_registry`] serves one short page only.
+    async fn spawn_paged_catalog_registry(total: usize, mode: Paging) -> (String, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let host = format!("127.0.0.1:{}", listener.local_addr().unwrap().port());
         let realm = format!("http://{host}/token");
         let handle = tokio::spawn(async move {
+            let mut pages_served = 0usize;
             loop {
                 let Ok((mut sock, _)) = listener.accept().await else {
                     return;
@@ -936,26 +1023,53 @@ mod tests {
                 let req = String::from_utf8_lossy(&req).to_ascii_lowercase();
                 let first = req.lines().next().unwrap_or("").to_string();
                 let has_bearer = req.contains("authorization: bearer ");
-                let ok_json = |body: &str| {
+                let ok_json = |body: &str, link: Option<usize>| {
+                    let next = |k: usize| format!("link: </v2/_catalog?n=1000&next_page={k}>; rel=\"next\"\r\n");
+                    let link = match (link, mode) {
+                        (None, _) => String::new(),
+                        (Some(k), Paging::SplitLinks) => {
+                            format!("link: </v2/_catalog?n=1000&next_page=0>; rel=\"prev\"\r\n{}", next(k))
+                        }
+                        (Some(k), _) => next(k),
+                    };
                     format!(
-                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n{link}content-length: {}\r\nconnection: close\r\n\r\n{}",
                         body.len(),
                         body
                     )
                 };
+                let number_after = |marker: &str| {
+                    first.split(marker).nth(1).and_then(|rest| {
+                        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+                        digits.parse::<usize>().ok()
+                    })
+                };
                 let response = if first.contains("/token") {
-                    ok_json(r#"{"token":"test-token"}"#)
+                    ok_json(r#"{"token":"test-token"}"#, None)
                 } else if first.contains("/v2/_catalog") && has_bearer {
-                    let start = first
-                        .split("last=repo-")
-                        .nth(1)
-                        .and_then(|rest| rest.get(..5))
-                        .and_then(|n| n.parse::<usize>().ok())
-                        .map_or(0, |n| n + 1);
-                    let page: Vec<String> = (start..total.min(start + 1000))
-                        .map(|i| format!("\"repo-{i:05}\""))
-                        .collect();
-                    ok_json(&format!(r#"{{"repositories":[{}]}}"#, page.join(",")))
+                    if matches!(mode, Paging::FailAfter(n) if pages_served >= n) {
+                        "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string()
+                    } else {
+                        pages_served += 1;
+                        let start = match mode {
+                            Paging::Last | Paging::FailAfter(_) => number_after("last=repo-").map_or(0, |n| n + 1),
+                            Paging::Link | Paging::SplitLinks => number_after("next_page=").unwrap_or(0),
+                            Paging::Repeat | Paging::EmptyLinks => 0,
+                        };
+                        let end = if matches!(mode, Paging::EmptyLinks) {
+                            start
+                        } else {
+                            total.min(start + 1000)
+                        };
+                        let page: Vec<String> = (start..end).map(|i| format!("\"repo-{i:05}\"")).collect();
+                        let link = match mode {
+                            Paging::Link | Paging::SplitLinks => (end < total).then_some(end),
+                            Paging::Repeat => Some(1000),
+                            Paging::EmptyLinks => Some(pages_served),
+                            Paging::Last | Paging::FailAfter(_) => None,
+                        };
+                        ok_json(&format!(r#"{{"repositories":[{}]}}"#, page.join(",")), link)
+                    }
                 } else {
                     format!(
                         "HTTP/1.1 401 Unauthorized\r\nwww-authenticate: Bearer realm=\"{realm}\",service=\"reg\"\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
@@ -968,28 +1082,134 @@ mod tests {
         (host, handle)
     }
 
-    /// The walk is bounded at [`CATALOG_LIST_CEILING`] repositories however
-    /// many the registry advertises, and the list it hands back is the prefix
-    /// the catalog layer reads as "cut short".
+    /// No ceiling: a registry far longer than the old 8000-repository cut-off
+    /// is listed whole and reported complete.
     #[tokio::test]
-    async fn list_catalog_stops_at_the_ceiling_on_a_longer_registry() {
-        let (host, handle) = spawn_paged_catalog_registry(CATALOG_LIST_CEILING + 1500).await;
+    async fn list_catalog_walks_past_8000_repositories() {
+        let (host, handle) = spawn_paged_catalog_registry(9500, Paging::Last).await;
         let client = RegistryClient::with_plain_http(&host);
-        let repos = client.list_catalog(&host).await.expect("catalog listing");
-        assert_eq!(repos.len(), CATALOG_LIST_CEILING, "the walk is bounded");
-        assert_eq!(repos.first().map(String::as_str), Some("repo-00000"));
-        assert_eq!(repos.last().map(String::as_str), Some("repo-07999"));
+        let listing = client.list_catalog(&host).await.expect("catalog listing");
+        assert_eq!(listing.repositories.len(), 9500);
+        assert_eq!(listing.repositories.last().map(String::as_str), Some("repo-09499"));
+        assert!(listing.complete);
         handle.abort();
     }
 
-    /// A registry shorter than the ceiling is listed whole across pages.
     #[tokio::test]
-    async fn list_catalog_walks_every_page_below_the_ceiling() {
-        let (host, handle) = spawn_paged_catalog_registry(2500).await;
+    async fn list_catalog_walks_every_page_by_the_last_cursor() {
+        let (host, handle) = spawn_paged_catalog_registry(2500, Paging::Last).await;
         let client = RegistryClient::with_plain_http(&host);
-        let repos = client.list_catalog(&host).await.expect("catalog listing");
-        assert_eq!(repos.len(), 2500);
+        let listing = client.list_catalog(&host).await.expect("catalog listing");
+        assert_eq!(listing.repositories.len(), 2500);
+        assert!(listing.complete);
         handle.abort();
+    }
+
+    /// Quay ignores `last` and pages only through its `Link` cursor; a
+    /// `last`-only walk would replay page 1 and stop there.
+    #[tokio::test]
+    async fn list_catalog_follows_the_link_header_when_last_is_ignored() {
+        let (host, handle) = spawn_paged_catalog_registry(2500, Paging::Link).await;
+        let client = RegistryClient::with_plain_http(&host);
+        let listing = client.list_catalog(&host).await.expect("catalog listing");
+        assert_eq!(listing.repositories.len(), 2500);
+        let unique: HashSet<_> = listing.repositories.iter().collect();
+        assert_eq!(unique.len(), 2500, "no page is replayed");
+        assert!(listing.complete);
+        handle.abort();
+    }
+
+    /// A registry that keeps handing back the same cursor must end the walk,
+    /// flagged incomplete, not loop.
+    #[tokio::test]
+    async fn list_catalog_stops_on_a_repeated_cursor() {
+        let (host, handle) = spawn_paged_catalog_registry(5000, Paging::Repeat).await;
+        let client = RegistryClient::with_plain_http(&host);
+        let listing = client.list_catalog(&host).await.expect("catalog listing");
+        assert!(!listing.complete);
+        handle.abort();
+    }
+
+    /// A failure after the first page is no longer a silently complete prefix.
+    #[tokio::test]
+    async fn list_catalog_flags_a_failure_mid_walk_incomplete() {
+        let (host, handle) = spawn_paged_catalog_registry(5000, Paging::FailAfter(1)).await;
+        let client = RegistryClient::with_plain_http(&host);
+        let listing = client.list_catalog(&host).await.expect("catalog listing");
+        assert_eq!(listing.repositories.len(), 1000);
+        assert!(!listing.complete);
+        handle.abort();
+    }
+
+    /// A registry minting endless pages is cut at the byte limit.
+    #[tokio::test]
+    async fn walk_catalog_stops_at_the_byte_limit() {
+        let (host, handle) = spawn_paged_catalog_registry(usize::MAX / 2, Paging::Link).await;
+        let client = RegistryClient::with_plain_http(&host);
+        let listing = client.walk_catalog(&host, 64 * 1024).await.expect("catalog listing");
+        assert!(!listing.complete);
+        assert!(listing.repositories.len() < 20_000);
+        handle.abort();
+    }
+
+    /// Empty pages carry no names, so only the empty-page rule (and the
+    /// cursor charge) can end a registry that never stops paging them.
+    #[tokio::test]
+    async fn walk_catalog_stops_on_endless_empty_pages() {
+        let (host, handle) = spawn_paged_catalog_registry(0, Paging::EmptyLinks).await;
+        let client = RegistryClient::with_plain_http(&host);
+        let listing = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            client.walk_catalog(&host, 128 * 1024 * 1024),
+        )
+        .await
+        .expect("an endless run of empty pages must end the walk")
+        .expect("catalog listing");
+        assert!(!listing.complete);
+        assert!(listing.repositories.is_empty());
+        handle.abort();
+    }
+
+    /// `prev` and `next` as two headers, `prev` first: only the second one
+    /// continues the walk, and reading just the first header ends it early.
+    #[tokio::test]
+    async fn list_catalog_finds_next_among_several_link_headers() {
+        let (host, handle) = spawn_paged_catalog_registry(2500, Paging::SplitLinks).await;
+        let client = RegistryClient::with_plain_http(&host);
+        let listing = client.list_catalog(&host).await.expect("catalog listing");
+        assert_eq!(listing.repositories.len(), 2500);
+        assert!(listing.complete);
+        handle.abort();
+    }
+
+    fn pairs(q: &[(&str, &str)]) -> Option<Vec<(String, String)>> {
+        Some(q.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+    }
+
+    #[test]
+    fn next_page_query_reads_a_relative_link() {
+        let link = r#"</v2/_catalog?n=1000&next_page=abc%3D>; rel="next""#;
+        assert_eq!(next_page_query(link), pairs(&[("n", "1000"), ("next_page", "abc=")]));
+    }
+
+    /// Another host's Link keeps its query but loses its host.
+    #[test]
+    fn next_page_query_drops_the_host_of_an_absolute_link() {
+        let link = r#"<https://evil.example/v2/_catalog?n=5&last=x>; rel="next""#;
+        assert_eq!(next_page_query(link), pairs(&[("n", "5"), ("last", "x")]));
+    }
+
+    #[test]
+    fn next_page_query_rejects_another_path_and_other_relations() {
+        assert_eq!(next_page_query(r#"</v2/other?n=5>; rel="next""#), None);
+        assert_eq!(next_page_query(r#"</v2/_catalog?n=5>; rel="prev""#), None);
+        assert_eq!(next_page_query(""), None);
+    }
+
+    #[test]
+    fn next_page_query_accepts_an_unquoted_relation_among_several() {
+        let link = r#"</v2/_catalog?n=5&last=a>; rel=prev, </v2/_catalog?n=5&last=b>; rel=next"#;
+        assert_eq!(next_page_query(link), pairs(&[("n", "5"), ("last", "b")]));
     }
 
     // ── CWE-770: bounded blob download against a lying descriptor ─────────
