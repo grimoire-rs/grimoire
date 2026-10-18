@@ -148,7 +148,7 @@ and if `built_at` is older than `CATALOG_TTL_SECONDS = 3600`
   unconditionally, every time (`index_source.rs:186-231`). The clone pays for
   the ref advertisement *and then* a full packfile, whether or not the tip moved.
 - **OCI `_catalog`** — a `list_tags` + `resolve_digest` + `fetch_manifest` walk,
-  three round trips per repository, up to `MAX_CATALOG_REPOS`, at
+  three round trips per repository (every repository since the 500 cap was lifted), at
   `CONCURRENCY = 16` (`registry_catalog.rs:764-796`).
 
 In the TUI this rebuild happens on the event-loop thread: `reload_into`
