@@ -185,8 +185,8 @@ a locator that matches neither transport shape is a data error (exit 65).
 Both transports share the regular catalog cache (`$GRIM_HOME/catalog/`,
 1-hour TTL, `--refresh`, offline degradation) and browse exactly like an
 `oci` entry — search, TUI, and MCP treat index and registry sources
-alike. An index is never capped at 500 entries (only the `oci` `_catalog`
-walk is), and a refresh that fails serves the cached listing. The static
+alike. Neither is capped: an index lists every entry and an `oci` source
+every repository, and a refresh that fails serves the cached listing. The static
 transport decodes a gzip response for the index files only, and bounds the
 decoded size and the entry count so an oversized index fails its fetch
 instead of truncating. Nothing is required of the host. Limits and timeouts:
@@ -374,13 +374,12 @@ else:
   intent, not a mistake.
 - **The filter narrows the view, never the listing.** Each source's listing
   is built first; the patterns run afterwards. An `index` source lists every
-  entry, so a filter reaches every row of it. An `oci` source's `_catalog`
-  walk is capped at **500 repositories** when the listing is built, and a
-  narrow filter can never widen what grim looked at — on a registry big
-  enough to hit the cap, narrow the `oci` locator instead
-  (`ghcr.io/acme/platform`, not `ghcr.io`) or point at a package index.
-  Never tell a user a filter will surface packages a plain browse of a capped
-  `oci` source missed.
+  entry and an `oci` source every repository its `_catalog` returns, so a
+  filter reaches every row of either. While an `oci` build is still running
+  (or was interrupted) the listing is incomplete and the source reads
+  `capped: true`; a filter cannot change that. Narrowing the `oci` locator
+  (`ghcr.io/acme/platform`, not `ghcr.io`) reads less of the registry in the
+  first place.
 
 ### Writing filters {#writing-filters}
 
@@ -714,26 +713,32 @@ Two more siblings of `items` are always present. `total` counts every
 matching row (after the browse filter, deprecated visibility, the query and
 the relevance cutoff) before `--offset` and `--limit` cut the list, and
 `truncated` is `true` when `items` is not the complete answer. That happens
-when `--offset` or `--limit` removed rows, or when an `oci` source's listing
-was capped at build time and `total` is only a lower bound. `items.length < total` means the
-page is partial, and an `oci` cap may apply as well. Branch on `truncated`
-before treating `items` as the whole answer. `truncated` is also true on every
-page past the first, so tell a cap from an ordinary page with
-`sources[].capped`, a boolean on every source that is `true` when its listing
-was capped, whatever the offset.
+when `--offset` or `--limit` removed rows, or when a source's listing is
+incomplete and `total` is only a lower bound. `items.length < total` means the
+page is partial, and an incomplete listing may apply as well. Branch on
+`truncated` before treating `items` as the whole answer. `truncated` is also
+true on every page past the first, so tell an incomplete listing from an
+ordinary page with `sources[].capped`, a boolean on every source that is
+`true` when its listing is incomplete, whatever the offset. An `oci` listing
+is incomplete while its build is still running or was interrupted (any grim
+serves the rows built so far, `--offline` too, and the next online command
+resumes), and when the `_catalog` walk could not finish. To wait for a long
+build, run `grim search --format json --limit 1` and read pages with
+`--offline` while it lives. It builds only if no other grim holds the build
+lock; otherwise it serves the checkpoint and exits at once with `capped: true`,
+so repeat it until `capped` is `false`.
 
 To read every page, loop `offset += items.length` while `offset < total`
 (and stop on an empty `items`). No field echoes the offset. Pages of any
 size concatenate to the unpaged list, because ties break deterministically.
 Add `--offline` to every call after the first so a cache refresh cannot shift
 rows between pages; the MCP tool has no such flag, so page promptly there. A plain partial page also prints `showing 101-200 of 600; next
-page: --offset 200` on stderr; JSON prints no such line. An `index` source is never truncated:
-an index past the abuse bounds fails its fetch instead. A queried search over
-a capped `oci` source warns once per source on stderr: `catalog for source
-'<name>' capped at 500 repositories; a
-narrower query cannot reach past the cap — use a package index or a narrower
-oci locator`. The advice in that line is literal: a narrower query cannot
-reach past the cap, so move to a package index or narrow the `oci` locator.
+page: --offset 200` on stderr; JSON prints no such line. An index past the
+abuse bounds fails its fetch instead of truncating. A queried search over an
+incomplete listing warns once per source on stderr: `catalog for source
+'<name>' is incomplete: its listing has not finished, so results and the
+total are a lower bound; the next online grim search retries it`. Run the search
+again later, not with a narrower query.
 
 A registry declaring a [browse filter](#browse-filters) contributes only the
 repositories its patterns admit — to `grim search`, the TUI, and
@@ -746,8 +751,8 @@ comes back thinner than expected, there are two things to check before
 blaming the registry: the entry's `include`/`exclude` (`grim context
 --format json` reports the resolved patterns per source), and the relevance
 cutoff (`options.search_min_relevance`, default 50) — set it to `0` to rule
-it out. In JSON, `truncated: true` says an `--offset`, a `--limit` or a capped
-`oci` listing cut the list.
+it out. In JSON, `truncated: true` says an `--offset`, a `--limit` or an incomplete
+listing cut the list.
 
 A package the publisher has marked deprecated is **hidden by default** from
 both `grim search` and the TUI — unless it is installed in the active scope

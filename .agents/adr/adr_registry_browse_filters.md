@@ -385,6 +385,22 @@ the docs.
 > truncates, so an index needs no `truncated` flag. A cached index listing
 > that an earlier grim capped at 500 is rebuilt on the next command.
 
+> **Amended 2026-10-18 — the oci listing is uncapped.** `MAX_CATALOG_REPOS`
+> and the access layer's 8000-repository `CATALOG_LIST_CEILING` are gone: an
+> `oci` source lists every repository its `_catalog` returns. The walk
+> follows the registry's own paging: the `rel="next"` `Link` (its query
+> only, resolved against the registry's own `_catalog` endpoint, so a Link
+> can neither redirect the walk nor leak a token), with `last=` as the
+> fallback. A repeated cursor, a failure after the first page, or 128 MiB of
+> repository names ends the walk flagged incomplete. D6's "build-time
+> truncation" now means listing incompleteness: an unfinished walk, or a
+> build that is still running or was interrupted (it checkpoints partial
+> progress and resumes, and other processes serve the newest checkpoint).
+> `truncated` and `sources[].capped` still report it verbatim, and the
+> filter is still read-time only and still never widens or narrows the
+> listing. D5, D6 and D9 stand. The "narrow the `oci` locator" remedy
+> remains true as a way to read less, no longer as a way past a cap.
+
 ### D7. The TUI tree-root label is derived from the include list's literal prefix
 
 The label is a pure function of config:
