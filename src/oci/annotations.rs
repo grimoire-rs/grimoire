@@ -337,7 +337,8 @@ pub enum RepositoryUrlError {
 /// # Errors
 ///
 /// [`RepositoryUrlError::NotHttps`] when `value` does not start with
-/// `https://`; [`RepositoryUrlError::EmbeddedCredentials`] when its authority
+/// `https://` or has an empty authority (`https://`, `https:///path`);
+/// [`RepositoryUrlError::EmbeddedCredentials`] when its authority
 /// (the host portion up to the first `/`) carries userinfo (an `@`), e.g. an
 /// authored `https://token@host/o/r`.
 pub fn validate_repository_url(value: &str) -> Result<(), RepositoryUrlError> {
@@ -351,8 +352,15 @@ pub fn validate_repository_url(value: &str) -> Result<(), RepositoryUrlError> {
     // authored credentialed URL must fail loudly, deliberately asymmetric with
     // the git-derived path that auto-strips it.
     let authority = rest.split_once('/').map_or(rest, |(authority, _)| authority);
-    if authority.contains('@') {
+    // `https:///user:token@host/x` has an empty authority here, yet URL parsers
+    // (WHATWG) read the next segment as the authority and its userinfo with it.
+    if authority.contains('@') || (authority.is_empty() && rest.contains('@')) {
         return Err(RepositoryUrlError::EmbeddedCredentials);
+    }
+    if authority.is_empty() {
+        return Err(RepositoryUrlError::NotHttps {
+            value: value.to_string(),
+        });
     }
     Ok(())
 }
@@ -1504,6 +1512,16 @@ mod tests {
         assert!(!err.to_string().contains("token"), "credential must not leak: {err}");
         // A clean https URL still passes.
         assert!(validate_repository_url("https://github.com/o/r").is_ok());
+    }
+
+    #[test]
+    fn validate_repository_url_rejects_an_empty_authority() {
+        // WHATWG parsers read `https:///u:t@h/x` as `https://u:t@h/x`.
+        let err = validate_repository_url("https:///user:token@host.example/m").unwrap_err();
+        assert!(matches!(err, RepositoryUrlError::EmbeddedCredentials), "{err}");
+        for bad in ["https://", "https:///", "https:///o/r"] {
+            assert!(validate_repository_url(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
