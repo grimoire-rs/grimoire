@@ -255,5 +255,7 @@ publish plan.
   repository shape once the catalog grows past one skill.
 - [Host Your Own Index](../hosting-an-index.md) covers branding, the
   contribution gate, and private instances.
+- [Host a plugin marketplace](../guides/hosting-a-marketplace.md#department)
+  serves bundles from the same index as plugins to every supported tool.
 - [The Package Index](../package-index.md) is the pointer format and the
   announce mechanics in full.

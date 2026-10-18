@@ -285,6 +285,27 @@ says they are "echoed" there) — as of `.agents/worktrees/grimoire-index` @
 wording (`grep -in` for "enterprise", "ghes", "expir", "16.0", "17.6",
 "365", "since 3." over the file returns nothing). No indexer edit is
 needed for F-5.
+
+## Marketplace private-repository auth watchlist
+
+Claims in `docs/src/content/docs/guides/use-a-marketplace.md#private-repositories`
+about how each harness authenticates when it clones a private marketplace
+repository. Recorded 2026-10-18 from sources fetched 2026-09-29
+(`research_marketplace_native_consumption.md`). Rows marked
+`verified 2026-10-18` were re-fetched that day; the rest were not.
+Re-verify before changing the guide.
+
+| Capability | Vendor | Guide claim | Upstream status | Action when claim changes |
+|---|---|---|---|---|
+| Private clone via the machine's git | Claude Code | clones with `git`, prompts suppressed; credential helper or SSH agent | Documented ([Claude plugin docs](https://code.claude.com/docs/en/plugins/install), [host a marketplace](https://code.claude.com/docs/en/plugins/host-marketplace)) | none unless the docs change the auth model |
+| Private clone | Copilot CLI | not documented; credential-helper regression in 1.0.70 closed as resolved in 1.0.88 ([github/copilot-cli#4103](https://github.com/github/copilot-cli/issues/4103), opened 2026-07-12, closed completed 2026-09-25) | verified 2026-10-18: closed by `copilot-cli-bot` as "appears to be resolved as of" 1.0.88; no private clone re-tested by us | re-test on a current build; drop the local-clone advice if a private HTTPS clone works |
+| Private repository add | Claude Desktop, claude.ai | connect a GitHub account and give the Claude GitHub App access; GitHub and GitHub Enterprise work, GitLab and Bitbucket only when public | verified 2026-10-18: documented in the [Claude plugins overview](https://claude.com/docs/plugins/overview#find-and-add-a-plugin); the narrower [Use plugins in Claude](https://support.claude.com/en/articles/13837440-use-plugins-in-claude) help article names only GitHub plus public GitLab and Bitbucket, not the private route | none unless the overview changes |
+| Hosting a marketplace | Artifactory | VCS repositories only proxy and cache archives from a Git provider, so Artifactory cannot host a marketplace | verified 2026-10-18: [JFrog VCS repositories](https://docs.jfrog.com/artifactory/docs/vcs-repositories) — "Artifactory does not support local or virtual repositories for VCS" | re-check if JFrog adds hosted Git |
+| Private clone | VS Code Copilot | falls back to a clone; reuses the VS Code GitHub session since 1.140.0 ([vscode#337586](https://github.com/microsoft/vscode/pull/337586)) | Reported in release notes; not re-tested | none |
+| Private clone | Codex | not documented; git credentials assumed | **Unverified** | test with a private repository; document the result |
+| Private clone | Qoder | not documented; git credentials assumed | **Unverified** | test with a private repository; document the result |
+| Private repository import | Cursor | no individual route; admin Team Marketplace import, GitHub App for private GitHub repositories | Documented ([Cursor plugin docs](https://cursor.com/docs/plugins)); GitLab, Bitbucket and Azure DevOps acceptance docs-vs-forum disagreement open | re-check which hosts Import from Repo accepts |
+
 ## Hook-kind watchlist
 
 All rows `verified 2026-08-17` (the Hook kind shipped arming for three of

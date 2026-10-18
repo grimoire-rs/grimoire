@@ -453,6 +453,11 @@ what lands on disk, deploying to either forge, accepting contributions,
 branding, and running one privately. The two lower-level shapes below
 stay valid — nothing in grim requires the toolchain.
 
+An index repository can also host a plugin marketplace: commit a
+`marketplace.toml` beside the package pointers and deploy the export to a
+sibling repository. See [Host a plugin
+marketplace](./guides/hosting-a-marketplace.md#department).
+
 ### A Plain Git Repository {#self-hosting-git}
 
 Simplest — works everywhere, with no build step at all. Create a
