@@ -99,9 +99,11 @@ Recurring attack surfaces in Grimoire codebase. Use as STRIDE scoping checklist 
   `std::fs::write`, so files land at the default umask. There is no
   setuid/setgid surface to guard
 - Oversized blobs (CWE-770) — a streamed `CappedSink` aborts past `max_bytes`
-  before the digest re-hash, plus a per-caller pre-download gate. Compression
-  bombs do not apply: the layer media type is uncompressed tar and there is no
-  `flate2`/`gzip`/`zstd` dependency
+  before the digest re-hash, plus a per-caller pre-download gate
+- Compression bombs (CWE-409) — gzip layers decode under the caller's cap plus
+  a 100x expansion bound (64 MiB floor), with strict single-member framing, and
+  the `com.grimoire.uncompressed.digest` annotation is verified on read; `+zstd`
+  is refused. See `.agents/adr/adr_compressed_artifact_layers.md`
 
 ### MCP Descriptor Execution
 - An `mcp` artifact carries `command` + `args` for the stdio transport. Install

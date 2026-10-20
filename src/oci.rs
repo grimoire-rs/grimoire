@@ -13,6 +13,7 @@ pub mod digest;
 pub mod git_provenance;
 pub mod hook;
 pub mod identifier;
+pub mod layer;
 pub mod manifest;
 pub mod mcp;
 pub mod member_ref;

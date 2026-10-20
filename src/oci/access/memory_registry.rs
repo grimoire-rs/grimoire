@@ -122,13 +122,16 @@ impl OciAccess for MemoryRegistry {
     }
 }
 
+/// Digest, media type, size and annotations of one layer.
+type LayerKey = (String, String, u64, Option<BTreeMap<String, String>>);
+
 /// A serializable projection of the manifest subset, used only to derive
 /// a stable manifest digest in the in-memory double.
 #[derive(serde::Serialize)]
 struct ManifestKey {
     artifact_type: Option<String>,
     config_media_type: Option<String>,
-    layers: Vec<(String, String, u64)>,
+    layers: Vec<LayerKey>,
     annotations: BTreeMap<String, String>,
 }
 
@@ -140,7 +143,14 @@ impl From<&OciManifest> for ManifestKey {
             layers: m
                 .layers
                 .iter()
-                .map(|d| (d.digest.to_string(), d.media_type.clone(), d.size))
+                .map(|d| {
+                    (
+                        d.digest.to_string(),
+                        d.media_type.clone(),
+                        d.size,
+                        d.annotations.clone(),
+                    )
+                })
                 .collect(),
             annotations: m.annotations.clone(),
         }

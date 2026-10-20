@@ -2509,6 +2509,7 @@ tree_separators_typo = 1
                     digest: blob_digest,
                     media_type: "application/vnd.grimoire.content.v1.tar".to_string(),
                     size: 1,
+                    annotations: None,
                 }],
                 annotations: annotations
                     .iter()

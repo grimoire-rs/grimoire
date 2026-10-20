@@ -25,11 +25,12 @@ use crate::context::Context;
 use crate::oci::access::{OciAccess, Operation};
 use crate::oci::annotations::{annotations_for_bundle, annotations_for_mcp};
 use crate::oci::bundle::{BUNDLE_LAYER_MEDIA_TYPE, BundleManifest};
+use crate::oci::layer::{self, Compression};
 use crate::oci::manifest::{Descriptor, OciManifest};
 use crate::oci::mcp::MCP_LAYER_MEDIA_TYPE;
 use crate::oci::reference::ArtifactRef;
 use crate::oci::release::{ReleaseError, ReleaseErrorKind, publish_tags, resolve_cascade};
-use crate::oci::{Algorithm, ArtifactKind, Identifier};
+use crate::oci::{Algorithm, ArtifactKind, Digest, Identifier, PinnedIdentifier};
 use crate::resolve::resolve_error::{ResolveError, ResolveErrorKind};
 
 use super::build::{derive_git_provenance, detect_kind, read_bundle_members, read_mcp_descriptor, validate_and_pack};
@@ -109,6 +110,12 @@ pub struct ReleaseArgs {
     /// behavior). A malformed value is a data error (65).
     #[arg(long, value_name = "HOST[/PREFIX]")]
     pub push_registry: Option<String>,
+
+    /// Layer compression for skill, rule, agent and hook releases; ignored
+    /// for bundles and mcp. Consumers need a grim that reads gzip layers to
+    /// install a gzip release.
+    #[arg(long, value_enum, default_value_t)]
+    pub compression: Compression,
 }
 
 impl ReleaseArgs {
@@ -257,24 +264,6 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
         &args.metadata.defaults(),
     )?;
 
-    let layer_digest = Algorithm::Sha256.hash(&packed.tar);
-    let manifest = OciManifest {
-        media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
-        // GitLab rejects both a custom config media type AND a custom
-        // `artifactType` (`adr_oci_empty_config_compat.md`), so the wire carries
-        // neither: the push stamps the OCI empty config and no `artifactType`,
-        // and the kind rides on the `com.grimoire.kind` annotation. Keep the
-        // in-memory manifest faithful to what is pushed.
-        artifact_type: None,
-        config_media_type: None,
-        layers: vec![Descriptor {
-            digest: layer_digest.clone(),
-            media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),
-            size: packed.tar.len() as u64,
-        }],
-        annotations: packed.annotations.clone(),
-    };
-
     let access: Arc<dyn OciAccess> = super::access_seam(ctx)?;
 
     // --skip-existing: an exact-version tag that already exists (any
@@ -289,9 +278,31 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
         return Ok((report, ExitCode::Success));
     }
 
+    if args.compression == Compression::Gzip {
+        // One line per process: `grim publish` calls this once per entry.
+        static GZIP_NOTICE: std::sync::Once = std::sync::Once::new();
+        GZIP_NOTICE.call_once(|| {
+            tracing::warn!("--compression gzip: consumers need a grim that reads gzip layers to install this release");
+        });
+    }
+    // The lock and `grim build` hash stay on the uncompressed tar; only the pushed blob is encoded.
+    let (layer_blob, layer) = layer::encode_layer(&packed.tar, args.compression);
+    let manifest = OciManifest {
+        media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
+        // GitLab rejects both a custom config media type AND a custom
+        // `artifactType` (`adr_oci_empty_config_compat.md`), so the wire carries
+        // neither: the push stamps the OCI empty config and no `artifactType`,
+        // and the kind rides on the `com.grimoire.kind` annotation. Keep the
+        // in-memory manifest faithful to what is pushed.
+        artifact_type: None,
+        config_media_type: None,
+        layers: vec![layer],
+        annotations: packed.annotations.clone(),
+    };
+
     if args.dry_run {
         // No push: report the plan with a deterministic preview digest.
-        let preview = preview_manifest_digest(&manifest);
+        let preview = preview_manifest_digest(&manifest)?;
         let report = ReleaseReport::new(id.to_string(), preview, tags, false).with_pushed_to(pushed_to);
         return Ok((report, ExitCode::Success));
     }
@@ -300,22 +311,23 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
     // re-push of identical content is an idempotent no-op that yields the
     // same `manifest_digest` — nothing observable changes until a tag is
     // moved.
-    super::grim(access.push_blob(&push_repo, &packed.tar).await)?;
+    super::grim(access.push_blob(&push_repo, &layer_blob).await)?;
     let manifest_digest = super::grim(access.push_manifest(&push_repo, &manifest).await)?;
 
-    // Overwrite guard: if the exact-version tag already resolves to a
-    // *different* manifest digest, refuse unless --force (a published
-    // version is immutable by default; an identical re-release is a
-    // no-op success).
-    if !args.force {
-        super::grim(guard_existing_version(&access, &push_repo, &version, &manifest_digest).await)?;
-    }
+    // Overwrite guard: a published version is immutable by default. An
+    // identical re-release is a no-op, equal content under another digest is
+    // adopted, anything else is refused unless --force.
+    let target = if args.force {
+        manifest_digest
+    } else {
+        super::grim(guard_existing_version(&access, &push_repo, &version, &manifest_digest, Some(&manifest)).await)?
+    };
 
     // Move the exact version tag FIRST, then the wider floating tags last
     // (crash safety: `1.2.3` exists before `1.2`/`1`/`latest` move to it).
-    super::grim(move_tags(&access, &push_repo, &tags, &version, &manifest_digest).await)?;
+    super::grim(move_tags(&access, &push_repo, &tags, &version, &target).await)?;
 
-    let report = ReleaseReport::new(id.to_string(), manifest_digest.to_string(), tags, true).with_pushed_to(pushed_to);
+    let report = ReleaseReport::new(id.to_string(), target.to_string(), tags, true).with_pushed_to(pushed_to);
     Ok((report, ExitCode::Success))
 }
 
@@ -406,12 +418,13 @@ async fn release_bundle(
             digest: layer_digest.clone(),
             media_type: BUNDLE_LAYER_MEDIA_TYPE.to_string(),
             size: layer.len() as u64,
+            annotations: None,
         }],
         annotations,
     };
 
     if args.dry_run {
-        let preview = preview_manifest_digest(&oci_manifest);
+        let preview = preview_manifest_digest(&oci_manifest)?;
         let report = ReleaseReport::new(id.to_string(), preview, tags.to_vec(), false).with_pushed_to(pushed_to);
         return Ok((report, ExitCode::Success));
     }
@@ -419,13 +432,14 @@ async fn release_bundle(
     super::grim(access.push_blob(&push_repo, &layer).await)?;
     let manifest_digest = super::grim(access.push_manifest(&push_repo, &oci_manifest).await)?;
 
-    if !args.force {
-        super::grim(guard_existing_version(&access, &push_repo, version, &manifest_digest).await)?;
-    }
-    super::grim(move_tags(&access, &push_repo, tags, version, &manifest_digest).await)?;
+    let target = if args.force {
+        manifest_digest
+    } else {
+        super::grim(guard_existing_version(&access, &push_repo, version, &manifest_digest, None).await)?
+    };
+    super::grim(move_tags(&access, &push_repo, tags, version, &target).await)?;
 
-    let report =
-        ReleaseReport::new(id.to_string(), manifest_digest.to_string(), tags.to_vec(), true).with_pushed_to(pushed_to);
+    let report = ReleaseReport::new(id.to_string(), target.to_string(), tags.to_vec(), true).with_pushed_to(pushed_to);
     Ok((report, ExitCode::Success))
 }
 
@@ -484,12 +498,13 @@ async fn release_mcp(
             digest: layer_digest.clone(),
             media_type: MCP_LAYER_MEDIA_TYPE.to_string(),
             size: layer.len() as u64,
+            annotations: None,
         }],
         annotations,
     };
 
     if args.dry_run {
-        let preview = preview_manifest_digest(&oci_manifest);
+        let preview = preview_manifest_digest(&oci_manifest)?;
         let report = ReleaseReport::new(id.to_string(), preview, tags.to_vec(), false).with_pushed_to(pushed_to);
         return Ok((report, ExitCode::Success));
     }
@@ -497,13 +512,14 @@ async fn release_mcp(
     super::grim(access.push_blob(&push_repo, &layer).await)?;
     let manifest_digest = super::grim(access.push_manifest(&push_repo, &oci_manifest).await)?;
 
-    if !args.force {
-        super::grim(guard_existing_version(&access, &push_repo, version, &manifest_digest).await)?;
-    }
-    super::grim(move_tags(&access, &push_repo, tags, version, &manifest_digest).await)?;
+    let target = if args.force {
+        manifest_digest
+    } else {
+        super::grim(guard_existing_version(&access, &push_repo, version, &manifest_digest, None).await)?
+    };
+    super::grim(move_tags(&access, &push_repo, tags, version, &target).await)?;
 
-    let report =
-        ReleaseReport::new(id.to_string(), manifest_digest.to_string(), tags.to_vec(), true).with_pushed_to(pushed_to);
+    let report = ReleaseReport::new(id.to_string(), target.to_string(), tags.to_vec(), true).with_pushed_to(pushed_to);
     Ok((report, ExitCode::Success))
 }
 
@@ -638,55 +654,74 @@ async fn resolve_existing_version(
         .flatten()
 }
 
-/// Refuse to move an existing exact-version tag onto a different digest.
-/// An absent tag, or a tag already pointing at `new_digest` (idempotent
-/// re-release), is allowed.
+/// The digest the exact-version tag should point at after pushing `new_digest`.
+///
+/// An absent tag, or one already on `new_digest`, keeps `new_digest`. With
+/// `adoptable` set (tar kinds only), a tag on another manifest with the same
+/// content ([`layer::same_content`], e.g. after a `--compression` flip) is
+/// adopted: its digest is returned.
+///
+/// # Errors
+///
+/// The existing manifest's fetch error, with its own exit code; `TagExists`
+/// (65) when that manifest is missing, its content differs, or `adoptable` is `None`.
 async fn guard_existing_version(
     access: &Arc<dyn OciAccess>,
     repo: &Identifier,
     version: &str,
-    new_digest: &crate::oci::Digest,
-) -> Result<(), ReleaseError> {
+    new_digest: &Digest,
+    adoptable: Option<&OciManifest>,
+) -> Result<Digest, crate::error::Error> {
     let Some(existing_digest) = resolve_existing_version(access, repo, version).await else {
-        return Ok(());
+        return Ok(new_digest.clone());
     };
     if &existing_digest == new_digest {
-        return Ok(());
+        return Ok(existing_digest);
     }
-    Err(ReleaseError::with_reference(
+    // Bundle and mcp readers never verify the uncompressed-digest annotation,
+    // so adopting for them would install a gzip layer that lies about its content.
+    let Some(new) = adoptable else {
+        return Err(tag_exists(repo, version, &existing_digest, new_digest));
+    };
+    // Manifest only, never a blob: the content key lives in the descriptors.
+    let pinned = PinnedIdentifier::try_from(repo.clone_with_digest(existing_digest.clone()))?;
+    if let Some(existing) = access.fetch_manifest(&pinned).await?
+        && layer::same_content(&existing, new)
+    {
+        tracing::warn!(
+            "{repo}:{version} already holds this content as {existing_digest}; keeping that manifest (pass --force to replace it)"
+        );
+        return Ok(existing_digest);
+    }
+    Err(tag_exists(repo, version, &existing_digest, new_digest))
+}
+
+fn tag_exists(repo: &Identifier, version: &str, existing: &Digest, new: &Digest) -> crate::error::Error {
+    ReleaseError::with_reference(
         repo.clone(),
         ReleaseErrorKind::TagExists {
             tag: version.to_string(),
-            existing: existing_digest.to_string(),
-            new: new_digest.to_string(),
+            existing: existing.to_string(),
+            new: new.to_string(),
         },
-    ))
+    )
+    .into()
 }
 
-/// A deterministic, non-authoritative preview of the manifest digest for
-/// `--dry-run` output. The real digest is whatever the registry returns
-/// on the actual push (the overwrite guard uses that, not this); the
-/// preview only has to be stable for identical content so the printed
-/// plan does not flap.
-fn preview_manifest_digest(manifest: &OciManifest) -> String {
-    let mut key = String::new();
-    if let Some(at) = &manifest.artifact_type {
-        key.push_str(&format!("artifactType={at}\n"));
-    }
-    if let Some(cmt) = &manifest.config_media_type {
-        key.push_str(&format!("configMediaType={cmt}\n"));
-    }
-    for d in &manifest.layers {
-        key.push_str(&format!("{}|{}|{}\n", d.digest, d.media_type, d.size));
-    }
-    for (k, v) in &manifest.annotations {
-        // Every annotation feeds the preview. That is safe because none of
-        // them is read from the clock: `org.opencontainers.image.created` is
-        // the commit date (or a `SOURCE_DATE_EPOCH` instant), so the preview
-        // is stable for identical content and matches the pushed digest.
-        key.push_str(&format!("{k}={v}\n"));
-    }
-    Algorithm::Sha256.hash(key.as_bytes()).to_string()
+/// The `--dry-run` preview of the manifest digest: the sha256 of the exact
+/// bytes a real push sends, so it equals the digest that push reports
+/// (unless the guard adopts an existing manifest).
+///
+/// # Errors
+///
+/// A manifest JSON serialization failure.
+fn preview_manifest_digest(manifest: &OciManifest) -> anyhow::Result<String> {
+    // Every annotation feeds the bytes. None is read from the clock
+    // (`org.opencontainers.image.created` is the commit date or a
+    // `SOURCE_DATE_EPOCH` instant), so the preview is stable for identical content.
+    let body = crate::oci::access::registry_client::wire_manifest_body(manifest)
+        .map_err(|e| anyhow::anyhow!("cannot serialize manifest: {e}"))?;
+    Ok(Algorithm::Sha256.hash(&body).to_string())
 }
 
 #[cfg(test)]
@@ -777,10 +812,31 @@ mod tests {
                 digest: Algorithm::Sha256.hash(b"x"),
                 media_type: "t".to_string(),
                 size: 1,
+                annotations: None,
             }],
             annotations: std::collections::BTreeMap::new(),
         };
-        assert_eq!(preview_manifest_digest(&m), preview_manifest_digest(&m));
+        assert_eq!(
+            preview_manifest_digest(&m).unwrap(),
+            preview_manifest_digest(&m).unwrap()
+        );
+    }
+
+    /// The preview hashes the pushed bytes, so a layer annotation must move it.
+    #[test]
+    fn preview_digest_covers_layer_annotations() {
+        let gzip = manifest_with(b"skill tar", Compression::Gzip).1;
+        let mut stripped = gzip.clone();
+        stripped.layers[0].annotations = None;
+        assert_ne!(
+            preview_manifest_digest(&gzip).unwrap(),
+            preview_manifest_digest(&stripped).unwrap()
+        );
+        let body = crate::oci::access::registry_client::wire_manifest_body(&gzip).unwrap();
+        assert_eq!(
+            preview_manifest_digest(&gzip).unwrap(),
+            Algorithm::Sha256.hash(&body).to_string()
+        );
     }
 
     fn manifest_of(tar: &[u8]) -> OciManifest {
@@ -793,9 +849,28 @@ mod tests {
                 digest: Algorithm::Sha256.hash(tar),
                 media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),
                 size: tar.len() as u64,
+                annotations: None,
             }],
             annotations: std::collections::BTreeMap::new(),
         }
+    }
+
+    /// `manifest_of(tar)` with its layer encoded under `compression`, plus the blob.
+    fn manifest_with(tar: &[u8], compression: Compression) -> (Vec<u8>, OciManifest) {
+        let (blob, layer) = layer::encode_layer(tar, compression);
+        let mut manifest = manifest_of(tar);
+        manifest.layers = vec![layer];
+        (blob, manifest)
+    }
+
+    fn is_tag_exists(err: &crate::error::Error) -> bool {
+        matches!(
+            err,
+            crate::error::Error::Release(ReleaseError {
+                kind: ReleaseErrorKind::TagExists { .. },
+                ..
+            })
+        )
     }
 
     /// End-to-end push against the in-memory registry double: blob +
@@ -815,9 +890,10 @@ mod tests {
         // First release: blob + manifest + all four cascade tags.
         access.push_blob(&repo, &tar).await.unwrap();
         let digest = access.push_manifest(&repo, &manifest).await.unwrap();
-        guard_existing_version(&access, &repo, "1.2.3", &digest)
+        let target = guard_existing_version(&access, &repo, "1.2.3", &digest, Some(&manifest))
             .await
             .expect("no prior tag ⇒ no guard");
+        assert_eq!(target, digest);
         move_tags(&access, &repo, &tags, "1.2.3", &digest).await.unwrap();
 
         for tag in ["1.2.3", "1.2", "1", "latest"] {
@@ -834,7 +910,7 @@ mod tests {
         // allows it (the tag already points at the same digest).
         let digest2 = access.push_manifest(&repo, &manifest).await.unwrap();
         assert_eq!(digest, digest2, "re-release of identical content is idempotent");
-        guard_existing_version(&access, &repo, "1.2.3", &digest2)
+        guard_existing_version(&access, &repo, "1.2.3", &digest2, Some(&manifest))
             .await
             .expect("identical re-release is a no-op success");
 
@@ -842,10 +918,319 @@ mod tests {
         let other = manifest_of(b"skill tarball v2 DIFFERENT");
         let other_digest = access.push_manifest(&repo, &other).await.unwrap();
         assert_ne!(digest, other_digest);
-        let err = guard_existing_version(&access, &repo, "1.2.3", &other_digest)
+        let err = guard_existing_version(&access, &repo, "1.2.3", &other_digest, Some(&other))
             .await
             .expect_err("overwriting a version with different content must refuse");
-        assert!(matches!(err.kind, ReleaseErrorKind::TagExists { .. }));
+        assert!(is_tag_exists(&err), "{err}");
+
+        // A none -> gzip flip on unchanged content adopts the existing manifest.
+        let (blob, gzip) = manifest_with(&tar, Compression::Gzip);
+        access.push_blob(&repo, &blob).await.unwrap();
+        let gzip_digest = access.push_manifest(&repo, &gzip).await.unwrap();
+        assert_ne!(gzip_digest, digest);
+        let target = guard_existing_version(&access, &repo, "1.2.3", &gzip_digest, Some(&gzip))
+            .await
+            .expect("equal content under gzip adopts");
+        assert_eq!(target, digest, "adoption keeps the existing manifest");
+
+        // A content change under the flip is still refused.
+        let changed = manifest_with(b"skill tarball v2 DIFFERENT", Compression::Gzip).1;
+        let changed_digest = access.push_manifest(&repo, &changed).await.unwrap();
+        let err = guard_existing_version(&access, &repo, "1.2.3", &changed_digest, Some(&changed))
+            .await
+            .expect_err("different content under gzip must refuse");
+        assert!(is_tag_exists(&err), "{err}");
+
+        // A tag on a manifest the registry no longer serves is refused, never adopted.
+        let gone = manifest_with(b"never pushed", Compression::None).1;
+        let gone_digest = Algorithm::Sha256.hash(b"no such manifest");
+        access.put_tag(&repo, "9.9.9", &gone_digest).await.unwrap();
+        let err = guard_existing_version(&access, &repo, "9.9.9", &digest, Some(&gone))
+            .await
+            .expect_err("a missing existing manifest must refuse");
+        assert!(is_tag_exists(&err), "{err}");
+    }
+
+    /// A registry double whose manifest fetch fails with the given kind; everything else is a `MemoryRegistry`.
+    struct ManifestDenied(
+        crate::oci::access::memory_registry::MemoryRegistry,
+        fn() -> crate::oci::access::error::AccessErrorKind,
+    );
+
+    #[async_trait::async_trait]
+    impl OciAccess for ManifestDenied {
+        async fn resolve_digest(
+            &self,
+            id: &Identifier,
+            op: Operation,
+        ) -> Result<Option<Digest>, crate::oci::access::error::AccessError> {
+            self.0.resolve_digest(id, op).await
+        }
+        async fn fetch_manifest(
+            &self,
+            _id: &PinnedIdentifier,
+        ) -> Result<Option<OciManifest>, crate::oci::access::error::AccessError> {
+            Err(crate::oci::access::error::AccessError::without_identifier((self.1)()))
+        }
+        async fn fetch_blob(
+            &self,
+            repo: &Identifier,
+            digest: &Digest,
+            max: u64,
+        ) -> Result<Option<Vec<u8>>, crate::oci::access::error::AccessError> {
+            self.0.fetch_blob(repo, digest, max).await
+        }
+        async fn list_tags(
+            &self,
+            id: &Identifier,
+        ) -> Result<Option<Vec<String>>, crate::oci::access::error::AccessError> {
+            self.0.list_tags(id).await
+        }
+        async fn list_catalog(
+            &self,
+            registry: &str,
+        ) -> Result<crate::oci::access::CatalogListing, crate::oci::access::error::AccessError> {
+            self.0.list_catalog(registry).await
+        }
+        async fn push_blob(
+            &self,
+            repo: &Identifier,
+            bytes: &[u8],
+        ) -> Result<Digest, crate::oci::access::error::AccessError> {
+            self.0.push_blob(repo, bytes).await
+        }
+        async fn push_manifest(
+            &self,
+            repo: &Identifier,
+            m: &OciManifest,
+        ) -> Result<Digest, crate::oci::access::error::AccessError> {
+            self.0.push_manifest(repo, m).await
+        }
+        async fn put_tag(
+            &self,
+            repo: &Identifier,
+            tag: &str,
+            d: &Digest,
+        ) -> Result<(), crate::oci::access::error::AccessError> {
+            self.0.put_tag(repo, tag, d).await
+        }
+    }
+
+    /// The existing-manifest fetch error keeps its own exit code and moves no tag.
+    #[tokio::test]
+    async fn guard_propagates_existing_manifest_fetch_error() {
+        use crate::oci::access::error::AccessErrorKind;
+        let cases: [(fn() -> AccessErrorKind, ExitCode); 3] = [
+            (
+                || AccessErrorKind::Authentication(Box::new(std::io::Error::other("denied"))),
+                ExitCode::AuthError,
+            ),
+            (
+                || AccessErrorKind::Registry(Box::new(std::io::Error::other("down"))),
+                ExitCode::Unavailable,
+            ),
+            (|| AccessErrorKind::OfflineMiss, ExitCode::OfflineBlocked),
+        ];
+        for (kind, exit) in cases {
+            let access: Arc<dyn OciAccess> = Arc::new(ManifestDenied(
+                crate::oci::access::memory_registry::MemoryRegistry::new(),
+                kind,
+            ));
+            let repo = Identifier::parse("localhost:5000/acme/code-review").unwrap();
+            let tar = b"skill tarball v1".to_vec();
+            let plain = manifest_of(&tar);
+            let digest = access.push_manifest(&repo, &plain).await.unwrap();
+            access.put_tag(&repo, "1.0.0", &digest).await.unwrap();
+
+            let gzip = manifest_with(&tar, Compression::Gzip).1;
+            let gzip_digest = access.push_manifest(&repo, &gzip).await.unwrap();
+            let err = guard_existing_version(&access, &repo, "1.0.0", &gzip_digest, Some(&gzip))
+                .await
+                .expect_err("a failed manifest fetch must not adopt");
+            assert_eq!(crate::error::classify_error(&anyhow::Error::from(err)), exit);
+            assert_eq!(
+                tag_digest_of(&access, "localhost:5000/acme/code-review:1.0.0").await,
+                digest
+            );
+        }
+    }
+
+    async fn tag_digest_of(access: &Arc<dyn OciAccess>, reference: &str) -> Digest {
+        access
+            .resolve_digest(&Identifier::parse(reference).unwrap(), Operation::Query)
+            .await
+            .unwrap()
+            .expect("tag resolves")
+    }
+
+    async fn tag_digest(registry: &crate::oci::access::memory_registry::MemoryRegistry, reference: &str) -> Digest {
+        registry
+            .resolve_digest(&Identifier::parse(reference).unwrap(), Operation::Query)
+            .await
+            .unwrap()
+            .expect("tag resolves")
+    }
+
+    /// Through `run`: a compression flip adopts with `pushed: true`, and
+    /// `--force` converts the version in both directions.
+    #[tokio::test]
+    async fn run_compression_flip_adopts_and_force_converts() {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let skill = write_skill(tmp.path(), "gz-skill");
+        let registry = MemoryRegistry::new();
+        let ctx = Context::with_access(tmp.path().to_path_buf(), registry.clone());
+        let reference = "localhost:5000/acme/gz-skill:1.0.0";
+        let mut args = release_args(skill, reference, None);
+
+        let (plain, _) = run(&ctx, &args).await.expect("first release");
+        args.compression = Compression::Gzip;
+        let (adopted, exit) = run(&ctx, &args).await.expect("flip adopts");
+        assert_eq!(exit, ExitCode::Success);
+        assert!(adopted.pushed);
+        assert_eq!(adopted.manifest_digest, plain.manifest_digest);
+        assert_eq!(
+            tag_digest(&registry, "localhost:5000/acme/gz-skill:latest")
+                .await
+                .to_string(),
+            plain.manifest_digest
+        );
+
+        args.force = true;
+        let (forced, _) = run(&ctx, &args).await.expect("--force gzip");
+        assert_ne!(forced.manifest_digest, plain.manifest_digest);
+        for tag in ["1.0.0", "latest"] {
+            let at = tag_digest(&registry, &format!("localhost:5000/acme/gz-skill:{tag}")).await;
+            assert_eq!(at.to_string(), forced.manifest_digest, "{tag}");
+        }
+
+        args.compression = Compression::None;
+        let (back, _) = run(&ctx, &args).await.expect("--force none");
+        assert_eq!(back.manifest_digest, plain.manifest_digest);
+        let at = tag_digest(&registry, reference).await;
+        assert_eq!(at.to_string(), plain.manifest_digest);
+    }
+
+    /// A gzip -> none flip adopts the gzip manifest without `--force`.
+    #[tokio::test]
+    async fn run_gzip_to_none_flip_adopts() {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let skill = write_skill(tmp.path(), "gz-back");
+        let ctx = Context::with_access(tmp.path().to_path_buf(), MemoryRegistry::new());
+        let mut args = release_args(skill, "localhost:5000/acme/gz-back:1.0.0", None);
+        args.compression = Compression::Gzip;
+        let (gzip, _) = run(&ctx, &args).await.expect("gzip release");
+        args.compression = Compression::None;
+        let (adopted, exit) = run(&ctx, &args).await.expect("flip back adopts");
+        assert_eq!(exit, ExitCode::Success);
+        assert!(adopted.pushed);
+        assert_eq!(adopted.manifest_digest, gzip.manifest_digest);
+    }
+
+    /// Agents (like hooks) take the shared tar path, so `--compression gzip` applies.
+    #[tokio::test]
+    async fn run_agent_releases_a_gzip_layer() {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = tmp.path().join("reviewer.md");
+        std::fs::write(
+            &agent,
+            "---\nname: reviewer\ndescription: Reviews.\n---\nReview code.\n",
+        )
+        .unwrap();
+        let registry = MemoryRegistry::new();
+        let ctx = Context::with_access(tmp.path().to_path_buf(), registry.clone());
+        let mut args = release_args(agent, "localhost:5000/acme/reviewer:1.0.0", None);
+        args.kind = Some("agent".to_string());
+        args.compression = Compression::Gzip;
+        let (report, _) = run(&ctx, &args).await.expect("gzip agent release");
+
+        let access: Arc<dyn OciAccess> = Arc::new(registry);
+        let id = Identifier::parse("localhost:5000/acme/reviewer").unwrap();
+        let pinned = PinnedIdentifier::try_from(id.clone_with_digest(report.manifest_digest.parse().unwrap())).unwrap();
+        let manifest = access.fetch_manifest(&pinned).await.unwrap().expect("manifest stored");
+        let layer = manifest.single_layer().expect("one layer");
+        assert_eq!(layer.media_type, layer::TAR_GZIP_LAYER_MEDIA_TYPE);
+        assert!(
+            layer
+                .annotations
+                .as_ref()
+                .is_some_and(|a| a.contains_key(layer::UNCOMPRESSED_DIGEST_ANNOTATION))
+        );
+    }
+
+    /// A bundle or mcp tag on a gzip-labelled layer that claims the new raw
+    /// layer's digest is refused: their readers never verify the claim.
+    #[tokio::test]
+    async fn run_mcp_never_adopts_a_gzip_labelled_layer() {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mcp = tmp.path().join("demo-mcp.toml");
+        std::fs::write(
+            &mcp,
+            "description = \"Demo.\"\n\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"\nargs = [\"mcp\"]\n",
+        )
+        .unwrap();
+        let registry = MemoryRegistry::new();
+        let ctx = Context::with_access(tmp.path().to_path_buf(), registry.clone());
+        let reference = "localhost:5000/acme/demo-mcp:1.0.0";
+        let mut args = release_args(mcp, reference, None);
+        args.kind = Some("mcp".to_string());
+        let (first, _) = run(&ctx, &args).await.expect("first mcp release");
+
+        // Re-point the version at a lying manifest: same annotations, a gzip
+        // layer type whose annotation names the honest raw layer's digest.
+        let access: Arc<dyn OciAccess> = Arc::new(registry.clone());
+        let repo = Identifier::parse("localhost:5000/acme/demo-mcp").unwrap();
+        let pinned =
+            PinnedIdentifier::try_from(repo.clone_with_digest(first.manifest_digest.parse().unwrap())).unwrap();
+        let honest = access.fetch_manifest(&pinned).await.unwrap().expect("manifest stored");
+        let raw = honest.single_layer().expect("one layer").clone();
+        let evil = b"{\"server\":{\"command\":\"evil\"}}".to_vec();
+        let mut lying = honest.clone();
+        lying.layers = vec![Descriptor {
+            digest: access.push_blob(&repo, &evil).await.unwrap(),
+            media_type: layer::TAR_GZIP_LAYER_MEDIA_TYPE.to_string(),
+            size: evil.len() as u64,
+            annotations: Some(std::collections::BTreeMap::from([(
+                layer::UNCOMPRESSED_DIGEST_ANNOTATION.to_string(),
+                raw.digest.to_string(),
+            )])),
+        }];
+        let lying_digest = access.push_manifest(&repo, &lying).await.unwrap();
+        access.put_tag(&repo, "1.0.0", &lying_digest).await.unwrap();
+
+        let err = run(&ctx, &args).await.expect_err("must refuse, not adopt");
+        let grim = err.downcast_ref::<crate::error::Error>().expect("typed error");
+        assert!(is_tag_exists(grim), "{err:#}");
+        assert_eq!(tag_digest(&registry, reference).await, lying_digest);
+    }
+
+    /// Bundles and mcp ignore `--compression`: the same manifest either way.
+    #[tokio::test]
+    async fn run_compression_is_ignored_for_mcp() {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mcp = tmp.path().join("demo-mcp.toml");
+        std::fs::write(
+            &mcp,
+            "description = \"Demo.\"\n\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"\nargs = [\"mcp\"]\n",
+        )
+        .unwrap();
+        let ctx = Context::with_access(tmp.path().to_path_buf(), MemoryRegistry::new());
+        let mut args = release_args(mcp, "localhost:5000/acme/demo-mcp:1.0.0", None);
+        args.kind = Some("mcp".to_string());
+        args.dry_run = true;
+        let (none, _) = run(&ctx, &args).await.expect("mcp dry-run");
+        args.compression = Compression::Gzip;
+        let (gzip, _) = run(&ctx, &args).await.expect("mcp dry-run under gzip");
+        assert_eq!(none.manifest_digest, gzip.manifest_digest);
     }
 
     /// Issue #31: `--pin` resolves a `../`-relative member against the
@@ -1025,6 +1410,7 @@ mod tests {
             no_git: false,
             metadata: Default::default(),
             push_registry: push_registry.map(str::to_string),
+            compression: Compression::None,
         }
     }
 

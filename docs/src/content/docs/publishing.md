@@ -641,8 +641,66 @@ grim release ./code-review ghcr.io/acme/code-review:1.2.3 --dry-run
 ```
 
 An exact-version tag is immutable by default. If `1.2.3` already exists and
-points at different bytes, the release refuses rather than rewrite history.
-Pass `--force` only when you deliberately mean to move it.
+points at different content, the release refuses rather than rewrite history.
+Pass `--force` only when you deliberately mean to move it. A compressed
+re-release of equal content is the one exception, covered in
+[Compressing layers][compression-section].
+
+### Compressing layers {#compression}
+
+By default a skill, rule, agent or hook packs into one uncompressed tar
+layer. Pass `--compression gzip` to publish a gzip-compressed layer instead.
+Skills shrink about threefold, and small rules and agents about sixfold.
+
+```sh
+grim release ./code-review ghcr.io/acme/code-review:1.2.3 --compression gzip
+```
+
+The default is `none`, and default output stays byte-identical to releases
+before 0.15.0. Bundles and MCP server descriptors ignore the flag. Their layers
+are small JSON documents, so grim never compresses them.
+
+When you opt in, grim also prints one stderr line. It reminds you of the
+consumer requirement below.
+
+A compressed layer uses the media type
+`application/vnd.grimoire.artifact.layer.v1.tar+gzip` and carries a
+`com.grimoire.uncompressed.digest` annotation. The annotation holds the digest
+of the uncompressed tar, so `grim describe` and the overwrite guard can name
+the content without downloading the blob.
+
+**Consumers need grim 0.15.0 or later.** Only that release reads a gzip
+layer. Grim 0.14.3 cannot read one, and `grim fetch` fails with exit `65`
+(verified on that version). Upgrade every machine and CI job that installs the
+artifact before you opt in. See [Compressed layers need grim 0.15.0][upgrading-compression].
+
+**Compress new versions only.** The overwrite guard compares content, not
+bytes. Re-releasing an existing version after you flip `--compression`, or
+after the compressor itself changes, is therefore not a conflict. When the
+content is otherwise equal, grim adopts the version already on the registry.
+
+Adoption applies to skill, rule, agent and hook releases only. A bundle or MCP
+server release whose digest differs from the one at the tag still refuses,
+because readers never verify its annotation.
+
+Equality is strict about layers grim cannot vouch for. A layer it cannot read
+(`+zstd`) never equals anything. A gzip layer without the annotation equals
+only the identical blob, never a raw tar.
+
+Adopting leaves the version tag on the existing manifest and points the
+cascade tags at it. grim prints one stderr line naming the adopted digest.
+The report shows that digest with `pushed: true`. Any real content change
+still exits `65`.
+
+`--dry-run` makes no guard read. Its preview digest equals the digest a real
+push of the same content reports. A real run that adopts reports the existing
+digest instead, so the two differ only in that case.
+
+`--force` never adopts. It moves the tag to the new manifest, so it is the
+only way to convert an existing version to or from gzip. That changes the
+version's digest, and a consumer whose lock pins the old digest then fails
+with a stale-lock refusal. Publish compression from the next version
+instead, and never `--force` an existing one.
 
 ## Build provenance {#git-provenance}
 
@@ -816,6 +874,7 @@ value carrying a `/` exits `65`. The namespace under the host belongs in
 ```toml
 #:schema https://grimoire.rs/schemas/grim-publish.schema.json
 registry = "ghcr.io"              # required; overridden by --registry
+# compression = "gzip"            # optional; none (default) or gzip
 
 [skills.grim-usage]
 version = "0.1.1"                  # strict X.Y.Z
@@ -847,6 +906,12 @@ carries, and the bundle resolves the member from its own manifest. It never
 removes a pointer an earlier run announced, and it hides the entry from an
 index only; a registry that lists its own repositories still shows the
 OCI repository.
+
+The optional top-level `compression` key sets the [layer
+compression](#compression) for every skill, rule, agent and hook entry in
+the run. It takes `none` or `gzip`, and any other value exits `65`. The
+precedence is the `--compression` flag, then this key, then `none`. Bundle
+and MCP entries ignore it, so one key can sit above a mixed manifest.
 
 #### One version for the whole catalog {#batch-publish-version}
 
@@ -1237,6 +1302,10 @@ This rule is uniform for **every** value, including a channel
 and needs `--force` to move, exactly like a semver release. There is no
 special-cased always-moving tag.
 
+Skip-existing never rewrites a published version. It is therefore also the
+safe way to roll out [`compression`](#compression). Entries you already
+published keep their bytes, and only a bumped version packs gzip.
+
 ### Flags {#batch-publish-flags}
 
 | Flag | Description |
@@ -1244,6 +1313,7 @@ special-cased always-moving tag.
 | `--manifest <path>` | Manifest file to read (default: `./publish.toml`). |
 | `--dry-run` | Validate and plan without pushing. Prints what would be pushed. Companions are still containment- and size-checked and packed, so a bad companion fails the dry run; zero registry mutations occur either way. |
 | `--force` | Move existing exact-version tags instead of skipping them. |
+| `--compression <none\|gzip>` | Layer compression for skill, rule, agent and hook entries; bundles and MCP servers ignore it. Overrides the manifest's `compression` key, and `none` applies when neither is set. Consumers need grim 0.15.0 or later to install gzip layers. See [Compressing layers](#compression). |
 | `--only <name>` | Publish only the named entry (repeatable). A name absent from the manifest exits 65. |
 | `--version <version>` | The single version source for the run. A **semver** value overrides the manifest's top-level `version` (entries with their own `version` keep it) and every entry cascades; a **non-semver** value (e.g. `canary`) is a movable channel tag applied to every entry uniformly, with no cascade. A prerelease/build-metadata value, a reserved cascade-float shape (`latest`, a bare major, or `major.minor`), or a value that is not a legal OCI tag exits 65 rather than being treated as a channel — see [Validation and fail-fast](#batch-publish-validation). The manifest's `version_prefix` (default `v`) is stripped first, so `--version v1.2.3` publishes `1.2.3`. See [One version for the whole catalog](#batch-publish-version). |
 | `--cascade` / `--no-cascade` | Control the rolling cascade (`X.Y.Z` → `X.Y`, `X`, `latest`) for the whole run. Neither flag is the default: cascade automatically for a semver `--version`, single tag for a channel. `--cascade` asserts a semver release and exits 65 if combined with a channel value; `--no-cascade` publishes only each exact version tag. |
@@ -1410,3 +1480,5 @@ example with `docker login` against
 
 <!-- internal -->
 [global-options]: ./commands.md#global-options
+[upgrading-compression]: ./upgrading.md#compressed-layers-need-new-grim
+[compression-section]: #compression

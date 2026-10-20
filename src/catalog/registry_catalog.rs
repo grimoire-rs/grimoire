@@ -1649,6 +1649,7 @@ mod tests {
                 digest: Algorithm::Sha256.hash(b"payload"),
                 media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),
                 size: 7,
+                annotations: None,
             }],
             annotations,
         }

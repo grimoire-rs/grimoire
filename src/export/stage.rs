@@ -2109,6 +2109,7 @@ mod tests {
                 digest: layer,
                 media_type: media_type.to_string(),
                 size: blob.len() as u64,
+                annotations: None,
             }],
             annotations: ann,
         };

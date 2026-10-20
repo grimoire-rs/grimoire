@@ -374,7 +374,9 @@ Two read-only companions:
   tag listing it already fetches, at zero extra network cost. Curated
   fields include `deprecated` (the notice, or null) and `replaced_by`
   (the successor reference, or null); `tags[]` hides grim-internal
-  companion tags. `--format json` is a single object with every field
+  companion tags. `compression` is `"none"`, `"gzip"` or `null` (a layer
+  this grim cannot read); an older grim omits the key, so treat absent as
+  unknown. `--format json` is a single object with every field
   always present; plain output is a flat key/value table.
   Confirm with `grim describe --help`.
 

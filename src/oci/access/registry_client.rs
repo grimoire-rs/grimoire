@@ -37,20 +37,9 @@ use oci_client::errors::{OciDistributionError, OciErrorCode};
 use oci_client::manifest::{OciDescriptor, OciImageManifest};
 use oci_client::secrets::RegistryAuth;
 
-use crate::oci::manifest::Descriptor;
+use crate::oci::layer::TAR_LAYER_MEDIA_TYPE;
+use crate::oci::manifest::{Descriptor, OCI_EMPTY_CONFIG_MEDIA_TYPE};
 
-/// The media type of a Grimoire artifact layer (single uncompressed tar).
-const GRIMOIRE_LAYER_MEDIA_TYPE: &str = "application/vnd.grimoire.artifact.layer.v1.tar";
-/// The OCI empty config descriptor media type. Stamped on every pushed
-/// manifest's config descriptor (the blob is the byte-identical `{}` the OCI
-/// spec blesses for artifacts that carry an `artifactType`). The custom
-/// per-kind config type the project used before `adr_oci_empty_config_compat.md`
-/// is off GitLab's referenced-media-type allowlist and made GitLab reject the
-/// manifest (`400 MANIFEST_INVALID`); the empty type is on every registry's
-/// allowlist. The kind rides solely on the `com.grimoire.kind` annotation —
-/// no `artifactType` is written either (GitLab rejects a custom one) — and the
-/// config descriptor never carries it (`adr_oci_empty_config_compat.md`).
-const OCI_EMPTY_CONFIG_MEDIA_TYPE: &str = "application/vnd.oci.empty.v1+json";
 /// The media type of an OCI image manifest.
 const OCI_MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
 
@@ -286,9 +275,47 @@ fn oci_descriptor(d: &Descriptor) -> OciDescriptor {
         digest: d.digest.to_string(),
         size: i64::try_from(d.size).unwrap_or(i64::MAX),
         urls: None,
-        annotations: None,
+        annotations: d.annotations.clone(),
         artifact_type: None,
     }
+}
+
+/// The exact manifest bytes [`RegistryClient::push_manifest`] PUTs; their
+/// sha256 is the pushed manifest digest.
+///
+/// # Errors
+///
+/// A JSON serialization failure.
+pub(crate) fn wire_manifest_body(manifest: &OciManifest) -> serde_json::Result<Vec<u8>> {
+    let config = RegistryClient::config_blob();
+    let image = OciImageManifest {
+        schema_version: 2,
+        media_type: Some(OCI_MANIFEST_MEDIA_TYPE.to_string()),
+        config: OciDescriptor {
+            media_type: OCI_EMPTY_CONFIG_MEDIA_TYPE.to_string(),
+            digest: crate::oci::Algorithm::Sha256.hash(&config).to_string(),
+            // The empty config blob is the 2-byte `{}`; its length fits an
+            // i64 exactly, so this cast can never wrap.
+            size: config.len() as i64,
+            urls: None,
+            annotations: None,
+            artifact_type: None,
+        },
+        layers: manifest.layers.iter().map(oci_descriptor).collect(),
+        subject: None,
+        // Never written: GitLab rejects a custom `artifactType` (see `push_manifest`).
+        // The kind is carried by the `com.grimoire.kind` annotation; the
+        // `OciManifest.artifact_type` field is retained only on the READ
+        // path to type pre-`adr_oci_empty_config_compat.md` artifacts.
+        artifact_type: None,
+        annotations: if manifest.annotations.is_empty() {
+            None
+        } else {
+            Some(manifest.annotations.clone())
+        },
+    };
+
+    serde_json::to_vec(&image)
 }
 
 impl RegistryClient {
@@ -488,41 +515,13 @@ impl OciAccess for RegistryClient {
         // the kind rides solely on the `com.grimoire.kind` annotation
         // (`adr_oci_empty_config_compat.md`). The empty config blob is the
         // byte-identical `{}` — only the descriptor's media type matters here.
-        let config = Self::config_blob();
-        let config_digest = self.push_blob(repo, &config).await?;
-
-        let image = OciImageManifest {
-            schema_version: 2,
-            media_type: Some(OCI_MANIFEST_MEDIA_TYPE.to_string()),
-            config: OciDescriptor {
-                media_type: OCI_EMPTY_CONFIG_MEDIA_TYPE.to_string(),
-                digest: config_digest.to_string(),
-                // The empty config blob is the 2-byte `{}`; its length fits an
-                // i64 exactly, so this cast can never wrap.
-                size: config.len() as i64,
-                urls: None,
-                annotations: None,
-                artifact_type: None,
-            },
-            layers: manifest.layers.iter().map(oci_descriptor).collect(),
-            subject: None,
-            // Never written: GitLab rejects a custom `artifactType` (see above).
-            // The kind is carried by the `com.grimoire.kind` annotation; the
-            // `OciManifest.artifact_type` field is retained only on the READ
-            // path to type pre-`adr_oci_empty_config_compat.md` artifacts.
-            artifact_type: None,
-            annotations: if manifest.annotations.is_empty() {
-                None
-            } else {
-                Some(manifest.annotations.clone())
-            },
-        };
+        self.push_blob(repo, &Self::config_blob()).await?;
 
         // Serialize the manifest ourselves and PUT those exact bytes by
         // digest: the manifest digest a registry stores is the hash of the
         // bytes it received, so controlling the bytes makes the returned
         // digest deterministic and the push idempotent.
-        let body = serde_json::to_vec(&image).map_err(|e| {
+        let body = wire_manifest_body(manifest).map_err(|e| {
             AccessError::with_identifier(
                 repo.clone(),
                 AccessErrorKind::InvalidManifest(format!("cannot serialize manifest: {e}")),
@@ -564,7 +563,7 @@ impl OciAccess for RegistryClient {
         );
         let (body, _digest) = self
             .client
-            .pull_manifest_raw(&by_digest, &auth, &[OCI_MANIFEST_MEDIA_TYPE, GRIMOIRE_LAYER_MEDIA_TYPE])
+            .pull_manifest_raw(&by_digest, &auth, &[OCI_MANIFEST_MEDIA_TYPE, TAR_LAYER_MEDIA_TYPE])
             .await
             .map_err(|e| AccessError::with_identifier(repo.clone(), registry_or_auth(e)))?;
 
@@ -816,6 +815,23 @@ fn next_page_query(link: &str, endpoint: &str) -> Option<Vec<(String, String)>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oci_descriptor_passes_annotations_and_writes_no_key_without_them() {
+        let (_, plain) = crate::oci::layer::encode_layer(b"tar", crate::oci::layer::Compression::None);
+        let json = serde_json::to_value(oci_descriptor(&plain)).unwrap();
+        assert!(json.get("annotations").is_none(), "{json}");
+
+        let (_, gzip) = crate::oci::layer::encode_layer(b"tar", crate::oci::layer::Compression::Gzip);
+        let oci = oci_descriptor(&gzip);
+        assert_eq!(oci.annotations, gzip.annotations);
+        let back = OciManifest::try_from(OciImageManifest {
+            layers: vec![oci],
+            ..OciImageManifest::default()
+        })
+        .unwrap();
+        assert_eq!(back.layers, vec![gzip]);
+    }
 
     /// Regression: the production client config must seed the embedded CA
     /// roots. Without them, `oci-client`'s `Client::new` panics on a host with

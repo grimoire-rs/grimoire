@@ -2328,7 +2328,9 @@ async fn pack_verified_local(
     Ok(layer)
 }
 
-/// Fetch and digest-verify an artifact's single layer blob.
+/// Fetch and digest-verify an artifact's single layer blob, then decode a
+/// tar-kind layer to tar bytes under the same cap
+/// ([`crate::oci::layer::decode_layer`]).
 ///
 /// `artifact.source.pinned()` is the *manifest* digest: resolve the
 /// manifest to its single layer descriptor, fetch that layer blob, and
@@ -2373,6 +2375,11 @@ pub(crate) async fn fetch_verified_layer(
         .into());
     };
     let layer_digest = layer.digest.clone();
+    let tar_layer = crate::oci::layer::is_tar_kind(kind);
+    if tar_layer {
+        // Refuse an undecodable (`+zstd`) layer before downloading it.
+        crate::oci::layer::classify(&layer.media_type)?;
+    }
 
     // Pre-download policy gate on the (untrusted) descriptor size: a
     // hostile multi-GB declared size would otherwise become the memory cap
@@ -2409,7 +2416,10 @@ pub(crate) async fn fetch_verified_layer(
         })
         .into());
     }
-    Ok(blob)
+    if !tar_layer {
+        return Ok(blob);
+    }
+    Ok(crate::oci::layer::decode_layer_blocking(layer.clone(), blob, cap).await?)
 }
 
 /// One client's MCP registration, fully resolved but not yet written.
@@ -3121,6 +3131,7 @@ mod tests {
                 digest: Algorithm::Sha256.hash(blob),
                 media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),
                 size: blob.len() as u64,
+                annotations: None,
             }],
             annotations: std::collections::BTreeMap::new(),
         }
@@ -7529,6 +7540,149 @@ mod tests {
         assert!(
             matches!(&err, crate::error::Error::Install(ie)
                 if matches!(ie.kind, InstallErrorKind::LocalContentChanged { .. })),
+            "{err:?}"
+        );
+        assert_eq!(exit_of(err), crate::cli::exit_code::ExitCode::DataError);
+    }
+
+    // ── compressed layers ──
+
+    const ZSTD: &str = "application/vnd.oci.image.layer.v1.tar+zstd";
+
+    /// Push `blob` behind a single-layer manifest whose layer descriptor
+    /// carries `media_type` and `annotations`, and pin it.
+    async fn locked_layer(
+        reg: &crate::oci::access::memory_registry::MemoryRegistry,
+        name: &str,
+        kind: ArtifactKind,
+        blob: &[u8],
+        media_type: &str,
+        annotations: Option<std::collections::BTreeMap<String, String>>,
+    ) -> LockedArtifact {
+        let id = Identifier::new_registry(name, "localhost:5000");
+        let digest = reg.push_blob(&id, blob).await.unwrap();
+        let mut manifest = manifest_for(blob);
+        manifest.layers = vec![Descriptor {
+            digest,
+            media_type: media_type.to_string(),
+            size: blob.len() as u64,
+            annotations,
+        }];
+        let mdigest = reg.push_manifest(&id, &manifest).await.unwrap();
+        LockedArtifact::direct(
+            name.to_string(),
+            kind,
+            PinnedIdentifier::try_from(id.clone_with_digest(mdigest)).unwrap(),
+        )
+    }
+
+    fn sha256_annotation(value: &str) -> Option<std::collections::BTreeMap<String, String>> {
+        Some(std::collections::BTreeMap::from([(
+            crate::oci::layer::UNCOMPRESSED_DIGEST_ANNOTATION.to_string(),
+            value.to_string(),
+        )]))
+    }
+
+    #[tokio::test]
+    async fn gzip_registry_skill_stages_the_decoded_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = crate::oci::access::memory_registry::MemoryRegistry::new();
+        let tar = skill_tar("code-review", SKILL_DOC);
+        let (blob, desc) = crate::oci::layer::encode_layer(&tar, crate::oci::layer::Compression::Gzip);
+        let artifact = locked_layer(
+            &reg,
+            "code-review",
+            ArtifactKind::Skill,
+            &blob,
+            &desc.media_type,
+            desc.annotations,
+        )
+        .await;
+
+        let staged = stage_locked_artifact(
+            &artifact,
+            ArtifactKind::Skill,
+            &arc(reg.clone()),
+            Path::new("."),
+            &DefaultMaterializer,
+            tmp.path(),
+        )
+        .await
+        .expect("stage gzip skill");
+        assert_eq!(std::fs::read(staged.canonical.join("SKILL.md")).unwrap(), SKILL_DOC);
+    }
+
+    #[tokio::test]
+    async fn mcp_layer_is_never_decoded() {
+        let reg = crate::oci::access::memory_registry::MemoryRegistry::new();
+        let blob = b"{\"not\": \"decoded\"}".to_vec();
+        // A `+zstd` type would be refused on the tar read path; JSON kinds skip it.
+        let artifact = locked_layer(&reg, "srv", ArtifactKind::Mcp, &blob, ZSTD, None).await;
+        let got = fetch_verified_layer(&artifact, ArtifactKind::Mcp, &arc(reg.clone()))
+            .await
+            .expect("mcp layer read raw");
+        assert_eq!(got, blob);
+    }
+
+    /// Every layer refusal reachable under the install cap exits 65 through
+    /// `fetch_verified_layer`; only `+zstd` carries a reason. The oversize
+    /// variant needs a decode past 512 MiB here, so it is proven on the
+    /// shared decode point in `decode_layer_blocking_cap_is_data_error`.
+    #[tokio::test]
+    async fn layer_refusals_exit_65_via_fetch_verified_layer() {
+        use crate::cli::exit_code::ExitCode;
+        use crate::error::ErrorReason;
+        use crate::oci::layer::{Compression, TAR_GZIP_LAYER_MEDIA_TYPE, encode_layer};
+
+        let reg = crate::oci::access::memory_registry::MemoryRegistry::new();
+        let tar = skill_tar("code-review", SKILL_DOC);
+        let gz = encode_layer(&tar, Compression::Gzip).0;
+        let other = Algorithm::Sha256.hash(b"other").to_string();
+        let cases = [
+            (
+                "zstd",
+                tar.clone(),
+                ZSTD,
+                None,
+                Some(ErrorReason::UnsupportedLayerMediaType),
+            ),
+            ("corrupt", tar.clone(), TAR_GZIP_LAYER_MEDIA_TYPE, None, None),
+            (
+                "mismatch",
+                gz.clone(),
+                TAR_GZIP_LAYER_MEDIA_TYPE,
+                sha256_annotation(&other),
+                None,
+            ),
+            (
+                "malformed",
+                gz,
+                TAR_GZIP_LAYER_MEDIA_TYPE,
+                sha256_annotation("sha256:abc"),
+                None,
+            ),
+        ];
+        for (name, blob, media_type, annotations, reason) in cases {
+            let artifact = locked_layer(&reg, name, ArtifactKind::Skill, &blob, media_type, annotations).await;
+            let err = fetch_verified_layer(&artifact, ArtifactKind::Skill, &arc(reg.clone()))
+                .await
+                .expect_err(name);
+            assert!(matches!(err, crate::error::Error::Layer(_)), "{name}: {err:?}");
+            let c = crate::error::classify(&anyhow::Error::from(err));
+            assert_eq!((c.exit, c.reason), (ExitCode::DataError, reason), "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn decode_layer_blocking_cap_is_data_error() {
+        use crate::oci::layer::{Compression, decode_layer_blocking, encode_layer};
+        let (blob, desc) = encode_layer(&vec![0u8; 64 * 1024], Compression::Gzip);
+        let err = crate::error::Error::from(decode_layer_blocking(desc, blob, 4096).await.expect_err("past the cap"));
+        assert!(
+            matches!(
+                err,
+                crate::error::Error::Layer(crate::oci::layer::LayerError::DecompressedTooLarge { limit: 4096 })
+            ),
             "{err:?}"
         );
         assert_eq!(exit_of(err), crate::cli::exit_code::ExitCode::DataError);

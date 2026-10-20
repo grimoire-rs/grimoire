@@ -32,7 +32,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::anyhow;
+use anyhow::{Context as _, anyhow};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::Serialize;
@@ -141,7 +141,8 @@ pub struct FetchedArtifact {
     pub payload: FetchedPayload,
     /// The artifact name (the reference's last path segment).
     pub name: String,
-    /// The verified single-layer blob.
+    /// The verified single-layer blob; for a tar kind or a description
+    /// companion, the decoded tar.
     pub blob: Vec<u8>,
     /// The resolved scope kind (project/global; project when scope
     /// resolution degraded) — vendor MCP entries are scope-shaped.
@@ -299,7 +300,8 @@ impl FetchOutcome {
 /// Reference parse failures, resolution/transport faults (their own
 /// taxonomy: offline 81, auth 80, unreachable 69, …), a missing tag or
 /// manifest, a multi-layer manifest, an un-inferable kind, an oversize
-/// layer, or a blob digest mismatch.
+/// layer, or a blob digest mismatch. A tar layer this grim cannot decode or
+/// whose decoded bytes it refuses is [`crate::error::Error::Layer`] (65).
 pub async fn fetch_artifact(
     scope: &FetchScope,
     access: &Arc<dyn OciAccess>,
@@ -350,6 +352,17 @@ pub async fn fetch_artifact(
             manifest.layers.len()
         )
     })?;
+    let tar_layer = match payload {
+        FetchedPayload::Artifact(kind) => crate::oci::layer::is_tar_kind(kind),
+        FetchedPayload::Description => true,
+    };
+    let layer_refused = || format!("cannot read the layer of '{pinned}'");
+    if tar_layer {
+        // Refuse an undecodable (`+zstd`) layer before downloading it.
+        crate::oci::layer::classify(&layer.media_type)
+            .map_err(crate::error::Error::from)
+            .with_context(layer_refused)?;
+    }
 
     // Size gate on the (untrusted) descriptor BEFORE the transfer. The
     // publish-side kind caps always hold; the generic cap is the caller's.
@@ -384,6 +397,18 @@ pub async fn fetch_artifact(
             "layer blob digest mismatch for '{pinned}': expected {layer_digest}, got {actual}"
         ));
     }
+    // The decode cap is the caller's layer cap, so a gzip layer carries no
+    // more content than a raw one and `grim fetch` truncation stays
+    // unreachable. The `?` converts through `Error`, keeping exit 65.
+    let blob = if tar_layer {
+        let limit = cap.unwrap_or(crate::install::installer::INSTALL_LAYER_SIZE_LIMIT);
+        crate::oci::layer::decode_layer_blocking(layer.clone(), blob, limit)
+            .await
+            .map_err(crate::error::Error::from)
+            .with_context(layer_refused)?
+    } else {
+        blob
+    };
 
     Ok(FetchedArtifact {
         identifier: id,
@@ -878,6 +903,10 @@ pub struct DescribeReport {
     /// re-release. Every field `null` when the repository publishes no
     /// companion, or when the companion carries no support keys.
     pub support: crate::oci::description::SupportLinks,
+    /// The single content layer's compression: `"none"`, `"gzip"`, or
+    /// `null` when this grim cannot read the layer (a `+zstd` type, or not
+    /// exactly one layer). Read off the manifest, so it costs no request.
+    pub compression: Option<crate::oci::layer::Compression>,
 }
 
 /// Resolve `reference` and read its manifest-level metadata — kind, curated
@@ -974,6 +1003,7 @@ pub async fn describe_artifact(
         replaced_by: crate::oci::annotations::replacement_ref(a),
         tags,
         annotations: a.clone(),
+        compression: crate::oci::layer::compression_of(&manifest),
     })
 }
 
@@ -1124,6 +1154,32 @@ mod tests {
 
     /// Push `blob` as a single-layer artifact of `kind` at `reference`.
     async fn publish(reg: &MemoryRegistry, reference: &str, kind: &str, blob: &[u8]) {
+        publish_layer(
+            reg,
+            reference,
+            kind,
+            blob,
+            "application/vnd.grimoire.content.v1.tar",
+            None,
+        )
+        .await;
+    }
+
+    /// Push `tar` as the gzip layer a `--compression gzip` release writes.
+    async fn publish_gzip(reg: &MemoryRegistry, reference: &str, kind: &str, tar: &[u8]) {
+        let (blob, desc) = crate::oci::layer::encode_layer(tar, crate::oci::layer::Compression::Gzip);
+        publish_layer(reg, reference, kind, &blob, &desc.media_type, desc.annotations).await;
+    }
+
+    /// Push `blob` behind a layer descriptor with `media_type` and `annotations`.
+    async fn publish_layer(
+        reg: &MemoryRegistry,
+        reference: &str,
+        kind: &str,
+        blob: &[u8],
+        media_type: &str,
+        annotations: Option<BTreeMap<String, String>>,
+    ) {
         use crate::oci::access::OciAccess as _;
         let id = Identifier::parse(reference).unwrap();
         let digest = reg.push_blob(&id, blob).await.unwrap();
@@ -1133,8 +1189,9 @@ mod tests {
             config_media_type: None,
             layers: vec![Descriptor {
                 digest,
-                media_type: "application/vnd.grimoire.content.v1.tar".to_string(),
+                media_type: media_type.to_string(),
                 size: blob.len() as u64,
+                annotations,
             }],
             annotations: std::iter::once((KIND_ANNOTATION.to_string(), kind.to_string())).collect(),
         };
@@ -1192,6 +1249,7 @@ mod tests {
                     digest: crate::oci::Algorithm::Sha256.hash(&self.blob),
                     media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),
                     size: self.declared_size,
+                    annotations: None,
                 }],
                 annotations: std::collections::BTreeMap::new(),
             }))
@@ -1640,6 +1698,7 @@ mod tests {
                 digest,
                 media_type: "application/vnd.grimoire.content.v1.tar".to_string(),
                 size: blob.len() as u64,
+                annotations: None,
             }],
             annotations: annotations
                 .iter()
@@ -1835,5 +1894,161 @@ mod tests {
         };
         let err = entry_content(&binary).expect_err("binary must error");
         assert!(err.to_string().contains("grim_render"));
+    }
+
+    // ── compressed layers ──
+
+    const ZSTD: &str = "application/vnd.oci.image.layer.v1.tar+zstd";
+
+    #[tokio::test]
+    async fn fetch_gzip_skill_matches_the_uncompressed_fetch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = MemoryRegistry::new();
+        let doc = b"---\nname: demo\ndescription: d\n---\n# Demo\n";
+        let tar = tar_of(&[("demo/SKILL.md", doc), ("demo/scripts/run.sh", b"echo hi\n")]);
+        publish(&reg, "test.registry/acme/skills/demo:latest", "skill", &tar).await;
+        publish_gzip(&reg, "test.registry/gzip/skills/demo:latest", "skill", &tar).await;
+        let (scope, access) = scope_and_access(&reg, tmp.path(), tmp.path());
+
+        let fetch = |reference: &'static str| {
+            let (scope, access) = (&scope, &access);
+            async move {
+                fetch_with_limit(scope, access, reference, None, None, FETCH_BLOB_SIZE_LIMIT as usize)
+                    .await
+                    .expect("fetch")
+            }
+        };
+        let raw = fetch("test.registry/acme/skills/demo:latest").await;
+        let gz = fetch("test.registry/gzip/skills/demo:latest").await;
+        assert_eq!(gz.content.as_bytes(), doc);
+        assert!(!gz.truncated);
+        let paths = |r: &FetchReport| r.files.iter().map(|f| (f.path.clone(), f.size)).collect::<Vec<_>>();
+        assert_eq!(paths(&gz), paths(&raw));
+    }
+
+    /// A gzip layer that decodes past the 8 MiB fetch cap is a data error on
+    /// both tar read paths of `grim fetch`, never a truncated payload.
+    #[tokio::test]
+    async fn gzip_layer_decoding_past_the_fetch_cap_is_data_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = MemoryRegistry::new();
+        let big = vec![0u8; FETCH_BLOB_SIZE_LIMIT as usize];
+        let tar = tar_of(&[("demo/SKILL.md", big.as_slice())]);
+        let (blob, desc) = crate::oci::layer::encode_layer(&tar, crate::oci::layer::Compression::Gzip);
+        assert!(blob.len() < 64 * 1024, "stored size stays far under the cap");
+        for (reference, kind) in [
+            ("test.registry/acme/skills/demo:latest", "skill"),
+            ("test.registry/acme/skills/demo:__grimoire", "desc"),
+        ] {
+            publish_layer(&reg, reference, kind, &blob, &desc.media_type, desc.annotations.clone()).await;
+        }
+        let (scope, access) = scope_and_access(&reg, tmp.path(), tmp.path());
+        let reference = "test.registry/acme/skills/demo:latest";
+
+        let fetched = fetch_with_limit(&scope, &access, reference, None, None, FETCH_BLOB_SIZE_LIMIT as usize)
+            .await
+            .expect_err("fetch past the cap");
+        let companion = fetch_description(&scope, &access, reference, None)
+            .await
+            .expect_err("companion past the cap");
+        for err in [fetched, companion] {
+            assert!(
+                matches!(
+                    err.downcast_ref::<crate::error::Error>(),
+                    Some(crate::error::Error::Layer(
+                        crate::oci::layer::LayerError::DecompressedTooLarge { .. }
+                    ))
+                ),
+                "{err:#}"
+            );
+            let c = crate::error::classify(&err);
+            assert_eq!((c.exit, c.reason), (crate::cli::exit_code::ExitCode::DataError, None));
+        }
+    }
+
+    /// Every layer refusal reaches `fetch_artifact`'s anyhow caller as
+    /// `Error::Layer`, so it exits 65 rather than 1; only `+zstd` carries a reason.
+    #[tokio::test]
+    async fn layer_refusals_exit_65_via_fetch_artifact() {
+        use crate::cli::exit_code::ExitCode;
+        use crate::error::ErrorReason;
+        use crate::oci::layer::{Compression, TAR_GZIP_LAYER_MEDIA_TYPE, UNCOMPRESSED_DIGEST_ANNOTATION, encode_layer};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = MemoryRegistry::new();
+        let tar = tar_of(&[("demo/SKILL.md", b"# d\n")]);
+        let gz = encode_layer(&tar, Compression::Gzip).0;
+        let bomb = encode_layer(&vec![0u8; 64 * 1024], Compression::Gzip).0;
+        let claim = |v: &str| {
+            Some(BTreeMap::from([(
+                UNCOMPRESSED_DIGEST_ANNOTATION.to_string(),
+                v.to_string(),
+            )]))
+        };
+        let other = crate::oci::Algorithm::Sha256.hash(b"other").to_string();
+        let cases = [
+            (
+                "zstd",
+                tar.clone(),
+                ZSTD,
+                None,
+                Some(ErrorReason::UnsupportedLayerMediaType),
+            ),
+            ("toolarge", bomb, TAR_GZIP_LAYER_MEDIA_TYPE, None, None),
+            ("corrupt", tar, TAR_GZIP_LAYER_MEDIA_TYPE, None, None),
+            ("mismatch", gz.clone(), TAR_GZIP_LAYER_MEDIA_TYPE, claim(&other), None),
+            ("malformed", gz, TAR_GZIP_LAYER_MEDIA_TYPE, claim("sha256:abc"), None),
+        ];
+        for (name, blob, media_type, annotations, _) in &cases {
+            let reference = format!("test.registry/acme/skills/{name}:latest");
+            publish_layer(&reg, &reference, "skill", blob, media_type, annotations.clone()).await;
+        }
+        let (scope, access) = scope_and_access(&reg, tmp.path(), tmp.path());
+
+        for (name, _, _, _, reason) in cases {
+            let reference = format!("test.registry/acme/skills/{name}:latest");
+            // A 4 KiB cap admits every stored blob but not the 64 KiB decode.
+            let err = fetch_artifact(&scope, &access, &reference, Some(4096))
+                .await
+                .expect_err(name);
+            assert!(
+                matches!(
+                    err.downcast_ref::<crate::error::Error>(),
+                    Some(crate::error::Error::Layer(_))
+                ),
+                "{name}: {err:#}"
+            );
+            let c = crate::error::classify(&err);
+            assert_eq!((c.exit, c.reason), (ExitCode::DataError, reason), "{name}");
+            let shown = format!("{err:#}");
+            assert!(
+                shown.starts_with("cannot read the layer of 'test.registry/"),
+                "{name}: {shown}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn describe_reports_layer_compression() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = MemoryRegistry::new();
+        let tar = tar_of(&[("demo/SKILL.md", b"# d\n")]);
+        publish(&reg, "test.registry/acme/skills/raw:latest", "skill", &tar).await;
+        publish_gzip(&reg, "test.registry/acme/skills/gz:latest", "skill", &tar).await;
+        publish_layer(&reg, "test.registry/acme/skills/zstd:latest", "skill", &tar, ZSTD, None).await;
+        let (scope, access) = scope_and_access(&reg, tmp.path(), tmp.path());
+
+        for (name, expected) in [
+            ("raw", Some(crate::oci::layer::Compression::None)),
+            ("gz", Some(crate::oci::layer::Compression::Gzip)),
+            ("zstd", None),
+        ] {
+            let d = describe_artifact(&scope, &access, &format!("test.registry/acme/skills/{name}:latest"))
+                .await
+                .expect("describe");
+            assert_eq!(d.compression, expected, "{name}");
+            let json = serde_json::to_value(&d).unwrap();
+            assert!(json.get("compression").is_some(), "{name}: always serialised");
+        }
     }
 }

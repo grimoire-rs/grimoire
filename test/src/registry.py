@@ -19,8 +19,10 @@ GitLab-safe output — empty config, NO ``artifactType``, kind via the
 annotation — is asserted by the ``grim release`` / ``grim publish``
 wire-shape tests.
 """
+
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import os
@@ -46,6 +48,16 @@ _LAYER_MEDIA_TYPE = "application/vnd.grimoire.artifact.layer.v1.tar"
 _OCI_EMPTY_CONFIG_MEDIA_TYPE = "application/vnd.oci.empty.v1+json"
 # The registry-agnostic kind fallback annotation key.
 _KIND_ANNOTATION = "com.grimoire.kind"
+
+# Compressed-layer wire contract (adr_compressed_artifact_layers.md): three
+# gzip layer types are read; zstd is refused; the annotation carries the
+# sha256 of the uncompressed tar.
+LAYER_MEDIA_TYPE = _LAYER_MEDIA_TYPE
+GRIMOIRE_GZIP_LAYER_MEDIA_TYPE = "application/vnd.grimoire.artifact.layer.v1.tar+gzip"
+OCI_GZIP_LAYER_MEDIA_TYPE = "application/vnd.oci.image.layer.v1.tar+gzip"
+DOCKER_GZIP_LAYER_MEDIA_TYPE = "application/vnd.docker.image.rootfs.diff.tar.gzip"
+OCI_ZSTD_LAYER_MEDIA_TYPE = "application/vnd.oci.image.layer.v1.tar+zstd"
+UNCOMPRESSED_DIGEST_ANNOTATION = "com.grimoire.uncompressed.digest"
 
 
 def _artifact_type(kind: str) -> str:
@@ -126,6 +138,9 @@ def push_artifact(
     tar_bytes: bytes,
     kind: str,
     annotations: dict[str, str] | None = None,
+    *,
+    layer_media_type: str = _LAYER_MEDIA_TYPE,
+    layer_annotations: dict[str, str] | None = None,
 ) -> PublishedArtifact:
     """Push a single-layer OCI artifact and tag it.
 
@@ -135,7 +150,9 @@ def push_artifact(
     descriptor is the OCI empty type. Any extra ``annotations`` are merged
     in (and may override ``com.grimoire.kind``). Returns the published
     reference incl. the manifest digest, so callers can assert ``@sha256``
-    pins.
+    pins. ``layer_media_type`` / ``layer_annotations`` shape the layer
+    descriptor; the defaults write today's descriptor with no
+    ``annotations`` key, so existing fixtures keep their manifest bytes.
     """
     config_blob = b"{}"
     config_digest = _push_blob(repo, config_blob)
@@ -144,6 +161,14 @@ def push_artifact(
     merged_annotations = {_KIND_ANNOTATION: kind}
     if annotations:
         merged_annotations.update(annotations)
+
+    layer: dict[str, object] = {
+        "mediaType": layer_media_type,
+        "digest": layer_digest,
+        "size": len(tar_bytes),
+    }
+    if layer_annotations is not None:
+        layer["annotations"] = layer_annotations
 
     manifest = {
         "schemaVersion": 2,
@@ -154,13 +179,7 @@ def push_artifact(
             "digest": config_digest,
             "size": len(config_blob),
         },
-        "layers": [
-            {
-                "mediaType": _LAYER_MEDIA_TYPE,
-                "digest": layer_digest,
-                "size": len(tar_bytes),
-            }
-        ],
+        "layers": [layer],
         "annotations": merged_annotations,
     }
     manifest_bytes = json.dumps(manifest).encode()
@@ -170,8 +189,39 @@ def push_artifact(
         manifest_bytes,
         _MANIFEST_MEDIA_TYPE,
     )
-    return PublishedArtifact(
-        repo=repo, tag=tag, digest=manifest_digest, kind=kind
+    return PublishedArtifact(repo=repo, tag=tag, digest=manifest_digest, kind=kind)
+
+
+def push_gzip_artifact(
+    repo: str,
+    tag: str,
+    tar_bytes: bytes,
+    kind: str,
+    *,
+    media_type: str = GRIMOIRE_GZIP_LAYER_MEDIA_TYPE,
+    annotate: bool = True,
+    uncompressed_digest: str | None = None,
+    blob: bytes | None = None,
+) -> PublishedArtifact:
+    """Push ``tar_bytes`` as a gzip-typed layer, the way grim's writer does.
+
+    The blob is ``gzip.compress(tar, mtime=0)`` (single member, no FNAME)
+    unless ``blob`` supplies hand-built bytes for a framing test. The layer
+    carries ``com.grimoire.uncompressed.digest`` = sha256 of ``tar_bytes``,
+    or ``uncompressed_digest`` verbatim to plant a lying or malformed claim;
+    ``annotate=False`` models a third-party gzip layer with no annotation.
+    """
+    layer_annotations = None
+    if annotate:
+        claim = uncompressed_digest or _sha256(tar_bytes)
+        layer_annotations = {UNCOMPRESSED_DIGEST_ANNOTATION: claim}
+    return push_artifact(
+        repo,
+        tag,
+        blob if blob is not None else gzip.compress(tar_bytes, mtime=0),
+        kind,
+        layer_media_type=media_type,
+        layer_annotations=layer_annotations,
     )
 
 

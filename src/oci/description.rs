@@ -181,8 +181,9 @@ pub async fn push_description_companion(
         config_media_type: None,
         layers: vec![Descriptor {
             digest: layer_digest,
-            media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),
+            media_type: crate::oci::layer::TAR_LAYER_MEDIA_TYPE.to_string(),
             size: tar.len() as u64,
+            annotations: None,
         }],
         annotations,
     };
@@ -276,6 +277,7 @@ mod tests {
                 digest: crate::oci::Algorithm::Sha256.hash(b"x"),
                 media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),
                 size: 1,
+                annotations: None,
             }],
             annotations: std::collections::BTreeMap::new(),
         };

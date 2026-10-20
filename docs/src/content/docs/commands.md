@@ -1688,6 +1688,11 @@ is a not-found failure (exit 79); an offline run against an uncached
 reference exits 81 instead, since the reference may exist and only the
 network to confirm it is unreachable.
 
+The 8 MiB limit bounds **decoded content**. A [gzip layer](./artifacts.md#layers)
+is decompressed under the same limit, so a small compressed layer that expands
+past 8 MiB exits 65 and is never truncated. The MCP `grim_fetch` tool and the
+description companion follow the same rule.
+
 ### Description companion (--description) {#fetch-description}
 
 `--description` retargets the reference to the repository's [description
@@ -1758,7 +1763,7 @@ beyond the globals.
 {ref, digest, kind, name, title, description, has_description, summary,
  version, license, repository, revision, created, authors, vendor, url,
  documentation, compatibility, support, keywords, deprecated, replaced_by,
- tags, annotations}
+ tags, annotations, compression}
 ```
 
 `kind` is `null` for a foreign / non-Grimoire manifest (describe never
@@ -1781,8 +1786,13 @@ hidden. The
 curated fields follow [`grim search`](#search) semantics: `repository` is kept only when the source annotation is an
 `https://` URL, `deprecated` is the deprecation notice or `null`, and
 `replaced_by` is the [successor reference](./publishing.md#metadata-replaced-by)
-or `null`. Plain output is a flat key/value table (like
-[`grim context`](#context)) with `keywords` and `tags` comma-joined.
+or `null`. `compression` is `"gzip"` for a [gzip-compressed
+layer](./artifacts.md#layers), `"none"` for any other single layer grim can
+read, and `null` for a layer it cannot read. See the
+[field reference](./json-interface.md#describe-compression). Plain output is a
+flat key/value table (like [`grim context`](#context)) with `keywords` and
+`tags` comma-joined, plus one `compression` row, which shows `-` when
+`compression` is `null`.
 
 ```sh
 grim describe skills/code-review
@@ -2779,7 +2789,13 @@ author (a non-git path then fails, 65), while `--no-git` suppresses every
 derived annotation. The metadata flags (`--license`, `--repository`,
 `--authors`, `--vendor`, `--url`, `--documentation`) fill
 [annotations](./publishing.md#metadata-flags) the artifact file does not
-author. `--push-registry <host[/prefix]>`
+author. `--compression <none|gzip>` (default `none`) packs a skill, rule,
+agent or hook into a gzip layer, and a bundle or MCP server ignores it.
+Consumers need grim 0.15.0 or later to install a gzip layer, and the flag
+prints one stderr line saying so. Re-releasing an existing version with the
+other setting adopts the published manifest when the content is otherwise
+equal. `--force` converts it at the cost of a new digest. See
+[Compressing layers](./publishing.md#compression). `--push-registry <host[/prefix]>`
 pushes to a different endpoint while every baked and reported name — the
 source-annotation fallback, pinned bundle member ids, the report `ref` —
 keeps the reference's registry (the canonical pull name); a malformed
@@ -2832,6 +2848,10 @@ exit 65 at validation, before any push. The manifest's `version_prefix`
 `--cascade` combined with a channel value exits 65. Like every publish, a
 channel value skips-existing by default and needs `--force` to move.
 `--manifest <path>` selects a manifest other than the default `./publish.toml`.
+`--compression <none|gzip>` overrides the manifest's top-level `compression`
+key for the run, and `none` applies when neither is set. It affects skill,
+rule, agent and hook entries only. The same consumer requirement and
+[adopt semantics](./publishing.md#compression) as `grim release` apply.
 `--git` requires [build provenance](./publishing.md#git-provenance) on every
 published entry and discloses the `origin` remote and commit author (a non-git
 path fails, 65); `--no-git` suppresses every derived annotation. The metadata

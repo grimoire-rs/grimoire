@@ -16,6 +16,17 @@ use std::collections::BTreeMap;
 
 use super::Digest;
 
+/// The OCI empty config descriptor media type. Stamped on every pushed
+/// manifest's config descriptor (the blob is the byte-identical `{}` the OCI
+/// spec blesses for artifacts that carry an `artifactType`). The custom
+/// per-kind config type the project used before `adr_oci_empty_config_compat.md`
+/// is off GitLab's referenced-media-type allowlist and made GitLab reject the
+/// manifest (`400 MANIFEST_INVALID`); the empty type is on every registry's
+/// allowlist. The kind rides solely on the `com.grimoire.kind` annotation —
+/// no `artifactType` is written either (GitLab rejects a custom one) — and the
+/// config descriptor never carries it (`adr_oci_empty_config_compat.md`).
+pub const OCI_EMPTY_CONFIG_MEDIA_TYPE: &str = "application/vnd.oci.empty.v1+json";
+
 /// One content descriptor (layer or config) inside a manifest.
 ///
 /// The OCI `size` field is an `i64` on the wire; a negative size is
@@ -29,6 +40,9 @@ pub struct Descriptor {
     pub media_type: String,
     /// The size of the described blob in bytes.
     pub size: u64,
+    /// Descriptor annotations; `None` serialises to no key, keeping default
+    /// manifests byte-identical.
+    pub annotations: Option<BTreeMap<String, String>>,
 }
 
 /// The portion of an OCI image manifest Grimoire consumes.
@@ -121,6 +135,7 @@ fn descriptor_from_oci(d: oci_client::manifest::OciDescriptor) -> Result<Descrip
         digest,
         media_type: d.media_type,
         size: u64::try_from(d.size).unwrap_or(0),
+        annotations: d.annotations,
     })
 }
 
@@ -222,6 +237,19 @@ mod tests {
             oci_client::manifest::OciManifest::Image(image_manifest(vec![oci_descriptor(&digest.to_string(), -7)]));
         let manifest = OciManifest::try_from(oci).expect("converts");
         assert_eq!(manifest.layers[0].size, 0);
+    }
+
+    #[test]
+    fn descriptor_annotations_survive_conversion() {
+        let digest = Algorithm::Sha256.hash(b"x");
+        let mut layer = oci_descriptor(&digest.to_string(), 1);
+        let annotations = BTreeMap::from([("com.grimoire.uncompressed.digest".to_string(), "sha256:00".to_string())]);
+        layer.annotations = Some(annotations.clone());
+        let plain = oci_descriptor(&digest.to_string(), 1);
+        let oci = oci_client::manifest::OciManifest::Image(image_manifest(vec![layer, plain]));
+        let manifest = OciManifest::try_from(oci).expect("converts");
+        assert_eq!(manifest.layers[0].annotations, Some(annotations));
+        assert_eq!(manifest.layers[1].annotations, None);
     }
 
     #[test]
