@@ -41,7 +41,7 @@ sha2 = "0.11"
 hmac = "0.13"
 # OS CSPRNG for that machine-local key. A guessable key defeats the whole
 # point of the token, so a non-cryptographic source is not an option.
-getrandom = "0.3"
+getrandom = "0.4"
 hex = "0.4"
 toml = "1.1"
 # Span-preserving TOML edits for Codex's `config.toml` MCP registration —
