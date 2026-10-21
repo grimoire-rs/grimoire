@@ -181,8 +181,9 @@ pub async fn push_description_companion(
         config_media_type: None,
         layers: vec![Descriptor {
             digest: layer_digest,
-            media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),
+            media_type: crate::oci::layer::TAR_LAYER_MEDIA_TYPE.to_string(),
             size: tar.len() as u64,
+            annotations: None,
         }],
         annotations,
     };
@@ -198,6 +199,22 @@ pub async fn push_description_companion(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn companion_layer_is_always_raw_and_unannotated() {
+        use crate::oci::access::OciAccess as _;
+        use crate::oci::access::memory_registry::MemoryRegistry;
+        let reg = MemoryRegistry::new();
+        let repo = Identifier::parse("test.registry/acme/skills/demo").unwrap();
+        let digest = push_description_companion(&reg, &repo, b"tar bytes", &SupportLinks::default())
+            .await
+            .unwrap();
+        let pinned = crate::oci::PinnedIdentifier::try_from(repo.clone_with_digest(digest)).unwrap();
+        let manifest = reg.fetch_manifest(&pinned).await.unwrap().unwrap();
+        let layer = manifest.single_layer().unwrap();
+        assert_eq!(layer.media_type, crate::oci::layer::TAR_LAYER_MEDIA_TYPE);
+        assert!(layer.annotations.is_none());
+    }
 
     #[test]
     fn internal_tag_covers_reserved_tag_and_family_only() {
@@ -276,6 +293,7 @@ mod tests {
                 digest: crate::oci::Algorithm::Sha256.hash(b"x"),
                 media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),
                 size: 1,
+                annotations: None,
             }],
             annotations: std::collections::BTreeMap::new(),
         };

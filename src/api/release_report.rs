@@ -7,15 +7,18 @@
 //! (Ref | Manifest Digest | Tags | Pushed).
 //!
 //! JSON format: a single object `{ref, manifest_digest, tags, pushed,
-//! pushed_to}` (not an array — `release` concerns exactly one artifact
+//! pushed_to, compression}` (not an array — `release` concerns exactly one artifact
 //! reference). `pushed_to` is always present and `null` unless a
 //! `--push-registry` split was active (`ref` stays the pull name).
+//! `compression` is always present: `"none"` or `"gzip"` for a tar kind,
+//! `null` for bundle and mcp (they ignore `--compression`).
 
 use std::io::{self, Write};
 
 use serde::Serialize;
 
 use crate::cli::printer::{Printable, print_table};
+use crate::oci::layer::Compression;
 
 /// The result of a release (or a `--dry-run` plan).
 #[derive(Debug, Serialize)]
@@ -34,6 +37,11 @@ pub struct ReleaseReport {
     /// split was active; `null` when push == pull (the knob unset).
     /// Additive always-present field — never absent from the JSON.
     pub pushed_to: Option<String>,
+    /// Layer compression of the manifest the tag now points at (`none` or
+    /// `gzip`); `null` for bundle and mcp. Skipped under `--skip-existing`
+    /// reports the requested value, not the existing manifest's.
+    /// Additive always-present field.
+    pub compression: Option<Compression>,
 }
 
 impl ReleaseReport {
@@ -46,7 +54,16 @@ impl ReleaseReport {
             tags,
             pushed,
             pushed_to: None,
+            compression: None,
         }
+    }
+
+    /// Attach the layer compression (consuming builder). Left `None` for
+    /// bundle and mcp.
+    #[must_use]
+    pub fn with_compression(mut self, compression: Compression) -> Self {
+        self.compression = Some(compression);
+        self
     }
 
     /// Attach the push-side reference used under a `--push-registry` split
@@ -102,6 +119,25 @@ mod tests {
         assert!(lines[0].starts_with("Ref"));
         assert!(lines[1].contains("1.2.3,1.2,1,latest"));
         assert!(lines[1].contains("true"));
+    }
+
+    #[test]
+    fn json_compression_is_always_present() {
+        let report = || ReleaseReport::new("x:1".into(), "sha256:a".into(), vec![], true);
+        let json = |r: &ReleaseReport| {
+            let mut buf = Vec::new();
+            r.print_json(&mut buf).unwrap();
+            serde_json::from_slice::<serde_json::Value>(&buf).unwrap()
+        };
+        assert!(json(&report()).get("compression").expect("key present").is_null());
+        assert_eq!(
+            json(&report().with_compression(Compression::Gzip))["compression"],
+            "gzip"
+        );
+        assert_eq!(
+            json(&report().with_compression(Compression::None))["compression"],
+            "none"
+        );
     }
 
     #[test]

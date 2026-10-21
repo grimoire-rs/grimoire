@@ -2328,7 +2328,9 @@ async fn pack_verified_local(
     Ok(layer)
 }
 
-/// Fetch and digest-verify an artifact's single layer blob.
+/// Fetch and digest-verify an artifact's single layer blob, then decode a
+/// tar-kind layer to tar bytes under the same cap
+/// ([`crate::oci::layer::decode_layer`]).
 ///
 /// `artifact.source.pinned()` is the *manifest* digest: resolve the
 /// manifest to its single layer descriptor, fetch that layer blob, and
@@ -2373,6 +2375,11 @@ pub(crate) async fn fetch_verified_layer(
         .into());
     };
     let layer_digest = layer.digest.clone();
+    let tar_layer = crate::oci::layer::is_tar_kind(kind);
+    if tar_layer {
+        // Refuse an undecodable (`+zstd`) layer before downloading it.
+        crate::oci::layer::classify(&layer.media_type)?;
+    }
 
     // Pre-download policy gate on the (untrusted) descriptor size: a
     // hostile multi-GB declared size would otherwise become the memory cap
@@ -2409,7 +2416,10 @@ pub(crate) async fn fetch_verified_layer(
         })
         .into());
     }
-    Ok(blob)
+    if !tar_layer {
+        return Ok(blob);
+    }
+    Ok(crate::oci::layer::decode_layer_blocking(layer.clone(), blob, cap).await?)
 }
 
 /// One client's MCP registration, fully resolved but not yet written.
@@ -3121,6 +3131,7 @@ mod tests {
                 digest: Algorithm::Sha256.hash(blob),
                 media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),
                 size: blob.len() as u64,
+                annotations: None,
             }],
             annotations: std::collections::BTreeMap::new(),
         }
@@ -7532,5 +7543,383 @@ mod tests {
             "{err:?}"
         );
         assert_eq!(exit_of(err), crate::cli::exit_code::ExitCode::DataError);
+    }
+
+    // ── compressed layers ──
+
+    const ZSTD: &str = "application/vnd.oci.image.layer.v1.tar+zstd";
+
+    /// Push `blob` behind a single-layer manifest whose layer descriptor
+    /// carries `media_type` and `annotations`, and pin it.
+    async fn locked_layer(
+        reg: &crate::oci::access::memory_registry::MemoryRegistry,
+        name: &str,
+        kind: ArtifactKind,
+        blob: &[u8],
+        media_type: &str,
+        annotations: Option<std::collections::BTreeMap<String, String>>,
+    ) -> LockedArtifact {
+        let id = Identifier::new_registry(name, "localhost:5000");
+        let digest = reg.push_blob(&id, blob).await.unwrap();
+        let mut manifest = manifest_for(blob);
+        manifest.layers = vec![Descriptor {
+            digest,
+            media_type: media_type.to_string(),
+            size: blob.len() as u64,
+            annotations,
+        }];
+        let mdigest = reg.push_manifest(&id, &manifest).await.unwrap();
+        LockedArtifact::direct(
+            name.to_string(),
+            kind,
+            PinnedIdentifier::try_from(id.clone_with_digest(mdigest)).unwrap(),
+        )
+    }
+
+    fn sha256_annotation(value: &str) -> Option<std::collections::BTreeMap<String, String>> {
+        Some(std::collections::BTreeMap::from([(
+            crate::oci::layer::UNCOMPRESSED_DIGEST_ANNOTATION.to_string(),
+            value.to_string(),
+        )]))
+    }
+
+    #[tokio::test]
+    async fn gzip_registry_skill_stages_the_decoded_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = crate::oci::access::memory_registry::MemoryRegistry::new();
+        let tar = skill_tar("code-review", SKILL_DOC);
+        let (blob, desc) = crate::oci::layer::encode_layer(&tar, crate::oci::layer::Compression::Gzip);
+        let artifact = locked_layer(
+            &reg,
+            "code-review",
+            ArtifactKind::Skill,
+            &blob,
+            &desc.media_type,
+            desc.annotations,
+        )
+        .await;
+
+        let staged = stage_locked_artifact(
+            &artifact,
+            ArtifactKind::Skill,
+            &arc(reg.clone()),
+            Path::new("."),
+            &DefaultMaterializer,
+            tmp.path(),
+        )
+        .await
+        .expect("stage gzip skill");
+        assert_eq!(std::fs::read(staged.canonical.join("SKILL.md")).unwrap(), SKILL_DOC);
+    }
+
+    #[tokio::test]
+    async fn mcp_layer_is_never_decoded() {
+        let reg = crate::oci::access::memory_registry::MemoryRegistry::new();
+        let blob = b"{\"not\": \"decoded\"}".to_vec();
+        // A `+zstd` type would be refused on the tar read path; JSON kinds skip it.
+        let artifact = locked_layer(&reg, "srv", ArtifactKind::Mcp, &blob, ZSTD, None).await;
+        let got = fetch_verified_layer(&artifact, ArtifactKind::Mcp, &arc(reg.clone()))
+            .await
+            .expect("mcp layer read raw");
+        assert_eq!(got, blob);
+    }
+
+    /// Every layer refusal reachable without a huge allocation exits 65 through
+    /// `fetch_verified_layer`; only `+zstd` carries a reason. The oversize
+    /// variant is proven through this path past the 64 MiB floor in
+    /// `gzip_bomb_is_refused_through_fetch_verified_layer`, and on the shared
+    /// decode point in `decode_layer_blocking_cap_is_data_error`.
+    #[tokio::test]
+    async fn layer_refusals_exit_65_via_fetch_verified_layer() {
+        use crate::cli::exit_code::ExitCode;
+        use crate::error::ErrorReason;
+        use crate::oci::layer::{Compression, TAR_GZIP_LAYER_MEDIA_TYPE, encode_layer};
+
+        let reg = crate::oci::access::memory_registry::MemoryRegistry::new();
+        let tar = skill_tar("code-review", SKILL_DOC);
+        let gz = encode_layer(&tar, Compression::Gzip).0;
+        let other = Algorithm::Sha256.hash(b"other").to_string();
+        let cases = [
+            (
+                "zstd",
+                tar.clone(),
+                ZSTD,
+                None,
+                Some(ErrorReason::UnsupportedLayerMediaType),
+            ),
+            ("corrupt", tar.clone(), TAR_GZIP_LAYER_MEDIA_TYPE, None, None),
+            (
+                "mismatch",
+                gz.clone(),
+                TAR_GZIP_LAYER_MEDIA_TYPE,
+                sha256_annotation(&other),
+                None,
+            ),
+            (
+                "malformed",
+                gz,
+                TAR_GZIP_LAYER_MEDIA_TYPE,
+                sha256_annotation("sha256:abc"),
+                None,
+            ),
+        ];
+        for (name, blob, media_type, annotations, reason) in cases {
+            let artifact = locked_layer(&reg, name, ArtifactKind::Skill, &blob, media_type, annotations).await;
+            let err = fetch_verified_layer(&artifact, ArtifactKind::Skill, &arc(reg.clone()))
+                .await
+                .expect_err(name);
+            assert!(matches!(err, crate::error::Error::Layer(_)), "{name}: {err:?}");
+            let c = crate::error::classify(&anyhow::Error::from(err));
+            assert_eq!((c.exit, c.reason), (ExitCode::DataError, reason), "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn decode_layer_blocking_cap_is_data_error() {
+        use crate::oci::layer::{Compression, decode_layer_blocking, encode_layer};
+        let (blob, desc) = encode_layer(&vec![0u8; 64 * 1024], Compression::Gzip);
+        let err = crate::error::Error::from(decode_layer_blocking(desc, blob, 4096).await.expect_err("past the cap"));
+        assert!(
+            matches!(
+                err,
+                crate::error::Error::Layer(crate::oci::layer::LayerError::DecompressedTooLarge { limit: 4096 })
+            ),
+            "{err:?}"
+        );
+        assert_eq!(exit_of(err), crate::cli::exit_code::ExitCode::DataError);
+    }
+
+    /// ~64 KiB of gzip that expands past the 64 MiB floor is refused on the
+    /// install path: the floor, not the 512 MiB install cap, bounds a tiny blob.
+    #[tokio::test]
+    async fn gzip_bomb_is_refused_through_fetch_verified_layer() {
+        use crate::oci::layer::{Compression, LayerError, encode_layer};
+        let reg = crate::oci::access::memory_registry::MemoryRegistry::new();
+        let (blob, desc) = encode_layer(&vec![0u8; 65 * 1024 * 1024], Compression::Gzip);
+        assert!(blob.len() < 100 * 1024, "the bomb is small on the wire: {}", blob.len());
+        let artifact = locked_layer(
+            &reg,
+            "bomb",
+            ArtifactKind::Skill,
+            &blob,
+            &desc.media_type,
+            desc.annotations,
+        )
+        .await;
+        let err = fetch_verified_layer(&artifact, ArtifactKind::Skill, &arc(reg))
+            .await
+            .expect_err("past the floor");
+        assert!(
+            matches!(&err, crate::error::Error::Layer(LayerError::DecompressedTooLarge { limit })
+                if *limit == 64 * 1024 * 1024),
+            "{err:?}"
+        );
+        assert_eq!(exit_of(err), crate::cli::exit_code::ExitCode::DataError);
+    }
+
+    /// Install `rule_v1` raw, then try to update to a v2 layer the reader refuses:
+    /// the files and the record stay as v1 left them.
+    async fn assert_update_to_bad_layer_leaves_install(name: &str, bad_blob: Vec<u8>, media_type: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let blob_v1 = rule_tar("rust-style", b"v1\n");
+        let lock_v1 = lock_of(vec![locked_rule("rust-style", &blob_v1)]);
+        let target = InstallTarget::new(dir.path(), crate::config::scope::ConfigScope::Project, vec![]);
+        let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
+        let roots = roots(dir.path());
+        let first = install_all(
+            &lock_v1,
+            &arc(BlobMock { blob: blob_v1 }),
+            &DefaultMaterializer,
+            &target,
+            &mut state,
+            &roots,
+            Path::new("."),
+            false,
+        )
+        .await;
+        assert_eq!(*first[0].result.as_ref().unwrap(), InstallOutcome::Installed, "{name}");
+        let before = state.get(ArtifactKind::Rule, "rust-style").cloned();
+
+        let reg = crate::oci::access::memory_registry::MemoryRegistry::new();
+        let v2 = locked_layer(&reg, "rust-style", ArtifactKind::Rule, &bad_blob, media_type, None).await;
+        let r = install_all(
+            &lock_of(vec![v2]),
+            &arc(reg),
+            &DefaultMaterializer,
+            &target,
+            &mut state,
+            &roots,
+            Path::new("."),
+            false,
+        )
+        .await;
+        let err = r.into_iter().next().unwrap().result.expect_err(name);
+        assert!(matches!(err, crate::error::Error::Layer(_)), "{name}: {err:?}");
+        assert_eq!(exit_of(err), crate::cli::exit_code::ExitCode::DataError, "{name}");
+        assert_eq!(
+            std::fs::read(dir.path().join(".claude/rules/rust-style.md")).unwrap(),
+            b"v1\n",
+            "{name}"
+        );
+        assert_eq!(state.get(ArtifactKind::Rule, "rust-style").cloned(), before, "{name}");
+    }
+
+    #[tokio::test]
+    async fn update_to_zstd_layer_leaves_the_install_untouched() {
+        assert_update_to_bad_layer_leaves_install("zstd", rule_tar("rust-style", b"v2\n"), ZSTD).await;
+    }
+
+    #[tokio::test]
+    async fn update_to_corrupt_gzip_layer_leaves_the_install_untouched() {
+        assert_update_to_bad_layer_leaves_install(
+            "corrupt gzip",
+            b"not gzip at all".to_vec(),
+            crate::oci::layer::TAR_GZIP_LAYER_MEDIA_TYPE,
+        )
+        .await;
+    }
+
+    /// Install one hook through a registry layer into a fresh home; returns
+    /// the result and the home (kept alive for inspection).
+    async fn install_hook_layer(
+        media_type: &str,
+        blob: &[u8],
+        annotations: Option<std::collections::BTreeMap<String, String>>,
+    ) -> (
+        Result<InstallOutcome, crate::error::Error>,
+        tempfile::TempDir,
+        InstallState,
+    ) {
+        let home = tempfile::tempdir().unwrap();
+        let target = global_hook_target(home.path(), vec![ClientTarget::Claude]);
+        let mut state = InstallState::load(&home.path().join("state.json")).unwrap();
+        let reg = crate::oci::access::memory_registry::MemoryRegistry::new();
+        let artifact = locked_layer(&reg, "shell-guard", ArtifactKind::Hook, blob, media_type, annotations).await;
+        let r = install_all(
+            &lock_of_hooks(vec![artifact]),
+            &arc(reg),
+            &DefaultMaterializer,
+            &target,
+            &mut state,
+            &roots(home.path()),
+            Path::new("."),
+            false,
+        )
+        .await;
+        (r.into_iter().next().unwrap().result, home, state)
+    }
+
+    fn payload_files(home: &Path) -> Vec<(String, Vec<u8>)> {
+        let root = home.join("hooks/shell-guard");
+        let mut files: Vec<_> = walkdir_files(&root)
+            .into_iter()
+            .map(|p| {
+                (
+                    p.strip_prefix(&root).unwrap().to_string_lossy().into_owned(),
+                    std::fs::read(&p).unwrap(),
+                )
+            })
+            .collect();
+        files.sort();
+        files
+    }
+
+    fn walkdir_files(dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                out.extend(walkdir_files(&path));
+            } else {
+                out.push(path);
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn gzip_hook_materializes_the_same_payload_as_raw() {
+        use crate::oci::layer::{Compression, encode_layer};
+        let tar = hook_tar("shell-guard", "#!/bin/sh\nexit 0\n");
+        let (raw_blob, raw) = encode_layer(&tar, Compression::None);
+        let (gz_blob, gz) = encode_layer(&tar, Compression::Gzip);
+        let (raw_result, raw_home, _) = install_hook_layer(&raw.media_type, &raw_blob, raw.annotations).await;
+        let (gz_result, gz_home, _) = install_hook_layer(&gz.media_type, &gz_blob, gz.annotations).await;
+        assert_eq!(raw_result.unwrap(), InstallOutcome::Installed);
+        assert_eq!(gz_result.unwrap(), InstallOutcome::Installed);
+        let raw_files = payload_files(raw_home.path());
+        assert!(!raw_files.is_empty());
+        assert_eq!(payload_files(gz_home.path()), raw_files);
+    }
+
+    #[tokio::test]
+    async fn zstd_hook_layer_is_refused_before_anything_is_armed_or_written() {
+        let tar = hook_tar("shell-guard", "#!/bin/sh\nexit 0\n");
+        let (result, home, state) = install_hook_layer(ZSTD, &tar, None).await;
+        let err = result.expect_err("zstd hook");
+        assert!(matches!(err, crate::error::Error::Layer(_)), "{err:?}");
+        assert_eq!(exit_of(err), crate::cli::exit_code::ExitCode::DataError);
+        assert!(!home.path().join("hooks").exists(), "no payload, table or launcher");
+        assert!(state.get(ArtifactKind::Hook, "shell-guard").is_none());
+    }
+
+    /// Bundle members arrive as ordinary lock entries, so one install pass
+    /// covers raw and gzip members side by side; a corrupt member fails alone
+    /// (`install_all` isolates entries; a bundle adds no cross-member rollback).
+    #[tokio::test]
+    async fn gzip_and_mixed_members_install_and_a_corrupt_member_fails_alone() {
+        use crate::oci::layer::{Compression, TAR_GZIP_LAYER_MEDIA_TYPE, encode_layer};
+        let dir = tempfile::tempdir().unwrap();
+        let reg = crate::oci::access::memory_registry::MemoryRegistry::new();
+        let mut members = Vec::new();
+        for (name, compression) in [("raw-rule", Compression::None), ("gz-rule", Compression::Gzip)] {
+            let (blob, desc) = encode_layer(&rule_tar(name, name.as_bytes()), compression);
+            members.push(
+                locked_layer(
+                    &reg,
+                    name,
+                    ArtifactKind::Rule,
+                    &blob,
+                    &desc.media_type,
+                    desc.annotations,
+                )
+                .await,
+            );
+        }
+        members.push(
+            locked_layer(
+                &reg,
+                "bad-rule",
+                ArtifactKind::Rule,
+                b"not gzip",
+                TAR_GZIP_LAYER_MEDIA_TYPE,
+                None,
+            )
+            .await,
+        );
+        let target = InstallTarget::new(dir.path(), crate::config::scope::ConfigScope::Project, vec![]);
+        let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
+        let r = install_all(
+            &lock_of(members),
+            &arc(reg),
+            &DefaultMaterializer,
+            &target,
+            &mut state,
+            &roots(dir.path()),
+            Path::new("."),
+            false,
+        )
+        .await;
+        let outcome = |name: &str| r.iter().find(|a| a.reference.name == name).unwrap().result.as_ref();
+        assert_eq!(*outcome("raw-rule").unwrap(), InstallOutcome::Installed);
+        assert_eq!(*outcome("gz-rule").unwrap(), InstallOutcome::Installed);
+        assert!(matches!(outcome("bad-rule"), Err(crate::error::Error::Layer(_))));
+        for name in ["raw-rule", "gz-rule"] {
+            assert_eq!(
+                std::fs::read(dir.path().join(format!(".claude/rules/{name}.md"))).unwrap(),
+                name.as_bytes()
+            );
+        }
+        assert!(!dir.path().join(".claude/rules/bad-rule.md").exists());
     }
 }

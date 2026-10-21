@@ -131,6 +131,13 @@ pub struct PublishArgs {
     /// value is a data error (65).
     #[arg(long, value_name = "HOST[/PREFIX]")]
     pub push_registry: Option<String>,
+
+    /// Layer compression for skill, rule, agent and hook entries; ignored for
+    /// bundles and mcp. Overrides publish.toml `compression`; none when
+    /// neither is set. Consumers need a grim that reads gzip layers to
+    /// install a gzip release.
+    #[arg(long, value_enum)]
+    pub compression: Option<crate::oci::layer::Compression>,
 }
 
 /// The `[announce] fork` value: an explicit [`ForkPolicy`] string, or the
@@ -513,6 +520,11 @@ pub struct PublishManifest {
     /// an internal push URL mirrored to the public pull name). Overridden
     /// for a run by `grim publish --push-registry`. Unset: push == pull.
     pub push_registry: Option<String>,
+
+    /// Layer compression for skill, rule, agent and hook entries: `none`
+    /// (default) or `gzip`. Ignored for bundles and mcp. Overridden for a run
+    /// by `grim publish --compression`.
+    pub compression: Option<crate::oci::layer::Compression>,
 
     /// Optional catalog-wide version applied to every entry that omits its
     /// `version` (or sets the literal `${version}`). May carry the
@@ -1190,6 +1202,7 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
             // The already-validated push endpoint: release rewrites its
             // network calls to it while the reference stays pull-named.
             push_registry: push_value.clone(),
+            compression: args.compression.or(manifest.compression).unwrap_or_default(),
         };
 
         match super::release::run(ctx, &release_args).await {
@@ -1231,6 +1244,7 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
                     tags: Vec::new(),
                     status: PublishStatus::Failed,
                     pushed_to: None,
+                    compression: None,
                 };
                 report_entries.push(failed_entry);
                 let code = classify_error(&err);
@@ -2374,6 +2388,7 @@ fn publish_entry_from_release(
         // The push-side reference release actually used (null when the
         // push/pull split is inactive) — report actual results.
         pushed_to: report.pushed_to.clone(),
+        compression: report.compression,
     }
 }
 
@@ -4179,6 +4194,7 @@ mod tests {
             announce: false,
             announce_repo: None,
             push_registry: None,
+            compression: None,
         }
     }
 
@@ -4339,6 +4355,7 @@ mod tests {
             announce: false,
             announce_repo: None,
             push_registry: None,
+            compression: None,
         };
         let err = run(&ctx, &args).await.expect_err("--cascade + channel must error");
         assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
@@ -4390,6 +4407,93 @@ mod tests {
             resolved.is_none(),
             "dry-run must not push anything to registry; tag 0.1.0 found: {resolved:?}"
         );
+    }
+
+    /// The pushed layer media type of `repo:tag` in the in-memory registry.
+    async fn layer_media_type(registry: &crate::oci::access::memory_registry::MemoryRegistry, repo: &str) -> String {
+        use crate::oci::access::OciAccess;
+        let id = crate::oci::Identifier::parse(repo).unwrap();
+        let digest = registry
+            .resolve_digest(&id, crate::oci::access::Operation::Query)
+            .await
+            .unwrap()
+            .expect("tag pushed");
+        let pinned = crate::oci::PinnedIdentifier::try_from(id.clone_with_digest(digest)).unwrap();
+        let manifest = registry
+            .fetch_manifest(&pinned)
+            .await
+            .unwrap()
+            .expect("manifest stored");
+        manifest.layers[0].media_type.clone()
+    }
+
+    /// `compression` resolves flag, then publish.toml, then none, and bundle
+    /// and mcp entries keep their own layer types under gzip.
+    #[tokio::test]
+    async fn run_compression_resolves_flag_then_manifest() {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+        use crate::oci::layer::{Compression, TAR_GZIP_LAYER_MEDIA_TYPE, TAR_LAYER_MEDIA_TYPE};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        make_test_manifest_sources(dir);
+        write(
+            &dir.join("mcp/demo-mcp.toml"),
+            "description = \"Demo.\"\n\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"\nargs = [\"mcp\"]\n",
+        );
+        write(
+            &dir.join("bundles/demo-bundle.toml"),
+            "[skills]\ntest-skill = \"localhost:5000/skills/test-skill:0.1.0\"\n",
+        );
+        let manifest_path = dir.join("publish.toml");
+        std::fs::write(
+            &manifest_path,
+            "registry = \"localhost:5000\"\nversion = \"0.1.0\"\ncompression = \"gzip\"\n\n\
+             [skills.test-skill]\n\n[rules.test-rule]\n\n[mcp.demo-mcp]\n\n[bundles.demo-bundle]\n",
+        )
+        .unwrap();
+
+        let registry = MemoryRegistry::new();
+        let ctx = Context::with_access(dir.to_path_buf(), registry.clone());
+        let (_, exit) = run(
+            &ctx,
+            &make_publish_args(manifest_path.clone(), vec![], None, false, false),
+        )
+        .await
+        .expect("publish under manifest gzip");
+        assert_eq!(exit, ExitCode::Success);
+        for (repo, expected) in [
+            ("localhost:5000/skills/test-skill:0.1.0", TAR_GZIP_LAYER_MEDIA_TYPE),
+            ("localhost:5000/rules/test-rule:0.1.0", TAR_GZIP_LAYER_MEDIA_TYPE),
+            (
+                "localhost:5000/mcp/demo-mcp:0.1.0",
+                crate::oci::mcp::MCP_LAYER_MEDIA_TYPE,
+            ),
+            (
+                "localhost:5000/bundles/demo-bundle:0.1.0",
+                crate::oci::bundle::BUNDLE_LAYER_MEDIA_TYPE,
+            ),
+        ] {
+            assert_eq!(layer_media_type(&registry, repo).await, expected, "{repo}");
+        }
+
+        // `--compression none` beats the manifest's gzip.
+        let registry = MemoryRegistry::new();
+        let ctx = Context::with_access(dir.to_path_buf(), registry.clone());
+        let mut args = make_publish_args(manifest_path, vec!["test-skill".to_string()], None, false, false);
+        args.compression = Some(Compression::None);
+        run(&ctx, &args).await.expect("publish with --compression none");
+        assert_eq!(
+            layer_media_type(&registry, "localhost:5000/skills/test-skill:0.1.0").await,
+            TAR_LAYER_MEDIA_TYPE
+        );
+    }
+
+    #[test]
+    fn manifest_compression_value_is_validated() {
+        let parsed: PublishManifest = toml::from_str("registry = \"r.example\"\ncompression = \"gzip\"\n").unwrap();
+        assert_eq!(parsed.compression, Some(crate::oci::layer::Compression::Gzip));
+        assert!(toml::from_str::<PublishManifest>("registry = \"r.example\"\ncompression = \"zstd\"\n").is_err());
     }
 
     // ── F1: skip-existing after a first real push reports Skipped not DryRun ─

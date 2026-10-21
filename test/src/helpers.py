@@ -10,7 +10,13 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from src.registry import PublishedArtifact, push_artifact
+from src.registry import (
+    GRIMOIRE_GZIP_LAYER_MEDIA_TYPE,
+    LAYER_MEDIA_TYPE,
+    PublishedArtifact,
+    push_artifact,
+    push_gzip_artifact,
+)
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -25,7 +31,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 # ---------------------------------------------------------------------------
 
 
-def _tar_of(files: dict[str, str | bytes]) -> bytes:
+def tar_of(files: dict[str, str | bytes]) -> bytes:
     """Build an uncompressed tar from a ``{path: content}`` mapping.
 
     Paths are written verbatim and entries are emitted in sorted order so
@@ -150,7 +156,7 @@ def make_hook(
         "timeout = 30\n"
         'payload = "stdin"\n'
     )
-    tar_bytes = _tar_of(
+    tar_bytes = tar_of(
         {
             f"{name}/hook.toml": manifest,
             f"{name}/handler.sh": "#!/bin/sh\nexit 0\n",
@@ -171,7 +177,7 @@ def make_description(repo: str, files: dict[str, str | bytes]) -> PublishedArtif
     directly to the registry so the fetch read lane does not depend on
     ``grim publish``.
     """
-    tar_bytes = _tar_of(files)
+    tar_bytes = tar_of(files)
     return push_artifact(repo, "__grimoire", tar_bytes, "desc")
 
 
@@ -181,6 +187,7 @@ def make_artifact(
     files: dict[str, str | bytes],
     tag: str = "latest",
     annotations: dict[str, str] | None = None,
+    layer_media_type: str = LAYER_MEDIA_TYPE,
 ) -> PublishedArtifact:
     """Build and push a single-layer OCI skill/rule artifact.
 
@@ -194,8 +201,37 @@ def make_artifact(
     Returns the published reference incl. the manifest digest so tests can
     assert ``@sha256`` pins and retag for rolling-release scenarios.
     """
-    tar_bytes = _tar_of(files)
-    return push_artifact(repo, tag, tar_bytes, kind, annotations)
+    tar_bytes = tar_of(files)
+    return push_artifact(
+        repo, tag, tar_bytes, kind, annotations, layer_media_type=layer_media_type
+    )
+
+
+def make_gzip_artifact(
+    repo: str,
+    kind: str,
+    files: dict[str, str | bytes],
+    tag: str = "latest",
+    *,
+    media_type: str = GRIMOIRE_GZIP_LAYER_MEDIA_TYPE,
+    annotate: bool = True,
+    uncompressed_digest: str | None = None,
+    blob: bytes | None = None,
+) -> PublishedArtifact:
+    """:func:`make_artifact` with a gzip-compressed layer.
+
+    The options pass through to :func:`src.registry.push_gzip_artifact`.
+    """
+    return push_gzip_artifact(
+        repo,
+        tag,
+        tar_of(files),
+        kind,
+        media_type=media_type,
+        annotate=annotate,
+        uncompressed_digest=uncompressed_digest,
+        blob=blob,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +249,9 @@ VERSIONED_MANIFESTS = (
 
 def inventory_suffix(inventory: list[tuple[str, bool, str]]) -> str:
     """C-002: 12 hex of SHA-256 over the compact JSON array of `[name, exec, sha256]` triples."""
-    blob = json.dumps([list(t) for t in inventory], separators=(",", ":"), ensure_ascii=False).encode()
+    blob = json.dumps(
+        [list(t) for t in inventory], separators=(",", ":"), ensure_ascii=False
+    ).encode()
     return hashlib.sha256(blob).hexdigest()[:12]
 
 
@@ -227,7 +265,9 @@ def tree_suffix(root: Path, base: str) -> str:
         data = path.read_bytes()
         if rel in VERSIONED_MANIFESTS:
             version = json.loads(data)["version"]
-            data = data.replace(f'"version": "{version}"'.encode(), f'"version": "{base}"'.encode())
+            data = data.replace(
+                f'"version": "{version}"'.encode(), f'"version": "{base}"'.encode()
+            )
         exec_bit = sys.platform != "win32" and bool(path.stat().st_mode & 0o111)
         inventory.append((rel, exec_bit, hashlib.sha256(data).hexdigest()))
     inventory.sort(key=lambda entry: entry[0].encode())
@@ -248,14 +288,16 @@ def held_flock(sidecar: Path) -> Iterator[None]:
         sidecar.unlink(missing_ok=True)
 
 
-def make_repos(namespace: str, count: int, description: str = "Generic helper") -> list[str]:
+def make_repos(
+    namespace: str, count: int, description: str = "Generic helper"
+) -> list[str]:
     """Push ``count`` single-skill repos ``<namespace>/pkg-000``… and return
     their repository paths (no registry host), in listing order.
 
     One tar is shared by every repo; each push still uploads its own blobs, as
     a registry scopes blobs per repository. ~4 ms a repo against zot.
     """
-    tar_bytes = _tar_of({"pkg/SKILL.md": "---\nname: pkg\n---\n# P\n"})
+    tar_bytes = tar_of({"pkg/SKILL.md": "---\nname: pkg\n---\n# P\n"})
     annotations = {"org.opencontainers.image.description": description}
     repos = [f"{namespace}/pkg-{i:03d}" for i in range(count)]
     for repo in repos:

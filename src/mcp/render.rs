@@ -224,6 +224,7 @@ mod tests {
                 digest,
                 media_type: "application/vnd.grimoire.content.v1.tar".to_string(),
                 size: blob.len() as u64,
+                annotations: None,
             }],
             annotations: std::iter::once((KIND_ANNOTATION.to_string(), kind.to_string())).collect(),
         };

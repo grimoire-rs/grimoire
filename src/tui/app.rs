@@ -5910,6 +5910,7 @@ mod tests {
                     digest: skill_layer,
                     media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),
                     size: tar_blob.len() as u64,
+                    annotations: None,
                 }],
                 annotations: Default::default(),
             };
@@ -5945,6 +5946,7 @@ mod tests {
                 digest: members_layer,
                 media_type: BUNDLE_LAYER_MEDIA_TYPE.to_string(),
                 size: members_blob.len() as u64,
+                annotations: None,
             }],
             annotations: Default::default(),
         };
@@ -8008,6 +8010,7 @@ mod tests {
                         digest: layer,
                         media_type: layer_type.to_string(),
                         size: blob.len() as u64,
+                        annotations: None,
                     }],
                     annotations: Default::default(),
                 };

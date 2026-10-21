@@ -1804,6 +1804,7 @@ mod tests {
                 digest: blob_digest.clone(),
                 media_type: "application/vnd.grimoire.bundle.v1+json".to_string(),
                 size: blob.len() as u64,
+                annotations: None,
             }],
             annotations: BTreeMap::new(),
         };
@@ -2043,6 +2044,7 @@ mod tests {
                 digest: small_digest,
                 media_type: "application/vnd.grimoire.bundle.v1+json".to_string(),
                 size: BUNDLE_LAYER_SIZE_LIMIT + 1, // descriptor says oversize
+                annotations: None,
             }],
             annotations: BTreeMap::new(),
         };

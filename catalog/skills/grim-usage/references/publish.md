@@ -69,6 +69,25 @@ rewrite history. Pass `--force` only when you deliberately mean to move
 it. Floating tags (`1.2`, `1`, `latest`) move freely on every cascade —
 that is their job.
 
+## Compression
+
+`--compression gzip` on `grim release` or `grim publish` (or a top-level
+`compression` key in `publish.toml`; the flag wins) publishes a skill, rule,
+agent or hook as a gzip layer. Bundles and MCP servers ignore it. Default is
+`none`, byte-identical to earlier releases. Consumers need grim 0.15.0 or
+later; an older grim cannot read a gzip layer and fails with exit 65 on
+`grim fetch` (verified on 0.14.3). Compress **new versions only**:
+re-releasing an existing skill, rule, agent or hook version with the other
+setting adopts the published manifest when content is equal (bundle and MCP
+releases still refuse), and `--force` converts it with a new digest that
+breaks locks pinning the old one. A `--dry-run` preview digest equals a real
+push's digest, except when a real run adopts the existing manifest. A gzip layer grim's own reader would refuse
+(tar over 64 MiB and over 100x its gzip size) is refused at release with exit
+65; use `--compression none`. The `release` and `publish` JSON reports carry
+an always-present `compression` (`none`/`gzip`, `null` for bundle and mcp).
+Confirm flags with
+`grim release --help`; see [Compressing layers][compression].
+
 ## Scripted Publishing
 
 For multi-package repositories, `grim publish` supersedes the manual
@@ -644,6 +663,7 @@ for the layout, ownership rules, JSON report and exit codes.
   GitLab CI.
 
 [publishing]: https://grimoire.rs/publishing.html
+[compression]: https://grimoire.rs/publishing.html#compression
 [package-index]: https://grimoire.rs/package-index.html
 [metadata]: https://grimoire.rs/publishing.html#metadata
 [batch-publish]: https://grimoire.rs/publishing.html#batch-publish

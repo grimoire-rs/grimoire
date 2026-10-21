@@ -420,8 +420,32 @@ annotated references.
 **What to do.** Upgrade every machine and CI job that reads the file before
 you add the keys.
 
+## Compressed layers need grim 0.15.0 {#compressed-layers-need-new-grim}
+
+[`grim release` and `grim publish`][compression] can publish a skill,
+rule, agent or hook as a gzip-compressed layer with `--compression gzip`.
+Nothing changes unless a publisher opts in. Default output is byte-identical,
+and every artifact published without the flag installs on every grim.
+
+**What you will see.** From 0.15.0 grim reads gzip layers everywhere it
+reads a layer, and `grim describe` reports a new
+[`compression`][describe-compression] field. A grim before 0.15.0 cannot read a
+gzip layer, and `grim fetch` fails with exit `65` (verified on 0.14.3).
+
+**What to do.** Upgrade every machine and CI job that installs an artifact
+before its publisher opts in to compression. As a publisher, compress new
+versions only, and never `--force` an existing version, because that changes
+its digest and breaks the locks that pin it. Re-releasing equal content under a
+different manifest digest, for example after a compression flip, adopts the
+existing version from 0.15.0 instead of refusing. That holds for skill, rule, agent and
+hook releases, while bundle and MCP releases still refuse.
+
 ## Smaller notes {#smaller-notes}
 
+- **The `--dry-run` preview digest equals the real push digest from 0.15.0.**
+  Before that, the preview of `grim release` and `grim publish` printed a
+  non-authoritative hash, bundles and MCP servers included. From 0.15.0 it
+  hashes the exact bytes a real push sends.
 - **A live symlink at an install destination now exits 65, not 74.** A
   symlink-to-directory at a destination grim was about to write used to abort
   the whole install with an I/O error, because the footprint hash followed the
@@ -677,6 +701,8 @@ you add the keys.
 [marketplace-table]: ./configuration.md#marketplace-table
 [plugin-metadata]: ./configuration.md#plugin-metadata
 [install]: ./commands.md#install
+[compression]: ./publishing.md#compression
+[describe-compression]: ./json-interface.md#describe-compression
 [update]: ./commands.md#update
 [remove]: ./commands.md#remove
 [tui]: ./commands.md#tui

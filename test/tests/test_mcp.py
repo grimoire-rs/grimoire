@@ -16,7 +16,12 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 
-from src.helpers import make_artifact, make_description, paged_namespace
+from src.helpers import (
+    make_artifact,
+    make_description,
+    make_gzip_artifact,
+    paged_namespace,
+)
 from src.index_fixture import index_config, package, write_all_json
 from src.registry import REGISTRY_HOST
 from src.runner import GrimRunner
@@ -233,6 +238,33 @@ def test_mcp_describe_tool_matches_cli_json(
     cli_payload = runner.json("describe", ref)
     assert mcp_payload == cli_payload, "MCP grim_describe must equal CLI describe --format json"
     assert mcp_payload["replaced_by"] == "ghcr.io/acme/skills/mcp-desc-2"
+
+    # A gzip layer: MCP and CLI agree on `compression: "gzip"`.
+    gz_repo = f"{unique_repo}/skills/mcp-desc-gz"
+    make_gzip_artifact(
+        gz_repo,
+        "skill",
+        {"mcp-desc-gz/SKILL.md": "---\nname: mcp-desc-gz\ndescription: d\n---\n# d\n"},
+    )
+    gz_ref = f"{registry}/{gz_repo}:latest"
+    responses = _drive(
+        runner,
+        project_dir,
+        [
+            _initialize(1),
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "grim_describe", "arguments": {"ref": gz_ref}},
+            },
+        ],
+        offline=False,
+    )
+    gz_mcp = json.loads(responses[2]["result"]["content"][0]["text"])
+    assert gz_mcp["compression"] == "gzip"
+    assert gz_mcp["compression"] == runner.json("describe", gz_ref)["compression"]
 
 
 def test_mcp_fetch_description_and_digest_only_match_cli(
