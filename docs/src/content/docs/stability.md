@@ -37,7 +37,7 @@ surface, which [Unstable](#unstable) lists by name.
 | Bundle source manifest | The [bundle member declaration schema][bundles], under the same widening rule as the manifests above |
 | [MCP descriptor][mcp-descriptor] (`mcp/<name>.toml`) | The published descriptor schema, including which fields an older grim rejects rather than drops |
 | Install state (`state.json`) | Schema V2, governed by the same additive-field policy as JSON reports |
-| OCI wire format | [Artifact kinds][artifacts-kinds], the [release/push mechanics][publishing-release], and the [`com.grimoire.*` manifest annotations][annotations] written onto pushed artifacts |
+| OCI wire format | [Artifact kinds][artifacts-kinds], the [release/push mechanics][publishing-release], the [`com.grimoire.*` manifest annotations][annotations] written onto pushed artifacts, the [layer media types][artifacts-layers] grim reads (the grimoire and OCI tar and `tar+gzip` types, and the docker rootfs gzip type) and writes (the uncompressed tar type and the `tar+gzip` type), the refusal of any `+zstd` type, and the `com.grimoire.uncompressed.digest` layer annotation |
 | [Package index][package-index] transport | The locators a published index serves — HTTP `<base>/all.json`, the optional `<base>/stats.json` [ratings sidecar][stats-sidecar], and the git-transport `index/<host>/<ns>/<pkg>/metadata.json` tree. The sidecar's *presence* is not promised (most indexes publish none, and a `404` is a normal, non-error answer); its **path and document shape** are, under its own monotonic `schema_version` and the consumer rule stated with it |
 | [MCP server][mcp-server] tool surface | Tool names (`grim_search`, `grim_status`, `grim_fetch`, `grim_describe`, `grim_render`) and their argument names — the payloads are covered by the reports row |
 | Published schema URLs | `https://grimoire.rs/schemas/{grimoire-config,grim-publish,grimoire-lock}.schema.json` keep resolving — [`grim init`][init] writes the first into every generated `grimoire.toml` |
@@ -149,6 +149,15 @@ keeps its bytes. The one visible effect: if such an artifact is installed
 and its hash was recorded before the growth, it reads as ordinary drift,
 recoverable the same way any local edit is: `grim install --force` /
 `grim update --force`.
+
+The compressed layer type follows the same rule. The `tar+gzip` layer media
+type and the `com.grimoire.uncompressed.digest` layer annotation join the
+frozen OCI wire format from the release that introduced them. They are
+written only when a publisher opts in with
+[`--compression gzip`][publishing-compression], so default output stays
+byte-identical. grim never rewrites a published layer itself. `--force`
+publishes a new manifest at the tag instead, which changes the version's
+digest.
 
 ## Unstable — may change in any minor {#unstable}
 
@@ -537,6 +546,8 @@ unaffected — they read straight from disk and never touch a manifest.
 [context]: ./commands.md#context
 [exit-codes]: ./json-interface.md#error-document
 [annotations]: ./artifacts.md#annotations
+[artifacts-layers]: ./artifacts.md#layers
+[publishing-compression]: ./publishing.md#compression
 [grimignore]: ./artifacts.md#grimignore
 [bundles]: ./artifacts.md#bundles
 [mcp-descriptor]: ./mcp-servers.md#format

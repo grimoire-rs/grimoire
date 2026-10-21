@@ -843,6 +843,16 @@ them.
 | [Docker Hub][dockerhub] | no | yes |
 | [GitLab Container Registry (SaaS)][gitlab-registry] | no | yes |
 
+**Compressed layers.** An opt-in
+[gzip layer](./publishing.md#compression) uses the custom media type
+`application/vnd.grimoire.artifact.layer.v1.tar+gzip` and a layer annotation.
+A probe on 2026-10-21 pushed it to GHCR and the GitLab Container Registry.
+Both accepted the type and kept the annotation byte for byte. Artifactory has
+not been probed yet, so do not publish compressed layers there until a probe
+confirms it.
+
+Reading a compressed layer needs no registry support.
+
 When an online browse that includes a registry (`oci`) source comes back
 empty, grim prints a hint pointing to this section so you can confirm
 whether the registry supports `_catalog`. An index-only browse set is

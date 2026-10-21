@@ -29,6 +29,7 @@ impl Printable for DescribeCliReport {
         let d = &self.0;
         let opt = |v: &Option<String>| v.clone().unwrap_or_else(|| "-".to_string());
         let list = |v: &[String]| if v.is_empty() { "-".to_string() } else { v.join(",") };
+        let compression = d.compression.map_or_else(|| "-".to_string(), |c| c.to_string());
         let rows: Vec<Vec<String>> = vec![
             vec!["ref".into(), d.reference.clone()],
             vec!["digest".into(), d.digest.clone()],
@@ -37,6 +38,7 @@ impl Printable for DescribeCliReport {
             vec!["title".into(), opt(&d.title)],
             vec!["description".into(), opt(&d.description)],
             vec!["has_description".into(), d.has_description.to_string()],
+            vec!["compression".into(), compression],
             vec!["summary".into(), opt(&d.summary)],
             vec!["version".into(), opt(&d.version)],
             vec!["license".into(), opt(&d.license)],
@@ -102,6 +104,7 @@ mod tests {
             replaced_by: Some("ghcr.io/acme/skills/code-review-2".to_string()),
             tags: vec!["1.2.0".to_string(), "latest".to_string()],
             annotations,
+            compression: Some(crate::oci::layer::Compression::Gzip),
         })
     }
 
@@ -116,6 +119,39 @@ mod tests {
         assert!(out.contains("review,quality"), "keywords comma-joined");
         assert!(out.contains("1.2.0,latest"), "tags comma-joined");
         assert!(out.contains("ghcr.io/acme/skills/code-review-2"));
+        let row = out
+            .lines()
+            .find(|l| l.starts_with("compression"))
+            .expect("compression row");
+        assert_eq!(row.split_whitespace().collect::<Vec<_>>(), ["compression", "gzip"]);
+    }
+
+    #[test]
+    fn compression_is_always_serialised_and_dashed_when_unknown() {
+        let mut r = report();
+        let mut buf = Vec::new();
+        r.print_json(&mut buf).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["compression"], "gzip");
+
+        r.0.compression = Some(crate::oci::layer::Compression::None);
+        let mut buf = Vec::new();
+        r.print_json(&mut buf).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["compression"], "none");
+
+        r.0.compression = None;
+        let mut buf = Vec::new();
+        r.print_json(&mut buf).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert!(v.get("compression").expect("key present").is_null());
+        let mut buf = Vec::new();
+        r.print_plain(&mut buf).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            out.lines()
+                .any(|l| l.split_whitespace().collect::<Vec<_>>() == ["compression", "-"])
+        );
     }
 
     #[test]

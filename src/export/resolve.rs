@@ -599,6 +599,7 @@ mod tests {
                 digest: layer,
                 media_type: media_type.to_string(),
                 size: blob.len() as u64,
+                annotations: None,
             }],
             annotations: BTreeMap::from([(KIND_ANNOTATION.to_string(), kind.to_string())]),
         };

@@ -46,6 +46,9 @@ was refused; retry with a full `grim update`), `modified` (exit 65 — an
 install refused a locally modified artifact; retry with `--force`),
 `untracked-destination` (exit 65 — an install refused to clobber an
 unrecorded pre-existing destination; retry with `--force`),
+`unsupported-layer-media-type` (exit 65 — a skill, rule, agent or hook layer
+has a `+zstd` media type this grim cannot decode; not forceable, not
+retryable, upgrade grim),
 `anchor-escape` (exit 65 — a recorded install path resolved outside its
 anchor root; **never** fixable with `--force`, see [Containment
 Refusals](#containment-refusals)), `no-config`
@@ -109,7 +112,14 @@ Common causes, roughly in order of frequency:
   the `grim-authoring` skill's `references/hook-spec.md`.
 - **Release tag errors.** Reference with no tag; invalid version
   string; exact-version tag already exists at a different digest
-  (re-release with `--force` only if you mean to rewrite it).
+  (re-release with `--force` only if you mean to rewrite it). Equal
+  content under a different digest is not an error for a skill, rule,
+  agent or hook: grim adopts the existing manifest, see [Compressing
+  layers][compression]. Bundle and MCP releases still refuse.
+- **Gzip or zstd layer refusals.** A layer that decodes past its size cap,
+  is not a single clean gzip member, or fails its
+  `com.grimoire.uncompressed.digest` check exits 65. A `+zstd` layer
+  exits 65 with reason `unsupported-layer-media-type`.
 - **Shared-pool opt-in on a non-reader.** `grim config set
   options.vendors.<name>.shared_skills true` for a client that does not
   read the cross-vendor `.agents/skills` pool is refused here (a
@@ -364,3 +374,4 @@ Exit 80 is the registry rejecting your credential. Things to know:
 [auth]: https://grimoire.rs/authentication.html
 [config]: https://grimoire.rs/configuration.html
 [json-interface]: https://grimoire.rs/json-interface.html
+[compression]: https://grimoire.rs/publishing.html#compression

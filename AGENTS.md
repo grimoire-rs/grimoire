@@ -170,7 +170,7 @@ should persist as an AI config update (rules, skills, agents).
 Stabilization freeze on the road to 1.0.0: breaking changes are prohibited — do not propose, implement, or merge one.
 Treat every schema, layout, and renderer change with high caution.
 Schema evolution is additive-only (new fields optional + default; enum literals added, never removed).
-Layout moves ship automatic state migration, an old-path reaper, and an upgrade fixture; renderer changes prove self-heal (re-materialize leaves `status` not-modified). Contract: `docs/src/stability.md`, `adr_render_layout_stability.md`.
+Layout moves ship automatic state migration, an old-path reaper, and an upgrade fixture; renderer changes prove self-heal (re-materialize leaves `status` not-modified). Contract: `docs/src/content/docs/stability.md`, `adr_render_layout_stability.md`.
 
 ## Tech Stack
 

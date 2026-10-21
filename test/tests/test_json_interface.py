@@ -398,9 +398,10 @@ def test_describe_is_single_object_with_all_fields_present(
         "ref", "digest", "kind", "name", "title", "description",
         "has_description", "summary", "version", "license", "repository",
         "revision", "created", "keywords", "deprecated", "replaced_by",
-        "tags", "annotations",
+        "tags", "annotations", "compression",
     ):
         assert key in doc, f"single-object report must always carry {key}"
+    assert doc["compression"] == "none"
     assert doc["revision"] is None and doc["created"] is None
     assert isinstance(doc["has_description"], bool), "companion presence is an always-present bool"
     assert isinstance(doc["keywords"], list)

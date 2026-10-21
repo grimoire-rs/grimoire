@@ -26,6 +26,7 @@ use crate::oci::access::error::{AccessError, AccessErrorKind};
 use crate::oci::digest::error::DigestError;
 use crate::oci::hook::HookError;
 use crate::oci::identifier::error::IdentifierError;
+use crate::oci::layer::LayerError;
 use crate::oci::pinned_identifier::PinnedIdentifierError;
 use crate::oci::release::{ReleaseError, ReleaseErrorKind};
 use crate::resolve::resolve_error::{ResolveError, ResolveErrorKind};
@@ -93,6 +94,10 @@ pub enum Error {
     /// (`crate::oci::hook::unsupported_kind`).
     #[error(transparent)]
     Hook(#[from] HookError),
+
+    /// A layer the tar read path cannot decode, or whose decoded bytes it refuses.
+    #[error(transparent)]
+    Layer(#[from] LayerError),
 }
 
 /// Machine-readable failure `reason` subtype for the JSON error envelope
@@ -130,6 +135,9 @@ pub enum ErrorReason {
     /// (`AnchorError::EscapedAnchor`). NEVER forceable: `--force` does not
     /// bypass containment. The remediation is uninstall + reinstall.
     AnchorEscape,
+    /// A layer's media type names a compression this grim cannot decode
+    /// (any `+zstd` type). Upgrading grim, not `--force`, is the remedy.
+    UnsupportedLayerMediaType,
 }
 
 impl std::fmt::Display for ErrorReason {
@@ -141,6 +149,7 @@ impl std::fmt::Display for ErrorReason {
             Self::NoConfig => "no-config",
             Self::Locked => "locked",
             Self::AnchorEscape => "anchor-escape",
+            Self::UnsupportedLayerMediaType => "unsupported-layer-media-type",
         })
     }
 }
@@ -247,6 +256,17 @@ pub fn classify(err: &anyhow::Error) -> Classification {
                 // seam that does not implement the kind. Both are DataError,
                 // never a panic — see `oci::hook::unsupported_kind`.
                 Error::Hook(_) => Classification::new(ExitCode::DataError),
+                Error::Layer(le) => match le {
+                    LayerError::UnsupportedMediaType(_) => Classification {
+                        exit: ExitCode::DataError,
+                        reason: Some(ErrorReason::UnsupportedLayerMediaType),
+                    },
+                    LayerError::DecompressedTooLarge { .. }
+                    | LayerError::UnreadableAsGzip { .. }
+                    | LayerError::Corrupt(_)
+                    | LayerError::UncompressedDigestMismatch { .. }
+                    | LayerError::MalformedAnnotation(_) => Classification::new(ExitCode::DataError),
+                },
                 Error::Announce(ae) => Classification::new(match ae {
                     AnnounceError::Io(io) => classify_io(io),
                     AnnounceError::Git { .. }
@@ -784,6 +804,10 @@ mod tests {
         assert_eq!(ErrorReason::NoConfig.to_string(), "no-config");
         assert_eq!(ErrorReason::Locked.to_string(), "locked");
         assert_eq!(ErrorReason::AnchorEscape.to_string(), "anchor-escape");
+        assert_eq!(
+            ErrorReason::UnsupportedLayerMediaType.to_string(),
+            "unsupported-layer-media-type"
+        );
     }
 
     #[test]
@@ -801,6 +825,7 @@ mod tests {
         // not a transient condition — retrying the identical command can only
         // fail identically.
         assert!(!ErrorReason::AnchorEscape.retryable());
+        assert!(!ErrorReason::UnsupportedLayerMediaType.retryable());
     }
 
     /// A1: `forceable` is keyed on the reason, and this variant-by-variant
@@ -820,6 +845,7 @@ mod tests {
         // covers both this and the forceable refusals — which is exactly why
         // the client must key on the reason, not the exit code.
         assert!(!ErrorReason::AnchorEscape.forceable());
+        assert!(!ErrorReason::UnsupportedLayerMediaType.forceable());
     }
 
     /// A2: an escaped anchor classifies as bad on-disk state data (65) AND
@@ -1454,14 +1480,16 @@ mod tests {
         (81, "offline-blocked"),
     ];
 
-    /// Every `ErrorReason` slug at 520c6540.
-    const FROZEN_REASON_SLUGS: [&str; 6] = [
+    /// Every `ErrorReason` slug at 520c6540, then each slug added since,
+    /// appended in order.
+    const FROZEN_REASON_SLUGS: [&str; 7] = [
         "stale-lock",
         "modified",
         "untracked-destination",
         "no-config",
         "locked",
         "anchor-escape",
+        "unsupported-layer-media-type",
     ];
 
     #[test]
@@ -1523,6 +1551,7 @@ mod tests {
                 ErrorReason::NoConfig => 3,
                 ErrorReason::Locked => 4,
                 ErrorReason::AnchorEscape => 5,
+                ErrorReason::UnsupportedLayerMediaType => 6,
             }
         }
         let every = [
@@ -1532,6 +1561,7 @@ mod tests {
             ErrorReason::NoConfig,
             ErrorReason::Locked,
             ErrorReason::AnchorEscape,
+            ErrorReason::UnsupportedLayerMediaType,
         ];
         for (i, r) in every.iter().enumerate() {
             assert_eq!(position(*r), i);

@@ -121,6 +121,11 @@ for everyone already on them. Full rules: [Batch publishing][batch-publish].
   bytes from the **same commit** is idempotent and always fine; from a
   *different* commit the provenance differs, so the digest does too and the
   release is refused unless `--force` (or `--no-git`, see below).
+- **Compression is opt-in.** `--compression gzip` (or `publish.toml`
+  `compression`) publishes skills, rules, agents and hooks as a gzip layer;
+  bundles and MCP ignore it. Consumers need grim 0.15.0 or later, so compress
+  new versions only and never `--force` an existing one. See
+  [Compressing layers][compression].
 - **Build provenance is on by default.** `grim build`/`release`/`publish`
   stamp the source commit and its date onto the manifest as OCI annotations.
   Neither value comes from the clock — `created` is the commit's own date, or
@@ -260,6 +265,7 @@ refusal; the full set with reproductions is
 [validate]: https://grimoire.rs/publishing.html#validate-before-you-push
 [dry-run]: https://grimoire.rs/publishing.html#dry-runs-and-overwrites
 [cascade]: https://grimoire.rs/publishing.html#cascade-tags
+[compression]: https://grimoire.rs/publishing.html#compression
 [pin]: https://grimoire.rs/publishing.html#pin
 [publish-val]: https://grimoire.rs/vendor-metadata.html#publish-validation
 [batch-publish]: https://grimoire.rs/publishing.html#batch-publish

@@ -2109,6 +2109,7 @@ mod tests {
                 digest: layer,
                 media_type: media_type.to_string(),
                 size: blob.len() as u64,
+                annotations: None,
             }],
             annotations: ann,
         };
@@ -4122,6 +4123,70 @@ mod tests {
         assert_eq!(staged[1].emitted, "style");
         assert!(matches!(staged[1].content, MemberContent::Unfetched));
         assert_eq!(counting.manifests.load(Ordering::SeqCst), 1);
+    }
+
+    /// A skill staged from a gzip layer is the same tree as from a raw layer.
+    #[tokio::test]
+    async fn staging_a_gzip_skill_matches_the_raw_layer() {
+        use crate::oci::layer::{Compression, encode_layer};
+
+        let mut tar = tar::Builder::new(Vec::new());
+        for (path, body) in [
+            ("demo/SKILL.md", "---\nname: demo\ndescription: d\n---\n# Demo\n"),
+            ("demo/notes.md", "n\n"),
+        ] {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(body.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            tar.append_data(&mut h, path, body.as_bytes()).unwrap();
+        }
+        let tar = tar.into_inner().unwrap();
+
+        let reg = MemoryRegistry::new();
+        let mut members = Vec::new();
+        for (tag, compression) in [("raw", Compression::None), ("gz", Compression::Gzip)] {
+            let (blob, desc) = encode_layer(&tar, compression);
+            let pin = publish(
+                &reg,
+                &format!("{REG}/team/demo:{tag}"),
+                "skill",
+                &blob,
+                &desc.media_type,
+                &[],
+            )
+            .await;
+            members.push((
+                LockedArtifact::direct("demo".to_string(), ArtifactKind::Skill, pin),
+                "demo".to_string(),
+            ));
+        }
+        let access: Arc<dyn OciAccess> = Arc::new(reg);
+        let tmp = tempfile::tempdir().unwrap();
+        let staged = stage_members(
+            &members,
+            &[claude()],
+            &access,
+            tmp.path(),
+            tmp.path(),
+            (&crate::install::SilentProgress, &mut 0, "p"),
+        )
+        .await
+        .unwrap();
+        let tree = |m: &StagedMember<'_>| match &m.content {
+            MemberContent::Tree(t) => {
+                let mut files: Vec<_> = t
+                    .entries
+                    .iter()
+                    .map(|e| (e.clone(), std::fs::read(t.canonical.parent().unwrap().join(e)).unwrap()))
+                    .collect();
+                files.sort();
+                files
+            }
+            _ => panic!("a skill stages as a tree"),
+        };
+        assert_eq!(tree(&staged[0]).len(), 2);
+        assert_eq!(tree(&staged[0]), tree(&staged[1]));
     }
 
     /// C-140: a hook member is never fetched, whichever family is selected.

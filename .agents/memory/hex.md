@@ -45,7 +45,7 @@ preferences, not copies. Team-shared — commit it.
   Contract detail: `docs/src/stability.md`,
   `.agents/adr/adr_render_layout_stability.md`.
 - Discussions: `.agents/discussions/` (hex default) — `/hex-discuss`
-  artifacts; `State: active` there arms the hex-state no-edit rule.
+  artifacts; `State: active` there arms the hex-state no-edit rule. Most recently drained: `compressed-artifact-layers.md` (→ architect, 2026-10-21).
 - Worktrees: agent worktrees at the hex default `.agents/worktrees/`
   (gitignored); human feature worktrees are siblings `../grimoire-wt-<topic>`
   (`AGENTS.md` › "Workflow"). Whoever creates one removes it.
@@ -99,6 +99,11 @@ research-axes:
   before anything else, regardless of tier.
 
 ## Memory
+
+- **Discussion drained (2026-10-21, → architect):**
+  `.agents/discussions/compressed-artifact-layers.md`. It covers opt-in gzip layers (`--compression <none|gzip>`), readers first, and a layer annotation `com.grimoire.uncompressed.digest` for the re-release guard. It was handed off to `/hex-architect` under a `/goal`, then `/hex-execute` and one bounded `/hex-review`, on branch `feat/compressed-layers`. The sibling discussion `.agents/discussions/registry-tag-overwrite.md` stays parked (department tag isolation in Artifactory).
+  **Pitfall:** zsh applies history modifiers to `$VAR:c…`, so write `${VAR}:tag` when building OCI references in shell.
+  **Outcome (2026-10-21):** ADR `.agents/adr/adr_compressed_artifact_layers.md`; executed free-text (no plan artifact), one review round (codex caught two guard Blocks: adoption must stay tar-kinds-only, unreadable layers never compare equal), one fix pass, gate green. Artifactory probe still owed.
 
 - **Active plan (2026-10-18, hex-plan high):**
   `.agents/plans/plan_marketplace_render_deploy.md` — State `review` (executed 2026-10-18: gates green, r2 review 0 Block; next `/hex-finalize`);

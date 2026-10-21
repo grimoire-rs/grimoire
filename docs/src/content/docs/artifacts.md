@@ -126,7 +126,7 @@ A mismatch fails the build with exit code 65 (data error).
 
 A skill is a directory: the `SKILL.md` index plus any supporting files
 (scripts, templates, references). Everything in the tree is packed into a
-single tar layer and installed verbatim, except files excluded by
+single [tar layer](#layers) and installed verbatim, except files excluded by
 [`.grimignore`](#grimignore) — only `SKILL.md` itself is ever re-rendered,
 and only when it carries vendor-namespaced metadata keys.
 
@@ -634,6 +634,49 @@ your own namespace (a typo like `claude.efort`) warns and drops. A key in a
 **foreign** namespace drops silently — that is how one canonical file
 serves several clients
 ([publish-time validation](./vendor-metadata.md#publish-validation)).
+
+## Layer encoding {#layers}
+
+A skill, rule, agent or hook publishes as one layer holding a tar archive.
+The layer is either a plain tar or a gzip-compressed tar. A publisher opts in
+to gzip with [`--compression gzip`](./publishing.md#compression). The default
+stays an uncompressed tar.
+
+grim classifies a layer by its exact media type, with no parameters and no
+content sniffing:
+
+| Layer media type | How grim reads it |
+|------------------|-------------------|
+| `application/vnd.grimoire.artifact.layer.v1.tar+gzip` | gzip tar. The type grim writes. |
+| `application/vnd.oci.image.layer.v1.tar+gzip` | gzip tar |
+| `application/vnd.docker.image.rootfs.diff.tar.gzip` | gzip tar |
+| any type ending `+zstd` | refused with exit `65` and the error reason `unsupported-layer-media-type` |
+| any other type, `…layer.v1.tar` included | raw tar |
+
+An unknown type still reads as a raw tar, because refusing it would break
+artifacts that install today. grim writes only the first type above.
+
+A gzip layer must be a single gzip member with no trailing bytes. Its header
+must carry no extra, name or comment field. Anything else exits `65`.
+The same size limit that applies without compression bounds the decoded
+output. A compressed artifact therefore never carries more content than an
+uncompressed one.
+
+A gzip layer's descriptor carries a `com.grimoire.uncompressed.digest`
+annotation. It holds the `sha256:` digest of the uncompressed tar. grim checks
+it against the decoded bytes on every read. A mismatch or a malformed value
+exits `65`. The annotation is written only on compressed layers.
+
+A gzip layer without the annotation, such as one a third-party tool wrote, is
+decoded without that check. An annotation with an unknown digest algorithm is
+skipped for the same reason.
+
+The decoded size is bounded twice. The caller's own cap applies, and so does
+an expansion-ratio bound of 100 times the stored bytes, with a floor of
+64 MiB. The tighter of the two wins, so a small layer cannot inflate far past
+its stored size. Exceeding either exits `65`.
+
+Bundle and MCP layers are small JSON documents and are never compressed.
 
 ## Catalog annotations {#annotations}
 
