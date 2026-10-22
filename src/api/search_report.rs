@@ -672,6 +672,17 @@ mod tests {
     }
 
     #[test]
+    fn a_summary_holding_a_line_feed_renders_on_one_row() {
+        let mut e = entry("localhost:5000/acme/x", StatusBadge::Installed);
+        e.summary = Some("first line\nsecond line".to_string());
+        let mut buf = Vec::new();
+        SearchReport::new(vec![e], vec![]).print_plain(&mut buf).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert_eq!(out.lines().count(), 2, "header and one row: {out:?}");
+        assert!(out.contains("first line second line"), "{out:?}");
+    }
+
+    #[test]
     fn json_includes_summary_and_full_description() {
         let e = SearchEntry {
             kind: Some("skill".to_string()),
