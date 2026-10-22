@@ -27,6 +27,7 @@ Every report file in `src/api/` follow this structure:
 2. **`new()` constructor** (or named constructors for polymorphic types like `without_tags` / `with_tags`)
 3. **`Printable` impl** with single `print_table` call — no conditional empty-checks, no multiple tables
 4. **Static `&str` headers** in `print_table` — never `format!()` for dynamic headers; add data columns instead
+5. **Cells are screened inside `print_table`** — pass record text raw. It escapes the code points an index strips (C0/C1 controls, DEL, bidi, invisible format, tag characters; a well-formed flag sequence passes) as `\u{hex}` and prints a tab or line feed as one space, since a cell never spans lines
 
 Reference impls: `src/api/install_report.rs` (multi-item, `items`
 envelope), `src/api/release_report.rs` (single-item),

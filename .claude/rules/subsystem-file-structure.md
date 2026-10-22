@@ -869,6 +869,30 @@ detection is empty, so the generic fallback is never persisted).
 Detection reuses the same vendor env overrides documented in the table
 above.
 
+## Catalog Cache {#catalog-cache}
+
+Each browse source (an `oci` or `index` registry entry) caches its listing
+under `$GRIM_HOME/catalog/`, one pair of files per source. `<h16>` is the first
+16 hex characters of the SHA-256 of the source locator, so sources cache
+independently and a refresh of one never clobbers another.
+
+| Path | Owner | Contract |
+|---|---|---|
+| `$GRIM_HOME/catalog/<h16>.json` | `CatalogFile` | Self-keyed by its `registry` field, so a hash collision rebuilds and never mis-serves. Byte shape unchanged by the sidecar. `deny_unknown_fields` is gone from the five cache structs, so a cache a later grim extended is read, not refused |
+| `$GRIM_HOME/catalog/<h16>.sync.json` | SyncState | New, private, versioned, tolerant. Holds the digests, the adopted root's digest and generation, stats digests, `checked_at` and backoff state of the last sync. Stores no URL, locator or userinfo, and its `last_error` is redacted |
+
+The sidecar **binds** to the cache file: it applies only when its `version` is
+the one this grim writes, its `locator_sha256` matches the source and its
+`catalog_sha256` equals the SHA-256 of the `CatalogFile` bytes on disk.
+Anything else ignores it whole and costs one fresh sync, which is how a
+mixed-version `$GRIM_HOME` heals. Both files are written with `atomic_write`
+under the source's advisory lock, the `CatalogFile` first and the sidecar
+second, so a crash between them leaves a digest mismatch and never a half
+state. A quiet refresh (an unchanged root or flat digest) writes the sidecar
+only and never re-serializes the `CatalogFile`. The uncoordinated fallback
+writes the `CatalogFile` alone, which deliberately breaks the binding. Design
+and contract: `.agents/specs/design_catalog_at_scale.md` §5.4 and §6.3.
+
 ## Constraints
 
 - Never assume a path operation crosses filesystems silently — check first.
