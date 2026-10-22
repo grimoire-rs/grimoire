@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "registry": "http://127.0.0.1:<port>",
+  "scope": "",
+  "truncated": false,
+  "built_at": "<built_at>",
+  "entries": {
+    "ghcr.io/acme/agents/delta": {
+      "registry": "ghcr.io",
+      "repository": "acme/agents/delta",
+      "kind": "agent",
+      "description": "Delta agent",
+      "repository_url": "https://github.com/acme/skills",
+      "deprecated": "use alpha",
+      "replaced_by": "ghcr.io/acme/skills/alpha",
+      "fetched_at": "<fetched_at>"
+    },
+    "ghcr.io/acme/skills/alpha": {
+      "registry": "ghcr.io",
+      "repository": "acme/skills/alpha",
+      "kind": "skill",
+      "description": "Alpha skill",
+      "summary": "Reviews code",
+      "keywords": [
+        "review",
+        "lint"
+      ],
+      "repository_url": "https://github.com/acme/skills",
+      "rating": {
+        "up": 12,
+        "target": "D_kwDOAlpha",
+        "url": "https://github.com/acme/index/discussions/7",
+        "provider": "github",
+        "host": "github.com"
+      },
+      "downloads": {
+        "total": 1416,
+        "as_of": "2026-09-10T21:48:47Z",
+        "versions": [
+          {
+            "version": "1.0.10",
+            "total": 116
+          },
+          {
+            "version": "1.0.2",
+            "total": 900
+          },
+          {
+            "version": "1.0.1",
+            "total": 400
+          }
+        ]
+      },
+      "fetched_at": "<fetched_at>"
+    },
+    "ghcr.io/acme/skills/beta": {
+      "registry": "ghcr.io",
+      "repository": "acme/skills/beta",
+      "kind": "skill",
+      "description": "Beta skill",
+      "repository_url": "https://github.com/acme/skills",
+      "downloads": {
+        "total": 5,
+        "as_of": "2026-09-10T21:48:47Z",
+        "versions": [
+          {
+            "version": "1.0.0",
+            "total": 5
+          }
+        ]
+      },
+      "fetched_at": "<fetched_at>"
+    },
+    "registry.example/acme/rules/gamma": {
+      "registry": "registry.example",
+      "repository": "acme/rules/gamma",
+      "kind": "rule",
+      "description": "Gamma rule",
+      "keywords": [
+        "style"
+      ],
+      "repository_url": "https://github.com/acme/skills",
+      "rating": {
+        "up": 3,
+        "target": "D_kwDOGamma",
+        "url": "https://github.com/acme/index/discussions/8",
+        "provider": "github",
+        "host": "github.com"
+      },
+      "fetched_at": "<fetched_at>"
+    }
+  }
+}

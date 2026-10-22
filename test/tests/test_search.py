@@ -677,6 +677,41 @@ def test_search_json_reports_a_healthy_source(
         assert row["source"] == {"alias": None, "locator": locator}
 
 
+def _catalog_files(grim_home: Path) -> list[Path]:
+    """The catalog cache files; a ``*.sync.json`` sidecar beside one is not."""
+    return [
+        p
+        for p in (grim_home / "catalog").glob("*.json")
+        if not p.name.endswith(".sync.json")
+    ]
+
+
+def test_search_offline_ignores_a_sync_sidecar_beside_the_cache(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A sidecar next to a cache never changes what the offline browse serves,
+    even when it is garbage."""
+    make_artifact(
+        f"{unique_repo}/sidecar",
+        "skill",
+        {"sidecar/SKILL.md": "---\nname: sidecar\ndescription: s\n---\n# S\n"},
+        tag="latest",
+    )
+    runner = grim_at(project_dir)
+    locator = f"{REGISTRY_HOST}/{unique_repo}"
+    warm = runner.json("search", "--registry", locator, "--refresh")
+    assert warm["items"]
+    caches = _catalog_files(runner.grim_home)
+    assert caches, "the browse must have written a catalog cache"
+    for cache in caches:
+        cache.with_suffix(".sync.json").write_text("{ not json at all")
+
+    offline = runner.json("search", "--offline", "--registry", locator)
+
+    assert offline["items"] == warm["items"]
+    assert offline["sources"][0]["ok"] is True, offline["sources"]
+
+
 def test_search_json_names_a_source_whose_cache_will_not_parse(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
@@ -701,7 +736,7 @@ def test_search_json_names_a_source_whose_cache_will_not_parse(
 
     # Warm the per-locator cache, then corrupt it.
     assert runner.json("search", "--registry", locator, "--refresh")["items"]
-    cached = list((runner.grim_home / "catalog").glob("*.json"))
+    cached = _catalog_files(runner.grim_home)
     assert cached, "the browse must have written a catalog cache"
     for f in cached:
         f.write_text("{ not json at all")

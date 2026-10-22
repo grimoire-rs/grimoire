@@ -5,6 +5,8 @@
 grim sends ``Accept-Encoding: gzip`` and decodes a gzip ``all.json``. A
 decoded body over 128 MiB degrades the source (``ok: false``) instead of
 exhausting memory; an over-cap ``stats.json`` keeps the previous ratings.
+A refresh asks for the root once and for nothing else in the ``c/`` tree
+beyond the blobs the root names.
 """
 
 from __future__ import annotations
@@ -12,72 +14,77 @@ from __future__ import annotations
 import functools
 import gzip
 import io
-import threading
-from http.server import SimpleHTTPRequestHandler
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from src.index_fixture import (
+    Fault,
+    KindedIndex,
     index_config,
     package,
     search_envelope,
-    serve,
     write_all_json,
     write_stats,
 )
 
 DECODED_CAP = 128 * 1024 * 1024
 ENTRY_LIMIT = 100_000
-
-
-def _gzip_handler(
-    body: bytes,
-) -> tuple[type[SimpleHTTPRequestHandler], list[str | None]]:
-    """A handler serving ``all.json`` as ``body`` with ``Content-Encoding:
-    gzip``, plus the log of ``Accept-Encoding`` values it was asked with."""
-    accept_encodings: list[str | None] = []
-
-    class GzipAllJson(SimpleHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802 — http.server's own casing
-            if not self.path.endswith("all.json"):
-                super().do_GET()
-                return
-            accept_encodings.append(self.headers.get("Accept-Encoding"))
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Encoding", "gzip")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-    return GzipAllJson, accept_encodings
+UNPUBLISHED_TREE = ("/c/p/", "/c/s/", "/c/q/", "/c/root.json.")
 
 
 def test_grim_asks_for_gzip_and_decodes_it(
-    grim_at, project_dir: Path, tmp_path: Path
+    grim_at, project_dir: Path, kind_server: KindedIndex
 ) -> None:
-    root = tmp_path / "index-dist-gzip"
-    root.mkdir()
     write_all_json(
-        root,
+        kind_server.root,
         [
             package("one", "skill", "ghcr.io/acme/skills/one", "First"),
             package("two", "skill", "ghcr.io/acme/skills/two", "Second"),
         ],
     )
-    handler, accept_encodings = _gzip_handler(
-        gzip.compress((root / "all.json").read_bytes())
-    )
-    with serve(root, handler) as base:
-        index_config(project_dir, base)
-        envelope = search_envelope(grim_at(project_dir))
+    kind_server.fault("flat", Fault(gzipped=True))
+    index_config(project_dir, kind_server.base)
+    envelope = search_envelope(grim_at(project_dir))
 
     assert sorted(r["repo"] for r in envelope["items"]) == [
         "ghcr.io/acme/skills/one",
         "ghcr.io/acme/skills/two",
     ], f"a gzip index body must decode; sources: {envelope['sources']}"
-    assert any("gzip" in (v or "") for v in accept_encodings), (
-        f"grim must advertise gzip; saw Accept-Encoding: {accept_encodings}"
+    flat_paths = set(kind_server.document_paths("flat"))
+    accepted = [
+        r.headers.get("accept-encoding")
+        for r in kind_server.log
+        if r.path in flat_paths
+    ]
+    assert any("gzip" in (v or "") for v in accepted), (
+        f"grim must advertise gzip; saw Accept-Encoding: {accepted}"
     )
+
+
+def test_a_refresh_asks_for_the_root_once_and_for_no_other_part_of_the_tree(
+    grim_at, project_dir: Path, kind_server: KindedIndex
+) -> None:
+    write_all_json(
+        kind_server.root,
+        [
+            package("one", "skill", "ghcr.io/acme/skills/one", "First"),
+            package("two", "skill", "ghcr.io/acme/skills/two", "Second"),
+        ],
+    )
+    write_stats(
+        kind_server.root,
+        {"ghcr.io/acme/skills/one": {"rating": {"up": 3, "target": "t", "url": "u"}}},
+    )
+    index_config(project_dir, kind_server.base)
+    runner = grim_at(project_dir)
+
+    for refresh in (1, 2):
+        seen = len(kind_server.log)
+        search_envelope(runner)
+        paths = [urlsplit(r.path).path for r in kind_server.log[seen:]]
+        assert paths.count("/c/root.json") == 1, f"refresh {refresh}: {paths}"
+        strays = [p for p in paths if p.startswith(UNPUBLISHED_TREE)]
+        assert strays == [], f"refresh {refresh}: {strays}"
 
 
 @functools.cache
@@ -96,16 +103,14 @@ def _gzip_bomb(head: bytes = b"[", tail: bytes = b"]") -> bytes:
 
 
 def test_a_gzip_bomb_degrades_the_source(
-    grim_at, project_dir: Path, tmp_path: Path
+    grim_at, project_dir: Path, kind_server: KindedIndex
 ) -> None:
-    root = tmp_path / "index-dist-bomb"
-    root.mkdir()
+    write_all_json(kind_server.root, [])
     bomb = _gzip_bomb()
     assert len(bomb) < 200 * 1024, "the fixture must stay a small download"
-    handler, _ = _gzip_handler(bomb)
-    with serve(root, handler) as base:
-        index_config(project_dir, base)
-        envelope = search_envelope(grim_at(project_dir))
+    kind_server.fault("flat", Fault(body=bomb, headers={"Content-Encoding": "gzip"}))
+    index_config(project_dir, kind_server.base)
+    envelope = search_envelope(grim_at(project_dir))
 
     assert envelope["items"] == []
     source = envelope["sources"][0]
@@ -113,43 +118,33 @@ def test_a_gzip_bomb_degrades_the_source(
 
 
 def test_an_over_cap_stats_sidecar_keeps_the_previous_rating(
-    grim_at, project_dir: Path, tmp_path: Path
+    grim_at, project_dir: Path, kind_server: KindedIndex
 ) -> None:
     """An over-cap ``stats.json`` was not observed, so the warm cache's
     rating carries forward (the same arm a 503 takes) and the build exits 0."""
     ref = "ghcr.io/acme/skills/rated"
-    root = tmp_path / "index-dist-stats-bomb"
-    root.mkdir()
-    write_all_json(root, [package("rated", "skill", ref, "Rated")])
-    write_stats(root, {ref: {"rating": {"up": 12, "target": "t", "url": "u"}}})
+    write_all_json(kind_server.root, [package("rated", "skill", ref, "Rated")])
+    write_stats(
+        kind_server.root, {ref: {"rating": {"up": 12, "target": "t", "url": "u"}}}
+    )
     # A valid sidecar that declares nothing rated: parsed, it would clear the
     # rating, so only the size cap keeps the previous one.
-    bomb = _gzip_bomb(b'{"schema_version": 1, "providers": {"rating": "github"}, "entries": {}', b"}")
-    armed = threading.Event()
+    bomb = _gzip_bomb(
+        b'{"schema_version": 1, "providers": {"rating": "github"}, "entries": {}',
+        b"}",
+    )
+    index_config(project_dir, kind_server.base)
+    runner = grim_at(project_dir)
 
-    class BombStats(SimpleHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802 — http.server's own casing
-            if not (armed.is_set() and self.path.endswith("stats.json")):
-                super().do_GET()
-                return
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Encoding", "gzip")
-            self.send_header("Content-Length", str(len(bomb)))
-            self.end_headers()
-            self.wfile.write(bomb)
+    warm = search_envelope(runner)
+    assert warm["items"][0]["rating"]["up"] == 12, "the warm build must see the rating"
 
-    with serve(root, BombStats) as base:
-        index_config(project_dir, base)
-        runner = grim_at(project_dir)
+    kind_server.fault("stats", Fault(body=bomb, headers={"Content-Encoding": "gzip"}))
+    envelope = search_envelope(runner)
 
-        warm = search_envelope(runner)
-        assert warm["items"][0]["rating"]["up"] == 12, "the warm build must see the rating"
-
-        armed.set()
-        envelope = search_envelope(runner)
-
-    assert envelope["sources"][0]["ok"] is True, f"a sidecar never fails the source; got {envelope['sources']}"
+    assert envelope["sources"][0]["ok"] is True, (
+        f"a sidecar never fails the source; got {envelope['sources']}"
+    )
     assert [r["repo"] for r in envelope["items"]] == [ref]
     assert envelope["items"][0]["rating"]["up"] == 12, (
         f"an over-cap sidecar is unobserved, not empty; got {envelope['items'][0]}"
@@ -157,21 +152,22 @@ def test_an_over_cap_stats_sidecar_keeps_the_previous_rating(
 
 
 def test_an_index_listing_too_many_entries_degrades_the_source(
-    grim_at, project_dir: Path, tmp_path: Path
+    grim_at, project_dir: Path, kind_server: KindedIndex
 ) -> None:
     """The byte cap alone admits millions of tiny entries: the count has its
     own bound, and one past it fails the source instead of truncating."""
-    root = tmp_path / "index-dist-too-many"
-    root.mkdir()
     minimal = [
         {"schema": 1, "name": f"p{i}", "kind": "skill", "ref": f"ghcr.io/acme/s/p{i}"}
         for i in range(ENTRY_LIMIT + 1)
     ]
-    write_all_json(root, minimal)
-    with serve(root, SimpleHTTPRequestHandler) as base:
-        index_config(project_dir, base)
-        envelope = search_envelope(grim_at(project_dir))
+    write_all_json(kind_server.root, minimal)
+    index_config(project_dir, kind_server.base)
+    envelope = search_envelope(grim_at(project_dir))
 
-    assert envelope["items"] == [], "an over-limit index must not be truncated into a listing"
+    assert envelope["items"] == [], (
+        "an over-limit index must not be truncated into a listing"
+    )
     source = envelope["sources"][0]
-    assert source["ok"] is False, f"an over-limit index must fail the source; got {source}"
+    assert source["ok"] is False, (
+        f"an over-limit index must fail the source; got {source}"
+    )

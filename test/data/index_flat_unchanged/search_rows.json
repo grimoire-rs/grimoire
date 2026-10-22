@@ -1,0 +1,97 @@
+[
+  {
+    "kind": "skill",
+    "repo": "ghcr.io/acme/skills/alpha",
+    "source": {
+      "alias": "hub",
+      "locator": "<index>"
+    },
+    "summary": "Reviews code",
+    "description": "Alpha skill",
+    "version": null,
+    "latest_tag": null,
+    "repository": "https://github.com/acme/skills",
+    "revision": null,
+    "created": null,
+    "deprecated": null,
+    "replaced_by": null,
+    "rating": {
+      "up": 12,
+      "url": "https://github.com/acme/index/discussions/7"
+    },
+    "downloads": {
+      "total": 1416,
+      "versions": [
+        {
+          "version": "1.0.10",
+          "total": 116
+        },
+        {
+          "version": "1.0.2",
+          "total": 900
+        },
+        {
+          "version": "1.0.1",
+          "total": 400
+        }
+      ],
+      "as_of": "2026-09-10T21:48:47Z"
+    },
+    "oci": {},
+    "status": "not-installed"
+  },
+  {
+    "kind": "skill",
+    "repo": "ghcr.io/acme/skills/beta",
+    "source": {
+      "alias": "hub",
+      "locator": "<index>"
+    },
+    "summary": null,
+    "description": "Beta skill",
+    "version": null,
+    "latest_tag": null,
+    "repository": "https://github.com/acme/skills",
+    "revision": null,
+    "created": null,
+    "deprecated": null,
+    "replaced_by": null,
+    "rating": null,
+    "downloads": {
+      "total": 5,
+      "versions": [
+        {
+          "version": "1.0.0",
+          "total": 5
+        }
+      ],
+      "as_of": "2026-09-10T21:48:47Z"
+    },
+    "oci": {},
+    "status": "not-installed"
+  },
+  {
+    "kind": "rule",
+    "repo": "registry.example/acme/rules/gamma",
+    "source": {
+      "alias": "hub",
+      "locator": "<index>"
+    },
+    "summary": null,
+    "description": "Gamma rule",
+    "version": null,
+    "latest_tag": null,
+    "repository": "https://github.com/acme/skills",
+    "revision": null,
+    "created": null,
+    "deprecated": null,
+    "replaced_by": null,
+    "rating": {
+      "up": 3,
+      "url": "https://github.com/acme/index/discussions/8"
+    },
+    "downloads": null,
+    "oci": {},
+    "status": "not-installed"
+  }
+]

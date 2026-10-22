@@ -2,11 +2,10 @@
 # Copyright 2026 The Grimoire Authors
 """A flat index behaves exactly as it did before the anchored root.
 
-The legacy ``all.json`` + ``stats.json`` index is a frozen contract. The tests
-that are not skipped pin what a legacy-only index does at the base this work
-started from and must stay green; the skipped ones are the probe contract,
-which adds exactly one ``c/root.json`` GET per refresh and nothing else a user
-can see.
+The legacy ``all.json`` + ``stats.json`` index is a frozen contract. Most of
+these tests pin what a legacy-only index does at the base this work started
+from and must stay green; the probe tests pin the one ``c/root.json`` GET per
+refresh that a root-aware client adds, and nothing else a user can see.
 
 The expected rows in ``data/index_flat_unchanged/search_rows.json`` are the
 ``items`` of ``grim --format json search --refresh`` from the base binary
@@ -16,6 +15,14 @@ normalised value is the loopback index URL (``source.locator``), which carries
 a random port and is rewritten to ``<index>``; no row carries a timestamp of
 its own. Never re-capture from a newer binary: a row that changed is a
 contract change.
+
+``data/index_flat_unchanged/catalog_cache.json`` is the ``CatalogFile`` that
+same ``grim 0.14.3`` wrote to ``$GRIM_HOME/catalog/<h16>.json`` for the same
+tree, after two ``search --refresh`` runs. Only three values are rewritten, as
+text substitutions on the raw bytes so key order and whitespace survive:
+``built_at`` and every ``fetched_at`` become ``<built_at>`` / ``<fetched_at>``,
+and the loopback port becomes ``<port>``. Never re-capture it from a newer
+binary: a byte that changed is a contract change.
 """
 
 from __future__ import annotations
@@ -29,6 +36,7 @@ from pathlib import Path
 import pytest
 
 from src.index_fixture import (
+    Fault,
     IndexHandler,
     index_config,
     package,
@@ -46,32 +54,17 @@ ROOT_PROBE = "/c/root.json"
 LEGACY_REQUESTS = ["/all.json", "/stats.json"]
 INDEX_PLACEHOLDER = "<index>"
 
-# `built_at` and `fetched_at` are the volatile values; only key sets are pinned.
-_ENTRY_BASE = [
-    "description",
-    "fetched_at",
-    "kind",
-    "registry",
-    "repository",
-    "repository_url",
+EXPECTED_CACHE = (
+    Path(__file__).parent.parent
+    / "data"
+    / "index_flat_unchanged"
+    / "catalog_cache.json"
+)
+# Applied to the raw cache bytes; the fixture was normalised with the same two.
+VOLATILE_CACHE_VALUES = [
+    (re.compile(rb'"(built_at|fetched_at)": "[^"]*"'), rb'"\1": "<\1>"'),
+    (re.compile(rb"(127\.0\.0\.1:)\d+"), rb"\1<port>"),
 ]
-EXPECTED_CACHE_SHAPE = {
-    "top": ["built_at", "entries", "registry", "scope", "truncated", "version"],
-    "entries": {
-        "ghcr.io/acme/agents/delta": sorted(
-            [*_ENTRY_BASE, "deprecated", "replaced_by"]
-        ),
-        "ghcr.io/acme/skills/alpha": sorted(
-            [*_ENTRY_BASE, "downloads", "keywords", "rating", "summary"]
-        ),
-        "ghcr.io/acme/skills/beta": sorted([*_ENTRY_BASE, "downloads"]),
-        "registry.example/acme/rules/gamma": sorted(
-            [*_ENTRY_BASE, "keywords", "rating"]
-        ),
-    },
-    "rating": ["host", "provider", "target", "up", "url"],
-    "downloads": ["as_of", "total", "versions"],
-}
 
 
 def _write_legacy_index(root: Path) -> None:
@@ -194,18 +187,18 @@ def _expected_rows() -> list[dict]:
     return json.loads(EXPECTED_ROWS.read_text())
 
 
-def _cache_shape(grim_home: Path) -> dict:
-    caches = list((grim_home / "catalog").glob("*.json"))
+def _normalised_cache(grim_home: Path) -> str:
+    caches = [
+        p
+        for p in (grim_home / "catalog").glob("*.json")
+        if not p.name.endswith(".sync.json")
+    ]
     assert len(caches) == 1, f"one registry, one cache file; got {caches}"
     assert re.fullmatch(r"[0-9a-f]{16}", caches[0].stem), caches[0].name
-    doc = json.loads(caches[0].read_text())
-    alpha = doc["entries"]["ghcr.io/acme/skills/alpha"]
-    return {
-        "top": sorted(doc),
-        "entries": {ref: sorted(entry) for ref, entry in doc["entries"].items()},
-        "rating": sorted(alpha["rating"]),
-        "downloads": sorted(alpha["downloads"]),
-    }
+    raw = caches[0].read_bytes()
+    for pattern, replacement in VOLATILE_CACHE_VALUES:
+        raw = pattern.sub(replacement, raw)
+    return raw.decode()
 
 
 def test_a_flat_index_lists_the_pinned_rows_with_clean_stderr(
@@ -230,22 +223,21 @@ def test_a_flat_index_fetches_all_json_and_stats_json_once_per_refresh(
         )
 
 
-def test_a_flat_index_keeps_the_catalog_cache_key_set(
+def test_a_flat_index_writes_the_catalog_cache_bytes_of_the_base(
     flat_index: FlatIndex, grim_home: Path
 ) -> None:
+    expected = EXPECTED_CACHE.read_bytes().decode()
     for n in (1, 2):
         flat_index.refresh()
-        assert _cache_shape(grim_home) == EXPECTED_CACHE_SHAPE, f"refresh {n}"
+        assert _normalised_cache(grim_home) == expected, f"refresh {n}"
 
 
-@pytest.mark.skip(reason="contract: GC")
 def test_each_refresh_sends_exactly_one_root_probe(flat_index: FlatIndex) -> None:
     for n in (1, 2):
         paths = flat_index.refresh().paths
         assert paths.count(ROOT_PROBE) == 1, f"refresh {n}: saw {paths}"
 
 
-@pytest.mark.skip(reason="contract: GC")
 def test_an_l0_prime_index_gives_the_same_rows_and_clean_stderr(
     flat_index: FlatIndex,
 ) -> None:
@@ -259,3 +251,41 @@ def test_an_l0_prime_index_gives_the_same_rows_and_clean_stderr(
         assert refresh.rows == expected, (
             f"refresh {n}: L0' rows differ from the flat index"
         )
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        pytest.param(Fault(status=404), id="not-found"),
+        pytest.param(Fault(status=403), id="forbidden"),
+        pytest.param(Fault(status=500), id="server-error"),
+        pytest.param(Fault(body=b"<html>welcome</html>"), id="html-page"),
+    ],
+)
+def test_an_unusable_root_probe_leaves_the_flat_refresh_unchanged(
+    flat_index: FlatIndex, fault: Fault
+) -> None:
+    """A root that cannot be used sends the refresh down the legacy path: same
+    rows, nothing on stderr, still one probe and the two legacy files."""
+    flat_index.handler.faults[ROOT_PROBE] = fault
+    expected = _expected_rows()
+    for n in (1, 2):
+        refresh = flat_index.refresh()
+        assert refresh.stderr == "", f"refresh {n}: {refresh.stderr}"
+        assert refresh.rows == expected, f"refresh {n}"
+        assert refresh.paths.count(ROOT_PROBE) == 1, f"refresh {n}: {refresh.paths}"
+        assert refresh.legacy_paths == LEGACY_REQUESTS, f"refresh {n}"
+
+
+def test_a_throttled_root_probe_warns_once_and_the_refresh_still_lists_the_rows(
+    flat_index: FlatIndex,
+) -> None:
+    flat_index.handler.faults[ROOT_PROBE] = Fault(
+        status=429, headers={"Retry-After": "120"}
+    )
+    refresh = flat_index.refresh()
+    lines = [line for line in refresh.stderr.splitlines() if line.strip()]
+    assert len(lines) == 1, refresh.stderr
+    assert "rate limiting" in lines[0], lines[0]
+    assert flat_index.base.removeprefix("http://") in lines[0], lines[0]
+    assert refresh.rows == _expected_rows()
