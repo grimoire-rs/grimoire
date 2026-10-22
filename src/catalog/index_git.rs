@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use crate::catalog::catalog_error::CatalogError;
 use crate::catalog::git_cmd::{GitOpts, GitProfile, git_cmd};
-use crate::catalog::index_source::IndexPackage;
+use crate::catalog::index_package::IndexPackage;
 use crate::catalog::redact::redact_url;
 
 /// Upper bound on one index clone; a stalled transfer is killed rather than
