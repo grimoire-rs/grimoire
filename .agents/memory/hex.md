@@ -127,6 +127,16 @@ research-axes:
   Research: `.agents/research/research_otel_*.md` (8 files).
   **Pitfall:** Claude Code strips `OTEL_*` from hook subprocesses since 2.1.128. Do not justify gates by hook inheritance.
 
+- **Active plan (2026-10-22, hex-plan xhigh, goal loop `.agents/goals/pr-210.md`):**
+  `.agents/plans/plan_catalog_at_scale.md` — State `plan-approved`; next
+  `/hex-execute`. 3 repos: grim #210 (`hex/adr-catalog-at-scale`), indexer
+  P2b (`.agents/worktrees/indexer-p2b`, stacked on `fix/p0-hardening`),
+  vscode P2c (`.agents/worktrees/vscode-p2c`). 2 contract waves (CW-G, CW-I)
+  + 16 pipelines in 5 waves; critical path CW-I → I1 → I2 → I5 → E2 → I6; go/no-go
+  2026-10-28 18:00 UTC. #216 candidate cuts isolated as late single-commit
+  steps. **Pitfall:** one cargo build at a time — every grim pipeline takes
+  the shared `flock` before compiling.
+
 - **Discussion drained (2026-10-21, → architect):**
   `.agents/discussions/compressed-artifact-layers.md`. It covers opt-in gzip layers (`--compression <none|gzip>`), readers first, and a layer annotation `com.grimoire.uncompressed.digest` for the re-release guard. It was handed off to `/hex-architect` under a `/goal`, then `/hex-execute` and one bounded `/hex-review`, on branch `feat/compressed-layers`. The sibling discussion `.agents/discussions/registry-tag-overwrite.md` stays parked (department tag isolation in Artifactory).
   **Pitfall:** zsh applies history modifiers to `$VAR:c…`, so write `${VAR}:tag` when building OCI references in shell.
@@ -141,6 +151,73 @@ research-axes:
   export to a sibling git marketplace repo (default branch; no branches, no
   HTTP); members must be indexed packages (gate); export writes a root README
   with per-harness add commands.
+
+- **Discussion handed off (2026-10-20):** `.agents/discussions/index-structure.md`
+  — `handed-off → architect`. Extends the catalog-at-scale layout to the whole
+  index: one 3-level root (root → plane index → shard) with `catalog`, `stats`
+  and `enrich` planes, a content-addressed blob store replacing `enrich.json`'s
+  base64 files, an incremental indexer (input hash + revalidate window, CI cache
+  first, site fallback), a compact site search file chunked on trigger, and
+  retention of the last 3 generations + 24 h. Outcome: amend the Proposed
+  `adr_catalog_at_scale.md` + design doc in place. Research:
+  `.agents/research/research_{all_json_consumers,static_index_layouts,static_site_search_at_scale}.md`.
+- **ADR amended (2026-10-21):** `.agents/adr/adr_catalog_at_scale.md` (Proposed)
+  + `.agents/specs/design_catalog_at_scale.md` — `/hex-architect` at tier high
+  (dossier fast path), D22–D25 added, requirements IX-R/VX-R/GR-R in design
+  §16–§18, 28 owner Open Questions. Phase 5 panel (spec, quality, security,
+  gap researcher, codex `gpt-6-astra`) found 1 Block + 12 High; all fixed and
+  re-validated. Then 3 `/hex-review` ⇄ `/hex-execute` rounds (spec, quality,
+  security, performance, indexer+extension impact seats; codex as the round-3
+  cross-model seat): 12 → 9 → 7 High, 0 Block throughout, each fixed by an opus
+  fixer from a deduped brief. New P0: an indexer security patch (markdown
+  sanitizer, CSP post-process, logo magic-byte choke point, cache-writer
+  scoping) independent of the layout.
+  **Pitfalls:** a codex usage limit can cut a review mid-run, so schedule the
+  cross-model seat when its quota resets; the dedicated impact seat
+  (real-code walk of sibling repos) found the most implementer-blocking gaps
+  every round.
+- **ADR reset (2026-10-21, owner-directed):** the whole-index amendment had
+  drifted. `c/root.json` now names the flat and stats bytes directly
+  (`flat`/`stats` refs to immutable `c/f/sha256/<hex>.json` blobs); the stats
+  plane, flat-file conditional GET and the skew branch are gone; `sync.legacy`
+  (default true) keeps `/all.json` + `/stats.json`. Site search, site budget,
+  browser cache and the P0 hardening moved to `adr_index_site_at_scale.md`.
+  **Pitfall:** circular "until a reader exists" reasoning kept a dead plane
+  alive for three review rounds — check a deferral's premise, not just its
+  consistency.
+- **KISS cut (2026-10-22, owner):** retention = the previous root's closure
+  (root gains a site-private `search` member); tree sync deferred to the stub
+  `adr_catalog_tree_sync.md` (full design at `a5de87d3`); soft ratchet dropped
+  (`generation` informational); Q19 converter dropped. Applied by sonnet editors
+  plus a dedup trim pass; codex adversary (8 findings, all fixed) and an opus
+  simplicity critic (8 owner proposals, none applied). **Pitfall:** codex quota
+  ran out on the fix re-check — a sonnet consistency reviewer replaced it.
+
+- **ADR drafted (2026-10-17, Proposed):** `.agents/adr/adr_catalog_at_scale.md`
+  + `.agents/specs/design_catalog_at_scale.md`, branch `hex/adr-catalog-at-scale`.
+  `/hex-architect` xhigh from the dossier below; research=1 (security &
+  compliance → `research_catalog_scale_security.md`; the dossier's four
+  artifacts covered the other axes). Partly supersedes
+  `adr_catalog_freshness_revalidation.md` (D4 validator store, D7 git leg;
+  D1/D5/D6 stand). The pre-500 bugfix (`fix/index-scale-pre500`) is recorded
+  as given. The panel caught that the dossier's "no-op rebuild = same
+  `all.json`" and "maxBuffer shipped" were false, and that a 24 h-stale
+  `stats.json` was needed to meet the per-release byte bar.
+  **Adversary:** `codex:rescue` as a background subagent completed this time
+  (~5 min, 6 Blocks, all real; 3 found by no native seat: sidecar
+  second-precision binding, ROOT-skew validator, delta schema change). **Preference hint for
+  `/hex-init`:** add a research axis "static-index sync security
+  (decompression caps, digest trees, freshness attacks)".
+
+- **Discussion handed off (2026-10-17):** `.agents/discussions/index-scale-rollout.md`
+  — `handed-off → architect`. Catalog for indexes with more than 500 entries
+  (design point 20,000 entries, 100,000 ceiling):
+  uncap index sources, negotiated gzip,
+  stall timeouts, stale fallback, two-level hashed Merkle layout discovered by
+  sibling-path probe and served beside frozen `/all.json`, indexer build
+  limits. Pre-500 fixes ship as a bugfix ahead of the ADR. Research:
+  `.agents/research/research_{index_findability_change_rate,internal_catalog_success_at_scale,index_scale_archaeology,catalog_sync_migrations}.md`.
+  Consumed by `/hex-architect` 2026-10-17 (entry above).
 
 - **Landed plan (2026-09-28):** `.agents/plans/plan_hooks_pr98_revival.md`
   — State `done` (L3 `/hex-review` approved 2026-09-28; next `/hex-finalize`;
