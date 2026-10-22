@@ -636,7 +636,7 @@ pub(crate) fn release_default_registry(ctx: &Context) -> anyhow::Result<String> 
     // Best-effort: discover the project scope. On miss (no config in tree),
     // fall back through the global-[[registries]]-aware helper so a user with
     // a [[registries]]-only global config gets the right default.
-    match scope_resolution::resolve(ctx, false, None) {
+    match scope_resolution::resolve_untracked(ctx, false, None, None) {
         Ok(scope) => super::primary_registry_for_scope(ctx, &scope),
         Err(_) => super::primary_registry_global_fallback(ctx),
     }

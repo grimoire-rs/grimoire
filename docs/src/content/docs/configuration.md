@@ -1283,6 +1283,8 @@ applies.
 | `GRIM_HOME` | Root data directory (cache, global config, global install state at `$GRIM_HOME/state/global.json`). Project install state lives at `<workspace>/.grimoire/state.json`, not here. | `~/.grimoire` |
 | `GRIM_DEFAULT_REGISTRY` | Default registry for short references. | unset |
 | `GRIM_OFFLINE` | Disable all network access (same as `--offline`). | `false` |
+| `GRIM_TELEMETRY` | Opt in to anonymous usage telemetry, sent to the OpenTelemetry collector named by `OTEL_EXPORTER_OTLP_ENDPOINT`. Off unless set; disarmed by `OTEL_SDK_DISABLED`, `DO_NOT_TRACK` and offline mode. Unstable until 1.0 — see [Telemetry](./telemetry.md#enable). | unset |
+| `GRIM_TELEMETRY_REPOSITORY` | Add the redacted `origin` remote of the project repository to the telemetry resource (`vcs.*`). Needs `GRIM_TELEMETRY`. Unstable until 1.0 — see [Telemetry](./telemetry.md#enable). | unset |
 | `GRIM_INSECURE_REGISTRIES` | Comma-separated registries reachable over plain HTTP — for a host no `[[registries]]` entry declares. Adds to the [`insecure`](#plain-http-registries) field rather than overriding it. | unset |
 | `GRIM_ANNOUNCE_TOKEN` | Forge API token for [`grim publish --announce`](./package-index.md#announcing) — always wins over CI-provided tokens. Sent as an API header only, never logged. | unset |
 | `GRIM_RATE_TOKEN` | Forge API token for [`grim rate`](./ratings.md) — the first rung of its own credential ladder, separate from and narrower than `GRIM_ANNOUNCE_TOKEN`. Sent as an `Authorization` header only, never logged. | unset |

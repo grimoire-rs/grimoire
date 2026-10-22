@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 import pytest
 
 from src.index_fixture import serve
+from src.otlp_fixture import serve_collector
 from src.runner import GrimRunner
 
 
@@ -46,6 +47,18 @@ def http_index(tmp_path: Path):
     root.mkdir()
     with serve(root, SimpleHTTPRequestHandler) as base:
         yield root, base
+
+
+@pytest.fixture()
+def otlp_collector(request: pytest.FixtureRequest):
+    """A capture OTLP/HTTP logs collector on a loopback port (``src/otlp_fixture.py``).
+
+    Starts in mode ``ok``; set ``otlp_collector.mode`` at any time, or choose
+    it up front with ``@pytest.mark.parametrize("otlp_collector", ["hang"],
+    indirect=True)``. Teardown releases a ``hang`` mode and returns promptly.
+    """
+    with serve_collector(getattr(request, "param", "ok")) as collector:
+        yield collector
 
 
 @pytest.fixture()

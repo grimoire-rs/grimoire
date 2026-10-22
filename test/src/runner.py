@@ -105,6 +105,7 @@ class GrimRunner:
         check: bool = True,
         log_level: str | None = None,
         stdin: str | None = None,
+        timeout: float | None = None,
     ) -> subprocess.CompletedProcess[str]:
         """Run ``grim`` with the given arguments.
 
@@ -116,6 +117,9 @@ class GrimRunner:
         this parameter and still builds its own ``subprocess.run`` call
         (it also injects a per-test ``DOCKER_CONFIG``, which this method
         has no reason to know about).
+
+        ``timeout`` (seconds) is passed to ``subprocess.run``; an overrun
+        raises ``subprocess.TimeoutExpired``.
         """
         if HOST_MANAGED_CLAUDE_CONFIG_DIR and "--global" in args:
             pytest.skip(
@@ -140,6 +144,7 @@ class GrimRunner:
             errors="replace",
             env=self.env,
             cwd=str(self.cwd) if self.cwd else None,
+            timeout=timeout,
         )
         if check and result.returncode != 0:
             raise AssertionError(

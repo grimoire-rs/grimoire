@@ -16,4 +16,10 @@ tmp_path_retention_count = 1
 tmp_path_retention_policy = "failed"
 
 [dependency-groups]
-dev = ["pytest>=8.0", "pytest-xdist>=3.5", "pexpect>=4.9", "rich>=14.0"]
+dev = [
+    "pytest>=8.0",
+    "pytest-xdist>=3.5",
+    "pexpect>=4.9",
+    "rich>=14.0",
+    "opentelemetry-proto>=1.45.1",
+]

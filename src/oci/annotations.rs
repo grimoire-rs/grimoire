@@ -1919,4 +1919,48 @@ mod tests {
         assert_eq!(bd["org.opencontainers.image.revision"], "abc123def456-dirty");
         assert_eq!(bd["org.opencontainers.image.source"], "https://github.com/acme/x");
     }
+
+    /// Every non-`None` remote-normalization vector from `git_provenance.rs`,
+    /// carried through to the `image.source` string: the published annotation
+    /// must not change when other code wraps `normalize_remote_url`.
+    #[test]
+    fn source_annotation_strings_for_normalized_remotes_are_pinned() {
+        let vectors = [
+            ("https://github.com/acme/repo.git", "https://github.com/acme/repo"),
+            ("https://gitlab.com/group/sub/proj", "https://gitlab.com/group/sub/proj"),
+            ("http://example.com/acme/repo.git", "https://example.com/acme/repo"),
+            ("git@github.com:acme/repo.git", "https://github.com/acme/repo"),
+            ("git@gitlab.com:group/sub/proj.git", "https://gitlab.com/group/sub/proj"),
+            ("ssh://git@github.com/acme/repo.git", "https://github.com/acme/repo"),
+            ("https://user:token@github.com/o/r.git", "https://github.com/o/r"),
+            ("https://x-access-token:SECRET@github.com/o/r", "https://github.com/o/r"),
+            (
+                "https://oauth2:glpat-xxx@gitlab.com/group/sub/proj.git",
+                "https://gitlab.com/group/sub/proj",
+            ),
+            ("https://user@token@github.com/o/r", "https://github.com/o/r"),
+            ("https://user:p@ss@github.com/o/r", "https://github.com/o/r"),
+            ("https://:ghp_SECRET@github.com/o/r", "https://github.com/o/r"),
+            ("http://token@host/o/r", "https://host/o/r"),
+            ("ssh://git@host:22/o/r.git", "https://host/o/r"),
+            ("ssh://git@[2001:db8::1]:22/o/r", "https://[2001:db8::1]/o/r"),
+            ("ssh://[2001:db8::1]/o/r", "https://[2001:db8::1]/o/r"),
+        ];
+        for (raw, expected) in vectors {
+            let normalized =
+                crate::oci::git_provenance::normalize_remote_url(raw).unwrap_or_else(|| panic!("{raw} normalizes"));
+            let git = GitProvenance {
+                revision: None,
+                created: "2026-01-01T00:00:00+00:00".to_string(),
+                source_url: Some(normalized),
+                authors: None,
+            };
+            let source = source_annotation(SourceInputs {
+                authored: None,
+                git: Some(&git),
+                fallback: None,
+            });
+            assert_eq!(source.as_deref(), Some(expected), "{raw}");
+        }
+    }
 }

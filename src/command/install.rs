@@ -99,6 +99,8 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
         &scope.options.vendors,
     ))?
     .with_hook_policy(hook_policy);
+    ctx.telemetry()
+        .record_install_clients(&target, &scope.workspace, scope.scope);
     let access = super::access_seam(ctx)?;
     let mut state = super::grim(scope_resolution::load_state(&scope).map_err(|e| state_io(&scope.state_path, e)))?;
     let materializer = DefaultMaterializer;
@@ -130,8 +132,36 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
         .await,
     )?;
 
+    record_changed(ctx, &outcomes, &scope.set);
     let armed = armed_after_convergence(ctx.grim_home(), &scope.workspace, scope.scope);
     finish(outcomes, &armed)
+}
+
+/// Reports each freshly installed or updated artifact to the usage
+/// telemetry; unchanged, skipped, refused and failed rows report nothing.
+fn record_changed(ctx: &Context, outcomes: &[ArtifactInstall], declared: &crate::config::declaration::DesiredSet) {
+    use crate::telemetry::record::{ArtifactAction, ArtifactEvent, declared_identifiers, reference};
+    ctx.telemetry().record_artifacts_with(|| {
+        outcomes
+            .iter()
+            .filter_map(|o| {
+                let action = match o.result {
+                    Ok(InstallOutcome::Installed) => ArtifactAction::Installed,
+                    Ok(InstallOutcome::Updated) => ArtifactAction::Updated,
+                    _ => return None,
+                };
+                Some(ArtifactEvent {
+                    kind: o.reference.kind,
+                    action,
+                    reference: o
+                        .reference
+                        .source
+                        .identifier()
+                        .map(|id| reference(id, declared_identifiers(declared))),
+                })
+            })
+            .collect()
+    });
 }
 
 /// One-off render of a local path source into the clients: validate +
@@ -609,6 +639,55 @@ mod tests {
         }];
         let err = finish(outcomes, &Default::default()).expect_err("refusal must fail the run");
         assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
+    }
+
+    #[test]
+    fn telemetry_records_only_installed_and_updated_rows() {
+        use crate::telemetry::Telemetry;
+        use crate::telemetry::record::ArtifactAction;
+
+        let row = |name: &str, result| ArtifactInstall {
+            reference: aref(name),
+            target: None,
+            result,
+        };
+        let outcomes = vec![
+            row("fresh", Ok(InstallOutcome::Installed)),
+            row("bumped", Ok(InstallOutcome::Updated)),
+            row("same", Ok(InstallOutcome::AlreadyInstalled)),
+            row("skipped", Ok(InstallOutcome::Skipped("declined".into()))),
+            row(
+                "refused",
+                Ok(InstallOutcome::Refused {
+                    recorded: crate::oci::Digest::Sha256("a".repeat(64)),
+                    actual: crate::oci::Digest::Sha256("b".repeat(64)),
+                }),
+            ),
+            row(
+                "failed",
+                Err(crate::error::Error::from(InstallError::without_reference(
+                    InstallErrorKind::BlobMissing,
+                ))),
+            ),
+        ];
+        let telemetry = Telemetry::armed_for_test(std::path::PathBuf::from("/grim-home"));
+        let ctx = Context::hermetic(std::path::PathBuf::from("/grim-home")).with_telemetry(telemetry.clone());
+        let mut declared = crate::config::declaration::DesiredSet::default();
+        declared.rules.insert(
+            "x".into(),
+            crate::config::declaration::DeclaredSource::Registry(Identifier::parse("localhost:5000/x:9").unwrap()),
+        );
+        record_changed(&ctx, &outcomes, &declared);
+
+        let events = telemetry.snapshot().unwrap().artifacts;
+        let seen: Vec<_> = events.iter().map(|e| e.action).collect();
+        assert_eq!(seen, [ArtifactAction::Installed, ArtifactAction::Updated]);
+        // Every row points at the same repository, so the declared tag applies.
+        assert!(
+            events
+                .iter()
+                .all(|e| e.reference.as_deref() == Some("localhost:5000/x:9"))
+        );
     }
 
     #[test]

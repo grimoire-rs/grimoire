@@ -211,6 +211,7 @@ export default defineConfig({
             { slug: 'json-interface', label: 'The JSON Interface' },
             { slug: 'hooks', label: 'Hooks (experimental)' },
             { slug: 'hooks-troubleshooting', label: 'When a hook does not arm' },
+            { slug: 'telemetry', label: 'Telemetry' },
             { slug: 'stability', label: 'Stability and Versioning' },
             { slug: 'upgrading', label: 'Upgrading' },
           ],
