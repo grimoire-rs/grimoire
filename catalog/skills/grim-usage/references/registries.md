@@ -155,8 +155,8 @@ Two transports, chosen by the locator's shape:
 
 | Locator shape | Transport |
 |---|---|
-| `http://…`, `https://…` | Static files — fetches `<base>/all.json` |
-| `git+…`, `ssh://…`, `git@…`, or ending in `.git` | Git — shallow-clones and walks `index/**/metadata.json` |
+| `http://…`, `https://…` | Static files — reads the index root `<base>/c/root.json` and the blob it names, else `<base>/all.json` |
+| `git+…`, `ssh://…`, `git@…`, or ending in `.git` | Git — shallow-clones (hardened, see below) and walks `index/**/metadata.json` |
 
 ```toml
 [[registries]]
@@ -187,14 +187,53 @@ a locator that matches neither transport shape is a data error (exit 65).
 Both transports share the regular catalog cache (`$GRIM_HOME/catalog/`,
 1-hour TTL, `--refresh`, offline degradation) and browse exactly like an
 `oci` entry — search, TUI, and MCP treat index and registry sources
-alike. Neither is capped: an index lists every entry and an `oci` source
-every repository, and a refresh that fails serves the cached listing. The static
-transport decodes a gzip response for the index files only, and bounds the
-decoded size and the entry count so an oversized index fails its fetch
-instead of truncating. Nothing is required of the host. Limits and timeouts:
-[Consuming an Index][package-index-consuming]. `grim publish --announce` is
-the write side: it publishes pointers into an index repository rather than
-reading them — see [references/publish.md](publish.md#announce).
+alike. Neither is windowed to a fixed row count: an index lists every entry
+and an `oci` source every repository. An index is bounded instead, in entry
+count and decoded size, and an oversized one fails its fetch rather than
+truncating. A refresh that fails serves the cached listing. The static
+transport decodes a gzip response for the index data files, and nothing is
+required of the host. Limits and timeouts:
+[Consuming an Index][package-index-consuming].
+`grim publish --announce` is the write side: it publishes pointers into an
+index repository rather than reading them — see
+[references/publish.md](publish.md#announce).
+
+**How a static index refresh works.** Nothing here needs configuring, and the
+exact limits live on the docs page, not in this skill.
+
+- **Root first.** Each refresh asks the index for its root, `c/root.json`, with
+  one small plain request derived from the locator. A locator naming some other
+  `.json` file, or carrying a query or fragment, is never probed. A valid root
+  names the catalog by digest, and a catalog already held is not downloaded
+  again. A `404`, a root with `flat: null`, or any answer that is not a valid
+  root sends grim to `all.json`. Once a root has been adopted, a transport
+  failure fails the refresh and serves the cache instead of trying `all.json`.
+- **Blobs.** When the root names a changed flat blob
+  (`c/f/sha256/<digest>.json.gz`), grim downloads it, inflates it itself and
+  verifies its SHA-256 and size before parsing. A missing or bad blob falls
+  back to `all.json` for that refresh. A host or CDN that already decoded the
+  gzip in transit is fine.
+- **Ratings.** An index with a root advertises a stats blob. grim fetches it
+  once per advertised digest, with no timer. A missing or bad blob leaves the
+  ratings grim has. `--refresh` (and `grim rate` on an unrated row) forces the
+  fetch, and an `all.json`-only index still has `stats.json` fetched on every
+  refresh.
+- **The sync sidecar.** `$GRIM_HOME/catalog/<hash>.sync.json` sits beside each
+  cache file and is private to grim: digests, the adopted root's generation,
+  check time and backoff state, never a URL. If an older grim rewrote the
+  cache, or the file is deleted, the next refresh simply syncs from scratch.
+- **Backoff.** A failed refresh serves the cache and starts a wait that grows
+  with each consecutive failure up to a cap, honouring `Retry-After`. While it
+  runs grim makes no request to that source. `grim search` reports
+  `sources[].ok: false` with an `error` containing
+  `refresh deferred until <timestamp>` plus the redacted last error. `--refresh`
+  bypasses the wait, and `--offline` never makes a request.
+- **The git clone is hardened.** A git index is cloned with `--depth 1
+  --no-local`. Only the `file`, `http`, `https`, `ssh` and `git` protocols are
+  allowed (an `ext::` URL fails), terminal and askpass prompts are off, and a
+  stalled clone is killed at the refresh deadline. A private repository
+  therefore needs an ambient credential helper or ssh agent, and credentials
+  never appear in an error.
 
 ### Plain HTTP {#plain-http}
 
@@ -709,7 +748,11 @@ unavailable: <error>`, naming the source by its locator rather than its alias.
 When cached rows were served it ends with
 `; serving the cached catalog built <built_at>`. A failed refresh does not
 restamp the cache, so the next command retries only once the cache has
-expired or with `--refresh`. A still-fresh cache is served with `ok: true`.
+expired, and an index or registry source that keeps failing is also held back
+by a backoff: until it ends, `grim search` makes no request and reports
+`ok: false` with an `error` that contains `refresh deferred until <timestamp>`
+and the last failure. Pass `--refresh` to retry at once. A still-fresh cache is
+served with `ok: true`.
 
 Two more siblings of `items` are always present. `total` counts every
 matching row (after the browse filter, deprecated visibility, the query and
@@ -881,9 +924,9 @@ Confirm current flags with `grim mcp --help`.
 ## Ratings and Voting {#ratings}
 
 Some indexes publish community ratings — a `stats.json` sidecar served
-beside `all.json`, tallied from upvotes on the index operator's own forge
-threads. There is no Grimoire service holding them; the forge *is* the
-database. When the browsed index publishes them, `grim search --format
+beside `all.json` (or a stats blob the index root advertises), tallied from
+upvotes on the index operator's own forge threads. There is no Grimoire
+service holding them; the forge *is* the database. When the browsed index publishes them, `grim search --format
 json` carries a `rating` object per row (`{up, url}`, or `null` when
 unrated), the TUI detail pane gains a `Rating:` row, and `--sort rating`
 orders the browse by upvotes.
