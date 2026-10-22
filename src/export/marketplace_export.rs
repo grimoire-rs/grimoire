@@ -1168,7 +1168,7 @@ fn commit(
         if !carried {
             return Err(ExportError::EmptyPlugin {
                 plugin: plugin.name.clone(),
-                client: repo.selected.first().map_or(ClientTarget::Claude, |c| c.client),
+                clients: repo.selected.iter().map(|c| c.client).collect(),
             });
         }
     }
@@ -2455,8 +2455,14 @@ mod tests {
             .err()
             .unwrap();
         assert!(
-            matches!(&err, ExportError::EmptyPlugin { plugin, .. } if plugin == "rules"),
+            matches!(&err, ExportError::EmptyPlugin { plugin, clients }
+                if plugin == "rules" && *clients == [ClientTarget::Claude, ClientTarget::Codex]),
             "{err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("'claude', 'codex' plugin formats"),
+            "every client is named: {msg}"
         );
         assert!(!root.join(".claude-plugin").exists() && !root.join("claude").exists());
     }

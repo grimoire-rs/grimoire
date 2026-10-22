@@ -79,9 +79,9 @@ pub enum ExportError {
     )]
     RenameStaleReference { plugin: String, hits: Vec<String> },
 
-    /// Every member of the plugin was omitted for this client (65).
-    #[error("plugin '{plugin}' has no member the '{client}' plugin format can carry")]
-    EmptyPlugin { plugin: String, client: ClientTarget },
+    /// Every member of the plugin was omitted for each of these clients (65).
+    #[error("plugin '{plugin}' has no member {}", carry_phrase(clients))]
+    EmptyPlugin { plugin: String, clients: Vec<ClientTarget> },
 
     /// A staged path or zip entry name would escape the plugin root (65).
     #[error("unsafe entry path '{}' in plugin output", path.display())]
@@ -134,6 +134,15 @@ pub enum ExportError {
         #[source]
         source: io::Error,
     },
+}
+
+/// `the 'x' plugin format can carry`, or the plural naming every client.
+fn carry_phrase(clients: &[ClientTarget]) -> String {
+    let names: Vec<String> = clients.iter().map(|c| format!("'{c}'")).collect();
+    match names.as_slice() {
+        [one] => format!("the {one} plugin format can carry"),
+        _ => format!("the {} plugin formats can carry", names.join(", ")),
+    }
 }
 
 /// The first [`STALE_HITS_SHOWN`] hits, one per line, then a count of the

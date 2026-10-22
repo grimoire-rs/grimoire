@@ -1370,7 +1370,7 @@ mod tests {
             (
                 ExportError::EmptyPlugin {
                     plugin: s("p"),
-                    client: ClientTarget::Claude,
+                    clients: vec![ClientTarget::Claude],
                 },
                 ExitCode::DataError,
                 None,
