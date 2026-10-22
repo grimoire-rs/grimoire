@@ -72,7 +72,7 @@ use crate::command::status::StatusArgs;
 use crate::command::tui::TuiArgs;
 use crate::command::uninstall::UninstallArgs;
 use crate::command::update::UpdateArgs;
-use crate::error::{ErrorReason, classify};
+use crate::error::ErrorReason;
 
 #[derive(Parser)]
 #[command(
@@ -197,8 +197,10 @@ fn main() -> std::process::ExitCode {
         }
     };
 
-    match runtime.block_on(app::run(cli)) {
-        Ok(code) => code.into(),
+    let outcome = runtime.block_on(app::run(cli));
+    let exit = crate::error::outcome_exit(&outcome);
+    match outcome {
+        Ok(_) => exit.exit.into(),
         Err(err) => {
             // grim's own stdout was closed by the downstream reader
             // (`grim … | head`): exit 0 silently. Every write below would
@@ -206,7 +208,7 @@ fn main() -> std::process::ExitCode {
             // this is the `| head` contract (ripgrep/cargo convention), not a
             // failure worth a code or a diagnostic.
             if crate::error::is_stdout_pipe_closed(&err) {
-                return ExitCode::Success.into();
+                return exit.exit.into();
             }
             // Full chain via the alternate format, printed exactly once on
             // stderr (a `tracing::error!` here would duplicate the line —
@@ -221,9 +223,8 @@ fn main() -> std::process::ExitCode {
             if let Some(hint) = &hint {
                 let _ = writeln!(io::stderr(), "{hint}");
             }
-            let classification = classify(&err);
-            emit_error_document(format, classification.exit, &chain, classification.reason, hint);
-            classification.exit.into()
+            emit_error_document(format, exit.exit, &chain, exit.reason, hint);
+            exit.exit.into()
         }
     }
 }

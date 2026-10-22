@@ -329,6 +329,17 @@ pub fn is_stdout_pipe_closed(err: &anyhow::Error) -> bool {
     err.chain().any(|c| c.downcast_ref::<StdoutPipeClosed>().is_some())
 }
 
+/// The process exit of a finished command: `Ok` keeps its code, a closed
+/// stdout pipe is a silent [`ExitCode::Success`], anything else is
+/// [`classify`]d. The one mapping both `main.rs` and the telemetry report.
+pub fn outcome_exit(outcome: &anyhow::Result<ExitCode>) -> Classification {
+    match outcome {
+        Ok(code) => Classification::new(*code),
+        Err(err) if is_stdout_pipe_closed(err) => Classification::new(ExitCode::Success),
+        Err(err) => classify(err),
+    }
+}
+
 /// Map a config-tier error to a classification. `NotDiscovered` (no
 /// `grimoire.toml` found walking up from cwd) carries the `NoConfig` reason;
 /// every other arm — including the explicit-`--config`-path-missing `Io`
