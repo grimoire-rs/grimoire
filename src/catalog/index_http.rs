@@ -4,6 +4,8 @@
 //! HTTP transport for package-index documents: the shared client, the
 //! gzip-aware size-capped body reader, and the deadlines both rely on.
 
+use reqwest::Url;
+
 /// Time allowed to open the connection to the index host.
 const INDEX_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -18,6 +20,24 @@ const INDEX_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// Decoded-body ceiling for index documents, several times the size of a
 /// large index; it bounds a decompression bomb.
 pub(crate) const INDEX_BODY_LIMIT: usize = 128 * 1024 * 1024;
+
+/// Redirects followed before the next one is refused as a loop.
+const MAX_REDIRECTS: usize = 5;
+
+/// Why the hop from the last of `previous` to `next` must not be followed.
+/// Following an https-to-http hop would send the request in the clear, and
+/// the caller never chose plain HTTP.
+fn redirect_refusal(previous: &[Url], next: &Url) -> Option<&'static str> {
+    if previous.len() > MAX_REDIRECTS {
+        return Some("too many redirects");
+    }
+    match previous.last() {
+        Some(from) if from.scheme() == "https" && next.scheme() != "https" => {
+            Some("redirect from https to http refused")
+        }
+        _ => None,
+    }
+}
 
 /// The shared HTTP client for index fetches (embedded TLS roots, timeouts,
 /// grim user-agent).
@@ -36,7 +56,14 @@ fn build_client(
             .connect_timeout(connect)
             .read_timeout(read)
             .timeout(total)
-            .user_agent(concat!("grim/", env!("CARGO_PKG_VERSION"))),
+            .user_agent(concat!("grim/", env!("CARGO_PKG_VERSION")))
+            .referer(false)
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                match redirect_refusal(attempt.previous(), attempt.url()) {
+                    Some(reason) => attempt.error(reason),
+                    None => attempt.follow(),
+                }
+            })),
     )
     .build()
 }
@@ -125,6 +152,7 @@ mod tests {
     use crate::catalog::test_hosts::{
         accepts_gzip, gzip, http_200, read_head, spawn_capturing_host, spawn_fixed_host, spawn_scripted_host,
     };
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::io::AsyncWriteExt;
 
@@ -346,6 +374,170 @@ mod tests {
             started.elapsed() > read_timeout,
             "the fetch must outlast the read timeout"
         );
+    }
+
+    /// A host answering `/i` with a redirect to `/i+1` until `/hops`, which
+    /// answers `200`. Every request head is recorded.
+    async fn spawn_redirect_chain(hops: usize) -> (String, Arc<Mutex<Vec<String>>>) {
+        let heads = Arc::new(Mutex::new(Vec::new()));
+        let seen = heads.clone();
+        let base = spawn_scripted_host(move |mut sock| {
+            let seen = seen.clone();
+            async move {
+                let head = read_head(&mut sock).await;
+                let step: usize = head
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|path| path.trim_start_matches('/').parse().ok())
+                    .unwrap_or(0);
+                seen.lock().unwrap().push(head);
+                let response = if step < hops {
+                    format!(
+                        "HTTP/1.1 302 Found\r\nlocation: /{}\r\nset-cookie: s=1\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                        step + 1
+                    )
+                    .into_bytes()
+                } else {
+                    http_200("", b"[]")
+                };
+                let _ = sock.write_all(&response).await;
+                let _ = sock.shutdown().await;
+            }
+        })
+        .await;
+        (base, heads)
+    }
+
+    fn header_lines(head: &str) -> Vec<String> {
+        head.lines().map(|line| line.to_ascii_lowercase()).collect()
+    }
+
+    #[tokio::test]
+    async fn a_chain_of_five_redirects_is_followed_and_a_sixth_hop_is_refused() {
+        let (base, heads) = spawn_redirect_chain(5).await;
+        let client = http_client().unwrap();
+        let response = index_get(&client, &format!("{base}/0"))
+            .send()
+            .await
+            .expect("five hops");
+        assert_eq!(response.status(), 200);
+        assert_eq!(heads.lock().unwrap().len(), 6);
+
+        let (base, heads) = spawn_redirect_chain(6).await;
+        let err = index_get(&client, &format!("{base}/0"))
+            .send()
+            .await
+            .expect_err("the sixth redirect is refused");
+        assert!(err.is_redirect(), "a refused redirect is a transport error: {err}");
+        assert_eq!(heads.lock().unwrap().len(), 6, "no seventh request is made");
+    }
+
+    #[tokio::test]
+    async fn an_http_locator_follows_http_redirects() {
+        let (base, heads) = spawn_redirect_chain(1).await;
+
+        let response = index_get(&http_client().unwrap(), &format!("{base}/0"))
+            .send()
+            .await
+            .expect("http to http is followed");
+
+        assert_eq!(response.status(), 200);
+        assert_eq!(heads.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_redirect_carries_no_referer_and_no_cookie() {
+        let (base, heads) = spawn_redirect_chain(1).await;
+
+        index_get(&http_client().unwrap(), &format!("{base}/0"))
+            .send()
+            .await
+            .expect("followed");
+
+        for head in heads.lock().unwrap().iter() {
+            let lines = header_lines(head);
+            for name in ["referer:", "cookie:", "authorization:"] {
+                assert!(
+                    !lines.iter().any(|line| line.starts_with(name)),
+                    "{name} must not be sent:\n{head}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cross_origin_redirect_arrives_without_the_locator_userinfo() {
+        let (elsewhere, mut landed) = spawn_capturing_host().await;
+        let (home, mut asked) = {
+            let (tx, rx) = tokio::sync::mpsc::channel::<String>(1);
+            let target = elsewhere.clone();
+            let base = spawn_scripted_host(move |mut sock| {
+                let (tx, target) = (tx.clone(), target.clone());
+                async move {
+                    let _ = tx.try_send(read_head(&mut sock).await);
+                    let response = format!(
+                        "HTTP/1.1 302 Found\r\nlocation: {target}/next\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                    );
+                    let _ = sock.write_all(response.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                }
+            })
+            .await;
+            (base, rx)
+        };
+        let with_userinfo = home.replacen("http://", "http://user:secret@", 1);
+
+        let response = index_get(&http_client().unwrap(), &with_userinfo)
+            .send()
+            .await
+            .expect("cross-origin is followed");
+        assert_eq!(response.status(), 200);
+
+        let first = asked.recv().await.expect("the locator's host was asked");
+        assert!(
+            header_lines(&first)
+                .iter()
+                .any(|line| line.starts_with("authorization: basic ")),
+            "the locator's own origin gets its userinfo:\n{first}"
+        );
+        let second = landed.recv().await.expect("the redirect target was asked");
+        assert!(
+            !header_lines(&second)
+                .iter()
+                .any(|line| line.starts_with("authorization:")),
+            "another origin must never see the userinfo:\n{second}"
+        );
+    }
+
+    fn url(text: &str) -> Url {
+        Url::parse(text).unwrap()
+    }
+
+    #[test]
+    fn a_redirect_from_https_to_http_is_refused() {
+        let from = [url("https://h/idx/c/root.json")];
+
+        assert!(redirect_refusal(&from, &url("http://h/idx/c/root.json")).is_some());
+        assert!(redirect_refusal(&from, &url("http://elsewhere/other")).is_some());
+    }
+
+    #[test]
+    fn every_other_scheme_pair_and_origin_is_followed() {
+        let https = [url("https://h/a")];
+        let http = [url("http://h/a")];
+
+        assert_eq!(redirect_refusal(&https, &url("https://h/b")), None);
+        assert_eq!(redirect_refusal(&https, &url("https://cdn.example/b")), None);
+        assert_eq!(redirect_refusal(&http, &url("http://h/b")), None);
+        assert_eq!(redirect_refusal(&http, &url("https://h/b")), None);
+    }
+
+    #[test]
+    fn the_downgrade_check_looks_at_the_hop_just_taken() {
+        // An http hop earlier in the chain does not make a later http hop a downgrade.
+        let chain = [url("https://h/a"), url("http://h/b")];
+
+        assert_eq!(redirect_refusal(&chain, &url("http://h/c")), None);
     }
 
     #[tokio::test]
