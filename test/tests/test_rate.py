@@ -39,6 +39,7 @@ from pathlib import Path
 
 import pytest
 
+from src.index_fixture import ConformanceKind, Fault, KindedIndex, serve_kind
 
 # ---------------------------------------------------------------------------
 # Helpers / fixtures
@@ -995,6 +996,180 @@ def test_a_ref_in_no_catalog_is_not_found(rated_project) -> None:
     from a row that carries no rating."""
     result = _rate(rated_project, "rate", "ghcr.io/acme/skills/ghost", "--yes")
     assert result.returncode == 79, result.stderr
+
+
+def _stats_requests(index: KindedIndex) -> int:
+    """Requests for the stats document, over whichever path this kind serves."""
+    paths = set(index.document_paths("stats"))
+    return sum(1 for request in index.log if request.path.split("?")[0] in paths)
+
+
+def _kind_project(grim_at, project_dir: Path, index: KindedIndex):
+    _publish(index.root)
+    _index_config(project_dir, index.base)
+    return grim_at(project_dir)
+
+
+def test_an_unrated_row_refetches_the_stats_once_before_it_is_reported_unrated(
+    grim_at, project_dir: Path, kind_server: KindedIndex
+) -> None:
+    """The cache is fresh, so only a forced fetch can see a stats document
+    that was unavailable when the catalog was built."""
+    _publish(kind_server.root)
+    kind_server.fault("stats", Fault(status=503))
+    _index_config(project_dir, kind_server.base)
+    runner = grim_at(project_dir)
+    _warm_catalog(runner)
+    kind_server.fault("stats", None)
+    before = _stats_requests(kind_server)
+
+    result = _rate(runner, "--format", "json", "rate", RATED, "--dry-run")
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["up"] == 12
+    assert _stats_requests(kind_server) - before == 1
+
+
+def test_a_row_that_stays_unrated_costs_exactly_one_stats_fetch(
+    grim_at, project_dir: Path, kind_server: KindedIndex
+) -> None:
+    runner = _kind_project(grim_at, project_dir, kind_server)
+    _warm_catalog(runner)
+    before = _stats_requests(kind_server)
+
+    result = _rate(runner, "rate", UNRATED, "--yes")
+
+    assert result.returncode == 65, result.stderr
+    assert _stats_requests(kind_server) - before == 1
+
+
+def test_the_stats_reload_waits_out_a_recorded_failure(
+    grim_at, project_dir: Path, kind_server: KindedIndex
+) -> None:
+    """Only a full refresh overrides a source's failure wait, so the reload
+    `rate` makes must leave a source inside its wait alone, even once the
+    host is healthy again."""
+    runner = _kind_project(grim_at, project_dir, kind_server)
+    _warm_catalog(runner)
+    kind_server.outage(True)
+    before_refresh = len(kind_server.log)
+    runner.run("--format", "json", "search", "--refresh", check=False)
+    assert len(kind_server.log) > before_refresh, "the outage never reached the host"
+    kind_server.outage(False)
+    seen = len(kind_server.log)
+
+    result = _rate(runner, "rate", UNRATED, "--yes")
+
+    assert result.returncode == 65, result.stderr
+    assert len(kind_server.log) == seen, "the reload went out inside the wait"
+
+
+def test_a_rated_or_unknown_row_sends_no_request(
+    grim_at, project_dir: Path, kind_server: KindedIndex
+) -> None:
+    runner = _kind_project(grim_at, project_dir, kind_server)
+    _warm_catalog(runner)
+    seen = len(kind_server.log)
+
+    rated = _rate(runner, "rate", RATED, "--dry-run")
+    ghost = _rate(runner, "rate", "ghcr.io/acme/skills/ghost", "--yes")
+
+    assert (rated.returncode, ghost.returncode) == (0, 79), (rated.stderr, ghost.stderr)
+    assert len(kind_server.log) == seen
+
+
+def test_offline_does_not_refetch_the_stats_for_an_unrated_row(
+    grim_at, project_dir: Path, kind_server: KindedIndex
+) -> None:
+    runner = _kind_project(grim_at, project_dir, kind_server)
+    _warm_catalog(runner)
+    seen = len(kind_server.log)
+
+    result = _rate(runner, "rate", UNRATED, "--dry-run", "--offline")
+
+    assert result.returncode == 65, result.stderr
+    assert len(kind_server.log) == seen
+
+
+def _two_index_config(project_dir: Path, first: str, second: str) -> None:
+    (project_dir / "grimoire.toml").write_text(
+        f'[[registries]]\nalias = "hub"\nindex = "{first}"\ndefault = true\n\n'
+        f'[[registries]]\nalias = "mirror"\nindex = "{second}"\n\n[skills]\n\n[rules]\n'
+    )
+
+
+def test_a_ref_a_later_source_serves_unrated_keeps_the_first_sources_rating(
+    grim_at,
+    project_dir: Path,
+    tmp_path: Path,
+    kind_server: KindedIndex,
+    index_kind: ConformanceKind,
+) -> None:
+    """Two sources serve one ref, the first rated and the second not: the row
+    the lookup lands on is the first source's, as it was before the stats
+    reload existed. The first source's row is rated, so nothing is refetched."""
+    second_root = tmp_path / "index-dist-mirror"
+    second_root.mkdir()
+    with serve_kind(second_root, index_kind) as mirror:
+        _publish(kind_server.root)
+        _publish(mirror.root, rated=False)
+        _two_index_config(project_dir, kind_server.base, mirror.base)
+        runner = grim_at(project_dir)
+        _warm_catalog(runner)
+        before = (_stats_requests(kind_server), _stats_requests(mirror))
+
+        result = _rate(runner, "--format", "json", "rate", RATED, "--dry-run")
+
+        assert result.returncode == 0, result.stderr
+        report = json.loads(result.stdout)
+        assert report["up"] == 12
+        assert report["url"] == "https://github.com/acme/index/discussions/7"
+        assert (_stats_requests(kind_server), _stats_requests(mirror)) == before
+
+
+def _git_index_repo(tmp_path: Path, names: list[str]) -> Path:
+    """A local git index (the path ends in ``.git``) holding one unrated
+    pointer per name, each at ``ghcr.io/acme/skills/<name>``."""
+    repo = tmp_path / "index-repo.git"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    _commit_pointers(repo, names)
+    return repo
+
+
+def _commit_pointers(repo: Path, names: list[str]) -> None:
+    for name in names:
+        entry = repo / "index" / "github.com" / "acme" / name
+        entry.mkdir(parents=True, exist_ok=True)
+        (entry / "metadata.json").write_text(
+            json.dumps(_package(name, f"ghcr.io/acme/skills/{name}"))
+        )
+    for args in (
+        ["add", "-A"],
+        ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", ",".join(names)],
+    ):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+
+def test_an_unrated_git_index_row_is_not_recloned_to_look_for_stats(
+    grim_at, project_dir: Path, tmp_path: Path
+) -> None:
+    """A git index has no stats document, so the reload would be a full clone
+    for nothing. The index moves on after the warm-up; a clone made by `rate`
+    would carry the new pointer into the cache."""
+    repo = _git_index_repo(tmp_path, ["unrated"])
+    (project_dir / "grimoire.toml").write_text(
+        f'[[registries]]\nalias = "hub"\nindex = "{repo.as_posix()}"\ndefault = true\n\n[skills]\n\n[rules]\n'
+    )
+    runner = grim_at(project_dir)
+    _warm_catalog(runner)
+    _commit_pointers(repo, ["late"])
+
+    result = _rate(runner, "rate", UNRATED, "--yes")
+
+    assert result.returncode == 65, result.stderr
+    cached = _rate(runner, "--format", "json", "search", "--offline")
+    assert cached.returncode == 0, cached.stderr
+    assert [row["repo"] for row in json.loads(cached.stdout)["items"]] == [UNRATED]
 
 
 def test_a_malformed_ref_is_a_usage_error(rated_project) -> None:
