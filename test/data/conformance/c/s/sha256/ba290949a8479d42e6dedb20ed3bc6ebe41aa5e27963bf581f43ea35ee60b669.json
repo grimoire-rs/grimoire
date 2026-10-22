@@ -1,0 +1,1 @@
+{"bucket":"09","entries":{"ghcr.io/acme/shared":{"data":{"version":"2.0.0"},"failing_since":null,"failures":0,"files":{"readme.md":{"sha256":"e95ae4fc42c97e01454607ccd08ce398def9e2aa9b0baa7d920c304ab26fe19e","size":29}},"input":"09590e5bb711e8f613ec13705242c5779e06f93d88473cf96d42988da6cbc452","last_failure_at":null}},"plane":"enrich","schema":1}

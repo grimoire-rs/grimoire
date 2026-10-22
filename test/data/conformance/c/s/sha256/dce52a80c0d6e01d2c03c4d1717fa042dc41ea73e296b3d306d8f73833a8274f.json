@@ -1,0 +1,1 @@
+{"bucket":"0a","entries":{"ghcr.io/acme/bucket-519":{"data":{"version":"1.0.0"},"failing_since":null,"failures":0,"files":{"readme.md":{"sha256":"f40633ad8b370f5ed37872592e3e7aceb4db6afa2901535f512d073ae07a7066","size":33}},"input":"0a59bdb9c792ecc0ae787244d4addedd5f51683dba962f1044b5bdbb89a0eccc","last_failure_at":null}},"plane":"enrich","schema":1}
