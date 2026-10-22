@@ -1465,7 +1465,24 @@ pub(crate) fn mcp_value(
             (container == MCP_SERVERS).then_some(value)
         }
         Family::AgentPlugins => {
-            let value = family::agent_plugins_mcp_entry(descriptor)?;
+            let mut value = family::agent_plugins_mcp_entry(descriptor)?;
+            if client == ClientTarget::Cursor {
+                // Live-probed on Cursor 2026.10.22: it expands `${CURSOR_PLUGIN_ROOT}` (and
+                // `${CLAUDE_PLUGIN_ROOT}`) but not the spec's `${PLUGIN_ROOT}`, and has no
+                // data-directory variable at all. Rename the root; the data reference ships
+                // literally, so say so.
+                crate::install::mcp_config::translate_env_refs(&mut value, &|var| match var {
+                    "PLUGIN_ROOT" => "${CURSOR_PLUGIN_ROOT}".to_string(),
+                    other => format!("${{{other}}}"),
+                });
+                if value.to_string().contains("${PLUGIN_DATA}") {
+                    tracing::warn!(
+                        "mcp server '{emitted}' for {client}: {client} expands no plugin data directory, so \
+                         ${{PLUGIN_DATA}} is sent literally; use a literal path, or have the server pick its own \
+                         data directory"
+                    );
+                }
+            }
             // The spec expands no environment variables, and Codex, Cursor and
             // Copilot are not documented to either — yet. Warn rather than
             // decline: the server still ships, and starts working once its
@@ -2959,14 +2976,9 @@ mod tests {
     }
 
     #[test]
-    fn every_agent_plugins_client_gets_the_spec_placeholder_names() {
+    fn codex_copilot_and_agents_get_the_spec_placeholder_names() {
         let d = both_spellings();
-        for client in [
-            ClientTarget::Codex,
-            ClientTarget::Cursor,
-            ClientTarget::Copilot,
-            ClientTarget::Agents,
-        ] {
+        for client in [ClientTarget::Codex, ClientTarget::Copilot, ClientTarget::Agents] {
             assert_eq!(
                 mcp_value(Family::AgentPlugins, client, "srv", &d),
                 Some(json!({
@@ -2978,6 +2990,21 @@ mod tests {
                 "{client}"
             );
         }
+    }
+
+    #[test]
+    fn cursor_gets_its_own_plugin_root_name_and_a_warning_for_the_data_directory() {
+        let d = both_spellings();
+        let value = mcp_value(Family::AgentPlugins, ClientTarget::Cursor, "srv", &d).unwrap();
+        assert_eq!(
+            value["args"],
+            json!(["${CURSOR_PLUGIN_ROOT}/a.js", "${CURSOR_PLUGIN_ROOT}/b.js"])
+        );
+        assert_eq!(
+            value["env"],
+            json!({"C": "${PLUGIN_DATA}", "D": "${PLUGIN_DATA}"}),
+            "still shipped"
+        );
     }
 
     #[test]
@@ -3003,7 +3030,7 @@ mod tests {
                 .finish(),
         );
         let d = descriptor(
-            "transport = \"stdio\"\ncommand = \"grim\"\nargs = [\"--dsn=${DB_DSN}\"]\nenv = { SECRET = \"${TOKEN}\" }\ntimeout = 5",
+            "transport = \"stdio\"\ncommand = \"grim\"\nargs = [\"--dsn=${DB_DSN}\"]\nenv = { SECRET = \"${TOKEN}\", DATA = \"${PLUGIN_DATA}\" }\ntimeout = 5",
         );
         assert!(mcp_value(Family::AgentPlugins, ClientTarget::Cursor, "db", &d).is_some());
         drop(guard);
@@ -3013,6 +3040,10 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("use a literal value"), "{text}");
+        assert!(
+            text.contains("mcp server 'db' for cursor: cursor expands no plugin data directory"),
+            "{text}"
+        );
         assert!(
             text.contains("mcp server 'db' for cursor: `timeout` has no Agent Plugins mcp.json key; dropped"),
             "{text}"

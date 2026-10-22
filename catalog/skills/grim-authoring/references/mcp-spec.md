@@ -160,7 +160,8 @@ install` writes the descriptor as is):
 | Export for | `${CLAUDE_PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_DATA}` | `${PLUGIN_ROOT}` / `${PLUGIN_DATA}` |
 |---|---|---|
 | `claude` | kept | renamed to Claude's names, in every field incl. `url` and headers |
-| `codex`, `cursor`, `copilot`, `agents` | renamed to the spec's names | kept |
+| `codex`, `copilot`, `agents` | renamed to the spec's names | kept |
+| `cursor` | renamed to the spec's names, except the root: `${CURSOR_PLUGIN_ROOT}`; Cursor has no data variable (warned) | root renamed to `${CURSOR_PLUGIN_ROOT}`, data kept |
 | `droid`, `junie`, `openclaw` | kept | kept |
 
 **Portable advice:** put `${PLUGIN_ROOT}` / `${PLUGIN_DATA}` (or the

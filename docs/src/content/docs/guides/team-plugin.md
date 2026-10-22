@@ -104,7 +104,8 @@ Write [`${CLAUDE_PLUGIN_ROOT}`][claude-plugin-root] or the spec's
 | Export for | Names written | Fields where they work |
 |---|---|---|
 | `claude`, `qoder` | `${CLAUDE_PLUGIN_ROOT}`, `${CLAUDE_PLUGIN_DATA}` | `command`, `args`, `env`, `url`, headers. Claude has no `cwd`. |
-| `codex`, `cursor`, `copilot`, `agents` | `${PLUGIN_ROOT}`, `${PLUGIN_DATA}` | `args`, `env` values, `cwd` |
+| `codex`, `copilot`, `agents` | `${PLUGIN_ROOT}`, `${PLUGIN_DATA}` | `args`, `env` values, `cwd` |
+| `cursor` | `${CURSOR_PLUGIN_ROOT}`; `${PLUGIN_DATA}` stays as written, and Cursor does not expand it | `command`, `args`, `env` values, `cwd` |
 | `droid`, `junie`, `openclaw` | Your spelling, unchanged | See the [admission table](../commands.md#export-plugin-admission) |
 
 A placeholder in `args` or `env` values works for `claude` and every

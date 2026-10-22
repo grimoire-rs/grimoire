@@ -1988,7 +1988,9 @@ spec performs no expansion there. In `args`, env values and `cwd` the
 spec expands only `${PLUGIN_ROOT}` and `${PLUGIN_DATA}`. grim renames
 `${CLAUDE_PLUGIN_ROOT}` and `${CLAUDE_PLUGIN_DATA}` to them. Any other
 `${VAR}` there is exported with a warning, because a client may pass it
-through literally.
+through literally. A `cursor` export writes `${CURSOR_PLUGIN_ROOT}` for the
+root, because Cursor does not expand `${PLUGIN_ROOT}`. Cursor has no data
+folder variable, so `${PLUGIN_DATA}` is exported with a warning.
 
 A `claude` export does the reverse, and so does a `qoder` export. It renames `${PLUGIN_ROOT}` and
 `${PLUGIN_DATA}` to `${CLAUDE_PLUGIN_ROOT}` and `${CLAUDE_PLUGIN_DATA}` in
