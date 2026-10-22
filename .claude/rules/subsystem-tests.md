@@ -21,7 +21,7 @@ Pytest (not Rust integration tests) because acceptance tests exercise the real c
 | `test/src/helpers.py` | `write_config()`, `make_bundle()`, `make_artifact()` — build + push test fixtures |
 | `test/src/assertions.py` | Cross-platform path assertion helpers |
 | `test/src/registry.py` | `PublishedArtifact` + minimal stdlib OCI client (push/fetch/retag) |
-| `test/taskfile.yml` | Task runner: `build` (internal), `default`, `quick`, `parallel` |
+| `test/taskfile.yml` | Task runner: `build` (internal), `default`, `quick`, `parallel`, `index-e2e`, `index-matrix`, `bench` |
 
 ## Key Fixtures
 
@@ -93,10 +93,15 @@ Returned by `make_artifact()`, `make_bundle()`, and the `registry.py` primitives
 task test              # build grim, copy to test/bin/grim, run full pytest suite
 task test:quick        # skip rebuild (SKIP_BUILD=true), pytest -n auto
 task test:parallel     # rebuild-aware (sources track src/tests), pytest -n auto
+task test:index-e2e    # build the pinned indexer ($GRIM_INDEXER_DIR), sync its fixture index with grim 0.14.3 and the built grim
+task test:index-matrix # every grim generation (0.14.3, 0.15.0 once pinned, built) against every index kind
+task test:bench        # 20,000-entry sync budgets (marker `bench`); prints each measurement
 
 # Single test (binary must already exist at test/bin/grim, or set GRIM_COMMAND):
 cd test && uv run pytest tests/test_install.py::test_lock_then_install_materializes_files -v
 ```
+
+The ordinary run (`task test`) deselects the `index_e2e` and `bench` markers: both need inputs it lacks and run through their own tasks and the deep-verify jobs. `test_index_matrix.py` takes the older grims from `GRIM_G0_COMMAND` / `GRIM_G1_COMMAND` and skips a leg whose binary is absent.
 
 There is no `--no-build` pytest flag — build/rebuild is controlled entirely by the `task` layer (`SKIP_BUILD` var / `CI` env), not by a pytest CLI option.
 
@@ -110,7 +115,7 @@ There is no `--no-build` pytest flag — build/rebuild is controlled entirely by
 
 ## Test Files
 
-`test/tests/*.py` cover: install/uninstall/update/lock, config + registry management (incl. TUI options, default registry), add/remove (+ infer), init, release (+ non-version tags) and publish (+ announce), login, search (+ namespaced), status, targets, integrity, deprecation, metadata, multifile rules, bundles, agents, mcp (core, artifact, fetch), client rendering + desync + TUI multi-registry, global scope, git provenance, state portability, index source, docs, build, smoke, and cross-cutting workflows.
+`test/tests/*.py` cover: install/uninstall/update/lock, config + registry management (incl. TUI options, default registry), add/remove (+ infer), init, release (+ non-version tags) and publish (+ announce), login, search (+ namespaced), status, targets, integrity, deprecation, metadata, multifile rules, bundles, agents, mcp (core, artifact, fetch), client rendering + desync + TUI multi-registry, global scope, git provenance, state portability, index source (+ anchored, flat-unchanged, stale, transport, scale, git), the index end-to-end build (`test_index_e2e.py`, marker `index_e2e`), the grim-generation x index-kind matrix (`test_index_matrix.py`), the 20,000-entry sync budgets (`test_index_bench.py`, marker `bench`), docs, build, smoke, and cross-cutting workflows.
 
 ## Quality Gate
 
