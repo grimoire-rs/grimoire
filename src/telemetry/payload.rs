@@ -102,21 +102,16 @@ pub fn host_arch(arch: &str) -> &str {
 
 /// Exit code and `error.type` for a finished command.
 ///
-/// Mirrors `main.rs` exactly: an `Err` is classified by [`crate::error::classify`],
-/// and a closed stdout pipe is a silent exit 0.
+/// The exit comes from [`crate::error::outcome_exit`], the mapping `main.rs`
+/// uses; `error.type` is the reason slug, else the exit slug, never on success.
 pub fn exit_info(outcome: &anyhow::Result<ExitCode>) -> (i64, Option<String>) {
-    match outcome {
-        Ok(ExitCode::Success) => (0, None),
-        Ok(code) => (i64::from(*code as u8), Some(code.slug().to_string())),
-        Err(err) if crate::error::is_stdout_pipe_closed(err) => (0, None),
-        Err(err) => {
-            let classification = crate::error::classify(err);
-            let error_type = classification
-                .reason
-                .map_or_else(|| classification.exit.slug().to_string(), |reason| reason.to_string());
-            (i64::from(classification.exit as u8), Some(error_type))
-        }
-    }
+    let exit = crate::error::outcome_exit(outcome);
+    let error_type = match (exit.exit, exit.reason) {
+        (ExitCode::Success, _) => None,
+        (_, Some(reason)) => Some(reason.to_string()),
+        (code, None) => Some(code.slug().to_string()),
+    };
+    (i64::from(exit.exit as u8), error_type)
 }
 
 /// Resource attributes in merge order: derived keys, then
