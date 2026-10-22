@@ -323,8 +323,10 @@ with no lock pin (dev-install, path source, path-sourced bundle), or a row
 whose own re-resolution failed. And even under
 `checked == true`, one registry's catalog refresh failing falls back to
 its cached catalog, and with none cached degrades just that registry's rows'
-`deprecated`/`replaced_by` to `null` — partial data, not a failed check. Confirm the current flag set with
-`grim status --help`.
+`deprecated`/`replaced_by` to `null` — partial data, not a failed check. A
+source still in backoff after earlier failures counts as failing the same way:
+grim makes no request to it and uses its cache. Confirm the current flag set
+with `grim status --help`.
 
 Multi-item reports (`status`, `install`, `lock`, `update`, `search`,
 `config list`, `config registry list`, `config registry fields`, `publish`)
@@ -350,7 +352,10 @@ Two read-only companions:
   `registries` entry carries an `authenticated` boolean: whether the
   docker-compatible credential store holds an entry for that registry's
   host (a file-only probe — it never invokes a credential helper, so a
-  global `credsStore` alone reads as `false`).
+  global `credsStore` alone reads as `false`). Each entry also carries
+  `catalog`, that source's sync state read from the sidecar without a
+  request (`null` when no sidecar is readable), so a script can tell a stale
+  or backing-off source from a healthy one.
 - `grim fetch <ref> [--vendor …] [--path …]` prints an artifact's
   content without installing (use != install). Plain output is the raw
   payload (pipe-able: `grim fetch skills/x > SKILL.md`); `--format json`
