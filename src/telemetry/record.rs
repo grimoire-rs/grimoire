@@ -8,6 +8,7 @@ use std::path::Path;
 use crate::config::declaration::DesiredSet;
 use crate::config::scope::ConfigScope;
 use crate::install::client_target::ClientTarget;
+use crate::install::installer::{ArtifactInstall, InstallOutcome};
 use crate::install::target::{InstallTarget, detect_clients};
 use crate::oci::Identifier;
 use crate::oci::artifact_kind::ArtifactKind;
@@ -82,6 +83,31 @@ pub fn reference<'a>(source: &Identifier, declared: impl IntoIterator<Item = &'a
         Some(tag) => format!("{location}:{tag}"),
         None => location,
     }
+}
+
+/// One event per artifact this run wrote: `installed` or `updated` from the
+/// install outcome. Unchanged, skipped, refused and failed rows report nothing,
+/// so a pin that moved without a write is not an event.
+pub fn install_events(outcomes: &[ArtifactInstall], declared: &DesiredSet) -> Vec<ArtifactEvent> {
+    outcomes
+        .iter()
+        .filter_map(|o| {
+            let action = match o.result {
+                Ok(InstallOutcome::Installed) => ArtifactAction::Installed,
+                Ok(InstallOutcome::Updated) => ArtifactAction::Updated,
+                _ => return None,
+            };
+            Some(ArtifactEvent {
+                kind: o.reference.kind,
+                action,
+                reference: o
+                    .reference
+                    .source
+                    .identifier()
+                    .map(|id| reference(id, declared_identifiers(declared))),
+            })
+        })
+        .collect()
 }
 
 /// Every registry identifier the scope declares, for [`reference`]'s tag lookup.
