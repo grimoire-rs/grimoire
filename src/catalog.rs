@@ -14,6 +14,8 @@
 pub mod browse_sort;
 pub mod catalog_error;
 pub mod catalog_service;
+#[cfg(test)]
+mod conformance_tests;
 pub mod forge;
 pub mod git_cmd;
 pub mod index_announce;

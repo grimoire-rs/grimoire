@@ -13,3 +13,6 @@
 *.[tT][aA][rR].[gG][zZ] binary
 *.[tT][aA][rR].[bB][zZ] binary
 *.[tT][aA][rR].[xX][zZ] binary
+
+# Cross-repo conformance tree: byte-exact, no line-ending or LFS rewriting
+test/data/conformance/** -text

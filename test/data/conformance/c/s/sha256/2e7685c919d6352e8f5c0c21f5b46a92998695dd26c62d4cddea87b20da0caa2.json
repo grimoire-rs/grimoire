@@ -1,0 +1,1 @@
+{"bucket":"10","entries":{"ghcr.io/acme/bucket-305":{"data":{"version":"1.0.0"},"failing_since":null,"failures":0,"files":{"readme.md":{"sha256":"b8863b6448c45d74feb5fad4ee16d138bff269c06eae967548eaf3d3043b8d0b","size":33}},"input":"1000431d6183292a40411b5f42dbb413f63783d4005c3f213fce75c88df27598","last_failure_at":null}},"plane":"enrich","schema":1}
