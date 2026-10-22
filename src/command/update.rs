@@ -36,7 +36,7 @@ use crate::context::Context;
 use crate::export::ExportError;
 use crate::export::marketplace;
 use crate::export::resolve::{self, IncludeOrigin, PluginPick, PluginSelection};
-use crate::install::installer::{InstallIntent, install_all_with_progress};
+use crate::install::installer::{ArtifactInstall, InstallIntent, install_all_with_progress};
 use crate::install::materializer::DefaultMaterializer;
 use crate::install::prune::{PruneOutcome, PrunedArtifact, ReapedClients, prune_orphans, reap_dropped_clients};
 use crate::install::target::InstallTarget;
@@ -337,6 +337,7 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     // A hard `Err` keeps propagating: its exit code comes from
     // `classify_error` walking the chain, which a fixed code here would flatten.
     let mut report = build_report(None, &new_lock, previous.as_ref(), &pruned, &reaped);
+    record_changed(ctx, &outcomes, &pruned, previous.as_ref(), &scope.set);
     let mut refused = false;
     for o in outcomes {
         let (kind, name) = (o.reference.kind, o.reference.name.clone());
@@ -366,53 +367,35 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
         }
     }
 
-    // Rebuilt around the rows so the telemetry can read them: the report keeps
-    // its items private and this is its only consumer here.
-    let items = report.into_items();
-    record_changed(ctx, &items, &new_lock, previous.as_ref(), &scope.set);
-    let report = UpdateReport::new(items);
-
     if refused {
         return Ok((report, ExitCode::DataError));
     }
     Ok((report, ExitCode::Success))
 }
 
-/// Reports each updated (and not refused) or removed row to the usage
-/// telemetry. An updated row takes its reference from the new lock, a removed
-/// one from the previous lock it left.
+/// Reports what this run wrote (the install outcome, as `grim install` does)
+/// and each pruned orphan, whose reference comes from the previous lock it left.
 fn record_changed(
     ctx: &Context,
-    rows: &[UpdateEntry],
-    new_lock: &GrimoireLock,
+    outcomes: &[ArtifactInstall],
+    pruned: &[PrunedArtifact],
     previous: Option<&GrimoireLock>,
     declared: &crate::config::declaration::DesiredSet,
 ) {
-    use crate::telemetry::record::{ArtifactAction, ArtifactEvent, declared_identifiers, reference};
-    let source_of = |lock: Option<&GrimoireLock>, row: &UpdateEntry| {
-        let found = lock?
-            .iter_artifacts()
-            .find(|a| a.kind == row.kind && a.name == row.name)?;
-        found
-            .source
-            .pinned()
-            .map(|pinned| reference(pinned, declared_identifiers(declared)))
-    };
+    use crate::telemetry::record::{ArtifactAction, ArtifactEvent, declared_identifiers, install_events, reference};
     ctx.telemetry().record_artifacts_with(|| {
-        rows.iter()
-            .filter_map(|row| {
-                let (action, lock) = match row.action {
-                    UpdateAction::Updated if !row.refused => (ArtifactAction::Updated, Some(new_lock)),
-                    UpdateAction::Removed => (ArtifactAction::Removed, previous),
-                    _ => return None,
-                };
-                Some(ArtifactEvent {
-                    kind: row.kind,
-                    action,
-                    reference: source_of(lock, row),
-                })
-            })
-            .collect()
+        let removed = pruned
+            .iter()
+            .filter(|p| p.outcome == PruneOutcome::Pruned)
+            .map(|p| ArtifactEvent {
+                kind: p.kind,
+                action: ArtifactAction::Removed,
+                reference: previous
+                    .and_then(|lock| lock.iter_artifacts().find(|a| a.kind == p.kind && a.name == p.name))
+                    .and_then(|a| a.source.pinned())
+                    .map(|pinned| reference(pinned, declared_identifiers(declared))),
+            });
+        install_events(outcomes, declared).into_iter().chain(removed).collect()
     });
 }
 
@@ -744,17 +727,33 @@ mod tests {
     }
 
     #[test]
-    fn telemetry_records_updated_not_refused_and_removed_rows_with_their_lock_refs() {
+    fn telemetry_reports_install_outcomes_and_pruned_rows_with_their_lock_refs() {
+        use crate::install::installer::InstallOutcome;
+        use crate::oci::ArtifactRef;
         use crate::telemetry::Telemetry;
         use crate::telemetry::record::{ArtifactAction, ArtifactEvent};
 
         let prev = lock_of(vec![
-            locked("kept", 'a'),
             locked("bumped", 'b'),
-            locked("refused", 'c'),
+            locked("declined", 'c'),
             locked("dropped", 'd'),
         ]);
-        let new = lock_of(vec![locked("kept", 'a'), locked("bumped", 'e'), locked("refused", 'f')]);
+        let outcome = |name: &str, result| ArtifactInstall {
+            reference: ArtifactRef::registry(
+                ArtifactKind::Skill,
+                name,
+                Identifier::new_registry(name, "localhost:5000"),
+            ),
+            target: None,
+            result: Ok(result),
+        };
+        // `declined` moved its pin, but every client declined it: nothing was
+        // written, so no event — the lock change alone is not one.
+        let outcomes = [
+            outcome("bumped", InstallOutcome::Updated),
+            outcome("declined", InstallOutcome::Skipped("declined".into())),
+            outcome("added", InstallOutcome::Installed),
+        ];
         let pruned = [PrunedArtifact {
             kind: ArtifactKind::Skill,
             name: "dropped".to_string(),
@@ -765,13 +764,11 @@ mod tests {
             abandoned_entries: Vec::new(),
             clients: Vec::new(),
         }];
-        let mut report = build_report(None, &new, Some(&prev), &pruned, &[]);
-        report.mark_refused(ArtifactKind::Skill, "refused");
 
         let telemetry = Telemetry::armed_for_test(PathBuf::from("/grim-home"));
         let ctx = Context::hermetic(PathBuf::from("/grim-home")).with_telemetry(telemetry.clone());
         let declared = crate::config::declaration::DesiredSet::default();
-        record_changed(&ctx, &report.into_items(), &new, Some(&prev), &declared);
+        record_changed(&ctx, &outcomes, &pruned, Some(&prev), &declared);
 
         let event = |action, repo: &str| ArtifactEvent {
             kind: ArtifactKind::Skill,
@@ -782,6 +779,7 @@ mod tests {
             telemetry.snapshot().unwrap().artifacts,
             vec![
                 event(ArtifactAction::Updated, "bumped"),
+                event(ArtifactAction::Installed, "added"),
                 event(ArtifactAction::Removed, "dropped")
             ]
         );

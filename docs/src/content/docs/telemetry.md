@@ -190,6 +190,11 @@ in a fixed order.
 | `grim.artifact.action` | string | always | `installed`, `updated`, `removed`, `added` |
 | `grim.artifact.ref` | string | omitted for a local path source | `ghcr.io/acme/review:1` |
 
+`installed` and `updated` describe what grim wrote on this machine, for
+`grim install` and `grim update` alike. A pin that moved in the lock while
+every selected client declined the kind writes nothing and sends no event.
+`removed` is an artifact `grim update` pruned after it left the lock.
+
 The reference is `registry/repository`, plus `:tag` when the declaration
 carries one. It never holds a digest, userinfo or a local path. A bundle
 install sends one event per changed member. `grim add` of a bundle sends one

@@ -140,28 +140,8 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
 /// Reports each freshly installed or updated artifact to the usage
 /// telemetry; unchanged, skipped, refused and failed rows report nothing.
 fn record_changed(ctx: &Context, outcomes: &[ArtifactInstall], declared: &crate::config::declaration::DesiredSet) {
-    use crate::telemetry::record::{ArtifactAction, ArtifactEvent, declared_identifiers, reference};
-    ctx.telemetry().record_artifacts_with(|| {
-        outcomes
-            .iter()
-            .filter_map(|o| {
-                let action = match o.result {
-                    Ok(InstallOutcome::Installed) => ArtifactAction::Installed,
-                    Ok(InstallOutcome::Updated) => ArtifactAction::Updated,
-                    _ => return None,
-                };
-                Some(ArtifactEvent {
-                    kind: o.reference.kind,
-                    action,
-                    reference: o
-                        .reference
-                        .source
-                        .identifier()
-                        .map(|id| reference(id, declared_identifiers(declared))),
-                })
-            })
-            .collect()
-    });
+    ctx.telemetry()
+        .record_artifacts_with(|| crate::telemetry::record::install_events(outcomes, declared));
 }
 
 /// One-off render of a local path source into the clients: validate +
