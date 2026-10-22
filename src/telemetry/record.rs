@@ -70,9 +70,10 @@ impl Telemetry {
 /// `registry/repository[:tag]` for `source`.
 ///
 /// Built from the identifier's accessors, so a digest or anything else a raw
-/// string could carry never reaches the wire. The tag is the one a `declared`
-/// identifier for the same repository carries; a pin's own advisory tag is
-/// not trusted, and a bundle member or digest-only declaration has none.
+/// string could carry never reaches the wire. The tag is the first one a
+/// `declared` identifier for the same repository carries, in iteration order
+/// ([`declared_identifiers`] fixes it); a pin's own advisory tag is not
+/// trusted, and a bundle member or digest-only declaration has none.
 pub fn reference<'a>(source: &Identifier, declared: impl IntoIterator<Item = &'a Identifier>) -> String {
     let tag = declared
         .into_iter()
@@ -110,7 +111,8 @@ pub fn install_events(outcomes: &[ArtifactInstall], declared: &DesiredSet) -> Ve
         .collect()
 }
 
-/// Every registry identifier the scope declares, for [`reference`]'s tag lookup.
+/// Every registry identifier the scope declares, for [`reference`]'s tag lookup:
+/// skills, rules, agents, bundles, mcp, hooks, each in binding-name order.
 pub fn declared_identifiers(set: &DesiredSet) -> impl Iterator<Item = &Identifier> {
     [&set.skills, &set.rules, &set.agents, &set.bundles, &set.mcp, &set.hooks]
         .into_iter()
@@ -274,6 +276,18 @@ mod tests {
         assert_eq!(reference(&pinned, declared.iter()), "r.io/acme/review");
         let digest_only = id(&format!("r.io/acme/review@sha256:{}", "a".repeat(64)));
         assert_eq!(reference(&pinned, [digest_only].iter()).as_str(), "r.io/acme/review");
+    }
+
+    #[test]
+    fn duplicate_bindings_take_the_tag_from_the_first_section_then_the_lowest_name() {
+        use crate::config::declaration::{DeclaredSource, DesiredSet};
+        let mut set = DesiredSet::default();
+        let declare = |raw: &str| DeclaredSource::Registry(id(raw));
+        set.rules.insert("a".into(), declare("r.io/acme/review:3"));
+        set.skills.insert("zeta".into(), declare("r.io/acme/review:2"));
+        set.skills.insert("alpha".into(), declare("r.io/acme/review:1"));
+        let pinned = id(&format!("r.io/acme/review@sha256:{}", "a".repeat(64)));
+        assert_eq!(reference(&pinned, declared_identifiers(&set)), "r.io/acme/review:1");
     }
 
     #[test]

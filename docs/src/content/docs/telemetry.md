@@ -196,7 +196,9 @@ every selected client declined the kind writes nothing and sends no event.
 `removed` is an artifact `grim update` pruned after it left the lock.
 
 The reference is `registry/repository`, plus `:tag` when the declaration
-carries one. It never holds a digest, userinfo or a local path. A bundle
+carries one. When several declarations name the same repository, the tag comes
+from the first one. Skills come first, then rules, agents, bundles, MCP servers
+and hooks, each in name order. It never holds a digest, userinfo or a local path. A bundle
 install sends one event per changed member. `grim add` of a bundle sends one
 event of kind `bundle`.
 
