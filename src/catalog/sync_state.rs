@@ -185,6 +185,14 @@ pub fn confirmed_at(cache: &Path, source_key: &str, built_at: &str) -> Option<St
         .and_then(|state| state.checked_at)
 }
 
+/// What `grim context` reports for the source behind `cache`: the sidecar
+/// alone, never the `CatalogFile` or the network, so a sidecar the catalog no
+/// longer binds to still reports. `None` when no readable sidecar of this
+/// version and source exists.
+pub fn catalog_view(cache: &Path, source_key: &str) -> Option<CatalogView> {
+    read_for(cache, source_key).map(|state| state.context_view())
+}
+
 /// Writes the sidecar atomically beside `cache`.
 ///
 /// # Errors
@@ -293,13 +301,6 @@ impl SyncState {
         text
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "no command renders the sidecar view; the sidecar tests build it"
-        )
-    )]
     pub fn context_view(&self) -> CatalogView {
         let built_at = self.catalog_built_at.as_ref().map(|built| {
             match (parse_time(Some(built)), parse_time(self.checked_at.as_deref())) {
@@ -893,5 +894,46 @@ mod tests {
             (None, None, None, None)
         );
         assert_eq!(view.failures, 1);
+    }
+
+    #[test]
+    fn the_catalog_view_needs_only_a_readable_sidecar_of_this_version_and_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache_in(&dir);
+        assert_eq!(catalog_view(&cache, KEY), None, "no sidecar, no view");
+
+        store(&cache, &adopted(Some(b"catalog bytes"))).unwrap();
+        let view = catalog_view(&cache, KEY).expect("a stored sidecar reads");
+        assert_eq!(view.generation, Some(7));
+        assert_eq!(
+            catalog_view(&cache, "https://other.example"),
+            None,
+            "another source's sidecar is not this one's"
+        );
+
+        let mut newer = adopted(None);
+        newer.version = SYNC_STATE_VERSION + 1;
+        store(&cache, &newer).unwrap();
+        assert_eq!(
+            catalog_view(&cache, KEY),
+            None,
+            "a sidecar of another version is ignored"
+        );
+
+        std::fs::write(sidecar_path(&cache), b"{ not json").unwrap();
+        assert_eq!(catalog_view(&cache, KEY), None, "an unreadable sidecar is not an error");
+    }
+
+    #[test]
+    fn the_catalog_view_survives_a_catalog_that_no_longer_binds() {
+        // `grim context` reads the sidecar and never the catalog file, so a file
+        // rewritten under it changes nothing the report says.
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache_in(&dir);
+        store(&cache, &adopted(Some(b"first write"))).unwrap();
+        std::fs::write(&cache, b"second write").unwrap();
+
+        assert!(catalog_view(&cache, KEY).is_some());
+        assert_eq!(load_bound(&cache, KEY, Some(b"second write")), None);
     }
 }

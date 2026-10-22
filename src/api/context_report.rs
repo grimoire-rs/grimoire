@@ -23,13 +23,16 @@
 //! and always `[]` under `--registry`, whose forced browse set carries no
 //! filter). The plain table reports the filters as `, N include, M
 //! exclude` counts appended to the registry row, omitted entirely when
-//! both lists are empty.
+//! both lists are empty. Each registry also carries an always-present
+//! `catalog`: the last sync's state read from the source's sidecar, or `null`
+//! when no readable sidecar exists; the plain table does not show it.
 
 use std::io::{self, Write};
 use std::path::PathBuf;
 
 use serde::Serialize;
 
+use crate::catalog::sync_state::CatalogView;
 use crate::cli::printer::{Printable, print_table};
 
 /// How a browse source lists its packages, as reported by `grim context`.
@@ -87,6 +90,9 @@ pub struct ContextRegistry {
     /// surfaces cannot disagree. `false` for every entry under
     /// `--registry`, whose forced browse set has no config entry behind it.
     pub insecure: bool,
+    /// The state of this source's last catalog sync, read from its sidecar
+    /// alone; `null` when no readable sidecar of this grim's version exists.
+    pub catalog: Option<CatalogView>,
 }
 
 /// Where the effective offline mode came from.
@@ -241,6 +247,7 @@ impl Printable for ContextReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::sync_state::SyncState;
 
     fn report() -> ContextReport {
         ContextReport {
@@ -266,6 +273,7 @@ mod tests {
                 authenticated: true,
                 include: vec!["acme/platform/**".to_string(), "acme/tools/**".to_string()],
                 exclude: vec!["acme/platform/legacy/**".to_string()],
+                catalog: None,
             }],
             default_registry: "ghcr.io/acme".to_string(),
         }
@@ -454,6 +462,52 @@ mod tests {
             let list = v["registries"][0].get(side).expect("key must always be present");
             assert_eq!(list, &serde_json::json!([]), "{side} must serialize as []");
         }
+    }
+
+    #[test]
+    fn json_registry_carries_a_catalog_key_that_is_null_without_a_sidecar() {
+        // `src/api/` bans `skip_serializing_if`: no sync state is `null`, never a
+        // missing key a consumer would read as an older grim.
+        let v = serde_json::to_value(report()).unwrap();
+        let catalog = v["registries"][0].get("catalog").expect("key must always be present");
+        assert!(catalog.is_null(), "got: {catalog}");
+    }
+
+    #[test]
+    fn json_catalog_object_carries_every_field_even_when_null() {
+        // The frozen key set of `registries[].catalog`; a field serialized only
+        // when set would vanish for the cold-failure and OCI-source shapes.
+        let mut r = report();
+        r.registries[0].catalog = Some(SyncState::unbound("ghcr.io/acme").context_view());
+        let v = serde_json::to_value(&r).unwrap();
+        let catalog = v["registries"][0]["catalog"].as_object().expect("an object");
+        let mut keys: Vec<&str> = catalog.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "built_at",
+                "entries",
+                "failures",
+                "fallbacks",
+                "generation",
+                "last_error",
+                "layout",
+                "retry_after"
+            ]
+        );
+        for nullable in [
+            "built_at",
+            "entries",
+            "generation",
+            "last_error",
+            "layout",
+            "retry_after",
+        ] {
+            assert!(catalog[nullable].is_null(), "{nullable} must serialize as null");
+        }
+        assert_eq!(catalog["fallbacks"], 0);
+        assert_eq!(catalog["failures"], 0);
     }
 
     #[test]
