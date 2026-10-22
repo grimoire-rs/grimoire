@@ -4,3 +4,7 @@
 [tools]
 zot = "ocx.sh/project-zot/zot:2"
 node = "ocx.sh/nodejs/node:24"
+
+# g0 pins grim 0.14.3 for the index end-to-end test.
+[group.g0.tools]
+grim = "ocx.sh/grimoire/cli:0.14.3"

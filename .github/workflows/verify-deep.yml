@@ -122,6 +122,7 @@ jobs:
         uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
         with:
           version: "0.6.3"
+          groups: default
       - name: Run Acceptance Tests
         shell: bash
         run: task test -- --junit-xml=results/junit.xml
@@ -180,6 +181,7 @@ jobs:
         uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
         with:
           version: "0.6.3"
+          groups: default
       - name: Golden fixture (required)
         working-directory: test
         run: uv run pytest tests/test_golden_pre_hooks.py -n 0 -v --junit-xml=results/junit.xml
@@ -224,9 +226,154 @@ jobs:
             task p9:diff
           fi
 
+  # The pinned indexer builds the fixture index flat (default config), anchored,
+  # and anchored with legacy off. The default build still works for the oldest
+  # grim that reads an index and for this branch's grim; the anchored builds work
+  # for this branch's grim. The indexer is checked out at the commit in
+  # test/data/index_e2e/INDEXER_REF; grim 0.14.3 is the ocx group g0.
+  # GRIM_REQUIRE_INDEX_E2E makes a missing input a failure rather than a skip,
+  # and the JUnit steps below fail on any skipped test, so green means ran and
+  # passed. One skip is allowed: the 0.15.0 (g1) matrix leg, only while
+  # ocx.toml declares no g1 group. Once it does, that leg must run and pass.
+  index-e2e:
+    name: Index end-to-end
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    concurrency:
+      group: ${{ github.workflow }}-index-e2e-${{ github.ref }}
+      # A cancel would drop this result from the first run's aggregate.
+      cancel-in-progress: false
+    env:
+      GRIM_REQUIRE_INDEX_E2E: "1"
+      GRIM_INDEXER_DIR: ${{ github.workspace }}/.indexer
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # This job runs branch-built code; nothing here needs the token.
+          persist-credentials: false
+      - name: Read indexer pin
+        id: pin
+        run: |
+          ref="$(tr -d '[:space:]' < test/data/index_e2e/INDEXER_REF)"
+          [[ "$ref" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::INDEXER_REF must be a full commit SHA"; exit 1; }
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+      - name: Checkout indexer
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: grimoire-rs/indexer
+          ref: ${{ steps.pin.outputs.ref }}
+          path: .indexer
+          persist-credentials: false
+      - name: Download Binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: grim-x86_64-unknown-linux-gnu
+          path: test/bin
+      - name: Prepare Binary
+        run: |
+          mv test/bin/grim-x86_64-unknown-linux-gnu test/bin/grim
+          chmod +x test/bin/grim
+      - name: Install uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - name: Setup Task
+        uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
+      - name: Resolve ocx groups
+        id: ocx-groups
+        run: |
+          groups="default,g0"
+          if grep -q '^\[group\.g1[].]' ocx.toml; then groups="$groups,g1"; fi
+          echo "groups=$groups" >> "$GITHUB_OUTPUT"
+      - name: Setup OCX
+        # The root ocx.toml supplies node (the indexer build) and zot (the suite)
+        # in the default group; g0 (grim 0.14.3) is pulled here and nowhere else,
+        # and g1 (0.15.0) joins once ocx.toml declares it.
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        with:
+          version: "0.6.3"
+          groups: ${{ steps.ocx-groups.outputs.groups }}
+      - name: Index end-to-end (required)
+        run: task test:index-e2e -- --junit-xml=results/junit.xml
+        env:
+          SKIP_BUILD: "true"
+      - name: Assert no index end-to-end test was skipped
+        working-directory: test
+        run: |
+          python3 - <<'EOF'
+          import xml.etree.ElementTree as ET
+          cases = list(ET.parse("results/junit.xml").iter("testcase"))
+          bad = {"failure", "error", "skipped"}
+          outcomes = [next((c.tag for c in case if c.tag in bad), "passed") for case in cases]
+          passed, skipped = outcomes.count("passed"), outcomes.count("skipped")
+          print(f"index-e2e: {passed} passed, {skipped} skipped, {len(outcomes)} total")
+          if passed < 7 or passed != len(outcomes):
+              raise SystemExit("expected at least 7 index_e2e tests, all passed, none skipped")
+          EOF
+      - name: Grim and index version matrix
+        if: ${{ !cancelled() }}
+        run: task test:index-matrix -- -rs --junit-xml=results/matrix/junit.xml
+        env:
+          SKIP_BUILD: "true"
+      - name: Assert only the unpublished 0.15.0 matrix leg was skipped
+        if: ${{ !cancelled() }}
+        working-directory: test
+        run: |
+          python3 - <<'EOF'
+          import tomllib
+          import xml.etree.ElementTree as ET
+          with open("../ocx.toml", "rb") as f:
+              g1_pinned = "g1" in tomllib.load(f).get("group", {})
+          cases = list(ET.parse("results/matrix/junit.xml").iter("testcase"))
+          bad = {"failure", "error", "skipped"}
+          problems, ran = [], {"g0": 0, "g1": 0, "g2": 0}
+          for case in cases:
+              name = case.get("name")
+              outcome = next((c for c in case if c.tag in bad), None)
+              if outcome is None:
+                  for leg in ran:
+                      ran[leg] += f"[{leg}-" in name
+              elif not (outcome.tag == "skipped" and "[g1-" in name and not g1_pinned):
+                  problems.append(f"{name}: {outcome.tag} {outcome.get('message')}")
+          print(f"index-matrix: {len(cases)} total, passed per leg {ran}, g1 pinned: {g1_pinned}")
+          required = ("g0", "g2") + (("g1",) if g1_pinned else ())
+          if problems or not all(ran[leg] for leg in required):
+              raise SystemExit("matrix: every leg but an unpublished g1 must pass: " + "; ".join(problems))
+          EOF
+      - name: Index sync budgets
+        if: ${{ !cancelled() }}
+        run: task test:bench -- -s --junit-xml=results/bench/junit.xml
+        env:
+          SKIP_BUILD: "true"
+      - name: Assert no index sync budget test was skipped
+        if: ${{ !cancelled() }}
+        working-directory: test
+        run: |
+          python3 - <<'EOF'
+          import xml.etree.ElementTree as ET
+          cases = list(ET.parse("results/bench/junit.xml").iter("testcase"))
+          bad = {"failure", "error", "skipped"}
+          outcomes = [next((c.tag for c in case if c.tag in bad), "passed") for case in cases]
+          passed, skipped = outcomes.count("passed"), outcomes.count("skipped")
+          print(f"bench: {passed} passed, {skipped} skipped, {len(outcomes)} total")
+          if passed < 6 or passed != len(outcomes):
+              raise SystemExit("expected at least 6 bench tests, all passed, none skipped")
+          EOF
+      - name: Upload Test Results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: deep-index-e2e
+          path: |
+            test/results/junit.xml
+            test/results/matrix/junit.xml
+            test/results/bench/junit.xml
+
   test-results:
     name: Publish Deep Test Results
-    needs: [build, cross-compile, acceptance-tests, principle-9]
+    needs: [build, cross-compile, acceptance-tests, principle-9, index-e2e]
     runs-on: ubuntu-latest
     if: ${{ !cancelled() }}
     steps:

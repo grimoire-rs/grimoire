@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "name": "e2e-beta",
+  "kind": "rule",
+  "ref": "ghcr.io/acme/rules/e2e-beta",
+  "description": "Beta rule for the end-to-end index test.",
+  "repository": "https://github.com/acme/e2e-beta",
+  "owner": { "github": "acme", "id": 1 }
+}

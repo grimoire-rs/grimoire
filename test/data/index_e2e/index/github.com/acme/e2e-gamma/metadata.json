@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "name": "e2e-gamma",
+  "kind": "agent",
+  "ref": "ghcr.io/acme/agents/e2e-gamma",
+  "description": "Gamma agent for the end-to-end index test.",
+  "repository": "https://github.com/acme/e2e-gamma",
+  "owner": { "github": "acme", "id": 1 }
+}

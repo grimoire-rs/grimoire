@@ -24,7 +24,77 @@ tasks:
         vars:
           SKIP_BUILD: "{{.SKIP_BUILD}}"
       # ocx exec puts zot (pinned in the root ocx.toml) on PATH for the suite.
-      - ocx exec -- uv run pytest {{.CLI_ARGS | default "-v"}}
+      # index_e2e and bench need inputs the ordinary run lacks; they have their
+      # own tasks and deep-verify jobs.
+      - ocx exec -- uv run pytest -m "not index_e2e and not bench" {{.CLI_ARGS | default "-v"}}
+    env:
+      GRIM_COMMAND: "{{.GRIM_BINARY}}"
+
+  .index-e2e-indexer:
+    internal: true
+    preconditions:
+      - sh: test -n "$GRIM_INDEXER_DIR"
+        msg: GRIM_INDEXER_DIR must name a checkout of grimoire-rs/indexer at the commit in test/data/index_e2e/INDEXER_REF
+    cmds:
+      # --prefix keeps ocx on this repo's toolchain: the indexer ships its own ocx.toml.
+      - ocx exec -- npm --prefix "$GRIM_INDEXER_DIR" ci --ignore-scripts
+      - ocx exec -- npm --prefix "$GRIM_INDEXER_DIR" run build
+
+  index-e2e:
+    desc: Build the fixture index with the pinned indexer and sync it with grim 0.14.3 and the built grim
+    summary: |
+      Runs test/tests/test_index_e2e.py (marker index_e2e). Needs GRIM_INDEXER_DIR,
+      a checkout of grimoire-rs/indexer at the commit in
+      test/data/index_e2e/INDEXER_REF; it is installed and built here on every
+      run, so a moved pin never meets a stale dist/. grim 0.14.3 comes from the
+      ocx group g0. Set GRIM_REQUIRE_INDEX_E2E=1 to make a missing input a
+      failure, not a skip.
+    vars:
+      G0_COMMAND:
+        sh: ocx exec -g g0 -- sh -c 'command -v grim'
+    cmds:
+      - task: build
+        vars:
+          SKIP_BUILD: "{{.SKIP_BUILD}}"
+      - task: .index-e2e-indexer
+      - ocx exec -- uv run pytest -m index_e2e tests/test_index_e2e.py {{.CLI_ARGS | default "-v"}}
+    env:
+      GRIM_COMMAND: "{{.GRIM_BINARY}}"
+      GRIM_G0_COMMAND: "{{.G0_COMMAND}}"
+
+  index-matrix:
+    desc: Run every grim generation against every index kind
+    summary: |
+      Runs test/tests/test_index_matrix.py. grim 0.14.3 comes from the ocx group
+      g0. The 0.15.0 leg resolves from a group g1 once one is pinned in ocx.toml
+      and skips with "0.15.0 not published" until then; with g1 declared, a
+      resolution failure fails the task instead of skipping the leg. The built
+      grim always runs.
+    vars:
+      G0_COMMAND:
+        sh: ocx exec -g g0 -- sh -c 'command -v grim'
+      G1_COMMAND:
+        sh: if grep -q '^\[group\.g1[].]' '{{.ROOT_DIR}}/ocx.toml'; then ocx exec -g g1 -- sh -c 'command -v grim'; fi
+    cmds:
+      - task: build
+        vars:
+          SKIP_BUILD: "{{.SKIP_BUILD}}"
+      - ocx exec -- uv run pytest tests/test_index_matrix.py {{.CLI_ARGS | default "-v -rs"}}
+    env:
+      GRIM_COMMAND: "{{.GRIM_BINARY}}"
+      GRIM_G0_COMMAND: "{{.G0_COMMAND}}"
+      GRIM_G1_COMMAND: "{{.G1_COMMAND}}"
+
+  bench:
+    desc: Assert the 20,000-entry sync budgets (time, memory, bytes written)
+    summary: |
+      Runs test/tests/test_index_bench.py (marker bench) against a synthetic
+      index and prints each measurement. Excluded from the ordinary run.
+    cmds:
+      - task: build
+        vars:
+          SKIP_BUILD: "{{.SKIP_BUILD}}"
+      - ocx exec -- uv run pytest -m bench tests/test_index_bench.py {{.CLI_ARGS | default "-v -s"}}
     env:
       GRIM_COMMAND: "{{.GRIM_BINARY}}"
 

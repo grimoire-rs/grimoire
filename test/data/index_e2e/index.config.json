@@ -1,0 +1,7 @@
+{
+  "site": "https://index.example.test",
+  "brand": "e2e index",
+  "repoUrl": "https://github.com/acme/index",
+  "registry": { "alias": "e2e", "index": "https://index.example.test" },
+  "ratings": { "provider": "github", "container": "Ratings" }
+}

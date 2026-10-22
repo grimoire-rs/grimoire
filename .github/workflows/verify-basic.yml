@@ -173,6 +173,7 @@ jobs:
         uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
         with:
           version: "0.6.3"
+          groups: default
       - name: Run Acceptance Tests
         run: task test -- --junit-xml=results/junit.xml
         env:

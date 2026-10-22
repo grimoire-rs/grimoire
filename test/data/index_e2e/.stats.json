@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-21T08:00:00Z",
+  "providers": { "rating": "github", "rating_host": "github.com" },
+  "entries": {
+    "ghcr.io/acme/skills/e2e-alpha": {
+      "rating": {
+        "up": 7,
+        "target": "D_kwDOE2eAlpha",
+        "url": "https://github.com/acme/index/discussions/7"
+      }
+    }
+  }
+}

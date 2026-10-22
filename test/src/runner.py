@@ -109,6 +109,9 @@ class GrimRunner:
     ) -> subprocess.CompletedProcess[str]:
         """Run ``grim`` with the given arguments.
 
+        ``timeout`` (seconds) kills a hung child and raises
+        ``subprocess.TimeoutExpired``; ``None`` waits indefinitely.
+
         ``stdin``, when given, is piped to the child as text (e.g. a
         password for ``--password-stdin``). When omitted, stdin is
         ``subprocess.DEVNULL`` so a command that unexpectedly waits on a

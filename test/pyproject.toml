@@ -6,6 +6,10 @@ requires-python = ">=3.10"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "index_e2e: builds an index with the pinned indexer; needs GRIM_INDEXER_DIR and GRIM_G0_COMMAND (deep verify, task test:index-e2e)",
+    "bench: timed 20,000-entry sync budgets; run by deep verify only",
+]
 
 # Temp-dir retention: pytest keeps the last 3 runs and every test's tmp_path by
 # default, so disk use tracks total tests rather than concurrent failures.
