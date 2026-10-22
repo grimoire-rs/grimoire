@@ -16,7 +16,13 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
-from src.index_fixture import serve
+from src.index_fixture import (
+    INDEX_KINDS,
+    ConformanceKind,
+    KindedIndex,
+    serve,
+    serve_kind,
+)
 from src.otlp_fixture import serve_collector
 from src.runner import GrimRunner
 
@@ -47,6 +53,28 @@ def http_index(tmp_path: Path):
     root.mkdir()
     with serve(root, SimpleHTTPRequestHandler) as base:
         yield root, base
+
+
+@pytest.fixture(params=INDEX_KINDS)
+def index_kind(request: pytest.FixtureRequest) -> ConformanceKind:
+    """Which published shape of the index a test runs against."""
+    return request.param
+
+
+@pytest.fixture()
+def kind_server(tmp_path: Path, index_kind: ConformanceKind):
+    """An index dist dir served as ``index_kind``; see ``KindedIndex``."""
+    root = tmp_path / "index-dist"
+    root.mkdir()
+    with serve_kind(root, index_kind) as index:
+        yield index
+
+
+@pytest.fixture()
+def kind_index(kind_server: KindedIndex):
+    """``http_index`` for every index kind: write ``all.json`` and
+    ``stats.json`` into the root and the other published files follow."""
+    return kind_server.root, kind_server.base
 
 
 @pytest.fixture()

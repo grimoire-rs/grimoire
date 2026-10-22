@@ -14,6 +14,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import shutil
 import threading
 import time
 from collections.abc import Iterator
@@ -143,14 +144,17 @@ def serve(root: Path, handler_cls: type[SimpleHTTPRequestHandler]) -> Iterator[s
         server.server_close()
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class Request:
     """One request an ``IndexHandler`` served. ``path`` is the raw request
-    target, query included; ``headers`` has lower-cased names."""
+    target, query included; ``headers`` has lower-cased names; ``length`` is
+    the response body bytes the handler sent (0 for a HEAD, a bodiless status
+    or a 404), filled in once the response is decided."""
 
     method: str
     path: str
     headers: dict[str, str]
+    length: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,7 +167,8 @@ class Fault:
     short body under a long declared length is a truncated response.
     ``gzipped`` gzip-encodes the body and sends ``Content-Encoding: gzip``.
     ``stall_before`` sleeps before the response starts; ``stall_mid`` sends
-    half the body, then sleeps before the rest.
+    half the body, then sleeps before the rest. A fault keyed ``"*"`` in
+    ``IndexHandler.faults`` answers every path without a fault of its own.
     """
 
     status: int | None = None
@@ -185,16 +190,9 @@ def _content_type(path: str) -> str:
     return "application/octet-stream"
 
 
-def _etag_matches(header: str | None, etag: str) -> bool:
-    if header is None:
-        return False
-    candidates = [c.strip().removeprefix("W/") for c in header.split(",")]
-    return "*" in candidates or etag in candidates
-
-
 class IndexHandler(SimpleHTTPRequestHandler):
-    """Serves the ``serve`` root with a strong ETag per file (``If-None-Match``
-    gives a 304), a request log and a fault table keyed by URL path.
+    """Serves the ``serve`` root with a strong ETag per file (never honoured as
+    a condition), a request log and a fault table keyed by URL path.
 
     Build the handler class per test with ``IndexHandler.new()`` and hand it to
     ``serve``: ``log`` and ``faults`` are class-level state, so a shared class
@@ -224,12 +222,11 @@ class IndexHandler(SimpleHTTPRequestHandler):
 
     def _answer(self, *, head: bool) -> None:
         path = urlsplit(self.path).path
-        self.log.append(
-            Request(
-                self.command, self.path, {k.lower(): v for k, v in self.headers.items()}
-            )
+        request = Request(
+            self.command, self.path, {k.lower(): v for k, v in self.headers.items()}
         )
-        fault = self.faults.get(path, _NO_FAULT)
+        self.log.append(request)
+        fault = self.faults.get(path, self.faults.get("*", _NO_FAULT))
         time.sleep(fault.stall_before)
 
         if fault.status is None:
@@ -246,11 +243,9 @@ class IndexHandler(SimpleHTTPRequestHandler):
             body = gzip.compress(body, mtime=0)
             headers["Content-Encoding"] = "gzip"
         if status == 200:
-            etag = f'"{hashlib.sha256(body).hexdigest()}"'
-            headers["ETag"] = etag
-            if _etag_matches(self.headers.get("If-None-Match"), etag):
-                status, body = 304, b""
+            headers["ETag"] = f'"{hashlib.sha256(body).hexdigest()}"'
         bodiless = status in (204, 304)
+        request.length = 0 if head or bodiless else len(body)
         if not bodiless:
             headers["Content-Length"] = str(len(body))
         for name, value in fault.headers.items():
@@ -327,7 +322,125 @@ def write_root_json(
     return doc
 
 
-def conformance_tree(
-    dest: Path, kind: Literal["legacy-only", "c-plus-legacy", "c-only"]
-) -> Path:
-    raise NotImplementedError("contract: GT")
+ConformanceKind = Literal["legacy-only", "c-plus-legacy", "c-only"]
+_CONFORMANCE = Path(__file__).resolve().parent.parent / "data" / "conformance"
+_CONFORMANCE_DROPPED = {
+    "legacy-only": ("c",),
+    "c-plus-legacy": (),
+    "c-only": ("all.json", "stats.json"),
+}
+
+
+def conformance_tree(dest: Path, kind: ConformanceKind) -> Path:
+    """Copy the checked-in indexer tree into ``dest`` as an index of ``kind``.
+
+    ``legacy-only`` drops the anchored ``c/`` tree, ``c-only`` drops
+    ``all.json`` and ``stats.json``, ``c-plus-legacy`` keeps both. The
+    manifest and README stay behind: a published tree has neither.
+    """
+    shutil.copytree(
+        _CONFORMANCE,
+        dest,
+        ignore=shutil.ignore_patterns("MANIFEST.json", "README.md"),
+        dirs_exist_ok=True,
+    )
+    for name in _CONFORMANCE_DROPPED[kind]:
+        target = dest / name
+        if target.is_dir():
+            shutil.rmtree(target)
+        else:
+            target.unlink()
+    return dest
+
+
+INDEX_KINDS: tuple[ConformanceKind, ...] = ("legacy-only", "c-plus-legacy", "c-only")
+
+
+def _read(path: Path) -> bytes | None:
+    return path.read_bytes() if path.is_file() else None
+
+
+def _digest(data: bytes | None) -> str | None:
+    return None if data is None else hashlib.sha256(data).hexdigest()
+
+
+class KindedIndex:
+    """A dist dir served as one of the ``INDEX_KINDS``.
+
+    Tests write plain ``all.json`` and ``stats.json`` into ``root``. Before
+    every request the anchored tree (``c/root.json`` and its blobs) is rebuilt
+    from them, so the same test body runs against all three kinds. In a
+    ``c-only`` index the two legacy files answer 404.
+
+    A document ("flat" or "stats") is published at more than one path in some
+    kinds; ``fault`` breaks all of them, so a test says what is unavailable
+    and not where. ``outage`` makes the whole server fail.
+    """
+
+    def __init__(self, root: Path, kind: ConformanceKind) -> None:
+        self.root = root
+        self.kind = kind
+        self.base = ""
+        self._lock = threading.Lock()
+        self._published: tuple[str | None, str | None] | None = None
+        hidden = {"/all.json": Fault(status=404), "/stats.json": Fault(status=404)}
+        index = self
+
+        class Kinded(IndexHandler):
+            def _answer(self, *, head: bool) -> None:
+                index.publish()
+                super()._answer(head=head)
+
+        self.handler = Kinded.new(hidden if kind == "c-only" else None)
+
+    @property
+    def log(self) -> list[Request]:
+        return self.handler.log
+
+    def publish(self) -> None:
+        """Write the anchored tree for the legacy files as they are now."""
+        if self.kind == "legacy-only":
+            return
+        with self._lock:
+            flat = _read(self.root / "all.json")
+            stats = _read(self.root / "stats.json")
+            published = (_digest(flat), _digest(stats))
+            if published != self._published:
+                write_root_json(self.root, flat, stats)
+                self._published = published
+
+    def document_paths(self, document: Literal["flat", "stats"]) -> list[str]:
+        """Every URL path serving ``document`` in this kind, as it stands now."""
+        name = "all.json" if document == "flat" else "stats.json"
+        paths = [] if self.kind == "c-only" else [f"/{name}"]
+        data = _read(self.root / name)
+        if self.kind != "legacy-only" and data is not None:
+            paths.append(f"/c/f/sha256/{_digest(data)}.json.gz")
+        return paths
+
+    def fault(self, document: Literal["flat", "stats"], fault: Fault | None) -> None:
+        """Apply ``fault`` to every path serving ``document``; ``None`` heals."""
+        for path in self.document_paths(document):
+            if fault is None:
+                self.handler.faults.pop(path, None)
+            else:
+                self.handler.faults[path] = fault
+
+    def outage(self, down: bool) -> None:
+        """Fail every path with a 500, the hidden legacy files included."""
+        if down:
+            self.handler.faults["*"] = Fault(status=500)
+        else:
+            self.handler.faults.pop("*", None)
+        if self.kind == "c-only":
+            for path in ("/all.json", "/stats.json"):
+                self.handler.faults[path] = Fault(status=500 if down else 404)
+
+
+@contextmanager
+def serve_kind(root: Path, kind: ConformanceKind) -> Iterator[KindedIndex]:
+    """Serve ``root`` as an index of ``kind``; ``base`` is set while serving."""
+    index = KindedIndex(root, kind)
+    with serve(root, index.handler) as base:
+        index.base = base
+        yield index

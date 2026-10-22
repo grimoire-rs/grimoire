@@ -17,17 +17,16 @@ from __future__ import annotations
 
 import json
 import subprocess
-import threading
-from http.server import SimpleHTTPRequestHandler
 from pathlib import Path
 
 import pytest
 
 from src.index_fixture import (
+    Fault,
+    KindedIndex,
     filtered_index_config,
     index_config,
     package,
-    serve,
     write_all_json,
     write_stats,
 )
@@ -74,10 +73,10 @@ def _search_rows(runner) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def test_search_http_index_lists_packages(grim_at, project_dir: Path, http_index) -> None:
+def test_search_http_index_lists_packages(grim_at, project_dir: Path, kind_index) -> None:
     """``grim search`` against an ``index = http://…`` source lists the
     packages from ``all.json`` — no OCI registry involved at all."""
-    root, base = http_index
+    root, base = kind_index
     write_all_json(
         root,
         [
@@ -99,8 +98,8 @@ def test_search_http_index_lists_packages(grim_at, project_dir: Path, http_index
     assert not skill.get("version"), f"index rows carry no version, got {skill!r}"
 
 
-def test_search_http_index_filters_by_query(grim_at, project_dir: Path, http_index) -> None:
-    root, base = http_index
+def test_search_http_index_filters_by_query(grim_at, project_dir: Path, kind_index) -> None:
+    root, base = kind_index
     write_all_json(
         root,
         [
@@ -117,11 +116,46 @@ def test_search_http_index_filters_by_query(grim_at, project_dir: Path, http_ind
     assert repos == ["ghcr.io/acme/skills/alpha-skill"], f"got {repos}"
 
 
-def test_search_http_index_matches_by_keyword(grim_at, project_dir: Path, http_index) -> None:
+def test_one_malformed_record_does_not_blank_the_index(
+    grim_at, project_dir: Path, kind_index
+) -> None:
+    """A record with a null ``keywords`` stays listed with none, and one whose
+    ``kind`` has the wrong type is skipped with a warning; either way the
+    rest of the index still lists, over every published shape."""
+    root, base = kind_index
+    bare = package("bare", "skill", "ghcr.io/acme/skills/bare", "Null keywords")
+    bare["keywords"] = None
+    odd = package("odd", "skill", "ghcr.io/acme/skills/odd", "Numeric kind")
+    odd["kind"] = 7
+    write_all_json(
+        root,
+        [
+            package("good", "skill", "ghcr.io/acme/skills/good", "Well formed"),
+            bare,
+            odd,
+        ],
+    )
+    index_config(project_dir, base)
+
+    result = grim_at(project_dir).run(
+        "--format", "json", "search", "--refresh", check=False
+    )
+
+    assert result.returncode == 0, result.stderr
+    envelope = json.loads(result.stdout)
+    assert envelope["sources"][0]["ok"] is True, envelope["sources"]
+    assert sorted(r["repo"] for r in envelope["items"]) == [
+        "ghcr.io/acme/skills/bare",
+        "ghcr.io/acme/skills/good",
+    ], f"sources: {envelope['sources']}; stderr: {result.stderr}"
+    assert "skipped 1 malformed entries" in result.stderr, result.stderr
+
+
+def test_search_http_index_matches_by_keyword(grim_at, project_dir: Path, kind_index) -> None:
     """A query term present only in an index pointer's ``keywords`` (never in
     the repo name or description) still matches — the index now carries the
     search metadata the phone book used to drop."""
-    root, base = http_index
+    root, base = kind_index
     write_all_json(
         root,
         [
@@ -145,11 +179,11 @@ def test_search_http_index_matches_by_keyword(grim_at, project_dir: Path, http_i
     assert repos == ["ghcr.io/grimoire-rs/mcp/grim"], f"keyword-only match failed: {repos}"
 
 
-def test_search_http_index_summary_reaches_search_row(grim_at, project_dir: Path, http_index) -> None:
+def test_search_http_index_summary_reaches_search_row(grim_at, project_dir: Path, kind_index) -> None:
     """A package's ``summary`` from the index ``all.json`` surfaces on the
     search row (``row["summary"]``) — the index now carries the catalog blurb
     the phone book used to drop."""
-    root, base = http_index
+    root, base = kind_index
     write_all_json(
         root,
         [
@@ -171,13 +205,13 @@ def test_search_http_index_summary_reaches_search_row(grim_at, project_dir: Path
     )
 
 
-def test_search_http_index_hides_and_marks_deprecated(grim_at, project_dir: Path, http_index) -> None:
+def test_search_http_index_hides_and_marks_deprecated(grim_at, project_dir: Path, kind_index) -> None:
     """A deprecated, *not installed*, index-sourced package is hidden by
     default and marked once shown — the same contract a registry-catalog
     source already honours. The pointer is the only browse-time source, so
     dropping its ``deprecated`` field made the row render as verified-healthy
     (grimoire#58)."""
-    root, base = http_index
+    root, base = kind_index
     write_all_json(
         root,
         [
@@ -277,6 +311,22 @@ def test_search_git_index_lists_packages(grim_at, project_dir: Path, tmp_path: P
     assert "gitlab.example/acme/bundles/git-bundle" in repos, f"got {repos}"
 
 
+def test_git_index_keeps_a_pointer_with_null_keywords(
+    grim_at, project_dir: Path, tmp_path: Path
+) -> None:
+    bare = package("bare", "skill", "ghcr.io/acme/skills/bare", "Null keywords")
+    bare["keywords"] = None
+    repo = _git_index_repo(
+        tmp_path,
+        [package("good", "skill", "ghcr.io/acme/skills/good", "Well formed"), bare],
+    )
+    index_config(project_dir, repo.as_posix())
+
+    repos = sorted(r.get("repo", "") for r in _search_rows(grim_at(project_dir)))
+
+    assert repos == ["ghcr.io/acme/skills/bare", "ghcr.io/acme/skills/good"], repos
+
+
 def test_git_index_refresh_picks_up_new_packages(grim_at, project_dir: Path, tmp_path: Path) -> None:
     """A second ``--refresh`` re-clones and surfaces newly announced packages."""
     repo = _git_index_repo(
@@ -312,13 +362,13 @@ def test_git_index_refresh_picks_up_new_packages(grim_at, project_dir: Path, tmp
 
 
 def test_search_outside_project_browses_global_index_source(
-    grim_at, grim_home: Path, tmp_path: Path, http_index
+    grim_at, grim_home: Path, tmp_path: Path, kind_index
 ) -> None:
     """``grim search`` run outside any project honors a GLOBAL config's
     ``[[registries]]`` index source — regression for issue #41, where the
     no-scope path browsed the push-side GHCR fallback (ignoring the global
     config tiers entirely) and mis-warned about ``_catalog`` gating."""
-    root, base = http_index
+    root, base = kind_index
     write_all_json(
         root,
         [package("outside-skill", "skill", "ghcr.io/acme/skills/outside-skill", "From the index")],
@@ -344,7 +394,7 @@ def test_search_outside_project_browses_global_index_source(
 
 
 def test_index_and_registry_sources_combine(
-    grim_at, project_dir: Path, registry: str, http_index
+    grim_at, project_dir: Path, registry: str, kind_index
 ) -> None:
     """A config declaring one registry source and one index source browses
     both — groups aggregate across source kinds."""
@@ -361,7 +411,7 @@ def test_index_and_registry_sources_combine(
         tag="latest",
     )
 
-    root, base = http_index
+    root, base = kind_index
     write_all_json(
         root,
         [package("hub-skill", "skill", "ghcr.io/acme/skills/hub-skill", "From the index")],
@@ -397,7 +447,7 @@ def test_index_and_registry_sources_combine(
 # ``test_registries.py`` for one reason: they need rows on TWO registry hosts,
 # and the session's single OCI registry container cannot serve them. An index
 # is a phone book of pointers — its ``ref`` values name hosts that need not
-# exist — so the ``http_index`` fixture is the only rig in the tree that can
+# exist — so the ``kind_index`` fixture is the only rig in the tree that can
 # express the case at all. The filter itself is source-kind-blind (C-008), so
 # nothing about these scenarios is index-specific.
 
@@ -440,7 +490,7 @@ _TWO_HOST_PACKAGES = [
 def test_browse_filter_addresses_either_candidate(
     grim_at,
     project_dir: Path,
-    http_index,
+    kind_index,
     include: tuple[str, ...],
     exclude: tuple[str, ...],
     expected: set[str],
@@ -465,7 +515,7 @@ def test_browse_filter_addresses_either_candidate(
     everything fails as loudly as one that admits nothing. Exit stays 0
     throughout — a filter is never an error.
     """
-    root, base = http_index
+    root, base = kind_index
     write_all_json(root, _TWO_HOST_PACKAGES)
     filtered_index_config(project_dir, base, include=include, exclude=exclude)
 
@@ -559,7 +609,7 @@ def test_config_file_with_oci_and_index_rejected(grim_at, project_dir: Path) -> 
 
 
 def test_install_from_http_index_lands_in_claude_config_dir(
-    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str, http_index
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str, kind_index
 ) -> None:
     """The whole reason an index exists: a user who knows only its URL can
     add it, find a package through it, and install that package.
@@ -575,7 +625,7 @@ def test_install_from_http_index_lands_in_claude_config_dir(
     from src.helpers import make_artifact
     from src.runner import GrimRunner
 
-    root, base = http_index
+    root, base = kind_index
     art = make_artifact(
         f"{unique_repo}/index-installed",
         "skill",
@@ -637,17 +687,19 @@ def _cached_entries(grim_home: Path) -> dict:
     packages land."""
     entries: dict = {}
     for cache in (grim_home / "catalog").glob("*.json"):
+        if cache.name.endswith(".sync.json"):
+            continue
         entries.update(json.loads(cache.read_text()).get("entries", {}))
     assert entries, f"no catalog cache was written under {grim_home / 'catalog'}"
     return entries
 
 
 def test_http_index_joins_the_ratings_sidecar_by_ref(
-    grim_at, grim_home: Path, project_dir: Path, http_index
+    grim_at, grim_home: Path, project_dir: Path, kind_index
 ) -> None:
     """S-001: an index publishing ``stats.json`` beside ``all.json`` has its
     ratings joined onto the catalog **by ref** — the rated pointer only."""
-    root, base = http_index
+    root, base = kind_index
     write_all_json(
         root,
         [
@@ -690,12 +742,12 @@ def test_http_index_joins_the_ratings_sidecar_by_ref(
 
 
 def test_http_index_joins_the_downloads_sidecar_by_ref(
-    grim_at, grim_home: Path, project_dir: Path, http_index
+    grim_at, grim_home: Path, project_dir: Path, kind_index
 ) -> None:
     """`downloads` is the sidecar's second stat and is joined by the same
     rule as `rating`, independently of it: a ref may be counted and unrated,
     rated and uncounted, or both."""
-    root, base = http_index
+    root, base = kind_index
     write_all_json(
         root,
         [
@@ -763,12 +815,12 @@ def test_http_index_joins_the_downloads_sidecar_by_ref(
 
 
 def test_a_declared_rating_host_lands_in_the_cache_normalised(
-    grim_at, grim_home: Path, project_dir: Path, http_index
+    grim_at, grim_home: Path, project_dir: Path, kind_index
 ) -> None:
     """`adr_index_declared_rating_host.md`: `providers.rating_host` rides
     onto every rated entry, already normalised, so what the cache holds is
     what `grim rate` would dial."""
-    root, base = http_index
+    root, base = kind_index
     write_all_json(root, [package("rated", "skill", "ghcr.io/acme/skills/rated", "Rated")])
     write_stats(
         root,
@@ -783,12 +835,12 @@ def test_a_declared_rating_host_lands_in_the_cache_normalised(
 
 
 def test_a_rejected_rating_host_leaves_the_entry_hostless(
-    grim_at, grim_home: Path, project_dir: Path, http_index
+    grim_at, grim_home: Path, project_dir: Path, kind_index
 ) -> None:
     """A declaration that is not a bare host never reaches the cache — the
     row stays readable and the vote falls back to the provider default,
     the same degradation an unrecognised `providers.rating` gets."""
-    root, base = http_index
+    root, base = kind_index
     write_all_json(root, [package("rated", "skill", "ghcr.io/acme/skills/rated", "Rated")])
     write_stats(
         root,
@@ -803,12 +855,12 @@ def test_a_rejected_rating_host_leaves_the_entry_hostless(
 
 
 def test_http_index_without_a_sidecar_reads_unrated_and_warns_nothing(
-    grim_at, grim_home: Path, project_dir: Path, http_index
+    grim_at, grim_home: Path, project_dir: Path, kind_index
 ) -> None:
     """S-002: no ``stats.json`` (404) is the normal case for every index that
     has not enabled ratings — the catalog builds, rows are unrated, and
     nothing is said above ``debug``."""
-    root, base = http_index
+    root, base = kind_index
     write_all_json(root, [package("plain", "skill", "ghcr.io/acme/skills/plain", "Plain")])
     index_config(project_dir, base)
 
@@ -822,77 +874,59 @@ def test_http_index_without_a_sidecar_reads_unrated_and_warns_nothing(
 
 
 def test_http_index_sidecar_server_error_reads_unrated(
-    grim_at, grim_home: Path, project_dir: Path, tmp_path: Path
+    grim_at, grim_home: Path, project_dir: Path, kind_server: KindedIndex
 ) -> None:
-    """C-003: only the ``all.json`` fetch decides whether the build
-    succeeded. A sidecar the server fails on degrades to *no ratings* — the
-    same arm an outright transport fault takes."""
+    """Only the flat listing decides whether the build succeeded. A
+    sidecar the server fails on degrades to *no ratings* — the same arm an
+    outright transport fault takes."""
+    ref = "ghcr.io/acme/skills/plain"
+    write_all_json(kind_server.root, [package("plain", "skill", ref, "Plain")])
+    write_stats(
+        kind_server.root, {ref: {"rating": {"up": 5, "target": "t", "url": "u"}}}
+    )
+    kind_server.fault("stats", Fault(status=500))
+    index_config(project_dir, kind_server.base)
 
-    class FailingStats(SimpleHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802 — http.server's own casing
-            if self.path.endswith("stats.json"):
-                self.send_error(500)
-                return
-            super().do_GET()
-
-    root = tmp_path / "index-dist-500"
-    root.mkdir()
-    write_all_json(root, [package("plain", "skill", "ghcr.io/acme/skills/plain", "Plain")])
-    with serve(root, FailingStats) as base:
-        index_config(project_dir, base)
-        runner = grim_at(project_dir)
-        result = runner.run("--format", "json", "search", "--refresh", check=False)
-        assert result.returncode == 0, f"a failing sidecar must not fail the build: {result.stderr}"
-        assert len(json.loads(result.stdout)["items"]) == 1
-        assert "rating" not in _cached_entries(grim_home)["ghcr.io/acme/skills/plain"]
+    result = grim_at(project_dir).run("--format", "json", "search", "--refresh", check=False)
+    assert result.returncode == 0, f"a failing sidecar must not fail the build: {result.stderr}"
+    assert len(json.loads(result.stdout)["items"]) == 1
+    assert "rating" not in _cached_entries(grim_home)[ref]
 
 
 def test_sidecar_503_leaves_a_warm_cache_rated(
-    grim_at, grim_home: Path, project_dir: Path, tmp_path: Path
+    grim_at, grim_home: Path, project_dir: Path, kind_server: KindedIndex
 ) -> None:
     """F-1 / R-2: a sidecar the server fails on was *not observed* — it is not
-    an observation that nothing is rated. One 503 with ``all.json`` still
+    an observation that nothing is rated. One 503 with the listing still
     serving must not publish "nothing is rated" into the cache for a whole
     TTL, so the previous build's rating carries forward."""
-
-    failing = threading.Event()
-
-    class FlakyStats(SimpleHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802 — http.server's own casing
-            if self.path.endswith("stats.json") and failing.is_set():
-                self.send_error(503)
-                return
-            super().do_GET()
-
-    root = tmp_path / "index-dist-flaky"
-    root.mkdir()
+    root = kind_server.root
     write_all_json(root, [package("rated", "skill", "ghcr.io/acme/skills/rated", "Rated")])
     write_stats(
         root,
         {"ghcr.io/acme/skills/rated": {"rating": {"up": 12, "target": "t", "url": "u"}}},
     )
-    with serve(root, FlakyStats) as base:
-        index_config(project_dir, base)
-        runner = grim_at(project_dir)
+    index_config(project_dir, kind_server.base)
+    runner = grim_at(project_dir)
 
-        # A warm cache: one successful build that saw the rating.
-        _search_rows(runner)
-        assert _cached_entries(grim_home)["ghcr.io/acme/skills/rated"]["rating"]["up"] == 12
+    # A warm cache: one successful build that saw the rating.
+    _search_rows(runner)
+    assert _cached_entries(grim_home)["ghcr.io/acme/skills/rated"]["rating"]["up"] == 12
 
-        # The sidecar starts failing; `all.json` keeps serving, so the
-        # catalog still rebuilds — over a rating nothing observed.
-        failing.set()
-        rows = _search_rows(runner)
-        rating = _cached_entries(grim_home)["ghcr.io/acme/skills/rated"].get("rating")
-        assert rating is not None, (
-            "a 503 on the sidecar is an unobserved rating, not an observation "
-            "of none — the warm cache's rating must survive the rebuild"
-        )
-        assert rating["up"] == 12
-        # And the shipped surface, not just the cache behind it: the JSON row
-        # is the contract consumers read.
-        row = next(r for r in rows if r["repo"] == "ghcr.io/acme/skills/rated")
-        assert row["rating"]["up"] == 12, f"the served row keeps the rating too; got {row['rating']}"
+    # The sidecar starts failing; the listing keeps serving, so the
+    # catalog still rebuilds — over a rating nothing observed.
+    kind_server.fault("stats", Fault(status=503))
+    rows = _search_rows(runner)
+    rating = _cached_entries(grim_home)["ghcr.io/acme/skills/rated"].get("rating")
+    assert rating is not None, (
+        "a 503 on the sidecar is an unobserved rating, not an observation "
+        "of none — the warm cache's rating must survive the rebuild"
+    )
+    assert rating["up"] == 12
+    # And the shipped surface, not just the cache behind it: the JSON row
+    # is the contract consumers read.
+    row = next(r for r in rows if r["repo"] == "ghcr.io/acme/skills/rated")
+    assert row["rating"]["up"] == 12, f"the served row keeps the rating too; got {row['rating']}"
 
 
 def test_git_index_reads_unrated(grim_at, grim_home: Path, project_dir: Path, tmp_path: Path) -> None:
@@ -910,12 +944,12 @@ def test_git_index_reads_unrated(grim_at, grim_home: Path, project_dir: Path, tm
 
 
 def test_offline_browse_is_unchanged_by_the_sidecar(
-    grim_at, grim_home: Path, project_dir: Path, http_index
+    grim_at, grim_home: Path, project_dir: Path, kind_index
 ) -> None:
     """C-003: ``GRIM_OFFLINE`` inherits catalog behaviour verbatim — the
     cached rating is served, and no sidecar request is made because no
     rebuild happens at all."""
-    root, base = http_index
+    root, base = kind_index
     write_all_json(root, [package("rated", "skill", "ghcr.io/acme/skills/rated", "Rated")])
     write_stats(root, {"ghcr.io/acme/skills/rated": {"rating": {"up": 3, "target": "t", "url": "u"}}})
     index_config(project_dir, base)
@@ -993,12 +1027,12 @@ def _repos(runner, *args: str) -> list[str]:
 
 
 def test_sort_rating_orders_the_browse_with_unrated_last(
-    grim_at, project_dir: Path, http_index
+    grim_at, project_dir: Path, kind_index
 ) -> None:
     """S-010: ``--sort rating`` orders the whole browse by upvotes descending
     with the unrated artifact in a bucket of its own at the end — never folded
     to zero, which would have interleaved it with the low-rated rows."""
-    root, base = http_index
+    root, base = kind_index
     _sorted_index(root, project_dir, base)
     assert _repos(grim_at(project_dir), "--sort", "rating") == [
         "Zulu",  # 40
@@ -1009,13 +1043,13 @@ def test_sort_rating_orders_the_browse_with_unrated_last(
 
 
 def test_sort_downloads_orders_the_browse_with_uncounted_last(
-    grim_at, project_dir: Path, http_index
+    grim_at, project_dir: Path, kind_index
 ) -> None:
     """``--sort downloads`` orders by the sidecar's download total descending,
     with the uncounted artifact in a bucket of its own at the end — never
     folded to zero pulls. The totals run opposite to the ratings, so this is
     provably not the rating order."""
-    root, base = http_index
+    root, base = kind_index
     _sorted_index(root, project_dir, base)
     assert _repos(grim_at(project_dir), "--sort", "downloads") == [
         "tool-tool",  # 900
@@ -1025,23 +1059,23 @@ def test_sort_downloads_orders_the_browse_with_uncounted_last(
     ]
 
 
-def test_sort_name_is_case_insensitive_ascending(grim_at, project_dir: Path, http_index) -> None:
+def test_sort_name_is_case_insensitive_ascending(grim_at, project_dir: Path, kind_index) -> None:
     """C-017: ``--sort name`` is ascending and case-insensitive, so ``Zulu``
     sorts by its letters rather than ahead of every lowercase name on its
     capital (a byte-wise sort would put it first)."""
-    root, base = http_index
+    root, base = kind_index
     _sorted_index(root, project_dir, base)
     assert _repos(grim_at(project_dir), "--sort", "name") == ["apex", "tool-tool", "unrated", "Zulu"]
 
 
 def test_sort_updated_is_deterministic_when_every_row_is_undated(
-    grim_at, project_dir: Path, http_index
+    grim_at, project_dir: Path, kind_index
 ) -> None:
     """C-017: an index pointer carries no ``created`` at all, so every row
     falls into the undated bucket together — and the order must still be
     total, resolved by the name tiebreak rather than left to the sort
     implementation."""
-    root, base = http_index
+    root, base = kind_index
     _sorted_index(root, project_dir, base)
     runner = grim_at(project_dir)
     first = _repos(runner, "--sort", "updated")
@@ -1049,13 +1083,13 @@ def test_sort_updated_is_deterministic_when_every_row_is_undated(
     assert _repos(runner, "--sort", "updated") == first, "an undated browse is stable across runs"
 
 
-def test_description_only_mentions_drop_below_a_name_hit(grim_at, project_dir: Path, http_index) -> None:
+def test_description_only_mentions_drop_below_a_name_hit(grim_at, project_dir: Path, kind_index) -> None:
     """A query that names an artifact returns that artifact, not every
     artifact whose description merely mentions the word — the relevance
     cutoff drops hits scoring below options.search_min_relevance percent of
     the best one (default 50). With no name hit the description mentions are
     the best there is and all of them stay."""
-    root, base = http_index
+    root, base = kind_index
     write_all_json(
         root,
         [
@@ -1076,11 +1110,11 @@ def test_description_only_mentions_drop_below_a_name_hit(grim_at, project_dir: P
     assert sorted(_repos(runner, "grim")) == ["grim-usage", "hex", "nox"]
 
 
-def test_sort_does_not_widen_the_relevance_set(grim_at, project_dir: Path, http_index) -> None:
+def test_sort_does_not_widen_the_relevance_set(grim_at, project_dir: Path, kind_index) -> None:
     """``--sort`` reorders the rows a query returns; it never decides *which*
     rows those are. The relevance cutoff still drops the description-only
     mentions of ``grim`` before the rating order is applied."""
-    root, base = http_index
+    root, base = kind_index
     write_all_json(
         root,
         [
@@ -1094,13 +1128,13 @@ def test_sort_does_not_widen_the_relevance_set(grim_at, project_dir: Path, http_
 
 
 def test_prose_and_namespace_match_whole_word_prefixes_only(
-    grim_at, project_dir: Path, http_index
+    grim_at, project_dir: Path, kind_index
 ) -> None:
     """Descriptions and the org path match by word prefix, not by scattered
     letters: ``test`` sits inside "la*test*" but starts no word, and ``hex``
     only letter-matches the org path ``michael-herwig/arcana`` — neither is a
     hit. A namespace word still finds the artifacts living under it."""
-    root, base = http_index
+    root, base = kind_index
     write_all_json(
         root,
         [
@@ -1116,11 +1150,11 @@ def test_prose_and_namespace_match_whole_word_prefixes_only(
     assert sorted(_repos(runner, "lat")) == ["nox", "other"]
 
 
-def test_sort_overrides_relevance_on_a_query(grim_at, project_dir: Path, http_index) -> None:
+def test_sort_overrides_relevance_on_a_query(grim_at, project_dir: Path, kind_index) -> None:
     """S-011: with a query present ``--sort`` replaces relevance ranking.
     ``tool-tool`` is the strongest match for ``tool`` and heads the unsorted
     query; under ``--sort rating`` it drops to its rating position instead."""
-    root, base = http_index
+    root, base = kind_index
     _sorted_index(root, project_dir, base)
     runner = grim_at(project_dir)
 
@@ -1133,12 +1167,12 @@ def test_sort_overrides_relevance_on_a_query(grim_at, project_dir: Path, http_in
 
 
 def test_absent_sort_leaves_the_browse_exactly_as_it_was(
-    grim_at, project_dir: Path, http_index
+    grim_at, project_dir: Path, kind_index
 ) -> None:
     """Principle 9: ``--sort`` is a new optional flag, so a run without it
     must be byte-identical to what it was before the flag existed — the
     unqueried browse in index order, the queried one by relevance."""
-    root, base = http_index
+    root, base = kind_index
     _sorted_index(root, project_dir, base)
     runner = grim_at(project_dir)
 
@@ -1159,13 +1193,13 @@ def test_absent_sort_leaves_the_browse_exactly_as_it_was(
 
 
 def test_http_index_caches_the_index_placement(
-    grim_at, grim_home: Path, project_dir: Path, http_index
+    grim_at, grim_home: Path, project_dir: Path, kind_index
 ) -> None:
     """``all.json`` derives each pointer's ``namespace``; the cache keeps
     ``<namespace>/<name>`` as ``index_path``. A pointer without one (an index
     compiled before the field) and one whose segments fail the allowlist
     carry no ``index_path``, so the tree keeps their OCI grouping."""
-    root, base = http_index
+    root, base = kind_index
     placed = package("grim-usage", "skill", "ghcr.io/acme/skills/grim-usage", "Placed")
     placed["namespace"] = "github.com/acme"
     hostile = package("evil", "skill", "ghcr.io/acme/skills/evil", "Hostile")

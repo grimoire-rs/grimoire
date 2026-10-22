@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The Grimoire Authors
-"""Self-test of ``IndexHandler`` and ``write_root_json`` (``src/index_fixture.py``).
+"""Self-test of ``IndexHandler``, ``write_root_json``, ``conformance_tree`` and
+``KindedIndex``.
 
-The index suites trust these two to serve and to write exactly what they say;
+The index suites trust these to serve and to write exactly what they say;
 this file proves it with plain HTTP and file reads, no ``grim`` involved.
 """
 
@@ -21,11 +22,19 @@ from urllib.parse import urlsplit
 import pytest
 
 from src.index_fixture import (
+    INDEX_KINDS,
+    ConformanceKind,
     Fault,
     IndexHandler,
+    KindedIndex,
     Request,
+    conformance_tree,
+    package,
     serve,
+    serve_kind,
+    write_all_json,
     write_root_json,
+    write_stats,
 )
 
 BODY = b'{"hello": "index"}\n'
@@ -71,18 +80,16 @@ def served(tmp_path: Path) -> Iterator[Served]:
         yield Served(root, base, handler)
 
 
-def test_files_carry_a_strong_etag_and_if_none_match_gives_304(served: Served) -> None:
+def test_files_carry_a_strong_etag_and_if_none_match_is_not_honoured(
+    served: Served,
+) -> None:
     first = served.get("/all.json")
     etag = first.headers["etag"]
     assert (first.status, first.body) == (200, BODY)
     assert etag == f'"{hashlib.sha256(BODY).hexdigest()}"', "strong, and over the bytes"
 
-    for matching in (etag, f"W/{etag}", f'"other", {etag}', "*"):
-        reply = served.get("/all.json", {"If-None-Match": matching})
-        assert (reply.status, reply.body) == (304, b""), matching
-        assert reply.headers["etag"] == etag
-
-    assert served.get("/all.json", {"If-None-Match": '"other"'}).status == 200
+    again = served.get("/all.json", {"If-None-Match": etag})
+    assert (again.status, again.body) == (200, BODY), "a plain static host"
 
     (served.root / "all.json").write_bytes(b"[]")
     assert served.get("/all.json").headers["etag"] != etag, "new bytes, new ETag"
@@ -111,6 +118,21 @@ def test_the_request_log_records_method_path_and_headers_in_order(
         "header names are lower-cased"
     )
     assert "host" in served.handler.log[1].headers
+
+
+def test_the_request_log_records_the_response_body_bytes_sent(
+    served: Served,
+) -> None:
+    served.handler.faults["/stats.json"] = Fault(gzipped=True, body=b"[1]")
+
+    served.get("/all.json")
+    served.get("/all.json", method="HEAD")
+    served.get("/c/root.json")
+    sent = served.get("/stats.json").body
+
+    assert [r.length for r in served.handler.log] == [len(BODY), 0, 0, len(sent)], (
+        "a body counts, a HEAD and a 404 send none, a gzipped body counts as sent"
+    )
 
 
 def test_each_new_handler_class_has_its_own_log_and_faults() -> None:
@@ -299,7 +321,129 @@ def test_a_written_root_is_served_with_an_etag(served: Served) -> None:
 
     reply = served.get("/c/root.json")
     assert reply.body == (served.root / "c" / "root.json").read_bytes()
-    assert (
-        served.get("/c/root.json", {"If-None-Match": reply.headers["etag"]}).status
-        == 304
+    assert reply.headers["etag"] == f'"{hashlib.sha256(reply.body).hexdigest()}"'
+
+
+CONFORMANCE = Path(__file__).resolve().parent.parent / "data" / "conformance"
+
+
+def _tree_files(root: Path) -> set[str]:
+    return {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
+
+
+@pytest.mark.parametrize(
+    ("kind", "has_legacy", "has_c"),
+    [
+        ("legacy-only", True, False),
+        ("c-plus-legacy", True, True),
+        ("c-only", False, True),
+    ],
+)
+def test_a_conformance_tree_is_shaped_by_its_kind(
+    tmp_path: Path, kind: ConformanceKind, has_legacy: bool, has_c: bool
+) -> None:
+    dest = conformance_tree(tmp_path / "dist", kind)
+
+    files = _tree_files(dest)
+    assert dest == tmp_path / "dist"
+    assert ("all.json" in files) is has_legacy
+    assert ("stats.json" in files) is has_legacy
+    assert any(f.startswith("c/") for f in files) is has_c
+    assert not files & {"MANIFEST.json", "README.md"}, "a published tree has neither"
+
+
+def test_a_conformance_tree_copy_matches_the_manifest(tmp_path: Path) -> None:
+    manifest = json.loads((CONFORMANCE / "MANIFEST.json").read_bytes())["files"]
+
+    dest = conformance_tree(tmp_path, "c-plus-legacy")
+
+    assert _tree_files(dest) == set(manifest)
+    for rel, want in manifest.items():
+        data = (dest / rel).read_bytes()
+        if rel.endswith(".gz"):
+            data = gzip.decompress(data)
+        assert hashlib.sha256(data).hexdigest() == want["sha256"], rel
+        assert len(data) == want["size"], rel
+
+
+def test_a_wildcard_fault_answers_every_path_without_its_own(served: Served) -> None:
+    served.handler.faults["*"] = Fault(status=500)
+    served.handler.faults["/stats.json"] = Fault(status=204)
+
+    assert served.get("/all.json").status == 500
+    assert served.get("/missing.json").status == 500
+    assert served.get("/stats.json").status == 204, "a path's own fault wins"
+
+    del served.handler.faults["*"]
+    assert served.get("/all.json").status == 200
+
+
+@pytest.fixture(params=INDEX_KINDS)
+def kinded(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[KindedIndex]:
+    root = tmp_path / "index-dist"
+    root.mkdir()
+    write_all_json(root, [package("one", "skill", "ghcr.io/acme/skills/one", "One")])
+    write_stats(root, {})
+    with serve_kind(root, request.param) as index:
+        yield index
+
+
+def _get(index: KindedIndex, path: str) -> Reply:
+    return Served(index.root, index.base, index.handler).get(path)
+
+
+def test_a_kinded_index_serves_each_document_where_its_kind_publishes_it(
+    kinded: KindedIndex,
+) -> None:
+    flat = (kinded.root / "all.json").read_bytes()
+    legacy = kinded.kind != "c-only"
+    anchored = kinded.kind != "legacy-only"
+
+    assert (_get(kinded, "/all.json").status == 200) is legacy
+    assert (_get(kinded, "/stats.json").status == 200) is legacy
+    assert (_get(kinded, "/c/root.json").status == 200) is anchored
+    if anchored:
+        root = json.loads(_get(kinded, "/c/root.json").body)
+        blob = _get(kinded, f"/c/f/sha256/{root['flat']['sha256']}.json.gz")
+        assert gzip.decompress(blob.body) == flat
+    assert [p for p in kinded.document_paths("flat") if p.startswith("/c/")] == (
+        [f"/c/f/sha256/{hashlib.sha256(flat).hexdigest()}.json.gz"] if anchored else []
+    )
+
+
+def test_a_kinded_index_follows_the_files_as_they_change(kinded: KindedIndex) -> None:
+    if kinded.kind == "legacy-only":
+        pytest.skip("a legacy-only index has no anchored tree to follow")
+    before = _get(kinded, "/c/root.json").body
+
+    write_all_json(
+        kinded.root, [package("two", "skill", "ghcr.io/acme/skills/two", "Two")]
+    )
+
+    assert _get(kinded, "/c/root.json").body != before, "a new document, a new root"
+    assert any(r.path == "/c/root.json" for r in kinded.log)
+
+
+def test_a_document_fault_breaks_every_path_serving_it_and_heals(
+    kinded: KindedIndex,
+) -> None:
+    paths = kinded.document_paths("flat")
+    assert paths, "every kind serves the flat document somewhere"
+    _get(kinded, "/c/root.json")  # builds the blob in the anchored kinds
+
+    kinded.fault("flat", Fault(status=503))
+    assert {_get(kinded, p).status for p in paths} == {503}
+
+    kinded.fault("flat", None)
+    assert {_get(kinded, p).status for p in paths} == {200}
+
+
+def test_an_outage_fails_the_whole_server_until_lifted(kinded: KindedIndex) -> None:
+    kinded.outage(True)
+    assert _get(kinded, "/all.json").status == 500
+    assert _get(kinded, "/c/root.json").status == 500
+
+    kinded.outage(False)
+    assert _get(kinded, "/c/root.json").status == (
+        404 if kinded.kind == "legacy-only" else 200
     )

@@ -57,9 +57,9 @@ def _repos(envelope: dict) -> list[str]:
 
 
 def test_the_envelope_always_carries_total_and_truncated(
-    grim_at, project_dir: Path, http_index
+    grim_at, project_dir: Path, kind_index
 ) -> None:
-    root, base = http_index
+    root, base = kind_index
     write_all_json(
         root,
         [package("one", "skill", "ghcr.io/acme/skills/one", "First")],
@@ -73,9 +73,9 @@ def test_the_envelope_always_carries_total_and_truncated(
 
 
 def test_an_index_past_500_entries_is_listed_whole(
-    grim_at, project_dir: Path, http_index
+    grim_at, project_dir: Path, kind_index
 ) -> None:
-    root, base = http_index
+    root, base = kind_index
     _write_big_index(root)
     index_config(project_dir, base)
 
@@ -89,9 +89,9 @@ def test_an_index_past_500_entries_is_listed_whole(
 
 
 def test_a_query_reaches_a_row_past_the_old_cap(
-    grim_at, project_dir: Path, http_index
+    grim_at, project_dir: Path, kind_index
 ) -> None:
-    root, base = http_index
+    root, base = kind_index
     _write_big_index(root)
     index_config(project_dir, base)
 
@@ -103,11 +103,11 @@ def test_a_query_reaches_a_row_past_the_old_cap(
 
 
 def test_an_include_filter_reaches_rows_past_the_old_cap(
-    grim_at, project_dir: Path, http_index
+    grim_at, project_dir: Path, kind_index
 ) -> None:
     """The browse filter runs after the build, so it only sees what the
     build kept: with the old cap, `pkg-55*` admitted nothing."""
-    root, base = http_index
+    root, base = kind_index
     _write_big_index(root)
     filtered_index_config(project_dir, base, include=("acme/skills/pkg-55*",))
 
@@ -119,9 +119,9 @@ def test_an_include_filter_reaches_rows_past_the_old_cap(
 
 
 def test_limit_on_a_filtered_browse_counts_the_filtered_rows(
-    grim_at, project_dir: Path, http_index
+    grim_at, project_dir: Path, kind_index
 ) -> None:
-    root, base = http_index
+    root, base = kind_index
     _write_big_index(root)
     filtered_index_config(project_dir, base, include=("acme/skills/pkg-55*",))
 
@@ -133,9 +133,9 @@ def test_limit_on_a_filtered_browse_counts_the_filtered_rows(
 
 
 def test_rate_resolves_a_row_past_the_old_cap(
-    grim_at, project_dir: Path, http_index
+    grim_at, project_dir: Path, kind_index
 ) -> None:
-    root, base = http_index
+    root, base = kind_index
     _write_big_index(root)
     write_stats(
         root,
@@ -162,9 +162,9 @@ def test_rate_resolves_a_row_past_the_old_cap(
 
 
 def test_limit_cuts_the_ranked_result_and_reports_the_full_count(
-    grim_at, project_dir: Path, http_index
+    grim_at, project_dir: Path, kind_index
 ) -> None:
-    root, base = http_index
+    root, base = kind_index
     _write_big_index(root)
     index_config(project_dir, base)
     runner = grim_at(project_dir)
@@ -179,11 +179,11 @@ def test_limit_cuts_the_ranked_result_and_reports_the_full_count(
 
 
 def test_limit_applies_after_the_sort_order(
-    grim_at, project_dir: Path, http_index
+    grim_at, project_dir: Path, kind_index
 ) -> None:
     """A limit applied before the sort would keep ``pkg-000``; the most-upvoted
     row sits past the old 500-entry cap."""
-    root, base = http_index
+    root, base = kind_index
     _write_big_index(root)
     write_stats(root, {LATE: _rating(9), _ref(10): _rating(2)})
     index_config(project_dir, base)
@@ -199,11 +199,11 @@ def test_limit_applies_after_the_sort_order(
 
 
 def test_limit_applies_after_the_relevance_rank(
-    grim_at, project_dir: Path, http_index
+    grim_at, project_dir: Path, kind_index
 ) -> None:
     """The weaker match is declared first, so a limit applied before ranking
     would keep ``pkg-000`` instead of the stronger late row."""
-    root, base = http_index
+    root, base = kind_index
     packages = _big_packages()
     packages[0]["description"] = "Helper for zebra patterns"
     packages[550]["keywords"] = ["zebra"]
@@ -223,8 +223,8 @@ def test_limit_applies_after_the_relevance_rank(
     assert limited["truncated"] is True
 
 
-def test_limit_zero_is_a_usage_error(grim_at, project_dir: Path, http_index) -> None:
-    root, base = http_index
+def test_limit_zero_is_a_usage_error(grim_at, project_dir: Path, kind_index) -> None:
+    root, base = kind_index
     write_all_json(root, [package("one", "skill", "ghcr.io/acme/skills/one", "First")])
     index_config(project_dir, base)
     runner = grim_at(project_dir)
@@ -258,9 +258,9 @@ def _pages(runner, size: int, *extra: str) -> list[dict]:
 
 
 def test_pages_of_100_cover_the_whole_index_disjointly_in_the_unpaged_order(
-    grim_at, project_dir: Path, http_index
+    grim_at, project_dir: Path, kind_index
 ) -> None:
-    root, base = http_index
+    root, base = kind_index
     _write_big_index(root)
     index_config(project_dir, base)
     runner = grim_at(project_dir)
@@ -277,9 +277,9 @@ def test_pages_of_100_cover_the_whole_index_disjointly_in_the_unpaged_order(
 
 
 def test_pages_are_sound_under_a_sort_and_under_a_query(
-    grim_at, project_dir: Path, http_index
+    grim_at, project_dir: Path, kind_index
 ) -> None:
-    root, base = http_index
+    root, base = kind_index
     _write_big_index(root)
     write_stats(root, {_ref(i): _rating(i % 4) for i in range(0, COUNT, 3)})
     index_config(project_dir, base)
@@ -292,9 +292,9 @@ def test_pages_are_sound_under_a_sort_and_under_a_query(
 
 
 def test_offset_at_or_past_the_end_lists_nothing_and_exits_zero(
-    grim_at, project_dir: Path, http_index
+    grim_at, project_dir: Path, kind_index
 ) -> None:
-    root, base = http_index
+    root, base = kind_index
     _write_big_index(root)
     index_config(project_dir, base)
     runner = grim_at(project_dir)
@@ -307,9 +307,9 @@ def test_offset_at_or_past_the_end_lists_nothing_and_exits_zero(
 
 
 def test_offset_without_limit_skips_rows_and_keeps_the_rest(
-    grim_at, project_dir: Path, http_index
+    grim_at, project_dir: Path, kind_index
 ) -> None:
-    root, base = http_index
+    root, base = kind_index
     _write_big_index(root)
     index_config(project_dir, base)
     runner = grim_at(project_dir)
@@ -325,9 +325,9 @@ def test_offset_without_limit_skips_rows_and_keeps_the_rest(
 
 
 def test_offset_rejects_negative_and_non_integer_values(
-    grim_at, project_dir: Path, http_index
+    grim_at, project_dir: Path, kind_index
 ) -> None:
-    root, base = http_index
+    root, base = kind_index
     write_all_json(root, [package("one", "skill", "ghcr.io/acme/skills/one", "First")])
     index_config(project_dir, base)
     runner = grim_at(project_dir)
@@ -341,9 +341,9 @@ def test_offset_rejects_negative_and_non_integer_values(
 
 
 def test_plain_output_hints_the_next_page_on_stderr_only_for_a_partial_page(
-    grim_at, project_dir: Path, http_index
+    grim_at, project_dir: Path, kind_index
 ) -> None:
-    root, base = http_index
+    root, base = kind_index
     _write_big_index(root)
     index_config(project_dir, base)
     runner = grim_at(project_dir)
@@ -366,9 +366,9 @@ def test_plain_output_hints_the_next_page_on_stderr_only_for_a_partial_page(
 
 
 def test_json_output_prints_no_paging_hint(
-    grim_at, project_dir: Path, http_index
+    grim_at, project_dir: Path, kind_index
 ) -> None:
-    root, base = http_index
+    root, base = kind_index
     _write_big_index(root)
     index_config(project_dir, base)
     runner = grim_at(project_dir)
@@ -382,12 +382,12 @@ def test_json_output_prints_no_paging_hint(
 
 
 def test_a_multi_host_index_keeps_its_qualified_reference_order(
-    grim_at, project_dir: Path, http_index
+    grim_at, project_dir: Path, kind_index
 ) -> None:
     """The unqueried browse and an equal-score query list rows by
     ``registry/repository``, as before paging existed. Host order and path order
     disagree here, so a tie-break on the bare repository path would flip it."""
-    root, base = http_index
+    root, base = kind_index
     write_all_json(
         root,
         [
@@ -405,9 +405,9 @@ def test_a_multi_host_index_keeps_its_qualified_reference_order(
 
 
 def test_later_pages_read_the_cache_with_offline_after_a_refreshing_first_call(
-    grim_at, project_dir: Path, http_index
+    grim_at, project_dir: Path, kind_index
 ) -> None:
-    root, base = http_index
+    root, base = kind_index
     _write_big_index(root)
     index_config(project_dir, base)
     runner = grim_at(project_dir)
