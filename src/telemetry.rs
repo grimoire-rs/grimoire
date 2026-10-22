@@ -12,8 +12,13 @@
 //! The handle lives on [`crate::context::Context`], which is built after
 //! `grim hook run` has already returned, so the hook path can never reach it.
 
+use std::cell::Cell;
+use std::future::Future;
+use std::panic::PanicHookInfo;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, MutexGuard, Once};
+use std::task::{Context, Poll};
 use std::time::Instant;
 
 use crate::Command;
@@ -120,6 +125,7 @@ impl Telemetry {
     }
 
     fn armed_with(state: State) -> Self {
+        install_quiet_panic_hook();
         Self {
             state: Some(Arc::new(Mutex::new(state))),
         }
@@ -209,11 +215,57 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// Runs `task` on its own tokio task so a panic inside it ends as a debug line
-/// instead of unwinding into the command's exit path.
-async fn isolated(task: impl std::future::Future<Output = ()> + Send + 'static) {
-    if let Err(err) = tokio::spawn(task).await {
+/// instead of unwinding into the command's exit path or printing on stderr.
+async fn isolated(task: impl Future<Output = ()> + Send + 'static) {
+    if let Err(err) = tokio::spawn(Quiet(Box::pin(task))).await {
         tracing::debug!(target: LOG_TARGET, "telemetry task failed: {err}");
     }
+}
+
+thread_local! {
+    /// True while a telemetry task is being polled on this thread.
+    static QUIET: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Polls the inner future with [`QUIET`] set, so the panic hook skips its panics.
+struct Quiet<F>(Pin<Box<F>>);
+
+impl<F: Future> Future for Quiet<F> {
+    type Output = F::Output;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                QUIET.set(false);
+            }
+        }
+        QUIET.set(true);
+        // Resets on unwind too: a flag left set would silence every later
+        // panic on this worker thread, grim's own included. Owned by
+        // a_telemetry_panic_skips_the_previous_hook_and_any_other_panic_reaches_it.
+        let _reset = Reset;
+        self.0.as_mut().poll(cx)
+    }
+}
+
+type PanicHook = Box<dyn Fn(&PanicHookInfo<'_>) + Send + Sync + 'static>;
+
+/// Wraps `previous` so it is skipped while [`QUIET`] is set.
+fn quiet(previous: PanicHook) -> PanicHook {
+    Box::new(move |info| {
+        if !QUIET.get() {
+            previous(info);
+        }
+    })
+}
+
+/// Installs [`quiet`] over the current panic hook, once per process.
+// ponytail: the hook is process-wide but only silent during telemetry polls;
+// a per-task hook does not exist in std, so this is the narrowest scope.
+fn install_quiet_panic_hook() {
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| std::panic::set_hook(quiet(std::panic::take_hook())));
 }
 
 fn env_lookup(key: &str) -> Option<String> {
@@ -358,6 +410,26 @@ mod tests {
             rt.block_on(isolated(async { panic!("telemetry bug") }));
         });
         assert!(logs.contains("telemetry task failed"), "{logs}");
+    }
+
+    #[test]
+    fn a_telemetry_panic_skips_the_previous_hook_and_any_other_panic_reaches_it() {
+        thread_local!(static SEEN: Cell<u32> = const { Cell::new(0) });
+        let original = std::panic::take_hook();
+        std::panic::set_hook(quiet(Box::new(|_| SEEN.set(SEEN.get() + 1))));
+        // A current-thread runtime polls the spawned task on this thread, so
+        // the thread-local counter sees exactly this test's panics.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(isolated(async { panic!("telemetry bug") }));
+        let after_telemetry = SEEN.get();
+        let _ = std::panic::catch_unwind(|| panic!("grim bug"));
+        let after_grim = SEEN.get();
+        drop(std::panic::take_hook());
+        std::panic::set_hook(original);
+        assert_eq!((after_telemetry, after_grim), (0, 1));
     }
 
     #[test]

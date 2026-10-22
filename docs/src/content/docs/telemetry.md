@@ -133,9 +133,6 @@ export. Each is cut off after 1 second.
 The export is lost when the process is killed or interrupted, for example by
 Ctrl-C.
 
-A bug inside grim's telemetry code can print a Rust panic message on stderr.
-The exit code never changes.
-
 ## Fields {#fields}
 
 Every key below is a name from the OpenTelemetry semantic conventions where
