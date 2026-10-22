@@ -548,6 +548,46 @@ def test_s006_dropped_client_loses_its_file_and_directory_but_never_dot_github(
     assert _files(work / "claude") == kept
 
 
+@unix_only
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores directory permissions")
+def test_s006_dropped_client_goes_directory_first_file_last_and_an_interrupted_drop_converges(
+    grim_at, work: Path, registry: str, unique_repo: str
+) -> None:
+    """The marketplace file is the ownership claim, so it is removed last.
+
+    A run that dies while emptying the dropped client's directory must leave the
+    file behind (still ours, still naming the marketplace) so the next run
+    finishes the drop. Were the file removed first, the stranded directory would
+    be unowned and no run would ever clean it up.
+    """
+    refs = _two_plugins(work, registry, unique_repo)
+    runner = grim_at(work)
+    _ok(_run(runner))
+    _write(work, {"alpha": {"include": [refs["a"]]}, "beta": {"include": [refs["b"]]}}, clients=["claude", "codex", "qoder"])
+
+    # Removal walks the dropped directory in name order: `alpha` goes, then
+    # `beta` fails on a read-only directory — the run is interrupted midway.
+    stuck = work / "copilot" / "beta"
+    stuck.chmod(0o555)
+    try:
+        failed = _run(runner)
+        assert failed.returncode == 77, f"rc={failed.returncode}\nstdout: {failed.stdout}\nstderr: {failed.stderr}"
+
+        assert not (work / "copilot" / "alpha").exists(), "removal got as far as the first tree"
+        assert stuck.is_dir(), "the interrupted tree is still there"
+        assert (work / FILES["copilot"]).is_file(), "the file is removed last, so it outlives the interruption"
+        assert _doc(work, "copilot")["name"] == "acme", "and still claims the directory for this marketplace"
+    finally:
+        stuck.chmod(0o755)
+
+    report = _ok(_run(runner))
+
+    assert _file_actions(report)["copilot"] == "removed"
+    assert not (work / FILES["copilot"]).exists() and not (work / "copilot").exists()
+    assert (work / ".github").is_dir(), ".github/ itself is never pruned"
+    assert _file_actions(_ok(_run(runner))) == dict.fromkeys(("claude", "codex", "qoder"), "unchanged")
+
+
 # ── S-007 — hand-edited tree ──────────────────────────────────────────────
 
 
