@@ -50,11 +50,13 @@ use secrecy::SecretString;
 use secrecy::zeroize::Zeroizing;
 
 use crate::api::rate_report::RateReport;
+use crate::catalog::Refresh;
 use crate::catalog::forge::{self, CiEnv, ForgeKind};
 use crate::catalog::rating_provider::{self, RateContext, RateError, ViewerIdentity, VoteAction, VoteOutcome};
 use crate::catalog::registry_catalog::RatingSummary;
 use crate::catalog::vote_store::{VoteIdentity, VoteStore};
 use crate::cli::exit_code::ExitCode;
+use crate::config::registry_resolve::SourceKind;
 use crate::context::Context;
 
 use super::scope_resolution;
@@ -682,22 +684,20 @@ async fn resolve_row(ctx: &Context, reference: &str) -> anyhow::Result<(String, 
         active: &crate::install::client_target::ClientTarget::ALL,
         target: None,
     };
-    let results = super::grim(
-        crate::catalog::load_catalog(
-            &ctx.paths(),
-            &registries,
-            "",
-            &access,
-            &badges,
-            ctx.offline(),
-            false,
-            // `Complete`, never `Browse`: a source's include/exclude filter
-            // decides what is *listed*, and hiding a row from a listing
-            // must not make an artifact unvotable.
-            crate::catalog::CatalogScope::Complete,
-        )
-        .await,
-    )?;
+    let mut results = load_rows(ctx, &registries, &access, &badges, Refresh::No).await?;
+    // A cached listing can hold a row its stats document never reached (the
+    // blob was unavailable, or rejected, when it was built), and voting on
+    // that row needs the rating. One forced stats fetch from the row's own
+    // source settles it; offline there is nothing to fetch.
+    if !ctx.offline()
+        && let Some(idx) = stats_reload_target(&results, &registries, &wanted)
+    {
+        let mut own = load_rows(ctx, &registries[idx..=idx], &access, &badges, Refresh::StatsForced).await?;
+        // A failed reload serves nothing fresher than the group already held.
+        if let Some(group) = own.groups.pop().filter(|g| g.error.is_none()) {
+            results.groups[idx] = group;
+        }
+    }
 
     let row = results
         .into_flat_rows()
@@ -714,6 +714,57 @@ async fn resolve_row(ctx: &Context, reference: &str) -> anyhow::Result<(String, 
         })
     })?;
     Ok((wanted, rating))
+}
+
+/// The catalog load `grim rate` resolves a row from.
+///
+/// `Complete`, never `Browse`: a source's include/exclude filter decides what
+/// is *listed*, and hiding a row from a listing must not make an artifact
+/// unvotable.
+async fn load_rows(
+    ctx: &Context,
+    registries: &[crate::config::ResolvedRegistry],
+    access: &std::sync::Arc<dyn crate::oci::access::OciAccess>,
+    badges: &crate::catalog::BadgeContext<'_>,
+    refresh: Refresh,
+) -> anyhow::Result<crate::catalog::CatalogResults> {
+    super::grim(
+        crate::catalog::load_catalog(
+            &ctx.paths(),
+            registries,
+            "",
+            access,
+            badges,
+            ctx.offline(),
+            refresh,
+            crate::catalog::CatalogScope::Complete,
+        )
+        .await,
+    )
+}
+
+/// The index of the group whose stats are worth refetching: the first one
+/// listing `wanted`, which is the row the lookup lands on, when that row is
+/// unrated and its source publishes a stats document.
+///
+/// Groups follow `registries` one for one, so the index addresses both.
+fn stats_reload_target(
+    results: &crate::catalog::CatalogResults,
+    registries: &[crate::config::ResolvedRegistry],
+    wanted: &str,
+) -> Option<usize> {
+    let (idx, row) = results
+        .groups
+        .iter()
+        .enumerate()
+        .find_map(|(idx, group)| Some((idx, group.rows.iter().find(|row| row.repo() == wanted)?)))?;
+    stats_reload_wanted(registries.get(idx)?.kind, row.rating.is_some()).then_some(idx)
+}
+
+/// Only an HTTP index has a stats document to refetch: a git index has none,
+/// and a registry listing carries no ratings.
+fn stats_reload_wanted(kind: SourceKind, rated: bool) -> bool {
+    !rated && kind == SourceKind::IndexHttp
 }
 
 /// Resolve the credential for `host`: the piped one under
@@ -956,6 +1007,17 @@ mod tests {
         );
         assert_eq!(exit_of(RateError::Unauthorized("401".to_string())), ExitCode::AuthError);
         assert_eq!(exit_of(RateError::Offline), ExitCode::OfflineBlocked);
+    }
+
+    #[test]
+    fn only_an_unrated_row_of_an_http_index_is_worth_a_stats_reload() {
+        assert!(stats_reload_wanted(SourceKind::IndexHttp, false));
+        assert!(!stats_reload_wanted(SourceKind::IndexHttp, true));
+        // A git index has no stats document and a registry listing carries
+        // no ratings: a reload would be a re-clone, or a second `_catalog`
+        // walk, for nothing.
+        assert!(!stats_reload_wanted(SourceKind::IndexGit, false));
+        assert!(!stats_reload_wanted(SourceKind::Registry, false));
     }
 
     // -----------------------------------------------------------------

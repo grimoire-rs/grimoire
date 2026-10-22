@@ -30,10 +30,6 @@ pub enum Refresh {
     /// Refetch the stats blob even when its digest was already applied or
     /// rejected. The pre-flight TTL is bypassed and a recorded failure backoff
     /// is kept.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "constructed once `grim rate` reloads an unrated row")
-    )]
     StatsForced,
 }
 
