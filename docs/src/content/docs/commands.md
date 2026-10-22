@@ -975,7 +975,7 @@ fine or is simply absent — `lock_exists` alone answers "is it there", not
 "can grim use it". The exit code stays `0` either way; `context` reports
 the state, it does not fail on it.
 `registries` entries are `{alias, url, kind, default, authenticated, include,
-exclude, insecure}` with `kind` either `registry` or `index`. `include` and `exclude`
+exclude, insecure, catalog}` with `kind` either `registry` or `index`. `include` and `exclude`
 are the source's authored
 [browse-filter](./configuration.md#browse-filters) patterns in declaration
 order — always-present arrays, `[]` on an unfiltered entry, and `[]` for
@@ -999,6 +999,24 @@ set or `GRIM_INSECURE_REGISTRIES` still reports `false`, so this key and
 carry no authored fields, so every row reports `false` there. That is a
 statement about the browse set, not about transport: `--registry` never
 narrows which hosts are reachable over plain HTTP.
+`catalog` reports how that source's cached listing was last synced. It is
+read from the [sync sidecar](./configuration.md#data-layout) and never
+touches the network, so it costs nothing offline. Its keys are always
+present:
+
+- `built_at`: when the listing was last built or confirmed current.
+- `entries`: the listing's size.
+- `layout`: `flat` or `anchored`.
+- `generation`: the adopted index root's generation. `null` on a flat sync.
+- `fallbacks`: consecutive refreshes that fell back to `all.json`.
+- `failures`: consecutive failed refreshes.
+- `last_error`: the last failure, with any URL redacted.
+- `retry_after`: when [backoff](./package-index.md#consuming-backoff) ends.
+
+An OCI source reports `null` for `layout` and `generation`. The whole value
+is `null` when the source has no readable sidecar from this version of grim,
+as before its first sync. The plain table is unchanged.
+
 `authenticated` is a boolean: `true`
 when a credential for this registry's **host** is present in the
 docker-compatible credential store (`~/.docker/config.json`, or
@@ -1187,7 +1205,14 @@ are reported on stderr:
 What attributes each row to the registry that served it is the `source`
 object under `--format json`, described below. The unqueried browse is not
 ranked and still lists registry by registry, in declaration order.
-`--refresh` forces a catalog rebuild. `--registry <ref>` collapses the
+
+`--refresh` forces every browsed source to sync. It ignores the cache
+lifetime and a failing source's [wait](./package-index.md#consuming-backoff).
+On an index with a root it also drops the
+[stats skip rules](./package-index.md#consuming-stats), so the stats are
+fetched again.
+
+`--registry <ref>` collapses the
 browse to exactly the registries it names. It is repeatable and
 comma-separated (`--registry a,b` or `--registry a --registry b`), and the
 first value given is primary.
@@ -1358,9 +1383,10 @@ cached rows and says so, and the source still reads `ok: false` in JSON:
 catalog for source 'https://index.example.org' unavailable: package index fetch failed for 'https://index.example.org'; serving the cached catalog built 2026-10-16T09:12:40Z
 ```
 
-A failed refresh does not restamp the cache. The next command retries only
-when the cache has expired, or when you pass `--refresh`. A still-fresh cache
-is served with `ok: true`.
+A failed refresh does not restamp the cache. Later commands make no request
+to that source until its recorded wait ends, one hour at most, and the source
+reads `ok: false` with a `refresh deferred until` error. `--refresh` ignores
+the wait. A still-fresh cache is served with `ok: true`.
 Full contract: [the `sources` array](./json-interface.md#search-sources).
 
 Two more always-present siblings say whether `items` is the whole answer.
@@ -1456,6 +1482,15 @@ exiting `79`. The vote applies to the *repository*, so a tag
 or digest suffix parses and is then ignored. A [browse
 filter](./configuration.md#browse-filters) hiding a row from a listing does
 not make it unvotable.
+
+When the row reads as unrated, `rate` fetches that source's stats once more
+before it exits `65`. A stats blob that was unavailable when the listing was
+built then cannot hide a rating. The fetch stays within the row's own source
+and is skipped under `--offline`.
+
+Only an HTTP index publishes stats, so a git index or a registry source skips
+the fetch and `rate` exits `65` as before. An index without a root serves its
+stats in `stats.json` beside `all.json`, and that fetch downloads both files.
 
 | Flag | Effect |
 |---|---|
@@ -3007,7 +3042,7 @@ down when the client closes stdin (EOF).
 
 | Tool | Description | Gate |
 |------|-------------|------|
-| `grim_search` | Browse/search the resolved scope's registries (no registry override — the configured set is the boundary). Each source's [browse filter](./configuration.md#browse-filters) narrows the results, exactly as for `grim search`; the tool's own description says so, and says that an absent package is still fetchable and installable by direct reference — a filter is a view, never a boundary. Args: `query?`, `refresh?`, `limit?` (positive integer, the same cap as `grim search --limit`), `offset?` (non-negative integer, the same skip as `grim search --offset`; a negative or non-integer value is an invalid-params error), scope. The payload still carries `total` and `truncated`; page with the [recipe][json-search-paging]. Same shape as `grim search --format json` (not byte-identical — see [MCP parity][json-mcp-parity]). | always |
+| `grim_search` | Browse/search the resolved scope's registries (no registry override — the configured set is the boundary). Each source's [browse filter](./configuration.md#browse-filters) narrows the results, exactly as for `grim search`; the tool's own description says so, and says that an absent package is still fetchable and installable by direct reference — a filter is a view, never a boundary. Args: `query?`, `refresh?`, `limit?` (positive integer, the same cap as `grim search --limit`), `offset?` (non-negative integer, the same skip as `grim search --offset`; a negative or non-integer value is an invalid-params error), scope. The payload still carries `total` and `truncated`; page with the [recipe][json-search-paging]. An unpaged call on a large index can return tens of megabytes, so pass `limit` and `offset`. `total`, `truncated` and `sources[].capped` report the cut. Same shape as `grim search --format json` (not byte-identical — see [MCP parity][json-mcp-parity]). | always |
 | `grim_status` | Install status of every declared artifact in the requested scope. `check` (optional, default `false`) re-checks the live catalog for deprecation/replacement and re-resolves update availability — same semantics as CLI `grim status --check` (network read; the report's `checked` field says whether it ran). Args: `check?`, scope. Same shape as `grim status --format json` (not byte-identical — see [MCP parity][json-mcp-parity]). | always |
 | `grim_fetch` | Return an artifact's content in the tool result — no install. Canonical bytes by default; `vendor` (any supported client name — see the [client compatibility matrix][clients-matrix]) returns that client's projection; `path` fetches one support file (base64 with `encoding: "base64"` for a binary file); a `files` listing is always included. `description` fetches the repository's [description companion](./publishing.md#description-companion) instead (every member inline); `digest_only` resolves to `{ref, digest}` with no download and composes with `description` to probe the companion tag. Content caps at 256 KiB (truncated content carries a marker); layers over 8 MiB are refused before download, and a registry that streams more bytes than its declared layer size aborts mid-transfer into a data error rather than buffering an unbounded body. Args: `ref`, `vendor?`, `path?`, `description?`, `digest_only?`, scope. | always |
 | `grim_describe` | Report an artifact's manifest-level metadata — kind, curated annotations, tags, `has_description`, and the verbatim annotation map — without downloading its content. Same shape as `grim describe --format json`. Args: `ref`, scope. | always |
