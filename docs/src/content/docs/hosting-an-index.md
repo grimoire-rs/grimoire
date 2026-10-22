@@ -111,8 +111,9 @@ Build it locally before you push anything:
 $ npx @grimoire-rs/indexer build
 ```
 
-`dist/` then holds the rendered site, `all.json`, and a path-addressable
-copy of every pointer — exactly what CI publishes.
+`dist/` then holds the rendered site, `all.json`, the index root at
+`c/root.json`, and a path-addressable copy of every pointer. That is exactly
+what CI publishes.
 
 ## Push It {#deploy}
 
@@ -127,7 +128,7 @@ A private instance that refuses remote CI includes needs one edit — see
 [Upgrading CI][upgrading].
 
 Either way the deployed site is two things at once: a searchable catalog
-for humans, and `all.json` for grim.
+for humans, and the catalog files for grim: `all.json` and the index root.
 
 > **Proven where?** The GitHub loop — scaffold, push, Pages, announce,
 > gate, auto-merge, consume from a clean `GRIM_HOME` — was rehearsed end
@@ -157,7 +158,8 @@ behavior is in [Consuming an Index][consuming].
 > `Accept-Encoding: gzip` for the index files and decodes the answer. A
 > compressed file saves transfer, and nothing is required of the host. grim
 > caps the decoded body at 128 MiB and an index at 100,000 entries. A fetch
-> past either limit fails.
+> past either limit fails. The `c/f` blobs of an `anchored` index are gzip
+> files already, so they need no host setting.
 
 ## Fill It {#packages}
 
@@ -330,6 +332,112 @@ It is also the only step that goes online — set `"enrich": false` in the
 [`ci` block](#upgrading) and re-render for a pointers-only site that never
 leaves the runner.
 
+## Choose a Sync Layout {#sync}
+
+A client should learn that nothing changed without downloading the whole
+catalog again. The `sync` block in `index.config.json` chooses how your index
+answers that. Leave it out and the build publishes the files it always did,
+plus a `c/` directory. That directory holds the index root at `c/root.json`,
+the stats blob, and files private to the pipeline.
+
+```json
+{
+  "sync": { "layout": "flat", "legacy": true, "revalidate": "1h" }
+}
+```
+
+Those values are the defaults, and every key is optional.
+
+| Key | Effect |
+|---|---|
+| `layout` | `flat` or `anchored`. Default `flat`. `tree` is reserved and exits `65` |
+| `legacy` | `true` also publishes `/all.json` and `/stats.json` at their frozen paths, with `.gz` siblings. `false` publishes only `c/`. Default `true` |
+| `revalidate` | How long `enrich` trusts a package's earlier answer before it asks the registry again. A number and a unit (`m`, `h` or `d`) from `15m` to `7d`. Default `1h` |
+
+The root is published in every layout. It names the catalog by digest, so a
+client that already holds the current catalog learns that from one request of
+about half a kilobyte. The layout decides what the root points at:
+
+| `layout` | Root `flat` | `c/f/` holds |
+|---|---|---|
+| `flat` | `null`, so clients read `all.json` | The stats blob only |
+| `anchored` | A reference to the flat blob | The flat blob and the stats blob |
+
+With `anchored`, a client whose catalog is current stops after the root. A
+changed catalog costs the root plus the flat blob, about 7 MB gzipped at
+20,000 entries. The [root][spec-root] and the [blobs][spec-blobs] have their
+own reference. The indexer writes the blobs first and the root last. A host
+that cannot deploy atomically must upload the root last as well.
+
+The build reads the block strictly. All of these exit `65` naming the key:
+
+- A `layout` other than `flat` or `anchored`, `tree` included.
+- A `legacy` that is not a boolean.
+- A `revalidate` that is malformed or outside its range.
+- A `sync` that is not an object.
+- `legacy: false` with `layout: flat`.
+
+An unknown key inside `sync` is a warning. An indexer from before the block
+warns that nothing reads `sync` and builds flat.
+
+### Dropping the Legacy Files {#sync-legacy}
+
+`legacy: false` stops publishing `/all.json`, `/stats.json` and their `.gz`
+siblings, and the footer drops its link to `/all.json`. The `/p/<ns>/<name>/`
+pages are site output, which `legacy` does not govern. It needs
+`layout: anchored`. With `flat` no flat file would exist, so the build exits
+`65` naming both keys.
+
+Set it last. A grim from before the index root never requests `c/`. Against a
+`c/`-only index its refresh fails, so it serves a stale cache or nothing, and
+a cold install is empty. Turn `legacy` off only after no such grim remains.
+Setting it back to `true` restores the files on the next deploy.
+
+With `legacy: false`, also keep `site` set and `enrich` on. Without them the
+build warns that a client holding the previous root can fail a refresh.
+
+### Switching and Rolling Back {#sync-switch}
+
+| You want | Do | Clients see |
+|---|---|---|
+| `anchored` | Set `"layout": "anchored"` and deploy | A grim that knows the root switches on its next refresh, and one that does not keeps reading `all.json`. The gzip blobs add about 8 MB to the site at 20,000 entries |
+| Back to `flat` | Set `"layout": "flat"` | The root's `flat` becomes `null`, and clients read `all.json` |
+| Fewer registry calls | Raise `revalidate`, for example to `"6h"` | A new release can take up to 6 hours to appear |
+| Undo a bad deploy | Redeploy the previous content | Clients adopt the previous root on their next refresh. grim does not compare generations |
+
+A rollback is therefore not instant. It lands on each client's next refresh,
+which waits for the one-hour cache to expire unless the user passes
+`--refresh`.
+
+### The Host Ceiling {#sync-ceiling}
+
+grim reads a flat blob of at most 128 MiB inflated, and an index of at most
+100,000 entries. The blob reaches the 128 MiB cap at about 64,000 entries,
+well before the entry cap. Past it, no shipped grim can read the catalog.
+
+The build warns when `all.json` reaches 80 percent of the cap or the entries
+reach 80 percent of 100,000. Past either limit the warning becomes an error
+message, and the build still exits `0`. A larger index needs the `tree`
+layout, which is reserved and does not exist yet.
+
+### Recovering a Bad State {#sync-recover}
+
+Re-render the pipeline with `npm run ci` after you upgrade the indexer. The
+rendered pipeline then takes two manual-run inputs:
+
+- `fresh` is a boolean. It re-enriches every package from scratch.
+- `purge` is a package reference or a 64-character blob digest. It removes
+  the stored data it names from the build state and from the next deploy.
+
+A mistyped `purge` fails the job with exit `65` before anything deploys. On
+GitLab the same inputs are the pipeline variables `GRIM_INDEX_FRESH` and
+`GRIM_INDEX_PURGE`.
+
+If you suspect the build cache itself, delete it too. Run `gh cache delete`
+on GitHub, or use "Clear runner caches" on GitLab. GitLab's cache key is
+fixed, so there `fresh` and `purge` do not retire the cache, and clearing it
+is the only way to evict it.
+
 ## Collect Ratings {#ratings}
 
 A catalog of two hundred packages with no signal at all is a catalog
@@ -481,6 +589,8 @@ browsable catalog, the contribution gate, or both.
 [config]: ./configuration.md
 [skip-existing]: ./publishing.md#batch-publish-skip-existing
 [consuming]: ./package-index.md#consuming
+[spec-root]: ./package-index.md#spec-root
+[spec-blobs]: ./package-index.md#spec-blobs
 [spec-metadata]: ./package-index.md#spec-metadata
 [announcing]: ./package-index.md#announcing
 [gitlab]: ./self-hosted-gitlab.md
