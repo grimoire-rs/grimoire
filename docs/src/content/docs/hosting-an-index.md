@@ -412,8 +412,8 @@ which waits for the one-hour cache to expire unless the user passes
 ### The Host Ceiling {#sync-ceiling}
 
 grim reads a flat blob of at most 128 MiB inflated, and an index of at most
-100,000 entries. The blob reaches the 128 MiB cap at about 64,000 entries,
-well before the entry cap. Past it, no shipped grim can read the catalog.
+100,000 entries. Which limit an index reaches first depends on the size of its
+entries. Past either one, no shipped grim can read the catalog.
 
 The build warns when `all.json` reaches 80 percent of the cap or the entries
 reach 80 percent of 100,000. Past either limit the warning becomes an error
