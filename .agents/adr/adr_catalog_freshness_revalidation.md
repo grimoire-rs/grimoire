@@ -12,6 +12,7 @@
       rather than adding `tokio-util`, and jitter is deliberately not implemented
       rather than pulling `rand`)
 **Domain Tags:** infrastructure, integration, security, tui
+**Superseded By (proposed):** [adr_catalog_at_scale.md](./adr_catalog_at_scale.md) — in part: D4 (validator store, body cap, redirect policy; its `CatalogEntry.digest` and `git_tip` fields withdrawn), D7 (git leg), and correction 1's `validator.is_some()` predicate, restated against the bound sync sidecar; D1, D5, D6 stand
 **Supersedes:**
 [`adr_multi_registry_mcp.md`](./adr_multi_registry_mcp.md) **§ 4's final
 sentence only** — "A long-lived MCP process additionally invalidates its
