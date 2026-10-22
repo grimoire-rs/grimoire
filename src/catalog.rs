@@ -16,10 +16,14 @@ pub mod catalog_error;
 pub mod catalog_service;
 pub mod forge;
 pub mod index_announce;
+pub mod index_git;
+pub mod index_http;
 pub mod index_source;
 pub mod rating_provider;
 pub mod registry_catalog;
 pub mod search_match;
+#[cfg(test)]
+mod test_hosts;
 pub mod update_availability;
 pub mod vote_store;
 
