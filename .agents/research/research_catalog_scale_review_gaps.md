@@ -1,0 +1,111 @@
+# Research: Ecosystem gap check on the catalog-at-scale design (conda shards, TUF, incremental builds, static hosts, client search, edge caches)
+
+## Metadata
+
+**Date:** 2026-10-21
+**Axis:** ecosystem (design-review gap check)
+**Domain:** static package indexes / CI / static hosting
+**Triggered by:** the `/hex-architect` review panel on the 2026-10-21 amendment of `adr_catalog_at_scale.md` and `design_catalog_at_scale.md`
+**Expires:** 2027-04-21
+**Overlaps:** extends, and in one place corrects, `research_static_index_layouts.md` (conda CEP 16, Pagefind), `research_static_site_search_at_scale.md` (Pagefind browse measurement), `research_index_build_state_security.md` (cache scoping, TUF rollback), `research_static_host_ci_limits.md` (hosts). Findings only where the existing research did not already answer.
+
+Tags: [doc] vendor docs, [src] source code read at the stated tag/commit, [issue] upstream issue or PR, [derived] my arithmetic on the ADR's own figures. Sources older than ~18 months are marked **OLD**. Design refs: `D:` = `.agents/specs/design_catalog_at_scale.md`, `A:` = `.agents/adr/adr_catalog_at_scale.md` (line numbers in the worktree files as of this run). Severity per the review context: Block / High / Warn / Suggest. Class: Actionable (fix without owner input) or Deferred (owner decision).
+
+**Limits of this run.** No header probe was run against GitHub Pages or GitLab Pages; Pages claims rest on docs, host source and the sibling artifacts' earlier probes. The Astro memory finding is derived from Astro docs plus the ADR's own per-package size, not from a measured 20,000-page build.
+
+## Gaps (highest severity first)
+
+### G1 [High, Actionable] A 4xx other than 404/410 is unclassified, on the root probe and on immutable children
+
+- **Affects:** D:489-498 (probe table, `unknown` row at :498), D:538-541 and :551 (delta `transport -> FAIL`), D:1474 (GR-R04 lists only 404, 410, integrity), A:406-412 (D4), A:426-433 (D5).
+- **Missed:** S3 and S3-fronted CDNs return **403**, not 404, for a missing key when the requester lacks `s3:ListBucket` ([AWS GetObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html)); CloudFront lists a missing object among the causes of a 403 from an S3 origin ([CloudFront 403 guide](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/http-403-permission-denied.html)). A WAF or corporate proxy can also answer 403 on an unfamiliar path. The ADR names object storage plus a CDN as the escape hatch (A:737), so this is the expected host class. Under the current text a bound `root`/`tree` source whose `c/root.json` starts answering 403 is `unknown` and **FAILs forever** (stale cache served, backoff capped at 1 h), although `all.json` is reachable. A pruned shard answering 403 in the delta path is a transport error, not BULK.
+- **Same class in the wild:** rattler's fallback to `repodata.json` accepts only 404 and 501 for a missing shard index, so ghcr.io's 403-for-nonexistent-repository aborted every solve on `oci://` channels with sharded repodata on ([conda/rattler#2726](https://github.com/conda/rattler/issues/2726), fixed by [#2733](https://github.com/conda/rattler/pull/2733) with a local synthetic 404, because widening the status match was judged the wrong layer). Filed 2026-08-27.
+- **Change:** probe: 401, 403, 405, 451 and any other 4xx except 408/429 are `miss` (flat this refresh, tree store kept, `debug`); 408, 429 and 5xx stay `unknown`. Children (plane index, shard, record): any 4xx except 408/429 is an integrity-class failure and takes BULK. Add a V-5 row "403 on a missing shard -> BULK" and "403 on the probe, bound tree source -> flat, not FAIL".
+
+### G2 [Warn, Actionable + Deferred] M4 rejects "Pagefind now" on two premises that upstream has since changed
+
+- **Affects:** A:170, A:272 (M4 "Whole-catalog browse ... filter-only browse loads every chunk"), A:274 (M4 "Build cost ... re-reads every page"), A:722 (D24 trigger D), D:301, D:1135.
+- **Missed (1), the browse cost:** the prior measurement is right for the released v1.5.2 (2026-04-12): `request_indexes` checks the empty term `""`, which loosely matches every chunk ([src v1.5.2 `pagefind_web/src/lib.rs`](https://github.com/Pagefind/pagefind/blob/v1.5.2/pagefind_web/src/lib.rs)). Upstream fixed it on main: [Pagefind#1317](https://github.com/Pagefind/pagefind/pull/1317) "Don't request index chunks for an empty search term", merged 2026-09-13, loop now `query.split(' ').filter(|term| !term.is_empty())` ([src main](https://github.com/Pagefind/pagefind/blob/main/pagefind_web/src/lib.rs)). **Not released**: the newest tag is v1.5.2. The linked bug, [Pagefind#1031](https://github.com/Pagefind/pagefind/issues/1031), is a Chrome `ERR_INSUFFICIENT_RESOURCES` on filter-only search over a very large site.
+- **Missed (2), the build cost:** the Node API `addCustomRecord({url, content, language, meta, filters, sort})` indexes non-HTML records with no page re-read ([Pagefind Node API](https://pagefind.app/docs/node-api/)). The catalog rows can feed it directly.
+- **Effect on the matrix:** C scores 2 on "Whole-catalog browse" (W4) and 2 on "Build cost" (W2). At 4 and 4, C goes from 94 to 106 against A's 99 [derived]. Counter-weights the matrix omits: Pagefind writes one fragment file per document (+20,000 file entries, about +17% of the ~118,000 GitLab budget at D:987); and global sort by rating or downloads needs every row's stats, which Pagefind's lazy `data()` does not give. That sort need, not the chunk count, is the real discriminator.
+- **Change (Actionable):** record the browse premise as version-bound ("true to v1.5.2; fixed on main, unreleased") and add a watchpoint "re-measure at the first release containing 513521e9". **Question (Deferred):** keep A (single `c/q/` file) as the owner decided, or re-open M4 once that release exists?
+
+### G3 [Warn, Actionable] The site search file ships raw on GitLab, and trigger D is host-blind
+
+- **Affects:** A:271 (M4 first-keystroke "~4.6 MB gzip"), A:656 (trigger D "> 8 MB gzip"), D:743-745 (warns at 6 MB gzip), D:994, D:1254 (the runbook multiplies by 6x for trigger C only), A:110-112.
+- **Missed:** GitLab Pages never compresses (A:110). The ADR's own rate (~1 KB raw per row) makes the file ~20 MB on the wire at the design point on GitLab, not ~4.6 MB. Trigger D measures gzip bytes, so on GitLab it fires about 5x too late.
+- **Host-agnostic pattern:** publish the file as `c/q/sha256/<d>.json.gz` (a distinct name with no uncompressed twin, so it is not a "precompressed sibling") and decode in the page with `DecompressionStream('gzip')`, Baseline since May 2023 ([MDN](https://developer.mozilla.org/en-US/docs/Web/API/DecompressionStream)). GitLab's `handleContentEncoding` appends `.gz`/`.br` to the requested path and falls back to the path as requested when no sibling exists, and sets `Content-Encoding` only when a sibling is chosen ([gitlab-pages `helpers.go`](https://gitlab.com/gitlab-org/gitlab-pages/-/raw/master/internal/serving/disk/helpers.go) [src, master]). So a directly requested `.json.gz` is served as bytes. **Not verified on GitHub Pages**; add it to the §13.4 runbook as a probe.
+- **Change:** measure trigger D in host-effective bytes (raw on GitLab), or ship the `.gz` object. The ratified "no precompressed siblings" covers `all.json`; this file is site-private (A:17), so it does not apply. **Question (Deferred, low):** may root's `flat` carry an optional `gz` ref so grim, which already decodes gzip by hand, gets the same on GitLab before the tree ships?
+
+### G4 [Warn, Actionable] The Astro build's memory and data-store size at 20,000 packages are unspecified
+
+- **Affects:** IX-R17 (D:1403), A:727-728 (D25 page cap), D:472 (P-10), D:1077 (NFR-1), A:948 (benchmark gate).
+- **Missed:** the indexer pins `astro ^7.1.4` and reads `enrich/**/{readme,changelog,contents}.md` through `glob()` content collections (`grimoire-indexer/src/renderer/astro/content.config.ts`, `pages/p/[...slug].astro` calls `getEntry` and `render`). By default `glob()` renders Markdown during content sync and keeps the HTML in a single `.astro/data-store.json`. Astro 7.1.0 added `deferRender` for glob (the OOM remedy) and `experimental.collectionStorage: 'chunked'` because the single-file store "can grow enough to hit platform file-size limits" ([release notes](https://newreleases.io/project/github/withastro/astro/release/astro@7.1.0)). At the ADR's ~84 KB of markdown per package (A:128-129) that is ~1.7 GB of source before rendering. Truncating at 24 KB inside the page component, after `render()`, bounds nothing upstream of it. P-10 and S8 cover `dist/` and the blob store, not `.astro/`.
+- **Incremental pages exist now:** `experimental.incrementalBuild` (Astro 7.2.0) skips pages whose `cacheKey` is unchanged, but needs `cacheDir` restored before `astro build`, is disabled when `build.concurrency > 1`, and does not apply to pages without a `cacheKey` ([docs](https://docs.astro.build/ar/reference/experimental-flags/incremental-build/)). The restored `node_modules/.astro/` would be published bytes, so it must sit under the single-writer, exact-key rule (D:1055).
+- **Change:** specify that truncation happens at staging (before the loader reads the file); set `deferRender: true`; evaluate `collectionStorage: 'chunked'`; add peak RSS and the size of `.astro/` to P-10 and the A:948 benchmark; treat `incrementalBuild` with `cacheKey = enrich entry input` as the named upgrade for the hourly page re-render.
+
+### G5 [Warn, Actionable] The rendered GitHub CI never sets `cache-mode`
+
+- **Affects:** D:261 (§3.7 validate row), IX-R20 (D:1406), A:684-690 (D22 single writer and keying). `research_index_build_state_security.md` §5 item 2 recommended an explicit `cache-mode: none|read` everywhere except the writer; the amendment kept "drop `cache: npm`" and lost the explicit mode.
+- **Evidence:** `cache-mode` = `read` | `write` | `write-only` | `none`, job level overrides workflow level, low-trust events default to read ([GitHub changelog 2026-09-10](https://github.blog/changelog/2026-09-10-control-github-actions-cache-access-with-cache-mode)); read-only tokens for untrusted triggers, github.com only, `pull_request_target` among the previously writable ones ([GitHub changelog 2026-06-26](https://github.blog/changelog/2026-06-26-read-only-actions-cache-for-untrusted-triggers/)). Both within 18 months.
+- **Change:** IX-R20 requires `cache-mode: none` on the validate job, `write` only on the one default-branch deploy job, `read` elsewhere; the rendered-workflow golden asserts the key is present. It survives a contributor re-adding `setup-node` `cache:` and does not rely on a default that exists only on github.com.
+
+### G6 [Warn, Actionable] The "object storage plus CDN" escape hatch has no profile, and the obvious Cloudflare picks fail
+
+- **Affects:** A:38, A:737 (D25), D:996-997 (§6.11), D:987 (~118,000 file entries at the design point).
+- **Missed:** Cloudflare Pages allows 20,000 files (free) or 100,000 (paid) per site, 25 MiB per file ([Pages limits](https://developers.cloudflare.com/pages/platform/limits/)); Workers Static Assets the same ([Workers limits](https://developers.cloudflare.com/workers/platform/limits/)). The design point needs ~118,000, and the Phase-3 record fan-out alone is one file per ref. R2's `r2.dev` URL is "rate-limited and should only be used for development", with no caching; production needs a custom domain ([R2 public buckets](https://developers.cloudflare.com/r2/buckets/public-buckets/)). Cloudflare "does not cache HTML or JSON by default", and a 200 with no `Cache-Control` gets a 120-minute edge TTL once a cache-everything rule exists ([default cache behavior](https://developers.cloudflare.com/cache/concepts/default-cache-behavior/)). A cache-everything rule over `c/` would therefore freeze the mutable `c/root.json` for up to two hours. S3 returns 403 for missing keys (G1).
+- **Change:** D25 gains a three-line object-storage profile: per-class headers (`c/root.json`, `all.json`, `stats.json` short `max-age`; `c/{p,s,r,q}/sha256/*` long and `immutable`), a custom domain not `r2.dev`, the 403 mapping from G1; and states that Cloudflare Pages/Workers file limits rule those two out at the design point. C2SP's static-ct-api gives the same split: the mutable checkpoint "SHOULD prevent caching beyond a few seconds", tiles are long-lived ([spec](https://github.com/C2SP/C2SP/blob/main/static-ct-api.md), **OLD**, 2024).
+
+### G7 [Warn, Actionable] The indexer's own reads of mutable files go through the Pages edge, and runs are serialized
+
+- **Affects:** D:925 (StateAnchor `GET <site>/c/root.json`), D:927-929 (enrich plane from the site), D:704-705 (`GET <site>/c/retained.json`), A:590 and A:595 (D16 steps 1 and 4), A:677-683 (D22). Rendered workflow: `concurrency: group: grim-indexer-pages`, `cancel-in-progress: false` (`grimoire-indexer/templates/ci/github-pages.yml:16-18`).
+- **Missed:** runs queue behind each other, so a second build starts the moment the first deploy finishes, inside the edge's `max-age=600` (A:581). A stale `retained.json` drops the files unique to the last generation from the new ledger, so a client mid-sync on the previous root gets a 404 and one BULK. A stale root names enrich-plane files that D16 does not retain (A:588), so the anchor 404s and the build goes cold (~50 min). The design already knows the remedy: its §13.4 probe uses a per-probe nonce query (D:1239-1240).
+- **Change:** every indexer-side read of `root.json`, `retained.json` and plane files appends a nonce query (`?cb=<run id>`); add a V-case with a stale-edge fake (root g-1 served while origin has g). The query-keyed edge cache is the design's own assumption (D:1239); confirm it once in the runbook.
+
+### G8 [Warn, Deferred] One oversized record drops the entire index off the tree (P-6)
+
+- **Affects:** P-6 (D:468), D:398, A:391-392, D:1069 (follow-up listed, "not done here").
+- **Evidence the dynamic is real:** a legitimate 49 MB (decompressed) conda shard exceeded the client's 16 MiB cap and broke solves in conda 26.7 ([conda/conda#16575](https://github.com/conda/conda/issues/16575), closed 2026-08-13; the cap was raised in [#16584](https://github.com/conda/conda/issues/16584)). Here `validateMetadata` only checks `typeof meta.description === "string"` (`grimoire-indexer/src/validate/core/metadata.ts`), and `src/enrich` and `src/data` apply no field clamp, so a contributor or a package publisher can exceed the 64 KiB record cap and flip every client to `root`.
+- **Question for the owner:** at emit, truncate over-long fields, exclude the package with a build warning, or accept the whole-index downgrade? Either way make the cap a Phase-3 prerequisite of IX-R25, not a follow-up, and put it on the enriched record (annotations), not only the pointer.
+
+### G9 [Suggest, Actionable] Type only what Phase-2 grim reads in the root
+
+- **Affects:** D:343, D:353-354, GR-R01 (D:1471).
+- **Evidence:** an advisory field (`info.repodata_revisions`) changed shape from array to map, and a stale reader lost the whole channel; the shard-index parse failure "does not fall back" ([conda/rattler#2784](https://github.com/conda/rattler/issues/2784), closed 2026-09-11).
+- **Status:** the design already falls back to flat on a root that fails the grammar (miss-200), which is better. Remaining risk: a typed `planes.stats`/`planes.enrich` in the Phase-2 reader would turn a future non-additive change to a pipeline-private plane into a miss for every old client. **Change:** parse `planes.catalog` typed; keep `stats` and `enrich` as untyped JSON values. V-case: `planes.enrich: "x"` still parses.
+
+### G10 [Suggest, Actionable] Pin the 304 edge cases
+
+- **Affects:** §6.4 (D:826-829).
+- **Evidence:** a 304 without `ETag`/`Last-Modified` was treated as an error ([rattler#2719](https://github.com/conda/rattler/issues/2719)); a 304 refreshed the policy for one request only, so every new process revalidated ([rattler#2724](https://github.com/conda/rattler/pull/2724)).
+- **Change:** a V-case "root 304 whose response carries no validators is accepted against the stored validator, and restamps `built_at`".
+
+### G11 [Suggest, Actionable] Kind `q` retention counts generations, not time
+
+- **Affects:** A:587 and A:602 (D16 `q` row), D:722-725.
+- **Missed:** a burst of four deploys inside one edge TTL (merge bursts, cron plus push, G7) removes the search file that a cached `index.html` names; the fallback chain then pulls `all.json` (A:710-720). **Change:** keep `q` for the last 3 generations or 1 h, whichever keeps more; the cost is a few extra files.
+
+## negative: checked, and the design already handles it
+
+- **conda CEP 16 index size.** conda-forge linux-64's shard index is 670 kB and grows with package names ([CEP 16](https://conda.org/learn/ceps/cep-0016/)); the design's plane index is 256 buckets, ~22 KB, constant in N.
+- **Hash verification.** conda "does not validate that a downloaded shard's contents match the SHA-256 hash encoded in its filename", citing performance and some channel providers ([conda sharded deep dive](https://docs.conda.io/projects/conda/en/latest/dev-guide/deep-dives/sharded.html)). The design verifies before parse (D5), and its "host rewrites JSON keeps clients flat" row (D:1136) is the same provider issue made safe.
+- **Retention.** CEP 16 says servers "should keep old shards for a certain amount of time (e.g. 1 week)". A grim client fetches only children of the new root and never an old digest, so 3 generations plus 24 h on the catalog plane exceeds the edge TTL it must cover.
+- **Fallback.** CEP 16 has no fallback text. Conda falls back only when no channel offers shards, caches a negative `has_shards` for 7 days, and does not describe a mid-fetch failure. The design's floor (verified `all.json`, never FAIL after it) and unpersisted miss are stricter; the cost of not persisting the miss is one ~404 GET per refresh, already accepted (D:500).
+- **Local store corruption.** conda-libmamba-solver needed a recovery path for a corrupted `repodata_shards.db` ([#823](https://github.com/conda/conda-libmamba-solver/issues/823)); the design re-hashes on read and bulk-resyncs (I5, D:1054).
+- **Staged adoption.** Homebrew 6.0.0 moved to one combined download with signed JSON ([brew.sh](https://brew.sh/2026/06/11/homebrew-6.0.0/), per `research_static_index_layouts.md`); this supports "flat plus root first, tree on trigger".
+- **TUF mix-and-match.** TUF aims to stop "a combination of metadata that never existed together" ([TUF spec 1.0.37, 2026-10-08](https://theupdateframework.github.io/specification/latest/)). The root -> plane -> shard -> record chain is a hash tree bound at the root, so one generation cannot mix children; every child carries a size (TUF §4.4 length rule); the root is persisted only after the closure verifies (the TUF-client lesson in `research_index_build_state_security.md` §4).
+- **TUF ordering and rollback.** The spec fixes no publication order and no retention except root files; root-last plus 3 generations is stricter. The soft ratchet is a deliberate departure: TUF discards a lower timestamp and aborts, and discards an equal one without error; the design holds a lower generation for 24 h and adopts an equal generation with a different digest. The second cannot occur with `generation = max(now, prev + 1)`. Freeze stays undetectable without `expires`; the owner declined the nudge (A:865).
+- **Cache poisoning.** Nx's S3/GCS/Azure/shared-fs cache plugins carry CVE-2025-36852 ("CREEP", first writer wins; CI workflow absent from the key) and were deprecated 2026-05-21 ([Nx remote cache plugins](https://nx.dev/docs/reference/remote-cache-plugins); [NVD](https://nvd.nist.gov/vuln/detail/CVE-2025-36852)). One writer, an exact key from the published root and a cacheless validate job (D22) are the mitigations. Hugo and Eleventy caches are not in play (the indexer is Astro).
+- **Pages caching changes.** No 2025-2026 change to GitHub Pages caching headers or custom-header support found; `max-age=600` stands. Deploy timeout 10 min and the 1 GB cap are unchanged ([Pages limits](https://docs.github.com/en/pages/getting-started-with-github-pages/github-pages-limits)).
+- **Client search libraries.** No 20,000-100,000-document browser benchmark of Orama, MiniSearch or FlexSearch found; whole-index libraries still load every row. SQLite-wasm: the default `opfs` VFS needs COOP/COEP, which Pages cannot set; `opfs-sahpool` avoids that but still downloads the whole database because Range fails on both hosts ([OpenReplay write-up](https://blog.openreplay.com/sqlite-browser-opfs/), secondary). Nothing removes the need for the Pagefind step; G2 is the only change.
+- **Caps from the shard side.** conda's cap-versus-outlier regression (G8) is already anticipated by P-6 and the 512 KiB shard cap; the hash-bucket key rules out a hot shard.
+
+## leads:
+
+- Re-measure Pagefind filter-only browse at the first release containing [513521e9](https://github.com/Pagefind/pagefind/pull/1317), using `addCustomRecord`.
+- conda-oci-mirror now publishes CEP 16 shards as OCI artifacts (`<subdir>/repodata.json/shards:<sha256>`, pulled by blob digest) and rattler reads them ([rattler#2855](https://github.com/conda/rattler/pull/2855), 2026-09-28). A candidate for D25's past-the-ceiling path next to object storage, since grim already speaks OCI; the ghcr.io 403-for-missing behaviour (G1) comes with it.
+- Verify GitHub Pages serves a `.json.gz` as bytes with no `Content-Encoding` (G3); add to the §13.4 runbook.
+- GitLab proposed a files-per-project limit for the free tier ([gitlab#500273](https://gitlab.com/gitlab-org/gitlab/-/issues/500273)); not confirmed shipped. The design budgets ~118,000 entries against 200,000.
+- Astro 7.2 `incrementalBuild`: measure page-render time for 20,000 pages, with and without `cacheKey`.
+- A signed note (C2SP) as the format for the reserved `c/root.json.*` (D15), if signing is ever built.
+- Search terms: `sharded repodata CEP 16 failure`, `rattler repodata_shards fallback`, `Pagefind filter-only chunks`, `Astro deferRender collectionStorage chunked`, `S3 403 missing key ListBucket`, `Cloudflare cache everything json R2 custom domain`.
