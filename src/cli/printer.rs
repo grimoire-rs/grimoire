@@ -84,13 +84,13 @@ pub fn write_json_pretty(w: &mut impl Write, value: &impl serde::Serialize) -> i
 
 /// Writes a column-aligned table.
 ///
-/// Columns are padded to the widest cell (header or data). Headers are
-/// static `&str` slices; callers add columns rather than formatting
-/// dynamic headers.
+/// Columns are padded to the widest cell (header or data), measured in *chars*, not bytes, so
+/// multi-byte cells (the `…` from [`truncate_ellipsis`], accented text) do not skew the columns
+/// after them. Headers are static `&str`; callers add columns rather than formatting dynamic headers.
 ///
-/// Widths are measured in *chars*, not bytes — multi-byte cells (the `…`
-/// from [`truncate_ellipsis`], accented text) would otherwise inflate
-/// their column and skew every following column off the header grid.
+/// Every cell is screened first: a tab or line feed prints as a space, so a
+/// cell never spans lines, and any other control or bidi character is
+/// escaped, so none reaches the terminal raw.
 ///
 /// # Errors
 ///
@@ -98,8 +98,16 @@ pub fn write_json_pretty(w: &mut impl Write, value: &impl serde::Serialize) -> i
 pub fn print_table(w: &mut impl Write, headers: &[&str], rows: &[Vec<String>]) -> io::Result<()> {
     const GAP: &str = "  ";
 
+    // Cells carry record text from a registry or an index; a raw control or
+    // bidi character would drive the terminal. Widths are taken after
+    // escaping so the columns still line up.
+    let rows: Vec<Vec<Cow<'_, str>>> = rows
+        .iter()
+        .map(|row| row.iter().map(|cell| screen_plain(cell)).collect())
+        .collect();
+
     let mut widths: Vec<usize> = headers.iter().map(|h| h.chars().count()).collect();
-    for row in rows {
+    for row in &rows {
         for (i, cell) in row.iter().enumerate() {
             let cell_width = cell.chars().count();
             if i < widths.len() {
@@ -111,10 +119,89 @@ pub fn print_table(w: &mut impl Write, headers: &[&str], rows: &[Vec<String>]) -
     }
 
     write_row(w, &widths, headers.iter().map(|h| h.as_ref()), GAP)?;
-    for row in rows {
-        write_row(w, &widths, row.iter().map(String::as_str), GAP)?;
+    for row in &rows {
+        write_row(w, &widths, row.iter().map(|cell| &**cell), GAP)?;
     }
     Ok(())
+}
+
+/// Screens record text bound for a plain table. A tab or line feed becomes one
+/// space, one char for one, so a column width budget holds and a cell never
+/// spans lines. The other code points the index strips from records (C0 and
+/// C1 controls, DEL, and the bidi, invisible-format and tag characters) become
+/// `\u{hex}` in lowercase. A well-formed flag tag sequence always passes.
+///
+/// Text with nothing to change comes back borrowed.
+fn screen_plain(s: &str) -> Cow<'_, str> {
+    if !s.chars().any(is_hidden) {
+        return Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len() + 8);
+    let mut changed = false;
+    let mut rest = s;
+    while let Some(c) = rest.chars().next() {
+        rest = &rest[c.len_utf8()..];
+        if c == FLAG_BASE {
+            out.push(c);
+            if let Some(len) = flag_tag_len(rest) {
+                out.push_str(&rest[..len]);
+                rest = &rest[len..];
+            }
+        } else if matches!(c, '\t' | '\n') {
+            out.push(' ');
+            changed = true;
+        } else if is_hidden(c) {
+            out.extend(c.escape_unicode());
+            changed = true;
+        } else {
+            out.push(c);
+        }
+    }
+    // A string whose only hidden code points form flag sequences is unchanged.
+    if changed { Cow::Owned(out) } else { Cow::Borrowed(s) }
+}
+
+/// Waving black flag, the base of the emoji flag tag sequences (England,
+/// Scotland, Wales).
+const FLAG_BASE: char = '\u{1F3F4}';
+
+/// Fewest and most tag characters a flag sequence carries before its cancel tag.
+const FLAG_TAG_RUN: std::ops::RangeInclusive<usize> = 3..=7;
+
+fn is_hidden(c: char) -> bool {
+    matches!(
+        c,
+        '\0'..='\u{1F}'
+            | '\u{7F}'..='\u{9F}'
+            | '\u{61C}'
+            | '\u{180E}'
+            | '\u{200B}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{E0001}'
+            | '\u{E0020}'..='\u{E007F}'
+    )
+}
+
+/// Byte length of the tag run and cancel tag that complete a flag sequence at
+/// the start of `rest`, or `None` when the run is not well formed.
+fn flag_tag_len(rest: &str) -> Option<usize> {
+    let mut tags = 0;
+    let mut bytes = 0;
+    for c in rest.chars() {
+        match c {
+            '\u{E0030}'..='\u{E0039}' | '\u{E0061}'..='\u{E007A}' => {
+                tags += 1;
+                bytes += c.len_utf8();
+            }
+            '\u{E007F}' => return FLAG_TAG_RUN.contains(&tags).then_some(bytes + c.len_utf8()),
+            _ => return None,
+        }
+    }
+    None
 }
 
 fn write_row<'a>(
@@ -258,6 +345,168 @@ mod tests {
         let out = truncate_ellipsis("héllo wörld", 6);
         assert_eq!(out, "héllo…");
         assert_eq!(out.chars().count(), 6);
+    }
+
+    #[test]
+    fn screen_plain_escapes_a_tag_character() {
+        assert_eq!(screen_plain("a\u{E0041}b"), "a\\u{e0041}b");
+        assert!(matches!(screen_plain("plain"), Cow::Borrowed("plain")));
+    }
+
+    #[test]
+    fn screen_plain_leaves_ordinary_text_borrowed() {
+        for text in ["don't \"x\"", "back\\slash", "naïve 日本語 \u{1F600}", ""] {
+            assert!(matches!(screen_plain(text), Cow::Borrowed(t) if t == text), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn screen_plain_escapes_every_hidden_code_point_as_lowercase_hex() {
+        let cases = [
+            ('\u{0}', "\\u{0}"),
+            ('\u{1b}', "\\u{1b}"),
+            ('\u{7f}', "\\u{7f}"),
+            ('\u{85}', "\\u{85}"),
+            ('\u{9b}', "\\u{9b}"),
+            ('\u{9f}', "\\u{9f}"),
+            ('\u{61c}', "\\u{61c}"),
+            ('\u{180e}', "\\u{180e}"),
+            ('\u{200b}', "\\u{200b}"),
+            ('\u{2060}', "\\u{2060}"),
+            ('\u{2064}', "\\u{2064}"),
+            ('\u{202a}', "\\u{202a}"),
+            ('\u{202e}', "\\u{202e}"),
+            ('\u{2066}', "\\u{2066}"),
+            ('\u{2069}', "\\u{2069}"),
+            ('\u{feff}', "\\u{feff}"),
+            ('\u{fff9}', "\\u{fff9}"),
+            ('\u{fffb}', "\\u{fffb}"),
+            ('\u{e0001}', "\\u{e0001}"),
+            ('\u{e0020}', "\\u{e0020}"),
+            ('\u{e007f}', "\\u{e007f}"),
+        ];
+        for (c, escaped) in cases {
+            let text = format!("a{c}b");
+            assert_eq!(screen_plain(&text), format!("a{escaped}b"), "U+{:04X}", c as u32);
+        }
+    }
+
+    #[test]
+    fn screen_plain_leaves_the_neighbours_of_the_hidden_ranges() {
+        // One code point either side of each range; ZWNJ, ZWJ, LRM and RLM
+        // are legitimate in Persian, Indic and emoji text.
+        for c in [
+            '\u{20}',
+            '\u{a0}',
+            '\u{a1}',
+            '\u{200a}',
+            '\u{200c}',
+            '\u{200d}',
+            '\u{200e}',
+            '\u{200f}',
+            '\u{202f}',
+            '\u{205f}',
+            '\u{2065}',
+            '\u{206a}',
+            '\u{fefe}',
+            '\u{fff8}',
+            '\u{fffc}',
+            '\u{e0000}',
+            '\u{e001f}',
+            '\u{e0080}',
+        ] {
+            let text = format!("a{c}b");
+            assert!(matches!(screen_plain(&text), Cow::Borrowed(_)), "U+{:04X}", c as u32);
+        }
+    }
+
+    #[test]
+    fn screen_plain_prints_a_tab_or_line_feed_as_one_space() {
+        assert_eq!(screen_plain("a\tb\nc"), "a b c");
+        assert_eq!(
+            screen_plain("a\t\nb").chars().count(),
+            4,
+            "one char for one, so a width budget holds"
+        );
+        assert_eq!(screen_plain("a\rb"), "a\\u{d}b", "carriage return still escapes");
+    }
+
+    #[test]
+    fn screen_plain_keeps_the_text_around_an_escape() {
+        assert_eq!(screen_plain("é\u{1b}[31m日本"), "é\\u{1b}[31m日本");
+        assert_eq!(screen_plain("\u{202e}txt.exe"), "\\u{202e}txt.exe");
+    }
+
+    #[test]
+    fn screen_plain_passes_a_well_formed_flag_tag_sequence() {
+        let england = "\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}";
+        let text = format!("go {england} now");
+        assert!(matches!(screen_plain(&text), Cow::Borrowed(t) if t == text));
+        assert_eq!(
+            screen_plain(&format!("{england}\u{1b}")),
+            format!("{england}\\u{{1b}}"),
+            "an escape after the flag is still escaped"
+        );
+    }
+
+    #[test]
+    fn screen_plain_escapes_a_malformed_flag_tag_sequence() {
+        let base = "\u{1F3F4}";
+        let cancel = "\u{E007F}";
+        // Too few and too many tags, a missing cancel tag, a non-tag letter
+        // inside the run, and a run with no flag base.
+        let cases = [
+            format!("{base}\u{E0067}\u{E0062}{cancel}"),
+            format!("{base}{}{cancel}", "\u{E0067}".repeat(8)),
+            format!("{base}\u{E0067}\u{E0062}\u{E0065}"),
+            format!("{base}\u{E0067}x\u{E0062}\u{E0065}{cancel}"),
+            format!("\u{E0067}\u{E0062}\u{E0065}{cancel}"),
+        ];
+        for text in cases {
+            let out = screen_plain(&text);
+            assert!(
+                out.chars().all(|c| !('\u{E0000}'..='\u{E007F}').contains(&c)),
+                "{text:?} -> {out:?}"
+            );
+            assert!(out.contains("\\u{e00"), "{text:?} -> {out:?}");
+        }
+    }
+
+    #[test]
+    fn screen_plain_passes_a_zwj_emoji_sequence_and_directional_marks() {
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        let text = format!("{family} a\u{200E}b\u{200F}c \u{200C}");
+        assert!(matches!(screen_plain(&text), Cow::Borrowed(t) if t == text));
+    }
+
+    #[test]
+    fn print_table_escapes_control_characters_and_aligns_on_the_escaped_width() {
+        let mut buf = Vec::new();
+        print_table(
+            &mut buf,
+            &["Name", "Kind"],
+            &[
+                vec!["evil\u{1b}[2J".to_string(), "skill".to_string()],
+                vec!["plain".to_string(), "rule".to_string()],
+            ],
+        )
+        .unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(!out.contains('\u{1b}'), "{out:?}");
+        let lines: Vec<&str> = out.lines().collect();
+        // The escaped first cell is 13 chars wide.
+        assert_eq!(lines[1], "evil\\u{1b}[2J  skill");
+        assert_eq!(lines[2], format!("{:<13}  rule", "plain"));
+        assert_eq!(lines[0], format!("{:<13}  Kind", "Name"));
+    }
+
+    #[test]
+    fn print_table_keeps_a_cell_on_one_line() {
+        let mut buf = Vec::new();
+        print_table(&mut buf, &["Description"], &[vec!["one\ntwo\tthree".to_string()]]).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert_eq!(out.lines().count(), 2, "{out:?}");
+        assert_eq!(out.lines().nth(1), Some("one two three"), "{out:?}");
     }
 
     #[test]
