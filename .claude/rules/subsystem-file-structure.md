@@ -569,6 +569,19 @@ such as `devcontainerId`) is a tracked follow-up, not part of this change.
 `atomic_write` prevents partial-file corruption; only record-set
 last-writer-wins is a residual risk.
 
+### Telemetry {#telemetry-installation-id}
+
+`$GRIM_HOME/telemetry/installation-id` holds the opt-in telemetry
+installation ID: one lowercase hyphenated UUID v4, written atomically on the
+first **armed** run (`GRIM_TELEMETRY` truthy and no disarm) and reused after
+that. An unarmed run never creates the file or the directory. A value that
+does not parse is replaced, a non-absolute `GRIM_HOME` or any I/O error means
+no ID (the export proceeds without `grim.installation.id`), and a shared
+`GRIM_HOME` volume shares one ID. **Unstable until 1.0**, not a frozen layout
+surface: no migration, no reaper, no upgrade fixture. Not a `ClientOutput`,
+so it is invisible to the anchor/remainder table and to reaping. User-facing
+contract → `docs/src/content/docs/telemetry.md#installation-id`.
+
 ### PathAnchor set {#path-anchor-set}
 
 Stored paths are anchor-relative rather than absolute, so a state file

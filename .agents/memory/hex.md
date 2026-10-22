@@ -45,7 +45,7 @@ preferences, not copies. Team-shared — commit it.
   Contract detail: `docs/src/stability.md`,
   `.agents/adr/adr_render_layout_stability.md`.
 - Discussions: `.agents/discussions/` (hex default) — `/hex-discuss`
-  artifacts; `State: active` there arms the hex-state no-edit rule. Most recently drained: `compressed-artifact-layers.md` (→ architect, 2026-10-21).
+  artifacts; `State: active` there arms the hex-state no-edit rule. Most recently drained: `otel-usage-telemetry.md` (→ loop, 2026-10-22).
 - Worktrees: agent worktrees at the hex default `.agents/worktrees/`
   (gitignored); human feature worktrees are siblings `../grimoire-wt-<topic>`
   (`AGENTS.md` › "Workflow"). Whoever creates one removes it.
@@ -97,8 +97,35 @@ research-axes:
 - Stability is a review perspective in its own right: any diff touching a
   schema, an install layout, or a renderer is checked against Principle 9
   before anything else, regardless of tier.
+- Codex reviews run on Sol 6.1 (owner, 2026-10-22): every cross-model
+  adversary call passes the model explicitly — `codex exec -m gpt-6.1-sol …`
+  direct, `--model gpt-6.1-sol` on `codex:rescue` — because the global
+  codex default (`model` in `~/.codex/config.toml`) is a different model;
+  that file's `review_model` covers only codex's native `/review`.
+  `nox-review` has no model flag and inherits that global default.
 
 ## Memory
+
+- **Active plan (2026-10-22, hex-plan high, goal loop):**
+  `.agents/plans/plan_otel_usage_telemetry.md` — State `review` (executed 2026-10-22, Next `/hex-finalize`), branch `hex/otel-usage-telemetry` (worktree `grimoire-duo`). ADR `adr_otel_usage_telemetry.md` (Accepted; OBS-12 exemption under 8 conditions). CW + P1–P4 (wave 1) + P5; critical path CW → P1 → P5. C-001…C-023, S-001…S-010.
+  **Pitfall:** opentelemetry-otlp 0.33.1 merges `OTEL_EXPORTER_OTLP_[LOGS_]HEADERS` into every request regardless of builder config, its Simple processor deadlocks on a current-thread runtime, its Batch processor panics with async reqwest — drive `LogExporter::export` yourself through your own `HttpClient`.
+  **Pitfall (execute):** the developer shell exports a real `OTEL_EXPORTER_OTLP_ENDPOINT` + Basic-auth headers — run every armed cargo/pytest/gate with `env -u OTEL_EXPORTER_OTLP_ENDPOINT -u OTEL_EXPORTER_OTLP_HEADERS`, and keep telemetry unit tests on an injected env lookup. A `resolve_in` caller that only picks registries must use `resolve_untracked`, but a command's own resolve must keep recording.
+  **Adversary:** codex hit its usage limit (exit 1, "usage limit … try again at 4:06 PM") — run a native substitute and report the cross-model leg as skipped; check `codex_stdout.txt` for that string before assuming a review ran.
+
+- **Discussion drained (2026-10-22, → loop):**
+  `.agents/discussions/otel-usage-telemetry.md`, tracked as
+  [grimoire-rs/grimoire#206](https://github.com/grimoire-rs/grimoire/issues/206).
+  The feature is opt-in OTel usage telemetry:
+  - `GRIM_TELEMETRY` arms it, and the standard `OTEL_*` variables configure it.
+  - It sends events only: `grim.command` once per invocation, plus `grim.artifact.changed` per changed artifact.
+  - Export goes through the `opentelemetry-otlp` crate over http/protobuf.
+  - Metrics are derived in the collector; grim emits none.
+  - Repository attributes (`vcs.*`) come only with `GRIM_TELEMETRY_REPOSITORY`.
+  - Each install gets a random installation ID.
+  - The whole surface is Unstable until 1.0.
+  The loop's first deliverable is an ADR recording the exemption from vendored OBS-12.
+  Research: `.agents/research/research_otel_*.md` (8 files).
+  **Pitfall:** Claude Code strips `OTEL_*` from hook subprocesses since 2.1.128. Do not justify gates by hook inheritance.
 
 - **Discussion drained (2026-10-21, → architect):**
   `.agents/discussions/compressed-artifact-layers.md`. It covers opt-in gzip layers (`--compression <none|gzip>`), readers first, and a layer annotation `com.grimoire.uncompressed.digest` for the re-release guard. It was handed off to `/hex-architect` under a `/goal`, then `/hex-execute` and one bounded `/hex-review`, on branch `feat/compressed-layers`. The sibling discussion `.agents/discussions/registry-tag-overwrite.md` stays parked (department tag isolation in Artifactory).
