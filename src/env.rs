@@ -14,6 +14,16 @@ const GRIM_HOME: &str = "GRIM_HOME";
 const GRIM_DEFAULT_REGISTRY: &str = "GRIM_DEFAULT_REGISTRY";
 /// Environment variable that, when truthy, disables all network access.
 const GRIM_OFFLINE: &str = "GRIM_OFFLINE";
+/// Environment variable that, when truthy, arms opt-in usage telemetry.
+const GRIM_TELEMETRY: &str = "GRIM_TELEMETRY";
+/// Environment variable that, when truthy, adds the redacted git origin to
+/// the telemetry resource.
+const GRIM_TELEMETRY_REPOSITORY: &str = "GRIM_TELEMETRY_REPOSITORY";
+/// The OpenTelemetry-standard kill switch; the OTLP crate ignores it, so
+/// grim reads it itself.
+const OTEL_SDK_DISABLED: &str = "OTEL_SDK_DISABLED";
+/// The cross-tool opt-out convention.
+const DO_NOT_TRACK: &str = "DO_NOT_TRACK";
 /// Docker-compatible config directory override, honoured by `grim login`
 /// / `grim logout` and the credential read path for parity with `docker`.
 const DOCKER_CONFIG: &str = "DOCKER_CONFIG";
@@ -42,6 +52,40 @@ pub fn default_registry() -> Option<String> {
 /// Whether offline mode is requested via `$GRIM_OFFLINE`.
 pub fn offline() -> bool {
     truthy(GRIM_OFFLINE)
+}
+
+/// Whether usage telemetry is switched on via `$GRIM_TELEMETRY`.
+pub fn telemetry() -> bool {
+    truthy(GRIM_TELEMETRY)
+}
+
+/// Whether repository context is requested via `$GRIM_TELEMETRY_REPOSITORY`.
+pub fn telemetry_repository() -> bool {
+    truthy(GRIM_TELEMETRY_REPOSITORY)
+}
+
+/// Whether `$OTEL_SDK_DISABLED` is truthy.
+pub fn otel_sdk_disabled() -> bool {
+    truthy(OTEL_SDK_DISABLED)
+}
+
+/// Whether `$DO_NOT_TRACK` is truthy.
+pub fn do_not_track() -> bool {
+    truthy(DO_NOT_TRACK)
+}
+
+/// Whether the process runs under CI, judged by the names `CI`,
+/// `GITHUB_ACTIONS` and `GITLAB_CI` only. Credentials are never loaded to
+/// answer this (`catalog::forge::CiEnv` would).
+pub fn ci() -> bool {
+    ci_in(&|key| std::env::var(key).ok())
+}
+
+/// [`ci`] over an injected lookup, so tests never mutate the process env.
+fn ci_in(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
+    ["CI", "GITHUB_ACTIONS", "GITLAB_CI"]
+        .into_iter()
+        .any(|key| lookup(key).is_some_and(|v| is_truthy(&v)))
 }
 
 /// Resolves the docker-compatible credential config path.
@@ -104,6 +148,40 @@ mod tests {
         for v in ["0", "false", "", "no", "off", "x"] {
             assert!(!is_truthy(v), "expected falsy: {v:?}");
         }
+    }
+
+    #[test]
+    fn truthy_set_is_exactly_the_four_documented_words() {
+        // `ci()` and the telemetry gate both ride `is_truthy`: a fifth
+        // accepted word would arm telemetry where the docs say it is off.
+        for v in ["1", "true", "yes", "on", "TRUE", " On "] {
+            assert!(is_truthy(v), "{v:?}");
+        }
+        for v in ["", "0", "false", "no", "off", "2", "enabled", "y"] {
+            assert!(!is_truthy(v), "{v:?}");
+        }
+    }
+
+    #[test]
+    fn ci_reads_exactly_the_three_named_variables_and_nothing_else() {
+        let with = |pairs: &'static [(&'static str, &'static str)]| {
+            move |key: &str| pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| (*v).to_string())
+        };
+        assert!(ci_in(&with(&[("CI", "true")])));
+        assert!(ci_in(&with(&[("GITHUB_ACTIONS", "1")])));
+        assert!(ci_in(&with(&[("GITLAB_CI", "yes")])));
+        assert!(!ci_in(&with(&[])));
+        assert!(!ci_in(&with(&[
+            ("CI", "0"),
+            ("GITHUB_ACTIONS", "false"),
+            ("GITLAB_CI", "")
+        ])));
+        // A credential variable must never decide the answer.
+        assert!(!ci_in(&with(&[
+            ("GH_TOKEN", "1"),
+            ("GITHUB_TOKEN", "1"),
+            ("GITLAB_TOKEN", "1")
+        ])));
     }
 
     #[test]

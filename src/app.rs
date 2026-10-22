@@ -64,170 +64,178 @@ pub async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     }
 
     let ctx = Context::new(&cli.global);
+    ctx.telemetry().start(&command);
 
     // `Printable` has generic methods (not object-safe), so render inside
     // each arm with the concrete report type rather than boxing.
-    let code = match command {
-        Command::Config(args) => {
-            let (r, c) = crate::command::config::run(&ctx, &args).await?;
-            render(&r, format)?;
-            c
-        }
-        Command::Context(args) => {
-            let (r, c) = crate::command::context::run(&ctx, &args).await?;
-            render(&r, format)?;
-            c
-        }
-        Command::Init(args) => {
-            let (r, c) = crate::command::init::run(&ctx, &args).await?;
-            render(&r, format)?;
-            c
-        }
-        Command::Lock(args) => {
-            let (r, c) = crate::command::lock::run(&ctx, &args).await?;
-            render(&r, format)?;
-            c
-        }
-        Command::Install(args) => {
-            let (r, c) = crate::command::install::run(&ctx, &args).await?;
-            render(&r, format)?;
-            c
-        }
-        Command::Update(args) => {
-            let (r, c) = crate::command::update::run(&ctx, &args).await?;
-            render(&r, format)?;
-            c
-        }
-        Command::Status(args) => {
-            let (r, c) = crate::command::status::run(&ctx, &args).await?;
-            render(&r, format)?;
-            c
-        }
-        Command::Build(args) => {
-            let (r, c) = crate::command::build::run(&ctx, &args).await?;
-            render(&r, format)?;
-            c
-        }
-        Command::Release(args) => {
-            let (r, c) = crate::command::release::run(&ctx, &args).await?;
-            render(&r, format)?;
-            c
-        }
-        Command::Publish(args) => {
-            let (r, c) = crate::command::publish::run(&ctx, &args).await?;
-            render(&r, format)?;
-            c
-        }
-        Command::Add(args) => {
-            let (r, c) = crate::command::add::run(&ctx, &args).await?;
-            render(&r, format)?;
-            c
-        }
-        Command::Remove(args) => {
-            let (r, c) = crate::command::remove::run(&ctx, &args).await?;
-            render(&r, format)?;
-            c
-        }
-        Command::Uninstall(args) => {
-            let (r, c) = crate::command::uninstall::run(&ctx, &args).await?;
-            render(&r, format)?;
-            c
-        }
-        Command::Search(args) => {
-            let (r, c) = crate::command::search::run(&ctx, &args).await?;
-            render(&r, format)?;
-            // After the table so a terminal shows it below the rows it
-            // describes. JSON consumers read `total` and their own offset;
-            // the hint is for a person paging a plain table.
-            if matches!(format, crate::cli::options::OutputFormat::Plain)
-                && let Some(hint) = r.page_hint()
-            {
-                tracing::warn!("{hint}");
+    //
+    // The dispatch runs in an async block so every early `?`/`return` inside
+    // it ends up in `outcome`, which is then reported exactly once.
+    let outcome: anyhow::Result<ExitCode> = async {
+        Ok(match command {
+            Command::Config(args) => {
+                let (r, c) = crate::command::config::run(&ctx, &args).await?;
+                render(&r, format)?;
+                c
             }
-            c
-        }
-        Command::Rate(args) => {
-            let (r, c) = crate::command::rate::run(&ctx, &args).await?;
-            render(&r, format)?;
-            c
-        }
-        Command::Fetch(args) => {
-            let (r, c) = crate::command::fetch::run(&ctx, &args, format).await?;
-            render(&r, format)?;
-            c
-        }
-        Command::Describe(args) => {
-            let (r, c) = crate::command::describe::run(&ctx, &args).await?;
-            render(&r, format)?;
-            c
-        }
-        Command::Export(args) => {
-            let (r, c) = crate::command::export::run(&ctx, &args).await?;
-            render(&r, format)?;
-            c
-        }
-        // `schema` prints a JSON Schema document, not a `Printable` report,
-        // so it is wired directly like `tui` (subsystem-cli-api.md exemption).
-        Command::Schema(args) => crate::command::schema::run(&args)?,
-        // `completions` prints a shell completion script, not a `Printable`
-        // report, so it is wired directly like `schema`.
-        Command::Completions(args) => crate::command::completions::run(&args)?,
-        Command::Login(args) => {
-            let (r, c) = crate::command::login::run(&ctx, &args).await?;
-            render(&r, format)?;
-            c
-        }
-        Command::Logout(args) => {
-            let (r, c) = crate::command::logout::run(&ctx, &args).await?;
-            render(&r, format)?;
-            c
-        }
-        // `tui` diverges into a full-screen session: it owns the terminal
-        // and emits no structured report (exempt from `Printable`).
-        Command::Tui(args) => crate::command::tui::run(&ctx, &args).await?,
-        // `mcp` runs a long-lived STDIO server (stdout is the JSON-RPC
-        // channel); it emits no structured report (exempt from `Printable`).
-        // Scope is per tool call (adr_mcp_percall_scope_fetch_render.md):
-        // reject the root-level scope flags loudly (64) instead of letting
-        // them bind silently to a launch scope that no longer exists.
-        Command::Mcp(args) => {
-            if cli.global.global || cli.global.config.is_some() {
-                return Err(crate::command::config_usage(
-                    "grim mcp does not take --global/--config; pass scope per tool call \
+            Command::Context(args) => {
+                let (r, c) = crate::command::context::run(&ctx, &args).await?;
+                render(&r, format)?;
+                c
+            }
+            Command::Init(args) => {
+                let (r, c) = crate::command::init::run(&ctx, &args).await?;
+                render(&r, format)?;
+                c
+            }
+            Command::Lock(args) => {
+                let (r, c) = crate::command::lock::run(&ctx, &args).await?;
+                render(&r, format)?;
+                c
+            }
+            Command::Install(args) => {
+                let (r, c) = crate::command::install::run(&ctx, &args).await?;
+                render(&r, format)?;
+                c
+            }
+            Command::Update(args) => {
+                let (r, c) = crate::command::update::run(&ctx, &args).await?;
+                render(&r, format)?;
+                c
+            }
+            Command::Status(args) => {
+                let (r, c) = crate::command::status::run(&ctx, &args).await?;
+                render(&r, format)?;
+                c
+            }
+            Command::Build(args) => {
+                let (r, c) = crate::command::build::run(&ctx, &args).await?;
+                render(&r, format)?;
+                c
+            }
+            Command::Release(args) => {
+                let (r, c) = crate::command::release::run(&ctx, &args).await?;
+                render(&r, format)?;
+                c
+            }
+            Command::Publish(args) => {
+                let (r, c) = crate::command::publish::run(&ctx, &args).await?;
+                render(&r, format)?;
+                c
+            }
+            Command::Add(args) => {
+                let (r, c) = crate::command::add::run(&ctx, &args).await?;
+                render(&r, format)?;
+                c
+            }
+            Command::Remove(args) => {
+                let (r, c) = crate::command::remove::run(&ctx, &args).await?;
+                render(&r, format)?;
+                c
+            }
+            Command::Uninstall(args) => {
+                let (r, c) = crate::command::uninstall::run(&ctx, &args).await?;
+                render(&r, format)?;
+                c
+            }
+            Command::Search(args) => {
+                let (r, c) = crate::command::search::run(&ctx, &args).await?;
+                render(&r, format)?;
+                // After the table so a terminal shows it below the rows it
+                // describes. JSON consumers read `total` and their own offset;
+                // the hint is for a person paging a plain table.
+                if matches!(format, crate::cli::options::OutputFormat::Plain)
+                    && let Some(hint) = r.page_hint()
+                {
+                    tracing::warn!("{hint}");
+                }
+                c
+            }
+            Command::Rate(args) => {
+                let (r, c) = crate::command::rate::run(&ctx, &args).await?;
+                render(&r, format)?;
+                c
+            }
+            Command::Fetch(args) => {
+                let (r, c) = crate::command::fetch::run(&ctx, &args, format).await?;
+                render(&r, format)?;
+                c
+            }
+            Command::Describe(args) => {
+                let (r, c) = crate::command::describe::run(&ctx, &args).await?;
+                render(&r, format)?;
+                c
+            }
+            Command::Export(args) => {
+                let (r, c) = crate::command::export::run(&ctx, &args).await?;
+                render(&r, format)?;
+                c
+            }
+            // `schema` prints a JSON Schema document, not a `Printable` report,
+            // so it is wired directly like `tui` (subsystem-cli-api.md exemption).
+            Command::Schema(args) => crate::command::schema::run(&args)?,
+            // `completions` prints a shell completion script, not a `Printable`
+            // report, so it is wired directly like `schema`.
+            Command::Completions(args) => crate::command::completions::run(&args)?,
+            Command::Login(args) => {
+                let (r, c) = crate::command::login::run(&ctx, &args).await?;
+                render(&r, format)?;
+                c
+            }
+            Command::Logout(args) => {
+                let (r, c) = crate::command::logout::run(&ctx, &args).await?;
+                render(&r, format)?;
+                c
+            }
+            // `tui` diverges into a full-screen session: it owns the terminal
+            // and emits no structured report (exempt from `Printable`).
+            Command::Tui(args) => crate::command::tui::run(&ctx, &args).await?,
+            // `mcp` runs a long-lived STDIO server (stdout is the JSON-RPC
+            // channel); it emits no structured report (exempt from `Printable`).
+            // Scope is per tool call (adr_mcp_percall_scope_fetch_render.md):
+            // reject the root-level scope flags loudly (64) instead of letting
+            // them bind silently to a launch scope that no longer exists.
+            Command::Mcp(args) => {
+                if cli.global.global || cli.global.config.is_some() {
+                    return Err(crate::command::config_usage(
+                        "grim mcp does not take --global/--config; pass scope per tool call \
                      (global / config / workspace arguments)",
-                ));
+                    ));
+                }
+                crate::command::mcp::run(&ctx, &args).await?
             }
-            crate::command::mcp::run(&ctx, &args).await?
-        }
-        // `grim hook` splits by subcommand, and the split is the C-007
-        // contract: `run` takes `&args` only — no context, so it cannot
-        // resolve a scope even by accident — while `list` is an ordinary
-        // report command that needs one.
-        Command::Hook(hook) => match hook.command {
-            // Already returned above, before the context was built. Handled
-            // again rather than `unreachable!()`d: a panic on the hot path of
-            // every tool call is the one thing this command may never do, and
-            // a total match costs one line (invariant I3).
-            crate::command::hook::HookCommand::Run(args) => crate::command::hook::run::run(&args).await,
-            crate::command::hook::HookCommand::List(args) => {
-                let (r, c) = crate::command::hook::list::run(&ctx, &args).await?;
-                render(&r, format)?;
-                c
-            }
-            crate::command::hook::HookCommand::Allow(args) => {
-                let (r, c) = crate::command::hook::allow::run(&ctx, &args).await?;
-                render(&r, format)?;
-                c
-            }
-            crate::command::hook::HookCommand::Revoke(args) => {
-                let (r, c) = crate::command::hook::revoke::run(&ctx, &args).await?;
-                render(&r, format)?;
-                c
-            }
-        },
-    };
+            // `grim hook` splits by subcommand, and the split is the C-007
+            // contract: `run` takes `&args` only — no context, so it cannot
+            // resolve a scope even by accident — while `list` is an ordinary
+            // report command that needs one.
+            Command::Hook(hook) => match hook.command {
+                // Already returned above, before the context was built. Handled
+                // again rather than `unreachable!()`d: a panic on the hot path of
+                // every tool call is the one thing this command may never do, and
+                // a total match costs one line (invariant I3).
+                crate::command::hook::HookCommand::Run(args) => crate::command::hook::run::run(&args).await,
+                crate::command::hook::HookCommand::List(args) => {
+                    let (r, c) = crate::command::hook::list::run(&ctx, &args).await?;
+                    render(&r, format)?;
+                    c
+                }
+                crate::command::hook::HookCommand::Allow(args) => {
+                    let (r, c) = crate::command::hook::allow::run(&ctx, &args).await?;
+                    render(&r, format)?;
+                    c
+                }
+                crate::command::hook::HookCommand::Revoke(args) => {
+                    let (r, c) = crate::command::hook::revoke::run(&ctx, &args).await?;
+                    render(&r, format)?;
+                    c
+                }
+            },
+        })
+    }
+    .await;
 
-    Ok(code)
+    ctx.telemetry().finish(&outcome).await;
+    outcome
 }
 
 /// Render `report` to stdout in the requested format.

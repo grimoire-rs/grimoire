@@ -234,6 +234,20 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
             .unwrap_or_else(|| id.to_string())
     };
 
+    // One event for what was declared (a bundle counts once, as a bundle);
+    // the install-on-add reports nothing of its own.
+    ctx.telemetry().record_artifacts_with(|| {
+        use crate::telemetry::record::{ArtifactAction, ArtifactEvent, declared_identifiers, reference};
+        vec![ArtifactEvent {
+            kind,
+            action: ArtifactAction::Added,
+            reference: Some(reference(
+                &id,
+                std::iter::once(&id).chain(declared_identifiers(&scope.set)),
+            )),
+        }]
+    });
+
     Ok((AddReport::new(kind, name, pinned), ExitCode::Success))
 }
 
@@ -436,6 +450,15 @@ async fn add_path_source(
         .map(|a| a.source.provenance())
         .unwrap_or_else(|| declared.to_string());
 
+    // A path source never reports a reference: no local path leaves the machine.
+    ctx.telemetry().record_artifacts_with(|| {
+        vec![crate::telemetry::record::ArtifactEvent {
+            kind,
+            action: crate::telemetry::record::ArtifactAction::Added,
+            reference: None,
+        }]
+    });
+
     Ok((AddReport::new(kind, name, pinned), ExitCode::Success))
 }
 
@@ -500,6 +523,8 @@ async fn install_added(
         &scope.options.vendors,
     ))?
     .with_hook_policy(hook_policy);
+    ctx.telemetry()
+        .record_install_clients(&target, &scope.workspace, scope.scope);
     let mut state = super::grim(
         super::scope_resolution::load_state(scope).map_err(|e| super::install::state_io(&scope.state_path, e)),
     )?;

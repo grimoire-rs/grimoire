@@ -700,7 +700,7 @@ fn declared_insecure_hosts(
     config: Option<&std::path::Path>,
     workspace: Option<&std::path::Path>,
 ) -> Vec<String> {
-    let scope = scope_resolution::resolve_in(ctx, global, config, workspace).ok();
+    let scope = scope_resolution::resolve_untracked(ctx, global, config, workspace).ok();
     let project = scope.as_ref().map(|s| s.registries.as_slice()).unwrap_or_default();
     let scope_kind = scope
         .as_ref()

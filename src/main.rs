@@ -35,6 +35,7 @@ mod path_safety;
 mod resolve;
 mod skill;
 mod store;
+mod telemetry;
 mod tls;
 mod tui;
 

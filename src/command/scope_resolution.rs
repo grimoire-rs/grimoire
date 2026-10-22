@@ -84,6 +84,34 @@ pub fn resolve_in(
     config: Option<&Path>,
     workspace: Option<&Path>,
 ) -> Result<ResolvedScope, ConfigError> {
+    let resolved = resolve_unrecorded(ctx, global, config, workspace)?;
+    ctx.telemetry()
+        .record_scope(ctx.global(), global, workspace, resolved.scope, &resolved.workspace);
+    Ok(resolved)
+}
+
+/// [`resolve_in`] for an incidental lookup (a default registry, the plain-HTTP
+/// host set): the same scope, but never offered to telemetry as the scope
+/// the user asked for.
+///
+/// # Errors
+///
+/// Propagates any [`ConfigError`] from discovery / parsing.
+pub fn resolve_untracked(
+    ctx: &Context,
+    global: bool,
+    config: Option<&Path>,
+    workspace: Option<&Path>,
+) -> Result<ResolvedScope, ConfigError> {
+    resolve_unrecorded(ctx, global, config, workspace)
+}
+
+fn resolve_unrecorded(
+    ctx: &Context,
+    global: bool,
+    config: Option<&Path>,
+    workspace: Option<&Path>,
+) -> Result<ResolvedScope, ConfigError> {
     let paths = ctx.paths();
     if global {
         let config_path = paths.global_config();
@@ -386,6 +414,57 @@ mod tests {
             workspace_from(Path::new("/a/grimoire.toml"), gone).unwrap(),
             PathBuf::from("/a")
         );
+    }
+
+    fn armed_ctx(home: &Path) -> Context {
+        Context::hermetic(home.to_path_buf())
+            .with_telemetry(crate::telemetry::Telemetry::armed_for_test(home.to_path_buf()))
+    }
+
+    #[test]
+    fn resolving_the_requested_project_scope_records_it_with_its_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("grimoire.toml");
+        std::fs::write(&cfg, "").unwrap();
+        let ctx = armed_ctx(&dir.path().join("home"));
+        let resolved = resolve_in(&ctx, false, Some(&cfg), None).unwrap();
+        let recorded = ctx.telemetry().snapshot().unwrap();
+        assert_eq!(recorded.scope, Some(ConfigScope::Project));
+        assert_eq!(recorded.workspace.as_deref(), Some(resolved.workspace.as_path()));
+    }
+
+    #[test]
+    fn resolving_the_requested_global_scope_records_it() {
+        // The hermetic context is `--global`-less, so a global resolve here is
+        // an internal side resolve; the requested one is covered by the
+        // telemetry module's own tests. This pins the other branch's wiring.
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = armed_ctx(&dir.path().join("home"));
+        resolve_in(&ctx, true, None, None).unwrap();
+        assert!(
+            ctx.telemetry().snapshot().unwrap().scope.is_none(),
+            "a global resolve the invocation did not ask for must not become `grim.scope`"
+        );
+    }
+
+    #[test]
+    fn an_untracked_resolve_records_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("grimoire.toml");
+        std::fs::write(&cfg, "").unwrap();
+        let ctx = armed_ctx(&dir.path().join("home"));
+        // Same arguments that `resolve_in` records in the test above.
+        resolve_untracked(&ctx, false, Some(&cfg), None).unwrap();
+        assert!(ctx.telemetry().snapshot().unwrap().scope.is_none());
+    }
+
+    #[test]
+    fn a_seeded_resolve_is_not_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("grimoire.toml"), "").unwrap();
+        let ctx = armed_ctx(&dir.path().join("home"));
+        resolve_in(&ctx, false, None, Some(dir.path())).unwrap();
+        assert!(ctx.telemetry().snapshot().unwrap().scope.is_none());
     }
 
     #[test]

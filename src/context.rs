@@ -18,6 +18,7 @@ use crate::oci::access::registry_client::RegistryClient;
 use crate::oci::access::{AccessMode, OciAccess};
 use crate::oci::tag_cache::TagCache;
 use crate::store::{BlobStore, GrimPaths};
+use crate::telemetry::Telemetry;
 
 /// Memoized OCI access seams for one invocation, keyed by the pair that
 /// defines what a client *is*: its routing mode and its plain-HTTP exception
@@ -90,6 +91,8 @@ pub struct Context {
     /// start. That distinction is invisible to a one-shot CLI run and is the
     /// whole point for `grim mcp`, whose process outlives many credentials.
     clients: AccessMemo,
+    /// Opt-in usage telemetry; a zero-state handle unless `GRIM_TELEMETRY` is set.
+    telemetry: Telemetry,
     /// Test-only injected `OciAccess` override.  When `Some`, `access()`
     /// returns this instead of constructing a real `CachedAccess`.  Only
     /// compiled in test builds (`#[cfg(test)]`).
@@ -115,7 +118,8 @@ impl std::fmt::Debug for Context {
             .field("registry_env", &self.registry_env)
             .field("offline", &self.offline)
             .field("global", &self.global)
-            .field("config", &self.config);
+            .field("config", &self.config)
+            .field("telemetry", &self.telemetry);
         #[cfg(test)]
         d.field("test_access", &self.test_access.as_ref().map(|_| "<injected>"));
         d.finish()
@@ -139,6 +143,8 @@ impl Clone for Context {
             // so carrying it would be sound but pointless — a clone is made to
             // be re-scoped.
             clients: AccessMemo::default(),
+            // Shared on purpose: a clone is the same invocation.
+            telemetry: self.telemetry.clone(),
             #[cfg(test)]
             test_access: self.test_access.clone(),
             #[cfg(test)]
@@ -165,11 +171,14 @@ impl Context {
     /// registry-precedence helper can order the flag above the env above
     /// any config default (see `command::resolve_default_registry`).
     pub fn new(options: &GlobalOptions) -> Self {
+        let grim_home = env::grim_home();
+        let offline = options.offline || env::offline();
         Self {
-            grim_home: env::grim_home(),
+            telemetry: Telemetry::from_env(offline, &grim_home),
+            grim_home,
             registry_flag: options.registry.clone(),
             registry_env: env::default_registry(),
-            offline: options.offline || env::offline(),
+            offline,
             progress: options.progress,
             global: options.global,
             config: options.config.clone(),
@@ -226,6 +235,11 @@ impl Context {
     /// The `--progress` mode for long-running passes.
     pub fn progress(&self) -> crate::cli::options::ProgressMode {
         self.progress
+    }
+
+    /// The usage-telemetry handle for this invocation.
+    pub fn telemetry(&self) -> &Telemetry {
+        &self.telemetry
     }
 
     /// The `--global` flag: operate on the global scope rather than the
@@ -373,9 +387,16 @@ impl Context {
             config: None,
             plain_http: std::sync::OnceLock::new(),
             clients: AccessMemo::default(),
+            telemetry: Telemetry::default(),
             test_access: None,
             plain_http_seen: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Test constructor swap: the same context with `telemetry` installed.
+    pub fn with_telemetry(mut self, telemetry: Telemetry) -> Self {
+        self.telemetry = telemetry;
+        self
     }
 
     /// [`Self::hermetic`] with an explicit `--global` / `--config` scope,
@@ -434,6 +455,7 @@ impl Context {
             config: None,
             plain_http: std::sync::OnceLock::new(),
             clients: AccessMemo::default(),
+            telemetry: Telemetry::default(),
             test_access: Some(Arc::new(access)),
             plain_http_seen: std::sync::Mutex::new(Vec::new()),
         }
@@ -457,6 +479,7 @@ impl Context {
             config: None,
             plain_http: std::sync::OnceLock::new(),
             clients: AccessMemo::default(),
+            telemetry: Telemetry::default(),
             test_access: Some(Arc::new(access)),
             plain_http_seen: std::sync::Mutex::new(Vec::new()),
         }

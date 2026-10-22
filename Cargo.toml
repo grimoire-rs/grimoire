@@ -107,6 +107,18 @@ fuzzy-matcher = "0.3"
 # needed: entries are stored (uncompressed), not deflated.
 zip = { version = "9", default-features = false }
 
+# Opt-in OTel usage telemetry (src/telemetry/). Exact pins and no default
+# features: the default set enables `reqwest-blocking-client`, `trace`,
+# `metrics` and `internal-logs`, none of which grim may take. grim drives
+# the exporter itself over its own HTTP client; see adr_otel_usage_telemetry.md
+# for the exemption conditions this block is pinned to.
+opentelemetry = { version = "=0.33.1", default-features = false, features = ["logs"] }
+opentelemetry_sdk = { version = "=0.33.1", default-features = false, features = ["logs"] }
+opentelemetry-otlp = { version = "=0.33.1", default-features = false, features = ["http-proto", "logs"] }
+opentelemetry-http = { version = "=0.33.1", default-features = false }
+# Random v4 installation id for the telemetry resource (src/telemetry/identity.rs).
+uuid = { version = "1", default-features = false, features = ["v4"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

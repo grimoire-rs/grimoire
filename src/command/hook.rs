@@ -161,6 +161,16 @@ mod tests {
              such as `additionalContext` cannot trip it",
         ),
         (
+            "crate::telemetry",
+            "the telemetry handle rides the per-invocation context, which the runtime never builds, \
+             and `grim hook run` must never export (hook path untouched)",
+        ),
+        (
+            "Telemetry",
+            "the telemetry handle type — naming it on the dispatch path means a record or an export \
+             can happen per tool call",
+        ),
+        (
             "grim_home(",
             "the env data-root accessor returns its environment value verbatim, with a relative \
              fallback, and the CWD of a client-spawned `grim hook run` is the workspace \
@@ -360,6 +370,51 @@ mod tests {
             "the `grim hook run` arm must be dispatched BEFORE the context is built, because \
              its constructor reads the environment data root unconditionally; otherwise the \
              process reads an attacker-choosable value on every tool call (B1)"
+        );
+    }
+
+    /// **Telemetry is built only after the hook runtime has returned.**
+    ///
+    /// `grim hook run` runs once per tool call and must never export, record
+    /// or even name the telemetry handle. The handle lives on `Context`, so
+    /// `main.rs` carries only the module declaration and `app.rs` reaches the
+    /// handle through `ctx.telemetry()` strictly after the runtime arm. A
+    /// top-level `use crate::telemetry` in `app.rs` would move the first
+    /// mention above that arm.
+    #[test]
+    fn telemetry_is_never_built_before_the_hook_runtime_returns() {
+        let main = code_lines(include_str!("../main.rs"));
+        for line in main
+            .lines()
+            .filter(|l| l.contains("telemetry") || l.contains("Telemetry"))
+        {
+            assert_eq!(
+                line.trim(),
+                "mod telemetry;",
+                "main.rs may only declare the telemetry module, found `{}`",
+                line.trim()
+            );
+        }
+        assert!(
+            main.contains("mod telemetry;"),
+            "main.rs must declare the telemetry module"
+        );
+
+        let app = code_lines(include_str!("../app.rs"));
+        let run_arm = app
+            .find("hook::run::run(")
+            .expect("app.rs must dispatch the hook runtime");
+        let first_telemetry = app
+            .find("telemetry")
+            .expect("app.rs must reach the telemetry handle through the context");
+        assert!(
+            run_arm < first_telemetry,
+            "the first mention of telemetry in app.rs must follow the `grim hook run` arm; \
+             reach the handle through `ctx.telemetry()`, never a top-level import"
+        );
+        assert!(
+            !app.contains("crate::telemetry"),
+            "app.rs must not import the telemetry module"
         );
     }
 }

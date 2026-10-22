@@ -150,6 +150,8 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
         &scope.options.vendors,
     ))?
     .with_hook_policy(hook_policy);
+    ctx.telemetry()
+        .record_install_clients(&target, &scope.workspace, scope.scope);
     // `install_and_persist` runs this same check; `update` calls
     // `install_all_with_progress` directly and would otherwise never warn
     // about the Copilot pool gap (the docs promise it on both `install` and
@@ -364,10 +366,54 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
         }
     }
 
+    // Rebuilt around the rows so the telemetry can read them: the report keeps
+    // its items private and this is its only consumer here.
+    let items = report.into_items();
+    record_changed(ctx, &items, &new_lock, previous.as_ref(), &scope.set);
+    let report = UpdateReport::new(items);
+
     if refused {
         return Ok((report, ExitCode::DataError));
     }
     Ok((report, ExitCode::Success))
+}
+
+/// Reports each updated (and not refused) or removed row to the usage
+/// telemetry. An updated row takes its reference from the new lock, a removed
+/// one from the previous lock it left.
+fn record_changed(
+    ctx: &Context,
+    rows: &[UpdateEntry],
+    new_lock: &GrimoireLock,
+    previous: Option<&GrimoireLock>,
+    declared: &crate::config::declaration::DesiredSet,
+) {
+    use crate::telemetry::record::{ArtifactAction, ArtifactEvent, declared_identifiers, reference};
+    let source_of = |lock: Option<&GrimoireLock>, row: &UpdateEntry| {
+        let found = lock?
+            .iter_artifacts()
+            .find(|a| a.kind == row.kind && a.name == row.name)?;
+        found
+            .source
+            .pinned()
+            .map(|pinned| reference(pinned, declared_identifiers(declared)))
+    };
+    ctx.telemetry().record_artifacts_with(|| {
+        rows.iter()
+            .filter_map(|row| {
+                let (action, lock) = match row.action {
+                    UpdateAction::Updated if !row.refused => (ArtifactAction::Updated, Some(new_lock)),
+                    UpdateAction::Removed => (ArtifactAction::Removed, previous),
+                    _ => return None,
+                };
+                Some(ArtifactEvent {
+                    kind: row.kind,
+                    action,
+                    reference: source_of(lock, row),
+                })
+            })
+            .collect()
+    });
 }
 
 /// Run `grim update --marketplace <M>` (C-011): roll the pins of `M`'s
@@ -695,6 +741,50 @@ mod tests {
             hooks: Vec::new(),
             bundles: vec![],
         }
+    }
+
+    #[test]
+    fn telemetry_records_updated_not_refused_and_removed_rows_with_their_lock_refs() {
+        use crate::telemetry::Telemetry;
+        use crate::telemetry::record::{ArtifactAction, ArtifactEvent};
+
+        let prev = lock_of(vec![
+            locked("kept", 'a'),
+            locked("bumped", 'b'),
+            locked("refused", 'c'),
+            locked("dropped", 'd'),
+        ]);
+        let new = lock_of(vec![locked("kept", 'a'), locked("bumped", 'e'), locked("refused", 'f')]);
+        let pruned = [PrunedArtifact {
+            kind: ArtifactKind::Skill,
+            name: "dropped".to_string(),
+            old: Digest::Sha256("d".repeat(64)),
+            outcome: PruneOutcome::Pruned,
+            removed: Vec::new(),
+            retained: Vec::new(),
+            abandoned_entries: Vec::new(),
+            clients: Vec::new(),
+        }];
+        let mut report = build_report(None, &new, Some(&prev), &pruned, &[]);
+        report.mark_refused(ArtifactKind::Skill, "refused");
+
+        let telemetry = Telemetry::armed_for_test(PathBuf::from("/grim-home"));
+        let ctx = Context::hermetic(PathBuf::from("/grim-home")).with_telemetry(telemetry.clone());
+        let declared = crate::config::declaration::DesiredSet::default();
+        record_changed(&ctx, &report.into_items(), &new, Some(&prev), &declared);
+
+        let event = |action, repo: &str| ArtifactEvent {
+            kind: ArtifactKind::Skill,
+            action,
+            reference: Some(format!("localhost:5000/{repo}")),
+        };
+        assert_eq!(
+            telemetry.snapshot().unwrap().artifacts,
+            vec![
+                event(ArtifactAction::Updated, "bumped"),
+                event(ArtifactAction::Removed, "dropped")
+            ]
+        );
     }
 
     #[test]

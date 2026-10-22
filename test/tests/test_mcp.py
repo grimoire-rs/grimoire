@@ -11,7 +11,6 @@ the whole session.
 from __future__ import annotations
 
 import json
-import subprocess
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -25,65 +24,8 @@ from src.helpers import (
 from src.index_fixture import index_config, package, write_all_json
 from src.registry import REGISTRY_HOST
 from src.runner import GrimRunner
-
-_PROTOCOL = "2025-06-18"
-
-
-def _drive(
-    runner: GrimRunner,
-    cwd: Path,
-    requests: list[dict],
-    *,
-    allow_writes: bool = False,
-    offline: bool = True,
-) -> dict[int, dict]:
-    """Run `grim [--offline] mcp` feeding `requests`, return responses by id.
-
-    `offline=True` (the default) passes `--offline` so the embedded catalog
-    browse stays off the network — a cold cache degrades to empty, keeping a
-    test hermetic. Pass `offline=False` when the test must drive a real
-    multi-registry browse (the server then resolves live against the
-    configured `[[registries]]`); such a test must take the session
-    `registry` fixture and publish its artifacts first.
-    """
-    args = [str(runner.binary)]
-    if offline:
-        args.append("--offline")
-    args.append("mcp")
-    if allow_writes:
-        args.append("--allow-writes")
-    payload = "".join(json.dumps(r) + "\n" for r in requests)
-    result = subprocess.run(
-        args,
-        input=payload,
-        capture_output=True,
-        text=True,
-        env=runner.env,
-        cwd=str(cwd),
-        timeout=60,
-    )
-    responses: dict[int, dict] = {}
-    for line in result.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        msg = json.loads(line)
-        if isinstance(msg.get("id"), int):
-            responses[msg["id"]] = msg
-    return responses
-
-
-def _initialize(idx: int) -> dict:
-    return {
-        "jsonrpc": "2.0",
-        "id": idx,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": _PROTOCOL,
-            "capabilities": {},
-            "clientInfo": {"name": "pytest", "version": "0"},
-        },
-    }
+from src.stdio_drivers import drive as _drive
+from src.stdio_drivers import initialize as _initialize
 
 
 def test_mcp_initialize_and_lists_read_tools(
