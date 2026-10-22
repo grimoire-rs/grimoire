@@ -26,24 +26,11 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::catalog::catalog_error::CatalogError;
+use crate::catalog::index_git::fetch_git;
+use crate::catalog::index_http::{BodyError, INDEX_BODY_LIMIT, http_client, index_get, read_capped};
 use crate::catalog::rating_provider;
 use crate::catalog::registry_catalog::{CatalogEntry, DownloadSummary, DownloadVersion, RatingSummary};
 use crate::config::registry_resolve::SourceKind;
-
-/// Time allowed to open the connection to the index host.
-const INDEX_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// Longest silence tolerated before the response headers and between body
-/// reads. It resets on every read, so a large index on a slow link survives
-/// for as long as bytes keep arriving.
-const INDEX_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// Ceiling for one whole fetch, however steadily the body arrives.
-const INDEX_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
-
-/// Decoded-body ceiling for index documents, several times the size of a
-/// large index; it bounds a decompression bomb.
-const INDEX_BODY_LIMIT: usize = 128 * 1024 * 1024;
 
 /// Most entries one `all.json` may list: an abuse bound far above
 /// any real index. The byte cap alone lets ~2M tiny entries through, which
@@ -61,17 +48,17 @@ const STATS_SCHEMA_VERSION: u32 = 1;
 /// single `metadata.json`). Unknown fields are tolerated so index schema
 /// additions never break older grim binaries.
 #[derive(Debug, Deserialize)]
-struct IndexPackage {
+pub(crate) struct IndexPackage {
     /// Metadata schema version; only `1` is consumed today.
     schema: u32,
     /// Package name (equals the index directory name). With `namespace` it
     /// forms the entry's [`CatalogEntry::index_path`], the tree's grouping.
-    name: String,
+    pub(crate) name: String,
     /// `<host>/<namespace…>` the pointer sits under. Derived by the index
     /// compiler into `all.json`; absent from a raw `metadata.json`, where the
     /// git walk fills it from the directory path instead.
     #[serde(default)]
-    namespace: Option<String>,
+    pub(crate) namespace: Option<String>,
     /// `skill` / `rule` / `agent` / `bundle`.
     kind: String,
     /// OCI reference (`registry/repository`, no tag) grim resolves against.
@@ -115,7 +102,7 @@ struct IndexPackage {
 impl IndexPackage {
     /// Project into a [`CatalogEntry`], or `None` when the `ref` carries no
     /// `registry/repository` split or the schema version is unknown.
-    fn into_entry(self, fetched_at: &str) -> Option<CatalogEntry> {
+    pub(crate) fn into_entry(self, fetched_at: &str) -> Option<CatalogEntry> {
         if self.schema != 1 {
             tracing::warn!(
                 "skipping index entry '{}': unsupported schema {}",
@@ -586,106 +573,6 @@ fn stats_url(locator: &str) -> String {
     }
 }
 
-/// The shared HTTP client for index fetches (embedded TLS roots, timeouts,
-/// grim user-agent).
-fn http_client() -> reqwest::Result<reqwest::Client> {
-    build_client(INDEX_CONNECT_TIMEOUT, INDEX_READ_TIMEOUT, INDEX_TOTAL_TIMEOUT)
-}
-
-/// [`http_client`] with the three deadlines injected, so tests can use short ones.
-fn build_client(
-    connect: std::time::Duration,
-    read: std::time::Duration,
-    total: std::time::Duration,
-) -> reqwest::Result<reqwest::Client> {
-    crate::tls::merge_embedded_roots(
-        reqwest::Client::builder()
-            .connect_timeout(connect)
-            .read_timeout(read)
-            .timeout(total)
-            .user_agent(concat!("grim/", env!("CARGO_PKG_VERSION"))),
-    )
-    .build()
-}
-
-/// Why [`read_capped`] stopped before the body ended.
-#[derive(Debug, thiserror::Error)]
-enum BodyError {
-    #[error("index body exceeds {} MiB once decoded", .limit / MIB)]
-    OverLimit { limit: usize },
-    #[error("unsupported Content-Encoding '{0}'")]
-    UnsupportedEncoding(String),
-    #[error("corrupt gzip index body: {0}")]
-    Gzip(#[source] std::io::Error),
-    #[error(transparent)]
-    Transport(#[from] reqwest::Error),
-}
-
-const MIB: usize = 1024 * 1024;
-
-/// GET `url` advertising gzip. The header is set by hand because reqwest's
-/// `gzip` feature is crate-wide: enabling it would also make the OCI, forge
-/// and auth clients send it and auto-decode, with no decoded-size cap.
-fn index_get(client: &reqwest::Client, url: &str) -> reqwest::RequestBuilder {
-    client.get(url).header(reqwest::header::ACCEPT_ENCODING, "gzip")
-}
-
-/// The one `Content-Encoding` [`read_capped`] can undo besides none.
-fn is_gzip(response: &reqwest::Response) -> Result<bool, BodyError> {
-    let mut values = response.headers().get_all(reqwest::header::CONTENT_ENCODING).iter();
-    let Some(first) = values.next() else {
-        return Ok(false);
-    };
-    let value = String::from_utf8_lossy(first.as_bytes());
-    match (value.trim().to_ascii_lowercase().as_str(), values.next()) {
-        ("identity", None) => Ok(false),
-        ("gzip" | "x-gzip", None) => Ok(true),
-        // `br`, `deflate`, `zstd`, a coding list or repeated headers: only
-        // gzip was advertised, so none of them is decodable.
-        _ => Err(BodyError::UnsupportedEncoding(value.trim().chars().take(32).collect())),
-    }
-}
-
-/// Inflate `compressed` (every gzip member), stopping one byte past `limit`
-/// so a bomb never grows the buffer beyond the cap.
-fn gunzip(compressed: &[u8], limit: usize) -> std::io::Result<Vec<u8>> {
-    use std::io::Read;
-    let mut out = Vec::new();
-    flate2::read::MultiGzDecoder::new(compressed)
-        .take(limit as u64 + 1)
-        .read_to_end(&mut out)?;
-    Ok(out)
-}
-
-/// Read `response` to the end, failing as soon as more than `limit` bytes
-/// have arrived, then undo a gzip `Content-Encoding`.
-///
-/// The cap applies to the wire bytes and again to the decoded bytes: a gzip
-/// bomb is tiny on the wire, and a decoded size is not in any header.
-async fn read_capped(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>, BodyError> {
-    let gzip = is_gzip(&response)?;
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
-        if body.len() + chunk.len() > limit {
-            return Err(BodyError::OverLimit { limit });
-        }
-        body.extend_from_slice(&chunk);
-    }
-    if !gzip {
-        return Ok(body);
-    }
-    // Inflating is CPU-bound, so it stays off the async workers.
-    let decoded = tokio::task::spawn_blocking(move || gunzip(&body, limit))
-        .await
-        .map_err(std::io::Error::other)
-        .and_then(|inflated| inflated)
-        .map_err(BodyError::Gzip)?;
-    if decoded.len() > limit {
-        return Err(BodyError::OverLimit { limit });
-    }
-    Ok(decoded)
-}
-
 /// GET `<base>/all.json` (or the locator itself when it already names a
 /// `.json` document) and parse the package array.
 async fn fetch_http(locator: &str, cache_path: &Path) -> Result<Vec<IndexPackage>, CatalogError> {
@@ -780,133 +667,10 @@ fn parse_packages(bytes: &[u8], limit: usize) -> Result<Vec<IndexPackage>, Packa
     }
 }
 
-/// Shallow-clone the index repository and walk `index/**/metadata.json`.
-///
-/// A fresh `--depth 1` clone lands in a temp sibling and atomically
-/// replaces the previous clone — simpler and more robust than fetch/reset
-/// against force-pushed or re-rooted index repos, and cheap under the
-/// catalog TTL (one clone per locator per hour).
-async fn fetch_git(locator: &str, git_dir: &Path, cache_path: &Path) -> Result<Vec<IndexPackage>, CatalogError> {
-    let url = locator.strip_prefix("git+").unwrap_or(locator).to_string();
-    let tmp = git_dir.with_extension("tmp");
-
-    if let Some(parent) = git_dir.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| CatalogError::io(cache_path, e))?;
-    }
-    // Best-effort cleanup of a previous interrupted clone.
-    let _ = tokio::fs::remove_dir_all(&tmp).await;
-
-    let output = tokio::process::Command::new("git")
-        .arg("clone")
-        .arg("--depth")
-        .arg("1")
-        .arg("--quiet")
-        .arg(&url)
-        .arg(&tmp)
-        // Never hang a browse on an interactive credential prompt; a
-        // private index needs ambient git credentials (helper / ssh agent).
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .output()
-        .await
-        .map_err(|e| CatalogError::io(cache_path, e))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(CatalogError::io(
-            cache_path,
-            std::io::Error::other(format!("git clone of index '{url}' failed: {}", stderr.trim())),
-        ));
-    }
-
-    let _ = tokio::fs::remove_dir_all(git_dir).await;
-    tokio::fs::rename(&tmp, git_dir)
-        .await
-        .map_err(|e| CatalogError::io(cache_path, e))?;
-
-    // Walk on the blocking pool — recursive std::fs, never on a worker.
-    let root = git_dir.join("index");
-    let cache = cache_path.to_path_buf();
-    let locator = locator.to_string();
-    tokio::task::spawn_blocking(move || walk_metadata(&root, &cache, &locator))
-        .await
-        .map_err(|e| CatalogError::io(cache_path, std::io::Error::other(e)))?
-}
-
-/// Collect every `metadata.json` under `root` (recursive), skipping
-/// unparseable files with a warning so one bad entry never hides the rest.
-fn walk_metadata(root: &Path, cache_path: &Path, locator: &str) -> Result<Vec<IndexPackage>, CatalogError> {
-    let mut packages = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(e) => e,
-            // A missing `index/` tree is an empty index, not an error.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(CatalogError::io(cache_path, e)),
-        };
-        for entry in entries {
-            let entry = entry.map_err(|e| CatalogError::io(cache_path, e))?;
-            let path = entry.path();
-            // `file_type` does not follow links: a link in the checkout could
-            // loop the walk or reach outside the index root, so skip them all.
-            let file_type = entry.file_type().map_err(|e| CatalogError::io(cache_path, e))?;
-            if file_type.is_symlink() {
-                tracing::debug!("skipping symlink in index checkout: {}", path.display());
-            } else if file_type.is_dir() {
-                stack.push(path);
-            } else if path.file_name().is_some_and(|n| n == "metadata.json") {
-                match std::fs::read(&path)
-                    .map_err(|e| CatalogError::io(cache_path, e))
-                    .and_then(|bytes| {
-                        serde_json::from_slice::<IndexPackage>(&bytes)
-                            .map_err(|e| CatalogError::index_fetch(cache_path, locator, e))
-                    }) {
-                    Ok(mut pkg) => {
-                        // `index/<host>/<namespace…>/<name>/metadata.json`: the
-                        // namespace is the package directory's parent, relative
-                        // to `index/`. `all.json` carries it as a field instead.
-                        // Always overwritten: the directory is what the index's
-                        // review gate checks, a declared field is not. The spec
-                        // requires `name` to equal the package directory; a
-                        // mismatch gets no placement rather than a mixed path.
-                        let pkg_dir = path.parent();
-                        let name_matches = pkg_dir
-                            .and_then(Path::file_name)
-                            .is_some_and(|d| d == pkg.name.as_str());
-                        if !name_matches {
-                            tracing::debug!(
-                                "index entry name `{}` differs from its directory: {}",
-                                pkg.name,
-                                path.display()
-                            );
-                        }
-                        pkg.namespace = pkg_dir
-                            .filter(|_| name_matches)
-                            .and_then(Path::parent)
-                            .and_then(|ns| ns.strip_prefix(root).ok())
-                            .and_then(|ns| {
-                                // Join components with `/` on every platform.
-                                let segs: Option<Vec<&str>> = ns.components().map(|c| c.as_os_str().to_str()).collect();
-                                segs.filter(|s| !s.is_empty()).map(|s| s.join("/"))
-                            });
-                        packages.push(pkg);
-                    }
-                    Err(e) => tracing::warn!("skipping unreadable index entry {}: {e}", path.display()),
-                }
-            }
-        }
-    }
-    Ok(packages)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use std::time::Duration;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpStream;
+    use crate::catalog::test_hosts::{accepts_gzip, spawn_capturing_host};
 
     fn pkg(json: &str) -> IndexPackage {
         serde_json::from_str(json).expect("valid index package")
@@ -997,108 +761,6 @@ mod tests {
         assert!(index_path("github.com", &long).is_some(), "128 chars is the limit");
         assert_eq!(index_path("github.com", &format!("{long}a")), None);
         assert_eq!(index_path(&format!("github.com/{long}a"), "x"), None);
-    }
-
-    #[test]
-    fn git_walk_directory_namespace_wins_over_declared_field() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path().join("index");
-        let path = root.join("github.com/acme/tool/metadata.json");
-        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
-        std::fs::write(
-            &path,
-            r#"{"schema": 1, "name": "tool", "namespace": "github.com/grimoire-rs", "kind": "skill", "ref": "ghcr.io/acme/tool"}"#,
-        )
-        .expect("write");
-        // A pointer outside any namespace directory carries none, whatever it declares.
-        let lone = root.join("lone/metadata.json");
-        std::fs::create_dir_all(lone.parent().expect("parent")).expect("mkdir");
-        std::fs::write(
-            &lone,
-            r#"{"schema": 1, "name": "lone", "namespace": "github.com/acme", "kind": "skill", "ref": "ghcr.io/acme/lone"}"#,
-        )
-        .expect("write");
-        // `name` must equal the package directory; a mismatch gets no placement.
-        let renamed = root.join("github.com/acme/dir-name/metadata.json");
-        std::fs::create_dir_all(renamed.parent().expect("parent")).expect("mkdir");
-        std::fs::write(
-            &renamed,
-            r#"{"schema": 1, "name": "other-name", "kind": "skill", "ref": "ghcr.io/acme/other-name"}"#,
-        )
-        .expect("write");
-        let mut paths: Vec<_> = walk_metadata(&root, dir.path(), "git+https://example.invalid/i")
-            .expect("walk")
-            .into_iter()
-            .filter_map(|p| p.into_entry("t"))
-            .map(|e| e.index_path)
-            .collect();
-        paths.sort();
-        assert_eq!(paths, vec![None, None, Some("github.com/acme/tool".to_string())]);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn git_walk_skips_symlinks() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path().join("index");
-        let real = root.join("github.com/acme/tool/metadata.json");
-        std::fs::create_dir_all(real.parent().expect("parent")).expect("mkdir");
-        std::fs::write(
-            &real,
-            r#"{"schema": 1, "name": "tool", "kind": "skill", "ref": "ghcr.io/acme/tool"}"#,
-        )
-        .expect("write");
-        // A pointer outside the index root, reachable only through a link.
-        let outside = dir.path().join("outside/evil");
-        std::fs::create_dir_all(&outside).expect("mkdir");
-        std::fs::write(
-            outside.join("metadata.json"),
-            r#"{"schema": 1, "name": "evil", "kind": "skill", "ref": "ghcr.io/acme/evil"}"#,
-        )
-        .expect("write");
-        std::os::unix::fs::symlink(".", root.join("loop")).expect("loop link");
-        std::os::unix::fs::symlink(dir.path().join("outside"), root.join("github.com/escape")).expect("dir link");
-        std::os::unix::fs::symlink(&real, root.join("github.com/acme/metadata.json")).expect("file link");
-        let names: Vec<_> = walk_metadata(&root, dir.path(), "git+https://example.invalid/i")
-            .expect("walk terminates")
-            .into_iter()
-            .map(|p| p.name)
-            .collect();
-        assert_eq!(names, vec!["tool".to_string()]);
-    }
-
-    #[test]
-    fn git_walk_derives_the_namespace_from_the_directory() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path().join("index");
-        let write = |rel: &str, body: &str| {
-            let path = root.join(rel);
-            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
-            std::fs::write(path, body).expect("write");
-        };
-        write(
-            "github.com/grimoire-rs/grim-usage/metadata.json",
-            r#"{"schema": 1, "name": "grim-usage", "kind": "skill", "ref": "ghcr.io/grimoire-rs/grim-usage"}"#,
-        );
-        // Nested GitLab group namespace keeps every segment.
-        write(
-            "gitlab.com/a/b/tool/metadata.json",
-            r#"{"schema": 1, "name": "tool", "kind": "rule", "ref": "registry.gitlab.com/a/b/tool"}"#,
-        );
-        let mut paths: Vec<_> = walk_metadata(&root, dir.path(), "git+https://example.invalid/i")
-            .expect("walk")
-            .into_iter()
-            .filter_map(|p| p.into_entry("t"))
-            .map(|e| e.index_path)
-            .collect();
-        paths.sort();
-        assert_eq!(
-            paths,
-            vec![
-                Some("github.com/grimoire-rs/grim-usage".to_string()),
-                Some("gitlab.com/a/b/tool".to_string()),
-            ]
-        );
     }
 
     #[test]
@@ -1577,94 +1239,7 @@ mod tests {
         assert_eq!(e.repository_url, None);
     }
 
-    // ── transport: gzip, decoded-size cap, timeouts ──
-
-    /// Spawn a host that hands every accepted connection to `serve`, so a
-    /// test can capture the request head, stall, or drip a body. Returns the
-    /// base URL.
-    async fn spawn_scripted_host<F, Fut>(serve: F) -> String
-    where
-        F: Fn(TcpStream) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = ()> + Send + 'static,
-    {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
-        tokio::spawn(async move {
-            while let Ok((sock, _)) = listener.accept().await {
-                tokio::spawn(serve(sock));
-            }
-        });
-        base
-    }
-
-    /// A `200` carrying `body` verbatim, with `extra` raw header lines.
-    fn http_200(extra: &str, body: &[u8]) -> Vec<u8> {
-        let mut out = format!(
-            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n{extra}\r\n",
-            body.len()
-        )
-        .into_bytes();
-        out.extend_from_slice(body);
-        out
-    }
-
-    async fn read_head(sock: &mut TcpStream) -> String {
-        let mut buf = [0u8; 4096];
-        let n = sock.read(&mut buf).await.unwrap_or(0);
-        String::from_utf8_lossy(&buf[..n]).into_owned()
-    }
-
-    async fn spawn_fixed_host(response: Vec<u8>) -> String {
-        spawn_scripted_host(move |mut sock| {
-            let response = response.clone();
-            async move {
-                let _ = read_head(&mut sock).await;
-                let _ = sock.write_all(&response).await;
-                let _ = sock.shutdown().await;
-            }
-        })
-        .await
-    }
-
-    /// A host answering `[]` and handing the first request head to the
-    /// returned receiver.
-    async fn spawn_capturing_host() -> (String, tokio::sync::mpsc::Receiver<String>) {
-        let (heads, seen) = tokio::sync::mpsc::channel::<String>(1);
-        let base = spawn_scripted_host(move |mut sock| {
-            let heads = heads.clone();
-            async move {
-                let _ = heads.try_send(read_head(&mut sock).await);
-                let _ = sock.write_all(&http_200("", b"[]")).await;
-                let _ = sock.shutdown().await;
-            }
-        })
-        .await;
-        (base, seen)
-    }
-
-    /// Whether the request head offers `Accept-Encoding: gzip`.
-    fn accepts_gzip(head: &str) -> bool {
-        head.to_ascii_lowercase()
-            .lines()
-            .any(|line| line.starts_with("accept-encoding:") && line.contains("gzip"))
-    }
-
-    async fn get(base: &str) -> reqwest::Response {
-        http_client().unwrap().get(base).send().await.unwrap()
-    }
-
-    fn gzip(data: &[u8]) -> Vec<u8> {
-        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        encoder.write_all(data).unwrap();
-        encoder.finish().unwrap()
-    }
-
-    /// `read_capped` over a `200` carrying `body` under `content_encoding`.
-    async fn read_encoded(content_encoding: &str, body: &[u8], limit: usize) -> Result<Vec<u8>, BodyError> {
-        let extra = format!("content-encoding: {content_encoding}\r\n");
-        let base = spawn_fixed_host(http_200(&extra, body)).await;
-        read_capped(get(&base).await, limit).await
-    }
+    // ── the index requests offer gzip ──
 
     #[tokio::test]
     async fn the_index_request_advertises_gzip() {
@@ -1693,232 +1268,6 @@ mod tests {
         assert!(
             accepts_gzip(&head),
             "request head must carry Accept-Encoding: gzip:\n{head}"
-        );
-    }
-
-    #[tokio::test]
-    async fn reqwest_does_not_advertise_gzip_crate_wide() {
-        // The OCI, forge and auth clients are built outside this module and
-        // must stay raw: reqwest's `gzip` feature would turn the header on for
-        // every one of them, and its decoder has no size cap.
-        let (base, mut seen) = spawn_capturing_host().await;
-        let plain = crate::tls::merge_embedded_roots(reqwest::Client::builder())
-            .build()
-            .unwrap();
-
-        plain.get(&base).send().await.expect("the host answers");
-
-        let head = seen.recv().await.expect("the host saw a request");
-        assert!(
-            !accepts_gzip(&head),
-            "a client built without index_get must not offer gzip; the reqwest `gzip` feature leaked on:\n{head}"
-        );
-    }
-
-    #[tokio::test]
-    async fn read_capped_refuses_one_byte_past_the_limit() {
-        let base = spawn_fixed_host(http_200("", &[b'x'; 1025])).await;
-
-        assert!(
-            matches!(
-                read_capped(get(&base).await, 1024).await,
-                Err(BodyError::OverLimit { limit: 1024 })
-            ),
-            "limit + 1 bytes must be refused"
-        );
-        let exact = read_capped(get(&base).await, 1025)
-            .await
-            .expect("a body of exactly the limit is accepted");
-        assert_eq!(exact.len(), 1025);
-    }
-
-    #[tokio::test]
-    async fn read_capped_counts_across_chunks() {
-        let base = spawn_drip_host(5, Duration::from_millis(5)).await;
-
-        assert!(
-            matches!(
-                read_capped(get(&base).await, 49).await,
-                Err(BodyError::OverLimit { limit: 49 })
-            ),
-            "the fifth ten-byte chunk crosses a 49-byte limit"
-        );
-        let whole = read_capped(get(&base).await, 50)
-            .await
-            .expect("five chunks fit exactly");
-        assert_eq!(whole.len(), 50);
-    }
-
-    #[tokio::test]
-    async fn read_capped_counts_decoded_bytes() {
-        let compressed = gzip(&[b'a'; 8192]);
-        assert!(compressed.len() < 100, "the bomb must stay tiny on the wire");
-
-        assert!(
-            matches!(
-                read_encoded("gzip", &compressed, 4096).await,
-                Err(BodyError::OverLimit { limit: 4096 })
-            ),
-            "the cap must count the decoded size"
-        );
-        assert!(
-            matches!(
-                read_encoded("gzip", &compressed, 8191).await,
-                Err(BodyError::OverLimit { .. })
-            ),
-            "decoded limit + 1 must be refused"
-        );
-        let decoded = read_encoded("gzip", &compressed, 8192)
-            .await
-            .expect("a decoded body of exactly the limit is accepted");
-        assert_eq!(decoded, vec![b'a'; 8192]);
-    }
-
-    #[tokio::test]
-    async fn read_capped_decodes_every_gzip_member() {
-        let members = [gzip(b"abc"), gzip(b"def")].concat();
-
-        let decoded = read_encoded("gzip", &members, 1024).await.expect("both members decode");
-
-        assert_eq!(decoded, b"abcdef");
-    }
-
-    #[tokio::test]
-    async fn read_capped_matches_the_encoding_case_insensitively() {
-        for name in ["X-GZip", "GZIP"] {
-            let decoded = read_encoded(name, &gzip(b"[]"), 1024).await.expect(name);
-            assert_eq!(decoded, b"[]", "{name}");
-        }
-        let raw = read_encoded("Identity", b"[]", 1024).await.expect("identity");
-        assert_eq!(raw, b"[]");
-    }
-
-    #[tokio::test]
-    async fn read_capped_refuses_an_encoding_it_did_not_advertise() {
-        for name in ["br", "deflate", "zstd", "gzip, br", "identity, gzip"] {
-            let err = read_encoded(name, &gzip(b"[]"), 1024)
-                .await
-                .expect_err("only gzip was advertised");
-            assert!(
-                matches!(&err, BodyError::UnsupportedEncoding(v) if v == name),
-                "{name}: {err}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn read_capped_refuses_corrupt_gzip() {
-        let whole = gzip(&[b'a'; 8192]);
-        let truncated = &whole[..whole.len() - 8];
-        for (what, body) in [("truncated", truncated), ("not gzip", b"not gzip at all".as_slice())] {
-            let err = read_encoded("gzip", body, 1 << 20).await.expect_err(what);
-            assert!(matches!(err, BodyError::Gzip(_)), "{what}: {err}");
-        }
-    }
-
-    #[test]
-    fn the_over_limit_message_counts_mebibytes() {
-        let err = BodyError::OverLimit {
-            limit: INDEX_BODY_LIMIT,
-        };
-
-        assert_eq!(err.to_string(), "index body exceeds 128 MiB once decoded");
-    }
-
-    /// A host answering with `chunks` ten-byte pieces, `gap` apart, after
-    /// sending headers at once.
-    async fn spawn_drip_host(chunks: usize, gap: Duration) -> String {
-        spawn_scripted_host(move |mut sock| async move {
-            let _ = read_head(&mut sock).await;
-            let head = format!(
-                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-                chunks * 10
-            );
-            let _ = sock.write_all(head.as_bytes()).await;
-            for _ in 0..chunks {
-                tokio::time::sleep(gap).await;
-                if sock.write_all(&[b'x'; 10]).await.is_err() {
-                    return;
-                }
-            }
-            let _ = sock.shutdown().await;
-        })
-        .await
-    }
-
-    /// Longer than any test waits, so only a deadline can end the wait.
-    const AMPLE: Duration = Duration::from_secs(60);
-
-    /// The read timeout must fire on its own, far inside [`AMPLE`]'s total.
-    const PROMPT: Duration = Duration::from_secs(5);
-
-    #[tokio::test]
-    async fn a_host_that_never_answers_trips_the_read_timeout() {
-        let base = spawn_scripted_host(|mut sock| async move {
-            let _ = read_head(&mut sock).await;
-            tokio::time::sleep(AMPLE).await;
-        })
-        .await;
-        let client = build_client(AMPLE, Duration::from_millis(200), AMPLE).unwrap();
-
-        let started = std::time::Instant::now();
-        let err = client.get(&base).send().await.expect_err("no answer must fail");
-
-        assert!(err.is_timeout(), "the stall must surface as a timeout: {err}");
-        assert!(started.elapsed() < PROMPT, "the read timeout, not the total, must fire");
-    }
-
-    #[tokio::test]
-    async fn a_body_that_stalls_midway_trips_the_read_timeout() {
-        let base = spawn_drip_host(1, AMPLE).await;
-        let client = build_client(AMPLE, Duration::from_millis(200), AMPLE).unwrap();
-        let response = client.get(&base).send().await.expect("headers arrive at once");
-
-        let started = std::time::Instant::now();
-        let err = read_capped(response, 1024).await.expect_err("a stalled body must fail");
-
-        assert!(
-            matches!(&err, BodyError::Transport(e) if e.is_timeout()),
-            "the stall must surface as a timeout: {err}"
-        );
-        assert!(started.elapsed() < PROMPT, "the read timeout, not the total, must fire");
-    }
-
-    #[tokio::test]
-    async fn a_slow_but_progressing_body_outlives_the_read_timeout() {
-        // Twelve pieces 50 ms apart take 600 ms in all, longer than the
-        // 500 ms read timeout: only a per-read deadline lets this through.
-        let base = spawn_drip_host(12, Duration::from_millis(50)).await;
-        let read_timeout = Duration::from_millis(500);
-        let client = build_client(AMPLE, read_timeout, AMPLE).unwrap();
-
-        let started = std::time::Instant::now();
-        let response = client.get(&base).send().await.expect("headers arrive at once");
-        let body = read_capped(response, 1024)
-            .await
-            .expect("progress keeps the fetch alive");
-
-        assert_eq!(body.len(), 120);
-        assert!(
-            started.elapsed() > read_timeout,
-            "the fetch must outlast the read timeout"
-        );
-    }
-
-    #[tokio::test]
-    async fn the_total_ceiling_still_cuts_off_a_body_that_never_ends() {
-        // Pieces every 50 ms never trip the 500 ms read timeout; the 800 ms
-        // ceiling is the only thing that can stop this fetch.
-        let base = spawn_drip_host(1000, Duration::from_millis(50)).await;
-        let client = build_client(AMPLE, Duration::from_millis(500), Duration::from_millis(800)).unwrap();
-        let response = client.get(&base).send().await.expect("headers arrive at once");
-
-        let err = read_capped(response, 1024 * 1024)
-            .await
-            .expect_err("the ceiling must fire");
-        assert!(
-            matches!(&err, BodyError::Transport(e) if e.is_timeout()),
-            "the ceiling must surface as a timeout: {err}"
         );
     }
 
