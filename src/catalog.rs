@@ -20,11 +20,14 @@ pub mod index_announce;
 pub mod index_git;
 pub mod index_http;
 pub mod index_package;
+pub mod index_root;
 pub mod index_source;
+pub mod index_sync;
 pub mod rating_provider;
 pub mod redact;
 pub mod registry_catalog;
 pub mod search_match;
+pub mod sync_state;
 #[cfg(test)]
 mod test_hosts;
 pub mod update_availability;
@@ -35,7 +38,9 @@ pub use browse_sort::{SortKey, SortMode, SortOrder};
 #[allow(unused_imports)]
 pub use catalog_error::{CatalogError, CatalogErrorKind};
 #[allow(unused_imports)]
-pub use catalog_service::{BadgeContext, CatalogGroup, CatalogResults, CatalogRow, CatalogScope, load_catalog};
+pub use catalog_service::{
+    BadgeContext, CatalogGroup, CatalogResults, CatalogRow, CatalogScope, Refresh, load_catalog,
+};
 #[allow(unused_imports)]
 pub use registry_catalog::{Catalog, CatalogEntry, DownloadSummary, DownloadVersion, OciMeta};
 #[allow(unused_imports)]

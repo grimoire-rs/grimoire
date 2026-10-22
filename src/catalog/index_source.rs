@@ -27,12 +27,11 @@ use serde::Deserialize;
 
 use crate::catalog::catalog_error::CatalogError;
 use crate::catalog::index_git::fetch_git;
-use crate::catalog::index_http::{BodyError, INDEX_BODY_LIMIT, http_client, index_get, read_capped, stats_url};
+use crate::catalog::index_http::{Deadline, INDEX_BODY_LIMIT, index_get, read_capped, stats_url};
 use crate::catalog::index_package::IndexPackage;
 use crate::catalog::rating_provider;
 use crate::catalog::redact::redact_url;
 use crate::catalog::registry_catalog::{CatalogEntry, DownloadSummary, DownloadVersion, RatingSummary};
-use crate::config::registry_resolve::SourceKind;
 
 /// Most entries one `all.json` may list: an abuse bound far above
 /// any real index. The byte cap alone lets ~2M tiny entries through, which
@@ -151,9 +150,35 @@ fn by_release_desc(a: &DownloadVersion, b: &DownloadVersion) -> std::cmp::Orderi
 /// carrying neither is never inserted, so a key in the map always means "the
 /// sidecar said something about this artifact".
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct IndexStats {
+pub(crate) struct IndexStats {
     rating: Option<RatingSummary>,
     downloads: Option<DownloadSummary>,
+}
+
+impl IndexStats {
+    /// The stats `entry` carries, cloned.
+    pub(crate) fn of(entry: &CatalogEntry) -> Self {
+        Self {
+            rating: entry.rating.clone(),
+            downloads: entry.downloads.clone(),
+        }
+    }
+}
+
+/// Reduces `entries` to the stats worth carrying into the next build and
+/// drops everything else. Taking the map by value is the point: the caller
+/// cannot keep the full old entries alive through the parse of a new body.
+pub(crate) fn carry_forward(entries: BTreeMap<String, CatalogEntry>) -> BTreeMap<String, IndexStats> {
+    entries
+        .into_iter()
+        .filter_map(|(key, entry)| {
+            let stats = IndexStats {
+                rating: entry.rating,
+                downloads: entry.downloads,
+            };
+            (stats != IndexStats::default()).then_some((key, stats))
+        })
+        .collect()
 }
 
 /// The wire form of one artifact's rating. `target` and `url` are opaque —
@@ -225,76 +250,65 @@ fn index_is_loopback(stats_url: &str) -> bool {
         .is_some_and(|host| rating_provider::is_loopback(&host))
 }
 
-/// Fetch the package list for `locator` over the transport `kind`.
+/// Fetch the package list of a git-transport index and project it onto
+/// catalog entries keyed by [`CatalogEntry::repo`].
 ///
-/// `git_dir` is the per-locator shallow-clone directory (git transport
-/// only); `cache_path` provides error context (the catalog cache file the
-/// build is for). `previous` is the prior cache's entries, keyed by
-/// [`CatalogEntry::repo`]: the stats a run inherits when the sidecar
-/// could not be observed at all (see [`fetch_stats`]).
+/// `git_dir` is the per-locator shallow-clone directory; `cache_path` gives
+/// error context (the catalog cache file the build is for).
 ///
 /// # Errors
 ///
-/// [`CatalogError`] for an HTTP transport/status failure, a git subprocess
-/// failure, or an index-content parse failure.
-pub async fn fetch_index_entries(
+/// [`CatalogError`] for a git subprocess failure or an index-content parse
+/// failure.
+pub(crate) async fn fetch_git_entries(
     locator: &str,
-    kind: SourceKind,
     git_dir: &Path,
     cache_path: &Path,
     fetched_at: &str,
-    previous: Option<&BTreeMap<String, CatalogEntry>>,
-) -> Result<Vec<CatalogEntry>, CatalogError> {
-    let packages = match kind {
-        SourceKind::IndexGit => fetch_git(locator, git_dir, cache_path).await?,
-        // `Registry` never reaches this module; treat defensively as HTTP.
-        SourceKind::IndexHttp | SourceKind::Registry => fetch_http(locator, cache_path).await?,
-    };
-    // Sidecar stats ride the HTTP index only: a git-transport index is a tree
-    // of per-package `metadata.json` files with no sidecar to fetch, and an
-    // OCI `_catalog` source never reaches this module at all. Both are
-    // completed observations that the source publishes no stats —
-    // `Some(empty)`, not an unobserved sidecar to carry stats forward over.
-    let observed = match kind {
-        SourceKind::IndexHttp => fetch_stats(locator).await,
-        SourceKind::IndexGit | SourceKind::Registry => Some(BTreeMap::new()),
-    };
-    Ok(packages
+    deadline: Deadline,
+) -> Result<BTreeMap<String, CatalogEntry>, CatalogError> {
+    let packages = fetch_git(locator, git_dir, cache_path, deadline).await?;
+    Ok(project_entries(packages, fetched_at))
+}
+
+/// Project parsed packages onto catalog entries keyed by
+/// [`CatalogEntry::repo`]; when two packages derive one key the later wins.
+pub(crate) fn project_entries(packages: Vec<IndexPackage>, fetched_at: &str) -> BTreeMap<String, CatalogEntry> {
+    packages
         .into_iter()
-        .filter_map(|p| {
-            // Joined *after* the projection — `into_entry` sees only
-            // `all.json` and knows nothing about ratings — and both lookups
-            // key off the same derived string. The sidecar spells the key as
-            // the index's `ref` and the cache spells it `registry/repository`;
-            // they round-trip today, but deriving each side separately would
-            // let one future normalization in `into_entry` silently break the
-            // carry-forward join while the sidecar join kept working.
-            let entry = p.into_entry(fetched_at)?;
-            let key = entry.repo();
-            let stats = match &observed {
-                // A completed observation is authoritative even when it
-                // found nothing: a retracted rating has to clear, and so does
-                // a pull count the producer stopped publishing.
-                Some(observed) => observed.get(&key).cloned().unwrap_or_default(),
-                // Nothing was observed, so nothing is known — keep what the
-                // last build knew rather than publishing "unrated" into the
-                // cache for a full TTL (R-2: no silent emptying). A cold
-                // cache stays unrated, which is honest.
-                None => previous
-                    .and_then(|entries| entries.get(&key))
-                    .map(|prior| IndexStats {
-                        rating: prior.rating.clone(),
-                        downloads: prior.downloads.clone(),
-                    })
-                    .unwrap_or_default(),
-            };
-            Some(CatalogEntry {
-                rating: stats.rating,
-                downloads: stats.downloads,
-                ..entry
-            })
-        })
-        .collect())
+        .filter_map(|p| p.into_entry(fetched_at))
+        .map(|entry| (entry.repo(), entry))
+        .collect()
+}
+
+/// Join the sidecar's stats onto `entries`; true when any entry's stats changed.
+///
+/// `observed` is `Some` when the sidecar was read, even when it found nothing:
+/// a retracted rating has to clear. `None` means it was not observed, so each
+/// entry takes what `carried` returns for its key instead of publishing
+/// "unrated" for a full TTL, and an entry `carried` has nothing for is left as
+/// it is. The join is by map key, the one [`project_entries`] keys on.
+pub(crate) fn apply_stats(
+    entries: &mut BTreeMap<String, CatalogEntry>,
+    observed: Option<&BTreeMap<String, IndexStats>>,
+    carried: impl Fn(&str) -> Option<IndexStats>,
+) -> bool {
+    let mut changed = false;
+    for (key, entry) in entries.iter_mut() {
+        let stats = match observed {
+            Some(observed) => observed.get(key).cloned().unwrap_or_default(),
+            None => match carried(key) {
+                Some(stats) => stats,
+                None => continue,
+            },
+        };
+        if entry.rating != stats.rating || entry.downloads != stats.downloads {
+            entry.rating = stats.rating;
+            entry.downloads = stats.downloads;
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// GET the `stats.json` sidecar and project its stats, keyed by artifact ref.
@@ -312,19 +326,16 @@ pub async fn fetch_index_entries(
 /// rated" into the cache for a whole TTL. Either way only the `all.json` fetch
 /// decides whether the catalog build succeeded, and nothing is said above
 /// `debug`.
-async fn fetch_stats(locator: &str) -> Option<BTreeMap<String, IndexStats>> {
+///
+/// The caller owns the deadline: this awaits as long as the client lets it.
+pub(crate) async fn fetch_stats_with(client: &reqwest::Client, locator: &str) -> Option<BTreeMap<String, IndexStats>> {
     let Some(url) = stats_url(locator) else {
         tracing::debug!("index locator carries a query or fragment; fetching no ratings sidecar");
         return None;
     };
     // The locator may carry a token in its userinfo; every line below logs it.
     let shown = redact_url(url.as_str());
-    let fetched = async {
-        let response = index_get(&http_client()?, url.as_str()).send().await?;
-        Ok::<_, reqwest::Error>(response)
-    }
-    .await;
-    let response = match fetched {
+    let response = match index_get(client, url.as_str()).send().await {
         Ok(response) => response,
         Err(e) => {
             tracing::debug!(
@@ -379,7 +390,7 @@ async fn fetch_stats(locator: &str) -> Option<BTreeMap<String, IndexStats>> {
 /// said. An unparseable document or a `schema_version` from the future is
 /// `None` instead: nothing was learned, so nothing may be published (see
 /// [`fetch_stats`]). At `debug`, never a warning and never an error.
-fn parse_stats(bytes: &[u8], url: &str) -> Option<BTreeMap<String, IndexStats>> {
+pub(crate) fn parse_stats(bytes: &[u8], url: &str) -> Option<BTreeMap<String, IndexStats>> {
     let stats: StatsFile = match serde_json::from_slice(bytes) {
         Ok(stats) => stats,
         Err(e) => {
@@ -436,43 +447,32 @@ fn parse_stats(bytes: &[u8], url: &str) -> Option<BTreeMap<String, IndexStats>> 
     )
 }
 
-/// GET `<base>/all.json` (or the locator itself when it already names a
-/// `.json` document) and parse the package array.
-async fn fetch_http(locator: &str, cache_path: &Path) -> Result<Vec<IndexPackage>, CatalogError> {
-    let base = locator.trim_end_matches('/');
-    let url = if base.ends_with(".json") {
-        base.to_string()
-    } else {
-        format!("{base}/all.json")
-    };
-
-    let client = http_client().map_err(|e| CatalogError::index_fetch(cache_path, locator, e))?;
-    let response = index_get(&client, &url)
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
-        .map_err(|e| CatalogError::index_fetch(cache_path, locator, e))?;
-    let (bytes, _) = read_capped(response, INDEX_BODY_LIMIT).await.map_err(|e| {
-        // The `CatalogError` text names only the locator, so the cause of a
-        // refused body would otherwise be invisible at every log level.
-        if !matches!(e, BodyError::Transport(_)) {
-            tracing::warn!(
-                "package index body from '{}' refused, ignoring it: {}",
-                redact_url(locator),
-                redact_url(&e.to_string())
-            );
+/// Parse a fetched flat document into packages. A document over the entry
+/// limit is refused with a warning naming the source, since the error text
+/// names only the locator. A record that does not deserialize is skipped and
+/// counted in one warning, so one publisher's bad record cannot blank the index.
+pub(crate) fn parse_flat(bytes: &[u8], locator: &str, cache_path: &Path) -> Result<Vec<IndexPackage>, CatalogError> {
+    match parse_packages(bytes, INDEX_ENTRY_LIMIT) {
+        Ok(parsed) => {
+            if parsed.skipped > 0 {
+                tracing::warn!(
+                    "package index from '{}': skipped {} malformed entries",
+                    redact_url(locator),
+                    parsed.skipped
+                );
+            }
+            Ok(parsed.packages)
         }
-        CatalogError::index_fetch(cache_path, locator, e)
-    })?;
-    parse_packages(&bytes, INDEX_ENTRY_LIMIT).map_err(|e| {
-        if matches!(e, PackagesError::TooMany { .. }) {
-            tracing::warn!(
-                "package index from '{}' lists too many entries, ignoring it: {e}",
-                redact_url(locator)
-            );
+        Err(e) => {
+            if matches!(e, PackagesError::TooMany { .. }) {
+                tracing::warn!(
+                    "package index from '{}' lists too many entries, ignoring it: {e}",
+                    redact_url(locator)
+                );
+            }
+            Err(CatalogError::index_fetch(cache_path, locator, e))
         }
-        CatalogError::index_fetch(cache_path, locator, e)
-    })
+    }
 }
 
 /// Why [`parse_packages`] refused an `all.json`.
@@ -484,9 +484,28 @@ enum PackagesError {
     Parse(#[from] serde_json::Error),
 }
 
+/// The readable records of an `all.json` and how many were dropped.
+#[derive(Debug)]
+struct Parsed {
+    packages: Vec<IndexPackage>,
+    skipped: usize,
+}
+
+/// Longest publisher-controlled text quoted in a skip log line or error.
+const SKIPPED_LOG_LEN: usize = 120;
+
+fn clip(text: &str) -> String {
+    text.chars().take(SKIPPED_LOG_LEN).collect()
+}
+
 /// Parse an `all.json` array, stopping at the first entry past `limit`
 /// instead of materialising the rest.
-fn parse_packages(bytes: &[u8], limit: usize) -> Result<Vec<IndexPackage>, PackagesError> {
+///
+/// Records are read one at a time through a transient [`serde_json::Value`],
+/// never collected, so a record that does not fit [`IndexPackage`] is skipped
+/// while the rest still parse. A document whose records are all unreadable is
+/// an error: committing it would replace a good catalog with an empty one.
+fn parse_packages(bytes: &[u8], limit: usize) -> Result<Parsed, PackagesError> {
     use serde::de::{DeserializeSeed, Error as _, SeqAccess, Visitor};
 
     struct Capped<'a> {
@@ -495,7 +514,7 @@ fn parse_packages(bytes: &[u8], limit: usize) -> Result<Vec<IndexPackage>, Packa
     }
 
     impl<'de> Visitor<'de> for Capped<'_> {
-        type Value = Vec<IndexPackage>;
+        type Value = Parsed;
 
         fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
             f.write_str("an array of package pointers")
@@ -503,19 +522,34 @@ fn parse_packages(bytes: &[u8], limit: usize) -> Result<Vec<IndexPackage>, Packa
 
         fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
             let mut packages = Vec::new();
-            while let Some(package) = seq.next_element()? {
-                if packages.len() == self.limit {
+            let mut seen = 0usize;
+            let mut first_error = None;
+            while let Some(record) = seq.next_element::<serde_json::Value>()? {
+                if seen == self.limit {
                     self.overflowed.set(true);
                     return Err(A::Error::custom("too many entries"));
                 }
-                packages.push(package);
+                seen += 1;
+                match IndexPackage::deserialize(&record) {
+                    Ok(package) => packages.push(package),
+                    Err(e) => {
+                        let shown = record.get("ref").and_then(serde_json::Value::as_str).map(clip);
+                        let reason = clip(&e.to_string());
+                        tracing::debug!("skipping index entry {shown:?}: {reason}");
+                        first_error.get_or_insert(reason);
+                    }
+                }
             }
-            Ok(packages)
+            let skipped = seen - packages.len();
+            match first_error {
+                Some(e) if packages.is_empty() => Err(A::Error::custom(e)),
+                _ => Ok(Parsed { packages, skipped }),
+            }
         }
     }
 
     impl<'de> DeserializeSeed<'de> for Capped<'_> {
-        type Value = Vec<IndexPackage>;
+        type Value = Parsed;
 
         fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
             d.deserialize_seq(self)
@@ -529,9 +563,9 @@ fn parse_packages(bytes: &[u8], limit: usize) -> Result<Vec<IndexPackage>, Packa
         overflowed: &overflowed,
     }
     .deserialize(&mut de)
-    .and_then(|packages| de.end().map(|()| packages));
+    .and_then(|parsed| de.end().map(|()| parsed));
     match parsed {
-        Ok(packages) => Ok(packages),
+        Ok(parsed) => Ok(parsed),
         Err(_) if overflowed.get() => Err(PackagesError::TooMany { limit }),
         Err(e) => Err(e.into()),
     }
@@ -540,8 +574,32 @@ fn parse_packages(bytes: &[u8], limit: usize) -> Result<Vec<IndexPackage>, Packa
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::catalog_service::Refresh;
+    use crate::catalog::index_http::http_client;
     use crate::catalog::index_package::index_path;
-    use crate::catalog::test_hosts::{accepts_gzip, spawn_capturing_host};
+    use crate::catalog::index_sync::{SyncContext, SyncOutcome};
+    use crate::catalog::test_hosts::{LogCapture, accepts_gzip, spawn_capturing_host};
+    use crate::config::registry_resolve::SourceKind;
+
+    async fn fetch_stats(locator: &str) -> Option<BTreeMap<String, IndexStats>> {
+        fetch_stats_with(&http_client().expect("the client builds"), locator).await
+    }
+
+    /// One refresh of an HTTP index with nothing cached.
+    async fn fetch_http(locator: &str, cache_path: &Path) -> Result<BTreeMap<String, CatalogEntry>, CatalogError> {
+        let ctx = SyncContext {
+            locator,
+            kind: SourceKind::IndexHttp,
+            git_dir: Path::new("unused"),
+            cache_path,
+            fetched_at: "2026-10-22T00:00:00Z",
+        };
+        match crate::catalog::index_sync::refresh(&ctx, None, None, Refresh::No, chrono::Utc::now()).await {
+            SyncOutcome::Commit { entries, .. } => Ok(entries),
+            SyncOutcome::Fail { error, .. } => Err(error),
+            SyncOutcome::Restamp { .. } => unreachable!("a refresh with no catalog never restamps"),
+        }
+    }
 
     fn pkg(json: &str) -> IndexPackage {
         serde_json::from_str(json).expect("valid index package")
@@ -720,14 +778,12 @@ mod tests {
     // ── C-001 / C-002 / C-003: the `stats.json` ratings sidecar ──
 
     #[test]
-    fn the_wire_struct_tolerates_unknown_fields_and_the_cache_struct_does_not() {
-        // C-002, the whole point of keeping two structs. The sidecar schema
-        // grows — `downloads` landed as a sibling stat and recency may
-        // follow — so the WIRE side must keep reading a newer document:
-        // unknown keys at the top level, inside a ref's stat bag, and inside
-        // `rating` and `downloads` themselves. The CACHE side is strict on
-        // purpose: that strictness is what makes an older grim reject a
-        // newer cache and rebuild it (S-015) instead of misreading it.
+    fn the_wire_and_cache_structs_both_tolerate_unknown_fields() {
+        // The sidecar schema grows — `downloads` landed as a sibling stat and
+        // recency may follow — so the wire side must keep reading a newer
+        // document: unknown keys at the top level, inside a ref's stat bag,
+        // and inside `rating` and `downloads` themselves. The cache side
+        // ignores them too, so a cache a newer grim wrote is read, not rebuilt.
         let ratings = parse_stats(
             br#"{
                 "schema_version": 1,
@@ -758,11 +814,9 @@ mod tests {
 
         let cached = serde_json::from_str::<RatingSummary>(
             r#"{"up": 7, "target": "D_kwDO", "url": "https://f/1", "score": 0.9}"#,
-        );
-        assert!(
-            cached.is_err(),
-            "the cache struct must REJECT the same unknown field the wire struct ignored: {cached:?}"
-        );
+        )
+        .expect("the cache struct ignores the same unknown field the wire struct ignored");
+        assert_eq!(cached.up, 7);
     }
 
     // ── F-1: an unobserved sidecar is not an observation of nothing ──
@@ -1134,7 +1188,7 @@ mod tests {
 
     #[test]
     fn parse_packages_accepts_exactly_the_limit_and_refuses_one_more() {
-        assert_eq!(parse_packages(entries_json(3).as_bytes(), 3).unwrap().len(), 3);
+        assert_eq!(parse_packages(entries_json(3).as_bytes(), 3).unwrap().packages.len(), 3);
         assert!(matches!(
             parse_packages(entries_json(4).as_bytes(), 3),
             Err(PackagesError::TooMany { limit: 3 })
@@ -1149,7 +1203,95 @@ mod tests {
                 "{bad}"
             );
         }
-        assert!(parse_packages(b"[]", 3).unwrap().is_empty());
+        assert!(parse_packages(b"[]", 3).unwrap().packages.is_empty());
+    }
+
+    // ── the join says whether anything changed ──
+
+    fn rated_pair() -> BTreeMap<String, CatalogEntry> {
+        projected(&format!(
+            r#"[{GOOD},{{"schema":1,"name":"two","kind":"skill","ref":"h/two"}}]"#
+        ))
+    }
+
+    fn sidecar(up: u32) -> BTreeMap<String, IndexStats> {
+        let doc = format!(
+            r#"{{"schema_version":1,"entries":{{"h/good":{{"rating":{{"up":{up},"target":"t","url":"u"}}}}}}}}"#
+        );
+        parse_stats(doc.as_bytes(), "https://idx.example/stats.json").expect("the sidecar parses")
+    }
+
+    #[test]
+    fn apply_stats_reports_a_change_only_when_a_rating_moves() {
+        let mut entries = rated_pair();
+        let nothing = |_: &str| None;
+
+        assert!(apply_stats(&mut entries, Some(&sidecar(3)), nothing), "a new rating");
+        assert!(
+            !apply_stats(&mut entries, Some(&sidecar(3)), nothing),
+            "the same rating"
+        );
+        assert!(apply_stats(&mut entries, Some(&sidecar(4)), nothing), "a moved rating");
+        assert!(
+            apply_stats(&mut entries, Some(&BTreeMap::new()), nothing),
+            "a retracted rating"
+        );
+        assert!(entries["h/good"].rating.is_none());
+    }
+
+    #[test]
+    fn apply_stats_leaves_an_entry_alone_when_nothing_was_carried_for_it() {
+        let mut entries = rated_pair();
+        apply_stats(&mut entries, Some(&sidecar(3)), |_| None);
+
+        assert!(
+            !apply_stats(&mut entries, None, |_| None),
+            "nothing observed, nothing carried"
+        );
+        assert_eq!(entries["h/good"].rating.as_ref().map(|r| r.up), Some(3));
+        let carried = IndexStats::of(&entries["h/good"]);
+        assert!(
+            apply_stats(&mut rated_pair(), None, |key| (key == "h/good")
+                .then(|| carried.clone())),
+            "a carried rating lands on a fresh entry"
+        );
+    }
+
+    // ── one malformed record never blanks the index ──
+
+    const GOOD: &str = r#"{"schema":1,"name":"good","kind":"skill","ref":"h/good"}"#;
+    const NULL_KEYWORDS: &str =
+        r#"{"schema":1,"name":"bare","kind":"skill","ref":"h/bare","keywords":null,"tags":null,"description":null}"#;
+    const NUMERIC_KIND: &str = r#"{"schema":1,"name":"odd","kind":7,"ref":"h/odd"}"#;
+
+    fn projected(doc: &str) -> BTreeMap<String, CatalogEntry> {
+        let packages = parse_flat(doc.as_bytes(), "https://idx.example", Path::new("index.json"))
+            .expect("a document with a good record parses");
+        project_entries(packages, "2026-10-22T00:00:00Z")
+    }
+
+    #[test]
+    fn a_null_keywords_record_is_kept_with_empty_keywords() {
+        let entries = projected(&format!("[{GOOD},{NULL_KEYWORDS}]"));
+
+        assert_eq!(entries.keys().collect::<Vec<_>>(), ["h/bare", "h/good"]);
+        assert!(entries["h/bare"].keywords.is_empty());
+    }
+
+    #[test]
+    fn a_record_that_does_not_deserialize_is_skipped_and_the_rest_commit() {
+        let logs = LogCapture::start();
+        let doc = format!("[{GOOD},{NUMERIC_KIND},7,{{\"ref\":\"h/no-schema\"}},{NULL_KEYWORDS}]");
+
+        let entries = projected(&doc);
+        let captured = logs.text();
+
+        assert_eq!(entries.keys().collect::<Vec<_>>(), ["h/bare", "h/good"]);
+        assert!(
+            captured.contains("skipped 3 malformed entries"),
+            "one summary names the count: {captured}"
+        );
+        assert!(captured.contains("h/odd"), "the debug line names the ref: {captured}");
     }
 
     #[test]
@@ -1165,49 +1307,6 @@ mod tests {
 
     fn with_userinfo(base: &str) -> String {
         base.replacen("http://", &format!("http://{USERINFO}"), 1)
-    }
-
-    /// Everything logged on this thread at any level until dropped.
-    struct LogCapture {
-        buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
-        _guard: tracing::subscriber::DefaultGuard,
-    }
-
-    struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl std::io::Write for Sink {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0
-                .lock()
-                .expect("log buffer is never poisoned")
-                .extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl LogCapture {
-        fn start() -> Self {
-            crate::log_switch::tracing_capture::arm();
-            let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-            let sink = std::sync::Arc::clone(&buf);
-            let guard = tracing::subscriber::set_default(
-                tracing_subscriber::fmt()
-                    .with_writer(move || Sink(std::sync::Arc::clone(&sink)))
-                    .with_max_level(tracing::Level::TRACE)
-                    .with_ansi(false)
-                    .without_time()
-                    .finish(),
-            );
-            Self { buf, _guard: guard }
-        }
-
-        fn text(&self) -> String {
-            String::from_utf8(self.buf.lock().expect("log buffer is never poisoned").clone())
-                .expect("tracing writes UTF-8")
-        }
     }
 
     #[tokio::test]

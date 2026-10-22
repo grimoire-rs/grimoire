@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Grimoire Authors
 
-//! Scripted loopback HTTP hosts and gzip helpers shared by the index
-//! transport tests.
+//! Scripted loopback HTTP hosts, gzip helpers and a log capture shared by
+//! the index transport and sync tests.
 
 use std::io::Write;
 
@@ -83,4 +83,46 @@ pub(crate) fn gzip(data: &[u8]) -> Vec<u8> {
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     encoder.write_all(data).unwrap();
     encoder.finish().unwrap()
+}
+
+/// Everything logged on this thread at any level until dropped.
+pub(crate) struct LogCapture {
+    buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    _guard: tracing::subscriber::DefaultGuard,
+}
+
+struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl Write for Sink {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .expect("log buffer is never poisoned")
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl LogCapture {
+    pub(crate) fn start() -> Self {
+        crate::log_switch::tracing_capture::arm();
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = std::sync::Arc::clone(&buf);
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(move || Sink(std::sync::Arc::clone(&sink)))
+                .with_max_level(tracing::Level::TRACE)
+                .with_ansi(false)
+                .without_time()
+                .finish(),
+        );
+        Self { buf, _guard: guard }
+    }
+
+    pub(crate) fn text(&self) -> String {
+        String::from_utf8(self.buf.lock().expect("log buffer is never poisoned").clone()).expect("tracing writes UTF-8")
+    }
 }

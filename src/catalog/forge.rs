@@ -716,7 +716,7 @@ fn gitlab_import_readiness(body: &serde_json::Value) -> Readiness {
 }
 
 /// The next backoff interval: double the current, capped at `max`.
-fn next_interval(current: std::time::Duration, max: std::time::Duration) -> std::time::Duration {
+pub(crate) fn next_interval(current: std::time::Duration, max: std::time::Duration) -> std::time::Duration {
     current.saturating_mul(2).min(max)
 }
 

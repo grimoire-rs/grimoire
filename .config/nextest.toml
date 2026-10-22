@@ -12,3 +12,9 @@ retries = 2
 
 [profile.ci.junit]
 path = "junit.xml"
+
+# Root-probe and index-sync tests count the requests a scripted host saw; a
+# retried pass would hide a first-attempt miscount behind a green run.
+[[profile.ci.overrides]]
+filter = 'test(/probe/) | test(/index_sync::tests::/)'
+retries = 0
