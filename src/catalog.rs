@@ -19,6 +19,7 @@ pub mod git_cmd;
 pub mod index_announce;
 pub mod index_git;
 pub mod index_http;
+pub mod index_package;
 pub mod index_source;
 pub mod rating_provider;
 pub mod redact;
