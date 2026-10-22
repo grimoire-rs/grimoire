@@ -851,7 +851,7 @@ impl RenderOutcome {
             Self::Rendered(rendered) => Ok(rendered),
             Self::Empty(_) => Err(ExportError::EmptyPlugin {
                 plugin: plugin.to_string(),
-                client,
+                clients: vec![client],
             }),
         }
     }
@@ -3273,8 +3273,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let err = render_or_refuse(&members, ClientTarget::Codex, Family::AgentPlugins, root.path()).unwrap_err();
         assert!(
-            matches!(export_error(&err), ExportError::EmptyPlugin { plugin, client }
-                if plugin == "team" && *client == ClientTarget::Codex),
+            matches!(export_error(&err), ExportError::EmptyPlugin { plugin, clients }
+                if plugin == "team" && *clients == [ClientTarget::Codex]),
             "{err:?}"
         );
         assert!(!root.path().join("mcp.json").exists(), "no file when nothing admitted");
@@ -4117,8 +4117,8 @@ mod tests {
         };
         let err = export_plugins(&req, &access).await.unwrap_err();
         assert!(
-            matches!(export_error(&err), ExportError::EmptyPlugin { plugin, client }
-                if plugin == "rules" && *client == ClientTarget::Claude),
+            matches!(export_error(&err), ExportError::EmptyPlugin { plugin, clients }
+                if plugin == "rules" && *clients == [ClientTarget::Claude]),
             "{err:?}"
         );
         assert_eq!(counter.calls.load(Ordering::SeqCst), 0, "rules are never fetched");
@@ -4444,8 +4444,8 @@ mod tests {
             .or_refuse("team", ClientTarget::Codex)
             .unwrap_err();
         assert!(
-            matches!(err, ExportError::EmptyPlugin { ref plugin, client }
-                if plugin == "team" && client == ClientTarget::Codex),
+            matches!(err, ExportError::EmptyPlugin { ref plugin, ref clients }
+                if plugin == "team" && *clients == [ClientTarget::Codex]),
             "{err:?}"
         );
     }
@@ -4457,7 +4457,7 @@ mod tests {
         let clients = [claude(), codex()];
         let err = staged_err(stage_in(reg, &[plugin], &clients, (Layout::Flat, None), (out.path(), out.path())).await);
         assert!(
-            matches!(export_error(&err), ExportError::EmptyPlugin { client, .. } if *client == ClientTarget::Codex),
+            matches!(export_error(&err), ExportError::EmptyPlugin { clients, .. } if *clients == [ClientTarget::Codex]),
             "{err:?}"
         );
         assert_eq!(exit_of(err), ExitCode::DataError);
