@@ -40,12 +40,14 @@ pub fn atomic_write(target: &Path, bytes: &[u8]) -> io::Result<()> {
     // Snapshot the existing file's mode (if any), capped at 0o644 so a
     // pre-existing world-writable file is not carried forward.
     let prior_perms = std::fs::metadata(target).ok().map(|m| {
-        let mut perms = m.permissions();
+        let perms = m.permissions();
         #[cfg(unix)]
-        {
+        let perms = {
             use std::os::unix::fs::PermissionsExt;
+            let mut perms = perms;
             perms.set_mode(perms.mode() & 0o644);
-        }
+            perms
+        };
         perms
     });
 
