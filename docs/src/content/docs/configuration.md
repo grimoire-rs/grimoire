@@ -1390,13 +1390,34 @@ for it. A private or corporate CA supplied through the standard OpenSSL
 overrides is trusted *alongside* the public roots — so an internal registry
 behind a corporate CA and a public one both verify from the same process.
 
-## Data layout
+## Data layout {#data-layout}
 
 The resolved-artifact content store, the catalog cache that
 [`grim search`](./commands.md#search) and the [TUI](./commands.md#tui) read, and
 the **global** install state (`$GRIM_HOME/state/global.json`) all live under
 `GRIM_HOME`. Keeping cache and global state under one directory means installs
 can use atomic, same-filesystem operations.
+
+The catalog cache keeps two files for each browse source, an `oci` or an `index`
+entry alike. In the table, `<h16>` is the first 16 hex characters of the
+SHA-256 of the source's locator.
+
+| Path | Holds |
+|---|---|
+| `$GRIM_HOME/catalog/<h16>.json` | The cached listing. Its byte shape is unchanged by the sidecar. |
+| `$GRIM_HOME/catalog/<h16>.sync.json` | The sync sidecar for the same source. Private to grim, versioned and tolerant of fields it does not know. |
+
+The sidecar records how the listing was last synced. That covers digests, the
+generation of the index root, when the listing was last confirmed
+current, and a count of fallbacks to `all.json`. It also holds the failure
+count and retry time behind a [backoff](./package-index.md#consuming-backoff).
+It never holds a URL, a locator or a credential, and its last error is
+redacted.
+
+A sidecar applies only while three things match. Its `version` is the one this
+grim writes, its locator hash names the source, and its digest equals the cache
+file on disk. Otherwise grim ignores all of it, and the next refresh syncs from
+scratch. Deleting a sidecar has the same effect and is safe at any time.
 
 **Project install state** is separate: it lives at
 `<workspace>/.grimoire/state.json`, co-located with `grimoire.toml`. The

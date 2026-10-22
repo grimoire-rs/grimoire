@@ -53,8 +53,8 @@ Two transports, chosen by the locator's shape:
 
 | Locator shape | Transport |
 |---|---|
-| `http://…`, `https://…` | Static files — grim fetches `<base>/all.json` |
-| `git+…`, `ssh://…`, `git@…`, or ending in `.git` | Git — grim shallow-clones and walks `index/**/metadata.json` |
+| `http://…`, `https://…` | Static files. grim reads the [index root][consuming-discovery] and the blob it names, or `<base>/all.json` when there is no usable root |
+| `git+…`, `ssh://…`, `git@…`, or ending in `.git` | Git. grim shallow-clones and walks `index/**/metadata.json` ([how the clone runs][consuming-git]) |
 
 Both transports share the regular catalog machinery: the per-source
 cache under `$GRIM_HOME/catalog/`, the 1-hour TTL, `--refresh`, and
@@ -62,24 +62,40 @@ offline degradation (`--offline` serves the cached listing and never
 touches the network). A refresh that fails serves the cached listing too,
 with a warning naming when it was built. That covers an unreachable host, a
 `5xx`, and an oversized or unparsable body. With no cache, the source reads
-as an empty group.
+as an empty group. The failure also starts a [backoff][consuming-backoff], so
+a dead host is not asked again on every command.
 
 A cached listing that an earlier grim capped at 500 entries is rebuilt on
 the next command instead of served until its TTL expires. If that rebuild
 fails, grim serves the capped rows with the incomplete-listing warning
 (`grim search --refresh` forces the rebuild).
 
-The static transport sends `Accept-Encoding: gzip` on its requests for
-`all.json` and `stats.json`, and on no other request. It decodes a gzip
-body. A host that serves those files compressed saves transfer, and nothing
-is required of the host. Any other `Content-Encoding` on an index response is
-a failed fetch.
+The static transport sends `Accept-Encoding: gzip` on every package-index
+request: the root, `all.json`, `stats.json` and the `c/f` blobs. No other
+client of grim sends it, and nothing is required of the host. A host that
+serves `all.json` or `stats.json` compressed saves transfer, and grim decodes
+the gzip body. A `c/f` blob is already a gzip file, so grim inflates it and
+also accepts a blob that a host or CDN decoded in transit.
+
+grim decodes only `gzip`. Any other `Content-Encoding`, such as `br` or
+`deflate`, is refused, and what follows depends on the response:
+
+| Response | Result |
+|---|---|
+| The root, or a `c/f` blob for the listing | [Counts a fallback][consuming-fallback]: grim reads `all.json` for this refresh |
+| `all.json` | A failed fetch: grim warns, serves the cached listing and starts a [backoff][consuming-backoff] |
+| `stats.json`, or the `c/f` blob for the stats | Skipped: the refresh succeeds and the cached ratings stay |
 
 A decoded body is capped at 128 MiB, and an index at 100,000 entries. Past
 either limit the fetch fails, so a listing is never silently truncated, and
-grim warns naming the source. The connect step waits 10 seconds, a transfer
-that delivers no bytes for 30 seconds is abandoned, and 300 seconds is the
-ceiling for the whole request.
+grim warns naming the source. A `c/f` blob has the same 128 MiB cap, both as
+downloaded and once inflated. The root is capped at 64 KiB. The connect step
+waits 10 seconds, a transfer that delivers no bytes for 30 seconds is
+abandoned, and 300 seconds is the ceiling for any one request.
+
+One refresh of a source, all of its requests together, has a 360 second
+deadline. When it runs out, grim cancels the request in flight and treats the
+refresh as a transport failure.
 
 CLI equivalent of the config above:
 
@@ -87,6 +103,134 @@ CLI equivalent of the config above:
 $ grim config registry add hub --index https://index.grimoire.rs --default
 $ grim config registry add corp --oci registry.corp.example/team
 ```
+
+### Discovery {#consuming-discovery}
+
+On each refresh grim looks for an **index root**, a small JSON file that names
+the catalog by digest. It derives the root's address from the locator, using
+the directory that holds `all.json`:
+
+| Locator | Root grim asks for | `stats.json` |
+|---|---|---|
+| `https://h/idx` or `https://h/idx/` | `https://h/idx/c/root.json` | `https://h/idx/stats.json` |
+| `https://h/idx/all.json` | `https://h/idx/c/root.json` | `https://h/idx/stats.json` |
+| `https://h` or `https://h/` | `https://h/c/root.json` | `https://h/stats.json` |
+| Any other `.json` file name | None | The sibling `stats.json` |
+| A query or a fragment | None | None |
+| A git locator | None | None |
+
+The `all.json` address is derived exactly as before, for every locator. A
+locator that gets no probe is read the way it always was.
+
+The probe is a single request. It waits 10 seconds at most, accepts 64 KiB at
+most and runs inside the refresh deadline. An index with no root costs one
+extra small request per refresh and nothing else. A missing root is not
+remembered, so the next refresh asks again. The table shows how grim reads each
+answer:
+
+| Answer | What grim does |
+|---|---|
+| `200` with a valid root that names a flat blob | Reads the catalog from the blob, only when the blob's digest is not the one it already holds |
+| `200` with a valid root whose `flat` is `null` | Reads `all.json` and drops any root it had adopted. The index chose a flat layout |
+| `404` or `410` | Reads `all.json` and drops any root it had adopted |
+| `200` that is not a valid root (a single-page-app fallback page, not JSON, a different `schema`, over 64 KiB), a `304` (grim sends no condition), or any other `4xx` (a `403` from object storage for a missing key, a `401`, a `451`) | Reads `all.json` for this refresh and counts a fallback |
+| `5xx`, `408`, `429`, a timeout, a connection error or a refused redirect | Fails the refresh when grim has already adopted a root for this source. Otherwise reads `all.json` |
+
+After a root was adopted, an outage is treated as site-wide. grim then skips
+`all.json` and serves its cache. Without an adopted root, falling back means
+a failed probe cannot break a flat index that already works.
+
+The fallback count is kept in the [sync sidecar][data-layout]. A rising count
+shows an index that answers the probe with something that is not a root,
+without a warning on every refresh. A valid root or a `404` resets it.
+[`grim context`][commands-context] reports it.
+
+### The Flat Blob and the Fallback {#consuming-fallback}
+
+When the root is valid and its `flat` reference differs from the catalog grim
+already holds, grim fetches the blob at `<index directory>/c/f/sha256/<digest>.json.gz`.
+It inflates the body, stopping once the output passes the size the root
+declared. It then checks the SHA-256 and the size against the root. Only then
+does it parse the document, exactly as it would parse `all.json`, and adopt
+the root. A root whose blob grim already holds costs the root request alone.
+
+A blob that is missing (`404`) or fails verification does not break the
+refresh. Then grim does not adopt that root, reads `all.json` instead and
+counts a fallback. A transport failure while fetching the blob fails the
+refresh. Then grim serves its cache, and the next refresh asks for the root and
+the blob again.
+
+grim sends no conditional request. On each refresh past the cache lifetime it
+fetches the small root with a plain `GET`, and `--refresh` does the same.
+An `ETag` or `Last-Modified` header the host serves is neither stored nor
+sent back.
+
+A `200` root whose `flat` reference matches the catalog grim holds downloads no
+blob and leaves the cached listing untouched. It restamps the time of the last
+check in the sidecar.
+
+### The Stats Rule {#consuming-stats}
+
+A root names its stats blob, a gzip file that holds the `stats.json` bytes.
+grim fetches that blob once per advertised digest, with no timer. It fetches
+only when the digest differs from the one it applied last and from the one it
+rejected last. A refresh that finds the digest already applied makes no stats
+request, an unchanged root included.
+
+A blob that is missing, fails verification, does not parse or declares a
+`schema_version` above the one grim knows is skipped. The ratings grim has stay
+in place. Nothing asks for that digest again until the root names another one.
+A transport failure is retried on the next refresh. A root whose `stats` is
+`null` advertises nothing, so grim makes no request and keeps what it has.
+
+`--refresh` fetches the blob regardless, and so does `grim rate` for a row
+that reads as unrated. When a new blob changes a rating or a download count,
+grim rewrites the cached listing once. Otherwise the refresh touches only the
+sidecar. The `all.json` path keeps its own rule: grim fetches `stats.json` on
+every refresh, and a `404` means unrated.
+
+### Failures and Backoff {#consuming-backoff}
+
+A refresh that cannot reach its source serves the cached listing and records
+the failure. Later refreshes then wait. grim makes no request to that source
+until the recorded time, so a dead host is asked once per interval.
+
+The interval starts near one minute and doubles with each consecutive failure:
+about 1, 2, 4, 8, 16 and 32 minutes. It carries 20 percent of jitter either
+way and stops growing at one hour. A `Retry-After` header on a `429` or `503`
+can lengthen the wait, never past one hour.
+
+While a source waits, `grim search` makes no request. It serves the cache, and
+that source reports `ok: false` in [`sources`][json-sources], with an `error`
+that contains `refresh deferred until <timestamp>` and the redacted last
+error. A source with no cache reads as an empty group for the same time.
+
+`--refresh` ignores the wait. A success clears it, and a clock set back makes
+it expire. `--offline` never makes a request. Index and OCI sources share the
+rule.
+
+### Redirects and Credentials {#consuming-redirects}
+
+grim follows up to five redirects on an index request and refuses one from
+`https` to `http`. A request carries no cookie and no credential of grim's
+own. A user name and password written in the locator are sent as Basic
+authentication. They reach only the locator's own host, and a cross-origin
+redirect drops them.
+
+They are never written to the sync sidecar or to a log. Every error grim prints
+also strips them, and any query or fragment.
+
+### The Git Clone {#consuming-git}
+
+A git locator is cloned with `git clone --depth 1 --no-local`. Only the
+`file`, `http`, `https`, `ssh` and `git` transports are allowed, so an `ext::`
+URL fails. Git follows HTTP redirects on the first request only. Nothing ever
+prompts for a credential, so a private repository needs an ambient credential
+helper or an ssh agent.
+
+A transfer slower than 1 KB per second for 30 seconds is abandoned. A clone is
+killed after 300 seconds at most, sooner when the refresh deadline is nearer.
+A URL in an error loses its credentials, query and fragment first.
 
 ## Index Specification (v1) {#spec}
 
@@ -145,7 +289,7 @@ scripts/                           # (optional) build/validation tooling
 | `ref` | string | yes | Fully-qualified OCI reference **without a tag**: `registry-host[/namespace]/repository`. MUST contain at least one `/`. MUST NOT carry a tag or digest — versions are resolved live. |
 | `description` | string | yes | One line, shown by `grim search` and the TUI. |
 | `summary` | string | no | Short single-line blurb, matched by `grim search` alongside `description` (distinct from it — usually shorter). |
-| `keywords` | array of string | no | Publisher keywords, matched by `grim search`. Omitted when empty. |
+| `keywords` | array of string | no | Publisher keywords, matched by `grim search`. Omitted when empty; a `null` reads as empty. |
 | `repository` | string | no | Source repository URL. Consumers keep it only with an `https://` prefix. |
 | `deprecated` | string | no | Publisher deprecation notice, mirroring the artifact's `com.grimoire.deprecated` annotation. A non-empty value marks the package deprecated — `grim search` and the TUI hide it unless it is installed or `show_deprecated` is on, and mark it when shown. Absent or whitespace-only ⇒ not deprecated. Written here because the pointer is the only source a browse reads: resolving the annotation would cost one manifest fetch per index entry. |
 | `replaced_by` | string | no | Successor grim reference, mirroring `com.grimoire.replaced-by`. Independent of `deprecated`. |
@@ -162,24 +306,107 @@ the index's own server-side validation.
 Unknown additional fields MUST be tolerated by consumers (additive
 schema evolution without a version bump).
 
+A consumer MUST NOT let one malformed entry blank the index. grim skips an
+`all.json` element whose fields have the wrong type, warns once with the
+count, and lists the rest. A document where every element is malformed
+fails, so the previous catalog stays.
+
 ### Compiled Artifacts {#spec-compiled}
 
 A statically-served index publishes the compiled form:
 
 | Path | Content |
 |---|---|
+| `/c/root.json` | The [index root](#spec-root): mutable, about half a kilobyte, names the catalog by digest. |
+| `/c/f/sha256/<hex>.json.gz` | The [flat and stats blobs](#spec-blobs): immutable gzip files named by the digest of their inflated bytes. |
 | `/all.json` | Every package, one JSON array. Each element is the `metadata.json` object plus a derived `namespace` field (e.g. `"github.com/grimoire-rs"`). |
 | `/index/<namespace…>/<package>/metadata.json` | Path-addressable copy of each pointer. |
 | `/stats.json` | *Optional.* Per-package publisher statistics — [artifact ratings](./ratings.md) and download counts. Absent on an index that publishes none; see [the stats sidecar](#spec-stats). |
 
-`all.json` is the only endpoint grim's HTTP transport requires. The
-path-addressable copies allow cheap single-package lookups by any
-consumer without downloading the full set.
+grim's HTTP transport needs one of two things: `all.json`, or the root and
+the flat blob it names. An index serves `/all.json` and `/stats.json` while
+its `legacy` setting is true, which is the default. With `legacy` set to
+false it serves only `c/`, and a grim that predates the root can no longer
+read it. The path-addressable copies allow cheap single-package lookups by
+any consumer without downloading the full set.
 
 The git transport skips compilation entirely: grim walks the
 `index/**/metadata.json` tree of the clone, so a plain git repository
 with the layout above *is already a fully functional index*. It has no
 `stats.json`, so a git-transport index is always unrated and uncounted.
+
+### The Index Root (`c/root.json`) {#spec-root}
+
+The root is the one mutable file a client needs. It names the catalog by
+content, so a client learns from half a kilobyte whether anything changed. It
+sits at `<index directory>/c/root.json` and is capped at 64 KiB. It is UTF-8
+JSON with keys in byte order, no extra whitespace and a trailing newline.
+
+```json
+{
+  "flat": { "sha256": "3781af9adf3b8eaa8d9de77b5487f07d6afe1aba47fdc2f967dbf9fda177ea4a", "size": 41400000 },
+  "generated_at": "2026-10-21T08:00:00Z",
+  "generation": 1792560000,
+  "planes": {
+    "catalog": null,
+    "enrich": { "sha256": "38e867c580171031fc413211ad92b896803c73dea036de8c594682161588f6c9", "size": 66000 }
+  },
+  "schema": 1,
+  "search": { "sha256": "d833f7c1426e5170b31eb5d84e9b4af67e9917af3df26bda2f2ca66149818c42", "size": 21000000 },
+  "stats": { "sha256": "0e33fde480b700b0bcddb2ee402d19f4c43878283a12bed2769ecef0fa396fb4", "size": 3000000 }
+}
+```
+
+| Field | Type | Constraints |
+|---|---|---|
+| `schema` | integer | Always present. Accepted only when exactly `1`. Any other value reads as not a root, and grim falls back to `all.json`. |
+| `generation` | integer | Always present, from 0 to 2^53 − 1. A build counter, normally the build's UNIX time and never below the previous root's generation plus one. grim reports it and never compares it. |
+| `generated_at` | string | Always present. RFC3339 UTC. |
+| `flat` | blob reference or `null` | Always present. Names the flat blob of the same build, or is `null` under `layout: flat`. A `null` makes grim read `all.json`. |
+| `stats` | blob reference or `null` | Always present. Names the stats blob of the same build, or is `null` when the build has no `stats.json`. A `null` advertises nothing, and grim keeps the ratings it has. |
+| `search` | blob reference or `null` | Always present. The site's search file. grim never reads it. |
+| `planes` | object | Always present. `catalog` is reserved and always `null`. `enrich` is a blob reference or `null` and is private to the index pipeline. grim ignores both. |
+
+A **blob reference** is `{ "sha256": <digest>, "size": <integer> }`. A digest
+matches `^[0-9a-f]{64}$`, lowercase only, and grim checks it before it builds
+any URL. The `size` is greater than 0 and not above the cap for its kind. For
+a `.gz` file it is the inflated size.
+
+The field `expires` is reserved. A producer never emits it, and no client
+enforces it. Clients ignore unknown fields, and a producer adds fields only
+additively under `schema: 1`.
+
+A producer writes the root last, after every file it names exists and
+verifies. A host that cannot deploy atomically uploads the blobs before the
+root.
+
+### The Flat and Stats Blobs (`c/f/`) {#spec-blobs}
+
+A blob lives at `<index directory>/c/f/sha256/<hex>.json.gz`. The **flat
+blob** is the gzip of the exact `all.json` bytes, and an index that sets
+`layout: flat` publishes none. The **stats blob** is the gzip of the exact
+`stats.json` bytes and exists in every layout when the build has a
+`stats.json`. Neither has a raw copy beside it.
+
+The `<hex>` in the name is the SHA-256 of the inflated bytes, and the root's
+`size` is the inflated size. A flat blob therefore has the same digest as
+`/all.json`. Each blob is capped at 128 MiB inflated, and the downloaded body
+has the same cap. A blob is immutable and never revalidated, because its name
+changes with its bytes.
+
+A client reads a blob in four steps:
+
+1. Fetch the file as a plain file. If the response carries `Content-Encoding: gzip`, decode that first.
+2. If the body starts with the gzip magic `1f 8b`, inflate it. Abort once the output passes the size in the root or 128 MiB. Otherwise a host or CDN already decoded it, and the body is used as it is.
+3. Check the SHA-256 and the size against the root.
+4. Parse the result exactly as the legacy file of the same name.
+
+An aborted inflate, a bad stream and a mismatch all make the blob failed.
+
+A producer writes the gzip deterministically: one member, a modification time
+of 0, no name or comment, and a fixed level. Two builds from the same input
+then give identical blobs. The bytes of `all.json` and `stats.json` are not
+re-serialized for the blob.
 
 ### The Stats Sidecar (`stats.json`) {#spec-stats}
 
@@ -284,6 +511,11 @@ grim implements exactly that: a `404`, a transport or TLS failure, a body
 that does not parse, and a `schema_version` above the one it knows all
 degrade to *no ratings* at `debug` level, and only the `all.json` fetch
 decides whether the catalog build succeeded.
+
+On an index with a root, the root's `stats` reference names a gzip blob of the
+same document, and grim applies it once per advertised digest. See [the stats
+rule][consuming-stats]. The document, its path and its schema do not change,
+and a failed stats blob never fails the refresh either.
 
 ### Namespaces and Ownership {#spec-namespaces}
 
@@ -496,8 +728,8 @@ helper or ssh agent) — grim never prompts.
 ### Static Files {#self-hosting-static}
 
 Fastest for consumers, and what the scaffolded CI publishes: compile
-`all.json` plus the path-addressable pointer copies and serve the `dist/`
-folder from [GitHub Pages][gh-pages], [GitLab Pages][gl-pages], or any
+`all.json` plus the path-addressable pointer copies and the index root, and
+serve the `dist/` folder from [GitHub Pages][gh-pages], [GitLab Pages][gl-pages], or any
 webserver:
 
 ```toml
@@ -507,7 +739,9 @@ index = "https://index.your-domain.example"
 ```
 
 `npx @grimoire-rs/indexer build` performs that compilation, and renders
-the browsable catalog alongside it.
+the browsable catalog alongside it. A folder you assemble by hand needs only
+`all.json`. The root and the blobs are optional, and
+[Host Your Own Index][hosting-sync] covers the `sync` block that controls them.
 
 ### Fork an Existing Index {#self-hosting-fork}
 
@@ -547,6 +781,17 @@ index can point at public packages.
 [zot]: https://zotregistry.dev/
 [harbor]: https://goharbor.io/
 [osv]: https://ossf.github.io/osv-schema/
+
+<!-- internal -->
+[consuming-discovery]: #consuming-discovery
+[consuming-backoff]: #consuming-backoff
+[consuming-fallback]: #consuming-fallback
+[consuming-git]: #consuming-git
+[consuming-stats]: #consuming-stats
+[data-layout]: ./configuration.md#data-layout
+[commands-context]: ./commands.md#context
+[json-sources]: ./json-interface.md#search-sources
+[hosting-sync]: ./hosting-an-index.md#sync
 
 <!-- grimoire -->
 [index-site]: https://index.grimoire.rs

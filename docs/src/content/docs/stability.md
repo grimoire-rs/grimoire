@@ -39,7 +39,7 @@ variables row. [Unstable](#unstable) lists both by name.
 | [MCP descriptor][mcp-descriptor] (`mcp/<name>.toml`) | The published descriptor schema, including which fields an older grim rejects rather than drops |
 | Install state (`state.json`) | Schema V2, governed by the same additive-field policy as JSON reports |
 | OCI wire format | [Artifact kinds][artifacts-kinds], the [release/push mechanics][publishing-release], the [`com.grimoire.*` manifest annotations][annotations] written onto pushed artifacts, the [layer media types][artifacts-layers] grim reads (the grimoire and OCI tar and `tar+gzip` types, and the docker rootfs gzip type) and writes (the uncompressed tar type and the `tar+gzip` type), the refusal of any `+zstd` type, and the `com.grimoire.uncompressed.digest` layer annotation |
-| [Package index][package-index] transport | The locators a published index serves — HTTP `<base>/all.json`, the optional `<base>/stats.json` [ratings sidecar][stats-sidecar], and the git-transport `index/<host>/<ns>/<pkg>/metadata.json` tree. The sidecar's *presence* is not promised (most indexes publish none, and a `404` is a normal, non-error answer); its **path and document shape** are, under its own monotonic `schema_version` and the consumer rule stated with it |
+| [Package index][package-index] transport | The locators a published index serves. The client contract is [the root][index-root] at `<base>/c/root.json` and [the gzip blobs][index-blobs] it names at `<base>/c/f/sha256/<hex>.json.gz`, whose digest and size cover the inflated JSON. Both are permanent once an index emits them, and under `schema: 1` they grow only by additive fields. Their *presence* is not promised: a `404` is a normal answer that sends grim to `all.json`. Everything else under `c/` is private to the index pipeline. Also served: HTTP `<base>/all.json` and the optional `<base>/stats.json` [ratings sidecar][stats-sidecar], both while the index's `legacy` setting is true (the default), and the git-transport `index/<host>/<ns>/<pkg>/metadata.json` tree. The sidecar's *presence* is not promised either (most indexes publish none, and a `404` is a normal, non-error answer). Its **path and document shape** are promised, under its own monotonic `schema_version` and the consumer rule stated with it |
 | [MCP server][mcp-server] tool surface | Tool names (`grim_search`, `grim_status`, `grim_fetch`, `grim_describe`, `grim_render`) and their argument names — the payloads are covered by the reports row |
 | Published schema URLs | `https://grimoire.rs/schemas/{grimoire-config,grim-publish,grimoire-lock}.schema.json` keep resolving — [`grim init`][init] writes the first into every generated `grimoire.toml` |
 | Environment variables | The documented [`GRIM_*` set and honored vendor overrides][env-vars], except the [telemetry switches][telemetry-enable], Unstable until 1.0 |
@@ -482,6 +482,12 @@ placement a package index gives each row add a field to the cache. An
 entry with neither still serializes byte-identically to what 0.13 wrote.
 So a user who only browsed OCI registries directly is not exposed.
 
+From this release the loader ignores cache fields it does not know. A cache
+that a later grim extended is read, not refused, so the rebuild above applies
+only to builds that predate this change. Beside each cache file grim keeps a private
+[sync sidecar][data-layout]. It is not a contract: a sidecar version this grim
+does not know is ignored, at the cost of one fresh sync.
+
 A lock's **size** cuts the same way, for one release boundary. Builds up
 to and including 0.12.0 read `grimoire.toml`, `grimoire.lock`, and
 `publish.toml` under a 64 KiB cap; later builds read them under 8 MiB. A
@@ -563,6 +569,9 @@ unaffected — they read straight from disk and never touch a manifest.
 [mcp-server]: ./commands.md#mcp
 [package-index]: ./package-index.md#spec
 [stats-sidecar]: ./package-index.md#spec-stats
+[index-root]: ./package-index.md#spec-root
+[index-blobs]: ./package-index.md#spec-blobs
+[data-layout]: ./configuration.md#data-layout
 [ratings]: ./ratings.md
 [search]: ./commands.md#search
 [json-items]: ./json-interface.md#items-envelope

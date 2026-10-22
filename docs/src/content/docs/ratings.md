@@ -37,7 +37,9 @@ distribution; writing one is a live call to a forge. They meet only at the
 An index that has ratings on publishes `<base>/stats.json` next to its
 [`all.json`][spec-compiled]. grim fetches it in the same pass as `all.json`
 and joins it onto the catalog by artifact ref, so a rating costs one extra
-`GET` per catalog rebuild and nothing per package. The result lands in the
+`GET` per catalog rebuild and nothing per package. An index with a root
+advertises a stats blob instead, and grim fetches it once per advertised
+digest ([the stats rule][stats-rule]). The result lands in the
 ordinary catalog cache under the ordinary one-hour TTL — there is no
 separate rating cache, no rating request at browse time, and no rating
 traffic at all under [`--offline`][offline].
@@ -499,6 +501,7 @@ which is the honest answer.
 [offline]: ./configuration.md#environment-variables
 [self-hosting-git]: ./package-index.md#self-hosting-git
 [spec-compiled]: ./package-index.md#spec-compiled
+[stats-rule]: ./package-index.md#consuming-stats
 
 <!-- grimoire -->
 [vscode]: https://marketplace.visualstudio.com/items?itemName=grimoire-rs.grimoire-vscode

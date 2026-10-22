@@ -440,6 +440,48 @@ different manifest digest, for example after a compression flip, adopts the
 existing version from 0.15.0 instead of refusing. That holds for skill, rule, agent and
 hook releases, while bundle and MCP releases still refuse.
 
+## Index refreshes add a root probe and a sync sidecar {#index-sync}
+
+A refresh of an HTTP [package index](./package-index.md) starts with a
+request for the index root, `c/root.json`. An index that publishes a usable
+root is read through it. Every other index is read through `all.json`, exactly
+as before. Beside the probe, grim keeps a small state file for each source and
+backs off from a source that keeps failing. No flag, exit code or cache byte
+shape changes.
+
+**What you will see.**
+
+- A flat index answers the probe with a `404`, or with a root whose `flat` is
+  `null`. Either way it costs one extra small request per refresh. Every other
+  answer is listed under [Discovery][index-discovery].
+- A file named `<hash>.sync.json` appears beside each
+  `$GRIM_HOME/catalog/<hash>.json`. It is the sync sidecar. It holds digests,
+  the adopted root's generation and a failure count, and it never holds a URL. See
+  [Data layout][data-layout].
+- After a failed refresh, grim makes no request to that source until a
+  recorded time, one hour at most. `grim search` serves the cache and reports
+  `refresh deferred until <timestamp>` in `sources[].error`. Before, every
+  command retried while the cache stayed expired. See
+  [Failures and backoff][index-backoff].
+- On an index with a root, grim fetches the stats blob once per advertised
+  digest and no longer on every refresh. A blob that changes a rating rewrites
+  the cached listing once. See [The stats rule][index-stats-rule].
+- `grim context --format json` gains `registries[].catalog`, always present.
+  It reports the source's last sync from the sidecar alone, with no request,
+  or `null` when no readable sidecar exists. See [`grim context`][commands-context].
+
+**One fresh sync after a mixed-version rewrite.** The sidecar binds to the
+exact bytes of the cache file. A grim without the sidecar that shares
+`$GRIM_HOME` reads the cache as it always did. If it rewrites the cache, the
+binding breaks, and the next refresh by this grim downloads the catalog once.
+
+That grim may also refresh sooner than this one, because it sees only the
+cache's own build time. It ignores the sidecar, so downgrading needs no
+cleanup.
+
+**What to do.** Nothing. `grim search --refresh` forces a sync and ignores a
+backoff. Deleting a `<hash>.sync.json` file costs the same one fresh sync.
+
 ## Smaller notes {#smaller-notes}
 
 - **The `--dry-run` preview digest equals the real push digest from 0.15.0.**
@@ -684,6 +726,13 @@ hook releases, while bundle and MCP releases still refuse.
   reports the server `unchanged` and writes nothing. `grim status` may still
   list that client under `outputs_pending` for a registry artifact, because
   status reads no server descriptor offline.
+- **A plain table escapes hidden characters in a record.** Every plain table
+  prints a hidden code point from a registry or index record as `\u{hex}`.
+  That covers control characters, bidi controls, invisible format characters
+  and tag characters, but not a well-formed flag sequence. A tab or line feed
+  inside a cell prints as one space, because a cell never spans lines. JSON
+  output is unchanged, and plain output carries [no compatibility
+  promise][stability].
 
 <!-- internal -->
 [agent-locations]: ./agents.md#locations
@@ -717,3 +766,8 @@ hook releases, while bundle and MCP releases still refuse.
 [mcp-server-table]: ./mcp-servers.md#server-table
 [clients-warp-mcp]: ./clients.md#gap-warp-mcp
 [junie-gap]: ./clients.md#gap-junie
+[index-discovery]: ./package-index.md#consuming-discovery
+[index-backoff]: ./package-index.md#consuming-backoff
+[index-stats-rule]: ./package-index.md#consuming-stats
+[data-layout]: ./configuration.md#data-layout
+[commands-context]: ./commands.md#context
