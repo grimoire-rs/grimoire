@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "name": "e2e-alpha",
+  "kind": "skill",
+  "ref": "ghcr.io/acme/skills/e2e-alpha",
+  "description": "Alpha skill for the end-to-end index test.",
+  "repository": "https://github.com/acme/e2e-alpha",
+  "keywords": ["review", "lint"],
+  "owner": { "github": "acme", "id": 1 }
+}

@@ -1,9 +1,9 @@
 [metadata]
 lock_version = 3
 declaration_hash_version = 1
-declaration_hash = "sha256:e7476eb7b7bc99c0b5608003b24062f65bf2ac81919c48b3338cf356fee1712e"
-generated_by = "ocx 0.6.4"
-generated_at = "2026-10-06T09:18:29Z"
+declaration_hash = "sha256:047183044bad77eef766fb36a9ea59bb8380923a332790151c9ae825889a74a1"
+generated_by = "ocx 0.6.5"
+generated_at = "2026-10-22T02:06:59Z"
 
 [[tool]]
 name = "node"
@@ -30,3 +30,16 @@ repository = "ocx.sh/project-zot/zot"
 "linux/arm64+libc.glibc" = "sha256:db47881c85243120e19b9a863c6bed82a6b4e593bfb2ef65bf524bac123a42de"
 "windows/amd64" = "sha256:3e765d65aff26b48219bf707d95bc870c75223fddc3f39a639f71cb1abbdff90"
 "windows/arm64" = "sha256:73493ecb40e3dc7cf368686a14bf545f804dd2cd540247248548e69c92738684"
+
+[[tool]]
+name = "grim"
+group = "g0"
+repository = "ocx.sh/grimoire/cli"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:4500862653390bbebd11ed5f6f70ec6d60b8a14a82b8a144156f36ca6f20f55f"
+"darwin/arm64" = "sha256:f19647fabf9bdf82e4151669b6c2b8fbc1f0904c93d20e3f4f6fca968c6adcae"
+"linux/amd64" = "sha256:2ef5983e907167704b14505fc9a4d0bfdc41ad0413d52cbf0621721616111cf7"
+"linux/arm64" = "sha256:1831d9efc4af07333783556f6aa2b246149e0d1bc685fcd929137264103f3814"
+"windows/amd64" = "sha256:ec6f779fd9b9a4c429feb1a841d410b210934a2c013cf7eb3732302ef2a9eb4a"
+"windows/arm64" = "sha256:bcfb88fc6063a6b0808b78a1a943a6c2de633f896747e81e1029651d75c70044"
