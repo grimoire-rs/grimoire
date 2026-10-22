@@ -943,7 +943,7 @@ async fn stage_all(req: &ExportRequest<'_>, access: &Arc<dyn OciAccess>) -> Resu
             .await
             .map_err(|e| local_drift_hint(e, req.manifest, plugin))?;
         if req.layout == Layout::Repo {
-            check_skill_names(&staged)?;
+            check_member_names(&staged)?;
         }
         let mut rendered = Vec::with_capacity(clients.len());
         for &(client, fam) in &clients {
@@ -1067,18 +1067,20 @@ async fn stage_all(req: &ExportRequest<'_>, access: &Arc<dyn OciAccess>) -> Resu
     })
 }
 
-/// C-015 on each staged skill's own archive spelling, laid out as it
-/// renders (`skills/<emitted>/…`). The rendered-tree check cannot see a case
+/// C-015 on each staged member's own archive spelling, every kind alike,
+/// laid out as it renders (`skills/<emitted>/…`). The rendered-tree check cannot see a case
 /// collision on a case-insensitive filesystem (Windows, default macOS): by
 /// then the second entry has overwritten the first in the staged tree.
-fn check_skill_names(staged: &[StagedMember<'_>]) -> Result<(), ExportError> {
+fn check_member_names(staged: &[StagedMember<'_>]) -> Result<(), ExportError> {
     for member in staged {
         let MemberContent::Tree(tree) = &member.content else {
             continue;
         };
-        if member.locked.kind != ArtifactKind::Skill {
-            continue;
-        }
+        let top = match member.locked.kind {
+            ArtifactKind::Skill => "skills",
+            ArtifactKind::Agent => "agents",
+            other => other.kind_str(),
+        };
         let Some(dir) = tree.canonical.file_name() else {
             continue;
         };
@@ -1086,7 +1088,7 @@ fn check_skill_names(staged: &[StagedMember<'_>]) -> Result<(), ExportError> {
             .entries
             .iter()
             .filter_map(|e| e.strip_prefix(dir).ok())
-            .filter_map(|rest| archive::entry_name(&Path::new("skills").join(member.emitted).join(rest)).ok())
+            .filter_map(|rest| archive::entry_name(&Path::new(top).join(member.emitted).join(rest)).ok())
             .collect();
         names.sort_unstable();
         archive::check_portable_names(names.iter().map(String::as_str)).map_err(|e| {
@@ -3223,7 +3225,7 @@ mod tests {
             emitted: "plan",
             content: MemberContent::Tree(tree),
         }];
-        match check_skill_names(&members) {
+        match check_member_names(&members) {
             Err(ExportError::UnsafeEntry { path }) => assert_eq!(path, Path::new("skills/plan/notes.md")),
             other => panic!("expected UnsafeEntry, got {other:?}"),
         }
@@ -3232,7 +3234,32 @@ mod tests {
             emitted: "plan",
             content: MemberContent::Tree(staged_skill("hex-plan")),
         }];
-        assert!(check_skill_names(&clean).is_ok());
+        assert!(check_member_names(&clean).is_ok());
+    }
+
+    /// The archive-name check is not skill-only: an agent member's colliding
+    /// entries are refused too, whatever the filesystem would have done.
+    #[test]
+    fn s013_a_non_skill_member_with_colliding_entries_is_refused() {
+        let agent = registry_member("reviewer", ArtifactKind::Agent, sha('b'));
+        let mut tree = staged_agent("reviewer");
+        tree.entries.push(PathBuf::from("reviewer.md/Notes.md"));
+        tree.entries.push(PathBuf::from("reviewer.md/notes.md"));
+        let members = [StagedMember {
+            locked: &agent,
+            emitted: "reviewer",
+            content: MemberContent::Tree(tree),
+        }];
+        match check_member_names(&members) {
+            Err(ExportError::UnsafeEntry { path }) => assert_eq!(path, Path::new("agents/reviewer/notes.md")),
+            other => panic!("expected UnsafeEntry, got {other:?}"),
+        }
+        let clean = [StagedMember {
+            locked: &agent,
+            emitted: "reviewer",
+            content: MemberContent::Tree(staged_agent("reviewer")),
+        }];
+        assert!(check_member_names(&clean).is_ok());
     }
 
     #[test]
