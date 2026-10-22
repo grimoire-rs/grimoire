@@ -37,7 +37,7 @@ pub(crate) struct IndexPackage {
     /// Publisher keywords, matched by `grim search` alongside the
     /// description. Absent in pre-keywords index files (and in the hosted
     /// `all.json` until packages re-announce) — defaults to `[]`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     keywords: Vec<String>,
     /// Short single-line blurb, matched by `grim search`. Absent in
     /// pre-summary index files — defaults to `None`.
@@ -131,6 +131,17 @@ impl IndexPackage {
             fetched_at: fetched_at.to_string(),
         })
     }
+}
+
+/// A JSON `null` reads as the type's default. The current indexer clamps a
+/// wrong-shaped list to `[]`, but an older or other indexer can publish `null`,
+/// and rejecting it would fail the whole index.
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 /// `<namespace>/<name>` when every segment is a plain identifier, else `None`.

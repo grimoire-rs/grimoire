@@ -37,6 +37,7 @@ use std::sync::Arc;
 use crate::catalog::redact::redact_url;
 use crate::catalog::registry_catalog::{Catalog, DownloadSummary, OciMeta, RatingSummary};
 use crate::catalog::search_match::SearchQuery;
+pub use crate::catalog::sync_state::Refresh;
 use crate::config::ResolvedRegistry;
 use crate::config::registry_resolve::{RowSource, SourceKind, row_source_of};
 use crate::install::client_target::ClientTarget;
@@ -326,9 +327,10 @@ pub async fn load_catalog(
     access: &Arc<dyn OciAccess>,
     badges: &BadgeContext<'_>,
     offline: bool,
-    force: bool,
+    refresh: impl Into<Refresh>,
     scope: CatalogScope,
 ) -> Result<CatalogResults, crate::catalog::catalog_error::CatalogError> {
+    let refresh = refresh.into();
     let parsed = SearchQuery::parse(query);
 
     // Fan out one coordinated refresh per distinct **locator** — not per
@@ -368,9 +370,11 @@ pub async fn load_catalog(
             // not dropped at build time. An index source lists from the
             // package index; a registry source walks `_catalog`.
             let result = if kind.is_index() {
-                Catalog::load_or_refresh_index_coordinated(&path, &registry, kind, "", &git_dir, offline, force).await
+                Catalog::load_or_refresh_index_coordinated(&path, &registry, kind, "", &git_dir, offline, refresh).await
             } else {
-                Catalog::load_or_refresh_coordinated(&path, &registry, "", &access, offline, force).await
+                // A stats-only refresh has nothing to refetch from a registry.
+                Catalog::load_or_refresh_coordinated(&path, &registry, "", &access, offline, refresh == Refresh::Yes)
+                    .await
             };
             match result {
                 Ok(catalog) => {
@@ -379,11 +383,16 @@ pub async fn load_catalog(
                         // both are escaped: a bidi override must not reach
                         // the terminal raw (CWE-150). A locator may carry a
                         // token in its userinfo or query, so both are redacted.
+                        // A cold deferral serves an empty catalog with no
+                        // build time: there is no cache to name.
+                        let served = match catalog.built_at() {
+                            "" => String::new(),
+                            built => format!("; serving the cached catalog built {built}"),
+                        };
                         tracing::warn!(
-                            "catalog for source '{}' unavailable: {}; serving the cached catalog built {}",
+                            "catalog for source '{}' unavailable: {}{served}",
                             redact_url(&registry).escape_debug(),
                             redact_url(error).escape_debug(),
-                            catalog.built_at()
                         );
                     }
                     (idx, Ok(catalog))
@@ -930,6 +939,79 @@ mod tests {
             captured.matches("serving the cached catalog built").count(),
             2,
             "one stale-serve warning per source: {captured}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_deferred_refresh_with_no_cache_does_not_claim_to_serve_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+        let paths = GrimPaths::new(tmp.path().to_path_buf());
+        let state = InstallState::empty(tmp.path());
+        let roots = AnchorRoots::resolve(PathBuf::new(), &ctx);
+        let badges = BadgeContext {
+            lock: None,
+            state: &state,
+            roots: &roots,
+            active: &ClientTarget::ALL,
+            target: None,
+        };
+        let registries = vec![source("registry.one", None, &[], &[])];
+        let access: Arc<dyn OciAccess> = Arc::new(FailingAccess);
+        // The first failure records the wait; the second run is deferred
+        // with nothing cached.
+        load_catalog(
+            &paths,
+            &registries,
+            "",
+            &access,
+            &badges,
+            false,
+            false,
+            CatalogScope::Browse,
+        )
+        .await
+        .expect("a failed refresh never fails the browse");
+
+        crate::log_switch::tracing_capture::arm();
+        let logs = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let sink = Arc::clone(&logs);
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(move || SharedBuf(Arc::clone(&sink)))
+                .with_ansi(false)
+                .without_time()
+                .finish(),
+        );
+        let results = load_catalog(
+            &paths,
+            &registries,
+            "",
+            &access,
+            &badges,
+            false,
+            false,
+            CatalogScope::Browse,
+        )
+        .await
+        .expect("a deferred refresh never fails the browse");
+        drop(guard);
+        let captured = String::from_utf8(logs.lock().expect("log buffer is never poisoned").clone())
+            .expect("tracing writes UTF-8");
+
+        assert!(
+            results.groups[0]
+                .error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("refresh deferred until ")),
+            "{:?}",
+            results.groups[0].error
+        );
+        assert!(captured.contains("refresh deferred until"), "{captured}");
+        assert!(captured.contains("--refresh"), "{captured}");
+        assert!(
+            !captured.contains("serving the cached catalog"),
+            "nothing cached is served: {captured}"
         );
     }
 

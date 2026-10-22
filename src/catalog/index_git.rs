@@ -9,11 +9,12 @@ use std::time::Duration;
 
 use crate::catalog::catalog_error::CatalogError;
 use crate::catalog::git_cmd::{GitOpts, GitProfile, git_cmd};
+use crate::catalog::index_http::Deadline;
 use crate::catalog::index_package::IndexPackage;
 use crate::catalog::redact::redact_url;
 
 /// Upper bound on one index clone; a stalled transfer is killed rather than
-/// holding the catalog lock.
+/// holding the catalog lock. The refresh deadline can cut it shorter.
 const CLONE_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Shallow-clone the index repository and walk `index/**/metadata.json`.
@@ -26,6 +27,7 @@ pub(crate) async fn fetch_git(
     locator: &str,
     git_dir: &Path,
     cache_path: &Path,
+    deadline: Deadline,
 ) -> Result<Vec<IndexPackage>, CatalogError> {
     let url = locator.strip_prefix("git+").unwrap_or(locator).to_string();
     let tmp = git_dir.with_extension("tmp");
@@ -50,7 +52,7 @@ pub(crate) async fn fetch_git(
     let args = clone_args(&source, target);
     // Private indexes need ambient git credentials (helper / ssh agent).
     let opts = GitOpts {
-        timeout: Some(CLONE_TIMEOUT),
+        timeout: Some(deadline.cap(CLONE_TIMEOUT)),
         profile: GitProfile::IndexClone,
     };
     let cwd = tmp.parent().filter(|p| !p.as_os_str().is_empty());
@@ -196,6 +198,7 @@ fn read_capped(path: &Path) -> std::io::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::test_hosts::spawn_scripted_host;
 
     /// Display and every `source()` of an error, as an operator would see it.
     fn full_text(err: &dyn std::error::Error) -> String {
@@ -247,14 +250,49 @@ mod tests {
         let git_dir = dir.path().join("index-git").join("0123456789abcdef");
         let cache = dir.path().join("cache.json");
 
-        let err = fetch_git("git+http://user:s3cret@127.0.0.1:1/index.git", &git_dir, &cache)
-            .await
-            .expect_err("nothing listens on port 1");
+        let err = fetch_git(
+            "git+http://user:s3cret@127.0.0.1:1/index.git",
+            &git_dir,
+            &cache,
+            Deadline::new(Duration::from_secs(60)),
+        )
+        .await
+        .expect_err("nothing listens on port 1");
 
         let text = full_text(&err);
         assert!(text.contains("git clone of index"), "{text}");
         assert!(!text.contains("s3cret"), "{text}");
         assert!(!text.contains("user:"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn the_refresh_deadline_cuts_a_stalled_clone_short_of_the_clone_timeout() {
+        // Accepts and then says nothing, so git waits on a response forever.
+        let base = spawn_scripted_host(|socket| async move {
+            let _held = socket;
+            std::future::pending::<()>().await;
+        })
+        .await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let git_dir = dir.path().join("index-git").join("0123456789abcdef");
+        let cache = dir.path().join("cache.json");
+        let started = std::time::Instant::now();
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(30),
+            fetch_git(
+                &format!("git+{base}/index.git"),
+                &git_dir,
+                &cache,
+                Deadline::new(Duration::from_millis(300)),
+            ),
+        )
+        .await
+        .expect("the clone ended at the refresh deadline, not the clone timeout");
+
+        let text = full_text(&outcome.expect_err("a stalled server never completes a clone"));
+        assert!(text.contains("did not finish"), "{text}");
+        assert!(started.elapsed() < Duration::from_secs(20), "{:?}", started.elapsed());
     }
 
     #[test]

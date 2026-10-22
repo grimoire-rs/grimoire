@@ -31,7 +31,10 @@ use crate::oci::{Digest, Identifier, PinnedIdentifier};
 use crate::store::atomic_write::atomic_write;
 
 use super::catalog_error::CatalogError;
+use super::index_sync::{self, SyncContext, SyncOutcome};
+use super::redact::redact_url;
 use super::search_match::SearchQuery;
+use super::sync_state::{self, Gate, Refresh, SyncState, sha256_hex};
 
 /// Catalog freshness window: a catalog older than this is stale and is
 /// rebuilt on the next online `search`/`tui` (offline still serves it).
@@ -101,9 +104,8 @@ pub struct OciMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compatibility: Option<String>,
     /// Manifest digest this row was read from: the refresh reuse key, never
-    /// displayed. Lives here, not on [`CatalogEntry`], because this is the one
-    /// cache struct an older grim parses tolerantly (no `deny_unknown_fields`);
-    /// a new `CatalogEntry` field would make it discard the whole cache.
+    /// displayed. Lives with the other curated manifest keys, which every
+    /// grim reads tolerantly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub digest: Option<Digest>,
 }
@@ -140,15 +142,11 @@ impl OciMeta {
 /// One artifact's community rating, joined from an index's `stats.json`
 /// sidecar at catalog-build time.
 ///
-/// This is the **cache** representation: `deny_unknown_fields`, following
-/// [`CatalogEntry`]'s discipline, so a cache written by a newer grim is
-/// rejected and rebuilt rather than misread. The **wire** representation in
-/// `stats.json` is a separate lenient struct in
-/// [`super::index_source`] — that is where forward compatibility with a
-/// growing sidecar schema lives. Do not collapse the two; that is the serde
-/// `deny_unknown_fields` forward-compat trap (serde-rs/serde#2634).
+/// This is the **cache** representation; it ignores unknown fields, so a cache
+/// a newer grim wrote is read, not rebuilt. The **wire** representation in
+/// `stats.json` is a separate struct in [`super::index_source`]; the two stay
+/// apart so a growing sidecar schema never reshapes the cache.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RatingSummary {
     /// Upvote count as of the sidecar's `generated_at`.
     pub up: u32,
@@ -162,9 +160,7 @@ pub struct RatingSummary {
     /// index build; `None` for a sidecar that declared no rating provider,
     /// and for every cache written before this field existed.
     ///
-    /// Additive: `serde(default)` keeps an older cache readable, and a
-    /// newer cache meeting an older grim's `deny_unknown_fields` is
-    /// rejected and rebuilt — the S-015 path, not an error.
+    /// Additive: `serde(default)` keeps an older cache readable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     /// The sidecar's `providers.rating_host` — the forge host `grim rate`
@@ -183,16 +179,14 @@ pub struct RatingSummary {
 /// One artifact's pull count, joined from the same `stats.json` sidecar as
 /// [`RatingSummary`] and independent of it.
 ///
-/// Cache representation, `deny_unknown_fields`, for exactly the reasons
-/// [`RatingSummary`] gives; the lenient wire struct lives in
-/// [`super::index_source`].
+/// Cache representation, tolerant of unknown fields for the reasons
+/// [`RatingSummary`] gives; the wire struct lives in [`super::index_source`].
 ///
 /// **An object, not a bare count.** The sidecar publishes a freshness stamp
 /// beside the number and a per-release breakdown below it, and a scalar could
 /// never grow either — the same reason the JSON reports use an `items`
 /// envelope instead of a bare array (`subsystem-cli-api.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct DownloadSummary {
     /// Every pull the producer could attribute to the artifact.
     ///
@@ -225,7 +219,6 @@ pub struct DownloadSummary {
 
 /// One release's share of an artifact's pull count.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct DownloadVersion {
     /// The release tag, exactly as the sidecar spelled it. A floating tag
     /// (`latest`, `1.35`) never appears: it aliases a release already counted
@@ -237,7 +230,6 @@ pub struct DownloadVersion {
 
 /// One repository's catalog record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CatalogEntry {
     /// The registry host the repository lives on.
     pub registry: String,
@@ -247,9 +239,7 @@ pub struct CatalogEntry {
     /// (e.g. `github.com/grimoire-rs/grim-usage`). The TUI tree groups an
     /// index-backed row by it instead of the OCI path. `None` for an OCI
     /// `_catalog` source, and for a pointer whose segments failed the index
-    /// source's allowlist. (Like [`Self::replaced_by`], adding a field to the
-    /// `deny_unknown_fields` on-disk shape means an older grim rejects a cache
-    /// a newer grim wrote and rebuilds it.)
+    /// source's allowlist.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index_path: Option<String>,
     /// The artifact kind (`skill`/`rule`/`agent`/`bundle`/`mcp`) as read
@@ -290,9 +280,7 @@ pub struct CatalogEntry {
     pub deprecated: Option<String>,
     /// `com.grimoire.replaced-by`, the successor reference when the
     /// representative tag's manifest names a replacement. `None` otherwise.
-    /// Surfaced in `grim search` and `grim describe`. (Adding this field to
-    /// the `deny_unknown_fields` on-disk shape means an older grim rejects a
-    /// cache a newer grim wrote and rebuilds it — an accepted downgrade.)
+    /// Surfaced in `grim search` and `grim describe`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaced_by: Option<String>,
     /// Curated extra `org.opencontainers.image.*` annotations (licenses,
@@ -312,19 +300,14 @@ pub struct CatalogEntry {
     /// Community rating, joined from the index's `stats.json` sidecar at
     /// catalog-build time. `None` when the index publishes no sidecar, the
     /// artifact has no entry in it, or the source is not an HTTP index —
-    /// absence means *unrated*, never an error. (Like [`Self::replaced_by`],
-    /// adding a field to the `deny_unknown_fields` on-disk shape means an
-    /// older grim rejects a cache a newer grim wrote and rebuilds it.)
+    /// absence means *unrated*, never an error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rating: Option<RatingSummary>,
     /// Pull count, joined from the same `stats.json` sidecar as
     /// [`Self::rating`] and independent of it. `None` means **unknown**,
     /// never zero: only a registry that publishes a per-artifact download
     /// counter can produce one at all, and neither GHCR nor the GitLab
-    /// registry does — so on most indexes this is absent on every row. (Like
-    /// [`Self::replaced_by`], adding a field to the `deny_unknown_fields`
-    /// on-disk shape means an older grim rejects a cache a newer grim wrote
-    /// and rebuilds it.)
+    /// registry does — so on most indexes this is absent on every row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub downloads: Option<DownloadSummary>,
     /// RFC3339 UTC timestamp this entry was fetched.
@@ -354,7 +337,6 @@ impl CatalogEntry {
 
 /// Versioned envelope persisted per registry at `$GRIM_HOME/catalog/<hash>.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct CatalogFile {
     version: CatalogVersion,
     /// The registry the catalog was built for.
@@ -374,6 +356,20 @@ struct CatalogFile {
     built_at: String,
     /// Entries keyed by repository path for stable, deduplicated output.
     entries: BTreeMap<String, CatalogEntry>,
+}
+
+/// [`CatalogFile`] by reference, so a save serializes the entries in place
+/// instead of cloning the whole map. Field names and order must match
+/// `CatalogFile`'s: the cache byte shape is frozen, and a field missing here
+/// is silently dropped from every cache this grim writes.
+#[derive(Serialize)]
+struct CatalogFileRef<'a> {
+    version: CatalogVersion,
+    registry: &'a str,
+    scope: &'a str,
+    truncated: bool,
+    built_at: &'a str,
+    entries: &'a BTreeMap<String, CatalogEntry>,
 }
 
 /// An in-memory catalog for one registry.
@@ -399,12 +395,14 @@ pub struct Catalog {
 /// `Serve` is not always fresh: offline, or while a peer holds the refresh
 /// lock, it is whatever is cached. `Rebuild` carries the cache it decided
 /// against too: the index build seeds ratings from it, and a failed rebuild
-/// serves it stale (`None` on a cold cache).
+/// serves it stale (`None` on a cold cache). `sync` is the sidecar bound to
+/// that cache, read under the lock; the uncoordinated fallback reads none.
 enum PreFlight {
     Serve(Catalog),
     Rebuild {
         guard: Option<AdvisoryFileLock>,
         previous: Option<Catalog>,
+        sync: Option<Box<SyncState>>,
     },
 }
 
@@ -488,6 +486,15 @@ impl Catalog {
         is_fresh_at(&self.built_at, now)
     }
 
+    /// [`Self::is_fresh`], or confirmed current inside the window by the
+    /// sidecar beside `path`. A quiet refresh restamps the sidecar and leaves
+    /// this file alone, so its own build time alone reads stale on every run
+    /// after the first hour.
+    fn is_fresh_or_confirmed(&self, path: &Path, now: chrono::DateTime<chrono::Utc>) -> bool {
+        self.is_fresh(now)
+            || sync_state::confirmed_at(path, &self.registry, &self.built_at).is_some_and(|at| is_fresh_at(&at, now))
+    }
+
     /// Load the catalog from `path`, if present and for `registry`.
     ///
     /// A missing file or a file built for a different registry yields
@@ -499,12 +506,34 @@ impl Catalog {
     ///
     /// [`CatalogError`] for a read failure or a parse / version rejection.
     pub fn load(path: &Path, registry: &str) -> Result<Option<Self>, CatalogError> {
-        let bytes = match std::fs::read(path) {
-            Ok(b) => b,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(CatalogError::io(path, e)),
+        Ok(Self::load_with_bytes(path, registry)?.map(|(catalog, _)| catalog))
+    }
+
+    /// [`Self::load`], also returning the file's bytes so a sync sidecar can
+    /// bind to them.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::load`].
+    pub fn load_with_bytes(path: &Path, registry: &str) -> Result<Option<(Self, Vec<u8>)>, CatalogError> {
+        let Some(bytes) = Self::read_file(path)? else {
+            return Ok(None);
         };
-        let file: CatalogFile = serde_json::from_slice(&bytes).map_err(|e| CatalogError::parse(path, e))?;
+        Ok(Self::parse(path, registry, &bytes)?.map(|catalog| (catalog, bytes)))
+    }
+
+    /// The cache file's bytes; `None` when there is no file.
+    fn read_file(path: &Path) -> Result<Option<Vec<u8>>, CatalogError> {
+        match std::fs::read(path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(CatalogError::io(path, e)),
+        }
+    }
+
+    /// The catalog `bytes` hold; `None` for another registry's cache.
+    fn parse(path: &Path, registry: &str, bytes: &[u8]) -> Result<Option<Self>, CatalogError> {
+        let file: CatalogFile = serde_json::from_slice(bytes).map_err(|e| CatalogError::parse(path, e))?;
         if file.registry != registry {
             return Ok(None);
         }
@@ -518,24 +547,83 @@ impl Catalog {
         }))
     }
 
-    /// [`Self::load`], but a cache this binary cannot read counts as a
-    /// *cold* cache whenever a rebuild can follow.
+    fn file_ref(&self) -> CatalogFileRef<'_> {
+        CatalogFileRef {
+            version: CatalogVersion::V1,
+            registry: &self.registry,
+            scope: &self.scope,
+            truncated: self.truncated,
+            built_at: &self.built_at,
+            entries: &self.entries,
+        }
+    }
+
+    /// [`Self::save`], returning the SHA-256 (lowercase hex) of the bytes
+    /// written.
     ///
-    /// The rejected shape is the one a **newer** grim wrote: every field
-    /// added to the `deny_unknown_fields` on-disk struct makes an older
-    /// binary refuse the whole file. Refusing must cost one network refresh
-    /// (S-015), not a permanently empty browse — and it would be permanent,
-    /// because the read precedes the rebuild decision, so even `--refresh`
-    /// would keep hitting it. The rejection still surfaces, as a warning
-    /// naming the file. Offline there is nothing to rebuild from, so there
-    /// the error stands.
+    /// # Errors
+    ///
+    /// As [`Self::save`].
+    pub fn save_with_digest(&self, path: &Path) -> Result<String, CatalogError> {
+        let bytes = serde_json::to_vec_pretty(&self.file_ref()).map_err(|e| CatalogError::parse(path, e))?;
+        atomic_write(path, &bytes).map_err(|e| CatalogError::io(path, e))?;
+        Ok(sha256_hex(&bytes))
+    }
+
+    /// Writes the catalog, then `state` bound to those bytes. A sidecar that
+    /// cannot be written is logged and skipped: the catalog is already
+    /// replaced, so the old sidecar no longer binds and the next refresh
+    /// starts clean.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::save`].
+    pub fn save_bound(&self, path: &Path, mut state: SyncState) -> Result<(), CatalogError> {
+        // The catalog lands first: a crash before the sidecar write leaves a
+        // digest mismatch, which unbinds the old sidecar instead of letting
+        // it describe bytes that are gone.
+        let digest = self.save_with_digest(path)?;
+        state.catalog_sha256 = Some(digest);
+        state.catalog_built_at = Some(self.built_at.clone());
+        state.entries = Some(self.entries.len() as u64);
+        if let Err(e) = sync_state::store(path, &state) {
+            tracing::debug!("sync sidecar beside '{}' not written: {e}", path.display());
+        }
+        Ok(())
+    }
+
+    /// [`Self::load_with_bytes`], but a cache this binary cannot read counts
+    /// as a *cold* cache whenever a rebuild can follow.
+    ///
+    /// An unreadable cache must cost one network refresh, not a permanently
+    /// empty browse: the read precedes the rebuild decision, so even
+    /// `--refresh` would keep hitting it. The rejection still surfaces, as a
+    /// warning naming the file. Offline there is nothing to rebuild from, so
+    /// there the error stands.
     ///
     /// # Errors
     ///
     /// [`CatalogError`] for any load failure while offline. Online there is
     /// none: an unreadable cache is a cold cache.
     fn load_or_cold(path: &Path, registry: &str, offline: bool) -> Result<Option<Self>, CatalogError> {
-        match Self::load(path, registry) {
+        Self::cold_if_unreadable(path, offline, Self::load(path, registry))
+    }
+
+    /// [`Self::load_or_cold`], also returning the bytes a sidecar binds to.
+    fn load_cold_with_bytes(
+        path: &Path,
+        registry: &str,
+        offline: bool,
+    ) -> Result<Option<(Self, Vec<u8>)>, CatalogError> {
+        Self::cold_if_unreadable(path, offline, Self::load_with_bytes(path, registry))
+    }
+
+    fn cold_if_unreadable<T>(
+        path: &Path,
+        offline: bool,
+        loaded: Result<Option<T>, CatalogError>,
+    ) -> Result<Option<T>, CatalogError> {
+        match loaded {
             Err(e) if !offline => {
                 tracing::warn!("rebuilding unreadable catalog cache '{}': {e}", path.display());
                 Ok(None)
@@ -550,16 +638,7 @@ impl Catalog {
     ///
     /// Serialization or atomic-write I/O failure.
     pub fn save(&self, path: &Path) -> Result<(), CatalogError> {
-        let file = CatalogFile {
-            version: CatalogVersion::V1,
-            registry: self.registry.clone(),
-            scope: self.scope.clone(),
-            truncated: self.truncated,
-            built_at: self.built_at.clone(),
-            entries: self.entries.clone(),
-        };
-        let bytes = serde_json::to_vec_pretty(&file).map_err(|e| CatalogError::parse(path, e))?;
-        atomic_write(path, &bytes).map_err(|e| CatalogError::io(path, e))
+        self.save_with_digest(path).map(|_| ())
     }
 
     /// Load a fresh, query-scoped cached catalog, or (re)build it.
@@ -651,10 +730,11 @@ impl Catalog {
         force: bool,
     ) -> Result<Self, CatalogError> {
         let scope = query.to_lowercase();
-        let (guard, previous) = match Self::coordinate(path, registry, &scope, offline, force).await? {
-            PreFlight::Serve(catalog) => return Ok(catalog),
-            PreFlight::Rebuild { guard, previous } => (guard, previous),
-        };
+        let (guard, previous, sync) =
+            match Self::coordinate(path, registry, &scope, offline, Refresh::from(force)).await? {
+                PreFlight::Serve(catalog) => return Ok(catalog),
+                PreFlight::Rebuild { guard, previous, sync } => (guard, previous, sync),
+            };
 
         // Phase 2 — the network rebuild, the only genuinely async work, runs on
         // the async executor. The advisory lock (an OS file handle, not a
@@ -662,12 +742,13 @@ impl Catalog {
         let rebuilt = match Self::build(registry, &scope, access, previous.as_ref(), force, path).await {
             Ok(rebuilt) => rebuilt,
             Err(build_err) => {
-                Self::dispose_guard(path, guard).await;
-                return Self::stale_or_err(previous, CatalogError::access(path, build_err));
+                let err = CatalogError::access(path, build_err);
+                Self::record_failure(path, registry, guard, sync, &err).await;
+                return Self::stale_or_err(previous, err);
             }
         };
 
-        Self::commit(path, guard, rebuilt).await
+        Self::commit(path, guard, rebuilt, sync.map(|_| SyncState::unbound(registry))).await
     }
 
     /// Like [`Self::load_or_refresh_coordinated`], but for an index-backed
@@ -688,24 +769,43 @@ impl Catalog {
         query: &str,
         git_dir: &Path,
         offline: bool,
-        force: bool,
+        refresh: impl Into<Refresh>,
     ) -> Result<Self, CatalogError> {
+        let refresh = refresh.into();
         let scope = query.to_lowercase();
-        let (guard, previous) = match Self::coordinate(path, locator, &scope, offline, force).await? {
+        let (guard, previous, sync) = match Self::coordinate(path, locator, &scope, offline, refresh).await? {
             PreFlight::Serve(catalog) => return Ok(catalog),
-            PreFlight::Rebuild { guard, previous } => (guard, previous),
+            PreFlight::Rebuild { guard, previous, sync } => (guard, previous, sync),
         };
 
-        let seed = previous.as_ref().map(|c| &c.entries);
-        let rebuilt = match Self::build_from_index(locator, kind, &scope, git_dir, path, seed).await {
-            Ok(rebuilt) => rebuilt,
-            Err(build_err) => {
-                Self::dispose_guard(path, guard).await;
-                return Self::stale_or_err(previous, build_err);
-            }
+        let now = chrono::Utc::now();
+        let fetched_at = sync_state::rfc3339(now);
+        let ctx = SyncContext {
+            locator,
+            kind,
+            git_dir,
+            cache_path: path,
+            fetched_at: &fetched_at,
         };
-
-        Self::commit(path, guard, rebuilt).await
+        // Only a cache built over the same scope and never capped lists every
+        // entry the engine would project, so it is the only one it may reuse.
+        let mut previous = previous;
+        let reusable = previous
+            .as_mut()
+            .filter(|cached| cached.scope == scope && !cached.truncated)
+            .map(|cached| &mut cached.entries);
+        let held = reusable.as_ref().is_some_and(|entries| !entries.is_empty());
+        let outcome = index_sync::refresh(&ctx, sync.map(|state| *state), reusable, refresh, now).await;
+        // The engine moves the entries out when it must parse a changed
+        // document, so a failure after that serves the cache from its file;
+        // serving the emptied copy would blank the browse.
+        if held
+            && matches!(outcome, SyncOutcome::Fail { .. })
+            && previous.as_ref().is_some_and(|c| c.entries.is_empty())
+        {
+            previous = Self::reread(path, locator).await;
+        }
+        Self::persist_outcome(path, locator, &scope, guard, previous, outcome, now).await
     }
 
     /// Phase 1 — blocking pre-flight on the blocking pool: read the cache,
@@ -723,24 +823,32 @@ impl Catalog {
         key: &str,
         scope: &str,
         offline: bool,
-        force: bool,
+        refresh: Refresh,
     ) -> Result<PreFlight, CatalogError> {
         let path = path.to_path_buf();
         let key = key.to_string();
         let scope = scope.to_string();
+        // Any refresh bypasses the TTL, so the engine runs; only a full one
+        // also bypasses a failing source's backoff.
+        let bypass_ttl = refresh != Refresh::No;
+        let force = refresh == Refresh::Yes;
         run_blocking(path.clone(), move || {
-            let mut cached = Catalog::load_or_cold(&path, &key, offline)?;
-            let reusable = |c: &Catalog| !(force || c.truncated) && c.scope == scope && c.is_fresh(chrono::Utc::now());
+            let mut loaded = Catalog::load_cold_with_bytes(&path, &key, offline)?;
+            let reusable = |c: &Catalog| {
+                !(bypass_ttl || c.truncated) && c.scope == scope && c.is_fresh_or_confirmed(&path, chrono::Utc::now())
+            };
 
             // Offline: serve whatever is cached (any scope), never lock or
             // reach the network. A cold cache is empty.
             if offline {
-                return Ok(PreFlight::Serve(cached.unwrap_or_else(|| Catalog::empty(&key))));
+                return Ok(PreFlight::Serve(
+                    loaded.map_or_else(|| Catalog::empty(&key), |(catalog, _)| catalog),
+                ));
             }
 
             // Fast path: a fresh, same-scope cache serves with no lock
             // taken, so the common case never contends.
-            if let Some(c) = cached.take_if(|c| reusable(c)) {
+            if let Some(c) = loaded.take_if(|(c, _)| reusable(c)).map(|(catalog, _)| catalog) {
                 return Ok(PreFlight::Serve(c));
             }
 
@@ -751,22 +859,35 @@ impl Catalog {
             }
 
             match AdvisoryFileLock::try_acquire(&path) {
-                Ok(guard) => Catalog::recheck(&path, &key, Some(guard), cached, reusable),
+                // The bytes shrink to a digest here: `recheck` reads the file
+                // again, and holding both would double the peak.
+                Ok(guard) => Catalog::recheck(
+                    &path,
+                    &key,
+                    Some(guard),
+                    loaded.map(|(catalog, bytes)| (catalog, sha256_hex(&bytes))),
+                    force,
+                    reusable,
+                ),
                 // A peer owns the refresh — serve stale and move on rather than
                 // walking the registry redundantly. With no cache the peer is
                 // building a cold one: the empty answer is a lower bound, not
                 // "0 total".
                 Err(e) if matches!(e.kind, crate::lock::lock_error::LockErrorKind::Locked) => {
-                    Ok(PreFlight::Serve(cached.unwrap_or_else(|| Catalog {
-                        truncated: true,
-                        ..Catalog::empty(&key)
-                    })))
+                    Ok(PreFlight::Serve(loaded.map_or_else(
+                        || Catalog {
+                            truncated: true,
+                            ..Catalog::empty(&key)
+                        },
+                        |(catalog, _)| catalog,
+                    )))
                 }
                 // A real lock I/O fault: fall back to an uncoordinated
                 // rebuild (the atomic write still prevents corruption).
                 Err(_) => Ok(PreFlight::Rebuild {
                     guard: None,
-                    previous: cached,
+                    previous: loaded.map(|(catalog, _)| catalog),
+                    sync: None,
                 }),
             }
         })
@@ -776,21 +897,67 @@ impl Catalog {
     /// With the lock held: serve a peer's fresh build, else rebuild over the
     /// file as it is now. The pre-lock read can be older than the file, and a
     /// rebuild taking it as `previous` could replace a peer's complete cache
-    /// with a checkpoint built from stale rows.
+    /// with a checkpoint built from stale rows. A peer's recorded failure
+    /// still inside its wait defers an unforced run, so two processes that
+    /// failed together do not each send a request.
+    ///
+    /// `cached` is the pre-lock read with the SHA-256 of the bytes it was
+    /// parsed from. A file that still hashes to it is `cached` itself, not
+    /// parsed again; any other file is parsed and `cached` stays the fallback.
     fn recheck(
         path: &Path,
         key: &str,
         guard: Option<AdvisoryFileLock>,
-        cached: Option<Self>,
+        cached: Option<(Self, String)>,
+        force: bool,
         reusable: impl Fn(&Self) -> bool,
     ) -> Result<PreFlight, CatalogError> {
-        match Self::load_or_cold(path, key, false)? {
-            Some(current) if reusable(&current) => Ok(PreFlight::Serve(current)),
-            current => Ok(PreFlight::Rebuild {
-                guard,
-                previous: current.or(cached),
-            }),
+        let bytes = Self::cold_if_unreadable(path, false, Self::read_file(path))?;
+        let digest = bytes.as_deref().map(sha256_hex);
+        let (mut current, cached) = match cached {
+            // A second parse beside `cached` would hold every entry twice.
+            Some((catalog, seen)) if digest.as_ref() == Some(&seen) => (Some(catalog), None),
+            cached => {
+                let parsed = match &bytes {
+                    Some(bytes) => Self::cold_if_unreadable(path, false, Self::parse(path, key, bytes))?,
+                    None => None,
+                };
+                (parsed, cached.map(|(catalog, _)| catalog))
+            }
+        };
+        // A file that is no catalog for `key` binds to nothing.
+        let digest = digest.filter(|_| current.is_some());
+        if let Some(fresh) = current.take_if(|c| reusable(c)) {
+            return Ok(PreFlight::Serve(fresh));
         }
+        let sync = sync_state::load_bound_to(path, key, digest.as_deref());
+        let previous = current.or(cached);
+        if !force
+            && let Some(state) = &sync
+            && let Gate::Deferred(until) = state.gate(chrono::Utc::now())
+        {
+            return Ok(PreFlight::Serve(Self::deferred(
+                previous,
+                key,
+                state.deferral_text(until),
+            )));
+        }
+        Ok(PreFlight::Rebuild {
+            guard,
+            previous,
+            sync: sync.map(Box::new),
+        })
+    }
+
+    /// What a deferred refresh serves: the cache, or on a cold one an empty
+    /// catalog with no build time, marked with `text` like a failed refresh.
+    fn deferred(cache: Option<Self>, key: &str, text: String) -> Self {
+        cache
+            .unwrap_or_else(|| Self {
+                built_at: String::new(),
+                ..Self::empty(key)
+            })
+            .with_refresh_error(text)
     }
 
     /// A failed rebuild serves the cache pre-flight already read, marked with
@@ -801,89 +968,200 @@ impl Catalog {
         match previous {
             Some(stale) => {
                 // `refresh_error` keeps the kind only; the cause chain is
-                // logged here or it is gone.
+                // logged here or it is gone. Both quote the locator, which may
+                // carry credentials.
                 let chain = std::iter::successors(Some(&err as &dyn std::error::Error), |e| e.source())
                     .map(|e| e.to_string())
                     .collect::<Vec<_>>()
                     .join(": ");
-                tracing::debug!("catalog refresh failed, serving the cached catalog: {chain}");
-                Ok(stale.with_refresh_error(err.kind.to_string()))
+                tracing::debug!(
+                    "catalog refresh failed, serving the cached catalog: {}",
+                    redact_url(&chain)
+                );
+                Ok(stale.with_refresh_error(redact_url(&err.kind.to_string())))
             }
             None => Err(err),
         }
     }
 
-    /// Dispose the advisory-lock guard on the blocking pool — its `Drop`
-    /// unlinks the sidecar (a blocking syscall that must not run on a
-    /// Tokio worker). Used on the rebuild error path; the success path
-    /// drops the guard inside [`Self::commit`]'s blocking closure.
-    async fn dispose_guard(path: &Path, guard: Option<AdvisoryFileLock>) {
-        let lock_path = path.to_path_buf();
-        let _ = run_blocking(lock_path, move || {
+    /// The cache as its file holds it now, for a stale serve after the engine
+    /// took the in-memory entries. `None` when the file cannot be read.
+    async fn reread(path: &Path, key: &str) -> Option<Self> {
+        let (file, key) = (path.to_path_buf(), key.to_string());
+        match run_blocking(path.to_path_buf(), move || {
+            Self::load_cold_with_bytes(&file, &key, false)
+        })
+        .await
+        {
+            Ok(loaded) => loaded.map(|(catalog, _)| catalog),
+            Err(error) => {
+                tracing::debug!("catalog cache '{}' could not be re-read: {error}", path.display());
+                None
+            }
+        }
+    }
+
+    /// A failed rebuild's last act: with the lock held, count the failure in
+    /// the sidecar. The sidecar is advisory, so a write that fails is logged
+    /// and the failure the caller serves is unchanged.
+    async fn record_failure(
+        path: &Path,
+        key: &str,
+        guard: Option<AdvisoryFileLock>,
+        sync: Option<Box<SyncState>>,
+        err: &CatalogError,
+    ) {
+        let (key, message) = (key.to_string(), err.kind.to_string());
+        Self::under_lock(path, guard, move |path| {
+            Catalog::store_failure(path, &key, sync.map(|state| *state), &message);
+        })
+        .await;
+    }
+
+    /// Runs `write` on the blocking pool with the lock held, then drops the
+    /// lock there: its `Drop` unlinks the lock file, a blocking syscall.
+    /// Without the lock nothing runs, because an uncoordinated run records
+    /// nothing.
+    async fn under_lock(path: &Path, guard: Option<AdvisoryFileLock>, write: impl FnOnce(&Path) + Send + 'static) {
+        let path = path.to_path_buf();
+        // The closure cannot fail; the only Err is a cancelled task at runtime
+        // shutdown, and the sidecar it would have written is advisory.
+        let _ = run_blocking(path.clone(), move || {
+            if guard.is_some() {
+                write(&path);
+            }
             drop(guard);
             Ok(())
         })
         .await;
     }
 
+    /// Counts the failure in the sidecar, bound to the cache file as it is
+    /// now: a failed walk can have checkpointed over the file the pre-flight
+    /// read, and a sidecar bound to the old bytes would be ignored.
+    fn store_failure(path: &Path, key: &str, sync: Option<SyncState>, message: &str) {
+        let binding = CacheBinding::read(path, key);
+        let mut state = sync
+            .filter(|state| state.catalog_sha256 == binding.digest)
+            .unwrap_or_else(|| SyncState::unbound(key));
+        binding.bind(&mut state);
+        state.on_failure(chrono::Utc::now(), None, message);
+        Self::store_sidecar(path, &state);
+    }
+
+    /// Stores a state the sync engine already counted, bound to the cache as
+    /// it is now. A state bound to other bytes keeps its schedule and nothing
+    /// else: its root and blob digests describe a file that is gone.
+    fn store_state(path: &Path, key: &str, mut state: SyncState) {
+        let binding = CacheBinding::read(path, key);
+        if state.catalog_sha256.is_some() && state.catalog_sha256 != binding.digest {
+            state = state.backoff_only(key);
+        }
+        binding.bind(&mut state);
+        Self::store_sidecar(path, &state);
+    }
+
+    fn store_sidecar(path: &Path, state: &SyncState) {
+        if let Err(e) = sync_state::store(path, state) {
+            tracing::debug!("sync sidecar beside '{}' not written: {e}", path.display());
+        }
+    }
+
     /// Phase 3 — blocking commit on the blocking pool: atomically write the
-    /// rebuilt cache and release the lock (its `Drop` unlinks the sidecar).
-    /// A save error exits via `?`; the guard then drops at the end of this
-    /// closure — still on the blocking pool — so the sidecar unlink never
-    /// runs on the async executor on either the success or the error path.
-    async fn commit(path: &Path, guard: Option<AdvisoryFileLock>, rebuilt: Catalog) -> Result<Catalog, CatalogError> {
+    /// rebuilt cache and release the lock (its `Drop` unlinks the lock
+    /// file). A save error exits via `?`; the guard then drops at the end of
+    /// this closure — still on the blocking pool — so the unlink never runs
+    /// on the async executor on either the success or the error path.
+    ///
+    /// `bind` is the sidecar to write beside the new bytes, so one that
+    /// existed is never left describing the old ones; with `None`, or
+    /// without the lock, the catalog file alone is written and no sidecar is
+    /// created or touched.
+    async fn commit(
+        path: &Path,
+        guard: Option<AdvisoryFileLock>,
+        rebuilt: Catalog,
+        bind: Option<SyncState>,
+    ) -> Result<Catalog, CatalogError> {
         let write_path = path.to_path_buf();
         run_blocking(write_path.clone(), move || {
-            rebuilt.save(&write_path)?;
+            match (&guard, bind) {
+                (Some(_), Some(state)) => rebuilt.save_bound(&write_path, state)?,
+                _ => rebuilt.save(&write_path)?,
+            }
             drop(guard);
             Ok(rebuilt)
         })
         .await
     }
 
-    /// Build an index-backed catalog: fetch the package index (HTTP static
-    /// files or a git shallow clone), apply the same lowercased name
-    /// prefilter as the `_catalog` walk, and key entries by their full
-    /// `registry/repository` ref (entries span registries, so the bare path
-    /// is not unique). Never capped: one fetched document lists every entry.
+    /// Persists what one index refresh decided and returns what to serve.
+    /// A new catalog is written with its sidecar bound to those bytes, so the
+    /// stats the sidecar claims are never ahead of the entries on disk. A
+    /// restamp writes the sidecar only. A failure stores the engine's backoff
+    /// and serves `previous`, or surfaces when there is none. Without the lock
+    /// only a new catalog is written. A restamp takes `previous` to have been
+    /// built under `scope` and `state` to be the sidecar [`Self::recheck`]
+    /// bound to the file; a state bound to other bytes is unbound on the next
+    /// read.
     ///
-    /// `previous` is the cache this rebuild replaces, keyed the same way.
-    /// Unlike the `_catalog` walk, an index build reads one field — the
-    /// rating — from a *separate* document (`stats.json`) that can fail
-    /// independently of `all.json`; the prior entries are what a failed
-    /// sidecar fetch falls back to instead of publishing "unrated".
-    async fn build_from_index(
-        locator: &str,
-        kind: crate::config::registry_resolve::SourceKind,
+    /// # Errors
+    ///
+    /// The new catalog could not be written, a restamp had no catalog to
+    /// confirm, or a failure had no cache to fall back on.
+    async fn persist_outcome(
+        path: &Path,
+        key: &str,
         scope: &str,
-        git_dir: &Path,
-        cache_path: &Path,
-        previous: Option<&BTreeMap<String, CatalogEntry>>,
+        guard: Option<AdvisoryFileLock>,
+        previous: Option<Self>,
+        outcome: SyncOutcome,
+        now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Self, CatalogError> {
-        let fetched_at = now_rfc3339();
-        let fetched = crate::catalog::index_source::fetch_index_entries(
-            locator,
-            kind,
-            git_dir,
-            cache_path,
-            &fetched_at,
-            previous,
-        )
-        .await?;
+        match outcome {
+            SyncOutcome::Commit { entries, mut state } => {
+                state.on_success();
+                let rebuilt = Self {
+                    registry: key.to_string(),
+                    scope: scope.to_string(),
+                    truncated: false,
+                    built_at: sync_state::rfc3339(now),
+                    entries: Self::scoped(entries.into_values(), scope),
+                    refresh_error: None,
+                };
+                Self::commit(path, guard, rebuilt, Some(state)).await
+            }
+            SyncOutcome::Restamp { mut state } => {
+                let Some(current) = previous else {
+                    return Err(CatalogError::io(
+                        path,
+                        std::io::Error::other("restamp without a catalog"),
+                    ));
+                };
+                state.on_success();
+                state.checked_at.get_or_insert_with(|| sync_state::rfc3339(now));
+                // Binding `state` to the file again would parse the catalog a
+                // second time beside `current`; it is already bound to the
+                // bytes `recheck` read under this lock.
+                Self::under_lock(path, guard, move |path| Catalog::store_sidecar(path, &state)).await;
+                Ok(current)
+            }
+            SyncOutcome::Fail { state, error } => {
+                let key = key.to_string();
+                Self::under_lock(path, guard, move |path| Catalog::store_state(path, &key, state)).await;
+                Self::stale_or_err(previous, error)
+            }
+        }
+    }
 
-        let entries: BTreeMap<String, CatalogEntry> = fetched
+    /// The entries whose repository contains the lowercased `scope`, keyed by
+    /// repository path.
+    fn scoped(entries: impl IntoIterator<Item = CatalogEntry>, scope: &str) -> BTreeMap<String, CatalogEntry> {
+        entries
             .into_iter()
             .filter(|e| scope.is_empty() || e.repo().to_lowercase().contains(scope))
             .map(|e| (e.repo(), e))
-            .collect();
-        Ok(Self {
-            registry: locator.to_string(),
-            scope: scope.to_string(),
-            truncated: false,
-            built_at: fetched_at,
-            entries,
-            refresh_error: None,
-        })
+            .collect()
     }
 
     /// Build the catalog over the access seam, for every repository.
@@ -1289,7 +1567,38 @@ pub fn is_fresh_at(built_at: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
 /// Current UTC time as an RFC3339 string (`%Y-%m-%dT%H:%M:%SZ`), matching
 /// the lock layer's timestamp format for consistency on disk.
 fn now_rfc3339() -> String {
-    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
+    sync_state::rfc3339(chrono::Utc::now())
+}
+
+/// The cache file as it is now, which a sidecar must describe.
+struct CacheBinding {
+    digest: Option<String>,
+    built_at: Option<String>,
+    entries: Option<u64>,
+}
+
+impl CacheBinding {
+    /// An absent or unreadable cache binds to nothing.
+    fn read(path: &Path, key: &str) -> Self {
+        match Catalog::load_with_bytes(path, key) {
+            Ok(Some((catalog, bytes))) => Self {
+                digest: Some(sha256_hex(&bytes)),
+                built_at: Some(catalog.built_at),
+                entries: Some(catalog.entries.len() as u64),
+            },
+            _ => Self {
+                digest: None,
+                built_at: None,
+                entries: None,
+            },
+        }
+    }
+
+    fn bind(self, state: &mut SyncState) {
+        state.catalog_sha256 = self.digest;
+        state.catalog_built_at = self.built_at;
+        state.entries = self.entries;
+    }
 }
 
 /// Spawn one repository's metadata lookup onto `set`. The task owns an
@@ -1309,6 +1618,47 @@ fn spawn_entry(
         let entry = Catalog::build_entry(&registry, &repository, access.as_ref(), prior, resume).await;
         (repository, entry)
     });
+}
+
+#[cfg(test)]
+impl Catalog {
+    /// Builds an index-backed catalog through the sync engine without a
+    /// cache file or sidecar: the unit-test path to a fresh fetch.
+    ///
+    /// # Errors
+    ///
+    /// The engine's failure, as [`CatalogError`].
+    async fn build_from_index(
+        locator: &str,
+        kind: crate::config::registry_resolve::SourceKind,
+        scope: &str,
+        git_dir: &Path,
+        cache_path: &Path,
+        previous: Option<&BTreeMap<String, CatalogEntry>>,
+    ) -> Result<Self, CatalogError> {
+        let now = chrono::Utc::now();
+        let fetched_at = sync_state::rfc3339(now);
+        let ctx = SyncContext {
+            locator,
+            kind,
+            git_dir,
+            cache_path,
+            fetched_at: &fetched_at,
+        };
+        let mut previous = previous.cloned();
+        match index_sync::refresh(&ctx, None, previous.as_mut(), Refresh::No, now).await {
+            SyncOutcome::Commit { entries, .. } => Ok(Self {
+                registry: locator.to_string(),
+                scope: scope.to_string(),
+                truncated: false,
+                built_at: fetched_at,
+                entries: Self::scoped(entries.into_values(), scope),
+                refresh_error: None,
+            }),
+            SyncOutcome::Fail { error, .. } => Err(error),
+            SyncOutcome::Restamp { .. } => unreachable!("a refresh without a sidecar has no catalog to confirm"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1467,8 +1817,8 @@ mod tests {
         assert!(loaded.truncated(), "truncated flag round-trips through disk");
         let e = loaded.entries().next().unwrap();
         assert_eq!(e.kind.as_deref(), Some("skill"));
-        // C-002: the cache round-trips a rating verbatim — `target` and
-        // `url` are opaque strings grim never parses or reconstructs.
+        // The cache round-trips a rating verbatim: `target` and `url` are
+        // opaque strings grim never parses or reconstructs.
         let rating = e.rating.as_ref().expect("rating round-trips through disk");
         assert_eq!(rating.up, 42);
         assert_eq!(rating.target, "D_kwDOAbCdEf");
@@ -1524,80 +1874,86 @@ mod tests {
         ));
     }
 
+    /// A cache as a newer grim writes it: one entry carrying a field this
+    /// binary does not know.
+    fn newer_grims_cache(built_at: &str) -> String {
+        format!(
+            r#"{{"version":1,"registry":"localhost:5000","scope":"","truncated":false,
+            "built_at":"{built_at}","entries":{{"acme/x":{{"registry":"localhost:5000",
+            "repository":"acme/x","fetched_at":"{built_at}","field_from_the_future":1}}}}}}"#
+        )
+    }
+
     #[test]
-    fn a_newer_cache_is_rebuilt_not_surfaced_as_an_error_s015() {
-        // S-015: run 0.14, downgrade. Every field added to the
-        // `deny_unknown_fields` on-disk struct makes the OLDER binary refuse
-        // the whole file — `rating` is only the latest of them. That refusal
-        // must cost one network refresh, not a wedged source: the cache read
-        // precedes the rebuild decision, so an error there is permanent (even
-        // `--refresh` re-reads the same file first).
-        //
-        // The fixture is the shape a newer grim writes: a cache carrying one
-        // field this binary's struct does not know.
+    fn a_cache_carrying_a_newer_grims_fields_is_read_not_rebuilt() {
+        // A downgrade must not wedge a source: the cache read precedes the
+        // rebuild decision, so a refusal there would repeat on every run,
+        // `--refresh` included.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("catalog.json");
-        let newer = r#"{"version":1,"registry":"localhost:5000","scope":"","truncated":false,
-            "built_at":"2099-01-01T00:00:00Z","entries":{"acme/x":{"registry":"localhost:5000",
-            "repository":"acme/x","fetched_at":"2099-01-01T00:00:00Z","field_from_the_future":1}}}"#;
-        std::fs::write(&path, newer).unwrap();
+        std::fs::write(&path, newer_grims_cache("2099-01-01T00:00:00Z")).unwrap();
 
-        // Strictness itself is intact: the loader still refuses the document.
-        let err = Catalog::load(&path, "localhost:5000").expect_err("an unknown field is rejected");
-        assert!(matches!(
-            err.kind,
-            super::super::catalog_error::CatalogErrorKind::Parse(_)
-        ));
+        let cat = Catalog::load(&path, "localhost:5000")
+            .expect("an unknown field is ignored")
+            .expect("the cache is for this registry");
+        assert_eq!(cat.entries().next().unwrap().repository, "acme/x");
+        assert!(
+            Catalog::load_or_cold(&path, "localhost:5000", false).unwrap().is_some(),
+            "online, the cache is read, not discarded"
+        );
+        assert!(
+            Catalog::load_or_cold(&path, "localhost:5000", true).unwrap().is_some(),
+            "offline, the cache is served"
+        );
+    }
 
-        // Online, the refusal reads as a cold cache so the rebuild below can
-        // overwrite it — no error, no data loss.
-        let cold = Catalog::load_or_cold(&path, "localhost:5000", false).expect("online: rebuild, never error");
-        assert!(cold.is_none(), "an unreadable cache reads cold, not stale");
+    #[test]
+    fn an_unparseable_cache_is_cold_online_and_an_error_offline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        std::fs::write(&path, "{ not json").unwrap();
 
-        // Offline there is nothing to rebuild from, so the refusal stands
-        // rather than silently claiming the registry is empty.
+        assert!(Catalog::load_or_cold(&path, "localhost:5000", false).unwrap().is_none());
         assert!(
             Catalog::load_or_cold(&path, "localhost:5000", true).is_err(),
-            "offline keeps surfacing the rejection"
+            "offline there is nothing to rebuild from, so the rejection stands"
         );
     }
 
     #[tokio::test]
-    async fn a_newer_cache_costs_one_refresh_and_no_data_s015() {
-        // S-015 end to end, through the seam `grim search` and the TUI use:
-        // the newer cache is refused, the source rebuilds from the registry
-        // in the same call, and the rebuilt catalog is served and persisted.
+    async fn a_fresh_cache_with_a_newer_grims_fields_is_served_without_a_refresh() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("catalog.json");
-        std::fs::write(
-            &path,
-            r#"{"version":1,"registry":"localhost:5000","scope":"","truncated":false,
-                "built_at":"2099-01-01T00:00:00Z","entries":{"acme/x":{"registry":"localhost:5000",
-                "repository":"acme/x","fetched_at":"2099-01-01T00:00:00Z","field_from_the_future":1}}}"#,
-        )
-        .unwrap();
+        std::fs::write(&path, newer_grims_cache(&ts(0))).unwrap();
         let access: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(seed().await);
 
-        // `force = false`: the rebuild is driven by the unreadable cache
-        // alone, which is the downgrade case — not by an explicit refresh.
         let cat = Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "", &access, false, false)
             .await
-            .expect("an unreadable cache rebuilds rather than erroring");
+            .expect("a readable fresh cache is served");
         assert_eq!(
-            cat.entries().next().expect("rebuilt from the registry").repository,
-            "acme/code-review"
+            cat.entries().next().expect("served from the cache").repository,
+            "acme/x",
+            "the registry was not walked"
         );
-        // Persisted in this binary's shape, so the next run is a cache hit.
-        assert!(Catalog::load(&path, "localhost:5000").unwrap().is_some());
+        assert_eq!(cat.refresh_error(), None);
     }
 
     #[test]
-    fn the_cache_rating_struct_rejects_unknown_fields() {
-        // C-002's cache half, asserted where the struct lives. The wire half
-        // — the same document parsed leniently — is in `index_source`.
+    fn the_cache_structs_ignore_unknown_fields() {
+        // The wire struct in `index_source` and the cache structs here are
+        // separate types; this pins the cache half.
+        assert!(serde_json::from_str::<RatingSummary>(r#"{"up":1,"target":"t","url":"u","score":0.5}"#).is_ok());
+        assert!(serde_json::from_str::<DownloadSummary>(r#"{"total":1,"extra":2}"#).is_ok());
+        assert!(serde_json::from_str::<DownloadVersion>(r#"{"version":"1","total":2,"extra":3}"#).is_ok());
         assert!(
-            serde_json::from_str::<RatingSummary>(r#"{"up":1,"target":"t","url":"u"}"#).is_ok(),
-            "the three original fields parse without the additive `provider`"
+            serde_json::from_str::<CatalogEntry>(r#"{"registry":"r","repository":"x","fetched_at":"t","extra":1}"#)
+                .is_ok()
+        );
+        assert!(
+            serde_json::from_str::<CatalogFile>(
+                r#"{"version":1,"registry":"r","built_at":"t","entries":{},"extra":1}"#
+            )
+            .is_ok()
         );
         assert_eq!(
             serde_json::from_str::<RatingSummary>(r#"{"up":1,"target":"t","url":"u","provider":"github"}"#)
@@ -1605,11 +1961,7 @@ mod tests {
                 .provider
                 .as_deref(),
             Some("github"),
-            "the additive `provider` round-trips"
-        );
-        assert!(
-            serde_json::from_str::<RatingSummary>(r#"{"up":1,"target":"t","url":"u","score":0.5}"#).is_err(),
-            "an unknown field is rejected, which is what forces the rebuild in S-015"
+            "the additive `provider` still round-trips"
         );
     }
 
@@ -1618,6 +1970,1071 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let got = Catalog::load(&dir.path().join("nope.json"), "localhost:5000").unwrap();
         assert!(got.is_none());
+    }
+
+    // ── sync sidecar beside the cache ────────────────────────────────
+
+    fn sample_catalog(registry: &str) -> Catalog {
+        let entry: CatalogEntry = serde_json::from_str(&format!(
+            r#"{{"registry":"{registry}","repository":"acme/x","fetched_at":"2026-01-01T00:00:00Z"}}"#
+        ))
+        .unwrap();
+        Catalog {
+            entries: BTreeMap::from([("acme/x".to_string(), entry)]),
+            built_at: ts(0),
+            ..Catalog::empty(registry)
+        }
+    }
+
+    #[test]
+    fn load_with_bytes_returns_the_bytes_the_digest_covers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        sample_catalog("localhost:5000").save(&path).unwrap();
+
+        let (cat, bytes) = Catalog::load_with_bytes(&path, "localhost:5000").unwrap().unwrap();
+        assert_eq!(bytes, std::fs::read(&path).unwrap());
+        assert_eq!(cat.entries().count(), 1);
+        assert!(
+            Catalog::load_with_bytes(&path, "ghcr.io").unwrap().is_none(),
+            "another registry reads cold"
+        );
+        assert!(
+            Catalog::load_with_bytes(&dir.path().join("nope.json"), "localhost:5000")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn save_with_digest_returns_the_sha256_of_what_save_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (plain, digested) = (dir.path().join("a.json"), dir.path().join("b.json"));
+        let cat = sample_catalog("localhost:5000");
+
+        cat.save(&plain).unwrap();
+        let digest = cat.save_with_digest(&digested).unwrap();
+
+        let written = std::fs::read(&digested).unwrap();
+        assert_eq!(digest, sha256_hex(&written));
+        assert_eq!(
+            written,
+            std::fs::read(&plain).unwrap(),
+            "the file's byte shape is unchanged"
+        );
+    }
+
+    fn full_entry(repository: &str) -> CatalogEntry {
+        let digest = format!("sha256:{}", "0".repeat(64));
+        serde_json::from_value(serde_json::json!({
+            "registry": "localhost:5000",
+            "repository": repository,
+            "index_path": format!("github.com/{repository}"),
+            "kind": "skill",
+            "description": "a description",
+            "summary": "a summary",
+            "keywords": ["one", "two"],
+            "repository_url": "https://example.test/acme/x",
+            "revision": "abc123-dirty",
+            "created": "2026-01-01T00:00:00Z",
+            "deprecated": "use acme/y",
+            "replaced_by": "localhost:5000/acme/y",
+            "oci": {
+                "licenses": "MIT", "authors": "acme", "url": "https://example.test",
+                "documentation": "https://example.test/docs", "vendor": "acme",
+                "compatibility": "any", "digest": digest,
+            },
+            "latest_tag": "latest",
+            "version": "1.2.3",
+            "rating": {"up": 3, "target": "t", "url": "u", "provider": "github", "host": "github.com"},
+            "downloads": {"total": 10, "as_of": "2026-01-01T00:00:00Z", "versions": [{"version": "1.2.3", "total": 7}]},
+            "fetched_at": "2026-01-01T00:00:00Z",
+        }))
+        .unwrap()
+    }
+
+    /// Every `Catalog` field set, so a field the writer drops shows as a diff.
+    fn populated_catalog() -> Catalog {
+        let sparse: CatalogEntry = serde_json::from_str(
+            r#"{"registry":"localhost:5000","repository":"acme/sparse","fetched_at":"2026-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+        let mut entries: BTreeMap<String, CatalogEntry> = (0..4)
+            .map(|i| (format!("acme/x{i}"), full_entry(&format!("acme/x{i}"))))
+            .collect();
+        entries.insert("acme/sparse".to_string(), sparse);
+        Catalog {
+            registry: "localhost:5000".to_string(),
+            scope: "acme".to_string(),
+            truncated: true,
+            built_at: ts(0),
+            entries,
+            refresh_error: Some("held in memory only".to_string()),
+        }
+    }
+
+    /// The envelope built the way `save_with_digest` used to: an owned
+    /// `CatalogFile` over a clone of the entries. The struct literal names
+    /// every field, so adding one to `CatalogFile` stops this compiling.
+    fn owned_cache_file(cat: &Catalog) -> CatalogFile {
+        CatalogFile {
+            version: CatalogVersion::V1,
+            registry: cat.registry.clone(),
+            scope: cat.scope.clone(),
+            truncated: cat.truncated,
+            built_at: cat.built_at.clone(),
+            entries: cat.entries.clone(),
+        }
+    }
+
+    #[test]
+    fn the_borrowed_envelope_writes_the_bytes_the_owned_one_does() {
+        let cat = populated_catalog();
+        let owned = serde_json::to_vec_pretty(&owned_cache_file(&cat)).unwrap();
+
+        assert_eq!(
+            serde_json::to_vec_pretty(&cat.file_ref()).unwrap(),
+            owned,
+            "the borrowed twin is byte-identical to the owned envelope"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let digest = cat.save_with_digest(&path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), owned, "the cache byte shape is frozen");
+        assert_eq!(digest, sha256_hex(&owned));
+    }
+
+    #[test]
+    fn a_field_added_to_catalog_file_must_reach_the_borrowed_twin() {
+        let cat = populated_catalog();
+        let twin = serde_json::to_vec_pretty(&cat.file_ref()).unwrap();
+
+        let owned_keys: Vec<String> = serde_json::to_value(owned_cache_file(&cat))
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        let twin_keys: Vec<String> = serde_json::from_slice::<serde_json::Value>(&twin)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(twin_keys, owned_keys, "the twin carries exactly the envelope's fields");
+
+        // A field the twin omits would read back as its `serde(default)`.
+        let back: CatalogFile = serde_json::from_slice(&twin).unwrap();
+        assert_eq!(back.version, CatalogVersion::V1);
+        assert_eq!(back.registry, cat.registry);
+        assert_eq!(back.scope, cat.scope);
+        assert_eq!(back.truncated, cat.truncated);
+        assert_eq!(back.built_at, cat.built_at);
+        assert_eq!(back.entries, cat.entries);
+    }
+
+    #[test]
+    fn save_bound_writes_the_catalog_then_a_sidecar_bound_to_its_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let cat = sample_catalog("localhost:5000");
+
+        cat.save_bound(&path, SyncState::unbound("localhost:5000")).unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        let bound = sync_state::load_bound(&path, "localhost:5000", Some(&bytes)).expect("the sidecar binds");
+        assert_eq!(bound.catalog_sha256, Some(sha256_hex(&bytes)));
+        assert_eq!(bound.catalog_built_at.as_deref(), Some(cat.built_at()));
+        assert_eq!(bound.entries, Some(1));
+    }
+
+    #[test]
+    fn a_failed_sidecar_write_leaves_the_new_catalog_unbound() {
+        // The catalog file is already replaced when the sidecar write fails,
+        // so the save still succeeds and nothing binds to the new bytes.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        sample_catalog("localhost:5000")
+            .save_bound(&path, SyncState::unbound("localhost:5000"))
+            .unwrap();
+        let newer = Catalog {
+            built_at: "2030-01-01T00:00:00Z".into(),
+            ..sample_catalog("localhost:5000")
+        };
+        std::fs::remove_file(sync_state::sidecar_path(&path)).unwrap();
+        std::fs::create_dir(sync_state::sidecar_path(&path)).unwrap();
+
+        newer
+            .save_bound(&path, SyncState::unbound("localhost:5000"))
+            .expect("a sidecar that cannot be written does not fail the save");
+
+        let on_disk = std::fs::read(&path).unwrap();
+        assert!(
+            String::from_utf8_lossy(&on_disk).contains("2030-01-01"),
+            "the catalog was replaced first"
+        );
+        assert!(sync_state::load_bound(&path, "localhost:5000", Some(&on_disk)).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_coordinated_rebuild_with_no_sidecar_writes_none() {
+        // An unchanged first run leaves exactly the files it left before.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog").join("reg.json");
+        let access: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(seed().await);
+
+        Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "", &access, false, true)
+            .await
+            .unwrap();
+
+        assert!(path.exists());
+        assert!(!sync_state::sidecar_path(&path).exists());
+    }
+
+    #[tokio::test]
+    async fn a_coordinated_rebuild_rebinds_an_existing_sidecar_and_clears_its_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog").join("reg.json");
+        let access: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(seed().await);
+        Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "", &access, false, true)
+            .await
+            .unwrap();
+        age_cache(&path, "localhost:5000");
+        let aged = std::fs::read(&path).unwrap();
+        let mut failing = SyncState::unbound("localhost:5000");
+        failing.catalog_sha256 = Some(sha256_hex(&aged));
+        failing.failures = 3;
+        failing.last_error = Some("registry access failed".into());
+        sync_state::store(&path, &failing).unwrap();
+
+        Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "", &access, false, false)
+            .await
+            .unwrap();
+
+        let fresh = std::fs::read(&path).unwrap();
+        assert_ne!(fresh, aged, "the stale cache was rebuilt");
+        let bound = sync_state::load_bound(&path, "localhost:5000", Some(&fresh)).expect("rebound to the new bytes");
+        assert_eq!(bound.failures, 0);
+        assert_eq!(bound.last_error, None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_uncoordinated_fallback_writes_the_catalog_file_only() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        symlink(dir.path().join("nonexistent-target"), &path).unwrap();
+        std::fs::create_dir(dir.path().join("catalog.json.lock")).unwrap();
+        sync_state::store(&path, &SyncState::unbound("localhost:5000")).unwrap();
+        let sidecar_before = std::fs::read(sync_state::sidecar_path(&path)).unwrap();
+        let access: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(seed().await);
+
+        Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "", &access, false, true)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read(sync_state::sidecar_path(&path)).unwrap(),
+            sidecar_before,
+            "no lock, no sidecar write"
+        );
+        let on_disk = std::fs::read(&path).unwrap();
+        assert!(
+            sync_state::load_bound(&path, "localhost:5000", Some(&on_disk)).is_none(),
+            "the rewritten catalog no longer binds"
+        );
+    }
+
+    // ── refresh backoff ──────────────────────────────────────────────
+
+    /// A warm index cache whose build time is long past the TTL, behind a
+    /// host that fails every request while `failing` is set.
+    struct FlakyIndex {
+        _dir: tempfile::TempDir,
+        cache: PathBuf,
+        git_dir: PathBuf,
+        locator: String,
+        failing: std::sync::Arc<AtomicBool>,
+        hits: std::sync::Arc<AtomicUsize>,
+        aged: String,
+    }
+
+    impl FlakyIndex {
+        const KIND: crate::config::registry_resolve::SourceKind =
+            crate::config::registry_resolve::SourceKind::IndexHttp;
+
+        /// `credentials` (`user:secret`, or empty) go in the locator's userinfo.
+        async fn new(credentials: &str, warm: bool) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let failing = std::sync::Arc::new(AtomicBool::new(false));
+            let (base, hits) = spawn_counted_flaky_host(failing.clone()).await;
+            let locator = if credentials.is_empty() {
+                base
+            } else {
+                base.replacen("http://", &format!("http://{credentials}@"), 1)
+            };
+            let mut idx = Self {
+                cache: dir.path().join("catalog").join("idx.json"),
+                git_dir: dir.path().join("git"),
+                _dir: dir,
+                locator,
+                failing,
+                hits,
+                aged: String::new(),
+            };
+            if warm {
+                idx.run(false, true).await.unwrap();
+                idx.aged = age_cache(&idx.cache, &idx.locator);
+            } else {
+                idx.failing.store(true, Ordering::SeqCst);
+            }
+            idx
+        }
+
+        async fn run(&self, offline: bool, force: bool) -> Result<Catalog, CatalogError> {
+            Catalog::load_or_refresh_index_coordinated(
+                &self.cache,
+                &self.locator,
+                Self::KIND,
+                "",
+                &self.git_dir,
+                offline,
+                force,
+            )
+            .await
+        }
+
+        fn requests(&self) -> usize {
+            self.hits.load(Ordering::SeqCst)
+        }
+
+        /// The sidecar, which must bind to the cache file as it is.
+        fn sidecar(&self) -> SyncState {
+            let bytes = std::fs::read(&self.cache).unwrap();
+            sync_state::load_bound(&self.cache, &self.locator, Some(&bytes)).expect("a sidecar bound to the cache")
+        }
+
+        /// Moves the stored schedule into the past, as if the wait had run out.
+        fn expire_backoff(&self) {
+            let mut state = self.sidecar();
+            state.retry_after = Some("2020-01-01T00:00:00Z".into());
+            sync_state::store(&self.cache, &state).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_index_refresh_records_a_backoff_beside_the_cache() {
+        let idx = FlakyIndex::new("", true).await;
+        let before = std::fs::read(&idx.cache).unwrap();
+        idx.failing.store(true, Ordering::SeqCst);
+
+        let cat = idx.run(false, false).await.expect("the stale cache is served");
+
+        assert_eq!(cat.entries().count(), 1);
+        assert_eq!(
+            std::fs::read(&idx.cache).unwrap(),
+            before,
+            "the cache bytes are untouched"
+        );
+        let state = idx.sidecar();
+        assert_eq!(state.failures, 1);
+        assert_eq!(state.catalog_built_at.as_deref(), Some(idx.aged.as_str()));
+        assert!(state.retry_after.is_some());
+        assert!(
+            state
+                .last_error
+                .as_deref()
+                .is_some_and(|e| e.contains("package index fetch failed")),
+            "the failure kind is recorded"
+        );
+        AdvisoryFileLock::try_acquire(&idx.cache).expect("the lock is released after recording");
+    }
+
+    #[tokio::test]
+    async fn a_run_inside_the_backoff_serves_the_cache_without_a_request() {
+        let idx = FlakyIndex::new("", true).await;
+        idx.failing.store(true, Ordering::SeqCst);
+        idx.run(false, false).await.unwrap();
+        let requests = idx.requests();
+
+        let cat = idx.run(false, false).await.expect("the stale cache is served");
+
+        assert_eq!(idx.requests(), requests, "a deferred run sends nothing");
+        assert_eq!(cat.entries().count(), 1);
+        assert_eq!(cat.built_at(), idx.aged, "the stale catalog keeps its own build time");
+        let error = cat
+            .refresh_error()
+            .expect("a deferral is reported as the refresh error");
+        assert!(error.starts_with("refresh deferred until "), "{error}");
+        assert!(
+            error.contains("package index fetch failed"),
+            "the last error rides along: {error}"
+        );
+        assert_eq!(idx.sidecar().failures, 1, "a deferral is not another failure");
+    }
+
+    #[tokio::test]
+    async fn a_forced_refresh_ignores_the_backoff() {
+        let idx = FlakyIndex::new("", true).await;
+        idx.failing.store(true, Ordering::SeqCst);
+        idx.run(false, false).await.unwrap();
+        idx.failing.store(false, Ordering::SeqCst);
+
+        let cat = idx.run(false, true).await.unwrap();
+
+        assert_eq!(cat.refresh_error(), None);
+        assert_ne!(cat.built_at(), idx.aged, "the forced run rebuilt the catalog");
+        assert_eq!(idx.sidecar().failures, 0);
+    }
+
+    #[tokio::test]
+    async fn a_run_after_the_backoff_expires_retries_and_counts_the_failure() {
+        let idx = FlakyIndex::new("", true).await;
+        idx.failing.store(true, Ordering::SeqCst);
+        idx.run(false, false).await.unwrap();
+        idx.expire_backoff();
+        let requests = idx.requests();
+
+        let cat = idx.run(false, false).await.unwrap();
+
+        assert!(idx.requests() > requests, "the expired wait lets a request out");
+        let error = cat.refresh_error().expect("the retry failed");
+        assert!(!error.starts_with("refresh deferred"), "{error}");
+        assert_eq!(idx.sidecar().failures, 2);
+    }
+
+    #[tokio::test]
+    async fn a_success_after_failures_clears_the_backoff() {
+        let idx = FlakyIndex::new("", true).await;
+        idx.failing.store(true, Ordering::SeqCst);
+        idx.run(false, false).await.unwrap();
+        idx.expire_backoff();
+        idx.failing.store(false, Ordering::SeqCst);
+
+        let cat = idx.run(false, false).await.unwrap();
+
+        assert_eq!(cat.refresh_error(), None);
+        let state = idx.sidecar();
+        assert_eq!(state.failures, 0);
+        assert_eq!(state.last_error, None);
+        assert_eq!(state.retry_after, None);
+    }
+
+    #[tokio::test]
+    async fn an_offline_run_does_not_consult_the_backoff() {
+        let idx = FlakyIndex::new("", true).await;
+        idx.failing.store(true, Ordering::SeqCst);
+        idx.run(false, false).await.unwrap();
+        let requests = idx.requests();
+
+        let cat = idx.run(true, false).await.unwrap();
+
+        assert_eq!(cat.refresh_error(), None, "offline serves the cache plainly");
+        assert_eq!(cat.entries().count(), 1);
+        assert_eq!(idx.requests(), requests);
+    }
+
+    #[tokio::test]
+    async fn a_cold_first_failure_is_remembered_and_later_runs_serve_an_empty_catalog() {
+        let idx = FlakyIndex::new("", false).await;
+        idx.run(false, false)
+            .await
+            .expect_err("with nothing cached the failure surfaces");
+        let state = sync_state::load_bound(&idx.cache, &idx.locator, None).expect("a sidecar bound to no catalog");
+        assert_eq!(state.failures, 1);
+        assert_eq!(state.catalog_sha256, None);
+        let requests = idx.requests();
+
+        let cat = idx
+            .run(false, false)
+            .await
+            .expect("a cold deferral is an empty catalog");
+
+        assert_eq!(idx.requests(), requests, "a deferred run sends nothing");
+        assert_eq!(cat.entries().count(), 0);
+        assert!(
+            cat.refresh_error()
+                .is_some_and(|e| e.starts_with("refresh deferred until "))
+        );
+        assert!(!idx.cache.exists(), "no catalog file is invented");
+
+        idx.failing.store(false, Ordering::SeqCst);
+        let healed = idx.run(false, true).await.unwrap();
+        assert_eq!(healed.entries().count(), 1);
+        assert_eq!(idx.sidecar().failures, 0);
+    }
+
+    #[tokio::test]
+    async fn a_locator_with_credentials_reaches_neither_the_sidecar_nor_the_served_error() {
+        let idx = FlakyIndex::new("user:hunter2", true).await;
+        idx.failing.store(true, Ordering::SeqCst);
+
+        let failed = idx.run(false, false).await.unwrap();
+        let deferred = idx.run(false, false).await.unwrap();
+
+        let sidecar = std::fs::read_to_string(sync_state::sidecar_path(&idx.cache)).unwrap();
+        assert!(!sidecar.contains("hunter2"), "{sidecar}");
+        for cat in [&failed, &deferred] {
+            let error = cat.refresh_error().expect("the refresh failed");
+            assert!(!error.contains("hunter2"), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_oci_source_backs_off_like_an_index_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog").join("reg.json");
+        let healthy: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(seed().await);
+        Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "", &healthy, false, true)
+            .await
+            .unwrap();
+        let aged = age_cache(&path, "localhost:5000");
+        let failing: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(FailingAccess);
+        Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "", &failing, false, false)
+            .await
+            .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let state =
+            sync_state::load_bound(&path, "localhost:5000", Some(&bytes)).expect("a sidecar bound to the cache");
+        assert_eq!(state.failures, 1);
+
+        let cat = Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "", &healthy, false, false)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            cat.built_at(),
+            aged,
+            "the healthy registry is not asked inside the wait"
+        );
+        assert!(
+            cat.refresh_error()
+                .is_some_and(|e| e.starts_with("refresh deferred until "))
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_uncoordinated_fallback_records_no_backoff() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        symlink(dir.path().join("nonexistent-target"), &path).unwrap();
+        std::fs::create_dir(dir.path().join("catalog.json.lock")).unwrap();
+        let failing: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(FailingAccess);
+
+        Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "", &failing, false, true)
+            .await
+            .expect_err("nothing cached, the failure surfaces");
+
+        assert!(!sync_state::sidecar_path(&path).exists(), "no lock, no sidecar");
+    }
+
+    /// `catalog` as `coordinate` hands it to `recheck`: with the digest of
+    /// the file it was read from.
+    fn read_from(path: &Path, catalog: Catalog) -> Option<(Catalog, String)> {
+        Some((catalog, sha256_hex(&std::fs::read(path).unwrap())))
+    }
+
+    /// A peer that failed while this run waited for the lock leaves a failure
+    /// still inside its wait: the lock holder defers instead of asking again.
+    #[tokio::test]
+    async fn recheck_under_the_lock_defers_to_a_peers_recorded_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let (_reg, access) = counted(2).await;
+        let cached = Catalog::load_or_refresh(&path, "localhost:5000", "", &access, false, true)
+            .await
+            .unwrap();
+        Catalog::store_failure(&path, "localhost:5000", None, "registry access failed");
+        let stale = |_: &Catalog| false;
+
+        let guard = AdvisoryFileLock::try_acquire(&path).unwrap();
+        let Ok(PreFlight::Serve(served)) = Catalog::recheck(
+            &path,
+            "localhost:5000",
+            Some(guard),
+            read_from(&path, cached.clone()),
+            false,
+            stale,
+        ) else {
+            panic!("an unforced run inside the wait defers");
+        };
+        assert!(
+            served
+                .refresh_error()
+                .is_some_and(|e| e.starts_with("refresh deferred until "))
+        );
+        assert_eq!(served.entries().count(), 2);
+        AdvisoryFileLock::try_acquire(&path).expect("a deferral releases the lock");
+
+        let Ok(PreFlight::Rebuild { sync, .. }) =
+            Catalog::recheck(&path, "localhost:5000", None, read_from(&path, cached), true, stale)
+        else {
+            panic!("a forced run rebuilds");
+        };
+        assert_eq!(sync.expect("the recorded failure rides along").failures, 1);
+    }
+
+    /// A stats-only refresh must reach the engine past a fresh cache, yet a
+    /// source in its failure wait is still left alone: only a full refresh
+    /// overrides the wait.
+    #[tokio::test]
+    async fn a_stats_forced_refresh_skips_the_ttl_but_not_a_recorded_backoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let (_reg, access) = counted(2).await;
+        Catalog::load_or_refresh(&path, "localhost:5000", "", &access, false, true)
+            .await
+            .unwrap();
+        let coordinate = |refresh| Catalog::coordinate(&path, "localhost:5000", "", false, refresh);
+
+        assert!(matches!(coordinate(Refresh::No).await, Ok(PreFlight::Serve(_))));
+        assert!(matches!(
+            coordinate(Refresh::StatsForced).await,
+            Ok(PreFlight::Rebuild { .. })
+        ));
+
+        Catalog::store_failure(&path, "localhost:5000", None, "registry access failed");
+        let Ok(PreFlight::Serve(served)) = coordinate(Refresh::StatsForced).await else {
+            panic!("a stats-only refresh honours the recorded wait");
+        };
+        assert!(
+            served
+                .refresh_error()
+                .is_some_and(|e| e.starts_with("refresh deferred until "))
+        );
+        assert!(matches!(coordinate(Refresh::Yes).await, Ok(PreFlight::Rebuild { .. })));
+    }
+
+    #[test]
+    fn a_failure_binds_to_the_cache_as_it_is_now_not_as_it_was_read() {
+        // A walk that failed after checkpointing replaced the bytes the
+        // pre-flight read; a sidecar bound to the old bytes would be ignored.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        sample_catalog("localhost:5000").save(&path).unwrap();
+        let mut read = SyncState::unbound("localhost:5000");
+        read.catalog_sha256 = Some(sha256_hex(&std::fs::read(&path).unwrap()));
+        read.failures = 5;
+        Catalog {
+            built_at: "2030-01-01T00:00:00Z".into(),
+            ..sample_catalog("localhost:5000")
+        }
+        .save(&path)
+        .unwrap();
+
+        Catalog::store_failure(&path, "localhost:5000", Some(read), "registry access failed");
+
+        let bytes = std::fs::read(&path).unwrap();
+        let bound = sync_state::load_bound(&path, "localhost:5000", Some(&bytes)).expect("bound to the new bytes");
+        assert_eq!(bound.catalog_built_at.as_deref(), Some("2030-01-01T00:00:00Z"));
+        assert_eq!(bound.failures, 1);
+    }
+
+    // ── quiet refresh: the sidecar only ──────────────────────────────
+
+    /// The sidecar a finished sync would hold for the cache at `path`.
+    fn bound_state(path: &Path, key: &str) -> SyncState {
+        let (cat, bytes) = Catalog::load_with_bytes(path, key).unwrap().expect("a cache");
+        SyncState {
+            catalog_sha256: Some(sha256_hex(&bytes)),
+            catalog_built_at: Some(cat.built_at.clone()),
+            entries: Some(cat.entries.len() as u64),
+            ..SyncState::unbound(key)
+        }
+    }
+
+    fn entry_for(registry: &str, repository: &str, up: Option<u32>) -> CatalogEntry {
+        let rating = up.map_or(String::new(), |up| {
+            format!(r#","rating":{{"up":{up},"target":"t","url":"https://example.invalid/d/1"}}"#)
+        });
+        serde_json::from_str(&format!(
+            r#"{{"registry":"{registry}","repository":"{repository}","fetched_at":"2026-01-01T00:00:00Z"{rating}}}"#
+        ))
+        .unwrap()
+    }
+
+    /// A stale cache holding one entry rated `up`, with a sidecar that
+    /// recorded `applied`, and the digest of the sidecar's stats ref.
+    fn rated_cache(path: &Path, key: &str, up: u32, applied: char) -> Vec<u8> {
+        let old = Catalog {
+            built_at: ts(CATALOG_TTL_SECONDS + 600),
+            entries: BTreeMap::from([("acme/x".to_string(), entry_for(key, "acme/x", Some(up)))]),
+            ..Catalog::empty(key)
+        };
+        let mut state = SyncState::unbound(key);
+        state.stats.applied = Some(applied.to_string().repeat(64));
+        old.save_bound(path, state).unwrap();
+        std::fs::read(path).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_bound_confirmation_keeps_an_old_catalog_fresh() {
+        let idx = FlakyIndex::new("", true).await;
+        let before = std::fs::read(&idx.cache).unwrap();
+        let mut state = bound_state(&idx.cache, &idx.locator);
+        state.checked_at = Some(ts(30));
+        sync_state::store(&idx.cache, &state).unwrap();
+        idx.failing.store(true, Ordering::SeqCst);
+        let requests = idx.requests();
+
+        let cat = idx.run(false, false).await.unwrap();
+
+        assert_eq!(
+            idx.requests(),
+            requests,
+            "a catalog confirmed inside the window sends nothing"
+        );
+        assert_eq!(cat.refresh_error(), None);
+        assert_eq!(cat.built_at(), idx.aged, "the catalog keeps its own build time");
+        assert_eq!(std::fs::read(&idx.cache).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn a_confirmation_that_does_not_bind_extends_nothing() {
+        type Unbind = fn(&mut SyncState);
+        let cases: [(&str, Unbind); 6] = [
+            ("another source", |s| s.locator_sha256 = sha256_hex(b"elsewhere")),
+            ("another build", |s| {
+                s.catalog_built_at = Some("2019-01-01T00:00:00Z".into());
+            }),
+            ("a newer sidecar version", |s| s.version += 1),
+            ("a future confirmation", |s| s.checked_at = Some(ts(-600))),
+            ("an expired confirmation", |s| {
+                s.checked_at = Some(ts(CATALOG_TTL_SECONDS + 60));
+            }),
+            ("an unreadable confirmation", |s| s.checked_at = Some("soon".into())),
+        ];
+        for (case, unbind) in cases {
+            let idx = FlakyIndex::new("", true).await;
+            let mut state = bound_state(&idx.cache, &idx.locator);
+            state.checked_at = Some(ts(30));
+            unbind(&mut state);
+            sync_state::store(&idx.cache, &state).unwrap();
+            idx.failing.store(true, Ordering::SeqCst);
+            let requests = idx.requests();
+
+            let cat = idx.run(false, false).await.unwrap();
+
+            assert!(idx.requests() > requests, "{case}: the stale catalog is refreshed");
+            assert!(cat.refresh_error().is_some(), "{case}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_restamp_writes_the_sidecar_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let key = "localhost:5000";
+        let before = rated_cache(&path, key, 1, 'a');
+        let built_at = Catalog::load(&path, key).unwrap().unwrap().built_at;
+        let mut state = sync_state::load_bound(&path, key, Some(&before)).unwrap();
+        state.failures = 2;
+        let checked = ts(5);
+        state.checked_at = Some(checked.clone());
+        let previous = Catalog::load(&path, key).unwrap();
+        let guard = AdvisoryFileLock::try_acquire(&path).unwrap();
+        let now = chrono::Utc::now();
+
+        let served = Catalog::persist_outcome(
+            &path,
+            key,
+            "",
+            Some(guard),
+            previous,
+            SyncOutcome::Restamp { state },
+            now,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "the catalog file is not rewritten"
+        );
+        let after = sync_state::load_bound(&path, key, Some(&before)).expect("still bound to the same bytes");
+        assert_eq!(after.checked_at.as_deref(), Some(checked.as_str()));
+        assert_eq!(after.catalog_built_at.as_deref(), Some(built_at.as_str()));
+        assert_eq!(after.failures, 0, "a confirmed catalog ends the backoff");
+        assert_eq!(
+            after.stats.applied,
+            Some("a".repeat(64)),
+            "the stats are as the engine left them"
+        );
+        assert_eq!(served.built_at(), built_at);
+        assert!(served.is_fresh_or_confirmed(&path, now));
+        assert!(
+            Catalog::load(&path, key)
+                .unwrap()
+                .unwrap()
+                .is_fresh_or_confirmed(&path, now),
+            "a new process sees the confirmation"
+        );
+        let mut names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["catalog.json", "catalog.sync.json"]);
+        AdvisoryFileLock::try_acquire(&path).expect("the lock is released");
+    }
+
+    #[tokio::test]
+    async fn a_restamp_without_the_lock_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let key = "localhost:5000";
+        let before = rated_cache(&path, key, 1, 'a');
+        let sidecar = std::fs::read(sync_state::sidecar_path(&path)).unwrap();
+        let mut state = sync_state::load_bound(&path, key, Some(&before)).unwrap();
+        state.checked_at = Some(ts(5));
+        let previous = Catalog::load(&path, key).unwrap();
+
+        let served = Catalog::persist_outcome(
+            &path,
+            key,
+            "",
+            None,
+            previous,
+            SyncOutcome::Restamp { state },
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(std::fs::read(sync_state::sidecar_path(&path)).unwrap(), sidecar);
+        assert_eq!(served.entries().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_stats_changing_commit_lands_the_entries_and_the_binding_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let key = "localhost:5000";
+        let before = rated_cache(&path, key, 1, 'a');
+        let mut state = bound_state(&path, key);
+        state.stats.applied = Some("b".repeat(64));
+        state.failures = 3;
+        let checked = ts(0);
+        state.checked_at = Some(checked.clone());
+        let previous = Catalog::load(&path, key).unwrap();
+        let guard = AdvisoryFileLock::try_acquire(&path).unwrap();
+        let now = chrono::Utc::now();
+        let entries = BTreeMap::from([("acme/x".to_string(), entry_for(key, "acme/x", Some(2)))]);
+
+        let served = Catalog::persist_outcome(
+            &path,
+            key,
+            "",
+            Some(guard),
+            previous,
+            SyncOutcome::Commit { entries, state },
+            now,
+        )
+        .await
+        .unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        assert_ne!(bytes, before);
+        let bound = sync_state::load_bound(&path, key, Some(&bytes))
+            .expect("the sidecar binds to the bytes that carry the new stats");
+        assert_eq!(bound.stats.applied, Some("b".repeat(64)));
+        assert_eq!(bound.checked_at.as_deref(), Some(checked.as_str()));
+        assert_eq!(bound.failures, 0, "a successful refresh ends the backoff");
+        assert_eq!(bound.catalog_built_at.as_deref(), Some(served.built_at()));
+        assert_eq!(served.built_at(), now.format("%Y-%m-%dT%H:%M:%SZ").to_string());
+
+        let offline = Catalog::load_or_refresh_index_coordinated(
+            &path,
+            key,
+            FlakyIndex::KIND,
+            "",
+            &dir.path().join("git"),
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+        let up = |cat: &Catalog| cat.entries().next().unwrap().rating.as_ref().unwrap().up;
+        assert_eq!(
+            up(&offline),
+            2,
+            "a new process reads the new rating without the network"
+        );
+        assert_eq!(up(&served), 2);
+    }
+
+    #[tokio::test]
+    async fn a_commit_that_cannot_write_the_catalog_leaves_the_old_sidecar_alone() {
+        // The sidecar names the stats digest the catalog file carries; it
+        // must never move to a new one before the file does.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let key = "localhost:5000";
+        std::fs::create_dir(&path).unwrap();
+        let mut old = SyncState::unbound(key);
+        old.stats.applied = Some("a".repeat(64));
+        sync_state::store(&path, &old).unwrap();
+        let sidecar = std::fs::read(sync_state::sidecar_path(&path)).unwrap();
+        let mut state = SyncState::unbound(key);
+        state.stats.applied = Some("b".repeat(64));
+        let guard = AdvisoryFileLock::try_acquire(&path).unwrap();
+        let entries = BTreeMap::from([("acme/x".to_string(), entry_for(key, "acme/x", Some(2)))]);
+
+        let result = Catalog::persist_outcome(
+            &path,
+            key,
+            "",
+            Some(guard),
+            None,
+            SyncOutcome::Commit { entries, state },
+            chrono::Utc::now(),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(sync_state::sidecar_path(&path)).unwrap(), sidecar);
+    }
+
+    #[tokio::test]
+    async fn a_commit_keeps_only_the_entries_in_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let key = "localhost:5000";
+        let entries = BTreeMap::from([
+            ("a".to_string(), entry_for(key, "acme/x", None)),
+            ("b".to_string(), entry_for(key, "other/y", None)),
+        ]);
+
+        let served = Catalog::persist_outcome(
+            &path,
+            key,
+            "acme",
+            None,
+            None,
+            SyncOutcome::Commit {
+                entries,
+                state: SyncState::unbound(key),
+            },
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+
+        let on_disk = Catalog::load(&path, key).unwrap().unwrap();
+        for cat in [&served, &on_disk] {
+            let repos: Vec<_> = cat.entries().map(CatalogEntry::repo).collect();
+            assert_eq!(repos, [format!("{key}/acme/x")]);
+            assert_eq!(cat.scope, "acme");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_outcome_stores_the_engines_backoff_and_serves_the_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let key = "localhost:5000";
+        let before = rated_cache(&path, key, 1, 'a');
+        let mut state = bound_state(&path, key);
+        state.on_failure(
+            chrono::Utc::now(),
+            Some(sync_state::RetryAfter(std::time::Duration::from_secs(900))),
+            "package index fetch failed",
+        );
+        let scheduled = state.retry_after.clone();
+        let previous = Catalog::load(&path, key).unwrap();
+        let guard = AdvisoryFileLock::try_acquire(&path).unwrap();
+        let error = CatalogError::index_fetch(&path, key, "boom");
+
+        let served = Catalog::persist_outcome(
+            &path,
+            key,
+            "",
+            Some(guard),
+            previous,
+            SyncOutcome::Fail { state, error },
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("the cache is served");
+
+        assert_eq!(std::fs::read(&path).unwrap(), before, "the catalog file is untouched");
+        let stored = sync_state::load_bound(&path, key, Some(&before)).expect("bound to the cache");
+        assert_eq!(stored.failures, 1, "the engine's count is stored, not counted again");
+        assert_eq!(stored.retry_after, scheduled);
+        assert_eq!(
+            served.refresh_error(),
+            Some("package index fetch failed for 'localhost:5000'")
+        );
+        assert_eq!(served.entries().count(), 1);
+        AdvisoryFileLock::try_acquire(&path).expect("the lock is released");
+    }
+
+    #[tokio::test]
+    async fn a_cold_failed_outcome_binds_the_backoff_to_no_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let key = "localhost:5000";
+        let mut state = SyncState::unbound(key);
+        state.on_failure(chrono::Utc::now(), None, "package index fetch failed");
+        let guard = AdvisoryFileLock::try_acquire(&path).unwrap();
+        let error = CatalogError::index_fetch(&path, key, "boom");
+
+        let result = Catalog::persist_outcome(
+            &path,
+            key,
+            "",
+            Some(guard),
+            None,
+            SyncOutcome::Fail { state, error },
+            chrono::Utc::now(),
+        )
+        .await;
+
+        assert!(result.is_err(), "with nothing cached the failure surfaces");
+        let stored = sync_state::load_bound(&path, key, None).expect("a sidecar bound to no catalog");
+        assert_eq!(stored.failures, 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_outcome_over_changed_bytes_keeps_only_the_backoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let key = "localhost:5000";
+        let read = rated_cache(&path, key, 1, 'a');
+        let mut state = bound_state(&path, key);
+        state.root = Some(sync_state::AdoptedRoot {
+            sha256: "c".repeat(64),
+            generation: 7,
+        });
+        state.on_failure(chrono::Utc::now(), None, "package index fetch failed");
+        let rewritten = rated_cache(&path, key, 9, 'd');
+        assert_ne!(read, rewritten);
+        let previous = Catalog::load(&path, key).unwrap();
+        let guard = AdvisoryFileLock::try_acquire(&path).unwrap();
+        let error = CatalogError::index_fetch(&path, key, "boom");
+
+        Catalog::persist_outcome(
+            &path,
+            key,
+            "",
+            Some(guard),
+            previous,
+            SyncOutcome::Fail { state, error },
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+
+        let stored = sync_state::load_bound(&path, key, Some(&rewritten)).expect("bound to the bytes on disk");
+        assert_eq!(stored.failures, 1, "the backoff survives");
+        assert!(stored.root.is_none(), "the root described bytes that are gone");
     }
 
     // ── build / refresh over the access seam ─────────────────────────
@@ -1939,10 +3356,9 @@ mod tests {
 
     #[test]
     fn an_older_grim_rejects_an_entry_carrying_index_path() {
-        // Downgrade direction of S-015 for `index_path`: an older binary's
-        // strict entry shape (no `index_path`) refuses what this one writes
-        // for an index-backed row, which `load_or_cold` turns into one
-        // rebuild (pinned by `a_newer_cache_is_rebuilt_not_surfaced_as_an_error_s015`).
+        // An older binary's strict entry shape (no `index_path`) refuses what
+        // this one writes for an index-backed row; this binary ignores unknown
+        // fields instead (`the_cache_structs_ignore_unknown_fields`).
         #[derive(Debug, Deserialize)]
         #[serde(deny_unknown_fields)]
         #[allow(dead_code)]
@@ -2271,11 +3687,50 @@ mod tests {
         AdvisoryFileLock::try_acquire(&cache).expect("lock must be released after a failed fetch");
 
         failing.store(false, Ordering::SeqCst);
-        let healed = Catalog::load_or_refresh_index_coordinated(&cache, &base, kind, "", &git_dir, false, false)
+        let healed = Catalog::load_or_refresh_index_coordinated(&cache, &base, kind, "", &git_dir, false, true)
             .await
             .unwrap();
-        assert_eq!(healed.refresh_error(), None, "the next run retries and succeeds");
+        assert_eq!(healed.refresh_error(), None, "a forced run retries and succeeds");
         assert_ne!(healed.built_at(), aged, "the retry rebuilt the catalog");
+    }
+
+    #[tokio::test]
+    async fn index_coordinated_serves_the_cache_when_the_fetched_document_does_not_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("catalog").join("idx.json");
+        let git_dir = dir.path().join("git");
+        let garbled = std::sync::Arc::new(AtomicBool::new(false));
+        let flag = garbled.clone();
+        let base = spawn_host(move |request| {
+            if request.contains("stats.json") {
+                NOT_FOUND.to_string()
+            } else if flag.load(Ordering::SeqCst) {
+                json_ok("not a package list")
+            } else {
+                json_ok(r#"[{"schema":1,"name":"x","kind":"skill","ref":"ghcr.io/acme/x"}]"#)
+            }
+        })
+        .await;
+        let kind = crate::config::registry_resolve::SourceKind::IndexHttp;
+        Catalog::load_or_refresh_index_coordinated(&cache, &base, kind, "", &git_dir, false, true)
+            .await
+            .unwrap();
+        let aged = age_cache(&cache, &base);
+        let before = std::fs::read(&cache).unwrap();
+
+        garbled.store(true, Ordering::SeqCst);
+        let cat = Catalog::load_or_refresh_index_coordinated(&cache, &base, kind, "", &git_dir, false, false)
+            .await
+            .expect("a document that does not parse, with a cache, serves the cache");
+
+        assert_eq!(
+            cat.entries().count(),
+            1,
+            "the entries the engine released are served again"
+        );
+        assert!(cat.refresh_error().is_some());
+        assert_eq!(cat.built_at(), aged);
+        assert_eq!(std::fs::read(&cache).unwrap(), before);
     }
 
     #[tokio::test]
@@ -2404,14 +3859,15 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn coordinated_uncoordinated_rebuild_on_lock_fault() {
-        // A lock I/O fault (here: a symlink planted at the cache path, which
-        // `try_acquire` rejects) is not `Locked`, so the coordinator falls back
-        // to an uncoordinated rebuild (`PreFlight::Rebuild(None)`) rather than
-        // failing — the atomic write still replaces the path safely.
+        // A lock I/O fault (here: a directory where the lock file belongs,
+        // which `try_acquire` cannot open) is not `Locked`, so the coordinator
+        // falls back to an uncoordinated rebuild rather than failing — the
+        // atomic write still replaces the path safely.
         use std::os::unix::fs::symlink;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("catalog.json");
         symlink(dir.path().join("nonexistent-target"), &path).unwrap();
+        std::fs::create_dir(dir.path().join("catalog.json.lock")).unwrap();
 
         let reg: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(seed().await);
         let cat = Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "", &reg, false, true)
@@ -2776,13 +4232,51 @@ mod tests {
         };
 
         let forced = |_: &Catalog| false;
+        let read = Some((stale_checkpoint, sha256_hex(b"the bytes the checkpoint was read from")));
         let Ok(PreFlight::Rebuild { previous, .. }) =
-            Catalog::recheck(&path, "localhost:5000", None, Some(stale_checkpoint), forced)
+            Catalog::recheck(&path, "localhost:5000", None, read, true, forced)
         else {
             panic!("a forced run rebuilds");
         };
         let previous = previous.expect("the file on disk is the previous cache");
         assert!(!previous.truncated() && previous.entries().count() == 4);
+    }
+
+    /// A file that still hashes to the pre-lock digest is that read itself,
+    /// so its catalog comes back unparsed; a file a peer replaced is parsed.
+    #[tokio::test]
+    async fn recheck_reuses_the_cached_catalog_only_while_the_file_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let key = "localhost:5000";
+        let (_reg, access) = counted(2).await;
+        Catalog::load_or_refresh(&path, key, "", &access, false, true)
+            .await
+            .unwrap();
+        sync_state::store(&path, &bound_state(&path, key)).unwrap();
+        let held = Catalog::load(&path, key)
+            .unwrap()
+            .unwrap()
+            .with_refresh_error("held from before the lock".into());
+        let before_lock = read_from(&path, held.clone());
+        let rebuild = |read| match Catalog::recheck(&path, key, None, read, true, |_: &Catalog| false) {
+            Ok(PreFlight::Rebuild { previous, sync, .. }) => (previous.expect("a cache"), sync),
+            _ => panic!("a forced run rebuilds"),
+        };
+
+        let (previous, sync) = rebuild(before_lock.clone());
+        assert_eq!(previous.refresh_error(), Some("held from before the lock"));
+        assert!(sync.is_some(), "the sidecar binds to the unchanged bytes");
+
+        let replaced = Catalog {
+            built_at: ts(5),
+            ..held.clone()
+        };
+        replaced.save(&path).unwrap();
+        let (previous, sync) = rebuild(before_lock);
+        assert_eq!(previous.refresh_error(), None, "the new file was parsed");
+        assert_eq!(previous.built_at(), replaced.built_at());
+        assert!(sync.is_none(), "the sidecar describes the old bytes");
     }
 
     #[tokio::test]
@@ -3021,7 +4515,7 @@ mod tests {
 
     // ── F-1: an unobserved ratings sidecar must not empty the cache ──
 
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     const RATED_REF: &str = "ghcr.io/acme/skills/rated";
 
@@ -3089,7 +4583,15 @@ mod tests {
     /// Spawn an index host serving one package pointer until `failing` is set,
     /// then answering `all.json` with a 500.
     async fn spawn_flaky_index_host(failing: std::sync::Arc<AtomicBool>) -> String {
-        spawn_host(move |request| {
+        spawn_counted_flaky_host(failing).await.0
+    }
+
+    /// [`spawn_flaky_index_host`], also returning the count of requests it served.
+    async fn spawn_counted_flaky_host(failing: std::sync::Arc<AtomicBool>) -> (String, std::sync::Arc<AtomicUsize>) {
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        let base = spawn_host(move |request| {
+            counter.fetch_add(1, Ordering::SeqCst);
             if request.contains("stats.json") {
                 NOT_FOUND.to_string()
             } else if failing.load(Ordering::SeqCst) {
@@ -3098,7 +4600,8 @@ mod tests {
                 json_ok(r#"[{"schema":1,"name":"x","kind":"skill","ref":"ghcr.io/acme/x"}]"#)
             }
         })
-        .await
+        .await;
+        (base, hits)
     }
 
     /// Spawn an index host serving `count` distinct skill pointers in `all.json`
