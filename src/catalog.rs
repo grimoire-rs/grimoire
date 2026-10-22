@@ -20,6 +20,7 @@ pub mod index_git;
 pub mod index_http;
 pub mod index_source;
 pub mod rating_provider;
+pub mod redact;
 pub mod registry_catalog;
 pub mod search_match;
 #[cfg(test)]

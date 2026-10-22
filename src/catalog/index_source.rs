@@ -29,6 +29,7 @@ use crate::catalog::catalog_error::CatalogError;
 use crate::catalog::index_git::fetch_git;
 use crate::catalog::index_http::{BodyError, INDEX_BODY_LIMIT, http_client, index_get, read_capped};
 use crate::catalog::rating_provider;
+use crate::catalog::redact::redact_url;
 use crate::catalog::registry_catalog::{CatalogEntry, DownloadSummary, DownloadVersion, RatingSummary};
 use crate::config::registry_resolve::SourceKind;
 
@@ -352,7 +353,10 @@ impl WireRating {
 fn accepted_rating_host(declared: &str, stats_url: &str) -> Option<String> {
     let host = rating_provider::normalize_host(declared)?;
     if rating_provider::is_loopback(&host) && !index_is_loopback(stats_url) {
-        tracing::debug!("ratings sidecar at '{stats_url}' declared loopback host '{host}'; ignoring it");
+        tracing::debug!(
+            "ratings sidecar at '{}' declared loopback host '{host}'; ignoring it",
+            redact_url(stats_url)
+        );
         return None;
     }
     Some(host)
@@ -455,6 +459,8 @@ pub async fn fetch_index_entries(
 /// `debug`.
 async fn fetch_stats(locator: &str) -> Option<BTreeMap<String, IndexStats>> {
     let url = stats_url(locator);
+    // The locator may carry a token in its userinfo; every line below logs it.
+    let shown = redact_url(&url);
     let fetched = async {
         let response = index_get(&http_client()?, &url).send().await?;
         Ok::<_, reqwest::Error>(response)
@@ -463,7 +469,10 @@ async fn fetch_stats(locator: &str) -> Option<BTreeMap<String, IndexStats>> {
     let response = match fetched {
         Ok(response) => response,
         Err(e) => {
-            tracing::debug!("ratings sidecar at '{url}' was not observed: {e}");
+            tracing::debug!(
+                "ratings sidecar at '{shown}' was not observed: {}",
+                redact_url(&e.to_string())
+            );
             return None;
         }
     };
@@ -471,7 +480,7 @@ async fn fetch_stats(locator: &str) -> Option<BTreeMap<String, IndexStats>> {
     // The two statuses that report *absence* rather than failure: never
     // published, and deliberately gone.
     if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE {
-        tracing::debug!("no ratings sidecar at '{url}'");
+        tracing::debug!("no ratings sidecar at '{shown}'");
         return Some(BTreeMap::new());
     }
     if status.is_client_error() {
@@ -483,17 +492,20 @@ async fn fetch_stats(locator: &str) -> Option<BTreeMap<String, IndexStats>> {
         // when `s3:ListBucket` is denied, so an S3-hosted index that retracts
         // ratings by deleting `stats.json` pins the last set — hence `warn`,
         // the one unobserved arm that does not clear up on its own.
-        tracing::warn!("ratings sidecar at '{url}' returned {status}; still showing the last observed ratings");
+        tracing::warn!("ratings sidecar at '{shown}' returned {status}; still showing the last observed ratings");
         return None;
     }
     if !status.is_success() {
-        tracing::debug!("ratings sidecar at '{url}' was not observed: status {status}");
+        tracing::debug!("ratings sidecar at '{shown}' was not observed: status {status}");
         return None;
     }
     match read_capped(response, INDEX_BODY_LIMIT).await {
         Ok(bytes) => parse_stats(&bytes, &url),
         Err(e) => {
-            tracing::debug!("ratings sidecar at '{url}' was not observed: {e}");
+            tracing::debug!(
+                "ratings sidecar at '{shown}' was not observed: {}",
+                redact_url(&e.to_string())
+            );
             None
         }
     }
@@ -513,13 +525,17 @@ fn parse_stats(bytes: &[u8], url: &str) -> Option<BTreeMap<String, IndexStats>> 
     let stats: StatsFile = match serde_json::from_slice(bytes) {
         Ok(stats) => stats,
         Err(e) => {
-            tracing::debug!("ratings sidecar at '{url}' was not observed: unparseable ({e})");
+            tracing::debug!(
+                "ratings sidecar at '{}' was not observed: unparseable ({e})",
+                redact_url(url)
+            );
             return None;
         }
     };
     if stats.schema_version > STATS_SCHEMA_VERSION {
         tracing::debug!(
-            "ratings sidecar at '{url}' was not observed: schema {} is newer than {STATS_SCHEMA_VERSION}",
+            "ratings sidecar at '{}' was not observed: schema {} is newer than {STATS_SCHEMA_VERSION}",
+            redact_url(url),
             stats.schema_version
         );
         return None;
@@ -593,13 +609,20 @@ async fn fetch_http(locator: &str, cache_path: &Path) -> Result<Vec<IndexPackage
         // The `CatalogError` text names only the locator, so the cause of a
         // refused body would otherwise be invisible at every log level.
         if !matches!(e, BodyError::Transport(_)) {
-            tracing::warn!("package index body from '{locator}' refused, ignoring it: {e}");
+            tracing::warn!(
+                "package index body from '{}' refused, ignoring it: {}",
+                redact_url(locator),
+                redact_url(&e.to_string())
+            );
         }
         CatalogError::index_fetch(cache_path, locator, e)
     })?;
     parse_packages(&bytes, INDEX_ENTRY_LIMIT).map_err(|e| {
         if matches!(e, PackagesError::TooMany { .. }) {
-            tracing::warn!("package index from '{locator}' lists too many entries, ignoring it: {e}");
+            tracing::warn!(
+                "package index from '{}' lists too many entries, ignoring it: {e}",
+                redact_url(locator)
+            );
         }
         CatalogError::index_fetch(cache_path, locator, e)
     })
@@ -1303,5 +1326,114 @@ mod tests {
         let err = parse_packages(entries_json(3).as_bytes(), 2).unwrap_err();
 
         assert_eq!(err.to_string(), "package index lists more than 2 entries");
+    }
+
+    // ── a credentialed locator never reaches an error or a log line ──
+
+    const USERINFO: &str = "user:s3cret@";
+
+    fn with_userinfo(base: &str) -> String {
+        base.replacen("http://", &format!("http://{USERINFO}"), 1)
+    }
+
+    /// Everything logged on this thread at any level until dropped.
+    struct LogCapture {
+        buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+        _guard: tracing::subscriber::DefaultGuard,
+    }
+
+    struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Sink {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("log buffer is never poisoned")
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl LogCapture {
+        fn start() -> Self {
+            crate::log_switch::tracing_capture::arm();
+            let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let sink = std::sync::Arc::clone(&buf);
+            let guard = tracing::subscriber::set_default(
+                tracing_subscriber::fmt()
+                    .with_writer(move || Sink(std::sync::Arc::clone(&sink)))
+                    .with_max_level(tracing::Level::TRACE)
+                    .with_ansi(false)
+                    .without_time()
+                    .finish(),
+            );
+            Self { buf, _guard: guard }
+        }
+
+        fn text(&self) -> String {
+            String::from_utf8(self.buf.lock().expect("log buffer is never poisoned").clone())
+                .expect("tracing writes UTF-8")
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_fetch_carries_no_locator_credential() {
+        let locator = format!("http://{USERINFO}127.0.0.1:1/idx?tok=abc123");
+
+        let err = fetch_http(&locator, Path::new("index.json"))
+            .await
+            .expect_err("nothing listens on port 1");
+
+        let mut text = err.to_string();
+        let mut next = std::error::Error::source(&err);
+        while let Some(cause) = next {
+            text.push_str(&format!(": {cause}"));
+            next = cause.source();
+        }
+        assert!(text.contains("package index fetch failed for"), "{text}");
+        for secret in ["s3cret", "abc123"] {
+            assert!(!text.contains(secret), "{secret} leaked into {text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn index_log_lines_carry_no_locator_credential() {
+        let forbidden =
+            spawn_index_host("HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
+        let absent = spawn_index_host("HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
+        let brotli = spawn_index_host(
+            "HTTP/1.1 200 OK\r\ncontent-encoding: br\r\ncontent-length: 2\r\nconnection: close\r\n\r\n[]",
+        )
+        .await;
+        let crowded = crate::catalog::test_hosts::spawn_fixed_host(crate::catalog::test_hosts::http_200(
+            "",
+            entries_json(INDEX_ENTRY_LIMIT + 1).as_bytes(),
+        ))
+        .await;
+        let logs = LogCapture::start();
+
+        let _ = fetch_stats(&with_userinfo(&forbidden)).await;
+        let _ = fetch_stats(&with_userinfo(&absent)).await;
+        let _ = fetch_stats(&format!("http://{USERINFO}127.0.0.1:1")).await;
+        let _ = fetch_http(&with_userinfo(&brotli), Path::new("index.json")).await;
+        let _ = fetch_http(&with_userinfo(&crowded), Path::new("index.json")).await;
+        let _ = parse_stats(b"nope", &format!("https://{USERINFO}idx.example/stats.json"));
+        let _ = accepted_rating_host("localhost", &format!("https://{USERINFO}idx.example/stats.json"));
+        let captured = logs.text();
+
+        for marker in [
+            "returned 403",
+            "no ratings sidecar at",
+            "was not observed",
+            "refused, ignoring it",
+            "lists too many entries",
+            "declared loopback host",
+        ] {
+            assert!(captured.contains(marker), "{marker:?} missing from {captured}");
+        }
+        assert!(!captured.contains("s3cret"), "{captured}");
     }
 }
