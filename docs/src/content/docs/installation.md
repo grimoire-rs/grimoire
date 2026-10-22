@@ -138,6 +138,14 @@ tar -xf grimoire-x86_64-unknown-linux-gnu.tar.gz
 install -m 0755 grim ~/.local/bin/grim
 ```
 
+A checksum proves the download arrived intact, not that this repository's
+release workflow built it. Each archive also carries a GitHub build provenance
+attestation; check it with the [GitHub CLI][gh]:
+
+```sh
+gh attestation verify grimoire-x86_64-unknown-linux-gnu.tar.gz --repo grimoire-rs/grimoire
+```
+
 On Windows, unzip the archive and place `grim.exe` somewhere on `PATH`.
 
 ## Build from source
@@ -169,6 +177,7 @@ If the command prints a version string, you are ready for the
 <!-- external -->
 [cargo-dist]: https://github.com/axodotdev/cargo-dist
 [cyclonedx]: https://cyclonedx.org
+[gh]: https://cli.github.com
 [gl-components]: https://gitlab.com/grimoire-rs/components
 [gl-mirror]: https://docs.gitlab.com/user/project/repository/mirror/
 [ocx]: https://ocx.sh

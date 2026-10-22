@@ -34,3 +34,5 @@ source-tarball = false
 cargo-auditable = true
 # Whether to use cargo-cyclonedx to generate an SBOM
 cargo-cyclonedx = true
+# Publish GitHub build provenance attestations for the release archives
+github-attestations = true
