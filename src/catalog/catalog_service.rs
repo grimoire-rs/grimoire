@@ -34,6 +34,7 @@
 
 use std::sync::Arc;
 
+use crate::catalog::redact::redact_url;
 use crate::catalog::registry_catalog::{Catalog, DownloadSummary, OciMeta, RatingSummary};
 use crate::catalog::search_match::SearchQuery;
 use crate::config::ResolvedRegistry;
@@ -376,11 +377,12 @@ pub async fn load_catalog(
                     if let Some(error) = catalog.refresh_error() {
                         // The kind embeds the locator for an index source, so
                         // both are escaped: a bidi override must not reach
-                        // the terminal raw (CWE-150).
+                        // the terminal raw (CWE-150). A locator may carry a
+                        // token in its userinfo or query, so both are redacted.
                         tracing::warn!(
                             "catalog for source '{}' unavailable: {}; serving the cached catalog built {}",
-                            registry.escape_debug(),
-                            error.escape_debug(),
+                            redact_url(&registry).escape_debug(),
+                            redact_url(error).escape_debug(),
                             catalog.built_at()
                         );
                     }
@@ -393,8 +395,8 @@ pub async fn load_catalog(
                     let detail = e.to_string();
                     tracing::warn!(
                         "catalog for source '{}' unavailable: {}",
-                        registry.escape_debug(),
-                        detail.escape_debug()
+                        redact_url(&registry).escape_debug(),
+                        redact_url(&detail).escape_debug()
                     );
                     // The *kind* only, never `CatalogError`'s `Display`: that
                     // prefixes the absolute cache-file path, which is a local
@@ -987,6 +989,68 @@ mod tests {
             assert!(captured.contains(line), "{line:?} missing from {captured:?}");
         }
         assert_eq!(captured.matches("warm\\u{202e}").count(), 2, "{captured:?}");
+    }
+
+    #[tokio::test]
+    async fn a_source_locator_credential_reaches_neither_the_report_nor_the_logs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+        let paths = GrimPaths::new(tmp.path().to_path_buf());
+        let state = InstallState::empty(tmp.path());
+        let roots = AnchorRoots::resolve(PathBuf::new(), &ctx);
+        let badges = BadgeContext {
+            lock: None,
+            state: &state,
+            roots: &roots,
+            active: &ClientTarget::ALL,
+            target: None,
+        };
+        // Port 1 refuses the connection; one source has a warm cache, one is cold.
+        let warm = "http://user:s3cret@127.0.0.1:1/warm?token=abc123";
+        let cold = "http://user:s3cret@127.0.0.1:1/cold?token=abc123";
+        seed_catalog(&paths, warm, &[("ghcr.io", "acme/beta")], false);
+        let registries = vec![index_source(warm, None, &[], &[]), index_source(cold, None, &[], &[])];
+        let access: Arc<dyn OciAccess> = Arc::new(FailingAccess);
+
+        crate::log_switch::tracing_capture::arm();
+        let logs = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let sink = Arc::clone(&logs);
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(move || SharedBuf(Arc::clone(&sink)))
+                .with_ansi(false)
+                .without_time()
+                .finish(),
+        );
+        let results = load_catalog(
+            &paths,
+            &registries,
+            "",
+            &access,
+            &badges,
+            false,
+            true,
+            CatalogScope::Browse,
+        )
+        .await
+        .expect("a failed refresh never fails the browse");
+        drop(guard);
+        let captured = String::from_utf8(logs.lock().expect("log buffer is never poisoned").clone())
+            .expect("tracing writes UTF-8");
+
+        assert_eq!(
+            captured.matches("catalog for source").count(),
+            2,
+            "one warning per source: {captured}"
+        );
+        let mut texts = vec![captured];
+        texts.extend(results.groups.iter().filter_map(|g| g.error.clone()));
+        for text in texts {
+            assert!(text.contains("127.0.0.1:1/"), "the source is still named: {text}");
+            for secret in ["s3cret", "abc123"] {
+                assert!(!text.contains(secret), "{secret} leaked into {text}");
+            }
+        }
     }
 
     // ── C-007 / C-008 / C-019: the browse filter at the shared seam ─────────

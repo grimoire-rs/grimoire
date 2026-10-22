@@ -14,6 +14,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::catalog::redact::redact_url;
 use crate::oci::access::error::AccessError;
 
 /// A catalog operation failed, with the catalog file path for context.
@@ -87,9 +88,9 @@ pub enum CatalogErrorKind {
     /// failures surface as `Io`).
     #[error("package index fetch failed for '{locator}'")]
     IndexFetch {
-        /// The index locator the fetch ran against.
+        /// The index locator the fetch ran against, without credentials.
         locator: String,
-        /// The transport / parse cause.
+        /// The transport / parse cause, with every URL in it redacted.
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
@@ -113,20 +114,52 @@ impl CatalogError {
     }
 
     /// Wrap a package-index fetch failure.
+    ///
+    /// The locator and the cause are redacted here because the error reaches
+    /// logs and JSON `error` fields; a token in either would leak with it.
     pub fn index_fetch(
         path: &Path,
         locator: impl Into<String>,
         source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
     ) -> Self {
+        let cause: Box<dyn std::error::Error + Send + Sync> = source.into();
         Self::new(
             path,
             CatalogErrorKind::IndexFetch {
-                locator: locator.into(),
-                source: source.into(),
+                locator: redact_url(&locator.into()),
+                source: Box::new(RedactedCause::of(cause.as_ref())),
             },
         )
     }
 }
+
+/// A cause flattened to text so every URL in its chain can be redacted.
+///
+/// reqwest drops userinfo from its own messages but keeps the query string,
+/// so the chain cannot be passed through as it came.
+#[derive(Debug)]
+struct RedactedCause(String);
+
+impl RedactedCause {
+    fn of(cause: &(dyn std::error::Error + 'static)) -> Self {
+        let mut text = cause.to_string();
+        let mut next = cause.source();
+        while let Some(inner) = next {
+            text.push_str(": ");
+            text.push_str(&inner.to_string());
+            next = inner.source();
+        }
+        Self(redact_url(&text))
+    }
+}
+
+impl std::fmt::Display for RedactedCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for RedactedCause {}
 
 #[cfg(test)]
 mod tests {
@@ -140,6 +173,53 @@ mod tests {
         );
         assert!(err.to_string().starts_with("/grim/catalog.json: "));
         assert!(err.to_string().contains("unsupported catalog version: 9"));
+    }
+
+    /// Display and every `source()` of an error, as an operator would see it.
+    fn full_text(err: &dyn std::error::Error) -> String {
+        let mut text = err.to_string();
+        let mut next = err.source();
+        while let Some(cause) = next {
+            text.push_str(": ");
+            text.push_str(&cause.to_string());
+            next = cause.source();
+        }
+        text
+    }
+
+    #[test]
+    fn an_index_fetch_names_the_locator_without_its_credentials() {
+        let err = CatalogError::index_fetch(
+            Path::new("/c"),
+            "https://user:s3cret@idx.example/i?token=abc123#frag",
+            io::Error::other("boom"),
+        );
+
+        let CatalogErrorKind::IndexFetch { locator, .. } = &err.kind else {
+            panic!("expected an index fetch failure");
+        };
+        assert_eq!(locator, "https://idx.example/i");
+        for text in [err.to_string(), err.kind.to_string()] {
+            assert!(text.contains("https://idx.example/i"), "{text}");
+            for secret in ["s3cret", "abc123", "frag"] {
+                assert!(!text.contains(secret), "{secret} leaked into {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_index_fetch_cause_is_redacted_and_keeps_its_wording() {
+        // reqwest drops userinfo from its error text but keeps the query.
+        let cause = io::Error::other("error sending request for url (https://idx.example/all.json?token=abc123)");
+        let err = CatalogError::index_fetch(Path::new("/c"), "https://idx.example/i", cause);
+
+        let text = full_text(&err);
+
+        assert!(
+            text.contains("error sending request for url (https://idx.example/all.json)"),
+            "{text}"
+        );
+        assert!(!text.contains("abc123"), "{text}");
     }
 
     #[test]
