@@ -15,6 +15,7 @@ pub mod browse_sort;
 pub mod catalog_error;
 pub mod catalog_service;
 pub mod forge;
+pub mod git_cmd;
 pub mod index_announce;
 pub mod index_git;
 pub mod index_http;

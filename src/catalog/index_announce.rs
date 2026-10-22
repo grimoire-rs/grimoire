@@ -19,6 +19,8 @@
 use std::path::Path;
 
 use super::forge::{ForgeContext, ForgeKind, ForkPolicy};
+use super::git_cmd::{GitOpts, GitProfile, git_cmd};
+use super::redact::redact_url;
 
 /// The default public index announcements target.
 pub const DEFAULT_INDEX_REPO: &str = "https://github.com/grimoire-rs/index";
@@ -634,29 +636,18 @@ async fn git_output_impl(
     action: &'static str,
     args: &[&str],
 ) -> Result<std::process::Output, AnnounceError> {
-    let mut cmd = tokio::process::Command::new("git");
-    if let Some(dir) = cwd {
-        cmd.current_dir(dir);
-    }
-    let output = cmd
-        // Hard-disable git's `ext::` remote-helper transport for every
-        // invocation (clone + pushes route through here). A push target or
-        // clone URL of the form `ext::sh -c '…'` — reachable from a hostile
-        // forge's fork response or a crafted index URL — otherwise executes
-        // an arbitrary command (RCE). A global `-c` must precede the verb, so
-        // it is prepended before the caller's args. Credential-helper config
-        // (`with_credential`) is unaffected.
-        .arg("-c")
-        .arg("protocol.ext.allow=never")
-        .args(args)
-        // Never hang on an interactive credential prompt.
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .output()
-        .await?;
+    let opts = GitOpts {
+        timeout: None,
+        profile: GitProfile::Announce,
+    };
+    let output = git_cmd(args, cwd, opts).await?;
     if !output.status.success() {
+        // The push URL or a remote's reply may quote a credentialed URL. Only
+        // the failure text is redacted: a successful push's stderr is parsed
+        // for the merge-request link.
         return Err(AnnounceError::Git {
             action,
-            detail: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            detail: redact_url(String::from_utf8_lossy(&output.stderr).trim()),
         });
     }
     Ok(output)
@@ -665,6 +656,30 @@ async fn git_output_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_failed_git_command_reports_no_url_credential() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        git(Some(dir.path()), "init", &["init", "--quiet", "."])
+            .await
+            .expect("init");
+
+        // git echoes an unmatched pathspec verbatim on stderr.
+        let err = git(
+            Some(dir.path()),
+            "checkout",
+            &["checkout", "http://user:s3cret@x.invalid/y.git"],
+        )
+        .await
+        .expect_err("no such pathspec");
+
+        let AnnounceError::Git { detail, .. } = err else {
+            panic!("expected a git failure, got {err:?}");
+        };
+        assert!(detail.contains("pathspec"), "{detail}");
+        assert!(detail.contains("http://x.invalid/y.git"), "{detail}");
+        assert!(!detail.contains("s3cret"), "{detail}");
+    }
 
     fn pkg(name: &str) -> AnnouncePackage {
         AnnouncePackage {
