@@ -27,7 +27,7 @@ use serde::Deserialize;
 
 use crate::catalog::catalog_error::CatalogError;
 use crate::catalog::index_git::fetch_git;
-use crate::catalog::index_http::{BodyError, INDEX_BODY_LIMIT, http_client, index_get, read_capped};
+use crate::catalog::index_http::{BodyError, INDEX_BODY_LIMIT, http_client, index_get, read_capped, stats_url};
 use crate::catalog::rating_provider;
 use crate::catalog::redact::redact_url;
 use crate::catalog::registry_catalog::{CatalogEntry, DownloadSummary, DownloadVersion, RatingSummary};
@@ -458,11 +458,14 @@ pub async fn fetch_index_entries(
 /// decides whether the catalog build succeeded, and nothing is said above
 /// `debug`.
 async fn fetch_stats(locator: &str) -> Option<BTreeMap<String, IndexStats>> {
-    let url = stats_url(locator);
+    let Some(url) = stats_url(locator) else {
+        tracing::debug!("index locator carries a query or fragment; fetching no ratings sidecar");
+        return None;
+    };
     // The locator may carry a token in its userinfo; every line below logs it.
-    let shown = redact_url(&url);
+    let shown = redact_url(url.as_str());
     let fetched = async {
-        let response = index_get(&http_client()?, &url).send().await?;
+        let response = index_get(&http_client()?, url.as_str()).send().await?;
         Ok::<_, reqwest::Error>(response)
     }
     .await;
@@ -500,7 +503,7 @@ async fn fetch_stats(locator: &str) -> Option<BTreeMap<String, IndexStats>> {
         return None;
     }
     match read_capped(response, INDEX_BODY_LIMIT).await {
-        Ok(bytes) => parse_stats(&bytes, &url),
+        Ok((bytes, _)) => parse_stats(&bytes, url.as_str()),
         Err(e) => {
             tracing::debug!(
                 "ratings sidecar at '{shown}' was not observed: {}",
@@ -578,17 +581,6 @@ fn parse_stats(bytes: &[u8], url: &str) -> Option<BTreeMap<String, IndexStats>> 
     )
 }
 
-/// `<base>/stats.json` — the ratings sidecar beside `all.json`.
-fn stats_url(locator: &str) -> String {
-    let base = locator.trim_end_matches('/');
-    match base.rsplit_once('/') {
-        // The locator already names the index document itself, so the
-        // sidecar is its sibling rather than a child of it.
-        Some((dir, last)) if last.ends_with(".json") => format!("{dir}/stats.json"),
-        _ => format!("{base}/stats.json"),
-    }
-}
-
 /// GET `<base>/all.json` (or the locator itself when it already names a
 /// `.json` document) and parse the package array.
 async fn fetch_http(locator: &str, cache_path: &Path) -> Result<Vec<IndexPackage>, CatalogError> {
@@ -605,7 +597,7 @@ async fn fetch_http(locator: &str, cache_path: &Path) -> Result<Vec<IndexPackage
         .await
         .and_then(reqwest::Response::error_for_status)
         .map_err(|e| CatalogError::index_fetch(cache_path, locator, e))?;
-    let bytes = read_capped(response, INDEX_BODY_LIMIT).await.map_err(|e| {
+    let (bytes, _) = read_capped(response, INDEX_BODY_LIMIT).await.map_err(|e| {
         // The `CatalogError` text names only the locator, so the cause of a
         // refused body would otherwise be invisible at every log level.
         if !matches!(e, BodyError::Transport(_)) {
@@ -1224,23 +1216,6 @@ mod tests {
                 "https://idx.example/stats.json",
             ),
             None
-        );
-    }
-
-    #[test]
-    fn the_sidecar_is_a_sibling_of_all_json() {
-        // C-001: `<base>/stats.json`, beside `all.json` — including when the
-        // locator names the index document itself, where the sidecar is its
-        // sibling rather than a child of it.
-        assert_eq!(stats_url("https://index.example"), "https://index.example/stats.json");
-        assert_eq!(stats_url("https://index.example/"), "https://index.example/stats.json");
-        assert_eq!(
-            stats_url("https://index.example/all.json"),
-            "https://index.example/stats.json"
-        );
-        assert_eq!(
-            stats_url("https://index.example/dist/all.json"),
-            "https://index.example/dist/stats.json"
         );
     }
 

@@ -2,9 +2,11 @@
 // Copyright 2026 The Grimoire Authors
 
 //! HTTP transport for package-index documents: the shared client, the
-//! gzip-aware size-capped body reader, and the deadlines both rely on.
+//! gzip-aware size-capped body reader, the bounded blob inflate, the
+//! per-refresh deadline and the URLs derived from an index locator.
 
 use reqwest::Url;
+use sha2::{Digest, Sha256};
 
 /// Time allowed to open the connection to the index host.
 const INDEX_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -118,32 +120,161 @@ fn gunzip(compressed: &[u8], limit: usize) -> std::io::Result<Vec<u8>> {
 }
 
 /// Read `response` to the end, failing as soon as more than `limit` bytes
-/// have arrived, then undo a gzip `Content-Encoding`.
+/// have arrived, then undo a gzip `Content-Encoding`. Returns the bytes and
+/// their SHA-256.
 ///
 /// The cap applies to the wire bytes and again to the decoded bytes: a gzip
-/// bomb is tiny on the wire, and a decoded size is not in any header.
-pub(crate) async fn read_capped(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>, BodyError> {
+/// bomb is tiny on the wire, and a decoded size is not in any header. The
+/// digest names the returned bytes, so a transport encoding never changes it.
+pub(crate) async fn read_capped(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<(Vec<u8>, [u8; 32]), BodyError> {
     let gzip = is_gzip(&response)?;
     let mut body = Vec::new();
+    let mut hasher = Sha256::new();
     while let Some(chunk) = response.chunk().await? {
         if body.len() + chunk.len() > limit {
             return Err(BodyError::OverLimit { limit });
         }
+        if !gzip {
+            hasher.update(&chunk);
+        }
         body.extend_from_slice(&chunk);
     }
     if !gzip {
-        return Ok(body);
+        return Ok((body, hasher.finalize().into()));
     }
-    // Inflating is CPU-bound, so it stays off the async workers.
-    let decoded = tokio::task::spawn_blocking(move || gunzip(&body, limit))
-        .await
-        .map_err(std::io::Error::other)
-        .and_then(|inflated| inflated)
-        .map_err(BodyError::Gzip)?;
+    // Inflating and hashing up to `limit` bytes is CPU-bound, so both stay off
+    // the async workers.
+    let (decoded, digest) = tokio::task::spawn_blocking(move || {
+        let decoded = gunzip(&body, limit)?;
+        let digest: [u8; 32] = Sha256::digest(&decoded).into();
+        Ok::<_, std::io::Error>((decoded, digest))
+    })
+    .await
+    .map_err(std::io::Error::other)
+    .and_then(|inflated| inflated)
+    .map_err(BodyError::Gzip)?;
     if decoded.len() > limit {
         return Err(BodyError::OverLimit { limit });
     }
-    Ok(decoded)
+    Ok((decoded, digest))
+}
+
+/// A published blob is a plain `.json.gz` file, but a host or CDN may have
+/// decoded it in transit. Inflate `body` once when it opens with the gzip
+/// magic bytes, otherwise keep it as served; fail once the result passes
+/// `limit`. It never inflates twice: a nested gzip stream stays compressed
+/// and fails the caller's digest check.
+///
+/// CPU-bound: call it from `spawn_blocking`.
+#[allow(dead_code, reason = "called by the sync engine once the root and blob fetches land")]
+pub(crate) fn inflate_bounded(body: Vec<u8>, limit: usize) -> Result<Vec<u8>, BodyError> {
+    let out = if body.starts_with(&GZIP_MAGIC) {
+        gunzip(&body, limit).map_err(BodyError::Gzip)?
+    } else {
+        body
+    };
+    if out.len() > limit {
+        return Err(BodyError::OverLimit { limit });
+    }
+    Ok(out)
+}
+
+/// The first two bytes of every gzip member.
+const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
+
+/// One refresh's time budget: every request takes the smaller of its own
+/// timeout and what is left, so a slow source cannot outlast the total
+/// however many requests it is spread over.
+#[allow(
+    dead_code,
+    reason = "used by the sync engine once the refresh runs under one deadline"
+)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Deadline {
+    end: std::time::Instant,
+}
+
+#[allow(
+    dead_code,
+    reason = "used by the sync engine once the refresh runs under one deadline"
+)]
+impl Deadline {
+    pub(crate) fn new(total: std::time::Duration) -> Self {
+        Self {
+            end: std::time::Instant::now() + total,
+        }
+    }
+
+    /// `own`, or the time left when that is less; zero once the deadline passed.
+    pub(crate) fn cap(&self, own: std::time::Duration) -> std::time::Duration {
+        own.min(self.end.saturating_duration_since(std::time::Instant::now()))
+    }
+}
+
+/// The index directory of an HTTP locator, ending in `/`: `https://h/idx` and
+/// `https://h/idx/all.json` both give `https://h/idx/`. `None` when the
+/// locator carries a query or fragment, or names another `.json` document;
+/// grim then probes no root.
+#[allow(dead_code, reason = "called by the sync engine to build the root and blob URLs")]
+pub(crate) fn index_dir(locator: &str) -> Option<Url> {
+    let mut url = parse_plain(locator)?;
+    let (dir, foreign_json) = split_locator(&url);
+    if foreign_json {
+        return None;
+    }
+    url.set_path(&format!("{dir}/"));
+    Some(url)
+}
+
+/// `<dir>c/root.json`.
+#[allow(dead_code, reason = "called by the sync engine to probe the root")]
+pub(crate) fn root_url(dir: &Url) -> Url {
+    child(dir, "c/root.json")
+}
+
+/// `<dir>c/f/sha256/<digest>.json.gz`, or `None` unless `digest` is 64
+/// lowercase hex digits, so a digest from the wire never shapes the path.
+#[allow(dead_code, reason = "called by the sync engine to fetch a published blob")]
+pub(crate) fn blob_url(dir: &Url, digest: &str) -> Option<Url> {
+    let valid = digest.len() == 64 && digest.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    valid.then(|| child(dir, &format!("c/f/sha256/{digest}.json.gz")))
+}
+
+/// The `stats.json` sidecar beside the index document: `<dir>stats.json`, also
+/// when the locator names a `.json` document itself. `None` for a locator with
+/// a query or fragment.
+pub(crate) fn stats_url(locator: &str) -> Option<Url> {
+    let mut url = parse_plain(locator)?;
+    let (dir, _) = split_locator(&url);
+    url.set_path(&format!("{dir}/stats.json"));
+    Some(url)
+}
+
+/// An `http(s)` locator with no query and no fragment.
+fn parse_plain(locator: &str) -> Option<Url> {
+    let url = Url::parse(locator).ok()?;
+    let plain = matches!(url.scheme(), "http" | "https") && url.query().is_none() && url.fragment().is_none();
+    plain.then_some(url)
+}
+
+/// The locator's directory path without a trailing `/`, and whether its last
+/// segment names a `.json` document other than `all.json`.
+fn split_locator(url: &Url) -> (String, bool) {
+    let path = url.path().trim_end_matches('/');
+    match path.rsplit_once('/') {
+        Some((parent, "all.json")) => (parent.to_owned(), false),
+        Some((parent, last)) if last.ends_with(".json") => (parent.to_owned(), true),
+        _ => (path.to_owned(), false),
+    }
+}
+
+fn child(dir: &Url, relative: &str) -> Url {
+    let mut url = dir.clone();
+    url.set_path(&format!("{}{relative}", dir.path()));
+    url
 }
 
 #[cfg(test)]
@@ -152,6 +283,7 @@ mod tests {
     use crate::catalog::test_hosts::{
         accepts_gzip, gzip, http_200, read_head, spawn_capturing_host, spawn_fixed_host, spawn_scripted_host,
     };
+    use sha2::{Digest, Sha256};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::io::AsyncWriteExt;
@@ -164,7 +296,7 @@ mod tests {
     async fn read_encoded(content_encoding: &str, body: &[u8], limit: usize) -> Result<Vec<u8>, BodyError> {
         let extra = format!("content-encoding: {content_encoding}\r\n");
         let base = spawn_fixed_host(http_200(&extra, body)).await;
-        read_capped(get(&base).await, limit).await
+        read_capped(get(&base).await, limit).await.map(|(body, _)| body)
     }
 
     #[tokio::test]
@@ -200,7 +332,7 @@ mod tests {
         let exact = read_capped(get(&base).await, 1025)
             .await
             .expect("a body of exactly the limit is accepted");
-        assert_eq!(exact.len(), 1025);
+        assert_eq!(exact.0.len(), 1025);
     }
 
     #[tokio::test]
@@ -217,7 +349,7 @@ mod tests {
         let whole = read_capped(get(&base).await, 50)
             .await
             .expect("five chunks fit exactly");
-        assert_eq!(whole.len(), 50);
+        assert_eq!(whole.0.len(), 50);
     }
 
     #[tokio::test]
@@ -369,7 +501,7 @@ mod tests {
             .await
             .expect("progress keeps the fetch alive");
 
-        assert_eq!(body.len(), 120);
+        assert_eq!(body.0.len(), 120);
         assert!(
             started.elapsed() > read_timeout,
             "the fetch must outlast the read timeout"
@@ -538,6 +670,260 @@ mod tests {
         let chain = [url("https://h/a"), url("http://h/b")];
 
         assert_eq!(redirect_refusal(&chain, &url("http://h/c")), None);
+    }
+
+    fn sha256_of(bytes: &[u8]) -> [u8; 32] {
+        Sha256::digest(bytes).into()
+    }
+
+    #[tokio::test]
+    async fn read_capped_returns_the_sha256_of_the_bytes_it_returns() {
+        let plain = spawn_fixed_host(http_200("", b"[1,2,3]")).await;
+        let (body, digest) = read_capped(get(&plain).await, 1024).await.unwrap();
+        assert_eq!(body, b"[1,2,3]");
+        assert_eq!(digest, sha256_of(b"[1,2,3]"));
+
+        // A content-encoding is transport: the digest names the decoded bytes.
+        let gz = spawn_fixed_host(http_200("content-encoding: gzip\r\n", &gzip(b"[1,2,3]"))).await;
+        let (body, digest) = read_capped(get(&gz).await, 1024).await.unwrap();
+        assert_eq!(body, b"[1,2,3]");
+        assert_eq!(digest, sha256_of(b"[1,2,3]"));
+    }
+
+    #[tokio::test]
+    async fn read_capped_hashes_a_body_that_arrives_in_pieces() {
+        let base = spawn_drip_host(5, Duration::from_millis(5)).await;
+
+        let (body, digest) = read_capped(get(&base).await, 1024).await.unwrap();
+
+        assert_eq!(digest, sha256_of(&body));
+        assert_eq!(body, [b'x'; 50]);
+    }
+
+    #[tokio::test]
+    async fn a_lying_content_length_does_not_widen_the_cap() {
+        // The header claims 1 GiB; the cap counts the bytes that arrive and
+        // never sizes a buffer from the header.
+        let base = spawn_scripted_host(|mut sock| async move {
+            let _ = read_head(&mut sock).await;
+            let head = "HTTP/1.1 200 OK\r\ncontent-length: 1073741824\r\nconnection: close\r\n\r\n";
+            let _ = sock.write_all(head.as_bytes()).await;
+            let _ = sock.write_all(&[b'x'; 4096]).await;
+            tokio::time::sleep(AMPLE).await;
+        })
+        .await;
+
+        let started = std::time::Instant::now();
+        let err = read_capped(get(&base).await, 1024).await.expect_err("past the cap");
+
+        assert!(matches!(err, BodyError::OverLimit { limit: 1024 }), "{err}");
+        assert!(
+            started.elapsed() < PROMPT,
+            "the cap must fire without waiting for the header's length"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_capped_aborts_an_oversize_compressed_body_at_the_cap() {
+        // Noise does not compress, so the blob stays larger than the cap on the wire.
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let noise: Vec<u8> = (0..4096)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 24) as u8
+            })
+            .collect();
+        let blob = gzip(&noise);
+        assert!(blob.len() > 1024);
+        let base = spawn_fixed_host(http_200("", &blob)).await;
+
+        let err = read_capped(get(&base).await, 1024).await.expect_err("past the cap");
+
+        assert!(matches!(err, BodyError::OverLimit { limit: 1024 }), "{err}");
+    }
+
+    #[test]
+    fn inflate_bounded_aborts_a_bomb_at_the_limit() {
+        let bomb = gzip(&vec![0u8; 1 << 20]);
+        assert!(bomb.len() < 4096, "the bomb must stay tiny on the wire");
+
+        assert!(matches!(
+            inflate_bounded(bomb.clone(), 4096),
+            Err(BodyError::OverLimit { limit: 4096 })
+        ));
+        // A ref that understates its size aborts at the ref size; one that
+        // overstates it is held by the kind cap the caller passes instead.
+        let exact = gzip(&[b'a'; 512]);
+        assert_eq!(inflate_bounded(exact.clone(), 512).unwrap(), [b'a'; 512]);
+        assert!(matches!(
+            inflate_bounded(exact, 511),
+            Err(BodyError::OverLimit { limit: 511 })
+        ));
+    }
+
+    #[test]
+    fn inflate_bounded_inflates_exactly_once() {
+        let inner = gzip(b"payload");
+        let twice = gzip(&inner);
+
+        assert_eq!(inflate_bounded(twice, 1024).unwrap(), inner);
+    }
+
+    #[test]
+    fn inflate_bounded_keeps_a_host_decoded_body_as_served() {
+        let json = br#"{"schema":1}"#.to_vec();
+
+        assert_eq!(inflate_bounded(json.clone(), 1024).unwrap(), json);
+        assert!(matches!(
+            inflate_bounded(json, 4),
+            Err(BodyError::OverLimit { limit: 4 })
+        ));
+        assert!(inflate_bounded(Vec::new(), 4).unwrap().is_empty());
+    }
+
+    #[test]
+    fn inflate_bounded_refuses_a_corrupt_member() {
+        let whole = gzip(&[b'a'; 8192]);
+
+        let err = inflate_bounded(whole[..whole.len() - 8].to_vec(), 1 << 20).expect_err("truncated");
+
+        assert!(matches!(err, BodyError::Gzip(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_blob_is_inflated_once_whatever_the_content_encoding_says() {
+        let json = br#"{"entries":{}}"#;
+        // The blob as stored: no content-encoding, the magic bytes arrive.
+        let stored = spawn_fixed_host(http_200("", &gzip(json))).await;
+        // A store that labels the file's own gzip as a transport encoding.
+        let labelled = spawn_fixed_host(http_200("content-encoding: gzip\r\n", &gzip(json))).await;
+        // A host or CDN that decoded it in transit and dropped the label.
+        let decoded = spawn_fixed_host(http_200("", json)).await;
+
+        for (what, base) in [("stored", stored), ("labelled", labelled), ("decoded", decoded)] {
+            let (body, _) = read_capped(get(&base).await, 1024).await.expect(what);
+            assert_eq!(inflate_bounded(body, 1024).expect(what), json, "{what}");
+        }
+    }
+
+    #[test]
+    fn a_deadline_never_grants_more_than_it_has_left() {
+        let ample = Deadline::new(Duration::from_secs(100));
+        assert_eq!(ample.cap(Duration::from_secs(30)), Duration::from_secs(30));
+        assert!(ample.cap(Duration::from_secs(1000)) <= Duration::from_secs(100));
+
+        let spent = Deadline::new(Duration::ZERO);
+        assert_eq!(spent.cap(Duration::from_secs(30)), Duration::ZERO);
+
+        let shrinking = Deadline::new(Duration::from_millis(60));
+        std::thread::sleep(Duration::from_millis(80));
+        assert_eq!(shrinking.cap(Duration::from_secs(30)), Duration::ZERO);
+    }
+
+    fn dir_of(locator: &str) -> Option<String> {
+        index_dir(locator).map(|u| u.to_string())
+    }
+
+    fn stats_of(locator: &str) -> Option<String> {
+        stats_url(locator).map(|u| u.to_string())
+    }
+
+    #[test]
+    fn the_index_directory_follows_the_discovery_table() {
+        for (locator, dir) in [
+            ("https://h/idx", "https://h/idx/"),
+            ("https://h/idx/", "https://h/idx/"),
+            ("https://h/idx//", "https://h/idx/"),
+            ("https://h/idx/all.json", "https://h/idx/"),
+            ("https://h/", "https://h/"),
+            ("https://h", "https://h/"),
+            ("https://h/all.json", "https://h/"),
+            ("http://127.0.0.1:8080/a/b", "http://127.0.0.1:8080/a/b/"),
+            ("https://user:pw@h/idx", "https://user:pw@h/idx/"),
+        ] {
+            assert_eq!(dir_of(locator).as_deref(), Some(dir), "{locator}");
+        }
+    }
+
+    #[test]
+    fn a_locator_the_table_leaves_without_a_probe_has_no_directory() {
+        for locator in [
+            "https://h/idx/other.json",
+            "https://h/dist/index.json",
+            "https://h/idx?token=1",
+            "https://h/idx/all.json?token=1",
+            "https://h/idx#frag",
+            "https://h/idx?",
+            "not a url",
+            "ftp://h/idx",
+        ] {
+            assert_eq!(dir_of(locator), None, "{locator}");
+        }
+    }
+
+    #[test]
+    fn the_root_and_blob_urls_hang_off_the_directory() {
+        let dir = index_dir("https://h/idx/all.json").unwrap();
+        let digest = "0123456789abcdef".repeat(4);
+
+        assert_eq!(root_url(&dir).as_str(), "https://h/idx/c/root.json");
+        assert_eq!(
+            blob_url(&dir, &digest).unwrap().as_str(),
+            format!("https://h/idx/c/f/sha256/{digest}.json.gz")
+        );
+        let bare = index_dir("https://h").unwrap();
+        assert_eq!(root_url(&bare).as_str(), "https://h/c/root.json");
+    }
+
+    #[test]
+    fn a_blob_url_is_built_only_from_a_checked_digest() {
+        let dir = index_dir("https://h/idx").unwrap();
+
+        for digest in [
+            "",
+            "../../../../etc/passwd",
+            &"A".repeat(64),
+            &"a".repeat(63),
+            &"a".repeat(65),
+            &format!("{}/x", "a".repeat(62)),
+            &"g".repeat(64),
+        ] {
+            assert_eq!(blob_url(&dir, digest), None, "{digest}");
+        }
+    }
+
+    #[test]
+    fn the_stats_url_is_the_sibling_of_the_index_document() {
+        for (locator, stats) in [
+            ("https://h/idx", "https://h/idx/stats.json"),
+            ("https://h/idx/", "https://h/idx/stats.json"),
+            ("https://h/idx/all.json", "https://h/idx/stats.json"),
+            ("https://h", "https://h/stats.json"),
+            ("https://h/", "https://h/stats.json"),
+            (
+                "https://index.example/dist/all.json",
+                "https://index.example/dist/stats.json",
+            ),
+            ("https://h/dist/index.json", "https://h/dist/stats.json"),
+            ("https://h/idx/other.json", "https://h/idx/stats.json"),
+        ] {
+            assert_eq!(stats_of(locator).as_deref(), Some(stats), "{locator}");
+        }
+    }
+
+    #[test]
+    fn a_query_or_fragment_fetches_no_stats() {
+        for locator in [
+            "https://h/idx?token=1",
+            "https://h/idx/all.json?token=1",
+            "https://h/idx#frag",
+            "https://h/dist/index.json?x=1",
+            "not a url",
+        ] {
+            assert_eq!(stats_of(locator), None, "{locator}");
+        }
     }
 
     #[tokio::test]
