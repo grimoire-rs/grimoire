@@ -45,12 +45,14 @@ from src.zot import start_zot  # noqa: E402
 FIXTURES = Path(__file__).resolve().parent / "p9_fixtures"
 
 # C-153's closed list, restricted to what a hook-free run can show: `status`
-# items gain `arming: []`, install rows gain `armed: null`. Keyed by command
+# items gain `arming: []`, install rows gain `armed: null`, and `context`
+# registry rows gain `catalog: null` (no sync has run). Keyed by command
 # and value; nothing else may appear. Per D-20, `add`/`update` rows keep
 # main's exact key set — no `armed` — so they are deliberately absent here.
 ADDITIVE_STDOUT_KEYS: dict[str, tuple[str, object]] = {
     "status": ("arming", []),
     "install": ("armed", None),
+    "context": ("catalog", None),
 }
 
 # Named stdout equivalences (orchestrator decision D-13). Each is one rule, not
@@ -717,6 +719,19 @@ def self_test(root: Path) -> None:
     assert diff_stdout("t", row, '{"a": [{"x": 1, "arming": []}]}', "status") == []
     assert diff_stdout("t", row, '{"a": [{"x": 1, "arming": ["h"]}]}', "status")
     assert diff_stdout("t", '{"a": 1}', '{"a": 1, "extra": 2}', "install")
+    ctx = '{"registries": [{"url": "r"}]}'
+    assert (
+        diff_stdout(
+            "t", ctx, '{"registries": [{"url": "r", "catalog": null}]}', "context"
+        )
+        == []
+    )
+    assert diff_stdout(
+        "t", ctx, '{"registries": [{"url": "r", "catalog": {"entries": 1}}]}', "context"
+    )
+    assert diff_stdout(
+        "t", ctx, '{"registries": [{"url": "r", "catalog": null}]}', "install"
+    )
     assert diff_stdout("t", '{"a": 1, "armed": null}', '{"a": 1}', "install")
     assert diff_stdout("t", '{"a": [{"x": 1, "y": 2}]}', '{"a": [{"x": 1}]}')
     assert diff_stdout("t", '{"a": 1}', '{"a": 2}')

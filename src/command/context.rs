@@ -18,6 +18,7 @@ use clap::Args;
 
 use crate::api::context_report::{ContextRegistry, ContextRegistryKind, ContextReport, OfflineSource};
 use crate::auth::store::{DockerCredentialStore, StoreOptions};
+use crate::catalog::sync_state::{CatalogView, catalog_view};
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
 use crate::install::target::InstallTarget;
@@ -63,11 +64,13 @@ pub async fn run(ctx: &Context, _args: &ContextArgs) -> anyhow::Result<(ContextR
     // (S-8): that recompiled every entry's `GlobSet` again and printed each
     // filter's diagnostics twice for one `grim context`.
     let default_registry = default_registry_of(&resolved);
+    let paths = ctx.paths();
     let registries = resolved
         .into_iter()
         .map(|r| {
             let authenticated = cred_store.as_ref().is_some_and(|s| s.has_credential(&r.url));
-            context_registry(r, authenticated)
+            let catalog = catalog_view(&paths.catalog_file_for(&r.url), &r.url);
+            context_registry(r, authenticated, catalog)
         })
         .collect();
 
@@ -132,9 +135,14 @@ fn default_registry_of(registries: &[crate::config::ResolvedRegistry]) -> String
 /// what decides whether a filter applies at all, so a second config read
 /// here would report configured patterns under `--registry`, where the
 /// forced browse set is genuinely unfiltered (plan C-009, S-014/S-019).
-fn context_registry(r: crate::config::ResolvedRegistry, authenticated: bool) -> ContextRegistry {
+fn context_registry(
+    r: crate::config::ResolvedRegistry,
+    authenticated: bool,
+    catalog: Option<CatalogView>,
+) -> ContextRegistry {
     ContextRegistry {
         authenticated,
+        catalog,
         include: r.filter.include_patterns().to_vec(),
         exclude: r.filter.exclude_patterns().to_vec(),
         alias: r.alias,
@@ -175,7 +183,7 @@ mod tests {
         // two fields here inverts an allowlist into a denylist in the one
         // report a JSON consumer trusts, and fails this assertion.
         let resolved = resolve_registries(&[], &[filtered_entry()], None, &[], None, "fallback.example", None);
-        let row = context_registry(resolved.into_iter().next().expect("one entry"), false);
+        let row = context_registry(resolved.into_iter().next().expect("one entry"), false, None);
         assert_eq!(
             row.include,
             vec!["acme/platform/**".to_string(), "acme/tools/**".to_string()]
@@ -198,7 +206,7 @@ mod tests {
             "fallback.example",
             None,
         );
-        let row = context_registry(resolved.into_iter().next().expect("one forced entry"), false);
+        let row = context_registry(resolved.into_iter().next().expect("one forced entry"), false, None);
         assert_eq!(row.url, "ghcr.io/other");
         assert!(
             row.include.is_empty() && row.exclude.is_empty(),
@@ -215,7 +223,7 @@ mod tests {
             ..Default::default()
         };
         let resolved = resolve_registries(&[], &[entry], None, &[], None, "fallback.example", None);
-        let row = context_registry(resolved.into_iter().next().expect("one entry"), false);
+        let row = context_registry(resolved.into_iter().next().expect("one entry"), false, None);
         assert!(row.include.is_empty() && row.exclude.is_empty());
     }
 

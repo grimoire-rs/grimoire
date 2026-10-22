@@ -3,12 +3,20 @@
 """`grim context` acceptance tests — read-only resolution introspection."""
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 
-from src.helpers import write_config
+from src.index_fixture import (
+    DEFAULT_GENERATION,
+    KindedIndex,
+    index_config,
+    package,
+    search_envelope,
+    write_all_json,
+)
 
 # `grim context` is read-only introspection and never dials a registry, so
 # the browse-filter tests below take a literal host instead of the session
@@ -388,3 +396,145 @@ def test_context_registry_flag_reports_insecure_false(
 
     regs = runner.json("--registry", "localhost:5050/grimoire", "context")["registries"]
     assert [r["insecure"] for r in regs] == [False], regs
+
+
+CATALOG_KEYS = {
+    "built_at",
+    "entries",
+    "layout",
+    "generation",
+    "fallbacks",
+    "failures",
+    "last_error",
+    "retry_after",
+}
+OLD = "2020-01-01T00:00:00Z"
+
+
+def _publish(index: KindedIndex) -> None:
+    write_all_json(
+        index.root,
+        [
+            package("one", "skill", "ghcr.io/acme/skills/one", "First"),
+            package("two", "skill", "ghcr.io/acme/skills/two", "Second"),
+        ],
+    )
+
+
+def _catalog(runner) -> dict | None:
+    (source,) = runner.json("context")["registries"]
+    return source["catalog"]
+
+
+def _sidecar_path(grim_home: Path) -> Path:
+    (sidecar,) = (grim_home / "catalog").glob("*.sync.json")
+    return sidecar
+
+
+def test_context_reports_no_catalog_before_a_source_has_synced(
+    grim_at, project_dir: Path, kind_server: KindedIndex
+) -> None:
+    """The key is always there; `null` says "no sync state", never "older grim"."""
+    index_config(project_dir, kind_server.base)
+
+    (source,) = grim_at(project_dir).json("context")["registries"]
+
+    assert "catalog" in source, "an absent key would read as an older grim"
+    assert source["catalog"] is None
+
+
+def test_context_reports_the_sync_state_of_an_index_source(
+    grim_at, project_dir: Path, kind_server: KindedIndex, index_kind: str
+) -> None:
+    _publish(kind_server)
+    index_config(project_dir, kind_server.base)
+    runner = grim_at(project_dir)
+    search_envelope(runner)
+    requests = len(kind_server.log)
+
+    catalog = _catalog(runner)
+
+    assert catalog is not None
+    assert set(catalog) == CATALOG_KEYS
+    assert catalog["entries"] == 2
+    assert catalog["built_at"], "a synced source has a build time"
+    anchored = index_kind != "legacy-only"
+    assert catalog["layout"] == ("anchored" if anchored else "flat")
+    assert catalog["generation"] == (DEFAULT_GENERATION if anchored else None)
+    assert (catalog["fallbacks"], catalog["failures"]) == (0, 0)
+    assert catalog["last_error"] is None and catalog["retry_after"] is None
+    assert len(kind_server.log) == requests, "context reads the sidecar and sends nothing"
+
+
+def test_context_reports_a_cold_first_failure_without_a_catalog(
+    grim_at, project_dir: Path, kind_server: KindedIndex
+) -> None:
+    _publish(kind_server)
+    kind_server.outage(True)
+    index_config(project_dir, kind_server.base)
+    runner = grim_at(project_dir)
+    runner.run("--format", "json", "search", "--refresh", check=False)
+
+    catalog = _catalog(runner)
+
+    assert catalog is not None
+    assert catalog["built_at"] is None and catalog["entries"] is None
+    assert catalog["failures"] == 1
+    assert catalog["last_error"], "the failure stays visible without a network"
+    assert catalog["retry_after"], "and so does the wait it started"
+
+
+def _age_catalog(grim_home: Path) -> None:
+    """Back-date the cache and keep the sidecar bound to it, as a day passing would."""
+    (cache,) = (
+        p
+        for p in (grim_home / "catalog").glob("*.json")
+        if not p.name.endswith(".sync.json")
+    )
+    doc = json.loads(cache.read_text())
+    doc["built_at"] = OLD
+    data = json.dumps(doc).encode()
+    cache.write_bytes(data)
+    sidecar = _sidecar_path(grim_home)
+    state = json.loads(sidecar.read_text())
+    state.update(
+        catalog_sha256=hashlib.sha256(data).hexdigest(),
+        catalog_built_at=OLD,
+        checked_at=OLD,
+    )
+    sidecar.write_text(json.dumps(state))
+
+
+def test_context_built_at_follows_a_quiet_refresh(
+    grim_at, grim_home: Path, project_dir: Path, kind_server: KindedIndex
+) -> None:
+    """A quiet refresh restamps the sidecar and leaves the catalog file alone;
+    "built at" reports when the catalog was last confirmed current."""
+    _publish(kind_server)
+    index_config(project_dir, kind_server.base)
+    runner = grim_at(project_dir)
+    search_envelope(runner)
+    _age_catalog(grim_home)
+    assert (_catalog(runner) or {})["built_at"] == OLD
+
+    result = runner.run("--format", "json", "search", check=False)
+    assert result.returncode == 0, result.stderr
+
+    checked_at = json.loads(_sidecar_path(grim_home).read_text())["checked_at"]
+    assert checked_at != OLD, "the unforced run must have revalidated the catalog"
+    assert (_catalog(runner) or {})["built_at"] == checked_at
+
+
+def test_context_ignores_a_sidecar_from_another_version(
+    grim_at, grim_home: Path, project_dir: Path, kind_server: KindedIndex
+) -> None:
+    _publish(kind_server)
+    index_config(project_dir, kind_server.base)
+    runner = grim_at(project_dir)
+    search_envelope(runner)
+    sidecar = _sidecar_path(grim_home)
+    state = json.loads(sidecar.read_text())
+    state["version"] = 2
+    sidecar.write_text(json.dumps(state))
+
+    assert _catalog(runner) is None
