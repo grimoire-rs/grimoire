@@ -221,8 +221,18 @@ pub(crate) async fn export_marketplace(
     access: &Arc<dyn OciAccess>,
     offline: bool,
 ) -> Result<MarketplaceExportReport, crate::error::Error> {
-    export_marketplace_with(req, scope, access, offline, &mut |from, to| std::fs::rename(from, to)).await
+    export_marketplace_with(
+        req,
+        scope,
+        access,
+        offline,
+        Box::new(|from, to| std::fs::rename(from, to)),
+    )
+    .await
 }
+
+/// Owned so the placement can move into `spawn_blocking`.
+type RenameFn = Box<dyn FnMut(&Path, &Path) -> io::Result<()> + Send>;
 
 /// [`export_marketplace`] with the tree placement's `rename` injectable, so a
 /// test can fail a placement after the marketplace files are written.
@@ -231,7 +241,7 @@ async fn export_marketplace_with(
     scope: &FetchScope,
     access: &Arc<dyn OciAccess>,
     offline: bool,
-    rename: &mut (dyn FnMut(&Path, &Path) -> io::Result<()> + Send),
+    mut rename: RenameFn,
 ) -> Result<MarketplaceExportReport, crate::error::Error> {
     let manifest = std::path::absolute(req.manifest).map_err(|e| io_error(req.manifest, e))?;
     // C-016: `<name>.lock` would be the output-root sidecar.
@@ -329,14 +339,28 @@ async fn export_marketplace_with(
                 profile: p.profile.clone(),
             })
             .collect();
-        let repo = Repo {
-            root: &root,
-            meta,
-            selected: &selected,
-            dropped: &inspection.dropped,
-            readme: inspection.readme,
-        };
-        Ok::<_, crate::error::Error>(commit(&repo, &summaries, staged, rename)?)
+        // The place/commit phase is all `std::fs`: run it on the blocking pool.
+        let (meta, selected, dropped, readme) = (
+            meta.clone(),
+            selected.clone(),
+            inspection.dropped.clone(),
+            inspection.readme,
+        );
+        let committed = tokio::task::spawn_blocking(move || {
+            let repo = Repo {
+                root: &root,
+                meta: &meta,
+                selected: &selected,
+                dropped: &dropped,
+                readme,
+            };
+            commit(&repo, &summaries, staged, &mut *rename)
+        })
+        .await;
+        // quality-rust.md permits `.expect()` at the join boundary.
+        #[allow(clippy::expect_used)]
+        let report = committed.expect("marketplace commit task panicked")?;
+        Ok::<_, crate::error::Error>(report)
     }
     .await;
     if result.is_err()
