@@ -41,13 +41,14 @@
 
 use crate::config::defaults;
 use clap::Args;
+use std::borrow::Borrow;
 use std::num::NonZeroUsize;
 
 use crate::api::search_report::{
     SearchDownloadVersion, SearchDownloads, SearchEntry, SearchRating, SearchReport, SearchSource, SearchSourceStatus,
 };
 use crate::catalog::registry_catalog::{CATALOG_GATED_REGISTRIES, REGISTRY_COMPAT_DOCS_URL};
-use crate::catalog::{BadgeContext, CatalogGroup, SearchQuery, SortKey, SortMode};
+use crate::catalog::{BadgeContext, CatalogEntry, CatalogGroup, CatalogRow, SearchQuery, SortKey, SortMode, badge_of};
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
 use crate::install::client_target::ClientTarget;
@@ -168,35 +169,34 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
         active: &active,
         target: target.as_ref(),
     };
-    let results = super::grim(
-        crate::catalog::load_catalog(
-            &ctx.paths(),
-            &registries,
-            args.query.as_deref().unwrap_or(""),
-            &access,
-            &badges,
-            ctx.offline(),
-            args.refresh,
-            // A user-facing browse: each source's `include`/`exclude` narrows
-            // what is listed (plan C-007). The MCP `grim_search` tool inherits
-            // this by delegating to `run`.
-            crate::catalog::CatalogScope::Browse,
-        )
-        .await,
+    // Loaded once, then filtered, scored, ranked and paged over *borrowed*
+    // entries: only the returned page is ever cloned into a row, so a search
+    // that returns 20 rows no longer holds a copy of the whole catalog.
+    let loaded = super::grim(
+        crate::catalog::load_catalogs(&ctx.paths(), &registries, &access, ctx.offline(), args.refresh).await,
     )?;
+    // A user-facing browse: each source's `include`/`exclude` narrows what is
+    // listed (plan C-007). The MCP `grim_search` tool inherits this by
+    // delegating to `run`.
+    let browsed = loaded.browse(
+        &registries,
+        &parsed,
+        crate::catalog::CatalogScope::Browse,
+        ctx.offline(),
+    );
 
     // Read before the groups are consumed below: whether any source's listing
     // is incomplete (its walk could not finish, or its build is still
     // running), which makes `items` an incomplete answer whatever `--limit`
     // says.
-    let capped = results.any_truncated();
+    let capped = browsed.any_truncated();
 
     // A non-empty query against an incomplete listing may be missing matches.
     // Surface it so a short or empty result set is not read as exhaustive.
     // (An empty query is an explicit browse — `capped` in the JSON carries the
     // same fact — so no warning.)
     if capped && !parsed.is_empty() {
-        for warning in capped_catalog_warnings(&results.groups) {
+        for warning in capped_catalog_warnings(&browsed.groups) {
             tracing::warn!("{warning}");
         }
     }
@@ -211,12 +211,12 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     // rows at all *before* the query and the read-time filters ran. That is
     // what tells an empty table caused by a query, a browse filter or the
     // relevance cutoff apart from one caused by a `_catalog`-gated registry.
-    let any_rows_listed = results.any_rows_listed();
+    let any_rows_listed = browsed.any_rows_listed();
     // A plain OCI source that actually loaded. Index sources never touch
     // `_catalog`, and a source that failed (unreachable, 401) already
     // reports its own error — the hint would misdiagnose both. Groups are
     // one per resolved registry, in order.
-    let any_registry_source = results
+    let any_registry_source = browsed
         .groups
         .iter()
         .zip(&registries)
@@ -226,7 +226,7 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     // the flatten below consumes them. Group order is registry-declaration
     // order, the same order `grim context` lists `registries[]` in, and under
     // `--registry` it is exactly the collapsed browse set.
-    let sources: Vec<SearchSourceStatus> = results
+    let sources: Vec<SearchSourceStatus> = browsed
         .groups
         .iter()
         .map(|g| SearchSourceStatus {
@@ -242,23 +242,31 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     // group's source attribution onto its rows — the alias/locator pair no
     // consumer can reconstruct from `repo` alone (an index serves rows from
     // many hosts). Base order is `CatalogResults::into_flat_rows`': groups in
-    // declaration/precedence order, each group's rows already sorted by
+    // declaration/precedence order, each group's entries already sorted by
     // repository.
-    let mut scored: Vec<ScoredRow> = results
-        .groups
-        .into_iter()
-        .flat_map(|g| {
-            let source = SearchSource {
-                alias: g.alias,
-                locator: g.registry,
-            };
-            g.rows.into_iter().map(move |r| (source.clone(), r))
+    let source_order: Vec<SearchSource> = sources
+        .iter()
+        .map(|s| SearchSource {
+            alias: s.alias.clone(),
+            locator: s.locator.clone(),
         })
-        .filter(|(_, r)| deprecated_row_visible(show, r.deprecated.is_some(), r.badge != StatusBadge::NotInstalled))
-        // Every row here already passed the same matcher inside `load_catalog`,
+        .collect();
+    let mut scored: Vec<ScoredRow<&SearchSource, &CatalogEntry>> = browsed
+        .entries
+        .iter()
+        .zip(&source_order)
+        .flat_map(|(entries, source)| entries.iter().map(move |&e| (source, e)))
+        // The badge is only read for a deprecated row that would otherwise be
+        // hidden; every other row's verdict does not depend on it.
+        .filter(|(_, e)| {
+            let deprecated = e.deprecated.is_some();
+            let installed = deprecated && !show && badge_of(e, &badges) != StatusBadge::NotInstalled;
+            deprecated_row_visible(show, deprecated, installed)
+        })
+        // Every entry here already passed the same matcher inside `browse`,
         // so it scores; a `None` would mean the two disagreed, and scoring it
         // lowest is the honest degradation.
-        .map(|(source, r)| (r.score(&parsed).unwrap_or(i64::MIN), (source, r)))
+        .map(|(source, e)| (e.score(&parsed).unwrap_or(i64::MIN), (source, e)))
         .collect();
 
     // The relevance cutoff decides *which* rows a query returns; `--sort`
@@ -269,49 +277,12 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     if let Some(notice) = hidden_rows_notice(hidden) {
         tracing::warn!("{notice}");
     }
-    let source_order: Vec<SearchSource> = sources
-        .iter()
-        .map(|s| SearchSource {
-            alias: s.alias.clone(),
-            locator: s.locator.clone(),
-        })
-        .collect();
     order_results(&mut scored, args.sort, &source_order);
     let (total, truncated) = apply_page(&mut scored, args.offset, args.limit, capped);
 
     let entries: Vec<SearchEntry> = scored
         .into_iter()
-        .map(|(_, (source, r))| SearchEntry {
-            repo: r.repo(),
-            source,
-            kind: r.kind,
-            summary: r.summary,
-            description: r.description,
-            repository: r.repository_url,
-            revision: r.revision,
-            created: r.created,
-            latest_tag: r.latest_tag,
-            version: r.version,
-            deprecated: r.deprecated,
-            replaced_by: r.replaced_by,
-            oci: r.oci,
-            // Absence is *unrated*, never `up: 0` — the JSON field stays null.
-            rating: r.rating.map(|x| SearchRating { up: x.up, url: x.url }),
-            // Same doctrine one signal over: absence is *unknown*, never 0.
-            downloads: r.downloads.map(|x| SearchDownloads {
-                total: x.total,
-                as_of: x.as_of,
-                versions: x
-                    .versions
-                    .into_iter()
-                    .map(|v| SearchDownloadVersion {
-                        version: v.version,
-                        total: v.total,
-                    })
-                    .collect(),
-            }),
-            status: r.badge,
-        })
+        .map(|(_, (source, e))| search_entry(source.clone(), CatalogRow::from_entry(e, &badges)))
         .collect();
 
     // An online browse or search whose sources listed nothing at all is
@@ -335,8 +306,83 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     ))
 }
 
-/// One flattened, scored row: relevance score plus its source and catalog row.
-type ScoredRow = (i64, (SearchSource, crate::catalog::CatalogRow));
+/// The wire entry for one materialized catalog row.
+fn search_entry(source: SearchSource, r: CatalogRow) -> SearchEntry {
+    SearchEntry {
+        repo: r.repo(),
+        source,
+        kind: r.kind,
+        summary: r.summary,
+        description: r.description,
+        repository: r.repository_url,
+        revision: r.revision,
+        created: r.created,
+        latest_tag: r.latest_tag,
+        version: r.version,
+        deprecated: r.deprecated,
+        replaced_by: r.replaced_by,
+        oci: r.oci,
+        // Absence is *unrated*, never `up: 0` — the JSON field stays null.
+        rating: r.rating.map(|x| SearchRating { up: x.up, url: x.url }),
+        // Same doctrine one signal over: absence is *unknown*, never 0.
+        downloads: r.downloads.map(|x| SearchDownloads {
+            total: x.total,
+            as_of: x.as_of,
+            versions: x
+                .versions
+                .into_iter()
+                .map(|v| SearchDownloadVersion {
+                    version: v.version,
+                    total: v.total,
+                })
+                .collect(),
+        }),
+        status: r.badge,
+    }
+}
+
+/// One flattened, scored row: relevance score plus its source and the row
+/// itself — a [`CatalogEntry`] borrowed from the loaded catalog in `run`, an
+/// owned [`CatalogRow`] in the ordering tests.
+type ScoredRow<S = SearchSource, R = CatalogRow> = (i64, (S, R));
+
+/// What the orderings read off a row.
+trait Ranked {
+    fn repo(&self) -> String;
+    fn rating(&self) -> Option<u32>;
+    fn downloads(&self) -> Option<u64>;
+    fn created(&self) -> Option<&str>;
+}
+
+impl Ranked for CatalogRow {
+    fn repo(&self) -> String {
+        CatalogRow::repo(self)
+    }
+    fn rating(&self) -> Option<u32> {
+        self.rating.as_ref().map(|x| x.up)
+    }
+    fn downloads(&self) -> Option<u64> {
+        self.downloads.as_ref().map(|d| d.total)
+    }
+    fn created(&self) -> Option<&str> {
+        self.created.as_deref()
+    }
+}
+
+impl Ranked for &CatalogEntry {
+    fn repo(&self) -> String {
+        CatalogEntry::repo(self)
+    }
+    fn rating(&self) -> Option<u32> {
+        self.rating.as_ref().map(|x| x.up)
+    }
+    fn downloads(&self) -> Option<u64> {
+        self.downloads.as_ref().map(|d| d.total)
+    }
+    fn created(&self) -> Option<&str> {
+        self.created.as_deref()
+    }
+}
 
 /// Sort the flattened rows by relevance, descending, in place, in a **total**
 /// order.
@@ -357,13 +403,16 @@ type ScoredRow = (i64, (SearchSource, crate::catalog::CatalogRow));
 /// requests for different pages must slice one and the same list. An empty
 /// query scores every row 0, so the unqueried browse is exactly that tie-break
 /// order, unchanged from before paging. Extracted so the ordering is unit-testable without a live registry.
-fn rank_by_relevance(scored: &mut Vec<ScoredRow>, source_order: &[SearchSource]) {
+fn rank_by_relevance<S: Borrow<SearchSource>, R: Ranked>(
+    scored: &mut Vec<ScoredRow<S, R>>,
+    source_order: &[SearchSource],
+) {
     let mut keyed: Vec<_> = scored
         .drain(..)
         .map(|row| {
             let key = (
                 std::cmp::Reverse(row.0),
-                source_rank(source_order, &row.1.0),
+                source_rank(source_order, row.1.0.borrow()),
                 row.1.1.repo(),
             );
             (key, row)
@@ -381,7 +430,11 @@ fn rank_by_relevance(scored: &mut Vec<ScoredRow>, source_order: &[SearchSource])
 /// score dominate, so `--sort rating` would appear not to sort at all.
 /// Absent the flag nothing about today's ordering changes, which is the
 /// Principle 9 guarantee this function carries.
-fn order_results(scored: &mut Vec<ScoredRow>, sort: Option<SortMode>, source_order: &[SearchSource]) {
+fn order_results<S: Borrow<SearchSource>, R: Ranked>(
+    scored: &mut Vec<ScoredRow<S, R>>,
+    sort: Option<SortMode>,
+    source_order: &[SearchSource],
+) {
     match sort {
         Some(mode) => sort_by_mode(scored, mode, source_order),
         None => rank_by_relevance(scored, source_order),
@@ -440,18 +493,17 @@ fn apply_page<T>(rows: &mut Vec<T>, offset: usize, limit: Option<NonZeroUsize>, 
 /// the final key here is the source's position in `source_order`: `--offset`
 /// paging never rests on the incoming order surviving a stable sort, the same
 /// rule [`rank_by_relevance`] follows.
-fn sort_by_mode(scored: &mut Vec<ScoredRow>, mode: SortMode, source_order: &[SearchSource]) {
+fn sort_by_mode<S: Borrow<SearchSource>, R: Ranked>(
+    scored: &mut Vec<ScoredRow<S, R>>,
+    mode: SortMode,
+    source_order: &[SearchSource],
+) {
     let mut keyed: Vec<_> = scored
         .drain(..)
         .map(|row| {
             let r = &row.1.1;
-            let key = SortKey::new(
-                r.rating.as_ref().map(|x| x.up),
-                r.downloads.as_ref().map(|d| d.total),
-                r.created.as_deref(),
-                &r.repo(),
-            );
-            (key, source_rank(source_order, &row.1.0), row)
+            let key = SortKey::new(r.rating(), r.downloads(), r.created(), &r.repo());
+            (key, source_rank(source_order, row.1.0.borrow()), row)
         })
         .collect();
     keyed.sort_by(|(a, ra, _), (b, rb, _)| crate::catalog::browse_sort::compare(a, b, mode).then(ra.cmp(rb)));

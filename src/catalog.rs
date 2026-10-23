@@ -41,7 +41,8 @@ pub use browse_sort::{SortKey, SortMode, SortOrder};
 pub use catalog_error::{CatalogError, CatalogErrorKind};
 #[allow(unused_imports)]
 pub use catalog_service::{
-    BadgeContext, CatalogGroup, CatalogResults, CatalogRow, CatalogScope, Refresh, load_catalog,
+    BadgeContext, Browsed, CatalogGroup, CatalogResults, CatalogRow, CatalogScope, LoadedCatalogs, Refresh, badge_of,
+    load_catalog, load_catalogs,
 };
 #[allow(unused_imports)]
 pub use registry_catalog::{Catalog, CatalogEntry, DownloadSummary, DownloadVersion, OciMeta};

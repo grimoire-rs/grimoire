@@ -35,7 +35,7 @@
 use std::sync::Arc;
 
 use crate::catalog::redact::redact_url;
-use crate::catalog::registry_catalog::{Catalog, DownloadSummary, OciMeta, RatingSummary};
+use crate::catalog::registry_catalog::{Catalog, CatalogEntry, DownloadSummary, OciMeta, RatingSummary};
 use crate::catalog::search_match::SearchQuery;
 pub use crate::catalog::sync_state::Refresh;
 use crate::config::ResolvedRegistry;
@@ -150,22 +150,44 @@ impl CatalogRow {
         format!("{}/{}", self.registry, self.repository)
     }
 
-    /// This row's relevance score for `query`, or `None` when it does not
-    /// match — the ranking half of the shared matcher.
-    ///
-    /// Projects exactly the fields
-    /// [`super::registry_catalog::CatalogEntry::matches`] projects, so the
-    /// score a front-end ranks by is derived from the same view of the row
-    /// that admitted it in the first place.
-    pub fn score(&self, query: &SearchQuery) -> Option<i64> {
-        query.score_fields(
-            self.kind.as_deref(),
-            &self.repo(),
-            self.summary.as_deref().unwrap_or(""),
-            self.description.as_deref().unwrap_or(""),
-            &self.keywords,
-        )
+    /// Materialize `e` as a badged row. The one place a catalog entry is
+    /// cloned into a [`CatalogRow`], so a front-end that pages first pays the
+    /// clone for the page only.
+    pub fn from_entry(e: &CatalogEntry, badges: &BadgeContext<'_>) -> Self {
+        Self {
+            kind: e.kind.clone(),
+            registry: e.registry.clone(),
+            repository: e.repository.clone(),
+            index_path: e.index_path.clone(),
+            summary: e.summary.clone(),
+            description: e.description.clone(),
+            keywords: e.keywords.clone(),
+            repository_url: e.repository_url.clone(),
+            revision: e.revision.clone(),
+            created: e.created.clone(),
+            deprecated: e.deprecated.clone(),
+            replaced_by: e.replaced_by.clone(),
+            oci: e.oci.clone(),
+            latest_tag: e.latest_tag.clone(),
+            version: e.version.clone(),
+            rating: e.rating.clone(),
+            downloads: e.downloads.clone(),
+            badge: badge_of(e, badges),
+        }
     }
+}
+
+/// The install badge of one catalog entry in the scope `badges` describes.
+pub fn badge_of(e: &CatalogEntry, badges: &BadgeContext<'_>) -> StatusBadge {
+    derive_badge(
+        &e.registry,
+        &e.repository,
+        badges.lock,
+        badges.state,
+        badges.roots,
+        badges.active,
+        badges.target,
+    )
 }
 
 /// One registry's slice of the result set — the TUI tree's root node.
@@ -274,6 +296,10 @@ impl CatalogResults {
     /// post-query, so under `grim search <query>` it cannot tell "the
     /// registry listed nothing" from "the query matched nothing in a
     /// populated catalog".
+    #[allow(
+        dead_code,
+        reason = "`grim search` reads the same fact off `Browsed`; only the shared-seam tests read it here"
+    )]
     pub fn any_rows_listed(&self) -> bool {
         self.any_rows_listed
     }
@@ -296,6 +322,13 @@ impl CatalogResults {
 /// as a source that answered.
 const TASK_FAILED: &str = "catalog refresh task failed";
 
+/// Every configured registry's loaded catalog, in resolution order, before the
+/// query and browse filter ran: the owner a borrowed search reads from.
+/// Sibling views of one locator share one load.
+pub struct LoadedCatalogs {
+    sources: Vec<Result<Arc<Catalog>, String>>,
+}
+
 /// Load (or coordinately refresh) every configured registry's catalog in
 /// parallel, filter by `query`, badge every surviving row, and return the
 /// result grouped by registry.
@@ -310,6 +343,10 @@ const TASK_FAILED: &str = "catalog refresh task failed";
 /// still return. The per-registry refresh is coordinated across processes
 /// (advisory lock, serve-stale-on-contention) so a long-lived MCP server and
 /// ad-hoc CLI/TUI runs sharing one `$GRIM_HOME` never stampede the network.
+///
+/// A front-end that ranks and pages the result should call
+/// [`load_catalogs`] and [`LoadedCatalogs::browse`] instead, and materialize
+/// rows for the returned page only.
 ///
 /// # Errors
 ///
@@ -330,8 +367,28 @@ pub async fn load_catalog(
     refresh: impl Into<Refresh>,
     scope: CatalogScope,
 ) -> Result<CatalogResults, crate::catalog::catalog_error::CatalogError> {
+    let loaded = load_catalogs(paths, registries, access, offline, refresh).await?;
+    Ok(loaded
+        .browse(registries, &SearchQuery::parse(query), scope, offline)
+        .into_results(badges))
+}
+
+/// Load (or coordinately refresh) every configured registry's catalog in
+/// parallel — the fan-out half of [`load_catalog`], with its failure
+/// semantics: a registry that cannot load is carried as its error, not
+/// raised.
+///
+/// # Errors
+///
+/// Currently infallible; see [`load_catalog`].
+pub async fn load_catalogs(
+    paths: &GrimPaths,
+    registries: &[ResolvedRegistry],
+    access: &Arc<dyn OciAccess>,
+    offline: bool,
+    refresh: impl Into<Refresh>,
+) -> Result<LoadedCatalogs, crate::catalog::catalog_error::CatalogError> {
     let refresh = refresh.into();
-    let parsed = SearchQuery::parse(query);
 
     // Fan out one coordinated refresh per distinct **locator** — not per
     // entry. `resolve_registries` admits two differently-aliased entries at
@@ -358,7 +415,7 @@ pub async fn load_catalog(
             })
         })
         .collect();
-    let mut set: tokio::task::JoinSet<(usize, Result<Catalog, String>)> = tokio::task::JoinSet::new();
+    let mut set: tokio::task::JoinSet<(usize, Result<Arc<Catalog>, String>)> = tokio::task::JoinSet::new();
     for (idx, (url, kind)) in loads.iter().copied().enumerate() {
         let path = paths.catalog_file_for(url);
         let registry = url.to_string();
@@ -395,7 +452,7 @@ pub async fn load_catalog(
                             redact_url(error).escape_debug(),
                         );
                     }
-                    (idx, Ok(catalog))
+                    (idx, Ok(Arc::new(catalog)))
                 }
                 Err(e) => {
                     // Logged as before — the stderr line is a shipped signal
@@ -425,7 +482,8 @@ pub async fn load_catalog(
     // regardless of completion order (quality-rust JoinSet rule) with no
     // separate sort. A task that panicked is logged and its registry degrades
     // to an absent (empty) group below rather than vanishing silently.
-    let mut by_load: std::collections::BTreeMap<usize, Result<Catalog, String>> = std::collections::BTreeMap::new();
+    let mut by_load: std::collections::BTreeMap<usize, Result<Arc<Catalog>, String>> =
+        std::collections::BTreeMap::new();
     while let Some(joined) = set.join_next().await {
         match joined {
             Ok((idx, catalog)) => {
@@ -439,121 +497,146 @@ pub async fn load_catalog(
         }
     }
 
-    let mut views_left = vec![0usize; loads.len()];
-    for &l in &load_of {
-        views_left[l] += 1;
-    }
-    let mut groups = Vec::with_capacity(registries.len());
-    let mut any_rows_listed = false;
-    for (idx, reg) in registries.iter().enumerate() {
-        // Sibling views of one locator read the same load, each narrowing it
-        // through its own filter below: all but the last clone it. An absent
-        // entry is a task that failed to join, which is a failure — never a
-        // source that answered with nothing.
-        let catalog = load_of
-            .get(idx)
-            .and_then(|&l| {
-                views_left[l] -= 1;
-                if views_left[l] == 0 {
-                    by_load.remove(&l)
-                } else {
-                    by_load.get(&l).cloned()
-                }
-            })
-            .unwrap_or_else(|| Err(TASK_FAILED.to_string()));
-        let group = match catalog {
-            Ok(catalog) => {
-                any_rows_listed |= catalog.entries().next().is_some();
-                // The rows the browse filter is asked about: everything the
-                // shared `SearchQuery` admitted. Materialized so the count is
-                // available for the C-019 diagnostic below.
-                let candidates: Vec<_> = catalog.entries().filter(|e| e.matches(&parsed)).collect();
-                let considered = candidates.len();
-                let rows: Vec<CatalogRow> = candidates
-                    .into_iter()
-                    // Plan C-008: a **read-time** narrowing, applied here and
-                    // nowhere else. It never touches the catalog build — the
-                    // on-disk cache is keyed on the url alone and shared with
-                    // the `Complete` caller, so a build-time prefilter would
-                    // poison `grim status --check` across processes (ADR D6).
-                    // The match is total over `CatalogScope` on purpose: a
-                    // future scope cannot compile without deciding.
-                    .filter(|e| match scope {
-                        CatalogScope::Complete => true,
-                        CatalogScope::Browse => reg.filter.matches(&e.registry, &e.repository),
-                    })
-                    .map(|e| CatalogRow {
-                        kind: e.kind.clone(),
-                        registry: e.registry.clone(),
-                        repository: e.repository.clone(),
-                        index_path: e.index_path.clone(),
-                        summary: e.summary.clone(),
-                        description: e.description.clone(),
-                        keywords: e.keywords.clone(),
-                        repository_url: e.repository_url.clone(),
-                        revision: e.revision.clone(),
-                        created: e.created.clone(),
-                        deprecated: e.deprecated.clone(),
-                        replaced_by: e.replaced_by.clone(),
-                        oci: e.oci.clone(),
-                        latest_tag: e.latest_tag.clone(),
-                        version: e.version.clone(),
-                        rating: e.rating.clone(),
-                        downloads: e.downloads.clone(),
-                        badge: derive_badge(
-                            &e.registry,
-                            &e.repository,
-                            badges.lock,
-                            badges.state,
-                            badges.roots,
-                            badges.active,
-                            badges.target,
-                        ),
-                    })
-                    .collect();
-                // A partial listing has not reached the rows the include list
-                // names yet, so zero matches cannot yet blame the pattern.
-                if scope == CatalogScope::Browse
-                    && !catalog.truncated()
-                    && let Some(warning) = zero_match_warning(reg, &parsed, considered, rows.len())
-                {
-                    tracing::warn!("{warning}");
-                }
-                CatalogGroup {
-                    registry: reg.url.clone(),
-                    alias: reg.alias.clone(),
-                    // Plan C-008 / ADR D6: **build-time** listing incompleteness,
-                    // reported verbatim. It is a property of the listing, fixed
-                    // before the filter is ever consulted, so a filter never
-                    // changes it.
-                    truncated: catalog.truncated(),
-                    built_at: catalog.built_at().to_string(),
-                    served_offline: offline || catalog.refresh_error().is_some(),
-                    error: catalog.refresh_error().map(str::to_owned),
-                    rows_before_filter: considered,
-                    rows,
-                }
-            }
-            Err(error) => CatalogGroup {
-                registry: reg.url.clone(),
-                alias: reg.alias.clone(),
-                truncated: false,
-                built_at: String::new(),
-                served_offline: true,
-                error: Some(error),
-                // A failed or offline-degraded source considered nothing —
-                // the group is empty for a reason no filter caused.
-                rows_before_filter: 0,
-                rows: Vec::new(),
-            },
-        };
-        groups.push(group);
+    // Sibling views of one locator read the same load, each narrowing it
+    // through its own filter in `browse`. An absent entry is a task that
+    // failed to join, which is a failure — never a source that answered with
+    // nothing.
+    let sources = load_of
+        .iter()
+        .map(|l| by_load.get(l).cloned().unwrap_or_else(|| Err(TASK_FAILED.to_string())))
+        .collect();
+    Ok(LoadedCatalogs { sources })
+}
+
+/// The result of [`LoadedCatalogs::browse`]: every source's group metadata and
+/// the entries that survived the query and browse filter, still **borrowed**
+/// from the loaded catalogs. Nothing is cloned until a caller picks the rows
+/// it keeps.
+pub struct Browsed<'a> {
+    /// One group per configured registry, in resolution order, with
+    /// [`CatalogGroup::rows`] left empty — the entries are in
+    /// [`Self::entries`].
+    pub groups: Vec<CatalogGroup>,
+    /// The matching entries of `groups[i]`, sorted by repository path.
+    pub entries: Vec<Vec<&'a CatalogEntry>>,
+    any_rows_listed: bool,
+}
+
+impl Browsed<'_> {
+    /// Whether any registry's listing is incomplete.
+    pub fn any_truncated(&self) -> bool {
+        self.groups.iter().any(|g| g.truncated)
     }
 
-    Ok(CatalogResults {
-        groups,
-        any_rows_listed,
-    })
+    /// See [`CatalogResults::any_rows_listed`].
+    pub fn any_rows_listed(&self) -> bool {
+        self.any_rows_listed
+    }
+
+    /// Clone and badge every entry into a [`CatalogResults`].
+    pub fn into_results(self, badges: &BadgeContext<'_>) -> CatalogResults {
+        let groups = self
+            .groups
+            .into_iter()
+            .zip(self.entries)
+            .map(|(mut group, entries)| {
+                group.rows = entries.into_iter().map(|e| CatalogRow::from_entry(e, badges)).collect();
+                group
+            })
+            .collect();
+        CatalogResults {
+            groups,
+            any_rows_listed: self.any_rows_listed,
+        }
+    }
+}
+
+impl LoadedCatalogs {
+    /// Filter every source by `query` (and, under [`CatalogScope::Browse`],
+    /// its `include`/`exclude` filter) without cloning a single entry.
+    /// `registries` is the slice [`load_catalogs`] was given.
+    pub fn browse<'a>(
+        &'a self,
+        registries: &[ResolvedRegistry],
+        query: &SearchQuery,
+        scope: CatalogScope,
+        offline: bool,
+    ) -> Browsed<'a> {
+        let mut groups = Vec::with_capacity(registries.len());
+        let mut all_entries = Vec::with_capacity(registries.len());
+        let mut any_rows_listed = false;
+        for (reg, loaded) in registries.iter().zip(&self.sources) {
+            let (group, entries) = match loaded {
+                Ok(catalog) => {
+                    any_rows_listed |= catalog.entries().next().is_some();
+                    // The rows the browse filter is asked about: everything the
+                    // shared `SearchQuery` admitted. Materialized so the count
+                    // is available for the C-019 diagnostic below.
+                    let candidates: Vec<_> = catalog.entries().filter(|e| e.matches(query)).collect();
+                    let considered = candidates.len();
+                    let entries: Vec<&CatalogEntry> = candidates
+                        .into_iter()
+                        // Plan C-008: a **read-time** narrowing, applied here and
+                        // nowhere else. It never touches the catalog build — the
+                        // on-disk cache is keyed on the url alone and shared with
+                        // the `Complete` caller, so a build-time prefilter would
+                        // poison `grim status --check` across processes (ADR D6).
+                        // The match is total over `CatalogScope` on purpose: a
+                        // future scope cannot compile without deciding.
+                        .filter(|e| match scope {
+                            CatalogScope::Complete => true,
+                            CatalogScope::Browse => reg.filter.matches(&e.registry, &e.repository),
+                        })
+                        .collect();
+                    // A partial listing has not reached the rows the include list
+                    // names yet, so zero matches cannot yet blame the pattern.
+                    if scope == CatalogScope::Browse
+                        && !catalog.truncated()
+                        && let Some(warning) = zero_match_warning(reg, query, considered, entries.len())
+                    {
+                        tracing::warn!("{warning}");
+                    }
+                    let group = CatalogGroup {
+                        registry: reg.url.clone(),
+                        alias: reg.alias.clone(),
+                        // Plan C-008 / ADR D6: **build-time** listing incompleteness,
+                        // reported verbatim. It is a property of the listing, fixed
+                        // before the filter is ever consulted, so a filter never
+                        // changes it.
+                        truncated: catalog.truncated(),
+                        built_at: catalog.built_at().to_string(),
+                        served_offline: offline || catalog.refresh_error().is_some(),
+                        error: catalog.refresh_error().map(str::to_owned),
+                        rows_before_filter: considered,
+                        rows: Vec::new(),
+                    };
+                    (group, entries)
+                }
+                Err(error) => (
+                    CatalogGroup {
+                        registry: reg.url.clone(),
+                        alias: reg.alias.clone(),
+                        truncated: false,
+                        built_at: String::new(),
+                        served_offline: true,
+                        error: Some(error.clone()),
+                        // A failed or offline-degraded source considered nothing —
+                        // the group is empty for a reason no filter caused.
+                        rows_before_filter: 0,
+                        rows: Vec::new(),
+                    },
+                    Vec::new(),
+                ),
+            };
+            groups.push(group);
+            all_entries.push(entries);
+        }
+        Browsed {
+            groups,
+            entries: all_entries,
+            any_rows_listed,
+        }
+    }
 }
 
 /// The cause and remedy appended to the plan C-019 diagnostic: the counts alone

@@ -320,6 +320,20 @@ impl CatalogEntry {
         format!("{}/{}", self.registry, self.repository)
     }
 
+    /// This entry's relevance score for `query`, or `None` when it does not
+    /// match — the ranking half of the shared matcher. Projects exactly the
+    /// fields [`Self::matches`] projects, so the score a front-end ranks by is
+    /// derived from the same view of the entry that admitted it.
+    pub fn score(&self, query: &SearchQuery) -> Option<i64> {
+        query.score_fields(
+            self.kind.as_deref(),
+            &self.repo(),
+            self.summary.as_deref().unwrap_or(""),
+            self.description.as_deref().unwrap_or(""),
+            &self.keywords,
+        )
+    }
+
     /// Whether `query` matches this entry, delegating to the shared
     /// [`SearchQuery`] matcher (AND-of-terms over kind / repo / summary /
     /// description / keywords, plus bare kind-keyword filters). The query is
