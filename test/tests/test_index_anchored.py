@@ -115,7 +115,7 @@ def test_a_blob_that_is_not_the_one_the_root_names_falls_back_to_all_json(
 
 
 def test_a_root_only_index_with_a_bad_blob_degrades_the_source(
-    grim_at, project_dir: Path, root_only_index: KindedIndex
+    grim_at, grim_home: Path, project_dir: Path, root_only_index: KindedIndex
 ) -> None:
     write_all_json(root_only_index.root, [package("one", "skill", ONE, "First")])
     root_only_index.handler.faults[_blob_path(root_only_index)] = Fault(status=404)
@@ -125,21 +125,34 @@ def test_a_root_only_index_with_a_bad_blob_degrades_the_source(
 
     assert envelope["items"] == []
     assert envelope["sources"][0]["ok"] is False, envelope["sources"]
+    catalog = grim_home / "catalog"
+    cached = [p for p in catalog.glob("*.json") if not p.name.endswith(".sync.json")]
+    assert cached == [], "a refresh that never verified a blob must cache no catalog"
+    (sidecar,) = catalog.glob("*.sync.json")
+    state = json.loads(sidecar.read_text())
+    assert state["root"] is None, "a blob that failed adopts no root"
+    assert state["failures"] == 1
+
+
+def _publish_two(index: KindedIndex) -> None:
+    write_all_json(
+        index.root,
+        [package("one", "skill", ONE, "First"), package("two", "skill", TWO, "Second")],
+    )
 
 
 def test_a_blob_the_host_cannot_serve_keeps_the_warm_cache(
-    grim_at, project_dir: Path, anchored_index: KindedIndex
+    grim_at, grim_home: Path, project_dir: Path, anchored_index: KindedIndex
 ) -> None:
     write_all_json(anchored_index.root, [package("one", "skill", ONE, "First")])
     index_config(project_dir, anchored_index.base)
     runner = grim_at(project_dir)
     warm = search_envelope(runner)
     assert [r["repo"] for r in warm["items"]] == [ONE]
+    cached = _cache_file(grim_home).read_bytes()
+    adopted = _sidecar(grim_home)["root"]
 
-    write_all_json(
-        anchored_index.root,
-        [package("one", "skill", ONE, "First"), package("two", "skill", TWO, "Second")],
-    )
+    _publish_two(anchored_index)
     anchored_index.fault("flat", Fault(status=503))
     seen = len(anchored_index.log)
     envelope = search_envelope(runner)
@@ -151,6 +164,33 @@ def test_a_blob_the_host_cannot_serve_keeps_the_warm_cache(
     assert "/all.json" not in _requested(anchored_index)[seen:], (
         "a blob the host cannot serve must not send the refresh to all.json"
     )
+    assert _cache_file(grim_home).read_bytes() == cached
+    state = _sidecar(grim_home)
+    assert state["root"] == adopted, "the failed root must not be adopted"
+    assert state["failures"] == 1
+
+
+def test_a_blob_that_recovers_is_adopted_by_the_next_refresh(
+    grim_at, grim_home: Path, project_dir: Path, anchored_index: KindedIndex
+) -> None:
+    write_all_json(anchored_index.root, [package("one", "skill", ONE, "First")])
+    index_config(project_dir, anchored_index.base)
+    runner = grim_at(project_dir)
+    search_envelope(runner)
+    adopted = _sidecar(grim_home)["root"]
+    _publish_two(anchored_index)
+    anchored_index.fault("flat", Fault(status=503))
+    assert search_envelope(runner)["sources"][0]["ok"] is False
+    anchored_index.fault("flat", None)
+
+    envelope = search_envelope(runner)
+
+    assert envelope["sources"][0]["ok"] is True, envelope["sources"]
+    assert {r["repo"] for r in envelope["items"]} == {ONE, TWO}
+    state = _sidecar(grim_home)
+    assert state["root"] != adopted
+    assert state["root"]["sha256"] == _digest(anchored_index.root / "c" / "root.json")
+    assert state["failures"] == 0
 
 
 OLD = "2020-01-01T00:00:00Z"
@@ -459,6 +499,8 @@ def test_a_root_whose_blob_fails_is_not_adopted(
     index_config(project_dir, index.base)
     runner = grim_at(project_dir)
     search_envelope(runner)
+    before = _sidecar(grim_home)
+    assert before["root"] is not None and before["fallbacks"] == 0
     write_all_json(
         index.root,
         [package("one", "skill", ONE, "First"), package("two", "skill", TWO, "Second")],
@@ -469,9 +511,13 @@ def test_a_root_whose_blob_fails_is_not_adopted(
     envelope = _browse(runner)
 
     assert envelope["sources"][0]["ok"] is True
-    assert _sidecar(grim_home)["root"] is None, (
-        "a root whose blob failed is not adopted"
+    assert {r["repo"] for r in envelope["items"]} == {ONE, TWO}, (
+        "the listing must come from all.json, the fallback"
     )
+    state = _sidecar(grim_home)
+    assert state["root"] is None, "a root whose blob failed is not adopted"
+    assert (state["fallbacks"], state["failures"]) == (1, 0)
+    assert state["flat"]["sha256"] == _digest(index.root / "all.json")
 
 
 def test_stats_the_root_advertises_are_fetched_behind_an_unchanged_root(

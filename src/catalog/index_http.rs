@@ -890,21 +890,64 @@ mod tests {
 
     #[tokio::test]
     async fn a_redirect_carries_no_referer_and_no_cookie() {
+        // The client has no cookie jar: a `Set-Cookie` on hop 1 is never replayed
+        // to a same-origin hop 2, whatever the credential on the first request.
         let (base, heads) = spawn_redirect_chain(1).await;
-
         index_get(&http_client().unwrap(), &format!("{base}/0"))
             .send()
             .await
             .expect("followed");
-
-        for head in heads.lock().unwrap().iter() {
+        let heads = heads.lock().unwrap().clone();
+        assert_eq!(heads.len(), 2);
+        for head in &heads {
             let lines = header_lines(head);
-            for name in ["referer:", "cookie:", "authorization:"] {
+            for name in ["referer:", "cookie:"] {
                 assert!(
                     !lines.iter().any(|line| line.starts_with(name)),
                     "{name} must not be sent:\n{head}"
                 );
             }
+        }
+
+        // Across origins a credential on the first request must not follow.
+        let (elsewhere, mut landed) = spawn_capturing_host().await;
+        let (home, mut asked) = {
+            let (tx, rx) = tokio::sync::mpsc::channel::<String>(1);
+            let base = spawn_scripted_host(move |mut sock| {
+                let (tx, target) = (tx.clone(), elsewhere.clone());
+                async move {
+                    let _ = tx.try_send(read_head(&mut sock).await);
+                    let response = format!(
+                        "HTTP/1.1 302 Found\r\nlocation: {target}/next\r\nset-cookie: s=1\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                    );
+                    let _ = sock.write_all(response.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                }
+            })
+            .await;
+            (base, rx)
+        };
+
+        index_get(&http_client().unwrap(), &home)
+            .header(reqwest::header::AUTHORIZATION, "Bearer t")
+            .header(reqwest::header::COOKIE, "s=0")
+            .send()
+            .await
+            .expect("followed");
+
+        let first = header_lines(&asked.recv().await.expect("hop 1 was asked"));
+        for name in ["authorization:", "cookie:"] {
+            assert!(
+                first.iter().any(|line| line.starts_with(name)),
+                "the first request must carry {name} for the second hop to prove anything:\n{first:?}"
+            );
+        }
+        let second = header_lines(&landed.recv().await.expect("hop 2 was asked"));
+        for name in ["referer:", "cookie:", "authorization:"] {
+            assert!(
+                !second.iter().any(|line| line.starts_with(name)),
+                "{name} must not reach the second hop:\n{second:?}"
+            );
         }
     }
 

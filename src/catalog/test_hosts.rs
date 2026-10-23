@@ -27,6 +27,14 @@ where
     base
 }
 
+/// A loopback port nobody listens on: bound, then released, so a connect is
+/// refused at once on every platform (`127.0.0.1:1` waits out the connect
+/// timeout on Windows).
+pub(crate) fn closed_loopback_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().port()
+}
+
 /// A `200` carrying `body` verbatim, with `extra` raw header lines.
 pub(crate) fn http_200(extra: &str, body: &[u8]) -> Vec<u8> {
     let mut out = format!(

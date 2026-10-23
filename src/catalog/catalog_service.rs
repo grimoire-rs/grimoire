@@ -665,6 +665,7 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
+    use crate::catalog::test_hosts::closed_loopback_port;
     use crate::context::Context;
     use crate::oci::access::Operation;
     use crate::oci::access::error::{AccessError, AccessErrorKind};
@@ -884,8 +885,9 @@ mod tests {
             active: &ClientTarget::ALL,
             target: None,
         };
-        // Port 1 refuses the connection, so the index fetch fails fast.
-        let index_url = "http://127.0.0.1:1";
+        // A closed port refuses the connection, so the index fetch fails fast.
+        let index_url = format!("http://127.0.0.1:{}", closed_loopback_port());
+        let index_url = index_url.as_str();
         seed_catalog(&paths, "registry.one", &[("registry.one", "ns/alpha")], false);
         seed_catalog(&paths, index_url, &[("ghcr.io", "acme/beta")], false);
         let registries = vec![
@@ -1031,8 +1033,10 @@ mod tests {
             active: &ClientTarget::ALL,
             target: None,
         };
-        let warm = "http://127.0.0.1:1/warm\u{202e}";
-        let cold = "http://127.0.0.1:1/cold\u{202e}";
+        let port = closed_loopback_port();
+        let warm = format!("http://127.0.0.1:{port}/warm\u{202e}");
+        let cold = format!("http://127.0.0.1:{port}/cold\u{202e}");
+        let (warm, cold) = (warm.as_str(), cold.as_str());
         seed_catalog(&paths, warm, &[("ghcr.io", "acme/beta")], false);
         let registries = vec![index_source(warm, None, &[], &[]), index_source(cold, None, &[], &[])];
         let access: Arc<dyn OciAccess> = Arc::new(FailingAccess);
@@ -1087,9 +1091,11 @@ mod tests {
             active: &ClientTarget::ALL,
             target: None,
         };
-        // Port 1 refuses the connection; one source has a warm cache, one is cold.
-        let warm = "http://user:s3cret@127.0.0.1:1/warm?token=abc123";
-        let cold = "http://user:s3cret@127.0.0.1:1/cold?token=abc123";
+        // A closed port refuses the connection; one source has a warm cache, one is cold.
+        let port = closed_loopback_port();
+        let warm = format!("http://user:s3cret@127.0.0.1:{port}/warm?token=abc123");
+        let cold = format!("http://user:s3cret@127.0.0.1:{port}/cold?token=abc123");
+        let (warm, cold) = (warm.as_str(), cold.as_str());
         seed_catalog(&paths, warm, &[("ghcr.io", "acme/beta")], false);
         let registries = vec![index_source(warm, None, &[], &[]), index_source(cold, None, &[], &[])];
         let access: Arc<dyn OciAccess> = Arc::new(FailingAccess);
@@ -1128,7 +1134,10 @@ mod tests {
         let mut texts = vec![captured];
         texts.extend(results.groups.iter().filter_map(|g| g.error.clone()));
         for text in texts {
-            assert!(text.contains("127.0.0.1:1/"), "the source is still named: {text}");
+            assert!(
+                text.contains(&format!("127.0.0.1:{port}/")),
+                "the source is still named: {text}"
+            );
             for secret in ["s3cret", "abc123"] {
                 assert!(!text.contains(secret), "{secret} leaked into {text}");
             }
