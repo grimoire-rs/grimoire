@@ -30,6 +30,7 @@ from src.index_fixture import (
     write_all_json,
     write_stats,
 )
+from src.otlp_fixture import closed_port
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +254,7 @@ def test_search_http_index_hides_and_marks_deprecated(grim_at, project_dir: Path
 def test_search_unreachable_http_index_degrades_to_empty(grim_at, project_dir: Path) -> None:
     """An unreachable index degrades that source to an empty group — the
     browse still exits 0 (same contract as an unreachable registry)."""
-    index_config(project_dir, "http://127.0.0.1:1/absent")
+    index_config(project_dir, f"http://127.0.0.1:{closed_port()}/absent")
     rows = _search_rows(grim_at(project_dir))
     assert rows == [], f"unreachable index must yield no rows, got {rows}"
 
@@ -266,7 +267,7 @@ def test_search_json_names_the_failed_index_source(grim_at, project_dir: Path) -
     sibling says which source failed and why, so an empty ``items`` is never
     mistaken for an empty index.
     """
-    locator = "http://127.0.0.1:1/absent"
+    locator = f"http://127.0.0.1:{closed_port()}/absent"
     index_config(project_dir, locator)
     runner = grim_at(project_dir)
 

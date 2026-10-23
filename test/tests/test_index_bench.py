@@ -8,7 +8,10 @@ sized by a small launcher so the pytest process never counts toward it.
 Budgets: a warm search and a quiet refresh each finish in under a second and
 300 MB; a quiet refresh is one plain request for the root, answered in under
 1 KB, rewrites no catalog file and writes under 1 KB beyond its sidecar; a
-refresh that fetches a new catalog peaks at twice a warm search at most. Times
+refresh that fetches a new catalog peaks at twice a warm search at most; a
+refresh that fails keeps the cache, asks for the root once and stays within the
+warm budgets; one that falls back to ``all.json`` finishes in under five
+seconds and peaks at twice a warm search at most. Times
 are the best of several runs, so a busy runner cannot fail a budget that the
 code meets. Run with ``-m bench -s`` to print the measurements.
 """
@@ -29,6 +32,7 @@ from pathlib import Path
 import pytest
 
 from src.index_fixture import (
+    Fault,
     IndexHandler,
     Request,
     index_config,
@@ -44,6 +48,7 @@ pytestmark = pytest.mark.bench
 
 ENTRIES = 20_000
 MAX_SECONDS = 1.0
+MAX_FALLBACK_SECONDS = 5.0
 MAX_BYTES = 300 * 10**6
 MAX_EXTRA_WRITTEN = 1024
 MAX_QUIET_BYTES = 1024
@@ -96,6 +101,11 @@ class Measured:
     cold_requests: list[Request]
     changed: Run
     changed_requests: list[Request]
+    failing: list[Run]
+    failing_requests: list[list[Request]]
+    failing_kept_catalog: bool
+    fallback: Run
+    fallback_requests: list[Request]
 
 
 def _generation(revision: int) -> tuple[bytes, bytes]:
@@ -269,6 +279,22 @@ def measured(
 
         _publish(dist, *_generation(1))
         changed, changed_requests = refreshed(*REFRESHING, "--refresh")
+
+        # The root cannot be served: every refresh fails and the cache stays.
+        catalog, _ = _catalog_files(home)
+        cached = catalog.read_bytes()
+        handler.faults["/c/root.json"] = Fault(status=503)
+        failing, failing_requests = [], []
+        for _ in range(REPEATS):
+            run, requests = refreshed(*REFRESHING, "--refresh")
+            failing.append(run)
+            failing_requests.append(requests)
+        failing_kept_catalog = catalog.read_bytes() == cached
+
+        # No root at all: the refresh reads the whole catalog from /all.json.
+        handler.faults["/c/root.json"] = Fault(status=404)
+        _publish(dist, *_generation(0))
+        fallback, fallback_requests = refreshed(*REFRESHING, "--refresh")
     result = Measured(
         warm,
         warm_limited,
@@ -278,6 +304,11 @@ def measured(
         cold_requests,
         changed,
         changed_requests,
+        failing,
+        failing_requests,
+        failing_kept_catalog,
+        fallback,
+        fallback_requests,
     )
     quiet_run = _best([q.run for q in quiet])
     quiet_sent = max(sum(r.length for r in q.requests) for q in quiet)
@@ -288,7 +319,10 @@ def measured(
         f"{quiet_sent} B received, {quiet_written} B written beyond the sidecar; "
         f"cold refresh {cold} ({cold.peak_bytes / warm_limited.peak_bytes:.2f}x warm "
         f"peak); changed-catalog refresh {changed} "
-        f"({changed.peak_bytes / warm_limited.peak_bytes:.2f}x warm peak)"
+        f"({changed.peak_bytes / warm_limited.peak_bytes:.2f}x warm peak); "
+        f"failing refresh {_best(failing)}; "
+        f"all.json fallback refresh {fallback} "
+        f"({fallback.peak_bytes / warm_limited.peak_bytes:.2f}x warm peak)"
     )
     yield result
 
@@ -371,4 +405,31 @@ def test_a_quiet_refresh_peaks_no_higher_than_a_cold_refresh(
     best = _best([q.run for q in quiet])
     assert best.peak_bytes <= measured.cold.peak_bytes, (
         f"quiet refresh {best}; cold refresh {measured.cold}"
+    )
+
+
+def test_a_failing_refresh_keeps_the_cache_within_one_second_and_300_mb(
+    measured: Measured,
+) -> None:
+    for requests in measured.failing_requests:
+        assert [r.path for r in requests] == ["/c/root.json"], (
+            f"a failed root ends the refresh: {requests}"
+        )
+    assert measured.failing_kept_catalog, "a failed refresh must not touch the cache"
+    best = _best(measured.failing)
+    assert best.seconds < MAX_SECONDS, f"failing refresh: {best}"
+    assert best.peak_bytes < MAX_BYTES, f"failing refresh: {best}"
+
+
+def test_an_all_json_fallback_stays_within_five_seconds_and_twice_a_warm_search(
+    measured: Measured,
+) -> None:
+    assert "/all.json" in [r.path for r in measured.fallback_requests], (
+        f"the fallback refresh never read all.json: {measured.fallback_requests}"
+    )
+    assert measured.fallback.seconds < MAX_FALLBACK_SECONDS, (
+        f"all.json fallback: {measured.fallback}"
+    )
+    assert measured.fallback.peak_bytes <= 2 * measured.warm_limited.peak_bytes, (
+        f"all.json fallback {measured.fallback}; warm {measured.warm_limited}"
     )
