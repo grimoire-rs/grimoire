@@ -1011,7 +1011,13 @@ present:
 - `fallbacks`: consecutive refreshes that fell back to `all.json`.
 - `failures`: consecutive failed refreshes.
 - `last_error`: the last failure, with any URL redacted.
-- `retry_after`: when [backoff](./package-index.md#consuming-backoff) ends.
+- `retry_after`: the end of the [backoff](./package-index.md#consuming-backoff),
+  as an RFC 3339 UTC timestamp, or `null` when no wait is recorded. It is
+  grim's own deadline, not the server's `Retry-After` header: each failure
+  stores the later of grim's schedule and the server's request, capped at one
+  hour. Read it as the wait grim applies. grim ignores a deadline it cannot
+  parse, and it cuts one more than an hour away to an hour, so the value can
+  outlast the wait.
 
 An OCI source reports `null` for `layout` and `generation`. The whole value
 is `null` when the source has no readable sidecar from this version of grim,

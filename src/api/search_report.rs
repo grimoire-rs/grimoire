@@ -39,7 +39,7 @@ use std::io::{self, Write};
 
 use serde::{Serialize, Serializer};
 
-use crate::cli::printer::{Printable, print_table, terminal_width, truncate_ellipsis};
+use crate::cli::printer::{Printable, print_table, screen_plain, terminal_width, truncate_ellipsis};
 use crate::install::status_badge::StatusBadge;
 
 /// Which configured registry entry a row was browsed from — the JSON
@@ -348,17 +348,43 @@ fn blurb_budget(width: usize, fixed: usize) -> usize {
     width.saturating_sub(fixed).clamp(MIN, MAX)
 }
 
+/// Table headers; the blurb is the third column.
+const HEADERS: [&str; 5] = ["Kind", "Repo", "Summary", "Version", "Status"];
+/// Two-space gaps between the five columns.
+const GAP_TOTAL: usize = (HEADERS.len() - 1) * 2;
+/// Index of the blurb column the budget applies to.
+const BLURB: usize = 2;
+
+/// Clamps the blurb column of `rows` to a terminal `width`. Cells are escaped
+/// first, so a hidden code point that expands to `\u{..}` is measured and cut
+/// at its printed width; `print_table` screening the result again is a no-op.
+fn fit_blurb(rows: &mut [Vec<String>], width: usize) {
+    for r in rows.iter_mut() {
+        for cell in r.iter_mut() {
+            *cell = screen_plain(cell).into_owned();
+        }
+    }
+    // Width the fixed columns (everything but the blurb) consume.
+    let col_width = |i: usize| {
+        rows.iter()
+            .map(|r| r[i].chars().count())
+            .chain(std::iter::once(HEADERS[i].chars().count()))
+            .max()
+            .unwrap_or(0)
+    };
+    let fixed = col_width(0) + col_width(1) + col_width(3) + col_width(4) + GAP_TOTAL;
+    let budget = blurb_budget(width, fixed);
+    for r in rows.iter_mut() {
+        r[BLURB] = truncate_ellipsis(&r[BLURB], budget).into_owned();
+    }
+}
+
 impl Printable for SearchReport {
     fn print_plain(&self, w: &mut impl Write) -> io::Result<()> {
         // The displayed blurb prefers the short summary, falling back to
         // the long description. On a real terminal it is clamped to a
         // readable window so a verbose description can't wrap the table;
         // piped/non-TTY output stays full and byte-deterministic.
-        const HEADERS: [&str; 5] = ["Kind", "Repo", "Summary", "Version", "Status"];
-        /// Two-space gaps between the five columns.
-        const GAP_TOTAL: usize = (HEADERS.len() - 1) * 2;
-        /// Index of the blurb column the budget applies to.
-        const BLURB: usize = 2;
 
         let mut rows: Vec<Vec<String>> = self
             .items
@@ -389,19 +415,7 @@ impl Printable for SearchReport {
             .collect();
 
         if let Some(width) = terminal_width() {
-            // Width the fixed columns (everything but the blurb) consume.
-            let col_width = |i: usize| {
-                rows.iter()
-                    .map(|r| r[i].chars().count())
-                    .chain(std::iter::once(HEADERS[i].chars().count()))
-                    .max()
-                    .unwrap_or(0)
-            };
-            let fixed = col_width(0) + col_width(1) + col_width(3) + col_width(4) + GAP_TOTAL;
-            let budget = blurb_budget(width, fixed);
-            for r in &mut rows {
-                r[BLURB] = truncate_ellipsis(&r[BLURB], budget).into_owned();
-            }
+            fit_blurb(&mut rows, width);
         }
 
         print_table(w, &HEADERS, &rows)
@@ -519,6 +533,30 @@ mod tests {
         assert_eq!(v["items"][0]["kind"], "skill");
         assert_eq!(v["items"][0]["status"], "not-installed");
         assert_eq!(v["items"][0]["repo"], "localhost:5000/acme/x");
+    }
+
+    #[test]
+    fn fit_blurb_measures_escaped_cells_so_hostile_summary_stays_in_budget() {
+        let hostile = "\u{202e}\u{202e}\u{202e}\u{202e}\u{202e}\u{202e}\u{202e}\u{202e}\ttab".repeat(4);
+        let mut rows = vec![vec![
+            "skill".to_string(),
+            "acme/x".to_string(),
+            hostile,
+            "1.0.0".to_string(),
+            "available".to_string(),
+        ]];
+        fit_blurb(&mut rows, 80);
+        let budget = blurb_budget(
+            80,
+            "skill".len() + "acme/x".len() + "1.0.0".len() + "available".len() + GAP_TOTAL,
+        );
+        let blurb = &rows[0][BLURB];
+        assert!(blurb.chars().count() <= budget, "{blurb:?} over {budget}");
+        assert!(!blurb.contains('\u{202e}') && !blurb.contains('\t'), "{blurb:?}");
+        assert!(
+            matches!(screen_plain(blurb), std::borrow::Cow::Borrowed(_)),
+            "re-screen must be a no-op"
+        );
     }
 
     #[test]
