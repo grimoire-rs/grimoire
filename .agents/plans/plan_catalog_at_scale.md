@@ -5,16 +5,17 @@
 - **Plan:** plan_catalog_at_scale
 - **Active phase:** 4 — closing review approved; landing (finalize in the cross-repo pin order) remains
 - **Step:** /hex-review → call 3 of 3: Approve
-- **Last update:** 2026-10-22 (closing review approved; `task --force verify` green at `7c9fd39b`)
+- **Last update:** 2026-10-23 (closing review approved; `task --force verify` green at `7c9fd39b`)
 - State:   landing
 - Tier:    xhigh
 - Tier-grammar: 5
-- Updated: 2026-10-22
-- Next:    land in the goal file's § Decisions pin order: (1) indexer P2b finalizes and force-pushes X, `GRIM_REF` per that order; (2) grim sets `INDEXER_REF` to X, regenerates the conformance tree at X (`gen-conformance --check`), runs `/hex-finalize`, force-pushes #210 and dispatches verify-deep; (3) the indexer appends `GRIM_REF` to the finalized grim commit; vscode P2c lands after #210
+- Updated: 2026-10-23
+- Pins:    2026-10-23, moved to release tags (grim v0.15.0, indexer v0.6.0; [#221](https://github.com/grimoire-rs/grimoire/issues/221)): `INDEXER_REF` is `v0.6.0` and the indexer's `GRIM_REF` is `v0.15.0`; the pin-bump order, the E2 step 2 bump and the I6 step 1 `GRIM_REF` SHA are superseded by tag pins; see the goal file's last pin decision.
+- Next:    run `/hex-finalize`, force-push [#210](https://github.com/grimoire-rs/grimoire/pull/210) and dispatch verify-deep; vscode P2c lands after #210
 - Repos:
   - `grimoire` `/home/mherwig/dev/grimoire/.agents/worktrees/adr-catalog-at-scale`, branch `hex/adr-catalog-at-scale` ([#210](https://github.com/grimoire-rs/grimoire/pull/210)), head after the closing review (call 3 of 3: Approve), rebased onto origin/main `7b21abce` (not pushed; a push needs force-with-lease). `sccache --stop-server; RUSTC_WRAPPER= task --force verify` green at `7c9fd39b` (later commits are Markdown only): nextest 4431/4431, pytest 2039 passed, 33 skipped, 1 xfailed; `index-matrix` 32 passed, 14 skipped; `test:bench` 7/7; `claude:tests` 91/91; `catalog:verify` green. Local `index-e2e` 7/7 passed at `INDEXER_REF` `66c3621`; the conformance tree carries the clamped record at `8452c5a4`; the dispatched verify-deep run waits for the indexer P2b and #210 pushes. GE's G1 leg skips until grim 0.15.0 is published, and a skip does not count toward go/no-go. Landed: no
   - `indexer` P0: grimoire-rs/indexer@63647d5 ([indexer#11](https://github.com/grimoire-rs/indexer/pull/11)), final, merge-ready, draft. Landed: no
-  - `indexer` P2b: `/home/mherwig/dev/grimoire/.agents/worktrees/indexer-p2b`, branch `feat/catalog-at-scale`, local head `66c3621` on P0, with I6 at `9a3de09` (unpushed; [indexer#12](https://github.com/grimoire-rs/indexer/pull/12) needs the finalize force-push). I6 pins `GRIM_REF` `6c646a68`, which carries the pre-clamp tree, so it must move to `8452c5a4`. Landed: no
+  - `indexer` P2b: `/home/mherwig/dev/grimoire/.agents/worktrees/indexer-p2b`, branch `feat/catalog-at-scale`, local head `66c3621` on P0, with I6 at `9a3de09` (unpushed; [indexer#12](https://github.com/grimoire-rs/indexer/pull/12) needs the finalize force-push). I6 `GRIM_REF` moves to `v0.15.0`. Landed: no
   - `vscode` P2c: grimoire-rs/grimoire-vscode@ce3c524 ([grimoire-vscode#31](https://github.com/grimoire-rs/grimoire-vscode/pull/31)), final, merge-ready, draft. Landed: no
 
 ---
@@ -309,8 +310,8 @@ Behaviour is the spec's **[T]** bullets. A tester writes failing tests from the 
 | GD | grimoire | GR-R10 (rate), R12 (null policy), R18, R19; C-009; S-006 | `src/api/context_report.rs`, `src/command/{context,rate}.rs`, `src/mcp/server.rs`, `test/tests/{test_context,test_rate}.py`, `docs/src/content/docs/{json-interface,commands}.md`, `catalog/skills/grim-usage/**` (drift re-check) | 3 | GC | — | merged |
 | GE | grimoire | GR-R31, R33; V-1, V-2, V-4, V-13, V-30 (grim) | `src/catalog/conformance_tests.rs` (equivalence tests), `test/tests/{test_index_matrix,test_index_bench}.py`, `.github/workflows/verify-deep.yml` (bench step), `ocx.toml` (`g1`), `ocx.lock` | 3 | GC, GT, E1 | — | merged; G1 leg skipped (0.15.0 unpublished), not a pass |
 | I5 | indexer | IX-R23; [#216] ~~R13~~ (cut 8, dropped fully, owner decision 2026-10-22, [#216](https://github.com/grimoire-rs/grimoire/issues/216)), R22 (kept), R29 (site leg), R48 (`false`, staged flip), published plane (kept); V-19; docs §15 Phase 2b; S-012 (`legacy: false`) | `src/build/logline.ts`, `src/state/retention.ts`, `src/emit/{overlap,legacy,publish-plane}.ts`, `src/cli/{build,enrich}.ts`, `src/renderer/index.ts` (tail), `src/renderer/astro/components/SiteFooter.astro`, `scripts/bench-scale.mjs`, `docs/**`, `test/{build,state}/**` | 3 | I2, I3, I4 | — | pending |
-| I6 | indexer | IX-R42 (drift check) | `test/conformance/GRIM_REF`, `.github/workflows/ci.yml` (job `conformance`), `package.json` (script `conformance:check`), `test/conformance/check.test.ts` | 4 | GE, E2 step 1 | — | committed locally (indexer `9a3de09`); `GRIM_REF` must move to grim `8452c5a4` |
-| E2 | grimoire | V-41 full: anchored, incremental, ~~[#216] 304~~ (cut by owner decision, #216) and `legacy: false`; tree refresh at the P2b head; final pin | `test/data/conformance/**` (refresh), `test/tests/test_index_e2e.py`, `test/data/index_e2e/**` (incl. `INDEXER_REF`) | 4 | GE, E1, I5 | — | committed; `INDEXER_REF` `66c3621`; verify-deep pending pushes |
+| I6 | indexer | IX-R42 (drift check) | `test/conformance/GRIM_REF`, `.github/workflows/ci.yml` (job `conformance`), `package.json` (script `conformance:check`), `test/conformance/check.test.ts` | 4 | GE, E2 step 1 | — | committed locally (indexer `9a3de09`); `GRIM_REF` `v0.15.0` (indexer repo) |
+| E2 | grimoire | V-41 full: anchored, incremental, ~~[#216] 304~~ (cut by owner decision, #216) and `legacy: false`; tree refresh at the P2b head; final pin | `test/data/conformance/**` (refresh), `test/tests/test_index_e2e.py`, `test/data/index_e2e/**` (incl. `INDEXER_REF`) | 4 | GE, E1, I5 | — | committed; `INDEXER_REF` `v0.6.0`; verify-deep pending pushes |
 
 ```mermaid
 graph TD

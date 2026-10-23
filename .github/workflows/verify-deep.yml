@@ -229,8 +229,9 @@ jobs:
   # The pinned indexer builds the fixture index flat (default config), anchored,
   # and anchored with legacy off. The default build still works for the oldest
   # grim that reads an index and for this branch's grim; the anchored builds work
-  # for this branch's grim. The indexer is checked out at the commit in
-  # test/data/index_e2e/INDEXER_REF; grim 0.14.3 is the ocx group g0.
+  # for this branch's grim. The indexer is checked out at the commit named by
+  # the release tag in test/data/index_e2e/INDEXER_REF (IX-R42); grim 0.14.3 is
+  # the ocx group g0.
   # GRIM_REQUIRE_INDEX_E2E makes a missing input a failure rather than a skip,
   # and the JUnit steps below fail on any skipped test, so green means ran and
   # passed. One skip is allowed: the 0.15.0 (g1) matrix leg, only while
@@ -259,15 +260,19 @@ jobs:
         id: pin
         run: |
           ref="$(tr -d '[:space:]' < test/data/index_e2e/INDEXER_REF)"
-          [[ "$ref" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::INDEXER_REF must be a full commit SHA"; exit 1; }
+          [[ "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::INDEXER_REF must be a release tag of the form v<major>.<minor>.<patch>"; exit 1; }
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
       - name: Checkout indexer
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: grimoire-rs/indexer
-          ref: ${{ steps.pin.outputs.ref }}
+          # refs/tags/ keeps a same-named branch from standing in for the tag;
+          # checkout fetches the tag and checks out the commit it peels to.
+          ref: refs/tags/${{ steps.pin.outputs.ref }}
           path: .indexer
           persist-credentials: false
+      - name: Log indexer commit
+        run: git -C .indexer rev-parse HEAD
       - name: Download Binary
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
