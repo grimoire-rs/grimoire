@@ -986,7 +986,6 @@ async fn stage_all(req: &ExportRequest<'_>, access: &Arc<dyn OciAccess>) -> Resu
             .as_deref()
             .map(|d| read_declared_doc(req, d))
             .transpose()?;
-        let contents = member_contents(plugin, access).await;
         let logo_rel = logo.as_ref().map(|(ext, _)| family::logo_path(ext));
         let base = plugin.description_base.as_deref();
         let (description, cut) = family::plugin_description(base);
@@ -1019,7 +1018,6 @@ async fn stage_all(req: &ExportRequest<'_>, access: &Arc<dyn OciAccess>) -> Resu
                 &omitted,
                 logo_rel.as_deref(),
                 readme_text.as_deref(),
-                &contents,
             );
             std::fs::write(&readme, readme_bytes).map_err(|e| io_error(&readme, e))?;
             if let Some(changelog) = &changelog_text {
@@ -1654,34 +1652,6 @@ fn read_doc(path: &Path) -> Result<String, ExportError> {
         return Err(invalid("larger than 1 MiB"));
     }
     String::from_utf8(bytes).map_err(|_| invalid("not valid UTF-8"))
-}
-
-/// One README `Contents` entry per member, in lock order: its own
-/// description from the pinned manifest and its `registry/repo`. A path
-/// source has neither.
-async fn member_contents(plugin: &PluginInput, access: &Arc<dyn OciAccess>) -> Vec<family::ContentsEntry> {
-    let mut entries = Vec::with_capacity(plugin.members.len());
-    for (locked, emitted) in &plugin.members {
-        let pin = locked.source.pinned();
-        let description = match pin {
-            // The description is cosmetic: a failed read must not abort the export.
-            Some(pin) => access
-                .fetch_manifest(pin)
-                .await
-                .inspect_err(|e| tracing::warn!("no description for {} in the README: {e}", locked.name))
-                .ok()
-                .flatten()
-                .and_then(|m| m.annotations.get(DESCRIPTION_ANNOTATION).cloned()),
-            None => None,
-        };
-        entries.push(family::ContentsEntry {
-            kind: locked.kind,
-            name: emitted.clone(),
-            description,
-            reference: pin.map(|p| p.as_identifier().registry_repository()),
-        });
-    }
-    entries
 }
 
 /// Read and check a plugin logo: a regular file (a symlink is followed),
@@ -3853,8 +3823,8 @@ mod tests {
 
         assert_eq!(
             counting.manifests.load(Ordering::SeqCst),
-            2,
-            "C-017: one fetch for the layer and one for the README description, whatever the client count"
+            1,
+            "C-017: one manifest fetch per member, whatever the client count"
         );
         assert_eq!(
             entries(&dir),
@@ -4677,7 +4647,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_declared_readme_and_changelog_ship_with_the_contents_list() {
+    async fn a_declared_readme_and_changelog_ship() {
         let (guard, root, _) = manifest_dir();
         std::fs::write(root.join("PLUGIN.md"), "# Team kit\n\nHand written.\n").unwrap();
         std::fs::write(root.join("CHANGES.md"), "## 1.0.0\n\n- first\n").unwrap();
@@ -4692,7 +4662,7 @@ mod tests {
         let tree = &run.outputs[0].staged;
         let readme = std::fs::read_to_string(tree.join("README.md")).unwrap();
         assert!(
-            readme.starts_with("# Team kit\n\nHand written.\n\n## Contents\n\n- mcp `srv`"),
+            readme.starts_with("# Team kit\n\nHand written.\n\nPackaged by grim"),
             "{readme}"
         );
         assert_eq!(
@@ -4702,7 +4672,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn without_a_declared_readme_the_generated_header_gains_contents_and_no_changelog_ships() {
+    async fn without_a_declared_readme_the_header_is_generated_and_no_changelog_ships() {
         let (guard, root, _) = manifest_dir();
         let (reg, plugin) = team_with_server().await;
         let out = guard.path().join("out");
@@ -4712,10 +4682,7 @@ mod tests {
             .unwrap();
         let tree = &run.outputs[0].staged;
         let readme = std::fs::read_to_string(tree.join("README.md")).unwrap();
-        assert!(
-            readme.starts_with("# team\n\nBase\n\n## Contents\n\n- mcp `srv`"),
-            "{readme}"
-        );
+        assert!(readme.starts_with("# team\n\nBase\n\nPackaged by grim"), "{readme}");
         assert!(!tree.join("CHANGELOG.md").exists());
     }
 
