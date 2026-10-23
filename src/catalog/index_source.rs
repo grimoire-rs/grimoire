@@ -27,8 +27,9 @@ use serde::Deserialize;
 
 use crate::catalog::catalog_error::CatalogError;
 use crate::catalog::index_git::fetch_git;
-use crate::catalog::index_http::{Deadline, INDEX_BODY_LIMIT, index_get, read_capped, stats_url};
+use crate::catalog::index_http::{Deadline, INDEX_BODY_LIMIT, index_get, read_capped_unhashed, stats_url};
 use crate::catalog::index_package::IndexPackage;
+use crate::catalog::index_sync::blocking;
 use crate::catalog::rating_provider;
 use crate::catalog::redact::redact_url;
 use crate::catalog::registry_catalog::{CatalogEntry, DownloadSummary, DownloadVersion, RatingSummary};
@@ -368,8 +369,14 @@ pub(crate) async fn fetch_stats_with(client: &reqwest::Client, locator: &str) ->
         tracing::debug!("ratings sidecar at '{shown}' was not observed: status {status}");
         return None;
     }
-    match read_capped(response, INDEX_BODY_LIMIT).await {
-        Ok((bytes, _)) => parse_stats(&bytes, url.as_str()),
+    match read_capped_unhashed(response, INDEX_BODY_LIMIT).await {
+        Ok(bytes) => {
+            let url = url.to_string();
+            blocking(move || parse_stats(&bytes, &url)).await.unwrap_or_else(|e| {
+                tracing::debug!("ratings sidecar at '{shown}' was not observed: {e}");
+                None
+            })
+        }
         Err(e) => {
             tracing::debug!(
                 "ratings sidecar at '{shown}' was not observed: {}",

@@ -112,11 +112,21 @@ fn is_gzip(response: &reqwest::Response) -> Result<bool, BodyError> {
 /// so a bomb never grows the buffer beyond the cap.
 fn gunzip(compressed: &[u8], limit: usize) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(gunzip_hint(compressed, limit));
     flate2::read::MultiGzDecoder::new(compressed)
         .take(limit as u64 + 1)
         .read_to_end(&mut out)?;
     Ok(out)
+}
+
+/// The decoded size the last member's trailer claims (`ISIZE`, modulo 2^32).
+/// The wire says it, so it only sizes the buffer, and never past the one byte
+/// beyond `limit` that [`gunzip`] reads.
+fn gunzip_hint(compressed: &[u8], limit: usize) -> usize {
+    let claimed = compressed
+        .last_chunk::<4>()
+        .map_or(0, |trailer| u32::from_le_bytes(*trailer) as usize);
+    claimed.min(limit.saturating_add(1))
 }
 
 /// Read `response` to the end, failing as soon as more than `limit` bytes
@@ -126,30 +136,49 @@ fn gunzip(compressed: &[u8], limit: usize) -> std::io::Result<Vec<u8>> {
 /// The cap applies to the wire bytes and again to the decoded bytes: a gzip
 /// bomb is tiny on the wire, and a decoded size is not in any header. The
 /// digest names the returned bytes, so a transport encoding never changes it.
-pub(crate) async fn read_capped(
+pub(crate) async fn read_capped(response: reqwest::Response, limit: usize) -> Result<(Vec<u8>, [u8; 32]), BodyError> {
+    let (body, digest) = read_body(response, limit, true).await?;
+    // Always present when asked for; the fallback keeps the contract total.
+    let digest = digest.unwrap_or_else(|| Sha256::digest(&body).into());
+    Ok((body, digest))
+}
+
+/// [`read_capped`] for a caller that has no use for the digest: the body is
+/// never hashed.
+pub(crate) async fn read_capped_unhashed(response: reqwest::Response, limit: usize) -> Result<Vec<u8>, BodyError> {
+    read_body(response, limit, false).await.map(|(body, _)| body)
+}
+
+async fn read_body(
     mut response: reqwest::Response,
     limit: usize,
-) -> Result<(Vec<u8>, [u8; 32]), BodyError> {
+    hash: bool,
+) -> Result<(Vec<u8>, Option<[u8; 32]>), BodyError> {
     let gzip = is_gzip(&response)?;
-    let mut body = Vec::new();
+    // `Content-Length` is a hint from the wire: never reserve past `limit`.
+    let mut body = Vec::with_capacity(
+        response
+            .content_length()
+            .map_or(0, |len| len.min(limit as u64) as usize),
+    );
     let mut hasher = Sha256::new();
     while let Some(chunk) = response.chunk().await? {
         if body.len() + chunk.len() > limit {
             return Err(BodyError::OverLimit { limit });
         }
-        if !gzip {
+        if hash && !gzip {
             hasher.update(&chunk);
         }
         body.extend_from_slice(&chunk);
     }
     if !gzip {
-        return Ok((body, hasher.finalize().into()));
+        return Ok((body, hash.then(|| hasher.finalize().into())));
     }
     // Inflating and hashing up to `limit` bytes is CPU-bound, so both stay off
     // the async workers.
     let (decoded, digest) = tokio::task::spawn_blocking(move || {
         let decoded = gunzip(&body, limit)?;
-        let digest: [u8; 32] = Sha256::digest(&decoded).into();
+        let digest: Option<[u8; 32]> = hash.then(|| Sha256::digest(&decoded).into());
         Ok::<_, std::io::Error>((decoded, digest))
     })
     .await
@@ -294,7 +323,7 @@ mod tests {
     async fn read_encoded(content_encoding: &str, body: &[u8], limit: usize) -> Result<Vec<u8>, BodyError> {
         let extra = format!("content-encoding: {content_encoding}\r\n");
         let base = spawn_fixed_host(http_200(&extra, body)).await;
-        read_capped(get(&base).await, limit).await.map(|(body, _)| body)
+        read_capped_unhashed(get(&base).await, limit).await
     }
 
     #[tokio::test]
@@ -522,6 +551,36 @@ mod tests {
         let (body, digest) = read_capped(get(&gz).await, 1024).await.unwrap();
         assert_eq!(body, b"[1,2,3]");
         assert_eq!(digest, sha256_of(b"[1,2,3]"));
+    }
+
+    #[tokio::test]
+    async fn read_capped_unhashed_returns_the_bytes_read_capped_returns() {
+        let plain = spawn_fixed_host(http_200("", b"a plain body")).await;
+        let gz = spawn_fixed_host(http_200("content-encoding: gzip\r\n", &gzip(b"a gzip body"))).await;
+
+        for (base, expected) in [(&plain, &b"a plain body"[..]), (&gz, &b"a gzip body"[..])] {
+            assert_eq!(read_capped_unhashed(get(base).await, 1024).await.unwrap(), expected);
+        }
+        assert!(matches!(
+            read_capped_unhashed(get(&plain).await, 4).await,
+            Err(BodyError::OverLimit { limit: 4 })
+        ));
+    }
+
+    #[test]
+    fn gunzip_hint_follows_the_trailer_and_never_passes_the_read_cap() {
+        let whole = gzip(&[b'x'; 300]);
+        assert_eq!(gunzip_hint(&whole, 1024), 300);
+        assert_eq!(
+            gunzip_hint(&whole, 100),
+            101,
+            "a claim past the cap is cut to limit + 1"
+        );
+        assert_eq!(gunzip_hint(&[1, 2], 1024), 0, "no trailer, no hint");
+        let mut lying = gzip(b"tiny");
+        let end = lying.len();
+        lying[end - 4..].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(gunzip_hint(&lying, 4096), 4096 + 1);
     }
 
     #[tokio::test]

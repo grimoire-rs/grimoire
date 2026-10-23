@@ -730,7 +730,7 @@ async fn project(ctx: &SyncContext<'_>, bytes: Vec<u8>) -> Result<BTreeMap<Strin
 /// Runs CPU-bound `work` on the blocking pool under the caller's tracing
 /// dispatcher: the default is per thread, so a warning the work emits would
 /// miss a scoped subscriber on the pool's thread. A panic is re-raised here.
-async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> std::io::Result<T> {
+pub(crate) async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> std::io::Result<T> {
     let dispatch = tracing::dispatcher::get_default(Clone::clone);
     match tokio::task::spawn_blocking(move || tracing::dispatcher::with_default(&dispatch, work)).await {
         Ok(done) => Ok(done),
