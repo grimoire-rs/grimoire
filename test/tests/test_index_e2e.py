@@ -3,11 +3,11 @@
 """An index built by the pinned indexer still works for the oldest grim that
 reads an index and for the grim under test.
 
-The indexer at ``data/index_e2e/INDEXER_REF`` builds the small index root in
-``data/index_e2e/`` three ways. With no ``sync`` block it publishes the legacy
-files and a ``c/root.json`` that names no flat catalog: grim 0.14.3 predates the
-root and must list the same rows as before, and the built grim the same rows
-without a word on stderr. With ``layout: anchored`` the root names the flat
+The indexer at the release tag in ``data/index_e2e/INDEXER_REF`` builds the
+small index root in ``data/index_e2e/`` three ways. With no ``sync`` block it
+publishes the legacy files and a ``c/root.json`` that names no flat catalog:
+grim 0.14.3 predates the root and must list the same rows as before, and the
+built grim the same rows without a word on stderr. With ``layout: anchored`` the root names the flat
 blob and the built grim lists the rows the flat build lists, a changed package
 costing it one new blob. With ``legacy: false`` as well no legacy file is
 published and the built grim never asks for one.

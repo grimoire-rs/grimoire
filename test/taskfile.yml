@@ -34,7 +34,7 @@ tasks:
     internal: true
     preconditions:
       - sh: test -n "$GRIM_INDEXER_DIR"
-        msg: GRIM_INDEXER_DIR must name a checkout of grimoire-rs/indexer at the commit in test/data/index_e2e/INDEXER_REF
+        msg: GRIM_INDEXER_DIR must name a checkout of grimoire-rs/indexer at the release tag in test/data/index_e2e/INDEXER_REF
     cmds:
       # --prefix keeps ocx on this repo's toolchain: the indexer ships its own ocx.toml.
       - ocx exec -- npm --prefix "$GRIM_INDEXER_DIR" ci --ignore-scripts
@@ -44,7 +44,7 @@ tasks:
     desc: Build the fixture index with the pinned indexer and sync it with grim 0.14.3 and the built grim
     summary: |
       Runs test/tests/test_index_e2e.py (marker index_e2e). Needs GRIM_INDEXER_DIR,
-      a checkout of grimoire-rs/indexer at the commit in
+      a checkout of grimoire-rs/indexer at the release tag in
       test/data/index_e2e/INDEXER_REF; it is installed and built here on every
       run, so a moved pin never meets a stale dist/. grim 0.14.3 comes from the
       ocx group g0. Set GRIM_REQUIRE_INDEX_E2E=1 to make a missing input a
