@@ -183,9 +183,13 @@ log text, not a contract.
 | D | Search-file wire bytes ≥ 8 MB (warns at 6 MB) | Pagefind and per-kind browse listings (follow-up ADR) |
 | E | Site bytes ≥ 80% of 1 GB, or entries ≥ 80% of 200,000 | Object storage and a CDN (below) |
 
-- **Astro at scale:** `deferRender: true` and `experimental.collectionStorage: 'chunked'`, so Astro
-  is pinned exactly. Synthetic-build budgets at 20,000: peak RSS ≤ 4 GiB, `.astro/` ≤ 2 GiB, the
-  Astro step ≤ 15 min, `__GRIMOIRE_DATA__` included.
+- **Astro at scale:** `experimental.collectionStorage: 'chunked'`, so Astro is pinned exactly.
+  Without it the single content store passes V8's string limit near 37,000 entries. `deferRender`
+  stays off: measured at 20,000 entries it makes each markdown file its own bundler module
+  (15.3 GiB and 843 s, against 5.8 GiB and 262 s without it). Synthetic-build budget at 20,000:
+  the Astro step ≤ 15 min, `__GRIMOIRE_DATA__` included. The build makes no claim on memory:
+  peak RSS and the `.astro/` size are measured and reported, not judged, until someone hits a
+  limit (indexes hold about 500 entries today).
 - **Past the ceiling**, and for 100,000, the site moves to object storage and a CDN. Paths stay
   relative (`withBase`), so this is a deploy-target change. A non-atomic store needs serialized
   publication, one deployer at a time: upload and verify every content-addressed file, then switch
@@ -372,3 +376,4 @@ Resolved by the owner on 2026-10-22:
 | 2026-10-21 | architect | Initial draft: site decisions, P0 package and the browser-cache decision, moved out of `adr_catalog_at_scale.md` at the reset |
 | 2026-10-22 | architect | owner answers to the open questions folded in (2026-10-22) |
 | 2026-10-22 | architect | KISS cut (owner): retention is the previous root's closure, which names the search file via the root's `search` member; no host-headroom cap; `c/r` dropped with the deferred tree |
+| 2026-10-23 | owner | IX-R33 amended: the peak-RSS (4 GiB) and `.astro/` (2 GiB) build budgets dropped, measured and reported only; `deferRender` removed from the Astro settings (measured at 20,000 entries: 15.3 GiB and 843 s against 5.8 GiB and 262 s), `collectionStorage: 'chunked'` kept |
