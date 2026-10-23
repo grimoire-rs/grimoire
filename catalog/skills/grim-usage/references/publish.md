@@ -641,7 +641,7 @@ capped at 500 characters: a `--description` or declared `description` over
 Markdown files relative to the manifest (`grimoire.toml` for `[plugin]`), UTF-8,
 at most 1 MiB, else 65: `readme` replaces the generated README heading and
 `changelog` is copied to `CHANGELOG.md`. The generated README lists omitted
-members and gains a `## Contents` member list. `grim export plugin --project`
+members; it carries no member list. `grim export plugin --project`
 exports the project's own `grimoire.lock` as one plugin (name from `--name`
 or `grimoire.toml`'s `[plugin].name`, no re-resolution), and a
 `marketplace.toml` plugin can declare `project = "<dir>"` instead of `include`

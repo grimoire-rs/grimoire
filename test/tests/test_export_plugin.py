@@ -307,9 +307,8 @@ def test_s001_claude_zip_from_one_bundle_ref(grim_at, tmp_path: Path, work: Path
     # C-003: the pinned bundle's version annotation (leading `v` stripped) plus the tree hash.
     assert doc["version"] == f"1.4.0+{_suffix(unpacked, '1.4.0')}"
     assert doc["description"] == "The team stack."
-    assert readme.startswith("# team-stack\n\nThe team stack.\n\n## Contents\n\n- "), readme
-    for member in ("skill `team-plan`", "skill `team-review`", "agent `team-reviewer`", "rule `team-style`"):
-        assert f"- {member}" in readme, readme
+    assert readme.startswith("# team-stack\n\nThe team stack.\n\n"), readme
+    assert "## Contents" not in readme, readme
     assert readme.endswith(f"\n\nOmitted for claude: rule team-style.\n\n{ONRAMP}\n"), readme
 
     (item,) = out["items"]
@@ -1452,7 +1451,7 @@ def test_s034_declared_logo_ships_in_every_client(grim_at, work: Path, registry:
     claude, codex = work / "dist" / "team.claude", work / "dist" / "team.codex"
     for root in (claude, codex):
         assert (root / "assets" / "logo.svg").read_bytes() == SVG
-        assert _readme(root).startswith("# team\n\n![team](assets/logo.svg)\n\n")
+        assert _readme(root).startswith("# team\n\n<img src=\"assets/logo.svg\" alt=\"team\" width=\"96\">\n\n")
     assert "extensions" not in _manifest(claude), "Claude plugin.json has no logo field"
     raw = json.loads((codex / "plugin.json").read_text())
     assert list(raw) == ["$schema", "name", "version", "description", "extensions"]

@@ -119,8 +119,8 @@ url = "https://github.com/michael-herwig"
 ```
 
 Point `readme` and `changelog` at Markdown files next to the manifest to
-write the plugin's page yourself. grim lists the members under a `Contents`
-heading either way.
+write the plugin's page yourself: say what the plugin is for and how to use
+it. The harness and the index already list its members.
 
 ```toml
 [plugins.hex]
