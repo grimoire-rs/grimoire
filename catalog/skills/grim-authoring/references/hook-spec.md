@@ -7,7 +7,7 @@ handlers run — for `grim build` or `grim release`.
 Contents: [Ships Disarmed](#ships-disarmed) · [File Shape](#file-shape) ·
 [Top-Level Keys](#top-level-keys) · [The `[[hooks]]` Entry](#hooks-entry) ·
 [Events](#events) · [Tiers](#tiers) · [Matchers](#matchers) ·
-[The Handler](#the-handler) ·
+[The Handler](#the-handler) · [Writing the Handler](#writing-the-handler) ·
 [The Payload-Not-Executable Trap](#payload-not-executable) ·
 [Vendor Overrides](#vendor-overrides) · [Reserved Names](#reserved-names) ·
 [Which Clients](#which-clients) · [Publishing](#publishing) ·
@@ -229,6 +229,51 @@ $ grim build ./hooks/meta-guard --kind hook
 hook 'obs' declares no handler: set exactly one of 'argv' or 'command'
 ```
 
+## Writing the Handler {#writing-the-handler}
+
+The manifest says what runs. This is what the program sees and prints; the
+tables are in [the handler contract][handler-contract], so link them for the
+I/O shapes, and confirm arming with `grim hook list` after installing.
+
+- **In.** One JSON envelope on stdin: `schema`, `event`, `native_event`,
+  `client`, `scope`, `hook` (`<artifact>/<id>`), `tier`, `cwd`,
+  `session_id`, `correlation_id`, `tool` (`{name, input}`, or null for an
+  event without a tool) and `raw`. A shell command is at
+  `tool.input.command`. Parse the envelope; never substring-search the raw
+  bytes.
+- **Out.** One JSON object on stdout, every member optional, unknown ones
+  ignored: `decision` (`allow`, `deny`, `ask`, `none`; default `none`),
+  `reason`, `context`, and `updated_input` (a mutator at `PreToolUse`
+  only). `user_message` and `stop` are dropped with a warning.
+- **`{}` is not `{"decision":"allow"}`.** `{}` is no opinion and the
+  client's own approval flow runs. An explicit `allow` approves, and on
+  Claude and Copilot skips the approval prompt. Empty or unparseable
+  stdout is no opinion. Stdout is read up to a documented cap (see
+  [the response rules][handler-response]); stderr is discarded.
+- **Where it runs.** The working directory is the hook's own payload
+  directory. A `matcher` is an exact name, `A|B` or a glob, never a regex.
+  `argv` is exec form with `${GRIM_HOOK_DIR}` expanded by grim; `command`
+  goes through `/bin/sh -c`. Grim also sets `GRIM_HOOK_SCHEMA`, `_EVENT`,
+  `_CLIENT`, `_NAME`, `_TIER`, `_TOOL`, `_CWD`, `_DIR` and `_PAYLOAD`.
+  Tool input never travels in the environment.
+- **Tiers at runtime.** Mutators run first, in declaration order, each
+  seeing the previous rewrite. Gatekeepers judge the final input and the
+  strictest verdict wins (`none` < `allow` < `ask` < `deny`; a `deny`
+  discards any rewrite). Observers run last and their answers are
+  discarded. A verdict from a non-gatekeeper or a rewrite from a
+  non-mutator is ignored with a warning.
+- **Exit code and time.** The handler's exit code is **ignored** (a JSON
+  answer counts whatever the status; a failed handler with no answer is no
+  opinion), and `grim hook run` always exits 0. `timeout` has a default and
+  a bounded range, and every hook matched for one tool call shares one
+  budget derived from the shortest registered entry timeout; the values are
+  in [the exit and timeout rules][handler-exit].
+- **Per-client response shapes** are translated by grim. See
+  [client translation][handler-translation] instead of hand-writing any.
+
+A complete worked gatekeeper (approve safe commands, deny the rest) is the
+[Agent Hooks guide][agent-hooks].
+
 ## The Payload-Not-Executable Trap {#payload-not-executable}
 
 **This is the mistake to internalize.** A handler whose first token names a
@@ -385,6 +430,18 @@ has been seen firing from a grim registration yet. Every other client
 declines hooks. Hooks also arm on Linux and macOS only; on Windows grim
 reports every hook `not-armed` with cause `platform-unsupported`.
 
+Copilot's hooks cover `PreToolUse`, `PostToolUse` and `SessionStart` only.
+A `gatekeeper` at `PostToolUse` is declined there (no verdict channel), and
+so is a `mutator` aimed at Copilot's shell tool; a mutator rewrite uses
+`hookSpecificOutput.updatedInput`. GitHub's Copilot **cloud agent** is
+deliberately excluded: it reads `.github/hooks/*.json` from the pushed
+branch, which would put an armable file in the repository, so no hook runs
+there ([why][copilot-cloud]). Codex shows a plain tick in the clients
+matrix, but its arming is still global-scope only
+([global-only clients][global-only]). Run `grim hook list` (the JSON
+`arming` array) to see per-client declines instead of guessing. Event
+tables: [Copilot][gap-copilot], [Codex][gap-codex], [Qoder][gap-qoder].
+
 Treat the [enforced matrix][clients] as authoritative. Design for the
 decline: a hook whose value depends on firing everywhere is the wrong
 artifact, and a skill reaches clients a hook never will.
@@ -462,9 +519,23 @@ Every row below fails `grim build` with **exit 65**.
   grim's own doc comments for every event, tier, and field. Bind it in your
   editor before writing the manifest.
 - [Client Compatibility][clients] — the enforced per-client matrix.
+- [Hooks: handler contract][handler-contract] — envelope, environment,
+  response, tiers, exit code and per-client translation tables.
+- [Agent Hooks guide][agent-hooks] — a worked approve-safe-commands
+  gatekeeper, from authoring to publishing.
 - [release-checklist.md](release-checklist.md) — pre-release gates and the
   exit-65 triage table.
 - [../SKILL.md#hooks-ship-disarmed](../SKILL.md#hooks-ship-disarmed) — the
   gate model, stated once.
 
 [clients]: https://grimoire.rs/clients.html
+[handler-contract]: https://grimoire.rs/hooks.html#handler-contract
+[handler-response]: https://grimoire.rs/hooks.html#handler-response
+[handler-exit]: https://grimoire.rs/hooks.html#handler-exit
+[handler-translation]: https://grimoire.rs/hooks.html#handler-translation
+[agent-hooks]: https://grimoire.rs/guides/agent-hooks.html
+[copilot-cloud]: https://grimoire.rs/hooks.html#copilot-cloud-agent
+[global-only]: https://grimoire.rs/hooks.html#global-only
+[gap-copilot]: https://grimoire.rs/clients.html#gap-copilot-hooks
+[gap-codex]: https://grimoire.rs/clients.html#gap-codex-hooks
+[gap-qoder]: https://grimoire.rs/clients.html#gap-qoder-hooks

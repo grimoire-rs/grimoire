@@ -159,14 +159,16 @@ install` writes the descriptor as is):
 
 | Export for | `${CLAUDE_PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_DATA}` | `${PLUGIN_ROOT}` / `${PLUGIN_DATA}` |
 |---|---|---|
-| `claude` | kept | renamed to Claude's names, in every field incl. `url` and headers |
+| `claude`, `qoder` (a `qoder` export needs grim 0.15.0) | kept | renamed to Claude's names, in every field incl. `url` and headers |
 | `codex`, `copilot`, `agents` | renamed to the spec's names | kept |
 | `cursor` | renamed to the spec's names, except the root: `${CURSOR_PLUGIN_ROOT}`; Cursor has no data variable (warned) | root renamed to `${CURSOR_PLUGIN_ROOT}`, data kept |
 | `droid`, `junie`, `openclaw` | kept | kept |
 
-**Portable advice:** put `${PLUGIN_ROOT}` / `${PLUGIN_DATA}` (or the
-Claude spelling) in `args` or `env` values. That works for `claude` and
-every Agent Plugins client. The Claude rendering has no `cwd`.
+**Portable advice:** put `${PLUGIN_ROOT}` (or the Claude spelling) in
+`args` or `env` values. That works for `claude`, `qoder` (a `qoder` export
+needs grim 0.15.0) and every Agent Plugins client. `${PLUGIN_DATA}` is not
+portable to `cursor`, which has no data variable: it stays as written and
+is exported with a warning. The Claude rendering has no `cwd`.
 
 For an Agent Plugins export (`codex`, `cursor`, `copilot`, `agents`), a
 `${…}` reference in `command`, `url`, an env key or a header omits the

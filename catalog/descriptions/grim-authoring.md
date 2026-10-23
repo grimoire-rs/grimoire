@@ -2,7 +2,8 @@
 
 Author, validate, and package grim-publishable artifacts: skill
 directories, rule files, agent definitions, MCP server descriptors, and
-bundle TOMLs.
+bundle TOMLs, plus the operator side of offering them: a plugin
+marketplace git repository and your own package index.
 
 The skill carries the per-kind packaging specs — required frontmatter,
 catalog metadata, vendor-namespaced keys (`claude.*`, `cursor.*`,
@@ -23,6 +24,9 @@ grim add ghcr.io/grimoire-rs/skills/grim-authoring:0
   `mcp-spec.md`, `bundle-spec.md` — one packaging spec per kind
 - `references/vendor-metadata.md` — vendor-namespaced metadata keys
 - `references/release-checklist.md` — build → release → publish → announce
+- `references/hosting-a-marketplace.md` — create, deploy and maintain a
+  plugin marketplace git repository (needs grim 0.15.0 or later)
+- `references/hosting-an-index.md` — stand up and run a package index
 - `references/bootstrap-existing-repo.md` — turning an existing repo into
   a publishable catalog
 

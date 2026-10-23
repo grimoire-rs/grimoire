@@ -1,8 +1,8 @@
 ---
 name: grim-authoring
-description: Author, validate, and package grim-publishable artifacts — skill directories, rule files, agent definitions, MCP server descriptors, hook manifests, and bundle TOMLs. Use when creating or editing an artifact for grim build or grim release; when choosing frontmatter or catalog metadata fields; when writing a hook.toml with its events, tiers, matchers, and handlers; when adding a vendor-namespaced metadata key for any client grim supports (claude, opencode, copilot, codex, cursor, kiro, junie, gemini, zed, amp, antigravity, cline, droid, goose, warp, openclaw, kilo, qoder — one namespace per client name); or when grim build fails validation with exit code 65.
+description: Author, validate, and package grim-publishable artifacts — skill directories, rule files, agent definitions, MCP server descriptors, hook manifests, and bundle TOMLs. Use when creating or editing an artifact for grim build or grim release; when choosing frontmatter or catalog metadata fields; when writing a hook.toml with its events, tiers, matchers, and handlers; when creating or maintaining a plugin marketplace git repository (marketplace.toml, grim export marketplace, regenerate CI) or hosting a package index; when adding a vendor-namespaced metadata key for any client grim supports (claude, opencode, copilot, codex, cursor, kiro, junie, gemini, zed, amp, antigravity, cline, droid, goose, warp, openclaw, kilo, qoder — one namespace per client name); or when grim build fails validation with exit code 65.
 license: Apache-2.0
-compatibility: grim>=0.14
+compatibility: grim>=0.15
 metadata:
   summary: Deep authoring guide for grim skill, rule, agent, mcp, hook, and bundle artifacts
   keywords: grim,grimoire,authoring,frontmatter,validation,vendor-metadata,skill,rule,agent,mcp,hook,bundle,packaging
@@ -269,6 +269,25 @@ refuses to do. The hook loop is therefore `grim build` to validate, then
 `grim release` (a local registry works fine for iterating), then
 `grim add` from that reference.
 
+## Offering What You Author
+
+Packaging is half the job; the other half is where people get the result.
+Four surfaces, and the choice can change what you author:
+
+- **OCI registry**: `grim release` / `grim publish`, for people who run grim.
+- **Package index**: `grim publish --announce` makes it discoverable; to run
+  your own index see [hosting-an-index.md](references/hosting-an-index.md).
+- **Plugin marketplace repository**: `grim export marketplace` serves
+  Claude Code, Copilot, Codex, Qoder and Cursor users who have no grim; see
+  [hosting-a-marketplace.md](references/hosting-a-marketplace.md) (needs
+  grim 0.15.0 or later). **File handoff**: `grim export plugin`.
+- Inside a plugin, skills reach every client. MCP servers reach every
+  client unless the descriptor uses `oauth`, `ws`, or a `${...}` reference
+  in `command`, `url`, an env key or a header (see
+  [references/mcp-spec.md](references/mcp-spec.md)). Agents go only to the
+  Claude family (`claude`, `qoder`), and rules and hooks never. Bundle
+  accordingly.
+
 ## Routing Table
 
 | Read… | …when |
@@ -282,6 +301,8 @@ refuses to do. The hook loop is therefore `grim build` to validate, then
 | [references/vendor-metadata.md](references/vendor-metadata.md) | Adding a key in a reserved `<vendor>.*` namespace — one per client name (`claude.*`, `opencode.*`, `copilot.*`, `codex.*`, `cursor.*`, `kiro.*`, `junie.*`, `gemini.*`, `zed.*`, `amp.*`, `antigravity.*`, `cline.*`, `droid.*`, `goose.*`, `warp.*`, `openclaw.*`, `kilo.*`, `qoder.*`) |
 | [references/release-checklist.md](references/release-checklist.md) | Before `grim release`/`grim publish`, the metadata every package should set, repository-path layout, batch manifests, description companions, or triaging an exit-65 failure |
 | [references/bootstrap-existing-repo.md](references/bootstrap-existing-repo.md) | Turning an existing skill repo (agentskills.io `skills/<name>/SKILL.md` or `.claude/skills/`) into a grim publisher — inventorying artifacts, fixing names, backfilling catalog metadata, wiring publish CI |
+| [references/hosting-a-marketplace.md](references/hosting-a-marketplace.md) | Creating or maintaining a plugin marketplace git repository: layout, `[marketplace]` table, regenerate CI, required check, tokens, department and sibling deploy |
+| [references/hosting-an-index.md](references/hosting-an-index.md) | Standing up or operating a package index: indexer scaffold, contribution gate, sync layout, ratings, private options |
 | [references/updating.md](references/updating.md) | Maintaining this skill package itself |
 
 ## Schema Authority

@@ -18,7 +18,11 @@ first:
    [Vendor-Specific Metadata][vendor], [Publishing][publishing],
    [Agent Artifacts][agents], [MCP Server Artifacts][mcp],
    [Client Compatibility][clients], [The Package Index][index],
-   [Hooks][hooks], [Hook Troubleshooting][hooks-ts], [Agent Hooks guide][agent-hooks].
+   [Hooks][hooks] (incl. the handler contract), [Hook Troubleshooting][hooks-ts], [Agent Hooks guide][agent-hooks],
+   [Host a plugin marketplace][host-mp], [Host Your Own Index][host-index],
+   [Artifact Ratings][ratings], [`grim export marketplace`][export-mp],
+   [Hand a team a plugin][team-plugin], [Use a marketplace][use-mp],
+   [Configuration: `[marketplace]` and plugin metadata][config-mp].
 3. **The source** — frontmatter structs in [`src/skill/`][src-skill]
    (skill/rule/agent frontmatter, name rules), the hook manifest and its
    validation rules in [`src/oci/hook.rs`][src-hook], and the vendor
@@ -69,6 +73,11 @@ On every grim **minor** release:
 - `grim hook payload not executable registry 0644 interpreter form`
 - `grim options.experimental.hooks hook allow workspace consent arming gate`
 - `agentskills.io specification metadata map string values`
+- `grim export marketplace marketplace.toml marketplace.lock ownership untracked-destination`
+- `grim marketplace regenerate verify required check CODEOWNERS grim/marketplace`
+- `grim marketplace sibling deploy repository OUTPUT_ROOT department index`
+- `indexer init build ci:check index.config.json sync layout anchored legacy purge fresh`
+- `grim hook handler contract stdin envelope decision allow deny ask updated_input`
 
 ## Canonical Links
 
@@ -85,3 +94,10 @@ On every grim **minor** release:
 [src-skill]: https://github.com/grimoire-rs/grimoire/tree/main/src/skill
 [src-hook]: https://github.com/grimoire-rs/grimoire/blob/main/src/oci/hook.rs
 [src-install]: https://github.com/grimoire-rs/grimoire/tree/main/src/install
+[host-mp]: https://grimoire.rs/guides/hosting-a-marketplace.html
+[host-index]: https://grimoire.rs/hosting-an-index.html
+[ratings]: https://grimoire.rs/ratings.html
+[export-mp]: https://grimoire.rs/commands.html#export-marketplace
+[config-mp]: https://grimoire.rs/configuration.html#marketplace-table
+[team-plugin]: https://grimoire.rs/guides/team-plugin.html
+[use-mp]: https://grimoire.rs/guides/use-a-marketplace.html
