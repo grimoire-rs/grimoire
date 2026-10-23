@@ -37,9 +37,9 @@ forward and `grim status` to see where you stand.
 canonical way to set a default registry via a `default = true` entry, or
 `grim config registry use <alias>`), an `[options]` table for other defaults
 (`clients`, `[options.tui]` for the interactive browser), and `[skills]` /
-`[rules]` / `[agents]` / `[bundles]` tables mapping a binding name to a
-reference. Manage settings and registries with `grim config` rather
-than by hand — see [registries.md](registries.md#managing-config); it never
+`[rules]` / `[agents]` / `[mcp]` / `[hooks]` / `[bundles]` tables mapping a
+binding name to a reference (`[hooks]` takes registry references only).
+Manage settings and registries with `grim config` rather than by hand — see [registries.md](registries.md#managing-config); it never
 touches the declaration tables, which stay under `grim add` / `grim remove`.
 You may still edit by hand (run `grim lock` afterwards), but note that any
 grim write strips comments and the `#:schema` directive.
@@ -252,7 +252,13 @@ grammar and flags with `grim update --help`.
 ## Inspecting
 
 `grim status` reports each declared artifact's state: `installed`,
-`outdated`, `modified`, `missing`, or `stale`. See [artifact
+`outdated`, `modified`, `missing`, or `stale`. A hook row adds three more:
+`gated` (feature flag off, or consent missing or drifted), `not-armed` (a
+host-level refusal such as `insecure-transport`, a relative or nested
+`GRIM_HOME`, a non-Unix host, or a surface grim cannot register) and
+`untrusted` (client-side trust still pending); the reason is in the
+always-present `arming[].cause` array, see
+[troubleshooting.md](troubleshooting.md#a-hook-that-never-fires). See [artifact
 states][artifact-states] for what each one means. The
 `Source` column shows provenance: `direct`, the bundle the artifact came
 from, `path: <path>` for a declared local path source, or
@@ -418,6 +424,13 @@ always-present arrays, `[]` on a healthy run:
 Both come from the containment guard — see
 [troubleshooting.md](troubleshooting.md#containment-refusals).
 
+**Hooks are the exception to "left on disk".** `grim remove hook <name>` drops
+only the declaration and the lock entry: the dispatch row and the client
+registration **keep firing** until the next `grim install` (which converges and
+disarms) or `grim uninstall hook <name>` (which removes the dispatch row, the
+client registration **and** the payload). grim warns that the hook stays armed.
+To stop a hook now, use `uninstall` ([remove and uninstall][hooks-remove]).
+
 ## Bundles
 
 A bundle is a curated set of members. Declare it once and it **expands**
@@ -449,9 +462,9 @@ a manifest digest. Its members must still be registry references: `grim
 lock` rejects a relative (`./`/`../`) member id, since a local bundle has
 no registry identity of its own to resolve one against.
 
-A bundle's member tables are `[skills]`, `[rules]`, `[agents]`, and
-`[hooks]` — **an MCP server is not bundleable.** If you want one, declare it
-directly.
+A bundle's member tables are `[skills]`, `[rules]`, `[agents]`, `[mcp]` and
+`[hooks]`; the `[mcp]` key is the name the server registers under in each
+client's MCP config.
 
 A bundle-provided **hook** is declared, never armed: it locks with the
 bundle as its provenance and its own digest-pinned source, then faces the
@@ -541,6 +554,23 @@ because the first resolution that produces the digest pin is itself
 attacker-influenceable on the wire. Loopback is exempt, and only
 `--trust-hooks` overrides it.
 
+Setting `options.experimental.hooks` back to `false` and running `grim install`
+removes every registration and dispatch row at that scope (state returns to
+`gated`, cause `feature-flag-off`) but **keeps** the payload, the launcher
+`$GRIM_HOME/hooks/bin/grim-hook` and the workspace consent record. Flipping the
+flag back on re-arms with no new `grim hook allow`
+([flag off][hooks-flag-off]).
+
+**Team adoption gotcha:** a grim older than 0.15 refuses to load a
+`grimoire.lock` (and config) that declares a hook and exits **78**
+(`deny_unknown_fields`; it never silently drops the entry). Every machine and
+CI job sharing the project must be on 0.15.0 or later before a hook is
+declared. Dropping the only hook declaration and re-locking makes the lock
+readable to older builds again. The `grim hook` verbs and JSON, the dispatch
+table shape, `--trust-hooks` and the `[hooks]` tables are Unstable until 1.0;
+the OCI wire format for `hook.toml` `schema = 1` is frozen
+([stability][stability-unstable]).
+
 ### What you get today
 
 Declaring and locking a hook work with the flag off, and that is
@@ -616,3 +646,6 @@ no configuration. `grim hook --help` says so outright. Treat it like
 [config-toml]: https://grimoire.rs/configuration.html
 [json-interface]: https://grimoire.rs/json-interface.html
 [artifact-states]: https://grimoire.rs/commands.html#artifact-states
+[hooks-remove]: https://grimoire.rs/hooks.html#remove-stays-armed
+[hooks-flag-off]: https://grimoire.rs/hooks.html#flag-off-retention
+[stability-unstable]: https://grimoire.rs/stability.html#unstable

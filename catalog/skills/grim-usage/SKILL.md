@@ -1,8 +1,8 @@
 ---
 name: grim-usage
-description: Drive the grim CLI — the OCI package manager for AI skills, rules, agents, MCP servers, hooks, and bundles. Use when installing, updating, searching, rating, or publishing AI-config artifacts with grim; when composing grim init, config, add, lock, install, update, status, context, fetch, describe, export, search, rate, tui, mcp, hook, build, release, publish, login, logout, or completions commands; when configuring settings, multiple registries, or qualified alias/repo references; or when resolving registries, project vs global scope, client targets, or offline mode.
+description: Drive the grim CLI — the OCI package manager for AI skills, rules, agents, MCP servers, hooks, and bundles. Use when installing, updating, searching, rating, or publishing AI-config artifacts with grim; when composing grim init, config, add, lock, install, update, status, context, fetch, describe, export, search, rate, tui, mcp, hook, build, release, publish, login, logout, or completions commands; when adding, pinning, or exporting a plugin marketplace (marketplace.toml); when enabling opt-in telemetry; when configuring settings, multiple registries, or qualified alias/repo references; or when resolving registries, project vs global scope, client targets, or offline mode.
 license: Apache-2.0
-compatibility: grim>=0.14
+compatibility: grim>=0.15
 metadata:
   summary: How to use the grim CLI end to end
   keywords: grim,grimoire,cli,oci,registry,install,update,publish,skills,rules,agents,bundles,mcp,hooks,multi-registry
@@ -35,12 +35,17 @@ Compatibility][clients] docs page — trust it over this summary, and check it
 rather than assuming.
 
 > **Hooks are experimental and off by default.** The kind publishes,
-> resolves, locks, installs, and reports today; **arming is gated** behind
-> `options.experimental.hooks` (`false` unless you set it, config-only —
-> no environment variable overrides it). So adding a hook gives you a
-> declaration, a lock pin, and a materialized payload tree, and nothing
-> fires. `grim hook list` is the surface for inspecting what you have. Full
-> picture: [references/consume.md](references/consume.md#hooks).
+> resolves, locks, installs, and reports today; **arming is gated twice**:
+> `options.experimental.hooks` must be true (`false` unless you set it,
+> config-only — no environment variable overrides it) **and** the workspace
+> must have consented (`grim hook allow`, `grim add`, or an accepted prompt;
+> global scope is always consented). `grim install` and `grim update` never
+> grant consent. So adding a hook gives you a declaration, a lock pin, and a
+> materialized payload tree, and nothing fires until both gates clear.
+> `grim hook list` is the surface for inspecting what you have. Full picture:
+> [references/consume.md](references/consume.md#hooks); a hook that stays
+> silent:
+> [references/troubleshooting.md](references/troubleshooting.md#a-hook-that-never-fires).
 
 Two consequences of that shape are worth knowing before your first
 install. When **nothing** is detected, grim targets the generic `agents`
@@ -65,6 +70,10 @@ Before composing any non-trivial grim command:
 These pages teach workflows and semantics, never exhaustive flags. The
 full reference is `--help` plus the docs site linked below.
 
+To verify a pre-built grim release archive's build provenance:
+`gh attestation verify <archive> --repo grimoire-rs/grimoire`
+([Installation][install]).
+
 ## Command Map
 
 | Command | Purpose | Details |
@@ -80,12 +89,13 @@ full reference is `--help` plus the docs site linked below.
 | `grim fetch` | Print an artifact's content without installing | [consume](references/consume.md) |
 | `grim describe` | Report an artifact's metadata (kind, annotations, tags) without downloading content | [consume](references/consume.md) |
 | `grim remove` / `uninstall` | Undeclare vs full inverse of install | [consume](references/consume.md) |
-| `grim export plugin` | Render already-locked artifacts as a Claude Code (or Qoder) or Agent Plugins plugin (directory or `--zip`), for a client with no grim install | [publish](references/publish.md) |
-| `grim export marketplace` | Regenerate a git marketplace repository from a `marketplace.toml`'s `[marketplace]` table: one marketplace file and one plugin tree per client, plus a root README with the add commands, for consumers with no grim install | [publish](references/publish.md) |
+| `grim export plugin` | Render already-locked artifacts as a Claude-family (Claude Code, Qoder) or Agent Plugins plugin (directory or `--zip`), for a client with no grim install | [publish](references/publish.md#export) |
+| `grim export marketplace` | Regenerate a git marketplace repository from a `marketplace.toml`'s `[marketplace]` table: one marketplace file and one plugin tree per client, plus a root README with the add commands, for consumers with no grim install | [marketplaces](references/marketplaces.md) |
 | `grim search` / `tui` | Browse your declared registries' catalogs | [registries](references/registries.md) |
 | `grim rate` | Vote on an artifact through the index's rating forge | [registries](references/registries.md) |
 | `grim mcp` | Run a local STDIO MCP server for AI agent integration | [registries](references/registries.md) |
 | `grim hook list` | Report every declared hook with its tier, events, and per-client arming state | [consume](references/consume.md#hooks) |
+| `grim hook allow` / `grim hook revoke` (alias `deny`) | Record or remove this workspace's consent to arm its hooks | [consume](references/consume.md#hooks) |
 | `grim build` | Validate and pack locally, no push | [publish](references/publish.md) |
 | `grim release` | Validate, pack, push with cascade tags | [publish](references/publish.md) |
 | `grim publish` | Batch-release packages from a `publish.toml` manifest | [publish](references/publish.md) |
@@ -109,11 +119,11 @@ full reference is `--help` plus the docs site linked below.
 > `--no-git` suppresses every derived annotation. Confirm with
 > `grim release --help`.
 >
-> **`grim hook run` is not a command you type.** `grim hook` has two
-> subcommands, and only `list` is user-facing; `run` dispatches one client
-> event and its caller is the launcher grim generates, which passes it
-> `--client`, `--event`, `--table`, and `--root`. `grim hook --help` says
-> as much. Same shape as `grim mcp`, which speaks JSON-RPC on stdout rather
+> **`grim hook run` is not a command you type.** `grim hook` has four
+> subcommands; `list`, `allow` and `revoke` (alias `deny`) are user-facing,
+> while `run` dispatches one client event and its caller is the launcher grim
+> generates, which passes it `--client`, `--event`, `--table`, and `--root`.
+> `grim hook --help` says as much. Same shape as `grim mcp`, which speaks JSON-RPC on stdout rather
 > than to a person — invoke neither by hand expecting readable output.
 >
 > **Global flags** apply to every subcommand — `--format`, `--global` (`-g`),
@@ -163,6 +173,8 @@ and the multi-registry browse behavior in
 | [references/consume.md](references/consume.md) | Installing, updating, or removing artifacts in a project |
 | [references/publish.md](references/publish.md) | Building, releasing, tagging, or logging in to publish |
 | [references/registries.md](references/registries.md) | Resolving registries, scopes, client targets, offline mode, searching, or rating |
+| [references/marketplaces.md](references/marketplaces.md) | Running `grim export marketplace`, or adding, pinning, rolling out or troubleshooting a grim-generated plugin marketplace in Claude Code, Copilot, Codex, Qoder or Cursor (consumers need no grim) |
+| [references/telemetry.md](references/telemetry.md) | Turning opt-in telemetry on, proving it is off, or auditing what it sends |
 | [references/troubleshooting.md](references/troubleshooting.md) | A grim command failed — exit codes, integrity gates, common causes |
 | [references/updating.md](references/updating.md) | Maintaining this skill itself against newer grim releases |
 
@@ -175,6 +187,9 @@ and the multi-registry browse behavior in
   variables.
 - [Publishing][publishing] — the author-to-release workflow.
 - [Authentication][auth] — credential store, login/logout, CI recipes.
+- [Use a marketplace][use-a-marketplace] and [Host a marketplace][hosting-a-marketplace]
+  — consumer and curator guides. To *create* one (layout, deploy repository,
+  scheduled regenerate), use the `grim-authoring` skill's marketplace reference.
 
 [commands]: https://grimoire.rs/commands.html
 [concepts]: https://grimoire.rs/concepts.html
@@ -182,6 +197,9 @@ and the multi-registry browse behavior in
 [publishing]: https://grimoire.rs/publishing.html
 [auth]: https://grimoire.rs/authentication.html
 [clients]: https://grimoire.rs/clients.html
+[install]: https://grimoire.rs/installation.html#pre-built-binaries
+[use-a-marketplace]: https://grimoire.rs/guides/use-a-marketplace.html
+[hosting-a-marketplace]: https://grimoire.rs/guides/hosting-a-marketplace.html
 
 ---
 

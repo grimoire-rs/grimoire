@@ -9,6 +9,7 @@ Contents: [Exit Codes](#exit-codes) · [Exit 65](#exit-65-data-errors) ·
 [Containment Refusals](#containment-refusals) ·
 [Kind Inference](#the-kind-inference-gotcha) ·
 [A Hook That Never Fires](#a-hook-that-never-fires) ·
+[Marketplace and Plugin Export](#marketplace-and-plugin-export) ·
 [Offline Failures](#offline-failures) · [Auth Failures](#auth-failures)
 
 ## Exit Codes
@@ -131,7 +132,10 @@ Common causes, roughly in order of frequency:
 - **Oversize blob.** A registry serving more bytes than its manifest
   declared for a layer aborts the download mid-transfer rather than
   buffering an unbounded body. Reachable from `grim fetch` (also gated by
-  an 8 MiB pre-download check on the declared size) and from
+  an 8 MiB pre-download check on the declared size; since 0.15 the same
+  limit also bounds the **decoded** content of a gzip layer, so a small
+  compressed layer that expands past it exits 65 — layer encoding rules:
+  [artifacts][layers]) and from
   `grim install`/`grim update` (no separate flag — any locked artifact's
   download can hit this on a lying descriptor).
 - **Git provenance unavailable.** Building or releasing with `--git`
@@ -268,6 +272,20 @@ grim config get options.experimental.hooks        # exit 1 = off (see below); pr
 ls "$GRIM_HOME/hooks/consent/"                    # one file per consented workspace
 ```
 
+**The machine contract.** `grim install` rows carry `armed` (null for a
+non-hook, an array of `{client, tier}` for a hook). `grim status` and
+`grim hook list` rows carry an always-present `arming` array of
+`{client, cause, message, transient}`; an empty array means armed everywhere.
+**Branch on `cause`, never on `message`.** `cause` is a closed kebab-case set
+documented at [json-interface][hook-arming] (it includes `feature-flag-off`,
+`workspace-not-consented`, `consent-drifted`, `insecure-transport`,
+`surface-user-owned`, `platform-unsupported`, `not-registered` and
+`dispatch-lock-held`, the only `transient: true` one); link it rather than
+copy it. The `state` tokens besides the common ones are `gated`, `not-armed`
+and `untrusted`. A `GRIM_HOME` that is relative, or nested inside the
+workspace, makes grim **refuse to arm** (not merely warn); fix it with an
+absolute `GRIM_HOME` outside the repository.
+
 Work through it in this order:
 
 1. **The feature flag.** `options.experimental.hooks` is `false` unless
@@ -321,7 +339,10 @@ Work through it in this order:
    is full (1 MiB) or a table this grim cannot read (newer schema,
    unparseable, over the cap), which grim leaves untouched. Free space with
    `grim uninstall hook`; for an unreadable table, upgrade grim or move it
-   aside. Then re-run `grim install`.
+   aside. Then re-run `grim install`. Per-cause pages: [gated][ht-gated],
+   [global-only][ht-global], [user-owned file][ht-owned],
+   [Windows][ht-windows], [table full][ht-full],
+   [table unreadable][ht-unreadable] (the cap is 1 MiB).
 4. **The tier and the moment.** The design refuses rather than degrades: a
    `gatekeeper` or `mutator` a client cannot honour is *declined* for that
    `(hook, client)` pair, never quietly downgraded to an observer, because
@@ -332,6 +353,35 @@ Work through it in this order:
 
 `grim hook run` is not part of this diagnosis: it is the launcher's entry
 point, not a command to invoke by hand.
+
+## Marketplace and Plugin Export
+
+Symptom, cause, fix for `grim export marketplace` and the manifests it reads
+(needs grim 0.15.0 or later; narrative in [marketplaces.md](marketplaces.md)):
+
+- **65 `untracked-destination`:** a foreign marketplace file, or a non-empty
+  `./<client>/` that has no marketplace file of ours. The usual cause is a
+  **renamed** `[marketplace].name`. `--force` adopts it and deletes the
+  strays; consumers must re-add the marketplace under the new name.
+- **65 naming `[marketplace]`, `repository` or a client:** the table is
+  missing or invalid, `repository` is not an https URL without credentials, or
+  `clients` is empty or names `junie`, `openclaw` or `droid` (select `claude`).
+- **65 on every command after adding `[marketplace]` or plugin metadata
+  keys, on a CI box:** that machine runs grim older than 0.15.0 (unknown
+  field). Upgrade every machine and CI job first.
+- **65 "a plugin no selected client can carry":** every member was a rule or a
+  hook, or agents-only for non-Claude clients.
+- **75:** another export holds the manifest lock or the output-root
+  `.grim-export.lock`.
+- **CI, required `verify` check stays pending on the bot PR:** the PR was
+  opened with `GITHUB_TOKEN`, which starts no `pull_request` run. Use a GitHub
+  App, or close and reopen the PR ([tokens][mk-tokens]).
+- **CI, regenerate fails "Pull request not opened":** the organization or
+  repository forbids Actions to create pull requests; allow it at both levels,
+  or install an App.
+- **CI, `verify` fails on a PR that edits only `marketplace.toml`:** commit
+  the regenerated files in the same PR, or use the [curator
+  two-step][mk-two-step].
 
 ## Offline Failures
 
@@ -375,3 +425,13 @@ Exit 80 is the registry rejecting your credential. Things to know:
 [config]: https://grimoire.rs/configuration.html
 [json-interface]: https://grimoire.rs/json-interface.html
 [compression]: https://grimoire.rs/publishing.html#compression
+[layers]: https://grimoire.rs/artifacts.html#layers
+[hook-arming]: https://grimoire.rs/json-interface.html#hook-arming
+[ht-gated]: https://grimoire.rs/hooks-troubleshooting.html#gated
+[ht-global]: https://grimoire.rs/hooks-troubleshooting.html#global-only
+[ht-owned]: https://grimoire.rs/hooks-troubleshooting.html#surface-user-owned
+[ht-windows]: https://grimoire.rs/hooks-troubleshooting.html#platform-unsupported
+[ht-full]: https://grimoire.rs/hooks-troubleshooting.html#dispatch-full
+[ht-unreadable]: https://grimoire.rs/hooks-troubleshooting.html#dispatch-unreadable
+[mk-tokens]: https://grimoire.rs/guides/hosting-a-marketplace.html#tokens
+[mk-two-step]: https://grimoire.rs/guides/hosting-a-marketplace.html#two-step

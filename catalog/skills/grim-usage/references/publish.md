@@ -64,9 +64,12 @@ a full semver.
 ## Immutability
 
 An exact-version tag is immutable by default: if `1.2.3` already exists
-and points at different bytes, the release refuses (exit 65) rather than
-rewrite history. Pass `--force` only when you deliberately mean to move
-it. Floating tags (`1.2`, `1`, `latest`) move freely on every cascade —
+and points at different content, the release refuses (exit 65) rather than
+rewrite history. The guard compares content, not bytes, so for a skill, rule,
+agent or hook equal content under a new manifest digest (a flipped
+`--compression`) is adopted, not refused; see [Compression](#compression).
+Pass `--force` only when you deliberately mean to move it, and note that
+`--force` never adopts. Floating tags (`1.2`, `1`, `latest`) move freely on every cascade —
 that is their job.
 
 ## Compression
@@ -77,7 +80,8 @@ agent or hook as a gzip layer; a bare `--compression` means `gzip`. Bundles
 and MCP servers ignore it. Default is
 `none`, byte-identical to earlier releases. Consumers need grim 0.15.0 or
 later; an older grim cannot read a gzip layer and fails with exit 65 on
-`grim fetch` (verified on 0.14.3). Compress **new versions only**:
+`grim fetch` (verified on 0.14.3; see [upgrading][compression-upgrade]).
+The opt-in prints one stderr reminder line. Compress **new versions only**:
 re-releasing an existing skill, rule, agent or hook version with the other
 setting adopts the published manifest when content is equal (bundle and MCP
 releases still refuse), and `--force` converts it with a new digest that
@@ -86,7 +90,13 @@ push's digest, except when a real run adopts the existing manifest. A gzip layer
 (tar over 64 MiB and over 100x its gzip size) is refused at release with exit
 65; use `--compression none`. The `release` and `publish` JSON reports carry
 an always-present `compression` (`none`/`gzip`, `null` for bundle and mcp).
-Confirm flags with
+**Registry support:** a probe on 2026-10-21 showed GHCR and the GitLab
+Container Registry accept the custom layer type and keep its annotation byte
+for byte. Artifactory has **not** been probed, so do not publish compressed
+layers there until the docs say otherwise ([registry
+compatibility][registry-compat]). Reading a gzip layer needs no registry
+support. The safe rollout is skip-existing: compress from the next version and
+never `--force` an existing one. Confirm flags with
 `grim release --help`; see [Compressing layers][compression].
 
 ## Scripted Publishing
@@ -122,8 +132,8 @@ and per-entry `version`, validates the whole set before any push, then
 releases each entry in a fixed kind order: skills first, then rules, then
 agents, then MCP servers, then hooks, then bundles — alphabetical within
 each kind. Bundle members always land before the bundles that reference
-them. (`mcp` and `hooks` are not bundleable — they precede `bundles`
-because the kind sequence is fixed, not because a bundle can hold them.)
+them: the kind sequence is fixed so that a bundle's `mcp` and `hooks`
+members are pushed before the bundle that references them.
 
 The manifest format uses per-entry sub-tables keyed by name. A minimal
 example:
@@ -355,9 +365,10 @@ for the hosted URLs.
 
 ## Bundles
 
-A bundle is a small `.toml` whose `[skills]` / `[rules]` / `[agents]` / `[mcp]`
-tables list members by reference — the same shape as a `grimoire.toml`.
-Build and release it like any artifact:
+A bundle is a small `.toml` whose `[skills]` / `[rules]` / `[agents]` / `[mcp]` /
+`[hooks]` tables list members by reference — the same shape as a `grimoire.toml`. A
+hook member is declared by the bundle, never armed by it; consent is recorded
+per member. Build and release it like any artifact:
 
 ```sh
 grim build ./python-stack.toml
@@ -579,38 +590,64 @@ With no positional registry, `login`/`logout` resolve `--registry`, then
 
 Everything above pushes to an OCI registry, which is the right target
 when the consumer runs grim. `grim export plugin` covers the case where
-they do not: it packages already-published skills, agents, and MCP
-servers as a Claude Code or [Agent Plugins][agent-plugins] plugin — a
+they do not: it packages already-published artifacts as a plugin — a
 directory or `--zip` archive a teammate installs directly, no registry
-credential or grim binary needed on their end. **A hook member is always
-declined** — an exported plugin runs without grim, and a hook needs
-grim's own hook runtime to fire. Declining is one warning per hook per
-plugin, the existing `Omitted for <client>: hook <name>.` README line, and
-an `omitted[]` JSON row, with a reason per family: `not-representable` for
-the Claude format (its hook file cannot carry a grim hook) and
-`no-format-surface` for Agent Plugins (no hook file at all) — exit `0`
-either way. A plugin whose **only** locked members are hooks has nothing
-left to export and exits **65**.
+credential or grim binary needed on their end.
 
 ```sh
 grim export plugin ghcr.io/acme/skills/code-review:1 --client claude --zip -o dist
 ```
 
-A `--plugin`/`--marketplace` declared export re-resolves from a
-`marketplace.toml` and writes a `marketplace.lock` beside it — a separate
-file from `grimoire.lock`, never mixed with it. This is a rendering step,
-not a release: it carries no version-cascade, no announce, and no
-skip-existing semantics of its own. The rendered `plugin.json`
-description is the base text alone, capped at 500 characters: a
-`--description` or declared `description` over 500 exits 65, while a
-publisher's annotation text is cut to fit. Omitted members are listed in
-the plugin's generated `README.md`. A plugin logo (`--logo` or a declared
-`logo`, `.png`/`.svg` up to 1 MiB) ships as `assets/logo.<ext>`; a single-reference export without one uses
-that repository's published companion logo. `grim export plugin
---project` exports the project's own `grimoire.lock` as one plugin (name
-from `--name` or `grimoire.toml`'s `[plugin].name`, no re-resolution), and
-a `marketplace.toml` plugin can declare `project = "<dir>"` instead of
-`include` to take a project's pins. Confirm the current flag set with
+**What an export emits** depends on the client, which falls in one of two
+families. The **Claude** family (`claude`, `qoder`, `droid`, `junie`,
+`openclaw`) writes `.claude-plugin/plugin.json` (Qoder:
+`.qoder-plugin/plugin.json`). The [**Agent Plugins**][agent-plugins] family (`copilot`, `codex`,
+`cursor`, `agents`) writes `plugin.json`, and Cursor also writes
+`.cursor-plugin/plugin.json` with `${CURSOR_PLUGIN_ROOT}` for MCP paths. A
+client outside both families, or a `--client` naming one with no plugin format,
+exits 78. From 0.15.0 `--client qoder` succeeds (it exited 78 before), and a
+`qoder` entry in `[options].clients` is no longer skipped when `--client` is
+omitted.
+
+Admission is a design-level invariant, not a flag. Skills and MCP servers
+travel everywhere. **Agents travel only in the Claude family** (and `openclaw`
+drops agents and MCP as `client-declined`). **Rules never travel**
+(`no-format-surface`). **A hook member is always declined**: an exported
+plugin runs without grim and a hook needs grim's own runtime. Declining is one
+warning per member per plugin, a line in the plugin README and an `omitted[]`
+JSON row — exit 0, never an error. If **every** member is omitted for a client,
+the export exits 65 (a hook-only plugin included). The per-client table and
+reasons: [what each client admits][export-admission].
+
+The plugin `version` is `<base>+<12 hex>`, where the hash covers the **rendered
+tree** (every file's path, exec bit and content). Editing the description or
+logo, or a grim release that renders a skill differently, moves it, and it can
+differ between clients for the same plugin. Compare for equality, never order;
+bump `--version` or the declared `version` to change the base. Only the
+grammar is frozen, not the hash inputs. Through 0.14 the suffix hashed member
+digests, so every plugin gets one new suffix on first re-export from 0.15.0
+([upgrading][plugin-version-move]).
+
+Output is `<DIR>/<plugin>.<client>` or `.zip`, and an existing output is
+refused with 65 unless `--force`. A `--plugin`/`--marketplace` declared export
+re-resolves from a `marketplace.toml` and writes a `marketplace.lock` beside it
+— a separate file from `grimoire.lock`, never mixed with it. This is a
+rendering step, not a release: no version-cascade, no announce, no
+skip-existing. The rendered `plugin.json` description is the base text alone,
+capped at 500 characters: a `--description` or declared `description` over
+500 exits 65, while a publisher's annotation text is cut to fit. A plugin logo
+(`--logo` or a declared `logo`, `.png`/`.svg` up to 1 MiB) ships as
+`assets/logo.<ext>`. Optional `readme` and `changelog` plugin keys name
+Markdown files relative to the manifest (`grimoire.toml` for `[plugin]`), UTF-8,
+at most 1 MiB, else 65: `readme` replaces the generated README heading and
+`changelog` is copied to `CHANGELOG.md`. The generated README lists omitted
+members and gains a `## Contents` member list. `grim export plugin --project`
+exports the project's own `grimoire.lock` as one plugin (name from `--name`
+or `grimoire.toml`'s `[plugin].name`, no re-resolution), and a
+`marketplace.toml` plugin can declare `project = "<dir>"` instead of `include`
+to take a project's pins. The metadata keys (`author`, `homepage`, `license`,
+...) and these file keys need grim 0.15.0 or later; limits are in
+[plugin metadata][plugin-metadata]. Confirm the current flag set with
 `grim export plugin --help`, and see the full walkthrough in [Hand a team
 a plugin without grim][team-plugin] and the [command
 reference][commands-export].
@@ -618,37 +655,23 @@ reference][commands-export].
 ### Serving a marketplace repository {#export-marketplace}
 
 `grim export marketplace` hands a whole audience one address instead of one
-folder. From a `marketplace.toml` that carries a `[marketplace]` table (a
-`name`, an `owner`, optionally `clients`), it regenerates a git repository
-holding one marketplace file per client and one plugin tree per plugin and
-client at `./<client>/<plugin>`, plus a root `README.md` with each client's
-add and install commands (set `[marketplace].repository` to the clone URL
-they use). A hand-written `README.md` is left alone with a warning. The
-default clients are Claude Code,
-Copilot, Codex and Qoder, and Cursor is opt-in. Commit the result. A
-consumer adds the repository with their own client's commands, no grim
-needed; the [consumer guide][use-a-marketplace] shows each client, and
-the [curator guide][hosting-a-marketplace] covers the regenerate workflow,
-the required check and the token setup.
+folder: from a `marketplace.toml` carrying a `[marketplace]` table it
+regenerates a git repository holding one marketplace file per client and one
+plugin tree per plugin and client, plus a root `README.md` with each client's
+add commands. Commit the result; a consumer adds it with their own tool, no
+grim needed. A manifest carrying `[marketplace]` needs grim 0.15.0 or later on
+every machine and CI job that reads it: an older grim rejects it (exit 65).
 
 ```sh
 grim export marketplace -o ../acme-marketplace
 ```
 
-Ownership is a convention, not recorded state. grim rewrites only
-`./<client>/` and that client's marketplace file, and refuses a foreign one
-at exit 65 (`untracked-destination`) unless `--force` adopts it.
-`--force` deletes whatever else sits in an adopted `./<client>/`, and after
-you rename the marketplace it means consumers must re-add it under the new
-name. A plugin can also declare `author = { name, email?, url? }`,
-`homepage`, `repository`, `documentation`, `support`, `license`, `keywords`,
-`tags` and `category`, and `[marketplace.owner]` can declare `url`. grim
-writes each into the files of the harnesses whose format defines it, see
-[plugin metadata][plugin-metadata]; a bad value exits 65. A manifest
-carrying `[marketplace]` or these keys needs grim 0.15.0 or later: an older
-grim rejects it. Confirm the current flag set with `grim export
-marketplace --help`, and see the [command reference][commands-export-marketplace]
-for the layout, ownership rules, JSON report and exit codes.
+Running it, its flags and exit codes, the JSON report, adding the result in
+each client, pinning, and rollout live in
+[marketplaces.md](marketplaces.md). Creating and hosting one is the
+`grim-authoring` skill's marketplace reference and the [curator
+guide][hosting-a-marketplace]. See the [command
+reference][commands-export-marketplace] for the layout and ownership rules.
 
 ## Further Reading
 
@@ -672,8 +695,11 @@ for the layout, ownership rules, JSON report and exit codes.
 [auth]: https://grimoire.rs/authentication.html
 [commands]: https://grimoire.rs/commands.html#build
 [commands-export]: https://grimoire.rs/commands.html#export-plugin
+[export-admission]: https://grimoire.rs/commands.html#export-plugin-admission
+[plugin-version-move]: https://grimoire.rs/upgrading.html#plugin-version-move
+[compression-upgrade]: https://grimoire.rs/upgrading.html#compressed-layers-need-new-grim
+[registry-compat]: https://grimoire.rs/configuration.html#registry-compatibility
 [commands-export-marketplace]: https://grimoire.rs/commands.html#export-marketplace
-[use-a-marketplace]: https://grimoire.rs/guides/use-a-marketplace.html
 [plugin-metadata]: https://grimoire.rs/configuration.html#plugin-metadata
 [hosting-a-marketplace]: https://grimoire.rs/guides/hosting-a-marketplace.html
 [team-plugin]: https://grimoire.rs/guides/team-plugin.html

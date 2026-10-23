@@ -46,7 +46,7 @@ Environment variables that matter here (full table:
 | `GRIM_HOME` | Data root: cache, catalog, global config (default `~/.grimoire`) |
 | `GRIM_DEFAULT_REGISTRY` | Default registry for short references |
 | `GRIM_OFFLINE` | Same as `--offline` |
-| `GRIM_TELEMETRY` | Opt in to anonymous usage telemetry to the OTLP collector named by `OTEL_EXPORTER_OTLP_ENDPOINT` (off by default, no default endpoint; `DO_NOT_TRACK`, `OTEL_SDK_DISABLED` and offline disarm it; unstable until 1.0) |
+| `GRIM_TELEMETRY` | Opt in to anonymous usage telemetry to the OTLP collector named by `OTEL_EXPORTER_OTLP_ENDPOINT` (off by default, no default endpoint; `DO_NOT_TRACK`, `OTEL_SDK_DISABLED` and offline disarm it; unstable until 1.0). Procedure: [telemetry.md](telemetry.md) |
 | `GRIM_TELEMETRY_REPOSITORY` | With `GRIM_TELEMETRY`, add the redacted project `origin` remote as `vcs.*` |
 | `GRIM_INSECURE_REGISTRIES` | Comma-separated plain-HTTP registries, for a host no `[[registries]]` entry declares — adds to the `insecure` field, never overrides it |
 | `DOCKER_CONFIG` | Directory of the Docker-compatible credential `config.json` |
@@ -180,7 +180,15 @@ scaffolds an index repository — pointer tree, site config, and CI that
 builds the catalog site and gates contributions — served from GitHub or
 GitLab Pages. A plain git repository holding `index/**/metadata.json`
 also works as-is, with no build step. Full walkthrough:
-[Host Your Own Index][hosting].
+[Host Your Own Index][hosting]. An operator who wants the whole path (the
+contribution gate, branding, sync layout, ratings, a private index) should use
+the `grim-authoring` skill's index-hosting reference and the [hosting
+page][hosting]; [Publish a skill to your own index][own-index-tutorial] is the end-to-end
+walkthrough (author, publish, stand up, announce, install). This skill stays
+the consumer view. The same repository can also hold `marketplace.toml` and
+`marketplace.lock` beside the package pointers and deploy an export to a
+sibling marketplace repository, so a platform team's index can serve plugins
+too ([department index][mk-department]; see [marketplaces.md](marketplaces.md)).
 
 `oci` and `index` set together on one entry is a config error (exit 78);
 a locator that matches neither transport shape is a data error (exit 65).
@@ -234,6 +242,27 @@ exact limits live on the docs page, not in this skill.
   stalled clone is killed at the refresh deadline. A private repository
   therefore needs an ambient credential helper or ssh agent, and credentials
   never appear in an error.
+
+**Consumer-visible effects of the 0.15 sync layout.** An index that publishes
+only `c/` (`legacy: false`) cannot be read by a grim older than 0.15: that
+consumer sees refresh failures and should upgrade. An operator rollback reaches
+a consumer on its next refresh (`grim search --refresh` forces one); grim does
+not compare generations. `grim context` reports a per-source fallback counter
+in the sync sidecar, which counts times an index answered the root probe with
+something that was not a root, a diagnostic for a misconfigured host. Limits
+and timings stay on the docs page ([consuming an index][package-index-consuming]).
+
+**Self-hosted GitLab.** The [self-hosted GitLab walkthrough][gitlab-setup] is
+the corporate-instance path. Facts a GitLab user trips on: the git transport is
+the private-instance path and carries **no ratings** (every row reads unrated,
+by design); grim binaries reach runners through a release mirror, and `latest`
+does not resolve through a mirror, so pin an exact version; the index validate
+job needs a masked `GRIM_INDEX_BOT_TOKEN` with `api` scope, because the job
+token cannot merge MRs or read members; publishing projects on the same
+instance announce with only `repository` and `namespace` set; a Pages site on a
+separate domain needs `providers.rating_host` so voting targets the forge host.
+The variable tables (`GRIM_INDEX_MIN_ACCESS_LEVEL`, `GRIM_INDEX_REGISTRY_AUTH`,
+`GRIM_RATINGS_TOKEN`) are on that page.
 
 ### Plain HTTP {#plain-http}
 
@@ -1030,6 +1059,9 @@ rate][rate] and [Artifact Ratings][ratings-doc].
 [package-index]: https://grimoire.rs/package-index.html
 [package-index-consuming]: https://grimoire.rs/package-index.html#consuming
 [hosting]: https://grimoire.rs/hosting-an-index.html
+[own-index-tutorial]: https://grimoire.rs/tutorials/own-index.html
+[mk-department]: https://grimoire.rs/guides/hosting-a-marketplace.html#department
+[gitlab-setup]: https://grimoire.rs/self-hosted-gitlab.html
 [index-repo]: https://github.com/grimoire-rs/index
 [config-cmd]: https://grimoire.rs/commands.html#config
 [search]: https://grimoire.rs/commands.html#search
