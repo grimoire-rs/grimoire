@@ -234,6 +234,24 @@ def test_release_gzip_is_idempotent(
     assert second["pushed"] is True
 
 
+def test_bare_compression_flag_means_gzip(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    skill = _local_skill(project_dir)
+    ref = f"{registry}/{unique_repo}/code-review:1.0.0"
+    runner = grim_at(project_dir)
+
+    gzip_digest = runner.json("release", str(skill), ref, "--compression", "gzip")[
+        "manifest_digest"
+    ]
+    bare = runner.json("release", str(skill), ref, "--compression")
+    assert bare["manifest_digest"] == gzip_digest, bare
+
+    manifest = _publish_tree(project_dir, registry, unique_repo, compression=None)
+    rows = runner.json("publish", "--manifest", str(manifest), "--compression")["items"]
+    assert {r["compression"] for r in rows} == {"gzip"}, rows
+
+
 def test_release_gzip_dry_run_previews_the_pushed_digest(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

@@ -113,9 +113,9 @@ pub struct ReleaseArgs {
     pub push_registry: Option<String>,
 
     /// Layer compression for skill, rule, agent and hook releases; ignored
-    /// for bundles and mcp. Consumers need a grim that reads gzip layers to
-    /// install a gzip release.
-    #[arg(long, value_enum, default_value_t)]
+    /// for bundles and mcp; a bare `--compression` means gzip. Consumers need
+    /// a grim that reads gzip layers to install a gzip release.
+    #[arg(long, value_enum, default_value_t, num_args = 0..=1, default_missing_value = "gzip")]
     pub compression: Compression,
 }
 

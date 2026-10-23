@@ -2828,6 +2828,7 @@ derived annotation. The metadata flags (`--license`, `--repository`,
 [annotations](./publishing.md#metadata-flags) the artifact file does not
 author. `--compression <none|gzip>` (default `none`) packs a skill, rule,
 agent or hook into a gzip layer, and a bundle or MCP server ignores it.
+A bare `--compression` means `gzip`.
 Consumers need grim 0.15.0 or later to install a gzip layer, and the flag
 prints one stderr line saying so. Re-releasing an existing version with the
 other setting adopts the published manifest when the content is otherwise
@@ -2886,7 +2887,8 @@ exit 65 at validation, before any push. The manifest's `version_prefix`
 channel value skips-existing by default and needs `--force` to move.
 `--manifest <path>` selects a manifest other than the default `./publish.toml`.
 `--compression <none|gzip>` overrides the manifest's top-level `compression`
-key for the run, and `none` applies when neither is set. It affects skill,
+key for the run, and `none` applies when neither is set. A bare
+`--compression` means `gzip`. It affects skill,
 rule, agent and hook entries only. The same consumer requirement and
 [adopt semantics](./publishing.md#compression) as `grim release` apply.
 `--git` requires [build provenance](./publishing.md#git-provenance) on every

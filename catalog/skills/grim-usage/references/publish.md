@@ -73,7 +73,8 @@ that is their job.
 
 `--compression gzip` on `grim release` or `grim publish` (or a top-level
 `compression` key in `publish.toml`; the flag wins) publishes a skill, rule,
-agent or hook as a gzip layer. Bundles and MCP servers ignore it. Default is
+agent or hook as a gzip layer; a bare `--compression` means `gzip`. Bundles
+and MCP servers ignore it. Default is
 `none`, byte-identical to earlier releases. Consumers need grim 0.15.0 or
 later; an older grim cannot read a gzip layer and fails with exit 65 on
 `grim fetch` (verified on 0.14.3). Compress **new versions only**:

@@ -650,6 +650,7 @@ re-release of equal content is the one exception, covered in
 
 By default a skill, rule, agent or hook packs into one uncompressed tar
 layer. Pass `--compression gzip` to publish a gzip-compressed layer instead.
+A bare `--compression` means the same.
 Skills shrink about threefold, and small rules and agents about sixfold.
 
 ```sh
@@ -1318,7 +1319,7 @@ published keep their bytes, and only a bumped version packs gzip.
 | `--manifest <path>` | Manifest file to read (default: `./publish.toml`). |
 | `--dry-run` | Validate and plan without pushing. Prints what would be pushed. Companions are still containment- and size-checked and packed, so a bad companion fails the dry run; zero registry mutations occur either way. |
 | `--force` | Move existing exact-version tags instead of skipping them. |
-| `--compression <none\|gzip>` | Layer compression for skill, rule, agent and hook entries; bundles and MCP servers ignore it. Overrides the manifest's `compression` key, and `none` applies when neither is set. Consumers need grim 0.15.0 or later to install gzip layers. See [Compressing layers](#compression). |
+| `--compression <none\|gzip>` | Layer compression for skill, rule, agent and hook entries; bundles and MCP servers ignore it. Overrides the manifest's `compression` key, and `none` applies when neither is set. A bare `--compression` means `gzip`. Consumers need grim 0.15.0 or later to install gzip layers. See [Compressing layers](#compression). |
 | `--only <name>` | Publish only the named entry (repeatable). A name absent from the manifest exits 65. |
 | `--version <version>` | The single version source for the run. A **semver** value overrides the manifest's top-level `version` (entries with their own `version` keep it) and every entry cascades; a **non-semver** value (e.g. `canary`) is a movable channel tag applied to every entry uniformly, with no cascade. A prerelease/build-metadata value, a reserved cascade-float shape (`latest`, a bare major, or `major.minor`), or a value that is not a legal OCI tag exits 65 rather than being treated as a channel — see [Validation and fail-fast](#batch-publish-validation). The manifest's `version_prefix` (default `v`) is stripped first, so `--version v1.2.3` publishes `1.2.3`. See [One version for the whole catalog](#batch-publish-version). |
 | `--cascade` / `--no-cascade` | Control the rolling cascade (`X.Y.Z` → `X.Y`, `X`, `latest`) for the whole run. Neither flag is the default: cascade automatically for a semver `--version`, single tag for a channel. `--cascade` asserts a semver release and exits 65 if combined with a channel value; `--no-cascade` publishes only each exact version tag. |

@@ -134,9 +134,9 @@ pub struct PublishArgs {
 
     /// Layer compression for skill, rule, agent and hook entries; ignored for
     /// bundles and mcp. Overrides publish.toml `compression`; none when
-    /// neither is set. Consumers need a grim that reads gzip layers to
-    /// install a gzip release.
-    #[arg(long, value_enum)]
+    /// neither is set; a bare `--compression` means gzip. Consumers need a
+    /// grim that reads gzip layers to install a gzip release.
+    #[arg(long, value_enum, num_args = 0..=1, default_missing_value = "gzip")]
     pub compression: Option<crate::oci::layer::Compression>,
 }
 
