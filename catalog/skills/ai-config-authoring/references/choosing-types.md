@@ -82,7 +82,7 @@ Ask in order; the first decisive answer picks the type.
    and Junie each read their own file instead, so the baseline needs a
    per-client wrapper, import, or symlink. Vendor-native rules and hooks are
    lock-in surfaces — a packaging layer can narrow that (grim's `hook` kind
-   translates one declaration into three clients' dialects) but never remove
+   translates one declaration into four clients' dialects) but never remove
    it, since the surface has to exist in the client to be written at all.
 8. **Would removing it cause mistakes?** The deletion test, applied to
    every always-on line. If not, cut.
@@ -147,11 +147,24 @@ type** — which is why cross-client packaging defaults to skills.
   must be re-implemented per client. **A packaging layer can now hide part
   of that**: grim ships a `hook` artifact kind that declares an event, a
   tier, a matcher, and a handler once and translates each into the target
-  client's own dialect at install time — but only for **Claude, Codex, and
-  Copilot**, and only Claude at project scope. OpenCode's plugin surface is
-  not one grim writes, and every other client declines hooks. So the type is
+  client's own dialect at install time — but only for **Claude, Codex,
+  Copilot, and Qoder**, only Claude at project scope (the other three arm at
+  global scope only), and Qoder's registration is unverified by a live run
+  and declines the mutator tier. OpenCode's plugin surface is not one grim
+  writes, and every other client declines hooks. So the type is
   packageable across a narrow set, not portable, and grim's hooks are
   experimental and off by default. See the `grim-authoring` skill.
+- **Plugin marketplaces admit fewer kinds still.** Some teams reach people
+  through a client's plugin marketplace, no package manager involved. Skills
+  and MCP servers fit both plugin formats; agents fit only the Claude-family
+  plugin format (`.claude-plugin/plugin.json`), not the neutral Agent
+  Plugins one, and not every client of the Claude family takes them; rules
+  and hooks fit neither. So rule-shaped content bound for marketplace
+  users should be written as a skill. Each client reads its own marketplace file at its own path, so
+  generate them from one declaration rather than hand-maintaining several;
+  grim does this (needs grim 0.15.0 or later), see the `grim-authoring`
+  skill's marketplace reference, [the output layout][layout] and
+  [the admission table][admission].
 - **Name-collision precedence is client-specific** and contradicts the
   spec guide's stated convention. Unique names are the only portable
   strategy.
@@ -231,3 +244,5 @@ parallelism is demonstrably needed.
 [boucle]: https://blog.boucle.sh/posts/what-claude-code-hooks-can-and-cannot-enforce
 [eth]: https://arxiv.org/abs/2602.11988
 [willison]: https://simonwillison.net/2025/Oct/16/claude-skills/
+[admission]: https://grimoire.rs/commands.html#export-plugin-admission
+[layout]: https://grimoire.rs/commands.html#export-marketplace-layout

@@ -48,6 +48,7 @@ durable; update the numbers, keep the spine.
 - `copilot hooks reference declarative json events site:docs.github.com`
 - `AGENTS.md standard adoption nearest file precedence`
 - `skills not activating subagent headless`
+- `grim export marketplace plugin admission site:grimoire.rs`
 - `anthropic effective context engineering attention budget`
 
 ## Further Reading
@@ -80,6 +81,11 @@ durable; update the numbers, keep the spine.
   them read `.agents/skills`** — pool membership is the fastest-moving
   claim in this package, and reading the pool is not the same as writing
   to it.
+- grim's own docs, for the hook-client and plugin-marketplace claims in
+  `choosing-types.md`: [clients][g-clients] (hook gaps: `#gap-codex-hooks`,
+  `#gap-qoder-hooks`), [plugin admission][g-admission] (which kinds each
+  plugin format carries), and [Host a plugin marketplace][g-host]. Re-check
+  the hook-capable client count and the admission table.
 - [Skill authoring best practices][bp] and the
   [official example skills][repo] — re-measure body-length norms there.
 
@@ -111,3 +117,6 @@ durable; update the numbers, keep the spine.
 [kilo]: https://kilo.ai
 [bp]: https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices
 [repo]: https://github.com/anthropics/skills
+[g-clients]: https://grimoire.rs/clients.html
+[g-admission]: https://grimoire.rs/commands.html#export-plugin-admission
+[g-host]: https://grimoire.rs/guides/hosting-a-marketplace.html

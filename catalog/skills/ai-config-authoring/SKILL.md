@@ -51,8 +51,8 @@ failure modes, migration paths — in
 Every row above is *packageable* — grim distributes skills, rules,
 subagents, MCP registrations, and now hooks as artifact kinds. That changes
 distribution, never portability: a hook still needs a lifecycle surface in
-the client to be written at all, so it reaches three clients where a skill
-reaches all of them. Details in
+the client to be written at all, so it reaches a narrow set (four clients
+today) where a skill reaches all of them. Details in
 [references/choosing-types.md](references/choosing-types.md).
 
 ## Root-as-Index Pattern
@@ -84,13 +84,18 @@ artifact via [grim][grimoire]. To package and publish your artifact with
 grim — frontmatter schemas, validation, vendor metadata — read the
 companion skill `grim-authoring` at
 [`../grim-authoring/SKILL.md`](../grim-authoring/SKILL.md); both ship
-together in the `grim-essentials` bundle. If that file is missing,
-install it by identifier:
+together in the `grim-essentials` bundle. If that file is missing, install
+it by identifier:
 
 ```sh
 grim add ghcr.io/grimoire-rs/skills/grim-authoring:0   # installs by default
 # fresh project (no grimoire.toml yet): run `grim init` first
 ```
+
+Teams that reach people through a plugin marketplace rather than a package
+manager: only skills and MCP servers survive every plugin format, so write
+marketplace-bound content as a skill
+([choosing-types.md](references/choosing-types.md)).
 
 ## Further Reading
 
