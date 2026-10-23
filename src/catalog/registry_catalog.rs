@@ -1040,7 +1040,7 @@ impl Catalog {
     /// now: a failed walk can have checkpointed over the file the pre-flight
     /// read, and a sidecar bound to the old bytes would be ignored.
     fn store_failure(path: &Path, key: &str, sync: Option<SyncState>, message: &str) {
-        let binding = CacheBinding::read(path, key);
+        let binding = CacheBinding::read(path, key, sync.as_ref());
         let mut state = sync
             .filter(|state| state.catalog_sha256 == binding.digest)
             .unwrap_or_else(|| SyncState::unbound(key));
@@ -1053,7 +1053,7 @@ impl Catalog {
     /// it is now. A state bound to other bytes keeps its schedule and nothing
     /// else: its root and blob digests describe a file that is gone.
     fn store_state(path: &Path, key: &str, mut state: SyncState) {
-        let binding = CacheBinding::read(path, key);
+        let binding = CacheBinding::read(path, key, Some(&state));
         if state.catalog_sha256.is_some() && state.catalog_sha256 != binding.digest {
             state = state.backoff_only(key);
         }
@@ -1578,19 +1578,40 @@ struct CacheBinding {
 }
 
 impl CacheBinding {
-    /// An absent or unreadable cache binds to nothing.
-    fn read(path: &Path, key: &str) -> Self {
-        match Catalog::load_with_bytes(path, key) {
-            Ok(Some((catalog, bytes))) => Self {
-                digest: Some(sha256_hex(&bytes)),
+    /// An absent or unreadable cache binds to nothing. `known` is a sidecar
+    /// the caller holds: when it already describes these very bytes, its
+    /// timestamp and entry count carry over and the file is not parsed.
+    fn read(path: &Path, key: &str, known: Option<&SyncState>) -> Self {
+        let Ok(Some(bytes)) = Catalog::read_file(path) else {
+            return Self::unbound();
+        };
+        let digest = sha256_hex(&bytes);
+        if let Some(state) = known
+            && state.locator_sha256 == sha256_hex(key.as_bytes())
+            && state.catalog_sha256.as_deref() == Some(digest.as_str())
+            && let (Some(built_at), Some(entries)) = (&state.catalog_built_at, state.entries)
+        {
+            return Self {
+                digest: Some(digest),
+                built_at: Some(built_at.clone()),
+                entries: Some(entries),
+            };
+        }
+        match Catalog::parse(path, key, &bytes) {
+            Ok(Some(catalog)) => Self {
+                digest: Some(digest),
                 built_at: Some(catalog.built_at),
                 entries: Some(catalog.entries.len() as u64),
             },
-            _ => Self {
-                digest: None,
-                built_at: None,
-                entries: None,
-            },
+            _ => Self::unbound(),
+        }
+    }
+
+    fn unbound() -> Self {
+        Self {
+            digest: None,
+            built_at: None,
+            entries: None,
         }
     }
 
@@ -2609,6 +2630,58 @@ mod tests {
                 .is_some_and(|e| e.starts_with("refresh deferred until "))
         );
         assert!(matches!(coordinate(Refresh::Yes).await, Ok(PreFlight::Rebuild { .. })));
+    }
+
+    #[test]
+    fn a_sidecar_that_describes_the_bytes_binds_without_a_parse() {
+        // Bytes that are not a catalog cannot be parsed, so a binding that
+        // still carries the sidecar's figures proves the file was only hashed.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        std::fs::write(&path, b"not a catalog").unwrap();
+        let digest = sha256_hex(b"not a catalog");
+        let known = SyncState {
+            catalog_sha256: Some(digest.clone()),
+            catalog_built_at: Some("2026-01-01T00:00:00Z".into()),
+            entries: Some(7),
+            ..SyncState::unbound("localhost:5000")
+        };
+
+        let carried = CacheBinding::read(&path, "localhost:5000", Some(&known));
+        assert_eq!(carried.digest.as_deref(), Some(digest.as_str()));
+        assert_eq!(carried.built_at.as_deref(), Some("2026-01-01T00:00:00Z"));
+        assert_eq!(carried.entries, Some(7));
+
+        for (what, stale) in [
+            ("no sidecar", None),
+            (
+                "other bytes",
+                Some(SyncState {
+                    catalog_sha256: Some(sha256_hex(b"other")),
+                    ..known.clone()
+                }),
+            ),
+            (
+                "another source",
+                Some(SyncState {
+                    locator_sha256: sha256_hex(b"elsewhere"),
+                    ..known.clone()
+                }),
+            ),
+            (
+                "no figures",
+                Some(SyncState {
+                    entries: None,
+                    ..known.clone()
+                }),
+            ),
+        ] {
+            let parsed = CacheBinding::read(&path, "localhost:5000", stale.as_ref());
+            assert!(
+                parsed.digest.is_none() && parsed.built_at.is_none() && parsed.entries.is_none(),
+                "{what}: the file is parsed, and unparseable bytes bind to nothing"
+            );
+        }
     }
 
     #[test]

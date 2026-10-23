@@ -684,36 +684,47 @@ async fn resolve_row(ctx: &Context, reference: &str) -> anyhow::Result<(String, 
         active: &crate::install::client_target::ClientTarget::ALL,
         target: None,
     };
-    let mut results = load_rows(ctx, &registries, &access, &badges, Refresh::No).await?;
+    let results = load_rows(ctx, &registries, &access, &badges, Refresh::No).await?;
     // A cached listing can hold a row its stats document never reached (the
     // blob was unavailable, or rejected, when it was built), and voting on
     // that row needs the rating. One forced stats fetch from the row's own
     // source settles it; offline there is nothing to fetch.
-    if !ctx.offline()
-        && let Some(idx) = stats_reload_target(&results, &registries, &wanted)
-    {
+    let reload = if ctx.offline() {
+        None
+    } else {
+        stats_reload_target(&results, &registries, &wanted)
+    };
+    // Narrowed to each group's row before the reload, so two listings are
+    // never held at once.
+    let mut rows = wanted_rows(results, &wanted);
+    if let Some(idx) = reload {
         let mut own = load_rows(ctx, &registries[idx..=idx], &access, &badges, Refresh::StatsForced).await?;
         // A failed reload serves nothing fresher than the group already held.
         if let Some(group) = own.groups.pop().filter(|g| g.error.is_none()) {
-            results.groups[idx] = group;
+            rows[idx] = group.rows.into_iter().find(|row| row.repo() == wanted);
         }
     }
 
-    let row = results
-        .into_flat_rows()
-        .into_iter()
-        .find(|row| row.repo() == wanted)
-        .ok_or_else(|| {
-            map_rate(RateError::NoSuchRef {
-                reference: wanted.clone(),
-            })
-        })?;
+    let row = rows.into_iter().flatten().next().ok_or_else(|| {
+        map_rate(RateError::NoSuchRef {
+            reference: wanted.clone(),
+        })
+    })?;
     let rating = row.rating.ok_or_else(|| {
         map_rate(RateError::NotRated {
             reference: wanted.clone(),
         })
     })?;
     Ok((wanted, rating))
+}
+
+/// Each group's row of `wanted`, by group index; every other row is dropped.
+fn wanted_rows(results: crate::catalog::CatalogResults, wanted: &str) -> Vec<Option<crate::catalog::CatalogRow>> {
+    results
+        .groups
+        .into_iter()
+        .map(|group| group.rows.into_iter().find(|row| row.repo() == wanted))
+        .collect()
 }
 
 /// The catalog load `grim rate` resolves a row from.
