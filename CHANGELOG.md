@@ -5,6 +5,102 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-10-23
+
+### Added
+
+- Add hooks as an experimental artifact kind *(hook)*
+- Decline hook members with a per-family reason *(export)*
+- Publish tool-call-logger and command-guard example hooks *(catalog)*
+- Derive plugin versions from the rendered tree *(export)*
+- Export qoder plugins *(export)*
+- Add .cursor-plugin/plugin.json to cursor trees *(export)*
+- Parse and validate the [marketplace] table *(export)*
+- Contain declared inputs and add the repo layout *(export)*
+- Add grim export marketplace *(export)*
+- Carry plugin author, links, licence and keywords into each harness's files *(export)*
+- Ship a plugin README with its contents and an optional changelog *(export)*
+- Write a marketplace README with each harness's add command *(export)*
+- Report total and truncated in the JSON envelope *(search)*
+- Add --limit to grim search and the MCP grim_search tool *(search)*
+- Add --offset to page through grim search and grim_search *(search)*
+- Mark capped sources in the search JSON envelope *(search)*
+- Checkpoint and resume long oci catalog builds *(catalog)*
+- Opt-in gzip compression for published artifact layers
+- Add opt-in OTLP usage telemetry behind GRIM_TELEMETRY
+- Redact index locators in errors and logs *(catalog)*
+- Escape hidden and control characters in plain table cells *(cli)*
+- Refresh an index through a root probe and a bound sync sidecar *(catalog)*
+- Report each source's catalog sync state *(context)*
+- Refetch stats once before reporting a row unrated *(rate)*
+- Bare --compression means gzip *(release)*
+
+### Changed
+
+- Extract the declared path and the stage step *(export)*
+- Revalidate oci rows by manifest digest *(catalog)*
+- Run the place/commit phase in spawn_blocking *(export)*
+- Move index transport and git into their own modules *(catalog)*
+- Hash, inflate and derive index URLs in the transport *(catalog)*
+- Move IndexPackage into its own module *(catalog)*
+- Share the exit mapping with main.rs *(telemetry)*
+
+### Documentation
+
+- Add a user-facing changelog page and the /changelog release skill
+- Document experimental hooks *(hook)*
+- Teach the first-party skills about hooks *(catalog)*
+- List the experimental hook kind wherever kinds are enumerated
+- Fix VS Code extension id to grimoire-rs.grimoire-vscode and link the marketplace
+- Document grim export marketplace and the render-derived plugin version
+- Add guides for using and hosting a plugin marketplace
+- Cover grim export marketplace in grim-usage *(catalog)*
+- Document the ChatGPT and Claude Desktop GUI routes to a marketplace
+- Document hook omission for the export marketplace path
+- Host a department marketplace from its index repository
+- Document uncapped index browsing, --limit and stale-cache serving
+- Document paging search results with --offset and total
+- Describe the uncapped oci listing in the search and JSON references
+- Warn grim_search callers about unbounded large indexes *(mcp)*
+- Describe the index root, flat blob, sync sidecar and backoff
+- Document the refresh wait, the stats refetch and the context catalog field
+- State only the two flat-blob limits in the host ceiling
+- Document the tag pick for duplicate bindings *(telemetry)*
+- Add the two fail-closed redaction rows to C-010 *(telemetry)*
+- Teach grim-authoring to host a marketplace and a package index *(catalog)*
+- Add marketplace and telemetry references to grim-usage *(catalog)*
+- Cover plugin marketplaces in ai-config-authoring *(catalog)*
+
+### Fixed
+
+- Size the title row and tree labels to the terminal *(tui)*
+- Refuse declaration keys that could escape the install root *(install)*
+- Resolve a relative --config to an absolute workspace *(config)*
+- Apply publish metadata defaults to hook packages *(build)*
+- Cap logo reads by bytes read *(export)*
+- Keep hook members in marketplace.lock so a rerun stays unchanged *(export)*
+- Bump rustls and zip for RUSTSEC-2026-0346 to 0349 and 0367 *(deps)*
+- Stop capping index sources at 500 entries *(catalog)*
+- Serve the cached catalog when a refresh fails *(catalog)*
+- Harden index fetches for indexes past 500 entries *(catalog)*
+- Stop advising a narrower query for a capped catalog *(search)*
+- Order --sort ties across sources by declaration rank *(search)*
+- Flag a _catalog walk cut short by its 8000-repo ceiling *(catalog)*
+- Follow _catalog pagination to the end *(oci)*
+- Build every oci repository *(catalog)*
+- Follow tags/list pagination when listing a repository's tags *(oci)*
+- Bump rustls-webpki and webpki-root-certs for RUSTSEC-2026-0382 and RUSTSEC-2026-0383 *(deps)*
+- Bump vite and sharp in the docs site lockfile *(deps)*
+- Scope the atomic-write perms mut to unix
+- Refuse case-colliding member entries before extraction for every kind *(export)*
+- Name every client in the all-empty plugin refusal *(export)*
+- Name Cursor's plugin-root placeholder, warn on the data dir *(export)*
+- Refuse https-to-http redirects on index requests *(catalog)*
+- Run index and announce git through one hardened helper *(catalog)*
+- Report updated from the install outcome *(telemetry)*
+- Keep a telemetry panic off stderr *(telemetry)*
+- Bump ctutils to 0.4.5 for RUSTSEC-2026-0385 *(deps)*
+
 ## [0.14.3] - 2026-09-28
 
 ### Added
@@ -875,6 +971,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make release-update.sh executable; add rolling-release regression tests
 - Contact loopback registries over plain HTTP on any port
 
+[0.15.0]: https://github.com/grimoire-rs/grimoire/compare/v0.14.3..v0.15.0
 [0.14.3]: https://github.com/grimoire-rs/grimoire/compare/v0.14.2..v0.14.3
 [0.14.2]: https://github.com/grimoire-rs/grimoire/compare/v0.14.1..v0.14.2
 [0.14.1]: https://github.com/grimoire-rs/grimoire/compare/v0.14.0..v0.14.1

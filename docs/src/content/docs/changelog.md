@@ -12,6 +12,148 @@ new client, or a behavior worth knowing about. It links to the page that
 shows how. [`CHANGELOG.md`][changelog] has every change at commit
 granularity, including the refactors and internal work this page leaves out.
 
+## 0.15 — marketplaces, hooks, and catalogs of any size {#v0-15}
+
+0.15 turns a `marketplace.toml` into [a git repository your team adds as a
+plugin marketplace](#v0-15-0-marketplace). It adds [experimental
+hooks](#v0-15-0-hooks) that answer an agent's permission questions, and lets
+[`grim search` page through catalogs of any size](#v0-15-0-large-catalogs).
+
+### 0.15.0 — 2026-10-23 {#v0-15-0}
+
+0.15.0 adds [`grim export marketplace`](#v0-15-0-marketplace),
+[experimental hooks](#v0-15-0-hooks), [paged search over uncapped
+catalogs](#v0-15-0-large-catalogs), [opt-in usage
+telemetry](#v0-15-0-telemetry) and [gzip-compressed layers](#v0-15-0-gzip).
+It also fixes a [set of install, config and catalog
+bugs](#v0-15-0-fixes).
+
+#### Host a plugin marketplace from one manifest {#v0-15-0-marketplace}
+
+[`grim export plugin`][export-plugin] hands one plugin over as a folder or a
+zip. A team wants an address instead: add it once, receive updates.
+
+[`grim export marketplace`][export-marketplace] regenerates a git repository
+from the plugins a `marketplace.toml` declares. It writes one marketplace
+file per client (Claude Code, Copilot, Codex, Qoder and Cursor), one plugin
+tree per plugin and client, and a root README that tells visitors how to add
+the marketplace. You commit the result, and a consumer adds the repository
+with their client's own commands, with no grim installed.
+
+```sh
+grim export marketplace --marketplace tools/marketplace.toml -o ../acme-marketplace
+```
+
+Each plugin can now carry an author, licence, links and keywords, and grim
+writes them into every client's files ([plugin metadata][plugin-metadata]).
+Qoder joins [`grim export plugin`][export-plugin], and Cursor trees get a
+`.cursor-plugin/plugin.json`. [Host a plugin marketplace][host-marketplace]
+covers the scheduled regenerate job and the required check, and [Use a plugin
+marketplace without grim][use-marketplace] is the page to send your users.
+
+Two things change for existing exports. A plugin's version suffix now hashes
+the rendered tree, so every plugin you exported before gets a new suffix once
+([upgrade note][plugin-version-move]). A configured `qoder` client is no
+longer skipped on export ([upgrade note][qoder-plugin-export]). A manifest
+that uses the new `[marketplace]` table or plugin metadata keys also needs
+grim 0.15.0 everywhere it is read ([`[marketplace]`][marketplace-needs-new],
+[metadata keys][plugin-metadata-needs-new]).
+
+#### Let a hook answer your agent's permission questions {#v0-15-0-hooks}
+
+An agent asks before it runs a shell command, and by the twentieth ask you
+click yes without reading. A hook is a small program the client runs before
+or after a tool call. Its answer lets the call run, asks you, or refuses it.
+Publish a `hook.toml` once, and grim translates it into each client's own
+hook format.
+
+Hooks are a new, **experimental** artifact kind. They execute code, so grim
+arms one only after you switch the feature on and consent for the workspace:
+
+```sh
+grim config set options.experimental.hooks true
+grim add --kind hook ghcr.io/acme/hooks/approve-safe-commands:1
+```
+
+[Control agent commands with hooks][hooks-guide] installs one and writes
+another. The [hooks reference][hooks-reference] lists the gates, the handler
+contract and each client's limits, and [artifact formats][artifacts-hooks]
+lists the manifest fields. The first-party catalog now publishes two example
+hooks, `command-guard` and `tool-call-logger`. Plugin export omits hook
+members. The kind is [unstable until 1.0][stability-unstable].
+
+#### Page through catalogs of any size {#v0-15-0-large-catalogs}
+
+An index source stopped at 500 entries, and an OCI registry's `_catalog` and
+`tags/list` listings stopped at their first page. A catalog larger than that
+looked complete and was not.
+
+grim now lists every entry an index publishes, and follows a registry's own
+paging to the end. A long OCI build checkpoints its rows, so an interrupted
+run resumes on the next command. Other commands serve the rows built so far
+and read `capped: true` for the source until it finishes. A refresh that
+fails serves the cached catalog instead of an error.
+
+[`grim search`][search] pages the result, and the JSON envelope reports
+`total` and `truncated`:
+
+```sh
+grim search --sort rating --limit 10 --offset 10
+```
+
+The MCP `grim_search` tool takes the same `limit` and `offset`. See [paging
+`search` results][search-paging], and [browse filters][browse-filters] for
+what a filter does and does not narrow. A refresh of an HTTP package index
+also starts with a root probe and backs off from a source that keeps failing
+([upgrade note][index-sync]), and [`grim context`][context] reports each
+source's last sync.
+
+#### Send anonymous usage telemetry to your own collector {#v0-15-0-telemetry}
+
+You can now see how grim is used across a team without a vendor in the
+middle. Set `GRIM_TELEMETRY` and point `OTEL_EXPORTER_OTLP_ENDPOINT` at an
+OpenTelemetry collector you run. grim sends one record per command there. It
+is off by default, and `DO_NOT_TRACK`, `OTEL_SDK_DISABLED` and offline mode
+switch it off again. There is no default endpoint, and nothing leaves the
+machine for any other address. [Telemetry][telemetry] lists every field, what
+is never collected, and how to audit the bytes. The surface is [unstable until
+1.0][stability-unstable].
+
+#### Publish smaller layers with gzip {#v0-15-0-gzip}
+
+A skill, rule, agent or hook packs into one uncompressed tar layer. Pass
+`--compression gzip`, or a bare `--compression`, to publish a compressed layer
+instead. Skills shrink about threefold, and small rules and agents about
+sixfold.
+
+```sh
+grim release ./code-review ghcr.io/acme/code-review:1.2.3 --compression gzip
+```
+
+Default output is unchanged. A grim before 0.15.0 cannot read a gzip layer, so
+upgrade every machine that installs the artifact first
+([upgrade note][compressed-layers]). See [compressing layers][compression].
+
+#### Skills that know this release {#v0-15-0-skills}
+
+The first-party skills publish with 0.15.0. `grim-authoring` gains references
+for hosting a plugin marketplace and a package index. `grim-usage` gains
+references for running a marketplace and for telemetry. Run `grim update` to
+pick them up.
+
+#### Fixes {#v0-15-0-fixes}
+
+- [`grim rate`][rate] refetches stats once before it reports a row unrated.
+- A relative `--config` now resolves to an absolute workspace.
+- A declaration key that could escape the install root is refused.
+- Index requests refuse an https-to-http redirect, and errors and logs redact
+  index locators.
+- Plain-table cells escape hidden and control characters.
+- The [TUI][tui] title row and tree labels fit the terminal width.
+- Publish metadata defaults now apply to hook packages.
+- Dependency updates close RUSTSEC-2026-0346 to 0349, 0367, 0382, 0383 and
+  0385.
+
 ## 0.14 — ratings, downloads, and exporting a project as a plugin {#v0-14}
 
 0.14 gives every catalog browse [a rating and a download count](#v0-14-0-ratings).
@@ -372,6 +514,10 @@ the full commit-level record back to the first tagged release.
 <!-- commands -->
 
 [export-plugin]: ./commands.md#export-plugin
+[export-marketplace]: ./commands.md#export-marketplace
+[search-paging]: ./json-interface.md#search-paging
+[context]: ./commands.md#context
+[rate]: ./commands.md#rate
 [export-plugin-output]: ./commands.md#export-plugin-output
 [update-marketplace]: ./commands.md#update-marketplace
 [search]: ./commands.md#search
@@ -392,6 +538,8 @@ the full commit-level record back to the first tagged release.
 [config-registry-set]: ./commands.md#config-registry
 [options-vendors]: ./configuration.md#options-vendors
 [push-registry]: ./publishing.md#batch-publish-push-registry
+[plugin-metadata]: ./configuration.md#plugin-metadata
+[compression]: ./publishing.md#compression
 
 <!-- publishing / index -->
 
@@ -404,8 +552,15 @@ the full commit-level record back to the first tagged release.
 [ratings-setup]: ./ratings.md#setup
 [voting-host]: ./ratings.md#voting-host
 
-<!-- clients / artifacts -->
+<!-- clients / artifacts / hooks -->
 
+[hooks-guide]: ./guides/agent-hooks.md
+[hooks-reference]: ./hooks.md
+[artifacts-hooks]: ./artifacts.md#hooks
+[host-marketplace]: ./guides/hosting-a-marketplace.md
+[use-marketplace]: ./guides/use-a-marketplace.md
+[telemetry]: ./telemetry.md
+[stability-unstable]: ./stability.md#unstable
 [clients-matrix]: ./clients.md#matrix
 [gap-skills-only]: ./clients.md#gap-skills-only
 [gap-shared-pool]: ./clients.md#gap-shared-pool
@@ -423,6 +578,12 @@ the full commit-level record back to the first tagged release.
 [rating-host]: ./upgrading.md#rating-host
 [update-integrity]: ./upgrading.md#update-integrity
 [default-provenance]: ./upgrading.md#default-provenance
+[plugin-version-move]: ./upgrading.md#plugin-version-move
+[qoder-plugin-export]: ./upgrading.md#qoder-plugin-export
+[marketplace-needs-new]: ./upgrading.md#marketplace-table-needs-new-grim
+[plugin-metadata-needs-new]: ./upgrading.md#plugin-metadata-needs-new-grim
+[compressed-layers]: ./upgrading.md#compressed-layers-need-new-grim
+[index-sync]: ./upgrading.md#index-sync
 
 <!-- json interface -->
 
