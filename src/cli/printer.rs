@@ -132,7 +132,7 @@ pub fn print_table(w: &mut impl Write, headers: &[&str], rows: &[Vec<String>]) -
 /// `\u{hex}` in lowercase. A well-formed flag tag sequence always passes.
 ///
 /// Text with nothing to change comes back borrowed.
-fn screen_plain(s: &str) -> Cow<'_, str> {
+pub(crate) fn screen_plain(s: &str) -> Cow<'_, str> {
     if !s.chars().any(is_hidden) {
         return Cow::Borrowed(s);
     }
