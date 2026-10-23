@@ -60,7 +60,10 @@ ADDITIVE_STDOUT_KEYS: dict[str, tuple[str, object]] = {
 #   c118-relative-config-target: under a relative `--config`, main prints a
 #   `target` relative to the cwd and the branch (C-118, PR 2a436191) prints it
 #   absolute. Equal iff cwd / main's value == the branch's value.
-STDOUT_EQUIVALENCES = ("c118-relative-config-target",)
+#   context-reported-version: `grim context` prints the binary's own version
+#   at `$.version`, which differs whenever the branch bumps it (a release).
+#   Equal iff both are strings; only that one field, only for `context`.
+STDOUT_EQUIVALENCES = ("c118-relative-config-target", "context-reported-version")
 
 # Named volatile fields: (root-relative path glob, key). A `key = "…"` (TOML)
 # or `"key": "…"` (JSON) string value is masked in matching files; nothing
@@ -294,6 +297,17 @@ def _c118_equal(key: str, a: object, b: object, cwd: str) -> bool:
     )
 
 
+def _version_equal(command: str, path: str, key: str, a: object, b: object) -> bool:
+    """``context-reported-version``: see ``STDOUT_EQUIVALENCES``."""
+    return (
+        command == "context"
+        and path == "$"
+        and key == "version"
+        and isinstance(a, str)
+        and isinstance(b, str)
+    )
+
+
 def diff_json(
     label: str, a, b, path: str = "$", command: str = "", cwd: str = "/"
 ) -> list[str]:
@@ -314,7 +328,9 @@ def diff_json(
                         f"{label}: stdout {path}.{k} = {b[k]!r}, hook-free run "
                         f"must print {allowed[1]!r}"
                     )
-            elif _c118_equal(k, a[k], b[k], cwd):
+            elif _c118_equal(k, a[k], b[k], cwd) or _version_equal(
+                command, path, k, a[k], b[k]
+            ):
                 continue
             else:
                 out += diff_json(label, a[k], b[k], f"{path}.{k}", command, cwd)
@@ -742,6 +758,17 @@ def self_test(root: Path) -> None:
     assert diff_stdout("t", rel, '{"i": [{"target": "/r/ws/y"}]}', "install", "/r")
     assert diff_stdout("t", rel, ab, "install", "/other")
     assert diff_stdout("t", '{"path": "ws/x"}', '{"path": "/r/ws/x"}', "install", "/r")
+
+    # context-reported-version: the top-level `version` of `context`, nothing else.
+    v1, v2 = '{"version": "0.14.3", "x": 1}', '{"version": "0.15.0", "x": 1}'
+    assert diff_stdout("t", v1, v2, "context") == []
+    assert diff_stdout("t", v1, v2, "install"), "version is masked for context only"
+    assert diff_stdout("t", v1, v2), "no command, no mask"
+    assert diff_stdout("t", v1, '{"version": "0.15.0", "x": 2}', "context")
+    assert diff_stdout(
+        "t", '{"a": {"version": "1"}}', '{"a": {"version": "2"}}', "context"
+    )
+    assert diff_stdout("t", v1, '{"version": 15, "x": 1}', "context")
 
     # Manifests: only the named namespace annotations are normalized.
     m = {"annotations": {NAMESPACE_ANNOTATIONS[0]: "h/p9/x", "k": "p9"}}
