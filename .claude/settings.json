@@ -1,24 +1,4 @@
 {
-  "permissions": {
-    "allow": [
-      "Read",
-      "Glob",
-      "Grep",
-      "WebSearch",
-      "Edit",
-      "Write",
-      "NotebookEdit"
-    ],
-    "deny": [
-      "Bash(sudo:*)",
-      "Bash(curl:*)",
-      "Bash(wget:*)",
-      "Bash(chmod 777:*)"
-    ]
-  },
-  "env": {
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
-  },
   "enableAllProjectMcpServers": true,
   "hooks": {
     "SessionStart": [
