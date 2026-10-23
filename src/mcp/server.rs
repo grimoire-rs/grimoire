@@ -150,11 +150,11 @@ impl GrimMcpServer {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for GrimMcpServer {
-    fn get_info(&self) -> rmcp::model::ServerInfo {
-        // `ServerInfo` / `Implementation` are `#[non_exhaustive]` (cannot be
+    fn get_info(&self) -> rmcp::model::ServerConfig {
+        // `ServerConfig` / `Implementation` are `#[non_exhaustive]` (cannot be
         // struct-literal'd from outside rmcp); start from the default and set
         // the fields we own.
-        let mut info = rmcp::model::ServerInfo::default();
+        let mut info = rmcp::model::ServerConfig::default();
         info.server_info.name = "grim".to_string();
         info.server_info.version = env!("CARGO_PKG_VERSION").to_string();
         info.instructions = Some(
