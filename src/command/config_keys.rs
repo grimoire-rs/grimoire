@@ -23,7 +23,7 @@
 //! is the automated tripwire. See `.claude/rules/subsystem-config-keys.md`
 //! for the description-authoring style rules.
 
-use crate::api::{ValueConstraints, ValueType};
+use crate::api::{ConfigSection, ValueConstraints, ValueType};
 use crate::catalog::{SortMode, SortOrder};
 use crate::config::declaration::DefaultView;
 use crate::config::defaults;
@@ -46,6 +46,8 @@ pub struct KeySpec {
     /// beyond closed-set membership (e.g. `options.clients`, whose closed
     /// set is already machine-readable via `ConfigEntry::values`).
     pub constraints: Option<ValueConstraints>,
+    /// Settings-UI panel the key belongs to.
+    pub section: ConfigSection,
 }
 
 /// The 11 fixed `options.*` config keys, in listing order.
@@ -97,6 +99,7 @@ impl ConfigKey {
                            `ghcr.io/grimoire-rs` when this key, `--registry`, and \
                            `GRIM_DEFAULT_REGISTRY` are all unset.",
             constraints: None,
+            section: ConfigSection::General,
         };
         const CLIENTS: KeySpec = KeySpec {
             key: "options.clients",
@@ -111,6 +114,7 @@ impl ConfigKey {
             // Closed set — already machine-readable via ConfigEntry::values,
             // no item-pattern needed.
             constraints: None,
+            section: ConfigSection::General,
         };
         const SHOW_DEPRECATED: KeySpec = KeySpec {
             key: "options.show_deprecated",
@@ -121,6 +125,7 @@ impl ConfigKey {
             description: "Controls whether deprecated artifacts appear in `grim search` and the TUI \
                            catalog. Hidden by default unless already installed.",
             constraints: None,
+            section: ConfigSection::General,
         };
         const TUI_DEFAULT_VIEW: KeySpec = KeySpec {
             key: "options.tui.default_view",
@@ -132,6 +137,7 @@ impl ConfigKey {
             description: "Sets the view the browser opens in. Defaults to `tree`, grouping items by \
                            path segments; `flat` lists them ungrouped.",
             constraints: None,
+            section: ConfigSection::Tui,
         };
         const TUI_GROUP_BY_TYPE: KeySpec = KeySpec {
             key: "options.tui.group_by_type",
@@ -142,6 +148,7 @@ impl ConfigKey {
             description: "Controls whether a type-level group (skill, rule, agent, mcp, or bundle) appears \
                            between the registry root and path segments in tree view. Disabled by default.",
             constraints: None,
+            section: ConfigSection::Tui,
         };
         const TUI_TREE_SEPARATORS: KeySpec = KeySpec {
             key: "options.tui.tree_separators",
@@ -158,6 +165,7 @@ impl ConfigKey {
                 item_pattern: TREE_SEPARATOR_ITEM_PATTERN,
                 item_width: 1,
             }),
+            section: ConfigSection::Tui,
         };
         const TUI_EXPAND_LEVELS: KeySpec = KeySpec {
             key: "options.tui.expand_levels",
@@ -168,6 +176,7 @@ impl ConfigKey {
             description: "Sets how many levels of the grouped tree are expanded when the browser opens. \
                            Defaults to `1` (registry roots only); `0` expands the tree fully.",
             constraints: None,
+            section: ConfigSection::Tui,
         };
         const TUI_SORT: KeySpec = KeySpec {
             key: "options.tui.sort",
@@ -183,6 +192,7 @@ impl ConfigKey {
                            browser groups by kind and then by name. Overridden by the `--sort` flag \
                            when given.",
             constraints: None,
+            section: ConfigSection::Tui,
         };
         const TUI_SORT_ORDER: KeySpec = KeySpec {
             key: "options.tui.sort_order",
@@ -197,6 +207,7 @@ impl ConfigKey {
                            order runs its natural way: `name` ascending, every other order and the \
                            default grouping with the biggest or newest first.",
             constraints: None,
+            section: ConfigSection::Tui,
         };
         const SEARCH_MIN_RELEVANCE: KeySpec = KeySpec {
             key: "options.search_min_relevance",
@@ -208,6 +219,7 @@ impl ConfigKey {
                            best hit's score, from `0` to `100`. Defaults to `50`; `0` lists every match. \
                            Applies to `grim search`, the TUI search and the MCP `grim_search` tool.",
             constraints: None,
+            section: ConfigSection::General,
         };
         const EXPERIMENTAL_HOOKS: KeySpec = KeySpec {
             key: "options.experimental.hooks",
@@ -221,6 +233,7 @@ impl ConfigKey {
                            unset, install arms nothing and removes grim's existing hook registrations; \
                            no environment variable overrides this.",
             constraints: None,
+            section: ConfigSection::Experimental,
         };
         match self {
             Self::DefaultRegistry => &DEFAULT_REGISTRY,
@@ -304,6 +317,7 @@ impl RegistryField {
             description: "Sets the OCI registry host, for example `ghcr.io` or `ghcr.io/acme` with a \
                            namespace. Mutually exclusive with `index` on the same registry entry.",
             constraints: None,
+            section: ConfigSection::Registry,
         };
         const INDEX: KeySpec = KeySpec {
             key: "registry.<alias>.index",
@@ -313,6 +327,7 @@ impl RegistryField {
                            Accepts an `http(s)://` base or a git repository URL. Mutually exclusive with \
                            `oci` on the same registry entry.",
             constraints: None,
+            section: ConfigSection::Registry,
         };
         const INCLUDE: KeySpec = KeySpec {
             key: "registry.<alias>.include",
@@ -328,6 +343,7 @@ impl RegistryField {
                            Affects browsing only; a direct reference to a hidden package still \
                            resolves and installs.",
             constraints: None,
+            section: ConfigSection::Registry,
         };
         const EXCLUDE: KeySpec = KeySpec {
             key: "registry.<alias>.exclude",
@@ -343,6 +359,7 @@ impl RegistryField {
                            Affects browsing only; a direct reference to a hidden package still \
                            resolves and installs.",
             constraints: None,
+            section: ConfigSection::Registry,
         };
         // Not an `[options]`/`[options.tui]` key, so there is no matching
         // `config::defaults` const — this literal instead mirrors
@@ -354,6 +371,7 @@ impl RegistryField {
             description: "Controls whether this registry is the primary one short identifiers expand \
                            against. Only one entry may set this; the first entry wins when none do.",
             constraints: None,
+            section: ConfigSection::Registry,
         };
         // Same rationale as `DEFAULT` above: mirrors `RegistryConfig`'s
         // serde-derived `bool` default, not a `config::defaults` const.
@@ -367,6 +385,7 @@ impl RegistryField {
                            `GRIM_INSECURE_REGISTRIES` environment variable, which still covers hosts no \
                            entry declares.",
             constraints: None,
+            section: ConfigSection::Registry,
         };
         match self {
             Self::Oci => &OCI,
@@ -398,6 +417,7 @@ pub const VENDOR_SHARED_SKILLS: KeySpec = KeySpec {
                    pool instead of its own directory. Disabled by default, keeping the native \
                    layout. Enabling it is refused for a client that does not read the pool.",
     constraints: None,
+    section: ConfigSection::Vendors,
 };
 
 /// The field name addressable under a vendor table — the last segment of
@@ -452,6 +472,7 @@ impl PluginField {
             description: "Sets the name of the plugin `grim export plugin --project` builds from this \
                            project. Overridden by the `--name` flag when given.",
             constraints: None,
+            section: ConfigSection::Plugin,
         };
         const DESCRIPTION: KeySpec = KeySpec {
             key: "plugin.description",
@@ -460,6 +481,7 @@ impl PluginField {
             description: "Sets the description written to the exported plugin, at most 500 characters. \
                            Overridden by the `--description` flag when given.",
             constraints: None,
+            section: ConfigSection::Plugin,
         };
         const VERSION: KeySpec = KeySpec {
             key: "plugin.version",
@@ -469,6 +491,7 @@ impl PluginField {
                            appends a content-hash suffix on export. Overridden by the `--version` flag \
                            when given.",
             constraints: None,
+            section: ConfigSection::Plugin,
         };
         const LOGO: KeySpec = KeySpec {
             key: "plugin.logo",
@@ -478,6 +501,7 @@ impl PluginField {
                            directory, shipped as `assets/logo.<ext>` in every exported plugin. Overridden \
                            by the `--logo` flag when given.",
             constraints: None,
+            section: ConfigSection::Plugin,
         };
         const HOMEPAGE: KeySpec = KeySpec {
             key: "plugin.homepage",
@@ -485,6 +509,7 @@ impl PluginField {
             title: "Plugin home page",
             description: "Sets the plugin's home page, an `https://` link.",
             constraints: None,
+            section: ConfigSection::Plugin,
         };
         const REPOSITORY: KeySpec = KeySpec {
             key: "plugin.repository",
@@ -492,6 +517,7 @@ impl PluginField {
             title: "Plugin repository",
             description: "Sets the plugin's source repository, an `https://` link.",
             constraints: None,
+            section: ConfigSection::Plugin,
         };
         const DOCUMENTATION: KeySpec = KeySpec {
             key: "plugin.documentation",
@@ -499,6 +525,7 @@ impl PluginField {
             title: "Plugin documentation",
             description: "Sets the plugin's documentation, an `https://` link.",
             constraints: None,
+            section: ConfigSection::Plugin,
         };
         const SUPPORT: KeySpec = KeySpec {
             key: "plugin.support",
@@ -506,6 +533,7 @@ impl PluginField {
             title: "Plugin support link",
             description: "Sets where users get help, an `https://` link.",
             constraints: None,
+            section: ConfigSection::Plugin,
         };
         const LICENSE: KeySpec = KeySpec {
             key: "plugin.license",
@@ -514,6 +542,7 @@ impl PluginField {
             description: "Sets the plugin's license, preferably an SPDX identifier such as `Apache-2.0`; at most 128 \
                            characters.",
             constraints: None,
+            section: ConfigSection::Plugin,
         };
         const CATEGORY: KeySpec = KeySpec {
             key: "plugin.category",
@@ -521,6 +550,7 @@ impl PluginField {
             title: "Plugin category",
             description: "Sets the plugin's category, a lowercase slug of at most 32 characters.",
             constraints: None,
+            section: ConfigSection::Plugin,
         };
         match self {
             Self::Name => &NAME,
@@ -576,6 +606,37 @@ mod tests {
             assert!(
                 !spec.description.contains("  "),
                 "{}: whitespace run in description",
+                spec.key
+            );
+        }
+    }
+
+    /// `section` is what a settings UI groups panels by, so a key filed under
+    /// the wrong one lands in the wrong panel with no other symptom.
+    #[test]
+    fn every_spec_declares_the_section_its_key_prefix_names() {
+        let specs = ConfigKey::ALL
+            .iter()
+            .map(|k| k.spec())
+            .chain(RegistryField::ALL.iter().map(|f| f.spec()))
+            .chain(std::iter::once(&VENDOR_SHARED_SKILLS))
+            .chain(PluginField::ALL.iter().map(|f| f.spec()));
+        for spec in specs {
+            let expected = [
+                ("options.tui.", ConfigSection::Tui),
+                ("options.experimental.", ConfigSection::Experimental),
+                ("options.vendors.", ConfigSection::Vendors),
+                ("registry.", ConfigSection::Registry),
+                ("plugin.", ConfigSection::Plugin),
+            ]
+            .into_iter()
+            .find(|(prefix, _)| spec.key.starts_with(prefix))
+            .map_or(ConfigSection::General, |(_, section)| section);
+            assert_eq!(spec.section, expected, "{}: wrong section", spec.key);
+            assert_eq!(
+                spec.section.advanced(),
+                spec.key.starts_with("plugin."),
+                "{}: only plugin keys are advanced",
                 spec.key
             );
         }

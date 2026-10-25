@@ -305,9 +305,9 @@ def test_config_get_unset_key_reports_data_not_error(
 def test_config_list_items_carry_metadata_fields(
     grim_at, project_dir: Path
 ) -> None:
-    """`config list --all --format json` items carry exactly the 9 frozen
+    """`config list --all --format json` items carry exactly the 11 frozen
     fields (`key`, `value`, `set`, `type`, `title`, `description`,
-    `default`, `values`, `constraints`) — the always-present-null policy
+    `default`, `values`, `constraints`, `section`, `advanced`) — the always-present-null policy
     applies to `config list` entries too, not just single-object reports.
 
     `constraints` is non-null only for `options.tui.tree_separators`
@@ -323,8 +323,8 @@ def test_config_list_items_carry_metadata_fields(
     item = items[0]
     assert set(item.keys()) == {
         "key", "value", "set", "type", "title", "description", "default",
-        "values", "constraints",
-    }, f"item must carry exactly the 9 frozen fields; got: {sorted(item.keys())}"
+        "values", "constraints", "section", "advanced",
+    }, f"item must carry exactly the 11 frozen fields; got: {sorted(item.keys())}"
 
     by_key = {row["key"]: row for row in items}
     tree_separators = by_key["options.tui.tree_separators"]

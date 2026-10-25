@@ -39,9 +39,9 @@ pub use artifact_status::{ArtifactStatus, HookArmingCause, InitStatus, InstallSt
 pub use build_report::{BuildReport, BuildStatus};
 #[allow(unused_imports)]
 pub use config_report::{
-    ConfigEntry, ConfigGetReport, ConfigListReport, ConfigReport, ConfigWriteReport, Origin, RegistryFieldChange,
-    RegistryFieldChangeAction, RegistryFieldValue, RegistryListReport, RegistryRow, RegistryShowReport,
-    ValueConstraints, ValueType, WriteAction,
+    ConfigEntry, ConfigGetReport, ConfigListReport, ConfigReport, ConfigSection, ConfigWriteReport, Origin,
+    RegistryFieldChange, RegistryFieldChangeAction, RegistryFieldValue, RegistryListReport, RegistryRow,
+    RegistryShowReport, ValueConstraints, ValueType, WriteAction,
 };
 #[allow(unused_imports)]
 pub use context_report::{ContextRegistry, ContextRegistryKind, ContextReport, OfflineSource};

@@ -541,11 +541,17 @@ pub struct ConfigEntry {
     /// beyond membership in [`Self::values`]. See [`ValueConstraints`] for
     /// the advisory-not-authoritative honesty contract.
     pub constraints: Option<ValueConstraints>,
+    /// The settings-UI panel the key belongs to.
+    pub section: ConfigSection,
+    /// `true` for a key a settings UI may hide behind a "show advanced"
+    /// toggle; derived from [`Self::section`].
+    pub advanced: bool,
 }
 
 impl ConfigEntry {
-    /// Build an entry, deriving [`Self::set`] from `value` and
-    /// [`Self::values`] / [`Self::default`] from `value_type`.
+    /// Build an entry, deriving [`Self::set`] from `value`,
+    /// [`Self::values`] / [`Self::default`] from `value_type`, and
+    /// [`Self::advanced`] from `section`.
     pub fn new(
         key: String,
         value: Option<String>,
@@ -553,6 +559,7 @@ impl ConfigEntry {
         title: &'static str,
         description: &'static str,
         constraints: Option<ValueConstraints>,
+        section: ConfigSection,
     ) -> Self {
         let set = value.is_some();
         let values = value_type.values();
@@ -567,7 +574,31 @@ impl ConfigEntry {
             default,
             values,
             constraints,
+            section,
+            advanced: section.advanced(),
         }
+    }
+}
+
+/// The settings-UI panel a config key belongs to — `section` on each
+/// `grim config list --format json` item. Literals are append-only;
+/// consumers treat an unknown one as `general`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConfigSection {
+    General,
+    Tui,
+    Experimental,
+    Vendors,
+    Registry,
+    Plugin,
+}
+
+impl ConfigSection {
+    /// Whether keys in this section are authoring metadata rather than
+    /// behaviour settings, so a UI may tuck them away.
+    pub fn advanced(self) -> bool {
+        matches!(self, Self::Plugin)
     }
 }
 
@@ -1145,6 +1176,30 @@ mod tests {
         }
     }
 
+    /// Settings UIs group and hide keys by these two fields, so both must
+    /// be present on every item, never skipped.
+    #[test]
+    fn config_entry_json_always_carries_section_and_advanced() {
+        let entry = |key: &str, section| {
+            let e = ConfigEntry::new(
+                key.to_string(),
+                None,
+                ValueType::String { default: None },
+                "T",
+                "D.",
+                None,
+                section,
+            );
+            serde_json::to_value(e).unwrap()
+        };
+        let plugin = entry("plugin.name", ConfigSection::Plugin);
+        assert_eq!(plugin["section"], "plugin");
+        assert_eq!(plugin["advanced"], true);
+        let hooks = entry("options.experimental.hooks", ConfigSection::Experimental);
+        assert_eq!(hooks["section"], "experimental");
+        assert_eq!(hooks["advanced"], false);
+    }
+
     #[test]
     fn config_list_report_plain_shows_key_value_entries() {
         // ADR: list plain format — key=value lines, one table per invocation.
@@ -1160,6 +1215,7 @@ mod tests {
                 "Determines which clients receive installs and updates when `--client` is absent. \
                  Auto-detects clients when left empty, falling back to all clients when none are detected.",
                 None,
+                ConfigSection::General,
             )],
         };
         let mut buf: Vec<u8> = Vec::new();
@@ -1197,6 +1253,7 @@ mod tests {
                 "Include",
                 "Browse-filter include patterns.",
                 None,
+                ConfigSection::Registry,
             )],
         };
         let mut buf: Vec<u8> = Vec::new();
@@ -1356,6 +1413,7 @@ mod tests {
                 "Include",
                 "Browse-filter include patterns.",
                 None,
+                ConfigSection::Registry,
             )],
         };
         let mut buf: Vec<u8> = Vec::new();
@@ -1381,6 +1439,7 @@ mod tests {
                 "Determines which clients receive installs and updates when `--client` is absent. \
                  Auto-detects clients when left empty, falling back to all clients when none are detected.",
                 None,
+                ConfigSection::General,
             )],
         };
         let mut buf: Vec<u8> = Vec::new();
@@ -1394,7 +1453,8 @@ mod tests {
 
     #[test]
     fn config_entry_json_pins_full_metadata_shape() {
-        // Frozen I2 shape: exactly these 9 keys, always present.
+        // Frozen I2 shape: exactly these 11 keys, always present
+        // (`section` and `advanced` appended in 0.16).
         let enum_entry = ConfigEntry::new(
             "options.tui.default_view".to_string(),
             Some("tree".to_string()),
@@ -1406,6 +1466,7 @@ mod tests {
             "Sets the view the browser opens in. Defaults to `tree`, grouping items by path segments; \
              `flat` lists them ungrouped.",
             None,
+            ConfigSection::Tui,
         );
         let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&enum_entry).unwrap()).unwrap();
         let obj = v.as_object().expect("entry must serialize as an object");
@@ -1420,6 +1481,8 @@ mod tests {
             "default",
             "values",
             "constraints",
+            "section",
+            "advanced",
         ]
         .into_iter()
         .collect();
@@ -1440,6 +1503,7 @@ mod tests {
             "Controls whether deprecated artifacts appear in `grim search` and the TUI catalog. \
              Hidden by default unless already installed.",
             None,
+            ConfigSection::General,
         );
         let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&bool_entry).unwrap()).unwrap();
         assert_eq!(v["type"], "boolean");
@@ -1459,6 +1523,7 @@ mod tests {
                 item_pattern: crate::config::project_config::TREE_SEPARATOR_ITEM_PATTERN,
                 item_width: 1,
             }),
+            ConfigSection::Tui,
         );
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&tree_separators_entry).unwrap()).unwrap();
@@ -1478,6 +1543,7 @@ mod tests {
             "Default registry",
             "Default registry for short identifiers.",
             None,
+            ConfigSection::General,
         );
         let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
         assert!(v["value"].is_null());
@@ -1496,6 +1562,7 @@ mod tests {
                  `[[registries]]` entry is declared — the array's default entry expands short \
                  identifiers instead.",
                 None,
+                ConfigSection::General,
             )],
         };
         let mut buf: Vec<u8> = Vec::new();

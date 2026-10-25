@@ -174,3 +174,23 @@ def test_plugin_table_survives_other_writes_and_never_stales_the_lock(
     rows = runner.json("install")["items"]
     assert {r["status"] for r in rows} == {"installed"}, "the lock is not stale"
     assert (project_dir / "grimoire.lock").read_text() == lock_before
+
+
+def test_list_files_each_key_under_its_settings_section(grim_at, project_dir: Path) -> None:
+    """Every `config list --all` item names the settings panel it belongs to;
+    only the plugin keys are `advanced`, so a settings UI can tuck them away."""
+    write_config(project_dir)
+    runner = grim_at(project_dir)
+    runner.run("config", "set", "plugin.name", "team-tools")
+
+    by_key = {row["key"]: row for row in runner.json("config", "list", "--all")["items"]}
+
+    expected = {
+        "options.default_registry": "general",
+        "options.search_min_relevance": "general",
+        "options.tui.default_view": "tui",
+        "options.experimental.hooks": "experimental",
+        **{key: "plugin" for key in PLUGIN_KEYS},
+    }
+    assert {key: by_key[key]["section"] for key in expected} == expected
+    assert sorted(key for key, row in by_key.items() if row["advanced"]) == sorted(PLUGIN_KEYS)

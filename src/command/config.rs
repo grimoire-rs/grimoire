@@ -1090,6 +1090,7 @@ fn entry(key: String, value: Option<String>, spec: &'static KeySpec) -> ConfigEn
         spec.title,
         spec.description,
         spec.constraints,
+        spec.section,
     )
 }
 

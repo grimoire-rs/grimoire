@@ -557,7 +557,7 @@ lock on every change.
   grim config set   options.clients claude,opencode --dry-run  # validate + report, write nothing
   grim config get   options.clients          # bare value on one line; exit 1 if unset
   grim config list                           # every explicitly-set key in this scope
-  grim config list --all                     # every supported key, incl. unset — JSON carries type/title/description/default metadata for tooling, plus a constraints object for list keys with a shape rule beyond closed-set membership
+  grim config list --all                     # every supported key, incl. unset — JSON carries type/title/description/default metadata for tooling, plus a constraints object for list keys with a shape rule beyond closed-set membership, and section/advanced for settings-UI grouping
   ```
 
   `set` accepts `--dry-run`: it validates the key and value and reports

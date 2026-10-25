@@ -1,60 +1,24 @@
-# A ready-made consumer project for the manual rig.
-#
-#   cd test/manual/project
-#   grim lock && grim install && grim status
-#
-# The skill/rule entries use the FLOATING major tag `:1`. bootstrap.sh
-# publishes code-reviewer ascending to 1.2.0, so `grim lock` here records
-# 1.2.0; running scripts/release-update.sh AFTER locking publishes 1.3.0 and
-# `grim update` rolls the pin forward 1.2.0 → 1.3.0 (rolling release).
 [options]
 default_registry = "localhost:5050"
 clients = ["claude"]
 
-# The rig registry declared as a real entry, so the manual walkthrough
-# exercises `[[registries]]` rather than only the legacy single-default
-# chain. `insecure` is deliberately NOT set here: env.sh exports
-# GRIM_INSECURE_REGISTRIES for :5050, and leaving that as the rig's route
-# keeps this file usable by anyone who cloned it without reading further.
-# To dogfood the config field instead, drop the export and add
-# `insecure = true` below.
 [[registries]]
 alias = "localhost"
 oci = "localhost:5050"
 
-# The rig's static HTTP index (docker-compose `index` service, port 5052),
-# serving test/manual/index/{all.json,stats.json}.
-#
-# It is here for ONE reason: the `stats.json` sidecar rides the HTTP index
-# transport only. An OCI `_catalog` browse has no sidecar to read, so with the
-# entry above alone every row is permanently unrated and uncounted, and the
-# rating badge / Rating: row / download badge / Downloads: row are unreachable
-# in review.
-#
-# It lists the SAME refs the OCI entry serves, so the browse shows a second
-# tree root carrying the same artifacts — that duplication is real grim
-# behaviour (one repository served by two registries appears once per
-# registry), not a rig artefact. Drop this entry to get the old single-root
-# view back.
 [[registries]]
 alias = "index"
 index = "http://localhost:5052"
 
 [skills]
-hello-world   = "localhost:5050/grimoire/skills/hello-world:1"
 code-reviewer = "localhost:5050/grimoire/skills/code-reviewer:1"
 commit-helper = "localhost:5050/grimoire/skills/commit-helper:1"
+hello-world = "localhost:5050/grimoire/skills/hello-world:1"
 
 [rules]
-rust-style         = "localhost:5050/grimoire/rules/rust-style:1"
-security-baseline  = "localhost:5050/grimoire/rules/security-baseline:1"
-# A multi-file rule (index + support dir): install materializes
-# .claude/rules/architecture-guide.md AND .claude/rules/architecture-guide/.
-# Edit a file under that dir to see `grim status` report it as `modified`.
 architecture-guide = "localhost:5050/grimoire/rules/architecture-guide:1"
+rust-style = "localhost:5050/grimoire/rules/rust-style:1"
+security-baseline = "localhost:5050/grimoire/rules/security-baseline:1"
 
 [agents]
-# bootstrap.sh publishes reviewer ascending to 1.1.0, so `grim lock`
-# records 1.1.0. release-bot (the vendor-override demo) is added on demand:
-#   grim add localhost:5050/grimoire/agents/release-bot:1
 reviewer = "localhost:5050/grimoire/agents/reviewer:1"
