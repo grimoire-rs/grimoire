@@ -54,7 +54,8 @@ retryable, upgrade grim),
 anchor root; **never** fixable with `--force`, see [Containment
 Refusals](#containment-refusals)), `no-config`
 (exit 79 — a project-scope command found no `grimoire.toml` walking up
-from the working directory), and `locked` (exit 75 — another grim
+from the working directory), `no-lock` (exit 79 — `grim install` found
+no `grimoire.lock`; run `grim lock`), and `locked` (exit 75 — another grim
 process holds the config-file lock). New reasons are additive — treat an
 unknown one as absent.
 

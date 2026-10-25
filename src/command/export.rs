@@ -685,6 +685,7 @@ mod tests {
                 ErrorReason::Locked => "locked",
                 ErrorReason::AnchorEscape => "anchor-escape",
                 ErrorReason::UnsupportedLayerMediaType => "unsupported-layer-media-type",
+                ErrorReason::NoLock => "no-lock",
             }
         }
         for code in [
@@ -711,6 +712,7 @@ mod tests {
             ErrorReason::Locked,
             ErrorReason::AnchorEscape,
             ErrorReason::UnsupportedLayerMediaType,
+            ErrorReason::NoLock,
         ] {
             assert_eq!(literal(reason), reason.to_string(), "{reason:?}");
         }

@@ -195,6 +195,27 @@ def test_error_reason_marks_no_config(grim_at, project_dir: Path) -> None:
     )
 
 
+def test_error_reason_marks_no_lock(grim_at, project_dir: Path) -> None:
+    """``grim install`` with a ``grimoire.toml`` but no ``grimoire.lock``
+    carries reason ``no-lock``, so a consumer can offer "run grim lock"
+    without scraping ``message`` — exit 79 alone is shared with every other
+    not-found failure."""
+    write_config(
+        project_dir, skills={"code-review": "ghcr.io/acme/code-review:stable"}
+    )
+    runner = grim_at(project_dir)
+
+    result = runner.run("--offline", "--format", "json", "install", check=False)
+    assert result.returncode == 79, result.stderr
+    doc = json.loads(result.stdout)
+    assert doc["error"]["code"] == "not-found"
+    assert doc["error"]["exit"] == 79
+    assert doc["error"]["reason"] == "no-lock"
+    assert "retryable" not in doc["error"], (
+        f"no-lock is not a retryable reason: {doc}"
+    )
+
+
 @pytest.mark.skipif(
     sys.platform == "win32", reason="POSIX fcntl.flock sidecar contention"
 )

@@ -138,6 +138,9 @@ pub enum ErrorReason {
     /// A layer's media type names a compression this grim cannot decode
     /// (any `+zstd` type). Upgrading grim, not `--force`, is the remedy.
     UnsupportedLayerMediaType,
+    /// A command that installs from `grimoire.lock` found none
+    /// (`CommandError::LockMissing`). The remedy is `grim lock`.
+    NoLock,
 }
 
 impl std::fmt::Display for ErrorReason {
@@ -150,6 +153,7 @@ impl std::fmt::Display for ErrorReason {
             Self::Locked => "locked",
             Self::AnchorEscape => "anchor-escape",
             Self::UnsupportedLayerMediaType => "unsupported-layer-media-type",
+            Self::NoLock => "no-lock",
         })
     }
 }
@@ -216,18 +220,21 @@ pub fn classify(err: &anyhow::Error) -> Classification {
                 Error::Release(re) => Classification::new(classify_release(re)),
                 Error::Catalog(ce) => Classification::new(classify_catalog(ce)),
                 Error::Auth(ae) => Classification::new(classify_auth(ae)),
-                Error::Command(ce) => Classification::new(match ce {
-                    CommandError::LockMissing { .. } => ExitCode::NotFound,
-                    CommandError::LockStale { .. } => ExitCode::DataError,
-                    CommandError::NoLoginRegistry => ExitCode::ConfigError,
-                    CommandError::LoginInput(_) => ExitCode::UsageError,
-                    CommandError::KindInferenceFailed { .. } => ExitCode::DataError,
-                    CommandError::DeclareConflict { .. } => ExitCode::UsageError,
-                    CommandError::InvalidBindingName { .. } => ExitCode::UsageError,
-                    CommandError::ConfigUsage(_) => ExitCode::UsageError,
-                    CommandError::HookConsentUsage(_) => ExitCode::UsageError,
-                    CommandError::ConfigValue(_) => ExitCode::DataError,
-                }),
+                Error::Command(ce) => Classification {
+                    exit: match ce {
+                        CommandError::LockMissing { .. } => ExitCode::NotFound,
+                        CommandError::LockStale { .. } => ExitCode::DataError,
+                        CommandError::NoLoginRegistry => ExitCode::ConfigError,
+                        CommandError::LoginInput(_) => ExitCode::UsageError,
+                        CommandError::KindInferenceFailed { .. } => ExitCode::DataError,
+                        CommandError::DeclareConflict { .. } => ExitCode::UsageError,
+                        CommandError::InvalidBindingName { .. } => ExitCode::UsageError,
+                        CommandError::ConfigUsage(_) => ExitCode::UsageError,
+                        CommandError::HookConsentUsage(_) => ExitCode::UsageError,
+                        CommandError::ConfigValue(_) => ExitCode::DataError,
+                    },
+                    reason: matches!(ce, CommandError::LockMissing { .. }).then_some(ErrorReason::NoLock),
+                },
                 // Announce needs remote resources (the index repository, the
                 // GitHub API); a local I/O fault classifies as I/O. A failed
                 // required fork is a remote-resource fault too — the packages
@@ -819,6 +826,7 @@ mod tests {
             ErrorReason::UnsupportedLayerMediaType.to_string(),
             "unsupported-layer-media-type"
         );
+        assert_eq!(ErrorReason::NoLock.to_string(), "no-lock");
     }
 
     #[test]
@@ -837,6 +845,7 @@ mod tests {
         // fail identically.
         assert!(!ErrorReason::AnchorEscape.retryable());
         assert!(!ErrorReason::UnsupportedLayerMediaType.retryable());
+        assert!(!ErrorReason::NoLock.retryable());
     }
 
     /// A1: `forceable` is keyed on the reason, and this variant-by-variant
@@ -857,6 +866,7 @@ mod tests {
         // the client must key on the reason, not the exit code.
         assert!(!ErrorReason::AnchorEscape.forceable());
         assert!(!ErrorReason::UnsupportedLayerMediaType.forceable());
+        assert!(!ErrorReason::NoLock.forceable());
     }
 
     /// A2: an escaped anchor classifies as bad on-disk state data (65) AND
@@ -893,6 +903,21 @@ mod tests {
             Classification {
                 exit: ExitCode::DataError,
                 reason: None,
+            }
+        );
+    }
+
+    #[test]
+    fn lock_missing_classifies_reason_as_no_lock() {
+        let err: anyhow::Error = Error::from(CommandError::LockMissing {
+            path: std::path::PathBuf::from("/w/grimoire.lock"),
+        })
+        .into();
+        assert_eq!(
+            classify(&err),
+            Classification {
+                exit: ExitCode::NotFound,
+                reason: Some(ErrorReason::NoLock),
             }
         );
     }
@@ -1493,7 +1518,7 @@ mod tests {
 
     /// Every `ErrorReason` slug at 520c6540, then each slug added since,
     /// appended in order.
-    const FROZEN_REASON_SLUGS: [&str; 7] = [
+    const FROZEN_REASON_SLUGS: [&str; 8] = [
         "stale-lock",
         "modified",
         "untracked-destination",
@@ -1501,6 +1526,7 @@ mod tests {
         "locked",
         "anchor-escape",
         "unsupported-layer-media-type",
+        "no-lock",
     ];
 
     #[test]
@@ -1563,6 +1589,7 @@ mod tests {
                 ErrorReason::Locked => 4,
                 ErrorReason::AnchorEscape => 5,
                 ErrorReason::UnsupportedLayerMediaType => 6,
+                ErrorReason::NoLock => 7,
             }
         }
         let every = [
@@ -1573,6 +1600,7 @@ mod tests {
             ErrorReason::Locked,
             ErrorReason::AnchorEscape,
             ErrorReason::UnsupportedLayerMediaType,
+            ErrorReason::NoLock,
         ];
         for (i, r) in every.iter().enumerate() {
             assert_eq!(position(*r), i);
