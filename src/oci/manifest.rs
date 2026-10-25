@@ -82,6 +82,14 @@ impl OciManifest {
             _ => None,
         }
     }
+
+    /// Parse raw manifest bytes, as pulled from a registry or read back from
+    /// the blob store.
+    pub fn from_json(bytes: &[u8]) -> Result<Self, ManifestConversionError> {
+        let oci: oci_client::manifest::OciManifest =
+            serde_json::from_slice(bytes).map_err(|e| ManifestConversionError(e.to_string()))?;
+        Self::try_from(oci)
+    }
 }
 
 /// Parse failure converting an `oci_client` manifest into [`OciManifest`].

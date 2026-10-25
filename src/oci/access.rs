@@ -102,6 +102,14 @@ pub trait OciAccess: Send + Sync {
     /// `Ok(None)` when the manifest does not exist.
     async fn fetch_manifest(&self, id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError>;
 
+    /// Fetch the raw bytes of `id`'s manifest, which hash to `id`'s digest.
+    ///
+    /// `Ok(None)` when the manifest does not exist or this access has no raw
+    /// form; callers then fall back to [`Self::fetch_manifest`].
+    async fn fetch_manifest_bytes(&self, _id: &PinnedIdentifier) -> Result<Option<Vec<u8>>, AccessError> {
+        Ok(None)
+    }
+
     /// Fetch the raw bytes of `digest` from `repo`'s registry.
     ///
     /// Implementations verify the bytes hash to `digest`. `Ok(None)` when

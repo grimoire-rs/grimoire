@@ -1400,11 +1400,9 @@ def test_update_copilot_one_file_declines_new_pin_and_its_stale_entry_goes(
     row = next(r for r in runner.json("status")["items"] if r["name"] == "grim-mcp")
     outputs = _copilot_outputs(row)
     assert len(outputs) == 1 and outputs.pop().endswith(".vscode/mcp.json"), row
-    # Pinned: plain `grim status` has no local copy of a registry descriptor
-    # (no manifest cache), so the declined file still reads pending there.
-    # Follow-up: cache manifests so status can ask the renderer too.
-    pending = _copilot_outputs(row, "outputs_pending")
-    assert len(pending) == 1 and pending.pop().endswith(".github/mcp.json"), row
+    # Status reads the descriptor from the cached manifest, so the declined
+    # file is not pending there either (issue #166).
+    assert _copilot_outputs(row, "outputs_pending") == set(), row
     # The install gate does ask it: a repeat install is a byte-stable no-op.
     before = {p: (project_dir / p).read_bytes() for p in (_VSCODE_MCP, _GITHUB_MCP)}
     again = runner.json("install", "--client", "copilot")["items"]
@@ -1658,11 +1656,11 @@ def test_warp_global_env_ref_server_is_never_pending_and_reinstalls_unchanged(
     assert again[0]["status"] == "unchanged", again
     assert claude_cfg.read_bytes() == before
     assert not (runner.home / ".warp" / ".mcp.json").exists()
-    # Pinned: plain `grim status` has no local copy of a registry descriptor
-    # (no manifest cache), so it still lists Warp. Follow-up: cache manifests
-    # so status can ask the renderer too.
-    row = next(r for r in runner.json("status", "--global")["items"] if r["name"] == "grim-mcp")
-    assert [o["client"] for o in row["outputs_pending"]] == ["warp"], row
+    # Status reads the descriptor from the cached manifest, online and
+    # offline, so it agrees with the install gate (issue #166).
+    for offline in ((), ("--offline",)):
+        row = next(r for r in runner.json(*offline, "status", "--global")["items"] if r["name"] == "grim-mcp")
+        assert row["outputs_pending"] == [], (offline, row)
 
 def test_warp_refuses_untracked_hand_added_entry_then_force_replaces(
     grim_at, bare_project_dir: Path, registry: str, unique_repo: str

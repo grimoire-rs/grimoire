@@ -414,6 +414,24 @@ impl OciAccess for RegistryClient {
         Ok(Some(parsed))
     }
 
+    async fn fetch_manifest_bytes(&self, id: &PinnedIdentifier) -> Result<Option<Vec<u8>>, AccessError> {
+        let identifier = id.as_identifier().clone();
+        let reference = reference_for(&identifier);
+        let auth = Self::auth_for(identifier.registry());
+
+        match self
+            .client
+            .pull_manifest_raw(&reference, &auth, &[OCI_MANIFEST_MEDIA_TYPE])
+            .await
+        {
+            Ok((body, _digest)) => Ok(Some(body.to_vec())),
+            Err(e) => match lookup_failure(e) {
+                None => Ok(None),
+                Some(kind) => Err(AccessError::with_identifier(identifier, kind)),
+            },
+        }
+    }
+
     async fn fetch_blob(
         &self,
         repo: &Identifier,

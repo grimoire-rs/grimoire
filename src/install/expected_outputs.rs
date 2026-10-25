@@ -21,7 +21,7 @@
 //! is answerable, exactly, because it is a statement about this codebase's own
 //! behaviour rather than about history.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::install::client_target::ClientTarget;
 use crate::install::install_state::{ClientOutput, InstallRecord};
@@ -29,7 +29,9 @@ use crate::install::installer::client_hosts;
 use crate::install::path_anchor::AnchorRoots;
 use crate::install::target::InstallTarget;
 use crate::oci::ArtifactKind;
+use crate::oci::manifest::OciManifest;
 use crate::oci::mcp::McpDescriptor;
+use crate::store::{BlobStore, GrimPaths};
 
 /// The clients a pass over `kind` would produce output for: the target
 /// selection minus those whose vendor declines the kind at this scope.
@@ -69,10 +71,11 @@ pub fn expected_clients(kind: ArtifactKind, name: &str, target: &InstallTarget) 
 /// *deleted* is likewise absent: nothing here touches the filesystem, and that
 /// state surfaces as `state: missing` instead.
 ///
-/// `mcp` is the artifact's MCP descriptor when the caller has it. A surface
-/// the vendor cannot write THIS descriptor to (`mcp_entry_for` is `None`) is
-/// skipped by every install, so it is never pending; without the descriptor
-/// only the vendor's surface list is known and every surface counts.
+/// `mcp` is the artifact's MCP descriptor when the caller has it, else the
+/// one cached for `record`'s pin under `$GRIM_HOME/blobs`. A surface the
+/// vendor cannot write THIS descriptor to (`mcp_entry_for` is `None`) is
+/// skipped by every install, so it is never pending; with no descriptor
+/// either way only the vendor's surface list is known and every surface counts.
 pub fn pending_outputs(
     record: Option<&InstallRecord>,
     kind: ArtifactKind,
@@ -81,6 +84,11 @@ pub fn pending_outputs(
     roots: &AnchorRoots,
     mcp: Option<&McpDescriptor>,
 ) -> Vec<(ClientTarget, PathBuf)> {
+    let cached = match (kind, mcp, record) {
+        (ArtifactKind::Mcp, None, Some(rec)) => cached_mcp_descriptor(rec, &roots.grim_home),
+        _ => None,
+    };
+    let mcp = mcp.or(cached.as_ref());
     let mut pending: Vec<(ClientTarget, PathBuf)> = expected_clients(kind, name, target)
         .into_iter()
         .flat_map(|client| pending_for_client(record, client, kind, name, target, roots, mcp))
@@ -88,6 +96,17 @@ pub fn pending_outputs(
     // Stable: a client's several MCP surfaces keep the vendor's order.
     pending.sort_by_key(|(client, _)| client.as_str());
     pending
+}
+
+/// The descriptor of `record`'s pinned MCP artifact, read from the blob store
+/// alone: manifest under the pin digest, then its single layer. `None` on any
+/// miss — a pin installed before manifests were cached, or a pruned store.
+fn cached_mcp_descriptor(record: &InstallRecord, grim_home: &Path) -> Option<McpDescriptor> {
+    let blobs = BlobStore::new(GrimPaths::new(grim_home).blobs_dir());
+    let manifest = blobs.get(&record.source.pinned()?.digest()).ok()??;
+    let manifest = OciManifest::from_json(&manifest).ok()?;
+    let layer = blobs.get(&manifest.single_layer()?.digest).ok()??;
+    McpDescriptor::from_layer_bytes(&layer).ok()
 }
 
 fn pending_for_client(
@@ -551,6 +570,48 @@ mod tests {
         assert!(pending(Some(&env_ref)).is_empty());
         assert_eq!(pending(Some(&plain)).len(), 1);
         assert_eq!(pending(None).len(), 1, "no descriptor: today's answer");
+    }
+
+    /// Issue #166: `grim status` passes no descriptor, so the one cached for
+    /// the record's pin must stand in — else Warp's `${VAR}` skip reads
+    /// pending forever. With nothing cached the conservative answer holds.
+    #[test]
+    fn a_cached_descriptor_stands_in_when_the_caller_has_none() {
+        use crate::oci::Algorithm;
+        let dir = tempfile::tempdir().unwrap();
+        let target = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Warp]);
+        let roots = roots(dir.path());
+        let layer = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"x\"\nenv = { T = \"${T}\" }\n",
+        )
+        .unwrap()
+        .to_layer_bytes()
+        .unwrap();
+        let layer_digest = Algorithm::Sha256.hash(&layer);
+        let manifest = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.empty.v1+json","digest":"{}","size":2}},"layers":[{{"mediaType":"application/vnd.grimoire.mcp.v1+json","digest":"{layer_digest}","size":{}}}]}}"#,
+            Algorithm::Sha256.hash(b"{}"),
+            layer.len()
+        );
+        let manifest_digest = Algorithm::Sha256.hash(manifest.as_bytes());
+        let pin = PinnedIdentifier::try_from(
+            Identifier::new_registry("m", "localhost:5000").clone_with_digest(manifest_digest.clone()),
+        )
+        .unwrap();
+        let rec = InstallRecord {
+            kind: ArtifactKind::Mcp,
+            name: "m".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pin),
+            dev: false,
+            outputs: Vec::new(),
+        };
+        let pending = || pending_outputs(Some(&rec), ArtifactKind::Mcp, "m", &target, &roots, None);
+        assert_eq!(pending().len(), 1, "nothing cached: every surface counts");
+
+        let blobs = BlobStore::new(GrimPaths::new(dir.path()).blobs_dir());
+        blobs.put(&manifest_digest, manifest.as_bytes()).unwrap();
+        blobs.put(&layer_digest, &layer).unwrap();
+        assert!(pending().is_empty(), "{:?}", pending());
     }
 
     /// C-002: `outputs_pending` must be deterministic regardless of

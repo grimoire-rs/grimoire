@@ -92,14 +92,36 @@ impl<A: OciAccess> OciAccess for CachedAccess<A> {
 
     async fn fetch_manifest(&self, id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
         if self.mode == AccessMode::Offline {
-            // No manifest cache in Phase 3 — a manifest fetch always needs
-            // the network, which offline forbids.
+            // The manifest cache below is write-only: `grim status` reads it
+            // straight from the blob store, so offline still refuses here.
             return Err(AccessError::with_identifier(
                 id.as_identifier().clone(),
                 AccessErrorKind::OfflineMiss,
             ));
         }
-        self.inner.fetch_manifest(id).await
+        let Some(bytes) = self.inner.fetch_manifest_bytes(id).await? else {
+            return self.inner.fetch_manifest(id).await;
+        };
+        // Stored under the pinned digest, so `put` verifies the registry
+        // served the manifest the lock names before anything is cached.
+        let digest = id.digest();
+        let identifier = id.as_identifier();
+        if let Err(e) = self.blobs.put(&digest, &bytes) {
+            if e.kind() == std::io::ErrorKind::InvalidData {
+                let actual = digest.algorithm().hash(&bytes);
+                return Err(AccessError::with_identifier(
+                    identifier.clone(),
+                    AccessErrorKind::DigestMismatch {
+                        expected: digest,
+                        actual,
+                    },
+                ));
+            }
+            return Err(Self::io_err(identifier, e));
+        }
+        OciManifest::from_json(&bytes)
+            .map(Some)
+            .map_err(|e| AccessError::with_identifier(identifier.clone(), AccessErrorKind::InvalidManifest(e.0)))
     }
 
     async fn fetch_blob(
@@ -215,6 +237,10 @@ mod tests {
         }
         async fn fetch_manifest(&self, _id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
             Ok(None)
+        }
+        async fn fetch_manifest_bytes(&self, _id: &PinnedIdentifier) -> Result<Option<Vec<u8>>, AccessError> {
+            *self.calls.lock().unwrap() += 1;
+            Ok(Some(self.blob.clone()))
         }
         async fn fetch_blob(
             &self,
@@ -373,6 +399,44 @@ mod tests {
             Some(digest.clone())
         );
         assert_eq!(tags.get(&id()).unwrap(), Some(digest));
+    }
+
+    const MANIFEST: &[u8] = br#"{"schemaVersion":2,"config":{"mediaType":"application/vnd.oci.empty.v1+json","digest":"sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a","size":2},"layers":[]}"#;
+
+    fn pinned_at(digest: &Digest) -> PinnedIdentifier {
+        PinnedIdentifier::try_from(id().clone_with_digest(digest.clone())).unwrap()
+    }
+
+    /// Issue #166: an online manifest fetch leaves the raw bytes under the
+    /// pinned digest, where `grim status` resolves the MCP descriptor offline.
+    #[tokio::test]
+    async fn online_manifest_fetch_caches_bytes_under_the_pin() {
+        let (_d, tags, blobs) = paths();
+        let digest = Algorithm::Sha256.hash(MANIFEST);
+        let inner = CountingInner {
+            digest: digest.clone(),
+            calls: Arc::new(Mutex::new(0)),
+            blob: MANIFEST.to_vec(),
+        };
+        let access = CachedAccess::new(inner, tags, blobs.clone(), AccessMode::Online);
+        let manifest = access.fetch_manifest(&pinned_at(&digest)).await.unwrap().unwrap();
+        assert!(manifest.layers.is_empty());
+        assert_eq!(blobs.get(&digest).unwrap().as_deref(), Some(MANIFEST));
+    }
+
+    #[tokio::test]
+    async fn manifest_bytes_off_the_pin_are_refused_and_not_cached() {
+        let (_d, tags, blobs) = paths();
+        let pin = Algorithm::Sha256.hash(b"some other manifest");
+        let inner = CountingInner {
+            digest: pin.clone(),
+            calls: Arc::new(Mutex::new(0)),
+            blob: MANIFEST.to_vec(),
+        };
+        let access = CachedAccess::new(inner, tags, blobs.clone(), AccessMode::Online);
+        let err = access.fetch_manifest(&pinned_at(&pin)).await.unwrap_err();
+        assert!(matches!(err.kind, AccessErrorKind::DigestMismatch { .. }), "{err:?}");
+        assert_eq!(blobs.get(&pin).unwrap(), None);
     }
 
     #[tokio::test]
