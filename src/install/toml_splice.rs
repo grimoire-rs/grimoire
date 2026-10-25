@@ -203,7 +203,7 @@ fn json_to_toml_value(value: &serde_json::Value) -> io::Result<Value> {
 /// cannot hold — degrades to its lexical string (see [`toml_value_to_json`])
 /// rather than being dropped, so a hand-authored value never silently
 /// vanishes from the semantic snapshot.
-fn toml_item_to_json(item: &Item) -> Option<serde_json::Value> {
+pub(crate) fn toml_item_to_json(item: &Item) -> Option<serde_json::Value> {
     match item {
         Item::None | Item::ArrayOfTables(_) => None,
         Item::Value(v) => toml_value_to_json(v),

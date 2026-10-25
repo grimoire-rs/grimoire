@@ -9,13 +9,10 @@ variables. Settings (`[options]`, `[options.tui]`) and named registries
 (`[[registries]]`) are managed through [`grim config`][grim-config]; declarations
 (`[skills]`, `[rules]`, `[agents]`, [`[mcp]`](./mcp-servers.md#consuming),
 `[bundles]`) stay under [`grim add`][grim-add]
-and [`grim remove`][grim-remove]. You can also hand-edit either file directly,
-but note that **any `grim` write — `grim config`, `grim add`, `grim remove` — uses a
-lossy serializer: comments are removed** on every write, and so is any key whose
-default value collapses to unset (`show_deprecated = false`, an all-default
-`[options.tui]`, an all-default `[options.vendors.<name>]`). The one exception
-is a leading [`#:schema` editor directive](#editor-schema), which every
-rewrite preserves at the top of the file.
+and [`grim remove`][grim-remove]. You can also hand-edit either file directly.
+Any `grim` write — `grim config`, `grim add`, `grim remove` — **edits the file in
+place**: only the lines whose meaning changed move. Comments, blank lines and key
+order survive, and a new entry is appended at the end of its table.
 
 ## `grimoire.toml` {#grimoire-toml}
 
@@ -639,11 +636,10 @@ flag: `grim config registry set <alias> --clear-include` (and
 default flag, position, and other list untouched. `grim config unset
 registry.<alias>.include` does the same thing through the dotted-key surface.
 Both are silent on any list length — including an already-empty one, which
-exits `0` and leaves the rest of the entry untouched — and both write the
-emptied list as **no key at all**, byte-identical to an entry that was never
-filtered. The *file* is still rewritten by the lossy serializer described at
-the top of this page; a clear changes nothing in the entry, not nothing on
-disk.
+exits `0` and leaves the rest of the entry untouched — and both remove the
+list's key, so the entry reads exactly like one that was never filtered. An
+already-empty `include = []` is left as written, and nothing else in the file
+moves.
 `--clear-include` conflicts with `--include` on the same call (exit `64`);
 naming no field at all is also exit `64`.
 

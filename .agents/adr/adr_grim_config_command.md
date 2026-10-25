@@ -175,7 +175,9 @@ own that coupling.
   has the same overlap (`git config remote.x.url` vs `git remote add`).
 
 **Risks:**
-- *Comment/schema-directive loss on every write.* Mitigation: v1 documents it; the
+- *Comment/schema-directive loss on every write.* **Resolved 2026-10-25:** `write_config`
+  now renders the model, then merges it into the parsed file through `toml_edit`
+  (`src/config/toml_merge.rs`), so only lines whose meaning changed move. Original text: v1 documents it; the
   **upgrade path** is to migrate `write_config` to `toml_edit` (already the backing crate
   of the `toml` dep, so near-zero new surface) — this benefits `add`/`remove` too and is
   recorded as a follow-up, not v1 scope.

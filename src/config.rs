@@ -22,6 +22,7 @@ pub mod registry_filter;
 pub mod registry_resolve;
 pub mod resolved;
 pub mod scope;
+pub mod toml_merge;
 
 #[allow(unused_imports)]
 pub use config_error::{ConfigError, ConfigErrorKind};

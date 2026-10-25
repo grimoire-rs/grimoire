@@ -490,10 +490,10 @@ grim config unset registry.acme.include            # dotted-key route
 ```
 
 Both are silent at every list length — including an already-empty list, which
-exits `0` and leaves the rest of the entry untouched — and both write the
-emptied list as **no key at all**, indistinguishable from an entry that was
-never filtered. The file itself is still rewritten by the lossy serializer
-(below); "unchanged" is about the entry, not the bytes. `--clear-include` conflicts with `--include` on the same call
+exits `0` and leaves the rest of the entry untouched — and both remove the
+list's key, so the entry reads exactly like one that was never filtered (an
+already-empty `include = []` is left as written). Nothing else in the file
+moves (below). `--clear-include` conflicts with `--include` on the same call
 (`64`); a `set` naming no field at all is also `64`. The two differ only in
 their JSON report: the flag route is `action: "registry-set"` with a
 `{"field":"include","action":"cleared"}` element in `fields`, the dotted-key
@@ -598,10 +598,9 @@ scripts cleanly (`$(grim config get options.clients)`), exiting `1` when the
 key is valid but unset. Add `--format json` to any subcommand for
 machine-readable output.
 
-**Every grim write is lossy**: comments are stripped from `grimoire.toml` on
-any `grim config` / `grim add` / `grim remove`, and so is any key whose value
-collapses to the default. The one exception is a **leading `#:schema` editor
-directive, which every rewrite preserves** at the top of the file. The full dotted-key list, JSON shapes, and exit codes live in the
+**Every grim write edits `grimoire.toml` in place**: `grim config` / `grim add` /
+`grim remove` move only the lines whose meaning changed. Comments, blank lines
+and key order survive, and a new entry is appended at the end of its table. The full dotted-key list, JSON shapes, and exit codes live in the
 [command reference][config-cmd] — never memorize them; confirm with `grim
 config --help`.
 

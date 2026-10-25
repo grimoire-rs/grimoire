@@ -1183,34 +1183,6 @@ async fn fetch_manifest_best_effort(
     access.fetch_manifest(&pinned).await.ok()?
 }
 
-/// The first `#:schema` editor directive in `path`'s *leading comment
-/// block* (blank and `#` lines before the first content line), if any.
-///
-/// Preserve-only seam for [`write_config`]: the lossy re-serialize drops
-/// comments, but the schema directive is machine-meaningful (taplo/editor
-/// validation), so it survives a rewrite. Never invents a directive; a
-/// directive below the first content line is out of the leading block and
-/// is dropped like any other comment. Read failures (fresh file) yield
-/// `None`.
-fn preserved_schema_directive(path: &std::path::Path) -> Option<String> {
-    let existing = std::fs::read_to_string(path).ok()?;
-    for line in existing.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if trimmed.starts_with('#') {
-            if trimmed.starts_with("#:schema") {
-                return Some(trimmed.to_string());
-            }
-            continue;
-        }
-        // First content line ends the leading comment block.
-        return None;
-    }
-    None
-}
-
 /// Render a binding name as a TOML table key: bare when bare-key safe
 /// (`[A-Za-z0-9_-]+`), quoted otherwise. Dotted binding names (issue #40,
 /// e.g. `socket.io`) must be quoted — a bare dotted key parses as a
@@ -1224,14 +1196,13 @@ fn toml_key(name: &str) -> String {
     }
 }
 
-/// Re-serialize the declaration to `path` as the shared
+/// Write the declaration to `path` as the shared
 /// `[options]`/`[bundles]`/`[skills]`/`[rules]` schema. Atomic via the
-/// store primitive so a crash never truncates the config. The `[bundles]`
-/// table is emitted only when at least one bundle is declared, so a
-/// bundle-free config is byte-identical to one written before bundles
-/// existed. A `#:schema` directive in the existing file's leading comment
-/// block is preserved at the top of the rewritten file, and so is its
-/// `[plugin]` table, exactly as authored.
+/// store primitive so a crash never truncates the config. An existing file
+/// is edited in place ([`toml_merge::merge`](crate::config::toml_merge::merge)):
+/// only lines whose meaning changed move, comments and layout survive, and
+/// its `[plugin]` table is kept as authored. A missing file is rendered
+/// fresh.
 pub(crate) fn write_config(
     path: &std::path::Path,
     options: &crate::config::declaration::ConfigOptions,
@@ -1271,12 +1242,36 @@ pub(crate) fn write_config_with_plugin(
     set: &crate::config::declaration::DesiredSet,
     plugin: Option<&crate::config::plugin_meta::PluginMeta>,
 ) -> Result<(), crate::config::config_error::ConfigError> {
+    use crate::config::config_error::{ConfigError, ConfigErrorKind};
+
+    let desired = render_config(options, registries, set, plugin);
+    let text = match std::fs::read_to_string(path) {
+        Ok(existing) => match crate::config::toml_merge::merge(&existing, &desired) {
+            Ok(text) => text,
+            // Report a broken file as the loader would (78). A file only
+            // `toml_edit` rejects gets a fresh render, as before this merge.
+            Err(_) => match toml::from_str::<toml::Table>(&existing) {
+                Err(e) => return Err(ConfigError::new(path, ConfigErrorKind::TomlParse(e))),
+                Ok(_) => desired,
+            },
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => desired,
+        Err(e) => return Err(ConfigError::new(path, ConfigErrorKind::Io(e))),
+    };
+    crate::store::atomic_write::atomic_write_through_symlink(path, text.as_bytes())
+        .map_err(|e| ConfigError::new(path, ConfigErrorKind::Io(e)))
+}
+
+/// The config `write_config_with_plugin` would write to a fresh file.
+fn render_config(
+    options: &crate::config::declaration::ConfigOptions,
+    registries: &[crate::config::declaration::RegistryConfig],
+    set: &crate::config::declaration::DesiredSet,
+    plugin: Option<&crate::config::plugin_meta::PluginMeta>,
+) -> String {
     use std::fmt::Write as _;
 
     let mut out = String::new();
-    if let Some(directive) = preserved_schema_directive(path) {
-        let _ = writeln!(out, "{directive}");
-    }
     let has_base_options = options.default_registry.is_some()
         || !options.clients.is_empty()
         || options.show_deprecated
@@ -1526,9 +1521,7 @@ pub(crate) fn write_config_with_plugin(
         }
     }
 
-    crate::store::atomic_write::atomic_write_through_symlink(path, out.as_bytes()).map_err(|e| {
-        crate::config::config_error::ConfigError::new(path, crate::config::config_error::ConfigErrorKind::Io(e))
-    })
+    out
 }
 
 #[cfg(test)]
@@ -2328,23 +2321,73 @@ tree_separators_typo = 1
     }
 
     #[test]
-    fn write_config_drops_schema_directive_below_content() {
-        // A directive after the first content line is not in the leading
-        // block — it is dropped like any other comment.
+    fn write_config_edits_a_commented_config_in_place() {
+        let authored = "\
+#:schema https://grimoire.rs/schemas/grimoire-config.schema.json
+# Team config.
+
+[options]
+clients = [\"claude\"] # claude only
+
+# the shared registry
+[[registries]]
+alias = \"acme\"
+oci = \"ghcr.io/acme\"
+default = true
+
+[skills]
+# reviewers first
+zeta = \"ghcr.io/acme/skills/zeta:1\"
+alpha = 'ghcr.io/acme/skills/alpha'
+
+[rules]
+# style guide
+style = \"ghcr.io/acme/rules/style:1\"
+";
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("grimoire.toml");
+        std::fs::write(&path, authored).unwrap();
+        let mut config = ProjectConfig::from_toml_str(authored).unwrap();
+        config.options.clients.push("codex".into());
+        let beta = crate::config::DeclaredSource::Registry(Identifier::parse("ghcr.io/acme/skills/beta:2").unwrap());
+        config.set.skills.insert("beta".into(), beta);
+        config.set.rules.remove("style");
+
+        write_config(&path, &config.options, &config.registries, &config.set).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            body,
+            authored
+                .replace("[\"claude\"] #", "[\"claude\", \"codex\"] #")
+                .replace(
+                    "alpha = 'ghcr.io/acme/skills/alpha'\n",
+                    "alpha = 'ghcr.io/acme/skills/alpha'\nbeta = \"ghcr.io/acme/skills/beta:2\"\n",
+                )
+                .replace("# style guide\nstyle = \"ghcr.io/acme/rules/style:1\"\n", ""),
+        );
+        let back = ProjectConfig::from_toml_str(&body).unwrap();
+        assert_eq!(back.options, config.options);
+        assert_eq!(back.registries, config.registries);
+        assert_eq!(back.set.skills, config.set.skills);
+        assert_eq!(back.set.rules, config.set.rules);
+    }
+
+    #[test]
+    fn write_config_keeps_a_mid_file_directive_in_place() {
         let body = rewrite_over(Some("[skills]\n#:schema https://x.example/s.json\n"));
         assert!(
-            !body.contains("#:schema"),
-            "mid-file directive must not be hoisted: {body}"
+            body.starts_with("[skills]\n#:schema https://x.example/s.json\n"),
+            "a comment stays where it was written, never hoisted or dropped: {body}"
         );
     }
 
     #[test]
-    fn write_config_preserves_directive_under_ordinary_comment() {
+    fn write_config_keeps_the_whole_leading_comment_block() {
         const D: &str = "#:schema https://x.example/s.json";
         let body = rewrite_over(Some(&format!("# hand-written header\n{D}\n[skills]\n")));
         assert!(
-            body.starts_with(D),
-            "directive below an ordinary leading comment still survives: {body}"
+            body.starts_with(&format!("# hand-written header\n{D}\n[skills]\n")),
+            "the ordinary comment and the directive both survive, in order: {body}"
         );
     }
 

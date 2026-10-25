@@ -249,3 +249,40 @@ def test_add_two_entries_then_lock_install(
     assert {r["status"] for r in rows} == {"installed"}
     assert (project_dir / ".claude/skills/code-review/SKILL.md").is_file()
     assert (project_dir / ".claude/rules/rust-style.md").is_file()
+
+
+def test_config_writes_keep_comments_and_layout(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Every write edits `grimoire.toml` in place: only the changed lines move."""
+    ru = make_artifact(
+        f"{unique_repo}/rust-style",
+        "rule",
+        {"rust-style.md": "---\npaths: ['**/*.rs']\n---\n# rust\n"},
+        tag="v1",
+    )
+    authored = (
+        "# Team config — hand-maintained.\n"
+        "\n"
+        "[options]\n"
+        'clients = ["claude"] # claude only\n'
+        "\n"
+        "[skills]\n"
+        "\n"
+        "# rules we share\n"
+        "[rules]\n"
+    )
+    config = project_dir / "grimoire.toml"
+    config.write_text(authored)
+    runner = grim_at(project_dir)
+
+    runner.json("add", "--no-install", ru.fq)
+    added = config.read_text()
+    assert added.startswith(authored), added
+    assert added[len(authored):].startswith("rust-style = "), added
+
+    runner.run("config", "set", "options.clients", "claude,codex")
+    runner.json("remove", "rule", "rust-style")
+    assert config.read_text() == authored.replace(
+        'clients = ["claude"] # claude only', 'clients = ["claude", "codex"] # claude only'
+    )

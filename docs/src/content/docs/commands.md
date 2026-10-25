@@ -96,7 +96,7 @@ The command covers two areas of the file: **settings** (the `[options]` and `[op
 
 Scope follows the same rule as every config-aware command: without a flag, `grim config` discovers and edits the project `grimoire.toml` by walking up from the working directory; `--global` targets `$GRIM_HOME/grimoire.toml`; `--config <path>` selects an explicit project file.
 
-Every write re-runs registry validation before touching the file, so the at-most-one-`default` constraint and alias rules always hold. The serializer is shared with [`grim add`](#add) and [`grim remove`](#remove) — **comments are not preserved on any write**, with one exception: a leading `#:schema` editor directive survives every rewrite.
+Every write re-runs registry validation before touching the file, so the at-most-one-`default` constraint and alias rules always hold. The writer is shared with [`grim add`](#add) and [`grim remove`](#remove), and it **edits the file in place**: only the lines whose meaning changed move. Comments, blank lines and key order survive, and a new entry is appended at the end of its table.
 
 ### Settings {#config-settings}
 
@@ -119,7 +119,7 @@ grim config list --all
 
 `list` shows every explicitly-set key and value for the active scope — keys at their default or absent values are omitted. Each invocation reads from exactly one scope, so origin is implicit in the scope flag used. Scopes are never merged: `grim config --global list` shows only global values, project `list` shows only project values.
 
-`--all` additionally lists every supported key that is unset or at its default (plain: empty `Value` cell; JSON: `value` null, `set` false). Keys whose false/empty value collapses to unset — `options.show_deprecated`, `options.tui.group_by_type`, an empty `options.clients`, an empty `options.tui.tree_separators` — appear unset under `--all` even after being explicitly set to that value. Per-vendor rows follow the same rule as registry rows: `options.vendors.<name>.shared_skills` is listed only for a client the config's `[options.vendors]` actually names — `--all` widens a named entry to its unset row, it never enumerates every supported client. An entry carrying only default values is not preserved across a config rewrite, so its `--all` row disappears after the next `grim` write. Registry rows appear only for existing aliased `[[registries]]` entries; `registry.<alias>.default` always shows its effective value (no unset state — it is never omitted, `--all` or not); an alias-less `[[registries]]` entry is not dotted-key addressable and is never listed, `--all` or not. In plain output, an empty `Value` cell is ambiguous between unset and an explicit empty-string value (e.g. `options.default_registry` set to `""`) — the JSON `value`/`set` pair disambiguates.
+`--all` additionally lists every supported key that is unset or at its default (plain: empty `Value` cell; JSON: `value` null, `set` false). Keys whose false/empty value collapses to unset — `options.show_deprecated`, `options.tui.group_by_type`, an empty `options.clients`, an empty `options.tui.tree_separators` — appear unset under `--all` even after being explicitly set to that value. Per-vendor rows follow the same rule as registry rows: `options.vendors.<name>.shared_skills` is listed only for a client the config's `[options.vendors]` actually names — `--all` widens a named entry to its unset row, it never enumerates every supported client. grim never writes an entry carrying only default values, but it leaves a hand-written one in place, so its `--all` row stays. Registry rows appear only for existing aliased `[[registries]]` entries; `registry.<alias>.default` always shows its effective value (no unset state — it is never omitted, `--all` or not); an alias-less `[[registries]]` entry is not dotted-key addressable and is never listed, `--all` or not. In plain output, an empty `Value` cell is ambiguous between unset and an explicit empty-string value (e.g. `options.default_registry` set to `""`) — the JSON `value`/`set` pair disambiguates.
 
 `config list --format json` emits the same per-key metadata (type, title, description, default, enum values) for every row, set or unset — tooling such as editor extensions can drive a settings UI from it without hardcoding the key list.
 
@@ -217,12 +217,11 @@ Each conflicts with its own list flag — `--clear-include --include 'a/**'`
 exits `64` — and neither conflicts with the other side, so a single call can
 clear one list and rewrite the other. A clear is **silent** at every list
 length, including an already-empty one: exit `0`, the entry otherwise
-untouched, no warning. (The *file* is still rewritten — every `grim config`
-write re-serializes it, as [above](#config) — so "unchanged" is a claim
-about the entry, never about the bytes on disk.) It is not `config set`'s single-pattern replacement, which does warn
+untouched, no warning. (Nothing else in the file moves either: every
+`grim config` write edits it in place, as [above](#config).) It is not `config set`'s single-pattern replacement, which does warn
 when it discards patterns; a clear says what it does in its own flag name.
-The emptied list is written as **no key at all**, byte-identical to an entry
-that was never filtered.
+A clear removes the list's key, so the entry reads exactly like one that was
+never filtered. An already-empty `include = []` is left as written.
 
 `grim config unset registry.<alias>.include` is the second, equally supported
 clearing route, through the dotted-key surface. The two differ only in what
