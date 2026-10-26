@@ -1,0 +1,21 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20261018T163050Z-73ffdd56.json"
+  ],
+  "first_seen": "2026-10-18T16:30:50Z",
+  "fixed": null,
+  "folded_at": "2026-10-26T15:16:19Z",
+  "folds": 1,
+  "id": "project-sccache-sandbox",
+  "kind": "pitfall",
+  "last_seen": "2026-10-18T16:30:50Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "sccache fails in the sandboxed shell: temp dir under / and over-long socket path",
+  "v": 1,
+  "versions": []
+}

@@ -1,0 +1,21 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20261018T115508Z-f320d1d8.json"
+  ],
+  "first_seen": "2026-10-18T11:30:00Z",
+  "fixed": null,
+  "folded_at": "2026-10-26T15:16:19Z",
+  "folds": 1,
+  "id": "project-pre-push-privacy-range",
+  "kind": "pitfall",
+  "last_seen": "2026-10-18T11:30:00Z",
+  "occurrences": 1,
+  "scope": "project",
+  "severity": "high",
+  "status": "deferred",
+  "title": "Pre-push privacy grep covered only the newest commits, not the whole PR range",
+  "v": 1,
+  "versions": []
+}

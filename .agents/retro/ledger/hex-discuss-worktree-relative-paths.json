@@ -1,0 +1,23 @@
+{
+  "artifact": "hex-discuss",
+  "cost_min": 0,
+  "entries": [
+    "20261020T215207Z-c7664a80.json"
+  ],
+  "first_seen": "2026-10-20T21:52:06Z",
+  "fixed": null,
+  "folded_at": "2026-10-26T15:16:19Z",
+  "folds": 1,
+  "id": "hex-discuss-worktree-relative-paths",
+  "kind": "pitfall",
+  "last_seen": "2026-10-20T21:52:06Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "low",
+  "status": "deferred",
+  "title": "hex-discuss announces worktree-relative artifact paths the owner looks for in the primary checkout",
+  "v": 1,
+  "versions": [
+    "ghcr.io/michael-herwig/arcana/hex-discuss@sha256:b0e014bb782defe9ef3d3cf24836bd6d37ba06de756cc369cc6a9c4d158584ed"
+  ]
+}

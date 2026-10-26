@@ -1,0 +1,23 @@
+{
+  "artifact": "hex-review",
+  "cost_min": 0,
+  "entries": [
+    "20261026T140302Z-339dfc13.json"
+  ],
+  "first_seen": "2026-10-26T14:03:02Z",
+  "fixed": null,
+  "folded_at": "2026-10-26T15:16:19Z",
+  "folds": 1,
+  "id": "hex-review-codex-stdin",
+  "kind": "pitfall",
+  "last_seen": "2026-10-26T14:03:02Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "low",
+  "status": "deferred",
+  "title": "codex exec as a background task blocks reading stdin unless redirected from /dev/null",
+  "v": 1,
+  "versions": [
+    "ghcr.io/michael-herwig/arcana/hex-review@sha256:843ba7b434ad2a1d9cc7935b219b79286ce0767c7e1f2d6f95b324bb1acce536"
+  ]
+}

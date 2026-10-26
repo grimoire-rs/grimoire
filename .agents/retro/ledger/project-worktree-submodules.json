@@ -1,0 +1,21 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20261023T021927Z-67cba0ef.json"
+  ],
+  "first_seen": "2026-10-23T02:19:27Z",
+  "fixed": null,
+  "folded_at": "2026-10-26T15:16:19Z",
+  "folds": 1,
+  "id": "project-worktree-submodules",
+  "kind": "pitfall",
+  "last_seen": "2026-10-23T02:19:27Z",
+  "occurrences": 1,
+  "scope": "project",
+  "severity": "low",
+  "status": "deferred",
+  "title": "Fresh agent worktrees lack submodules, so the first build fails",
+  "v": 1,
+  "versions": []
+}

@@ -1,0 +1,21 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20260930T213558Z-9c25a1bf.json"
+  ],
+  "first_seen": "2026-09-30T21:40:00Z",
+  "fixed": null,
+  "folded_at": "2026-10-26T15:16:19Z",
+  "folds": 1,
+  "id": "project-chained-reset-hard",
+  "kind": "pitfall",
+  "last_seen": "2026-09-30T21:40:00Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "high",
+  "status": "deferred",
+  "title": "Chained status-count && reset --hard discarded an owner's uncommitted edit in the primary checkout",
+  "v": 1,
+  "versions": []
+}

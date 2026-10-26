@@ -1,0 +1,23 @@
+{
+  "artifact": "hex-finalize",
+  "cost_min": 0,
+  "entries": [
+    "20261004T084541Z-80a2bf7d.json"
+  ],
+  "first_seen": "2026-10-04T08:45:41Z",
+  "fixed": null,
+  "folded_at": "2026-10-26T15:16:19Z",
+  "folds": 1,
+  "id": "hex-finalize-zsh-refspec",
+  "kind": "pitfall",
+  "last_seen": "2026-10-04T08:45:41Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "low",
+  "status": "deferred",
+  "title": "hex-finalize C-812 push refspec mangled by zsh history modifiers on an unbraced variable",
+  "v": 1,
+  "versions": [
+    "ghcr.io/michael-herwig/arcana/hex-finalize@sha256:d2522bd7ec97a6dc8775f1bcdc5c7ad1134df5d89732a5d174d0edc82378fb21"
+  ]
+}

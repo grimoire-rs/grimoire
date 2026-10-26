@@ -1,0 +1,25 @@
+{
+  "artifact": "hex-loop",
+  "cost_min": 0,
+  "entries": [
+    "20261018T124337Z-e55ffa27.json",
+    "20261025T162801Z-445a696c.json",
+    "20261026T021631Z-67b5bc9e.json"
+  ],
+  "first_seen": "2026-10-18T12:43:37Z",
+  "fixed": null,
+  "folded_at": "2026-10-26T15:16:19Z",
+  "folds": 1,
+  "id": "hex-loop-branch-binding",
+  "kind": "inconvenient",
+  "last_seen": "2026-10-26T02:16:31Z",
+  "occurrences": 3,
+  "scope": "harness",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "hex-loop cannot bind {branch} to an existing owner-chosen feature branch or non-trunk base",
+  "v": 1,
+  "versions": [
+    "ghcr.io/michael-herwig/arcana/hex-loop@sha256:59ccc12245adfa8e0f7531ae3edb819acefeda012f8f37b2c8e8df4402b3ff7f"
+  ]
+}

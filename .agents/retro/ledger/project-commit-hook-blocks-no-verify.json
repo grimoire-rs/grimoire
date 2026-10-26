@@ -1,0 +1,23 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20260929T155121Z-9b195113.json",
+    "20261017T155943Z-14e1e5cf.json",
+    "20261021T172600Z-7c3e19a4.json"
+  ],
+  "first_seen": "2026-09-29T15:55:00Z",
+  "fixed": null,
+  "folded_at": "2026-10-26T15:16:19Z",
+  "folds": 1,
+  "id": "project-commit-hook-blocks-no-verify",
+  "kind": "defect",
+  "last_seen": "2026-10-21T17:26:00Z",
+  "occurrences": 3,
+  "scope": "project",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "Project pre-commit verify hook blocks hex --no-verify commits and sibling-repo worktree commits",
+  "v": 1,
+  "versions": []
+}

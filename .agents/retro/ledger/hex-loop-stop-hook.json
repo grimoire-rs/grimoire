@@ -1,0 +1,24 @@
+{
+  "artifact": "hex-loop",
+  "cost_min": 0,
+  "entries": [
+    "20261021T190000Z-ca9317a3.json",
+    "20261022T172713Z-7e802b21.json"
+  ],
+  "first_seen": "2026-10-21T19:00:00Z",
+  "fixed": null,
+  "folded_at": "2026-10-26T15:16:19Z",
+  "folds": 1,
+  "id": "hex-loop-stop-hook",
+  "kind": "defect",
+  "last_seen": "2026-10-22T17:27:13Z",
+  "occurrences": 2,
+  "scope": "harness",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "Goal stop hook ignores the DONE not-met clause and re-fires repeatedly while legitimately paused",
+  "v": 1,
+  "versions": [
+    "ghcr.io/michael-herwig/arcana/hex-loop@sha256:59ccc12245adfa8e0f7531ae3edb819acefeda012f8f37b2c8e8df4402b3ff7f"
+  ]
+}

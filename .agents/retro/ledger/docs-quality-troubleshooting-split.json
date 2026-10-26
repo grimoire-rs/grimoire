@@ -1,0 +1,23 @@
+{
+  "artifact": "docs-quality",
+  "cost_min": 0,
+  "entries": [
+    "20260930T204728Z-be565a9f.json"
+  ],
+  "first_seen": "2026-09-30T20:47:28Z",
+  "fixed": null,
+  "folded_at": "2026-10-26T15:16:19Z",
+  "folds": 1,
+  "id": "docs-quality-troubleshooting-split",
+  "kind": "defect",
+  "last_seen": "2026-09-30T20:47:28Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "docs-quality page_type.py applies the DOC-TYPE-09 five-entry split to troubleshooting pages",
+  "v": 1,
+  "versions": [
+    "ghcr.io/ocx-sh/lore/docs-quality@sha256:d9ab2df9ccff688f98f539ab1f1c3c9cf56fdfefa91b7d190dfca70d0afed09e"
+  ]
+}

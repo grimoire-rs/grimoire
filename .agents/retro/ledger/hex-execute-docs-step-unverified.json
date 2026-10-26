@@ -1,0 +1,23 @@
+{
+  "artifact": "hex-execute",
+  "cost_min": 0,
+  "entries": [
+    "20261026T123218Z-ae46cbf7.json"
+  ],
+  "first_seen": "2026-10-26T12:32:18Z",
+  "fixed": null,
+  "folded_at": "2026-10-26T15:16:19Z",
+  "folds": 1,
+  "id": "hex-execute-docs-step-unverified",
+  "kind": "pitfall",
+  "last_seen": "2026-10-26T12:32:18Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "low",
+  "status": "deferred",
+  "title": "Non-behavioural fixer steps run no check, so a broken taskfile surfaced only at the gate",
+  "v": 1,
+  "versions": [
+    "ghcr.io/michael-herwig/arcana/hex-execute@sha256:b74c31371e0861a500b15b48b2f80733477ac454b449967d816b19a9ddbe01c2"
+  ]
+}
