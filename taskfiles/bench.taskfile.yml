@@ -2,27 +2,37 @@
 
 version: '3'
 
-# Latency measurement for the hook dispatch path.
+# Latency measurement for the hook dispatch path, and the gate on it.
 #
-# NOTHING HERE GATES ANYTHING. The plan asks for a reported table, explicitly
-# with no pass/fail threshold, and that is deliberate: a latency gate on a path
-# whose cost is dominated by a process spawn would fail on a loaded CI runner
-# and teach everyone to re-run it. Read the numbers, record them, decide.
+# THE LATENCY ROW NOW GATES. The native `grim-hook` launcher exists because the
+# old chain (sh -> sh shim -> 26.8 MB grim) was too slow on every tool call, and
+# its size budget (512 KiB, 640 KiB on musl) was set on the premise that a
+# sub-MiB binary starts in a few milliseconds. `report` therefore compares the
+# `no-match/matcher×1` p50 with GATE_COLD_MS for BOTH registration forms and
+# with GATE_WARM_MS for `chain` only, and exits non-zero over any of the three.
+# `chain` is the exec form Copilot registers. `shell-form` is the `/bin/sh -c`
+# string Claude, Qoder and Codex register. Its warm row is reported, not gated:
+# it keeps the one `sh` the old chain had, so it sits near the old 2.65 ms. The
+# thresholds are the WSL2 ext4 reference
+# (adr_hook_native_dispatcher.md, NFR latency); a miss falsifies the size
+# premise, so change the design, never the thresholds or the harness. Other
+# platforms are reported, not inferred.
 #
-# Because no gate depends on the numbers, the ONLY value this harness has is
-# that a reader can trust and reproduce them. So every task below is built to
-# be checkable rather than merely runnable:
+# What makes a gate worth having is that a reader can trust and reproduce the
+# number, so every task below is built to be checkable rather than merely
+# runnable:
 #
 #   * `confirm` proves each scenario did the work its name claims, by counting
 #     the audit records the invocation left behind, and FAILS the run when a
-#     scenario refused early instead. Every refusal on this path exits 0 (I3),
-#     so an exit code cannot tell a measured dispatch from a declined one — a
-#     0.3 ms "no-match" is what a refusal looks like.
+#     scenario refused early instead. A 0.3 ms "no-match" is what a refusal
+#     looks like, and the launcher exits 0 for every benign state, so exit 0
+#     alone cannot tell a measured dispatch from a declined one.
 #   * the cold rows evict the page cache for real (`POSIX_FADV_DONTNEED`),
 #     rather than running `sync`, which flushes dirty pages and evicts nothing.
-#   * `report` stamps the platform, the binary profile, and the FILESYSTEM the
-#     fixtures sat on, because on WSL2 that last one moves the numbers by more
-#     than everything else in this file combined.
+#   * `report` asserts the launcher was built under the size-tuned `hook`
+#     profile and stamps the platform and the FILESYSTEM the fixtures sat on,
+#     because on WSL2 that last one moves the numbers by more than everything
+#     else in this file combined.
 #
 # Results and full methodology: `.agents/hook_dispatch_latency.md`.
 #
@@ -32,12 +42,19 @@ vars:
   # Overridable, and that is the point: the WSL2 9P row is this same task with
   # `BENCH_ROOT=/mnt/c/<dir>`, so one harness produces every filesystem row.
   BENCH_ROOT: '{{.BENCH_ROOT | default (printf "%s/target/bench/hooks" .ROOT_DIR)}}'
-  GRIM: '{{.ROOT_DIR}}/target/release/grim'
+  # The launcher as `rust:hook:size` builds it (`--profile hook`). The launcher
+  # reads `dispatch.json` beside its own executable, so each table shape below
+  # gets its own copy of these bytes.
+  LAUNCHER: '{{.ROOT_DIR}}/target/hook/grim-hook'
   # 500 warm runs so the p99 is the 495th sample rather than an extrapolation;
   # the cold rows pay an eviction on every run, so they get fewer.
   WARM_RUNS: '500'
   COLD_RUNS: '150'
   WARMUP: '20'
+  # The gate, in ms at p50, on `no-match/matcher×1 · chain` (cold and warm) and
+  # `no-match/matcher×1 · shell-form` (cold).
+  GATE_COLD_MS: '7.47'
+  GATE_WARM_MS: '2.65'
   # The opaque per-install root token (audit finding B3) — keyed by token, never
   # by `global` and never by a workspace path. A fixture value: a real one is
   # HMAC-SHA256 of the root under a machine-local key that lives outside any
@@ -48,42 +65,38 @@ vars:
 
 tasks:
   default:
-    desc: Measure the hook guard and dispatch paths, and print the table
+    desc: Measure the hook launcher, print the table, and gate on the latency row
     deps: [hooks]
 
   hooks:
-    desc: 'Hook dispatch latency: no-match vs match-and-dispatch, p50 and p99, cold and warm'
+    desc: 'Hook launcher latency: no-match vs match-and-dispatch, p50 and p99, cold and warm'
     summary: |
-      Measures the command a client invokes on every tool call of every armed
-      client, at TWO points in the chain and across FIVE table shapes.
+      Measures what a client runs on every tool call of every armed client: the
+      native launcher, `grim-hook claude PreToolUse <root>`, across FIVE table
+      shapes.
 
-      The chain, because the registration is not one process:
+      `chain` is the launcher exec'd directly (`hyperfine -N`), which is the
+      registration Copilot uses. Claude, Qoder and Codex register a shell
+      string instead, so `shell-form` runs the same launcher under
+      `/bin/sh -c` for the `no-match/matcher×1` row: the extra shell exec is
+      what those three clients pay on top. Both cold rows gate; of the warm
+      rows only `chain` gates, and `shell-form` warm is reported.
 
-        runtime   `grim hook run` alone — grim's own cost.
-        chain     the registered `sh` string → the launcher shim → grim. This
-                  is what a client actually runs, and it carries the extra
-                  `fork` the dropped `exec` costs (audit finding B8): the
-                  registration runs the launcher as a CHILD so it can tell "the
-                  launcher never ran" from "the launcher returned a verdict",
-                  which is what keeps a missing interpreter (127) or an ENOEXEC
-                  (126) from reaching a fail-closed client as a denial. The fork
-                  is on the GUARD path, so it is paid even when nothing matches.
-
-      The shapes, because "no match" is not one measurement — the runtime has
+      The shapes, because "no match" is not one measurement — the launcher has
       two structurally different no-match paths and they differ by more than
       noise:
 
         unknown-root      a well-formed token naming no root. Returns before
                           stdin is read and before the audit trail is opened.
         no-match/event    rows exist, none at the firing event. Same early
-                          return: `run` reads the payload only AFTER row
-                          selection is known non-empty.
+                          return: the payload is read only AFTER row selection
+                          is known non-empty.
         no-match/matcher  rows are armed at this event and grim's own matcher
                           declines. This one reads stdin, parses the payload,
                           opens the audit trail, and writes one `NoMatch`
                           record PER ARMED HOOK (implement-report finding G-5) —
                           so it is measured at 1 and at 10 armed rows to show
-                          the slope.
+                          the slope. The ×1 row is the gate.
         match             one matching row, payload spawned, response projected.
 
       Each is reported cold and warm, with p50 AND p99 rather than a mean: the
@@ -106,96 +119,89 @@ tasks:
         msg: python3 is required to build the fixtures and compute p50/p99 from hyperfine's JSON
     # The build and the fixtures are `cmds`, not `deps`, so the missing-tool
     # refusal above happens FIRST: `deps` run before preconditions, and a
-    # 60-second release build ahead of "hyperfine is not installed" is the kind
-    # of harness people stop running.
+    # release build ahead of "hyperfine is not installed" is the kind of harness
+    # people stop running.
     cmds:
-      - task: :rust:build
+      - task: launcher
       - task: fixtures
       - task: confirm
+      # A stale export from an earlier harness shape would be reported as a row.
+      - rm -rf {{.BENCH_ROOT}}/out
       - mkdir -p {{.BENCH_ROOT}}/out
-      # Warm, runtime-only. `-N` (== `--shell=none`) is not optional in a
-      # sub-5 ms regime: a shell spawn is the same order as the thing being
-      # measured, so it would dominate. `--input` supplies the client payload on
-      # stdin, which hyperfine otherwise wires to /dev/null — and an empty
-      # payload is not a JSON object, so the runtime would refuse (exit 0) and
-      # the row would report a refusal wearing a dispatch's name.
+      # Warm. `-N` (== `--shell=none`) is not optional in a sub-5 ms regime: a
+      # shell spawn is the same order as the thing being measured, so it would
+      # dominate. `--input` supplies the client payload on stdin, which
+      # hyperfine otherwise wires to /dev/null — and an empty payload is not a
+      # JSON object, so the launcher would exit 65 and the row would report a
+      # failure wearing a dispatch's name.
       - |
         hyperfine -N --warmup {{.WARMUP}} --runs {{.WARM_RUNS}} \
-          --export-json {{.BENCH_ROOT}}/out/runtime-warm.json \
+          --export-json {{.BENCH_ROOT}}/out/chain-warm.json \
           --input {{.BENCH_ROOT}}/payload_bash.json \
-          --command-name 'unknown-root · runtime · warm' \
-          '{{.GRIM}} hook run --client claude --event PreToolUse --table {{.BENCH_ROOT}}/armed1/dispatch.json --root {{.UNKNOWN_TOKEN}}' \
-          --command-name 'no-match/event · runtime · warm' \
-          '{{.GRIM}} hook run --client claude --event Stop --table {{.BENCH_ROOT}}/armed1/dispatch.json --root {{.ROOT_TOKEN}}' \
-          --command-name 'match/1 · runtime · warm' \
-          '{{.GRIM}} hook run --client claude --event PreToolUse --table {{.BENCH_ROOT}}/match1/dispatch.json --root {{.ROOT_TOKEN}}'
+          --command-name 'unknown-root · chain · warm' \
+          '{{.BENCH_ROOT}}/armed1/grim-hook claude PreToolUse {{.UNKNOWN_TOKEN}}' \
+          --command-name 'no-match/event · chain · warm' \
+          '{{.BENCH_ROOT}}/armed1/grim-hook claude Stop {{.ROOT_TOKEN}}' \
+          --command-name 'match/1 · chain · warm' \
+          '{{.BENCH_ROOT}}/match1/grim-hook claude PreToolUse {{.ROOT_TOKEN}}'
       # The matcher-decline rows take the `Read` payload against a `Bash`
       # matcher, so they need their own invocation: `--input` is per-hyperfine,
       # not per-command.
       - |
         hyperfine -N --warmup {{.WARMUP}} --runs {{.WARM_RUNS}} \
-          --export-json {{.BENCH_ROOT}}/out/runtime-warm-decline.json \
-          --input {{.BENCH_ROOT}}/payload_read.json \
-          --command-name 'no-match/matcher×1 · runtime · warm' \
-          '{{.GRIM}} hook run --client claude --event PreToolUse --table {{.BENCH_ROOT}}/armed1/dispatch.json --root {{.ROOT_TOKEN}}' \
-          --command-name 'no-match/matcher×10 · runtime · warm' \
-          '{{.GRIM}} hook run --client claude --event PreToolUse --table {{.BENCH_ROOT}}/armed10/dispatch.json --root {{.ROOT_TOKEN}}'
-      # Warm, full chain — the registered `sh` string, so the B8 fork is inside
-      # the measurement rather than argued about.
-      - |
-        hyperfine -N --warmup {{.WARMUP}} --runs {{.WARM_RUNS}} \
-          --export-json {{.BENCH_ROOT}}/out/chain-warm.json \
+          --export-json {{.BENCH_ROOT}}/out/chain-warm-decline.json \
           --input {{.BENCH_ROOT}}/payload_read.json \
           --command-name 'no-match/matcher×1 · chain · warm' \
-          '/bin/sh {{.BENCH_ROOT}}/armed1/registration.sh'
+          '{{.BENCH_ROOT}}/armed1/grim-hook claude PreToolUse {{.ROOT_TOKEN}}' \
+          --command-name 'no-match/matcher×10 · chain · warm' \
+          '{{.BENCH_ROOT}}/armed10/grim-hook claude PreToolUse {{.ROOT_TOKEN}}'
+      # The shell form Claude, Qoder and Codex register: the launcher under
+      # `sh -c`, so the shell's own exec is inside the measurement.
       - |
         hyperfine -N --warmup {{.WARMUP}} --runs {{.WARM_RUNS}} \
-          --export-json {{.BENCH_ROOT}}/out/chain-warm-match.json \
-          --input {{.BENCH_ROOT}}/payload_bash.json \
-          --command-name 'match/1 · chain · warm' \
-          '/bin/sh {{.BENCH_ROOT}}/match1/registration.sh'
+          --export-json {{.BENCH_ROOT}}/out/shell-warm.json \
+          --input {{.BENCH_ROOT}}/payload_read.json \
+          --command-name 'no-match/matcher×1 · shell-form · warm' \
+          "/bin/sh -c '{{.BENCH_ROOT}}/armed1/grim-hook claude PreToolUse {{.ROOT_TOKEN}}'"
       # Cold. `--prepare` runs before EVERY timed run and its own cost is not
       # counted, so the eviction is free to be slow. What it evicts is stated
-      # rather than implied: the grim binary, the dispatch table, and the
-      # launcher shim — the shells' own pages stay resident, since `/bin/dash`
-      # and libc are shared with every other process on the machine and
-      # evicting them is neither possible for an unprivileged user nor
-      # representative of anything.
-      - |
-        hyperfine -N --warmup 0 --runs {{.COLD_RUNS}} \
-          --export-json {{.BENCH_ROOT}}/out/runtime-cold.json \
-          --input {{.BENCH_ROOT}}/payload_bash.json \
-          --prepare 'python3 {{.BENCH_ROOT}}/evict.py {{.GRIM}} {{.BENCH_ROOT}}/armed1/dispatch.json {{.BENCH_ROOT}}/match1/dispatch.json {{.BENCH_ROOT}}/bin/grim-hook' \
-          --command-name 'unknown-root · runtime · cold' \
-          '{{.GRIM}} hook run --client claude --event PreToolUse --table {{.BENCH_ROOT}}/armed1/dispatch.json --root {{.UNKNOWN_TOKEN}}' \
-          --command-name 'no-match/event · runtime · cold' \
-          '{{.GRIM}} hook run --client claude --event Stop --table {{.BENCH_ROOT}}/armed1/dispatch.json --root {{.ROOT_TOKEN}}' \
-          --command-name 'match/1 · runtime · cold' \
-          '{{.GRIM}} hook run --client claude --event PreToolUse --table {{.BENCH_ROOT}}/match1/dispatch.json --root {{.ROOT_TOKEN}}'
-      - |
-        hyperfine -N --warmup 0 --runs {{.COLD_RUNS}} \
-          --export-json {{.BENCH_ROOT}}/out/runtime-cold-decline.json \
-          --input {{.BENCH_ROOT}}/payload_read.json \
-          --prepare 'python3 {{.BENCH_ROOT}}/evict.py {{.GRIM}} {{.BENCH_ROOT}}/armed1/dispatch.json {{.BENCH_ROOT}}/armed10/dispatch.json {{.BENCH_ROOT}}/bin/grim-hook' \
-          --command-name 'no-match/matcher×1 · runtime · cold' \
-          '{{.GRIM}} hook run --client claude --event PreToolUse --table {{.BENCH_ROOT}}/armed1/dispatch.json --root {{.ROOT_TOKEN}}' \
-          --command-name 'no-match/matcher×10 · runtime · cold' \
-          '{{.GRIM}} hook run --client claude --event PreToolUse --table {{.BENCH_ROOT}}/armed10/dispatch.json --root {{.ROOT_TOKEN}}'
+      # rather than implied: the launcher and the dispatch table beside it — the
+      # shell's own pages stay resident, since `/bin/dash` and libc are shared
+      # with every other process on the machine and evicting them is neither
+      # possible for an unprivileged user nor representative of anything.
       - |
         hyperfine -N --warmup 0 --runs {{.COLD_RUNS}} \
           --export-json {{.BENCH_ROOT}}/out/chain-cold.json \
-          --input {{.BENCH_ROOT}}/payload_read.json \
-          --prepare 'python3 {{.BENCH_ROOT}}/evict.py {{.GRIM}} {{.BENCH_ROOT}}/armed1/dispatch.json {{.BENCH_ROOT}}/bin/grim-hook' \
-          --command-name 'no-match/matcher×1 · chain · cold' \
-          '/bin/sh {{.BENCH_ROOT}}/armed1/registration.sh'
+          --input {{.BENCH_ROOT}}/payload_bash.json \
+          --prepare 'python3 {{.BENCH_ROOT}}/evict.py {{.BENCH_ROOT}}/armed1/grim-hook {{.BENCH_ROOT}}/armed1/dispatch.json {{.BENCH_ROOT}}/match1/grim-hook {{.BENCH_ROOT}}/match1/dispatch.json {{.BENCH_ROOT}}/payload/noop.sh' \
+          --command-name 'unknown-root · chain · cold' \
+          '{{.BENCH_ROOT}}/armed1/grim-hook claude PreToolUse {{.UNKNOWN_TOKEN}}' \
+          --command-name 'no-match/event · chain · cold' \
+          '{{.BENCH_ROOT}}/armed1/grim-hook claude Stop {{.ROOT_TOKEN}}' \
+          --command-name 'match/1 · chain · cold' \
+          '{{.BENCH_ROOT}}/match1/grim-hook claude PreToolUse {{.ROOT_TOKEN}}'
       - |
         hyperfine -N --warmup 0 --runs {{.COLD_RUNS}} \
-          --export-json {{.BENCH_ROOT}}/out/chain-cold-match.json \
-          --input {{.BENCH_ROOT}}/payload_bash.json \
-          --prepare 'python3 {{.BENCH_ROOT}}/evict.py {{.GRIM}} {{.BENCH_ROOT}}/match1/dispatch.json {{.BENCH_ROOT}}/bin/grim-hook {{.BENCH_ROOT}}/payload/noop.sh' \
-          --command-name 'match/1 · chain · cold' \
-          '/bin/sh {{.BENCH_ROOT}}/match1/registration.sh'
+          --export-json {{.BENCH_ROOT}}/out/chain-cold-decline.json \
+          --input {{.BENCH_ROOT}}/payload_read.json \
+          --prepare 'python3 {{.BENCH_ROOT}}/evict.py {{.BENCH_ROOT}}/armed1/grim-hook {{.BENCH_ROOT}}/armed1/dispatch.json {{.BENCH_ROOT}}/armed10/grim-hook {{.BENCH_ROOT}}/armed10/dispatch.json' \
+          --command-name 'no-match/matcher×1 · chain · cold' \
+          '{{.BENCH_ROOT}}/armed1/grim-hook claude PreToolUse {{.ROOT_TOKEN}}' \
+          --command-name 'no-match/matcher×10 · chain · cold' \
+          '{{.BENCH_ROOT}}/armed10/grim-hook claude PreToolUse {{.ROOT_TOKEN}}'
+      - |
+        hyperfine -N --warmup 0 --runs {{.COLD_RUNS}} \
+          --export-json {{.BENCH_ROOT}}/out/shell-cold.json \
+          --input {{.BENCH_ROOT}}/payload_read.json \
+          --prepare 'python3 {{.BENCH_ROOT}}/evict.py {{.BENCH_ROOT}}/armed1/grim-hook {{.BENCH_ROOT}}/armed1/dispatch.json' \
+          --command-name 'no-match/matcher×1 · shell-form · cold' \
+          "/bin/sh -c '{{.BENCH_ROOT}}/armed1/grim-hook claude PreToolUse {{.ROOT_TOKEN}}'"
       - task: report
+
+  launcher:
+    desc: Build the launcher under the size-tuned `hook` profile
+    internal: true
+    cmd: cargo build -p grim-hook --profile hook --locked
 
   confirm:
     desc: Prove each measured scenario does the work its name claims
@@ -209,27 +215,29 @@ tasks:
       task gates nothing and is not part of that pipeline, so borrowing the name
       would imply it runs where it does not.
 
-      Every refusal on the `grim hook run` path exits 0 (invariant I3 — some
-      clients fail closed on a non-zero hook exit), so the exit code cannot
-      distinguish "dispatched nothing because nothing matched" from "refused the
-      argv before reading anything". A scenario that silently refuses measures
-      process startup and reports it as dispatch latency.
+      The launcher exits 0 for every benign state (flag off, unknown root, no
+      match), so exit 0 cannot distinguish "dispatched nothing because nothing
+      matched" from "returned early before reading anything". A scenario that
+      silently returns early measures process startup and reports it as
+      dispatch latency. A NON-zero exit is a real failure and is asserted
+      against, never tolerated.
 
       So each scenario is invoked once against a reset audit trail and its
       record count and outcomes are asserted. The counts are derived from the
-      runtime's own contract, not from observation: an early return writes
+      launcher's own contract, not from observation: an early return writes
       nothing, a matcher decline writes one `no-match` record per armed hook,
       and a match writes one `completed`.
     cmds:
+      - task: launcher
       - task: fixtures
       - |
-        python3 - {{.GRIM}} {{.BENCH_ROOT}} {{.ROOT_TOKEN}} {{.UNKNOWN_TOKEN}} <<'PY'
+        python3 - {{.BENCH_ROOT}} {{.ROOT_TOKEN}} {{.UNKNOWN_TOKEN}} <<'PY'
         import json, pathlib, subprocess, sys
 
-        grim, bench, token, unknown = sys.argv[1], pathlib.Path(sys.argv[2]), sys.argv[3], sys.argv[4]
+        bench, token, unknown = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 
         # (label, table dir, event, root, payload, expected records, expected outcome)
-        # Expected counts come from the runtime's contract:
+        # Expected counts come from the launcher's contract:
         #   * an unknown root and an event with no armed row both return before
         #     stdin is read, so the audit trail is never even opened;
         #   * a matcher decline records one `no-match` per armed hook (G-5);
@@ -244,23 +252,22 @@ tasks:
 
         failures = []
         for label, directory, event, root, payload, want_records, want_outcome in cases:
-            table = bench / directory / "dispatch.json"
+            launcher = bench / directory / "grim-hook"
             trail = bench / directory / "hook_audit.jsonl"
             trail.unlink(missing_ok=True)
             marker = bench / "spawn.marker"
             marker.unlink(missing_ok=True)
             done = subprocess.run(
-                [grim, "hook", "run", "--client", "claude", "--event", event,
-                 "--table", str(table), "--root", root],
+                [str(launcher), "claude", event, root],
                 stdin=(bench / payload).open("rb"), capture_output=True, text=True,
             )
             records = [json.loads(l) for l in trail.read_text().splitlines() if l.strip()] if trail.is_file() else []
             outcomes = sorted({r["outcome"] for r in records})
             state = "ok"
-            # Exit 0 is the contract on EVERY path, so it is asserted and then
-            # deliberately not used as evidence of anything else.
+            # Every scenario here is a benign state, so exit 0 is asserted and
+            # then deliberately not used as evidence of anything else.
             if done.returncode != 0:
-                failures.append(f"{label}: exit {done.returncode} (this command's only permitted code is 0)\n{done.stderr}")
+                failures.append(f"{label}: exit {done.returncode} (a benign state must exit 0)\n{done.stderr}")
                 state = "FAIL"
             elif len(records) != want_records:
                 failures.append(
@@ -287,12 +294,13 @@ tasks:
       What the counts DO establish is where the work goes, which is the question
       "why is no-match not free" needs answered rather than asserted.
 
-      `-f` is required: the full chain forks, and the whole point is to count
+      `-f` is required: the shell form forks, and the whole point is to count
       that fork.
     preconditions:
       - sh: command -v strace
         msg: 'strace is not installed; syscall attribution needs it (apt install strace)'
     cmds:
+      - task: launcher
       - task: fixtures
       - for:
           - 'no-match-event|armed1|Stop|payload_read.json'
@@ -301,30 +309,30 @@ tasks:
           - 'match-1|match1|PreToolUse|payload_bash.json'
         cmd: |
           set -- $(echo '{{.ITEM}}' | tr '|' ' ')
-          echo "### runtime only: $1"
+          echo "### launcher exec'd directly: $1"
           rm -f {{.BENCH_ROOT}}/$2/hook_audit.jsonl
           strace -c -f -o {{.BENCH_ROOT}}/out/syscalls-$1.txt \
-            {{.GRIM}} hook run --client claude --event $3 \
-            --table {{.BENCH_ROOT}}/$2/dispatch.json --root {{.ROOT_TOKEN}} \
+            {{.BENCH_ROOT}}/$2/grim-hook claude $3 {{.ROOT_TOKEN}} \
             < {{.BENCH_ROOT}}/$4 >/dev/null 2>&1 || true
           cat {{.BENCH_ROOT}}/out/syscalls-$1.txt
       - |
-        echo "### full chain (registered sh string → shim → grim): no-match-matcher-1"
+        echo "### shell form (sh -c over the launcher): no-match-matcher-1"
         rm -f {{.BENCH_ROOT}}/armed1/hook_audit.jsonl
-        strace -c -f -o {{.BENCH_ROOT}}/out/syscalls-chain.txt \
-          /bin/sh {{.BENCH_ROOT}}/armed1/registration.sh \
+        strace -c -f -o {{.BENCH_ROOT}}/out/syscalls-shell.txt \
+          /bin/sh -c '{{.BENCH_ROOT}}/armed1/grim-hook claude PreToolUse {{.ROOT_TOKEN}}' \
           < {{.BENCH_ROOT}}/payload_read.json >/dev/null 2>&1 || true
-        cat {{.BENCH_ROOT}}/out/syscalls-chain.txt
+        cat {{.BENCH_ROOT}}/out/syscalls-shell.txt
 
   report:
     desc: Print the p50/p99 table from the exported hyperfine JSON
     internal: true
     cmds:
       - |
-        python3 - {{.GRIM}} {{.BENCH_ROOT}} {{.BENCH_ROOT}}/out/*.json <<'PY'
-        import json, pathlib, platform, subprocess, sys
+        python3 - {{.LAUNCHER}} {{.BENCH_ROOT}} {{.GATE_COLD_MS}} {{.GATE_WARM_MS}} {{.BENCH_ROOT}}/out/*.json <<'PY'
+        import hashlib, json, pathlib, platform, sys
 
-        grim, bench, exports = sys.argv[1], pathlib.Path(sys.argv[2]), sys.argv[3:]
+        launcher, bench = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+        gate_cold, gate_warm, exports = float(sys.argv[3]), float(sys.argv[4]), sys.argv[5:]
 
         def platform_row() -> str:
             # WSL2 is a distinct row, not "Linux": its process-creation and
@@ -374,60 +382,79 @@ tasks:
                              percentile(times, 99), min(times), max(times)))
         if not rows:
             print("no hyperfine export found — run `task bench:hooks`")
-            sys.exit(0)
+            sys.exit(1)
 
-        # Scenario, then chain level, then warm before cold: the reading order,
+        # Scenario, then launch form, then warm before cold: the reading order,
         # not the order the exports happened to be globbed in.
         order = ["unknown-root", "no-match/event", "no-match/matcher×1",
                  "no-match/matcher×10", "match/1"]
         def key(row):
             scenario, chain, thermal = (part.strip() for part in row[0].split("·"))
             return (order.index(scenario) if scenario in order else len(order),
-                    0 if chain == "runtime" else 1, 0 if thermal == "warm" else 1)
+                    0 if chain == "chain" else 1, 0 if thermal == "warm" else 1)
         rows.sort(key=key)
 
-        version = subprocess.run([grim, "--version"], capture_output=True, text=True).stdout.strip()
-        profile = "release" if f"{pathlib.os.sep}release{pathlib.os.sep}" in grim else "NOT RELEASE — the number below is meaningless"
-        print(f"\nhook dispatch latency — no pass/fail gate")
+        # The size-tuned profile is the one that ships; a number from any other
+        # profile measures a binary no client runs.
+        profile = "hook" if launcher.parent.name == "hook" else "NOT THE hook PROFILE — the number below is meaningless"
+        digest = hashlib.sha256(launcher.read_bytes()).hexdigest()[:16]
+        print(f"\nhook launcher latency — the no-match/matcher×1 p50 rows (chain and shell-form) gate")
         print(f"  platform    : {platform_row()}  ({platform.system()} {platform.release()}, {platform.machine()})")
         print(f"  filesystem  : {filesystem_of(bench)}   (fixtures at {bench})")
-        print(f"  binary      : {version}, {profile}")
+        print(f"  launcher    : {launcher.stat().st_size} bytes, sha256 {digest}…, profile {profile}")
         print(f"  cpus        : {pathlib.os.cpu_count()}\n")
         print(f"{'scenario · chain · thermal':<42} {'runs':>5} {'p50 ms':>8} {'p99 ms':>8} {'min ms':>8} {'max ms':>8}")
         print("-" * 85)
         for name, runs, p50, p99, low, high in rows:
             print(f"{name:<42} {runs:>5} {p50:>8.2f} {p99:>8.2f} {low:>8.2f} {high:>8.2f}")
         print()
+
+        gated = {"cold": gate_cold, "warm": gate_warm}
+        failed = profile != "hook"
+        for form in ("chain", "shell-form"):
+            for thermal, limit in gated.items():
+                if (form, thermal) == ("shell-form", "warm"):
+                    continue
+                row = next((r for r in rows if r[0] == f"no-match/matcher×1 · {form} · {thermal}"), None)
+                if row is None:
+                    print(f"gate {form} {thermal}: FAIL — row missing")
+                    failed = True
+                    continue
+                verdict = "PASS" if row[2] <= limit else "FAIL"
+                failed = failed or verdict == "FAIL"
+                print(f"gate {form} {thermal}: {verdict} — p50 {row[2]:.2f} ms against {limit:.2f} ms")
+        if failed:
+            print("\nthe latency gate failed: the size premise of the native launcher is falsified on this host")
+            sys.exit(1)
         PY
 
   fixtures:
-    desc: Write the dispatch tables, payloads, launcher chain and eviction helper
+    desc: Write the dispatch tables, payloads, launcher copies and eviction helper
     internal: true
     cmds:
       - mkdir -p {{.BENCH_ROOT}}/out
       # One generator for every fixture, in Python rather than a stack of `cat`
       # heredocs, so the required `client` field cannot be present in one table
       # and missing from the next — a row whose client does not match is
-      # invisible to the runtime (`client_admits`), which would look exactly
+      # invisible to the launcher (`client_admits`), which would look exactly
       # like a fast no-match.
       - |
-        python3 - {{.BENCH_ROOT}} {{.GRIM}} {{.ROOT_TOKEN}} <<'PY'
-        import json, pathlib, stat, sys
+        python3 - {{.BENCH_ROOT}} {{.LAUNCHER}} {{.ROOT_TOKEN}} <<'PY'
+        import json, pathlib, shutil, stat, sys
 
-        bench, grim, token = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+        bench, launcher, token = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
         payload_dir = bench / "payload"
         payload_dir.mkdir(parents=True, exist_ok=True)
 
-        # A payload that exits immediately: this measures grim's overhead, and a
+        # A payload that exits immediately: this measures the launcher's overhead, and a
         # payload doing real work would report the payload.
         noop = payload_dir / "noop.sh"
         noop.write_text("#!/bin/sh\nexit 0\n")
         noop.chmod(noop.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
         def entry(hook_id: str, matcher: str | None) -> dict:
-            # The shape of `DispatchEntry`, matching the single construction
-            # point in test/tests/test_hook_run_runtime.py — `client` included,
-            # since the table grew its client dimension.
+            # The shape of `DispatchEntry`, `client` included: a row whose client
+            # does not match is invisible to the launcher.
             return {
                 "artifact": "bench", "id": hook_id, "event": "PreToolUse",
                 "tier": "observer", "matcher": matcher,
@@ -436,14 +463,17 @@ tasks:
                 "resolved_digest": "sha256:" + "ab" * 32, "client": "claude",
             }
 
-        def table(name: str, entries: list[dict]) -> pathlib.Path:
+        def table(name: str, entries: list[dict]) -> None:
+            # The launcher reads `dispatch.json` BESIDE ITS OWN EXECUTABLE, so a
+            # shape is a directory holding the table and its own launcher copy.
             directory = bench / name
             directory.mkdir(parents=True, exist_ok=True)
-            path = directory / "dispatch.json"
-            path.write_text(json.dumps(
+            (directory / "dispatch.json").write_text(json.dumps(
                 {"schema": 1, "roots": {token: {"root": "global", "hooks": entries}}}
             ))
-            return path
+            copy = directory / "grim-hook"
+            shutil.copyfile(launcher, copy)
+            copy.chmod(0o755)
 
         shapes = {
             # matcher `Bash`, so a `Read` payload declines at grim's own matcher.
@@ -464,36 +494,6 @@ tasks:
                 "tool_input": {"command": "echo hello"},
                 "cwd": "/repo", "session_id": "bench-session",
             }))
-
-        # The launcher chain, byte-for-byte the shapes `src/install/hook_launcher.rs`
-        # generates: `shim_body` for the file, `registered_command` for the string
-        # the client runs. Reproduced rather than obtained from `grim install`
-        # because arming does not converge yet (WP-J2), and the strings are what
-        # the measurement needs — not the state that would have written them.
-        launcher = bench / "bin" / "grim-hook"
-        launcher.parent.mkdir(parents=True, exist_ok=True)
-        def quote(value: str) -> str:
-            return "'" + value.replace("'", "'\\''") + "'"
-        launcher.write_text(
-            "#!/bin/sh\n"
-            "# generated by grim — do not edit; `grim install` regenerates it\n"
-            f"G={quote(grim)}\n"
-            '[ -f "$G" ] && [ -x "$G" ] || exit 0\n'
-            'exec "$G" hook "$@"\n'
-        )
-        launcher.chmod(0o755)
-        for name in shapes:
-            # `arms` renders empty for claude: VERDICT_EXIT_CODES is empty for all
-            # three v1 clients, because a verdict travels as a JSON document on
-            # stdout and never as an exit code.
-            (bench / name / "registration.sh").write_text(
-                f"L={quote(str(launcher))}\n"
-                '[ -f "$L" ] && [ -x "$L" ] || exit 0\n'
-                f'"$L" run --client claude --event PreToolUse '
-                f'--table {quote(str(bench / name / "dispatch.json"))} --root {token}\n'
-                "s=$?\n"
-                'case "$s" in 0) exit 0 ;; *) exit 0 ;; esac'
-            )
 
         # The cold rows' eviction helper. `POSIX_FADV_DONTNEED` drops a file's
         # CLEAN pages without root, which is what makes a cold row honest:

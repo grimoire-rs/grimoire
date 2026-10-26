@@ -1,5 +1,10 @@
 # Hook dispatch latency — WP-K's `Measure:` deliverable
 
+> **Superseded in part by [`adr_hook_native_dispatcher.md`](./adr/adr_hook_native_dispatcher.md).** The
+> `sh` shim and `grim hook run` chain this file measures are gone: every client runs the native
+> `grim-hook` launcher now, and `task bench:hooks` gates its latency. The numbers below are the history
+> that motivated the replacement, not the current cost.
+
 **No pass/fail gate depends on any number here**, and that is the plan's explicit choice: a
 latency gate on a path whose cost is dominated by process creation would fail on a loaded CI
 runner and teach everyone to re-run it. The only value this table has is that a reader can trust
@@ -585,3 +590,49 @@ the child's `PATH` in `envelope::environment`, which closes every hop and change
 environment contract. Pinning only the `Command` site to `/bin/sh` would leave the majority form
 unpinned while implying the question was settled, and would ship a behaviour change no bench row
 measures.
+
+## 2026-10-26: P2 step 4, `grim hook run` without a Tokio runtime
+
+`grim hook run` now runs before any Tokio runtime is built (the F-1 current-thread scheduler and its
+`runtime_flavor` plumbing are deleted), over the std dispatcher in `grimoire-hook-core`.
+
+- Command: `env -u OTEL_EXPORTER_OTLP_ENDPOINT -u OTEL_EXPORTER_OTLP_HEADERS task bench:hooks`, once
+  (warm 500 runs, cold 150 runs), WSL2, 32 cpus, ext4, grim 0.15.0 release.
+- BEFORE: HEAD 8b385f94 (Tokio). AFTER: the commit that adds this section, on top of HEAD 0eaac745
+  (std core pipeline). p50 ms:
+
+| scenario | BEFORE warm | AFTER warm | BEFORE cold | AFTER cold |
+|---|---|---|---|---|
+| unknown-root · runtime | 2.80 | 3.77 | 23.27 | 27.55 |
+| no-match/event · runtime | 3.41 | 3.79 | 22.46 | 25.19 |
+| no-match/matcher×1 · runtime | 3.42 | 4.14 | 21.26 | 27.32 |
+| no-match/matcher×1 · chain | 5.42 | 8.92 | 21.05 | 30.11 |
+| no-match/matcher×10 · runtime | 2.86 | 4.46 | 19.45 | 27.03 |
+| match/1 · runtime | **6.45** | **6.34** | 23.26 | 28.54 |
+| match/1 · chain | 6.84 | 10.39 | 27.46 | 36.51 |
+
+- Gate (`match/1` runtime warm p50 after <= before + 1 ms): **PASS**, 6.34 vs 6.45 ms (-0.11 ms).
+- Not part of the gate, but recorded: every other row is slower after, the warm no-match rows by
+  0.4 to 1.6 ms and both chain rows by about 3.5 ms. The chain rows also carry the largest p99/max
+  (24 and 20 ms), so one run on a shared WSL2 host does not separate a real regression from noise.
+  Not tuned. A repeat run, or a hyperfine A/B of the two binaries, would settle it.
+
+## 2026-10-26: P6 step 4, the native launcher (gate)
+
+The bench now execs `$GRIM_HOME/hooks/grim-hook <client> <event> <root>` via `hyperfine -N`, with
+`dispatch.json` beside the launcher, and fails when a threshold is missed.
+
+- Command: `env -u OTEL_EXPORTER_OTLP_ENDPOINT -u OTEL_EXPORTER_OTLP_HEADERS task bench:hooks`, once,
+  WSL2 ext4, launcher 505,784 B (profile `hook`), `bench:confirm` green first. p50 ms:
+
+| scenario | warm | cold |
+|---|---|---|
+| unknown-root | 0.60 | 1.77 |
+| no-match/event | 0.64 | 1.83 |
+| no-match/matcher×1 · chain (gate) | **0.87** | **1.81** |
+| no-match/matcher×10 | 0.82 | 2.07 |
+| match/1 | 2.27 | 10.54 |
+| shell-form no-match/matcher×1 (sh-launched clients) | 1.62 | 3.07 |
+
+- Gate: cold ≤ 7.47 ms, warm ≤ 2.65 ms: **PASS** (1.81 / 0.87). Gate row p99 warm/cold 3.50 / 2.66.
+- Unmeasured: native Linux, macOS, Windows (no hyperfine on the Windows host). Not inferred.
