@@ -1,0 +1,25 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20261026T151349Z-eefe8f3b.json"
+  ],
+  "first_seen": "2026-10-26T15:13:49Z",
+  "fixed": {
+    "at": "2026-10-26T15:16:19Z",
+    "by": "a8b669e6",
+    "stale_versions": []
+  },
+  "folded_at": "2026-10-26T15:16:19Z",
+  "folds": 1,
+  "id": "project-p9-nested-workspace",
+  "kind": "pitfall",
+  "last_seen": "2026-10-26T15:13:49Z",
+  "occurrences": 1,
+  "scope": "project",
+  "severity": "medium",
+  "status": "fixed",
+  "title": "Root [workspace] listing \".\" voids exclude and claims the p9 main checkout under target/",
+  "v": 1,
+  "versions": []
+}

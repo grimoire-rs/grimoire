@@ -1,0 +1,23 @@
+{
+  "artifact": "hex-architect",
+  "cost_min": 0,
+  "entries": [
+    "20261022T003228Z-2c25c4fe.json"
+  ],
+  "first_seen": "2026-10-22T00:32:28Z",
+  "fixed": null,
+  "folded_at": "2026-10-26T15:16:19Z",
+  "folds": 1,
+  "id": "hex-architect-adversary-usage-limit",
+  "kind": "inconvenient",
+  "last_seen": "2026-10-22T00:32:28Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "low",
+  "status": "deferred",
+  "title": "Cross-model adversary hit its usage limit on the fix re-check",
+  "v": 1,
+  "versions": [
+    "ghcr.io/michael-herwig/arcana/hex-architect@sha256:fe82336b75b7ec77723f95c4280791c166e0a4c5b998c80ec6f5309794ef2bfa"
+  ]
+}

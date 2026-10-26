@@ -1,0 +1,21 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20261003T182323Z-0dedbc1f.json"
+  ],
+  "first_seen": "2026-10-03T18:23:23Z",
+  "fixed": null,
+  "folded_at": "2026-10-26T15:16:19Z",
+  "folds": 1,
+  "id": "project-test-taskfile-cwd",
+  "kind": "pitfall",
+  "last_seen": "2026-10-03T18:23:23Z",
+  "occurrences": 1,
+  "scope": "project",
+  "severity": "low",
+  "status": "deferred",
+  "title": "Acceptance taskfile run from test/ copies the binary from the wrong target dir",
+  "v": 1,
+  "versions": []
+}

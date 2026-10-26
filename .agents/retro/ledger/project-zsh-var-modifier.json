@@ -1,0 +1,21 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20261020T220844Z-2dae14a3.json"
+  ],
+  "first_seen": "2026-10-21T00:00:00Z",
+  "fixed": null,
+  "folded_at": "2026-10-26T15:16:19Z",
+  "folds": 1,
+  "id": "project-zsh-var-modifier",
+  "kind": "pitfall",
+  "last_seen": "2026-10-21T00:00:00Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "low",
+  "status": "deferred",
+  "title": "zsh $VAR:<letter> history modifiers and empty PIPESTATUS mangle refs and exit codes",
+  "v": 1,
+  "versions": []
+}

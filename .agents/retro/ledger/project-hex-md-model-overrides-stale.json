@@ -1,0 +1,24 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20261017T165315Z-9912ed1d.json",
+    "20261020T215206Z-0dcc0179.json"
+  ],
+  "first_seen": "2026-10-17T16:53:15Z",
+  "fixed": null,
+  "folded_at": "2026-10-26T15:16:19Z",
+  "folds": 1,
+  "id": "project-hex-md-model-overrides-stale",
+  "kind": "defect",
+  "last_seen": "2026-10-20T21:52:06Z",
+  "occurrences": 2,
+  "scope": "project",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "hex.md models.overrides pins opus roles against the owner's newer sonnet-default routing",
+  "v": 1,
+  "versions": [
+    "unknown"
+  ]
+}

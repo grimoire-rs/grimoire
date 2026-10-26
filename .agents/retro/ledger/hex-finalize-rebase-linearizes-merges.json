@@ -1,0 +1,23 @@
+{
+  "artifact": "hex-finalize",
+  "cost_min": 0,
+  "entries": [
+    "20261026T151349Z-c541ffa2.json"
+  ],
+  "first_seen": "2026-10-26T15:13:49Z",
+  "fixed": null,
+  "folded_at": "2026-10-26T15:16:19Z",
+  "folds": 1,
+  "id": "hex-finalize-rebase-linearizes-merges",
+  "kind": "pitfall",
+  "last_seen": "2026-10-26T15:13:49Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "hex-finalize C-807 step 1 rebase linearizes branch merges and conflicts on an unmoved base",
+  "v": 1,
+  "versions": [
+    "ghcr.io/michael-herwig/arcana/hex-finalize@sha256:d2522bd7ec97a6dc8775f1bcdc5c7ad1134df5d89732a5d174d0edc82378fb21"
+  ]
+}
