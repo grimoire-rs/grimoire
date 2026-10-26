@@ -184,3 +184,66 @@ jobs:
         with:
           files: test/results/junit.xml
           check_name: "Acceptance Test Results"
+
+  # C-024: the launcher runs on every hook event, so its size is a gate. Linux
+  # builds with cargo-auditable (as dist does) so `cargo audit bin` can read the
+  # dependency list the SBOM does not carry for a nested build.
+  hook-size:
+    name: Launcher Size (${{ matrix.job.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - { name: Linux gnu, target: x86_64-unknown-linux-gnu, budget: "524288", audit: true }
+          - { name: Linux musl, target: x86_64-unknown-linux-musl, budget: "655360", audit: false }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # `external/docker_credential` is the [patch.crates-io] source.
+          submodules: recursive
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          target: ${{ matrix.job.target }}
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Setup Task
+        uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
+      - name: Install cargo-auditable and cargo-audit
+        if: ${{ matrix.job.audit }}
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-auditable,cargo-audit
+      - name: Build and check size
+        env:
+          TARGET: ${{ matrix.job.target }}
+          BUDGET: ${{ matrix.job.budget }}
+          BUILD: ${{ matrix.job.audit && 'cargo auditable build' || 'cargo build' }}
+        run: task rust:hook:size TARGET="$TARGET" BUDGET="$BUDGET" BUILD="$BUILD"
+      - name: Audit embedded dependencies
+        if: ${{ matrix.job.audit }}
+        env:
+          TARGET: ${{ matrix.job.target }}
+        run: task rust:hook:audit TARGET="$TARGET"
+
+  hook-size-windows:
+    name: Launcher Size (Windows x64)
+    runs-on: ubuntu-latest
+    container:
+      image: messense/cargo-xwin
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # `external/docker_credential` is the [patch.crates-io] source.
+          submodules: recursive
+      - name: Install Rust target
+        run: rustup target add x86_64-pc-windows-msvc
+      - name: Setup Task
+        uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
+      - name: Build and check size
+        run: task rust:hook:size TARGET=x86_64-pc-windows-msvc BUDGET=524288 BUILD="cargo xwin build"
