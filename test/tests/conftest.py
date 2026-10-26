@@ -249,3 +249,17 @@ def hostile_hook_clone(tmp_path: Path) -> Callable[..., HostileHookClone]:
         )
 
     return _make
+
+
+@pytest.fixture()
+def launcher(
+    grim_at: Callable[[Path], GrimRunner], project_dir: Path, registry: str, unique_repo: str
+) -> Path:
+    """The real ``$GRIM_HOME/hooks/grim-hook``, written by arming one hook with ``grim install``.
+
+    A test that wants its own ``dispatch.json`` overwrites the one beside it; see
+    ``src/hook_launcher.py``.
+    """
+    from src.hook_launcher import install_launcher
+
+    return install_launcher(grim_at(project_dir), unique_repo)

@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::scope::ConfigScope;
-use crate::oci::hook::{HookCommand, HookRegistration, HookSurface};
+use crate::oci::hook::{HookCommand, HookRegistration, HookShell, HookSurface};
 use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
@@ -231,10 +231,10 @@ impl Vendor for ClaudeVendor {
     ///   environment and watched it expand into the launcher's argv. Claude is
     ///   *not* immune "by construction, no shell"; it is immune because grim
     ///   writes an absolute literal into a non-committed file.
-    /// - **The `[ -x "$L" ] || exit 0` guard is emitted for claude too.** Claude
-    ///   is fail-open, so its absence is not a Block — but without it the user
-    ///   gets a spurious `Hook command failed with code 127` in the transcript
-    ///   on *every* tool call while grim is not yet installed.
+    /// - **No shell guard in the string.** The command is the bare native
+    ///   launcher plus its operands; the launcher exits 0 itself when it has
+    ///   nothing to do, and a missing one surfaces as Claude's own non-blocking
+    ///   hook error rather than grim masking it.
     ///
     /// **Watchlisted, and I1 leans on it:** that Claude Code itself adds
     /// `settings.local.json` to `.gitignore` is documented upstream but was
@@ -274,17 +274,16 @@ impl Vendor for ClaudeVendor {
     fn hook_spliced_handler(&self, registration: &HookRegistration) -> Option<SplicedHandler> {
         let mut element = serde_json::Map::new();
         element.insert("type".to_string(), serde_json::Value::String("command".to_string()));
-        // v1 registers the shell form on every client — `HookCommand::Argv` is
-        // never constructed, because copilot's exec form removes the shell and
-        // therefore the launcher guard.
-        let command = match &registration.command {
-            HookCommand::Shell(shell) => shell.clone(),
-            // Unreachable in v1 and refused rather than joined: joining an argv
-            // array into a shell string would re-introduce the quoting bug the
-            // single-generator rule exists to prevent.
-            HookCommand::Argv(_) => return None,
+        // Claude has no exec form; an `Argv` is refused rather than joined, and
+        // `converge_splice` treats the refusal as a caller bug.
+        let HookCommand::Shell(command) = &registration.command else {
+            return None;
         };
+        let command = command.clone();
         element.insert("command".to_string(), serde_json::Value::String(command));
+        if registration.shell == Some(HookShell::PowerShell) {
+            element.insert("shell".to_string(), serde_json::Value::String("powershell".to_string()));
+        }
         if let Some(timeout) = registration.timeout {
             element.insert("timeout".to_string(), serde_json::Value::from(timeout));
         }

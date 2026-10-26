@@ -5,7 +5,11 @@ version: '3'
 x-shared:
   rust-sources: &rust-sources
     - '{{.ROOT_DIR}}/src/**/*.rs'
+    - '{{.ROOT_DIR}}/crates/**/*.rs'
+    - '{{.ROOT_DIR}}/build.rs'
+    - '{{.ROOT_DIR}}/build/**/*.rs'
     - '{{.ROOT_DIR}}/Cargo.toml'
+    - '{{.ROOT_DIR}}/crates/**/Cargo.toml'
     - '{{.ROOT_DIR}}/Cargo.lock'
     - '{{.ROOT_DIR}}/rustfmt.toml'
     - exclude: '{{.ROOT_DIR}}/target/**'
@@ -15,7 +19,7 @@ tasks:
     desc: Rust quality gate (format, clippy, license, build, unit tests)
     summary: |
       Runs all Rust-specific checks sequentially (fail-fast):
-        1. cargo fmt --check
+        1. cargo fmt --all --check
         2. cargo clippy
         3. cargo-deny license audit
         4. cargo build --release
@@ -31,20 +35,20 @@ tasks:
   format:check:
     desc: Check Rust formatting
     sources: *rust-sources
-    cmd: cargo fmt --check
+    cmd: cargo fmt --all --check
 
   format:apply:
     desc: Apply Rust formatting
-    cmd: cargo fmt
+    cmd: cargo fmt --all
 
   clippy:check:
     desc: Run clippy linter
     sources: *rust-sources
-    cmd: cargo clippy --locked --all-targets -- -D warnings
+    cmd: cargo clippy --workspace --locked --all-targets -- -D warnings
 
   clippy:fix:
     desc: Auto-fix clippy warnings
-    cmd: cargo clippy --locked --all-targets --fix --allow-dirty
+    cmd: cargo clippy --workspace --locked --all-targets --fix --allow-dirty
 
   build:
     desc: Build release binary
@@ -65,7 +69,7 @@ tasks:
     sources: *rust-sources
     deps:
       - install:nextest
-    cmd: cargo nextest run --release --locked {{.CLI_ARGS}}
+    cmd: cargo nextest run --workspace --release --locked {{.CLI_ARGS}}
 
   install:hawkeye:
     internal: true
@@ -107,3 +111,27 @@ tasks:
     deps:
       - install:cargo-deny
     cmd: cargo deny check advisories bans sources
+
+  # The launcher runs on every hook event, so its size is a budget and its
+  # dependency list is audited. BUILD swaps the builder (cargo auditable build,
+  # cargo xwin build); the artifact path is the same for all of them.
+  hook:size:
+    desc: Build grim-hook for TARGET and fail when it exceeds BUDGET bytes
+    requires:
+      vars: [TARGET, BUDGET]
+    cmds:
+      - '{{.BUILD | default "cargo build"}} -p grim-hook --profile hook --locked --target {{.TARGET}}'
+      - |
+        bin="target/{{.TARGET}}/hook/grim-hook{{if contains "windows" .TARGET}}.exe{{end}}"
+        size=$(wc -c < "$bin")
+        echo "grim-hook {{.TARGET}}: $size bytes (budget {{.BUDGET}})"
+        if [ "$size" -gt {{.BUDGET}} ]; then
+          echo "grim-hook is over its size budget" >&2
+          exit 1
+        fi
+
+  hook:audit:
+    desc: Audit the dependencies embedded in a grim-hook built by `hook:size` with BUILD="cargo auditable build"
+    requires:
+      vars: [TARGET]
+    cmd: cargo audit bin target/{{.TARGET}}/hook/grim-hook

@@ -1,0 +1,189 @@
+{
+  "$defs": {
+    "CanonicalEvent": {
+      "description": "The four canonical lifecycle events.\n\nCanonical breadth is exactly these four (ADR decision D3). The names and\nspelling are Claude Code's, which the survey established as the de facto\nstandard rather than a neutral invention. Every other vendor moment is\nreached natively through a `<vendor>.event` override on the entry.\n\nClosed internal enum: matches stay total, no `#[non_exhaustive]`.",
+      "oneOf": [
+        {
+          "const": "PreToolUse",
+          "description": "Before a tool call runs — the only event a `mutator` may declare, and\nthe only moment at which rewriting a tool's input is meaningful.",
+          "type": "string"
+        },
+        {
+          "const": "PostToolUse",
+          "description": "After a tool call has run.",
+          "type": "string"
+        },
+        {
+          "const": "SessionStart",
+          "description": "At session start.",
+          "type": "string"
+        },
+        {
+          "const": "Stop",
+          "description": "When the agent's turn stops.",
+          "type": "string"
+        }
+      ]
+    },
+    "HookEntry": {
+      "description": "One `[[hooks]]` entry: a single handler bound to a moment and a tier.\n\n`[[hooks]]` is an array of tables because a pre/post pair sharing one\npayload tree is the common case. Unknown top-level keys are **not** denied\nhere (unlike every other grim manifest type): the format reserves\n`<vendor>.<field>` override tables and the [`RESERVED_POLICY_KEY`], both of\nwhich must round-trip through a grim that does not understand them. What\ncloses the hole `deny_unknown_fields` would have closed is validation:\nevery client name in `ClientTarget::ALL` is a reserved key, and using one\nfor anything but a vendor override fails `grim build`.",
+      "oneOf": [
+        {
+          "description": "Exec-form argument vector — no shell involved.",
+          "properties": {
+            "argv": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "argv"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A single string handed to the platform shell.",
+          "properties": {
+            "command": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object"
+        }
+      ],
+      "properties": {
+        "event": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CanonicalEvent"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The canonical event. Omitted only when a `<vendor>.event` override\nstands alone (a native-only moment on exactly one client)."
+        },
+        "id": {
+          "description": "Stable id, unique within the artifact. Reaches the dispatch table and\nthe audit trail as `<artifact>/<id>`; never interpolated into a\ngenerated shell string (C-018b).",
+          "type": "string"
+        },
+        "matcher": {
+          "description": "Grim's own matcher dialect: an exact name or a glob, never a regex.\nCharset-allowlisted and length-capped at `grim build` ([`MATCHER_ALLOWED`],\n[`MATCHER_MAX_BYTES`]); translated into the target client's own dialect\nat registration time, and the `(hook, client)` pair is `Declined` when\nthe translation would not be lossless (C-025).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HookPayloadMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Envelope transport; `stdin` unless the author opts into `file`."
+        },
+        "policy": {
+          "description": "The reserved [`RESERVED_POLICY_KEY`], captured **unparsed** so a grim\nthat predates whatever vocabulary it eventually carries still preserves\nit.\n\n**Round-trip is faithful for the JSON-expressible TOML subset only — do\nnot read it as byte-for-byte.** The value model is `serde_json::Value`\n(forced: [`HookManifest`] must derive `schemars::JsonSchema` and\n`toml::Value` does not implement it), so TOML's four natives JSON lacks\nare not representable. A datetime is the sharp case: `since = 2026-08-14`\nparses to `{\"$__toml_private_datetime\": \"2026-08-14\"}` and\n**re-serializes as a nested table leaking that private sentinel** — a\nstructural corruption of a published format, not a lossy value.\nOrdinary tables and dotted keys round-trip correctly. `grim build` must\ntherefore reject a datetime / local-date / local-time under `policy` or\na vendor key rather than admit a value it cannot re-emit; the published\nformat doc must state the same narrowing."
+        },
+        "tier": {
+          "$ref": "#/$defs/HookTier",
+          "description": "What the handler is allowed to do."
+        },
+        "timeout": {
+          "description": "Per-handler timeout in seconds ([`DEFAULT_TIMEOUT_SECS`]). **Grim**\nenforces it, not the vendor, so the behaviour is identical on every\nclient. From 1 to 3600 seconds.",
+          "format": "uint64",
+          "maximum": 3600,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "tier"
+      ],
+      "type": "object",
+      "unevaluatedProperties": true
+    },
+    "HookPayloadMode": {
+      "description": "How the canonical envelope reaches the payload.\n\n`stdin` is the default and the only transport that avoids the always-on\nmetadata vectors (`/proc/<pid>/cmdline`, `/proc/<pid>/environ`, crash dumps,\nCI logs). `file` is an explicit opt-in for payloads that would overflow\n`ARG_MAX`, never a default.",
+      "oneOf": [
+        {
+          "const": "stdin",
+          "description": "One JSON object on the payload's stdin (default).",
+          "type": "string"
+        },
+        {
+          "const": "file",
+          "description": "The envelope is written to a file whose path is exported as\n`GRIM_HOOK_PAYLOAD`.",
+          "type": "string"
+        }
+      ]
+    },
+    "HookTier": {
+      "description": "What a hook is allowed to do with the moment it fires at.\n\nThe tier is a **capability declaration**, resolved per client: a tier the\nclient cannot honour is `Declined`, never silently degraded into a weaker\none — degrading a guardrail into a logger reports a security control as\ninstalled when it is not.",
+      "oneOf": [
+        {
+          "const": "observer",
+          "description": "Reads the event; its response cannot change what happens.",
+          "type": "string"
+        },
+        {
+          "const": "gatekeeper",
+          "description": "May return a verdict that blocks the operation. Valid only on an event\nthat admits a verdict ([`CanonicalEvent::admits_verdict`]).",
+          "type": "string"
+        },
+        {
+          "const": "mutator",
+          "description": "May rewrite the tool input. Valid only on\n[`CanonicalEvent::PreToolUse`], and `Declined` per client for tools\nwhose input is a shell-command string (ADR decision K).",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$id": "https://grimoire.rs/schemas/grim-hook.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The `hook.toml` document (C-001).\n\nAuthored as TOML in the **TOML 1.0-compatible subset** — unquoted dotted\nkeys and single-line inline tables only. Grim's own parser accepts more\n(its `toml` is `+spec-1.1.0`), but `hook.toml` is a published format read by\nthird-party tooling whose stock TOML 1.0 parsers hard-reject the 1.1 forms:\nliberal in what grim accepts, conservative in what it documents and emits.",
+  "properties": {
+    "description": {
+      "description": "Catalog-facing description (becomes\n`org.opencontainers.image.description`).",
+      "type": "string"
+    },
+    "hooks": {
+      "default": [],
+      "description": "The declared handlers. One approval and one payload tree cover every\nentry, so the entries are a set, not independent artifacts.",
+      "items": {
+        "$ref": "#/$defs/HookEntry"
+      },
+      "type": "array"
+    },
+    "name": {
+      "description": "Artifact name; must equal the directory stem (the agent-kind\nprecedent).",
+      "type": "string"
+    },
+    "schema": {
+      "description": "Manifest + envelope contract version; [`HOOK_SCHEMA_VERSION`] today.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema",
+    "name",
+    "description"
+  ],
+  "title": "hook.toml — Grimoire hook manifest",
+  "type": "object"
+}

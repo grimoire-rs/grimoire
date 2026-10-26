@@ -93,7 +93,8 @@ use crate::oci::hook::{CanonicalEvent, HOOK_MANIFEST_FILE, HookEntry, HookManife
 use crate::store::atomic_write::{atomic_write, resolve_symlink};
 
 use super::client_target::ClientTarget;
-use super::hook_dispatch::{DispatchEntry, DispatchError, DispatchWrite, RootScope, RootToken};
+use super::hook_command::{self, HostOs};
+use super::hook_dispatch::{DispatchEntry, DispatchError, DispatchGuard, DispatchWrite, RootScope, RootToken};
 use super::hook_launcher::CommandRefusal;
 use super::install_state::InstallState;
 use super::json_splice::{self, NestedGroupPath, NestedHandlerPath, Splice};
@@ -131,7 +132,7 @@ pub enum ArmRefusal {
     ///
     /// [`crate::env::grim_home`] returns `$GRIM_HOME` verbatim with no
     /// absoluteness check, and falls back to a relative `.grimoire` when `HOME`
-    /// is unset. The CWD of a `grim hook run` spawned by a client is the
+    /// is unset. The CWD of the `grim-hook` launcher a client spawns is the
     /// workspace, so a relative root makes the dispatch table — the arming
     /// authority — resolve *inside the repository*, where a committed file
     /// satisfies it. Executed against the shipped 0.13.0 binary.
@@ -146,6 +147,10 @@ pub enum ArmRefusal {
     /// **Cause 3 (B2 · T3 · I1, I6).** The resolved launcher or table path
     /// carries a newline or another control character.
     LauncherPath(CommandRefusal),
+    /// The launcher path cannot be written into this client's command without
+    /// ambiguity: it is not UTF-8, or it holds a character `cmd /C` cannot
+    /// quote. Per client, because the shells differ.
+    LauncherPathUnquotable,
     /// **Cause 4 (W1 · no attacker · I3).** Another `grim install` holds the
     /// dispatch lock.
     ///
@@ -173,10 +178,22 @@ pub enum ArmRefusal {
     /// the client's dispatch rows are withdrawn. Reported as `not-registered`
     /// by `grim status`, whose message sends the user back to this warning.
     SurfaceUnreadable,
-    /// **Cause 7 (no attacker · I3).** Not a Unix host. The launcher and every
-    /// registered command are POSIX shell; Copilot runs its command through
-    /// PowerShell, fails it, and then denies every tool call.
+    /// **Cause 7 (no attacker · I3).** A Windows host and a client outside
+    /// `HOOKS_WINDOWS_VERIFIED`: its launch path has not passed Windows
+    /// acceptance, and a registration a client cannot run denies every tool call.
     PlatformUnsupported,
+    /// **Cause 8 (no attacker · I3).** The native launcher could not be written
+    /// or replaced at `$GRIM_HOME/hooks/grim-hook`. Produced by
+    /// [`super::launcher::ensure`].
+    LauncherUnwritable,
+    /// **Cause 9 (no attacker · I3).** A directory sits at the launcher's path.
+    /// grim will not remove it, and writes nothing. Produced by
+    /// [`super::launcher::ensure`].
+    LauncherPathOccupied,
+    /// **Cause 10 (B2 · T3 · I3).** Windows only: the canonical `$GRIM_HOME` is
+    /// not a local path under `%USERPROFILE%` or `%LOCALAPPDATA%`. A launcher
+    /// built for this host would be handed to every host sharing the home.
+    GrimHomeShared,
 }
 
 impl ArmRefusal {
@@ -195,6 +212,7 @@ impl ArmRefusal {
                 "GRIM_HOME resolves inside this workspace, which would make an armable file repo-resident"
             }
             Self::LauncherPath(r) => r.reason(),
+            Self::LauncherPathUnquotable => "the launcher path cannot be quoted for this client's shell",
             Self::DispatchLocked => "another grim install holds the dispatch table lock",
             Self::DispatchTableFull => {
                 "the hook dispatch table is at its size limit, so this workspace's hooks were not added; run \
@@ -205,7 +223,14 @@ impl ArmRefusal {
             }
             Self::SurfaceUnreadable => "grim could not edit the client's hook config, so nothing was registered there",
             Self::PlatformUnsupported => {
-                "grim arms hooks on Linux and macOS only, so no client was registered on this platform"
+                "grim has not verified hooks for this client on Windows, so it was not registered"
+            }
+            Self::LauncherUnwritable => "grim could not write its launcher under GRIM_HOME, so nothing was armed",
+            Self::LauncherPathOccupied => {
+                "something other than a file sits at the launcher's path under GRIM_HOME, so grim wrote nothing"
+            }
+            Self::GrimHomeShared => {
+                "on Windows, GRIM_HOME is not a local path under your user profile, so another host could run this host's launcher"
             }
         }
     }
@@ -280,7 +305,7 @@ pub fn log_sync(client: &str, outcome: &HookSync) {
                 ArmRefusal::SurfaceUserOwned.reason()
             );
         }
-        // Warned once per command by `converge_on`, not once per client.
+        // Warned by `converge_on`, which knows whether the whole host or one client is unsupported.
         HookSync::NotArmed(ArmRefusal::PlatformUnsupported) => {
             tracing::debug!("{client} hook sync: {outcome:?}");
         }
@@ -391,17 +416,55 @@ pub fn converge_clients(
     roots: &AnchorRoots,
     policy: &HookPolicy,
 ) -> Vec<(ClientTarget, HookSync)> {
-    converge_on(HOOKS_SUPPORTED, state, workspace, scope, roots, policy)
+    converge_on(
+        HOST_IS_WINDOWS,
+        HOOKS_WINDOWS_VERIFIED,
+        state,
+        workspace,
+        scope,
+        roots,
+        policy,
+    )
 }
 
-/// Whether this build may arm hooks at all: the launcher and every command
-/// grim registers are POSIX shell.
-const HOOKS_SUPPORTED: bool = cfg!(unix);
+/// Whether this build runs on Windows.
+const HOST_IS_WINDOWS: bool = cfg!(windows);
+
+/// The clients whose hook command path has been observed to launch on Windows
+/// (C-N14). A client joins only on a live run of its own CLI, not an emulated
+/// launch: Copilot denies a failing `preToolUse`, so an unobserved admission can
+/// block every tool call. Until then it keeps `platform-unsupported`. Unix has
+/// no list.
+const HOOKS_WINDOWS_VERIFIED: &[ClientTarget] = &[ClientTarget::Claude];
+
+/// Whether `client` may arm on this build's host. The per-client half of
+/// [`arming_refusal`], which answers for the whole scope, so `grim status`
+/// does not report an unadmitted Windows client as armed.
+pub fn client_arms_on_this_host(client: ClientTarget) -> bool {
+    platform_allows(HOST_IS_WINDOWS, HOOKS_WINDOWS_VERIFIED, client)
+}
+
+/// Whether the launcher's path cannot be written into `client`'s command on this
+/// host. The read-only twin of the check `converge_on` refuses on.
+pub fn launcher_unquotable(client: ClientTarget, grim_home: &Path) -> bool {
+    hook_command::check(
+        client.vendor().hook_command_form(),
+        &super::launcher::path(grim_home),
+        HostOs::current(),
+    )
+    .is_err()
+}
+
+/// Whether `client` may arm on this host.
+fn platform_allows(windows: bool, verified: &[ClientTarget], client: ClientTarget) -> bool {
+    !windows || verified.contains(&client)
+}
 
 /// [`converge_clients`] with the platform verdict passed in, so a Linux test
-/// can drive the non-Unix branch.
+/// can drive the Windows branch.
 fn converge_on(
-    hooks_supported: bool,
+    windows: bool,
+    verified: &[ClientTarget],
     state: &InstallState,
     workspace: &Path,
     scope: ConfigScope,
@@ -444,7 +507,11 @@ fn converge_on(
     // ever removes grim's own registrations, so after it the reported
     // `not-armed` is true rather than a claim about a registration that
     // survived (security review W1).
-    if let Some(refusal) = arming_refusal_on(hooks_supported, grim_home, workspace, scope) {
+    // Only when no client at all may arm here: the platform check ranks ahead of the
+    // `$GRIM_HOME` causes, whose remedies change nothing. A partial list is handled per
+    // client in the loop below.
+    let any_client_may_arm = surfaces.iter().any(|(c, _)| platform_allows(windows, verified, *c));
+    if let Some(refusal) = arming_refusal_on(any_client_may_arm, grim_home, workspace, scope) {
         // One line for the platform, not one per client. Gated on the flag and a
         // recorded hook so a flag-off or hook-free run prints nothing new.
         if refusal == ArmRefusal::PlatformUnsupported
@@ -461,8 +528,7 @@ fn converge_on(
     // "untrusted" reach the runtime as an absent entry rather than as a runtime
     // check the runtime is forbidden to make.
     let trust = |binding: &str, source: &LockedSource| policy.arms(binding, source);
-    let table = super::hook_dispatch::dispatch_path(grim_home);
-    let launcher = super::hook_launcher::launcher_path(grim_home);
+    let launcher = super::launcher::path(grim_home);
 
     // The three paths a registration embeds, resolved BEFORE the desired sets —
     // because the registration verdict is what filters them (P-1). `dispatch_path`
@@ -473,6 +539,15 @@ fn converge_on(
     // name the root it is emptying — so no path gained a write it did not have.
     // `arming_refusal` above still precedes every one of them, which is the
     // property that matters: a refusal writes nothing at all.
+    // One guard for the whole pass (PD-8): the lock is not reentrant, so `ensure`
+    // and both `converge_root` calls borrow it and nothing below may acquire again.
+    // Taken ahead of `root_token`, whose first-use key mint is not atomic: two
+    // unserialised installs on a fresh `$GRIM_HOME` can read a half-written key.
+    // A held lock or an I/O failure lands here, before any launcher byte is written.
+    let guard = match DispatchGuard::try_acquire(grim_home) {
+        Ok(guard) => guard,
+        Err(e) => return dispatch_failure(e, &surfaces, grim_home, confine),
+    };
     let token = match super::hook_dispatch::root_token(grim_home, root) {
         Ok(token) => token,
         Err(e) => {
@@ -482,13 +557,35 @@ fn converge_on(
     };
     let armed_paths = ArmedPaths {
         launcher: &launcher,
-        table: &table,
         token: &token,
+        host_os: HostOs::current(),
     };
 
     let mut per_client: Vec<ArmedClient> = Vec::new();
     let mut outcomes: Vec<(ClientTarget, HookSync)> = Vec::new();
     for (client, surface) in surfaces.iter().cloned() {
+        if !platform_allows(windows, verified, client) {
+            // The all-clients case warned once above; a partial list names each client.
+            if any_client_may_arm
+                && policy.feature_enabled()
+                && state.iter_records().any(|r| r.kind == ArtifactKind::Hook)
+            {
+                tracing::warn!(
+                    "hooks not armed for {client}: {}",
+                    ArmRefusal::PlatformUnsupported.reason()
+                );
+            }
+            outcomes.extend(disarm_all(&[(client, surface)], grim_home, confine, |_| {
+                HookSync::NotArmed(ArmRefusal::PlatformUnsupported)
+            }));
+            continue;
+        }
+        if hook_command::check(client.vendor().hook_command_form(), &launcher, armed_paths.host_os).is_err() {
+            outcomes.extend(disarm_all(&[(client, surface)], grim_home, confine, |_| {
+                HookSync::NotArmed(ArmRefusal::LauncherPathUnquotable)
+            }));
+            continue;
+        }
         // A user-owned own-file surface is never registered on (security
         // review B1), so it gets no dispatch row either — the P-1 invariant
         // "a row exists iff the registration was written" holds for it too.
@@ -523,14 +620,14 @@ fn converge_on(
 
     let union = union_of(&per_client);
 
-    // Step 2 — generate the launcher, idempotently, and only when something is
-    // actually being armed. A pure reap must not create the shim it is about to
-    // orphan.
-    if !union.is_empty()
-        && let Err(e) = generate_launcher(grim_home)
-    {
-        tracing::warn!(error = %e, "hook launcher could not be written; nothing armed");
-        return disarm_all(&surfaces, grim_home, confine, reaped);
+    // Step 2 — the launcher, only when something is actually being armed. A pure
+    // reap must not create the file it is about to orphan.
+    if !union.is_empty() {
+        if let Err(refusal) = super::launcher::ensure(grim_home, &guard) {
+            tracing::warn!("hooks not armed: {}", refusal.reason());
+            return disarm_all(&surfaces, grim_home, confine, |_| HookSync::NotArmed(refusal));
+        }
+        super::launcher::retire_legacy_shim(grim_home, &guard);
     }
 
     // Step 4 — write the dispatch entry wholesale under the lock, once, with the
@@ -538,29 +635,9 @@ fn converge_on(
     // entry is missing degrades to no-match ⇒ exit 0, whereas a table entry with
     // no registration is inert. Both orders are safe; this one leaves no window
     // in which a client can invoke a launcher that finds nothing to do.
-    let write = match super::hook_dispatch::converge_root(grim_home, &token, root, &union) {
+    let write = match super::hook_dispatch::converge_root(grim_home, &guard, &token, root, &union) {
         Ok(write) => write,
-        Err(DispatchError::Locked) => {
-            // Cause 4. Reported rather than written over — the loser of a race
-            // must not believe it armed. The table stays as the winner leaves
-            // it; this client's own registrations are stripped, so a disarm
-            // that lost the race does not leave them firing (W1).
-            return disarm_all(&surfaces, grim_home, confine, |_| {
-                HookSync::NotArmed(ArmRefusal::DispatchLocked)
-            });
-        }
-        Err(DispatchError::TableFull { size }) => {
-            // Issue #93. Nothing written: every other root keeps arming off the
-            // previous table, and this root reports not-armed with the remedy.
-            tracing::debug!(size, "dispatch table write refused at the size cap");
-            return disarm_all(&surfaces, grim_home, confine, |_| {
-                HookSync::NotArmed(ArmRefusal::DispatchTableFull)
-            });
-        }
-        Err(e @ DispatchError::Io(_)) => {
-            tracing::warn!(error = %e, "dispatch table write failed; nothing armed");
-            return disarm_all(&surfaces, grim_home, confine, reaped);
-        }
+        Err(e) => return dispatch_failure(e, &surfaces, grim_home, confine),
     };
 
     // Steps 5 and 6 — converge each client's own surface, then the git-exclude
@@ -568,6 +645,10 @@ fn converge_on(
     let mut unregistered: Vec<ClientTarget> = Vec::new();
     for armed in &per_client {
         let client = armed.client;
+        // Read before the converge rewrites it: C-022 compares the strings.
+        let codex_before = (client == ClientTarget::Codex)
+            .then(|| armed.surface.as_deref().and_then(|s| std::fs::read_to_string(s).ok()))
+            .flatten();
         let outcome = match sync_for_state(
             client.vendor(),
             workspace,
@@ -601,6 +682,11 @@ fn converge_on(
                 HookSync::NoHooks
             }
         };
+        if matches!(outcome, HookSync::Armed(_))
+            && let Some(before) = &codex_before
+        {
+            warn_codex_retrust(&retrusted_gatekeepers(armed, before));
+        }
         log_sync(client.vendor().name(), &outcome);
         outcomes.push((client, outcome));
     }
@@ -612,7 +698,7 @@ fn converge_on(
             .into_iter()
             .filter(|armed| !unregistered.contains(&armed.client))
             .collect();
-        if let Err(e) = super::hook_dispatch::converge_root(grim_home, &token, root, &union_of(&kept)) {
+        if let Err(e) = super::hook_dispatch::converge_root(grim_home, &guard, &token, root, &union_of(&kept)) {
             tracing::warn!(error = %e, "dispatch table could not drop the unregistered clients' rows");
         }
     }
@@ -620,6 +706,67 @@ fn converge_on(
     // `hook_clients` order every caller and test reads.
     outcomes.sort_by_key(|(client, _)| clients.iter().position(|c| c == client));
     outcomes
+}
+
+/// C-022: the gatekeeper rows of `armed` whose registration string is absent from
+/// the Codex hook file as it stood before this converge. Codex keys its stored
+/// approval on that string, so each of these is untrusted until the user approves
+/// it again in `/hooks`. A first install has no file to read and never reaches here, and an
+/// unchanged converge finds every string present and returns nothing.
+fn retrusted_gatekeepers(armed: &ArmedClient, before: &str) -> Vec<String> {
+    armed
+        .rows
+        .iter()
+        .zip(&armed.registrations)
+        .filter(|(row, _)| row.tier == crate::oci::hook::HookTier::Gatekeeper)
+        .filter(|(_, registration)| match &registration.command {
+            crate::oci::hook::HookCommand::Shell(command) => {
+                serde_json::to_string(command).is_ok_and(|encoded| !before.contains(&encoded))
+            }
+            crate::oci::hook::HookCommand::Argv(_) => false,
+        })
+        .map(|(row, _)| format!("{}/{}", row.artifact, row.id))
+        .collect()
+}
+
+fn warn_codex_retrust(rows: &[String]) {
+    if !rows.is_empty() {
+        tracing::warn!(
+            "codex no longer trusts the hook command grim registered for {}; approve it again in codex's /hooks \
+             screen or it is skipped silently",
+            rows.join(", ")
+        );
+    }
+}
+
+/// The reap-only pass for a dispatch-table failure, with the outcome each cause reports.
+fn dispatch_failure(
+    error: DispatchError,
+    surfaces: &[(ClientTarget, Option<PathBuf>)],
+    grim_home: &Path,
+    confine: Option<&Path>,
+) -> Vec<(ClientTarget, HookSync)> {
+    match error {
+        // Cause 4. Reported rather than written over — the loser of a race
+        // must not believe it armed. The table stays as the winner leaves
+        // it; this client's own registrations are stripped, so a disarm
+        // that lost the race does not leave them firing (W1).
+        DispatchError::Locked => disarm_all(surfaces, grim_home, confine, |_| {
+            HookSync::NotArmed(ArmRefusal::DispatchLocked)
+        }),
+        // Issue #93. Nothing written: every other root keeps arming off the
+        // previous table, and this root reports not-armed with the remedy.
+        DispatchError::TableFull { size } => {
+            tracing::debug!(size, "dispatch table write refused at the size cap");
+            disarm_all(surfaces, grim_home, confine, |_| {
+                HookSync::NotArmed(ArmRefusal::DispatchTableFull)
+            })
+        }
+        e @ DispatchError::Io(_) => {
+            tracing::warn!(error = %e, "dispatch table write failed; nothing armed");
+            disarm_all(surfaces, grim_home, confine, reaped)
+        }
+    }
 }
 
 /// The reap-only pass every early return of [`converge_clients`] runs
@@ -725,33 +872,12 @@ fn union_of(per_client: &[ArmedClient]) -> Vec<DispatchEntry> {
     union
 }
 
-/// Write the launcher shim, resolving the running binary's absolute path.
-///
-/// `std::env::current_exe` is read here rather than inside
-/// [`super::hook_launcher::generate`] so that generator stays a pure function of
-/// its arguments and hermetically testable — its own doc requires exactly that.
-/// A failure to resolve it is a genuine I/O error, not a policy refusal: there
-/// is no [`ArmRefusal`] cause for "grim does not know where it lives", and
-/// inventing one would report an environment failure as a consent decision.
-fn generate_launcher(grim_home: &Path) -> io::Result<()> {
-    let binary = std::env::current_exe()?;
-    super::hook_launcher::generate(grim_home, &binary).map_err(|e| match e {
-        super::hook_launcher::LauncherError::Io(io) => io,
-        refused @ super::hook_launcher::LauncherError::Refused(_) => io::Error::other(refused.to_string()),
-    })?;
-    Ok(())
-}
-
-/// The three paths every registration embeds, resolved once per command.
-///
-/// Passed as one struct rather than three arguments because they are only ever
-/// used together, and because a caller that got the launcher from one
-/// `$GRIM_HOME` and the table from another would write a registration that can
-/// never match.
+/// What every registration embeds, resolved once per command: the launcher
+/// path, the root token and the host the command string is rendered for.
 struct ArmedPaths<'a> {
     launcher: &'a Path,
-    table: &'a Path,
     token: &'a RootToken,
+    host_os: HostOs,
 }
 
 /// One hook the desired set wants armed: the dispatch row **and** the manifest
@@ -821,7 +947,7 @@ fn register_desired(
     let mut registrations = Vec::with_capacity(desired.len());
     let mut rows = Vec::with_capacity(desired.len());
     for hook in desired {
-        match vendor.hook_registration(&hook.manifest, hook.event, armed.launcher, armed.table, armed.token) {
+        match vendor.hook_registration(&hook.manifest, hook.event, armed.launcher, armed.token, armed.host_os) {
             Ok(registration) => {
                 registrations.push(registration);
                 rows.push(hook.entry.clone());
@@ -1153,7 +1279,7 @@ fn canonical_prefix(path: &Path) -> io::Result<PathBuf> {
 }
 
 /// Lowercase hex SHA-256 of `bytes`.
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(super) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest as _;
     hex::encode(sha2::Sha256::digest(bytes))
 }
@@ -1207,6 +1333,13 @@ fn converge_splice(
     let mut wanted: Vec<(String, serde_json::Value)> = Vec::new();
     for registration in registrations {
         let Some(handler) = vendor.hook_spliced_handler(registration) else {
+            // The builder pairs every client with the form its serializer takes,
+            // so a refusal here means a mismatched registration, not user input.
+            debug_assert!(
+                false,
+                "{} refused a registration its own builder produced",
+                vendor.name()
+            );
             continue;
         };
         let path = NestedHandlerPath {
@@ -1357,6 +1490,28 @@ fn owns_anything(vendor: &dyn Vendor, grim_home: &Path, surface: Option<&Path>, 
     }
 }
 
+/// The dispatch table under `grim_home`, with the core's diagnostics (a skipped
+/// row, a rejected table) rendered through `tracing` at their own level.
+pub(crate) fn read_table_logged(
+    grim_home: &Path,
+) -> (
+    grimoire_hook_core::table::DispatchTable,
+    Option<super::hook_dispatch::DispatchDegrade>,
+) {
+    let mut diagnostics = Vec::new();
+    let read = grimoire_hook_core::table::read_table_diagnosed(
+        &super::hook_dispatch::dispatch_path(grim_home),
+        &mut diagnostics,
+    );
+    for d in diagnostics {
+        match d.level {
+            grimoire_hook_core::Level::Warn => tracing::warn!("{}", d.message),
+            grimoire_hook_core::Level::Debug => tracing::debug!("{}", d.message),
+        }
+    }
+    read
+}
+
 /// Whether the dispatch table holds an entry for `root`. Read-only: it never
 /// mints the machine key or takes the table lock, and any failure reads as no
 /// entry.
@@ -1364,10 +1519,7 @@ fn root_in_table(grim_home: &Path, root: RootScope<'_>) -> bool {
     let Ok(Some(token)) = super::hook_dispatch::existing_root_token(grim_home, root) else {
         return false;
     };
-    super::hook_dispatch::read_table(&super::hook_dispatch::dispatch_path(grim_home))
-        .0
-        .roots
-        .contains_key(&token)
+    read_table_logged(grim_home).0.roots.contains_key(&token)
 }
 
 /// Whether `state` records a hook artifact with an output for this client.
@@ -1398,7 +1550,12 @@ fn has_hook_record(vendor: &dyn Vendor, state: &InstallState) -> bool {
 /// the fact that the next `grim install` converges. WP-H must not present the
 /// status answer as authoritative for cause 4.
 pub fn arming_refusal(grim_home: &Path, workspace: &Path, scope: ConfigScope) -> Option<ArmRefusal> {
-    arming_refusal_on(HOOKS_SUPPORTED, grim_home, workspace, scope)
+    arming_refusal_on(
+        !HOST_IS_WINDOWS || !HOOKS_WINDOWS_VERIFIED.is_empty(),
+        grim_home,
+        workspace,
+        scope,
+    )
 }
 
 fn arming_refusal_on(
@@ -1418,7 +1575,7 @@ fn arming_refusal_on(
     // rather than taking them as arguments is what keeps this re-derivable: a
     // status caller has `$GRIM_HOME` and nothing else.
     for path in [
-        super::hook_launcher::launcher_path(grim_home),
+        super::launcher::path(grim_home),
         super::hook_dispatch::dispatch_path(grim_home),
     ] {
         if let Err(refusal) = super::hook_launcher::path_is_representable(&path) {
@@ -1483,7 +1640,53 @@ pub fn validate_grim_home(grim_home: &Path, workspace: &Path, scope: ConfigScope
     if nested && !placeholder_workspace {
         return Err(ArmRefusal::GrimHomeInWorkspace);
     }
+    if cfg!(windows) {
+        // The locality test below compares canonical text, so a home it cannot canonicalize
+        // or that still carries `..` would be judged on a path that is not where it points.
+        if home_is_unverifiable(grim_home) {
+            return Err(ArmRefusal::GrimHomeShared);
+        }
+        let roots: Vec<String> = ["USERPROFILE", "LOCALAPPDATA"]
+            .iter()
+            .filter_map(std::env::var_os)
+            .map(|root| resolved(Path::new(&root)).to_string_lossy().into_owned())
+            .collect();
+        if !is_local_user_path(&resolved(grim_home).to_string_lossy(), &roots) {
+            return Err(ArmRefusal::GrimHomeShared);
+        }
+    }
     Ok(())
+}
+
+/// Whether `home` cannot be reduced to a canonical path: it holds a `..` component
+/// or does not canonicalize (missing, or not readable).
+fn home_is_unverifiable(home: &Path) -> bool {
+    home.components().any(|c| c == std::path::Component::ParentDir) || dunce::canonicalize(home).is_err()
+}
+
+/// C-023: whether `home` is a local path at or under one of `roots`.
+///
+/// Textual and platform-independent so it is testable off Windows. Compares
+/// case-insensitively with `/` folded to `\`. A path starting `\\` (UNC,
+/// device) is refused; a verbatim `\\?\C:\` one is unwrapped first. Both sides
+/// must already be canonical: an 8.3 short name on one side would not match.
+///
+/// ponytail: a mapped network drive letter (`Z:\` over SMB) passes. Detecting it
+/// needs `GetDriveTypeW` (unsafe); add when a shared-profile report arrives.
+fn is_local_user_path(home: &str, roots: &[String]) -> bool {
+    fn norm(path: &str) -> String {
+        let path = path.replace('/', "\\").to_ascii_lowercase();
+        let path = path
+            .strip_prefix("\\\\?\\")
+            .filter(|rest| !rest.starts_with("unc\\"))
+            .unwrap_or(&path);
+        path.trim_end_matches('\\').to_owned()
+    }
+    let home = norm(home);
+    !home.starts_with("\\\\")
+        && roots.iter().map(String::as_str).map(norm).any(|root| {
+            !root.is_empty() && !root.starts_with("\\\\") && (home == root || home.starts_with(&format!("{root}\\")))
+        })
 }
 
 /// `path` canonicalized, or `path` verbatim when it cannot be.
@@ -2094,6 +2297,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_symlinked_grim_home_pointing_into_the_workspace_is_the_same_refusal() {
         let ws = tempfile::tempdir().unwrap();
@@ -2101,15 +2305,55 @@ mod tests {
         let real = ws.path().join("tools/grim");
         std::fs::create_dir_all(&real).unwrap();
         let link = outside.path().join("grim-home");
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&real, &link).unwrap();
-        #[cfg(not(unix))]
-        return;
 
         assert_eq!(
             validate_grim_home(&link, ws.path(), ConfigScope::Project),
             Err(ArmRefusal::GrimHomeInWorkspace)
         );
+    }
+
+    /// C-023: Windows arms only from a local path under the profile.
+    #[test]
+    fn a_shared_or_foreign_windows_home_is_not_a_local_user_path() {
+        let roots = [r"C:\Users\Ada".to_owned(), r"C:\Users\Ada\AppData\Local".to_owned()];
+        for local in [
+            r"C:\Users\Ada\.grimoire",
+            r"c:/users/ada/AppData/Local/grim",
+            r"C:\Users\Ada",
+            r"\\?\C:\Users\Ada\grim home",
+        ] {
+            assert!(is_local_user_path(local, &roots), "{local}");
+        }
+        for shared in [
+            r"\\fileserver\home\ada\.grimoire",
+            r"\\?\UNC\fileserver\home\ada",
+            r"\\.\C:\Users\Ada",
+            r"D:\grim",
+            r"C:\Users\Adam\.grimoire",
+            r"C:\Users",
+        ] {
+            assert!(!is_local_user_path(shared, &roots), "{shared}");
+        }
+        assert!(
+            !is_local_user_path(r"C:\Users\Ada\.grimoire", &[]),
+            "no profile variable, no proof"
+        );
+        assert!(
+            !is_local_user_path(r"\\srv\share\x", &[r"\\srv\share".to_owned()]),
+            "a UNC profile root never proves locality"
+        );
+    }
+
+    /// A home with a `..` component, or one that cannot be canonicalized, is judged on a
+    /// path that is not where it points, so the Windows locality check refuses it.
+    #[test]
+    fn a_home_that_cannot_be_canonicalized_or_holds_dotdot_is_unverifiable() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!home_is_unverifiable(dir.path()));
+        assert!(home_is_unverifiable(&dir.path().join("missing")));
+        std::fs::create_dir(dir.path().join("a")).unwrap();
+        assert!(home_is_unverifiable(&dir.path().join("a").join("..").join("a")));
     }
 
     #[test]
@@ -2162,6 +2406,7 @@ mod tests {
             ArmRefusal::DispatchLocked,
             ArmRefusal::SurfaceUserOwned,
             ArmRefusal::PlatformUnsupported,
+            ArmRefusal::GrimHomeShared,
         ];
         let mut reasons: Vec<&str> = causes.iter().map(|c| c.reason()).collect();
         reasons.sort_unstable();
@@ -2218,7 +2463,6 @@ mod tests {
     /// `&str` constructor, since a forgeable token is B3 with extra steps.
     struct ProbeArmedPaths {
         launcher: PathBuf,
-        table: PathBuf,
         token: RootToken,
     }
 
@@ -2226,16 +2470,15 @@ mod tests {
         fn borrow(&self) -> ArmedPaths<'_> {
             ArmedPaths {
                 launcher: &self.launcher,
-                table: &self.table,
                 token: &self.token,
+                host_os: HostOs::Unix,
             }
         }
     }
 
     fn probe_armed_paths(grim_home: &Path) -> ProbeArmedPaths {
         ProbeArmedPaths {
-            launcher: crate::install::hook_launcher::launcher_path(grim_home),
-            table: crate::install::hook_dispatch::dispatch_path(grim_home),
+            launcher: crate::install::launcher::path(grim_home),
             token: crate::install::hook_dispatch::root_token(grim_home, RootScope::Global).unwrap(),
         }
     }
@@ -2322,9 +2565,10 @@ mod tests {
                 }
             }
         }
-        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut files = Vec::new();
-        walk(&src, &mut files);
+        for root in ["src", "crates"] {
+            walk(&Path::new(env!("CARGO_MANIFEST_DIR")).join(root), &mut files);
+        }
         let mut checked = 0;
         for file in files {
             let name = file.file_name().unwrap().to_string_lossy().into_owned();
@@ -2648,8 +2892,8 @@ mod tests {
                     &manifest.hooks[0],
                     CanonicalEvent::PreToolUse,
                     &paths.launcher,
-                    &paths.table,
                     &paths.token,
+                    HostOs::Unix,
                 )
                 .unwrap();
             let mut slower = registration.clone();
@@ -2666,7 +2910,7 @@ mod tests {
             )
             .unwrap();
             let text = std::fs::read_to_string(&surface).unwrap();
-            let launches = text.matches("dispatch.json").count();
+            let launches = text.matches(&*paths.launcher.to_string_lossy()).count();
             assert_eq!(
                 launches,
                 1,
@@ -2707,6 +2951,43 @@ mod tests {
         }
     }
 
+    /// C-022: only a gatekeeper whose registration string is new to the Codex file
+    /// is named; an unchanged converge and an observer name nothing.
+    #[test]
+    fn codex_retrust_names_changed_gatekeepers_only() {
+        let registration = probe_registration();
+        let crate::oci::hook::HookCommand::Shell(command) = &registration.command else {
+            panic!("codex registers shell form");
+        };
+        let row = |id: &str, tier| DispatchEntry {
+            artifact: "g".to_string(),
+            id: id.to_string(),
+            client: "codex".to_string(),
+            event: CanonicalEvent::PreToolUse,
+            tier,
+            matcher: None,
+            handler: crate::oci::hook::HookHandler::Argv(vec!["true".to_string()]),
+            timeout: None,
+            payload: crate::oci::hook::HookPayloadMode::Stdin,
+            payload_dir: PathBuf::from("/p"),
+            resolved_digest: None,
+            policy: None,
+        };
+        let armed = ArmedClient {
+            client: ClientTarget::Codex,
+            surface: None,
+            registrations: vec![registration.clone(), registration.clone()],
+            rows: vec![
+                row("gate", crate::oci::hook::HookTier::Gatekeeper),
+                row("watch", crate::oci::hook::HookTier::Observer),
+            ],
+        };
+        let old = r#"{"hooks":{"Stop":[{"hooks":[{"command":"/old/grim-hook.sh"}]}]}}"#;
+        assert_eq!(retrusted_gatekeepers(&armed, old), vec!["g/gate".to_string()]);
+        let current = format!("{{\"command\": {}}}", serde_json::to_string(command).unwrap());
+        assert!(retrusted_gatekeepers(&armed, &current).is_empty());
+    }
+
     /// One Codex registration, for the own-file tests above.
     fn probe_registration() -> crate::oci::hook::HookRegistration {
         let home = tempfile::tempdir().unwrap();
@@ -2721,10 +3002,29 @@ mod tests {
                 &manifest.hooks[0],
                 CanonicalEvent::Stop,
                 &paths.launcher,
-                &paths.table,
                 &paths.token,
+                HostOs::Unix,
             )
             .unwrap()
+    }
+
+    /// A splice surface fed an exec-form registration is a builder bug (only
+    /// Copilot builds exec form, and it has no splice surface): loud in debug,
+    /// skipped in release rather than armed with a half-built element.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "refused a registration its own builder produced")]
+    fn a_splice_surface_refuses_an_exec_form_registration_loudly() {
+        let home = tempfile::tempdir().unwrap();
+        let surface = home.path().join("settings.json");
+        let registration = crate::oci::hook::HookRegistration {
+            event: "PreToolUse".to_string(),
+            matcher: None,
+            command: crate::oci::hook::HookCommand::Argv(vec!["/x/grim-hook".into(), "claude".into()]),
+            shell: None,
+            timeout: None,
+        };
+        let _ = converge_splice(&ClaudeVendor, &surface, &[registration], None);
     }
 
     /// **C-123 / C-124 on qoder's splice surface.** Qoder's hooks live in the
@@ -2745,8 +3045,8 @@ mod tests {
                 &manifest.hooks[0],
                 CanonicalEvent::PreToolUse,
                 &paths.launcher,
-                &paths.table,
                 &paths.token,
+                HostOs::Unix,
             )
             .unwrap();
         let surface = home.path().join("qoder/settings.json");
@@ -3113,7 +3413,11 @@ mod tests {
                 .collect()
         };
         let size_with = |n: usize| {
-            crate::install::hook_dispatch::converge_root(home.path(), &global, RootScope::Global, &rows(n)).unwrap();
+            {
+                let guard = DispatchGuard::try_acquire(home.path()).unwrap();
+                crate::install::hook_dispatch::converge_root(home.path(), &guard, &global, RootScope::Global, &rows(n))
+                    .unwrap();
+            }
             std::fs::metadata(&table).unwrap().len()
         };
         // Fill the global root until less than one row of headroom is left.
@@ -3277,9 +3581,8 @@ mod tests {
         assert_eq!(hooks[0]["artifact"], "shell-guard");
         assert_eq!(hooks[0]["id"], "guard");
 
-        // 2. The launcher exists and is executable — a shim whose `chmod` failed
-        //    makes `[ -x "$L" ]` false and the hook never fires (S1).
-        let launcher = crate::install::hook_launcher::launcher_path(home.path());
+        // 2. The launcher exists and is executable; a client cannot exec it otherwise.
+        let launcher = crate::install::launcher::path(home.path());
         assert!(launcher.is_file());
         #[cfg(unix)]
         {
@@ -3300,9 +3603,7 @@ mod tests {
         let element = &group["hooks"][0];
         assert_eq!(element[HOOK_MARKER_KEY], HOOK_MARKER_VALUE);
         let command = element["command"].as_str().unwrap();
-        assert!(command.contains(&*launcher.to_string_lossy()), "{command}");
-        assert!(command.contains("--client claude"), "{command}");
-        assert!(command.contains("--event PreToolUse"), "{command}");
+        assert_eq!(command, format!("{} claude PreToolUse {token}", launcher.display()));
         assert!(
             !command.contains("GRIM_HOME"),
             "no env-derived executed path (I1) — {command}"
@@ -3575,7 +3876,7 @@ mod tests {
         // it), so the assertion names the three files that arm rather than the
         // `hooks/` directory as a whole.
         assert!(
-            !crate::install::hook_launcher::launcher_path(&nested).exists(),
+            !crate::install::launcher::path(&nested).exists(),
             "a refusal must not write the launcher"
         );
         assert!(
@@ -3603,29 +3904,200 @@ mod tests {
         let settings = ws.path().join(CLAUDE_LOCAL_SETTINGS);
 
         assert_eq!(
-            converge_on(false, &state, ws.path(), ConfigScope::Project, &roots, &arming_policy()),
+            converge_on(
+                true,
+                &[],
+                &state,
+                ws.path(),
+                ConfigScope::Project,
+                &roots,
+                &arming_policy()
+            ),
             declined
         );
-        assert!(!crate::install::hook_launcher::launcher_path(home.path()).exists());
+        assert!(!crate::install::launcher::path(home.path()).exists());
         assert!(!crate::install::hook_dispatch::dispatch_path(home.path()).exists());
         assert!(!crate::install::hook_dispatch::root_key_path(home.path()).exists());
         assert!(!settings.exists());
 
         // Positive control: the same inputs arm on Unix.
         assert_eq!(
-            converge_on(true, &state, ws.path(), ConfigScope::Project, &roots, &arming_policy()),
+            converge_on(
+                false,
+                &[],
+                &state,
+                ws.path(),
+                ConfigScope::Project,
+                &roots,
+                &arming_policy()
+            ),
             vec![(ClientTarget::Claude, HookSync::Armed(1))]
         );
         assert!(std::fs::read_to_string(&settings).unwrap().contains(HOOK_MARKER_VALUE));
 
         assert_eq!(
-            converge_on(false, &state, ws.path(), ConfigScope::Project, &roots, &arming_policy()),
+            converge_on(
+                true,
+                &[],
+                &state,
+                ws.path(),
+                ConfigScope::Project,
+                &roots,
+                &arming_policy()
+            ),
             declined
         );
         assert!(
             !std::fs::read_to_string(&settings).unwrap().contains(HOOK_MARKER_VALUE),
             "a registration a client cannot run must not survive the decline"
         );
+    }
+
+    #[test]
+    fn the_platform_gate_is_per_client() {
+        let claude = ClientTarget::Claude;
+        let codex = ClientTarget::Codex;
+        for client in [claude, codex] {
+            assert!(platform_allows(false, &[], client), "Unix has no list");
+            assert!(
+                !platform_allows(true, &[], client),
+                "an empty list arms nothing on Windows"
+            );
+        }
+        assert!(platform_allows(true, &[claude], claude));
+        assert!(!platform_allows(true, &[claude], codex));
+        assert!(
+            [ClientTarget::Qoder, ClientTarget::Copilot, ClientTarget::Codex]
+                .iter()
+                .all(|c| !HOOKS_WINDOWS_VERIFIED.contains(c)),
+            "only a live run admits a client on Windows; Qoder, Copilot and Codex are unobserved"
+        );
+    }
+
+    /// C-016: a refused install writes no launcher (the table lock is held).
+    #[test]
+    fn a_held_dispatch_lock_reports_not_armed_and_writes_no_launcher() {
+        let ws = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let roots = roots_for(home.path(), ws.path());
+        let mut state = InstallState::empty(&ws.path().join("state.json"));
+        state.record(hook_record(home.path(), RootScope::Workspace(ws.path()), &["claude"]));
+        let _held = crate::lock::advisory_lock::AdvisoryFileLock::try_acquire(
+            &crate::install::hook_dispatch::dispatch_path(home.path()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            converge_clients(&state, ws.path(), ConfigScope::Project, &roots, &arming_policy()),
+            vec![(ClientTarget::Claude, HookSync::NotArmed(ArmRefusal::DispatchLocked))]
+        );
+        assert!(!crate::install::launcher::path(home.path()).exists());
+        assert!(!crate::install::launcher::path(home.path()).exists());
+        assert!(!super::test_fixture::claude_marker_present(ws.path()));
+    }
+
+    /// The launcher is ensured before the table and the registrations are written.
+    #[test]
+    fn arming_ensures_the_native_launcher() {
+        let ws = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let roots = roots_for(home.path(), ws.path());
+        let mut state = InstallState::empty(&ws.path().join("state.json"));
+        state.record(hook_record(home.path(), RootScope::Workspace(ws.path()), &["claude"]));
+        assert_eq!(
+            converge_clients(&state, ws.path(), ConfigScope::Project, &roots, &arming_policy()),
+            vec![(ClientTarget::Claude, HookSync::Armed(1))]
+        );
+        assert_eq!(
+            std::fs::read(crate::install::launcher::path(home.path())).unwrap(),
+            crate::install::hook_launcher::LAUNCHER_BYTES
+        );
+    }
+
+    /// PD-8: a pass with nothing to arm (here: the policy gates the only hook) never writes a launcher.
+    #[test]
+    fn a_pass_with_nothing_to_arm_writes_no_launcher() {
+        let ws = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let roots = roots_for(home.path(), ws.path());
+        let mut state = InstallState::empty(&ws.path().join("state.json"));
+        state.record(hook_record(home.path(), RootScope::Workspace(ws.path()), &["claude"]));
+        converge_clients(&state, ws.path(), ConfigScope::Project, &roots, &gated_policy());
+        assert!(!crate::install::launcher::path(home.path()).exists());
+    }
+
+    /// `ensure` refusals arm nothing: no table, no registration.
+    #[test]
+    fn an_occupied_launcher_path_arms_nothing_and_leaves_the_table_unwritten() {
+        let ws = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let roots = roots_for(home.path(), ws.path());
+        let mut state = InstallState::empty(&ws.path().join("state.json"));
+        state.record(hook_record(home.path(), RootScope::Workspace(ws.path()), &["claude"]));
+        std::fs::create_dir_all(crate::install::launcher::path(home.path())).unwrap();
+
+        assert_eq!(
+            converge_clients(&state, ws.path(), ConfigScope::Project, &roots, &arming_policy()),
+            vec![(
+                ClientTarget::Claude,
+                HookSync::NotArmed(ArmRefusal::LauncherPathOccupied)
+            )]
+        );
+        assert!(crate::install::launcher::path(home.path()).is_dir());
+        assert!(!crate::install::hook_dispatch::dispatch_path(home.path()).exists());
+        assert!(!super::test_fixture::claude_marker_present(ws.path()));
+    }
+
+    /// Two installs racing on one `$GRIM_HOME`: the lock serialises them, the
+    /// loser reports `dispatch-lock-held`, and the winner's launcher is whole.
+    #[test]
+    fn two_concurrent_installs_leave_one_valid_launcher_and_no_litter() {
+        let home = tempfile::tempdir().unwrap();
+        let workspaces: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+        let barrier = std::sync::Barrier::new(workspaces.len());
+        let outcomes: Vec<_> = std::thread::scope(|scope| {
+            let handles: Vec<_> = workspaces
+                .iter()
+                .map(|ws| {
+                    let (barrier, home) = (&barrier, home.path());
+                    scope.spawn(move || {
+                        let roots = roots_for(home, ws.path());
+                        let mut state = InstallState::empty(&ws.path().join("state.json"));
+                        state.record(hook_record(home, RootScope::Workspace(ws.path()), &["claude"]));
+                        barrier.wait();
+                        converge_clients(&state, ws.path(), ConfigScope::Project, &roots, &arming_policy())
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+
+        assert!(
+            outcomes
+                .iter()
+                .any(|o| o == &vec![(ClientTarget::Claude, HookSync::Armed(1))]),
+            "{outcomes:?}"
+        );
+        for outcome in &outcomes {
+            assert!(
+                matches!(
+                    outcome.as_slice(),
+                    [(_, HookSync::Armed(1))] | [(_, HookSync::NotArmed(ArmRefusal::DispatchLocked))]
+                ),
+                "{outcome:?}"
+            );
+        }
+        assert_eq!(
+            std::fs::read(crate::install::launcher::path(home.path())).unwrap(),
+            crate::install::hook_launcher::LAUNCHER_BYTES
+        );
+        let litter: Vec<_> = std::fs::read_dir(crate::install::hook_dispatch::hooks_dir(home.path()))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".grim-hook."))
+            .collect();
+        assert!(litter.is_empty(), "{litter:?}");
     }
 
     /// **F-1.** `desired_entries` is **per vendor** — it filters

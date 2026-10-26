@@ -6,9 +6,8 @@
 //! An ordinary report command in every respect: it resolves a scope, reads the
 //! declared set, and renders a [`HookListReport`] through `Printable` so
 //! `--format json` and the plain table come from one source. It is the
-//! *supported* half of `grim hook`; [`super::run`] is grim's own generated
-//! caller's entry point and is documented as not intended for direct
-//! invocation.
+//! *supported* half of `grim hook`; the dispatcher itself is the separate
+//! `grim-hook` launcher binary, not a `grim` verb.
 //!
 //! **This module is deliberately exempt from the runtime's import ban.** The
 //! source-level test in [`super`] forbids configuration, scope resolution, the
@@ -51,16 +50,18 @@
 //! missing would violate invariant I3.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use clap::Args;
 
 use crate::api::artifact_status::ArtifactStatus;
-use crate::api::hook_report::{HookListEntry, HookListReport};
+use crate::api::hook_report::{HookListEntry, HookListReport, LauncherReport};
 use crate::api::status_report::HookArming;
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
 use crate::install::hook_dispatch::{self, RootScope};
 use crate::install::hook_registrar::root_scope_for;
+use crate::install::launcher;
 use crate::install::target::{InstallTarget, detect_clients_or_all};
 use crate::lock::lock_io;
 use crate::oci::ArtifactKind;
@@ -100,6 +101,17 @@ struct HookSubject {
     installed: BTreeSet<String>,
 }
 
+/// The launcher block of the report (C-021): one read-only look at the file,
+/// never an `ensure`.
+fn launcher_report(grim_home: &Path) -> LauncherReport {
+    let seen = launcher::inspect(grim_home);
+    LauncherReport {
+        path: seen.path.display().to_string(),
+        sha256: seen.sha256,
+        state: seen.state,
+    }
+}
+
 /// List every declared hook entry with its tier, events, and per-client
 /// arming state.
 ///
@@ -108,7 +120,7 @@ struct HookSubject {
 /// A scope that cannot be resolved, a configuration or lock file that does not
 /// parse, an unreadable install state, or an invalid configured client name —
 /// the ordinary report-command failures, classified into the ordinary exit
-/// codes. Unlike [`super::run`] this command *may* fail: it is not on any
+/// codes. Unlike the `grim-hook` launcher this command *may* fail: it is not on any
 /// client's hot path, so an honest error is better than an empty answer.
 ///
 /// A **payload** that cannot be read is deliberately not in that list — see the
@@ -129,7 +141,10 @@ pub async fn run(ctx: &Context, _args: &ListArgs) -> anyhow::Result<(HookListRep
     // is the *only* path on which an empty report is the correct answer.
     if !status::declares_a_hook(&scope, lock.as_ref()) {
         tracing::debug!("grim hook list: no hooks are declared for this scope");
-        return Ok((HookListReport::new(Vec::new()), ExitCode::Success));
+        return Ok((
+            HookListReport::new(Vec::new(), launcher_report(ctx.grim_home())),
+            ExitCode::Success,
+        ));
     }
 
     let state = super::super::grim(
@@ -196,7 +211,10 @@ pub async fn run(ctx: &Context, _args: &ListArgs) -> anyhow::Result<(HookListRep
 
     let root = root_scope_for(&scope.workspace, scope.scope);
     let items = assemble(ctx.grim_home(), root, subjects, Some(&inputs)).await;
-    Ok((HookListReport::new(items), ExitCode::Success))
+    Ok((
+        HookListReport::new(items, launcher_report(ctx.grim_home())),
+        ExitCode::Success,
+    ))
 }
 
 /// Read each subject's `hook.toml` and expand it into one report item per
@@ -370,6 +388,35 @@ command = "sh guard.sh"
             message: cause.message().to_string(),
             transient: cause.transient(),
         }
+    }
+
+    /// C-021: the launcher block reads the file and writes nothing. Missing
+    /// reports `null`/`missing` without creating `hooks/`; a directory reports
+    /// `occupied`; a foreign file reports `stale` with its hash.
+    #[test]
+    fn the_launcher_block_is_read_only_and_reports_each_state() {
+        let home = tempfile::tempdir().unwrap();
+        let report = launcher_report(home.path());
+        assert_eq!(report.state, launcher::LauncherState::Missing);
+        assert!(report.sha256.is_none());
+        assert!(
+            !home.path().join("hooks").exists(),
+            "hook list must not create anything"
+        );
+
+        let path = launcher::path(home.path());
+        std::fs::create_dir_all(&path).unwrap();
+        let report = launcher_report(home.path());
+        assert_eq!(report.state, launcher::LauncherState::Occupied);
+        assert!(report.sha256.is_none());
+        std::fs::remove_dir(&path).unwrap();
+
+        std::fs::write(&path, b"not the launcher").unwrap();
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let report = launcher_report(home.path());
+        assert_eq!(report.state, launcher::LauncherState::Stale);
+        assert_eq!(report.sha256.as_deref().map(str::len), Some(64));
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), before);
     }
 
     /// The defect this command shipped with: an installed, armed hook produced

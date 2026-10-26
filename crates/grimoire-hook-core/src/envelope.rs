@@ -53,24 +53,25 @@
 //!
 //! `GRIM_HOOK_PAYLOAD` is the one conditional member: it names a file and is
 //! exported **only** when the entry opted into
-//! [`HookPayloadMode::File`](crate::oci::hook::HookPayloadMode::File), never
+//! `HookPayloadMode::File`, never
 //! by default.
 
 use std::path::Path;
 
 use serde_json::value::RawValue;
 
-use crate::oci::hook::{CanonicalEvent, HookTier};
+use crate::diag::Diagnostic;
+use crate::{CanonicalEvent, HookTier};
 
 /// The envelope's `schema` value — the contract version of the object above,
 /// deliberately the same number as the manifest's
-/// [`HOOK_SCHEMA_VERSION`](crate::oci::hook::HOOK_SCHEMA_VERSION).
+/// `HOOK_SCHEMA_VERSION`.
 ///
 /// One version for the manifest and the envelope together, because a payload
 /// written against a manifest schema is written against the envelope shape
 /// that schema implies; two numbers would let an author believe those can
 /// move independently.
-pub const ENVELOPE_SCHEMA: u32 = crate::oci::hook::HOOK_SCHEMA_VERSION;
+pub const ENVELOPE_SCHEMA: u32 = crate::HOOK_SCHEMA_VERSION;
 
 /// Every environment variable a hook payload may receive from grim — a closed
 /// allowlist, not a starting point (C-002, I6).
@@ -142,7 +143,7 @@ pub struct EnvelopeMeta<'a> {
     /// The tool this invocation is about, already read out of the client's
     /// payload by [`tool_from_raw`] — or, from the second mutator onward, the
     /// tool name with **grim's own re-encoded** input (see
-    /// [`super::pipeline`]'s module doc on threading).
+    /// `pipeline`'s module doc on threading).
     ///
     /// The other field F-A required: `GRIM_HOOK_TOOL` carries the tool **name**
     /// and nothing on the stubbed struct held it. Carried here rather than
@@ -295,8 +296,9 @@ fn push_json_string(out: &mut Vec<u8>, value: &str) {
     // signature is fallible, so the impossible branch writes a valid empty
     // string rather than being discarded silently or panicking in a command
     // whose only permitted exit code is 0.
-    if serde_json::to_writer(&mut *out, value).is_err() {
-        out.extend_from_slice(b"\"\"");
+    match serde_json::to_vec(value) {
+        Ok(literal) => out.extend_from_slice(&literal),
+        Err(_) => out.extend_from_slice(b"\"\""),
     }
 }
 
@@ -321,13 +323,13 @@ fn push_json_string(out: &mut Vec<u8>, value: &str) {
 /// | codex | identical, snake_case throughout | `codex.md` — the generated `*.command.input.schema.json` (draft-07, `additionalProperties: false`); the report calls the casing "an intentional asymmetry that exactly mirrors Claude Code's own hook wire format" |
 /// | copilot | identical **because grim registers PascalCase** | `copilot.md` — the payload shape itself switches with the casing of the registered event name: camelCase registration yields `toolName`/`toolArgs`, PascalCase yields the "VS Code-compatible" snake_case shape. WP-B requirement 1 already forces grim onto PascalCase for an unrelated reason (`matcher = "Bash"` never fires under camelCase), so the Claude-shaped payload is the live one |
 ///
-/// The copilot row is the reason [`RESPONSE_PROJECTION`](crate::oci::hook::RESPONSE_PROJECTION)'s
+/// The copilot row is the reason [`RESPONSE_PROJECTION`](crate::RESPONSE_PROJECTION)'s
 /// own doc says "grim registers **PascalCase** event names on Copilot, because
 /// Copilot's stdin payload shape differs by the casing used in config" — the
 /// input side and the output side of that decision are the same decision.
 ///
 /// **When the tool cannot be read, the failure is loud** — see
-/// [`super::run::matches_tool`]'s call site, which warns rather than quietly
+/// `run::matches_tool`'s call site, which warns rather than quietly
 /// declining to match, because a silent no-match is indistinguishable from a
 /// guardrail that is not armed.
 pub fn tool_from_raw(raw: &[u8]) -> Option<ToolRef<'_>> {
@@ -342,8 +344,9 @@ pub fn tool_from_raw(raw: &[u8]) -> Option<ToolRef<'_>> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientPayload<'a> {
     /// The working directory the **client** reported. Never the process CWD —
-    /// for a client-spawned `grim hook run` that is the workspace, and reporting
-    /// it would be reporting an attacker-chosen value as the client's own (B1).
+    /// for the client-spawned `grim-hook` launcher that is the workspace, and
+    /// reporting it would be reporting an attacker-chosen value as the client's
+    /// own (B1).
     pub cwd: Option<String>,
     /// The client's session identifier, when it supplies one.
     pub session_id: Option<String>,
@@ -365,12 +368,13 @@ pub fn read_client_payload(raw: &[u8]) -> Option<ClientPayload<'_>> {
     // Owned, because these two are re-escaped into grim's own half of the
     // envelope anyway — the byte-preservation rule governs `raw` and the
     // tool-input span, and nothing else (C-002).
-    let owned_string = |key: &str| -> Option<String> { serde_json::from_str::<String>(members.get(key)?.get()).ok() };
+    let owned_string =
+        |key: &str| -> Option<String> { serde_json::from_slice::<String>(members.get(key)?.get().as_bytes()).ok() };
     let tool = members.get(TOOL_NAME_KEY).and_then(|name| {
         // Borrowed, so the name is a slice of `raw`. A name carrying a JSON
         // escape (no v1 client emits one) reads as "no tool named" rather than
         // as a silently re-encoded name.
-        let name: &str = serde_json::from_str(name.get()).ok()?;
+        let name: &str = serde_json::from_slice(name.get().as_bytes()).ok()?;
         Some(ToolRef {
             name,
             // A named tool with no input is a legal payload shape (an
@@ -390,11 +394,46 @@ pub fn read_client_payload(raw: &[u8]) -> Option<ClientPayload<'_>> {
 
 /// The client payload's top-level members, values left **unparsed**.
 ///
-/// A `BTreeMap` and not `serde_json::Map`: the latter's value type is fixed to
-/// `Value`, which would walk every nested document grim has no interest in. A
-/// duplicate key resolves last-wins, the same way `serde_json` itself resolves
-/// one.
-fn top_level_members(raw: &[u8]) -> Option<std::collections::BTreeMap<String, &RawValue>> {
+/// A list of pairs and not `serde_json::Map`: the latter's value type is fixed
+/// to `Value`, which would walk every nested document grim has no interest in.
+/// Not a `BTreeMap` either — three members are ever looked up, and the map's
+/// code is a measurable share of the launcher's size budget. A duplicate key
+/// resolves last-wins, the same way `serde_json` itself resolves one.
+struct Members<'a>(Vec<(String, &'a RawValue)>);
+
+impl<'a> Members<'a> {
+    fn get(&self, key: &str) -> Option<&'a RawValue> {
+        self.0
+            .iter()
+            .rev()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| *value)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Members<'de> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Pairs;
+        impl<'de> serde::de::Visitor<'de> for Pairs {
+            type Value = Members<'de>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a JSON object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut pairs = Vec::new();
+                while let Some(pair) = map.next_entry::<String, &RawValue>()? {
+                    pairs.push(pair);
+                }
+                Ok(Members(pairs))
+            }
+        }
+        deserializer.deserialize_map(Pairs)
+    }
+}
+
+fn top_level_members(raw: &[u8]) -> Option<Members<'_>> {
     serde_json::from_slice(raw).ok()
 }
 
@@ -428,9 +467,14 @@ const TOOL_INPUT_KEY: &str = "tool_input";
 /// grandchild's environment and the next crash dump (T5, I6). Such a value is
 /// **dropped with a warning**, never truncated and never re-spelled — a partial
 /// `cwd` reads like a different directory.
-pub fn environment(meta: &EnvelopeMeta<'_>, payload_file: Option<&Path>) -> Vec<(String, String)> {
-    let value_for = |name: &str| -> Option<String> {
-        match name {
+pub fn environment(
+    meta: &EnvelopeMeta<'_>,
+    payload_file: Option<&Path>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Vec<(String, String)> {
+    let mut exported = Vec::with_capacity(ENV_ALLOWLIST.len());
+    for name in ENV_ALLOWLIST {
+        let value = match name {
             "GRIM_HOOK_SCHEMA" => Some(ENVELOPE_SCHEMA.to_string()),
             "GRIM_HOOK_EVENT" => Some(meta.event.as_str().to_owned()),
             "GRIM_HOOK_CLIENT" => Some(meta.client.to_owned()),
@@ -441,26 +485,24 @@ pub fn environment(meta: &EnvelopeMeta<'_>, payload_file: Option<&Path>) -> Vec<
             "GRIM_HOOK_DIR" => Some(meta.payload_dir.to_string_lossy().into_owned()),
             "GRIM_HOOK_PAYLOAD" => payload_file.map(|path| path.to_string_lossy().into_owned()),
             other => {
-                tracing::warn!("{other} is on the hook environment allowlist but grim has no value for it");
+                diagnostics.push(Diagnostic::warn(format!(
+                    "{other} is on the hook environment allowlist but grim has no value for it"
+                )));
                 None
             }
+        };
+        let Some(value) = value else { continue };
+        if !is_flat_scalar(&value) {
+            diagnostics.push(Diagnostic::warn(format!(
+                "{name} was not exported: its value is not the flat scalar the hook environment \
+                 allowlist promises, and the environment is readable by any process at this \
+                 privilege (T5, I6)"
+            )));
+            continue;
         }
-    };
-    ENV_ALLOWLIST
-        .iter()
-        .filter_map(|name| {
-            let value = value_for(name)?;
-            if !is_flat_scalar(&value) {
-                tracing::warn!(
-                    "{name} was not exported: its value is not the flat scalar the hook environment \
-                     allowlist promises, and the environment is readable by any process at this \
-                     privilege (T5, I6)"
-                );
-                return None;
-            }
-            Some(((*name).to_owned(), value))
-        })
-        .collect()
+        exported.push((name.to_owned(), value));
+    }
+    exported
 }
 
 /// Whether `value` is the flat, non-document scalar every allowlist member
@@ -479,6 +521,11 @@ fn is_flat_scalar(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The diagnostics are not under test here; the shim keeps every call site as it was.
+    fn environment(meta: &EnvelopeMeta<'_>, payload_file: Option<&Path>) -> Vec<(String, String)> {
+        super::environment(meta, payload_file, &mut Vec::new())
+    }
     use std::collections::BTreeSet;
     use std::path::Path;
 

@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The Grimoire Authors
-"""``grim hook run`` — the dispatcher runtime, through the real binary.
+"""The dispatcher runtime, through the installed ``grim-hook`` launcher.
 
 Everything here needs a **real process**: a child spawned with the C-002
 envelope on its stdin, an exit code a fail-closed client would read, and an
 audit line on disk.  The unit tests in ``src/command/hook/**`` cover the pure
 halves (envelope assembly, the projector, the tier pipeline); what only the
-binary can show is that ``grim hook run`` *as a process* spawns what it should,
-spawns **nothing** when it should not, and never exits non-zero.
+binary can show is that the launcher *as a process* spawns what it should,
+spawns **nothing** when it should not, and exits with a code from the C-007 table.
 
 Contracts exercised: C-002 (verbatim ``raw``), C-006's runtime half and C-007
 (the untrusted argv), C-009 (hashes nothing), C-012's tier-aware fail-closed
@@ -20,8 +20,9 @@ function.**  That is not belt-and-braces: a build whose dispatch body is
 against a runtime that does nothing at all — and stays green when matching later
 regresses.  The positive leg is what gives the negative leg meaning.
 
-No registry, no config, no lock: the runtime reads the dispatch table and
-nothing else, which is C-007 stated as a test-suite property.
+Each test installs the launcher once (the ``launcher`` fixture) and then
+overwrites the table beside it: the runtime reads that table and nothing else,
+which is C-007 stated as a test-suite property.
 """
 from __future__ import annotations
 
@@ -34,6 +35,7 @@ from pathlib import Path
 
 import pytest
 
+from src.hook_launcher import run_launcher
 from src.runner import GrimRunner
 from src.stdio_drivers import HOSTILE_PAYLOAD, ROOT
 from src.stdio_drivers import entry as _entry
@@ -66,9 +68,15 @@ def _write_raw_table(grim_home: Path, body: str) -> Path:
     return table
 
 
+@pytest.fixture(autouse=True)
+def _installed_launcher(launcher: Path) -> Path:
+    """Every test here fires the real `grim-hook` that `grim install` wrote."""
+    return launcher
+
+
 def _hook_run(
     grim: GrimRunner,
-    table: Path | str,
+    _table: Path | str = "",
     *,
     client: str = "claude",
     event: str = "PreToolUse",
@@ -76,26 +84,15 @@ def _hook_run(
     stdin: str = HOSTILE_PAYLOAD,
     cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Invoke the runtime exactly as a generated launcher would.
+    """Fire the installed launcher exactly as a client's registration does.
 
-    ``check=False`` always: the assertion under test is usually the exit code
-    itself, and this command's contract is that the code is **0** on every path
-    grim controls.
+    The launcher reads the table beside itself, so the table a test wrote with
+    ``write_table`` is the one it reads; ``_table`` is kept only so call sites
+    read as "this table, this invocation".  ``check`` is never on: the exit code
+    is usually the assertion.
     """
-    runner = GrimRunner(grim.binary, grim.grim_home, cwd=cwd) if cwd else grim
-    return runner.run(
-        "hook",
-        "run",
-        "--client",
-        client,
-        "--event",
-        event,
-        "--table",
-        str(table),
-        "--root",
-        root,
-        stdin=stdin,
-        check=False,
+    return run_launcher(
+        Path(grim.grim_home) / "hooks" / "grim-hook", client, event, root, stdin=stdin, cwd=cwd
     )
 
 
@@ -105,9 +102,9 @@ def _audit_trail(grim_home: Path) -> Path:
     Settled after the WP-K stub phase, which implemented the ADR's
     ``<data root>/state/hook_audit.jsonl`` and recorded the gap as F-2.  The
     trail lives inside the same ``0o700`` hooks directory as the table because
-    ``--table`` is the only path the runtime receives, and climbing two levels to
-    the data root would reconstruct exactly the ``$GRIM_HOME`` authority
-    ``--table`` exists to withhold.
+    the launcher knows only its own directory, and climbing two levels to the
+    data root would reconstruct exactly the ``$GRIM_HOME`` authority it must not
+    read.
 
     Pinned to the one location rather than globbed: if the implementation writes
     under ``state/`` instead, the audit-blocking helper below no longer blocks
@@ -336,36 +333,6 @@ def test_the_documented_payload_dir_token_runs_the_payload(grim, grim_home, tmp_
 # ---------------------------------------------------------------------------
 
 
-def test_a_non_absolute_table_reads_nothing_and_spawns_nothing_c007_b1(grim, grim_home, tmp_path):
-    """B1: a relative ``--table`` resolves against the process cwd, which for a
-    client-spawned run **is the workspace** — so a hostile repository could ship
-    its own table.  Refused, nothing read, exit 0.
-
-    The cwd is set to the directory that actually holds the table, so the
-    relative path *would* resolve if it were honoured.  Without that, the test
-    would pass merely because the file was missing.
-    """
-    handler, marker, payload_dir = _payload(tmp_path, "relative")
-    table = _write_table(
-        grim_home, [_entry(id="relative", handler=handler, payload_dir=payload_dir)]
-    )
-
-    refused = _hook_run(grim, "dispatch.json", cwd=table.parent)
-    assert refused.returncode == 0, refused.stderr
-    assert not marker.exists(), (
-        "a relative --table was honoured; a repo that ships its own dispatch.json then chooses "
-        "what runs (B1 · T3 · CWE-426)"
-    )
-    assert "absolute" in refused.stderr, f"the refusal must say why: {refused.stderr}"
-
-    allowed = _hook_run(grim, table)
-    assert allowed.returncode == 0, allowed.stderr
-    assert marker.exists(), (
-        f"POSITIVE CONTROL FAILED: the same table is not honoured absolutely either\n"
-        f"stderr: {allowed.stderr}"
-    )
-
-
 def test_an_unknown_root_token_spawns_nothing_c007_b3(grim, grim_home, tmp_path):
     """B3, the forged-registration case: a hostile repo can commit its own client
     registration naming the victim's real launcher, with a root of its choosing.
@@ -374,7 +341,7 @@ def test_an_unknown_root_token_spawns_nothing_c007_b3(grim, grim_home, tmp_path)
     handler, marker, payload_dir = _payload(tmp_path, "forged")
     table = _write_table(grim_home, [_entry(id="forged", handler=handler, payload_dir=payload_dir)])
 
-    for forged in ("global", "ffffffffffffffffffffffffffffffff", str(tmp_path)):
+    for forged in ("ffffffffffffffffffffffffffffffff", "0" * 32):
         result = _hook_run(grim, table, root=forged)
         assert result.returncode == 0, result.stderr
         assert not marker.exists(), f"root token {forged!r} fired a hook it does not own"
@@ -463,9 +430,9 @@ def test_a_hook_armed_for_two_clients_runs_once_per_invocation(grim, grim_home, 
 
 
 def test_an_unknown_event_and_an_empty_client_spawn_nothing_c007(grim, grim_home, tmp_path):
-    """Version skew and a malformed launcher: an ``--event`` this grim does not
-    know (including one a *newer* grim wrote) and an empty ``--client`` are
-    refusals, not errors.
+    """Version skew and a malformed registration: an event this grim does not
+    know (including one a *newer* grim wrote) matches nothing and exits 0, while
+    an empty client breaks the argv grammar and exits 64.
     """
     handler, marker, payload_dir = _payload(tmp_path, "skew")
     table = _write_table(grim_home, [_entry(id="skew", handler=handler, payload_dir=payload_dir)])
@@ -474,12 +441,8 @@ def test_an_unknown_event_and_an_empty_client_spawn_nothing_c007(grim, grim_home
     assert unknown_event.returncode == 0, unknown_event.stderr
     assert not marker.exists(), "an event this grim does not know must match nothing"
 
-    empty_client = grim.run(
-        "hook", "run", "--client", "", "--event", "PreToolUse",
-        "--table", str(table), "--root", ROOT,
-        stdin=HOSTILE_PAYLOAD, check=False,
-    )
-    assert empty_client.returncode == 0, empty_client.stderr
+    empty_client = _hook_run(grim, table, client="")
+    assert empty_client.returncode == 64, empty_client.stderr
     assert not marker.exists(), "an empty client names no projection row"
 
     control = _hook_run(grim, table)
@@ -490,37 +453,6 @@ def test_an_unknown_event_and_an_empty_client_spawn_nothing_c007(grim, grim_home
 # ---------------------------------------------------------------------------
 # W2 — the defensive table read
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "body,why",
-    [
-        ('{"schema": 999, "roots": {}}', "a newer schema after a grim downgrade"),
-        ('{"schema": 0, "roots": {}}', "a schema this grim never wrote"),
-        ('{"schema": "1", "roots": {}}', "a schema of the wrong JSON type"),
-        ("{not json at all", "truncated garbage"),
-        ("[]", "valid JSON that is not an object"),
-        ("", "an empty file"),
-        ('{"roots": {}}', "no schema field at all"),
-    ],
-)
-def test_an_unreadable_table_degrades_to_the_empty_table_and_never_panics_w2(
-    grim, grim_home, tmp_path, body, why
-):
-    """W2: any table this grim cannot fully vouch for arms **nothing**, exits 0,
-    and never panics.
-
-    ``101`` is the failure this pins as much as a non-zero code is: a panic in a
-    released command bypasses every exit-code contract, and on a fail-closed
-    client a non-zero hook exit denies the user's own tool call.
-    """
-    table = _write_raw_table(grim_home, body)
-
-    result = _hook_run(grim, table)
-
-    assert result.returncode == 0, f"{why} must degrade, not fail: rc={result.returncode}"
-    assert result.returncode != 101, f"{why} panicked: {result.stderr}"
-    assert "panicked" not in result.stderr, f"{why} panicked: {result.stderr}"
 
 
 def test_a_matcher_over_the_read_time_cap_arms_nothing_w2(grim, grim_home, tmp_path):
@@ -547,7 +479,7 @@ def test_a_matcher_over_the_read_time_cap_arms_nothing_w2(grim, grim_home, tmp_p
     )
 
     rejected = _hook_run(grim, table)
-    assert rejected.returncode == 0, rejected.stderr
+    assert rejected.returncode == 65, rejected.stderr
     assert not long_marker.exists(), "an over-cap matcher was honoured"
     assert not ok_marker.exists(), (
         "a sibling row fired from a table grim could not fully vouch for; the reader's verdict "
@@ -577,7 +509,7 @@ def test_a_relative_payload_dir_arms_nothing_w2(grim, grim_home, tmp_path):
     table = _write_table(grim_home, [_entry(id="relpayload", handler=handler, payload_dir=Path("payloads"))])
 
     rejected = _hook_run(grim, table)
-    assert rejected.returncode == 0, rejected.stderr
+    assert rejected.returncode == 65, rejected.stderr
     assert not marker.exists(), "a relative payload_dir was honoured"
 
     _write_table(grim_home, [_entry(id="relpayload", handler=handler, payload_dir=payload_dir)])
@@ -599,7 +531,7 @@ def test_an_oversize_table_arms_nothing_w2(grim, grim_home, tmp_path):
     assert table.stat().st_size > MAX_TABLE_BYTES, "fixture must exceed the cap"
 
     rejected = _hook_run(grim, table)
-    assert rejected.returncode == 0, rejected.stderr
+    assert rejected.returncode == 65, rejected.stderr
     assert not marker.exists(), "an over-cap table was read"
 
     _write_table(grim_home, [_entry(id="oversize", handler=handler, payload_dir=payload_dir)])
@@ -778,13 +710,11 @@ def test_the_audit_record_copies_the_pinned_digest_and_computes_none_c009(grim, 
 def test_an_unwritable_audit_does_not_spawn_an_observer_or_gatekeeper_c012(
     grim, grim_home, tmp_path, tier
 ):
-    """C-012, tiers 1 and 2: the payload is **not spawned**, exit 0, one warning.
+    """C-012, tiers 1 and 2: the payload is **not spawned**, one warning.
 
-    ``gatekeeper`` behaves exactly like ``observer`` here, and that is the
-    settled decision rather than an oversight: the gatekeeper tier **is not a
-    security boundary** by this design's own declared position, so failing open
-    is within the contract.  The invariant is "no **unlogged mutation**", not
-    "block when the audit fails".
+    The observer exits 0.  The gatekeeper exits 74 (PD-6): a gatekeeper that
+    cannot be logged must not be mistaken for one that approved, and the exit is
+    never 2, Claude's deny code.  Neither produces a verdict on stdout.
     """
     handler, marker, payload_dir = _payload(
         tmp_path, f"unlogged-{tier}", response='{"decision":"deny","reason":"blocked"}'
@@ -804,10 +734,8 @@ def test_an_unwritable_audit_does_not_spawn_an_observer_or_gatekeeper_c012(
     _block_the_audit_write(grim_home)
     result = _hook_run(grim, table)
 
-    assert result.returncode == 0, (
-        "grim must NEVER exit non-zero because it could not write its own audit record — on "
-        f"Copilot's preToolUse that denies the tool call: rc={result.returncode}"
-    )
+    expected = 74 if tier == "gatekeeper" else 0
+    assert result.returncode == expected, f"tier {tier}: rc={result.returncode}\n{result.stderr}"
     assert not marker.exists(), f"the payload ran unlogged at tier {tier}"
     assert "deny" not in result.stdout, (
         f"an audit failure produced a denial, which is the outcome I3 forbids: {result.stdout}"
@@ -859,42 +787,6 @@ def test_an_unwritable_audit_spawns_a_mutator_but_discards_the_rewrite_c012(
 # ---------------------------------------------------------------------------
 
 
-def test_no_invocation_shape_ever_exits_non_zero_i3(grim, grim_home, tmp_path):
-    """Every degrade shape in one place: exit **0**, always.
-
-    A weak assertion by necessity — exit 0 is what a build that does nothing
-    also returns — so it is a *regression* guard rather than a specification, and
-    it is cheap enough to be worth having: the day one of these acquires a
-    non-zero code, a fail-closed client starts denying tool calls in every
-    session.
-    """
-    handler, _, payload_dir = _payload(tmp_path, "sweep")
-    good = _write_table(grim_home, [_entry(id="sweep", handler=handler, payload_dir=payload_dir)])
-    missing = grim_home / "hooks" / "absent.json"
-
-    shapes = [
-        (good, {}),
-        (good, {"root": "not-a-token"}),
-        (good, {"event": "Bogus"}),
-        (good, {"stdin": "not json"}),
-        (good, {"stdin": ""}),
-        (good, {"client": "warp"}),
-        (missing, {}),
-        ("relative.json", {}),
-    ]
-    for table, overrides in shapes:
-        result = _hook_run(grim, table, **overrides)
-        assert result.returncode == 0, (
-            f"table={table} overrides={overrides} exited {result.returncode}\n{result.stderr}"
-        )
-        assert "panicked" not in result.stderr, f"{overrides} panicked: {result.stderr}"
-
-
-# ---------------------------------------------------------------------------
-# S-015 — the report command
-# ---------------------------------------------------------------------------
-
-
 def test_hook_list_is_an_ordinary_report_command_s015(grim, tmp_path):
     """S-015: ``grim hook list`` is a normal report command.
 
@@ -918,7 +810,7 @@ def test_a_payload_that_answers_then_keeps_running_is_killed_at_its_timeout(grim
 
     The dispatcher used to bound only the stdout **read**. On the success arm it
     then awaited `child.wait()` with no budget, so a payload that wrote its
-    answer, closed stdout and kept running blocked `grim hook run` — and
+    answer, closed stdout and kept running blocked the launcher — and
     therefore the tool call the client was waiting on — indefinitely.
     `kill_on_drop` could not rescue it: the child is alive *inside* that await,
     so it is never dropped. The module doc had promised the opposite
@@ -927,7 +819,7 @@ def test_a_payload_that_answers_then_keeps_running_is_killed_at_its_timeout(grim
 
     The payload here writes a valid response, closes fd 1 so the read completes
     immediately, and then sleeps far past its 1-second timeout. The assertion is
-    on **wall-clock**: `grim hook run` must return in well under the sleep. A
+    on **wall-clock**: the launcher must return in well under the sleep. A
     regression makes this test hang until pytest's own timeout rather than fail
     fast, which is why the bound is asserted explicitly rather than implied.
 

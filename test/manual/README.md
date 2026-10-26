@@ -683,8 +683,8 @@ someone at the keyboard runs `grim hook allow` here. `--trust-hooks` on
 `install`/`update`/`add` answers the same question for one invocation only and
 writes no record.
 
-**c. The dispatcher.** `grim hook run` is invoked by the launcher grim
-generated, not by you — but driving it by hand shows the envelope and the
+**c. The dispatcher.** `$GRIM_HOME/hooks/grim-hook` is invoked by the client's
+registration, not by you — but driving it by hand shows the envelope and the
 verdict with no client in the loop:
 
 ```sh
@@ -702,7 +702,7 @@ Fire it for each alternative and for a tool the matcher excludes:
 ```sh
 for tool in Bash Write Read; do
   echo "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"$tool\",\"tool_input\":{\"command\":\"ls\"},\"cwd\":\"$PWD\",\"session_id\":\"s-1\"}" \
-    | grim hook run --client claude --event PreToolUse --table "$TABLE" --root "$ROOT" >/dev/null
+    | "$GRIM_HOME/hooks/grim-hook" claude PreToolUse "$ROOT" >/dev/null
 done
 cat "$GRIM_HOME"/hooks/payload/*/tool-calls.log
 ```
@@ -723,7 +723,7 @@ itself locally modified on the next `grim status`.
 ```sh
 grim add localhost:5050/grimoire/hooks/write-guard:1 && grim install
 echo "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\".env\"},\"cwd\":\"$PWD\",\"session_id\":\"s-2\"}" \
-  | grim hook run --client claude --event PreToolUse --table "$TABLE" --root "$ROOT"
+  | "$GRIM_HOME/hooks/grim-hook" claude PreToolUse "$ROOT"
 echo "exit=$?"
 ```
 
@@ -733,9 +733,8 @@ exit=0
 ```
 
 The payload wrote `{"decision":"deny","reason":"…"}`; grim projected it onto
-Claude's own response shape. The exit code is `0` on every path grim controls —
-deliberately, because a client that fails closed on a non-zero hook exit must
-never be denied a tool call by grim's internals.
+Claude's own response shape. A verdict never travels as an exit code, and the
+launcher never exits `2`, which is Claude's own deny code.
 
 **e. The audit trail answers "did the guardrail apply here?"**
 
@@ -752,18 +751,21 @@ tail -3 "$GRIM_HOME/hooks/hook_audit.jsonl" | jq -c '{hook_id, outcome, verdict}
 The `no-match` record is the point: "this hook did not apply to that call" has
 to stay answerable, so a decline is recorded rather than passed over silently.
 
-**f. Things that should NOT work.** Each exits `0` and runs nothing:
+**f. Things that should NOT work.** Each runs nothing:
 
 ```sh
 P="{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Write\",\"tool_input\":{},\"cwd\":\"$PWD\",\"session_id\":\"s3\"}"
 
-# A relative --table would resolve against the client-spawned CWD — the
-# repository — which is what makes a table repo-plantable.
-echo "$P" | grim hook run --client claude --event PreToolUse --table hooks/dispatch.json --root "$ROOT"
+# A well-formed root token no table holds is indistinguishable from an absent
+# one: exit 0, nothing spawned.
+echo "$P" | "$GRIM_HOME/hooks/grim-hook" claude PreToolUse ffffffffffffffffffffffffffffffff; echo "exit=$?"
 
-# An unknown root token is indistinguishable from an absent one.
-echo "$P" | grim hook run --client claude --event PreToolUse --table "$TABLE" --root deadbeef
+# A malformed argv is a usage error: exit 64, one usage line on stderr.
+echo "$P" | "$GRIM_HOME/hooks/grim-hook" claude PreToolUse deadbeef; echo "exit=$?"
 ```
+
+The table is always the `dispatch.json` beside the launcher, whatever the
+working directory or environment says, so a repository cannot supply its own.
 
 **g. Revoking.** `grim hook revoke` (alias `deny`) withdraws the workspace's
 consent record; the next converging command disarms — there is no runtime

@@ -242,8 +242,8 @@ fn load_at(path: &Path) -> Option<ConsentRecord> {
 /// an accepted prompt, and only when there was a terminal to ask on. A
 /// non-interactive run of either writes nothing, which is the state every CI
 /// run and every fresh clone is in. `grim lock`, `grim status`,
-/// `grim context`, `grim hook list`, `grim hook run`, the TUI and the MCP
-/// server never reach it at all.
+/// `grim context`, `grim hook list`, the `grim-hook` launcher, the TUI and
+/// the MCP server never reach it at all.
 ///
 /// **This is the T3 control**: `grim install` materializes what is already
 /// declared, and a cloned repository's `grimoire.toml` is not the user's

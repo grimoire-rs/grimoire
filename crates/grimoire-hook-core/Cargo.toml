@@ -1,0 +1,25 @@
+[package]
+name = "grimoire-hook-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared hook-dispatch types for grim and the grim-hook launcher"
+publish = false
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+schemars = { version = "1", optional = true }
+
+[features]
+# Derives `JsonSchema` on the manifest types; only `grimoire` enables it, so the
+# launcher build never links schemars.
+schema = ["dep:schemars"]
+# `RootToken::for_test`; only grim's dev-dependencies enable it, so no production build has it.
+test-util = []
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

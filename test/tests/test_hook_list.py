@@ -19,6 +19,7 @@ stub never emits.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -249,3 +250,105 @@ def test_a_declared_but_never_materialized_hook_warns_instead_of_vanishing(
     runner.run("config", "set", "options.experimental.hooks", "true")
     runner.run("install", "--trust-hooks")
     assert [i["id"] for i in runner.json("hook", "list")["items"]] == ["post", "pre"]
+
+
+# ---------------------------------------------------------------------------
+# C-021 — the launcher object, read-only
+# ---------------------------------------------------------------------------
+
+
+def test_the_launcher_object_carries_exactly_path_sha256_and_state(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """C-021: `launcher` is a top-level sibling of `items`, with exactly the
+    keys `{path, sha256, state}`. After an install it is `current`, and the
+    digest is the SHA-256 of the file on disk.
+    """
+    runner = grim_at(project_dir)
+    _arm(runner, project_dir, unique_repo)
+
+    report = runner.json("hook", "list")
+    launcher = Path(runner.grim_home) / "hooks" / "grim-hook"
+    assert sorted(report["launcher"]) == ["path", "sha256", "state"], report["launcher"]
+    assert report["launcher"] == {
+        "path": str(launcher),
+        "sha256": hashlib.sha256(launcher.read_bytes()).hexdigest(),
+        "state": "current",
+    }
+
+
+def test_hook_list_writes_nothing_and_reports_a_missing_launcher_on_the_empty_path(
+    grim_at, project_dir: Path
+) -> None:
+    """C-021: read-only, and present on the empty-items path too. Nothing is
+    declared, so the launcher is `missing` with a `null` digest, and listing
+    must not create it (nor the `hooks/` directory around it).
+    """
+    runner = grim_at(project_dir)
+    runner.run("init")
+
+    report = runner.json("hook", "list")
+    assert report["items"] == []
+    assert report["launcher"] == {
+        "path": str(Path(runner.grim_home) / "hooks" / "grim-hook"),
+        "sha256": None,
+        "state": "missing",
+    }
+    assert not (Path(runner.grim_home) / "hooks").exists(), "hook list created something"
+
+
+def test_hook_list_leaves_an_installed_launcher_and_table_untouched(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """C-021's no-write proof on an armed install: inode, mtime and bytes of the
+    launcher and the dispatch table are unchanged by `hook list`.
+    """
+    runner = grim_at(project_dir)
+    _arm(runner, project_dir, unique_repo)
+    hooks = Path(runner.grim_home) / "hooks"
+
+    def snapshot() -> dict:
+        return {
+            name: (s.st_ino, s.st_mtime_ns, (hooks / name).read_bytes())
+            for name in ("grim-hook", "dispatch.json")
+            for s in [(hooks / name).stat()]
+        }
+
+    before = snapshot()
+    runner.json("hook", "list")
+    runner.run("hook", "list")
+    assert snapshot() == before
+
+
+def test_a_directory_at_the_launcher_path_reads_launcher_path_occupied(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """C-020 / C-019: grim will not remove a directory at `hooks/grim-hook` and
+    writes nothing; `grim status` and `hook list` both say why, read-only. The
+    status path used to read `not-registered` here, because only the install
+    saw the directory.
+    """
+    runner = grim_at(project_dir)
+    occupied = Path(runner.grim_home) / "hooks" / "grim-hook"
+    (occupied / "keep").mkdir(parents=True)
+    hook = _publish_hook(unique_repo)
+    _declare(project_dir, hook.fq)
+    runner.run("lock")
+    runner.run("config", "set", "options.experimental.hooks", "true")
+    # Durable consent, not `--trust-hooks`: status only sees the former, and the
+    # cause under test is the launcher's, not `workspace-not-consented`.
+    runner.run("hook", "allow")
+    install = runner.run("install")
+    assert install.returncode == 0, install.stderr
+    assert _rows(runner) == [], "an occupied launcher path must arm nothing"
+    assert (occupied / "keep").is_dir(), "grim must not touch what sits at the launcher path"
+
+    row = next(i for i in runner.json("status")["items"] if i["kind"] == "hook")
+    assert row["state"] == "not-armed", row
+    assert [a["cause"] for a in row["arming"]] == ["launcher-path-occupied"], row
+    assert all(a["transient"] is False and a["message"] for a in row["arming"]), row
+
+    listed = runner.json("hook", "list")
+    assert listed["launcher"] == {"path": str(occupied), "sha256": None, "state": "occupied"}
+    assert {i["state"] for i in listed["items"]} == {"not-armed"}, listed["items"]
+    assert (occupied / "keep").is_dir()

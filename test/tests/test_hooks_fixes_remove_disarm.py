@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from src.helpers import make_artifact, write_config
+from src.hook_launcher import run_launcher
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt", reason="the hook launcher and its registered command are POSIX-only in v1"
@@ -74,10 +75,8 @@ def _fire(runner, project_dir: Path, token: str, log: Path) -> list[str]:
         "cwd": str(project_dir),
         "session_id": "s",
     }
-    fired = runner.run(
-        "hook", "run", "--client", "claude", "--event", "PreToolUse",
-        "--table", str(_table(runner)), "--root", token,
-        stdin=json.dumps(envelope), check=False,
+    fired = run_launcher(
+        _table(runner).parent / "grim-hook", "claude", "PreToolUse", token, stdin=json.dumps(envelope)
     )
     assert fired.returncode == 0, fired.stderr
     return sorted(log.read_text().split())

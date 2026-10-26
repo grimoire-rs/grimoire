@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 from pathlib import Path
 
 import pytest
@@ -175,17 +176,35 @@ def test_global_arming_across_clients(grim, registry: str, unique_repo: str) -> 
     group = qoder["hooks"]["PreToolUse"][0]
     assert group["matcher"] == "Bash", qoder
     [element] = _marked(qoder)
-    assert element["type"] == "command" and "--client qoder" in element["command"], element
+    # C-017/C-N13 (PD-9): Qoder takes the shell form, `<abs launcher> <client>
+    # <event> <root>` as one string; the root is the single opaque table key.
+    launcher = Path(grim.grim_home) / "hooks" / "grim-hook"
+    (token,) = json.loads((launcher.parent / "dispatch.json").read_text())["roots"]
+    assert element["type"] == "command", element
+    assert shlex.split(element["command"]) == [str(launcher), "qoder", "PreToolUse", token], element
     assert element["timeout"] == 5, "qoder's timeout is seconds, like claude's"
     assert len(_marked(json.loads(surfaces["claude"].read_text()))) == 1
     for client in ("codex", "copilot"):
         assert "PreToolUse" in json.loads(surfaces[client].read_text())["hooks"], client
 
-    before = {name: (path.read_bytes(), path.stat().st_mtime_ns) for name, path in surfaces.items()}
-    grim.json("install", "--global", "--trust-hooks")
-    after = {name: (path.read_bytes(), path.stat().st_mtime_ns) for name, path in surfaces.items()}
-    for name in surfaces:
-        assert after[name] == before[name], f"C-124: a re-converge rewrote {name}'s hook surface"
+    # S-002 / C-124: a second install is byte-identical — registrations, the
+    # dispatch table and the launcher (same inode, no rewrite) — and says so.
+    table = launcher.parent / "dispatch.json"
+    watched = {**surfaces, "launcher": launcher, "table": table}
+    before = {name: (path.read_bytes(), path.stat().st_mtime_ns) for name, path in watched.items()}
+    inode = launcher.stat().st_ino
+    again = grim.run("install", "--global", "--trust-hooks", format="json")
+    assert again.returncode == 0, again.stderr
+    hook_rows = [i for i in json.loads(again.stdout)["items"] if i["kind"] == "hook"]
+    assert [r["status"] for r in hook_rows] == ["unchanged"], hook_rows
+    after = {name: (path.read_bytes(), path.stat().st_mtime_ns) for name, path in watched.items()}
+    for name in watched:
+        assert after[name] == before[name], f"C-124: a re-converge rewrote {name}"
+    assert launcher.stat().st_ino == inode, "an unchanged launcher must not be replaced"
+    # C-022 prints nothing on a converge that changed no registration string.
+    assert "no longer trusts" not in again.stderr, again.stderr
+    status_row = next(i for i in grim.json("status", "--global")["items"] if i["kind"] == "hook")
+    assert status_row["state"] != "modified", status_row
 
 
 def test_unparseable_surface_not_armed(grim, registry: str, unique_repo: str) -> None:

@@ -31,12 +31,13 @@ from __future__ import annotations
 
 import json
 import os
-import tomllib
 from pathlib import Path
 
 import pytest
+import tomllib
 
 from src.helpers import write_config
+from src.hook_launcher import run_launcher
 from src.runner import GrimRunner
 
 # POSIX-only, matching the payloads themselves: both are `sh` scripts, which
@@ -102,7 +103,7 @@ def _arm(grim_at, project_dir: Path, registry: str, unique_repo: str, log: Path)
     """
     runner = grim_at(project_dir)
     # Where the observer writes. Set on grim's own environment because the
-    # payload inherits it through `grim hook run`; without it the example
+    # payload inherits it through the launcher; without it the example
     # falls back to a shared path under $TMPDIR, which tests must not touch.
     runner.env["GRIM_EXAMPLE_LOG"] = str(log)
     (project_dir / ".claude").mkdir(exist_ok=True)
@@ -140,19 +141,13 @@ def _fire(runner: GrimRunner, event: str, payload: str, *, root: str | None = No
     *before* the uninstall — a client whose registration grim has not rewritten
     yet still names the old one, and that invocation must run nothing.
     """
-    return runner.run(
-        "hook",
-        "run",
-        "--client",
+    return run_launcher(
+        _table(runner).parent / "grim-hook",
         "claude",
-        "--event",
         event,
-        "--table",
-        str(_table(runner)),
-        "--root",
         root or _root_token(runner),
         stdin=payload,
-        check=False,
+        env=runner.env,
     )
 
 

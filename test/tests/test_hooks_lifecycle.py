@@ -139,7 +139,7 @@ def test_s003_a_global_install_arms_the_hook_it_materialized(
     grim.run("install", "--global", "--trust-hooks")
 
     assert [row["id"] for row in _rows(grim)] == ["guard"], "a global install armed nothing"
-    launcher = grim_home / "hooks" / "bin" / "grim-hook"
+    launcher = grim_home / "hooks" / "grim-hook"
     assert launcher.is_file() and os.access(launcher, os.X_OK)
 
 

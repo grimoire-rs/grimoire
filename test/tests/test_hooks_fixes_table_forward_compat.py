@@ -3,9 +3,15 @@
 """The dispatch table is shared by every grim version on the machine.
 
 A row this grim cannot read (a newer tier, event or handler literal) is skipped
-alone, by the runtime and by convergence, and convergence never writes over a
-table it cannot read at all: either would let an older grim disarm every other
-workspace on the machine.
+alone by convergence, and by the runtime when it is not addressed to the firing
+`(client, event)`; a row that is addressed to it and unreadable refuses the whole
+dispatch, because skipping it could silently drop a gatekeeper. Convergence never
+writes over a table it cannot read at all: either would let an older grim disarm
+every other workspace on the machine.
+
+The installed `grim-hook` launcher is the reader under test. A refusal exits 65
+(table or selected row unreadable) with nothing on stdout, so "refuses" below
+means no handler ran.
 """
 
 from __future__ import annotations
@@ -17,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from src.helpers import make_artifact, write_config
+from src.hook_launcher import run_launcher
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt", reason="the hook launcher and the payload fixtures are POSIX-only in v1"
@@ -106,7 +113,14 @@ def _claude_marked(project_dir: Path) -> bool:
     return surface.is_file() and "hook-dispatcher" in surface.read_text()
 
 
-def test_hook_run_skips_a_row_it_cannot_read_and_runs_the_rest(grim, grim_home: Path, tmp_path: Path) -> None:
+def _run_hook(table: Path, root: str = ROOT):
+    # The launcher reads the table beside itself; `table` is that file.
+    return run_launcher(table.parent / "grim-hook", "claude", "PreToolUse", root, stdin=PAYLOAD)
+
+
+def test_launcher_skips_an_unreadable_row_addressed_elsewhere_and_runs_the_rest(
+    launcher: Path, grim_home: Path, tmp_path: Path
+) -> None:
     unknown_handler, unknown_marker, unknown_dir = _recording_payload(tmp_path, "unknown")
     known_handler, known_marker, known_dir = _recording_payload(tmp_path, "known")
     table = _seed(
@@ -118,8 +132,11 @@ def test_hook_run_skips_a_row_it_cannot_read_and_runs_the_rest(grim, grim_home: 
                     ROOT: {
                         "root": "global",
                         "hooks": [
-                            _row("unknown", unknown_dir, unknown_handler, tier="sentinel"),
-                            _row("unknown-handler", unknown_dir, [], handler={"wasm": "guard.wasm"}),
+                            _row("unknown", unknown_dir, unknown_handler, client="codex", tier="sentinel"),
+                            _row(
+                                "unknown-handler", unknown_dir, [], client="codex", handler={"wasm": "guard.wasm"}
+                            ),
+                            _row("other-event", unknown_dir, unknown_handler, event="Stop", tier="sentinel"),
                             _row("known", known_dir, known_handler),
                         ],
                     }
@@ -128,15 +145,90 @@ def test_hook_run_skips_a_row_it_cannot_read_and_runs_the_rest(grim, grim_home: 
         ),
     )
 
-    result = grim.run(
-        "hook", "run", "--client", "claude", "--event", "PreToolUse", "--table", str(table), "--root", ROOT,
-        stdin=PAYLOAD,
-        check=False,
-    )
+    result = _run_hook(table)
 
     assert result.returncode == 0, result.stderr
     assert known_marker.exists(), f"a row this grim can read must still run\nstderr: {result.stderr}"
-    assert not unknown_marker.exists(), "a row with a tier this grim does not know was run"
+    assert not unknown_marker.exists(), "a row addressed elsewhere was run"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"tier": "sentinel"},
+        {"handler": {"wasm": "guard.wasm"}},
+        {"payload_dir": "relative/dir"},
+    ],
+    ids=["unknown-tier", "unknown-handler", "relative-payload-dir"],
+)
+def test_launcher_refuses_when_a_selected_row_cannot_be_read(
+    launcher: Path, grim_home: Path, tmp_path: Path, bad: dict
+) -> None:
+    known_handler, known_marker, known_dir = _recording_payload(tmp_path, "known")
+    table = _seed(
+        grim_home,
+        json.dumps(
+            {
+                "schema": 1,
+                "roots": {
+                    ROOT: {
+                        "root": "global",
+                        "hooks": [
+                            _row("known", known_dir, known_handler),
+                            {**_row("unreadable", known_dir, known_handler), **bad},
+                        ],
+                    }
+                },
+            }
+        ),
+    )
+
+    result = _run_hook(table)
+
+    assert result.returncode == 65, result.stderr
+    assert not known_marker.exists(), "a selected unreadable row must refuse the dispatch, not be skipped"
+    assert "unreadable" in result.stderr, result.stderr
+
+
+def test_launcher_refuses_a_newer_schema(launcher: Path, grim_home: Path, tmp_path: Path) -> None:
+    handler, marker, payload_dir = _recording_payload(tmp_path, "known")
+    table = _seed(
+        grim_home,
+        json.dumps(
+            {"schema": 2, "roots": {ROOT: {"root": "global", "hooks": [_row("known", payload_dir, handler)]}}}
+        ),
+    )
+
+    result = _run_hook(table)
+
+    assert result.returncode == 65, result.stderr
+    assert not marker.exists(), "a table from a newer schema must arm nothing"
+
+
+def test_launcher_treats_an_unknown_root_as_empty_even_beside_unreadable_roots(
+    launcher: Path, grim_home: Path, tmp_path: Path
+) -> None:
+    handler, marker, payload_dir = _recording_payload(tmp_path, "known")
+    table = _seed(
+        grim_home,
+        json.dumps(
+            {
+                "schema": 1,
+                "roots": {
+                    ROOT: {"root": "global", "hooks": [_row("known", payload_dir, handler)]},
+                    OTHER_ROOT: {"layout": "from a newer grim"},
+                },
+            }
+        ),
+    )
+
+    unknown = _run_hook(table, root="1" * 32)
+    assert unknown.returncode == 0, unknown.stderr
+    assert not marker.exists(), "an unknown root must select nothing"
+
+    known = _run_hook(table)
+    assert known.returncode == 0, known.stderr
+    assert marker.exists(), "another root this grim cannot read must not disarm this one"
 
 
 def test_install_keeps_another_workspaces_rows_it_cannot_read(

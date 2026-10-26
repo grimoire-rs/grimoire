@@ -139,9 +139,9 @@ def _fire(command: str, cwd: Path) -> subprocess.CompletedProcess[str]:
     """Run a registered handler command the way the client runs it: `/bin/sh`,
     the tool call on stdin, the workspace as CWD.
 
-    Claude Code has no argv array — the `command` string is handed to a shell
-    with full expansion — so executing it any other way would test a shape no
-    client produces.
+    Claude and Qoder register the shell form (PD-9: `<launcher> <client>
+    <event> <root>` as one string), so the client hands it to a shell;
+    executing it any other way would test a shape no client produces.
     """
     return subprocess.run(
         ["/bin/sh", "-c", command],
@@ -177,7 +177,7 @@ def test_s011_a_clone_that_plants_grim_home_arms_nothing_b1(
     to a path *inside itself* and commits a dispatch table there.
 
     Both shapes are refusals, for one reason: a relative `GRIM_HOME` resolves
-    against the process CWD — which for a client-spawned `grim hook run` **is**
+    against the process CWD — which for a client-spawned `grim-hook` **is**
     the workspace — and a nested absolute one lands there directly. Either way
     the arming authority becomes repo-resident (**B1**, attacker **T3**,
     invariants **I1**/**I4**), so grim refuses to arm rather than warning, and
@@ -366,15 +366,29 @@ def test_s010_a_committed_registration_cannot_fire_the_victims_hooks_b3(
     honest_sentinel.unlink()
 
     (token,) = _dispatch(runner)["roots"].keys()
-    for forged_root in ("global", str(project_dir), token.upper()):
-        forged = honest.replace(f"--root {token}", f"--root {forged_root}")
+    assert honest.endswith(f" {token}"), f"the root is the registered command's last operand: {honest}"
+    flipped = ("0" if token[0] != "0" else "1") + token[1:]
+    # C-N4/C-006 + C-N7: a root outside the `[0-9a-f]{32}` grammar is a usage
+    # error (64, never 2, which Claude treats as a block); a well-formed root
+    # that is not a key in the table selects nothing (0, empty).
+    forgeries = [
+        ("global", 64),
+        (str(project_dir), 64),
+        (token.upper(), 64),
+        (flipped, 0),
+        ("0" * 32, 0),
+    ]
+    for forged_root, expected_exit in forgeries:
+        forged = honest[: -len(token)] + forged_root
         assert forged != honest, f"the forged command is identical to the honest one: {forged_root}"
         fired = _fire(forged, project_dir)
-        assert fired.returncode == 0, f"root={forged_root!r} exited {fired.returncode}: {fired.stderr}"
+        assert fired.returncode == expected_exit, (
+            f"root={forged_root!r} exited {fired.returncode}, expected {expected_exit}: {fired.stderr}"
+        )
         assert not honest_sentinel.exists(), (
             f"a registration naming root {forged_root!r} fired the victim's armed hook"
         )
-        assert "deny" not in fired.stdout, f"root={forged_root!r} produced a verdict: {fired.stdout}"
+        assert fired.stdout.strip() == "", f"root={forged_root!r} produced a verdict: {fired.stdout}"
 
 
 # ---------------------------------------------------------------------------
@@ -431,7 +445,7 @@ def test_s011_a_clone_cannot_consent_for_itself_with_committed_lines(
         assert fragment not in result.stderr, f"a cloned repo triggered a prompt: {result.stderr}"
     assert _rows(runner) == [], "a committed config may declare a hook, never consent to it"
     assert _records(runner) == [], "and converging over it must not become consent (T3)"
-    assert not (Path(runner.grim_home) / "hooks" / "bin" / "grim-hook").exists()
+    assert not (Path(runner.grim_home) / "hooks" / "grim-hook").exists()
     assert not sentinel.exists()
 
     row = next(i for i in runner.json("status")["items"] if i["kind"] == "hook")
@@ -451,23 +465,38 @@ def test_s011_a_clone_cannot_consent_for_itself_with_committed_lines(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("break_it", ["directory", "missing-interpreter"], ids=["directory", "no-interpreter"])
-def test_the_registered_command_exits_zero_when_the_launcher_is_unusable_b8(
-    grim_at, project_dir: Path, tmp_path: Path, registry: str, unique_repo: str, break_it: str
+@pytest.mark.parametrize(
+    ("break_it", "state", "has_digest", "exits"),
+    [
+        ("missing", "missing", False, {127}),
+        ("directory", "occupied", False, {126}),
+        ("missing-interpreter", "stale", True, {126, 127}),
+    ],
+    ids=["missing", "directory", "no-interpreter"],
+)
+def test_an_unusable_launcher_is_reported_and_never_exits_two_b8(
+    grim_at,
+    project_dir: Path,
+    tmp_path: Path,
+    registry: str,
+    unique_repo: str,
+    break_it: str,
+    state: str,
+    has_digest: bool,
+    exits: set[int],
 ) -> None:
-    """**B8 · I3.** Copilot's `preToolUse` is fail-closed: any non-zero exit
-    from the registered command **denies the user's tool call**. So the guard
-    in that command must survive a launcher that is not usable.
+    """**B8 · I3, reversed by the native dispatcher (C-N7, C-021).** There is no
+    shell guard around the registered command any more: grim no longer stands
+    between a client and its own failure policy (O4), so a launcher that cannot
+    run surfaces as the shell's own 126/127 and the client applies its own rule.
 
-    Two reachable states, both closer to reality than they look — a directory
-    passes `[ -x ]` (which is why `[ -f ]` was added ahead of it), and a
-    launcher whose `#!` interpreter is gone is what a half-finished upgrade or
-    a `noexec` mount looks like from the shell's side (`exec` failing yields
-    **127**, which is exactly why `exec` was dropped in favour of `s=$?` and a
-    verdict-code allowlist).
+    What grim guarantees instead is (a) the exit is never `2`, which Claude
+    treats as a *block*, (b) nothing runs and nothing is emitted, and (c) the
+    breakage is visible: `grim hook list` reports the launcher as `missing`,
+    `occupied` or `stale` (C-021), read-only.
 
-    The control runs first, with the launcher intact, so "exit 0" is not being
-    read off a command that never worked.
+    The control runs first, with the launcher intact, so the failure is read off
+    a command that worked, and `hook list` reports `current` for it.
     """
     sentinel = tmp_path / "HONEST-ran"
     hook = _publish_sentinel_hook(unique_repo, sentinel)
@@ -479,22 +508,29 @@ def test_the_registered_command_exits_zero_when_the_launcher_is_unusable_b8(
     assert control.returncode == 0, control.stderr
     assert sentinel.exists(), f"POSITIVE CONTROL FAILED\nstderr: {control.stderr}"
     sentinel.unlink()
+    healthy = runner.json("hook", "list")["launcher"]
+    assert healthy["state"] == "current" and healthy["sha256"], healthy
 
-    launcher = Path(runner.grim_home) / "hooks" / "bin" / "grim-hook"
+    launcher = Path(runner.grim_home) / "hooks" / "grim-hook"
     launcher.unlink()
     if break_it == "directory":
         launcher.mkdir()
-    else:
+    elif break_it == "missing-interpreter":
         launcher.write_text("#!/nonexistent/interpreter\nexit 3\n")
         launcher.chmod(0o755)
 
     fired = _fire(command, project_dir)
-    assert fired.returncode == 0, (
-        f"an unusable launcher exited {fired.returncode}; on Copilot's preToolUse that denies "
-        f"the user's tool call\nstderr: {fired.stderr}"
+    assert fired.returncode in exits, (
+        f"an unusable launcher exited {fired.returncode}, expected one of {sorted(exits)}; "
+        f"2 would block Claude's tool call\nstderr: {fired.stderr}"
     )
     assert fired.stdout.strip() == "", f"an unusable launcher emitted a verdict: {fired.stdout!r}"
     assert not sentinel.exists(), "the payload ran despite an unusable launcher"
+
+    reported = runner.json("hook", "list")["launcher"]
+    assert reported["path"] == str(launcher), reported
+    assert reported["state"] == state, reported
+    assert (reported["sha256"] is not None) == has_digest, reported
 
 
 # ---------------------------------------------------------------------------

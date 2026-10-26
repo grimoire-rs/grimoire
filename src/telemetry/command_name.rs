@@ -49,7 +49,6 @@ pub fn command_name(command: Option<&Command>) -> (&'static str, Option<&'static
             return (
                 "hook",
                 Some(match &args.command {
-                    HookCommand::Run(_) => "run",
                     HookCommand::List(_) => "list",
                     HookCommand::Allow(_) => "allow",
                     HookCommand::Revoke(_) => "revoke",
@@ -140,13 +139,6 @@ mod tests {
             (&["completions", "bash"], "completions", None),
             (&["tui"], "tui", None),
             (&["mcp"], "mcp", None),
-            (
-                &[
-                    "hook", "run", "--client", "c", "--event", "e", "--table", "t", "--root", "r",
-                ],
-                "hook",
-                Some("run"),
-            ),
             (&["hook", "list"], "hook", Some("list")),
             (&["hook", "allow"], "hook", Some("allow")),
             (&["hook", "revoke"], "hook", Some("revoke")),

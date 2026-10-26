@@ -47,7 +47,7 @@ MARKER_VALUE = "hook-dispatcher"
 def _dispatch_rows(runner) -> list[dict]:
     """Every dispatch row across every root — the machine-local arming truth.
 
-    The dispatch table is the file `grim hook run` reads, so a row here is what
+    The dispatch table is the file the `grim-hook` launcher reads, so a row here is what
     "armed" means; its absence is what "not armed" means.
     """
     path = Path(runner.grim_home) / "hooks" / "dispatch.json"

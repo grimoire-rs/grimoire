@@ -35,6 +35,8 @@ use crate::store::atomic_write::atomic_write;
 use super::install_error::{InstallError, InstallErrorKind};
 
 #[cfg(test)]
+use super::hook_command::HostOs;
+#[cfg(test)]
 use super::hook_dispatch::RootToken;
 #[cfg(test)]
 use super::vendor::KindSupport;
@@ -618,16 +620,7 @@ impl ClientTarget {
 /// inspects the launcher, that test fails rather than the doc column silently
 /// becoming environment-dependent.
 #[cfg(test)]
-const HOOK_CELL_PROBE_LAUNCHER: &str = "/grim-home/hooks/bin/grim-hook";
-
-/// The absolute dispatch-table path the [`hook_matrix_cell`] probes carry.
-///
-/// Same standing and same argument as [`HOOK_CELL_PROBE_LAUNCHER`]: the table is
-/// located by argv (B1) and reaches only the command string, so the refusal order
-/// never reads it, and the one equality test covers launcher, table and root
-/// token together.
-#[cfg(test)]
-const HOOK_CELL_PROBE_TABLE: &str = "/grim-home/hooks/dispatch.json";
+const HOOK_CELL_PROBE_LAUNCHER: &str = "/grim-home/hooks/grim-hook";
 
 /// The matcher forms [`hook_matrix_cell`] probes each `(event, tier)` pair
 /// with — a closed set, and a pair counts as armed when **any** entry arms it.
@@ -811,8 +804,8 @@ fn hook_cell_probe_arms(
             &hook_cell_probe_entry(tier, matcher),
             event,
             Path::new(HOOK_CELL_PROBE_LAUNCHER),
-            Path::new(HOOK_CELL_PROBE_TABLE),
             root,
+            HostOs::Unix,
         )
         .is_ok()
 }

@@ -2,40 +2,30 @@
 // Copyright 2026 The Grimoire Authors
 
 //! The machine-local dispatch table (C-006) — the one file that says which
-//! hooks are armed for which root, and the only runtime input `grim hook run`
+//! hooks are armed for which root, and the only runtime input `grim-hook`
 //! reads.
 //!
-//! # The table is located by argv, never by the environment (B1)
+//! # The table is located by the launcher's own path, never by the environment (B1)
 //!
-//! `$GRIM_HOME/hooks/dispatch.json` is where grim *writes* it. It is **not**
-//! how the runtime *finds* it: [`crate::env::grim_home`] returns the
-//! environment value verbatim, with no absoluteness check and a **relative**
-//! `.grimoire` fallback when `HOME` is unset, and the CWD of a `grim hook run`
-//! spawned by a client is the workspace. WP-P0 executed both variants against
-//! the shipped 0.13.0 binary: `GRIM_HOME=.devcontainer/tools/grim` and
-//! `env -u HOME -u GRIM_HOME` each resolve repo-relative. A hostile repo that
-//! ships `.envrc` / `.mise.toml` / devcontainer `containerEnv` and commits its
-//! own `dispatch.json` would then have grim read the attacker's table on the
-//! victim's next tool call, with every launcher-path control intact and
-//! *downstream* of it — the CWE-426 class decision I/P closed at the launcher
-//! path, reappearing one layer down where nothing stands in front of it.
+//! `$GRIM_HOME/hooks/dispatch.json` is where grim *writes* it, and the launcher
+//! (`$GRIM_HOME/hooks/grim-hook`) reads `dispatch.json` from the directory it was
+//! executed from, with no argument and no environment variable naming it. That
+//! matters because [`crate::env::grim_home`] returns the environment value
+//! verbatim, with no absoluteness check and a **relative** `.grimoire` fallback
+//! when `HOME` is unset, and the CWD of a launcher spawned by a client is the
+//! workspace. A hostile repo shipping `.envrc` / `.mise.toml` / devcontainer
+//! `containerEnv` could otherwise have the runtime read an attacker-committed
+//! table on the victim's next tool call (CWE-426), downstream of every launcher
+//! path control.
 //!
-//! So the registration bakes the **resolved absolute** table path into the
-//! launcher argv (`--table '<abs>'`, chosen over the equivalent
-//! `--home '<abs>'` — see the module note below), the runtime refuses a
-//! non-absolute `--table`, and `sync_config` refuses to arm at all when
-//! `grim_home()` is relative or resolves inside the workspace being installed
-//! for (C-017 causes 1–2, [`super::hook_registrar`]).
+//! The registration bakes the **resolved absolute** launcher path into the client
+//! command, and `sync_config` refuses to arm at all when `grim_home()` is relative
+//! or resolves inside the workspace being installed for ([`super::hook_registrar`],
+//! causes `grim-home-relative` and `grim-home-in-workspace`).
 //!
-//! ## Why `--table`, not `--home` (owed choice, settled 2026-08-17)
-//!
-//! WP-P0 states the two forms are equivalent for B1's purpose and leaves the
-//! pick to this WP. `--table` wins on least authority: it passes exactly the
-//! one path the runtime needs, where `--home` passes a **directory** from which
-//! the runtime could derive the launcher, the payload trees, the root-key file
-//! and the content store. Every one of those derivations would be a second
-//! runtime input smuggled in behind one argv value, and C-007's "the table is
-//! the sole runtime input" would stop being checkable by reading the argv.
+//! The launcher's only runtime inputs are that table, the client's stdin and its
+//! three argv words (client, event, root token); C-007's "the table is the sole
+//! runtime input" stays checkable by reading the launcher's `main`.
 //!
 //! # The root key is an opaque token (B3)
 //!
@@ -44,7 +34,7 @@
 //! supplyable: `global` is a fixed literal, and a workspace path is usually
 //! guessable. Grim is not the only writer of client hook configs — a hostile
 //! repo can commit **its own** registration invoking the victim's real launcher
-//! (`${HOME}/.grimoire/hooks/bin/grim-hook` expands on Claude, WP-B § 6.1) with
+//! (`${HOME}/.grimoire/hooks/grim-hook` expands on Claude, WP-B § 6.1) with
 //! an attacker-chosen event, matcher and root — so a guessable key lets it fire
 //! the victim's globally-armed `gatekeeper`, whose `allow` verdict suppresses
 //! the client's own tool-approval prompt (T3 to fire, T4 to profit). Checking
@@ -63,24 +53,27 @@
 //! (`root-key`, mode `0o600`), never in a repository, and the token is a pure
 //! function of it and the root.
 
-use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use hmac::{Hmac, KeyInit, Mac};
-use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
 use crate::lock::advisory_lock::AdvisoryFileLock;
 use crate::lock::lock_error::LockErrorKind;
-use crate::oci::hook::{CanonicalEvent, HookHandler, HookPayloadMode, HookTier, MATCHER_MAX_BYTES};
 use crate::store::atomic_write::atomic_write;
 
+#[cfg(test)]
+pub use grimoire_hook_core::table::read_table;
+pub use grimoire_hook_core::table::{
+    DISPATCH_SCHEMA, DispatchDegrade, DispatchEntry, DispatchRoot, MAX_TABLE_BYTES, RootToken, read_stored,
+};
+
 /// Directory under `$GRIM_HOME` holding everything hook-related: the generated
-/// launcher (`bin/grim-hook`), the dispatch table, the root-key file, and the
+/// launcher (`grim-hook`), the dispatch table, the root-key file, and the
 /// per-artifact payload trees.
 ///
-/// `bin` and `dispatch.json` are `RESERVED_ARTIFACT_NAMES`
+/// `grim-hook`, `bin` and `dispatch.json` are `RESERVED_ARTIFACT_NAMES`
 /// (`crate::oci::hook`) precisely because payloads are siblings here.
 pub const HOOKS_DIR: &str = "hooks";
 
@@ -133,23 +126,6 @@ const ROOT_KEY_BYTES: usize = 32;
 /// guessing attacker has. The remaining bytes are discarded, never stored.
 const ROOT_TOKEN_BYTES: usize = 16;
 
-/// The dispatch table's schema version, read **before** anything else (W2).
-///
-/// The reader contract is asymmetric on purpose: an unrecognized value —
-/// including a *newer* one after a grim downgrade — is treated as an **empty
-/// table**, one log line, exit 0. Codex's own behaviour is the cautionary
-/// precedent (WP-B § 2.2: one bad key silently drops every hook in the file),
-/// and I3 makes "the feature is off" the only acceptable degrade direction.
-pub const DISPATCH_SCHEMA: u32 = 1;
-
-/// Hard ceiling on the table read (W2 (c)).
-///
-/// A build-time cap does not bind a file on disk, so the runtime re-checks both
-/// this and `MATCHER_MAX_BYTES` at read time. 1 MiB is far above any real table
-/// (one JSON object per armed hook) and far below anything that costs the hot
-/// path a measurable read.
-pub const MAX_TABLE_BYTES: u64 = 1 << 20;
-
 /// Mode for `$GRIM_HOME/hooks/` — owner-only (W3).
 ///
 /// The shared-`$GRIM_HOME` case (`subsystem-file-structure.md` contemplates one
@@ -158,9 +134,11 @@ pub const MAX_TABLE_BYTES: u64 = 1 << 20;
 /// preserves an existing capped mode (`mode & 0o644`), so a `0o600` table
 /// *stays* `0o600` across writes — a tighter mode is implementable with the
 /// shipped primitive and costs nothing.
+#[cfg(unix)]
 pub const HOOKS_DIR_MODE: u32 = 0o700;
 
 /// Mode for the dispatch table and the root-key file — owner-only (W3).
+#[cfg(unix)]
 pub const TABLE_MODE: u32 = 0o600;
 
 /// `$GRIM_HOME/hooks`.
@@ -190,6 +168,7 @@ pub fn owned_file_record_path(grim_home: &Path, surface: &Path) -> PathBuf {
 pub fn ensure_owned_files_dir(grim_home: &Path) -> io::Result<PathBuf> {
     ensure_hooks_dir(grim_home)?;
     let dir = hooks_dir(grim_home).join(OWNED_FILES_DIR);
+    #[cfg(unix)]
     let existed = dir.exists();
     std::fs::create_dir_all(&dir)?;
     #[cfg(unix)]
@@ -235,6 +214,7 @@ pub fn consent_path(grim_home: &Path, workspace: &Path) -> PathBuf {
 pub fn ensure_consent_dir(grim_home: &Path) -> io::Result<PathBuf> {
     ensure_hooks_dir(grim_home)?;
     let dir = consent_dir(grim_home);
+    #[cfg(unix)]
     let existed = dir.exists();
     std::fs::create_dir_all(&dir)?;
     #[cfg(unix)]
@@ -375,58 +355,6 @@ pub fn workspace_key(workspace: &Path) -> String {
     hex::encode(hasher.finalize())
 }
 
-/// An opaque per-install root key: `HMAC-SHA256(machine key, root)`, hex,
-/// truncated to 128 bits.
-///
-/// Newtype rather than `String` so it cannot be confused with the
-/// human-readable root at a call site — which is the confusion B3 is about.
-/// **Never** `global`, never a path.
-/// # Why this deliberately does NOT derive `Deserialize`
-///
-/// It used to, and that quietly falsified the safety argument stated on
-/// [`Vendor::hook_registration`](super::vendor::Vendor::hook_registration):
-/// serde gives a private-field newtype a **transparent** deserializer, so
-/// `serde_json::from_str::<RootToken>("\"anything\"")` minted one — making the
-/// type exactly as forgeable from a `&str` as the absolute path it replaced,
-/// which is the property its own existence is meant to deny. Found by the WP-J1
-/// author while looking for a legitimate way to build a probe token.
-///
-/// The dispatch table still has to round-trip its keys, so the capability lives
-/// in the one reader that needs it ([`read_table`]) rather than on the type,
-/// where any caller could reach it. `Serialize` stays: writing a token is not
-/// minting one.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-pub struct RootToken(String);
-
-impl RootToken {
-    /// The token's wire form — 32 lowercase hex characters.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// A token with a caller-chosen value, **tests only**.
-    ///
-    /// `#[cfg(test)]`, so it does not exist in the shipped binary and cannot
-    /// widen the type for production callers. It exists because a byte-exact
-    /// assertion on a generated command string needs a known token, while
-    /// [`root_token`] derives one from a per-`$GRIM_HOME` random key.
-    ///
-    /// Before this existed, a test helper minted tokens with
-    /// `serde_json::from_value` — the very transparent-newtype route that
-    /// falsified the type's safety claim. Removing `Deserialize` broke that
-    /// helper, which is how the hole was closed rather than merely documented.
-    #[cfg(test)]
-    pub fn for_test(value: &str) -> Self {
-        Self(value.to_owned())
-    }
-}
-
-impl std::fmt::Display for RootToken {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
 /// [`root_token`] for a **read-only** caller: never creates the machine key.
 ///
 /// `Ok(None)` when no key file exists yet, which is exactly the case where
@@ -487,7 +415,12 @@ fn token_from_key(key: &[u8], root: RootScope<'_>) -> io::Result<RootToken> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "hook root key is not a usable HMAC key"))?;
     mac.update(root.display().as_bytes());
     let tag = mac.finalize().into_bytes();
-    Ok(RootToken(hex::encode(&tag[..ROOT_TOKEN_BYTES])))
+    RootToken::parse(&hex::encode(&tag[..ROOT_TOKEN_BYTES])).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "hook root token is not 32 lowercase hex characters",
+        )
+    })
 }
 
 /// Create `$GRIM_HOME/hooks` (and its parents) with owner-only permissions.
@@ -594,267 +527,6 @@ fn read_root_key(path: &Path) -> io::Result<Option<Vec<u8>>> {
     }
 }
 
-/// One armed hook, as the runtime needs it — the dispatch table's leaf.
-///
-/// Everything here is grim-resolved at install time. The runtime looks a row up
-/// by `(root token, client, event)` plus its own matcher pass and spawns
-/// `handler` from `payload_dir`; it **hashes nothing** (C-009).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DispatchEntry {
-    /// The config binding name of the artifact this entry came from. Reaches
-    /// the audit trail as `<artifact>/<id>`; never a shell string (C-018b).
-    pub artifact: String,
-    /// [`crate::oci::hook::HookEntry::id`], unique within the artifact.
-    pub id: String,
-    /// **The client this row is armed for** — the second component of the
-    /// `(root token, client, event)` selection key above, and the reason a row
-    /// exists per `(hook, client)` rather than per hook.
-    ///
-    /// # Why this field is required, and why that is the *safe* choice
-    ///
-    /// Without it the dimension is not merely unpopulated, it is
-    /// **unrecoverable**. Every other field on this struct is client-*independent*:
-    /// `artifact`, `id`, `event`, `tier`, `matcher`, `handler`, `timeout`,
-    /// `payload` and `policy` come from the record and the manifest, and
-    /// `payload_dir` is one directory per scope shared by every arming client
-    /// (S-003). So the two shapes the convergence loop bridges cannot be joined:
-    /// [`super::hook_registrar::desired_entries`] is **per vendor** (it filters
-    /// `record.outputs` by `o.client`), while [`converge_root`] replaces a root's
-    /// whole `hooks` vector **wholesale**. Calling it once per vendor makes each
-    /// vendor's write wipe the previous vendor's rows; unioning across vendors
-    /// instead yields *N byte-identical rows*, which is worse than a duplicate —
-    /// it means a hook grim `Declined` for one client (an untranslatable matcher
-    /// per C-025, a tier that client cannot honour) is indistinguishable from one
-    /// it armed there, so **the declining client runs code the user was told was
-    /// not armed for it.** That converts a render-time decline into a silent
-    /// arming, which is the failure C-017 and C-025 exist to prevent.
-    ///
-    /// # Required, not `#[serde(default)]` — Principle 9 does not apply yet
-    ///
-    /// Principle 9 governs **released** surfaces, and this table has never
-    /// shipped: `git ls-tree 03e59b0 -- src/install/` (the v0.13.0 release
-    /// commit) contains **no hook file at all**, and hooks are gated off behind
-    /// `[options.experimental]` regardless. There is no `dispatch.json` anywhere
-    /// to be compatible with, so this is the one free moment to make the field
-    /// mandatory. A defaulted `String` would yield `""` for a client-less row,
-    /// and `""` would then have to mean either "matches nothing" or "matches
-    /// every client" — an ambiguity sitting in exactly the row-selection path
-    /// that decides whether a declining client executes code. Required makes
-    /// that row unrepresentable, and W2's row-reject-with-a-log-line already
-    /// makes a malformed row degrade to *not armed* rather than to *armed for
-    /// everyone*. [`DISPATCH_SCHEMA`] therefore stays `1`.
-    ///
-    /// A `String` and not [`ClientTarget`](super::client_target::ClientTarget):
-    /// this is the same spelling [`ClientOutput::client`](super::install_state::ClientOutput)
-    /// carries, so the two structures the convergence loop bridges name a client
-    /// one way, and a legacy or unparsable client name recorded in `state.json`
-    /// stays representable here — it simply selects no row at dispatch time,
-    /// which is the fail-safe direction.
-    pub client: String,
-    /// The canonical firing event.
-    pub event: CanonicalEvent,
-    /// What the handler may do with the moment.
-    pub tier: HookTier,
-    /// grim's **own** matcher dialect, kept verbatim so grim — not the vendor —
-    /// owns matching (`None` = every tool). Re-checked against
-    /// `MATCHER_MAX_BYTES` at read time (W2 (c)): the build-time cap does not
-    /// bind a file on disk.
-    pub matcher: Option<String>,
-    /// The program to run.
-    pub handler: HookHandler,
-    /// Grim-enforced timeout in seconds; `None` = the format default.
-    pub timeout: Option<u64>,
-    /// Envelope transport.
-    pub payload: HookPayloadMode,
-    /// The materialized payload tree the handler runs from — absolute, resolved
-    /// from the recorded `ClientOutput` at convergence time.
-    pub payload_dir: PathBuf,
-    /// The digest the artifact resolved to at lock time — **provenance for
-    /// diagnostics only, never a gate** (W4 · I5).
-    ///
-    /// It was `approved digest` and that name was a false security claim: A2
-    /// deleted the approval store, A3 deleted the exec-time re-check, and the
-    /// runtime hashes nothing (C-009). A field named `approved` that gates
-    /// nothing gets read as a control by the next reviewer. `None` for a
-    /// path-sourced (dev) install, which has no registry pin.
-    pub resolved_digest: Option<String>,
-    /// The reserved `policy` key, carried through unparsed so a future
-    /// vocabulary lands additively.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub policy: Option<serde_json::Value>,
-}
-
-/// Every hook armed for one root, plus that root in readable form.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DispatchRoot {
-    /// [`RootScope::display`] — **diagnostics only.** Never matched against
-    /// anything at runtime, never compared to the invoking workspace (C-007),
-    /// and never derived back into a token.
-    pub root: String,
-    /// The armed hooks, in a stable order so the written bytes are
-    /// deterministic.
-    pub hooks: Vec<DispatchEntry>,
-}
-
-/// The whole table: `schema` plus one entry per root token.
-///
-/// One file for the whole machine — but see the module doc: "machine-local" is
-/// a property of *where grim writes it*, made true at runtime only by the
-/// argv-supplied absolute path.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct DispatchTable {
-    /// Read first, before any other field (W2 (a)).
-    pub schema: u32,
-    /// Armed hooks per opaque root token, holding only the rows this binary can
-    /// read. No `Deserialize`: [`read_table`] builds it row by row, and is the
-    /// only place a [`RootToken`] is reconstituted from stored bytes.
-    pub roots: BTreeMap<RootToken, DispatchRoot>,
-}
-
-/// One root as stored, its rows still untyped so each is read on its own.
-#[derive(Deserialize)]
-struct StoredRoot {
-    root: String,
-    hooks: Vec<serde_json::Value>,
-}
-
-impl DispatchTable {
-    /// The empty table at the current schema — also what every W2 degrade
-    /// resolves to, so "unreadable" and "nothing armed" are one code path.
-    pub fn empty() -> Self {
-        Self {
-            schema: DISPATCH_SCHEMA,
-            roots: BTreeMap::new(),
-        }
-    }
-}
-
-/// Why a table read produced [`DispatchTable::empty`] instead of content —
-/// one log line's worth of reason, never an error (W2 · I3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DispatchDegrade {
-    /// No table on disk — the ordinary "no hooks armed" state, including the
-    /// feature being off (Decision N: "off" reaches the runtime structurally,
-    /// as an empty table).
-    Absent,
-    /// Larger than [`MAX_TABLE_BYTES`].
-    Oversize,
-    /// Not readable as JSON, not an object, or without a `roots` object.
-    Unparsable,
-    /// A `schema` this binary does not recognize — **including a newer one**
-    /// after a downgrade. Never an error: a downgraded grim must degrade to
-    /// "hooks off", not block the agent.
-    UnknownSchema,
-    /// A row failed the read-time re-check (`MATCHER_MAX_BYTES`, a
-    /// non-absolute `payload_dir`).
-    ///
-    /// Whole-table, not per-row: a table grim cannot fully vouch for arms
-    /// nothing, because "some rows survived" is how a tampered table gets a
-    /// partial verdict honoured.
-    RowRejected,
-}
-
-/// Read the table at `path` — **never fails, never panics** (W2).
-///
-/// The whole of the reader contract, in the order the checks run: size cap →
-/// parse → `schema` → per-row re-checks. Any failure yields
-/// [`DispatchTable::empty`] plus the [`DispatchDegrade`] reason for one log
-/// line, and the caller exits 0. No `unwrap`, no `expect`, no `Err`
-/// (`quality-rust.md`; W2 (d)).
-///
-/// `path` must already be absolute — the runtime refuses a non-absolute
-/// `--table` before it gets here (B1 (3)), and this function deliberately does
-/// **not** re-derive it, because the only other way to get one is
-/// [`crate::env::grim_home`], which the runtime may never call (C-007).
-///
-/// **One parser, and it lives here.** WP-K's runtime calls this rather than
-/// deserializing the file itself: two readers of one format drift, and the
-/// drift direction is "the runtime honours a row the writer would not have
-/// written" — the C-021 lesson applied to the table instead of the projection.
-pub fn read_table(path: &Path) -> (DispatchTable, Option<DispatchDegrade>) {
-    let degraded = |reason: DispatchDegrade| (DispatchTable::empty(), Some(reason));
-    let mut stored = match read_stored(path) {
-        Ok(stored) => stored,
-        Err(reason) => return degraded(reason),
-    };
-
-    // Row by row: every grim on the machine shares this file, so a row an older
-    // binary cannot read (a newer tier, event or handler) must cost only that
-    // row, never every other workspace's hooks.
-    let mut table = DispatchTable::empty();
-    if let Some(serde_json::Value::Object(roots)) = stored.remove("roots") {
-        for (token, root) in roots {
-            let Ok(root) = serde_json::from_value::<StoredRoot>(root) else {
-                tracing::debug!("dispatch root this grim cannot read; skipped");
-                continue;
-            };
-            let hooks = root
-                .hooks
-                .into_iter()
-                .filter_map(|row| match serde_json::from_value::<DispatchEntry>(row) {
-                    Ok(entry) => Some(entry),
-                    Err(e) => {
-                        tracing::debug!(error = %e, "dispatch row this grim cannot read; skipped");
-                        None
-                    }
-                })
-                .collect();
-            table
-                .roots
-                .insert(RootToken(token), DispatchRoot { root: root.root, hooks });
-        }
-    }
-
-    // (c) Row re-checks. Whole-table, not per-row: a table grim cannot fully
-    // vouch for arms nothing, because "some rows survived" is how a tampered
-    // table gets a partial verdict honoured.
-    let rows_ok = table.roots.values().flat_map(|root| &root.hooks).all(|hook| {
-        hook.matcher.as_ref().is_none_or(|m| m.len() <= MATCHER_MAX_BYTES) && hook.payload_dir.is_absolute()
-    });
-    if !rows_ok {
-        return degraded(DispatchDegrade::RowRejected);
-    }
-
-    (table, None)
-}
-
-/// The table's top-level object exactly as stored, every key kept and no row
-/// typed yet — the shared base of [`read_table`] and [`converge_root`].
-///
-/// `Ok` guarantees a `schema` this binary understands and a `roots` object.
-fn read_stored(path: &Path) -> Result<serde_json::Map<String, serde_json::Value>, DispatchDegrade> {
-    // (c) The size cap, before the read — a cap applied after reading the file
-    // is not a cap.
-    match std::fs::metadata(path) {
-        Ok(meta) if meta.len() > MAX_TABLE_BYTES => return Err(DispatchDegrade::Oversize),
-        Ok(_) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(DispatchDegrade::Absent),
-        // Unreadable for any other reason is not "absent": the file may well be
-        // there. It is still the same degrade direction (I3) but a different
-        // log line, so it is reported as unparsable rather than as absent.
-        Err(_) => return Err(DispatchDegrade::Unparsable),
-    }
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(DispatchDegrade::Absent),
-        Err(_) => return Err(DispatchDegrade::Unparsable),
-    };
-
-    // (a) `schema` first, through an untyped parse, so a newer schema reports as
-    // `UnknownSchema` rather than as whatever its row shape fails on.
-    let Ok(serde_json::Value::Object(object)) = serde_json::from_slice(&bytes) else {
-        return Err(DispatchDegrade::Unparsable);
-    };
-    // (b) Any unrecognized value — including a newer one after a downgrade.
-    if object.get("schema").and_then(serde_json::Value::as_u64) != Some(u64::from(DISPATCH_SCHEMA)) {
-        return Err(DispatchDegrade::UnknownSchema);
-    }
-    if !object.get("roots").is_some_and(serde_json::Value::is_object) {
-        return Err(DispatchDegrade::Unparsable);
-    }
-    Ok(object)
-}
-
 /// The outcome of a [`converge_root`] call, for one `tracing` line and for the
 /// registrar's own report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -910,11 +582,45 @@ impl std::error::Error for DispatchError {
     }
 }
 
+/// Proof that this process holds the dispatch table's advisory lock.
+///
+/// Acquired once by the registrar and passed to every step that touches
+/// `hooks/` (the launcher ensure, then [`converge_root`]), so the lock covers the
+/// whole write rather than one call of it. Released on drop.
+#[derive(Debug)]
+pub struct DispatchGuard {
+    _lock: AdvisoryFileLock,
+}
+
+impl DispatchGuard {
+    /// Take the dispatch lock without waiting.
+    ///
+    /// # Errors
+    ///
+    /// [`DispatchError::Locked`] when another install holds it: the caller
+    /// reports `not-armed` and writes nothing. [`DispatchError::Io`] otherwise.
+    pub fn try_acquire(grim_home: &Path) -> Result<Self, DispatchError> {
+        // The lock's sidecar is created beside the guarded path, so the directory
+        // has to exist before the acquire — and it must be `0o700` before anything
+        // is written into it, not after (W3).
+        ensure_hooks_dir(grim_home).map_err(DispatchError::Io)?;
+        let lock = AdvisoryFileLock::try_acquire(&dispatch_path(grim_home)).map_err(|e| match e.kind {
+            LockErrorKind::Locked => DispatchError::Locked,
+            LockErrorKind::Io(io) => DispatchError::Io(io),
+            // No other `LockErrorKind` is reachable from `try_acquire` — the
+            // TOML/size variants belong to the lock *file* reader, not to the
+            // advisory guard. Kept total rather than panicking (I3).
+            other => DispatchError::Io(io::Error::other(other.to_string())),
+        })?;
+        Ok(Self { _lock: lock })
+    }
+}
+
 /// The fraction of [`MAX_TABLE_BYTES`] past which [`converge_root`] warns.
 ///
 /// The cliff is total: one byte over the cap and [`read_table`] returns the
 /// empty table, so **every hook for every root on the machine silently
-/// disarms**. `grim hook run` does log that at `warn`, but its stderr is a
+/// disarms**. The launcher does log that at `warn`, but its stderr is a
 /// client's to swallow, so in practice the user sees their hooks stop. The
 /// warning therefore has to fire on the *install* path, which is a terminal the
 /// user is looking at, and it has to fire before the cliff rather than at it.
@@ -979,31 +685,18 @@ const TABLE_WARN_DENOMINATOR: u64 = 10;
 ///
 /// # Errors
 ///
-/// [`DispatchError::Locked`] when another install holds the lock — the caller
-/// reports `not-armed` and writes nothing. [`DispatchError::TableFull`] when
+/// [`DispatchError::TableFull`] when
 /// the result would exceed [`MAX_TABLE_BYTES`] — likewise nothing written.
 /// [`DispatchError::Io`] otherwise, including a non-empty `hooks` over a table
 /// this binary cannot read, which is left untouched.
 pub fn converge_root(
     grim_home: &Path,
+    _guard: &DispatchGuard,
     token: &RootToken,
     root: RootScope<'_>,
     hooks: &[DispatchEntry],
 ) -> Result<DispatchWrite, DispatchError> {
-    // The lock's sidecar is created beside the guarded path, so the directory
-    // has to exist before the acquire — and it must be `0o700` before anything
-    // is written into it, not after (W3).
-    ensure_hooks_dir(grim_home).map_err(DispatchError::Io)?;
     let path = dispatch_path(grim_home);
-
-    let _guard = AdvisoryFileLock::try_acquire(&path).map_err(|e| match e.kind {
-        LockErrorKind::Locked => DispatchError::Locked,
-        LockErrorKind::Io(io) => DispatchError::Io(io),
-        // No other `LockErrorKind` is reachable from `try_acquire` — the
-        // TOML/size variants belong to the lock *file* reader, not to the
-        // advisory guard. Kept total rather than panicking (I3).
-        other => DispatchError::Io(io::Error::other(other.to_string())),
-    })?;
 
     // Spliced into the stored JSON, never re-serialized from `read_table`'s
     // view: that view drops what this binary cannot read, so writing it back
@@ -1098,6 +791,20 @@ pub fn converge_root(
 mod tests {
     use super::*;
 
+    /// `converge_root` under a freshly taken guard, so a held lock surfaces as
+    /// `DispatchError::Locked` exactly as it did before the guard was split out.
+    fn converge(
+        home: &Path,
+        token: &RootToken,
+        root: RootScope<'_>,
+        hooks: &[DispatchEntry],
+    ) -> Result<DispatchWrite, DispatchError> {
+        let guard = DispatchGuard::try_acquire(home)?;
+        converge_root(home, &guard, token, root, hooks)
+    }
+    use crate::oci::hook::{CanonicalEvent, HookHandler, HookPayloadMode, HookTier, MATCHER_MAX_BYTES};
+    use grimoire_hook_core::table::DispatchTable;
+
     // ── reserved-name drift (round 3, B1/B2) ─────────────────────────────────
 
     /// ⛔ **B1/B2.** Every name grim itself writes directly under
@@ -1152,14 +859,14 @@ mod tests {
         const EXPECTED_UNRESERVED: [&str; 0] = [];
 
         let home = tempfile::tempdir().expect("tempdir");
-        let grim = home.path().join("grim");
-        std::fs::write(&grim, b"#!/bin/sh\nexit 0\n").expect("fake binary");
-
         // Provoke every write install performs under `hooks/`.
         let token = root_token(home.path(), RootScope::Global).expect("mint the root key");
-        crate::install::hook_launcher::generate(home.path(), &grim).expect("generate the launcher");
+        {
+            let guard = DispatchGuard::try_acquire(home.path()).expect("uncontended guard");
+            crate::install::launcher::ensure(home.path(), &guard).expect("install the launcher");
+        }
         let rows = [entry("obs", &payload_dir(home.path(), RootScope::Global, "guard"))];
-        converge_root(home.path(), &token, RootScope::Global, &rows).expect("write the table");
+        converge(home.path(), &token, RootScope::Global, &rows).expect("write the table");
 
         let list = || -> std::collections::BTreeSet<String> {
             std::fs::read_dir(hooks_dir(home.path()))
@@ -1224,11 +931,11 @@ mod tests {
     /// take the second route, because the array cannot hold a pid.
     #[test]
     fn every_runtime_written_name_at_the_hooks_root_is_unusable_as_a_binding() {
-        let audit = crate::command::hook::run::AUDIT_FILE;
-        let rotated = format!("{audit}{}", crate::hook::audit::ROTATED_SUFFIX);
+        let audit = grimoire_hook_core::AUDIT_FILE;
+        let rotated = format!("{audit}{}", grimoire_hook_core::audit::ROTATED_SUFFIX);
         // Read from the function that produces it, so this row observes production
         // rather than re-spelling it (fix-verify pass 2, W1).
-        let envelope = crate::command::hook::pipeline::envelope_file_name(4294967295, 0);
+        let envelope = grimoire_hook_core::pipeline::envelope_file_name(4294967295, 0);
         // `atomic_write`'s temp sibling. This one IS a hand-written stand-in for
         // tempfile's default prefix, which grim does not choose and cannot import a
         // constant for — so the row rests on the leading dot being outside the
@@ -1412,7 +1119,7 @@ mod tests {
 
         let rows = [claude, codex];
         assert_eq!(
-            converge_root(home.path(), &token, RootScope::Global, &rows).unwrap(),
+            converge(home.path(), &token, RootScope::Global, &rows).unwrap(),
             DispatchWrite::Written
         );
 
@@ -1648,7 +1355,7 @@ mod tests {
 
         let mine = [entry("p", Path::new("/abs/p"))];
         assert_eq!(
-            converge_root(home.path(), &project, RootScope::Workspace(ws), &mine).unwrap(),
+            converge(home.path(), &project, RootScope::Workspace(ws), &mine).unwrap(),
             DispatchWrite::Written
         );
         assert_eq!(
@@ -1659,11 +1366,11 @@ mod tests {
         assert_eq!(on_disk()["extension"], extension);
         assert_eq!(read_table(&path).0.roots[&project].hooks, mine);
         assert_eq!(
-            converge_root(home.path(), &project, RootScope::Workspace(ws), &mine).unwrap(),
+            converge(home.path(), &project, RootScope::Workspace(ws), &mine).unwrap(),
             DispatchWrite::Unchanged
         );
 
-        converge_root(home.path(), &project, RootScope::Workspace(ws), &[]).unwrap();
+        converge(home.path(), &project, RootScope::Workspace(ws), &[]).unwrap();
         assert_eq!(on_disk()["roots"], serde_json::json!({"ffff": other}));
     }
 
@@ -1682,7 +1389,7 @@ mod tests {
             br#"{"schema":1,"roots":[]}"#.to_vec(),
         ] {
             std::fs::write(&path, &body).unwrap();
-            let err = converge_root(
+            let err = converge(
                 home.path(),
                 &token,
                 RootScope::Global,
@@ -1702,7 +1409,7 @@ mod tests {
 
             // Nothing to remove from it either, and still nothing written.
             assert_eq!(
-                converge_root(home.path(), &token, RootScope::Global, &[]).unwrap(),
+                converge(home.path(), &token, RootScope::Global, &[]).unwrap(),
                 DispatchWrite::Unchanged
             );
             assert_eq!(std::fs::read(&path).unwrap(), body);
@@ -1716,26 +1423,26 @@ mod tests {
         let hooks = vec![entry("deny-curl", Path::new("/abs/payloads/guard"))];
 
         assert_eq!(
-            converge_root(home.path(), &token, RootScope::Global, &hooks).unwrap(),
+            converge(home.path(), &token, RootScope::Global, &hooks).unwrap(),
             DispatchWrite::Written
         );
         let written = std::fs::read(dispatch_path(home.path())).unwrap();
 
         assert_eq!(
-            converge_root(home.path(), &token, RootScope::Global, &hooks).unwrap(),
+            converge(home.path(), &token, RootScope::Global, &hooks).unwrap(),
             DispatchWrite::Unchanged
         );
         assert_eq!(std::fs::read(dispatch_path(home.path())).unwrap(), written);
 
         assert_eq!(
-            converge_root(home.path(), &token, RootScope::Global, &[]).unwrap(),
+            converge(home.path(), &token, RootScope::Global, &[]).unwrap(),
             DispatchWrite::Removed
         );
         let (table, degrade) = read_table(&dispatch_path(home.path()));
         assert_eq!(degrade, None);
         assert!(table.roots.is_empty());
         assert_eq!(
-            converge_root(home.path(), &token, RootScope::Global, &[]).unwrap(),
+            converge(home.path(), &token, RootScope::Global, &[]).unwrap(),
             DispatchWrite::Unchanged
         );
     }
@@ -1769,10 +1476,10 @@ mod tests {
         let n = usize::try_from((MAX_TABLE_BYTES - 16 * per_entry) / per_entry).unwrap();
         assert!(size(n) <= MAX_TABLE_BYTES);
 
-        converge_root(home.path(), &global, RootScope::Global, &hooks(n, "g")).unwrap();
+        converge(home.path(), &global, RootScope::Global, &hooks(n, "g")).unwrap();
         let before = std::fs::read(dispatch_path(home.path())).unwrap();
 
-        let err = converge_root(home.path(), &project, RootScope::Workspace(ws), &hooks(64, "p"))
+        let err = converge(home.path(), &project, RootScope::Workspace(ws), &hooks(64, "p"))
             .expect_err("a write past the cap must be refused");
         assert!(matches!(err, DispatchError::TableFull { .. }), "{err:?}");
         assert_eq!(std::fs::read(dispatch_path(home.path())).unwrap(), before);
@@ -1788,14 +1495,14 @@ mod tests {
         let global = root_token(home.path(), RootScope::Global).unwrap();
         let project = root_token(home.path(), RootScope::Workspace(ws)).unwrap();
 
-        converge_root(
+        converge(
             home.path(),
             &global,
             RootScope::Global,
             &[entry("g", Path::new("/abs/g"))],
         )
         .unwrap();
-        converge_root(
+        converge(
             home.path(),
             &project,
             RootScope::Workspace(ws),
@@ -1809,7 +1516,7 @@ mod tests {
         assert_eq!(table.roots[&project].root, ws.to_string_lossy());
 
         // Removing one leaves the other.
-        converge_root(home.path(), &project, RootScope::Workspace(ws), &[]).unwrap();
+        converge(home.path(), &project, RootScope::Workspace(ws), &[]).unwrap();
         let (table, _) = read_table(&dispatch_path(home.path()));
         assert_eq!(table.roots.keys().collect::<Vec<_>>(), vec![&global]);
     }
@@ -1821,7 +1528,7 @@ mod tests {
         ensure_hooks_dir(home.path()).unwrap();
 
         let _held = AdvisoryFileLock::try_acquire(&dispatch_path(home.path())).unwrap();
-        let err = converge_root(
+        let err = converge(
             home.path(),
             &token,
             RootScope::Global,
@@ -1843,7 +1550,7 @@ mod tests {
         std::fs::write(&path, br#"{"schema":1,"roots":{}}"#).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-        converge_root(
+        converge(
             home.path(),
             &token,
             RootScope::Global,

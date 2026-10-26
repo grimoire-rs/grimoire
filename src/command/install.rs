@@ -470,7 +470,7 @@ fn armed_after_convergence(
     let Ok(Some(token)) = hook_dispatch::existing_root_token(grim_home, root) else {
         return out;
     };
-    let (table, _degrade) = hook_dispatch::read_table(&hook_dispatch::dispatch_path(grim_home));
+    let (table, _degrade) = crate::install::hook_registrar::read_table_logged(grim_home);
     if let Some(entry) = table.roots.get(&token) {
         for row in &entry.hooks {
             out.entry(row.artifact.clone())

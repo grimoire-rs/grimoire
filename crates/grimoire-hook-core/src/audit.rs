@@ -51,7 +51,7 @@
 //! | Tier | On an audit-write failure | Record |
 //! |---|---|---|
 //! | `observer` | do not spawn; exit 0; warn on stderr | [`AuditOutcome::NotSpawnedUnlogged`] |
-//! | `gatekeeper` | do not spawn; **no verdict**; exit 0; warn on stderr | [`AuditOutcome::NotSpawnedUnlogged`] |
+//! | `gatekeeper` | do not spawn; **no verdict**; warn on stderr (the launcher also exits 74) | [`AuditOutcome::NotSpawnedUnlogged`] |
 //! | `mutator` | **spawn, then discard the rewrite** — the tool call proceeds with its **original** input; exit 0; warn | [`AuditOutcome::RewriteDiscardedUnlogged`] when it rewrote something, [`AuditOutcome::Completed`] when it did not |
 //!
 //! The mutator row is the one that earns the distinction. An **unlogged
@@ -65,7 +65,7 @@
 //!
 //! For `gatekeeper`, failing **open** is within contract rather than a
 //! concession: the tier is already declared **not a security boundary**
-//! (see [`super::trust`]'s module doc). That is why the *durable* signal
+//! (see `hook::trust`'s module doc). That is why the *durable* signal
 //! must be grim's own `not-armed` reporting and the stderr warning, not
 //! the hook's silent absence — which nobody sees.
 //!
@@ -75,11 +75,11 @@
 //! ## Every path arrives as a parameter
 //!
 //! [`AuditLog::at`] takes an absolute path. Nothing in this module calls
-//! [`crate::env::grim_home`], which returns its environment value
+//! `crate::env::grim_home`, which returns its environment value
 //! verbatim with no absoluteness check and falls back to a *relative*
 //! `.grimoire` when `HOME` is unset — so a runtime-derived audit path is
 //! chosen by whoever controls the client's environment, and for a
-//! `grim hook run` spawned by a client the process CWD **is the
+//! `grim-hook` spawned by a client the process CWD **is the
 //! workspace** (audit finding B1, T3, CWE-426).
 
 use std::io::Write as _;
@@ -87,7 +87,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::oci::hook::{CanonicalEvent, HookTier};
+use crate::{CanonicalEvent, HookTier};
 
 /// On-disk record schema version. An unknown version on read is skipped,
 /// never an error: the trail is forensics, and refusing to read it must
@@ -146,7 +146,7 @@ pub enum AuditVerdict {
     ///
     /// **Added by WP-K's Implement phase, additively.** C-003's canonical
     /// vocabulary has four verdicts and this enum shipped with three, so the
-    /// runtime had no honest value for [`crate::command::hook::pipeline::Decision::Ask`]:
+    /// runtime had no honest value for [`Decision::Ask`](crate::response::Decision::Ask):
     /// `Deny` over-reports (the call may still run, with consent) and
     /// [`NoOpinion`](Self::NoOpinion) under-reports it as the fail-safe empty
     /// answer. A forensic record that cannot distinguish "blocked" from
@@ -299,6 +299,15 @@ pub struct AuditRecord {
     pub outcome: AuditOutcome,
 }
 
+/// Insert `name` keeping `names` sorted; an equal name lands after its twins.
+///
+/// An insertion sort rather than `Vec::sort`: the field lists are short and the
+/// generic stable sort is a measurable share of the launcher's size budget.
+pub(crate) fn insert_sorted(names: &mut Vec<String>, name: String) {
+    let at = names.partition_point(|existing| *existing <= name);
+    names.insert(at, name);
+}
+
 impl AuditRecord {
     /// Build a record, sanitizing every caller-supplied string on the way
     /// in and stamping [`AUDIT_SCHEMA_VERSION`], the timestamp and the
@@ -310,16 +319,14 @@ impl AuditRecord {
     /// someone adding a call site rather than by someone changing this
     /// module.
     pub fn new(input: &AuditInput<'_>) -> Self {
-        // Reuses the lock's RFC 3339 helper rather than spelling a second
-        // `chrono` format string: one instant format across every file grim
-        // writes, and `%Y-%m-%dT%H:%M:%SZ` is already the shape a reader of
-        // `grimoire.lock` knows.
-        let timestamp = crate::lock::lock_io::now_rfc3339();
+        let timestamp = crate::time::rfc3339_utc(std::time::SystemTime::now());
         // Sorted so two records describing the same rewrite are byte-equal
         // whatever order the runtime discovered the fields in, and sorted
         // **after** sanitization so the order is the one a reader sees.
-        let mut changed_fields: Vec<String> = input.changed_fields.iter().map(|field| sanitize(field)).collect();
-        changed_fields.sort();
+        let mut changed_fields: Vec<String> = Vec::with_capacity(input.changed_fields.len());
+        for field in input.changed_fields {
+            insert_sorted(&mut changed_fields, sanitize(field));
+        }
         Self {
             schema: AUDIT_SCHEMA_VERSION,
             timestamp,
@@ -422,7 +429,7 @@ pub fn sanitize(value: &str) -> String {
 /// An append-only JSONL audit trail at a fixed, caller-supplied path.
 ///
 /// Holds a path, not an open handle: the trail is written once per hook
-/// invocation from a short-lived `grim hook run` process, so an open
+/// invocation from a short-lived `grim-hook` process, so an open
 /// handle would buy nothing and would hold a lock across the payload's
 /// whole lifetime.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -483,7 +490,7 @@ impl AuditLog {
     /// **What the caller must do with that error is the fail-closed
     /// contract, it is tier-aware, and it is the one place in this
     /// feature most likely to be got backwards.** In every row: log one
-    /// line on stderr and **exit 0**.
+    /// line on stderr and deny nothing.
     ///
     /// - `observer`, `gatekeeper` — do not spawn the payload, emit **no**
     ///   verdict, report [`AuditOutcome::NotSpawnedUnlogged`].
@@ -496,10 +503,11 @@ impl AuditLog {
     ///   suppressed mutation that never happened into the one record a reader
     ///   consults to ask exactly that.
     ///
-    /// **Never a non-zero exit, and never a deny, in any row** — on
-    /// Copilot's `preToolUse` that denies the user's tool call, turning a
-    /// full disk into grim blocking the agent (I3). See the module doc's
-    /// tier table for why the mutator row differs.
+    /// **Never a deny, in any row.** The exit status is the caller's: the
+    /// launcher exits non-zero only when a gatekeeper was withheld, so the
+    /// client's own failure policy applies. A
+    /// deny would turn a full disk into grim blocking the agent (I3). See the
+    /// module doc's tier table for why the mutator row differs.
     pub fn append_all(&self, records: &[AuditRecord]) -> std::io::Result<()> {
         if records.is_empty() {
             return Ok(());
@@ -508,7 +516,7 @@ impl AuditLog {
         self.rotate_if_needed()?;
         // One buffer, so the batch is one `write_all` of N whole lines rather
         // than N writes. `append(true)` makes each write positioned at the OS
-        // level, so two concurrent `grim hook run` processes interleave whole
+        // level, so two concurrent `grim-hook` processes interleave whole
         // records instead of tearing one — which is why this needs no lock, and
         // why every newline must be inside the same buffer. A batch does not
         // weaken that: each line is capped at [`MAX_RECORD_BYTES`], and the only

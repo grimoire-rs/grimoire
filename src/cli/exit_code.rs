@@ -177,4 +177,21 @@ mod tests {
         let _: std::process::ExitCode = ExitCode::Failure.into();
         let _: std::process::ExitCode = ExitCode::ConfigError.into();
     }
+
+    /// C-N7: the launcher's table reuses grim's numbers, matched by name, so a
+    /// renumbering on either side fails here instead of in a client.
+    #[test]
+    fn the_launcher_exit_table_equals_the_grim_exit_codes_of_the_same_name() {
+        use grimoire_hook_core::DispatchExit;
+        for (launcher, grim) in [
+            (DispatchExit::Success, ExitCode::Success),
+            (DispatchExit::Failure, ExitCode::Failure),
+            (DispatchExit::UsageError, ExitCode::UsageError),
+            (DispatchExit::DataError, ExitCode::DataError),
+            (DispatchExit::IoError, ExitCode::IoError),
+            (DispatchExit::NotFound, ExitCode::NotFound),
+        ] {
+            assert_eq!(launcher.code(), grim as u8, "{launcher:?}");
+        }
+    }
 }

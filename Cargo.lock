@@ -1125,6 +1125,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "grim-hook"
+version = "0.15.0"
+dependencies = [
+ "grimoire-hook-core",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "grimoire"
 version = "0.15.0"
 dependencies = [
@@ -1143,6 +1152,7 @@ dependencies = [
  "fuzzy-matcher",
  "getrandom 0.4.3",
  "globset",
+ "grimoire-hook-core",
  "hex",
  "hmac",
  "ignore",
@@ -1176,6 +1186,16 @@ dependencies = [
  "uuid",
  "webpki-root-certs",
  "zip",
+]
+
+[[package]]
+name = "grimoire-hook-core"
+version = "0.15.0"
+dependencies = [
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

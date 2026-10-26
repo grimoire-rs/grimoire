@@ -586,13 +586,13 @@ def test_the_record_is_machine_local_and_never_repo_resident(
 def test_an_unreadable_record_degrades_to_unconsented_and_never_to_an_error(
     grim_at, project_dir: Path, unique_repo: str
 ) -> None:
-    """**I3** — grim degrades to "the feature is off", never to "the agent is
-    blocked".
+    """**I3** — no benign state errors, and grim forges no verdict of its own.
 
-    A truncated or future-versioned record is treated as absent. Failing hard
-    would let a corrupt file in `$GRIM_HOME` deny every command in every
-    workspace, which is the availability failure I3 exists to forbid — and
-    treating it as *valid* would be the security failure on the other side.
+    A truncated or future-versioned record is treated as absent: the workspace
+    is simply unconsented, and the command exits 0 with nothing armed. Erroring
+    on it would turn a corrupt file in `$GRIM_HOME` into a grim-made failure in
+    every workspace — and treating it as *valid* would be the security failure
+    on the other side.
     """
     hook = _publish_hook(unique_repo)
     write_config(project_dir, hooks={"shell-guard": hook.fq})

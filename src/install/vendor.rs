@@ -32,12 +32,12 @@ use std::path::{Path, PathBuf};
 use crate::config::scope::ConfigScope;
 use crate::oci::ArtifactKind;
 use crate::oci::hook::{
-    CanonicalEvent, HookCommand, HookEntry, HookRegistration, HookSurface, HookTier, matcher_char_allowed,
-    projection_for,
+    CanonicalEvent, HookEntry, HookRegistration, HookSurface, HookTier, matcher_char_allowed, projection_for,
 };
 use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
+use super::hook_command::{self, CommandForm, HostOs, WindowsShell};
 use super::hook_dispatch::RootToken;
 use super::install_state::{ClientOutput, InstallState};
 use super::render::{RenderError, RenderedDoc};
@@ -296,6 +296,9 @@ pub enum HookDecline {
     /// error (`HookManifest::validate` rule 3), which would make this variant
     /// unreachable — it stays as the seam's backstop.
     MatcherEmpty,
+    /// The launcher path cannot be written into this client's command without
+    /// ambiguity (control character, non-UTF-8, or unquotable under `cmd /C`).
+    LauncherPathUnquotable,
 }
 
 impl HookDecline {
@@ -313,6 +316,7 @@ impl HookDecline {
             }
             Self::MatcherNotLossless => "the matcher has no lossless form in this client's matcher dialect",
             Self::MatcherEmpty => "an empty matcher is rejected by at least one client and match-all on another",
+            Self::LauncherPathUnquotable => "the launcher path cannot be quoted for this client's shell",
         }
     }
 }
@@ -548,111 +552,6 @@ fn matcher_may_select_shell_command_tool(client: &str, matcher: Option<&str>) ->
 fn starts_with_ignore_ascii_case(tool: &str, alternative: &str) -> bool {
     let (tool, alternative) = (tool.as_bytes(), alternative.as_bytes());
     tool.len() >= alternative.len() && tool[..alternative.len()].eq_ignore_ascii_case(alternative)
-}
-
-/// A path or literal wrapped in POSIX single quotes for a generated shell
-/// string, with embedded `'` escaped the only way `sh` allows (`'\''`).
-///
-/// Every v1 client executes its registration through a shell — claude
-/// `/bin/sh`, copilot `bash`, codex the **user's** `$SHELL -lc` (WP-B § 4) —
-/// and the launcher path is grim-resolved but not grim-*shaped*: a home
-/// directory may contain a space or a quote. WP-B executed the failure: with an
-/// unquoted expansion and a space in the path, `sh`/`bash` word-split it and a
-/// planted executable at the split prefix **ran instead of the launcher**.
-///
-/// Implemented rather than stubbed: this quoting *is* the C-018b argument, and a
-/// body-less version would leave the design constraint unexpressed.
-///
-/// **There is a second copy of this function, and that is a merge obligation, not
-/// a design.** `hook_launcher::posix_single_quote` is byte-identical and is called
-/// by `hook_launcher::registered_command` — a second generator of the very string
-/// [`registration_command`] emits (see that function's note). Whichever generator
-/// survives reconciliation takes its own quoting with it.
-fn posix_single_quote(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
-    out.push('\'');
-    for c in value.chars() {
-        if c == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(c);
-        }
-    }
-    out.push('\'');
-    out
-}
-
-/// The registration command string, byte for byte as
-/// [`Vendor::hook_registration`]'s doc specifies it (C-008 as amended by WP-P0 —
-/// B1, B2, B3, B8).
-///
-/// # The parameter list *is* the C-018b proof
-///
-/// Five grim-chosen values and nothing else is in scope: no [`HookEntry`], so
-/// "no publisher-controlled value is interpolated into a generated shell string"
-/// is checkable by reading this signature rather than by auditing a format
-/// string. That is the same argument `hook_launcher::CommandSpec` makes in type
-/// form, and it is why the emission is a free function here instead of inline in
-/// a trait method that holds the entry.
-///
-/// # Two deliberate byte-level choices a future editor must not "tidy"
-///
-/// - **No trailing newline.** The string is embedded in a JSON string field in a
-///   file grim does not own, and **codex hashes the raw command text for its trust
-///   record** — a changed byte silently un-trusts an already-approved hook. Any
-///   choice is stable; this one is stable *and* leaves no trailing whitespace in
-///   the client's config.
-/// - **The `case` carries no per-client arm.** The doc's template spells the
-///   middle arm `<grim's own verdict codes for this client>`, and
-///   `hook_launcher::VERDICT_EXIT_CODES` answers that with an **empty list for
-///   every one of the three v1 clients** — deliberately, because every verdict on
-///   all twelve `RESPONSE_PROJECTION` rows is a JSON field on stdout, never an
-///   exit code. An empty list cannot be spelled as a `case` pattern at all (`)`
-///   with no pattern is a syntax error), so the arm is elided and what remains is
-///   exactly "everything → 0". **The coupling is real and unenforced:** that
-///   roster is private to `hook_launcher`, so a client that later declares a
-///   verdict exit code needs this line changed by hand. Reconciling the two
-///   generators (below) is what removes the hazard.
-///
-/// # Owed: this is the second generator of one string
-///
-/// `hook_launcher::registered_command` generates the same five lines from a
-/// `CommandSpec`, and eleven `expect(dead_code)` reasons in that module name
-/// `Vendor::hook_registration` as its consumer. Two generators for a string a
-/// client *hashes* is a byte-divergence hazard, so exactly one must survive
-/// merge. Delegating from here is not currently possible without a cross-WP
-/// change: `registered_command` returns `Result<_, CommandRefusal>`, and that
-/// refusal is owned by the registrar (which checks both paths in step 1 of
-/// `hook_registrar::sync_for_state`, before any file is touched) — mapping it to
-/// a [`HookDecline`] would misreport an environment problem as a per-hook policy
-/// decline. The two candidate resolutions, in preference order: make
-/// `VERDICT_EXIT_CODES`/`verdict_exit_codes` visible and delete this function in
-/// favour of `registered_command`; or delete `registered_command` and keep this
-/// one as the single site.
-fn registration_command(launcher: &Path, table: &Path, client: &str, event: &str, root: &RootToken) -> String {
-    // Both paths are single-quoted at the ASSIGNMENT site, which is the half of
-    // the quoting rule that is easy to miss: a double-quoted literal still
-    // performs parameter expansion, command substitution and backticks, and
-    // WP-P0 executed a `$GRIM_HOME` containing `$(…)` that ran its payload while
-    // the launcher never ran. `client`, `event` and the token are unquoted
-    // because each is drawn from a closed grim-chosen set — one of 18 ASCII
-    // vendor names, one of four PascalCase event literals, and 32 hex characters.
-    //
-    // `to_string_lossy` is the fail-safe direction for a non-UTF-8 path: the
-    // replacement character makes `[ -f "$L" ]` false, so the hook does not fire
-    // rather than firing on a path grim did not resolve. The registrar refuses to
-    // arm for the neighbouring case (a control character in either path) before
-    // this is ever reached.
-    format!(
-        "L={launcher}\n\
-         [ -f \"$L\" ] && [ -x \"$L\" ] || exit 0\n\
-         \"$L\" run --client {client} --event {event} --table {table} --root {root}\n\
-         s=$?\n\
-         case \"$s\" in 0) exit 0 ;; *) exit 0 ;; esac",
-        launcher = posix_single_quote(&launcher.to_string_lossy()),
-        table = posix_single_quote(&table.to_string_lossy()),
-        root = root.as_str(),
-    )
 }
 
 /// Which splice engine renders a vendor's [`Vendor::mcp_config_path`] file.
@@ -994,148 +893,47 @@ pub trait Vendor {
         KindSupport::Native
     }
 
-    /// Assemble the dispatcher registration this client writes for
-    /// `(entry, event, launcher, table, root)` — **the single
-    /// [`HookEntry`] → [`HookRegistration`] assembly site** (C-005, C-018b,
-    /// C-025).
+    /// How this client takes its hook command: exec form (Copilot) or a shell
+    /// string. The default is the shell form Claude and Qoder use, with
+    /// PowerShell as their Windows shell.
+    fn hook_command_form(&self) -> CommandForm {
+        CommandForm::Shell(WindowsShell::PowerShell)
+    }
+
+    /// Assemble the registration this client writes for
+    /// `(entry, event, launcher, root, host_os)`: the single
+    /// [`HookEntry`] to [`HookRegistration`] assembly site.
     ///
-    /// **`table` was added at Implement (2026-08-17) and the stub's four-parameter
-    /// signature was wrong.** The command string carries
-    /// `--table '<abs dispatch.json>'` (B1) and the stub had no way to obtain it;
-    /// the two alternatives were deriving it from `launcher` — encoding
-    /// `$GRIM_HOME/hooks/{bin/grim-hook,dispatch.json}` as a parent-walk in a
-    /// third module, with an undecidable failure mode for a launcher path that has
-    /// no grandparent — or passing it, which is what
-    /// `hook_launcher::CommandSpec` already does for exactly these five values.
-    /// The caller (`hook_registrar::sync_for_state`, WP-I/WP-J2) holds
-    /// `grim_home` and computes both paths from it already, so an extra argument
-    /// costs it nothing and a missing one is a compile error rather than a wrong
-    /// path.
-    ///
-    /// Defaulted with a complete shared body and **overridden by no vendor**,
-    /// which is what makes "single assembly site" a structural property rather
-    /// than a convention: the three v1 clients differ only in `--client` and the
-    /// event spelling, both read off `self`. A per-vendor override would
-    /// re-create the duplication C-018b and C-021 jointly exist to prevent.
-    ///
-    /// # The command string, byte for byte
-    ///
-    /// ```text
-    /// L='<launcher>'
-    /// [ -f "$L" ] && [ -x "$L" ] || exit 0
-    /// "$L" run --client <client> --event <Event> --table '<abs dispatch.json>' --root <opaque token>
-    /// s=$?
-    /// case "$s" in 0) exit 0 ;; <grim's own verdict codes for this client>) exit "$s" ;; *) exit 0 ;; esac
-    /// ```
-    ///
-    /// Five WP-P0 amendments are load-bearing in that string, and an earlier
-    /// revision of this very doc comment carried the **pre-audit** form under
-    /// the same "byte for byte" heading — the most authoritative phrasing
-    /// available — which is exactly how an implementer builds the wrong string
-    /// from an authoritative-looking source. Each line, and why:
-    ///
-    /// - **`[ -f "$L" ]` ahead of `[ -x "$L" ]`** (B8 · I3). A *directory*
-    ///   passes `-x`, so the exec-bit test alone admits one.
-    /// - **No `exec`** (B8). `exec` replaces the shell, so nothing can inspect
-    ///   the exit status afterwards; the `s=$?` + `case` pair exists to map
-    ///   grim's own verdict codes through and force **everything else to 0**.
-    ///   Mandatory on copilot, whose `preToolUse` is fail-closed, and used on
-    ///   all three for one code path. `exec` *is* used **inside** the shim, and
-    ///   never in this registration.
-    /// - **`--table '<abs>'`** (B1 · T3 · I1, I4). The dispatch table is located
-    ///   by argv, not derived from the environment at runtime, and it is exactly
-    ///   one file — never a directory the runtime could derive other paths from.
-    /// - **`--root <opaque token>`** (B3 · T3/T4 · I1, I4), an HMAC of the root
-    ///   path under a machine-local key. **Not** `global` and **not** an
-    ///   absolute workspace path: those are the two values B3 forbids on the
-    ///   wire. Grim-chosen is necessary but *insufficient* — the value must also
-    ///   be unguessable without the key. The parameter is
-    ///   [`super::hook_dispatch::RootToken`], minted **only** by
-    ///   `hook_dispatch::root_token`'s HMAC derivation, and that is the whole
-    ///   safety argument: a token any caller could build from a `&str` would be
-    ///   exactly as forgeable as the absolute path it replaced. **That claim was
-    ///   false for one revision and is now true again**: the type derived
-    ///   `Deserialize`, and serde gives a private-field newtype a *transparent*
-    ///   deserializer, so `from_str::<RootToken>("\"anything\"")` minted one —
-    ///   reachable by any caller, not merely by the dispatch table it was
-    ///   justified for. `Deserialize` is gone; the table reads its keys through a
-    ///   serde module scoped to that one field, and tests use a `#[cfg(test)]`
-    ///   constructor absent from the shipped binary. Worth stating because the
-    ///   hole was invisible at the call site and was found only by someone
-    ///   hunting for a legitimate way to build a probe token. This module
-    ///   briefly declared a second, borrowed `RootToken` of its own — deleted at
-    ///   Implement, because two types for one concept with the weaker one
-    ///   reachable is the regression the token exists to prevent, and because
-    ///   its private field made this method uncallable from any other module.
-    ///   A scope and a path are inputs to *deriving* a token
-    ///   (`hook_dispatch::RootScope`), never something the registration sees.
-    /// - **No `$PATH` fallback** (W9 · T3 · I1). A missing recorded launcher
-    ///   exits 0; it never falls back to resolving `grim` on `$PATH`.
-    ///
-    /// Every token is grim-owned (**C-018b**): grim's own literals, the absolute
-    /// launcher and dispatch-table paths grim resolved at install time,
-    /// `self.name()`,
-    /// [`Self::hook_event_name`], and `root`. **No value from `entry` is
-    /// interpolated into it** — `matcher` reaches
-    /// [`HookRegistration::matcher`] (a *structured* field the client parses as
-    /// data), `timeout` reaches [`HookRegistration::timeout`], and `id`,
-    /// `policy` and the vendor override tables reach the dispatch table or
-    /// nothing at all. The pinning test is therefore decidable: build a
-    /// registration from a manifest stuffed with shell metacharacters and assert
-    /// the command string is byte-identical to the metacharacter-free case.
-    ///
-    /// Four executed facts shape that one line, none of them stylistic
-    /// (`research_hooks_launcher_verification.md` § 4, § 5, § 6.2):
-    ///
-    /// - **The guard tests the launcher, not `grim` on `$PATH`.** Copilot's
-    ///   `preToolUse` is **fail-closed**, so WP-B watched the earlier
-    ///   `command -v grim && exec … || exit 0` form get the tool call *denied*:
-    ///   a failed `exec` exits **127**, which never reaches a trailing
-    ///   `|| exit 0`. Testing `$L` up front exits 0 and the call proceeds
-    ///   (S-009). The `exec`-free form above closes the same hole a second way
-    ///   — with the status captured rather than replaced, no spawn failure can
-    ///   reach the client as a verdict at all.
-    /// - **`"$L"` is quoted and the path single-quoted.** Unquoted, with a space
-    ///   in the path, WP-B observed a planted executable at the word-split
-    ///   prefix run *instead of* the launcher.
-    /// - **Absolute, never `${GRIM_HOME:-…}`.** All three clients expand
-    ///   environment variables in the registered string from the client's
-    ///   inherited environment — executed on each — so an env-derived executed
-    ///   path is attacker-selectable (CWE-426, I1).
-    /// - **Never copilot's exec-form `exec`/`args` field.** It removes the shell
-    ///   and therefore the guard, and a missing launcher becomes a spawn failure
-    ///   that copilot fails closed on.
-    ///   [`HookCommand::Argv`](crate::oci::hook::HookCommand::Argv) is
-    ///   consequently never constructed in v1.
+    /// The command runs the native launcher as `<client> <event> <root>`
+    /// ([`hook_command`]). Nothing from `entry` reaches it: `matcher` lands in the
+    /// client's structured matcher field and `timeout` in `timeout`, so a
+    /// manifest stuffed with shell metacharacters yields a byte-identical
+    /// command (pinned by `hook_command_ignores_every_entry_field`). The launcher
+    /// path is the only operand that can need quoting, and the shell form's
+    /// bytes are stable because Codex hashes the raw command text.
     ///
     /// # Refusal order
     ///
-    /// [`HookDecline::NoSurface`] → [`SurfaceUnimplemented`](HookDecline::SurfaceUnimplemented)
-    /// → [`EventUnsupported`](HookDecline::EventUnsupported)
-    /// → [`TierUnsupported`](HookDecline::TierUnsupported)
-    /// → [`MutatorOnShellCommandTool`](HookDecline::MutatorOnShellCommandTool)
-    /// → [`MatcherEmpty`](HookDecline::MatcherEmpty)
-    /// / [`MatcherNotLossless`](HookDecline::MatcherNotLossless). Cheapest and
-    /// most structural first, so the reported reason names the outermost cause.
-    ///
-    /// **Decision K sits ahead of the two matcher refusals deliberately.** An
-    /// empty or untranslatable matcher on a `mutator` would decline anyway, so
-    /// the order changes no verdict — only which reason the author is told, and
-    /// "you may not rewrite a shell command string" is the one that explains the
-    /// design. It is also the arm that must never be reordered *behind* a check
-    /// that could be relaxed later.
+    /// [`HookDecline::NoSurface`], [`SurfaceUnimplemented`](HookDecline::SurfaceUnimplemented),
+    /// [`EventUnsupported`](HookDecline::EventUnsupported),
+    /// [`TierUnsupported`](HookDecline::TierUnsupported),
+    /// [`MutatorOnShellCommandTool`](HookDecline::MutatorOnShellCommandTool),
+    /// [`MatcherEmpty`](HookDecline::MatcherEmpty) or
+    /// [`MatcherNotLossless`](HookDecline::MatcherNotLossless), then
+    /// [`LauncherPathUnquotable`](HookDecline::LauncherPathUnquotable). Decision K
+    /// stays ahead of the matcher refusals because it is the one reason that
+    /// explains the design.
     ///
     /// # Errors
     ///
-    /// One [`HookDecline`] per refusal above. A decline is warn-and-skip, not a
-    /// failure — see that type.
+    /// One [`HookDecline`] per refusal above; a decline is warn-and-skip.
     fn hook_registration(
         &self,
         entry: &HookEntry,
         event: CanonicalEvent,
         launcher: &Path,
-        table: &Path,
         root: &RootToken,
+        host_os: HostOs,
     ) -> Result<HookRegistration, HookDecline> {
         // The fail-safe gate first. `CodegenModule` resolves to a decline **plus
         // one warning at the caller** and never to a panic (I3) — a `match` arm
@@ -1183,21 +981,20 @@ pub trait Vendor {
             MatcherForm::Empty => return Err(HookDecline::MatcherEmpty),
             MatcherForm::NotTranslatable => return Err(HookDecline::MatcherNotLossless),
         };
+        let rendered = hook_command::render(
+            self.hook_command_form(),
+            launcher,
+            self.name(),
+            event_name,
+            root.as_str(),
+            host_os,
+        )
+        .map_err(|_| HookDecline::LauncherPathUnquotable)?;
         Ok(HookRegistration {
             event: event_name.to_string(),
             matcher,
-            // Shell form on all three v1 clients — claude included, which has no
-            // argv array at all. `HookCommand::Argv` is never constructed in v1:
-            // copilot's exec form would remove the shell and therefore the guard,
-            // and its `preToolUse` fails closed on the resulting spawn failure.
-            command: HookCommand::Shell(registration_command(launcher, table, self.name(), event_name, root)),
-            // Unused off Unix: the registrar refuses to arm there
-            // (`platform-unsupported`), since the launcher is POSIX shell too.
-            // Arming Windows means filling this from
-            // `hook_launcher::registered_command_powershell` and lifting that gate.
-            command_windows: None,
-            // Grim enforces the authored timeout itself; a client-side value is a
-            // backstop, so it passes through unchanged where the surface takes one.
+            command: rendered.command,
+            shell: rendered.shell,
             timeout: entry.timeout,
         })
     }
@@ -1567,6 +1364,7 @@ pub(crate) fn global_skills_root(home: Option<PathBuf>) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::oci::hook::{HookCommand, HookShell};
 
     /// Decision K's roster is keyed by client name, outside the trait, so
     /// nothing else forces a row for a new mutator-capable client — and without
@@ -1885,18 +1683,6 @@ mod tests {
 
     // ── The hook seam ──────────────────────────────────────────────────────
     //
-    // ⚠ C-018b's MANIFEST-LEVEL pinning test — build a registration from a
-    // manifest stuffed with shell metacharacters and assert the command string is
-    // byte-identical to the metacharacter-free case — is **owed and currently
-    // unwritable here**: every success path through `hook_registration` consults
-    // `hook_tier_support`, which consults `crate::oci::hook::projection_for`,
-    // which is still a WP-A stub (`unimplemented!`). It lands the moment WP-A's
-    // body does, and nothing about it is blocked on this WP.
-    //
-    // What *is* pinned now is the same property one level down, where it is
-    // decidable: `registration_command` takes five grim-chosen values and no
-    // `HookEntry`, so no publisher-controlled value is in scope to interpolate,
-    // and the byte-exact string is asserted directly.
 
     /// A [`RootToken`] with a known value, for a byte-exact assertion.
     ///
@@ -1993,106 +1779,172 @@ mod tests {
         assert!(matcher_may_select_shell_command_tool("cursor", None));
     }
 
-    #[test]
-    fn registration_command_is_the_documented_five_lines() {
-        // Byte for byte, because codex hashes the raw command text for its trust
-        // record: a changed byte silently un-trusts an already-approved hook.
-        let command = registration_command(
-            Path::new("/home/u/.grimoire/hooks/bin/grim-hook"),
-            Path::new("/home/u/.grimoire/hooks/dispatch.json"),
-            "claude",
-            "PreToolUse",
-            &token("0123456789abcdef0123456789abcdef"),
-        );
-        assert_eq!(
-            command,
-            "L='/home/u/.grimoire/hooks/bin/grim-hook'\n\
-             [ -f \"$L\" ] && [ -x \"$L\" ] || exit 0\n\
-             \"$L\" run --client claude --event PreToolUse \
-             --table '/home/u/.grimoire/hooks/dispatch.json' \
-             --root 0123456789abcdef0123456789abcdef\n\
-             s=$?\n\
-             case \"$s\" in 0) exit 0 ;; *) exit 0 ;; esac"
-        );
-        // The properties the string exists for, asserted by name so a "tidy-up"
-        // that keeps the shape but loses one of them fails loudly:
-        assert!(!command.contains("exec "), "no exec — s=$? + case must see the status");
-        assert!(
-            command.contains("[ -f \"$L\" ] && [ -x \"$L\" ]"),
-            "-f ahead of -x: a directory carries the exec bit"
-        );
-        assert!(!command.contains("GRIM_HOME"), "absolute, never env-derived");
-        assert!(!command.contains("command -v"), "no $PATH fallback");
-        assert!(!command.ends_with('\n'), "no trailing newline");
+    fn observer_entry(matcher: Option<&str>) -> HookEntry {
+        HookEntry {
+            id: "h".to_owned(),
+            event: Some(CanonicalEvent::PreToolUse),
+            tier: HookTier::Observer,
+            matcher: matcher.map(str::to_owned),
+            handler: crate::oci::hook::HookHandler::Command("./guard.sh".to_owned()),
+            timeout: Some(5),
+            payload: None,
+            policy: None,
+            vendor: std::collections::BTreeMap::new(),
+        }
     }
 
-    #[test]
-    fn registration_command_single_quotes_a_hostile_grim_home() {
-        // WP-P0 executed this under `dash`: with the assignment double-quoted, a
-        // `$GRIM_HOME` containing `$(…)` or a backtick RAN ITS PAYLOAD and the
-        // launcher never ran — silent in both directions.
-        let command = registration_command(
-            Path::new("/home/u/$(touch /tmp/pwned)/`id`/a b/it's/hooks/bin/grim-hook"),
-            Path::new("/home/u/$(touch /tmp/pwned)/hooks/dispatch.json"),
-            "codex",
-            "PreToolUse",
-            &token("0123456789abcdef0123456789abcdef"),
-        );
-        let assignment = command.lines().next().expect("the command has five lines");
-        assert_eq!(
-            assignment, "L='/home/u/$(touch /tmp/pwned)/`id`/a b/it'\\''s/hooks/bin/grim-hook'",
-            "single-quoted at the ASSIGNMENT site, with ' → '\\''"
-        );
-        // Inside single quotes nothing expands, so the metacharacters are inert
-        // rather than absent — what must not happen is a quote closing early.
-        assert!(command.contains("--table '/home/u/$(touch /tmp/pwned)/hooks/dispatch.json'"));
+    const ROOT: &str = "0123456789abcdef0123456789abcdef";
+
+    fn registered(client: &str, launcher: &str, host_os: HostOs) -> Result<HookRegistration, HookDecline> {
+        let target = crate::install::client_target::ClientTarget::ALL
+            .into_iter()
+            .find(|c| c.vendor().name() == client)
+            .expect("a known client");
+        target.vendor().hook_registration(
+            &observer_entry(None),
+            CanonicalEvent::PreToolUse,
+            Path::new(launcher),
+            &token(ROOT),
+            host_os,
+        )
     }
 
-    #[test]
-    fn the_two_command_generators_agree_byte_for_byte() {
-        use super::super::hook_launcher::{CommandSpec, registered_command};
+    fn shell(text: &str) -> HookCommand {
+        HookCommand::Shell(text.to_owned())
+    }
 
-        // `hook_launcher::registered_command` generates the same five lines from a
-        // `CommandSpec`, and eleven `expect(dead_code)` reasons in that module name
-        // `Vendor::hook_registration` as its consumer. Delegating is not possible
-        // from production code without editing that file: the attribute is
-        // `cfg_attr(not(test), …)`, so a production call would leave it unfulfilled
-        // under `-D warnings`, and its `Result<_, CommandRefusal>` belongs to the
-        // registrar, which refuses both paths in step 1 of `sync_for_state`.
-        //
-        // Until exactly one generator survives merge, this is the guard that makes
-        // the duplication safe rather than latent: **codex hashes the raw command
-        // text for its trust record**, so a one-byte divergence between the two
-        // would silently un-trust every already-approved hook. Asserted over a
-        // benign path AND a hostile one, and over both `OwnFile` clients plus
-        // claude, because the verdict-code arm is looked up per client.
-        for (client, event) in [("claude", "PreToolUse"), ("codex", "Stop"), ("copilot", "PostToolUse")] {
-            for (launcher, table) in [
-                (
-                    "/home/u/.grimoire/hooks/bin/grim-hook",
-                    "/home/u/.grimoire/hooks/dispatch.json",
-                ),
-                (
-                    "/home/u/$(touch /tmp/pwned)/`id`/a b/it's/hooks/bin/grim-hook",
-                    "/home/u/$(touch /tmp/pwned)/hooks/dispatch.json",
-                ),
-            ] {
-                let (launcher, table) = (Path::new(launcher), Path::new(table));
-                let root = token("0123456789abcdef0123456789abcdef");
-                let theirs = registered_command(&CommandSpec {
-                    launcher,
-                    table,
-                    client,
-                    event,
-                    root: &root,
-                })
-                .expect("neither path carries a control character");
-                assert_eq!(
-                    registration_command(launcher, table, client, event, &root),
-                    theirs,
-                    "the two generators must not diverge by a byte for {client}/{event}"
-                );
-            }
+    /// Byte-for-byte registrations per client, host OS and path shape. Codex
+    /// hashes the raw command text for its trust record, so a changed byte
+    /// un-trusts an approved hook.
+    #[test]
+    fn hook_registration_goldens() {
+        let unix = HostOs::Unix;
+        let win = HostOs::Windows;
+        let bare = "/home/u/.grimoire/hooks/grim-hook";
+        let quoted = "/home/u/it's a dir/hooks/grim-hook";
+        let win_bare = r"C:\Users\u\.grimoire\hooks\grim-hook.exe";
+        let win_quoted = r"C:\Users\Jo Doe\.grimoire\hooks\grim-hook.exe";
+        let ops = |client: &str| format!("{client} PreToolUse {ROOT}");
+
+        // (client, launcher, host, command, shell)
+        let cases: Vec<(&str, &str, HostOs, HookCommand, Option<HookShell>)> = vec![
+            ("claude", bare, unix, shell(&format!("{bare} {}", ops("claude"))), None),
+            ("qoder", bare, unix, shell(&format!("{bare} {}", ops("qoder"))), None),
+            ("codex", bare, unix, shell(&format!("{bare} {}", ops("codex"))), None),
+            (
+                "copilot",
+                bare,
+                unix,
+                HookCommand::Argv(vec![bare.into(), "copilot".into(), "PreToolUse".into(), ROOT.into()]),
+                None,
+            ),
+            (
+                "claude",
+                quoted,
+                unix,
+                shell(&format!("'/home/u/it'\\''s a dir/hooks/grim-hook' {}", ops("claude"))),
+                None,
+            ),
+            (
+                "codex",
+                quoted,
+                unix,
+                shell(&format!("'/home/u/it'\\''s a dir/hooks/grim-hook' {}", ops("codex"))),
+                None,
+            ),
+            (
+                "copilot",
+                quoted,
+                unix,
+                HookCommand::Argv(vec![quoted.into(), "copilot".into(), "PreToolUse".into(), ROOT.into()]),
+                None,
+            ),
+            (
+                "claude",
+                win_bare,
+                win,
+                shell(&format!("C:/Users/u/.grimoire/hooks/grim-hook.exe {}", ops("claude"))),
+                None,
+            ),
+            (
+                "codex",
+                win_bare,
+                win,
+                shell(&format!("{win_bare} {}", ops("codex"))),
+                None,
+            ),
+            (
+                "copilot",
+                win_bare,
+                win,
+                HookCommand::Argv(vec![
+                    win_bare.into(),
+                    "copilot".into(),
+                    "PreToolUse".into(),
+                    ROOT.into(),
+                ]),
+                None,
+            ),
+            (
+                "claude",
+                win_quoted,
+                win,
+                shell(&format!("& '{win_quoted}' {}", ops("claude"))),
+                Some(HookShell::PowerShell),
+            ),
+            (
+                "copilot",
+                win_quoted,
+                win,
+                HookCommand::Argv(vec![
+                    win_quoted.into(),
+                    "copilot".into(),
+                    "PreToolUse".into(),
+                    ROOT.into(),
+                ]),
+                None,
+            ),
+        ];
+        for (client, launcher, host_os, command, shell) in cases {
+            let got = registered(client, launcher, host_os).unwrap_or_else(|d| panic!("{client} {launcher}: {d}"));
+            assert_eq!(got.command, command, "{client} {launcher} {host_os:?}");
+            assert_eq!(got.shell, shell, "{client} {launcher} {host_os:?}");
+        }
+        // Codex's `cmd /C` has no escape for a quote or a space, so a launcher
+        // under such a path is refused instead of registered ambiguously.
+        assert_eq!(
+            registered("codex", win_quoted, win),
+            Err(HookDecline::LauncherPathUnquotable)
+        );
+    }
+
+    /// Nothing from the manifest entry reaches the command: a hostile id,
+    /// handler and matcher yield the bytes a plain one does.
+    #[test]
+    fn hook_registration_command_ignores_every_entry_field() {
+        let plain = observer_entry(Some("Bash"));
+        let mut hostile = observer_entry(Some("Bash"));
+        hostile.id = "$(touch /tmp/pwned)".to_owned();
+        hostile.handler = crate::oci::hook::HookHandler::Command("'; rm -rf / #".to_owned());
+        for client in ["claude", "codex", "copilot"] {
+            let vendor = crate::install::client_target::ClientTarget::ALL
+                .into_iter()
+                .find(|c| c.vendor().name() == client)
+                .expect("a known client")
+                .vendor();
+            let build = |entry: &HookEntry| {
+                vendor
+                    .hook_registration(
+                        entry,
+                        CanonicalEvent::PreToolUse,
+                        Path::new("/home/u/.grimoire/hooks/grim-hook"),
+                        &token(ROOT),
+                        HostOs::Unix,
+                    )
+                    .expect("registers")
+                    .command
+            };
+            assert_eq!(build(&plain), build(&hostile), "{client}");
         }
     }
 
@@ -2124,9 +1976,9 @@ mod tests {
                 vendor.hook_registration(
                     &entry,
                     CanonicalEvent::PreToolUse,
-                    Path::new("/home/u/.grimoire/hooks/bin/grim-hook"),
-                    Path::new("/home/u/.grimoire/hooks/dispatch.json"),
+                    Path::new("/home/u/.grimoire/hooks/grim-hook"),
                     &token("0123456789abcdef0123456789abcdef"),
+                    HostOs::Unix,
                 ),
                 Err(HookDecline::NoSurface),
                 "{client} has no hook surface and must decline"

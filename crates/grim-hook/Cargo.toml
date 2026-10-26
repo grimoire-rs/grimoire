@@ -1,0 +1,24 @@
+[package]
+name = "grim-hook"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native hook launcher for grim"
+publish = false
+
+[[bin]]
+name = "grim-hook"
+path = "src/main.rs"
+
+[dependencies]
+grimoire-hook-core = { path = "../grimoire-hook-core" }
+
+[dev-dependencies]
+serde_json = "1"
+tempfile = "3"
+
+[package.metadata.dist]
+dist = false
+
+[lints]
+workspace = true

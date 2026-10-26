@@ -170,7 +170,7 @@ def test_hostile_clone_today_grim_status_never_touches_the_planted_payload(
 ) -> None:
     """Baseline for S-011 ahead of the hooks feature landing: a `grim` build
     with no hook support at all must not go anywhere near a repo-planted
-    dispatch table. WP-O extends this once `grim hook run` exists."""
+    dispatch table. WP-O extends this now that the launcher exists."""
     workspace = tmp_path / "hostile-clone-status"
     clone = hostile_hook_clone(workspace)
 
