@@ -255,7 +255,7 @@ grammar and flags with `grim update --help`.
 `outdated`, `modified`, `missing`, or `stale`. A hook row adds three more:
 `gated` (feature flag off, or consent missing or drifted), `not-armed` (a
 host-level refusal such as `insecure-transport`, a relative or nested
-`GRIM_HOME`, a non-Unix host, or a surface grim cannot register) and
+`GRIM_HOME`, a client unverified on Windows, or a surface grim cannot register) and
 `untrusted` (client-side trust still pending); the reason is in the
 always-present `arming[].cause` array, see
 [troubleshooting.md](troubleshooting.md#a-hook-that-never-fires). See [artifact
@@ -480,8 +480,10 @@ A **hook** is an artifact that registers with a client's lifecycle so a
 handler runs at a defined moment — before a tool call, after one, at session
 start, or when the agent's turn stops. It is the only kind that causes code
 to execute, and grim treats it accordingly. It is workflow automation, not a
-policy control: hooks fail open, so for enforcement use the client's managed
-settings.
+policy control. A handler that fails or times out gives no opinion, and an
+unknown workspace or an event no hook matches exits 0. A failure in grim itself
+exits non-zero, and the client's own policy for a failing hook decides, because
+grim never masks it. For enforcement, use the client's managed settings.
 
 **It is experimental and off by default.** Arming is **two gates**, and the
 second can be satisfied three ways — deliberately answered in separate places
@@ -557,7 +559,7 @@ attacker-influenceable on the wire. Loopback is exempt, and only
 Setting `options.experimental.hooks` back to `false` and running `grim install`
 removes every registration and dispatch row at that scope (state returns to
 `gated`, cause `feature-flag-off`) but **keeps** the payload, the launcher
-`$GRIM_HOME/hooks/bin/grim-hook` and the workspace consent record. Flipping the
+`$GRIM_HOME/hooks/grim-hook` and the workspace consent record. Flipping the
 flag back on re-arms with no new `grim hook allow`
 ([flag off][hooks-flag-off]).
 
@@ -601,8 +603,9 @@ or deleted by grim: if the bytes on disk are not the ones grim last wrote,
 the client reports `surface-user-owned` and nothing about that file
 changes. Every other client declines hooks and records nothing. Qoder's
 registration is unverified: no Qoder hook has been seen firing from a grim
-registration yet. Hooks arm on Linux and macOS only; on Windows grim reports
-every hook `not-armed` with cause `platform-unsupported`.
+registration yet. Hooks arm on Linux and macOS; on Windows they arm for Claude
+only, and every other client reports `not-armed` with cause
+`platform-unsupported`.
 
 ### `grim hook list`
 
@@ -625,11 +628,12 @@ vocabulary `grim status` uses, and the JSON `items` objects carry a nested
 `arming` array so a consumer asking "which clients withheld this hook" does
 not have to re-group rows.
 
-**`grim hook run` is not for you.** It is the other `grim hook`
-subcommand, and its caller is the launcher grim generates — it takes
-`--client`, `--event`, `--table`, and `--root`, resolves no scope and reads
-no configuration. `grim hook --help` says so outright. Treat it like
-`grim mcp`: a machine-facing entry point, not a command to type.
+**The launcher is not a command you type.** Clients run
+`$GRIM_HOME/hooks/grim-hook <client> <event> <root>`, a small native program
+`grim install` writes. It reads the dispatch table beside it, resolves no
+scope and needs no `grim` binary. `grim hook list` reports its `launcher`
+(`path`, `sha256`, `state`). After upgrading grim, re-run `grim install` in
+each workspace that uses hooks.
 
 ## Further Reading
 

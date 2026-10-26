@@ -39,8 +39,9 @@ need to refresh it against a newer grim release.
    [troubleshooting.md](troubleshooting.md#a-hook-that-never-fires). Before
    widening any of it: `grim config get options.experimental.hooks`,
    `grim hook --help`, `grim hook allow --help`, `grim hook list`.
-   `grim hook run` stays framed as launcher-invoked, never as a command a
-   person types.
+   `grim hook` has three user-facing subcommands (`list`, `allow`,
+   `revoke`); dispatch runs through the `grim-hook` launcher, never a command
+   a person types.
 7. **Re-verify the marketplace client commands.** The use-a-marketplace guide
    stamps each vendor section "Verified <date>". Vendor CLIs move faster than
    grim, so on each minor re-check the command shapes and the private-repo

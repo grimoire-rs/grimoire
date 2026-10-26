@@ -52,8 +52,9 @@ On every grim **minor** release:
    Confirm against the binary before widening either claim: read
    `grim config list --all` for `options.experimental.hooks`, and
    `grim hook list --help` / `grim hook --help` for the user-facing surface.
-   `grim hook run` stays documented as launcher-invoked, not a command a
-   person types.
+   `grim hook` has three user-facing subcommands (`list`, `allow`,
+   `revoke`); dispatch runs through the `grim-hook` launcher, which is not a
+   `grim` subcommand and not something a person types.
 6. Bump the `compatibility` frontmatter in `SKILL.md` to the verified
    version line. The prose and the footer stay version-neutral — they
    track the release the package ships beside, so nothing else to bump.

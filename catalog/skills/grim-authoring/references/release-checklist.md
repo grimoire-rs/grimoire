@@ -243,7 +243,7 @@ Symptom → cause → fix:
 | "tier … is not valid at event …" | `mutator` outside `PreToolUse`, or `gatekeeper` on an event no client can block at | Change the tier, or the event — **never** relocate a gatekeeper to a later moment |
 | "invalid matcher …" / "matcher of N bytes exceeds…" / "an empty matcher is ambiguous" | A regex, a stray character, > 256 bytes, or `matcher = ""` | Use grim's glob dialect (`[A-Za-z0-9_*?./-\|]`); omit the key to match every tool |
 | "declares timeout = 0; it must be between 1 and 3600 seconds" | A hook entry whose `timeout` is below 1 or above 3600 seconds | Set `timeout` within that range, or omit it for the default 30 |
-| "hook artifact name 'bin' is reserved" | Hook artifact named `bin` or `dispatch.json` — grim's own launcher namespace | Rename the directory and the manifest `name` together |
+| "hook artifact name 'bin' is reserved" | Hook artifact named `bin`, `grim-hook`, `dispatch.json` or another name grim keeps under `$GRIM_HOME/hooks` — grim's own launcher namespace | Rename the directory and the manifest `name` together |
 | "declares both 'argv' and 'command'" / "declares no handler" | A hook entry with two handlers or none | Keep exactly one; prefer `argv` |
 | "key '…' is not a per-client override table" | A `[hooks.<x>]` table whose `<x>` is not a client grim supports (typo'd namespace) | Fix the client name — there is no free-form namespace |
 

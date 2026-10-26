@@ -173,8 +173,10 @@ for token, root in d['roots'].items():
 PreToolUse, `*`) — all for client `claude`, under one opaque root token.
 
 `.claude/settings.local.json` now carries grim-owned handler elements marked
-`"com.grimoire.managed": "hook-dispatcher"`. Their `command` holds the
-**absolute** launcher path (never `$GRIM_HOME`) and that opaque root token.
+`"com.grimoire.managed": "hook-dispatcher"`. Their `command` is one string,
+`<launcher> claude <event> <root>`: the **absolute** path of the native
+`grim-hook` launcher (never `$GRIM_HOME`), the client, the event and that
+opaque root token.
 
 ### 5. Fire them
 
