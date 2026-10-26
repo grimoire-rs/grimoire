@@ -14,7 +14,42 @@
       (Rust 2024, one binary, no new runtime dependency, no daemon)
 **Domain Tags:** integration | security | api | packaging
 **Supersedes:** N/A (this file replaces its own 2026-06-03 draft — see Changelog)
-**Superseded By:** N/A
+**Superseded By:** N/A (in part, on acceptance: [`adr_hook_native_dispatcher.md`](./adr_hook_native_dispatcher.md), see below)
+
+> ### ⚠ DECISIONS D, G, A5, D9 AND OPEN QUESTION 2 ARE SUPERSEDED BY THE NATIVE DISPATCHER — [`adr_hook_native_dispatcher.md`](./adr_hook_native_dispatcher.md) (Accepted 2026-10-25)
+>
+> The `sh` shim and the `grim hook run` dispatcher this file describes no longer exist. Every client now
+> runs a native `grim-hook` binary that grim embeds and writes to `$GRIM_HOME/hooks/grim-hook[.exe]`, and
+> grim deletes the old `hooks/bin/grim-hook` shim on the next convergence. The following text in this file
+> is **historical**. The body stays unedited so its reasoning stays legible:
+>
+> - **D9** (research decision: "no second binary, no `grim-hook` executable") — **reversed.** `grim-hook`
+>   is a second binary, built from a workspace crate and embedded per target.
+> - **Decision D** and **C-008** (the generated `sh` shim at `hooks/bin/grim-hook`, its exit-0 guard, and
+>   the `hook run --client … --event … --root …` argv) — **replaced.** Every client registers the bare
+>   command `<abs>/hooks/grim-hook <client> <event> <root>` (positional, no `--table`, the table found
+>   beside the executable — exec form where the client offers one). The old shim is **kept and regenerated
+>   on every converge**, never reaped, so unrevisited workspaces and cached sessions keep working. (Withdrawn
+>   with O6: the shim is deleted on the next convergence that arms something.)
+> - **A5** (the shim `exec`s a recorded absolute grim path) — **moot.** The launcher no longer runs `grim`.
+> - **Decision G** ("the launcher never signals failure through its exit code") and the matching
+>   **Availability** NFR row — **reversed by owner decision.** Grim never masks a harness's fail-closed
+>   rule. A launcher failure is a non-verdict error exit, never a forged 0 and never 2, so Copilot's
+>   `preToolUse` denies. No benign state (flag off, revoked, unknown root, no match) ever errors. Whether
+>   grim-owned pipeline failures that withhold a gatekeeper also take the error channel is that ADR's open
+>   question **D2**; payload-owned outcomes stay fail-open. Invariant **I3** in `arch-threat-model.md` is
+>   rewritten accordingly.
+> - **C-007** keeps its single-input property ("`dispatch.json` is the only fire-time read"). Its *runtime
+>   home* moves from `grim hook run` to `grim-hook`. `grim hook run` survives as the legacy and debug entry
+>   over the same shared core.
+> - **Open Question 2** (Windows launcher form: a `.cmd` beside the shim, refuse to arm until verified) —
+>   **replaced.** A native `.exe` lifts `platform-unsupported` **per client** once that client's Windows
+>   acceptance passes.
+>
+> Decisions **P** (one machine-local table located by an opaque root), **N** (flag-off as an empty root),
+> **L** (registrations derived, never recorded), **O** and C-004 / C-011 / C-012 are **unchanged**.
+> `dispatch.json` stays `schema: 1`, with additive-only evolution as that ADR's C-N10 defines, and
+> `converge_root`'s "an empty set removes the root" behaviour is unchanged.
 
 ## Context
 
@@ -1785,6 +1820,7 @@ The original wording of each, with its evidence:
 
 | Date | Author | Change |
 |------|--------|--------|
+| 2026-10-25 | Architect (`/hex-architect`, xhigh) | **Supersession banner added** below Metadata. On acceptance, [`adr_hook_native_dispatcher.md`](./adr_hook_native_dispatcher.md) supersedes D9, Decision D / C-008, A5, Decision G (with its I3 consequence and the Availability NFR row), C-007's runtime home, and Open Question 2. The body is not edited. |
 | 2026-09-28 | WP-07 (hex swarm, `hex/plan_hooks_pr98_revival--wp07`) | **Fact corrections, plan C-172 (three fixes).** (1) **Correction**: every citation of Gemini CLI's trust store as `trusted_hooks.json` was a paraphrase error — confirmed against upstream docs, issues and PRs (`research_hooks_qoder_copilot_schemas.md` §4) as `~/.gemini/trustedFolders.json`; corrected in place here and in `adr_hook_workspace_consent.md` (Key insight 6, the A2 partial-reversal note). (2) The Codex `hooks.json` collision path in this ADR's risk list wrongly described a shipped exit-65/`--force` adopt flow; corrected per plan D-16 — whole-file surfaces are grim's only by digest, otherwise `not-armed`/`surface-user-owned`, never written or deleted, no force-adopt exists. (3) C-004's Copilot PreToolUse/SessionStart rows updated from "unverified"/"NOT DOCUMENTED" to the WP-02 live-probed dialect (`updatedInput`, flat `additionalContext`); OpenCode stated plugin-API-only; the cloud agent's exclusion (D7) noted as deliberate, not an upstream gap. |
 | 2026-09-28 | WP-07 (hex swarm, `hex/plan_hooks_pr98_revival--wp07`) | **Amendment A7 (plan C-172).** Export decline is family-aware: `not-representable` vs `no-format-surface` (C-140…C-142). |
 | 2026-09-28 | WP-07 (hex swarm, `hex/plan_hooks_pr98_revival--wp07`) | **Amendment A8 (plan C-172).** Qoder ships armed, global-only, on source evidence in lieu of a live invocation, with the unobserved-firing residual dated and tracked as follow-up issue 2 (D-19). |

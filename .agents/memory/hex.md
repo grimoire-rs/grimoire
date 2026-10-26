@@ -42,7 +42,7 @@ preferences, not copies. Team-shared — commit it.
 - Constitution: `AGENTS.md` › "Core Principles" — nine binding principles.
   Principle 9 (Preserve Compatibility) is a hard gate on the road to
   1.0.0: breaking changes are prohibited, evolution is additive-only.
-  Contract detail: `docs/src/stability.md`,
+  Contract detail: `docs/src/content/docs/stability.md`,
   `.agents/adr/adr_render_layout_stability.md`.
 - Discussions: `.agents/discussions/` (hex default) — `/hex-discuss`
   artifacts; `State: active` there arms the hex-state no-edit rule. Most recently drained: `otel-usage-telemetry.md` (→ loop, 2026-10-22).
@@ -105,6 +105,11 @@ research-axes:
   `nox-review` has no model flag and inherits that global default.
 
 ## Memory
+
+- **Active plan (2026-10-25, hex-plan high):**
+  `.agents/plans/plan_hook_native_dispatcher.md`, State `plan-approved`, Next `/hex-execute`, branch `feat/hook-native-dispatcher` (root orchestrator in main checkout; the branch holds ADR, plan and all impl). ADR `adr_hook_native_dispatcher.md` Accepted 2026-10-25 (D1 512/640 KiB closed after P3; D2 non-verdict channel for withheld gatekeepers; D3 unsigned Windows behind clean-Win11 gate). Pipelines: P0 (spike, hard) → P1 (Hat 1 move) → P2 (Hat 2 std port) → CW → P3 ∥ P4 (review) → P3b ∥ P5 (hard) ∥ P6 → `/security-auditor`. C-001…C-025, S-001…S-011, PD-1…PD-12.
+  **Pitfall:** a std + serde_json + `Command` probe is already 366 KiB on glibc and 453 KiB on musl. The size budget gets set from real dispatcher bytes, never from a stub.
+  **Pitfall:** core may hold only serde/serde_json; a "pure move" of `pipeline.rs`/`run.rs` drags tokio/globset in (PD-1). `RootToken` needs a crate-private unchecked ctor in core, or Hat 1 breaks (PD-3).
 
 - **Active plan (2026-10-22, hex-plan high, goal loop):**
   `.agents/plans/plan_otel_usage_telemetry.md` — State `review` (executed 2026-10-22, Next `/hex-finalize`), branch `hex/otel-usage-telemetry` (worktree `grimoire-duo`). ADR `adr_otel_usage_telemetry.md` (Accepted; OBS-12 exemption under 8 conditions). CW + P1–P4 (wave 1) + P5; critical path CW → P1 → P5. C-001…C-023, S-001…S-010.
@@ -727,3 +732,12 @@ re-arguing settled design while still reporting divergences as information.
   in-band-only reply is a single point of failure for a whole perspective.
 - Retro candidate (project-context): "Windows harness CI-mirror mode: serial, verify-deep command, stdout to a pipe" — ledger project-windows-harness-ci-mirror, .agents/retro/reports/2026-09-29.md.
 - Retro candidate (project-context): "rtk hook rewrites grep/ls/find; use /usr/bin variants for exact POSIX behaviour" — ledger project-rtk-hook-posix-drift, .agents/retro/reports/2026-09-29.md.
+- Retro candidate (project-context): "Local Windows check must run the whole branch-added test set" — ledger project-windows-harness-ci-mirror, .agents/retro/reports/2026-10-26.md.
+- Retro candidate (project-context): "Let hex --no-verify commits through the pre-commit verify hook" — ledger project-commit-hook-blocks-no-verify, .agents/retro/reports/2026-10-26.md.
+- Retro candidate (project-context): "Drop stale opus pins from hex.md models.overrides" — ledger project-hex-md-model-overrides-stale, .agents/retro/reports/2026-10-26.md.
+- Retro candidate (project-context): "Never chain a destructive git op after a status count" — ledger project-chained-reset-hard, .agents/retro/reports/2026-10-26.md.
+- Retro candidate (project-context): "Run the privacy grep over the whole PR range" — ledger project-pre-push-privacy-range, .agents/retro/reports/2026-10-26.md.
+- Retro candidate (project-context): "Init submodules when creating an agent worktree" — ledger project-worktree-submodules, .agents/retro/reports/2026-10-26.md.
+- Retro candidate (project-context): "Document the sccache sandbox workaround" — ledger project-sccache-sandbox, .agents/retro/reports/2026-10-26.md.
+- Retro candidate (project-context): "Brace shell variables before a colon under zsh" — ledger project-zsh-var-modifier, .agents/retro/reports/2026-10-26.md.
+- Retro candidate (project-context): "Run acceptance tests from the repo root" — ledger project-test-taskfile-cwd, .agents/retro/reports/2026-10-26.md.
