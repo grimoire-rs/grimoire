@@ -34,7 +34,7 @@ jobs:
         with:
           tool: cargo-nextest
       - name: Test
-        run: cargo nextest run --target=${{ matrix.job.target }} --profile ci --locked
+        run: cargo nextest run --workspace --target=${{ matrix.job.target }} --profile ci --locked
       - name: Upload Test Results
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -73,6 +73,90 @@ jobs:
           path: grim-${{ matrix.job.target }}.exe
           compression-level: 0
           retention-days: 7
+
+  # C-024: the macOS leg of the launcher size gate (the others run in
+  # verify-basic), plus the signature and replace checks only a native macOS
+  # runner can make: the kernel kills an exec'd signed binary whose pages change
+  # under it, so a replacement must be a new inode that still verifies.
+  hook-size-macos:
+    name: Launcher Size and Replace (macOS)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # `external/docker_credential` is the [patch.crates-io] source.
+          submodules: recursive
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin
+      - name: Setup Task
+        uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
+      - name: Build and check size
+        run: task rust:hook:size TARGET=aarch64-apple-darwin BUDGET=524288
+      - name: Verify signature, exec, replace, exec
+        run: |
+          set -euo pipefail
+          built=target/aarch64-apple-darwin/hook/grim-hook
+          work="$(mktemp -d)"
+          mkdir "$work/hooks"
+          # An unknown root is a no-op exit 0: this proves the launcher starts, not a hook.
+          echo '{"schema":1,"roots":{}}' > "$work/hooks/dispatch.json"
+          root=00000000000000000000000000000000
+          cp "$built" "$work/hooks/grim-hook"
+          codesign -v "$work/hooks/grim-hook"
+          "$work/hooks/grim-hook" claude SessionStart "$root" </dev/null
+          cp "$built" "$work/hooks/.grim-hook.stage"
+          mv -f "$work/hooks/.grim-hook.stage" "$work/hooks/grim-hook"
+          codesign -v "$work/hooks/grim-hook"
+          "$work/hooks/grim-hook" claude SessionStart "$root" </dev/null
+
+  # The Windows hook suite needs a registry and runs only the hook files: the
+  # Platform Check below skips every registry-backed test. Reproduce locally
+  # with the grim-wintest run.sh before dispatching.
+  hooks-windows:
+    name: Hook Acceptance (Windows)
+    needs: [cross-compile]
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download Binary
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: grim-x86_64-pc-windows-msvc
+          path: test/bin
+      - name: Prepare Binary
+        shell: bash
+        run: mv test/bin/grim-x86_64-pc-windows-msvc.exe test/bin/grim.exe
+      - name: Install uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - name: Setup Task
+        uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
+      - name: Setup OCX
+        # Activates the root ocx.toml, putting the suite's zot registry on PATH.
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        with:
+          version: "0.6.3"
+          groups: default
+      - name: Run Windows hook suite
+        shell: bash
+        run: >-
+          task test --
+          --junit-xml=results/junit.xml
+          tests/test_hooks_windows_launch.py
+          tests/test_hooks_windows_replace.py
+          tests/test_hooks_fixes_windows.py
+        env:
+          SKIP_BUILD: "true"
+      - name: Upload Test Results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: deep-hooks-Windows
+          path: test/results/junit.xml
 
   # Two jobs with deliberately different names, because they are not the same
   # gate. Linux runs the whole suite against a real `registry:2`. Windows
@@ -378,7 +462,7 @@ jobs:
 
   test-results:
     name: Publish Deep Test Results
-    needs: [build, cross-compile, acceptance-tests, principle-9, index-e2e]
+    needs: [build, cross-compile, hooks-windows, acceptance-tests, principle-9, index-e2e]
     runs-on: ubuntu-latest
     if: ${{ !cancelled() }}
     steps:
