@@ -95,6 +95,27 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 ```
 
+### 7. The embedded hook launcher is size-gated
+
+The `grim-hook` launcher (`crates/grim-hook`) is embedded in grim and runs on every hook event, so its size is a CI gate (budget 524288 B, 655360 B on musl; the release build also const-asserts it). Each job calls `task rust:hook:size TARGET=… BUDGET=… [BUILD=…]`, which builds `-p grim-hook --profile hook` and fails when the file is over budget.
+
+| Job | Workflow | Covers |
+|---|---|---|
+| `hook-size` | `verify-basic.yml` | Linux gnu (with `cargo auditable build`, then `task rust:hook:audit` → `cargo audit bin`) and Linux musl |
+| `hook-size-windows` | `verify-basic.yml` | `x86_64-pc-windows-msvc` through `cargo xwin build` in the `messense/cargo-xwin` container |
+| `hook-size-macos` | `verify-deep.yml` | `aarch64-apple-darwin`, native build |
+
+A new target adds a matrix row, never an inline `wc -c`.
+
+Launcher execution is gated in `verify-deep.yml`, not `verify-basic.yml`:
+
+| Job | Covers |
+|---|---|
+| `hook-size-macos` | codesign verification and exec-after-replace of the launcher, besides the size budget |
+| `hooks-windows` ("Hook Acceptance (Windows)") | runs the Windows hook files `test_hooks_windows_launch.py`, `test_hooks_windows_replace.py` and `test_hooks_fixes_windows.py` against the cross-compiled `grim.exe` on `windows-latest`; needs a registry, so it runs only those files, not the whole suite |
+
+Reproduce `hooks-windows` locally with the grim-wintest `run.sh` before dispatching.
+
 ## Cost Factors
 
 | Factor | Impact | Guidance |

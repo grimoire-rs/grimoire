@@ -17,7 +17,7 @@ maintain, and publish AI-agent configuration (skills, rules, prompts)
 distributed through standard OCI registries. The binary is named `grim`;
 the Rust crate/package is `grimoire`. Shipping: full CLI (20 subcommands),
 OCI registry pipeline, catalog publishing, MCP server, TUI, experimental
-hooks. One binary crate, subsystem modules under `src/`, no stable *library* API — the binary is the only consumer.
+hooks. A cargo workspace (see Architecture), subsystem modules under `src/`, no stable *library* API — the binary is the only consumer.
 
 > **Status: stabilizing — preparing 1.0.0.** Released surfaces (CLI, JSON
 > output, schemas, layouts, OCI pipeline, catalog publishing) are frozen
@@ -71,9 +71,9 @@ commit. Conventions →
 
 ## Architecture
 
-**Layout**: a single binary crate. All source under `src/`; binary `grim`;
-crate/package `grimoire`. No workspace, no lib/CLI split. Acceptance tests
-under `test/`. Rust edition 2024.
+**Layout**: a cargo workspace — one binary crate (`grimoire`, binary `grim`,
+source under `src/`) plus two hook crates (`crates/grimoire-hook-core`,
+`crates/grim-hook`). No lib/CLI split of the main crate. Tests under `test/`. Rust edition 2024.
 
 **Read the matching subsystem rule before working on code in that area** —
 each carries invariants and design decisions not obvious from the code.
@@ -81,7 +81,7 @@ Claude Code auto-loads them on path match; other agents open them by hand.
 
 | Path | Subsystem rule |
 |---|---|
-| `src/**` | [subsystem-file-structure.md](./.claude/rules/subsystem-file-structure.md), [subsystem-cli.md](./.claude/rules/subsystem-cli.md), [subsystem-cli-api.md](./.claude/rules/subsystem-cli-api.md), [subsystem-cli-commands.md](./.claude/rules/subsystem-cli-commands.md) |
+| `src/**`, `crates/**` | [subsystem-file-structure.md](./.claude/rules/subsystem-file-structure.md), [subsystem-cli.md](./.claude/rules/subsystem-cli.md), [subsystem-cli-api.md](./.claude/rules/subsystem-cli-api.md), [subsystem-cli-commands.md](./.claude/rules/subsystem-cli-commands.md) |
 | `test/**` (pytest, fixtures) | [subsystem-tests.md](./.claude/rules/subsystem-tests.md) |
 | `.github/workflows/**` | [subsystem-ci.md](./.claude/rules/subsystem-ci.md) |
 | `taskfile.yml`, `taskfiles/**` | [subsystem-taskfiles.md](./.claude/rules/subsystem-taskfiles.md) |
@@ -103,7 +103,7 @@ surfaces, OWASP/STRIDE checklist) before any security review.
 | `GRIM_DEFAULT_REGISTRY` | Default registry for short-id resolution and the single-registry fallback when no `[[registries]]` is configured. Does **not** collapse or restrict the multi-registry browse set — `[[registries]]` is authoritative for browsing even when this is set; only the `--registry` flag collapses browse to one registry. Short-id precedence: `--registry` flag > `GRIM_DEFAULT_REGISTRY` > project `default_registry` > global `default_registry` > built-in fallback `ghcr.io/grimoire-rs` (browse fallback: the public index `https://index.grimoire.rs`) | (unset) |
 | `GRIM_INSECURE_REGISTRIES` | Comma-separated `host[:port]` list contacted over plain HTTP instead of HTTPS, matched exactly. Unions with the always-on loopback forms (`localhost`, `127.0.0.1`, bare and on port 5000) and with every `[[registries]]` entry declaring `insecure = true` — nothing removes a host from the set, and `--registry` never narrows it. Covers hosts no entry declares; it does not widen where `grim login` may send a credential | (unset) |
 | `GRIM_OFFLINE` | Disable all network access (cache-only; default is always-fresh online resolution) | false |
-| `GRIM_TELEMETRY`, `GRIM_TELEMETRY_REPOSITORY` | Opt-in OTLP usage telemetry, `truthy`-gated (`1\|true\|yes\|on`). `GRIM_TELEMETRY` arms it; unarmed, grim makes no telemetry call and writes no `$GRIM_HOME/telemetry/` file even with `OTEL_*` set, and an endpoint variable (`OTEL_EXPORTER_OTLP_[LOGS_]ENDPOINT`) is still required — there is no default endpoint. `OTEL_SDK_DISABLED`, `DO_NOT_TRACK` and offline mode disarm it; `grim hook run` never exports. `GRIM_TELEMETRY_REPOSITORY` additionally adds the redacted `origin` remote as `vcs.*` (project scope only, never a `$HOME` repository). Both Unstable until 1.0. Contract: `docs/src/content/docs/telemetry.md` | (unset) |
+| `GRIM_TELEMETRY`, `GRIM_TELEMETRY_REPOSITORY` | Opt-in OTLP usage telemetry, `truthy`-gated (`1\|true\|yes\|on`). `GRIM_TELEMETRY` arms it; unarmed, grim makes no telemetry call and writes no `$GRIM_HOME/telemetry/` file even with `OTEL_*` set, and an endpoint variable (`OTEL_EXPORTER_OTLP_[LOGS_]ENDPOINT`) is still required — there is no default endpoint. `OTEL_SDK_DISABLED`, `DO_NOT_TRACK` and offline mode disarm it; the `grim-hook` launcher carries no telemetry code. `GRIM_TELEMETRY_REPOSITORY` additionally adds the redacted `origin` remote as `vcs.*` (project scope only, never a `$HOME` repository). Both Unstable until 1.0. Contract: `docs/src/content/docs/telemetry.md` | (unset) |
 | `GRIM_ANNOUNCE_TOKEN` | Forge API token for `grim publish --announce` (PR/MR creation, owner-id lookup); always wins over CI-conventional tokens (`GH_TOKEN`/`GITHUB_TOKEN`, `GITLAB_TOKEN`), which apply only when the CI server host matches the announce target host. Never logged. Separately, `CI_JOB_TOKEN` is checked for **presence only** on a host-matched GitLab CI: it enables a fallback git-transport credential for the announce push (value never read into grim, never used for the MR API) | (unset) |
 | `GRIM_RATE_TOKEN` | Forge API token for `grim rate`, first rung of its **own** credential ladder (env → host-matched CI token → `gh`/`glab` stored credential → refuse with 80). Deliberately not the announce token: narrower scope, separate rotation. Never logged. **Host-agnostic, so it is gated**: against a host the index declared (`providers.rating_host`) it must be paired with `--token-host <host>` or the run exits 80 before the credential is read — same rule as `--token-stdin`, and the reason the two host-matched rungs need no gate. The rating host itself now comes from the index, not from the environment (`adr_index_declared_rating_host.md`) | (unset) |
 | `DOCKER_CONFIG` | Directory holding the docker-compatible `config.json` read/written by `grim login`/`logout` (and the credential read path) | `~/.docker` |

@@ -50,8 +50,10 @@ next regeneration. To modify the release workflow:
 
 ### Version Source of Truth
 
-`[package] version` in `Cargo.toml` is the single source of truth. The
-version is compiled in via `env!("CARGO_PKG_VERSION")`.
+`[workspace.package] version` in the root `Cargo.toml` is the single source of
+truth; `grimoire` and the `crates/*` members inherit it with
+`version.workspace = true`. The version is compiled in via
+`env!("CARGO_PKG_VERSION")`.
 
 ### Commit Convention
 

@@ -18,6 +18,13 @@
 | Async | Tokio |
 | Linker | Mold (dev) |
 
+**Deviation: the `grim-hook` launcher** (`crates/grim-hook`, embedded in grim) is
+synchronous `std`: no Tokio, clap, tracing, chrono or globset. It ships as a
+small binary per target (512 KiB, 640 KiB on musl) that a client execs on
+every tool call, so its dependency set is `serde`, `serde_json` and their
+transitive crates, pinned by an allowlist test over
+`cargo tree -p grim-hook -e normal --target all`. Everything else stays on Tokio. Rationale: `adr_hook_native_dispatcher.md` (C-N8, D1).
+
 ### Python (Acceptance Tests)
 
 | Component | Choice |

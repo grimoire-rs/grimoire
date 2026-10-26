@@ -1,6 +1,7 @@
 ---
 paths:
   - src/**
+  - crates/**
 ---
 
 # CLI Subsystem

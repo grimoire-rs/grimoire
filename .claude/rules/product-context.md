@@ -103,8 +103,9 @@ Global flags: `--offline`, `--global`, `--config <path>`,
 ## Technical Overview
 
 - **Language**: Rust 2024
-- **Layout**: single binary crate — source lives under `src/`; the binary
-  is `grim`, the crate/package is `grimoire`. No lib/CLI split, no workspace.
+- **Layout**: cargo workspace — one binary crate (`grimoire`, binary `grim`,
+  source under `src/`) plus two hook crates (`crates/grimoire-hook-core`,
+  `crates/grim-hook`). No lib/CLI split of the main crate.
 - **Default registry**: configurable via `GRIM_DEFAULT_REGISTRY`
 - **Testing**: pytest acceptance tests under `test/` against a real OCI
   registry
