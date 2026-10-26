@@ -79,16 +79,21 @@ Each subsystem rule has Quality Gate section specifying which verify task to run
 # Pattern A -- skip when output exists, re-run when sources change
 generate:
   cmds: [cargo run --release -- some-subcommand > {{.OUT}}]
-  sources: [src/**/*.rs, Cargo.lock]
+  sources: [src/**/*.rs, crates/**/*.rs, Cargo.lock]
   status: [test -f {{.OUT}}]
 
 # Pattern B -- wrap a tool with its own incremental build
 build:
   cmd: cargo build --release --locked
-  sources: [src/**/*.rs, Cargo.lock]
+  sources: [src/**/*.rs, crates/**/*.rs, Cargo.lock]
   status: [test target/release/grim -nt Cargo.lock]
   method: timestamp
 ```
+
+In a cargo workspace the source list names every member (`crates/**/*.rs`), and a
+whole-workspace command takes `--workspace` (`cargo clippy --workspace --locked`),
+so a change in a member re-runs the task. The launcher size and
+audit gates are their own tasks (`rust:hook:size`, `rust:hook:audit`).
 
 ### Sharing source lists: `x-shared:` anchors
 

@@ -8,6 +8,7 @@ paths:
   - "src/command/publish*"
   - "src/command/release*"
   - "catalog/**"
+  - "crates/**"
 ---
 
 # Grimoire Threat Model
@@ -22,8 +23,7 @@ attacker we defend against.
 > glob matching nothing is a rule that silently never fires and
 > `test_all_rule_globs_match_files` enforces that. The glob covers the dispatcher runtime, whose
 > whole design is this file's invariants: **I1** (nothing armable inside a repository), **I3** (grim
-> degrades to "the feature is off", never to "the agent is blocked" — which is why every refusal on
-> the dispatch path exits 0), and **I6** (secrets never in argv or the environment).
+> never converts its own failure into a verdict), and **I6** (secrets never in argv or the environment).
 
 Read this **before** filing or triaging a security finding, and before designing anything that
 executes code, writes into a file grim does not own, or reads content from a registry.
@@ -121,10 +121,11 @@ Design against these directly; they are what the boundary is *for*.
    > re-prompt, because the consented set carries no tag and no digest. That is **T1**, its answer
    > is the pin, and its visibility is `git diff` on the lock plus `grim status` — **I5**,
    > evidence, not prevention. State it that way; do not describe consent as preventing it.
-3. **I3 — Grim fails in the direction that does not block the user.** An internal error, a missing
-   binary, an unparsable file or an unknown schema version degrades to "the feature is off", never
-   to "the agent is blocked". This is a genuine availability obligation, because some clients fail
-   *closed* on a non-zero hook exit.
+3. **I3 — Grim never converts its own failure into a verdict.** No forged allow (exit 0), no forged
+   block (exit 2). A grim-internal failure is a non-verdict error exit, and the client's documented
+   policy decides the direction. Grim's obligations are that no benign state ever errors (flag off,
+   revoked, unknown root, no match) and that the runtime does not depend on the `grim` binary. Do not
+   add an exit-0 guard to mask a client's fail-closed rule.
 4. **I4 — Default-deny for anything that executes.** The only control with a causal track record
    across every ecosystem surveyed is a **default flip**; attestation and provenance layers added
    afterwards did not prevent named incidents. New execution capability ships off by default.

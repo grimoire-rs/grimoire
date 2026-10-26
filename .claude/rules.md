@@ -73,29 +73,29 @@ Catalog = single source of truth — `AGENTS.md` may summarize or reference by p
 
 | Subsystem | Rule | Path scope |
 |---|---|---|
-| Storage / file structure | [subsystem-file-structure.md](./rules/subsystem-file-structure.md) | `src/**` |
-| CLI shell | [subsystem-cli.md](./rules/subsystem-cli.md) | `src/**` |
-| CLI API / output formats | [subsystem-cli-api.md](./rules/subsystem-cli-api.md) | `src/**` |
-| CLI command index | [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md) | `src/**` |
+| Storage / file structure | [subsystem-file-structure.md](./rules/subsystem-file-structure.md) | `src/**`, `crates/**` |
+| CLI shell | [subsystem-cli.md](./rules/subsystem-cli.md) | `src/**`, `crates/**` |
+| CLI API / output formats | [subsystem-cli-api.md](./rules/subsystem-cli-api.md) | `src/**`, `crates/**` |
+| CLI command index | [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md) | `src/**`, `crates/**` |
 | Config key title/description style | [subsystem-config-keys.md](./rules/subsystem-config-keys.md) | `src/command/config_keys.rs`, `src/config/declaration.rs` |
 | Acceptance tests | [subsystem-tests.md](./rules/subsystem-tests.md) | `test/**` |
 | CI / workflows | [subsystem-ci.md](./rules/subsystem-ci.md) | `.github/workflows/**` |
 | Taskfiles | [subsystem-taskfiles.md](./rules/subsystem-taskfiles.md) | `taskfile.yml`, `taskfiles/**/*.yml`, `**/taskfile.yml` |
 
-The four `src/**`-scoped subsystem rules (`subsystem-cli.md`,
+The four `src/**`+`crates/**`-scoped subsystem rules (`subsystem-cli.md`,
 `subsystem-cli-api.md`, `subsystem-cli-commands.md`,
-`subsystem-file-structure.md`) co-fire while the single binary crate is
+`subsystem-file-structure.md`) co-fire while the workspace's crates are
 provisional; the coupling is intended (declared below).
 
 ## By auto-load path — "what fires when you edit"
 
 | Edit path | Rules that auto-load |
 |---|---|
-| `**/*.rs` | [quality-rust.md](./rules/quality-rust.md), [quality-rust-errors.md](./rules/quality-rust-errors.md), [quality-rust-exit_codes.md](./rules/quality-rust-exit_codes.md) [rust-quality.md](./rules/rust-quality.md) (vendored) (+ [arch-principles.md](./rules/arch-principles.md) under `src/**`, `external/**`) |
+| `**/*.rs` | [quality-rust.md](./rules/quality-rust.md), [quality-rust-errors.md](./rules/quality-rust-errors.md), [quality-rust-exit_codes.md](./rules/quality-rust-exit_codes.md) [rust-quality.md](./rules/rust-quality.md) (vendored) (+ [arch-principles.md](./rules/arch-principles.md) under `src/**`, `crates/**`, `external/**`) |
 | `**/Cargo.toml`, `**/Cargo.lock` | [quality-rust.md](./rules/quality-rust.md) (+ [rust-cargo.md](./rules/rust-cargo.md) on `**/Cargo.toml`, `**/clippy.toml`, `**/rustfmt.toml`, `**/deny.toml`, `**/rust-toolchain.toml`) |
-| `src/**` | + [subsystem-cli.md](./rules/subsystem-cli.md), [subsystem-cli-api.md](./rules/subsystem-cli-api.md), [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md), [subsystem-file-structure.md](./rules/subsystem-file-structure.md) |
+| `src/**`, `crates/**` | + [subsystem-cli.md](./rules/subsystem-cli.md), [subsystem-cli-api.md](./rules/subsystem-cli-api.md), [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md), [subsystem-file-structure.md](./rules/subsystem-file-structure.md) |
 | `src/install/vendor_*.rs`, `src/oci/mcp.rs`, `src/catalog/rating_provider.rs` | + [vendor-capability-watchlist.md](./rules/vendor-capability-watchlist.md) |
-| `src/oci/**`, `src/install/**`, `src/command/hook*`, `src/command/{login,logout}.rs`, `src/command/{publish,release}*`, `catalog/**` | + [arch-threat-model.md](./rules/arch-threat-model.md) |
+| `src/oci/**`, `src/install/**`, `src/command/hook*`, `src/command/{login,logout}.rs`, `src/command/{publish,release}*`, `catalog/**`, `crates/**` | + [arch-threat-model.md](./rules/arch-threat-model.md) |
 | `src/command/config_keys.rs`, `src/config/declaration.rs` | + [subsystem-config-keys.md](./rules/subsystem-config-keys.md) |
 | `test/**` | [subsystem-tests.md](./rules/subsystem-tests.md) |
 | `test/**/*.py`, `**/*.py` | + [quality-python.md](./rules/quality-python.md), [python-quality.md](./rules/python-quality.md) (vendored) |
@@ -139,9 +139,10 @@ Exempt from overlap detection (intended broad coupling):
 | `docs-style.md` + `product-context.md` | `docs/**` |
 | `docs-quality.md` + `docs-style.md` + `product-context.md` | `docs/**` (vendored rule co-fires with both) |
 | `docs-quality.md` + `workflow-git.md` + `workflow-release.md` | `CHANGELOG.md` (vendored rule carries changelog conventions; the other two carry the release process) |
-| `subsystem-cli.md` + `subsystem-cli-api.md` + `subsystem-cli-commands.md` + `subsystem-file-structure.md` | `src/**` (single provisional binary crate) |
-| `arch-threat-model.md` + `arch-principles.md` + the four `src/**` subsystem rules | `src/oci/**`, `src/install/**`, `src/command/hook*`, `src/command/{login,logout,publish,release}*` — the security-sensitive subset of `src/**`; the threat model co-fires with them by design, since a boundary question is always also a design question. `src/command/hook*` joined when the dispatcher runtime landed: it executes code a client runs automatically, which is the sharpest edge of the boundary |
+| `subsystem-cli.md` + `subsystem-cli-api.md` + `subsystem-cli-commands.md` + `subsystem-file-structure.md` | `src/**`, `crates/**` (cargo workspace, provisional crate split) |
+| `arch-threat-model.md` + `arch-principles.md` + the four `src/**` subsystem rules | `src/oci/**`, `src/install/**`, `src/command/hook*`, `src/command/{login,logout,publish,release}*`, `crates/**` — the security-sensitive subset of `src/**` plus the hook crates (the native launcher runs on every client hook event); the threat model co-fires with them by design, since a boundary question is always also a design question. `src/command/hook*` joined when the dispatcher runtime landed: it executes code a client runs automatically, which is the sharpest edge of the boundary |
 | `code-docs.md` + `rust-quality.md` / `python-quality.md` / `typescript-quality.md` | `**/*.rs`, `**/*.py`, `**/*.pyi`, `**/*.ts`, `**/*.tsx`, `**/*.mts`, `**/*.cts` (vendored comment rule co-fires with each language set; it owns what a comment keeps, they own syntax) |
+| `arch-threat-model.md` + `subsystem-cli.md` + `subsystem-cli-api.md` + `subsystem-cli-commands.md` + `subsystem-file-structure.md` | `crates/**` (hook crates: the launcher is security-sensitive and shares the subsystem scope) |
 | `arch-threat-model.md` + `quality-security.md` | `catalog/**` (published artifacts — the boundary scopes the checklist) |
 
 ## Vendored rules — installed, not authored here

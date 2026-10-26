@@ -437,7 +437,7 @@ class TestRuleGlobs:
     def test_subsystem_globs_not_catch_all_rs(self) -> None:
         """No subsystem rule should use a catch-all `*.rs` glob at the crate
         root — that would load subsystem context for unrelated code. Broad
-        `src/**` is allowed (the single binary crate); a literal `src/*.rs`
+        `src/**` is allowed (the workspace crates); a literal `src/*.rs`
         or `**/*.rs` on a subsystem rule is not.
         """
         offenders = []

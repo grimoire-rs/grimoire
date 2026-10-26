@@ -1,6 +1,7 @@
 ---
 paths:
   - src/**
+  - crates/**
 ---
 
 # CLI API Data Layer Patterns
