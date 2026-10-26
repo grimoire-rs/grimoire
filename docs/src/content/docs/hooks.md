@@ -12,8 +12,9 @@ matcher syntax and JSON response. This page lists the gates a hook clears
 before it arms, the contract its handler follows, and the limits of each
 client.
 
-Hooks are workflow automation, not a policy control. They fail open, and a
-removed or revoked hook is disarmed only at the next `grim install`. For
+Hooks are workflow automation, not a policy control. A handler that fails or
+times out gives no opinion, and a removed or revoked hook is disarmed only at
+the next `grim install`. For
 enforcement, use your client's managed settings.
 
 [Control agent commands with hooks][guide] installs and writes one step by
@@ -39,10 +40,16 @@ the feature cannot run yet is never an error. `grim hook list` and
 `grim status` report the gate as a `cause` token, listed in [Hook
 arming][json-hook-arming].
 
-Hooks arm on Linux and macOS only in v1. On Windows grim registers nothing for
-any client, whatever the three gates say. Once the feature flag is on and the
-workspace has consented, `grim hook list` reports the cause
-`platform-unsupported`. Until then it reports the gate that holds the hook back.
+Hooks arm for every hook-capable client on Linux and macOS. On Windows they
+arm for Claude Code only. Windows also needs `GRIM_HOME` to be a local path
+under `%USERPROFILE%` or `%LOCALAPPDATA%`. Any other home reports
+`grim-home-shared`, and only on Windows.
+
+Every other client, including Codex and Copilot, does not arm on Windows yet.
+Grim arms a client there only after its own hook launch has been observed
+working. Once the feature flag is on and the workspace has consented,
+`grim hook list` reports the cause as `platform-unsupported`. Until then it
+reports the gate that holds the hook back.
 
 ## Workspace consent {#consent}
 
@@ -96,8 +103,8 @@ scope. Each hook's state returns to `gated`, with cause `feature-flag-off`.
 Three things stay, so that turning the flag back on costs nothing:
 
 - the **payload**, the hook's unpacked files under `$GRIM_HOME`
-- the **launcher** at `$GRIM_HOME/hooks/bin/grim-hook`, which other projects
-  may still reference
+- the **launcher** at `$GRIM_HOME/hooks/grim-hook`, which other projects may
+  still reference
 - the workspace's **consent record**
 
 With the flag back on, the next `grim install` arms the same hooks with no new
@@ -123,14 +130,19 @@ translates its answer.
 
 ### Invocation {#handler-invocation}
 
-The client runs grim's launcher, which runs `grim hook run`. Grim selects the
-armed entries whose `event` matches and whose `matcher` admits the tool name.
+The client runs grim's launcher, `grim-hook <client> <event> <root>`, a small
+native program that grim writes to `$GRIM_HOME/hooks/grim-hook` on `grim
+install`. It reads the dispatch table beside it and needs neither the `grim`
+binary nor your config. The `<root>` operand is an opaque token that names the
+workspace the registration came from. The launcher selects the armed entries
+whose `event` matches and whose `matcher` admits the tool name.
 
 - **Matcher.** An exact tool name, an `A|B` alternation, or a glob, never a
   regular expression. With no `matcher`, the entry runs for every tool call.
 - **`argv`** runs in exec form, with no shell. Grim expands `${GRIM_HOOK_DIR}`
   and `$GRIM_HOOK_DIR` in each element itself.
-- **`command`** runs through `/bin/sh -c`.
+- **`command`** runs through `/bin/sh -c` on Linux and macOS. On Windows it
+  runs through `cmd /C`.
 - **Working directory** is the hook's own payload directory, so a relative
   path such as `approve.py` resolves to a file the hook ships.
 - **stderr** is discarded.
@@ -219,9 +231,7 @@ decided. A `deny` discards any rewrite.
 ### Exit code and timeout {#handler-exit}
 
 Grim ignores the handler's exit code. A JSON answer on stdout counts whatever
-the status, and a failed handler with no answer is no opinion. `grim hook run`
-itself always exits `0`, so a client that fails closed on a non-zero hook exit
-is never blocked by grim.
+the status, and a failed handler with no answer is no opinion.
 
 Each entry runs under its `timeout`, 30 seconds when unset. A handler still
 running at its timeout is killed, and counts as no opinion. One that answered
@@ -238,6 +248,44 @@ skipped.
 `timeout` lies between 1 and 3600 seconds. `grim build` refuses a value
 outside that range with exit code 65. Below 1 second the hook has no time to
 start, and no client waits an hour for a hook.
+
+### Launcher exit codes {#launcher-exit}
+
+The launcher never forges a verdict. Every state that is not a failure exits
+`0`, with an answer on stdout when a hook gave one. These states are the
+feature flag off, a revoked workspace, an unknown root, and an event no entry
+matches.
+
+A failure in grim itself exits non-zero instead. The client's own policy for a
+failing hook then decides what happens to the tool call. The launcher never
+exits `2`, because Claude Code reads that status as a block.
+
+| Exit | Meaning |
+|---|---|
+| `0` | Success, or nothing to do. |
+| `1` | Any other internal failure, such as a gatekeeper's envelope that could not be built. |
+| `64` | The three operands are missing or malformed. |
+| `65` | The dispatch table is unparsable, has a schema this launcher does not know, or a selected entry is unreadable. Also a client payload over the size cap, or one that is not a JSON object while a gatekeeper is selected. |
+| `74` | An I/O failure: the launcher cannot find its own path, or the table or stdin cannot be read. Also when a gatekeeper cannot run because grim could not write its audit record, or could not create or write its `payload = "file"` envelope. |
+| `79` | `dispatch.json` is absent while a registration still fires. |
+
+What a non-zero exit does depends on the client, and grim does not change it.
+[Codex][codex] marks the hook as failed and proceeds. [Copilot][copilot] denies
+a `preToolUse` call and lets other events through.
+
+[Claude Code][claude] shows a non-blocking error and the action proceeds. The
+exception is a hook that runs through PowerShell on Windows, which blocks. See
+[When a hook does not arm][troubleshooting]. [Qoder][qoder] is unverified.
+
+Deleting the launcher or the dispatch table while a hook is still registered
+makes every call fail by the client's policy. That lasts until the next
+`grim install` writes them again. A handler's own failure is never in this
+table. It gives no opinion.
+
+The launcher reads one environment variable, `GRIM_LOG`, for verbosity only.
+Warnings reach stderr at any setting. A value containing `debug` or `trace`
+adds the debug lines. It is not a tracing filter: a target filter such as
+`grim=debug` counts only because it contains `debug`.
 
 ### Client translation {#handler-translation}
 
@@ -305,7 +353,8 @@ whatever a contributor pushed.
 [`grim export plugin`][cmd-export-plugin] renders locked artifacts into a
 plugin a client installs without grim, and `grim export marketplace` renders
 the same trees for a marketplace repository. A hook needs grim at run time,
-because its launcher runs `grim hook run`.
+because its launcher and the dispatch table it reads live under `$GRIM_HOME`
+on the machine where grim installed them.
 
 Every hook member is therefore left out of an export. Each gets a warning, a
 line in the plugin's README, and a row in the export report, at exit 0. An

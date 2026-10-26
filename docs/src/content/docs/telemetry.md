@@ -34,7 +34,7 @@ visible only at `GRIM_LOG=debug`.
 |---|---|
 | A CLI command that runs to its end, including one that fails | One request |
 | `grim mcp`, `grim tui` | One `grim.command` event when the session ends. No scope, clients or artifact events |
-| `grim hook run` | Never exports, even when armed |
+| A hook firing (the `grim-hook` launcher) | Never exports. The launcher is a separate program with no telemetry code |
 | Bare `grim`, `--help`, `--version`, a usage error | No request |
 | Every other CLI command | A `grim.command` event only |
 

@@ -71,20 +71,23 @@ running.
 
 ## Warning: hooks do not arm on Windows {#platform-unsupported}
 
-`grim hook list` shows every hook as `not-armed` with cause
-`platform-unsupported`, for every client. With the feature flag on and a hook
-installed, `grim install` warns once. The warning reads `hooks not armed: grim
-arms hooks on Linux and macOS only, so no client was registered on this
-platform`.
+`grim hook list` shows the hook as `not-armed` with cause
+`platform-unsupported` for a client. With the feature flag on and a hook
+installed, `grim install` warns once per client. The warning reads `hooks not
+armed for <client>: grim has not verified hooks for this client on Windows, so
+it was not registered`.
 
-This issue occurs when grim runs on Windows. Hooks arm on Linux and macOS only
-in v1. The launcher grim generates is a POSIX `sh` script, and a `command`
-handler runs through `/bin/sh -c`. Until the feature flag is on and the
-workspace has consented, `grim hook list` shows that gate's cause instead.
-Grim declines to arm either way.
+This issue occurs when grim runs on Windows and the client is not one grim has
+verified there. Claude Code is the only one. Copilot and Codex have not yet been
+observed launching a hook on Windows. Grim registers nothing for them rather
+than risk a registration that denies every tool call.
 
-To arm the hook, run grim on Linux or macOS. Declaring a hook is never an
-error, so the declaration can stay in `grimoire.toml` for those machines.
+Until the feature flag is on and the workspace has consented, `grim hook list`
+shows that gate's cause instead. Grim declines to arm either way.
+
+To arm the hook for an unverified client, run grim on Linux or macOS. On
+Windows it arms for Claude Code. Declaring a hook is never an error, so the
+declaration can stay in `grimoire.toml` for other machines.
 
 ## Warning: the hook dispatch table would grow past its limit {#dispatch-full}
 
@@ -117,10 +120,149 @@ If another grim version wrote the table, upgrade grim. Otherwise move
 `dispatch.json` aside and run `grim install` again in each project that uses
 hooks. Each project rebuilds only its own rows.
 
+## Warning: grim could not place its launcher {#launcher-not-placed}
+
+`grim hook list` shows the client as `not-armed` with cause
+`launcher-unwritable` or `launcher-path-occupied`. The launcher is the small
+program every registration runs, at `$GRIM_HOME/hooks/grim-hook`
+(`grim-hook.exe` on Windows). The `launcher` object in
+`grim hook list --format json` reports its state.
+
+This issue occurs when grim cannot write the launcher. For
+`launcher-unwritable`, `$GRIM_HOME/hooks` or a file already at the launcher's
+path is not writable by you. For `launcher-path-occupied`, something other
+than a file sits at that path, such as a directory. Grim never removes it.
+
+To fix it, make `$GRIM_HOME/hooks` and any existing file there writable. If a
+directory occupies the path, move it aside. Then run `grim install` again.
+
+## Warning: the launcher path cannot be registered {#launcher-path}
+
+`grim hook list` shows the client as `not-armed` with cause
+`launcher-path-control-character` or `launcher-path-unquotable`.
+
+This issue occurs when the path to the launcher cannot be written into a
+client's hook configuration without ambiguity. A newline or another control
+character in `$GRIM_HOME` makes the first cause, for every client. The second
+is a path that is not valid UTF-8. It also covers, on Windows for a client that
+registers a `cmd` command line, a character that command line cannot quote,
+such as a space.
+
+To fix it, point `GRIM_HOME` at a plainer path, then run `grim install` again.
+
+## Warning: GRIM_HOME is shared between hosts {#grim-home-shared}
+
+`grim hook list` shows every client as `not-armed` with cause
+`grim-home-shared`.
+
+This issue occurs when `GRIM_HOME` is not a local path under
+`%USERPROFILE%` or `%LOCALAPPDATA%`, for example a UNC path on a network share.
+Grim makes this check on Windows only. The launcher is a native program built
+for one host, so each host sharing the home would overwrite the other's copy.
+
+To fix it, give each host its own `GRIM_HOME` on a local disk, then run
+`grim install` again.
+
+## Warning: a hook is bound under a name grim keeps {#binding-name-reserved}
+
+`grim hook list` shows the hook as `not-armed` with cause
+`binding-name-reserved`.
+
+This issue occurs when a hook is bound under a name grim writes under
+`$GRIM_HOME/hooks`: `bin`, `consent`, `dispatch.json`, `dispatch.json.lock`,
+`grim-hook`, `grim-hook.exe`, `payload` or `root-key`. It also occurs for a
+binding name that ends in `.exe`, `.com`, `.bat` or `.cmd`, which Windows could
+run in place of the launcher. Grim keeps all of these names.
+
+To fix it, rename the binding in `grimoire.toml`, for example
+`grim add --kind hook --name <name> <reference>`, then run `grim install`.
+
+## Warning: Codex no longer trusts the hook command {#codex-retrust}
+
+`grim install` warns that `codex no longer trusts the hook command grim
+registered for <hook>`. `grim hook list` shows the Codex row as `untrusted`
+with cause `client-trust-pending`.
+
+This issue occurs when grim rewrites the command it registered for a gatekeeper
+hook in Codex's `hooks.json`. Codex keys its stored approval on the exact
+command text, so a changed command is a new, unapproved hook. Codex skips it
+silently until you approve it. This happens once after upgrading to the native
+launcher, and again only if the command changes, for example when you move
+`GRIM_HOME`.
+
+To fix it, open Codex's `/hooks` screen and approve the hook again.
+
+## Warning: hooks stop firing or error after upgrading grim {#after-upgrade}
+
+A hook that fired before an upgrade does nothing. Or the client reports an
+error on every tool call, in a `grim-hook` line. Exit `79` means the
+`dispatch.json` beside the launcher is missing, and exit `65` means it is
+unreadable. See [launcher exit codes][launcher-exit] for every status.
+
+This issue occurs when a registration outlives what it pointed at. One case is a
+workspace you have not revisited since the upgrade. It still carries a
+registration from the shell-script release, which pointed at `bin/grim-hook` and
+at a `grim hook run` command, neither of which exists in the launcher release. That registration exits `0`
+without running anything, so it never blocks a tool call.
+
+The other case is a current registration whose launcher or table is gone, for
+example after you deleted `$GRIM_HOME/hooks`.
+
+To fix both, re-run `grim install` in each workspace and each scope that uses
+hooks after you upgrade grim. It writes the launcher and the table, deletes the
+old script, and rewrites that scope's registrations. Hooks are experimental, so
+this change is outside the compatibility promise. See
+[Stability][stability-unstable].
+
+## Warning: the launcher exits 74, 1 or 64 {#launcher-failure}
+
+The client reports an error on a tool call, in a `grim-hook:` line that the
+launcher wrote to stderr. The status is `74`, `1` or `64`. See [launcher exit
+codes][launcher-exit] for the full table.
+
+This issue occurs when the launcher hits a failure, and the cause depends on
+the status:
+
+- Exit `74` is an I/O failure. The launcher could not find its own path, or read
+  the table or the client's input. It also fires when a gatekeeper could not run
+  because grim could not write its audit record, or its `payload = "file"`
+  envelope, beside the dispatch table.
+- Exit `1` is any other internal failure. The usual one is a gatekeeper whose
+  envelope could not be built.
+- Exit `64` means the registration does not match the launcher's grammar,
+  `grim-hook <client> <event> <root>`. A hand-edited client hook file causes it.
+
+To fix exit `74`, make `$GRIM_HOME/hooks` writable and check the disk has free
+space. Then run `grim install` again.
+
+To fix exit `1`, set `GRIM_LOG=debug` in the client's environment and read the
+`grim-hook:` line for the cause. If it names the table or the launcher, run
+`grim install`.
+
+To fix exit `64`, run `grim install`, which rewrites the registration. Do not
+edit it by hand.
+
+## Warning: Claude Code blocks tool calls on Windows {#claude-powershell}
+
+Every Claude Code tool call is blocked, and the error names a `grim-hook`
+command that ran through PowerShell.
+
+This issue occurs when Claude Code runs the hook through PowerShell because Git
+Bash is not installed, and the launcher exits non-zero. Claude Code's
+documentation treats a failing PowerShell hook as a block. A hook that runs
+through `sh` or Git Bash only shows a non-blocking error. Grim does not override
+a client's policy. No run on Windows has confirmed this behavior yet.
+
+To fix it, find the failing status in [launcher exit codes][launcher-exit] and
+clear its cause. Most often `grim install` fixes it by writing the missing
+launcher or table. Installing Git for Windows also moves Claude Code onto the
+non-blocking path.
+
 <!-- internal -->
 [stability-unstable]: ./stability.md#unstable
 [json-hook-arming]: ./json-interface.md#hook-arming
 [gating]: ./hooks.md
+[launcher-exit]: ./hooks.md#launcher-exit
 
 <!-- external -->
 [gh-93]: https://github.com/grimoire-rs/grimoire/issues/93
