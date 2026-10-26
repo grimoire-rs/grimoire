@@ -46,9 +46,10 @@ use crate::config::scope::ConfigScope;
 use crate::context::Context;
 use crate::hook::consent::{self, Consent};
 use crate::install::client_target::ClientTarget;
-use crate::install::hook_registrar::{ArmRefusal, arming_refusal};
+use crate::install::hook_registrar::{ArmRefusal, arming_refusal, client_arms_on_this_host};
 use crate::install::install_state::{ClientOutput, InstallRecord, InstallState, active_outputs};
 use crate::install::installer::{client_hosts, client_supports_kind};
+use crate::install::launcher::{self, LauncherState};
 use crate::install::path_anchor::{AnchorRoots, Containment};
 use crate::install::target::{InstallTarget, detect_clients_or_all};
 use crate::lock::grimoire_lock::GrimoireLock;
@@ -526,7 +527,12 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
         }
     }
 
-    Ok((StatusReport::new(entries, checked), ExitCode::Success))
+    let mut report = StatusReport::new(entries, checked);
+    if hook_inputs.is_some() {
+        let seen = launcher::inspect(ctx.grim_home());
+        report = report.with_launcher(seen.state, seen.path.display().to_string());
+    }
+    Ok((report, ExitCode::Success))
 }
 
 /// Whether `--check` actually runs a live catalog lookup this invocation:
@@ -711,7 +717,11 @@ pub fn hook_arming(
     };
 
     // Whole-artifact gates, evaluated once: neither depends on the client.
-    let artifact_cause = if !inputs.feature_enabled {
+    // First: a refused binding name (reserved, or an executable suffix) never
+    // materializes (`installer::hook_gate`), so no other gate's remedy would arm it.
+    let artifact_cause = if crate::oci::hook::binding_name_refusal(artifact).is_some() {
+        Some(HookArmingCause::BindingNameReserved)
+    } else if !inputs.feature_enabled {
         Some(HookArmingCause::FeatureFlagOff)
     } else if pinned.is_some_and(|pin| inputs.insecure_transport(pin.registry())) {
         // The transport gate, above consent for the same reason it is above
@@ -783,6 +793,12 @@ pub fn hook_arming(
                 // future transient cause is added. The honest surface for a
                 // transient write-time refusal is WP-I's install-time warning.
                 cause
+            } else if !client_arms_on_this_host(*client) {
+                // Ranks after the flag and consent gates, like the scope-wide platform cause:
+                // on Windows only an admitted client arms.
+                HookArmingCause::PlatformUnsupported
+            } else if inputs.unquotable.contains(client) {
+                HookArmingCause::LauncherPathUnquotable
             } else if inputs.user_owned.contains(client) {
                 // Per client and read-only, through the registrar's own probe:
                 // a user's hook file grim will not touch (security review B1).
@@ -913,9 +929,9 @@ pub struct HookArmingInputs {
     /// as if nothing is watching.
     ///
     /// A row present for this root **is** armed, whatever the config says: the
-    /// table is the machine-local arming authority and is what `grim hook run`
-    /// actually reads. So the table is consulted first and a match reports no
-    /// cause at all.
+    /// table is the machine-local arming authority and is what the `grim-hook`
+    /// launcher actually reads. So the table is consulted first and a match
+    /// reports no cause at all.
     ///
     /// Empty when no key file exists (nothing on this machine can be armed),
     /// when the table is absent or unreadable, or when the read fails — all of
@@ -936,6 +952,9 @@ pub struct HookArmingInputs {
     /// registrar will neither write nor delete it (security review B1). Probed
     /// once, read-only, through `hook_registrar::surface_user_owned`.
     user_owned: Vec<ClientTarget>,
+    /// The clients whose command form cannot carry the launcher's path (Codex's
+    /// `cmd /C` on a home with a space), so the registrar refuses them.
+    unquotable: Vec<ClientTarget>,
 }
 
 impl HookArmingInputs {
@@ -977,6 +996,11 @@ impl HookArmingInputs {
 
         let mut clients = target.clients().to_vec();
         clients.sort_by_key(ToString::to_string);
+        let unquotable = clients
+            .iter()
+            .copied()
+            .filter(|client| crate::install::hook_registrar::launcher_unquotable(*client, ctx.grim_home()))
+            .collect();
         let user_owned = clients
             .iter()
             .copied()
@@ -993,12 +1017,13 @@ impl HookArmingInputs {
             feature_enabled: scope.options.experimental.hooks_enabled(),
             plain_http_hosts: crate::oci::access::registry_client::plain_http_hosts_with(&declared_insecure),
             consent: consent::evaluate(record.as_ref(), &scope.workspace, &declared),
-            refusal: arming_refusal(ctx.grim_home(), &scope.workspace, scope.scope),
+            refusal: arming_refusal(ctx.grim_home(), &scope.workspace, scope.scope).or_else(|| launcher_occupied(ctx)),
             clients,
             scope: scope.scope,
             workspace: scope.workspace.clone(),
             armed: armed_rows(ctx.grim_home(), scope),
             user_owned,
+            unquotable,
         })
     }
 
@@ -1155,8 +1180,7 @@ fn armed_rows(
     let Ok(Some(token)) = crate::install::hook_dispatch::existing_root_token(grim_home, root) else {
         return std::collections::BTreeSet::new();
     };
-    let (table, _degrade) =
-        crate::install::hook_dispatch::read_table(&crate::install::hook_dispatch::dispatch_path(grim_home));
+    let (table, _degrade) = crate::install::hook_registrar::read_table_logged(grim_home);
     table
         .roots
         .get(&token)
@@ -1178,6 +1202,14 @@ fn armed_rows(
 /// i.e. reported as armed. That is C-017's defect reached by a second route.
 pub fn declares_a_hook(scope: &scope_resolution::ResolvedScope, lock: Option<&GrimoireLock>) -> bool {
     !scope.set.hooks.is_empty() || lock.is_some_and(|l| l.iter_artifacts().any(|a| a.kind == ArtifactKind::Hook))
+}
+
+/// C-020: a directory at the launcher's path is observable without a write, so
+/// status reports it. `arming_refusal` stays free of file-system state because
+/// the install's reap-only pass shares it and must not be blocked by an
+/// occupied path it never writes.
+fn launcher_occupied(ctx: &Context) -> Option<ArmRefusal> {
+    (launcher::inspect(ctx.grim_home()).state == LauncherState::Occupied).then_some(ArmRefusal::LauncherPathOccupied)
 }
 
 /// The reported cause for a write-time [`ArmRefusal`].
@@ -1207,6 +1239,10 @@ fn cause_from_refusal(refusal: ArmRefusal) -> HookArmingCause {
         // the cap and its remedy (issue #93).
         ArmRefusal::DispatchTableFull => HookArmingCause::NotRegistered,
         ArmRefusal::PlatformUnsupported => HookArmingCause::PlatformUnsupported,
+        ArmRefusal::LauncherUnwritable => HookArmingCause::LauncherUnwritable,
+        ArmRefusal::LauncherPathOccupied => HookArmingCause::LauncherPathOccupied,
+        ArmRefusal::LauncherPathUnquotable => HookArmingCause::LauncherPathUnquotable,
+        ArmRefusal::GrimHomeShared => HookArmingCause::GrimHomeShared,
     }
 }
 
@@ -1933,6 +1969,7 @@ mod tests {
             scope: ConfigScope::Global,
             workspace: std::path::PathBuf::from("/home/dev"),
             user_owned: Vec::new(),
+            unquotable: Vec::new(),
         };
         let verdicts = hook_arming(ArtifactKind::Hook, "g", None, Some(&inputs));
         assert_eq!(
@@ -1957,6 +1994,7 @@ mod tests {
             scope: ConfigScope::Global,
             workspace: std::path::PathBuf::from("/home/dev"),
             user_owned: Vec::new(),
+            unquotable: Vec::new(),
         };
         let verdicts = hook_arming(ArtifactKind::Hook, "g", None, Some(&inputs));
         assert_eq!(
@@ -2041,6 +2079,13 @@ mod tests {
             vec![HookArmingCause::DispatchLockHeld],
             "exactly one cause is filtered out of a status report"
         );
+    }
+
+    #[test]
+    fn a_shared_grim_home_reports_its_own_cause() {
+        let cause = cause_from_refusal(ArmRefusal::GrimHomeShared);
+        assert_eq!(cause, HookArmingCause::GrimHomeShared);
+        assert!(!cause.transient(), "a shared home persists until it moves");
     }
 
     /// A full dispatch table leaves the root with no row, so status reports the

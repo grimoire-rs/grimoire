@@ -9,8 +9,8 @@
 //! every method on it returns immediately. The exemption this module rests on
 //! is `adr_otel_usage_telemetry.md`.
 //!
-//! The handle lives on [`crate::context::Context`], which is built after
-//! `grim hook run` has already returned, so the hook path can never reach it.
+//! The handle lives on [`crate::context::Context`]. The hook launcher is a
+//! separate binary with no telemetry code at all.
 
 use std::cell::Cell;
 use std::future::Future;

@@ -25,6 +25,7 @@ use crate::oci::hook::{HookCommand, HookRegistration, HookSurface};
 use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
+use super::hook_command::CommandForm;
 use super::render::{self, RenderError, RenderedDoc};
 use super::vendor::{FieldType, KnownField, Vendor, env_dir, home_dir, provenance};
 
@@ -112,11 +113,11 @@ impl Vendor for CopilotVendor {
     ///    emits the canonical PascalCase spelling and this vendor does not
     ///    override it.
     /// 2. **`preToolUse` is fail-CLOSED** — the only one of the three v1 clients
-    ///    that blocks. A non-zero hook exit denies the tool call verbatim, so the
-    ///    `[ -x "$L" ] || exit 0` guard is mandatory here rather than merely
-    ///    tidy, and copilot's exec-form `exec`/`args` field must **never** be
-    ///    used: no shell means no guard, and a missing launcher becomes a spawn
-    ///    failure that denies the call (breaks S-009).
+    ///    that blocks. grim never masks that policy: a missing launcher is a
+    ///    spawn failure the client reports, and the native launcher exits 0
+    ///    itself for every case it controls (unknown root, nothing armed).
+    ///    Registered in exec form because Copilot CLI 1.0.91 drops `args` on a
+    ///    Claude-format row — see [`Self::hook_command_form`].
     /// 3. **`mutator` is supported, not declined** (ADR Open Question 2, settled
     ///    by execution) in the PascalCase dialect. The field it ships as is the
     ///    `mutation` column of this client's `PreToolUse` row in
@@ -140,6 +141,13 @@ impl Vendor for CopilotVendor {
         hook_config_path(workspace, scope)
     }
 
+    /// Exec form: Copilot CLI 1.0.91 drops `args` on a Claude-format row, so the
+    /// shell form cannot carry the operands. The native launcher exits 0 itself
+    /// when it has nothing to do, so no shell guard is needed.
+    fn hook_command_form(&self) -> CommandForm {
+        CommandForm::Exec
+    }
+
     /// Copilot's own hook file: `{"version": 1, "hooks": {"<Event>": [{"type":
     /// "command", "command": …}]}}` — a **flat** per-event array with the matcher
     /// on each entry, *not* codex's and claude's nested matcher groups.
@@ -152,10 +160,10 @@ impl Vendor for CopilotVendor {
     /// - **Match-all omits `matcher` entirely.** Copilot treats `*` as a regex,
     ///   where it is invalid, and skips the entry. This is why the match-all
     ///   literal cannot be shared with claude's `*` group value.
-    /// - **`command`, never the exec-form `exec`/`args`.** The exec form removes
-    ///   the shell and therefore the launcher guard, and Copilot's `preToolUse`
-    ///   is fail-closed on the resulting spawn failure — grim would deny every
-    ///   tool call in the session.
+    /// - **Exec form: `exec` plus `args`, never `command`.** Copilot CLI 1.0.91
+    ///   drops `args` on a Claude-format row, so only the exec form carries the
+    ///   operands. A missing launcher is a spawn failure that `preToolUse` fails
+    ///   closed on; the registrar's launcher check is what prevents it.
     /// - **`timeoutSec`**, Copilot's own spelling (`timeout` is an accepted alias
     ///   since 1.0.2; the documented name is used).
     ///
@@ -165,17 +173,20 @@ impl Vendor for CopilotVendor {
     fn hook_file_document(&self, registrations: &[HookRegistration]) -> Option<serde_json::Value> {
         let mut events: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
         for registration in registrations {
-            let HookCommand::Shell(command) = &registration.command else {
-                // Never constructed in v1, and the exec form is the one shape
-                // that must never reach this file.
+            let HookCommand::Argv(argv) = &registration.command else {
+                debug_assert!(false, "copilot takes exec-form commands only");
+                continue;
+            };
+            let Some((launcher, args)) = argv.split_first() else {
                 continue;
             };
             let mut entry = serde_json::Map::new();
             entry.insert("type".to_string(), serde_json::Value::String("command".to_string()));
-            entry.insert("command".to_string(), serde_json::Value::String(command.clone()));
-            if let Some(powershell) = &registration.command_windows {
-                entry.insert("powershell".to_string(), serde_json::Value::String(powershell.clone()));
-            }
+            entry.insert("exec".to_string(), serde_json::Value::String(launcher.clone()));
+            entry.insert(
+                "args".to_string(),
+                serde_json::Value::Array(args.iter().cloned().map(serde_json::Value::String).collect()),
+            );
             if let Some(matcher) = &registration.matcher {
                 entry.insert("matcher".to_string(), serde_json::Value::String(matcher.clone()));
             }

@@ -27,7 +27,8 @@ use serde::Serialize;
 
 use crate::api::artifact_status::ArtifactStatus;
 use crate::api::status_report::HookArming;
-use crate::cli::printer::{Printable, print_table};
+use crate::cli::printer::{Printable, print_table, screen_plain};
+use crate::install::launcher::LauncherState;
 use crate::oci::hook::HookTier;
 
 /// One declared `[[hooks]]` entry and its arming state.
@@ -54,6 +55,20 @@ pub struct HookListEntry {
     pub arming: Vec<HookArming>,
 }
 
+/// The native launcher on disk, beside the hooks that depend on it.
+///
+/// Always present in the report: `sha256` is `null` when no regular file sits at
+/// the path.
+#[derive(Debug, Serialize)]
+pub struct LauncherReport {
+    /// Absolute path of the launcher, `$GRIM_HOME/hooks/grim-hook[.exe]`.
+    pub path: String,
+    /// Hex SHA-256 of the file on disk; `null` for a missing, occupied or linked path.
+    pub sha256: Option<String>,
+    /// How the file compares with the launcher embedded in this grim.
+    pub state: LauncherState,
+}
+
 /// Every declared hook entry, in a stable order.
 #[derive(Debug, Serialize)]
 pub struct HookListReport {
@@ -61,13 +76,15 @@ pub struct HookListReport {
     /// envelope can grow a sibling field additively and a top-level array
     /// cannot.
     pub items: Vec<HookListEntry>,
+    /// The launcher every listed hook fires through.
+    pub launcher: LauncherReport,
 }
 
 impl HookListReport {
     /// Build from resolved state. The caller sorts; this constructor does not
     /// re-order, so the report's order is the one the operation produced.
-    pub fn new(items: Vec<HookListEntry>) -> Self {
-        Self { items }
+    pub fn new(items: Vec<HookListEntry>, launcher: LauncherReport) -> Self {
+        Self { items, launcher }
     }
 }
 
@@ -102,7 +119,18 @@ impl Printable for HookListReport {
         // One table, static headers, unconditionally — an empty declared set
         // renders the header row and nothing else, which is a readable "no
         // hooks" rather than silence.
-        print_table(w, &["Hook", "Tier", "Events", "Client", "State", "Detail"], &rows)
+        print_table(w, &["Hook", "Tier", "Events", "Client", "State", "Detail"], &rows)?;
+        // The launcher is what every row fires through; a hook cannot run when it is
+        // anything but current, and the table above would not say so.
+        if self.launcher.state != LauncherState::Current {
+            writeln!(
+                w,
+                "\nLauncher {}: {} (run grim install to write it)",
+                self.launcher.state,
+                screen_plain(&self.launcher.path)
+            )?;
+        }
+        Ok(())
     }
 
     fn print_json(&self, w: &mut impl Write) -> io::Result<()> {
@@ -126,6 +154,14 @@ mod tests {
         }
     }
 
+    fn launcher() -> LauncherReport {
+        LauncherReport {
+            path: "/home/u/.grimoire/hooks/grim-hook".to_string(),
+            sha256: None,
+            state: LauncherState::Missing,
+        }
+    }
+
     fn arming(client: &str, cause: HookArmingCause) -> HookArming {
         HookArming {
             client: client.to_string(),
@@ -137,13 +173,16 @@ mod tests {
 
     #[test]
     fn plain_is_one_table_with_a_row_per_client() {
-        let report = HookListReport::new(vec![entry(
-            vec![
-                arming("claude", HookArmingCause::FeatureFlagOff),
-                arming("codex", HookArmingCause::ClientTrustPending),
-            ],
-            ArtifactStatus::Gated,
-        )]);
+        let report = HookListReport::new(
+            vec![entry(
+                vec![
+                    arming("claude", HookArmingCause::FeatureFlagOff),
+                    arming("codex", HookArmingCause::ClientTrustPending),
+                ],
+                ArtifactStatus::Gated,
+            )],
+            launcher(),
+        );
         let mut out = Vec::new();
         report.print_plain(&mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
@@ -160,7 +199,7 @@ mod tests {
     /// `Client` cell says `all` — an em dash there read as "no client".
     #[test]
     fn an_armed_hook_renders_one_row_armed_for_all_clients() {
-        let report = HookListReport::new(vec![entry(Vec::new(), ArtifactStatus::Installed)]);
+        let report = HookListReport::new(vec![entry(Vec::new(), ArtifactStatus::Installed)], launcher());
         let mut out = Vec::new();
         report.print_plain(&mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
@@ -171,8 +210,39 @@ mod tests {
     }
 
     #[test]
+    fn plain_names_a_launcher_that_is_not_current() {
+        let mut report = HookListReport::new(Vec::new(), launcher());
+        let mut out = Vec::new();
+        report.print_plain(&mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("Launcher missing: /home/u/.grimoire/hooks/grim-hook"),
+            "{text}"
+        );
+
+        report.launcher.state = LauncherState::Current;
+        let mut out = Vec::new();
+        report.print_plain(&mut out).unwrap();
+        assert!(!String::from_utf8(out).unwrap().contains("Launcher"));
+    }
+
+    #[test]
+    fn plain_screens_a_control_character_in_the_launcher_path() {
+        let mut report = HookListReport::new(Vec::new(), launcher());
+        report.launcher.path = "/h/\u{1b}[31m\nx/grim-hook".to_string();
+        let mut out = Vec::new();
+        report.print_plain(&mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+        assert!(
+            text.contains("Launcher missing: /h/\\u{1b}[31m x/grim-hook (run"),
+            "{text:?}"
+        );
+    }
+
+    #[test]
     fn json_uses_the_items_envelope() {
-        let report = HookListReport::new(Vec::new());
+        let report = HookListReport::new(Vec::new(), launcher());
         let mut out = Vec::new();
         report.print_json(&mut out).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&out).unwrap();
@@ -180,6 +250,21 @@ mod tests {
             value.get("items").is_some_and(|items| items.is_array()),
             "multi-item reports carry the uniform items envelope: {value}"
         );
+    }
+
+    /// C-021: `launcher` is a top-level sibling of `items`, and every key is present.
+    #[test]
+    fn json_carries_the_launcher_beside_the_items() {
+        let report = HookListReport::new(Vec::new(), launcher());
+        let mut out = Vec::new();
+        report.print_json(&mut out).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let launcher = value.get("launcher").expect("launcher is top-level");
+        let keys: Vec<&str> = launcher.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, ["path", "sha256", "state"], "the launcher object's exact key set");
+        assert_eq!(launcher["path"], "/home/u/.grimoire/hooks/grim-hook");
+        assert!(launcher.get("sha256").is_some_and(serde_json::Value::is_null));
+        assert_eq!(launcher["state"], "missing");
     }
 }
 

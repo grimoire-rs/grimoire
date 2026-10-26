@@ -18,7 +18,7 @@ tasks:
     desc: Run tests with LLVM coverage and generate reports.
     deps: [install]
     cmds:
-      - cargo llvm-cov --no-report --ignore-run-fail
+      - cargo llvm-cov --workspace --no-report --ignore-run-fail
       - cargo llvm-cov report --lcov --output-path lcov.info
       - cargo llvm-cov report --html
 

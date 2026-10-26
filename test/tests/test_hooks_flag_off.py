@@ -95,10 +95,14 @@ def _surfaces(runner, project_dir: Path) -> list[Path]:
 
 
 def _grim_elements(node) -> list:
-    """Every JSON object that is grim's: marked, or executing grim's launcher."""
+    """Every JSON object that is grim's: marked, or executing grim's launcher.
+
+    The launcher is named by `command` (the shell form Claude, Qoder and Codex
+    take) or by `exec` (Copilot's exec form, which has no `command` key; C-017).
+    """
     found = []
     if isinstance(node, dict):
-        if MARKER_KEY in node or LAUNCHER in str(node.get("command", "")):
+        if MARKER_KEY in node or any(LAUNCHER in str(node.get(key, "")) for key in ("command", "exec")):
             found.append(node)
         for value in node.values():
             found += _grim_elements(value)
@@ -256,7 +260,7 @@ def test_c152b_flag_off_reaps_registrations_and_keeps_payload_launcher_consent(
     assert {"project/.claude/settings.local.json"} | {
         GLOBAL_SURFACE[c] for c in expected
     } <= set(armed), armed
-    launcher = grim_home / "hooks" / "bin" / LAUNCHER
+    launcher = grim_home / "hooks" / LAUNCHER
     consent = sorted((grim_home / "hooks" / "consent").glob("*.json"))
     payloads = sorted(grim_home.glob("hooks/**/shell-guard/hook.toml"))
     assert launcher.is_file() and len(consent) == 1 and len(payloads) == 2, (

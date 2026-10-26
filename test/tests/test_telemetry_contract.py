@@ -25,12 +25,8 @@ import pytest
 from src.helpers import make_artifact, write_config
 from src.otlp_fixture import LOGS_PATH, OtlpCollector
 from src.runner import GrimRunner
-from src.stdio_drivers import HOSTILE_PAYLOAD, ROOT
 from src.stdio_drivers import drive as _drive
-from src.stdio_drivers import entry as _entry
 from src.stdio_drivers import initialize as _initialize
-from src.stdio_drivers import payload as _payload
-from src.stdio_drivers import write_table as _write_table
 
 COMMAND = "grim.command"
 ARTIFACT = "grim.artifact.changed"
@@ -134,35 +130,6 @@ def test_operator_vcs_override(
     for key in ("vcs.repository.url.full", "vcs.owner.name", "vcs.provider.name"):
         assert resource[key] == derived[key], key
     assert resource["vcs.owner.name"] == "acme"
-
-
-# --------------------------------------------------------------------------- #
-# Hooks never export
-# --------------------------------------------------------------------------- #
-
-
-@pytest.mark.skipif(os.name == "nt", reason="the hook payload is a POSIX shell script")
-def test_hook_run_never_exports(
-    grim_at, project_dir: Path, grim_home: Path, tmp_path: Path, otlp_collector: OtlpCollector
-) -> None:
-    (project_dir / "grimoire.toml").write_text("[skills]\n")
-    runner = arm(grim_at(project_dir), otlp_collector)
-    handler, marker, payload_dir = _payload(tmp_path, "hit")
-    table = _write_table(grim_home, [_entry(id="hit", handler=handler, payload_dir=payload_dir)])
-
-    result = runner.run(
-        "hook", "run", "--client", "claude", "--event", "PreToolUse",
-        "--table", str(table), "--root", ROOT,
-        stdin=HOSTILE_PAYLOAD, check=False, timeout=20,
-    )  # fmt: skip
-
-    assert result.returncode == 0, result.stderr
-    assert marker.exists(), f"the run never reached dispatch\nstderr: {result.stderr}"
-    assert otlp_collector.requests == []
-    assert not (grim_home / "telemetry").exists()
-
-    runner.run("status", timeout=10)  # positive control: same env, a normal command
-    assert len(otlp_collector.log_posts) == 1
 
 
 # --------------------------------------------------------------------------- #

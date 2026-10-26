@@ -103,7 +103,8 @@ use std::path::PathBuf;
 
 use serde::{Serialize, Serializer};
 
-use crate::cli::printer::{Printable, print_table};
+use crate::cli::printer::{Printable, print_table, screen_plain};
+use crate::install::launcher::LauncherState;
 use crate::oci::{ArtifactKind, PinnedIdentifier};
 
 use super::artifact_status::{ArtifactStatus, HookArmingCause};
@@ -273,13 +274,28 @@ pub struct StatusReport {
     /// Whether `--check` ran a live catalog lookup for this report. See the
     /// module doc for the full consumer contract.
     checked: bool,
+    /// Plain text only: the launcher when hooks are in play and it is not
+    /// current. Skipped in JSON, whose shape is frozen.
+    #[serde(skip)]
+    launcher_note: Option<(LauncherState, String)>,
 }
 
 impl StatusReport {
     /// Build from operation results. `checked` is `true` iff `--check` was
     /// passed and the run was online (see the module doc).
     pub fn new(items: Vec<StatusEntry>, checked: bool) -> Self {
-        Self { items, checked }
+        Self {
+            items,
+            checked,
+            launcher_note: None,
+        }
+    }
+
+    /// Have the plain rendering name a launcher that is not current.
+    #[must_use]
+    pub fn with_launcher(mut self, state: LauncherState, path: String) -> Self {
+        self.launcher_note = (state != LauncherState::Current).then_some((state, path));
+        self
     }
 }
 
@@ -311,7 +327,16 @@ impl Printable for StatusReport {
             .collect();
         const HEADERS: [&str; 5] = ["Kind", "Name", "Source", "Pinned", "State"];
         const HOOK_HEADERS: [&str; 6] = ["Kind", "Name", "Source", "Pinned", "State", "Note"];
-        print_table(w, if has_hook { &HOOK_HEADERS } else { &HEADERS }, &rows)
+        print_table(w, if has_hook { &HOOK_HEADERS } else { &HEADERS }, &rows)?;
+        // Every hook row fires through the launcher; the table would not say it is stale.
+        if let Some((state, path)) = &self.launcher_note {
+            writeln!(
+                w,
+                "\nLauncher {state}: {} (run grim install to write it)",
+                screen_plain(path)
+            )?;
+        }
+        Ok(())
     }
 
     fn print_json(&self, w: &mut impl Write) -> io::Result<()> {
@@ -375,6 +400,40 @@ mod tests {
         assert!(
             with_hook.lines().next().unwrap().trim_end().ends_with("Note"),
             "{with_hook}"
+        );
+    }
+
+    #[test]
+    fn plain_names_a_launcher_that_is_not_current_and_json_is_unchanged() {
+        let report = |state| {
+            StatusReport::new(vec![base_entry("x")], false).with_launcher(state, "/h/hooks/grim-hook".to_string())
+        };
+        let plain = |r: &StatusReport| {
+            let mut buf = Vec::new();
+            r.print_plain(&mut buf).unwrap();
+            String::from_utf8(buf).unwrap()
+        };
+        let stale = report(LauncherState::Missing);
+        assert!(plain(&stale).contains("Launcher missing: /h/hooks/grim-hook (run grim install to write it)"));
+        assert!(!plain(&report(LauncherState::Current)).contains("Launcher"));
+        let mut buf = Vec::new();
+        stale.print_json(&mut buf).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        let keys: Vec<&str> = json.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, ["checked", "items"]);
+    }
+
+    #[test]
+    fn plain_screens_a_control_character_in_the_launcher_path() {
+        let r = StatusReport::new(vec![base_entry("x")], false)
+            .with_launcher(LauncherState::Missing, "/h/\u{1b}[31m\nx/grim-hook".to_string());
+        let mut buf = Vec::new();
+        r.print_plain(&mut buf).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+        assert!(
+            text.contains("Launcher missing: /h/\\u{1b}[31m x/grim-hook (run"),
+            "{text:?}"
         );
     }
 

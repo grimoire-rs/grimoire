@@ -117,3 +117,4 @@ docs/public/schemas/
 # =============================================================================
 .agents/worktrees/
 .agents/.tmp/
+.agents/*.lock

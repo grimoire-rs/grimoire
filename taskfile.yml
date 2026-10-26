@@ -28,7 +28,7 @@ includes:
 
 tasks:
   check:
-    cmd: cargo check
+    cmd: cargo check --workspace
 
   run:
     desc: Build and run grim (pass args after --)

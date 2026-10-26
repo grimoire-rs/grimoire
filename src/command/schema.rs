@@ -360,6 +360,14 @@ mod tests {
         }
     }
 
+    /// The hook schema is a published contract: its bytes must not move when the
+    /// types behind it change crate. Golden is `grim schema --kind hook` stdout.
+    #[test]
+    fn hook_schema_stdout_is_byte_identical_to_the_golden() {
+        let stdout = format!("{}\n", generate(SchemaKind::Hook).expect("generate"));
+        assert_eq!(stdout, include_str!("testdata/hook.schema.json"));
+    }
+
     /// C-153: the config schema gains exactly an optional `hooks` table
     /// (binding → reference string) and `options.experimental.hooks`; the
     /// root's required set is unchanged (nothing required), so every existing

@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from src.helpers import make_artifact, write_config
+from src.hook_launcher import run_launcher
 
 # Only the tests that actually arm and inspect the launcher/registration are
 # POSIX-only in v1 — C-153, S-110 and S-112 in this module write or arm no
@@ -289,7 +290,9 @@ def test_s111_a_reserved_hook_binding_is_refused_by_add(
     assert install.returncode == 0, install.stderr
     assert "reserved" in install.stderr, install.stderr
     assert _rows(runner) == [] and not _claude_marked(project_dir)
-    assert _hook_item(runner)["state"] == "missing", "a reserved binding never materializes, so status reports it missing"
+    item = _hook_item(runner)
+    assert item["state"] == "not-armed", "a reserved binding never materializes, and status names why"
+    assert [a["cause"] for a in item["arming"]] == ["binding-name-reserved"], item
 
     write_config(project_dir)
     runner.run("add", hook.fq, "--name", "guard")
@@ -407,11 +410,10 @@ def test_s116_a_real_python_run_leaves_pycache_that_is_neither_drift_nor_a_disar
     [token] = json.loads(table.read_text())["roots"]
     [payload] = list((grim_home / "hooks").glob("payload/*/shell-guard"))
 
-    fired = runner.run(
-        "hook", "run", "--client", "claude", "--event", "PreToolUse", "--table", str(table), "--root", token,
+    fired = run_launcher(
+        grim_home / "hooks" / "grim-hook", "claude", "PreToolUse", token,
         stdin=json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash",
                           "tool_input": {"command": "ls"}, "cwd": str(project_dir), "session_id": "s"}),
-        check=False,
     )
     assert fired.returncode == 0, fired.stderr
     assert list(payload.glob("__pycache__/helper.*.pyc")), f"the handler must have run and imported helper: {fired.stderr}"

@@ -12,7 +12,7 @@ an isolated `COPILOT_HOME` (`research_hooks_qoder_copilot_schemas.md` § 6):
 - **S-108 / C-131.** SessionStart context reaches the session only as the
   flat top-level `additionalContext`; the nested Claude form did not surface.
 
-Asserted through `grim hook run` as a process, with a dispatch table written
+Asserted through the installed launcher as a process, with a dispatch table written
 where grim writes one: what matters is the document Copilot reads on stdout.
 """
 from __future__ import annotations
@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 
+from src.hook_launcher import run_launcher
 from src.runner import GrimRunner
 
 pytestmark = pytest.mark.skipif(
@@ -69,11 +70,15 @@ def _arm_table(grim_home: Path, tmp_path: Path, *, client: str, event: str, tier
     return table
 
 
+@pytest.fixture(autouse=True)
+def _installed_launcher(launcher: Path) -> Path:
+    """Every test fires the real `grim-hook` that `grim install` wrote."""
+    return launcher
+
+
 def _run(grim: GrimRunner, table: Path, *, client: str, event: str, stdin: str):
-    return grim.run(
-        "hook", "run", "--client", client, "--event", event, "--table", str(table), "--root", ROOT,
-        stdin=stdin, check=False,
-    )
+    # The launcher reads the table beside itself, which is the one `_arm_table` wrote.
+    return run_launcher(Path(grim.grim_home) / "hooks" / "grim-hook", client, event, ROOT, stdin=stdin)
 
 
 def test_s107_a_copilot_rewrite_uses_only_the_probe_selected_field(grim, grim_home: Path, tmp_path: Path) -> None:

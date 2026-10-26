@@ -48,6 +48,7 @@ use crate::oci::hook::{HookCommand, HookRegistration, HookSurface};
 use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
+use super::hook_command::{CommandForm, WindowsShell};
 use super::render::{self, RenderError, RenderedDoc};
 use super::vendor::{
     FieldType, KindSupport, KnownField, McpConfigFormat, Vendor, env_dir, global_skills_root, home_dir, toml_provenance,
@@ -158,6 +159,11 @@ impl Vendor for CodexVendor {
         hook_config_path(workspace, scope)
     }
 
+    /// Shell form through `cmd /C` on Windows, which cannot carry an embedded quote.
+    fn hook_command_form(&self) -> CommandForm {
+        CommandForm::Shell(WindowsShell::Cmd)
+    }
+
     /// Codex's `hooks.json`: `{"hooks": {"<Event>": [{"matcher": …, "hooks":
     /// [{"type": "command", …}]}]}}` — per-event **matcher groups**, the same
     /// nesting Claude uses, and *not* copilot's flat shape.
@@ -187,16 +193,12 @@ impl Vendor for CodexVendor {
         let mut events: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
         for registration in registrations {
             let HookCommand::Shell(command) = &registration.command else {
-                // `HookCommand::Argv` is never constructed in v1; refusing beats
-                // joining an argv array into a shell string here.
+                debug_assert!(false, "codex takes shell-form commands only");
                 continue;
             };
             let mut handler = serde_json::Map::new();
             handler.insert("type".to_string(), serde_json::Value::String("command".to_string()));
             handler.insert("command".to_string(), serde_json::Value::String(command.clone()));
-            if let Some(windows) = &registration.command_windows {
-                handler.insert("commandWindows".to_string(), serde_json::Value::String(windows.clone()));
-            }
             if let Some(timeout) = registration.timeout {
                 handler.insert("timeout".to_string(), serde_json::Value::from(timeout));
             }

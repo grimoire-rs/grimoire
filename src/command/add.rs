@@ -574,8 +574,10 @@ pub fn refuse_bad_binding_name(kind: ArtifactKind, name: &str) -> anyhow::Result
     ) && let Err(reason) = crate::skill::SkillName::parse(name)
     {
         reason
-    } else if kind == ArtifactKind::Hook && crate::oci::hook::is_reserved_binding_name(name) {
-        format!("'{name}' is reserved for grim's own hook entries under $GRIM_HOME/hooks/")
+    } else if kind == ArtifactKind::Hook
+        && let Some(reason) = crate::oci::hook::binding_name_refusal(name)
+    {
+        reason
     } else {
         return Ok(());
     };

@@ -2,4 +2,4 @@ inlineHeader = """
 SPDX-License-Identifier: Apache-2.0
 Copyright 2026 The Grimoire Authors"""
 
-includes = ["src/**/*.rs"]
+includes = ["src/**/*.rs", "crates/**/*.rs", "build.rs", "build/**/*.rs"]

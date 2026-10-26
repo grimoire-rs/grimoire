@@ -55,7 +55,7 @@ pub use export_report::{
 #[allow(unused_imports)]
 pub use fetch_report::FetchCliReport;
 #[allow(unused_imports)]
-pub use hook_report::{HookConsentAction, HookConsentReport, HookListEntry, HookListReport};
+pub use hook_report::{HookConsentAction, HookConsentReport, HookListEntry, HookListReport, LauncherReport};
 #[allow(unused_imports)]
 pub use init_report::InitReport;
 #[allow(unused_imports)]

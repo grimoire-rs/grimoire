@@ -471,10 +471,9 @@ mod tests {
         }
 
         let mut files = Vec::new();
-        rust_files(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
-            &mut files,
-        );
+        for root in ["src", "crates"] {
+            rust_files(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(root), &mut files);
+        }
 
         // Assembled, never written whole — see the doc comment. `concat` runs
         // at test time, so neither string below appears in any source file.

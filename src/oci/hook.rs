@@ -8,7 +8,7 @@
 //! true`): a `hook.toml` manifest at the root plus the payload files its
 //! handlers invoke. Installing it materializes the payload once per scope and
 //! registers **one grim-owned dispatcher entry per `(client, event, scope,
-//! matcher)`** whose command invokes `grim hook run` through a generated
+//! matcher)`** whose command invokes the generated native `grim-hook`
 //! launcher — grim, not the vendor, owns matching, ordering, failure policy
 //! and response projection. Design record: `.agents/adr/adr_hooks_support.md`
 //! (decisions A–Q, contracts C-001…C-014) and
@@ -57,63 +57,15 @@ use crate::install::client_target::ClientTarget;
 use crate::install::ignore_set::IgnoreSet;
 use crate::oci::ArtifactKind;
 
+pub use grimoire_hook_core::{
+    CanonicalEvent, DEFAULT_TIMEOUT_SECS, HOOK_SCHEMA_VERSION, HookHandler, HookPayloadMode, HookTier, MATCHER_ALLOWED,
+    MATCHER_MAX_BYTES, MAX_TIMEOUT_SECS, MIN_TIMEOUT_SECS, matcher_char_allowed, projection_for,
+};
+#[cfg(test)]
+pub use grimoire_hook_core::{EVENT_ECHO_FIELD, RESPONSE_PROJECTION, VerdictTokens};
+
 /// Manifest file name at the root of a hook artifact.
 pub const HOOK_MANIFEST_FILE: &str = "hook.toml";
-
-/// The `schema` value this grim writes and understands. Bumping it is a wire
-/// change; an unknown value must produce the explanatory error S-014 requires,
-/// never a bare TOML parse failure.
-pub const HOOK_SCHEMA_VERSION: u32 = 1;
-
-/// Characters a `matcher` may contain (C-018).
-///
-/// An **allowlist**, deliberately not a denylist of quotes and control
-/// characters: a denylist still admits bidi and homoglyph characters that let a
-/// matcher spoof what an approval prompt or a vendor's own trust TUI displays,
-/// and admits `$`/backtick forms that become a latency bomb on the hot path.
-pub const MATCHER_ALLOWED: &str = "A-Za-z0-9_*?./-|";
-
-/// Maximum `matcher` length in bytes (C-018). Longer fails `grim build`
-/// (exit 65).
-pub const MATCHER_MAX_BYTES: usize = 256;
-
-/// The per-handler timeout an entry that declares none gets, in seconds.
-///
-/// Declared here rather than in the runtime that enforces it: it is a property
-/// of the **format** (`hook.toml`'s `timeout` field documents "default 30"), and
-/// a number the manifest documents in prose while the enforcer holds the only
-/// literal is a number that drifts. **Grim** enforces it on every client, so a
-/// vendor's own timeout is a backstop and never the contract.
-pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
-
-/// The smallest `timeout` an entry may declare, in seconds. Below it the
-/// dispatcher's budget (the shortest timeout, less a margin) leaves no time to
-/// start any hook on that tool call.
-pub const MIN_TIMEOUT_SECS: u64 = 1;
-
-/// The largest `timeout` an entry may declare, in seconds. Far beyond any
-/// client's own limit, and small enough that the dispatcher's deadline
-/// arithmetic cannot overflow.
-pub const MAX_TIMEOUT_SECS: u64 = 3600;
-
-/// Whether one character is admissible in a `matcher` (C-018).
-///
-/// **This, not [`MATCHER_ALLOWED`], is the membership test.**
-/// `MATCHER_ALLOWED` is a range *spelling* for the diagnostic, so the obvious
-/// `MATCHER_ALLOWED.contains(c)` is wrong in both directions — it rejects `'B'`
-/// and accepts `'-'` only incidentally. Keeping the set here and the notation
-/// there means the error message stays readable without becoming the
-/// implementation.
-/// `|` is admitted because C-025's translation table lists `A|B` alternation
-/// as one of exactly three forms that translate **losslessly** to all three v1
-/// clients, and WP-B verified it fires on each. Without it the form would be
-/// unauthorable at `grim build` while the vendor seam accepted it — the two
-/// contracts have to agree, and this is the additive direction. It never
-/// reaches a shell: C-018b routes every publisher-controlled value through
-/// argv or a single-quoted string, where `|` is inert.
-pub const fn matcher_char_allowed(c: char) -> bool {
-    c.is_ascii_alphanumeric() || matches!(c, '_' | '*' | '?' | '.' | '/' | '-' | '|')
-}
 
 /// The charset a `[[hooks]]` `id` may use — lowercase-friendly ASCII word
 /// characters, `-` and `.`, and nothing else (audit finding P-6).
@@ -121,7 +73,7 @@ pub const fn matcher_char_allowed(c: char) -> bool {
 /// `id` was uncharted: `validate` checked only uniqueness, and the value reached
 /// a filesystem path interpolation, `GRIM_HOOK_NAME`, the envelope's `hook` field,
 /// the audit trail and `tracing` lines. The path sink is now hash-derived
-/// (`command::hook::pipeline::write_payload_file`), so **this rule is
+/// (`grimoire_hook_core::pipeline::write_payload_file`), so **this rule is
 /// defence in depth rather than the control** — I5's distinction, stated here so
 /// no later reader treats it as the thing that stops traversal.
 ///
@@ -146,7 +98,8 @@ pub const HOOK_ID_MAX_BYTES: usize = 128;
 /// one, and `grim build` refuses it (exit 65,
 /// [`HookError::ReservedArtifactName`]).
 ///
-/// `$GRIM_HOME/hooks/` holds the generated launcher (`bin/grim-hook`), the
+/// `$GRIM_HOME/hooks/` holds the native launcher (`grim-hook`, `grim-hook.exe` on
+/// Windows), the retired shim's `bin/` directory, the
 /// dispatch table (`dispatch.json`) and the `payload/` tree of per-workspace
 /// payload roots, all beside the **global** per-artifact payload trees — so each
 /// is a legal artifact name whose global payload would materialize **over** the
@@ -232,11 +185,13 @@ pub const HOOK_ID_MAX_BYTES: usize = 128;
 /// accepted.
 ///
 /// [`every_grim_owned_name_under_hooks_is_a_reserved_binding_name`]: crate::install::hook_dispatch
-pub const RESERVED_ARTIFACT_NAMES: [&str; 6] = [
+pub const RESERVED_ARTIFACT_NAMES: [&str; 8] = [
     "bin",
     "consent",
     "dispatch.json",
     "dispatch.json.lock",
+    "grim-hook",
+    "grim-hook.exe",
     "payload",
     "root-key",
 ];
@@ -252,13 +207,11 @@ pub const RESERVED_ARTIFACT_NAMES: [&str; 6] = [
 /// its member. So the shipped check guarded the wrong string, and a hook bound as
 /// `bin` materialized `$GRIM_HOME/hooks/bin/hook.toml`.
 ///
-/// The write collision itself was survivable — convergence regenerates
-/// `bin/grim-hook` afterwards inside the same command, so grim's own shim wins.
-/// **The reap is the sharp edge**: `grim uninstall --global hook bin` deletes the
-/// artifact's recorded output tree and takes the launcher with it, after which
-/// every armed hook on the machine, for every client and every workspace,
-/// silently stops firing — the registered command's own
-/// `[ -f "$L" ] && [ -x "$L" ] || exit 0` guard degrades to exit 0.
+/// A hook bound as `grim-hook` (or `grim-hook.exe`) would materialize over the
+/// native launcher's own path. **The reap is the sharp edge**: `grim uninstall
+/// --global hook grim-hook` deletes the artifact's recorded output tree and takes
+/// the launcher with it, after which every armed hook on the machine, for every
+/// client and every workspace, silently stops firing.
 ///
 /// A predicate rather than open `RESERVED_ARTIFACT_NAMES.contains` calls, so every
 /// site that asks it — `grim add`'s
@@ -323,7 +276,27 @@ pub fn binding_name_refusal(name: &str) -> Option<String> {
              '{name}' would materialize over one of them; rebind it under another name"
         ));
     }
+    if has_executable_suffix(name) {
+        return Some(format!(
+            "'{name}' ends in an executable suffix ({}): on Windows a hook bound as '{name}' would \
+             materialize `$GRIM_HOME/hooks/{name}`, which the launcher's own directory search \
+             finds ahead of the real program for a command-form handler; rebind it under another \
+             name",
+            EXECUTABLE_SUFFIXES.join(", ")
+        ));
+    }
     None
+}
+
+/// Suffixes Windows resolves as a program when a bare name is searched in the
+/// launcher's own directory (`hooks/`), which is also the binding namespace.
+const EXECUTABLE_SUFFIXES: [&str; 4] = [".exe", ".com", ".bat", ".cmd"];
+
+fn has_executable_suffix(name: &str) -> bool {
+    EXECUTABLE_SUFFIXES.iter().any(|suffix| {
+        name.len() >= suffix.len()
+            && name.as_bytes()[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix.as_bytes())
+    })
 }
 
 /// Reserved `[[hooks]]` key, parsed as an opaque value in v1.
@@ -341,207 +314,6 @@ pub fn binding_name_refusal(name: &str) -> Option<String> {
               something matches on the key"
 )]
 pub const RESERVED_POLICY_KEY: &str = "policy";
-
-/// The four canonical lifecycle events.
-///
-/// Canonical breadth is exactly these four (ADR decision D3). The names and
-/// spelling are Claude Code's, which the survey established as the de facto
-/// standard rather than a neutral invention. Every other vendor moment is
-/// reached natively through a `<vendor>.event` override on the entry.
-///
-/// Closed internal enum: matches stay total, no `#[non_exhaustive]`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema)]
-pub enum CanonicalEvent {
-    /// Before a tool call runs — the only event a `mutator` may declare, and
-    /// the only moment at which rewriting a tool's input is meaningful.
-    PreToolUse,
-    /// After a tool call has run.
-    PostToolUse,
-    /// At session start.
-    SessionStart,
-    /// When the agent's turn stops.
-    Stop,
-}
-
-impl CanonicalEvent {
-    /// Every canonical event, in firing order.
-    pub const ALL: [Self; 4] = [Self::PreToolUse, Self::PostToolUse, Self::SessionStart, Self::Stop];
-
-    /// The canonical (PascalCase) event name.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::PreToolUse => "PreToolUse",
-            Self::PostToolUse => "PostToolUse",
-            Self::SessionStart => "SessionStart",
-            Self::Stop => "Stop",
-        }
-    }
-
-    /// Whether **any** v1 vendor can express a blocking verdict at this event.
-    ///
-    /// A query over [`RESPONSE_PROJECTION`] (C-021), not a second table: true
-    /// iff some row for this event has a non-empty
-    /// [`ProjectionRow::verdict`]. A `gatekeeper` declared on an event that
-    /// admits no verdict anywhere is a manifest error at `grim build`, which is
-    /// what makes the per-event tier set well-defined (ADR decision F).
-    /// Per-client verdicts stay a per-client `Declined`, the normal path.
-    pub fn admits_verdict(self) -> bool {
-        RESPONSE_PROJECTION
-            .iter()
-            .any(|row| row.event == self && !row.verdict.is_empty())
-    }
-
-    /// Whether this event admits an input rewrite at all — true only for
-    /// [`PreToolUse`](Self::PreToolUse): nothing later has an input left to
-    /// rewrite.
-    ///
-    /// Also a query over [`RESPONSE_PROJECTION`] rather than a `match` on the
-    /// variant, so the table stays the single source (C-021). The two
-    /// formulations agree today and a test pins that they do: if a row ever
-    /// grows a [`ProjectionRow::mutation`] outside `PreToolUse`, the failing
-    /// test is the intended outcome — a later event has no input left to
-    /// rewrite, so such a row would be a vendor-survey error, not a widening.
-    pub fn admits_mutation(self) -> bool {
-        RESPONSE_PROJECTION
-            .iter()
-            .any(|row| row.event == self && row.mutation.is_some())
-    }
-}
-
-impl std::fmt::Display for CanonicalEvent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// What a hook is allowed to do with the moment it fires at.
-///
-/// The tier is a **capability declaration**, resolved per client: a tier the
-/// client cannot honour is `Declined`, never silently degraded into a weaker
-/// one — degrading a guardrail into a logger reports a security control as
-/// installed when it is not.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum HookTier {
-    /// Reads the event; its response cannot change what happens.
-    Observer,
-    /// May return a verdict that blocks the operation. Valid only on an event
-    /// that admits a verdict ([`CanonicalEvent::admits_verdict`]).
-    Gatekeeper,
-    /// May rewrite the tool input. Valid only on
-    /// [`CanonicalEvent::PreToolUse`], and `Declined` per client for tools
-    /// whose input is a shell-command string (ADR decision K).
-    Mutator,
-}
-
-impl HookTier {
-    /// Every tier, weakest first.
-    #[cfg(test)]
-    pub const ALL: [Self; 3] = [Self::Observer, Self::Gatekeeper, Self::Mutator];
-
-    /// The authored tier string.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Observer => "observer",
-            Self::Gatekeeper => "gatekeeper",
-            Self::Mutator => "mutator",
-        }
-    }
-
-    /// Whether this tier may be declared at `event` **in the manifest**.
-    ///
-    /// `mutator` only at [`CanonicalEvent::PreToolUse`]; `gatekeeper` only on a
-    /// verdict-admitting event; `observer` everywhere. Enforced at `grim build`
-    /// (exit 65) — a per-client refusal is a separate, later decision.
-    pub fn is_valid_at(self, event: CanonicalEvent) -> bool {
-        match self {
-            // Reading the event is always possible; a tier that changes
-            // nothing cannot be dishonoured by the moment it fires at.
-            Self::Observer => true,
-            Self::Gatekeeper => event.admits_verdict(),
-            Self::Mutator => event.admits_mutation(),
-        }
-    }
-}
-
-impl std::fmt::Display for HookTier {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// How the canonical envelope reaches the payload.
-///
-/// `stdin` is the default and the only transport that avoids the always-on
-/// metadata vectors (`/proc/<pid>/cmdline`, `/proc/<pid>/environ`, crash dumps,
-/// CI logs). `file` is an explicit opt-in for payloads that would overflow
-/// `ARG_MAX`, never a default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum HookPayloadMode {
-    /// One JSON object on the payload's stdin (default).
-    #[default]
-    Stdin,
-    /// The envelope is written to a file whose path is exported as
-    /// `GRIM_HOOK_PAYLOAD`.
-    File,
-}
-
-/// How a `[[hooks]]` entry names the program to run.
-///
-/// `argv` is the documented preferred form (no shell, no quoting); `command` is
-/// a single string handed to the platform shell and is documented as the lesser
-/// form. Serialized flattened into the entry table, so the variant name *is*
-/// the authored key: `argv = ["sh", "guard.sh"]` or `command = "guard.sh"`.
-///
-/// **"Exactly one of `argv`/`command`" is a validation rule, NOT a type
-/// invariant — do not document it as one.** Under `#[serde(flatten)]` the
-/// externally-tagged enum is resolved by `FlatMapDeserializer`, which takes the
-/// **first key matching a variant name in declaration order**, not the authored
-/// order. An entry supplying *both* keys therefore parses cleanly: `argv` wins,
-/// and the surplus `command` is swept into [`HookEntry::vendor`], the catch-all
-/// flatten that follows it. Nothing errors, and a human reading that
-/// `hook.toml` bottom-up would believe the *last* handler runs while grim runs
-/// `argv` (attacker T1: a published manifest carrying a shadow handler).
-/// [`HookManifest::validate`] closes it explicitly —
-/// [`HookError::AmbiguousHandler`] — by inspecting `vendor` for `argv` /
-/// `command`, which is exactly where the deserializer put them.
-///
-/// The *neither* case fails earlier, inside serde, with the internal message
-/// `no variant of enum HookHandler found in flattened data`. That is not an
-/// author-facing diagnostic for a published format, so
-/// [`HookManifest::from_toml_str`] re-maps it to
-/// [`HookError::MissingHandler`] — the same "explanatory error, never a bare
-/// TOML parse failure" rule S-014 already imposes on the `schema` field.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum HookHandler {
-    /// Exec-form argument vector — no shell involved.
-    Argv(Vec<String>),
-    /// A single string handed to the platform shell.
-    Command(String),
-}
-
-impl HookHandler {
-    /// The handler's first token: `argv[0]`, or the first whitespace-separated
-    /// word of `command`.
-    ///
-    /// The input to C-019's build-time rule: a first token that resolves to a
-    /// **payload-relative file** is rejected at `grim build` (exit 65), because
-    /// a payload fetched through OCI arrives `0o644` and a shell would `execve`
-    /// it into `EACCES`. The exec bit is never load-bearing; the message names
-    /// the interpreter form instead.
-    pub fn first_token(&self) -> Option<&str> {
-        match self {
-            Self::Argv(argv) => argv.first().map(String::as_str),
-            // `split_whitespace` and not `split(' ')`: the shell that would run
-            // this string splits on any run of blanks, so `"  sh guard.sh"`
-            // executes `sh`. Taking the literal first `' '`-delimited field
-            // would yield `""` there and skip C-019's check entirely.
-            Self::Command(command) => command.split_whitespace().next(),
-        }
-    }
-}
 
 /// One `[[hooks]]` entry: a single handler bound to a moment and a tier.
 ///
@@ -753,6 +525,14 @@ impl HookManifest {
         // comparison so a directory *called* `bin` reports the reservation
         // rather than a name/stem mismatch it cannot fix by renaming the file.
         self.validate_reserved_name()?;
+        // Only the executable-suffix refusal can still fire here, and it is build-only:
+        // a consumer may bind such a hook under another name, so install must not drop it.
+        if let Some(reason) = binding_name_refusal(&self.name) {
+            return Err(HookError::ArtifactNameInvalid {
+                name: self.name.clone(),
+                reason,
+            });
+        }
         let stem = artifact_dir
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
@@ -1147,32 +927,23 @@ pub enum HookSurface {
 
 /// The command form a client's registration field accepts.
 ///
-/// Not cosmetic: exec form removes shell quoting *and* shell expansion from the
-/// client boundary, which is why claude's project-scope registration is safe to
-/// carry an absolute launcher path. A shell string cannot carry a fail-open
-/// guard in exec form and so needs the `[ -x "$L" ] || exit 0` prefix — testing
-/// **the launcher**, never `grim` on `$PATH`, because a failed `exec` exits 127
-/// and never reaches `|| exit 0`.
-///
-/// Not serialized — see [`HookRegistration`].
+/// Exec form removes shell quoting and expansion from the client boundary;
+/// shell form is one string a shell parses. Not serialized: each vendor's writer
+/// converts it, see [`HookRegistration`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HookCommand {
-    /// Exec-form argv (claude): `["<launcher>", "run", "--client", …]`.
-    ///
-    /// **Never constructed in v1.** WP-B established by execution that claude
-    /// has no argv array — its `command` string is run by `/bin/sh` with full
-    /// expansion — so every v1 registration is a [`Shell`](Self::Shell) carrying
-    /// the fail-open guard. The variant stays because the *seam* is argv-shaped
-    /// and a client with a real exec form must not need it reshaped.
-    #[expect(
-        dead_code,
-        reason = "never constructed in v1 (hook_launcher.rs documents it: all three clients take a \
-                  guard-prefixed shell string). NO REMOVAL TRIGGER for WP-K: it becomes live when a \
-                  client with a real exec-form registration field lands"
-    )]
+    /// Exec-form argv (Copilot): the launcher path, then its three operands.
     Argv(Vec<String>),
-    /// A single shell string (codex, copilot), guard-prefixed and quoted.
+    /// A single shell string (Claude, Qoder, Codex).
     Shell(String),
+}
+
+/// The shell a [`HookCommand::Shell`] string needs when a client's default
+/// would misparse it. Only a quoted Windows path needs one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookShell {
+    /// Claude's `"shell": "powershell"`.
+    PowerShell,
 }
 
 /// One dispatcher registration: what a vendor writes into its own hook surface
@@ -1210,434 +981,19 @@ pub struct HookRegistration {
     pub matcher: Option<String>,
     /// The command the client invokes.
     pub command: HookCommand,
-    /// The Windows form where the client has a separate field for it
-    /// (codex `commandWindows`, copilot `powershell`).
-    pub command_windows: Option<String>,
+    /// The shell to request for a shell-form command, when not the client's default.
+    pub shell: Option<HookShell>,
     /// Client-side timeout in seconds, where the surface accepts one. Grim
     /// enforces the authored timeout itself regardless; this is a backstop.
     pub timeout: Option<u64>,
-}
-
-/// The **vendor tokens** one verdict target accepts, per canonical verdict.
-///
-/// **Added by WP-K's Implement phase (its Specify finding F-E), because the
-/// table gated field *names* and nothing held the per-pair *value*.** The
-/// vocabulary genuinely differs per target, and the differences are not
-/// derivable from the field name:
-///
-/// | Target | allow | deny | ask |
-/// |---|---|---|---|
-/// | claude·`PreToolUse` `permissionDecision` | `allow` | `deny` | `ask` |
-/// | claude·`PostToolUse` / `Stop` `decision` | ⊘ (absence allows) | `block` | ⊘ |
-/// | codex·`PreToolUse` `decision` | `approve` | `block` | ⊘ |
-/// | codex·`PreToolUse` `permissionDecision` | `allow` | `deny` | `ask` |
-/// | copilot·`Stop` `decision` | `allow` | `block` | ⊘ |
-///
-/// So codex's `PreToolUse` row spells one canonical `deny` as **`block` in one
-/// field and `deny` in the other**, and a projector working from the field name
-/// alone would write the wrong literal into the coarse channel. `None` means the
-/// target has no spelling for that verdict: absence is how every one of them
-/// says "allow", which is why a permissive verdict with no token is dropped
-/// while a **restrictive** one is refused outright (see
-/// [`ProjectionError`](crate::command::hook::projector::ProjectionError)).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VerdictTokens {
-    /// The token that lets the operation proceed — and, on claude and copilot,
-    /// **suppresses the client's own approval prompt**, which is why it is a
-    /// privilege statement rather than a no-op.
-    pub allow: Option<&'static str>,
-    /// The token that blocks the operation. Present at every verdict target of
-    /// every shipped row, which is what makes "all verdict targets are written
-    /// together, never a subset" true of a `deny` by data rather than by hope.
-    pub deny: Option<&'static str>,
-    /// The token that escalates to the user. Only the `permissionDecision`
-    /// targets have one.
-    pub ask: Option<&'static str>,
-}
-
-/// The field that echoes the **firing** event's native name, where a client
-/// requires it.
-///
-/// Declared beside the table rather than in the runtime projector (WP-K's stub
-/// finding F-6): it is a projection fact, and a projection fact spelled outside
-/// [`RESPONSE_PROJECTION`] is a second, one-fact table — exactly the drift C-021
-/// exists to prevent. Which clients require it is now
-/// [`ProjectionRow::event_echo`], because it is **not** derivable from a row:
-/// keying on "some field nested under `hookSpecificOutput`" would wrongly
-/// include copilot's `PreToolUse`.
-pub const EVENT_ECHO_FIELD: &str = "hookSpecificOutput.hookEventName";
-
-/// One row of the per-`(vendor, event)` response-projection table.
-///
-/// Field values are the **vendor's own** JSON spellings, dotted from the root
-/// of that vendor's hook response object. `None` (and, for
-/// [`verdict`](Self::verdict), the empty slice) is the ADR's `⊘`: the canonical
-/// field has no equivalent, so it is dropped with a one-time warning
-/// (`Degraded`) — and a tier that *requires* it is `Declined`, never degraded.
-///
-/// **Eight columns, because a projection needs eight facts** — six for C-004's
-/// field names, and two the runtime projector proved were missing the moment it
-/// was written (WP-K's F-E and F-6). A row that carried only
-/// verdict/context/mutation could not express four things the table actually
-/// says, and a consumer that needs one would have to build a second
-/// hand-maintained `(vendor, event)` map — the exact duplicate C-021 exists to
-/// prevent:
-///
-/// - **A verdict can be two fields.** codex·`PreToolUse` blocks through the
-///   top-level `decision` **and** `hookSpecificOutput.permissionDecision`, so
-///   [`verdict`](Self::verdict) is a slice, not a single name.
-/// - **Every verdict has a differently-spelled reason companion**, and the
-///   spelling varies per pair ([`reason`](Self::reason)). Codex enforces its
-///   presence in its *output parser* rather than its JSON schema, which is the
-///   fail-closed bug this column exists to keep the projector out of.
-/// - **The field name does not determine the verdict's *value*.** One canonical
-///   `deny` is `block` in codex's coarse `decision` and `deny` in its
-///   `permissionDecision` — on the *same row* — so
-///   [`verdict_tokens`](Self::verdict_tokens) is per target.
-/// - **The event echo is per row, not per client**
-///   ([`event_echo`](Self::event_echo)), because "some field nested under
-///   `hookSpecificOutput`" would wrongly include copilot's `PreToolUse`.
-///
-/// Columns are **append-only** and their positions are frozen: every reader
-/// consults the row through [`projection_for`], and a removed column is a
-/// consumer that starts guessing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProjectionRow {
-    /// `Vendor::name()` of the client this row describes.
-    pub client: &'static str,
-    /// The canonical event.
-    pub event: CanonicalEvent,
-    /// Every field a blocking verdict must be written to, in the vendor's own
-    /// spelling. **All** of them are written together, never a subset — codex's
-    /// `PreToolUse` carries the verdict in two places and honours neither half
-    /// alone. Empty ⇒ `⊘` ⇒ this client cannot block here, so `gatekeeper` is
-    /// `Declined` for the pair (and [`admits_verdict`] is the query over it).
-    ///
-    /// [`admits_verdict`]: CanonicalEvent::admits_verdict
-    pub verdict: &'static [&'static str],
-    /// Where the human-readable justification accompanying a verdict goes.
-    /// `None` exactly when [`verdict`](Self::verdict) is empty — a reason with
-    /// no verdict to explain is not a thing any v1 client accepts.
-    pub reason: Option<&'static str>,
-    /// Where added context goes; `None` ⇒ dropped with a warning.
-    pub context: Option<&'static str>,
-    /// Where a rewritten tool input goes; `None` ⇒ `mutator` is `Declined` for
-    /// the pair.
-    pub mutation: Option<&'static str>,
-    /// Fields that **fail the render** if emitted for this pair. Closed sets,
-    /// not advisory: Codex reserves some upstream and fails **closed** when it
-    /// sees them.
-    pub forbidden: &'static [&'static str],
-    /// The vendor token vocabulary of each [`verdict`](Self::verdict) target,
-    /// **index-aligned** with it (`verdict_tokens[i]` describes `verdict[i]`).
-    ///
-    /// Index-aligned rather than a map, because a map would key on the field
-    /// name — the one thing that does *not* determine the vocabulary (codex's
-    /// `PreToolUse` proves it: two targets, two different token sets). The
-    /// alignment is pinned by `verdict_tokens_align_with_their_targets` below,
-    /// so a row that grows a target without its tokens fails a test rather than
-    /// silently writing nothing there.
-    pub verdict_tokens: &'static [VerdictTokens],
-    /// Where the firing event's native name must be echoed
-    /// ([`EVENT_ECHO_FIELD`]), or `None` when this pair requires no echo.
-    ///
-    /// Constant across a client's four rows today, and still a per-row column:
-    /// the alternative is the per-client list the runtime used to carry, which is
-    /// a second table keyed on a client name (C-021).
-    pub event_echo: Option<&'static str>,
-}
-
-/// The one instance of the `(vendor, event)` projection table (C-004, C-021).
-///
-/// Consumed by both the render-time refusal and the runtime projector. Adding a
-/// client means adding rows **here**; a second copy anywhere else is the defect
-/// C-021 exists to prevent.
-///
-/// Two rules follow from the table rather than from any client's docs. Grim
-/// registers **PascalCase** event names on Copilot, because Copilot's stdin
-/// payload shape differs by the casing used in config and the PascalCase path
-/// is the Claude-shaped one. And `hookSpecificOutput.hookEventName` must echo
-/// the *firing* event on claude and codex, so the projector needs the native
-/// event name and not only the canonical one.
-///
-/// Native-only moments (codex's `PermissionRequest`) are deliberately **absent**:
-/// they are not canonical events, so they are reached through a `<vendor>.event`
-/// override and projected by that vendor's native passthrough, not by this
-/// table.
-pub const RESPONSE_PROJECTION: &[ProjectionRow] = &[
-    ProjectionRow {
-        client: "claude",
-        event: CanonicalEvent::PreToolUse,
-        // `hookSpecificOutput.hookEventName` is additionally a required const
-        // here; it echoes the *firing* event and is emitted by the projector
-        // for every claude/codex row, so it is not a per-row column.
-        verdict: &["hookSpecificOutput.permissionDecision"],
-        reason: Some("hookSpecificOutput.permissionDecisionReason"),
-        context: Some("hookSpecificOutput.additionalContext"),
-        mutation: Some("hookSpecificOutput.updatedInput"),
-        forbidden: &[],
-        verdict_tokens: &[VerdictTokens {
-            allow: Some("allow"),
-            deny: Some("deny"),
-            ask: Some("ask"),
-        }],
-        event_echo: Some(EVENT_ECHO_FIELD),
-    },
-    ProjectionRow {
-        client: "claude",
-        event: CanonicalEvent::PostToolUse,
-        verdict: &["decision"],
-        reason: Some("reason"),
-        context: Some("hookSpecificOutput.additionalContext"),
-        mutation: None,
-        forbidden: &["updatedInput"],
-        verdict_tokens: &[VerdictTokens {
-            allow: None,
-            deny: Some("block"),
-            ask: None,
-        }],
-        event_echo: Some(EVENT_ECHO_FIELD),
-    },
-    ProjectionRow {
-        client: "claude",
-        event: CanonicalEvent::SessionStart,
-        verdict: &[],
-        reason: None,
-        context: Some("hookSpecificOutput.additionalContext"),
-        mutation: None,
-        forbidden: &["decision", "updatedInput"],
-        verdict_tokens: &[],
-        event_echo: Some(EVENT_ECHO_FIELD),
-    },
-    ProjectionRow {
-        client: "claude",
-        event: CanonicalEvent::Stop,
-        // C-004 documents a second, equivalent blocking form here —
-        // `continue: false` + `stopReason`. Grim projects the `decision` form
-        // only: one shape per pair is what makes the render-time forbidden-set
-        // check decidable, and both forms block identically.
-        verdict: &["decision"],
-        reason: Some("reason"),
-        context: None,
-        mutation: None,
-        forbidden: &["updatedInput"],
-        verdict_tokens: &[VerdictTokens {
-            allow: None,
-            deny: Some("block"),
-            ask: None,
-        }],
-        event_echo: Some(EVENT_ECHO_FIELD),
-    },
-    ProjectionRow {
-        client: "codex",
-        event: CanonicalEvent::PreToolUse,
-        // Two fields, both required: Codex reads the top-level `decision` and
-        // the nested `permissionDecision`, and honours neither half alone.
-        verdict: &["decision", "hookSpecificOutput.permissionDecision"],
-        reason: Some("reason"),
-        context: Some("hookSpecificOutput.additionalContext"),
-        mutation: Some("hookSpecificOutput.updatedInput"),
-        forbidden: &[],
-        verdict_tokens: &[
-            VerdictTokens {
-                allow: Some("approve"),
-                deny: Some("block"),
-                ask: None,
-            },
-            VerdictTokens {
-                allow: Some("allow"),
-                deny: Some("deny"),
-                ask: Some("ask"),
-            },
-        ],
-        event_echo: Some(EVENT_ECHO_FIELD),
-    },
-    ProjectionRow {
-        client: "codex",
-        event: CanonicalEvent::PostToolUse,
-        verdict: &["decision"],
-        reason: Some("reason"),
-        context: Some("hookSpecificOutput.additionalContext"),
-        // `updatedMCPToolOutput` is a *result* rewrite, not an input rewrite —
-        // native-only, and not a mutation target.
-        mutation: None,
-        forbidden: &["updatedInput"],
-        verdict_tokens: &[VerdictTokens {
-            allow: None,
-            deny: Some("block"),
-            ask: None,
-        }],
-        event_echo: Some(EVENT_ECHO_FIELD),
-    },
-    ProjectionRow {
-        client: "codex",
-        event: CanonicalEvent::SessionStart,
-        verdict: &[],
-        reason: None,
-        context: Some("hookSpecificOutput.additionalContext"),
-        mutation: None,
-        forbidden: &["decision", "updatedInput"],
-        verdict_tokens: &[],
-        event_echo: Some(EVENT_ECHO_FIELD),
-    },
-    ProjectionRow {
-        client: "codex",
-        event: CanonicalEvent::Stop,
-        verdict: &["decision"],
-        // REQUIRED when blocking — enforced in Codex's output parser, not in
-        // its JSON schema, so an omitted `reason` fails **closed** rather than
-        // validating. This column is where the projector reads it from.
-        reason: Some("reason"),
-        context: None,
-        mutation: None,
-        forbidden: &["updatedInput"],
-        verdict_tokens: &[VerdictTokens {
-            allow: None,
-            deny: Some("block"),
-            ask: None,
-        }],
-        event_echo: Some(EVENT_ECHO_FIELD),
-    },
-    ProjectionRow {
-        client: "copilot",
-        event: CanonicalEvent::PreToolUse,
-        verdict: &["hookSpecificOutput.permissionDecision"],
-        reason: Some("hookSpecificOutput.permissionDecisionReason"),
-        context: Some("hookSpecificOutput.additionalContext"),
-        // C-130 live gate, re-run 2026-09-28 on copilot 1.0.88
-        // (`research_hooks_qoder_copilot_schemas.md` § 6): a PascalCase
-        // `PreToolUse` hook returning `hookSpecificOutput.updatedInput` made
-        // Copilot run the rewritten command, not the original. So this is the
-        // field, and the top-level `modifiedArgs` spelling (the camelCase
-        // dialect's, contested in github/copilot-cli#2013) is never emitted
-        // here (C-132): one field per pair, the probe-selected one.
-        mutation: Some("hookSpecificOutput.updatedInput"),
-        forbidden: &[],
-        verdict_tokens: &[VerdictTokens {
-            allow: Some("allow"),
-            deny: Some("deny"),
-            ask: Some("ask"),
-        }],
-        event_echo: None,
-    },
-    ProjectionRow {
-        client: "copilot",
-        event: CanonicalEvent::PostToolUse,
-        verdict: &[],
-        reason: None,
-        context: Some("additionalContext"),
-        // `modifiedResult` is a result rewrite — native-only.
-        mutation: None,
-        forbidden: &["updatedInput"],
-        verdict_tokens: &[],
-        event_echo: None,
-    },
-    ProjectionRow {
-        client: "copilot",
-        event: CanonicalEvent::SessionStart,
-        verdict: &[],
-        reason: None,
-        // C-131 live probe, 2026-09-28, copilot 1.0.88: the FLAT top-level
-        // `additionalContext` reached the session; the Claude-shaped
-        // `hookSpecificOutput.additionalContext` did not.
-        context: Some("additionalContext"),
-        mutation: None,
-        forbidden: &["decision"],
-        verdict_tokens: &[],
-        event_echo: None,
-    },
-    ProjectionRow {
-        client: "copilot",
-        // Runaway guard: 8 consecutive blocks and the CLI forces the turn to
-        // end. Grim does not model that; it is the client's own ceiling.
-        event: CanonicalEvent::Stop,
-        verdict: &["decision"],
-        reason: Some("reason"),
-        context: None,
-        mutation: None,
-        forbidden: &["updatedInput"],
-        verdict_tokens: &[VerdictTokens {
-            allow: Some("allow"),
-            deny: Some("block"),
-            ask: None,
-        }],
-        event_echo: None,
-    },
-    // Qoder (ADR amendment A8, C-122) — every cell read off `qodercli`
-    // 1.1.64's own hook-output schema (`research_hooks_qoder_copilot_schemas.md`
-    // § 5), not the IDE page. `hookSpecificOutput` is a union discriminated on
-    // `hookEventName`, so the echo is required on every row (Stop's variant
-    // accepts the echo alone). The mutator is declined whatever the schema
-    // says: `updatedInput` exists there, but no live run proved it applies,
-    // and an ignored rewrite is the silent-guardrail class (C-025).
-    ProjectionRow {
-        client: "qoder",
-        event: CanonicalEvent::PreToolUse,
-        verdict: &["hookSpecificOutput.permissionDecision"],
-        reason: Some("hookSpecificOutput.permissionDecisionReason"),
-        context: Some("hookSpecificOutput.additionalContext"),
-        mutation: None,
-        forbidden: &[],
-        verdict_tokens: &[VerdictTokens {
-            allow: Some("allow"),
-            deny: Some("deny"),
-            ask: Some("ask"),
-        }],
-        event_echo: Some(EVENT_ECHO_FIELD),
-    },
-    ProjectionRow {
-        client: "qoder",
-        event: CanonicalEvent::PostToolUse,
-        verdict: &[],
-        reason: None,
-        context: Some("hookSpecificOutput.additionalContext"),
-        mutation: None,
-        forbidden: &["updatedInput"],
-        verdict_tokens: &[],
-        event_echo: Some(EVENT_ECHO_FIELD),
-    },
-    ProjectionRow {
-        client: "qoder",
-        event: CanonicalEvent::SessionStart,
-        verdict: &[],
-        reason: None,
-        context: Some("hookSpecificOutput.additionalContext"),
-        mutation: None,
-        forbidden: &["decision", "updatedInput"],
-        verdict_tokens: &[],
-        event_echo: Some(EVENT_ECHO_FIELD),
-    },
-    ProjectionRow {
-        client: "qoder",
-        event: CanonicalEvent::Stop,
-        verdict: &[],
-        reason: None,
-        context: None,
-        mutation: None,
-        forbidden: &["updatedInput"],
-        verdict_tokens: &[],
-        event_echo: Some(EVENT_ECHO_FIELD),
-    },
-];
-
-/// The projection row for a `(client, event)` pair, or `None` when that client
-/// hosts no hook at that event (⇒ `Declined`, warn, zero outputs).
-///
-/// The one lookup into [`RESPONSE_PROJECTION`]; both the render-time refusal
-/// and the runtime projector go through it rather than scanning the table
-/// themselves (C-021).
-pub fn projection_for(client: &str, event: CanonicalEvent) -> Option<&'static ProjectionRow> {
-    RESPONSE_PROJECTION
-        .iter()
-        .find(|row| row.client == client && row.event == event)
 }
 
 /// A hook manifest rejected at parse or `grim build` validation time — plus
 /// the one seam refusal, [`HookError::UnsupportedKind`].
 ///
 /// Every variant classifies as DataError (65). Nothing here is raised by the
-/// **dispatcher**: its only failure direction is exit 0 with one log line (ADR
-/// decision G), so a runtime variant would be a contradiction rather than an
+/// **launcher**: a runtime failure is a non-verdict exit or a diagnostic there, never
+/// a `HookError`, so a runtime variant would be a contradiction rather than an
 /// omission. [`UnsupportedKind`](Self::UnsupportedKind) is not a dispatcher
 /// failure — it is grim refusing a hook artifact at a seam that does not
 /// implement the kind yet, which is a data refusal like any other.
@@ -1873,6 +1229,46 @@ pub fn dev_install_unsupported() -> crate::error::Error {
 
 #[cfg(test)]
 mod tests {
+    /// ⛔ **V1.** The payload envelope's name is unrepresentable as a hook binding.
+    ///
+    /// The envelope is written at the root of `$GRIM_HOME/hooks/`, which is also
+    /// the binding namespace, so a name a hook could be bound to would collide with
+    /// it — round-3 fix-verify executed that: a hook bound as
+    /// `payload-12345-0.json` was accepted. The names are dynamic, so the reserved
+    /// array cannot hold them; the guard is instead that an underscore is outside
+    /// `SkillName`'s grammar. This pins the separator, because "tidying" it to a
+    /// hyphen silently restores the collision and nothing else would fail.
+    #[test]
+    fn the_payload_envelope_name_cannot_be_a_binding_name() {
+        // The literal the format string produces, with the two integers it owns.
+        let name = grimoire_hook_core::pipeline::envelope_file_name(12345, 0);
+        assert!(
+            binding_name_refusal(&name).is_some(),
+            "{name} lives in the binding namespace, so it must not be a usable binding name"
+        );
+        // And the shape that WAS accepted, kept as the regression it is.
+        assert!(
+            binding_name_refusal("payload-12345-0.json").is_none(),
+            "if hyphens ever became refusable this test's premise changed — re-read V1"
+        );
+    }
+
+    /// Windows searches the launcher's own directory for the bare `cmd` a command-form
+    /// handler spawns, and accepts a directory named `cmd.exe`, so a binding that ends in
+    /// an executable suffix is refused on every platform (the key is portable).
+    #[test]
+    fn a_binding_name_with_an_executable_suffix_is_refused() {
+        for name in ["cmd.exe", "tool.com", "x.bat", "x.cmd", "a-b.exe"] {
+            let reason = binding_name_refusal(name).unwrap_or_else(|| panic!("{name} must be refused"));
+            assert!(reason.contains("executable suffix"), "{reason}");
+        }
+        for name in ["cmd", "exe", "cmd-exe", "exe.txt", "cmd.exe.d", "scom"] {
+            assert!(binding_name_refusal(name).is_none(), "{name} must stay usable");
+        }
+        // The case fold is the helper's; the name grammar refuses upper case first.
+        assert!(has_executable_suffix("CMD.EXE") && has_executable_suffix("a.Bat"));
+    }
+
     /// **`command::add` must agree with [`binding_name_refusal`] on every name.**
     ///
     /// Round-2 finding S2: `add` asks the same two questions separately, because
@@ -1906,6 +1302,8 @@ mod tests {
             ".",
             "..",
             "C:/windows",
+            "cmd.exe",
+            "run.bat",
         ];
         for name in names {
             // `add`'s ACTUAL seam, called — not a re-spelling of it. The previous
@@ -1969,7 +1367,14 @@ mod tests {
         // exactly how `root-key` passed this test while a hook bound as
         // `root-key` destroyed the machine key. A literal list fails when an
         // entry is dropped; the array-driven loop could not.
-        for name in ["bin", "dispatch.json", "payload", "root-key"] {
+        for name in [
+            "bin",
+            "dispatch.json",
+            "grim-hook",
+            "grim-hook.exe",
+            "payload",
+            "root-key",
+        ] {
             let reason = binding_name_refusal(name).unwrap_or_else(|| panic!("{name} must be refused"));
             assert!(
                 reason.contains("reserved"),
@@ -2027,7 +1432,9 @@ payload = "stdin"
     /// cannot catch (exact equality misses it) while the grammar does.
     #[test]
     fn a_manifest_name_that_is_not_a_plain_name_is_refused_at_build() {
-        for bad in ["my_hook", "MyHook", "Bin", "a b", "a/b", ".hidden", ""] {
+        for bad in [
+            "my_hook", "MyHook", "Bin", "a b", "a/b", ".hidden", "", "cmd.exe", "tool.cmd",
+        ] {
             let toml = format!(
                 "schema = 1\nname = \"{bad}\"\ndescription = \"d\"\n\n[[hooks]]\nid = \"a\"\n\
                  event = \"PreToolUse\"\ntier = \"observer\"\nargv = [\"true\"]\n"
@@ -2438,21 +1845,34 @@ payload = "stdin"
     /// qoder, whose mutator is declined, carries neither.
     #[test]
     fn c132_the_projector_emits_only_the_probe_selected_rewrite_field() {
-        use crate::command::hook::pipeline::{CanonicalResponse, Decision};
-        use crate::command::hook::projector::project;
+        use grimoire_hook_core::projector::project;
+        use grimoire_hook_core::response::{CanonicalResponse, Decision};
         let rewrite = CanonicalResponse {
             decision: Decision::Allow,
             updated_input: Some(serde_json::json!({"command": "echo safe"})),
             ..CanonicalResponse::default()
         };
-        let doc = project("copilot", CanonicalEvent::PreToolUse, "PreToolUse", &rewrite).expect("copilot projects");
+        let doc = project(
+            "copilot",
+            CanonicalEvent::PreToolUse,
+            "PreToolUse",
+            &rewrite,
+            &mut Vec::new(),
+        )
+        .expect("copilot projects");
         assert_eq!(
             doc["hookSpecificOutput"]["updatedInput"]["command"], "echo safe",
             "{doc}"
         );
         assert!(!doc.to_string().contains("modifiedArgs"), "{doc}");
 
-        let qoder = project("qoder", CanonicalEvent::PreToolUse, "PreToolUse", &rewrite);
+        let qoder = project(
+            "qoder",
+            CanonicalEvent::PreToolUse,
+            "PreToolUse",
+            &rewrite,
+            &mut Vec::new(),
+        );
         let text = qoder.map(|d| d.to_string()).unwrap_or_default();
         assert!(
             !text.contains("updatedInput") && !text.contains("modifiedArgs"),

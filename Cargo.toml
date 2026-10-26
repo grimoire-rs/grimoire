@@ -1,8 +1,23 @@
-[package]
-name = "grimoire"
+[workspace]
+# The root package is a member implicitly. Listing "." would make every path
+# under the root an explicit member and void `exclude`, which `task p9:diff`
+# needs: it builds a main checkout under target/p9/src.
+members = ["crates/grimoire-hook-core", "crates/grim-hook"]
+exclude = ["target"]
+resolver = "3"
+
+# The single version/edition/license site: members inherit it, and
+# `cargo set-version` (task release:*) bumps it for the whole workspace.
+[workspace.package]
 version = "0.15.0"
 edition = "2024"
 license = "Apache-2.0"
+
+[package]
+name = "grimoire"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "Package manager for AI-agent config — skills, rules, agents, and MCP servers, installed into every coding agent you use"
 repository = "https://github.com/grimoire-rs/grimoire"
 default-run = "grim"
@@ -16,6 +31,7 @@ clap = { version = ">=4.5.57, <5", features = ["derive", "color"] }
 clap_complete = "4.6.2"
 colored_json = "5"
 anyhow = "1.0.101"
+grimoire-hook-core = { path = "crates/grimoire-hook-core", features = ["schema"] }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = [
@@ -123,6 +139,7 @@ uuid = { version = "1", default-features = false, features = ["v4"] }
 libc = "0.2"
 
 [dev-dependencies]
+grimoire-hook-core = { path = "crates/grimoire-hook-core", features = ["test-util"] }
 tempfile = "3"
 
 # `grim login` writes credentials through a docker-compatible store. The
@@ -152,14 +169,33 @@ lto = "thin"
 # survives a symbol strip.
 strip = "symbols"
 
-[lints.rust]
+[workspace.lints.rust]
 # Single binary crate, but the domain modules are written library-style:
 # panics must never cross a module boundary without caller consent.
 # Tests are exempt (clippy's unwrap_used/expect_used skip #[cfg(test)]).
 unsafe_code = "forbid"
 
-[lints.clippy]
+[workspace.lints.clippy]
 # Library-style discipline for the domain modules. Scoped so tests still
 # use .unwrap()/.expect() freely (the restriction lints ignore test cfg).
 unwrap_used = "warn"
 expect_used = "warn"
+
+[lints]
+workspace = true
+
+# Launcher profiles: `grim-hook` is a size-budgeted native dispatcher, built
+# apart from `dist` (which stays the grim release profile).
+[profile.hook]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+debug = false
+incremental = false
+
+[profile.hook-dev]
+inherits = "dev"
+panic = "abort"

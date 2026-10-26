@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 from pathlib import Path
 
 import pytest
@@ -187,7 +188,7 @@ def test_s001_gated_add_skips_with_a_warning_and_arms_nothing(
     # Nothing armed, on any of the three surfaces that could arm one.
     assert _rows(runner) == []
     assert _managed_elements(project_dir) == []
-    assert not (Path(runner.grim_home) / "hooks" / "bin" / "grim-hook").exists()
+    assert not (Path(runner.grim_home) / "hooks" / "grim-hook").exists()
 
     # `grim status` says `gated`, and it is not a failure.
     status = runner.json("status")
@@ -298,18 +299,16 @@ def test_s002_trust_hooks_flag_arms_and_the_row_names_the_arming_client(
     assert token != "global"
     assert str(project_dir) not in token
 
-    launcher = Path(runner.grim_home) / "hooks" / "bin" / "grim-hook"
+    launcher = Path(runner.grim_home) / "hooks" / "grim-hook"
     assert launcher.is_file()
     assert os.access(launcher, os.X_OK), "a non-executable shim makes [ -x ] false and the hook never fires"
 
+    # C-017/C-N13 (PD-9): Claude takes the shell form, exactly `<abs launcher>
+    # <client> <event> <root>` — three operands, no flags, no table path.
     (element,) = _managed_elements(project_dir)
     command = element["command"]
-    assert str(launcher) in command
-    assert "--client claude" in command
-    assert "--event PreToolUse" in command
-    assert f"--root {token}" in command
+    assert shlex.split(command) == [str(launcher), "claude", "PreToolUse", token], command
     assert "GRIM_HOME" not in command, "an env-derived executed path is CWE-426 (I1)"
-    assert "--root global" not in command
 
 
 # ---------------------------------------------------------------------------
@@ -598,7 +597,7 @@ def test_a_cloned_workspaces_own_committed_hook_state_must_not_arm(
 
     assert _rows(victim) == [], "a repo-resident record must not be an arming authority"
     assert _managed_elements(clone) == []
-    assert not (Path(victim.grim_home) / "hooks" / "bin" / "grim-hook").exists(), (
+    assert not (Path(victim.grim_home) / "hooks" / "grim-hook").exists(), (
         "no launcher may be generated for a hook that never armed"
     )
     assert len(_records(victim)) == 1, "and the clone must not have gained a record of its own"
@@ -670,7 +669,7 @@ def test_status_reports_a_trust_hooks_flag_arming_as_armed_not_gated(
     Reporting a running guardrail as off is the wrong direction to be wrong in:
     a user who believes a hook is inert may act as if nothing is watching.
     `status` now consults the dispatch table, which is the machine-local arming
-    authority and what `grim hook run` actually reads.
+    authority and what the `grim-hook` launcher actually reads.
 
     Fails if the table check regresses: without it the row reads `gated` with a
     `workspace-not-consented` cause while `_rows` shows a live dispatch row —

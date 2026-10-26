@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The Grimoire Authors
-"""Hooks never arm on Windows: grim registers nothing a client would fail to run.
+"""A client outside `HOOKS_WINDOWS_VERIFIED` never arms on Windows.
 
-The launcher and every registered command are POSIX shell. Copilot runs its
-hook command through PowerShell, where that string does not parse, and a
-non-zero `preToolUse` exit denies the tool call. So grim declines to arm on
-Windows, reports cause `platform-unsupported`, and writes no registration.
+Qoder, Copilot and Codex have no observed Windows launch path (the last two
+passed only emulated launches), so they keep `platform-unsupported` while
+Claude, the one admitted client, arms on the same machine. grim registers nothing a
+client might fail to run: a non-zero `preToolUse` exit denies the tool call.
 """
 from __future__ import annotations
 
@@ -32,11 +32,15 @@ command = "sh guard.sh"
 timeout = 5
 """
 
-# Where each hook-capable client's global registration would land.
-SURFACES = (".claude/settings.json", ".codex/hooks.json", ".copilot/hooks/grim.json", ".qoder/settings.json")
+ARMED = ".claude/settings.json"
+DECLINED = {
+    "qoder": ".qoder/settings.json",
+    "copilot": ".copilot/hooks/grim.json",
+    "codex": ".codex/hooks.json",
+}
 
 
-def test_windows_declines_to_arm_with_platform_unsupported(grim_at, project_dir: Path, unique_repo: str) -> None:
+def test_windows_declines_a_client_that_has_not_passed_acceptance(grim_at, project_dir: Path, unique_repo: str) -> None:
     hook = make_artifact(
         f"{unique_repo}/shell-guard",
         "hook",
@@ -46,22 +50,30 @@ def test_windows_declines_to_arm_with_platform_unsupported(grim_at, project_dir:
     runner = grim_at(project_dir)
     home = Path(runner.home)
     (home / ".claude").mkdir()
+    (home / ".qoder").mkdir()
     (home / ".copilot" / "skills").mkdir(parents=True)
+    (home / ".codex").mkdir()
+    # The runner's env holds only USERPROFILE; a local GRIM_HOME must sit under the profile or LOCALAPPDATA.
+    runner.env["LOCALAPPDATA"] = os.environ["LOCALAPPDATA"]
 
     runner.run("config", "set", "options.experimental.hooks", "true", "--global")
-    added = runner.run("add", "--kind", "hook", hook.fq, "--global")
+    added = runner.run("add", "--kind", "hook", hook.fq, "--global", "--trust-hooks")
 
-    written = [s for s in SURFACES if (home / s).is_file() and "grim-hook" in (home / s).read_text()]
-    assert written == [], f"a hook registration was written: {written}"
-    hooks = Path(runner.grim_home) / "hooks"
-    for armable in ("bin/grim-hook", "dispatch.json", "root-key"):
-        assert not (hooks / armable).exists(), f"{armable} was written"
-    assert added.stderr.count("Linux and macOS only") == 1, added.stderr
+    assert "grim-hook" in (home / ARMED).read_text(encoding="utf-8"), "the admitted client did not arm"
+    for client, surface in DECLINED.items():
+        declined = home / surface
+        assert not declined.is_file() or "grim-hook" not in declined.read_text(encoding="utf-8"), f"{client} was registered"
 
     (item,) = runner.json("hook", "list", "--global")["items"]
     causes = {a["client"]: a["cause"] for a in item["arming"]}
-    assert item["state"] == "not-armed", item
-    assert causes["claude"] == causes["copilot"] == "platform-unsupported", item
+    for client in DECLINED:
+        assert causes[client] == "platform-unsupported", item
+    assert "claude" not in causes, item
 
     (row,) = [i for i in runner.json("status", "--global")["items"] if i["kind"] == "hook"]
-    assert {a["cause"] for a in row["arming"]} == {"platform-unsupported"}, row
+    status_causes = {a["client"]: a["cause"] for a in row["arming"]}
+    for client in DECLINED:
+        assert status_causes[client] == "platform-unsupported", row
+        message = f"hooks not armed for {client}: grim has not verified hooks for this client on Windows"
+        assert added.stderr.count(message) == 1, added.stderr
+    assert "hooks not armed for claude" not in added.stderr, added.stderr

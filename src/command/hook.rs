@@ -1,73 +1,36 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Grimoire Authors
 
-//! `grim hook` — the dispatcher runtime (`run`) and the user-facing
-//! inventory (`list`).
+//! `grim hook` — the user-facing inventory (`list`) and the workspace consent
+//! commands (`allow`, `revoke`).
 //!
-//! Two subcommands with almost nothing in common, and the split is the
-//! contract rather than tidiness:
+//! The dispatcher runtime is not a `grim` verb: it is the separate `grim-hook`
+//! launcher binary (`crates/grim-hook`), built on `grimoire-hook-core`, which a
+//! client's registration runs directly. This module keeps only what is
+//! user-driven and scope-resolving.
 //!
-//! - [`run`] is **not intended for direct invocation**. Its caller is the
-//!   generated launcher (`src/install/hook_launcher.rs`), it sits on the hot
-//!   path of every tool call on every armed client, and it is the only
-//!   command in grim that **can never fail**: its return type is
-//!   [`ExitCode`](crate::cli::exit_code::ExitCode), not `Result`, because
-//!   invariant **I3** makes "the feature is off" the single permitted degrade
-//!   direction. Documented in the shape of the `grim mcp` row — present in
-//!   the surface, driven by grim's own generated caller.
-//! - [`list`] is an ordinary report command (S-015): `--format json`,
-//!   `Printable`, scope resolution, the lot.
+//! The source-level tests below hold every file of the two runtime crates
+//! (`grimoire-hook-core`, `grim-hook`) to two bans, because a seam can be called
+//! and an absent import cannot:
 //!
-//! ## Why the runtime lives in its own module and imports almost nothing
+//! - **C-007**: no config, scope resolution, `Context`, telemetry handle or
+//!   environment data-root accessor. The runtime's only input is the table beside
+//!   the launcher, and a client-spawned process runs with the workspace as its
+//!   CWD, so an attacker-choosable data root would make the table repo-plantable
+//!   (B1, T3, CWE-426).
+//! - **C-009**: no digest primitive. `resolved_digest` is provenance carried into
+//!   the audit record, never recomputed on the hot path (N2 is a non-goal).
 //!
-//! **C-007 — the dispatch table is the runtime's sole input, and that is a
-//! *structural* property, not a runtime check.** The runtime resolves no
-//! scope, reads no config, and never asks the environment where anything
-//! is: every path it touches was resolved at install time and baked into the
-//! launcher argv. There is deliberately **no injection seam** for this. A
-//! production `ScopeResolver` trait with one real implementor would add
-//! indirection to the hot path to prove a compile-time truth and would
-//! *weaken* the guarantee — a seam can be called, an absent import cannot.
-//!
-//! So the property is pinned the way this repo already pins call-site rules:
-//! a source-level test (`the_runtime_imports_no_scope_no_config_no_data_root_c007`
-//! below), `include_str!` over each runtime file, in the same idiom as
-//! `command.rs`'s `the_global_config_is_loaded_from_exactly_one_seam_ws2`
-//! and `tui.rs`'s `tui_run_propagates_every_registry_resolution_t4`.
-//! Four forbidden symbols, and the fourth is the one WP-P0 added:
-//!
-//! | Forbidden in the runtime | Why |
-//! |---|---|
-//! | `crate::config` | resolving config *is* scope resolution (C-007) |
-//! | `scope_resolution` | ditto, by its own name |
-//! | `crate::context` | the per-invocation context — the carrier of both, and of the data root |
-//! | the `env` data-root accessor | it returns its environment value **verbatim** — no absoluteness check, and a *relative* `.grimoire` when `HOME` is unset. For a client-spawned `grim hook run` the process CWD **is the workspace**, so a repo that ships `.envrc` / `.mise.toml` / devcontainer `containerEnv` would choose the dispatch table (audit finding **B1** · T3, escalating T4 · I1, I4 · CWE-426) |
-//!
-//! [`list`] is exempt and imports all of them: it is a report command whose
-//! whole job is to describe the resolved scope. That is why the two live in
-//! separate files. The test reads **code lines only** — comment lines are
-//! stripped first, so this file and the runtime's own doc comments can name
-//! the forbidden symbols in order to explain them.
-//!
-//! ## The entire launcher argv is untrusted (B3)
-//!
-//! Any local file can invoke `grim hook run` — a hostile repository can
-//! commit its **own** client registration naming the victim's real launcher.
-//! So no argv value is ever used as a path, as a trust input, or as anything
-//! but a **lookup key**, and the one argv value that *is* a path
-//! (`--table`) is refused unless it is already absolute. The refusal code is
-//! **0**, never an error: some clients fail *closed* on a non-zero hook
-//! exit, so an error here would let a malformed invocation deny the user's
-//! own tool call. See [`argv`].
+//! `list`, `allow` and `revoke` are exempt from the first: describing or
+//! recording against the resolved scope is their whole job. The tests read code
+//! lines only, so doc comments can name the forbidden symbols to explain them.
 
 pub mod allow;
-pub mod argv;
-pub mod envelope;
 pub mod list;
-pub mod pipeline;
 pub mod projector;
 pub mod revoke;
-pub mod run;
+#[cfg(test)]
+mod std_parity;
 
 use clap::{Args, Subcommand};
 
@@ -82,14 +45,6 @@ pub struct HookArgs {
 /// The `hook` subcommand tree.
 #[derive(Debug, Subcommand)]
 pub enum HookCommand {
-    /// Dispatch armed hooks for one client event (invoked by the generated
-    /// launcher, not by hand).
-    ///
-    /// Reads only the dispatch table named by `--table`; resolves no scope
-    /// and no configuration. Exits **0** in every case grim controls — a
-    /// client that fails closed on a non-zero hook exit must never be
-    /// denied a tool call by grim's own internals.
-    Run(run::RunArgs),
     /// List declared hooks with their tiers, events, and per-client arming
     /// state.
     List(list::ListArgs),
@@ -114,35 +69,38 @@ pub enum HookCommand {
 
 #[cfg(test)]
 mod tests {
-    /// Every source file that is part of the runtime, relative to this file.
-    ///
-    /// An explicit list rather than "everything under `hook/` except
-    /// `list.rs`": adding a runtime module and forgetting to widen an
-    /// exclusion is silent, whereas adding one and forgetting to add it here
-    /// is caught by `every_declared_runtime_module_is_checked` below.
-    const RUNTIME_SOURCES: &[(&str, &str)] = &[
-        ("hook/argv.rs", include_str!("hook/argv.rs")),
-        ("hook/envelope.rs", include_str!("hook/envelope.rs")),
-        ("hook/pipeline.rs", include_str!("hook/pipeline.rs")),
-        ("hook/projector.rs", include_str!("hook/projector.rs")),
-        ("hook/run.rs", include_str!("hook/run.rs")),
-    ];
+    use std::path::{Path, PathBuf};
 
-    /// Every runtime module this file declares, and whether it is part of the
-    /// runtime. `list`, `allow` and `revoke` are the deliberate exemptions:
-    /// all three are report commands whose whole job is to describe or record
-    /// against the resolved scope, which is exactly what the ban forbids the
-    /// runtime from doing. `run` stays fully under it.
-    const DECLARED_MODULES: &[&str] = &[
-        "allow",
-        "argv",
-        "envelope",
-        "list",
-        "pipeline",
-        "projector",
-        "revoke",
-        "run",
-    ];
+    /// The runtime crates' source roots, relative to the repository root.
+    const RUNTIME_DIRS: &[&str] = &["crates/grimoire-hook-core/src", "crates/grim-hook/src"];
+
+    fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                collect(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// Every `.rs` file of the runtime crates, read at test time so a new file is
+    /// scanned without anyone listing it.
+    fn runtime_sources() -> Vec<(String, String)> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        for dir in RUNTIME_DIRS {
+            collect(&root.join(dir), &mut files);
+        }
+        files
+            .into_iter()
+            .map(|path| {
+                let source = std::fs::read_to_string(&path).unwrap();
+                (path.strip_prefix(root).unwrap().display().to_string(), source)
+            })
+            .collect()
+    }
 
     /// Symbols the runtime may not name, and the reason each one is a
     /// runtime input the design forbids.
@@ -163,7 +121,7 @@ mod tests {
         (
             "crate::telemetry",
             "the telemetry handle rides the per-invocation context, which the runtime never builds, \
-             and `grim hook run` must never export (hook path untouched)",
+             and the hook runtime must never export (hook path untouched)",
         ),
         (
             "Telemetry",
@@ -173,7 +131,7 @@ mod tests {
         (
             "grim_home(",
             "the env data-root accessor returns its environment value verbatim, with a relative \
-             fallback, and the CWD of a client-spawned `grim hook run` is the workspace \
+             fallback, and the CWD of a client-spawned hook process is the workspace \
              (B1, T3, CWE-426)",
         ),
     ];
@@ -203,8 +161,8 @@ mod tests {
     /// the hot path.
     #[test]
     fn the_runtime_imports_no_scope_no_config_no_data_root_c007() {
-        for (file, source) in RUNTIME_SOURCES {
-            let body = code_lines(source);
+        for (file, source) in runtime_sources() {
+            let body = code_lines(&source);
             for (needle, why) in FORBIDDEN {
                 assert!(
                     !body.contains(needle),
@@ -249,8 +207,8 @@ mod tests {
     /// **C-009, as a structural fact.** No runtime file computes a digest.
     #[test]
     fn the_runtime_computes_no_digest_c009() {
-        for (file, source) in RUNTIME_SOURCES {
-            let body = code_lines(source);
+        for (file, source) in runtime_sources() {
+            let body = code_lines(&source);
             for (needle, why) in HASHING {
                 assert!(
                     !body.contains(needle),
@@ -275,146 +233,21 @@ mod tests {
         }
     }
 
-    /// The runtime list must cover every module this file declares.
-    ///
-    /// Without this, adding `pub mod spawn;` and forgetting to list it in
-    /// `RUNTIME_SOURCES` would leave the new file unchecked and the test
-    /// still green — which is how a structural guard quietly stops guarding.
+    /// The scan reads the runtime crates themselves, so it must have found them:
+    /// a moved directory would otherwise leave both bans checking nothing.
     #[test]
-    fn every_declared_runtime_module_is_checked() {
-        let root = code_lines(include_str!("hook.rs"));
-        for module in DECLARED_MODULES {
+    fn the_scan_covers_the_runtime_crates() {
+        let files: Vec<String> = runtime_sources().into_iter().map(|(file, _)| file).collect();
+        for expected in [
+            "crates/grim-hook/src/main.rs",
+            "crates/grimoire-hook-core/src/run.rs",
+            "crates/grimoire-hook-core/src/table.rs",
+            "crates/grimoire-hook-core/src/pipeline.rs",
+        ] {
             assert!(
-                root.contains(&format!("pub mod {module};")),
-                "`{module}` is listed here but no longer declared in hook.rs"
+                files.iter().any(|f| f.replace('\\', "/") == expected),
+                "{expected} not scanned: {files:?}"
             );
         }
-        assert_eq!(
-            root.matches("pub mod ").count(),
-            DECLARED_MODULES.len(),
-            "a module was added to `hook.rs` without deciding whether it is part of the \
-             runtime; add it to DECLARED_MODULES and to RUNTIME_SOURCES, or state here why \
-             it is exempt as `list` is"
-        );
-        // Named, not counted: the exempt set is a decision per module, and a
-        // count would let a fourth module inherit an exemption three others
-        // earned. Each of these three resolves a scope because describing or
-        // recording against one *is* its job.
-        const EXEMPT: &[&str] = &["allow", "list", "revoke"];
-        let mut covered: Vec<&str> = RUNTIME_SOURCES
-            .iter()
-            .map(|(file, _)| file.trim_start_matches("hook/").trim_end_matches(".rs"))
-            .chain(EXEMPT.iter().copied())
-            .collect();
-        covered.sort_unstable();
-        assert_eq!(
-            covered,
-            DECLARED_MODULES.to_vec(),
-            "every declared module is either under the import ban or a recorded exemption; \
-             a new one is neither until someone decides which"
-        );
-    }
-
-    /// **The runtime that runs the dispatch path is chosen from the parsed
-    /// command, and `main.rs` has exactly one multi-thread constructor.**
-    ///
-    /// The behavioural pin lives in `main.rs` (`the_hook_runtime_runs_on_a_single_worker_f1`
-    /// asserts `num_workers() == 1`); this is the structural half, in the same
-    /// source-level idiom as the C-007 and C-009 tests above, and it guards the
-    /// regression those two cannot see: someone adds a second
-    /// `tokio::runtime::Runtime::new()` — or moves the construction back above
-    /// the parse — and `grim hook run` silently starts one worker thread per
-    /// logical CPU again on every tool call (F-1: 24 `clone3`, ≈1.9 ms of a
-    /// 3.20 ms floor, worse on a bigger machine).
-    #[test]
-    fn the_hook_runtime_is_not_built_on_the_multi_thread_scheduler_f1() {
-        let main = code_lines(include_str!("../main.rs"));
-        assert!(
-            main.contains("build_runtime(runtime_flavor("),
-            "main.rs must build its runtime from `runtime_flavor(<the parsed command>)`, so the \
-             scheduler `grim hook run` gets is decided by what was parsed rather than fixed"
-        );
-        assert!(
-            main.contains("new_current_thread"),
-            "the current-thread scheduler is what makes the guard path cheap; without this \
-             constructor main.rs cannot be giving the hook runtime one"
-        );
-        assert_eq!(
-            main.matches("tokio::runtime::Runtime::new()").count(),
-            1,
-            "exactly one multi-thread constructor is expected, inside `build_runtime`'s \
-             MultiThread arm — a second one is a path that bypasses the flavor decision"
-        );
-    }
-
-    /// **The runtime arm must be dispatched before `Context` is built.**
-    ///
-    /// `app::run` builds one per-invocation context for every command, and
-    /// its constructor reads the environment data root unconditionally
-    /// (`src/context.rs:169`). Without an early arm, "`grim hook run` never
-    /// reads the environment data root" would be **false for the process**
-    /// even while true for this module — the value would simply never be
-    /// *used*. The plan states the stronger claim, so `app.rs` dispatches the
-    /// runtime before the context exists and this pins the ordering.
-    #[test]
-    fn app_dispatches_the_runtime_before_it_builds_a_context_b1() {
-        let app = code_lines(include_str!("../app.rs"));
-        let run_arm = app
-            .find("hook::run::run(")
-            .expect("app.rs must dispatch the hook runtime");
-        let context = app
-            .find("Context::new(")
-            .expect("app.rs must build a per-invocation context");
-        assert!(
-            run_arm < context,
-            "the `grim hook run` arm must be dispatched BEFORE the context is built, because \
-             its constructor reads the environment data root unconditionally; otherwise the \
-             process reads an attacker-choosable value on every tool call (B1)"
-        );
-    }
-
-    /// **Telemetry is built only after the hook runtime has returned.**
-    ///
-    /// `grim hook run` runs once per tool call and must never export, record
-    /// or even name the telemetry handle. The handle lives on `Context`, so
-    /// `main.rs` carries only the module declaration and `app.rs` reaches the
-    /// handle through `ctx.telemetry()` strictly after the runtime arm. A
-    /// top-level `use crate::telemetry` in `app.rs` would move the first
-    /// mention above that arm.
-    #[test]
-    fn telemetry_is_never_built_before_the_hook_runtime_returns() {
-        let main = code_lines(include_str!("../main.rs"));
-        for line in main
-            .lines()
-            .filter(|l| l.contains("telemetry") || l.contains("Telemetry"))
-        {
-            assert_eq!(
-                line.trim(),
-                "mod telemetry;",
-                "main.rs may only declare the telemetry module, found `{}`",
-                line.trim()
-            );
-        }
-        assert!(
-            main.contains("mod telemetry;"),
-            "main.rs must declare the telemetry module"
-        );
-
-        let app = code_lines(include_str!("../app.rs"));
-        let run_arm = app
-            .find("hook::run::run(")
-            .expect("app.rs must dispatch the hook runtime");
-        let first_telemetry = app
-            .find("telemetry")
-            .expect("app.rs must reach the telemetry handle through the context");
-        assert!(
-            run_arm < first_telemetry,
-            "the first mention of telemetry in app.rs must follow the `grim hook run` arm; \
-             reach the handle through `ctx.telemetry()`, never a top-level import"
-        );
-        assert!(
-            !app.contains("crate::telemetry"),
-            "app.rs must not import the telemetry module"
-        );
     }
 }

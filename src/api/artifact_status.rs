@@ -103,8 +103,8 @@ impl std::fmt::Display for ArtifactStatus {
 #[serde(rename_all = "kebab-case")]
 pub enum HookArmingCause {
     /// `grim_home()` resolved to a **relative** path, so the dispatch table's
-    /// location depends on the process CWD — which for a client-spawned
-    /// `grim hook run` is the workspace, making the table repo-plantable
+    /// location depends on the process CWD — which for the client-spawned
+    /// `grim-hook` launcher is the workspace, making the table repo-plantable
     /// (WP-P0 B1 · T3, escalates T4 · I1, I4).
     GrimHomeRelative,
     /// `grim_home()` resolved **inside the workspace** being installed for, so
@@ -186,6 +186,25 @@ pub enum HookArmingCause {
     /// are POSIX shell, and a client that runs one through PowerShell fails it,
     /// which Copilot treats as a denial of every tool call.
     PlatformUnsupported,
+    /// The native launcher cannot be written or replaced at
+    /// `$GRIM_HOME/hooks/grim-hook`: the directory or the file refuses the
+    /// write, or a running image on Windows cannot be moved aside.
+    LauncherUnwritable,
+    /// Something other than a file occupies the launcher's path, a directory
+    /// for instance, and grim will not remove it.
+    LauncherPathOccupied,
+    /// The launcher's path cannot be written into a client registration
+    /// without ambiguity: it is not UTF-8, holds a control character, or holds
+    /// a character the client's quoting cannot carry. Distinct from [`Self::LauncherPathControlCharacter`],
+    /// which holds for every client.
+    LauncherPathUnquotable,
+    /// Windows only: `$GRIM_HOME` is not a local path under the user profile, so
+    /// a launcher built for one host could be handed to another.
+    GrimHomeShared,
+    /// A hook is bound under a name that cannot be a payload directory in
+    /// `$GRIM_HOME/hooks/`: a name grim writes there itself, or one ending in
+    /// `.exe`, `.com`, `.bat` or `.cmd`.
+    BindingNameReserved,
 }
 
 impl HookArmingCause {
@@ -202,7 +221,12 @@ impl HookArmingCause {
             | Self::DispatchLockHeld
             | Self::NotRegistered
             | Self::SurfaceUserOwned
-            | Self::PlatformUnsupported => ArtifactStatus::NotArmed,
+            | Self::PlatformUnsupported
+            | Self::LauncherUnwritable
+            | Self::LauncherPathOccupied
+            | Self::LauncherPathUnquotable
+            | Self::GrimHomeShared
+            | Self::BindingNameReserved => ArtifactStatus::NotArmed,
             Self::ClientTrustPending => ArtifactStatus::Untrusted,
             Self::InsecureTransport => ArtifactStatus::NotArmed,
             Self::FeatureFlagOff
@@ -285,8 +309,34 @@ impl HookArmingCause {
                  delete it; move that file aside, then re-run grim install"
             }
             Self::PlatformUnsupported => {
-                "grim arms hooks on Linux and macOS only, so it registered nothing for any client here; the \
+                "grim has not verified hooks for this client on Windows, so it registered nothing for it; the \
                  payload is installed and every other kind is unaffected"
+            }
+            Self::LauncherUnwritable => {
+                "grim could not write its launcher into the hooks directory under GRIM_HOME, so nothing was \
+                 armed; make that directory and any existing grim-hook file writable by your user, then \
+                 re-run grim install"
+            }
+            Self::LauncherPathOccupied => {
+                "something other than a file sits where grim keeps its launcher, hooks/grim-hook under \
+                 GRIM_HOME, and grim will not remove it; move it aside, then re-run grim install"
+            }
+            Self::LauncherPathUnquotable => {
+                "the launcher's path is not valid UTF-8, holds a control character, or, for a client that \
+                 runs hooks through cmd on Windows, holds a character cmd cannot quote (only letters, \
+                 digits and _ . : \\ + - are safe there); move GRIM_HOME to a plain path, then re-run grim \
+                 install"
+            }
+            Self::GrimHomeShared => {
+                "on Windows, GRIM_HOME must be a local path under your user profile or local app data, \
+                 because the launcher is built per host and a shared home would hand it to another host; \
+                 point GRIM_HOME at a local path, then re-run grim install"
+            }
+            Self::BindingNameReserved => {
+                "a hook is bound under a name that cannot be a hook directory under GRIM_HOME: one grim \
+                 reserves for its own files in hooks/ (its launcher, dispatch table and lock, payload \
+                 files, machine key), or one ending in .exe, .com, .bat or .cmd; rename the binding in \
+                 grimoire.toml, then re-run grim install"
             }
         }
     }
@@ -312,7 +362,12 @@ impl HookArmingCause {
             | Self::ClientHasNoHookSurface
             | Self::NotRegistered
             | Self::SurfaceUserOwned
-            | Self::PlatformUnsupported => false,
+            | Self::PlatformUnsupported
+            | Self::LauncherUnwritable
+            | Self::LauncherPathOccupied
+            | Self::LauncherPathUnquotable
+            | Self::GrimHomeShared
+            | Self::BindingNameReserved => false,
         }
     }
 }
@@ -333,6 +388,11 @@ impl std::fmt::Display for HookArmingCause {
             Self::NotRegistered => "not-registered",
             Self::SurfaceUserOwned => "surface-user-owned",
             Self::PlatformUnsupported => "platform-unsupported",
+            Self::LauncherUnwritable => "launcher-unwritable",
+            Self::LauncherPathOccupied => "launcher-path-occupied",
+            Self::LauncherPathUnquotable => "launcher-path-unquotable",
+            Self::GrimHomeShared => "grim-home-shared",
+            Self::BindingNameReserved => "binding-name-reserved",
         })
     }
 }
@@ -438,7 +498,7 @@ impl std::fmt::Display for InitStatus {
 /// match can express.
 #[cfg(test)]
 impl HookArmingCause {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 18] = [
         Self::GrimHomeRelative,
         Self::GrimHomeInWorkspace,
         Self::LauncherPathControlCharacter,
@@ -452,6 +512,11 @@ impl HookArmingCause {
         Self::NotRegistered,
         Self::SurfaceUserOwned,
         Self::PlatformUnsupported,
+        Self::LauncherUnwritable,
+        Self::LauncherPathOccupied,
+        Self::LauncherPathUnquotable,
+        Self::GrimHomeShared,
+        Self::BindingNameReserved,
     ];
 }
 
@@ -556,6 +621,31 @@ mod tests {
         // as `gated`, which means grim chose not to arm.
         assert_eq!(HookArmingCause::NotRegistered.state(), ArtifactStatus::NotArmed);
         assert_eq!(HookArmingCause::PlatformUnsupported.state(), ArtifactStatus::NotArmed);
+        for cause in [
+            HookArmingCause::LauncherUnwritable,
+            HookArmingCause::LauncherPathOccupied,
+            HookArmingCause::LauncherPathUnquotable,
+            HookArmingCause::GrimHomeShared,
+            HookArmingCause::BindingNameReserved,
+        ] {
+            assert_eq!(cause.state(), ArtifactStatus::NotArmed, "{cause}");
+        }
+    }
+
+    /// C-020: the five launcher-era tokens are frozen spellings.
+    #[test]
+    fn the_launcher_era_cause_tokens_are_spelled_as_documented() {
+        for (cause, token) in [
+            (HookArmingCause::LauncherUnwritable, "launcher-unwritable"),
+            (HookArmingCause::LauncherPathOccupied, "launcher-path-occupied"),
+            (HookArmingCause::LauncherPathUnquotable, "launcher-path-unquotable"),
+            (HookArmingCause::GrimHomeShared, "grim-home-shared"),
+            (HookArmingCause::BindingNameReserved, "binding-name-reserved"),
+        ] {
+            assert_eq!(cause.to_string(), token);
+            assert_eq!(serde_json::to_string(&cause).unwrap(), format!("\"{token}\""));
+        }
+        assert_eq!(HookArmingCause::ALL.len(), 18);
     }
 
     /// Only the held dispatch lock is transient. Telling a user to retry a

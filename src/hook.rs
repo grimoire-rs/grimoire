@@ -51,15 +51,13 @@
 //!
 //! ## Two invariants shape every signature below
 //!
-//! **I3 — grim fails in the direction that does not block the user.**
-//! An internal error, a missing file, an unparsable record or an unknown
-//! schema version degrades to *"the feature is off"*, never to *"the
-//! agent is blocked"*. This is a real availability obligation, not
-//! politeness: Copilot's `preToolUse` is **fail-closed**, so any non-zero
-//! exit grim produces denies the user's tool call. Where a contract here
-//! says "fail closed", it means *do not spawn the payload and exit 0* —
-//! never *emit a deny verdict*. See [`audit`]'s module doc, where that
-//! distinction is the whole subject.
+//! **I3 — grim never converts its own failure into a verdict.** No forged
+//! allow (exit 0), no forged block (exit 2): a grim-internal failure is a
+//! non-verdict error exit, and the client's documented policy decides the
+//! direction. Some clients (Copilot's `preToolUse`) fail **closed** on it, so
+//! grim's obligation is that no benign state ever errors (flag off, revoked,
+//! unknown root, no match), never an exit-0 guard that masks that rule. See
+//! `I3` in `.claude/rules/arch-threat-model.md`.
 //!
 //! **I5 — tamper-evidence, not tamper-resistance.** Under a machine
 //! compromised at grim's own privilege (N2, an explicit non-goal) nothing
@@ -70,7 +68,6 @@
 //! status`. Never describe a control here as prevention when it is
 //! evidence.
 
-pub mod audit;
 pub mod consent;
 pub mod policy;
 pub mod trust;

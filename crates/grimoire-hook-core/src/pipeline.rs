@@ -48,19 +48,17 @@
 //! not the byte-preservation C-002 protects, because after the first rewrite
 //! the value is grim's own composition rather than the client's payload.
 
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-use crate::hook::audit::{AuditInput, AuditLog, AuditOutcome, AuditRecord, AuditVerdict};
-use crate::install::hook_dispatch::DispatchEntry;
-use crate::oci::hook::{
-    CanonicalEvent, DEFAULT_TIMEOUT_SECS, HookHandler, HookPayloadMode, HookTier, MAX_TIMEOUT_SECS,
-};
-
-use super::envelope::{self, EnvelopeMeta, ToolRef};
+use crate::audit::{AuditInput, AuditLog, AuditOutcome, AuditRecord, AuditVerdict};
+use crate::diag::Diagnostic;
+use crate::envelope::{self, EnvelopeMeta, ToolRef};
+use crate::table::DispatchEntry;
+use crate::{CanonicalEvent, DEFAULT_TIMEOUT_SECS, HookHandler, HookPayloadMode, HookTier, MAX_TIMEOUT_SECS};
 
 /// Maximum bytes grim reads back from a payload's stdout.
 ///
@@ -71,110 +69,7 @@ use super::envelope::{self, EnvelopeMeta, ToolRef};
 /// response already produces.
 const MAX_RESPONSE_BYTES: u64 = 64 * 1024;
 
-/// A canonical verdict — grim's own small, closed vocabulary (C-003).
-///
-/// Anything richer is native passthrough for one declared vendor, never a
-/// fifth variant here.
-///
-/// Closed internal enum: the binary is the only consumer, so matches stay
-/// total — no `#[non_exhaustive]`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Decision {
-    /// Let the operation proceed.
-    Allow,
-    /// Block the operation. **Absorbing** — see [`aggregate`].
-    Deny,
-    /// Escalate to the user. Outranks [`Allow`](Self::Allow).
-    Ask,
-    /// No opinion; the client's own default applies.
-    ///
-    /// The `Default`, because a payload that answers `{}` has expressed no
-    /// verdict and every degrade path lands here (I3).
-    #[default]
-    None,
-}
-
-impl Decision {
-    /// Aggregation rank, lowest first: `none` < `allow` < `ask` < `deny`.
-    ///
-    /// A total order rather than a pairwise `match`, because parts 3 and 4 of
-    /// Decision O are one statement — "the most restrictive verdict wins" —
-    /// and expressing it twice is how `ask` eventually loses to `allow` in one
-    /// of the two places.
-    pub fn rank(self) -> u8 {
-        match self {
-            Self::None => 0,
-            Self::Allow => 1,
-            Self::Ask => 2,
-            Self::Deny => 3,
-        }
-    }
-}
-
-impl std::fmt::Display for Decision {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Allow => "allow",
-            Self::Deny => "deny",
-            Self::Ask => "ask",
-            Self::None => "none",
-        })
-    }
-}
-
-/// The canonical response a payload returns, before any per-client projection
-/// (C-003).
-///
-/// Small and closed on purpose. It is projected onto the invoking client's
-/// shape by [`super::projector`], which refuses any field that pair has no
-/// target for rather than dropping it silently.
-///
-/// Deserialized straight from the payload's stdout, every field defaulted: a
-/// hook answers only about what it has an opinion on, and `{}` is the
-/// no-opinion answer rather than a malformed one. Unknown members are ignored
-/// (not denied) so a payload written against a newer envelope schema still
-/// answers this one — the same degrade direction W2 takes for the table.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct CanonicalResponse {
-    /// The verdict.
-    pub decision: Decision,
-    /// Human-readable justification accompanying a verdict. Required by codex
-    /// when blocking — enforced in its **output parser** rather than its JSON
-    /// schema, so an omitted reason fails closed rather than validating.
-    pub reason: Option<String>,
-    /// Extra context for the agent, where the client can express it.
-    pub context: Option<String>,
-    /// A message aimed at the user rather than the model.
-    pub user_message: Option<String>,
-    /// Whether the agent's turn should stop.
-    pub stop: bool,
-    /// The rewritten tool input — `mutator` tier only, `PreToolUse` only.
-    ///
-    /// **S-016:** where the client's response shape supports it, a rewrite
-    /// also emits a line describing itself through `context` /
-    /// `user_message`, so the agent's own transcript records that its command
-    /// was altered. No vendor does this by default, and mutator control 5
-    /// exists precisely because a silent rewrite is indistinguishable from the
-    /// model having asked for the new command.
-    pub updated_input: Option<serde_json::Value>,
-}
-
-impl CanonicalResponse {
-    /// The no-opinion response: what a timeout, an unparsable answer, a
-    /// withheld verdict and an empty matched set all degrade to.
-    ///
-    /// Named rather than open-coded because "no opinion" is reached from many
-    /// failure paths and each one must reach the *same* value — a `deny`
-    /// assembled by accident on a failure path is the outcome I3 forbids.
-    pub fn no_opinion() -> Self {
-        // Spelled as the derived default so the two cannot drift: `#[serde(default)]`
-        // on this struct makes `Default` the shape a `{}` answer deserializes to,
-        // and that shape must be exactly "no opinion".
-        Self::default()
-    }
-}
+pub use crate::response::{CanonicalResponse, Decision};
 
 /// The armed set, partitioned by the order Decision O fixes.
 ///
@@ -209,9 +104,42 @@ pub struct HookOutcome {
     /// [`CanonicalResponse::no_opinion`] if it timed out or answered
     /// unusably.
     pub response: CanonicalResponse,
+    /// Why a `gatekeeper` was withheld by grim itself (D2); always `None` for
+    /// the other tiers, whose withholding keeps today's behaviour.
+    pub withheld: Option<WithheldCause>,
 }
 
-/// Everything one `grim hook run` invocation knows that is **not** per hook —
+/// Which grim-owned infrastructure failure withheld a selected `gatekeeper`.
+///
+/// A payload-owned outcome (a crash, a timeout, garbage on stdout, a handler that
+/// cannot be spawned) is **not** one of these: it keeps today's fail-open
+/// behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WithheldCause {
+    /// The audit trail could not be appended to (C-012).
+    AuditUnwritable,
+    /// The `payload = "file"` envelope could not be written.
+    PayloadFileWrite,
+    /// The hook's envelope could not be built. The launcher exits 1 (internal failure).
+    EnvelopeBuild,
+    /// A reader or writer thread for the handler could not be started. The
+    /// launcher exits 1 (internal failure).
+    ThreadSpawn,
+}
+
+/// [`compose`]'s result: the one response, and whether a gatekeeper was
+/// withheld without a `deny` having been composed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Composition {
+    pub response: CanonicalResponse,
+    /// Set only per PD-6: some selected gatekeeper was withheld **and** no
+    /// gatekeeper that ran composed a `deny`. A composed `deny` always wins,
+    /// because an error exit would turn a block into a non-blocking error in
+    /// Claude.
+    pub withheld: Option<WithheldCause>,
+}
+
+/// Everything one `grim-hook` invocation knows that is **not** per hook —
 /// grim's half of the C-002 envelope, plus the audit sink.
 ///
 /// **This type is the Implement phase's answer to F-B**, and the choice it
@@ -253,7 +181,7 @@ pub struct Invocation<'a> {
     /// Joins this invocation's records and log lines to each other.
     pub correlation_id: &'a str,
     /// Where the audit records go (C-012). The trail is the dispatch table's
-    /// sibling — see [`super::run::audit_trail_path`].
+    /// sibling of the dispatch table.
     pub audit: &'a AuditLog,
 }
 
@@ -313,8 +241,14 @@ pub fn aggregate(outcomes: &[HookOutcome]) -> Decision {
 ///
 /// None. Every failure a hook can produce degrades to
 /// [`CanonicalResponse::no_opinion`], because the caller's only permitted exit
-/// code is 0.
-pub async fn compose(plan: &TierPlan<'_>, invocation: &Invocation<'_>, raw: &[u8]) -> CanonicalResponse {
+/// code is 0. A gatekeeper grim itself had to withhold is reported through
+/// [`Composition::withheld`], never as a verdict.
+pub fn compose(
+    plan: &TierPlan<'_>,
+    invocation: &Invocation<'_>,
+    raw: &[u8],
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Composition {
     // Read once, not once per hook: `build` runs for every armed row, and the
     // tool does not change between them.
     let tool = envelope::tool_from_raw(raw);
@@ -322,20 +256,20 @@ pub async fn compose(plan: &TierPlan<'_>, invocation: &Invocation<'_>, raw: &[u8
     // **C-012, probed once.** Whether the trail can be appended to is a property
     // of the filesystem, not of any one hook, so it is established here and the
     // *tier-aware* consequence is applied per hook inside `invoke`.
-    let logged = audit_is_writable(invocation.audit).await;
+    let logged = invocation.audit.writable();
     // One deadline for the whole invocation (security review W3), strictly
     // below the client timeout of every registration that could have invoked
     // it. Hooks run serially, each up to its own timeout, so without it the
-    // client can kill `grim hook run` first — and on a fail-closed event
+    // client can kill `grim-hook` first — and on a fail-closed event
     // (Copilot `preToolUse`) that non-zero exit makes grim the blocker (I3).
-    let deadline = tokio::time::Instant::now() + invocation_budget(plan);
+    let deadline = Instant::now() + invocation_budget(plan);
     if !logged {
-        tracing::warn!(
+        diagnostics.push(Diagnostic::warn(format!(
             "the hook audit trail at {} cannot be appended to; observers and gatekeepers will not \
-             be spawned and any mutator rewrite will be discarded (C-012). No hook is denied and \
-             the exit code stays 0",
+             be spawned and any mutator rewrite will be discarded. No hook is denied; only the \
+             launcher turns a withheld gatekeeper into a non-zero exit",
             invocation.audit.path().display()
-        );
+        )));
     }
 
     let mut outcomes: Vec<HookOutcome> = Vec::new();
@@ -358,8 +292,8 @@ pub async fn compose(plan: &TierPlan<'_>, invocation: &Invocation<'_>, raw: &[u8
             tool_view(tool, input.as_deref()),
             logged,
             deadline,
-        )
-        .await;
+            diagnostics,
+        );
         if let Some(rewrite) = outcome.response.updated_input.as_ref() {
             match serde_json::to_vec(rewrite) {
                 Ok(bytes) => {
@@ -369,10 +303,10 @@ pub async fn compose(plan: &TierPlan<'_>, invocation: &Invocation<'_>, raw: &[u8
                     input = Some(bytes);
                     rewrote.push(outcome.hook.clone());
                 }
-                Err(e) => tracing::warn!(
+                Err(e) => diagnostics.push(Diagnostic::warn(format!(
                     "{}: its rewrite could not be encoded and was dropped: {e}",
                     outcome.hook
-                ),
+                ))),
             }
         }
         outcomes.push(outcome);
@@ -385,13 +319,29 @@ pub async fn compose(plan: &TierPlan<'_>, invocation: &Invocation<'_>, raw: &[u8
     // invariant rather than a comment (Decision O part 2).
     let threaded = tool_view(tool, input.as_deref());
     for entry in plan.gatekeepers.iter().chain(&plan.observers) {
-        outcomes.push(invoke(entry, invocation, raw, threaded, logged, deadline).await);
+        outcomes.push(invoke(entry, invocation, raw, threaded, logged, deadline, diagnostics));
     }
 
-    assemble(&outcomes, input.as_deref(), &rewrote)
+    Composition {
+        response: assemble(&outcomes, input.as_deref(), &rewrote),
+        withheld: withheld_cause(&outcomes),
+    }
 }
 
-/// How long one `grim hook run` may take: the shortest client timeout among
+/// PD-6's precedence: the first withheld gatekeeper's cause, unless a gatekeeper
+/// that ran composed a `deny`.
+///
+/// Never weakens a composed `deny`: an error exit would turn the block into a
+/// non-blocking error in Claude. Observers and mutators carry no cause, so
+/// withholding them changes nothing here.
+fn withheld_cause(outcomes: &[HookOutcome]) -> Option<WithheldCause> {
+    if aggregate(outcomes) == Decision::Deny {
+        return None;
+    }
+    outcomes.iter().find_map(|outcome| outcome.withheld)
+}
+
+/// How long one `grim-hook` may take: the shortest client timeout among
 /// the registrations `plan`'s rows sit under, minus [`DEADLINE_MARGIN`].
 ///
 /// Groups rows by matcher with the loosest timeout per group, as
@@ -402,22 +352,30 @@ pub async fn compose(plan: &TierPlan<'_>, invocation: &Invocation<'_>, raw: &[u8
 /// value past [`MAX_TIMEOUT_SECS`] is clamped so the deadline cannot overflow.
 // ponytail: keys on grim's matcher, so a vendor that ever merged two of them
 // would only make this budget tighter than the client's, never looser.
-fn invocation_budget(plan: &TierPlan<'_>) -> std::time::Duration {
-    let mut registrations: std::collections::BTreeMap<Option<&str>, u64> = std::collections::BTreeMap::new();
+fn invocation_budget(plan: &TierPlan<'_>) -> Duration {
+    // A list, not a map: a handful of rows, and a map's code is a measurable share of
+    // the launcher's size budget.
+    let mut registrations: Vec<(Option<&str>, u64)> = Vec::new();
     for entry in plan.mutators.iter().chain(&plan.gatekeepers).chain(&plan.observers) {
         // `*` registers as match-all, the same registration as no matcher.
         let matcher = entry.matcher.as_deref().filter(|m| *m != "*");
         let timeout = entry.timeout.unwrap_or(DEFAULT_TIMEOUT_SECS).min(MAX_TIMEOUT_SECS);
-        let loosest = registrations.entry(matcher).or_insert(timeout);
-        *loosest = (*loosest).max(timeout);
+        match registrations.iter_mut().find(|(m, _)| *m == matcher) {
+            Some((_, loosest)) => *loosest = (*loosest).max(timeout),
+            None => registrations.push((matcher, timeout)),
+        }
     }
-    let shortest = registrations.into_values().min().unwrap_or(DEFAULT_TIMEOUT_SECS);
-    std::time::Duration::from_secs(shortest).saturating_sub(DEADLINE_MARGIN)
+    let shortest = registrations
+        .into_iter()
+        .map(|(_, timeout)| timeout)
+        .min()
+        .unwrap_or(DEFAULT_TIMEOUT_SECS);
+    Duration::from_secs(shortest).saturating_sub(DEADLINE_MARGIN)
 }
 
 /// Headroom kept between grim's own deadline and the client's timeout, so grim
 /// answers — and exits 0 — before the client gives up on it.
-const DEADLINE_MARGIN: std::time::Duration = std::time::Duration::from_millis(500);
+const DEADLINE_MARGIN: Duration = Duration::from_millis(500);
 
 /// Record that each armed hook in `declined` had its matcher decline this tool
 /// call (S-004) — **one write for the whole invocation**.
@@ -435,10 +393,10 @@ const DEADLINE_MARGIN: std::time::Duration = std::time::Duration::from_millis(50
 /// tool call cost 142 ms at p50. An empty set writes nothing at all, which is
 /// what keeps the two early-return scenarios from ever creating a trail.
 ///
-/// Lives here rather than in [`super::run`] so that **one module owns every
-/// write to the trail** — the record shape, the sanitization boundary and the
-/// blocking-I/O handling are then in one place rather than two.
-pub async fn record_no_matches(invocation: &Invocation<'_>, declined: &[&DispatchEntry]) {
+/// Lives here rather than in the dispatch entry point so that **one module owns every
+/// write to the trail** — the record shape and the sanitization boundary are then
+/// in one place rather than two.
+pub fn record_no_matches(invocation: &Invocation<'_>, declined: &[&DispatchEntry], diagnostics: &mut Vec<Diagnostic>) {
     if declined.is_empty() {
         return;
     }
@@ -461,7 +419,7 @@ pub async fn record_no_matches(invocation: &Invocation<'_>, declined: &[&Dispatc
             })
         })
         .collect();
-    append_records(invocation.audit, records).await;
+    append_records(invocation.audit, &records, diagnostics);
 }
 
 /// The tool view one hook is handed: the client's tool **name** with the
@@ -474,61 +432,33 @@ fn tool_view<'a>(tool: Option<ToolRef<'a>>, input: Option<&'a [u8]>) -> Option<T
     })
 }
 
-/// Whether the audit trail can be appended to (C-012's precondition), off the
-/// runtime's worker thread.
-///
-/// A **probe** rather than a write, because the record a hook produces is only
-/// knowable after it has run while the fail-closed decision must be made before
-/// the spawn. [`AuditLog::writable`] is the probe itself and owns how the trail
-/// is opened — this function is only the `spawn_blocking` wrapper. It used to
-/// re-spell that prelude here (`create_dir_all` + `OpenOptions`), which was WP-K's
-/// finding G-6: two spellings of "how the trail is opened" drift, and the drift
-/// direction is a probe that answers a different question than the append.
-///
-/// A join failure counts as *not writable*: an unanswerable question takes the
-/// tier-aware degrade rather than assuming the trail is fine.
-async fn audit_is_writable(log: &AuditLog) -> bool {
-    let log = log.clone();
-    tokio::task::spawn_blocking(move || log.writable())
-        .await
-        .unwrap_or(false)
-}
-
-/// Append one record, off the async runtime's worker threads.
+/// Append one record.
 ///
 /// The shape [`invoke`] needs: a record produced *after* a spawn cannot be
 /// batched with the next hook's, because the next hook has not run yet.
-async fn append_record(log: &AuditLog, record: AuditRecord) {
-    append_records(log, vec![record]).await;
+fn append_record(log: &AuditLog, record: AuditRecord, diagnostics: &mut Vec<Diagnostic>) {
+    append_records(log, &[record], diagnostics);
 }
 
-/// Append a whole invocation's records in one open and one write, off the async
-/// runtime's worker threads.
+/// Append a whole invocation's records in one open and one write.
 ///
 /// The single seam for every trail write, so the F-2 batch and the per-record
-/// path report a failure the same way. `AuditLog::append_all` is deliberately
-/// synchronous (positioned writes, and an open handle would hold across the
-/// payload's whole lifetime), so the runtime hands it to `spawn_blocking` rather
-/// than blocking a reactor thread — `quality-rust.md` makes `std::fs` in an
-/// async path Block-tier.
-///
-/// Batching is for the records one invocation **already holds**, which is the
-/// no-match set; holding a post-spawn record back to join a later one would
-/// trade durability for a syscall.
-async fn append_records(log: &AuditLog, records: Vec<AuditRecord>) {
-    let log = log.clone();
-    let appended = tokio::task::spawn_blocking(move || log.append_all(&records)).await;
+/// path report a failure the same way. Batching is for the records one
+/// invocation **already holds**, which is the no-match set; holding a post-spawn
+/// record back to join a later one would trade durability for a syscall.
+fn append_records(log: &AuditLog, records: &[AuditRecord], diagnostics: &mut Vec<Diagnostic>) {
     // The trail is forensics; a failure to write it must never change what grim
     // returns (I3). The tier-aware consequence of an unwritable trail was already
-    // decided by `audit_is_writable` before the spawn, so a failure *here* — the
-    // trail becoming unwritable between the probe and the append — is reported and
-    // nothing more.
-    match appended {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => tracing::warn!("the hook audit record could not be appended: {e}"),
-        Err(e) => tracing::warn!("the hook audit append task did not complete: {e}"),
+    // decided by the `AuditLog::writable` probe before the spawn, so a failure
+    // *here* — the trail becoming unwritable between the probe and the append —
+    // is reported and nothing more.
+    if let Err(e) = log.append_all(records) {
+        diagnostics.push(Diagnostic::warn(format!(
+            "the hook audit record could not be appended: {e}"
+        )));
     }
 }
+
 /// The audit outcome for a hook that ran while the trail was unwritable.
 ///
 /// **A named function so the rule can be tested** (round 3, S4/M6): it was an
@@ -562,22 +492,23 @@ fn unlogged_mutator_outcome(had_rewrite: bool) -> AuditOutcome {
 ///   rewrote **nothing** reports [`Completed`](AuditOutcome::Completed) — see
 ///   [`unlogged_mutator_outcome`] |
 ///
-/// Never returns a `deny` it was not given, and never anything but exit 0 for
-/// the caller: every failure — an unbuildable envelope, a failed spawn, a
-/// timeout, an unusable answer — degrades to
-/// [`CanonicalResponse::no_opinion`] (I3).
-async fn invoke(
+/// Never returns a `deny` it was not given: every failure — an unbuildable
+/// envelope, a failed spawn, a timeout, an unusable answer — degrades to
+/// [`CanonicalResponse::no_opinion`] (I3). A gatekeeper that grim itself withheld
+/// also carries its [`WithheldCause`]; the launcher exits non-zero on that.
+fn invoke(
     entry: &DispatchEntry,
     invocation: &Invocation<'_>,
     raw: &[u8],
     tool: Option<ToolRef<'_>>,
     logged: bool,
-    deadline: tokio::time::Instant,
+    deadline: Instant,
+    diagnostics: &mut Vec<Diagnostic>,
 ) -> HookOutcome {
     // The label every log line, the envelope's `hook` field and the audit record
     // carry for this entry.
     //
-    // **The `tracing` sink is not sanitized, and that is the P-6 residual.** The
+    // **The diagnostic sink is not sanitized, and that is the P-6 residual.** The
     // envelope drops any value with a brace, bracket or control character
     // (`envelope::is_flat_scalar`) and `AuditRecord::new` sanitizes on the way in,
     // so those two are closed; a log line is not. What holds it today is
@@ -611,10 +542,14 @@ async fn invoke(
             outcome,
         })
     };
-    let degraded = |response: CanonicalResponse| HookOutcome {
+    // Only a gatekeeper's withholding is a cause; the other tiers stay "no opinion"
+    // whatever the caller's exit status.
+    let withheld = |cause: WithheldCause| (entry.tier == HookTier::Gatekeeper).then_some(cause);
+    let degraded = |response: CanonicalResponse, withheld: Option<WithheldCause>| HookOutcome {
         hook: hook.clone(),
         tier: entry.tier,
         response,
+        withheld,
     };
 
     let meta = EnvelopeMeta {
@@ -634,21 +569,25 @@ async fn invoke(
         Ok(envelope) => envelope,
         Err(e) => {
             // Unreachable through `run::dispatch`, which refuses a non-object
-            // payload before any hook is selected; reported rather than
+            // payload before any hook runs; reported rather than
             // panicked so a second caller cannot turn it into an exit 101.
-            tracing::warn!("{hook}: {e}; nothing was spawned");
-            append_record(invocation.audit, record(AuditOutcome::SpawnFailed, None, (0, 0), &[])).await;
-            return degraded(CanonicalResponse::no_opinion());
+            diagnostics.push(Diagnostic::warn(format!("{hook}: {e}; nothing was spawned")));
+            append_record(
+                invocation.audit,
+                record(AuditOutcome::SpawnFailed, None, (0, 0), &[]),
+                diagnostics,
+            );
+            return degraded(CanonicalResponse::no_opinion(), withheld(WithheldCause::EnvelopeBuild));
         }
     };
 
     // C-012, rows 1 and 2: withhold the invocation itself.
     if !logged && entry.tier != HookTier::Mutator {
-        tracing::warn!(
+        diagnostics.push(Diagnostic::warn(format!(
             "{hook} was not spawned: its invocation could not be audited, and an unauditable \
              {} is withheld rather than run unlogged (C-012). The tool call proceeds",
             entry.tier
-        );
+        )));
         // Attempted even though the probe failed: the trail may have become
         // writable in between, and a record of a withheld invocation is exactly
         // what a reader of the trail needs. A failure here is already reported by
@@ -656,31 +595,53 @@ async fn invoke(
         append_record(
             invocation.audit,
             record(AuditOutcome::NotSpawnedUnlogged, None, (envelope.len(), 0), &[]),
-        )
-        .await;
-        return degraded(CanonicalResponse::no_opinion());
+            diagnostics,
+        );
+        return degraded(
+            CanonicalResponse::no_opinion(),
+            withheld(WithheldCause::AuditUnwritable),
+        );
     }
 
-    let spawned = spawn_payload(entry, &meta, invocation.audit.path().parent(), &envelope, deadline).await;
+    let spawned = spawn_payload(
+        entry,
+        &meta,
+        invocation.audit.path().parent(),
+        &envelope,
+        deadline,
+        diagnostics,
+    );
     let (stdout, failure) = match spawned {
         Ok((stdout, None)) => (stdout, None),
         Ok((stdout, Some(outcome))) => (stdout, Some(outcome)),
         Err(e) => {
-            tracing::warn!("{hook}: its handler could not be spawned ({e}); no verdict, exit 0 (S-009)");
+            let what = match e {
+                SpawnError::Thread(_) => "a thread for its handler could not be started",
+                SpawnError::PayloadFile(_) | SpawnError::Spawn(_) => "its handler could not be spawned",
+            };
+            diagnostics.push(Diagnostic::warn(format!(
+                "{hook}: {what} ({}); no verdict from it",
+                e.io()
+            )));
             append_record(
                 invocation.audit,
                 record(AuditOutcome::SpawnFailed, None, (envelope.len(), 0), &[]),
-            )
-            .await;
-            return degraded(CanonicalResponse::no_opinion());
+                diagnostics,
+            );
+            let cause = match e {
+                SpawnError::PayloadFile(_) => withheld(WithheldCause::PayloadFileWrite),
+                SpawnError::Thread(_) => withheld(WithheldCause::ThreadSpawn),
+                SpawnError::Spawn(_) => None,
+            };
+            return degraded(CanonicalResponse::no_opinion(), cause);
         }
     };
 
     let sizes = (envelope.len(), stdout.len());
     let mut response = match failure {
         Some(outcome) => {
-            append_record(invocation.audit, record(outcome, None, sizes, &[])).await;
-            return degraded(CanonicalResponse::no_opinion());
+            append_record(invocation.audit, record(outcome, None, sizes, &[]), diagnostics);
+            return degraded(CanonicalResponse::no_opinion(), None);
         }
         // **Exit 0 with empty stdout is the fail-safe shape, not a malformed
         // answer**, and it is what every payload that has nothing to say
@@ -690,13 +651,15 @@ async fn invoke(
         None => match serde_json::from_slice::<CanonicalResponse>(&stdout) {
             Ok(response) => response,
             Err(e) => {
-                tracing::warn!("{hook}: its answer was not a canonical response ({e}); no verdict, exit 0");
+                diagnostics.push(Diagnostic::warn(format!(
+                    "{hook}: its answer was not a canonical response ({e}); no verdict, exit 0"
+                )));
                 append_record(
                     invocation.audit,
                     record(AuditOutcome::ResponseRejected, None, sizes, &[]),
-                )
-                .await;
-                return degraded(CanonicalResponse::no_opinion());
+                    diagnostics,
+                );
+                return degraded(CanonicalResponse::no_opinion(), None);
             }
         },
     };
@@ -710,11 +673,11 @@ async fn invoke(
     // C-012, row 3: the invocation stands, the rewrite does not.
     if !logged {
         if response.updated_input.take().is_some() {
-            tracing::warn!(
+            diagnostics.push(Diagnostic::warn(format!(
                 "{hook} ran but its rewrite was discarded: the invocation could not be audited, and \
                  an UNLOGGED MUTATION is the one outcome this failure mode must not produce \
                  (C-012). The tool call proceeds with its original input"
-            );
+            )));
             verdict = Some(AuditVerdict::Mutate);
             outcome = unlogged_mutator_outcome(true);
         }
@@ -725,27 +688,27 @@ async fn invoke(
     // direction — and both are reported rather than dropped in silence, because a
     // hook whose answer is being ignored looks exactly like a hook that is working.
     if entry.tier != HookTier::Mutator && response.updated_input.take().is_some() {
-        tracing::warn!(
+        diagnostics.push(Diagnostic::warn(format!(
             "{hook} is declared `{}`, so its rewrite was ignored — only a `mutator` may rewrite a \
              tool's input",
             entry.tier
-        );
+        )));
         changed = Vec::new();
     }
     if entry.tier != HookTier::Gatekeeper && response.decision != Decision::None {
-        tracing::warn!(
+        diagnostics.push(Diagnostic::warn(format!(
             "{hook} is declared `{}`, so its `{}` verdict was ignored — only a `gatekeeper` may \
              return a verdict, and the approval prompt the user saw named this tier",
-            entry.tier,
-            response.decision
-        );
+            entry.tier, response.decision
+        )));
     }
 
-    append_record(invocation.audit, record(outcome, verdict, sizes, &changed)).await;
+    append_record(invocation.audit, record(outcome, verdict, sizes, &changed), diagnostics);
     HookOutcome {
         hook,
         tier: entry.tier,
         response,
+        withheld: None,
     }
 }
 
@@ -774,14 +737,19 @@ fn changed_fields(original: Option<&[u8]>, rewrite: Option<&serde_json::Value>) 
     let before: serde_json::Map<String, serde_json::Value> = original
         .and_then(|bytes| serde_json::from_slice(bytes).ok())
         .unwrap_or_default();
-    let mut changed: Vec<String> = rewrite
+    // Both key lists are already in order, but not each other's: a sorted,
+    // deduplicated union.
+    let mut changed: Vec<String> = Vec::new();
+    for key in rewrite
         .iter()
         .filter(|(key, value)| before.get(*key) != Some(*value))
-        .map(|(key, _)| key.clone())
-        .chain(before.keys().filter(|key| !rewrite.contains_key(*key)).cloned())
-        .collect();
-    changed.sort();
-    changed.dedup();
+        .map(|(key, _)| key)
+        .chain(before.keys().filter(|key| !rewrite.contains_key(*key)))
+    {
+        if let Err(at) = changed.binary_search(key) {
+            changed.insert(at, key.clone());
+        }
+    }
     changed
 }
 
@@ -845,6 +813,25 @@ fn assemble(outcomes: &[HookOutcome], input: Option<&[u8]>, rewrote: &[String]) 
     }
 }
 
+/// Why a payload could not be started, split because only the handler half fails
+/// open: a handler that will not spawn is payload-owned, while a
+/// `payload = "file"` envelope or a reader/writer thread grim could not start is
+/// grim's own, and withholds a gatekeeper rather than forging "no opinion".
+#[derive(Debug)]
+enum SpawnError {
+    PayloadFile(std::io::Error),
+    Spawn(std::io::Error),
+    Thread(std::io::Error),
+}
+
+impl SpawnError {
+    fn io(&self) -> &std::io::Error {
+        match self {
+            Self::PayloadFile(e) | Self::Spawn(e) | Self::Thread(e) => e,
+        }
+    }
+}
+
 /// Spawn one payload with the envelope on its stdin and read its answer back.
 ///
 /// Returns the payload's stdout plus, when the invocation did not complete
@@ -859,120 +846,194 @@ fn assemble(outcomes: &[HookOutcome], input: Option<&[u8]>, rewrote: &[String]) 
 ///   own siblings resolve;
 /// - **stderr is discarded.** Surfacing it would render publisher-controlled
 ///   bytes into a stream a human reads in a terminal — CWE-117 with
-///   ANSI-escape spoofing, the same class `src/hook/audit.rs` sanitizes against.
+///   ANSI-escape spoofing, the same class `audit.rs` sanitizes against.
 ///   The audit trail is the record of what ran;
-/// - the child is **killed on drop** and on timeout, so an over-running payload
-///   cannot outlive the invocation. Both halves are bounded: the stdout read
-///   *and* the wait for the process to exit. Bounding only the read left a
-///   payload that answers and then keeps running able to block the dispatcher —
-///   and the user's tool call — indefinitely, because `kill_on_drop` cannot fire
-///   while the `Child` is still alive inside the await.
-async fn spawn_payload(
+/// - the child is **killed** on timeout, so an over-running payload cannot
+///   outlive the invocation. Both halves are bounded: the stdout read *and* the
+///   wait for the process to exit. Bounding only the read left a payload that
+///   answers and then keeps running able to block the dispatcher — and the
+///   user's tool call — indefinitely.
+///
+/// **A reader or writer thread is never joined after a kill.** A grandchild
+/// (`sleep 300 & echo x`) can hold the pipe open past the child's death, so a
+/// join would block on a process grim never started. The handles are dropped and
+/// the dispatcher continues.
+fn spawn_payload(
     entry: &DispatchEntry,
     meta: &EnvelopeMeta<'_>,
     private_dir: Option<&Path>,
     envelope: &[u8],
-    deadline: tokio::time::Instant,
-) -> std::io::Result<(Vec<u8>, Option<AuditOutcome>)> {
+    deadline: Instant,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<(Vec<u8>, Option<AuditOutcome>), SpawnError> {
     // The hook's own timeout, capped at what is left of the invocation's
     // deadline. Nothing is spawned once that budget is spent: a hook that
     // cannot get any time degrades exactly as one that ran out of it.
-    let timeout = std::time::Duration::from_secs(entry.timeout.unwrap_or(DEFAULT_TIMEOUT_SECS))
-        .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+    let timeout = Duration::from_secs(entry.timeout.unwrap_or(DEFAULT_TIMEOUT_SECS))
+        .min(deadline.saturating_duration_since(Instant::now()));
     if timeout.is_zero() {
-        tracing::warn!(
+        diagnostics.push(Diagnostic::warn(format!(
             "{}/{} was not spawned: the invocation's time budget is spent; no verdict, exit 0",
-            entry.artifact,
-            entry.id
-        );
+            entry.artifact, entry.id
+        )));
         return Ok((Vec::new(), Some(AuditOutcome::TimedOut)));
     }
     let payload_file = match entry.payload {
         HookPayloadMode::Stdin => None,
-        HookPayloadMode::File => Some(write_payload_file(private_dir, entry, envelope).await?),
+        HookPayloadMode::File => {
+            Some(write_payload_file(private_dir, entry, envelope, diagnostics).map_err(SpawnError::PayloadFile)?)
+        }
     };
+    // `payload_file` removes the envelope when it drops, so every return below
+    // cleans up without repeating the removal.
     let mut command = handler_command(&entry.handler, &entry.payload_dir);
     command
         .current_dir(&entry.payload_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-    for (name, value) in envelope::environment(meta, payload_file.as_deref()) {
+        .stderr(Stdio::null());
+    for (name, value) in envelope::environment(meta, payload_file.as_ref().map(PayloadFile::path), diagnostics) {
         command.env(name, value);
     }
 
-    let mut child = command.spawn()?;
+    let mut child = command.spawn().map_err(SpawnError::Spawn)?;
     let stdin = child.stdin.take();
     let stdout = child.stdout.take();
-    let bytes = envelope.to_vec();
-    let read = async move {
-        if let Some(mut stdin) = stdin {
-            // A payload that never reads its stdin makes this fail with a broken
-            // pipe, which is not an error here: the answer is still read back.
-            let _ = stdin.write_all(&bytes).await;
-            let _ = stdin.shutdown().await;
-            drop(stdin);
+
+    // The envelope may exceed the pipe buffer, so it is written off-thread. A
+    // payload that never reads its stdin makes the write fail with a broken pipe,
+    // which is not an error here: the answer is still read back.
+    if let Some(mut stdin) = stdin {
+        let bytes = envelope.to_vec();
+        let spawned_writer = spawn_thread(Box::new(move || {
+            let _ = stdin.write_all(&bytes);
+        }));
+        if let Err(e) = spawned_writer {
+            kill_and_reap(&mut child);
+            return Err(SpawnError::Thread(e));
         }
+    }
+    // The answer crosses threads through a slot and `park_timeout`, not an
+    // `mpsc` channel: the channel's code is a measurable share of the launcher's
+    // size budget. A reader that never stores an answer reads as a timeout.
+    let slot: Arc<Mutex<Option<Vec<u8>>>> = Arc::default();
+    let writer = Arc::clone(&slot);
+    let waiter = std::thread::current();
+    let spawned_reader = spawn_thread(Box::new(move || {
         let mut answer = Vec::new();
         if let Some(stdout) = stdout {
-            let _ = stdout.take(MAX_RESPONSE_BYTES).read_to_end(&mut answer).await;
+            let _ = stdout.take(MAX_RESPONSE_BYTES).read_to_end(&mut answer);
         }
-        answer
-    };
+        if let Ok(mut slot) = writer.lock() {
+            *slot = Some(answer);
+        }
+        waiter.unpark();
+    }));
+    if let Err(e) = spawned_reader {
+        kill_and_reap(&mut child);
+        return Err(SpawnError::Thread(e));
+    }
 
-    let started = tokio::time::Instant::now();
-    let outcome = match tokio::time::timeout(timeout, read).await {
-        Ok(answer) => {
-            // **The reap is bounded too, and it has to be.** Wrapping only the
-            // read left `child.wait()` unbounded on the success arm, so a payload
-            // that wrote its answer, closed stdout and kept running blocked the
+    let started = Instant::now();
+    let answered = loop {
+        if let Some(answer) = slot.lock().ok().and_then(|mut slot| slot.take()) {
+            break Some(answer);
+        }
+        let left = timeout.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            break None;
+        }
+        std::thread::park_timeout(left);
+    };
+    let outcome = match answered {
+        Some(answer) => {
+            // **The reap is bounded too, and it has to be.** Bounding only the
+            // read left the wait for exit unbounded on this arm, so a payload that
+            // wrote its answer, closed stdout and kept running blocked the
             // dispatcher — and therefore the user's tool call — forever.
-            // `kill_on_drop` cannot rescue that: the `Child` is alive inside the
-            // await, so it is never dropped. Found by the wave-8 review panel;
-            // the doc above had promised the opposite for the whole branch.
             //
             // The budget is what remains of the hook's own timeout, not a second
             // full one: the author declared how long the *invocation* may take,
             // and a well-behaved payload has already exited by the time its
             // stdout closed, so this costs it nothing.
             let remaining = timeout.saturating_sub(started.elapsed());
-            if tokio::time::timeout(remaining, child.wait()).await.is_err() {
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-                tracing::warn!(
+            if !exited_within(&mut child, remaining) {
+                kill_and_reap(&mut child);
+                diagnostics.push(Diagnostic::warn(format!(
                     "{}/{} answered but did not exit within its {}s timeout and was killed; \
                      the answer it gave is still used",
                     entry.artifact,
                     entry.id,
                     timeout.as_secs()
-                );
+                )));
             }
             (answer, None)
         }
-        Err(_) => {
+        None => {
             // Grim enforces the timeout, not the vendor: a payload that outlives
             // it is killed and degrades to no opinion, never to a verdict.
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-            tracing::warn!(
+            kill_and_reap(&mut child);
+            diagnostics.push(Diagnostic::warn(format!(
                 "{}/{} exceeded its {}s timeout and was killed; no verdict, exit 0",
                 entry.artifact,
                 entry.id,
                 timeout.as_secs()
-            );
+            )));
             (Vec::new(), Some(AuditOutcome::TimedOut))
         }
     };
-    if let Some(path) = payload_file {
-        // The envelope can carry a tool call's input, so the file does not
-        // outlive the invocation that needed it.
-        let _ = tokio::fs::remove_file(&path).await;
-    }
     Ok(outcome)
 }
 
-/// The `tokio` command for one handler.
+/// One detached worker thread. A single non-generic spawn site: each distinct
+/// closure type would otherwise instantiate std's whole thread-start path again.
+fn spawn_thread(job: Box<dyn FnOnce() + Send>) -> std::io::Result<()> {
+    #[cfg(test)]
+    if let Some(left) = FAIL_THREAD_SPAWN.with(std::cell::Cell::get) {
+        FAIL_THREAD_SPAWN.with(|f| f.set(left.checked_sub(1)));
+        if left == 0 {
+            return Err(std::io::Error::other("injected thread spawn failure"));
+        }
+    }
+    std::thread::Builder::new().spawn(job).map(drop)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// `Some(n)`: let `n` spawns succeed, then fail the next one (0 = the writer, 1 = the reader).
+    static FAIL_THREAD_SPAWN: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// Poll `child` until it exits or `limit` passes, backing off from 0.2 ms to a 5 ms cap.
+fn exited_within(child: &mut Child, limit: Duration) -> bool {
+    const FIRST_PAUSE: Duration = Duration::from_micros(200);
+    const MAX_PAUSE: Duration = Duration::from_millis(5);
+    let started = Instant::now();
+    let mut pause = FIRST_PAUSE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) => {}
+            // A wait that fails cannot be told apart from a child that never
+            // exits; the caller's answer is the same kill.
+            Err(_) => return false,
+        }
+        let left = limit.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            return false;
+        }
+        std::thread::sleep(pause.min(left));
+        pause = (pause * 2).min(MAX_PAUSE);
+    }
+}
+
+/// Kill the direct child and reap it. A grandchild is out of reach, as it always was.
+fn kill_and_reap(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// The command for one handler.
 ///
 /// `argv` is exec form — no shell, no quoting, and the documented preferred
 /// shape. `command` is handed to the platform shell, which is why the format
@@ -981,7 +1042,7 @@ async fn spawn_payload(
 /// Only `argv` gets [`expand_payload_dir`]. `command` reaches `sh -c` with
 /// `GRIM_HOOK_DIR` already in its environment, so the shell expands the token
 /// itself; substituting first would expand it twice.
-fn handler_command(handler: &HookHandler, payload_dir: &Path) -> tokio::process::Command {
+fn handler_command(handler: &HookHandler, payload_dir: &Path) -> Command {
     match handler {
         HookHandler::Argv(argv) => {
             let expanded: Vec<String> = argv
@@ -991,14 +1052,14 @@ fn handler_command(handler: &HookHandler, payload_dir: &Path) -> tokio::process:
             let (program, rest) = expanded
                 .split_first()
                 .map_or(("", &[][..]), |(first, rest)| (first.as_str(), rest));
-            let mut command = tokio::process::Command::new(program);
+            let mut command = Command::new(program);
             command.args(rest);
             command
         }
         HookHandler::Command(line) => {
             #[cfg(windows)]
             let mut command = {
-                let mut command = tokio::process::Command::new("cmd");
+                let mut command = Command::new("cmd");
                 command.arg("/C").arg(line);
                 command
             };
@@ -1006,7 +1067,7 @@ fn handler_command(handler: &HookHandler, payload_dir: &Path) -> tokio::process:
             // `$PATH` (security review S3, CWE-426 defence in depth).
             #[cfg(not(windows))]
             let mut command = {
-                let mut command = tokio::process::Command::new("/bin/sh");
+                let mut command = Command::new("/bin/sh");
                 command.arg("-c").arg(line);
                 command
             };
@@ -1026,7 +1087,7 @@ fn handler_command(handler: &HookHandler, payload_dir: &Path) -> tokio::process:
 /// not.
 ///
 /// Three sites already treat the token as meaning the payload directory:
-/// `hook-spec.md` calls this shape preferred, [`crate::oci::hook`]'s
+/// `hook-spec.md` calls this shape preferred, `oci::hook`'s
 /// `payload_relative_file` strips these same two prefixes to decide whether
 /// `argv[0]` names a payload file, and `grim build`'s own refusal message
 /// recommends `argv = ["sh", "${GRIM_HOOK_DIR}/…"]` as the fix. Expanding here is
@@ -1060,33 +1121,35 @@ fn handler_command(handler: &HookHandler, payload_dir: &Path) -> tokio::process:
 /// `PATH`-shaped argument would get the literal `$GRIM_HOOK_DIR` in their
 /// handler and no diagnostic.
 fn expand_payload_dir(token: &str, payload_dir: &Path) -> String {
-    const BARE: &str = "$GRIM_HOOK_DIR";
     let dir = payload_dir.to_string_lossy();
-    let braced = token.replace("${GRIM_HOOK_DIR}", &dir);
-    let mut out = String::with_capacity(braced.len());
-    let mut rest = braced.as_str();
-    while let Some(at) = rest.find(BARE) {
-        let (before, from_token) = rest.split_at(at);
-        let tail = &from_token[BARE.len()..];
-        out.push_str(before);
-        // A shell stops a bare `$NAME` at the first byte that cannot continue an
-        // identifier, so `$GRIM_HOOK_DIR:` expands and `$GRIM_HOOK_DIRECTORY`
-        // does not. Matching that rule is what keeps the braced and braceless
-        // forms interchangeable.
-        if tail
-            .chars()
+    let mut out = String::with_capacity(token.len());
+    let mut rest = token;
+    // One pass with `strip_prefix` and no substring search: `str::replace`/`find`
+    // pull in std's two-way searcher, a measurable share of the launcher's size budget.
+    //
+    // A bare `$NAME` ends at the first byte that cannot continue an identifier, as a
+    // shell's does, so `$GRIM_HOOK_DIR:` expands and `$GRIM_HOOK_DIRECTORY` does not.
+    // Matching that rule keeps the braced and braceless forms interchangeable.
+    let ends_name = |tail: &str| {
+        tail.chars()
             .next()
             .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
-        {
+    };
+    while let Some(c) = rest.chars().next() {
+        if let Some(tail) = rest.strip_prefix("${GRIM_HOOK_DIR}") {
             out.push_str(&dir);
+            rest = tail;
+        } else if let Some(tail) = rest.strip_prefix("$GRIM_HOOK_DIR").filter(|tail| ends_name(tail)) {
+            out.push_str(&dir);
+            rest = tail;
         } else {
-            out.push_str(BARE);
+            out.push(c);
+            rest = &rest[c.len_utf8()..];
         }
-        rest = tail;
     }
-    out.push_str(rest);
     out
 }
+
 /// The envelope file's name: `payload_<pid>_<slot>.json`.
 ///
 /// **One home for this name, because a comment could not hold it.** The separators
@@ -1119,9 +1182,10 @@ pub fn envelope_file_name(pid: u32, slot: u64) -> String {
 /// the runtime already has, and it is private. Never inside `payload_dir`, which
 /// is the materialized artifact tree whose content hash `grim status` compares
 /// (writing there would report every armed hook as locally modified).
-/// `private_dir` is `None` only when the trail's path has no parent, which a
-/// validated absolute `--table` never produces; the file transport then refuses
-/// rather than falling back to a world-readable temp directory.
+/// `private_dir` is `None` only when the trail's path has no parent, which the
+/// launcher's absolute `dispatch.json`-relative path never produces; the file
+/// transport then refuses rather than falling back to a world-readable temp
+/// directory.
 ///
 /// # No caller-supplied byte reaches the name (audit finding P-6)
 ///
@@ -1137,7 +1201,7 @@ pub fn envelope_file_name(pid: u32, slot: u64) -> String {
 /// interpolation rather than guarding it: there is no traversal to block, and no
 /// charset rule this format string has to stay in sync with. `grim build` and the
 /// install-seam re-check *also* constrain `id` now
-/// ([`hook_id_char_allowed`](crate::oci::hook::hook_id_char_allowed)), but that is
+/// (`hook_id_char_allowed`), but that is
 /// defence in depth and this site does not depend on it.
 ///
 /// **Deliberately not a hash of `(artifact, id)`**, which is what the finding
@@ -1146,11 +1210,12 @@ pub fn envelope_file_name(pid: u32, slot: u64) -> String {
 /// source-level symbol ban. That guard exists so nobody re-adds the exec-time
 /// integrity check decision A3 deleted, and a name-derivation hash would have had
 /// to weaken it. Two integers need no digest primitive at all.
-async fn write_payload_file(
+fn write_payload_file(
     private_dir: Option<&Path>,
     entry: &DispatchEntry,
     envelope: &[u8],
-) -> std::io::Result<PathBuf> {
+    diagnostics: &mut Vec<Diagnostic>,
+) -> std::io::Result<PayloadFile> {
     let Some(dir) = private_dir else {
         return Err(std::io::Error::other(
             "the hook payload file has no private directory to live in",
@@ -1162,34 +1227,88 @@ async fn write_payload_file(
     // if the tier pipeline ever stops being serial — an index derived from the
     // caller's loop would not.
     static NEXT_SLOT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let slot = NEXT_SLOT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path = dir.join(envelope_file_name(std::process::id(), slot));
-    // Owner-only and `create_new` (security review S2): the envelope can carry a
-    // tool call's input (T5), so it must not rely on the hooks directory's own
-    // mode alone, and a pre-planted file or symlink at this name is refused
-    // rather than followed.
-    let mut options = tokio::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut file = options.open(&path).await?;
-    file.write_all(envelope).await?;
-    file.flush().await?;
+    let file = create_payload_file(dir, envelope, &NEXT_SLOT)?;
     // The name no longer says which hook it belongs to, so the readable form goes
-    // in a log line — a hook author debugging `payload = "file"` still needs to
+    // in a diagnostic — a hook author debugging `payload = "file"` still needs to
     // know which file is theirs.
-    tracing::debug!(
+    diagnostics.push(Diagnostic::debug(format!(
         "hook '{}/{}' payload file: {}",
         entry.artifact,
         entry.id,
-        path.display()
-    );
-    Ok(path)
+        file.path().display()
+    )));
+    Ok(file)
+}
+
+/// How many slots [`create_payload_file`] tries before giving up.
+const MAX_SLOT_ATTEMPTS: u32 = 64;
+
+/// Create the envelope file at the next free slot and write `envelope` into it.
+///
+/// Owner-only and `create_new` (security review S2): the envelope can carry a
+/// tool call's input (T5), so it must not rely on the hooks directory's own mode
+/// alone, and a pre-planted file or symlink at a name is refused rather than
+/// followed. An existing name is skipped, never overwritten: a crashed earlier
+/// run with the same pid leaves `payload_<pid>_<slot>.json` behind, and failing
+/// on it would make the launcher exit 74 for every later call.
+fn create_payload_file(
+    dir: &Path,
+    envelope: &[u8],
+    next_slot: &std::sync::atomic::AtomicU64,
+) -> std::io::Result<PayloadFile> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut attempts = 0;
+    loop {
+        let slot = next_slot.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = dir.join(envelope_file_name(std::process::id(), slot));
+        match options.open(&path) {
+            Ok(mut file) => {
+                // The guard exists before the write, so a failed write removes the file.
+                let guard = PayloadFile(path);
+                file.write_all(envelope)?;
+                file.flush()?;
+                return Ok(guard);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempts + 1 < MAX_SLOT_ATTEMPTS => {
+                attempts += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// An envelope file that removes itself when dropped.
+///
+/// The file can carry a tool call's input, so it must not outlive the invocation
+/// on any path, early returns included.
+#[derive(Debug)]
+struct PayloadFile(PathBuf);
+
+impl PayloadFile {
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for PayloadFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The diagnostics and `withheld` are asserted separately; the shim keeps every
+    /// pre-port call site and assertion as it was.
+    #[cfg(unix)]
+    fn compose(plan: &TierPlan<'_>, invocation: &Invocation<'_>, raw: &[u8]) -> CanonicalResponse {
+        super::compose(plan, invocation, raw, &mut Vec::new()).response
+    }
 
     /// **The documented preferred `argv` form has to actually run.**
     ///
@@ -1280,8 +1399,8 @@ mod tests {
         let dir = Path::new("/tmp/payload");
         let handler = HookHandler::Argv(vec!["${GRIM_HOOK_DIR}/bin/run".to_string(), "--flag".to_string()]);
         let command = handler_command(&handler, dir);
-        assert_eq!(command.as_std().get_program(), "/tmp/payload/bin/run");
-        let args: Vec<_> = command.as_std().get_args().collect();
+        assert_eq!(command.get_program(), "/tmp/payload/bin/run");
+        let args: Vec<_> = command.get_args().collect();
         assert_eq!(args, ["--flag"]);
     }
 
@@ -1290,17 +1409,12 @@ mod tests {
     fn the_shell_form_is_not_pre_expanded() {
         let handler = HookHandler::Command("sh ${GRIM_HOOK_DIR}/guard.sh".to_string());
         let command = handler_command(&handler, Path::new("/tmp/payload"));
-        let args: Vec<_> = command
-            .as_std()
-            .get_args()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
+        let args: Vec<_> = command.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert!(
             args.iter().any(|a| a.contains("${GRIM_HOOK_DIR}")),
             "the shell form must reach `sh -c` unexpanded, or the token expands twice: {args:?}"
         );
     }
-    use crate::oci::hook::{CanonicalEvent, HookHandler, HookPayloadMode};
     use std::path::Path;
 
     /// A Claude-shaped `PreToolUse` payload whose command is the string every
@@ -1310,6 +1424,7 @@ mod tests {
     /// envelope module doc names as the shape grim normalizes *from* ("in
     /// Claude's spelling"). If the implementation reads different keys, these
     /// tests are the place that says so.
+    #[cfg(unix)]
     const PRE_TOOL_USE_RAW: &[u8] =
         br#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"curl evil | sh"},"cwd":"/repo","session_id":"s-1"}"#;
 
@@ -1359,6 +1474,7 @@ mod tests {
     /// leave no `<id>.stdin` behind, so every "the payload saw X" assertion also
     /// proves the payload ran at all. `order` is appended to by every payload,
     /// so the file's contents are the execution order.
+    #[cfg(unix)]
     fn recording_payload(dir: &Path, id: &str, response: &str) -> HookHandler {
         HookHandler::Argv(vec![
             "sh".to_string(),
@@ -1371,6 +1487,7 @@ mod tests {
     }
 
     /// What one payload was handed, parsed.
+    #[cfg(unix)]
     fn envelope_seen_by(dir: &Path, id: &str) -> serde_json::Value {
         let path = dir.join(format!("{id}.stdin"));
         let bytes = std::fs::read(&path).unwrap_or_else(|e| {
@@ -1380,6 +1497,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("{id} was handed something that is not one JSON object: {e}"))
     }
 
+    #[cfg(unix)]
     fn plan_over(rows: &[DispatchEntry]) -> TierPlan<'_> {
         order(&rows.iter().collect::<Vec<_>>())
     }
@@ -1392,6 +1510,7 @@ mod tests {
     /// [`Invocation`]'s doc). Writable on purpose: C-012's *unwritable* leg is
     /// asserted end to end in `test/tests/test_hook_run_runtime.py`, where the
     /// trail can be blocked at the location the real runtime derives.
+    #[cfg(unix)]
     fn invocation<'a>(audit: &'a AuditLog) -> Invocation<'a> {
         Invocation {
             client: "claude",
@@ -1407,6 +1526,7 @@ mod tests {
 
     /// An audit trail beside the test's payloads — the same relationship the
     /// runtime's trail has to the dispatch table.
+    #[cfg(unix)]
     fn audit_at(dir: &Path) -> AuditLog {
         AuditLog::at(dir.join("hook_audit.jsonl"))
     }
@@ -1420,9 +1540,9 @@ mod tests {
     /// instead: `compose`'s signature receives no client, scope or hook
     /// identity, so it cannot supply them — reported as a finding rather than
     /// worked around here.
-    #[tokio::test]
+    #[test]
     #[cfg(unix)]
-    async fn a_matched_payload_is_spawned_with_the_envelope_on_its_stdin_s005() {
+    fn a_matched_payload_is_spawned_with_the_envelope_on_its_stdin_s005() {
         let dir = tempfile::tempdir().expect("tempdir");
         let rows = [dispatch_entry(
             "o1",
@@ -1430,7 +1550,7 @@ mod tests {
             recording_payload(dir.path(), "o1", "{}"),
             dir.path(),
         )];
-        let _ = compose(&plan_over(&rows), &invocation(&audit_at(dir.path())), PRE_TOOL_USE_RAW).await;
+        let _ = compose(&plan_over(&rows), &invocation(&audit_at(dir.path())), PRE_TOOL_USE_RAW);
 
         let seen = envelope_seen_by(dir.path(), "o1");
         assert_eq!(seen["tool"]["name"], serde_json::json!("Bash"));
@@ -1450,9 +1570,9 @@ mod tests {
     /// later in the same declaration-ordered list rewrites it to `curl … | sh`,
     /// and grim emits one aggregated `allow` **plus** the rewrite — a guardrail
     /// that approved bytes which never ran.
-    #[tokio::test]
+    #[test]
     #[cfg(unix)]
-    async fn a_gatekeeper_never_observes_pre_mutation_input_c011() {
+    fn a_gatekeeper_never_observes_pre_mutation_input_c011() {
         let dir = tempfile::tempdir().expect("tempdir");
         let rows = [
             dispatch_entry(
@@ -1472,7 +1592,7 @@ mod tests {
                 dir.path(),
             ),
         ];
-        let response = compose(&plan_over(&rows), &invocation(&audit_at(dir.path())), PRE_TOOL_USE_RAW).await;
+        let response = compose(&plan_over(&rows), &invocation(&audit_at(dir.path())), PRE_TOOL_USE_RAW);
 
         // The gatekeeper is declared FIRST here on purpose: declaration order is
         // the installing user's order and must not decide who sees what.
@@ -1502,9 +1622,9 @@ mod tests {
     /// competing `updatedInput` as last-process-to-exit-wins and most clients
     /// leave ordering undocumented, so running the chain serially converts a
     /// race into a reproducible pipeline.
-    #[tokio::test]
+    #[test]
     #[cfg(unix)]
-    async fn the_mutator_chain_threads_deterministically_and_serially_c011() {
+    fn the_mutator_chain_threads_deterministically_and_serially_c011() {
         let dir = tempfile::tempdir().expect("tempdir");
         let rows = [
             dispatch_entry(
@@ -1528,7 +1648,7 @@ mod tests {
                 dir.path(),
             ),
         ];
-        let response = compose(&plan_over(&rows), &invocation(&audit_at(dir.path())), PRE_TOOL_USE_RAW).await;
+        let response = compose(&plan_over(&rows), &invocation(&audit_at(dir.path())), PRE_TOOL_USE_RAW);
 
         assert_eq!(
             envelope_seen_by(dir.path(), "m1")["tool"]["input"]["command"],
@@ -1558,9 +1678,9 @@ mod tests {
     ///
     /// Denied bytes must not also be rewritten, or the client carries a rewrite
     /// for an operation that never runs.
-    #[tokio::test]
+    #[test]
     #[cfg(unix)]
-    async fn a_deny_suppresses_the_mutation_entirely_c011() {
+    fn a_deny_suppresses_the_mutation_entirely_c011() {
         let dir = tempfile::tempdir().expect("tempdir");
         let rows = [
             dispatch_entry(
@@ -1584,7 +1704,7 @@ mod tests {
                 dir.path(),
             ),
         ];
-        let response = compose(&plan_over(&rows), &invocation(&audit_at(dir.path())), PRE_TOOL_USE_RAW).await;
+        let response = compose(&plan_over(&rows), &invocation(&audit_at(dir.path())), PRE_TOOL_USE_RAW);
 
         assert_eq!(response.decision, Decision::Deny);
         assert_eq!(
@@ -1600,9 +1720,9 @@ mod tests {
     /// The aggregate-level test below pins the pure function; this one pins that
     /// `compose` actually routes observer responses through it, which is where a
     /// tier that changes nothing would acquire the ability to deny.
-    #[tokio::test]
+    #[test]
     #[cfg(unix)]
-    async fn an_observer_cannot_deny_through_compose() {
+    fn an_observer_cannot_deny_through_compose() {
         let dir = tempfile::tempdir().expect("tempdir");
         let rows = [dispatch_entry(
             "o1",
@@ -1610,7 +1730,7 @@ mod tests {
             recording_payload(dir.path(), "o1", r#"{"decision":"deny","reason":"I am only a logger"}"#),
             dir.path(),
         )];
-        let response = compose(&plan_over(&rows), &invocation(&audit_at(dir.path())), PRE_TOOL_USE_RAW).await;
+        let response = compose(&plan_over(&rows), &invocation(&audit_at(dir.path())), PRE_TOOL_USE_RAW);
 
         // It ran (so this is not vacuous) and its verdict was discarded.
         envelope_seen_by(dir.path(), "o1");
@@ -1624,9 +1744,9 @@ mod tests {
     /// Every failure a payload can produce degrades to
     /// [`CanonicalResponse::no_opinion`] — never to a `deny` assembled by
     /// accident on a failure path (I3).
-    #[tokio::test]
+    #[test]
     #[cfg(unix)]
-    async fn an_unusable_answer_and_a_failed_spawn_both_degrade_to_no_opinion() {
+    fn an_unusable_answer_and_a_failed_spawn_both_degrade_to_no_opinion() {
         let dir = tempfile::tempdir().expect("tempdir");
         let rows = [
             dispatch_entry(
@@ -1642,7 +1762,7 @@ mod tests {
                 dir.path(),
             ),
         ];
-        let response = compose(&plan_over(&rows), &invocation(&audit_at(dir.path())), PRE_TOOL_USE_RAW).await;
+        let response = compose(&plan_over(&rows), &invocation(&audit_at(dir.path())), PRE_TOOL_USE_RAW);
         assert_eq!(response, CanonicalResponse::no_opinion(), "{response:?}");
     }
 
@@ -1652,9 +1772,9 @@ mod tests {
     /// Without the elapsed assertion this test passes vacuously against a
     /// `compose` that simply waits for the 5-second sleep and then reads empty
     /// output — the degrade value would be identical.
-    #[tokio::test]
+    #[test]
     #[cfg(unix)]
-    async fn a_payload_that_outlives_its_timeout_is_killed_and_degrades() {
+    fn a_payload_that_outlives_its_timeout_is_killed_and_degrades() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut slow = dispatch_entry(
             "slow",
@@ -1666,7 +1786,7 @@ mod tests {
         let rows = [slow];
 
         let started = std::time::Instant::now();
-        let response = compose(&plan_over(&rows), &invocation(&audit_at(dir.path())), PRE_TOOL_USE_RAW).await;
+        let response = compose(&plan_over(&rows), &invocation(&audit_at(dir.path())), PRE_TOOL_USE_RAW);
         let elapsed = started.elapsed();
 
         assert_eq!(response, CanonicalResponse::no_opinion(), "{response:?}");
@@ -1677,12 +1797,12 @@ mod tests {
     }
 
     /// **Security review W3.** Hooks run serially, each up to its own timeout,
-    /// yet the client kills `grim hook run` at the timeout ONE registration
+    /// yet the client kills `grim-hook` at the timeout ONE registration
     /// carries. Two slow gatekeepers with a 2s timeout each must therefore be
     /// cut off by one invocation-wide deadline strictly below 2s, not run for 4s.
-    #[tokio::test]
+    #[test]
     #[cfg(unix)]
-    async fn the_whole_invocation_ends_before_the_registered_client_timeout() {
+    fn the_whole_invocation_ends_before_the_registered_client_timeout() {
         let dir = tempfile::tempdir().expect("tempdir");
         let slow = |id: &str| {
             let mut entry = dispatch_entry(
@@ -1697,7 +1817,7 @@ mod tests {
         let rows = [slow("first"), slow("second")];
 
         let started = std::time::Instant::now();
-        let response = compose(&plan_over(&rows), &invocation(&audit_at(dir.path())), PRE_TOOL_USE_RAW).await;
+        let response = compose(&plan_over(&rows), &invocation(&audit_at(dir.path())), PRE_TOOL_USE_RAW);
         let elapsed = started.elapsed();
 
         assert_eq!(response, CanonicalResponse::no_opinion(), "{response:?}");
@@ -1709,9 +1829,9 @@ mod tests {
 
     /// An observer's short timeout must not cut the verdict budget: here it
     /// would leave 0.5s, and the gatekeeper needs 0.8s to answer.
-    #[tokio::test]
+    #[test]
     #[cfg(unix)]
-    async fn a_short_observer_timeout_does_not_starve_a_gatekeeper() {
+    fn a_short_observer_timeout_does_not_starve_a_gatekeeper() {
         let dir = tempfile::tempdir().expect("tempdir");
         let gatekeeper = dispatch_entry(
             "g1",
@@ -1732,7 +1852,7 @@ mod tests {
         observer.timeout = Some(1);
         let rows = [gatekeeper, observer];
 
-        let response = compose(&plan_over(&rows), &invocation(&audit_at(dir.path())), PRE_TOOL_USE_RAW).await;
+        let response = compose(&plan_over(&rows), &invocation(&audit_at(dir.path())), PRE_TOOL_USE_RAW);
 
         assert_eq!(response.decision, Decision::Deny, "{response:?}");
     }
@@ -1740,9 +1860,9 @@ mod tests {
     /// An observer on its own matcher gets its own 1s client registration, and
     /// that registration's invocation still runs the match-all gatekeeper. The
     /// whole run must end inside 1s, or Copilot kills grim and fails closed.
-    #[tokio::test]
+    #[test]
     #[cfg(unix)]
-    async fn a_separately_registered_observer_still_bounds_the_invocation() {
+    fn a_separately_registered_observer_still_bounds_the_invocation() {
         let dir = tempfile::tempdir().expect("tempdir");
         let gatekeeper = dispatch_entry(
             "g1",
@@ -1761,7 +1881,7 @@ mod tests {
         let rows = [gatekeeper, observer];
 
         let started = std::time::Instant::now();
-        compose(&plan_over(&rows), &invocation(&audit_at(dir.path())), PRE_TOOL_USE_RAW).await;
+        compose(&plan_over(&rows), &invocation(&audit_at(dir.path())), PRE_TOOL_USE_RAW);
         let elapsed = started.elapsed();
 
         assert!(
@@ -1772,9 +1892,9 @@ mod tests {
 
     /// A timeout too large for `Instant` arithmetic, as a hand-edited table can
     /// carry, must not panic the dispatcher and silence every hook at the event.
-    #[tokio::test]
+    #[test]
     #[cfg(unix)]
-    async fn an_absurd_table_timeout_does_not_panic_the_invocation() {
+    fn an_absurd_table_timeout_does_not_panic_the_invocation() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut gatekeeper = dispatch_entry(
             "g1",
@@ -1785,7 +1905,7 @@ mod tests {
         gatekeeper.timeout = Some(u64::MAX);
         let rows = [gatekeeper];
 
-        let response = compose(&plan_over(&rows), &invocation(&audit_at(dir.path())), PRE_TOOL_USE_RAW).await;
+        let response = compose(&plan_over(&rows), &invocation(&audit_at(dir.path())), PRE_TOOL_USE_RAW);
 
         assert_eq!(response.decision, Decision::Deny, "{response:?}");
     }
@@ -1796,23 +1916,143 @@ mod tests {
     #[cfg(unix)]
     fn the_shell_form_runs_bin_sh_by_absolute_path() {
         let command = handler_command(&HookHandler::Command("true".to_string()), Path::new("/tmp/payload"));
-        assert_eq!(command.as_std().get_program(), "/bin/sh");
+        assert_eq!(command.get_program(), "/bin/sh");
     }
 
     /// **Security review S2.** The envelope file can carry a tool call's input,
     /// so it is created owner-only.
-    #[tokio::test]
+    #[test]
     #[cfg(unix)]
-    async fn the_payload_envelope_file_is_owner_only() {
+    fn the_payload_envelope_file_is_owner_only() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("tempdir");
         let row = entry("file", HookTier::Observer);
-        let path = write_payload_file(Some(dir.path()), &row, b"{}")
-            .await
-            .expect("written");
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        let file = write_payload_file(Some(dir.path()), &row, b"{}", &mut Vec::new()).expect("written");
+        let path = file.path();
+        let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "envelope mode {mode:o}");
-        assert_eq!(std::fs::read(&path).unwrap(), b"{}");
+        assert_eq!(std::fs::read(path).unwrap(), b"{}");
+    }
+
+    /// Payload envelope files left in `dir`.
+    #[cfg(unix)]
+    fn envelope_files(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("payload_"))
+            .collect()
+    }
+
+    /// A stale envelope from a crashed run with the same pid must be stepped over,
+    /// never overwritten and never fatal: exit 74 on every call made Copilot deny
+    /// every tool use.
+    #[test]
+    #[cfg(unix)]
+    fn a_stale_envelope_file_is_skipped_not_fatal_or_overwritten() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid = std::process::id();
+        for slot in 0..3 {
+            std::fs::write(dir.path().join(envelope_file_name(pid, slot)), b"stale").unwrap();
+        }
+        let slots = std::sync::atomic::AtomicU64::new(0);
+
+        let file = create_payload_file(dir.path(), b"fresh", &slots).expect("a free slot is found");
+
+        assert_eq!(file.path(), dir.path().join(envelope_file_name(pid, 3)));
+        assert_eq!(std::fs::read(file.path()).unwrap(), b"fresh");
+        for slot in 0..3 {
+            let stale = dir.path().join(envelope_file_name(pid, slot));
+            assert_eq!(std::fs::read(stale).unwrap(), b"stale");
+        }
+    }
+
+    /// The slot search is bounded: a directory full of stale names fails rather than spinning.
+    #[test]
+    #[cfg(unix)]
+    fn the_slot_search_is_bounded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid = std::process::id();
+        for slot in 0..u64::from(MAX_SLOT_ATTEMPTS) {
+            std::fs::write(dir.path().join(envelope_file_name(pid, slot)), b"stale").unwrap();
+        }
+        let slots = std::sync::atomic::AtomicU64::new(0);
+
+        let err = create_payload_file(dir.path(), b"x", &slots).expect_err("no slot is free");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+    }
+
+    /// The envelope can hold tool input, so a spawn that fails must not leave it behind.
+    #[test]
+    #[cfg(unix)]
+    fn a_failed_handler_spawn_removes_the_envelope_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut row = dispatch_entry(
+            "gone",
+            HookTier::Observer,
+            HookHandler::Argv(vec!["/nonexistent/grim-test-handler".into()]),
+            dir.path(),
+        );
+        row.payload = HookPayloadMode::File;
+        let rows = [row];
+
+        super::compose(
+            &plan_over(&rows),
+            &invocation(&audit_at(dir.path())),
+            PRE_TOOL_USE_RAW,
+            &mut Vec::new(),
+        );
+
+        assert_eq!(envelope_files(dir.path()), Vec::<String>::new());
+    }
+
+    /// A reader or writer thread grim cannot start is grim's failure: a gatekeeper
+    /// is withheld (non-zero exit) rather than forged into "no opinion", the child
+    /// is killed so the call returns at once, and the envelope file is removed.
+    /// An observer stays fail-open.
+    #[test]
+    #[cfg(unix)]
+    fn a_writer_thread_spawn_failure_withholds_a_gatekeeper_and_cleans_up() {
+        thread_spawn_failure_withholds(0);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_reader_thread_spawn_failure_withholds_a_gatekeeper_and_cleans_up() {
+        thread_spawn_failure_withholds(1);
+    }
+
+    #[cfg(unix)]
+    fn thread_spawn_failure_withholds(failing_spawn: usize) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let slow = HookHandler::Argv(vec!["sleep".into(), "30".into()]);
+        let mut gatekeeper = dispatch_entry("g1", HookTier::Gatekeeper, slow.clone(), dir.path());
+        gatekeeper.payload = HookPayloadMode::File;
+        let observer = dispatch_entry("o1", HookTier::Observer, slow, dir.path());
+
+        FAIL_THREAD_SPAWN.with(|f| f.set(Some(failing_spawn)));
+        let started = Instant::now();
+        let withheld = super::compose(
+            &plan_over(&[gatekeeper]),
+            &invocation(&audit_at(dir.path())),
+            PRE_TOOL_USE_RAW,
+            &mut Vec::new(),
+        );
+        FAIL_THREAD_SPAWN.with(|f| f.set(Some(failing_spawn)));
+        let observed = super::compose(
+            &plan_over(&[observer]),
+            &invocation(&audit_at(dir.path())),
+            PRE_TOOL_USE_RAW,
+            &mut Vec::new(),
+        );
+        FAIL_THREAD_SPAWN.with(|f| f.set(None));
+
+        assert_eq!(withheld.withheld, Some(WithheldCause::ThreadSpawn));
+        assert_eq!(withheld.response, CanonicalResponse::no_opinion());
+        assert_eq!(observed.withheld, None);
+        assert!(started.elapsed() < Duration::from_secs(10), "the child was not killed");
+        assert_eq!(envelope_files(dir.path()), Vec::<String>::new());
     }
 
     fn outcome(tier: HookTier, decision: Decision) -> HookOutcome {
@@ -1823,6 +2063,7 @@ mod tests {
                 decision,
                 ..CanonicalResponse::no_opinion()
             },
+            withheld: None,
         }
     }
 
@@ -1898,28 +2139,215 @@ mod tests {
             "a mutator that rewrote nothing must not leave a discarded-rewrite record behind"
         );
     }
+    #[cfg(unix)]
+    fn sh_gatekeeper(dir: &Path, id: &str, script: &str, timeout: u64) -> DispatchEntry {
+        let mut row = dispatch_entry(
+            id,
+            HookTier::Gatekeeper,
+            HookHandler::Argv(vec!["sh".to_string(), "-c".to_string(), script.to_string()]),
+            dir,
+        );
+        row.timeout = Some(timeout);
+        row
+    }
 
-    /// ⛔ **V1.** The payload envelope's name is unrepresentable as a hook binding.
-    ///
-    /// The envelope is written at the root of `$GRIM_HOME/hooks/`, which is also
-    /// the binding namespace, so a name a hook could be bound to would collide with
-    /// it — round-3 fix-verify executed that: a hook bound as
-    /// `payload-12345-0.json` was accepted. The names are dynamic, so the reserved
-    /// array cannot hold them; the guard is instead that an underscore is outside
-    /// `SkillName`'s grammar. This pins the separator, because "tidying" it to a
-    /// hyphen silently restores the collision and nothing else would fail.
+    /// An answer past [`MAX_RESPONSE_BYTES`] is cut, so what the parser sees is a
+    /// truncated document and the hook degrades; an uncapped read would parse the
+    /// whole `deny`.
     #[test]
-    fn the_payload_envelope_name_cannot_be_a_binding_name() {
-        // The literal the format string produces, with the two integers it owns.
-        let name = envelope_file_name(12345, 0);
+    #[cfg(unix)]
+    fn an_answer_past_the_response_cap_is_truncated_and_degrades() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rows = [sh_gatekeeper(
+            dir.path(),
+            "big",
+            r#"printf '{"decision":"deny","reason":"'; head -c 200000 /dev/zero | tr '\0' x; printf '"}'"#,
+            5,
+        )];
+
+        let started = std::time::Instant::now();
+        let response = compose(&plan_over(&rows), &invocation(&audit_at(dir.path())), PRE_TOOL_USE_RAW);
+
+        assert_eq!(response, CanonicalResponse::no_opinion(), "{:?}", response.decision);
+        assert!(started.elapsed() < std::time::Duration::from_secs(4));
+    }
+
+    /// A handler's stderr is not inherited: it is the client's terminal channel.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_handler_stderr_is_dev_null() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rows = [sh_gatekeeper(
+            dir.path(),
+            "err",
+            &format!("readlink /proc/self/fd/2 > '{}/stderr-target'", dir.path().display()),
+            5,
+        )];
+        compose(&plan_over(&rows), &invocation(&audit_at(dir.path())), PRE_TOOL_USE_RAW);
+
+        let target = std::fs::read_to_string(dir.path().join("stderr-target")).expect("handler ran");
+        assert_eq!(target.trim(), "/dev/null");
+    }
+
+    /// A background grandchild inherits the stdout pipe and holds it open past the
+    /// handler's own exit; the deadline, not EOF, must end the wait.
+    #[test]
+    #[cfg(unix)]
+    fn a_grandchild_holding_the_pipe_does_not_hold_the_invocation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rows = [sh_gatekeeper(
+            dir.path(),
+            "gc",
+            &format!("touch '{}/ran'; sleep 5 & echo x", dir.path().display()),
+            1,
+        )];
+
+        let started = std::time::Instant::now();
+        let response = compose(&plan_over(&rows), &invocation(&audit_at(dir.path())), PRE_TOOL_USE_RAW);
+
+        assert!(dir.path().join("ran").exists(), "the handler never ran");
+        assert_eq!(response, CanonicalResponse::no_opinion());
         assert!(
-            crate::oci::hook::binding_name_refusal(&name).is_some(),
-            "{name} lives in the binding namespace, so it must not be a usable binding name"
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "the grandchild's pipe held the invocation for {:?}",
+            started.elapsed()
         );
-        // And the shape that WAS accepted, kept as the regression it is.
-        assert!(
-            crate::oci::hook::binding_name_refusal("payload-12345-0.json").is_none(),
-            "if hyphens ever became refusable this test's premise changed — re-read V1"
+    }
+
+    fn withheld_outcome(tier: HookTier, decision: Decision, withheld: Option<WithheldCause>) -> HookOutcome {
+        HookOutcome {
+            withheld,
+            ..outcome(tier, decision)
+        }
+    }
+
+    /// **PD-6.** A composed `deny` wins over a withheld gatekeeper; otherwise the
+    /// first withheld gatekeeper's cause is reported; other tiers carry none.
+    #[test]
+    fn a_composed_deny_beats_a_withheld_gatekeeper_pd6() {
+        let withheld = Some(WithheldCause::PayloadFileWrite);
+        let deny = withheld_outcome(HookTier::Gatekeeper, Decision::Deny, None);
+        let gone = withheld_outcome(HookTier::Gatekeeper, Decision::None, withheld);
+        assert_eq!(withheld_cause(&[gone.clone(), deny]), None);
+        assert_eq!(withheld_cause(&[gone]), withheld);
+        let allow = withheld_outcome(HookTier::Gatekeeper, Decision::Allow, None);
+        let gone = withheld_outcome(
+            HookTier::Gatekeeper,
+            Decision::None,
+            Some(WithheldCause::AuditUnwritable),
         );
+        assert_eq!(withheld_cause(&[allow, gone]), Some(WithheldCause::AuditUnwritable));
+        assert_eq!(withheld_cause(&[outcome(HookTier::Gatekeeper, Decision::Allow)]), None);
+    }
+
+    /// Only a gatekeeper's withholding is a cause: an observer behind an
+    /// unwritable trail is withheld too, but exits 0 as before.
+    #[test]
+    #[cfg(unix)]
+    fn an_unwritable_trail_withholds_only_a_gatekeeper_cause() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A directory where the trail file should be: it can never be appended to.
+        std::fs::create_dir(dir.path().join("hook_audit.jsonl")).unwrap();
+        let audit = audit_at(dir.path());
+
+        let rows = [dispatch_entry(
+            "o1",
+            HookTier::Observer,
+            HookHandler::Argv(vec!["true".into()]),
+            dir.path(),
+        )];
+        let composed = super::compose(
+            &plan_over(&rows),
+            &invocation(&audit),
+            PRE_TOOL_USE_RAW,
+            &mut Vec::new(),
+        );
+        assert_eq!(composed.withheld, None);
+
+        let rows = [dispatch_entry(
+            "g1",
+            HookTier::Gatekeeper,
+            HookHandler::Argv(vec!["true".into()]),
+            dir.path(),
+        )];
+        let composed = super::compose(
+            &plan_over(&rows),
+            &invocation(&audit),
+            PRE_TOOL_USE_RAW,
+            &mut Vec::new(),
+        );
+        assert_eq!(composed.withheld, Some(WithheldCause::AuditUnwritable));
+    }
+
+    /// A non-object raw payload cannot be enveloped.
+    #[test]
+    #[cfg(unix)]
+    fn a_non_object_payload_withholds_with_envelope_build() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rows = [dispatch_entry(
+            "g1",
+            HookTier::Gatekeeper,
+            HookHandler::Argv(vec!["true".into()]),
+            dir.path(),
+        )];
+        let composed = super::compose(
+            &plan_over(&rows),
+            &invocation(&audit_at(dir.path())),
+            b"[1]",
+            &mut Vec::new(),
+        );
+        assert_eq!(composed.withheld, Some(WithheldCause::EnvelopeBuild));
+        assert_eq!(composed.response, CanonicalResponse::no_opinion());
+    }
+
+    /// End to end: a `payload = "file"` gatekeeper whose file cannot be written is
+    /// withheld, and a sibling gatekeeper's composed `deny` still wins.
+    #[test]
+    #[cfg(unix)]
+    fn a_failed_payload_file_is_withheld_unless_a_sibling_denies_pd6() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let trail_dir = dir.path().join("trail");
+        std::fs::create_dir(&trail_dir).unwrap();
+        std::fs::write(trail_dir.join("hook_audit.jsonl"), b"").unwrap();
+        std::fs::set_permissions(&trail_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        if std::fs::File::create(trail_dir.join("probe")).is_ok() {
+            // Root ignores the mode; the failure cannot be provoked.
+            return;
+        }
+        let audit = audit_at(&trail_dir);
+
+        let mut filed = dispatch_entry(
+            "f1",
+            HookTier::Gatekeeper,
+            HookHandler::Argv(vec!["true".into()]),
+            dir.path(),
+        );
+        filed.payload = HookPayloadMode::File;
+        let rows = [filed.clone()];
+        let composed = super::compose(
+            &plan_over(&rows),
+            &invocation(&audit),
+            PRE_TOOL_USE_RAW,
+            &mut Vec::new(),
+        );
+        assert_eq!(composed.withheld, Some(WithheldCause::PayloadFileWrite));
+
+        let denier = dispatch_entry(
+            "d1",
+            HookTier::Gatekeeper,
+            recording_payload(dir.path(), "d1", r#"{"decision":"deny","reason":"no"}"#),
+            dir.path(),
+        );
+        let rows = [filed, denier];
+        let composed = super::compose(
+            &plan_over(&rows),
+            &invocation(&audit),
+            PRE_TOOL_USE_RAW,
+            &mut Vec::new(),
+        );
+        assert_eq!(composed.response.decision, Decision::Deny);
+        assert_eq!(composed.withheld, None);
+        std::fs::set_permissions(&trail_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 }
