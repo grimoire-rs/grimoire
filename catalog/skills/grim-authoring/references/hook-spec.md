@@ -134,17 +134,18 @@ handler *after* the damage. Accept the decline instead.
 ## Tiers
 
 > **A grim hook is workflow automation, never a security boundary.** A
-> `gatekeeper` that does not fire — because grim is not installed, the
-> launcher is missing, the client never registered it, or the user's shell
-> cannot run the registration — is *by design*: every layer fails open, so a
-> broken check can never deny someone a tool call. Write a `gatekeeper` to
-> catch mistakes, and never as the control that has to hold. For enforcement,
-> use the client's managed settings.
+> `gatekeeper` that does not fire — because the client never registered it,
+> the workspace was not revisited after an upgrade, or the handler crashed or
+> timed out — gives no opinion, and the tool call proceeds. Write a
+> `gatekeeper` to catch mistakes, and never as the control that has to hold.
+> For enforcement, use the client's managed settings.
 >
-> This is not a caveat on an otherwise-strong mechanism; it is the mechanism.
-> The registration itself begins `[ -f "$L" ] && [ -x "$L" ] || exit 0`, and a
-> dispatch table grim cannot parse disarms every hook rather than blocking
-> anything.
+> Grim's own failures are different from a handler's. The launcher never
+> forges a verdict: when grim cannot read its dispatch table or write a
+> gatekeeper's audit record, it exits non-zero (never `2`) and the **client's
+> own policy** decides, so Copilot denies a failing `preToolUse` call where
+> Claude Code and Codex show an error and proceed. A handler's own failure is
+> unchanged: no opinion.
 
 The tier is a **capability declaration**, and it is resolved per client. A
 client that cannot honour a tier declines the `(hook, client)` pair — it is
@@ -253,7 +254,7 @@ I/O shapes, and confirm arming with `grim hook list` after installing.
 - **Where it runs.** The working directory is the hook's own payload
   directory. A `matcher` is an exact name, `A|B` or a glob, never a regex.
   `argv` is exec form with `${GRIM_HOOK_DIR}` expanded by grim; `command`
-  goes through `/bin/sh -c`. Grim also sets `GRIM_HOOK_SCHEMA`, `_EVENT`,
+  goes through `/bin/sh -c` (`cmd /C` on Windows). Grim also sets `GRIM_HOOK_SCHEMA`, `_EVENT`,
   `_CLIENT`, `_NAME`, `_TIER`, `_TOOL`, `_CWD`, `_DIR` and `_PAYLOAD`.
   Tool input never travels in the environment.
 - **Tiers at runtime.** Mutators run first, in declaration order, each
@@ -264,7 +265,7 @@ I/O shapes, and confirm arming with `grim hook list` after installing.
   non-mutator is ignored with a warning.
 - **Exit code and time.** The handler's exit code is **ignored** (a JSON
   answer counts whatever the status; a failed handler with no answer is no
-  opinion), and `grim hook run` always exits 0. `timeout` has a default and
+  opinion). `timeout` has a default and
   a bounded range, and every hook matched for one tool call shares one
   budget derived from the shortest registered entry timeout; the values are
   in [the exit and timeout rules][handler-exit].
@@ -352,11 +353,13 @@ a **plain artifact name** — lowercase alphanumerics with `.` or `-`
 separators, and nothing else. A name carrying a path separator, a `..`
 segment, or a drive letter is refused before anything is written.
 
-On top of that, **five** names are refused outright: `bin`, `dispatch.json`,
-`dispatch.json.lock`, `payload`, and `root-key`. Each names part of grim's own
-launcher namespace
-(`$GRIM_HOME/hooks/{bin,dispatch.json,dispatch.json.lock,payload,root-key}`), and
-a payload materialized over one would arm or disarm the dispatcher itself.
+On top of that, grim refuses the names it keeps under `$GRIM_HOME/hooks/`
+outright: `bin`, `consent`, `dispatch.json`, `dispatch.json.lock`, `grim-hook`,
+`grim-hook.exe`, `payload`, and `root-key`. `grim-hook` and `grim-hook.exe`
+are the native launcher, and a binding under either name is refused at install
+with cause `binding-name-reserved`. Each name is part of grim's own launcher
+namespace, and a payload materialized over one would arm or disarm the
+dispatcher itself.
 `root-key` is the sharpest: it holds the machine's HMAC key, and a directory in
 its place means no dispatch table can be written at all, so every hook on the
 machine reports installed while nothing fires. `dispatch.json.lock` — the table's
@@ -405,7 +408,8 @@ $ echo $?
 
 The `payload` entry joined the set when the payload tree moved to
 `$GRIM_HOME/hooks/payload/<workspace-key>/<name>/`; `root-key` joined it in
-round 2 of review, having been missed when that file was added.
+round 2 of review, having been missed when that file was added; `grim-hook` and
+`grim-hook.exe` joined with the native launcher.
 
 The reserved check is exact string equality against that list. `Bin` is
 refused as well, but by the plain-name rule above — a plain name is
@@ -427,8 +431,9 @@ declines the `mutator` tier outright at every scope: its hook schema has no
 rewrite field, so a `PreToolUse` mutator entry is `declined` there, never
 degraded to a weaker tier. Qoder's registration is unverified: no Qoder hook
 has been seen firing from a grim registration yet. Every other client
-declines hooks. Hooks also arm on Linux and macOS only; on Windows grim
-reports every hook `not-armed` with cause `platform-unsupported`.
+declines hooks. Hooks arm on Linux and macOS; on Windows they arm for Claude
+only, and every other client reports `not-armed` with cause
+`platform-unsupported`.
 
 Copilot's hooks cover `PreToolUse`, `PostToolUse` and `SessionStart` only.
 A `gatekeeper` at `PostToolUse` is declined there (no verdict channel), and
@@ -496,7 +501,7 @@ Every row below fails `grim build` with **exit 65**.
 | Handler's first token is a payload file | `runs the payload file … directly; a payload delivered through a registry is not executable` |
 | `summary` / `keywords` / `repository` at top level | `unknown field 'summary', expected one of 'schema', 'name', 'description', 'hooks'` |
 | `name` ≠ directory stem | `hook manifest name 'other-name' must equal the directory stem 'meta-guard'` |
-| Artifact named `bin`, `dispatch.json`, `dispatch.json.lock`, `payload` or `root-key` | `hook artifact name 'bin' is reserved: 'bin' names part of grim's own hook launcher under $GRIM_HOME/hooks/ — rename the artifact` |
+| Artifact named `bin`, `consent`, `dispatch.json`, `dispatch.json.lock`, `grim-hook`, `grim-hook.exe`, `payload` or `root-key` | `hook artifact name 'bin' is reserved: 'bin' names part of grim's own hook launcher under $GRIM_HOME/hooks/ — rename the artifact` |
 | Artifact name is not a plain name (`my_hook`, `MyHook`) | `hook artifact name 'my_hook' is not usable: skill name 'my_hook' must contain only lowercase letters, digits, hyphens, and periods` |
 | `id` outside the charset, or over 128 bytes | `invalid hook id 'log:tool/call': expected only ASCII letters, digits, '_', '-' and '.'` |
 | Two entries sharing an `id` | `duplicate hook id 'obs'` |

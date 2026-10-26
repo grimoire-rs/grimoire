@@ -27,8 +27,8 @@ grim install
   default timeout is 500 ms. Export is best effort and never changes the exit
   code.
 - **Disarm switches win over `GRIM_TELEMETRY`:** `OTEL_SDK_DISABLED`,
-  `DO_NOT_TRACK`, and `GRIM_OFFLINE` / `--offline`. `grim hook run` never
-  exports.
+  `DO_NOT_TRACK`, and `GRIM_OFFLINE` / `--offline`. The `grim-hook` launcher
+  carries no telemetry code, so a hook firing never exports.
 - `GRIM_TELEMETRY_REPOSITORY` adds up to four redacted `vcs.*` resource keys
   from the project's `origin` remote (project scope only, never a repository
   that is the home directory).

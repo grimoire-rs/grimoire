@@ -119,12 +119,11 @@ To verify a pre-built grim release archive's build provenance:
 > `--no-git` suppresses every derived annotation. Confirm with
 > `grim release --help`.
 >
-> **`grim hook run` is not a command you type.** `grim hook` has four
-> subcommands; `list`, `allow` and `revoke` (alias `deny`) are user-facing,
-> while `run` dispatches one client event and its caller is the launcher grim
-> generates, which passes it `--client`, `--event`, `--table`, and `--root`.
-> `grim hook --help` says as much. Same shape as `grim mcp`, which speaks JSON-RPC on stdout rather
-> than to a person — invoke neither by hand expecting readable output.
+> **`grim hook` has three subcommands:** `list`, `allow` and `revoke` (alias
+> `deny`). Hooks fire through a separate native `grim-hook` launcher that
+> `grim install` writes to `$GRIM_HOME/hooks/`; clients run it, a person does
+> not. After upgrading grim, re-run `grim install` in each workspace that uses
+> hooks, or that workspace's hooks stay quiet.
 >
 > **Global flags** apply to every subcommand — `--format`, `--global` (`-g`),
 > `--config`, `--registry`, `--offline`, `--log-level`, and `--color

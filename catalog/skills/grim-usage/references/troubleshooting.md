@@ -328,9 +328,9 @@ Work through it in this order:
    which clients actually resolved. Qoder's registration is unverified: no
    Qoder hook has been seen firing from a grim registration yet.
 
-   Hooks also arm on Linux and macOS only. On Windows grim registers nothing,
-   and once the flag and consent gates are clear every hook reports
-   `not-armed` with cause `platform-unsupported`.
+   Hooks arm on Linux and macOS. On Windows they arm for Claude only; once the
+   flag and consent gates are clear every other client reports `not-armed`
+   with cause `platform-unsupported` and grim registers nothing for it.
 
    Cause `not-registered` has several sources; `grim install` prints which.
    Besides a tier or matcher the client cannot express, grim could not write
@@ -351,8 +351,11 @@ Work through it in this order:
    what it should; change the tier or the client, not your expectations of
    the other one.
 
-`grim hook run` is not part of this diagnosis: it is the launcher's entry
-point, not a command to invoke by hand.
+The causes `launcher-unwritable`, `launcher-path-occupied`,
+`launcher-path-unquotable` and `binding-name-reserved` concern the native
+launcher at `$GRIM_HOME/hooks/grim-hook`; `grim hook list` shows its state.
+Re-run `grim install` after fixing the named cause and after every grim
+upgrade.
 
 ## Marketplace and Plugin Export
 
