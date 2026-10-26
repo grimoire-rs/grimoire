@@ -178,6 +178,25 @@ exclusions are what keep 1.x able to move at all:
   - the dispatch table's on-disk shape, and every hook-only CLI flag
     (`--trust-hooks`, `--no-trust-hooks`).
 
+  Four launcher contracts are built to be frozen. They are experimental today
+  and grim already treats them as fixed, so they join the frozen list when
+  hooks graduate:
+  - the launcher's argv, `grim-hook <client> <event> <root>`: exactly three
+    operands and no flags. It can gain new `<client>` and `<event>` values and
+    never an operand, so one launcher serves every project on the machine,
+  - the launcher's exit codes `0`, `1`, `64`, `65`, `74` and `79`, never `2`.
+    See [Launcher exit codes](./hooks.md#launcher-exit),
+  - the dispatch table's read rule: `schema` stays `1`, a reader ignores keys
+    it does not know, and it skips an unreadable entry or root that is not
+    addressed to the invocation. An unreadable entry the invocation selects
+    makes the launcher exit `65`, because skipping it could drop a guard. New
+    capability arrives as optional table fields, never as argv,
+  - the registration shape: Copilot gets an `exec` and `args` pair, and
+    Claude Code, Codex and Qoder get one shell string,
+    `<launcher> <client> <event> <root>`. The same grim writes the same bytes
+    every run. Codex keys its stored approval on that text, so a change would
+    ask every Codex user to approve their hooks again.
+
   What is **not** exempted: the hook literals already shipped inside
   otherwise-frozen reports. These follow the same
   [additive-field policy](#frozen-additive-fields) as every other report

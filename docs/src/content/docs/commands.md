@@ -1102,7 +1102,7 @@ deleted files, same dropped record — and the undeclare half is a no-op
 
 ## grim hook {#hook}
 
-Four subcommands manage [hooks](./hooks.md). The kind is experimental. See
+Three subcommands manage [hooks](./hooks.md). The kind is experimental. See
 [Stability](./stability.md#unstable). Declaring one is still
 `grim add --kind hook <reference>`, exactly like any other kind.
 
@@ -1127,14 +1127,6 @@ Four subcommands manage [hooks](./hooks.md). The kind is experimental. See
   refusal: global scope never writes a consent record, so there is nothing
   to remove, and it exits `0` reporting `not-consented` like any other
   never-consented workspace.
-- **`grim hook run`**. The dispatcher the generated launcher invokes on
-  every matching tool call. **Not for direct invocation.** It resolves no
-  scope and reads no config, only the `--table` dispatch file its caller
-  names.
-
-  It exits **0** on every path grim controls. A client that fails closed
-  on a non-zero hook exit must never be denied a tool call by grim's own
-  internals.
 
 ```sh
 grim hook allow
