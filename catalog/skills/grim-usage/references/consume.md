@@ -480,7 +480,8 @@ A **hook** is an artifact that registers with a client's lifecycle so a
 handler runs at a defined moment — before a tool call, after one, at session
 start, or when the agent's turn stops. It is the only kind that causes code
 to execute, and grim treats it accordingly. It is workflow automation, not a
-policy control. A handler that fails or times out gives no opinion, and an
+policy control. A gatekeeper handler that fails or times out is withheld
+(the launcher exits non-zero), an observer's gives no opinion, and an
 unknown workspace or an event no hook matches exits 0. A failure in grim itself
 exits non-zero, and the client's own policy for a failing hook decides, because
 grim never masks it. For enforcement, use the client's managed settings.

@@ -37,7 +37,8 @@ this one would teach the pattern grim declines to honour.
   payload's stdin; the payload writes one canonical JSON response to stdout
   and exits 0 — *including when it refuses*. A verdict travels as a
   document, never as an exit code, because some clients read a non-zero hook
-  exit as "deny".
+  exit as "deny". A gatekeeper that fails with no answer is withheld, not
+  allowed, so a crash is never read as consent.
 - **`{}` is the permissive answer, not `{"decision":"allow"}`.** On Claude
   and Copilot an explicit allow *suppresses the client's own approval
   prompt*, so it grants privilege rather than declining to object.
