@@ -134,9 +134,9 @@ handler *after* the damage. Accept the decline instead.
 ## Tiers
 
 > **A grim hook is workflow automation, never a security boundary.** A
-> `gatekeeper` that does not fire — because the client never registered it,
-> the workspace was not revisited after an upgrade, or the handler crashed or
-> timed out — gives no opinion, and the tool call proceeds. Write a
+> `gatekeeper` that does not fire — because the client never registered it or
+> the workspace was not revisited after an upgrade — gives no opinion, and the
+> tool call proceeds. Write a
 > `gatekeeper` to catch mistakes, and never as the control that has to hold.
 > For enforcement, use the client's managed settings.
 >
@@ -144,8 +144,11 @@ handler *after* the damage. Accept the decline instead.
 > forges a verdict: when grim cannot read its dispatch table or write a
 > gatekeeper's audit record, it exits non-zero (never `2`) and the **client's
 > own policy** decides, so Copilot denies a failing `preToolUse` call where
-> Claude Code and Codex show an error and proceed. A handler's own failure is
-> unchanged: no opinion.
+> Claude Code and Codex show an error and proceed. A `gatekeeper` handler that
+> crashes with no answer, times out, prints unparsable output or cannot be
+> spawned is withheld the same way: the launcher exits `1`. A composed `deny`
+> or `ask` from another gatekeeper is still emitted. An observer's or a
+> mutator's own failure stays no opinion.
 
 The tier is a **capability declaration**, and it is resolved per client. A
 client that cannot honour a tier declines the `(hook, client)` pair — it is

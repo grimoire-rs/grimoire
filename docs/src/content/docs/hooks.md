@@ -12,9 +12,9 @@ matcher syntax and JSON response. This page lists the gates a hook clears
 before it arms, the contract its handler follows, and the limits of each
 client.
 
-Hooks are workflow automation, not a policy control. A handler that fails or
-times out gives no opinion, and a removed or revoked hook is disarmed only at
-the next `grim install`. For
+Hooks are workflow automation, not a policy control. A gatekeeper handler that
+fails or times out is withheld, and the client's own policy then decides. A
+removed or revoked hook is disarmed only at the next `grim install`. For
 enforcement, use your client's managed settings.
 
 [Control agent commands with hooks][guide] installs and writes one step by
@@ -212,8 +212,9 @@ and the client's own approval flow runs as usual. An explicit `allow` approves
 the call, and on [Claude Code][claude] and [Copilot][copilot] it skips the
 client's approval prompt.
 
-Empty or whitespace-only output is no opinion. Output that does not parse as
-JSON is no opinion plus a warning. Grim reads at most 64 KiB of stdout.
+Empty or whitespace-only output from a handler that exited 0 is no opinion.
+Output that does not parse as JSON is no opinion plus a warning, and it
+withholds a gatekeeper. Grim reads at most 64 KiB of stdout.
 
 ### Tiers {#handler-tiers}
 
@@ -230,12 +231,20 @@ decided. A `deny` discards any rewrite.
 
 ### Exit code and timeout {#handler-exit}
 
-Grim ignores the handler's exit code. A JSON answer on stdout counts whatever
-the status, and a failed handler with no answer is no opinion.
+Grim does not read the handler's exit code as a verdict. A JSON answer on
+stdout counts whatever the status. A failed handler with no answer is no
+opinion for an observer or a mutator.
+
+A gatekeeper that fails without an answer is withheld instead. That covers a
+crash with empty stdout, a timeout, unparsable output and a handler that cannot
+be spawned. The launcher then exits `1`, and the client's own policy decides.
+
+A composed `deny` or `ask` is never replaced by that exit. Claude Code treats
+an error exit as non-blocking, so the launcher keeps the verdict it composed.
 
 Each entry runs under its `timeout`, 30 seconds when unset. A handler still
-running at its timeout is killed, and counts as no opinion. One that answered
-and then kept running is killed, and its answer still counts.
+running at its timeout is killed, and counts as a failure with no answer. One
+that answered and then kept running is killed, and its answer still counts.
 
 Every hook matched for one tool call shares one budget, so grim answers before
 the client's own timeout. Grim registers hooks with the same matcher as one
@@ -263,7 +272,7 @@ exits `2`, because Claude Code reads that status as a block.
 | Exit | Meaning |
 |---|---|
 | `0` | Success, or nothing to do. |
-| `1` | Any other internal failure, such as a gatekeeper's envelope that could not be built. |
+| `1` | Any other internal failure, such as a gatekeeper's envelope that could not be built. Also a gatekeeper whose handler gave no usable verdict. |
 | `64` | The three operands are missing or malformed. |
 | `65` | The dispatch table is unparsable, has a schema this launcher does not know, or a selected entry is unreadable. Also a client payload over the size cap, or one that is not a JSON object while a gatekeeper is selected. |
 | `74` | An I/O failure: the launcher cannot find its own path, or the table or stdin cannot be read. Also when a gatekeeper cannot run because grim could not write its audit record, or could not create or write its `payload = "file"` envelope. |
@@ -279,8 +288,8 @@ exception is a hook that runs through PowerShell on Windows, which blocks. See
 
 Deleting the launcher or the dispatch table while a hook is still registered
 makes every call fail by the client's policy. That lasts until the next
-`grim install` writes them again. A handler's own failure is never in this
-table. It gives no opinion.
+`grim install` writes them again. An observer's or a mutator's own failure is
+never in this table. It gives no opinion.
 
 The launcher reads one environment variable, `GRIM_LOG`, for verbosity only.
 Warnings reach stderr at any setting. A value containing `debug` or `trace`
