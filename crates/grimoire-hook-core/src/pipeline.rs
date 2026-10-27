@@ -109,11 +109,12 @@ pub struct HookOutcome {
     pub withheld: Option<WithheldCause>,
 }
 
-/// Which grim-owned infrastructure failure withheld a selected `gatekeeper`.
+/// Why a selected `gatekeeper` gave no usable verdict and was withheld.
 ///
-/// A payload-owned outcome (a crash, a timeout, garbage on stdout, a handler that
-/// cannot be spawned) is **not** one of these: it keeps today's fail-open
-/// behaviour.
+/// Grim-owned infrastructure failures and payload-owned ones (a crash, a timeout,
+/// garbage on stdout, a handler that cannot be spawned) share one path: the
+/// launcher errors instead of forging "no opinion". Observers and mutators are
+/// never withheld.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WithheldCause {
     /// The audit trail could not be appended to (C-012).
@@ -125,6 +126,9 @@ pub enum WithheldCause {
     /// A reader or writer thread for the handler could not be started. The
     /// launcher exits 1 (internal failure).
     ThreadSpawn,
+    /// The payload crashed, timed out, answered with something unusable or could not
+    /// be spawned. The launcher exits 1 (internal failure).
+    PayloadFailed,
 }
 
 /// [`compose`]'s result: the one response, and whether a gatekeeper was
@@ -329,13 +333,13 @@ pub fn compose(
 }
 
 /// PD-6's precedence: the first withheld gatekeeper's cause, unless a gatekeeper
-/// that ran composed a `deny`.
+/// that ran composed a `deny` or an `ask`.
 ///
-/// Never weakens a composed `deny`: an error exit would turn the block into a
-/// non-blocking error in Claude. Observers and mutators carry no cause, so
-/// withholding them changes nothing here.
+/// Never weakens a composed `deny` or `ask`: an error exit would turn either into a
+/// non-blocking error in Claude, which proceeds without the prompt. Observers and
+/// mutators carry no cause, so withholding them changes nothing here.
 fn withheld_cause(outcomes: &[HookOutcome]) -> Option<WithheldCause> {
-    if aggregate(outcomes) == Decision::Deny {
+    if matches!(aggregate(outcomes), Decision::Deny | Decision::Ask) {
         return None;
     }
     outcomes.iter().find_map(|outcome| outcome.withheld)
@@ -631,7 +635,7 @@ fn invoke(
             let cause = match e {
                 SpawnError::PayloadFile(_) => withheld(WithheldCause::PayloadFileWrite),
                 SpawnError::Thread(_) => withheld(WithheldCause::ThreadSpawn),
-                SpawnError::Spawn(_) => None,
+                SpawnError::Spawn(_) => withheld(WithheldCause::PayloadFailed),
             };
             return degraded(CanonicalResponse::no_opinion(), cause);
         }
@@ -641,7 +645,7 @@ fn invoke(
     let mut response = match failure {
         Some(outcome) => {
             append_record(invocation.audit, record(outcome, None, sizes, &[]), diagnostics);
-            return degraded(CanonicalResponse::no_opinion(), None);
+            return degraded(CanonicalResponse::no_opinion(), withheld(WithheldCause::PayloadFailed));
         }
         // **Exit 0 with empty stdout is the fail-safe shape, not a malformed
         // answer**, and it is what every payload that has nothing to say
@@ -652,14 +656,14 @@ fn invoke(
             Ok(response) => response,
             Err(e) => {
                 diagnostics.push(Diagnostic::warn(format!(
-                    "{hook}: its answer was not a canonical response ({e}); no verdict, exit 0"
+                    "{hook}: its answer was not a canonical response ({e}); no verdict"
                 )));
                 append_record(
                     invocation.audit,
                     record(AuditOutcome::ResponseRejected, None, sizes, &[]),
                     diagnostics,
                 );
-                return degraded(CanonicalResponse::no_opinion(), None);
+                return degraded(CanonicalResponse::no_opinion(), withheld(WithheldCause::PayloadFailed));
             }
         },
     };
@@ -813,10 +817,10 @@ fn assemble(outcomes: &[HookOutcome], input: Option<&[u8]>, rewrote: &[String]) 
     }
 }
 
-/// Why a payload could not be started, split because only the handler half fails
-/// open: a handler that will not spawn is payload-owned, while a
-/// `payload = "file"` envelope or a reader/writer thread grim could not start is
-/// grim's own, and withholds a gatekeeper rather than forging "no opinion".
+/// Why a payload could not be started, split by who owns the failure: a handler
+/// that will not spawn is the payload's, a `payload = "file"` envelope or a
+/// reader/writer thread grim could not start is grim's own. Both withhold a
+/// gatekeeper rather than forging "no opinion".
 #[derive(Debug)]
 enum SpawnError {
     PayloadFile(std::io::Error),
@@ -873,7 +877,7 @@ fn spawn_payload(
         .min(deadline.saturating_duration_since(Instant::now()));
     if timeout.is_zero() {
         diagnostics.push(Diagnostic::warn(format!(
-            "{}/{} was not spawned: the invocation's time budget is spent; no verdict, exit 0",
+            "{}/{} was not spawned: the invocation's time budget is spent; no verdict",
             entry.artifact, entry.id
         )));
         return Ok((Vec::new(), Some(AuditOutcome::TimedOut)));
@@ -957,7 +961,8 @@ fn spawn_payload(
             // and a well-behaved payload has already exited by the time its
             // stdout closed, so this costs it nothing.
             let remaining = timeout.saturating_sub(started.elapsed());
-            if !exited_within(&mut child, remaining) {
+            let status = exited_within(&mut child, remaining);
+            if status.is_none() {
                 kill_and_reap(&mut child);
                 diagnostics.push(Diagnostic::warn(format!(
                     "{}/{} answered but did not exit within its {}s timeout and was killed; \
@@ -967,14 +972,25 @@ fn spawn_payload(
                     timeout.as_secs()
                 )));
             }
-            (answer, None)
+            // Exit 0 with empty stdout is "no opinion"; a failing exit with
+            // nothing said is a crash, which a gatekeeper must not pass as one.
+            let crashed = status.is_some_and(|s| !s.success()) && answer.iter().all(u8::is_ascii_whitespace);
+            if crashed {
+                diagnostics.push(Diagnostic::warn(format!(
+                    "{}/{} exited with {} and wrote no answer; no verdict",
+                    entry.artifact,
+                    entry.id,
+                    status.map_or_else(String::new, |s| s.to_string())
+                )));
+            }
+            (answer, crashed.then_some(AuditOutcome::ResponseRejected))
         }
         None => {
             // Grim enforces the timeout, not the vendor: a payload that outlives
             // it is killed and degrades to no opinion, never to a verdict.
             kill_and_reap(&mut child);
             diagnostics.push(Diagnostic::warn(format!(
-                "{}/{} exceeded its {}s timeout and was killed; no verdict, exit 0",
+                "{}/{} exceeded its {}s timeout and was killed; no verdict",
                 entry.artifact,
                 entry.id,
                 timeout.as_secs()
@@ -1004,23 +1020,23 @@ thread_local! {
     static FAIL_THREAD_SPAWN: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
-/// Poll `child` until it exits or `limit` passes, backing off from 0.2 ms to a 5 ms cap.
-fn exited_within(child: &mut Child, limit: Duration) -> bool {
+/// Poll `child` until it exits (its status) or `limit` passes (`None`), backing off from 0.2 ms to a 5 ms cap.
+fn exited_within(child: &mut Child, limit: Duration) -> Option<std::process::ExitStatus> {
     const FIRST_PAUSE: Duration = Duration::from_micros(200);
     const MAX_PAUSE: Duration = Duration::from_millis(5);
     let started = Instant::now();
     let mut pause = FIRST_PAUSE;
     loop {
         match child.try_wait() {
-            Ok(Some(_)) => return true,
+            Ok(Some(status)) => return Some(status),
             Ok(None) => {}
             // A wait that fails cannot be told apart from a child that never
             // exits; the caller's answer is the same kill.
-            Err(_) => return false,
+            Err(_) => return None,
         }
         let left = limit.saturating_sub(started.elapsed());
         if left.is_zero() {
-            return false;
+            return None;
         }
         std::thread::sleep(pause.min(left));
         pause = (pause * 2).min(MAX_PAUSE);
@@ -2055,6 +2071,90 @@ mod tests {
         assert_eq!(envelope_files(dir.path()), Vec::<String>::new());
     }
 
+    /// A gatekeeper that crashes, times out, answers with garbage or cannot be
+    /// spawned gave no usable verdict, so it is withheld like a grim-owned failure.
+    #[test]
+    #[cfg(unix)]
+    fn a_gatekeeper_payload_failure_is_withheld() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cases: [(&str, DispatchEntry); 4] = [
+            ("crash", sh_gatekeeper(dir.path(), "g", "exit 3", 5)),
+            ("garbage", sh_gatekeeper(dir.path(), "g", "echo not-json", 5)),
+            ("timeout", sh_gatekeeper(dir.path(), "g", "sleep 5", 1)),
+            (
+                "spawn",
+                dispatch_entry(
+                    "g",
+                    HookTier::Gatekeeper,
+                    HookHandler::Argv(vec!["/nonexistent/grim-test-handler".into()]),
+                    dir.path(),
+                ),
+            ),
+        ];
+        for (name, row) in cases {
+            let composed = super::compose(
+                &plan_over(&[row]),
+                &invocation(&audit_at(dir.path())),
+                PRE_TOOL_USE_RAW,
+                &mut Vec::new(),
+            );
+            assert_eq!(composed.withheld, Some(WithheldCause::PayloadFailed), "{name}");
+            assert_eq!(composed.response, CanonicalResponse::no_opinion(), "{name}");
+        }
+    }
+
+    /// Only a gatekeeper is withheld: the same failures in an observer or a mutator
+    /// stay fail-open.
+    #[test]
+    #[cfg(unix)]
+    fn an_observer_or_mutator_payload_failure_stays_fail_open() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for tier in [HookTier::Observer, HookTier::Mutator] {
+            for script in ["exit 3", "echo not-json"] {
+                let mut row = sh_gatekeeper(dir.path(), "h", script, 5);
+                row.tier = tier;
+                let composed = super::compose(
+                    &plan_over(&[row]),
+                    &invocation(&audit_at(dir.path())),
+                    PRE_TOOL_USE_RAW,
+                    &mut Vec::new(),
+                );
+                assert_eq!(composed.withheld, None, "{tier:?} {script}");
+            }
+        }
+    }
+
+    /// A clean exit with nothing to say stays "no opinion", and a usable answer
+    /// is honoured even when the process then exits non-zero.
+    #[test]
+    #[cfg(unix)]
+    fn a_silent_success_and_an_answered_failure_are_not_withheld() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let silent = sh_gatekeeper(dir.path(), "g", "exit 0", 5);
+        let composed = super::compose(
+            &plan_over(&[silent]),
+            &invocation(&audit_at(dir.path())),
+            PRE_TOOL_USE_RAW,
+            &mut Vec::new(),
+        );
+        assert_eq!(composed.withheld, None);
+
+        let answered = sh_gatekeeper(
+            dir.path(),
+            "g",
+            r#"printf '{"decision":"deny","reason":"no"}'; exit 3"#,
+            5,
+        );
+        let composed = super::compose(
+            &plan_over(&[answered]),
+            &invocation(&audit_at(dir.path())),
+            PRE_TOOL_USE_RAW,
+            &mut Vec::new(),
+        );
+        assert_eq!(composed.withheld, None);
+        assert_eq!(composed.response.decision, Decision::Deny);
+    }
+
     fn outcome(tier: HookTier, decision: Decision) -> HookOutcome {
         HookOutcome {
             hook: "guard/x".to_string(),
@@ -2238,6 +2338,16 @@ mod tests {
         );
         assert_eq!(withheld_cause(&[allow, gone]), Some(WithheldCause::AuditUnwritable));
         assert_eq!(withheld_cause(&[outcome(HookTier::Gatekeeper, Decision::Allow)]), None);
+    }
+
+    /// A composed `ask` is shielded like a `deny`: Claude treats the error exit as
+    /// non-blocking, so withholding would turn the prompt into a silent proceed.
+    #[test]
+    fn a_composed_ask_beats_a_withheld_gatekeeper() {
+        let ask = withheld_outcome(HookTier::Gatekeeper, Decision::Ask, None);
+        let gone = withheld_outcome(HookTier::Gatekeeper, Decision::None, Some(WithheldCause::PayloadFailed));
+        assert_eq!(withheld_cause(&[gone.clone(), ask]), None);
+        assert_eq!(withheld_cause(&[gone]), Some(WithheldCause::PayloadFailed));
     }
 
     /// Only a gatekeeper's withholding is a cause: an observer behind an

@@ -573,18 +573,17 @@ def test_a_gatekeeper_deny_reaches_the_client_as_json_never_an_exit_code_s006(
     assert document["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
 
 
-def test_a_payload_that_cannot_be_spawned_never_blocks_s009(grim, grim_home, tmp_path):
-    """S-009: grim absent or mid-upgrade ⇒ the hook silently does not fire and
-    **no client blocks**.
+def test_a_gatekeeper_that_cannot_be_spawned_is_withheld_not_forged_s009(
+    grim, grim_home, tmp_path
+):
+    """S-009: a gatekeeper handler that cannot be executed gave no verdict.
 
-    The launcher's shell guard owns the "grim is absent" half; the runtime owns
-    this one — a handler that cannot be executed at all.  It must degrade to no
-    opinion, not to a denial, because Copilot's ``preToolUse`` treats any
-    non-zero exit as a deny.
+    The launcher exits 1, never 0 (a forged allow) and never 2 (a forged deny):
+    the client's own policy for a failing hook decides the direction.
 
     The positive control is a gatekeeper that *can* be spawned and *does* deny:
     without it, "no denial appeared" is satisfied by a runtime that never denies
-    anything, which is exactly the state this build is in.
+    anything.  The observer leg pins that the same failure stays fail-open there.
     """
     denier, denier_marker, denier_dir = _payload(
         tmp_path, "denier", response='{"decision":"deny","reason":"blocked"}'
@@ -601,21 +600,53 @@ def test_a_payload_that_cannot_be_spawned_never_blocks_s009(grim, grim_home, tmp
         f"vacuous: {control.stdout}"
     )
 
-    _write_table(
+    missing = ["grim-hook-payload-that-does-not-exist"]
+    table = _write_table(
+        grim_home,
+        [_entry(id="missing", handler=missing, payload_dir=tmp_path, tier="gatekeeper")],
+    )
+    result = _hook_run(grim, table)
+    assert result.returncode == 1, f"a withheld gatekeeper exits 1, got {result.returncode}"
+    assert "deny" not in result.stdout, f"a failed spawn produced a denial: {result.stdout}"
+
+    table = _write_table(
+        grim_home,
+        [_entry(id="missing", handler=missing, payload_dir=tmp_path, tier="observer")],
+    )
+    result = _hook_run(grim, table)
+    assert result.returncode == 0, f"an observer's failed spawn stays fail-open: {result.stderr}"
+
+
+def test_a_crashing_gatekeeper_is_withheld_but_a_composed_ask_is_shielded(
+    grim, grim_home, tmp_path
+):
+    """A gatekeeper that exits non-zero with nothing on stdout is withheld, unless a
+    sibling gatekeeper composed an ``ask``: Claude treats the error exit as
+    non-blocking, so withholding would turn the prompt into a silent proceed.
+    """
+    crash = ["sh", "-c", "exit 3"]
+    table = _write_table(
+        grim_home,
+        [_entry(id="crash", handler=crash, payload_dir=tmp_path, tier="gatekeeper")],
+    )
+    result = _hook_run(grim, table)
+    assert result.returncode == 1, f"a crashing gatekeeper is withheld: {result.returncode}"
+
+    asker, asker_marker, asker_dir = _payload(
+        tmp_path, "asker", response='{"decision":"ask","reason":"confirm"}'
+    )
+    table = _write_table(
         grim_home,
         [
-            _entry(
-                id="missing",
-                handler=["grim-hook-payload-that-does-not-exist"],
-                payload_dir=tmp_path,
-                tier="gatekeeper",
-            )
+            _entry(id="asker", handler=asker, payload_dir=asker_dir, tier="gatekeeper"),
+            _entry(id="crash", handler=crash, payload_dir=tmp_path, tier="gatekeeper"),
         ],
     )
-    result = _hook_run(grim, can_deny)
-
-    assert result.returncode == 0, f"a failed spawn must not block the user: {result.returncode}"
-    assert "deny" not in result.stdout, f"a failed spawn produced a denial: {result.stdout}"
+    result = _hook_run(grim, table)
+    assert asker_marker.exists(), f"the asking gatekeeper never ran\nstderr: {result.stderr}"
+    assert result.returncode == 0, f"a composed ask must not be weakened: {result.stderr}"
+    document = json.loads(result.stdout)
+    assert document["hookSpecificOutput"]["permissionDecision"] == "ask", document
 
 
 def test_a_mutator_rewrite_is_also_surfaced_to_the_model_s016(grim, grim_home, tmp_path):

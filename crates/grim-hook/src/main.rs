@@ -126,6 +126,10 @@ fn run(args: &[OsString], diagnostics: &mut Vec<Diagnostic>) -> Result<Vec<u8>, 
             DispatchExit::Failure,
             "a gatekeeper was withheld: a handler I/O thread could not be started",
         )),
+        Some(WithheldCause::PayloadFailed) => Err(Fail::error(
+            DispatchExit::Failure,
+            "a gatekeeper was withheld: its handler gave no usable verdict",
+        )),
         None => Ok(outcome.stdout),
     }
 }

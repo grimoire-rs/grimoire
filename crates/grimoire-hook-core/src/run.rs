@@ -56,7 +56,7 @@ pub struct DispatchOutcome {
     /// expressed an opinion.
     pub stdout: Vec<u8>,
     /// Set only per PD-6: a selected gatekeeper was withheld and no gatekeeper
-    /// that ran composed a `deny`. The caller maps it to its error channel.
+    /// that ran composed a `deny` or an `ask`. The caller maps it to its error channel.
     pub withheld: Option<WithheldCause>,
     /// Set when the client's stdin could not be used: nothing ran. The launcher
     /// maps it to its error exit; grim's adapter ignores it (exit 0).
