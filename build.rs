@@ -101,17 +101,12 @@ fn run() -> Result<(), String> {
             commit_hash: hash,
         }),
     );
-    let nested_env = embed::nested_env(env::vars_os(), rustflags);
+    let args = embed::nested_args(profile, &target, &target_dir, offline, &rustflags);
 
     let mut command = Command::new(&cargo);
-    command
-        .args(embed::nested_args(profile, &target, &target_dir, offline))
-        .current_dir(&manifest_dir);
-    for name in nested_env.remove {
+    command.args(&args).current_dir(&manifest_dir);
+    for name in embed::nested_env(env::vars_os()) {
         command.env_remove(name);
-    }
-    for (name, value) in nested_env.set {
-        command.env(name, value);
     }
 
     let output = command
@@ -120,7 +115,7 @@ fn run() -> Result<(), String> {
     if !output.status.success() {
         return Err(format!(
             "build.rs: nested `cargo {}` failed ({})\n{}",
-            embed::nested_args(profile, &target, &target_dir, offline).join(" "),
+            args.join(" "),
             output.status,
             String::from_utf8_lossy(&output.stderr)
         ));

@@ -33,6 +33,8 @@ const DENY_EXACT: &[&str] = &[
     "RUSTDOC",
     "RUSTC_LINKER",
     "CARGO_ENCODED_RUSTFLAGS",
+    // Folded into the outer flags, which reach the nested build as `--config`.
+    "RUSTFLAGS",
     // clippy-driver, sccache: wrapping the nested build would lint or cache the
     // launcher. The workspace wrapper has its own rule, `is_denied_env`.
     "RUSTC_WRAPPER",
@@ -51,10 +53,15 @@ pub const WORKSPACE_WRAPPER_VARS: &[&str] = &["RUSTC_WORKSPACE_WRAPPER", "CARGO_
 /// workspace wrapper, and the launcher's `.dep-v0` section exists only if the
 /// nested build keeps it. Any other wrapper is dropped. The wrapper panics
 /// without `CARGO_AUDITABLE_ORIG_ARGS`, so that variable passes the filter; the
-/// wrapper reads it only to run `cargo metadata`, where the outer flags still
+/// wrapper reads it only to run `cargo metadata`, where the outer args still
 /// resolve `grim-hook` because the nested build runs at the same workspace root.
+/// That metadata call also queries the host, so no target's flags may reach it
+/// through the environment: `CARGO_TARGET_<triple>_RUSTFLAGS` is dropped too.
 pub fn is_denied_env(name: &str, value: &str) -> bool {
     let name = name.to_ascii_uppercase();
+    if name.starts_with("CARGO_TARGET_") && name.ends_with("_RUSTFLAGS") {
+        return true;
+    }
     if WORKSPACE_WRAPPER_VARS.contains(&name.as_str()) {
         return !matches!(
             Path::new(value).file_name().and_then(|n| n.to_str()),
@@ -96,17 +103,40 @@ pub fn embed_target_dir(
     Some(outer.join("grim-hook-embed"))
 }
 
-/// The arguments after `cargo`.
-pub fn nested_args(profile: &str, target: &str, target_dir: &Path, offline: bool) -> Vec<String> {
+/// The arguments after `cargo`. `rustflags` go in as `target.<triple>.rustflags`
+/// so they never reach the host, as `CARGO_ENCODED_RUSTFLAGS` would in the
+/// target-less `cargo metadata` that cargo-auditable runs.
+pub fn nested_args(profile: &str, target: &str, target_dir: &Path, offline: bool, rustflags: &[String]) -> Vec<String> {
     let mut args: Vec<String> = ["build", "-p", "grim-hook", "--profile", profile]
         .map(String::from)
         .into();
     args.extend(["--target".into(), target.into(), "--locked".into()]);
     args.extend(["--target-dir".into(), target_dir.display().to_string()]);
+    // ponytail: a config file's `target.'cfg(..)'.rustflags` joins these, so its
+    // flags apply twice; harmless for every flag a release build sets today.
+    if !rustflags.is_empty() {
+        let list: Vec<String> = rustflags.iter().map(|f| toml_string(f)).collect();
+        args.push("--config".into());
+        args.push(format!("target.{}.rustflags=[{}]", toml_string(target), list.join(",")));
+    }
     if offline {
         args.push("--offline".into());
     }
     args
+}
+
+fn toml_string(value: &str) -> String {
+    let mut out = String::from('"');
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 pub fn is_truthy(value: &str) -> bool {
@@ -153,7 +183,7 @@ pub fn rustc_commit_hash(version_verbose: &str) -> Option<&str> {
         .filter(|h| !h.is_empty() && *h != "unknown")
 }
 
-/// `CARGO_ENCODED_RUSTFLAGS` for the nested build: the outer flags minus
+/// Rustflags for the nested build: the outer flags minus
 /// instrumentation, plus remaps that keep `$CARGO_HOME`, the checkout path and
 /// the rust-src paths under the sysroot out of the launcher's panic and debug
 /// strings. The sysroot maps to `/rustc/<hash>`, where the prebuilt std already
@@ -163,7 +193,7 @@ pub fn nested_rustflags(
     cargo_home: Option<&Path>,
     root: &Path,
     toolchain: Option<Toolchain<'_>>,
-) -> String {
+) -> Vec<String> {
     let mut flags = filter_rustflags(outer_encoded);
     let sysroot = toolchain.map(|t| (t.sysroot, format!("/rustc/{}", t.commit_hash)));
     let remaps = [
@@ -179,20 +209,12 @@ pub fn nested_rustflags(
             flags.push(format!("--remap-path-prefix={}={to}", from.display()));
         }
     }
-    flags.join(&ENCODED_FLAG_SEP.to_string())
+    flags
 }
 
-/// Environment edits for the nested `cargo build`.
-pub struct NestedEnv {
-    pub remove: Vec<OsString>,
-    pub set: Vec<(&'static str, String)>,
-}
-
-/// Which outer variables the nested build drops and which it sets. Apply
-/// `remove` before `set`: `CARGO_ENCODED_RUSTFLAGS` is on the deny list, so the
-/// reverse order erases the nested flags and the launcher keeps `$CARGO_HOME` paths.
-pub fn nested_env(outer: impl IntoIterator<Item = (OsString, OsString)>, rustflags: String) -> NestedEnv {
-    let remove = outer
+/// Outer variables the nested `cargo build` drops.
+pub fn nested_env(outer: impl IntoIterator<Item = (OsString, OsString)>) -> Vec<OsString> {
+    outer
         .into_iter()
         .filter(|(name, value)| match (name.to_str(), value.to_str()) {
             (Some(n), Some(v)) => is_denied_env(n, v),
@@ -200,11 +222,7 @@ pub fn nested_env(outer: impl IntoIterator<Item = (OsString, OsString)>, rustfla
             _ => false,
         })
         .map(|(name, _)| name)
-        .collect();
-    NestedEnv {
-        remove,
-        set: vec![("CARGO_ENCODED_RUSTFLAGS", rustflags)],
-    }
+        .collect()
 }
 
 #[cfg(test)]
@@ -339,13 +357,13 @@ mod tests {
 
     #[test]
     fn args_pin_profile_target_dir_and_lockfile() {
-        let args = nested_args("hook", "x86_64-pc-windows-msvc", Path::new("/t/e"), false);
+        let args = nested_args("hook", "x86_64-pc-windows-msvc", Path::new("/t/e"), false, &[]);
         assert_eq!(
             args.join(" "),
             "build -p grim-hook --profile hook --target x86_64-pc-windows-msvc --locked --target-dir /t/e"
         );
         assert_eq!(
-            nested_args("hook", "t", Path::new("/t"), true).last().unwrap(),
+            nested_args("hook", "t", Path::new("/t"), true, &[]).last().unwrap(),
             "--offline"
         );
     }
@@ -392,7 +410,11 @@ mod tests {
         );
         assert_eq!(
             flags,
-            "--cfg=x\x1f--remap-path-prefix=/home/u/.cargo=/cargo\x1f--remap-path-prefix=/w=/grimoire"
+            [
+                "--cfg=x",
+                "--remap-path-prefix=/home/u/.cargo=/cargo",
+                "--remap-path-prefix=/w=/grimoire"
+            ]
         );
     }
 
@@ -409,7 +431,10 @@ mod tests {
         );
         assert_eq!(
             flags,
-            "--remap-path-prefix=/w=/grimoire\x1f--remap-path-prefix=/home/u/.rustup/toolchains/stable=/rustc/abc123"
+            [
+                "--remap-path-prefix=/w=/grimoire",
+                "--remap-path-prefix=/home/u/.rustup/toolchains/stable=/rustc/abc123"
+            ]
         );
     }
 
@@ -422,8 +447,36 @@ mod tests {
         assert_eq!(rustc_commit_hash("host: x\n"), None);
     }
 
+    // cargo-xwin scopes its flags to the target; the nested build must too, or
+    // cargo-auditable's `cargo metadata` applies them to the host and fails.
     #[test]
-    fn nested_env_keeps_the_nested_rustflags_and_drops_denied_variables() {
+    fn nested_rustflags_are_target_scoped_not_global() {
+        let outer = [
+            ("RUSTFLAGS", "-Cfoo"),
+            (
+                "CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_RUSTFLAGS",
+                "-C linker-flavor=lld-link",
+            ),
+        ]
+        .map(|(k, v)| (OsString::from(k), OsString::from(v)));
+        let remove = nested_env(outer);
+        assert!(remove.contains(&OsString::from("RUSTFLAGS")));
+        assert!(remove.contains(&OsString::from("CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_RUSTFLAGS")));
+        let flags = [
+            "-C".to_owned(),
+            "linker-flavor=lld-link".to_owned(),
+            r#"--x=C:\a "b""#.to_owned(),
+        ];
+        let args = nested_args("hook", "aarch64-pc-windows-msvc", Path::new("/t"), false, &flags);
+        let config = args.iter().position(|a| a == "--config").map(|i| &args[i + 1]);
+        assert_eq!(
+            config.map(String::as_str),
+            Some(r#"target."aarch64-pc-windows-msvc".rustflags=["-C","linker-flavor=lld-link","--x=C:\\a \"b\""]"#)
+        );
+    }
+
+    #[test]
+    fn nested_env_drops_denied_variables() {
         let outer = [
             ("CARGO_ENCODED_RUSTFLAGS", "-Cinstrument-coverage"),
             ("OUT_DIR", "/o"),
@@ -431,14 +484,10 @@ mod tests {
             ("PATH", "/bin"),
         ]
         .map(|(k, v)| (OsString::from(k), OsString::from(v)));
-        let env = nested_env(outer, "--remap-path-prefix=/a=/b".to_owned());
-        assert_eq!(
-            env.set,
-            [("CARGO_ENCODED_RUSTFLAGS", "--remap-path-prefix=/a=/b".to_owned())]
-        );
-        assert!(env.remove.contains(&OsString::from("CARGO_ENCODED_RUSTFLAGS")));
-        assert!(env.remove.contains(&OsString::from("OUT_DIR")));
-        assert!(env.remove.contains(&OsString::from("RUSTC_WRAPPER")));
-        assert!(!env.remove.contains(&OsString::from("PATH")));
+        let remove = nested_env(outer);
+        assert!(remove.contains(&OsString::from("CARGO_ENCODED_RUSTFLAGS")));
+        assert!(remove.contains(&OsString::from("OUT_DIR")));
+        assert!(remove.contains(&OsString::from("RUSTC_WRAPPER")));
+        assert!(!remove.contains(&OsString::from("PATH")));
     }
 }
