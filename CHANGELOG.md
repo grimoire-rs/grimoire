@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.1] - 2026-10-28
+
+### Added
+
+- Replace the sh launcher with an embedded native grim-hook *(hook)*
+- Report section and advanced for each config list key *(config)*
+- Tag a missing grimoire.lock with reason no-lock *(error)*
+- Preserve comments and layout when rewriting grimoire.toml *(config)*
+
+### Changed
+
+- Skip parse and copies on refresh-failure and stats paths *(catalog)*
+- Score, sort and page before cloning catalog rows *(search)*
+
+### Documentation
+
+- Document the native grim-hook launcher *(hook)*
+- Drift-review the hook skills for the native launcher *(catalog)*
+- Document the withheld gatekeeper on a handler failure *(hook)*
+
+### Fixed
+
+- Escape search cells before measuring and truncating them *(cli)*
+- Drop the Contents list and size the logo in plugin READMEs *(export)*
+- Resolve cached MCP descriptors for outputs_pending *(status)*
+- Withhold a gatekeeper whose handler gives no usable verdict *(hook)*
+- Scope nested grim-hook rustflags to the target *(build)*
+
 ## [0.15.0] - 2026-10-23
 
 ### Added
@@ -971,6 +999,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make release-update.sh executable; add rolling-release regression tests
 - Contact loopback registries over plain HTTP on any port
 
+[0.15.1]: https://github.com/grimoire-rs/grimoire/compare/v0.15.0..v0.15.1
 [0.15.0]: https://github.com/grimoire-rs/grimoire/compare/v0.14.3..v0.15.0
 [0.14.3]: https://github.com/grimoire-rs/grimoire/compare/v0.14.2..v0.14.3
 [0.14.2]: https://github.com/grimoire-rs/grimoire/compare/v0.14.1..v0.14.2

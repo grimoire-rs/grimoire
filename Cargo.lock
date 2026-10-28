@@ -1126,7 +1126,7 @@ dependencies = [
 
 [[package]]
 name = "grim-hook"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "grimoire-hook-core",
  "serde_json",
@@ -1135,7 +1135,7 @@ dependencies = [
 
 [[package]]
 name = "grimoire"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1190,7 +1190,7 @@ dependencies = [
 
 [[package]]
 name = "grimoire-hook-core"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "schemars",
  "serde",

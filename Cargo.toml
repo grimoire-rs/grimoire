@@ -9,7 +9,7 @@ resolver = "3"
 # The single version/edition/license site: members inherit it, and
 # `cargo set-version` (task release:*) bumps it for the whole workspace.
 [workspace.package]
-version = "0.15.0"
+version = "0.15.1"
 edition = "2024"
 license = "Apache-2.0"
 

@@ -18,6 +18,63 @@ granularity, including the refactors and internal work this page leaves out.
 plugin marketplace](#v0-15-0-marketplace). It adds [experimental
 hooks](#v0-15-0-hooks) that answer an agent's permission questions, and lets
 [`grim search` page through catalogs of any size](#v0-15-0-large-catalogs).
+0.15.1 makes grim [leave your `grimoire.toml` comments
+alone](#v0-15-1-toml-comments).
+
+### 0.15.1 — 2026-10-28 {#v0-15-1}
+
+0.15.1 [keeps your comments when grim edits `grimoire.toml`](#v0-15-1-toml-comments)
+and ships [a native hook launcher](#v0-15-1-launcher). A failing gatekeeper
+hook is now [withheld](#v0-15-1-gatekeeper), and
+[smaller improvements](#v0-15-1-more) cover config and error metadata.
+
+#### grim no longer strips comments from grimoire.toml {#v0-15-1-toml-comments}
+
+Every `grim add`, `grim remove`, `grim uninstall` and `grim config` write used
+to re-serialize the whole file. Your comments vanished and the tables were
+re-sorted, so a hand-annotated `grimoire.toml` looked different after one
+command.
+
+Now grim edits the file in place. Only the lines whose meaning changed move.
+Comments, blank lines and key order survive. A changed value keeps its
+trailing comment, and a new entry goes at the end of its table. See
+[`grimoire.toml`][grimoire-toml].
+
+#### Hooks run through a native launcher {#v0-15-1-launcher}
+
+The `sh` shim that every hook registration called is replaced by a small
+native `grim-hook` executable embedded in grim. It needs no `grim` binary on
+the path and starts without a shell. `grim install` writes it and rewrites
+the registrations that pointed at the old shim. Its exit codes are listed
+under [launcher exit codes][launcher-exit].
+
+Codex keys its stored approval on the exact command text, so it asks you to
+approve each gatekeeper hook once more. Open Codex's `/hooks` screen
+([Codex no longer trusts the hook command][codex-retrust]).
+
+#### A gatekeeper whose handler fails is withheld {#v0-15-1-gatekeeper}
+
+A gatekeeper hook answers an agent's permission question. If its handler
+crashed, timed out or printed no usable verdict, the launcher could still
+report a verdict. Now it withholds the gatekeeper and the client's own policy
+decides. See [exit code and timeout][handler-exit]. Hooks remain workflow
+automation, not a policy control.
+
+#### Smaller improvements {#v0-15-1-more}
+
+- `grim config list --format json` items carry `section` and `advanced`, so
+  a settings UI can group keys without guessing from prefixes ([JSON
+  output][config-json]).
+- A missing `grimoire.lock` now fails with `reason: no-lock` (still exit
+  `79`), so a client can offer "run `grim lock`" without matching message
+  text ([the `reason` field][error-reason]).
+- `grim search` no longer misaligns a table when a result cell holds control
+  characters.
+- Plugin READMEs from `grim export` drop the Contents list and size the logo.
+- `grim status` resolves cached MCP descriptors when it computes
+  `outputs_pending`, so MCP outputs no longer show as pending.
+- `grim search` and catalog refreshes parse and clone less, which helps large
+  catalogs.
 
 ### 0.15.0 — 2026-10-23 {#v0-15-0}
 
@@ -588,3 +645,8 @@ the full commit-level record back to the first tagged release.
 <!-- json interface -->
 
 [error-reason]: ./json-interface.md#error-reason
+[config-json]: ./commands.md#config-json
+[grimoire-toml]: ./configuration.md#grimoire-toml
+[launcher-exit]: ./hooks.md#launcher-exit
+[handler-exit]: ./hooks.md#handler-exit
+[codex-retrust]: ./hooks-troubleshooting.md#codex-retrust
