@@ -221,11 +221,11 @@ jobs:
           name: deep-tests-${{ matrix.job.name }}
           path: test/results/junit.xml
 
-  # Principle 9 evidence (C-150, C-151). The pre-hooks golden fixture pins
-  # `localhost:5000` into its locks, so it needs a registry on exactly that
-  # host; `task test` puts zot on a random port and the module skips there.
-  # Here it runs alone, required: a skip fails, and the JUnit report must show
-  # both golden tests passed. Then `p9:diff` builds origin/main's grim and
+  # Principle 9 evidence (C-150, C-151). The pre-hooks and pre-dependencies
+  # golden fixtures pin `localhost:5000` into their locks, so they need a
+  # registry on exactly that host; `task test` puts zot on a random port and
+  # the modules skip there. Here they run alone, required: a skip fails, and
+  # the JUnit report must show every golden test passed. Then `p9:diff` builds origin/main's grim and
   # byte-compares it against this branch's over the hook-free scenarios.
   principle-9:
     name: Principle 9 (golden + p9 diff)
@@ -266,13 +266,13 @@ jobs:
         with:
           version: "0.6.3"
           groups: default
-      - name: Golden fixture (required)
+      - name: Golden fixtures (required)
         working-directory: test
-        run: uv run pytest tests/test_golden_pre_hooks.py -n 0 -v --junit-xml=results/junit.xml
+        run: uv run pytest tests/test_golden_pre_hooks.py tests/test_golden_pre_dependencies.py tests/test_dependencies_contract.py -n 0 -v --junit-xml=results/junit.xml
         env:
           GRIM_TEST_REGISTRY_HOST: localhost:5000
           GRIM_REQUIRE_GOLDEN: "1"
-      - name: Assert both golden tests passed
+      - name: Assert every golden test passed
         working-directory: test
         run: |
           python3 - <<'EOF'
@@ -282,8 +282,9 @@ jobs:
           outcomes = [next((c.tag for c in case if c.tag in bad), "passed") for case in cases]
           passed, skipped = outcomes.count("passed"), outcomes.count("skipped")
           print(f"golden: {passed} passed, {skipped} skipped, {len(outcomes)} total")
-          if (passed, skipped, len(outcomes)) != (2, 0, 2):
-              raise SystemExit("C-150: expected exactly 2 passed and 0 skipped golden tests")
+          # 2 pre-hooks + 7 pre-dependencies + 2 dependency contract tests.
+          if (passed, skipped, len(outcomes)) != (11, 0, 11):
+              raise SystemExit("expected exactly 11 passed and 0 skipped golden tests")
           EOF
       - name: Upload Golden Results
         if: ${{ !cancelled() }}

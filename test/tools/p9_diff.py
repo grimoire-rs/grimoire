@@ -35,6 +35,7 @@ import sys
 import tarfile
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -44,15 +45,20 @@ from src.zot import start_zot  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "p9_fixtures"
 
-# C-153's closed list, restricted to what a hook-free run can show: `status`
-# items gain `arming: []`, install rows gain `armed: null`, and `context`
-# registry rows gain `catalog: null` (no sync has run). Keyed by command
-# and value; nothing else may appear. Per D-20, `add`/`update` rows keep
-# main's exact key set — no `armed` — so they are deliberately absent here.
-ADDITIVE_STDOUT_KEYS: dict[str, tuple[str, object]] = {
-    "status": ("arming", []),
-    "install": ("armed", None),
-    "context": ("catalog", None),
+# Closed list of additive keys a hook-free, dependency-free run may show, per
+# command, each with the predicate its value must meet; nothing else may appear.
+# `add`/`update` rows never gain `armed` (D-20). Hook keys: C-153; dependency
+# keys: adr_artifact_dependencies.md Decision 5 (`pulled_in` lists a bundle's
+# members on add).
+ADDITIVE_STDOUT_KEYS: dict[str, dict[str, Callable[[object], bool]]] = {
+    "status": {
+        "arming": lambda v: v == [],
+        "direct": lambda v: isinstance(v, bool),
+        "required_by": lambda v: v is None or isinstance(v, list),
+    },
+    "install": {"armed": lambda v: v is None},
+    "context": {"catalog": lambda v: v is None},
+    "add": {"pulled_in": lambda v: isinstance(v, list)},
 }
 
 # Named stdout equivalences (orchestrator decision D-13). Each is one rule, not
@@ -265,13 +271,35 @@ def _mask_file(rel: str, data: bytes) -> bytes:
     return data
 
 
+_BLOB = re.compile(r"(?:.*/)?grim_home/blobs/sha256/([0-9a-f]{2})(?:/([0-9a-f]{64}))?")
+
+
+def _cached_blob(rel: str, entry: tuple) -> bool:
+    """A branch-only content-store entry: its fan-out dir, or a blob whose bytes
+    hash to its own name. The store is append-only and content-addressed, so a
+    new entry changes no file main wrote; the branch caches a bundle's layer on
+    add (digest-pinned reads go through the store first)."""
+    m = _BLOB.fullmatch(rel)
+    if not m:
+        return False
+    fan, digest = m.groups()
+    if digest is None:
+        return entry[0] == "dir"
+    return (
+        entry[0] == "file"
+        and digest.startswith(fan)
+        and hashlib.sha256(entry[1]).hexdigest() == digest
+    )
+
+
 def diff_trees(label: str, a: dict[str, tuple], b: dict[str, tuple]) -> list[str]:
     out = []
     for rel in sorted(a.keys() | b.keys()):
         if rel not in b:
             out.append(f"{label}: {rel} only with main")
         elif rel not in a:
-            out.append(f"{label}: {rel} only with branch")
+            if not _cached_blob(rel, b[rel]):
+                out.append(f"{label}: {rel} only with branch")
         elif a[rel] != b[rel]:
             (ka, pa, xa), (kb, pb, xb) = a[rel], b[rel]
             if ka != kb or xa != xb:
@@ -313,20 +341,20 @@ def diff_json(
 ) -> list[str]:
     """Structural diff: the branch may only add the command's C-153 key."""
     if isinstance(a, dict) and isinstance(b, dict):
-        allowed = ADDITIVE_STDOUT_KEYS.get(command)
+        allowed = ADDITIVE_STDOUT_KEYS.get(command, {})
         out = []
         for k in sorted(a.keys() | b.keys()):
             if k not in b:
                 out.append(f"{label}: stdout {path}.{k} dropped by branch")
             elif k not in a:
-                if allowed is None or k != allowed[0]:
+                if k not in allowed:
                     out.append(
-                        f"{label}: stdout {path}.{k} added by branch, not a C-153 key"
+                        f"{label}: stdout {path}.{k} added by branch, not an additive key"
                     )
-                elif b[k] != allowed[1]:
+                elif not allowed[k](b[k]):
                     out.append(
-                        f"{label}: stdout {path}.{k} = {b[k]!r}, hook-free run "
-                        f"must print {allowed[1]!r}"
+                        f"{label}: stdout {path}.{k} = {b[k]!r}, not the value a "
+                        "hook-free, dependency-free run prints"
                     )
             elif _c118_equal(k, a[k], b[k], cwd) or _version_equal(
                 command, path, k, a[k], b[k]
@@ -711,6 +739,16 @@ def self_test(root: Path) -> None:
     assert diff_trees("t", base, base) == []
     assert any("d/gone.txt only with branch" in m for m in diff_trees("t", moved, base))
 
+    # A branch-only store blob passes only when its bytes hash to its name.
+    blob = b"layer"
+    dig = hashlib.sha256(blob).hexdigest()
+    fan, store = f"grim_home/blobs/sha256/{dig[:2]}", f"grim_home/blobs/sha256/{dig[:2]}/{dig}"
+    cached = {fan: ("dir", b"", False), store: ("file", blob, False)}
+    assert diff_trees("t", {}, cached) == []
+    assert diff_trees("t", {}, {store: ("file", b"other", False)}), "digest must match"
+    assert diff_trees("t", cached, {}), "a blob main has and the branch lacks is reported"
+    assert diff_trees("t", {}, {"grim_home/other/x": ("file", blob, False)})
+
     # The mask hides only the named key, never its neighbours.
     lock = b'generated_at = "2026-01-01T00:00:00Z"\ngenerated_x = "a"\n'
     assert _mask_file("ws/grimoire.lock", lock) == _mask_file(
@@ -735,6 +773,13 @@ def self_test(root: Path) -> None:
     assert diff_stdout("t", row, '{"a": [{"x": 1, "arming": []}]}', "status") == []
     assert diff_stdout("t", row, '{"a": [{"x": 1, "arming": ["h"]}]}', "status")
     assert diff_stdout("t", '{"a": 1}', '{"a": 1, "extra": 2}', "install")
+    dep = '{"items": [{"x": 1, "direct": true, "required_by": []}]}'
+    assert diff_stdout("t", '{"items": [{"x": 1}]}', dep, "status") == []
+    assert diff_stdout("t", '{"items": [{"x": 1}]}', dep, "install"), "status-only keys"
+    assert diff_stdout("t", '{"items": [{"x": 1}]}', '{"items": [{"x": 1, "direct": 1}]}', "status")
+    assert diff_stdout("t", '{"a": 1}', '{"a": 1, "pulled_in": []}', "add") == []
+    assert diff_stdout("t", '{"a": 1}', '{"a": 1, "pulled_in": [{"k": "s"}]}', "add") == []
+    assert diff_stdout("t", '{"a": 1}', '{"a": 1, "pulled_in": null}', "add")
     ctx = '{"registries": [{"url": "r"}]}'
     assert (
         diff_stdout(
