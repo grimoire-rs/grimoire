@@ -106,6 +106,31 @@ research-axes:
 
 ## Memory
 
+- **Active plan (2026-11-02, hex-plan xhigh, goal loop):**
+  `.agents/plans/plan_artifact_dependencies.md`, State `plan-approved`, Next `/hex-execute`, branch `hex/adr-artifact-dependencies` (main checkout). ADR `adr_artifact_dependencies.md` flipped to Accepted the same day (open questions closed on their recommendations, PD-1/PD-2). Pipelines: P0 (`fix(resolve):`, own commit) → CW (lock wire, merge policy, layout/features, ForceScope, test helpers) → P1 ∥ P2 (hard) ∥ P3 ∥ P-G → P4 ∥ P5 ∥ P6 ∥ P7 ∥ P8 → P9 ∥ P-X → P10. Critical path P0 → CW → P2 → P7 → P9 → P10. C-001…C-049, S-001…S-016, PD-1…PD-19. Deferred: F-1 five-registry push, F-2 grimoire-vscode, F-3 release notes, F-4 tag.
+  **Pitfall:** mcp and hook have no path source (`local_pack.rs:57,95`); the ADR's path-mcp freshness clause is moot (PD-3).
+
+- **ADR accepted 2026-11-02; proposed (2026-11-01, hex-architect xhigh):**
+  `.agents/adr/adr_artifact_dependencies.md` (Proposed) and `.agents/specs/design_artifact_dependencies.md`.
+  - Dependencies are a second members layer on the artifact's manifest. A bundle is just an artifact whose only layer is that members layer.
+  - Diamonds whose refs resolve to the same digest merge; different digests fail with exit 78, and a direct declaration overrides.
+  - New `grim why` command, plus `required_by` and `direct` on `status` items.
+  - Everything ships in a single release, R = 0.16.0. Release gates: five-registry push, a grimoire-vscode release, and a run against the old grim binary.
+  - 2 open questions remain (the caps; whether describe fetches requires). D4 settled 2026-11-01: hook protections apply uniformly; a transitive hook uses the same `insecure-transport` check on its own host; `--trust-hooks` keeps precedence; no rule based on how a hook was reached.
+  Research `.agents/research/research_artifact_dependencies_*.md` (9 files).
+  **Hint for /hex-init:** a research axis "OCI forward-compat / old-client refusal" mattered. OCI says to ignore unknown annotations, so only a layout change refuses on shipped grims. Propose it as a `research-axes` preference.
+
+- **Discussion drained (2026-11-01, → architect):**
+  `.agents/discussions/artifact-dependencies.md`. The model is flat dependencies with no ranges.
+  - Any artifact kind can declare `requires`. It publishes as the existing bundle members layer, so every artifact becomes a bundle and expansion is recursive.
+  - Floating by default; `--pin` freezes to digests.
+  - A diamond fails with exit 78, and a direct declaration overrides.
+  - Cross-registry dependencies are allowed, as for bundles.
+  - A new `com.grimoire.requires-features` signal makes future grims refuse what they can't handle. Grims older than it degrade once.
+  - Trust and consent ADRs are not reopened.
+  Research: `.agents/research/research_artifact_dependencies_*.md` (5 files).
+  **Pitfall:** unknown layer media types fall back to raw tar (`src/oci/layer.rs:92-105`). Older grims don't refuse new layers for free; test what 0.15.x actually does.
+
 - **Active plan (2026-10-25, hex-plan high):**
   `.agents/plans/plan_hook_native_dispatcher.md`, State `plan-approved`, Next `/hex-execute`, branch `feat/hook-native-dispatcher` (root orchestrator in main checkout; the branch holds ADR, plan and all impl). ADR `adr_hook_native_dispatcher.md` Accepted 2026-10-25 (D1 512/640 KiB closed after P3; D2 non-verdict channel for withheld gatekeepers; D3 unsigned Windows behind clean-Win11 gate). Pipelines: P0 (spike, hard) → P1 (Hat 1 move) → P2 (Hat 2 std port) → CW → P3 ∥ P4 (review) → P3b ∥ P5 (hard) ∥ P6 → `/security-auditor`. C-001…C-025, S-001…S-011, PD-1…PD-12.
   **Pitfall:** a std + serde_json + `Command` probe is already 366 KiB on glibc and 453 KiB on musl. The size budget gets set from real dispatcher bytes, never from a stub.
