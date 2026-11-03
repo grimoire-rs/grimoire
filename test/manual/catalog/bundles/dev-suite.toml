@@ -1,0 +1,11 @@
+# Nested-closure demo: both members carry their own dependencies, so
+# installing this bundle resolves bundle -> member -> member's dependency.
+summary = "Dev suite (members with their own dependencies)"
+keywords = "demo,dependencies,bundle"
+description = "pr-assistant and triage-bot, each pulling in its own dependencies"
+
+[skills]
+pr-assistant = "localhost:5050/grimoire/skills/pr-assistant:1"
+
+[agents]
+triage-bot = "localhost:5050/grimoire/agents/triage-bot:1"

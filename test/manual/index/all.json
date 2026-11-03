@@ -220,5 +220,80 @@
     "license": "Apache-2.0",
     "created": "2026-07-11T09:00:00Z",
     "namespace": "localhost:5051/tools"
+  },
+  {
+    "schema": 1,
+    "name": "pr-assistant",
+    "kind": "skill",
+    "ref": "localhost:5050/grimoire/skills/pr-assistant",
+    "description": "Drafts pull request descriptions.",
+    "summary": "Drafts pull request descriptions",
+    "keywords": [
+      "demo",
+      "dependencies"
+    ],
+    "license": "Apache-2.0",
+    "created": "2026-11-03T10:00:00Z",
+    "namespace": "localhost:5050/grimoire"
+  },
+  {
+    "schema": 1,
+    "name": "triage-bot",
+    "kind": "agent",
+    "ref": "localhost:5050/grimoire/agents/triage-bot",
+    "description": "Triages incoming changes using the review and commit skills.",
+    "summary": "Triages incoming changes using the review and commit skills",
+    "keywords": [
+      "demo",
+      "dependencies"
+    ],
+    "license": "Apache-2.0",
+    "created": "2026-11-03T10:00:00Z",
+    "namespace": "localhost:5050/grimoire"
+  },
+  {
+    "schema": 1,
+    "name": "commit-conventions",
+    "kind": "rule",
+    "ref": "localhost:5050/grimoire/rules/commit-conventions",
+    "description": "Commit message conventions.",
+    "summary": "Commit message conventions",
+    "keywords": [
+      "demo",
+      "dependencies"
+    ],
+    "license": "Apache-2.0",
+    "created": "2026-11-03T10:00:00Z",
+    "namespace": "localhost:5050/grimoire"
+  },
+  {
+    "schema": 1,
+    "name": "docs-search",
+    "kind": "mcp",
+    "ref": "localhost:5050/grimoire/mcp/docs-search",
+    "description": "Documentation search over MCP.",
+    "summary": "Documentation search over MCP",
+    "keywords": [
+      "demo",
+      "dependencies"
+    ],
+    "license": "Apache-2.0",
+    "created": "2026-11-03T10:00:00Z",
+    "namespace": "localhost:5050/grimoire"
+  },
+  {
+    "schema": 1,
+    "name": "dev-suite",
+    "kind": "bundle",
+    "ref": "localhost:5050/grimoire/bundles/dev-suite",
+    "description": "pr-assistant and triage-bot with their dependencies.",
+    "summary": "pr-assistant and triage-bot with their dependencies",
+    "keywords": [
+      "demo",
+      "dependencies"
+    ],
+    "license": "Apache-2.0",
+    "created": "2026-11-03T10:00:00Z",
+    "namespace": "localhost:5050/grimoire"
   }
 ]

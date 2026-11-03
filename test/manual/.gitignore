@@ -8,3 +8,9 @@ project-multi/.claude/
 project-multi/.opencode/
 project-multi/.github/
 project-multi/grimoire.lock
+project-deps/.claude/
+project-deps/.opencode/
+project-deps/.github/
+project-deps/.grimoire/
+project-deps/grimoire.lock
+project-deps/.mcp.json

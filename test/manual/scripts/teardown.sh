@@ -20,7 +20,10 @@ rm -rf \
     "$MANUAL_DIR/project/.claude" \
     "$MANUAL_DIR/project/.opencode" \
     "$MANUAL_DIR/project/.github" \
-    "$MANUAL_DIR/project/grimoire.lock"
+    "$MANUAL_DIR/project/grimoire.lock" \
+    "$MANUAL_DIR/project-deps/.claude" \
+    "$MANUAL_DIR/project-deps/.grimoire" \
+    "$MANUAL_DIR/project-deps/grimoire.lock"
 
 if [ "${1:-}" = "--registry" ]; then
     log "stopping compose services (both registries + the static index)"
