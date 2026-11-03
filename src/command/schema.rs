@@ -117,10 +117,37 @@ pub fn generate(kind: SchemaKind) -> anyhow::Result<String> {
         SchemaKind::Config => crate::config::project_config::config_json_schema(),
         SchemaKind::Publish => schemars::schema_for!(crate::command::publish::PublishManifest),
         SchemaKind::Lock => crate::lock::grimoire_lock::lock_json_schema(),
-        SchemaKind::Mcp => schemars::schema_for!(crate::oci::mcp::McpDescriptor),
+        SchemaKind::Mcp => mcp_json_schema()?,
         SchemaKind::Hook => schemars::schema_for!(crate::oci::hook::HookManifest),
     };
     decorate(&schema, &kind.id(), kind.title())
+}
+
+/// The MCP descriptor schema plus the authored `[requires.<table>]` table.
+///
+/// `requires` is not a field of `McpDescriptor`: it is split off the parsed
+/// TOML before the descriptor is built, so the layer bytes stay the same with
+/// or without it. The schema still has to declare it, because the descriptor
+/// is `additionalProperties: false`.
+fn mcp_json_schema() -> anyhow::Result<schemars::Schema> {
+    let mut value = serde_json::to_value(schemars::schema_for!(crate::oci::mcp::McpDescriptor))?;
+    let properties = value
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| anyhow::anyhow!("generated MCP schema has no properties"))?;
+    properties.insert(
+        "requires".to_string(),
+        serde_json::json!({
+            "description": "Artifacts this server requires: one table per kind (`skills`, `rules`, `agents`, `mcp`, `hooks`, `bundles`), each mapping a binding name to a member reference.",
+            "type": "object",
+            "propertyNames": { "enum": ["skills", "rules", "agents", "mcp", "hooks", "bundles"] },
+            "additionalProperties": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+            }
+        }),
+    );
+    schemars::Schema::try_from(value).map_err(|v| anyhow::anyhow!("generated MCP schema is not a schema: {v}"))
 }
 
 /// Inject the published `$id`, friendly `title`, and the draft `$schema`
@@ -193,6 +220,17 @@ mod tests {
         let defs = v["$defs"].as_object().expect("$defs object");
         assert!(defs.contains_key("McpTransport"), "{defs:?}");
         assert!(defs.contains_key("McpOAuth"), "{defs:?}");
+        // `requires` is split off before the descriptor is built, so the
+        // schema declares it by hand and keeps it optional.
+        assert_eq!(v["properties"]["requires"]["type"], "object");
+        assert!(!required.iter().any(|r| r == "requires"));
+    }
+
+    #[test]
+    fn hook_schema_declares_optional_requires() {
+        let v = parsed(SchemaKind::Hook);
+        assert_eq!(v["properties"]["requires"]["type"], "object");
+        assert_eq!(v["required"], serde_json::json!(["schema", "name", "description"]));
     }
 
     #[test]
@@ -243,6 +281,16 @@ mod tests {
                 "per-entry repository and version must be optional, got: {entry_required:?}"
             );
         }
+    }
+
+    #[test]
+    fn publish_schema_pin_covers_requires_of_any_kind() {
+        let v = parsed(SchemaKind::Publish);
+        let pin = v["$defs"]["PublishEntrySpec"]["properties"]["pin"]["description"]
+            .as_str()
+            .expect("pin is documented");
+        assert!(pin.contains("requires"), "pin must document requires, got: {pin}");
+        assert!(!pin.contains("only"), "pin is no longer bundle-only, got: {pin}");
     }
 
     #[test]

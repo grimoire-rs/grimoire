@@ -39,8 +39,10 @@ from pathlib import Path
 
 import pytest
 
-from src.helpers import make_artifact, write_config
-from src.registry import REGISTRY_HOST
+import re
+
+from src.helpers import make_artifact, make_bundle, make_dependent, write_config
+from src.registry import REGISTRY_HOST, retag
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt", reason="the hook launcher and its registered command are POSIX-only in v1"
@@ -608,3 +610,199 @@ def test_an_unreadable_record_degrades_to_unconsented_and_never_to_an_error(
         result = runner.run("install", check=False)
         assert result.returncode == 0, f"an unreadable record must not fail a command: {corrupt}"
         assert "workspace-not-consented" in _causes(runner), corrupt
+
+
+# ---------------------------------------------------------------------------
+# Dependencies — consent follows what the typed reference newly brings
+# ---------------------------------------------------------------------------
+
+
+def _skill_requiring(unique_repo: str, name: str, hooks: list[str], tag: str = "1"):
+    """A skill whose requires layer names each of `hooks` (published beside it)."""
+    return make_dependent(
+        f"{unique_repo}/{name}",
+        tag,
+        "skill",
+        {f"{name}/SKILL.md": f"---\nname: {name}\ndescription: d\n---\n# {name}\n"},
+        [("hook", h, f"./{h}:1") for h in hooks],
+    )
+
+
+def _hook_names(rows: list[dict]) -> set[str]:
+    return {row["artifact"] for row in rows}
+
+
+def _hook_state(runner, name: str) -> dict:
+    out = json.loads(runner.run("status", "--format", "json").stdout)
+    return next(i for i in out["items"] if i["kind"] == "hook" and i["name"] == name)
+
+
+def _drop_lock_block(lock: Path, table: str) -> None:
+    """Delete every `[[<table>]]` block from a lock (a hand-edit, or a stale lock)."""
+    text = lock.read_text()
+    lock.write_text(re.sub(rf"(?ms)^\[\[{table}\]\]\n.*?(?=^\[\[|\Z)", "", text))
+
+
+def test_add_does_not_consent_preexisting_hook(
+    grim_at, project_dir: Path, unique_repo: str
+) -> None:
+    """A hook the workspace already declared stays unconsented even when the
+    added artifact requires it too: `add` records only what it newly reaches."""
+    planted = _publish_hook(unique_repo, name="planted")
+    fresh = _publish_hook(unique_repo, name="fresh")
+    wanted = _skill_requiring(unique_repo, "wanted", ["planted", "fresh"])
+    write_config(project_dir, hooks={"planted": planted.fq})
+    runner = grim_at(project_dir)
+    _enabled(runner)
+    runner.run("lock")
+
+    runner.run("add", wanted.fq)
+
+    record = _record_for(runner, project_dir)
+    assert record is not None, "positive control: the newly reached hook is consented"
+    assert record["hooks"] == [f"fresh@{REGISTRY_HOST}/{fresh.repo}"]
+    assert _hook_names(_rows(runner)) == {"fresh"}
+    assert "consent-drifted" in {a["cause"] for a in _hook_state(runner, "planted")["arming"]}
+
+
+def test_add_does_not_consent_when_closure_incomputable(
+    grim_at, project_dir: Path, unique_repo: str
+) -> None:
+    """When the pre-add closure cannot be computed offline, every hook already
+    in the config or the previous lock is excluded rather than assumed new."""
+    planted = _publish_hook(unique_repo, name="planted")
+    fresh = _publish_hook(unique_repo, name="fresh")
+    holder = _skill_requiring(unique_repo, "holder", ["planted"])
+    wanted = _skill_requiring(unique_repo, "wanted", ["planted", "fresh"])
+    write_config(project_dir, skills={"holder": holder.fq})
+    runner = grim_at(project_dir)
+    _enabled(runner)
+    runner.run("lock")
+    # The followed edge holder -> planted now has no registry entry: the
+    # closure is unknowable without the network.
+    _drop_lock_block(project_dir / "grimoire.lock", "hook")
+    assert "[[hook]]" not in (project_dir / "grimoire.lock").read_text()
+
+    runner.run("add", wanted.fq)
+
+    record = _record_for(runner, project_dir)
+    assert record is not None, "positive control: the genuinely new hook is consented"
+    assert record["hooks"] == [f"fresh@{REGISTRY_HOST}/{fresh.repo}"], record
+    assert "planted" not in _hook_names(_rows(runner))
+
+
+def test_add_bundle_does_not_consent_preexisting_member(
+    grim_at, project_dir: Path, unique_repo: str
+) -> None:
+    """A bundle that lists a hook another declared bundle already provides
+    consents to its new hook members only."""
+    planted = _publish_hook(unique_repo, name="planted")
+    fresh = _publish_hook(unique_repo, name="fresh")
+    bundle = make_bundle(
+        f"{unique_repo}/pack",
+        [("hook", "planted", planted.fq), ("hook", "fresh", fresh.fq)],
+        tag="1",
+    )
+    old = make_bundle(f"{unique_repo}/old", [("hook", "planted", planted.fq)], tag="1")
+    write_config(project_dir, bundles={"old": old.fq})
+    runner = grim_at(project_dir)
+    _enabled(runner)
+    runner.run("lock")
+
+    runner.run("add", bundle.fq)
+
+    record = _record_for(runner, project_dir)
+    assert record is not None, "positive control: the bundle's new hook is consented"
+    assert record["hooks"] == [f"fresh@{REGISTRY_HOST}/{fresh.repo}"], record
+    assert _hook_names(_rows(runner)) == {"fresh"}
+
+
+def test_install_writes_no_consent_for_dependency(
+    grim_at, project_dir: Path, unique_repo: str
+) -> None:
+    """A hook reached only through `requires` is gated like any declared hook:
+    converging writes no record and arms nothing until the workspace consents."""
+    _publish_hook(unique_repo, name="deep")
+    dep = _skill_requiring(unique_repo, "dep", ["deep"])
+    write_config(project_dir, skills={"dep": dep.fq})
+    runner = grim_at(project_dir)
+    _enabled(runner)
+    runner.run("lock")
+
+    runner.run("install")
+
+    assert _records(runner) == [], "install must never consent"
+    assert _rows(runner) == []
+    assert "workspace-not-consented" in {a["cause"] for a in _hook_state(runner, "deep")["arming"]}
+
+    # Positive control: the explicit gesture arms the very same hook.
+    runner.run("hook", "allow")
+    runner.run("install")
+    assert _hook_names(_rows(runner)) == {"deep"}
+
+
+def test_gained_hook_drifts(
+    grim_at, project_dir: Path, unique_repo: str
+) -> None:
+    """A dependency that gains a hook between versions does not arm it: the
+    next `update` leaves it gated as drift naming the hook."""
+    known = _publish_hook(unique_repo, name="known")
+    gained = _publish_hook(unique_repo, name="gained")
+    files = {"b/SKILL.md": "---\nname: b\ndescription: d\n---\n# b\n"}
+    make_artifact(f"{unique_repo}/b", "skill", files, tag="1")
+    top = make_dependent(
+        f"{unique_repo}/top", "1", "skill",
+        {"top/SKILL.md": "---\nname: top\ndescription: d\n---\n# top\n"},
+        [("skill", "b", "./b:1")],
+    )
+    runner = grim_at(project_dir)
+    runner.run("init")
+    _enabled(runner)
+    runner.run("add", "--kind", "hook", known.fq)
+    runner.run("add", top.fq)
+    assert _hook_names(_rows(runner)) == {"known"}
+
+    b2 = make_dependent(
+        f"{unique_repo}/b", "2", "skill", files, [("hook", "gained", "./gained:1")]
+    )
+    retag(f"{unique_repo}/b", "1", b2.digest)
+    runner.run("update")
+
+    state = _hook_state(runner, "gained")
+    drift = [a for a in state["arming"] if a["cause"] == "consent-drifted"]
+    assert drift and "gained" in drift[0]["message"], state
+    assert "gained" not in _hook_names(_rows(runner)), "the gained hook must not arm"
+    assert gained.digest in (project_dir / "grimoire.lock").read_text()
+
+
+def test_transitive_hook_transport_parity(
+    grim_at, tmp_path: Path, unique_repo: str
+) -> None:
+    """A hook reached through `requires` follows the same arming gates as the
+    same hook delivered by a bundle: same dispatch row, same per-invocation refusal."""
+    hook = _publish_hook(unique_repo, name="shared")
+    via_requires = _skill_requiring(unique_repo, "carrier", ["shared"])
+    bundle = make_bundle(f"{unique_repo}/pack", [("hook", "shared", hook.fq)], tag="1")
+
+    def arm(name: str, ref: str, *flags: str) -> tuple[list[dict], str]:
+        proj = tmp_path / name
+        proj.mkdir()
+        (proj / ".claude").mkdir()
+        runner = grim_at(proj)
+        runner.run("init")
+        _enabled(runner)
+        before = _rows(runner)  # one $GRIM_HOME serves every project in a test
+        out = runner.run("add", *flags, ref)
+        return [r for r in _rows(runner) if r not in before], out.stderr
+
+    rows_req, err_req = arm("via-requires", via_requires.fq)
+    rows_bun, err_bun = arm("via-bundle", bundle.fq)
+    refused_req, _ = arm("refused-requires", via_requires.fq, "--no-trust-hooks")
+    refused_bun, _ = arm("refused-bundle", bundle.fq, "--no-trust-hooks")
+    assert refused_req == refused_bun == [], "--no-trust-hooks refuses both alike"
+
+    assert len(rows_req) == len(rows_bun) == 1
+    keys = lambda r: {k: v for k, v in r[0].items() if k not in ("payload_dir", "resolved_digest")}
+    assert keys(rows_req) == keys(rows_bun)
+    assert "hook 'shared' is required by skill 'carrier'" in err_req, err_req
+    assert "hook 'shared' is delivered by bundle" in err_bun, err_bun

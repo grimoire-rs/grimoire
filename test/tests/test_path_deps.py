@@ -364,9 +364,11 @@ def test_bare_install_refuses_when_source_content_drifted_since_lock(
         skill / "SKILL.md",
         "---\nname: my-skill\ndescription: Demo skill.\n---\n# Body v2\n",
     )
-    result = runner.run("install", "--client", "claude", check=False)
+    result = runner.run("--format", "json", "install", "--client", "claude", check=False)
     assert result.returncode == 65, result.stderr
-    assert "changed since the lock was written" in result.stderr
+    error = json.loads(result.stdout)["error"]
+    assert error["reason"] == "stale-lock", error
+    assert "changed since the lock was written" in error["message"], error
 
 
 def test_bare_install_refuses_when_source_missing(

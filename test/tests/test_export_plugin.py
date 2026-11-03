@@ -626,10 +626,6 @@ def test_s006_include_edit_reresolves_and_rewrites_lock(
 # ── S-007 — Offline from a warm cache (C-017, C-030) ────────────────────────
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="offline export needs a manifest cache — deferred in adr_mcp_percall_scope_fetch_render.md; follow-up",
-)
 def test_s007_offline_export_from_warm_cache_is_byte_identical(
     grim_at, tmp_path: Path, work: Path, registry: str, unique_repo: str
 ) -> None:

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "registry": "localhost:5000",
+  "repository": "grim-golden/pre-dependencies-cdeedcaa/reg-agent",
+  "tags": {
+    "1.0.0": "sha256:74d332f2c53b1c256df2a6a51814e4faae70a08795b02f4db71d99a92424305a"
+  }
+}

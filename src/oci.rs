@@ -10,6 +10,7 @@ pub mod artifact_kind;
 pub mod bundle;
 pub mod description;
 pub mod digest;
+pub mod features;
 pub mod git_provenance;
 pub mod hook;
 pub mod identifier;
@@ -20,7 +21,9 @@ pub mod member_ref;
 pub mod pinned_identifier;
 pub mod reference;
 pub mod release;
+pub mod requires_decl;
 pub mod tag_cache;
+pub mod text;
 
 // Convenience re-exports for the subsystems landing in Phases 2–6.
 // Unused until those call sites exist (see the crate-level Phase 1 note).

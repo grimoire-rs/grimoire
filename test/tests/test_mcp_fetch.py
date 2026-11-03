@@ -18,7 +18,7 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 
-from src.helpers import make_artifact
+from src.helpers import make_artifact, make_dependent
 from src.registry import REGISTRY_HOST
 from src.runner import GrimRunner
 
@@ -73,6 +73,18 @@ def _call_fetch(
     runner: GrimRunner, cwd: Path, arguments: dict, *, offline: bool = False
 ) -> dict:
     """Drive one ``grim_fetch`` tool call, return the raw tool result."""
+    return _call_tool(runner, cwd, "grim_fetch", arguments, offline=offline)
+
+
+def _call_tool(
+    runner: GrimRunner,
+    cwd: Path,
+    tool: str,
+    arguments: dict,
+    *,
+    offline: bool = False,
+) -> dict:
+    """Drive one MCP tool call, return the raw tool result."""
     responses = _drive(
         runner,
         cwd,
@@ -92,7 +104,7 @@ def _call_fetch(
                 "jsonrpc": "2.0",
                 "id": 2,
                 "method": "tools/call",
-                "params": {"name": "grim_fetch", "arguments": arguments},
+                "params": {"name": tool, "arguments": arguments},
             },
         ],
         offline=offline,
@@ -487,3 +499,33 @@ def test_render_rule_carries_support_dir(
     assert (dest / "multi-rule/examples.md").is_file(), (
         "the support dir must land beside the index so relative links resolve"
     )
+
+
+def test_grim_describe_requires(
+    grim_at: Callable[[Path], GrimRunner], project_dir: Path, registry: str
+) -> None:
+    """``grim_describe`` returns the same ``requires`` field as the CLI."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    make_dependent(
+        f"{ns}/dep",
+        "1",
+        "skill",
+        {"dep/SKILL.md": "---\nname: dep\ndescription: d\n---\n# Dep\n"},
+        [("mcp", "gdrive", "reg.example/gdrive:2"), ("skill", "base", "./base:1")],
+    )
+    make_artifact(f"{ns}/plain", "skill", {"plain/SKILL.md": "# plain\n"}, tag="1")
+    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    runner = grim_at(project_dir)
+
+    def describe(name: str) -> dict:
+        call = _call_tool(
+            runner, project_dir, "grim_describe", {"ref": f"{REGISTRY_HOST}/{ns}/{name}:1"}
+        )
+        assert call["isError"] is False, call
+        return json.loads(call["content"][0]["text"])
+
+    assert describe("dep")["requires"] == [
+        {"kind": "skill", "name": "base", "id": "./base:1"},
+        {"kind": "mcp", "name": "gdrive", "id": "reg.example/gdrive:2"},
+    ]
+    assert describe("plain")["requires"] == []

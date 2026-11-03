@@ -24,7 +24,7 @@ use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
 use crate::oci::access::{OciAccess, Operation};
 use crate::oci::annotations::{annotations_for_bundle, annotations_for_mcp};
-use crate::oci::bundle::{BUNDLE_LAYER_MEDIA_TYPE, BundleManifest};
+use crate::oci::bundle::{BUNDLE_LAYER_MEDIA_TYPE, BundleManifest, BundleMember};
 use crate::oci::layer::{self, Compression};
 use crate::oci::manifest::{Descriptor, OciManifest};
 use crate::oci::mcp::MCP_LAYER_MEDIA_TYPE;
@@ -34,7 +34,7 @@ use crate::oci::{Algorithm, ArtifactKind, Digest, Identifier, PinnedIdentifier};
 use crate::resolve::resolve_error::{ResolveError, ResolveErrorKind};
 use anyhow::Context as _;
 
-use super::build::{derive_git_provenance, detect_kind, read_bundle_members, read_mcp_descriptor, validate_and_pack};
+use super::build::{derive_git_provenance, detect_kind, read_bundle_members, read_mcp_source, validate_and_pack};
 
 /// `grim release` arguments.
 #[derive(Debug, Args)]
@@ -67,9 +67,10 @@ pub struct ReleaseArgs {
     #[arg(long, conflicts_with = "force")]
     pub skip_existing: bool,
 
-    /// For a bundle: resolve every floating member tag to a digest and
-    /// freeze it into the published bundle (reproducible, tunnel-safe).
-    /// Ignored for skills and rules.
+    /// Resolve every floating member tag of a bundle, and every `requires`
+    /// reference of any other artifact, to a digest and freeze it into the
+    /// published artifact (reproducible, tunnel-safe). No effect on an
+    /// artifact that declares nothing to freeze.
     #[arg(long)]
     pub pin: bool,
 
@@ -264,6 +265,8 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
         git.as_ref(),
         &args.metadata.defaults(),
     )?;
+    let mut requires = declared_requires(&args.path, kind)?;
+    check_members_resolve(&requires, &repo)?;
 
     let access: Arc<dyn OciAccess> = super::access_seam(ctx)?;
 
@@ -289,6 +292,10 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
     }
     // The lock and `grim build` hash stay on the uncompressed tar; only the pushed blob is encoded.
     let (layer_blob, layer) = layer::encode_layer(&packed.tar, args.compression);
+    if args.pin {
+        super::grim(pin_members(&access, &mut requires, &repo, push.as_ref()).await)?;
+    }
+    let requires_layer = requires_layer(&requires)?;
     if args.compression == Compression::Gzip {
         // Refuse here, before any push or dry-run preview, what `grim install` would later refuse.
         super::grim(layer::check_gzip_readable(
@@ -307,7 +314,9 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
         // in-memory manifest faithful to what is pushed.
         artifact_type: None,
         config_media_type: None,
-        layers: vec![layer],
+        layers: std::iter::once(layer)
+            .chain(requires_layer.as_ref().map(|(_, d)| d.clone()))
+            .collect(),
         annotations: packed.annotations.clone(),
     };
 
@@ -325,6 +334,9 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
     // same `manifest_digest` — nothing observable changes until a tag is
     // moved.
     super::grim(access.push_blob(&push_repo, &layer_blob).await)?;
+    if let Some((bytes, _)) = &requires_layer {
+        super::grim(access.push_blob(&push_repo, bytes).await)?;
+    }
     let manifest_digest = super::grim(access.push_manifest(&push_repo, &manifest).await)?;
 
     // Overwrite guard: a published version is immutable by default. An
@@ -394,17 +406,7 @@ async fn release_bundle(
     // (65), at publish time, not at some consumer's install. A bundle that
     // would only resolve when mirrored *deeper* than its own publish target
     // is broken at its published location, so rejecting it is correct.
-    for member in &members {
-        crate::oci::member_ref::MemberRef::parse(&member.id)
-            .and_then(|r| r.resolve(repo))
-            .map_err(|e| {
-                member_error(
-                    member,
-                    ResolveErrorKind::BundleInvalid(format!("member identifier '{}' does not resolve: {e}", member.id)),
-                )
-            })
-            .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
-    }
+    check_members_resolve(&members, repo)?;
 
     // `--pin`: resolve every floating member to a digest and bake it in, so
     // the published bundle is fully reproducible regardless of later tag
@@ -481,7 +483,8 @@ async fn release_mcp(
     source: &str,
     push: Option<&PushTarget>,
 ) -> anyhow::Result<(ReleaseReport, ExitCode)> {
-    let (name, descriptor) = read_mcp_descriptor(&args.path)?;
+    let (name, descriptor, mut requires) = read_mcp_source(&args.path)?;
+    check_members_resolve(&requires, repo)?;
     let push_repo = push.map_or_else(|| repo.clone(), |p| p.rewrite(repo));
     let pushed_to = push.map(|p| p.rewrite(id).to_string());
 
@@ -500,6 +503,10 @@ async fn release_mcp(
         return Ok((report, ExitCode::Success));
     }
 
+    if args.pin {
+        super::grim(pin_members(&access, &mut requires, repo, push).await)?;
+    }
+    let requires_layer = requires_layer(&requires)?;
     let layer = descriptor
         .to_layer_bytes()
         .map_err(|e| anyhow::anyhow!("failed to serialize MCP layer: {e}"))?;
@@ -517,12 +524,14 @@ async fn release_mcp(
         // No `artifactType`, OCI empty config — see the skill/rule path in `run`.
         artifact_type: None,
         config_media_type: None,
-        layers: vec![Descriptor {
+        layers: std::iter::once(Descriptor {
             digest: layer_digest.clone(),
             media_type: MCP_LAYER_MEDIA_TYPE.to_string(),
             size: layer.len() as u64,
             annotations: None,
-        }],
+        })
+        .chain(requires_layer.as_ref().map(|(_, d)| d.clone()))
+        .collect(),
         annotations,
     };
 
@@ -533,6 +542,9 @@ async fn release_mcp(
     }
 
     super::grim(access.push_blob(&push_repo, &layer).await)?;
+    if let Some((bytes, _)) = &requires_layer {
+        super::grim(access.push_blob(&push_repo, bytes).await)?;
+    }
     let manifest_digest = super::grim(access.push_manifest(&push_repo, &oci_manifest).await)?;
 
     let target = if args.force {
@@ -544,6 +556,74 @@ async fn release_mcp(
 
     let report = ReleaseReport::new(id.to_string(), target.to_string(), tags.to_vec(), true).with_pushed_to(pushed_to);
     Ok((report, ExitCode::Success))
+}
+
+/// The `requires` an artifact source declares, sorted by `(kind, name)`; a
+/// bundle's are its members.
+///
+/// # Errors
+///
+/// The same data errors (65) `grim build` raises for the source.
+pub(crate) fn declared_requires(path: &std::path::Path, kind: ArtifactKind) -> anyhow::Result<Vec<BundleMember>> {
+    use crate::oci::requires_decl::from_metadata;
+    use crate::skill::{SkillError, SkillErrorKind, validate_agent_file, validate_rule_file, validate_skill_dir};
+
+    let decl = |metadata: &std::collections::BTreeMap<String, String>| {
+        super::grim(
+            from_metadata(metadata).map_err(|e| SkillError::new(path, SkillErrorKind::MetadataInvalid(Box::new(e)))),
+        )
+    };
+    match kind {
+        ArtifactKind::Skill => decl(&super::grim(validate_skill_dir(path))?.metadata),
+        ArtifactKind::Rule => decl(&super::grim(validate_rule_file(path))?.metadata),
+        ArtifactKind::Agent => decl(&super::grim(validate_agent_file(path))?.metadata),
+        ArtifactKind::Mcp => Ok(read_mcp_source(path)?.2),
+        ArtifactKind::Bundle => Ok(read_bundle_members(path)?.1),
+        ArtifactKind::Hook => {
+            let manifest_path = path.join(crate::oci::hook::HOOK_MANIFEST_FILE);
+            let source = std::fs::read_to_string(&manifest_path)
+                .map_err(|e| crate::error::Error::from(SkillError::new(&manifest_path, SkillErrorKind::Io(e))))?;
+            super::grim(super::grim(crate::oci::hook::HookManifest::from_toml_str(&source))?.declared_requires())
+        }
+    }
+}
+
+/// Refuse (65) a member whose reference does not resolve against the release
+/// target `repo` (issue #31): an escaping relative ref fails at publish time,
+/// not at some consumer's install. Syntactic only; nothing is fetched.
+fn check_members_resolve(members: &[BundleMember], repo: &Identifier) -> anyhow::Result<()> {
+    for member in members {
+        crate::oci::member_ref::MemberRef::parse(&member.id)
+            .and_then(|r| r.resolve(repo))
+            .map_err(|e| {
+                member_error(
+                    member,
+                    ResolveErrorKind::BundleInvalid(format!("member identifier '{}' does not resolve: {e}", member.id)),
+                )
+            })
+            .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
+    }
+    Ok(())
+}
+
+/// The second layer of a dependent artifact: the canonical members document,
+/// never compressed and without descriptor annotations (a consumer compares
+/// it by digest). `None` when nothing is declared, so a dependency-free
+/// release keeps its single layer.
+fn requires_layer(requires: &[BundleMember]) -> anyhow::Result<Option<(Vec<u8>, Descriptor)>> {
+    if requires.is_empty() {
+        return Ok(None);
+    }
+    let bytes = BundleManifest::new(requires.to_vec())
+        .to_layer_bytes()
+        .map_err(|e| anyhow::anyhow!("failed to serialize requires layer: {e}"))?;
+    let descriptor = Descriptor {
+        digest: Algorithm::Sha256.hash(&bytes),
+        media_type: BUNDLE_LAYER_MEDIA_TYPE.to_string(),
+        size: bytes.len() as u64,
+        annotations: None,
+    };
+    Ok(Some((bytes, descriptor)))
 }
 
 /// Resolve every floating member to a digest in place. A member already
@@ -562,7 +642,7 @@ async fn release_mcp(
 /// (OCI content addressing makes that sound for true mirrors).
 async fn pin_members(
     access: &Arc<dyn OciAccess>,
-    members: &mut [crate::oci::bundle::BundleMember],
+    members: &mut [BundleMember],
     repo: &Identifier,
     push: Option<&PushTarget>,
 ) -> Result<(), ResolveError> {

@@ -29,7 +29,7 @@ use crate::install::installer::client_hosts;
 use crate::install::path_anchor::AnchorRoots;
 use crate::install::target::InstallTarget;
 use crate::oci::ArtifactKind;
-use crate::oci::manifest::OciManifest;
+use crate::oci::manifest::{LayerLayout, OciManifest};
 use crate::oci::mcp::McpDescriptor;
 use crate::store::{BlobStore, GrimPaths};
 
@@ -99,13 +99,18 @@ pub fn pending_outputs(
 }
 
 /// The descriptor of `record`'s pinned MCP artifact, read from the blob store
-/// alone: manifest under the pin digest, then its single layer. `None` on any
+/// alone: manifest under the pin digest, then its content layer. `None` on any
 /// miss — a pin installed before manifests were cached, or a pruned store.
 fn cached_mcp_descriptor(record: &InstallRecord, grim_home: &Path) -> Option<McpDescriptor> {
     let blobs = BlobStore::new(GrimPaths::new(grim_home).blobs_dir());
     let manifest = blobs.get(&record.source.pinned()?.digest()).ok()??;
     let manifest = OciManifest::from_json(&manifest).ok()?;
-    let layer = blobs.get(&manifest.single_layer()?.digest).ok()??;
+    let (LayerLayout::Content(layer) | LayerLayout::ContentWithRequires { content: layer, .. }) =
+        manifest.layout(ArtifactKind::Mcp).ok()?
+    else {
+        return None;
+    };
+    let layer = blobs.get(&layer.digest).ok()??;
     McpDescriptor::from_layer_bytes(&layer).ok()
 }
 

@@ -2586,7 +2586,8 @@ mod tests {
             );
             checked += syncs;
         }
-        assert!(checked >= 6, "expected at least six sync loops, found {checked}");
+        // Four since the TUI delete paths share `uninstall::delete_nodes`.
+        assert!(checked >= 4, "expected at least four sync loops, found {checked}");
     }
 
     #[test]

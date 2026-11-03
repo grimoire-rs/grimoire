@@ -467,9 +467,9 @@ pub struct PublishEntrySpec {
     /// group/project nesting (e.g. GitLab).
     pub repository: Option<String>,
 
-    /// For bundle entries only: freeze every floating member tag to a
-    /// digest in the published bundle (reproducible, tunnel-safe).
-    /// A `pin = true` on a non-bundle entry is a data error (exit 65).
+    /// Freeze every floating reference to a digest in the published
+    /// artifact (reproducible, tunnel-safe): a bundle's members, or the
+    /// `requires` of any other kind. No effect on an entry that declares none.
     #[serde(default)]
     pub pin: bool,
 
@@ -622,7 +622,7 @@ pub(crate) struct PlannedEntry {
     pub path: PathBuf,
     /// The full OCI reference (`registry/namespace/name:tag-or-version`).
     pub reference: String,
-    /// Whether to pin bundle members.
+    /// Whether to freeze bundle members and `requires` references.
     pub pin: bool,
     /// Whether `--announce` writes an index pointer for this entry.
     pub announce: bool,
@@ -1118,6 +1118,7 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
         &args.only,
         channel,
     );
+    let entries = order_by_requires(entries, &args.manifest)?;
 
     // Announce pointers are keyed by entry name alone, so two kinds sharing a
     // name would clobber each other in the index (#71). Checked before the
@@ -1835,14 +1836,9 @@ fn validate_manifest(
 /// Validate a single manifest entry.
 ///
 /// Checks: name charset (CWE-20), strict semver version (ADR D2), source
-/// path exists (ADR D2), and — for non-bundle kinds — that `pin = true`
-/// is absent (pin is bundle-only, ADR D2).
-///
-/// `kind` determines which check applies: bundle entries may carry `pin`;
-/// all other kinds reject it. Skill/rule/agent messages are byte-identical
-/// to the former `validate_entry`; bundle entries now share the longer
-/// semver message (adds the prerelease/v-prefix hint the old
-/// `validate_bundle_entry` lacked — no test asserted the shorter text).
+/// path exists (ADR D2). `pin` is accepted on every kind: it freezes a
+/// bundle's members or an artifact's `requires`, and does nothing for an
+/// entry with neither.
 fn validate_entry(
     name: &str,
     spec: &PublishEntrySpec,
@@ -1876,18 +1872,6 @@ fn validate_entry(
             format!(
                 "entry '{name}': version '{version}' is not strict semver (X.Y.Z required); \
                  prerelease markers are not allowed (a leading version_prefix is stripped before this check)"
-            ),
-        ));
-    }
-
-    // pin=true rejected for non-bundle entries only (ADR D2).
-    if spec.pin && kind != ArtifactKind::Bundle {
-        return Err(data_error_at(
-            manifest_path,
-            format!(
-                "entry '{}': pin=true is only valid on bundle entries (not {})",
-                name,
-                kind_str(kind)
             ),
         ));
     }
@@ -1971,6 +1955,74 @@ fn conventional_source_path(name: &str, kind: ArtifactKind, manifest_dir: &std::
         ArtifactKind::Bundle => manifest_dir.join("bundles").join(format!("{name}.toml")),
         ArtifactKind::Mcp => manifest_dir.join("mcp").join(format!("{name}.toml")),
     }
+}
+
+/// Order `entries` so each follows the same-manifest entries it requires.
+///
+/// Stable: with no such edge the input order (the fixed kind order, then name)
+/// is kept, and among entries ready at once the earliest wins. A source that
+/// does not parse contributes no edge here; its own release reports the error
+/// when its turn comes.
+///
+/// # Errors
+///
+/// Data error (65) when the entries require each other in a cycle, before
+/// anything is pushed.
+fn order_by_requires(entries: Vec<PlannedEntry>, manifest_path: &std::path::Path) -> anyhow::Result<Vec<PlannedEntry>> {
+    use crate::oci::member_ref::MemberRef;
+
+    let targets: Vec<Option<crate::oci::Identifier>> = entries
+        .iter()
+        .map(|e| {
+            crate::oci::Identifier::parse(&e.reference)
+                .ok()
+                .map(|id| id.without_tag())
+        })
+        .collect();
+    let deps: Vec<Vec<usize>> = entries
+        .iter()
+        .zip(&targets)
+        .enumerate()
+        .map(|(i, (entry, target))| {
+            let Some(target) = target else { return Vec::new() };
+            let declared = super::release::declared_requires(&entry.path, entry.kind).unwrap_or_default();
+            declared
+                .iter()
+                .filter_map(|m| {
+                    let resolved = MemberRef::parse(&m.id).and_then(|r| r.resolve(target)).ok()?;
+                    (0..entries.len()).find(|&j| {
+                        j != i
+                            && entries[j].kind == m.kind
+                            && targets[j]
+                                .as_ref()
+                                .is_some_and(|t| t.registry_repository() == resolved.registry_repository())
+                    })
+                })
+                .collect()
+        })
+        .collect();
+
+    let mut done = vec![false; entries.len()];
+    let mut order = Vec::with_capacity(entries.len());
+    while order.len() < entries.len() {
+        let Some(next) = (0..entries.len()).find(|&i| !done[i] && deps[i].iter().all(|&j| done[j])) else {
+            let stuck: Vec<String> = (0..entries.len())
+                .filter(|&i| !done[i])
+                .map(|i| format!("{} '{}'", kind_str(entries[i].kind), entries[i].name))
+                .collect();
+            return Err(data_error_at(
+                manifest_path,
+                format!(
+                    "publish entries cannot be ordered, they require each other in a cycle: {}",
+                    stuck.join(", ")
+                ),
+            ));
+        };
+        done[next] = true;
+        order.push(next);
+    }
+    let mut slots: Vec<Option<PlannedEntry>> = entries.into_iter().map(Some).collect();
+    Ok(order.into_iter().filter_map(|i| slots[i].take()).collect())
 }
 
 /// Build the ordered list of entries to publish from a validated manifest.
@@ -2879,64 +2931,28 @@ mod tests {
         );
     }
 
-    // ── validate_manifest: pin=true on non-bundle rejected ────────────────
+    // ── validate_manifest: pin=true is accepted on every kind ─────────────
 
     #[test]
-    fn validate_manifest_rejects_pin_on_skill() {
-        // `pin = true` is bundle-only (ADR D2)
+    fn validate_manifest_accepts_pin_on_skill_rule_and_agent() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         write(
             &dir.join("skills/my-skill/SKILL.md"),
             "---\nname: my-skill\ndescription: d.\n---\n",
         );
-        // `pin` on PublishEntrySpec defaults false and is accepted by serde;
-        // validate_manifest must catch it on non-bundle entries
-        let mut manifest: PublishManifest =
-            toml::from_str("registry = \"r.example\"\n\n[skills.my-skill]\nversion = \"1.0.0\"\n").unwrap();
-        // Manually force pin=true on the skill entry (bypasses serde
-        // deny_unknown_fields since pin is a real field)
-        manifest.skills.get_mut("my-skill").unwrap().pin = true;
-        let err = validate_manifest(&manifest, dir, Path::new("test.toml"), &[]);
-        assert!(
-            err.is_err(),
-            "pin=true on a skill must be rejected (ADR D2 bundle-only)"
-        );
-        let msg = format!("{:#}", err.unwrap_err());
-        assert!(
-            msg.contains("pin") || msg.contains("bundle"),
-            "error must mention pin/bundle, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn validate_manifest_rejects_pin_on_rule() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path();
         write(&dir.join("rules/my-rule.md"), "---\npaths: ['*.rs']\n---\nbody\n");
-        let mut manifest: PublishManifest =
-            toml::from_str("registry = \"r.example\"\n\n[rules.my-rule]\nversion = \"1.0.0\"\n").unwrap();
-        manifest.rules.get_mut("my-rule").unwrap().pin = true;
-        let err = validate_manifest(&manifest, dir, Path::new("test.toml"), &[]);
-        assert!(err.is_err(), "pin=true on a rule must be rejected (ADR D2 bundle-only)");
-    }
-
-    #[test]
-    fn validate_manifest_rejects_pin_on_agent() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path();
         write(
             &dir.join("agents/my-agent.md"),
             "---\nname: my-agent\ndescription: d.\n---\nbody\n",
         );
-        let mut manifest: PublishManifest =
-            toml::from_str("registry = \"r.example\"\n\n[agents.my-agent]\nversion = \"1.0.0\"\n").unwrap();
-        manifest.agents.get_mut("my-agent").unwrap().pin = true;
-        let err = validate_manifest(&manifest, dir, Path::new("test.toml"), &[]);
-        assert!(
-            err.is_err(),
-            "pin=true on an agent must be rejected (ADR D2 bundle-only)"
-        );
+        let manifest: PublishManifest = toml::from_str(
+            "registry = \"r.example\"\n\n[skills.my-skill]\nversion = \"1.0.0\"\npin = true\n\n\
+             [rules.my-rule]\nversion = \"1.0.0\"\npin = true\n\n\
+             [agents.my-agent]\nversion = \"1.0.0\"\npin = true\n",
+        )
+        .unwrap();
+        validate_manifest(&manifest, dir, Path::new("test.toml"), &[]).expect("pin = true is valid on any kind");
     }
 
     #[test]
@@ -3537,24 +3553,6 @@ mod tests {
         write(&dir.join("skills/s/SKILL.md"), "---\nname: s\ndescription: d.\n---\n");
         let manifest: PublishManifest =
             toml::from_str("registry = \"r.example\"\n\n[skills.s]\nversion = \"1.0\"\n").unwrap();
-        let err = validate_manifest(&manifest, dir, Path::new("test.toml"), &[]).unwrap_err();
-        assert_eq!(
-            crate::error::classify_error(&err),
-            crate::cli::exit_code::ExitCode::DataError
-        );
-    }
-
-    #[test]
-    fn validate_manifest_pin_on_skill_classifies_to_data_error() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path();
-        write(
-            &dir.join("skills/my-skill/SKILL.md"),
-            "---\nname: my-skill\ndescription: d.\n---\n",
-        );
-        let mut manifest: PublishManifest =
-            toml::from_str("registry = \"r.example\"\n\n[skills.my-skill]\nversion = \"1.0.0\"\n").unwrap();
-        manifest.skills.get_mut("my-skill").unwrap().pin = true;
         let err = validate_manifest(&manifest, dir, Path::new("test.toml"), &[]).unwrap_err();
         assert_eq!(
             crate::error::classify_error(&err),

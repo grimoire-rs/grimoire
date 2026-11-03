@@ -181,7 +181,7 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
         &mut state,
         &scope.roots,
         scope.config_dir(),
-        args.force,
+        args.force.into(),
         InstallIntent::Declared,
         progress.as_ref(),
     )
@@ -588,6 +588,7 @@ async fn refresh_dev_installs(
                 hash: new_hash,
             },
             bundles: Vec::new(),
+            requires: Vec::new(),
         };
         match rec.kind {
             ArtifactKind::Skill => synth.skills.push(entry),
@@ -603,7 +604,7 @@ async fn refresh_dev_installs(
             state,
             &scope.roots,
             scope.config_dir(),
-            true,
+            crate::install::installer::ForceScope::All,
             InstallIntent::Dev,
             &crate::install::progress::SilentProgress,
         )

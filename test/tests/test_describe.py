@@ -7,7 +7,8 @@ import json
 import uuid
 from pathlib import Path
 
-from src.helpers import make_artifact, make_description
+from src.helpers import make_artifact, make_dependent, make_description, tar_of
+from src.registry import LAYER_MEDIA_TYPE, push_manifest
 
 
 SKILL_DOC = (
@@ -183,3 +184,119 @@ def test_describe_unknown_flag_exits_64_without_json(
     assert result.returncode == 64
     assert result.stdout == "", f"no JSON document before the parse boundary: {result.stdout!r}"
     assert result.stderr.strip(), "clap usage message on stderr"
+
+
+REQUIRES_LAYER_TYPE = "application/vnd.grimoire.bundle.v1+json"
+
+
+def _push_with_requires_layer(repo: str, layer: bytes) -> str:
+    """Push a skill whose requires layer is the raw ``layer`` bytes."""
+    push_manifest(
+        repo,
+        "1",
+        [(LAYER_MEDIA_TYPE, tar_of({"req/SKILL.md": SKILL_DOC})), (REQUIRES_LAYER_TYPE, layer)],
+        {"com.grimoire.kind": "skill"},
+    )
+    return f"{repo}:1"
+
+
+def test_requires_field(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Sorted by (kind, name), ids exactly as published (a relative id stays relative)."""
+    # Written out of order on purpose: the report sorts, it does not trust the layer.
+    unsorted = {
+        "members": [
+            {"kind": "mcp", "name": "gdrive", "id": "reg.example/gdrive:2"},
+            {"kind": "skill", "name": "zeta", "id": "../zeta:1"},
+            {"kind": "skill", "name": "alpha", "id": "./alpha:1"},
+        ]
+    }
+    ref = _push_with_requires_layer(f"{unique_repo}/req", json.dumps(unsorted).encode())
+    runner = grim_at(project_dir)
+
+    doc = runner.json("describe", f"{registry}/{ref}")
+
+    assert doc["requires"] == [
+        {"kind": "skill", "name": "alpha", "id": "./alpha:1"},
+        {"kind": "skill", "name": "zeta", "id": "../zeta:1"},
+        {"kind": "mcp", "name": "gdrive", "id": "reg.example/gdrive:2"},
+    ]
+    plain = runner.plain("describe", f"{registry}/{ref}").stdout
+    row = next(line for line in plain.splitlines() if line.startswith("requires"))
+    assert row.split() == ["requires", "skill/alpha,skill/zeta,mcp/gdrive"]
+
+
+def test_requires_empty_without_layer(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    ref = _publish(registry, unique_repo)
+    runner = grim_at(project_dir)
+
+    assert runner.json("describe", ref)["requires"] == []
+    plain = runner.plain("describe", ref).stdout
+    row = next(line for line in plain.splitlines() if line.startswith("requires"))
+    assert row.split() == ["requires", "-"]
+
+
+def test_requires_null_for_foreign_manifest(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    repo = f"{unique_repo}/mystery/opaque"
+    make_artifact(repo, "widget", {"opaque.md": "opaque\n"}, tag="latest")
+    runner = grim_at(project_dir)
+
+    doc = runner.json("describe", f"{registry}/{repo}:latest")
+
+    assert doc["kind"] is None
+    assert "requires" in doc and doc["requires"] is None
+
+
+def test_requires_layer_invalid_fails(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A present but unusable requires layer fails the whole describe with 65."""
+    good = {"members": [{"kind": "skill", "name": "base", "id": "./base:1"}]}
+    cases = {
+        "good": json.dumps(good).encode(),
+        "notjson": b"not json",
+        "unknownfield": b'{"members": [], "extra": 1}',
+        "badname": json.dumps(
+            {"members": [{"kind": "skill", "name": "../evil", "id": "./x:1"}]}
+        ).encode(),
+        "badid": json.dumps(
+            {"members": [{"kind": "skill", "name": "ok", "id": "not a ref"}]}
+        ).encode(),
+        "oversize": b" " * (512 * 1024 + 1),
+    }
+    runner = grim_at(project_dir)
+    refs = {
+        name: f"{registry}/{_push_with_requires_layer(f'{unique_repo}/{name}', layer)}"
+        for name, layer in cases.items()
+    }
+
+    assert runner.json("describe", refs.pop("good"))["requires"] == good["members"]
+    for name, ref in refs.items():
+        result = runner.run("--format", "json", "describe", ref, check=False)
+        assert result.returncode == 65, (name, result.stdout, result.stderr)
+        error = json.loads(result.stdout)["error"]
+        assert error["exit"] == 65, (name, error)
+        assert "digest" not in json.loads(result.stdout), "never a partial report"
+
+
+def test_requires_from_make_dependent(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    published = make_dependent(
+        f"{unique_repo}/dep",
+        "1",
+        "skill",
+        {"dep/SKILL.md": SKILL_DOC},
+        [("skill", "base", "./base:1")],
+    )
+    runner = grim_at(project_dir)
+
+    doc = runner.json("describe", published.fq)
+
+    assert doc["requires"] == [{"kind": "skill", "name": "base", "id": "./base:1"}]
+    assert doc["compression"] == "none"

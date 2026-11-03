@@ -172,6 +172,16 @@
       "description": "Artifact name; must equal the directory stem (the agent-kind\nprecedent).",
       "type": "string"
     },
+    "requires": {
+      "additionalProperties": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "type": "object"
+      },
+      "description": "Artifacts this hook requires: `[requires.<table>]` tables of binding\nname to member reference (`skills`, `rules`, `agents`, `mcp`, `hooks`,\n`bundles`). Read by `grim build` and `grim release`; the consumer parser\naccepts and ignores it, because the resolver reads the published\nrequires layer instead.",
+      "type": "object"
+    },
     "schema": {
       "description": "Manifest + envelope contract version; [`HOOK_SCHEMA_VERSION`] today.",
       "format": "uint32",

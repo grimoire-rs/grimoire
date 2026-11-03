@@ -125,7 +125,7 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
             scope.scope,
             &scope.workspace,
             &scope.config_path,
-            args.force,
+            args.force.into(),
             InstallIntent::Declared,
             progress.as_ref(),
         )
@@ -311,6 +311,7 @@ async fn dev_install(
             hash,
         },
         bundles: Vec::new(),
+        requires: Vec::new(),
     };
     let mut synth = crate::lock::grimoire_lock::GrimoireLock {
         hooks: vec![],
@@ -370,7 +371,7 @@ async fn dev_install(
             scope.scope,
             &scope.workspace,
             &scope.config_path,
-            args.force,
+            args.force.into(),
             InstallIntent::Dev,
             progress.as_ref(),
         )

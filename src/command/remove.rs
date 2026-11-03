@@ -152,12 +152,17 @@ pub(crate) fn drop_from_lock(
 ) -> UndeclareOutcome {
     use crate::lock::effective_set::effective_set;
 
-    let (Some(before), Some(after)) = (
-        effective_set(set_before, &previous.bundles),
-        effective_set(set_after, &previous.bundles),
-    ) else {
-        return legacy_drop_from_lock(previous, kind, name, set_before, set_after);
+    let (Some(before), Some(after)) = (effective_set(set_before, previous), effective_set(set_after, previous)) else {
+        // A dependency-bearing lock whose closure cannot be followed offline
+        // must not take the legacy path: it would drop or restamp entries the
+        // graph still needs. A dependency-free lock keeps it unchanged.
+        return if has_dependency_data(previous) {
+            target_only_drop(previous, kind, name, set_after)
+        } else {
+            legacy_drop_from_lock(previous, kind, name, set_before, set_after)
+        };
     };
+    let dependency_bearing = has_dependency_data(previous);
 
     let mut lock = previous.clone();
     let mut stale = false;
@@ -173,8 +178,21 @@ pub(crate) fn drop_from_lock(
                 // remove never silently reaps unrelated drift.
                 None => !(before.contains_key(&key) || (entry.kind == kind && entry.name == name)),
                 Some(crate::lock::effective_set::Origin::Direct(_)) => true,
-                Some(crate::lock::effective_set::Origin::Bundles { id, contributors }) => {
-                    if entry.bundles.is_empty() {
+                Some(crate::lock::effective_set::Origin::Implied {
+                    id,
+                    contributors,
+                    required_by,
+                }) => {
+                    // On a dependency-bearing lock an entry that was already
+                    // not directly declared is dependency-only: nothing was
+                    // unmasked, so it is kept as locked.
+                    let was_direct = matches!(before.get(&key), Some(crate::lock::effective_set::Origin::Direct(_)));
+                    if dependency_bearing && !was_direct {
+                        if !contributors.is_empty() {
+                            entry.bundles = contributors.clone();
+                        }
+                        true
+                    } else if entry.bundles.is_empty() {
                         // The removed direct declaration unmasked the
                         // bundle-provided variant.
                         let direct_id = direct_id_of(set_before, key.0, &key.1);
@@ -185,7 +203,7 @@ pub(crate) fn drop_from_lock(
                             stale = true;
                             // Use the first contributor's repo+tag to name the bundle
                             // in the explanatory note. contributors is non-empty when
-                            // Origin::Bundles is returned (the resolver always records
+                            // Origin::Implied is returned (the resolver always records
                             // at least the declaring bundle).
                             let (bundle_repo, bundle_tag) = contributors
                                 .first()
@@ -196,10 +214,21 @@ pub(crate) fn drop_from_lock(
                             } else {
                                 format!("{bundle_repo}:{bundle_tag}")
                             };
-                            notes.push(format!(
-                                "{} '{}' is now provided by bundle '{}' at a different version; the lock is marked stale — run `grim lock` to pin the bundle's version",
-                                key.0, key.1, bundle_label
-                            ));
+                            if contributors.is_empty() {
+                                let parents: Vec<String> =
+                                    required_by.iter().map(|(k, n)| format!("{k}/{n}")).collect();
+                                notes.push(format!(
+                                    "{} '{}' is now required by {} at a different version; the lock is marked stale — run `grim lock` to pin it",
+                                    key.0,
+                                    key.1,
+                                    parents.join(", ")
+                                ));
+                            } else {
+                                notes.push(format!(
+                                    "{} '{}' is now provided by bundle '{}' at a different version; the lock is marked stale — run `grim lock` to pin the bundle's version",
+                                    key.0, key.1, bundle_label
+                                ));
+                            }
                             false
                         }
                     } else {
@@ -208,7 +237,8 @@ pub(crate) fn drop_from_lock(
                     }
                 }
                 Some(crate::lock::effective_set::Origin::Conflicted) => {
-                    if entry.bundles.is_empty() {
+                    let was_direct = matches!(before.get(&key), Some(crate::lock::effective_set::Origin::Direct(_)));
+                    if entry.bundles.is_empty() && (was_direct || !dependency_bearing) {
                         // Removal unmasked disagreeing bundle members; the
                         // next `grim lock` fails closed with the conflict.
                         stale = true;
@@ -246,8 +276,11 @@ pub(crate) fn drop_from_lock(
         set_after
             .bundles
             .get(&b.name)
-            .and_then(crate::config::declaration::DeclaredSource::identifier)
-            .is_some_and(|id| crate::lock::effective_set::snapshot_matches(&b.name, id, b))
+            .is_some_and(|declared| match declared.identifier() {
+                Some(id) => crate::lock::effective_set::snapshot_matches(&b.name, id, b),
+                // A path binding keeps its path snapshot.
+                None => b.path().is_some(),
+            })
     });
 
     if !stale {
@@ -256,7 +289,52 @@ pub(crate) fn drop_from_lock(
     UndeclareOutcome { lock, notes }
 }
 
-/// The direct identifier `set` declares for `(kind, name)`, if any.
+/// Whether the lock carries any dependency data: a `requires` edge or a
+/// transitively pulled-in bundle. Such a lock is never handled by the
+/// pre-dependency fallbacks.
+pub(crate) fn has_dependency_data(lock: &GrimoireLock) -> bool {
+    lock.iter_artifacts().any(|a| !a.requires.is_empty()) || lock.bundles.iter().any(|b| b.transitive)
+}
+
+/// The closure of a dependency-bearing lock cannot be computed offline, so
+/// only the target leaves the lock: its own entry, or a bundle's snapshot.
+/// Every other entry is written untouched and the declaration hash is not
+/// restamped, so the lock stays honestly stale until `grim lock`.
+fn target_only_drop(
+    previous: &GrimoireLock,
+    kind: ArtifactKind,
+    name: &str,
+    set_after: &crate::config::declaration::DesiredSet,
+) -> UndeclareOutcome {
+    let mut lock = previous.clone();
+    match kind {
+        ArtifactKind::Skill => lock.skills.retain(|a| a.name != name),
+        ArtifactKind::Rule => lock.rules.retain(|a| a.name != name),
+        ArtifactKind::Agent => lock.agents.retain(|a| a.name != name),
+        ArtifactKind::Mcp => lock.mcp.retain(|a| a.name != name),
+        ArtifactKind::Hook => lock.hooks.retain(|a| a.name != name),
+        ArtifactKind::Bundle => lock.bundles.retain(|b| b.name != name),
+    }
+    let direct = |a: &LockedArtifact| match a.kind {
+        ArtifactKind::Skill => set_after.skills.contains_key(&a.name),
+        ArtifactKind::Rule => set_after.rules.contains_key(&a.name),
+        ArtifactKind::Agent => set_after.agents.contains_key(&a.name),
+        ArtifactKind::Mcp => set_after.mcp.contains_key(&a.name),
+        ArtifactKind::Hook => set_after.hooks.contains_key(&a.name),
+        ArtifactKind::Bundle => false,
+    };
+    let kept = lock.iter_artifacts().filter(|a| !direct(a)).count();
+    let notes = if kept == 0 {
+        Vec::new()
+    } else {
+        vec![format!(
+            "kept {kept} artifacts whose dependency graph could not be computed offline; run grim lock"
+        )]
+    };
+    UndeclareOutcome { lock, notes }
+}
+
+/// The direct identifier `set` declares for `(kind, name)`, if any."""
 fn direct_id_of(
     set: &crate::config::declaration::DesiredSet,
     kind: ArtifactKind,
@@ -550,6 +628,7 @@ mod tests {
                 name: member.0.to_string(),
                 id: member.1.to_string(),
             }],
+            transitive: false,
         }
     }
 
@@ -611,6 +690,7 @@ mod tests {
                     id: (*id).to_string(),
                 })
                 .collect(),
+            transitive: false,
         }
     }
 
@@ -862,7 +942,7 @@ mod tests {
 
     #[test]
     fn remove_bundle_via_sets_evicts_its_mcp_member() {
-        // The `Origin::Bundles` re-derivation reaches lock.mcp too: removing
+        // The `Origin::Implied` re-derivation reaches lock.mcp too: removing
         // the only bundle that provided an mcp member must evict it.
         let mut prev = lock_of(vec![]);
         prev.mcp = vec![locked_mcp("grim", &[("localhost:5000/acme/stack", "1")])];
@@ -883,6 +963,7 @@ mod tests {
                 name: "grim".to_string(),
                 id: "localhost:5000/acme/grim:1".to_string(),
             }],
+            transitive: false,
         }];
         let before = set_of(&[], &[("stack", "localhost:5000/acme/stack:1")]);
         let after_set = set_of(&[], &[]);
@@ -1131,6 +1212,7 @@ mod tests {
                 name: "code-review".to_string(),
                 id: "localhost:5000/code-review:1".to_string(),
             }],
+            transitive: false,
         }];
 
         let mut before = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
@@ -1209,6 +1291,7 @@ mod tests {
                 name: "code-review".to_string(),
                 id: "localhost:5000/code-review:1".to_string(),
             }],
+            transitive: false,
         };
         prev.bundles = vec![path_snapshot("x"), path_snapshot("y")];
 

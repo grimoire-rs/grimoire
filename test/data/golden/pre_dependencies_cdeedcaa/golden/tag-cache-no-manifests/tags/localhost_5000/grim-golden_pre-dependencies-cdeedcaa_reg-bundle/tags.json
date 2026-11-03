@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "registry": "localhost:5000",
+  "repository": "grim-golden/pre-dependencies-cdeedcaa/reg-bundle",
+  "tags": {
+    "1.0.0": "sha256:cf8b6fd940478f38f555bb28485b03fe6ed0ea21a24b12fd11b55683e41af93d"
+  }
+}

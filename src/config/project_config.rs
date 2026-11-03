@@ -772,7 +772,7 @@ pub struct BundleMetadata {
 /// A parsed bundle source: validated members plus catalog metadata.
 ///
 /// The source is `grimoire.toml`-shaped — its
-/// `[skills]`/`[rules]`/`[agents]`/`[hooks]`/`[mcp]` tables are the members —
+/// `[skills]`/`[rules]`/`[agents]`/`[hooks]`/`[mcp]`/`[bundles]` tables are the members —
 /// with
 /// optional top-level `summary`/`keywords`/`description`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -805,6 +805,9 @@ pub struct BundleSource {
     /// MCP server members, name → validated member reference. The name is
     /// the key the descriptor registers under in each client's MCP config.
     pub mcp: BTreeMap<String, MemberRef>,
+    /// Bundle members, name → validated member reference: a bundle that groups
+    /// another bundle. The resolver expands it like any other member.
+    pub bundles: BTreeMap<String, MemberRef>,
     /// Catalog metadata for the bundle artifact.
     pub metadata: BundleMetadata,
 }
@@ -847,6 +850,8 @@ struct RawBundleSource {
     #[serde(default)]
     mcp: BTreeMap<String, String>,
     #[serde(default)]
+    bundles: BTreeMap<String, String>,
+    #[serde(default)]
     summary: Option<String>,
     #[serde(default)]
     keywords: Option<String>,
@@ -881,12 +886,14 @@ fn parse_bundle_source(s: &str, path: PathBuf) -> Result<BundleSource, ConfigErr
     let agents = parse_member_map(&raw.agents, &path)?;
     let hooks = parse_member_map(&raw.hooks, &path)?;
     let mcp = parse_member_map(&raw.mcp, &path)?;
+    let bundles = parse_member_map(&raw.bundles, &path)?;
     Ok(BundleSource {
         skills,
         rules,
         agents,
         hooks,
         mcp,
+        bundles,
         metadata: BundleMetadata {
             summary: raw.summary,
             keywords: raw.keywords,
@@ -2160,6 +2167,25 @@ sibling = "./hooks/sibling:2"
             "a registry-less hook member must fail like every other kind, got {:?}",
             err.kind
         );
+    }
+
+    #[test]
+    fn bundle_source_nested_bundle_member_takes_latest_and_relative_forms() {
+        let src = BundleSource::from_toml_str(
+            r#"
+[bundles]
+bare = "ghcr.io/acme/bundles/bare"
+sibling = "./bundles/sibling:2"
+"#,
+        )
+        .expect("a bundle source may list bundle members");
+        assert_eq!(
+            src.bundles.get("bare").unwrap().to_string(),
+            "ghcr.io/acme/bundles/bare:latest"
+        );
+        assert_eq!(src.bundles.get("sibling").unwrap().to_string(), "./bundles/sibling:2");
+        let err = BundleSource::from_toml_str("[bundles]\nx = \"bundles/x:0\"\n").expect_err("bare ref rejected");
+        assert!(matches!(err.kind, ConfigErrorKind::ArtifactValueMissingRegistry { .. }));
     }
 
     #[test]

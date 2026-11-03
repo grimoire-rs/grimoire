@@ -14,7 +14,9 @@
 
 use std::collections::BTreeMap;
 
-use super::Digest;
+use super::bundle::BUNDLE_LAYER_MEDIA_TYPE;
+use super::features::ArtifactFeatureError;
+use super::{ArtifactKind, Digest};
 
 /// The OCI empty config descriptor media type. Stamped on every pushed
 /// manifest's config descriptor (the blob is the byte-identical `{}` the OCI
@@ -71,7 +73,59 @@ pub struct OciManifest {
     pub annotations: BTreeMap<String, String>,
 }
 
+/// The accepted shapes of a manifest's layers (`OciManifest::layout`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayerLayout<'a> {
+    /// One content layer.
+    Content(&'a Descriptor),
+    /// A content layer and a requires layer (the bundle members document).
+    ContentWithRequires {
+        content: &'a Descriptor,
+        requires: &'a Descriptor,
+    },
+    /// A bundle's single members layer.
+    BundleMembers(&'a Descriptor),
+}
+
 impl OciManifest {
+    /// Classify the layers for an artifact of `kind`, by media type.
+    ///
+    /// Accepts a bundle's one members layer, or for any other kind one
+    /// content layer plus at most one requires layer (the bundle members
+    /// type), in either order. Anything else is a format this grim does not
+    /// know. The error carries no reference; name it with
+    /// [`ArtifactFeatureError::for_reference`].
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactFeatureError::UnsupportedLayout`] for every other shape:
+    /// zero, three or more layers, a two-layer bundle, two content or two
+    /// requires layers, or a non-bundle whose only layer is a requires layer.
+    pub fn layout(&self, kind: ArtifactKind) -> Result<LayerLayout<'_>, ArtifactFeatureError> {
+        let is_requires = |layer: &Descriptor| layer.media_type == BUNDLE_LAYER_MEDIA_TYPE;
+        let layout = match (kind, self.layers.as_slice()) {
+            // The members layer's type is not checked: shipped bundles were
+            // read by position, and refusing one now would break its installs.
+            (ArtifactKind::Bundle, [members]) => Some(LayerLayout::BundleMembers(members)),
+            (ArtifactKind::Bundle, _) => None,
+            (_, [content]) if !is_requires(content) => Some(LayerLayout::Content(content)),
+            (_, [first, second]) => match (is_requires(first), is_requires(second)) {
+                (false, true) => Some(LayerLayout::ContentWithRequires {
+                    content: first,
+                    requires: second,
+                }),
+                (true, false) => Some(LayerLayout::ContentWithRequires {
+                    content: second,
+                    requires: first,
+                }),
+                _ => None,
+            },
+            _ => None,
+        };
+        layout
+            .ok_or_else(|| ArtifactFeatureError::unsupported_layout(self.layers.iter().map(|l| l.media_type.as_str())))
+    }
+
     /// The single artifact layer, when the manifest carries exactly one.
     ///
     /// Grimoire artifacts are single-layer by construction; callers that
@@ -270,5 +324,129 @@ mod tests {
         ]));
         let manifest = OciManifest::try_from(oci).expect("converts");
         assert!(manifest.single_layer().is_none());
+    }
+    // ── layout ──
+
+    const TAR: &str = "application/vnd.grimoire.artifact.layer.v1.tar";
+    const GZIP: &str = "application/vnd.grimoire.artifact.layer.v1.tar+gzip";
+
+    fn manifest_of(media_types: &[&str]) -> OciManifest {
+        let digest = Algorithm::Sha256.hash(b"x");
+        OciManifest {
+            media_type: None,
+            artifact_type: None,
+            config_media_type: None,
+            layers: media_types
+                .iter()
+                .map(|m| Descriptor {
+                    digest: digest.clone(),
+                    media_type: (*m).to_string(),
+                    size: 1,
+                    annotations: None,
+                })
+                .collect(),
+            annotations: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn layout_accepts_one_layer_for_every_non_bundle_kind() {
+        let m = manifest_of(&[TAR]);
+        for kind in [
+            ArtifactKind::Skill,
+            ArtifactKind::Rule,
+            ArtifactKind::Agent,
+            ArtifactKind::Mcp,
+            ArtifactKind::Hook,
+        ] {
+            assert_eq!(m.layout(kind).unwrap(), LayerLayout::Content(&m.layers[0]), "{kind}");
+        }
+    }
+
+    #[test]
+    fn layout_reads_a_bundles_single_layer_as_its_members() {
+        let m = manifest_of(&[BUNDLE_LAYER_MEDIA_TYPE]);
+        assert_eq!(
+            m.layout(ArtifactKind::Bundle).unwrap(),
+            LayerLayout::BundleMembers(&m.layers[0])
+        );
+    }
+
+    #[test]
+    fn layout_accepts_content_then_requires_for_a_non_bundle_kind() {
+        for content in [TAR, GZIP, "application/json"] {
+            let m = manifest_of(&[content, BUNDLE_LAYER_MEDIA_TYPE]);
+            assert_eq!(
+                m.layout(ArtifactKind::Skill).unwrap(),
+                LayerLayout::ContentWithRequires {
+                    content: &m.layers[0],
+                    requires: &m.layers[1],
+                },
+                "{content}"
+            );
+        }
+    }
+
+    /// Layers are picked by media type: a tool that writes the requires
+    /// layer first still yields the same content and requires.
+    #[test]
+    fn layout_accepts_requires_then_content_for_a_non_bundle_kind() {
+        for content in [TAR, GZIP, "application/json"] {
+            let m = manifest_of(&[BUNDLE_LAYER_MEDIA_TYPE, content]);
+            assert_eq!(
+                m.layout(ArtifactKind::Skill).unwrap(),
+                LayerLayout::ContentWithRequires {
+                    content: &m.layers[1],
+                    requires: &m.layers[0],
+                },
+                "{content}"
+            );
+        }
+    }
+
+    #[test]
+    fn layout_refuses_every_other_shape() {
+        let cases: [(ArtifactKind, &[&str]); 7] = [
+            (ArtifactKind::Skill, &[]),
+            (
+                ArtifactKind::Skill,
+                &[TAR, BUNDLE_LAYER_MEDIA_TYPE, BUNDLE_LAYER_MEDIA_TYPE],
+            ),
+            (ArtifactKind::Skill, &[TAR, TAR, BUNDLE_LAYER_MEDIA_TYPE]),
+            (
+                ArtifactKind::Bundle,
+                &[BUNDLE_LAYER_MEDIA_TYPE, BUNDLE_LAYER_MEDIA_TYPE],
+            ),
+            (ArtifactKind::Bundle, &[TAR, BUNDLE_LAYER_MEDIA_TYPE]),
+            // A requires layer with no content is not an artifact of this kind.
+            (ArtifactKind::Skill, &[BUNDLE_LAYER_MEDIA_TYPE]),
+            (ArtifactKind::Skill, &[TAR, TAR]),
+        ];
+        for (kind, layers) in cases {
+            let m = manifest_of(layers);
+            let err = m.layout(kind).unwrap_err();
+            assert!(
+                matches!(err, ArtifactFeatureError::UnsupportedLayout { layer_count, .. } if layer_count == layers.len()),
+                "{kind} {layers:?}"
+            );
+        }
+        // Two requires layers and no content layer.
+        let two = manifest_of(&[BUNDLE_LAYER_MEDIA_TYPE, BUNDLE_LAYER_MEDIA_TYPE]);
+        assert!(two.layout(ArtifactKind::Skill).is_err());
+    }
+
+    #[test]
+    fn layout_refusal_lists_the_media_types() {
+        let err = manifest_of(&[TAR, TAR, GZIP])
+            .layout(ArtifactKind::Skill)
+            .unwrap_err()
+            .for_reference("ghcr.io/acme/x:1");
+        let text = err.to_string();
+        assert!(
+            text.starts_with("ghcr.io/acme/x:1: manifest layer layout is not supported by this grim (3 layers: "),
+            "{text}"
+        );
+        assert!(text.contains(GZIP), "{text}");
+        assert!(text.contains("update grim (this is grim "), "{text}");
     }
 }

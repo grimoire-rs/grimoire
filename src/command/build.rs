@@ -222,6 +222,7 @@ fn pack_hook_dir(
     // length cap, tier/event validity, unique ids, reserved client-name keys,
     // `name` == directory stem, and the reserved `bin`/`dispatch.json` names.
     super::grim(manifest.validate(path))?;
+    validate_requires(path, ArtifactKind::Hook, &manifest.name, manifest.declared_requires())?;
     // The same deterministic directory packer a skill uses: a hook genuinely is
     // a payload tree in one uncompressed tar layer, keyed on the directory name,
     // and `pack_skill_dir` requires no `SKILL.md` — it walks whatever is there in
@@ -288,6 +289,12 @@ pub fn validate_and_pack(
             }
             validate_repository(path, fm.metadata.get("repository").map(String::as_str))?;
             validate_replaced_by(path, fm.metadata.get("replaced-by").map(String::as_str))?;
+            validate_requires(
+                path,
+                kind,
+                fm.name.as_str(),
+                crate::oci::requires_decl::from_metadata(&fm.metadata),
+            )?;
             let tar = super::grim(pack_skill_dir(path))?;
             let annotations = annotations_for_skill(&fm, version, fallback_source, git, defaults);
             Ok(PackedArtifact {
@@ -330,6 +337,12 @@ pub fn validate_and_pack(
                 path,
                 crate::oci::annotations::string_from_extra(&fm, "replaced-by").as_deref(),
             )?;
+            validate_requires(
+                path,
+                kind,
+                &name,
+                crate::oci::requires_decl::from_metadata(&fm.metadata),
+            )?;
             let tar = super::grim(pack_rule_file(path))?;
             let annotations = annotations_for_rule(&name, &fm, &parsed.body, version, fallback_source, git, defaults);
             Ok(PackedArtifact {
@@ -349,6 +362,12 @@ pub fn validate_and_pack(
             }
             validate_repository(path, fm.metadata.get("repository").map(String::as_str))?;
             validate_replaced_by(path, fm.metadata.get("replaced-by").map(String::as_str))?;
+            validate_requires(
+                path,
+                kind,
+                fm.name.as_str(),
+                crate::oci::requires_decl::from_metadata(&fm.metadata),
+            )?;
             let tar = super::grim(pack_agent_file(path))?;
             let annotations = annotations_for_agent(&fm, version, fallback_source, git, defaults);
             Ok(PackedArtifact {
@@ -384,6 +403,49 @@ where
     E: std::error::Error + Send + Sync + 'static,
 {
     move |e| crate::skill::SkillError::new(path, crate::skill::SkillErrorKind::MetadataInvalid(Box::new(e)))
+}
+
+/// Refuse an edge that names the artifact being built.
+///
+/// The resolver keys every node by `(kind, name)`, so an edge into the
+/// declaring artifact's own key is a self-edge whatever its id says. Whether
+/// an absolute id points at the same repository is only knowable against a
+/// release target, so that half of the check belongs to `grim release`.
+///
+/// # Errors
+///
+/// A path-attributed `MetadataInvalid` (65) naming the offending entry.
+pub fn refuse_self_reference(
+    path: &Path,
+    kind: ArtifactKind,
+    name: &str,
+    declared: &[crate::oci::bundle::BundleMember],
+) -> anyhow::Result<()> {
+    if declared.iter().any(|m| m.kind == kind && m.name == name) {
+        let inner: Box<dyn std::error::Error + Send + Sync> =
+            Box::<dyn std::error::Error + Send + Sync>::from(format!("{kind} '{name}' requires itself"));
+        return Err(crate::error::Error::from(crate::skill::SkillError::new(
+            path,
+            crate::skill::SkillErrorKind::MetadataInvalid(inner),
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// Offline gate for a parsed `requires` declaration: the grammar, then
+/// [`refuse_self_reference`]. Both refuse 65.
+fn validate_requires<E>(
+    path: &Path,
+    kind: ArtifactKind,
+    name: &str,
+    declared: Result<Vec<crate::oci::bundle::BundleMember>, E>,
+) -> anyhow::Result<()>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let declared = super::grim(declared.map_err(metadata_invalid(path)))?;
+    refuse_self_reference(path, kind, name, &declared)
 }
 
 /// Publish-time gate for an authored `repository` metadata value: present
@@ -522,11 +584,20 @@ pub fn read_bundle_members(
             id: id.to_string(),
         });
     }
+    // A bundle may group another bundle; the resolver expands it.
+    for (name, id) in &source.bundles {
+        members.push(BundleMember {
+            kind: ArtifactKind::Bundle,
+            name: name.clone(),
+            id: id.to_string(),
+        });
+    }
 
     let name = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "bundle".to_string());
+    refuse_self_reference(path, ArtifactKind::Bundle, &name, &members)?;
     Ok((name, members, source.metadata))
 }
 
@@ -538,16 +609,36 @@ pub fn read_bundle_members(
 /// A parse/validation failure as a path-attributed `SkillError`
 /// (`MetadataInvalid` ⇒ DataError 65) or an I/O error.
 pub fn read_mcp_descriptor(path: &Path) -> anyhow::Result<(String, crate::oci::mcp::McpDescriptor)> {
+    let (name, descriptor, _requires) = read_mcp_source(path)?;
+    Ok((name, descriptor))
+}
+
+/// [`read_mcp_descriptor`] plus the validated `[requires.*]` declaration,
+/// sorted by `(kind, name)`. A self-reference refuses 65.
+///
+/// # Errors
+///
+/// As [`read_mcp_descriptor`], plus a malformed or self-referencing
+/// declaration.
+pub fn read_mcp_source(
+    path: &Path,
+) -> anyhow::Result<(
+    String,
+    crate::oci::mcp::McpDescriptor,
+    Vec<crate::oci::bundle::BundleMember>,
+)> {
     let content = std::fs::read_to_string(path).map_err(|e| {
         crate::error::Error::from(crate::skill::SkillError::new(path, crate::skill::SkillErrorKind::Io(e)))
     })?;
-    let descriptor =
-        super::grim(crate::oci::mcp::McpDescriptor::from_toml_str(&content).map_err(metadata_invalid(path)))?;
+    let (descriptor, requires) = super::grim(
+        crate::oci::mcp::McpDescriptor::from_toml_str_with_requires(&content).map_err(metadata_invalid(path)),
+    )?;
     let name = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "mcp".to_string());
-    Ok((name, descriptor))
+    refuse_self_reference(path, ArtifactKind::Mcp, &name, &requires)?;
+    Ok((name, descriptor, requires))
 }
 
 /// Run `grim build`.
@@ -633,6 +724,43 @@ mod tests {
         write(&dir.join("SKILL.md"), "---\nname: code-review\ndescription: d\n---\n");
         assert_eq!(detect_kind(&dir, None).unwrap(), ArtifactKind::Skill);
         assert_eq!(detect_kind(&dir, Some("rule")).unwrap(), ArtifactKind::Rule);
+    }
+
+    #[test]
+    fn read_bundle_members_keeps_a_nested_bundle_member_and_refuses_self() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("outer.toml");
+        write(&f, "[bundles]\ninner = \"ghcr.io/acme/bundles/inner:1\"\n");
+        let (_, members, _) = read_bundle_members(&f).unwrap();
+        assert_eq!(
+            members,
+            vec![crate::oci::bundle::BundleMember {
+                kind: ArtifactKind::Bundle,
+                name: "inner".into(),
+                id: "ghcr.io/acme/bundles/inner:1".into(),
+            }]
+        );
+        let own = tmp.path().join("own.toml");
+        write(&own, "[bundles]\nown = \"./own:1\"\n");
+        assert!(read_bundle_members(&own).is_err());
+    }
+
+    #[test]
+    fn read_mcp_source_splits_requires_and_leaves_descriptor_bytes_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"\n";
+        let plain = tmp.path().join("plain.toml");
+        let declared = tmp.path().join("declared.toml");
+        write(&plain, base);
+        write(
+            &declared,
+            &format!("{base}\n[requires.skills]\nhelper = \"ghcr.io/acme/helper:1\"\n"),
+        );
+        let (_, a, none) = read_mcp_source(&plain).unwrap();
+        let (_, b, some) = read_mcp_source(&declared).unwrap();
+        assert!(none.is_empty());
+        assert_eq!(some.len(), 1);
+        assert_eq!(a.to_layer_bytes().unwrap(), b.to_layer_bytes().unwrap());
     }
 
     #[test]

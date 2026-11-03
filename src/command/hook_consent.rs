@@ -36,11 +36,12 @@
 //!
 //! ## `grim add` unions; `grim hook allow` replaces
 //!
-//! [`resolve_for_add`] records **only the hooks the added reference brought
-//! in**, unioned onto whatever the record already covers. Recording the whole
-//! declared set there would be the T3 hole reopened through the front door: a
-//! workspace carrying an unconsented hook `A` would consent to it the moment the
-//! user typed `grim add B`. `grim hook allow` is the gesture that takes the
+//! [`resolve_for_add`] records **only the hooks the added reference newly
+//! brought in**, unioned onto whatever the record already covers. Recording
+//! everything it installs would be the T3 hole reopened through the front door:
+//! a workspace carrying an unconsented hook `A` would consent to it the moment
+//! the user typed `grim add B`, whether `B` is a bundle, a skill that requires
+//! `A`, or `A`'s own sibling. `grim hook allow` is the gesture that takes the
 //! whole set, because that is the one the user is shown.
 //!
 //! ## Once per invocation, never once per client
@@ -193,17 +194,19 @@ pub fn resolve(
 /// *Owner decision 2026-08-28*, resting on `adr_artifact_trust_model.md`
 /// decision 1 — `grim add <ref>` is the user's statement of trust, and
 /// *"adding a bundle is the user's statement of trust; everything that gesture
-/// transitively pulls in inherits it. Transitivity is the bundle feature, not a
-/// loophole in it."* So a bundle's hook members are consented too, and are not
-/// special-cased.
+/// transitively pulls in inherits it."* The inheritance stops at what the
+/// gesture newly brought: a hook that was already in the workspace was not
+/// vouched for by this command.
 ///
-/// `lock` here is `add`'s single-entry projection — the freshly-declared entry,
-/// or a bundle's members — never the whole workspace lock. That is what makes
-/// the union in [`record`] correct rather than a T3 hole: adding `B` cannot
-/// consent to an unconsented `A` that was already sitting in the workspace.
+/// `lock` is everything `add` installs (the target, a bundle's members, and
+/// what they require) and decides what the policy evaluates. `consentable`
+/// is the [`consent::consent_key`] set of the hooks among them that this add
+/// newly reached; only those are recorded, so adding `B` cannot consent to an
+/// unconsented `A` that was already sitting in the workspace, even when `A` is
+/// one of `B`'s own dependencies. Such an `A` stays `consent-drifted`.
 ///
 /// Records nothing when the feature is off (there is no arming to consent to),
-/// when the added entry brings no hook (adding a skill is not a statement about
+/// when the add brings no new hook (adding a skill is not a statement about
 /// hooks), under `--no-trust-hooks` (a per-invocation "no" is never persisted),
 /// or at global scope (which needs no record).
 ///
@@ -214,6 +217,7 @@ pub fn resolve_for_add(
     ctx: &Context,
     scope: &ResolvedScope,
     lock: &GrimoireLock,
+    consentable: &BTreeSet<String>,
     flag: Option<bool>,
 ) -> anyhow::Result<HookPolicy> {
     let declared = declared_hooks(lock);
@@ -228,10 +232,10 @@ pub fn resolve_for_add(
     // invocation and never persisted (`adr_hook_workspace_consent.md`
     // decision 6), so it must not become durable consent the next plain
     // `grim install` would arm on.
-    if flag == Some(false) {
+    if flag == Some(false) || consentable.is_empty() {
         return Ok(policy);
     }
-    if let Some(recorded) = record(ctx, scope, &declared) {
+    if let Some(recorded) = record(ctx, scope, consentable) {
         policy.adopt_consent(recorded);
     }
     Ok(policy)
@@ -326,12 +330,12 @@ pub fn policy_without_consent(
     .with_consented(consented)
 }
 
-/// Disclose every bundle-delivered hook, whatever the verdict.
+/// Disclose every bundle- or dependency-delivered hook, whatever the verdict.
 ///
-/// A bundle that delivers a hook means **installing a bundle can arm code**, so
-/// the hook must not be invisible: the user asked for a bundle and never typed
-/// the hook's reference. One line per bundle-delivered hook, at `warn` so it
-/// survives the default filter, naming the bundle that brought it.
+/// A bundle or a `requires` edge that delivers a hook means **installing it can
+/// arm code**, so the hook must not be invisible: the user asked for the parent
+/// and never typed the hook's reference. One line per delivering bundle or
+/// parent, at `warn` so it survives the default filter, naming it.
 ///
 /// Deliberately **not** a prompt: per-hook prompting is the re-prompt
 /// habituation failure the owner reversed D5 to avoid. This is disclosure, not a
@@ -351,6 +355,18 @@ fn disclose_bundle_hooks(lock: &GrimoireLock) {
                     .pinned()
                     .map(|p| format!(" from registry '{}'", p.registry()))
                     .unwrap_or_default()
+            );
+        }
+        for parent in lock.iter_artifacts().filter(|p| {
+            p.requires
+                .iter()
+                .any(|m| m.kind == ArtifactKind::Hook && m.name == artifact.name)
+        }) {
+            tracing::warn!(
+                "hook '{}' is required by {} '{}'",
+                artifact.name,
+                parent.kind,
+                parent.name
             );
         }
     }
@@ -443,7 +459,7 @@ mod tests {
         ))
         .expect("an entry-free lock parses");
         resolve(&ctx, &off, &hook_free, None).expect("hook-free install/update");
-        resolve_for_add(&ctx, &off, &hook_free, None).expect("hook-free add");
+        resolve_for_add(&ctx, &off, &hook_free, &BTreeSet::new(), None).expect("hook-free add");
 
         let on = project_scope(ws.path(), home.path(), true);
         let err = resolve_without_consent(&ctx, &on, None, &BTreeSet::new())

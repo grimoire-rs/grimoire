@@ -10,6 +10,10 @@
 //! transactional — the first failure aborts every sibling and no partial
 //! lock is produced.
 
+#[cfg(test)]
+mod agreement_tests;
+pub mod graph;
+pub mod members;
 pub mod resolve_error;
 pub mod resolve_options;
 pub mod resolver;

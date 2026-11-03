@@ -148,6 +148,16 @@ pub enum InstallErrorKind {
         locked: Digest,
         actual: Digest,
     },
+
+    /// A lock entry's `requires` differ from the requires layer of the
+    /// digest-verified manifest it pins (a lock written before dependencies
+    /// existed, a hand edit, an offline carry-forward). Raised without an
+    /// artifact reference: the message names the artifact itself.
+    #[error("{kind} '{name}': the lock's dependencies do not match the pinned artifact; run grim lock")]
+    StaleDependencies {
+        kind: crate::oci::ArtifactKind,
+        name: String,
+    },
 }
 
 /// The supported client names, single-quoted and comma-joined, for the
@@ -190,6 +200,18 @@ mod tests {
         assert!(!err.to_string().starts_with(':'));
         assert!(!err.to_string().starts_with(' '));
         assert!(err.to_string().contains("vscode"));
+    }
+
+    #[test]
+    fn stale_dependencies_message_names_the_artifact_and_the_remedy() {
+        let err = InstallError::without_reference(InstallErrorKind::StaleDependencies {
+            kind: crate::oci::ArtifactKind::Skill,
+            name: "dep".to_string(),
+        });
+        assert_eq!(
+            err.to_string(),
+            "skill 'dep': the lock's dependencies do not match the pinned artifact; run grim lock"
+        );
     }
 
     #[test]

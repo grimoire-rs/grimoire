@@ -581,7 +581,7 @@ fn tree_render_rows(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<R
                 depth,
                 row,
                 state: leaf_state,
-                is_bundle,
+                expandable,
                 collapsed,
                 ..
             } => {
@@ -592,10 +592,11 @@ fn tree_render_rows(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<R
                 // (rendered in `draw`), not a label prefix — keeping the tree
                 // label clean and aligned with the bundle arrow.
                 let leaf_deprecated = r.is_some_and(|row| row.deprecated.is_some());
-                // P3.2: bundle leaves carry an expand/collapse arrow glyph.
+                // P3.2: expandable leaves (bundles, artifacts with requires) carry
+                // an expand/collapse arrow glyph.
                 // F4: use UTF-8 ▸/▾ (same glyphs as group rows) — no ASCII fallback.
-                // Non-bundle leaves are rendered without prefix (unchanged).
-                let prefix = if *is_bundle {
+                // Other leaves are rendered without prefix (unchanged).
+                let prefix = if *expandable {
                     let arrow = if *collapsed { "▸" } else { "▾" };
                     format!("{indent}{arrow} ")
                 } else {
@@ -631,6 +632,9 @@ fn tree_render_rows(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<R
                 kind,
                 state: member_state,
                 related,
+                expandable,
+                expanded,
+                repeated,
                 ..
             } => {
                 let (glyph, status_label, color) = status_view(*member_state);
@@ -638,8 +642,15 @@ fn tree_render_rows(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<R
                 // Sanitize at the display boundary — cache holds raw label.
                 // F5: removed "(via bundle)" suffix — visual noise; member rows
                 // are structurally distinct (indented child of bundle leaf).
-                let sanitized = sanitize_member_label(label);
-                let prefix = format!("{indent}  ");
+                let mut sanitized = sanitize_member_label(label);
+                if *repeated {
+                    sanitized.push_str(" (repeated)");
+                }
+                let prefix = if *expandable {
+                    format!("{indent}{} ", if *expanded { "▾" } else { "▸" })
+                } else {
+                    format!("{indent}  ")
+                };
                 // Related members are highlighted — the `related` flag drives
                 // any future related-highlight styling at the draw layer.
                 // For now we expose it through `marked: false`; the draw layer
@@ -817,7 +828,7 @@ fn group_detail_lines(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec
 fn member_detail_lines_from_state(state: &TuiState, row: Option<&super::tree::DisplayRow>) -> Vec<DetailLine> {
     use super::bundle_members::BundleMemberCache;
     use super::tree::DisplayRow;
-    use crate::tui::detail::detail_lines_for_member;
+    use crate::tui::detail::{dependency_lines, detail_lines_for_member};
 
     let Some(DisplayRow::Member {
         label,
@@ -845,9 +856,14 @@ fn member_detail_lines_from_state(state: &TuiState, row: Option<&super::tree::Di
                     label: "Via bundle:",
                     value: sanitize_member_label(parent_bundle_repo),
                 });
+                lines.extend(dependency_lines(&state.deps, repo));
                 return lines;
             }
-            return detail_lines_for_member(node, parent_bundle_repo);
+            let mut lines = detail_lines_for_member(node, parent_bundle_repo);
+            if let Some(repo) = node.member_repo.as_deref() {
+                lines.extend(dependency_lines(&state.deps, repo));
+            }
+            return lines;
         }
     }
 
@@ -2414,6 +2430,57 @@ mod tests {
         assert_eq!(out.chars().count(), 10);
     }
 
+    /// The drawn cells carry the dependency rows: the frame's detail pane, not
+    /// just the line list, shows `Required by:` and `Why:`.
+    #[test]
+    fn detail_pane_draws_required_by_and_why() {
+        use crate::tui::bundle_members::{
+            DepIndex,
+            test_support::{declared, lock_of},
+        };
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let lock = lock_of(
+            &[
+                ("top", "ghcr.io/acme/top", &[("skill", "leaf", "./leaf:1")]),
+                ("leaf", "ghcr.io/acme/leaf", &[]),
+            ],
+            "",
+        );
+        let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
+        s.deps = DepIndex::build(&declared(&[("top", "ghcr.io/acme/top:1")]), Some(&lock));
+        s.set_rows(vec![
+            row("ghcr.io/acme/leaf", ArtifactState::Installed),
+            row("ghcr.io/acme/top", ArtifactState::Installed),
+        ]);
+        let leaf = s.rows.iter().position(|r| r.repo == "ghcr.io/acme/leaf").unwrap();
+        s.selected = s.filtered.iter().position(|&i| i == leaf).unwrap();
+
+        let mut term = Terminal::new(TestBackend::new(160, 40)).unwrap();
+        term.draw(|f| draw(f, &frame(&s))).unwrap();
+        let buf = term.backend().buffer();
+        let cols = buf.area.width as usize;
+        let screen: Vec<String> = buf
+            .content()
+            .chunks(cols)
+            .map(|r| r.iter().map(|c| c.symbol()).collect::<String>())
+            .collect();
+        assert!(
+            screen
+                .iter()
+                .any(|l| l.contains("Required by:") && l.contains("skill/top")),
+            "Required by row not drawn: {screen:#?}"
+        );
+        assert!(
+            screen
+                .iter()
+                .any(|l| l.contains("Why:") && l.contains("skill/top -> skill/leaf")),
+            "Why row not drawn: {screen:#?}"
+        );
+    }
+
     /// Draw `model` at `width` columns and return the title row as text.
     fn top_row(model: &RenderModel, width: u16) -> String {
         use ratatui::Terminal;
@@ -3290,6 +3357,9 @@ mod tests {
             related: node.related,
             parent_bundle_repo: parent_bundle_repo.to_string(),
             member_repo: member_repo.map(str::to_string),
+            expandable: false,
+            expanded: false,
+            repeated: false,
         };
         (member, node)
     }

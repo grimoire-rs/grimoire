@@ -9,34 +9,40 @@
 //! [`OciAccess`] seam instead of a chained index, and a declaration-hash
 //! staleness gate on the partial path that fires before any I/O.
 //!
-//! Fully transactional: the first failure aborts every sibling task and
-//! the function returns that error — no partial lock is ever produced.
+//! Every declaration and declared bundle is a root of the dependency graph
+//! ([`super::graph::expand_graph`]); the lock is assembled from the settled
+//! graph. Fully transactional: the first failure aborts the resolve and no
+//! partial lock is ever produced.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use tokio::sync::Semaphore;
-use tokio::task::JoinSet;
-
-use crate::oci::bundle::{BUNDLE_LAYER_SIZE_LIMIT, BundleManifest, BundleMember, MAX_BUNDLE_MEMBERS};
-use crate::skill::SkillName;
-
+use super::graph::{Carry, GraphNode, GraphRoot, RootSource, expand_graph};
 use super::resolve_error::{ResolveError, ResolveErrorKind};
 use super::resolve_options::ResolveOptions;
 use crate::config::declaration::{DeclaredSource, DesiredSet};
 use crate::config::hash::DECLARATION_HASH_VERSION;
+use crate::config::path_source::PathSource;
 use crate::config::scope::ConfigScope;
+use crate::lock::effective_set::NodeKey;
 use crate::lock::grimoire_lock::{GrimoireLock, LockMetadata};
 use crate::lock::lock_io::now_rfc3339;
 use crate::lock::lock_version::LockVersion;
 use crate::lock::locked_artifact::{BundleProvenance, LockedArtifact};
 use crate::lock::locked_bundle::{LockedBundle, LockedBundleSource};
+use crate::lock::locked_source::LockedSource;
+use crate::oci::access::OciAccess;
+use crate::oci::access::Operation;
 use crate::oci::access::error::AccessErrorKind;
-use crate::oci::access::{OciAccess, Operation};
+use crate::oci::bundle::{BundleManifest, BundleMember, MAX_BUNDLE_MEMBERS};
+use crate::oci::member_ref::MemberRef;
 use crate::oci::reference::ArtifactRef;
-use crate::oci::{ArtifactKind, Identifier, PinnedIdentifier};
+use crate::oci::requires_decl;
+use crate::oci::{ArtifactKind, Digest, Identifier};
+use crate::skill::SkillName;
 
-/// Resolve every declared skill, rule, and agent and assemble a fresh lock.
+/// Resolve every declared skill, rule, agent, mcp, hook and bundle, with the
+/// dependencies they require, and assemble a fresh lock.
 ///
 /// `scope` is currently informational (recorded by the caller); the lock
 /// document itself is scope-agnostic. Fully transactional — either every
@@ -45,7 +51,8 @@ use crate::oci::{ArtifactKind, Identifier, PinnedIdentifier};
 /// # Errors
 ///
 /// Returns the first [`ResolveError`] encountered (tag-not-found, auth,
-/// registry-unreachable, timeout). Sibling tasks are aborted on failure.
+/// registry-unreachable, timeout, an invalid or conflicting dependency
+/// graph).
 pub async fn resolve_lock(
     set: &DesiredSet,
     access: &Arc<dyn OciAccess>,
@@ -54,87 +61,444 @@ pub async fn resolve_lock(
     anchor: &std::path::Path,
 ) -> Result<GrimoireLock, ResolveError> {
     let _ = scope;
-    let (work, bundles) = build_work(set, access, options, anchor).await?;
-    let mut resolved = resolve_work(work, access, options).await?;
-    // Path-sourced entries pin locally (validate + pack + hash) — no
-    // registry round-trip, so they resolve even fully offline.
-    resolved.extend(resolve_path_entries(set, anchor, None).await?);
-    sort_locked(&mut resolved);
-    Ok(build_lock(resolved, set, bundles))
+    resolve_graph(set, None, None, access, options, anchor).await
 }
 
-/// Pin every path-sourced skill/rule/agent declaration by validating and
-/// packing its local source and hashing the canonical layer bytes.
+/// Whether `name` is re-resolved: everything is on a full resolve.
+fn is_fresh(selected: Option<&[String]>, name: &str) -> bool {
+    selected.is_none_or(|names| names.iter().any(|n| n == name))
+}
+
+/// Re-resolve the nodes `selected` names (`None` = all) and carry the rest.
 ///
-/// `only` restricts the pass to the given binding names (the partial
-/// relock); `None` pins every path entry. Packing is blocking file I/O,
-/// so each entry runs on the blocking pool.
+/// `previous` only ever shortens the work: its pins stand in for tag resolves
+/// of unselected nodes, and its `requires` stand in for a layer the store
+/// lacks while offline. A registry that answers is never second-guessed by it.
+async fn resolve_graph(
+    set: &DesiredSet,
+    previous: Option<&GrimoireLock>,
+    selected: Option<&[String]>,
+    access: &Arc<dyn OciAccess>,
+    options: &ResolveOptions,
+    anchor: &std::path::Path,
+) -> Result<GrimoireLock, ResolveError> {
+    let (roots, pins) = build_roots(set, previous, selected, anchor).await?;
+    let carry = previous.map(|p| build_carry(set, p, selected)).unwrap_or_default();
+    let graph = expand_graph(roots, access, options, &carry).await?;
+    for warning in &graph.warnings {
+        tracing::warn!("{warning}");
+    }
+    Ok(build_lock(graph.nodes, set, pins))
+}
+
+/// Local pins of the path-sourced roots, read once and handed to the lock.
+#[derive(Default)]
+struct LocalPins {
+    artifacts: BTreeMap<NodeKey, LockedSource>,
+    bundles: BTreeMap<String, LockedBundleSource>,
+}
+
+/// One root per declaration and per declared bundle, with the local pin of
+/// every path source.
+///
+/// A path source reads its own edges (PD-18): packing and validating run on
+/// the blocking pool. On a partial resolve an unselected path source with a
+/// previous path entry keeps that pin and those edges untouched.
 ///
 /// # Errors
 ///
-/// [`ResolveErrorKind::LocalSource`] when a source is missing or fails
-/// validation/packing.
-async fn resolve_path_entries(
+/// [`ResolveErrorKind::LocalSource`] when a path fails to validate or pack;
+/// [`ResolveErrorKind::BundleInvalid`] for a malformed `requires` declaration
+/// or local bundle.
+async fn build_roots(
     set: &DesiredSet,
+    previous: Option<&GrimoireLock>,
+    selected: Option<&[String]>,
     anchor: &std::path::Path,
-    only: Option<&[String]>,
-) -> Result<Vec<LockedArtifact>, ResolveError> {
-    let mut out = Vec::new();
+) -> Result<(Vec<GraphRoot>, LocalPins), ResolveError> {
+    let mut roots = Vec::new();
+    let mut pins = LocalPins::default();
     let tables = [
         (&set.skills, ArtifactKind::Skill),
         (&set.rules, ArtifactKind::Rule),
         (&set.agents, ArtifactKind::Agent),
+        (&set.mcp, ArtifactKind::Mcp),
+        (&set.hooks, ArtifactKind::Hook),
+        (&set.bundles, ArtifactKind::Bundle),
     ];
     for (table, kind) in tables {
-        for (name, source) in table.iter() {
-            let DeclaredSource::Path(path) = source else { continue };
-            if let Some(names) = only
-                && !names.iter().any(|n| n == name)
-            {
-                continue;
-            }
-            let reference = ArtifactRef {
-                kind,
-                name: name.clone(),
-                source: source.clone(),
+        for (name, source) in table {
+            let root = match (source, kind) {
+                (DeclaredSource::Registry(id), _) => RootSource::Registry(id.clone()),
+                (DeclaredSource::Path(path), ArtifactKind::Bundle) => {
+                    let reference = ArtifactRef {
+                        kind,
+                        name: name.clone(),
+                        source: source.clone(),
+                    };
+                    let (root, pin) = local_bundle_root(&reference, path, anchor).await?;
+                    pins.bundles.insert(name.clone(), pin);
+                    root
+                }
+                (DeclaredSource::Path(path), ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent) => {
+                    let reference = ArtifactRef {
+                        kind,
+                        name: name.clone(),
+                        source: source.clone(),
+                    };
+                    let kept = previous
+                        .filter(|_| !is_fresh(selected, name))
+                        .and_then(|p| p.iter_artifacts().find(|a| a.kind == kind && &a.name == name))
+                        .filter(|a| a.source.path() == Some(path));
+                    let (edges, pin) = match kept {
+                        Some(entry) => (entry.requires.clone(), entry.source.clone()),
+                        None => path_artifact(&reference, path, anchor).await?,
+                    };
+                    pins.artifacts.insert((kind, name.clone()), pin);
+                    RootSource::Path {
+                        path: path.clone(),
+                        edges,
+                        provenance: None,
+                    }
+                }
+                // `mcp` and `hook` tables reject path values at config parse.
+                (DeclaredSource::Path(_), _) => continue,
             };
-            let abs = path.resolve(anchor);
-            let join = tokio::task::spawn_blocking(move || crate::skill::pack_local_artifact(kind, &abs)).await;
-            // quality-rust.md permits `.expect()` at the join boundary; the
-            // message names the panicking context.
-            #[allow(clippy::expect_used)]
-            let packed = join.expect("path-source packing task panicked");
-            let (_intrinsic_name, layer) =
-                packed.map_err(|e| ResolveError::new(reference.clone(), ResolveErrorKind::LocalSource(Box::new(e))))?;
-            let hash = crate::oci::Algorithm::Sha256.hash(&layer);
-            out.push(LockedArtifact {
-                name: name.clone(),
+            roots.push(GraphRoot {
                 kind,
-                source: crate::lock::locked_source::LockedSource::Path {
-                    path: path.clone(),
-                    hash,
-                },
-                bundles: Vec::new(),
+                name: name.clone(),
+                source: root,
             });
         }
     }
-    Ok(out)
+    Ok((roots, pins))
 }
 
-/// Whether `set` declares a path-sourced skill/rule/agent under `name`.
-fn has_path_entry(set: &DesiredSet, name: &str) -> bool {
-    [&set.skills, &set.rules, &set.agents]
+/// Validate and pack a path-sourced skill, rule or agent, hash its canonical
+/// layer for the pin and read its `grim.requires.*` edges from its metadata.
+async fn path_artifact(
+    reference: &ArtifactRef,
+    path: &PathSource,
+    anchor: &std::path::Path,
+) -> Result<(Vec<BundleMember>, LockedSource), ResolveError> {
+    let kind = reference.kind;
+    let abs = path.resolve(anchor);
+    let join = tokio::task::spawn_blocking(move || -> Result<_, crate::skill::SkillError> {
+        let (_intrinsic_name, layer) = crate::skill::pack_local_artifact(kind, &abs)?;
+        let metadata = match kind {
+            ArtifactKind::Skill => crate::skill::validate_skill_dir(&abs)?.metadata,
+            ArtifactKind::Rule => crate::skill::validate_rule_file(&abs)?.metadata,
+            _ => crate::skill::validate_agent_file(&abs)?.metadata,
+        };
+        Ok((layer, metadata))
+    })
+    .await;
+    // quality-rust.md permits `.expect()` at the join boundary; the message
+    // names the panicking context.
+    #[allow(clippy::expect_used)]
+    let packed = join.expect("path-source packing task panicked");
+    let (layer, metadata) =
+        packed.map_err(|e| ResolveError::new(reference.clone(), ResolveErrorKind::LocalSource(Box::new(e))))?;
+    let edges = requires_decl::from_metadata(&metadata).map_err(|e| {
+        ResolveError::new(
+            reference.clone(),
+            ResolveErrorKind::BundleInvalid(format!("{:#}", anyhow::Error::from(e))),
+        )
+    })?;
+    let hash = crate::oci::Algorithm::Sha256.hash(&layer);
+    Ok((
+        edges,
+        LockedSource::Path {
+            path: path.clone(),
+            hash,
+        },
+    ))
+}
+
+/// Read a local (path-sourced) bundle: its members, validated like a
+/// registry bundle's, pinned by the SHA-256 of their canonical layer.
+///
+/// The members are the bundle's edges and every one must be an absolute
+/// reference: a local bundle has no registry directory to anchor a relative
+/// one against.
+///
+/// # Errors
+///
+/// [`ResolveErrorKind::BundleInvalid`] for a missing or unparseable bundle
+/// file, an invalid member or an unhashable layer.
+async fn local_bundle_root(
+    reference: &ArtifactRef,
+    path: &PathSource,
+    anchor: &std::path::Path,
+) -> Result<(RootSource, LockedBundleSource), ResolveError> {
+    let abs = path.resolve(anchor);
+    let join = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<BundleMember>> {
+        let (_name, mut members, _metadata) = crate::command::build::read_bundle_members(&abs)?;
+        members.extend(local_nested_bundles(&std::fs::read_to_string(&abs)?)?);
+        Ok(members)
+    })
+    .await;
+    #[allow(clippy::expect_used)]
+    let read = join.expect("local-bundle read task panicked");
+    let members =
+        read.map_err(|e| ResolveError::new(reference.clone(), ResolveErrorKind::BundleInvalid(format!("{e:#}"))))?;
+
+    // Canonical order (sorted by `(kind, name)`) keeps the pin and the stored
+    // member list reproducible across repacks of the same source.
+    let manifest = BundleManifest::new(members);
+    validate_local_members(reference, &manifest.members)?;
+    let layer = manifest
+        .to_layer_bytes()
+        .map_err(|e| ResolveError::new(reference.clone(), ResolveErrorKind::BundleInvalid(e.to_string())))?;
+    let source = LockedBundleSource::Path {
+        path: path.clone(),
+        hash: crate::oci::Algorithm::Sha256.hash(&layer),
+    };
+    // The declared path stands in for the repo and the layer hash (short form)
+    // for the tag; `add.rs` matches members back by the same pair.
+    let (repo, tag) = source.provenance_pair();
+    Ok((
+        RootSource::Path {
+            path: path.clone(),
+            edges: manifest.members,
+            provenance: Some(BundleProvenance::new(repo, tag)),
+        },
+        source,
+    ))
+}
+
+/// The nested bundles a local bundle source declares in its `[bundles]` table.
+fn local_nested_bundles(content: &str) -> anyhow::Result<Vec<BundleMember>> {
+    let table: toml::Table = toml::from_str(content)?;
+    let nested = table.get("bundles").map(|b| {
+        let mut only = toml::Table::new();
+        only.insert("bundles".to_string(), b.clone());
+        only
+    });
+    Ok(match nested {
+        Some(only) => requires_decl::from_toml_tables(&only)?,
+        None => Vec::new(),
+    })
+}
+
+/// Validate every member of a local bundle before it is packed or installed.
+///
+/// Enforces the same guards the graph applies to a registry bundle, so a
+/// local bundle cannot be weaponized where a registry one is safe:
+///
+/// - the member count must not exceed [`MAX_BUNDLE_MEMBERS`];
+/// - each member `name` (the config table KEY, which becomes an install-path
+///   component) must parse as a [`SkillName`] so a key like
+///   `"../../evil"` cannot traverse out of the client dir (CWE-22); and
+/// - each member id must be an absolute registry reference — a local bundle
+///   has no registry directory to late-bind a `./`/`../` member against.
+///
+/// # Errors
+///
+/// [`ResolveErrorKind::BundleInvalid`] on an over-cap count or the first
+/// member whose name or id is invalid.
+#[allow(clippy::result_large_err)]
+fn validate_local_members(bundle_ref: &ArtifactRef, members: &[BundleMember]) -> Result<(), ResolveError> {
+    if members.len() > MAX_BUNDLE_MEMBERS {
+        return Err(ResolveError::new(
+            bundle_ref.clone(),
+            ResolveErrorKind::BundleInvalid(format!(
+                "bundle declares {} members, exceeds the limit of {MAX_BUNDLE_MEMBERS}",
+                members.len()
+            )),
+        ));
+    }
+    for member in members {
+        SkillName::parse(&member.name).map_err(|e| {
+            ResolveError::new(
+                bundle_ref.clone(),
+                ResolveErrorKind::BundleInvalid(format!("member name '{}' is invalid: {e}", member.name)),
+            )
+        })?;
+        if !matches!(MemberRef::parse(&member.id), Ok(MemberRef::Absolute(_))) {
+            return Err(ResolveError::new(
+                bundle_ref.clone(),
+                ResolveErrorKind::BundleInvalid(format!(
+                    "local bundle member '{}' must be an absolute registry reference (relative members are not supported)",
+                    member.name
+                )),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// What `previous` lets this resolve skip, or fall back on while offline.
+///
+/// `requires` of every locked registry artifact keyed by its digest.
+/// `digests` exist only on a partial resolve: an unselected node keeps its
+/// pin when the identifier now requested for it is the one the previous lock
+/// already holds — a declared root (the declaration hash proves the
+/// declaration unchanged), or an edge the previous lock records. Declared
+/// bundles are never carried: they are always re-fetched.
+fn build_carry(set: &DesiredSet, previous: &GrimoireLock, selected: Option<&[String]>) -> Carry {
+    let mut carry = Carry::default();
+    for artifact in previous.iter_artifacts() {
+        if let (Some(pinned), false) = (artifact.source.pinned(), artifact.requires.is_empty()) {
+            carry.requires.insert(
+                ((artifact.kind, artifact.name.clone()), pinned.digest()),
+                artifact.requires.clone(),
+            );
+        }
+    }
+    let Some(names) = selected else { return carry };
+    let declared = |key: &NodeKey| {
+        [
+            (&set.skills, ArtifactKind::Skill),
+            (&set.rules, ArtifactKind::Rule),
+            (&set.agents, ArtifactKind::Agent),
+            (&set.mcp, ArtifactKind::Mcp),
+            (&set.hooks, ArtifactKind::Hook),
+            (&set.bundles, ArtifactKind::Bundle),
+        ]
         .into_iter()
-        .any(|table| table.get(name).is_some_and(|s| s.path().is_some()))
+        .any(|(table, kind)| kind == key.0 && table.contains_key(&key.1))
+    };
+    // The previous pin of a key, with the repository it was locked from.
+    let locked = |key: &NodeKey| -> Option<(String, Digest)> {
+        if key.0 == ArtifactKind::Bundle {
+            let bundle = previous.bundles.iter().find(|b| b.name == key.1)?;
+            return Some((
+                bundle.pinned()?.as_identifier().registry_repository(),
+                bundle.pinned()?.digest(),
+            ));
+        }
+        let artifact = previous.iter_artifacts().find(|a| a.kind == key.0 && a.name == key.1)?;
+        let pinned = artifact.source.pinned()?;
+        Some((pinned.as_identifier().registry_repository(), pinned.digest()))
+    };
+    let mut keep = |key: &NodeKey, id: &Identifier| {
+        if names.iter().any(|n| n == &key.1) {
+            return;
+        }
+        if let Some((repository, digest)) = locked(key)
+            && repository == id.registry_repository()
+        {
+            carry.digests.entry(id.clone()).or_insert(digest);
+        }
+    };
+    // Declared roots first: they are the identifiers the declaration names.
+    for (table, kind) in [
+        (&set.skills, ArtifactKind::Skill),
+        (&set.rules, ArtifactKind::Rule),
+        (&set.agents, ArtifactKind::Agent),
+        (&set.mcp, ArtifactKind::Mcp),
+        (&set.hooks, ArtifactKind::Hook),
+    ] {
+        for (name, source) in table {
+            if let DeclaredSource::Registry(id) = source {
+                keep(&(kind, name.clone()), id);
+            }
+        }
+    }
+    // Then every edge the previous lock records, except onto a declared key:
+    // a direct declaration wins and names its own identifier.
+    for artifact in previous.iter_artifacts() {
+        let Some(parent) = artifact.source.pinned().map(|p| p.as_identifier()) else {
+            continue;
+        };
+        for member in &artifact.requires {
+            if let Ok(id) = MemberRef::parse(&member.id).and_then(|r| r.resolve(parent)) {
+                let key = (member.kind, member.name.clone());
+                if !declared(&key) {
+                    keep(&key, &id);
+                }
+            }
+        }
+    }
+    for bundle in &previous.bundles {
+        for member in &bundle.members {
+            if let Ok(MemberRef::Absolute(id)) = MemberRef::parse(&member.id) {
+                let key = (member.kind, member.name.clone());
+                if !declared(&key) {
+                    keep(&key, &id);
+                }
+            }
+        }
+    }
+    carry
+}
+
+/// Assemble the lock from the settled graph. The graph's `(kind, name)` order
+/// is the lock's order.
+fn build_lock(nodes: BTreeMap<NodeKey, GraphNode>, set: &DesiredSet, pins: LocalPins) -> GrimoireLock {
+    let mut skills = Vec::new();
+    let mut rules = Vec::new();
+    let mut agents = Vec::new();
+    let mut mcp = Vec::new();
+    let mut hooks = Vec::new();
+    let mut bundles = Vec::new();
+    for ((kind, name), node) in nodes {
+        if kind == ArtifactKind::Bundle {
+            let source = node.bundle_source.clone().or_else(|| pins.bundles.get(&name).cloned());
+            // A registry bundle always carries its source and a path bundle
+            // is always a root with a pin, so a bundle without one cannot
+            // reach here.
+            if let Some(source) = source {
+                bundles.push(LockedBundle {
+                    members: node.resolved_members(),
+                    transitive: node.transitive,
+                    name,
+                    source,
+                });
+            }
+            continue;
+        }
+        let source = match &node.pinned {
+            Some(pinned) => Some(LockedSource::Registry(pinned.clone())),
+            None => pins.artifacts.get(&(kind, name.clone())).cloned(),
+        };
+        let Some(source) = source else { continue };
+        let artifact = LockedArtifact {
+            name,
+            kind,
+            source,
+            bundles: node.provenance,
+            requires: node.published,
+        };
+        match kind {
+            ArtifactKind::Skill => skills.push(artifact),
+            ArtifactKind::Rule => rules.push(artifact),
+            ArtifactKind::Agent => agents.push(artifact),
+            ArtifactKind::Mcp => mcp.push(artifact),
+            ArtifactKind::Hook => hooks.push(artifact),
+            ArtifactKind::Bundle => {}
+        }
+    }
+
+    GrimoireLock {
+        metadata: LockMetadata {
+            lock_version: LockVersion::V1,
+            declaration_hash_version: DECLARATION_HASH_VERSION,
+            declaration_hash: set.declaration_hash_cached().to_string(),
+            generated_by: LockMetadata::generated_by_current(),
+            // Stamp "now"; `lock_io::save` preserves it on a content-equal
+            // re-lock at write time.
+            generated_at: now_rfc3339(),
+        },
+        skills,
+        rules,
+        agents,
+        mcp,
+        hooks,
+        bundles,
+    }
 }
 
 /// Re-resolve only the named subset, carrying every other previous entry
-/// forward verbatim.
+/// forward.
 ///
 /// The stale-lock guard fires **first**, before any access call: if the
 /// predecessor's `declaration_hash` does not match the current
 /// declaration, a fresh resolve is required (a partial would launder a
-/// stale lock under a new hash). Each requested name must be declared.
+/// stale lock under a new hash). Each requested name must be declared, a
+/// path entry or locked. An unselected node keeps its previous pin while the
+/// identifier requested for it is unchanged.
 ///
 /// # Errors
 ///
@@ -168,46 +532,35 @@ pub async fn resolve_lock_partial(
         ));
     }
 
-    // Expand bundles + merge so a requested name can be a bundle member.
-    let (all_work, bundles) = build_work(set, access, options, anchor).await?;
-
-    // Validate every requested name is an effective artifact (direct,
-    // path-sourced, or a bundle member).
-    for name in names {
-        if !all_work.iter().any(|w| &w.reference.name == name) && !has_path_entry(set, name) {
-            return Err(ResolveError::unidentified(
-                ArtifactKind::Skill,
-                name.clone(),
-                ResolveErrorKind::NotDeclared,
-            ));
-        }
+    // A requested name must be something this resolve can identify before it
+    // touches the network. With declared bundles a name may also be a member
+    // the bundle gained since the lock; that case is checked after expansion.
+    let known: BTreeSet<&str> = declared_names(set)
+        .chain(previous.iter_artifacts().map(|a| a.name.as_str()))
+        .collect();
+    let unknown = names.iter().find(|n| !known.contains(n.as_str()));
+    if let (Some(name), true) = (unknown, set.bundles.is_empty()) {
+        return Err(not_declared(name));
     }
 
-    // Re-resolve only the named subset.
-    let selected: Vec<WorkItem> = all_work
+    let lock = resolve_graph(set, Some(previous), Some(names), access, options, anchor).await?;
+    if let Some(name) = unknown
+        && !lock.iter_artifacts().any(|a| &a.name == name)
+    {
+        return Err(not_declared(name));
+    }
+    Ok(lock)
+}
+
+fn not_declared(name: &str) -> ResolveError {
+    ResolveError::unidentified(ArtifactKind::Skill, name.to_string(), ResolveErrorKind::NotDeclared)
+}
+
+/// The names of every declared non-bundle root, registry or path.
+fn declared_names(set: &DesiredSet) -> impl Iterator<Item = &str> {
+    [&set.skills, &set.rules, &set.agents, &set.mcp, &set.hooks]
         .into_iter()
-        .filter(|w| names.iter().any(|n| n == &w.reference.name))
-        .collect();
-    let mut resolved = resolve_work(selected, access, options).await?;
-    // Re-pin the named path-sourced entries (re-pack + re-hash).
-    resolved.extend(resolve_path_entries(set, anchor, Some(names)).await?);
-
-    // Carry forward every previous entry not in the re-resolved set,
-    // keyed by (kind, name); then merge and sort.
-    let new_keys: std::collections::HashSet<(ArtifactKind, String)> =
-        resolved.iter().map(|a| (a.kind, a.name.clone())).collect();
-
-    let mut merged: Vec<LockedArtifact> = previous
-        .iter_artifacts()
-        .filter(|a| !new_keys.contains(&(a.kind, a.name.clone())))
-        .cloned()
-        .collect();
-    merged.extend(resolved);
-    sort_locked(&mut merged);
-
-    // The partial path re-expanded every declared bundle above, so the
-    // cached snapshots are as fresh as a full resolve's.
-    Ok(build_lock(merged, set, bundles))
+        .flat_map(|table| table.keys().map(String::as_str))
 }
 
 /// Roll `set` forward from `previous`: no `names` re-resolves everything;
@@ -215,6 +568,9 @@ pub async fn resolve_lock_partial(
 /// guard fires inside `resolve_lock_partial`), or fully when there is none
 /// to be stale against. The one roll-forward — `grim update` and
 /// marketplace update both call it.
+///
+/// A full roll-forward still reads `previous`, but only to carry a
+/// dependent artifact's `requires` over when the store lacks it offline.
 ///
 /// # Errors
 ///
@@ -232,584 +588,17 @@ pub async fn roll_forward(
         (false, Some(prev)) => resolve_lock_partial(set, prev, access, names, scope, options, anchor).await,
         // Partial requires a predecessor; absent ⇒ behave like a full
         // resolve (nothing to be stale against).
-        _ => resolve_lock(set, access, scope, options, anchor).await,
-    }
-}
-
-/// Collect the registry artifacts to resolve in deterministic `BTreeMap`
-/// order: every declared skill (kind Skill), then every declared rule
-/// (kind Rule), then every declared agent (kind Agent), then every
-/// declared MCP descriptor (kind Mcp), then every declared hook (kind
-/// Hook). Path-sourced entries never become
-/// work items — they pin locally (no registry round-trip), so the
-/// registry-only invariant of the work list is structural. The final
-/// `(kind, name)` sort happens after resolution.
-fn collect_work(set: &DesiredSet) -> Vec<WorkItem> {
-    let mut work =
-        Vec::with_capacity(set.skills.len() + set.rules.len() + set.agents.len() + set.mcp.len() + set.hooks.len());
-    let tables = [
-        (&set.skills, ArtifactKind::Skill),
-        (&set.rules, ArtifactKind::Rule),
-        (&set.agents, ArtifactKind::Agent),
-        (&set.mcp, ArtifactKind::Mcp),
-        (&set.hooks, ArtifactKind::Hook),
-    ];
-    for (table, kind) in tables {
-        for (name, source) in table.iter() {
-            if let DeclaredSource::Registry(id) = source {
-                work.push(WorkItem {
-                    reference: ArtifactRef::registry(kind, name.clone(), id.clone()),
-                    id: id.clone(),
-                    bundles: Vec::new(),
-                });
-            }
+        _ => {
+            let _ = scope;
+            resolve_graph(set, previous, None, access, options, anchor).await
         }
     }
-    work
-}
-
-/// A unit of resolution work: the reference to pin plus, for a bundle
-/// member, the provenance to stamp on the resulting lock entry.
-#[derive(Debug)]
-struct WorkItem {
-    reference: ArtifactRef,
-    /// The concrete registry identifier to resolve. Extracted once at
-    /// collection time — path sources never become work items, so every
-    /// item carries a real identifier by construction.
-    id: Identifier,
-    /// Every declared bundle this item came from (agreeing bundles
-    /// coalesce to one item but ALL contributors are recorded); empty for
-    /// a direct `[skills]`/`[rules]` entry.
-    bundles: Vec<BundleProvenance>,
-}
-
-/// One member produced by expanding a declared bundle.
-#[derive(Debug)]
-struct ExpandedMember {
-    kind: ArtifactKind,
-    name: String,
-    id: Identifier,
-    bundle_repo: String,
-    bundle_tag: String,
-}
-
-/// Build the full work list: direct declarations plus the members of every
-/// declared bundle, after applying the conflict policy.
-///
-/// Conflict policy, per `(kind, name)`:
-/// - a direct `[skills]`/`[rules]` declaration always wins over any bundle;
-/// - multiple bundles that agree on the identifier coalesce to one entry;
-/// - multiple bundles that disagree fail closed with
-///   [`ResolveErrorKind::BundleConflict`].
-async fn build_work(
-    set: &DesiredSet,
-    access: &Arc<dyn OciAccess>,
-    options: &ResolveOptions,
-    anchor: &std::path::Path,
-) -> Result<(Vec<WorkItem>, Vec<LockedBundle>), ResolveError> {
-    let mut work: Vec<WorkItem> = collect_work(set);
-
-    // Fast path: no bundles ⇒ no bundle I/O at all.
-    if set.bundles.is_empty() {
-        return Ok((work, Vec::new()));
-    }
-
-    let direct_keys: HashSet<(ArtifactKind, String)> = work
-        .iter()
-        .map(|w| (w.reference.kind, w.reference.name.clone()))
-        .collect();
-
-    let (members, snapshots) = expand_bundles(set, access, options, anchor).await?;
-    work.extend(merge_bundle_members(&direct_keys, members)?);
-    Ok((work, snapshots))
-}
-
-/// One `(kind, name)` claimed by bundles that disagree, with the sources
-/// that claimed it — collected so a single pass reports every conflict.
-struct Conflict {
-    kind: ArtifactKind,
-    name: String,
-    id: Identifier,
-    sources: String,
-}
-
-/// Render the conflicts beyond the first as a message suffix, so one run
-/// names the whole set. Empty when there is nothing beyond the first.
-fn describe_further_conflicts(rest: &[Conflict]) -> String {
-    if rest.is_empty() {
-        return String::new();
-    }
-    let list: Vec<String> = rest
-        .iter()
-        .map(|c| format!("{} '{}' ({})", c.kind, c.name, c.sources))
-        .collect();
-    format!(
-        "; {n} further {noun} conflict the same way: {list}",
-        n = rest.len(),
-        noun = if rest.len() == 1 { "artifact" } else { "artifacts" },
-        list = list.join(", ")
-    )
-}
-
-/// Apply the bundle conflict policy to expanded members, returning the work
-/// items for those that survive. Pure (no I/O) so it is unit-tested
-/// directly.
-///
-/// Per `(kind, name)`:
-/// - skip members already declared directly (direct wins);
-/// - coalesce members that all share one identifier;
-/// - fail closed with [`ResolveErrorKind::BundleConflict`] when two bundles
-///   disagree.
-///
-/// Every conflict is collected before returning, not just the first: the
-/// user fixes each one by hand, and a fail-fast made them re-run `lock`
-/// once per conflict to discover the next.
-// The sibling resolution functions return the same `ResolveError` without
-// tripping `result_large_err` because they are `async` (their signature is
-// a `Future`, which the lint does not inspect). This is the one sync
-// function on the path, so the suppression lives here rather than reshaping
-// the shared error type.
-#[allow(clippy::result_large_err)]
-fn merge_bundle_members(
-    direct_keys: &HashSet<(ArtifactKind, String)>,
-    members: Vec<ExpandedMember>,
-) -> Result<Vec<WorkItem>, ResolveError> {
-    // Group by (kind, name); `BTreeMap` keeps iteration deterministic.
-    let mut by_key: BTreeMap<(ArtifactKind, String), Vec<ExpandedMember>> = BTreeMap::new();
-    for member in members {
-        by_key
-            .entry((member.kind, member.name.clone()))
-            .or_default()
-            .push(member);
-    }
-
-    let mut work = Vec::new();
-    let mut conflicts: Vec<Conflict> = Vec::new();
-    for ((kind, name), group) in by_key {
-        // A direct declaration overrides any bundle member.
-        if direct_keys.contains(&(kind, name.clone())) {
-            continue;
-        }
-        let first = &group[0];
-        let all_agree = group.iter().all(|m| m.id == first.id);
-        if !all_agree {
-            let mut sources: Vec<String> = group
-                .iter()
-                .map(|m| format!("{} from {}:{}", m.id, m.bundle_repo, m.bundle_tag))
-                .collect();
-            sources.sort();
-            sources.dedup();
-            conflicts.push(Conflict {
-                kind,
-                name,
-                id: first.id.clone(),
-                sources: sources.join(", "),
-            });
-            continue;
-        }
-        // Record EVERY contributing bundle (sorted + deduped, so the lock
-        // stays deterministic) — evicting one bundle later must keep a
-        // member the others still hold.
-        let mut bundles: Vec<BundleProvenance> = group
-            .iter()
-            .map(|m| BundleProvenance::new(m.bundle_repo.clone(), m.bundle_tag.clone()))
-            .collect();
-        bundles.sort_by(|a, b| (&a.repo, &a.tag).cmp(&(&b.repo, &b.tag)));
-        bundles.dedup();
-        work.push(WorkItem {
-            reference: ArtifactRef::registry(kind, name, first.id.clone()),
-            id: first.id.clone(),
-            bundles,
-        });
-    }
-
-    // The error is keyed on the first conflict (`BTreeMap` order, so the
-    // choice is deterministic); the rest ride along in the message.
-    if let Some(first) = conflicts.first() {
-        return Err(ResolveError::new(
-            ArtifactRef::registry(first.kind, first.name.clone(), first.id.clone()),
-            ResolveErrorKind::BundleConflict {
-                sources: first.sources.clone(),
-                others: describe_further_conflicts(&conflicts[1..]),
-            },
-        ));
-    }
-
-    Ok(work)
-}
-
-/// Fetch and parse every declared bundle, returning its flattened members
-/// plus one [`LockedBundle`] snapshot per declared binding (the lock's
-/// `[[bundle]]` cache enabling offline effective-set mutations).
-///
-/// Each bundle is resolved fresh (its tag → digest), its manifest and
-/// single members-layer fetched, and the JSON members document parsed.
-/// A nested bundle member or an unparseable member id is rejected.
-async fn expand_bundles(
-    set: &DesiredSet,
-    access: &Arc<dyn OciAccess>,
-    options: &ResolveOptions,
-    anchor: &std::path::Path,
-) -> Result<(Vec<ExpandedMember>, Vec<LockedBundle>), ResolveError> {
-    let mut out = Vec::new();
-    let mut snapshots = Vec::new();
-    for (cfg_name, bundle_source) in &set.bundles {
-        let bundle_ref = ArtifactRef {
-            kind: ArtifactKind::Bundle,
-            name: cfg_name.clone(),
-            source: bundle_source.clone(),
-        };
-        let bundle_id = match bundle_source.identifier() {
-            Some(id) => id,
-            None => {
-                // A path-sourced bundle has no registry identity: resolve,
-                // pack, and hash it locally (no registry round-trip).
-                let path = bundle_source.path().ok_or_else(|| {
-                    ResolveError::new(
-                        bundle_ref.clone(),
-                        ResolveErrorKind::BundleInvalid(
-                            "bundle source is neither a registry reference nor a path".to_string(),
-                        ),
-                    )
-                })?;
-                let (members, snapshot) = expand_local_bundle(&bundle_ref, cfg_name, path, anchor).await?;
-                out.extend(members);
-                snapshots.push(snapshot);
-                continue;
-            }
-        };
-
-        let (members, pinned) = fetch_bundle_members(&bundle_ref, bundle_id, access, options).await?;
-
-        // Build the source once so the member provenance the loop stamps and
-        // the source stored in the lock snapshot derive from one encoding
-        // ([`LockedBundleSource::provenance_pair`]) — no lockstep to maintain.
-        let source = LockedBundleSource::Registry {
-            repo: bundle_id.registry_repository(),
-            tag: bundle_provenance_tag(bundle_id),
-            pinned,
-        };
-        let (bundle_repo, bundle_tag) = source.provenance_pair();
-
-        // The lock snapshot stores RESOLVED (absolute) member ids so every
-        // downstream consumer (effective-set mutations, status, TUI lock
-        // path) stays relative-agnostic (issue #31). A validation failure
-        // below aborts the whole resolve before the snapshot is pushed, so
-        // an invalid list never reaches the lock.
-        let mut resolved_members = Vec::with_capacity(members.len());
-        for member in members {
-            if member.kind == ArtifactKind::Bundle {
-                return Err(ResolveError::new(
-                    bundle_ref.clone(),
-                    ResolveErrorKind::BundleInvalid(format!("nested bundle member '{}' is not supported", member.name)),
-                ));
-            }
-            // The member name is registry-controlled and flows into a
-            // filesystem install path; validate it against the same charset
-            // as a declared name so it cannot traverse out of the workspace
-            // (CWE-22).
-            SkillName::parse(&member.name).map_err(|e| {
-                ResolveError::new(
-                    bundle_ref.clone(),
-                    ResolveErrorKind::BundleInvalid(format!("member name '{}' is invalid: {e}", member.name)),
-                )
-            })?;
-            // Absolute or deployment-relative (`./`/`../`) member id; a
-            // relative one resolves against the bundle identifier the layer
-            // was actually pulled from (late binding, issue #31).
-            let id = crate::oci::member_ref::MemberRef::parse(&member.id)
-                .and_then(|r| r.resolve(bundle_id))
-                .map_err(|e| {
-                    ResolveError::new(
-                        bundle_ref.clone(),
-                        ResolveErrorKind::BundleInvalid(format!(
-                            "member '{}' has an invalid identifier '{}': {e}",
-                            member.name, member.id
-                        )),
-                    )
-                })?;
-            resolved_members.push(BundleMember {
-                kind: member.kind,
-                name: member.name.clone(),
-                id: id.to_string(),
-            });
-            out.push(ExpandedMember {
-                kind: member.kind,
-                name: member.name,
-                id,
-                bundle_repo: bundle_repo.clone(),
-                bundle_tag: bundle_tag.clone(),
-            });
-        }
-        snapshots.push(LockedBundle {
-            name: cfg_name.clone(),
-            source,
-            members: resolved_members,
-        });
-    }
-    Ok((out, snapshots))
-}
-
-/// Expand a local (path-sourced) bundle into its flattened members plus a
-/// [`LockedBundle`] snapshot pinned by the SHA-256 of its canonical members
-/// layer.
-///
-/// Resolves the [`PathSource`] against the config-dir `anchor`, reads the
-/// bundle's member list, rejects any relative member (a local bundle has no
-/// registry directory to anchor one against — ADR sub-decision 5), packs the
-/// members into their canonical layer, hashes it, and builds the
-/// [`LockedBundleSource::Path`] snapshot.
-///
-/// # Errors
-///
-/// [`ResolveErrorKind::BundleInvalid`] for a missing/unparseable bundle
-/// file, a relative member, or a members-layer hash mismatch.
-async fn expand_local_bundle(
-    bundle_ref: &ArtifactRef,
-    cfg_name: &str,
-    path_source: &crate::config::path_source::PathSource,
-    anchor: &std::path::Path,
-) -> Result<(Vec<ExpandedMember>, LockedBundle), ResolveError> {
-    // `read_bundle_members` does blocking `std::fs` I/O; run it on the
-    // blocking pool (mirrors `resolve_path_entries`). A missing or malformed
-    // bundle file surfaces as `BundleInvalid` (65).
-    let abs = path_source.resolve(anchor);
-    let join = tokio::task::spawn_blocking(move || crate::command::build::read_bundle_members(&abs)).await;
-    // quality-rust.md permits `.expect()` at the join boundary; the message
-    // names the panicking context.
-    #[allow(clippy::expect_used)]
-    let read = join.expect("local-bundle read task panicked");
-    let (_name, members, _metadata) =
-        read.map_err(|e| ResolveError::new(bundle_ref.clone(), ResolveErrorKind::BundleInvalid(format!("{e:#}"))))?;
-
-    // Canonicalize the member set (sorted by `(kind, name)`) so the pin hash
-    // and stored member list are reproducible across repacks of the same
-    // source.
-    let manifest = BundleManifest::new(members);
-    // Validate the member set (count cap, name charset, absolute ids) before
-    // anything is packed or installed — the same guards the registry branch
-    // enforces, so a local bundle cannot traverse out of the client dir.
-    validate_local_members(bundle_ref, &manifest.members)?;
-
-    let layer = manifest
-        .to_layer_bytes()
-        .map_err(|e| ResolveError::new(bundle_ref.clone(), ResolveErrorKind::BundleInvalid(e.to_string())))?;
-    let hash = crate::oci::Algorithm::Sha256.hash(&layer);
-
-    // Build the source once so the member provenance the loop stamps and the
-    // source stored in the snapshot derive from one encoding
-    // ([`LockedBundleSource::provenance_pair`]): the declared path stands in
-    // for the repo, the members-layer hash (short form) for the tag. `add.rs`'s
-    // member projection matches members back by the same pair.
-    let source = LockedBundleSource::Path {
-        path: path_source.clone(),
-        hash,
-    };
-    let (bundle_repo, bundle_tag) = source.provenance_pair();
-    let mut expanded = Vec::with_capacity(manifest.members.len());
-    for member in &manifest.members {
-        // Already validated absolute by `validate_local_members`; parse the
-        // concrete identifier for the shared registry work path.
-        let id = Identifier::parse(&member.id).map_err(|e| {
-            ResolveError::new(
-                bundle_ref.clone(),
-                ResolveErrorKind::BundleInvalid(format!(
-                    "member '{}' has an invalid identifier '{}': {e}",
-                    member.name, member.id
-                )),
-            )
-        })?;
-        expanded.push(ExpandedMember {
-            kind: member.kind,
-            name: member.name.clone(),
-            id,
-            bundle_repo: bundle_repo.clone(),
-            bundle_tag: bundle_tag.clone(),
-        });
-    }
-
-    let locked = LockedBundle {
-        name: cfg_name.to_string(),
-        source,
-        members: manifest.members,
-    };
-    Ok((expanded, locked))
-}
-
-/// Validate every member of a local bundle before it is packed or installed.
-///
-/// Enforces the same guards the registry branch applies in [`expand_bundles`],
-/// so a local bundle cannot be weaponized where a registry one is safe:
-///
-/// - the member count must not exceed [`MAX_BUNDLE_MEMBERS`]
-///   (defense-in-depth parity with [`fetch_bundle_members`]);
-/// - each member `name` (the config table KEY, which becomes an install-path
-///   component) must parse as a [`SkillName`] so a key like
-///   `"../../evil"` cannot traverse out of the client dir (CWE-22); and
-/// - each member id must be an absolute registry reference — a local bundle
-///   has no registry directory to late-bind a `./`/`../` member against (ADR
-///   sub-decision 5).
-///
-/// # Errors
-///
-/// [`ResolveErrorKind::BundleInvalid`] on an over-cap count or the first
-/// member whose name or id is invalid.
-#[allow(clippy::result_large_err)]
-fn validate_local_members(bundle_ref: &ArtifactRef, members: &[BundleMember]) -> Result<(), ResolveError> {
-    if members.len() > MAX_BUNDLE_MEMBERS {
-        return Err(ResolveError::new(
-            bundle_ref.clone(),
-            ResolveErrorKind::BundleInvalid(format!(
-                "bundle declares {} members, exceeds the limit of {MAX_BUNDLE_MEMBERS}",
-                members.len()
-            )),
-        ));
-    }
-    for member in members {
-        // The member name is the config table key and flows into a filesystem
-        // install path; validate it against the same charset as a declared
-        // name so it cannot traverse out of the client dir (CWE-22) — the
-        // registry branch enforces the identical guard.
-        SkillName::parse(&member.name).map_err(|e| {
-            ResolveError::new(
-                bundle_ref.clone(),
-                ResolveErrorKind::BundleInvalid(format!("member name '{}' is invalid: {e}", member.name)),
-            )
-        })?;
-        let is_absolute = matches!(
-            crate::oci::member_ref::MemberRef::parse(&member.id),
-            Ok(crate::oci::member_ref::MemberRef::Absolute(_))
-        );
-        if !is_absolute {
-            return Err(ResolveError::new(
-                bundle_ref.clone(),
-                ResolveErrorKind::BundleInvalid(format!(
-                    "local bundle member '{}' must be an absolute registry reference (relative members are not supported)",
-                    member.name
-                )),
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Fetch and parse a bundle's member list, enforcing the `MAX_BUNDLE_MEMBERS`
-/// cap and the `BUNDLE_LAYER_SIZE_LIMIT` size guard.
-///
-/// Wraps the entire fetch chain (tag resolve → manifest → single-layer blob)
-/// in the per-artifact timeout from `options`, parses the blob as a
-/// [`BundleManifest`], and applies the count cap before returning.
-///
-/// Returns the raw `(members, pinned_identifier)` tuple. The caller is
-/// responsible for member-level validation (nested-bundle reject,
-/// `SkillName`/`Identifier` parse checks) and for the [`LockedBundle`]
-/// snapshot construction that requires the pinned id.
-///
-/// # Errors
-///
-/// Returns a [`ResolveError`] on timeout, registry error, oversized layer,
-/// parse failure, or exceeded member count.
-pub async fn fetch_bundle_members(
-    bundle_ref: &ArtifactRef,
-    bundle_id: &Identifier,
-    access: &Arc<dyn OciAccess>,
-    options: &ResolveOptions,
-) -> Result<(Vec<BundleMember>, PinnedIdentifier), ResolveError> {
-    // Bound the WHOLE fetch chain (tag resolve + manifest + blob) by the
-    // per-artifact timeout, so a hung registry on any leg cannot stall
-    // the resolve indefinitely (the per-artifact-timeout contract).
-    let (blob, pinned) = match tokio::time::timeout(
-        options.per_artifact_timeout,
-        fetch_bundle_layer(bundle_ref, bundle_id, access, options),
-    )
-    .await
-    {
-        Ok(result) => result?,
-        Err(_elapsed) => return Err(ResolveError::new(bundle_ref.clone(), ResolveErrorKind::ResolveTimeout)),
-    };
-
-    let bundle_manifest = BundleManifest::from_layer_bytes(&blob)
-        .map_err(|e| ResolveError::new(bundle_ref.clone(), ResolveErrorKind::BundleInvalid(e.to_string())))?;
-
-    if bundle_manifest.members.len() > MAX_BUNDLE_MEMBERS {
-        return Err(ResolveError::new(
-            bundle_ref.clone(),
-            ResolveErrorKind::BundleInvalid(format!(
-                "bundle declares {} members, exceeds the limit of {MAX_BUNDLE_MEMBERS}",
-                bundle_manifest.members.len()
-            )),
-        ));
-    }
-
-    Ok((bundle_manifest.members, pinned))
-}
-
-/// Fetch and integrity-check a bundle's members-layer blob: resolve the tag
-/// to a digest, fetch the manifest, then the single layer — rejecting an
-/// oversized layer by its descriptor before any bytes transfer, and again
-/// after, to bound memory against a hostile registry (CWE-770). Returns
-/// the blob together with the bundle's pinned identifier (manifest
-/// digest), recorded in the lock's `[[bundle]]` snapshot.
-async fn fetch_bundle_layer(
-    bundle_ref: &ArtifactRef,
-    bundle_id: &Identifier,
-    access: &Arc<dyn OciAccess>,
-    options: &ResolveOptions,
-) -> Result<(Vec<u8>, PinnedIdentifier), ResolveError> {
-    let digest = match retry_chain(bundle_ref, bundle_id, access, options).await {
-        Ok(digest) => digest,
-        Err(mut e) => {
-            // A missing bundle tag reads clearer as BundleNotFound.
-            if matches!(e.kind, ResolveErrorKind::TagNotFound) {
-                e.kind = ResolveErrorKind::BundleNotFound;
-            }
-            return Err(e);
-        }
-    };
-
-    let pinned_id = bundle_id.clone_with_digest(digest);
-    #[allow(clippy::expect_used)]
-    let pinned = PinnedIdentifier::try_from(pinned_id)
-        .expect("clone_with_digest unconditionally sets the digest; PinnedIdentifier cannot fail here");
-
-    let manifest = access
-        .fetch_manifest(&pinned)
-        .await
-        .map_err(|e| ResolveError::new(bundle_ref.clone(), ResolveErrorKind::RegistryUnreachable(e)))?
-        .ok_or_else(|| ResolveError::new(bundle_ref.clone(), ResolveErrorKind::BundleNotFound))?;
-
-    let layer = manifest.single_layer().ok_or_else(|| {
-        ResolveError::new(
-            bundle_ref.clone(),
-            ResolveErrorKind::BundleInvalid("expected exactly one members layer".to_string()),
-        )
-    })?;
-
-    // Pre-reject by the (untrusted) descriptor size before transferring.
-    if layer.size > BUNDLE_LAYER_SIZE_LIMIT {
-        return Err(oversize_error(bundle_ref, layer.size));
-    }
-
-    let blob = access
-        // The streamed body is bounded at the descriptor's declared size:
-        // a body exceeding it aborts mid-stream (CWE-770). The bundle cap
-        // is re-checked on the actual bytes below.
-        .fetch_blob(bundle_id, &layer.digest, layer.size)
-        .await
-        .map_err(|e| ResolveError::new(bundle_ref.clone(), ResolveErrorKind::RegistryUnreachable(e)))?
-        .ok_or_else(|| ResolveError::new(bundle_ref.clone(), ResolveErrorKind::BundleNotFound))?;
-
-    // Re-check the actual bytes: the descriptor size is not authoritative.
-    if blob.len() as u64 > BUNDLE_LAYER_SIZE_LIMIT {
-        return Err(oversize_error(bundle_ref, blob.len() as u64));
-    }
-    Ok((blob, pinned))
 }
 
 /// The provenance tag recorded for a bundle member: the bundle's own tag,
 /// or its short digest when the bundle is declared digest-only — never a
 /// fabricated `latest`.
-fn bundle_provenance_tag(bundle_id: &Identifier) -> String {
+pub(super) fn bundle_provenance_tag(bundle_id: &Identifier) -> String {
     match bundle_id.tag() {
         Some(tag) => tag.to_string(),
         None => bundle_id
@@ -819,106 +608,15 @@ fn bundle_provenance_tag(bundle_id: &Identifier) -> String {
     }
 }
 
-fn oversize_error(bundle_ref: &ArtifactRef, size: u64) -> ResolveError {
-    ResolveError::new(
-        bundle_ref.clone(),
-        ResolveErrorKind::BundleInvalid(format!(
-            "members layer is {size} bytes, exceeds the limit of {BUNDLE_LAYER_SIZE_LIMIT} bytes"
-        )),
-    )
-}
-
-/// Upper bound on concurrent direct resolves: an unbounded fan-out over a
-/// large declaration trips registry rate limits and exhausts sockets.
-const RESOLVE_CONCURRENCY: usize = 32;
-
-/// Spawn one task per work item, each wrapped in a per-artifact timeout.
-/// `JoinSet` provides fail-fast: the first error aborts the rest.
-async fn resolve_work(
-    work: Vec<WorkItem>,
-    access: &Arc<dyn OciAccess>,
-    options: &ResolveOptions,
-) -> Result<Vec<LockedArtifact>, ResolveError> {
-    if work.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let permits = Arc::new(Semaphore::new(RESOLVE_CONCURRENCY));
-    let mut set: JoinSet<Result<LockedArtifact, ResolveError>> = JoinSet::new();
-    for item in work {
-        let access = Arc::clone(access);
-        let options = options.clone();
-        let permits = Arc::clone(&permits);
-        set.spawn(async move {
-            // Acquired before `resolve_one` so time queued behind the bound
-            // never counts against the per-artifact timeout. The semaphore
-            // is never closed, so acquisition cannot fail.
-            #[allow(clippy::expect_used)]
-            let _permit = permits
-                .acquire_owned()
-                .await
-                .expect("resolve semaphore is never closed");
-            resolve_one(item, access, options).await
-        });
-    }
-
-    let mut resolved = Vec::new();
-    while let Some(join) = set.join_next().await {
-        // `.expect` at the join boundary documents "a resolver task
-        // panicked"; the inner Result is always propagated (quality-rust.md
-        // explicitly permits `.expect()` to surface a task panic at the
-        // join boundary — it is not a fallible-op swallow).
-        #[allow(clippy::expect_used)]
-        let outcome = join.expect("resolver task panicked");
-        match outcome {
-            Ok(artifact) => resolved.push(artifact),
-            Err(err) => {
-                set.abort_all();
-                return Err(err);
-            }
-        }
-    }
-    Ok(resolved)
-}
-
-/// Resolve one work item, wrapping the retry chain in a timeout and
-/// stamping any bundle provenance onto the resulting lock entry.
-async fn resolve_one(
-    item: WorkItem,
-    access: Arc<dyn OciAccess>,
-    options: ResolveOptions,
-) -> Result<LockedArtifact, ResolveError> {
-    let WorkItem { reference, id, bundles } = item;
-    let timeout = options.per_artifact_timeout;
-    let digest = match tokio::time::timeout(timeout, retry_chain(&reference, &id, &access, &options)).await {
-        Ok(Ok(digest)) => digest,
-        Ok(Err(err)) => return Err(err),
-        Err(_elapsed) => {
-            return Err(ResolveError::new(reference, ResolveErrorKind::ResolveTimeout));
-        }
-    };
-
-    let pinned_id = id.clone_with_digest(digest);
-    // `clone_with_digest` unconditionally sets the digest, so the
-    // conversion cannot fail. quality-rust.md permits `.expect()` for an
-    // invariant proven by preceding logic; the message names it.
-    #[allow(clippy::expect_used)]
-    let pinned = PinnedIdentifier::try_from(pinned_id)
-        .expect("clone_with_digest unconditionally sets the digest; PinnedIdentifier cannot fail here");
-
-    Ok(LockedArtifact {
-        name: reference.name,
-        kind: reference.kind,
-        source: crate::lock::locked_source::LockedSource::Registry(pinned),
-        bundles,
-    })
-}
+/// Upper bound on concurrent resolves: an unbounded fan-out over a large
+/// declaration trips registry rate limits and exhausts sockets.
+pub(super) const RESOLVE_CONCURRENCY: usize = 32;
 
 /// Run the retry chain for one artifact.
 ///
 /// Match on [`AccessErrorKind`] is **exhaustive** so a new access-error
 /// variant is a compile error here until it is explicitly routed.
-async fn retry_chain(
+pub(super) async fn retry_chain(
     reference: &ArtifactRef,
     id: &Identifier,
     access: &Arc<dyn OciAccess>,
@@ -972,63 +670,23 @@ async fn retry_chain(
     }
 }
 
-/// Deterministic ordering for lock entries: `(kind, name)`.
-fn sort_locked(items: &mut [LockedArtifact]) {
-    items.sort_by(|a, b| (a.kind, a.name.as_str()).cmp(&(b.kind, b.name.as_str())));
-}
-
-/// Build a [`GrimoireLock`] from resolved entries, the source set, and the
-/// declared bundles' cached expansion snapshots.
-fn build_lock(resolved: Vec<LockedArtifact>, set: &DesiredSet, bundles: Vec<LockedBundle>) -> GrimoireLock {
-    let mut skills = Vec::new();
-    let mut rules = Vec::new();
-    let mut agents = Vec::new();
-    let mut mcp = Vec::new();
-    let mut hooks = Vec::new();
-    for artifact in resolved {
-        match artifact.kind {
-            // A real fan-in arm, not a marker: `collect_work` above now emits
-            // `Hook` work items from `set.hooks`, so the gate that justified the
-            // `unreachable!()` here ("no hooks map exists, so no resolved
-            // artifact can carry Hook") no longer holds. Every resolved kind
-            // lands in its own lock list.
-            ArtifactKind::Hook => hooks.push(artifact),
-            ArtifactKind::Skill => skills.push(artifact),
-            ArtifactKind::Rule => rules.push(artifact),
-            ArtifactKind::Agent => agents.push(artifact),
-            ArtifactKind::Mcp => mcp.push(artifact),
-            // Bundles never produce lock entries — only their members do.
-            ArtifactKind::Bundle => {}
-        }
-    }
-
-    GrimoireLock {
-        metadata: LockMetadata {
-            lock_version: LockVersion::V1,
-            declaration_hash_version: DECLARATION_HASH_VERSION,
-            declaration_hash: set.declaration_hash_cached().to_string(),
-            generated_by: LockMetadata::generated_by_current(),
-            // Stamp "now"; `lock_io::save` preserves it on a content-equal
-            // re-lock at write time.
-            generated_at: now_rfc3339(),
-        },
-        skills,
-        rules,
-        agents,
-        mcp,
-        hooks,
-        bundles,
-    }
-}
-
 /// The stale-lock error attributed to the first requested name if it is
 /// declared, else to that name unidentified.
 fn stale_reference(set: &DesiredSet, names: &[String], kind: ResolveErrorKind) -> ResolveError {
     let first = names.first().cloned().unwrap_or_else(|| "<partial>".to_string());
-    match collect_work(set).into_iter().find(|w| w.reference.name == first) {
-        Some(found) => ResolveError::new(found.reference, kind),
-        None => ResolveError::unidentified(ArtifactKind::Skill, first, kind),
+    let tables = [
+        (&set.skills, ArtifactKind::Skill),
+        (&set.rules, ArtifactKind::Rule),
+        (&set.agents, ArtifactKind::Agent),
+        (&set.mcp, ArtifactKind::Mcp),
+        (&set.hooks, ArtifactKind::Hook),
+    ];
+    for (table, table_kind) in tables {
+        if let Some(DeclaredSource::Registry(id)) = table.get(&first) {
+            return ResolveError::new(ArtifactRef::registry(table_kind, first, id.clone()), kind);
+        }
     }
+    ResolveError::unidentified(ArtifactKind::Skill, first, kind)
 }
 
 #[cfg(test)]
@@ -1040,7 +698,8 @@ mod tests {
 
     use crate::oci::access::error::AccessError;
     use crate::oci::manifest::OciManifest;
-    use crate::oci::{Algorithm, Digest};
+    use crate::oci::{Algorithm, Digest, PinnedIdentifier};
+    use crate::resolve::members::fetch_bundle_members;
 
     // ── Scripted mock OciAccess ──────────────────────────────────────────
 
@@ -1097,7 +756,7 @@ mod tests {
         }
 
         async fn fetch_manifest(&self, _id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
-            Ok(None)
+            Ok(Some(plain_manifest()))
         }
         async fn fetch_blob(
             &self,
@@ -1121,6 +780,22 @@ mod tests {
         }
         async fn put_tag(&self, _repo: &Identifier, _tag: &str, _d: &Digest) -> Result<(), AccessError> {
             Ok(())
+        }
+    }
+
+    /// A content-only manifest: one tar layer, no dependencies.
+    fn plain_manifest() -> OciManifest {
+        OciManifest {
+            media_type: None,
+            artifact_type: None,
+            config_media_type: None,
+            layers: vec![crate::oci::manifest::Descriptor {
+                digest: Algorithm::Sha256.hash(b"content"),
+                media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),
+                size: 10,
+                annotations: None,
+            }],
+            annotations: BTreeMap::new(),
         }
     }
 
@@ -1167,7 +842,7 @@ mod tests {
             Ok(Some(digest()))
         }
         async fn fetch_manifest(&self, _id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
-            Ok(None)
+            Ok(Some(plain_manifest()))
         }
         async fn fetch_blob(&self, _r: &Identifier, _d: &Digest, _m: u64) -> Result<Option<Vec<u8>>, AccessError> {
             Ok(None)
@@ -1190,28 +865,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_work_bounds_in_flight_resolves() {
+    async fn resolve_bounds_in_flight_resolves() {
         use std::sync::atomic::Ordering::SeqCst;
-        let work: Vec<WorkItem> = (0..100)
+        let skills: BTreeMap<String, DeclaredSource> = (0..100)
             .map(|i| {
                 let id = Identifier::parse(&format!("ghcr.io/acme/skill-{i}:stable")).unwrap();
-                WorkItem {
-                    reference: ArtifactRef::registry(ArtifactKind::Skill, format!("skill-{i}"), id.clone()),
-                    id,
-                    bundles: Vec::new(),
-                }
+                (format!("skill-{i}"), DeclaredSource::Registry(id))
             })
             .collect();
+        let set = DesiredSet::from_parts(skills, BTreeMap::new());
         let fake = Arc::new(InFlightAccess {
             current: 0.into(),
             peak: 0.into(),
         });
         let access: Arc<dyn OciAccess> = fake.clone();
-        let resolved = resolve_work(work, &access, &fast_options()).await.expect("all resolve");
+        let lock = resolve_lock(
+            &set,
+            &access,
+            ConfigScope::Project,
+            &fast_options(),
+            std::path::Path::new("."),
+        )
+        .await
+        .expect("all resolve");
         let peak = fake.peak.load(SeqCst);
-        assert_eq!(resolved.len(), 100);
+        assert_eq!(lock.skills.len(), 100);
         assert!(peak > 1, "resolves must still run concurrently, peak was {peak}");
-        assert!(peak <= 32, "peak {peak} exceeds the bound of 32");
+        assert!(
+            peak <= RESOLVE_CONCURRENCY,
+            "peak {peak} exceeds the bound of {RESOLVE_CONCURRENCY}"
+        );
     }
 
     #[tokio::test]
@@ -1549,6 +1232,86 @@ mod tests {
         assert_eq!(b.source.content_digest(), old_b_digest, "b carried forward verbatim");
     }
 
+    /// A previous lock of `parent` (requiring `b:1`) and the `b` it pinned.
+    fn parent_and_b_lock() -> (DesiredSet, GrimoireLock, Digest) {
+        let mut skills = BTreeMap::new();
+        skills.insert(
+            "parent".to_string(),
+            DeclaredSource::Registry(Identifier::parse("ghcr.io/acme/parent:1").unwrap()),
+        );
+        let set = DesiredSet::from_parts(skills, BTreeMap::new());
+        let pin = |repo: &str, seed: &[u8]| {
+            PinnedIdentifier::try_from(
+                Identifier::parse(repo)
+                    .unwrap()
+                    .clone_with_digest(Algorithm::Sha256.hash(seed)),
+            )
+            .unwrap()
+        };
+        let mut parent =
+            LockedArtifact::direct("parent".into(), ArtifactKind::Skill, pin("ghcr.io/acme/parent:1", b"p"));
+        parent.requires = vec![BundleMember {
+            kind: ArtifactKind::Skill,
+            name: "b".into(),
+            id: "./b:1".into(),
+        }];
+        let old_b = Algorithm::Sha256.hash(b"b");
+        let b = LockedArtifact::direct("b".into(), ArtifactKind::Skill, pin("ghcr.io/acme/b:1", b"b"));
+        let lock = GrimoireLock {
+            hooks: vec![],
+            metadata: LockMetadata {
+                lock_version: LockVersion::V1,
+                declaration_hash_version: DECLARATION_HASH_VERSION,
+                declaration_hash: set.declaration_hash_cached().to_string(),
+                generated_by: LockMetadata::generated_by_current(),
+                generated_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+            skills: vec![b, parent],
+            rules: vec![],
+            agents: vec![],
+            mcp: vec![],
+            bundles: vec![],
+        };
+        (set, lock, old_b)
+    }
+
+    #[test]
+    fn updating_the_parent_keeps_the_unselected_childs_pin_for_its_old_request() {
+        let (set, previous, old_b) = parent_and_b_lock();
+
+        let carry = build_carry(&set, &previous, Some(&["parent".to_string()]));
+
+        let b1 = Identifier::parse("ghcr.io/acme/b:1").unwrap();
+        assert_eq!(carry.digests.get(&b1), Some(&old_b), "b:1 stays pinned while requested");
+        let b2 = Identifier::parse("ghcr.io/acme/b:2").unwrap();
+        assert!(
+            !carry.digests.contains_key(&b2),
+            "an edge moved to b:2 has no pin to keep, so it resolves fresh"
+        );
+        let parent = Identifier::parse("ghcr.io/acme/parent:1").unwrap();
+        assert!(!carry.digests.contains_key(&parent), "the selected node resolves fresh");
+    }
+
+    #[test]
+    fn selecting_the_child_resolves_it_fresh() {
+        let (set, previous, _) = parent_and_b_lock();
+
+        let carry = build_carry(&set, &previous, Some(&["b".to_string()]));
+
+        let b1 = Identifier::parse("ghcr.io/acme/b:1").unwrap();
+        assert!(!carry.digests.contains_key(&b1), "a selected name is never carried");
+    }
+
+    #[test]
+    fn a_full_resolve_pins_nothing_but_still_offers_the_locks_requires() {
+        let (set, previous, _) = parent_and_b_lock();
+
+        let carry = build_carry(&set, &previous, None);
+
+        assert!(carry.digests.is_empty());
+        assert_eq!(carry.requires.len(), 1, "parent's edges, keyed by its pinned digest");
+    }
+
     #[tokio::test]
     async fn partial_rejects_undeclared_name() {
         let set = single_skill_set();
@@ -1619,194 +1382,6 @@ mod tests {
         let s = err.to_string();
         assert!(s.starts_with("'ghost': partial-resolve refused"), "{s}");
         assert!(s.ends_with("retry with a full resolve"), "{s}");
-    }
-
-    // ── Bundle conflict engine (pure merge) ──────────────────────────────
-
-    fn member(kind: ArtifactKind, name: &str, id: &str, bundle: &str, tag: &str) -> ExpandedMember {
-        ExpandedMember {
-            kind,
-            name: name.to_string(),
-            id: Identifier::parse(id).unwrap(),
-            bundle_repo: bundle.to_string(),
-            bundle_tag: tag.to_string(),
-        }
-    }
-
-    fn no_direct() -> HashSet<(ArtifactKind, String)> {
-        HashSet::new()
-    }
-
-    #[test]
-    fn merge_single_member_becomes_work_with_provenance() {
-        let members = vec![member(
-            ArtifactKind::Skill,
-            "code-review",
-            "ghcr.io/acme/code-review:stable",
-            "ghcr.io/acme/python-stack",
-            "1.0.0",
-        )];
-        let work = merge_bundle_members(&no_direct(), members).expect("merge ok");
-        assert_eq!(work.len(), 1);
-        assert_eq!(work[0].reference.name, "code-review");
-        assert_eq!(
-            work[0].bundles,
-            vec![BundleProvenance::new("ghcr.io/acme/python-stack", "1.0.0")]
-        );
-    }
-
-    #[test]
-    fn merge_direct_declaration_wins_over_bundle() {
-        let mut direct = HashSet::new();
-        direct.insert((ArtifactKind::Skill, "code-review".to_string()));
-        let members = vec![member(
-            ArtifactKind::Skill,
-            "code-review",
-            "ghcr.io/acme/code-review:other",
-            "ghcr.io/acme/stack",
-            "1",
-        )];
-        let work = merge_bundle_members(&direct, members).expect("merge ok");
-        assert!(work.is_empty(), "the direct declaration overrides the bundle member");
-    }
-
-    #[test]
-    fn merge_agreeing_bundles_coalesce() {
-        let members = vec![
-            member(
-                ArtifactKind::Skill,
-                "code-review",
-                "ghcr.io/acme/code-review:stable",
-                "ghcr.io/acme/stack-a",
-                "1",
-            ),
-            member(
-                ArtifactKind::Skill,
-                "code-review",
-                "ghcr.io/acme/code-review:stable",
-                "ghcr.io/acme/stack-b",
-                "2",
-            ),
-        ];
-        let work = merge_bundle_members(&no_direct(), members).expect("merge ok");
-        assert_eq!(work.len(), 1, "identical members coalesce to one entry");
-        assert_eq!(
-            work[0].bundles,
-            vec![
-                BundleProvenance::new("ghcr.io/acme/stack-a", "1"),
-                BundleProvenance::new("ghcr.io/acme/stack-b", "2"),
-            ],
-            "every contributing bundle is recorded, sorted"
-        );
-    }
-
-    #[test]
-    fn merge_duplicate_provenance_dedupes() {
-        // The same bundle listed twice (e.g. two bindings at one repo+tag
-        // both expanded) must not double-record its provenance.
-        let members = vec![
-            member(
-                ArtifactKind::Skill,
-                "code-review",
-                "ghcr.io/acme/code-review:stable",
-                "ghcr.io/acme/stack",
-                "1",
-            ),
-            member(
-                ArtifactKind::Skill,
-                "code-review",
-                "ghcr.io/acme/code-review:stable",
-                "ghcr.io/acme/stack",
-                "1",
-            ),
-        ];
-        let work = merge_bundle_members(&no_direct(), members).expect("merge ok");
-        assert_eq!(work.len(), 1);
-        assert_eq!(work[0].bundles, vec![BundleProvenance::new("ghcr.io/acme/stack", "1")]);
-    }
-
-    #[test]
-    fn merge_disagreeing_bundles_fail_closed() {
-        let members = vec![
-            member(
-                ArtifactKind::Skill,
-                "code-review",
-                "ghcr.io/acme/code-review:stable",
-                "ghcr.io/acme/stack-a",
-                "1",
-            ),
-            member(
-                ArtifactKind::Skill,
-                "code-review",
-                "ghcr.io/acme/code-review:1.4",
-                "ghcr.io/acme/stack-b",
-                "2",
-            ),
-        ];
-        let err = merge_bundle_members(&no_direct(), members).expect_err("disagreement must fail closed");
-        assert!(matches!(err.kind, ResolveErrorKind::BundleConflict { .. }));
-        assert_eq!(err.reference.name, "code-review");
-        let ResolveErrorKind::BundleConflict { others, .. } = &err.kind else {
-            unreachable!("matched above");
-        };
-        assert_eq!(others, "", "a lone conflict names nothing further");
-    }
-
-    #[test]
-    fn every_conflict_is_reported_in_one_pass() {
-        // Fail-fast named one conflict per run, so a user with four of them
-        // had to run `lock` four times to discover them all.
-        let mut members = Vec::new();
-        for name in ["handoff", "pickup", "ai-hygiene"] {
-            members.push(member(
-                ArtifactKind::Skill,
-                name,
-                &format!("ghcr.io/acme/{name}:stable"),
-                "ghcr.io/acme/stack-a",
-                "1",
-            ));
-            members.push(member(
-                ArtifactKind::Skill,
-                name,
-                &format!("ghcr.io/acme/{name}:1.4"),
-                "ghcr.io/acme/stack-b",
-                "2",
-            ));
-        }
-
-        let err = merge_bundle_members(&no_direct(), members).expect_err("disagreement must fail closed");
-        let msg = err.to_string();
-        // Keyed on the first in BTreeMap order, the other two ride along.
-        assert_eq!(err.reference.name, "ai-hygiene");
-        assert!(msg.contains("2 further artifacts conflict"), "got: {msg}");
-        for name in ["handoff", "pickup"] {
-            assert!(
-                msg.contains(name),
-                "every conflict must be named, missing {name} in: {msg}"
-            );
-        }
-        // Each further conflict carries its own sources, not just its name.
-        assert!(msg.contains("stack-a") && msg.contains("stack-b"), "got: {msg}");
-    }
-
-    #[test]
-    fn merge_agent_member_becomes_work_with_provenance() {
-        // Bundle expansion is kind-generic: an agent member flows through
-        // the same merge with its provenance stamped.
-        let members = vec![member(
-            ArtifactKind::Agent,
-            "code-reviewer",
-            "ghcr.io/acme/code-reviewer:1",
-            "ghcr.io/acme/stack",
-            "1.0.0",
-        )];
-        let work = merge_bundle_members(&no_direct(), members).expect("merge ok");
-        assert_eq!(work.len(), 1);
-        assert_eq!(work[0].reference.kind, ArtifactKind::Agent);
-        assert_eq!(
-            work[0].bundles,
-            vec![BundleProvenance::new("ghcr.io/acme/stack", "1.0.0")]
-        );
     }
 
     // ── C-1 fetch_bundle_members ──────────────────────────────────────────────
@@ -1898,106 +1473,6 @@ mod tests {
         let id = Identifier::parse("ghcr.io/acme/my-bundle:latest").unwrap();
         let art_ref = ArtifactRef::registry(ArtifactKind::Bundle, "my-bundle", id.clone());
         (art_ref, id)
-    }
-
-    #[tokio::test]
-    async fn expand_bundles_resolves_relative_members_against_bundle_deployment() {
-        // Issue #31: a `../`-relative member id resolves against the bundle's
-        // own deployed repository directory, and the lock snapshot stores the
-        // RESOLVED absolute id so downstream lock consumers stay
-        // relative-agnostic.
-        let bm = BundleManifest::new(vec![
-            bundle_member(ArtifactKind::Skill, "x", "../skills/x:0"),
-            bundle_member(ArtifactKind::Rule, "r", "./r:1"),
-        ]);
-        let access = make_bundle_access(&bm);
-        let cfg = crate::config::project_config::ProjectConfig::from_toml_str(
-            "[bundles]\ntools = \"ghcr.io/acme/bundles/tools:0\"\n",
-        )
-        .unwrap();
-
-        let (members, snapshots) = expand_bundles(&cfg.set, &access, &fast_options(), std::path::Path::new("."))
-            .await
-            .expect("relative members must resolve");
-
-        let by_name: BTreeMap<&str, String> = members.iter().map(|m| (m.name.as_str(), m.id.to_string())).collect();
-        assert_eq!(by_name["x"], "ghcr.io/acme/skills/x:0", "../ resolves one dir up");
-        assert_eq!(by_name["r"], "ghcr.io/acme/bundles/r:1", "./ resolves to the same dir");
-
-        let snap_ids: Vec<&str> = snapshots[0].members.iter().map(|m| m.id.as_str()).collect();
-        assert!(
-            snap_ids.contains(&"ghcr.io/acme/skills/x:0") && snap_ids.contains(&"ghcr.io/acme/bundles/r:1"),
-            "lock snapshot must hold resolved absolute ids, got {snap_ids:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn expand_bundles_rejects_escaping_relative_member() {
-        // A `..` chain past the registry root is an error, never a clamp.
-        let bm = BundleManifest::new(vec![bundle_member(
-            ArtifactKind::Skill,
-            "x",
-            "../../../skills/x:0", // bundle dir depth is 2 (acme/bundles)
-        )]);
-        let access = make_bundle_access(&bm);
-        let cfg = crate::config::project_config::ProjectConfig::from_toml_str(
-            "[bundles]\ntools = \"ghcr.io/acme/bundles/tools:0\"\n",
-        )
-        .unwrap();
-
-        let err = expand_bundles(&cfg.set, &access, &fast_options(), std::path::Path::new("."))
-            .await
-            .expect_err("escaping member must fail the resolve");
-        assert!(
-            matches!(err.kind, ResolveErrorKind::BundleInvalid(ref msg) if msg.contains("escapes")),
-            "must be BundleInvalid naming the escape, got {err:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn expand_bundles_accepts_dotted_member_name() {
-        // Issue #40: a dotted member name is a valid artifact name and
-        // must pass the registry-branch CWE-22 guard.
-        let bm = BundleManifest::new(vec![bundle_member(
-            ArtifactKind::Skill,
-            "socket.io",
-            "ghcr.io/acme/skills/socket.io:1",
-        )]);
-        let access = make_bundle_access(&bm);
-        let cfg = crate::config::project_config::ProjectConfig::from_toml_str(
-            "[bundles]\ntools = \"ghcr.io/acme/bundles/tools:0\"\n",
-        )
-        .unwrap();
-
-        let (members, _snapshots) = expand_bundles(&cfg.set, &access, &fast_options(), std::path::Path::new("."))
-            .await
-            .expect("dotted member name must be accepted");
-        assert_eq!(members[0].name, "socket.io");
-    }
-
-    #[tokio::test]
-    async fn expand_bundles_rejects_hidden_member_name() {
-        // A leading-dot member name would materialize a hidden install
-        // dir; the guard must keep rejecting it after the dotted-name
-        // relaxation (issue #40).
-        let bm = BundleManifest::new(vec![bundle_member(
-            ArtifactKind::Skill,
-            ".hidden",
-            "ghcr.io/acme/skills/x:1",
-        )]);
-        let access = make_bundle_access(&bm);
-        let cfg = crate::config::project_config::ProjectConfig::from_toml_str(
-            "[bundles]\ntools = \"ghcr.io/acme/bundles/tools:0\"\n",
-        )
-        .unwrap();
-
-        let err = expand_bundles(&cfg.set, &access, &fast_options(), std::path::Path::new("."))
-            .await
-            .expect_err("hidden member name must be rejected");
-        assert!(
-            matches!(err.kind, ResolveErrorKind::BundleInvalid(ref msg) if msg.contains(".hidden")),
-            "must be BundleInvalid naming the offending member name, got {err:?}"
-        );
     }
 
     #[tokio::test]
@@ -2162,16 +1637,6 @@ mod tests {
     }
 
     #[test]
-    fn merge_distinguishes_skill_and_rule_with_same_name() {
-        let members = vec![
-            member(ArtifactKind::Skill, "x", "ghcr.io/acme/x:1", "ghcr.io/acme/s", "1"),
-            member(ArtifactKind::Rule, "x", "ghcr.io/acme/x-rule:1", "ghcr.io/acme/s", "1"),
-        ];
-        let work = merge_bundle_members(&no_direct(), members).expect("merge ok");
-        assert_eq!(work.len(), 2, "skill x and rule x are distinct keys");
-    }
-
-    #[test]
     fn provenance_tag_uses_digest_when_bundle_is_digest_pinned() {
         let tagged = Identifier::parse("ghcr.io/acme/stack:1.0").unwrap();
         assert_eq!(bundle_provenance_tag(&tagged), "1.0");
@@ -2188,8 +1653,8 @@ mod tests {
 
     // ── Local (path-sourced) bundle expansion — Phase 1 spec ────────────
     //
-    // `expand_local_bundle` / `validate_local_members` cover the design
-    // record's "Resolve — local branch in `expand_bundles`" contract: an
+    // `local_bundle_root` / `validate_local_members` cover the local-branch
+    // contract: an
     // absolute-member local bundle pins by the SHA-256 of its canonical
     // members layer, a relative member is rejected (ADR sub-decision 5 —
     // no registry directory to late-bind against), and packing is
@@ -2299,7 +1764,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn expand_local_bundle_with_absolute_members_pins_by_members_layer_hash() {
+    async fn local_bundle_with_absolute_members_pins_by_members_layer_hash() {
         let dir = tempfile::tempdir().expect("tempdir");
         write_bundle_source(
             dir.path(),
@@ -2309,32 +1774,31 @@ mod tests {
         let path_source = crate::config::path_source::PathSource::parse("./bundles/docs.toml").unwrap();
         let bundle_ref = local_bundle_ref("docs", "./bundles/docs.toml");
 
-        let (members, locked) = expand_local_bundle(&bundle_ref, "docs", &path_source, dir.path())
+        let (root, source) = local_bundle_root(&bundle_ref, &path_source, dir.path())
             .await
             .expect("absolute-member local bundle must resolve");
-
-        assert_eq!(locked.name, "docs");
-        assert_eq!(locked.path(), Some(&path_source));
-        assert!(locked.pinned().is_none(), "a local bundle carries no registry pin");
 
         let expected_member = BundleMember {
             kind: ArtifactKind::Skill,
             name: "code-review".to_string(),
             id: "ghcr.io/acme/code-review:1".to_string(),
         };
-        assert_eq!(locked.members, vec![expected_member.clone()]);
-        assert_eq!(members.len(), 1);
-        assert_eq!(members[0].name, "code-review");
-        assert_eq!(members[0].id.to_string(), "ghcr.io/acme/code-review:1");
+        let RootSource::Path { edges, provenance, .. } = root else {
+            panic!("a local bundle is a path root");
+        };
+        assert_eq!(edges, vec![expected_member.clone()]);
+        let (repo, tag) = source.provenance_pair();
+        assert_eq!(provenance, Some(BundleProvenance::new(repo, tag)));
 
         let expected_bytes = BundleManifest::new(vec![expected_member])
             .to_layer_bytes()
             .expect("serialize expected manifest");
-        let expected_hash = Algorithm::Sha256.hash(expected_bytes);
-        match &locked.source {
-            LockedBundleSource::Path { hash, .. } => {
+        match &source {
+            LockedBundleSource::Path { path, hash } => {
+                assert_eq!(path, &path_source);
                 assert_eq!(
-                    *hash, expected_hash,
+                    *hash,
+                    Algorithm::Sha256.hash(expected_bytes),
                     "pin must be the SHA-256 of the canonical members layer"
                 );
             }
@@ -2343,7 +1807,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn expand_local_bundle_is_deterministic_across_repacks() {
+    async fn local_bundle_is_deterministic_across_repacks() {
         let dir = tempfile::tempdir().expect("tempdir");
         write_bundle_source(
             dir.path(),
@@ -2353,49 +1817,131 @@ mod tests {
         let path_source = crate::config::path_source::PathSource::parse("./bundles/docs.toml").unwrap();
         let bundle_ref = local_bundle_ref("docs", "./bundles/docs.toml");
 
-        let (_, first) = expand_local_bundle(&bundle_ref, "docs", &path_source, dir.path())
+        let (first_root, first) = local_bundle_root(&bundle_ref, &path_source, dir.path())
             .await
             .expect("first pack succeeds");
-        let (_, second) = expand_local_bundle(&bundle_ref, "docs", &path_source, dir.path())
+        let (second_root, second) = local_bundle_root(&bundle_ref, &path_source, dir.path())
             .await
             .expect("second pack succeeds");
 
-        assert_eq!(
-            first.source, second.source,
-            "repacking the same source twice must yield the same hash"
-        );
-        assert_eq!(first.members, second.members);
+        assert_eq!(first, second, "repacking the same source must yield the same hash");
+        let (RootSource::Path { edges: a, .. }, RootSource::Path { edges: b, .. }) = (first_root, second_root) else {
+            panic!("path roots");
+        };
+        assert_eq!(a, b);
     }
 
     #[tokio::test]
-    async fn expand_local_bundle_rejects_relative_member() {
+    async fn local_bundle_rejects_relative_member() {
         let dir = tempfile::tempdir().expect("tempdir");
         write_bundle_source(dir.path(), "bundles/docs.toml", "[skills]\nwidget = \"./widget:1\"\n");
         let path_source = crate::config::path_source::PathSource::parse("./bundles/docs.toml").unwrap();
         let bundle_ref = local_bundle_ref("docs", "./bundles/docs.toml");
 
-        let err = expand_local_bundle(&bundle_ref, "docs", &path_source, dir.path())
+        let err = local_bundle_root(&bundle_ref, &path_source, dir.path())
             .await
             .expect_err("a relative member in a local bundle must be rejected");
-        assert!(
-            matches!(err.kind, ResolveErrorKind::BundleInvalid(_)),
-            "must be BundleInvalid, got {err:?}"
-        );
+        assert!(matches!(err.kind, ResolveErrorKind::BundleInvalid(_)), "{err:?}");
     }
 
     #[tokio::test]
-    async fn expand_local_bundle_missing_file_is_bundle_invalid() {
+    async fn local_bundle_missing_file_is_bundle_invalid() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path_source = crate::config::path_source::PathSource::parse("./bundles/ghost.toml").unwrap();
         let bundle_ref = local_bundle_ref("ghost", "./bundles/ghost.toml");
 
-        let err = expand_local_bundle(&bundle_ref, "ghost", &path_source, dir.path())
+        let err = local_bundle_root(&bundle_ref, &path_source, dir.path())
             .await
             .expect_err("a missing bundle file must be rejected");
-        assert!(
-            matches!(err.kind, ResolveErrorKind::BundleInvalid(_)),
-            "must be BundleInvalid, got {err:?}"
+        assert!(matches!(err.kind, ResolveErrorKind::BundleInvalid(_)), "{err:?}");
+    }
+
+    #[test]
+    fn local_nested_bundles_reads_the_bundles_table() {
+        let members = local_nested_bundles("[bundles]\ninner = \"ghcr.io/acme/inner:1\"\n").expect("parses");
+        assert_eq!(
+            members,
+            vec![BundleMember {
+                kind: ArtifactKind::Bundle,
+                name: "inner".to_string(),
+                id: "ghcr.io/acme/inner:1".to_string(),
+            }]
         );
+        assert!(
+            local_nested_bundles("[skills]\na = \"ghcr.io/acme/a:1\"\n")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    // ── dependency wiring ──────────────────────────────────────────────
+
+    /// A skill dir whose frontmatter declares one `grim.requires.skills` edge.
+    fn write_skill_requiring(root: &std::path::Path, name: &str, dep: &str, target: &str) {
+        let dir = root.join("skills").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!(
+                "---\nname: {name}\ndescription: d\nmetadata:\n  grim.requires.skills.{dep}: \"{target}\"\n---\nbody\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn path_skill_set(name: &str) -> DesiredSet {
+        let mut skills = BTreeMap::new();
+        skills.insert(
+            name.to_string(),
+            DeclaredSource::Path(crate::config::path_source::PathSource::parse(&format!("./skills/{name}")).unwrap()),
+        );
+        DesiredSet::from_parts(skills, BTreeMap::new())
+    }
+
+    #[tokio::test]
+    async fn relative_edge_from_path_source_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        write_skill_requiring(dir.path(), "local", "dep", "./dep:1");
+
+        let err = resolve_lock(
+            &path_skill_set("local"),
+            &arc(MockAccess::new(vec![])),
+            ConfigScope::Project,
+            &fast_options(),
+            dir.path(),
+        )
+        .await
+        .expect_err("a path source has no registry directory to resolve a relative id against");
+
+        assert!(matches!(err.kind, ResolveErrorKind::BundleInvalid(_)), "{err:?}");
+        assert!(err.to_string().contains("relative"), "{err}");
+        assert!(err.to_string().contains("local"), "names the path entry: {err}");
+    }
+
+    #[tokio::test]
+    async fn a_path_skill_locks_its_declared_edge_as_a_transitive_registry_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        write_skill_requiring(dir.path(), "local", "dep", "ghcr.io/acme/dep:1");
+
+        let lock = resolve_lock(
+            &path_skill_set("local"),
+            &arc(MockAccess::new(vec![Scripted::Ok(Some(digest()))])),
+            ConfigScope::Project,
+            &fast_options(),
+            dir.path(),
+        )
+        .await
+        .expect("resolves");
+
+        let local = lock.skills.iter().find(|s| s.name == "local").unwrap();
+        assert!(local.source.path().is_some());
+        assert_eq!(local.requires.len(), 1);
+        let dep = lock
+            .skills
+            .iter()
+            .find(|s| s.name == "dep")
+            .expect("edge target locked");
+        assert_eq!(dep.source.content_digest(), digest());
     }
 
     // ── roll_forward (C-034) ───────────────────────────────────────

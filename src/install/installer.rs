@@ -15,13 +15,16 @@
 //! skills-then-rules iteration order so the caller can build a stable
 //! report.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::config::scope::ConfigScope;
+use crate::lock::effective_set::NodeKey;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::locked_artifact::LockedArtifact;
 use crate::oci::access::OciAccess;
+use crate::oci::manifest::LayerLayout;
 use crate::oci::mcp::MCP_LAYER_SIZE_LIMIT;
 use crate::oci::reference::ArtifactRef;
 use crate::oci::{ArtifactKind, Digest, Identifier};
@@ -44,6 +47,35 @@ use super::target::InstallTarget;
 /// MiB never rejects a real artifact; it only bounds a hostile declared
 /// size. MCP layers use the tighter [`MCP_LAYER_SIZE_LIMIT`].
 pub const INSTALL_LAYER_SIZE_LIMIT: u64 = 512 * 1024 * 1024;
+
+/// Which destinations an install may overwrite despite the integrity gate
+/// (a locally modified artifact, an untracked pre-existing file).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForceScope {
+    /// Never overrides: every refusal stands.
+    None,
+    /// Overrides every destination (`--force`).
+    All,
+    /// Overrides only the destinations of the listed `(kind, name)` nodes.
+    Only(BTreeSet<NodeKey>),
+}
+
+impl ForceScope {
+    /// Whether the destination of `(kind, name)` may be overwritten.
+    fn overrides(&self, kind: ArtifactKind, name: &str) -> bool {
+        match self {
+            Self::None => false,
+            Self::All => true,
+            Self::Only(nodes) => nodes.contains(&(kind, name.to_owned())),
+        }
+    }
+}
+
+impl From<bool> for ForceScope {
+    fn from(force: bool) -> Self {
+        if force { Self::All } else { Self::None }
+    }
+}
 
 /// Whether an install pass records a **declared** artifact (from the lock)
 /// or a **dev-install** (`grim install <path>`, undeclared).
@@ -119,8 +151,8 @@ pub struct ArtifactInstall {
 /// Install every locked artifact, in skills-then-rules-then-agents order.
 ///
 /// `force` overrides the integrity gate (a locally modified artifact is
-/// overwritten instead of refused). The first hard error for an artifact
-/// is recorded against that artifact; siblings still process so the report
+/// overwritten instead of refused) for the destinations its scope names. The first hard error for an
+/// artifact is recorded against that artifact; siblings still process so the report
 /// reflects the whole set. Each artifact is materialized into every
 /// client target the [`InstallTarget`] selects.
 #[allow(
@@ -146,7 +178,7 @@ pub async fn install_all<M: ArtifactMaterializer>(
         state,
         roots,
         anchor,
-        force,
+        force.into(),
         InstallIntent::Declared,
         &SilentProgress,
     )
@@ -169,7 +201,7 @@ pub async fn install_all_with_progress<M: ArtifactMaterializer>(
     state: &mut InstallState,
     roots: &AnchorRoots,
     anchor: &Path,
-    force: bool,
+    force: ForceScope,
     intent: InstallIntent,
     progress: &dyn InstallProgress,
 ) -> Vec<ArtifactInstall> {
@@ -237,7 +269,7 @@ pub async fn install_all_with_progress<M: ArtifactMaterializer>(
             state,
             roots,
             anchor,
-            force,
+            force.overrides(kind, &artifact.name),
             intent,
         )
         .await;
@@ -403,7 +435,7 @@ pub async fn install_and_persist<M: ArtifactMaterializer>(
     scope: ConfigScope,
     workspace: &Path,
     config_path: &Path,
-    force: bool,
+    force: ForceScope,
     intent: InstallIntent,
     progress: &dyn InstallProgress,
 ) -> Result<Vec<ArtifactInstall>, InstallError> {
@@ -414,6 +446,7 @@ pub async fn install_and_persist<M: ArtifactMaterializer>(
         "install_and_persist installs hooks without a hook policy"
     );
     refuse_uninstallable_fallback(lock, target, state, roots)?;
+    refuse_stale_edges(lock, access, state).await?;
     // The fallback is the right default for the pool-reading clients, but a
     // Claude Code user on a bare workspace gets an `installed` row and a
     // skill in a pool Claude never reads (issue #113). Say so once, here, so
@@ -2328,12 +2361,13 @@ async fn pack_verified_local(
     Ok(layer)
 }
 
-/// Fetch and digest-verify an artifact's single layer blob, then decode a
+/// Fetch and digest-verify an artifact's content layer blob, then decode a
 /// tar-kind layer to tar bytes under the same cap
 /// ([`crate::oci::layer::decode_layer`]).
 ///
-/// `artifact.source.pinned()` is the *manifest* digest: resolve the
-/// manifest to its single layer descriptor, fetch that layer blob, and
+/// `artifact.source.pinned()` is the *manifest* digest: refuse a manifest
+/// that requires unknown features or has an unknown layer layout, resolve it
+/// to its content layer descriptor, fetch that layer blob, and
 /// verify the bytes hash to the layer digest (defence in depth —
 /// `CachedAccess` / `RegistryClient` already verify, but the seam contract
 /// allows a mock that does not). An access failure (offline miss, auth, registry)
@@ -2364,15 +2398,17 @@ pub(crate) async fn fetch_verified_layer(
     let Some(manifest) = manifest else {
         return Err(InstallError::with_reference(aref(), InstallErrorKind::BlobMissing).into());
     };
-    let Some(layer) = manifest.single_layer() else {
-        return Err(InstallError::with_reference(
-            aref(),
-            InstallErrorKind::MaterializeFailed(format!(
-                "expected a single-layer artifact, manifest has {} layers",
-                manifest.layers.len()
-            )),
-        )
-        .into());
+    let reference = pinned.as_identifier().to_string();
+    crate::oci::features::check_required_features(&reference, &manifest)?;
+    let layer = match manifest.layout(kind).map_err(|e| e.for_reference(&reference))? {
+        LayerLayout::Content(layer) | LayerLayout::BundleMembers(layer) => {
+            check_locked_edges(artifact, kind, None, access, &repo).await?;
+            layer
+        }
+        LayerLayout::ContentWithRequires { content, requires } => {
+            check_locked_edges(artifact, kind, Some(requires), access, &repo).await?;
+            content
+        }
     };
     let layer_digest = layer.digest.clone();
     let tar_layer = crate::oci::layer::is_tar_kind(kind);
@@ -2420,6 +2456,90 @@ pub(crate) async fn fetch_verified_layer(
         return Ok(blob);
     }
     Ok(crate::oci::layer::decode_layer_blocking(layer.clone(), blob, cap).await?)
+}
+
+/// Refuse the whole run, before the first destination or state write, when an
+/// entry about to be installed has stale edges.
+///
+/// Only a [`InstallErrorKind::StaleDependencies`] verdict stops the run here: a
+/// fetch failure or an unreadable layout skips the entry, and the per-node
+/// check in [`fetch_verified_layer`] reports it with its own exit code. An
+/// entry already recorded at its pinned digest is skipped: it was checked when
+/// it was installed, and an unchanged install must not need the network.
+async fn refuse_stale_edges(
+    lock: &GrimoireLock,
+    access: &Arc<dyn OciAccess>,
+    state: &InstallState,
+) -> Result<(), InstallError> {
+    for artifact in lock.iter_artifacts() {
+        let Some(pinned) = artifact.source.pinned() else {
+            continue;
+        };
+        let recorded = state.get(artifact.kind, &artifact.name);
+        if recorded.is_some_and(|rec| rec.source.eq_content(&artifact.source)) {
+            continue;
+        }
+        let Ok(Some(manifest)) = access.fetch_manifest(pinned).await else {
+            continue;
+        };
+        let requires = match manifest.layout(artifact.kind) {
+            Ok(LayerLayout::ContentWithRequires { requires, .. }) => Some(requires),
+            Ok(_) => None,
+            Err(_) => continue,
+        };
+        let repo = pinned.as_identifier().without_tag();
+        if let Err(crate::error::Error::Install(stale)) =
+            check_locked_edges(artifact, artifact.kind, requires, access, &repo).await
+        {
+            return Err(stale);
+        }
+    }
+    Ok(())
+}
+
+/// Refuse a lock entry whose `requires` differ from the requires layer of the
+/// manifest it pins, before any destination is written.
+///
+/// The pinned manifest is digest-verified, so the layer is publisher bytes and
+/// the lock entry is the claim being checked: a lock written before dependencies
+/// existed, a hand edit, or an offline carry-forward all differ here. `layer`
+/// is `None` when the manifest has no requires layer (an empty published set).
+async fn check_locked_edges(
+    artifact: &LockedArtifact,
+    kind: ArtifactKind,
+    layer: Option<&crate::oci::manifest::Descriptor>,
+    access: &Arc<dyn OciAccess>,
+    repo: &Identifier,
+) -> Result<(), crate::error::Error> {
+    use crate::resolve::resolve_error::{ResolveError, ResolveErrorKind};
+
+    let published = match layer {
+        Some(layer) => {
+            crate::resolve::members::fetch_members_blob(access, repo, layer)
+                .await
+                .map_err(|e| match e {
+                    // Keeps the access taxonomy: unreachable 69, offline 81, auth 80.
+                    ResolveErrorKind::RegistryUnreachable(access_error) => crate::error::Error::from(access_error),
+                    other => crate::error::Error::from(ResolveError::unidentified(kind, &artifact.name, other)),
+                })?
+                .members
+        }
+        None => Vec::new(),
+    };
+    let edges = |members: &[crate::oci::bundle::BundleMember]| {
+        members
+            .iter()
+            .map(|m| (m.kind, m.name.clone(), m.id.clone()))
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    if edges(&artifact.requires) != edges(&published) {
+        return Err(InstallError::without_reference(InstallErrorKind::StaleDependencies {
+            kind,
+            name: artifact.name.clone(),
+        })
+        .into());
+    }
+    Ok(())
 }
 
 /// One client's MCP registration, fully resolved but not yet written.
@@ -5715,7 +5835,7 @@ mod tests {
             &mut state,
             &roots,
             std::path::Path::new("."),
-            false,
+            ForceScope::None,
             InstallIntent::Declared,
             &recorder,
         )
@@ -6247,6 +6367,64 @@ mod tests {
 
     // ── A5: a DANGLING leaf symlink at the destination ───────────────────
 
+    /// `Only` overrides the listed nodes' destinations and nothing else: an
+    /// untracked pre-existing skill directory is overwritten for the listed
+    /// name and still refused for its sibling.
+    #[tokio::test]
+    async fn force_scope_only_overrides_listed_nodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let roots = roots(ws);
+        let target = InstallTarget::new(ws, ConfigScope::Project, vec![ClientTarget::Claude]);
+        let m = DefaultMaterializer;
+        let only_a = ForceScope::Only(BTreeSet::from([(ArtifactKind::Skill, "a".to_string())]));
+
+        let mut outcomes = Vec::new();
+        for name in ["a", "b"] {
+            let dest = ws.join(".claude/skills").join(name);
+            std::fs::create_dir_all(&dest).unwrap();
+            std::fs::write(dest.join("SKILL.md"), b"hand written\n").unwrap();
+
+            let blob = skill_tar(name, b"---\nname: x\ndescription: d\n---\nbody\n");
+            let lock = lock_of_skills(vec![locked_skill(name, &blob)]);
+            let access = arc(BlobMock { blob });
+            let mut state = InstallState::load(&ws.join(format!("state-{name}.json"))).unwrap();
+            let r = install_all_with_progress(
+                &lock,
+                &access,
+                &m,
+                &target,
+                &mut state,
+                &roots,
+                Path::new("."),
+                only_a.clone(),
+                InstallIntent::Declared,
+                &SilentProgress,
+            )
+            .await;
+            assert_eq!(r.len(), 1);
+            outcomes.push((dest, r.into_iter().next().unwrap().result));
+        }
+
+        let (dest_a, res_a) = &outcomes[0];
+        assert_eq!(
+            *res_a.as_ref().unwrap(),
+            InstallOutcome::Installed,
+            "listed node is overwritten"
+        );
+        assert_ne!(
+            std::fs::read(dest_a.join("SKILL.md")).unwrap(),
+            b"hand written\n",
+            "the clobber on the listed node must land"
+        );
+        let (dest_b, res_b) = &outcomes[1];
+        assert!(
+            matches!(res_b.as_ref().unwrap(), InstallOutcome::RefusedUntracked { path, .. } if path == dest_b),
+            "an unlisted node must still refuse, got {res_b:?}"
+        );
+        assert_eq!(std::fs::read(dest_b.join("SKILL.md")).unwrap(), b"hand written\n");
+    }
+
     /// A5, direction 1. `dest.exists()` follows symlinks, so a dangling leaf
     /// symlink at the destination is invisible to the untracked-clobber gate
     /// and grim writes THROUGH it — materializing into whatever the link
@@ -6634,7 +6812,7 @@ mod tests {
             ConfigScope::Global,
             home.path(),
             &home.path().join("grimoire.toml"),
-            false,
+            ForceScope::None,
             InstallIntent::Declared,
             &crate::install::progress::SilentProgress,
         )
@@ -7184,7 +7362,7 @@ mod tests {
                     ConfigScope::Global,
                     &home,
                     &home.join("grimoire.toml"),
-                    false,
+                    ForceScope::None,
                     InstallIntent::Declared,
                     &crate::install::progress::SilentProgress,
                 )
@@ -7295,6 +7473,7 @@ mod tests {
                 hash: Algorithm::Sha256.hash(&layer),
             },
             bundles: Vec::new(),
+            requires: Vec::new(),
         }
     }
 

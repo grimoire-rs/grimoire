@@ -13,9 +13,9 @@ use std::io::{self, Read};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::manifest::{Descriptor, OCI_EMPTY_CONFIG_MEDIA_TYPE, OciManifest};
+use super::manifest::{Descriptor, LayerLayout, OCI_EMPTY_CONFIG_MEDIA_TYPE, OciManifest};
+use super::text::registry_text;
 use super::{Algorithm, ArtifactKind};
-use crate::api::export_report::escape_controls;
 
 /// The media type of an uncompressed Grimoire artifact layer (a single tar).
 pub const TAR_LAYER_MEDIA_TYPE: &str = "application/vnd.grimoire.artifact.layer.v1.tar";
@@ -33,9 +33,6 @@ const GZIP_MEDIA_TYPES: [&str; 3] = [
 
 /// gzip header flag bits grim refuses: FEXTRA, FNAME, FCOMMENT.
 const REFUSED_GZIP_FLAGS: u8 = 0x04 | 0x08 | 0x10;
-
-/// Registry-sourced text is cut to this many characters before it reaches an error.
-const MAX_REGISTRY_TEXT: usize = 128;
 
 /// A gzip layer may always decode to this many bytes, whatever its stored size.
 const EXPANSION_FLOOR: u64 = 64 * 1024 * 1024;
@@ -113,11 +110,23 @@ pub fn is_tar_kind(kind: ArtifactKind) -> bool {
     }
 }
 
-/// The compression of a manifest's single layer.
+/// The compression of a manifest's content layer.
 ///
-/// `None` for a `+zstd` layer or a manifest without exactly one layer.
+/// `None` for a `+zstd` layer or a layer layout this grim does not read. A
+/// requires layer is not content and does not count.
 pub fn compression_of(manifest: &OciManifest) -> Option<Compression> {
-    match classify(&manifest.single_layer()?.media_type) {
+    // Every non-bundle kind reads the same layouts, so the kind does not
+    // change the answer. A bundle's members layer falls back to the single
+    // layer, keeping its `none` rather than turning it into `null`.
+    let content = match manifest.layout(ArtifactKind::Skill) {
+        Ok(
+            LayerLayout::Content(layer)
+            | LayerLayout::ContentWithRequires { content: layer, .. }
+            | LayerLayout::BundleMembers(layer),
+        ) => layer,
+        Err(_) => manifest.single_layer()?,
+    };
+    match classify(&content.media_type) {
         Ok(LayerEncoding::TarGzip) => Some(Compression::Gzip),
         Ok(LayerEncoding::Tar) => Some(Compression::None),
         Err(_) => None,
@@ -333,12 +342,6 @@ fn corrupt(message: &str) -> LayerError {
     LayerError::Corrupt(io::Error::new(io::ErrorKind::InvalidData, message))
 }
 
-/// Registry-sourced text made safe for a terminal: cut to
-/// [`MAX_REGISTRY_TEXT`] characters, then control characters spelled out.
-fn registry_text(text: &str) -> String {
-    escape_controls(&text.chars().take(MAX_REGISTRY_TEXT).collect::<String>())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,7 +415,7 @@ mod tests {
         assert!(shown.starts_with("evil\\u{1b}[2J"), "{shown}");
         assert_eq!(
             shown.chars().filter(|c| *c == 'a').count(),
-            MAX_REGISTRY_TEXT - "evil\u{1b}[2J".chars().count()
+            crate::oci::text::MAX_REGISTRY_TEXT - "evil\u{1b}[2J".chars().count()
         );
 
         let err = decode_err(&gzip_desc(Some("\u{7}bell")), gzip(TAR));
@@ -434,7 +437,30 @@ mod tests {
         zstd.media_type = "application/vnd.oci.image.layer.v1.tar+zstd".to_string();
         assert_eq!(compression_of(&manifest(vec![zstd])), None);
         assert_eq!(compression_of(&manifest(vec![])), None);
-        assert_eq!(compression_of(&manifest(vec![gz, raw])), None);
+        assert_eq!(compression_of(&manifest(vec![gz.clone(), raw])), None);
+        // A requires layer is not the content, in either position.
+        let mut requires = raw_requires_layer();
+        assert_eq!(
+            compression_of(&manifest(vec![gz.clone(), requires.clone()])),
+            Some(Compression::Gzip)
+        );
+        assert_eq!(
+            compression_of(&manifest(vec![requires.clone(), gz.clone()])),
+            Some(Compression::Gzip)
+        );
+        // A bundle's one members layer reports `none`, as it always did.
+        assert_eq!(
+            compression_of(&manifest(vec![requires.clone()])),
+            Some(Compression::None)
+        );
+        requires.media_type = "application/vnd.oci.image.layer.v1.tar".to_string();
+        assert_eq!(compression_of(&manifest(vec![gz, requires])), None);
+    }
+
+    fn raw_requires_layer() -> Descriptor {
+        let mut layer = encode_layer(b"{}", Compression::None).1;
+        layer.media_type = crate::oci::bundle::BUNDLE_LAYER_MEDIA_TYPE.to_string();
+        layer
     }
 
     // ── decode_layer ──

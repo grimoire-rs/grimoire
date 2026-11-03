@@ -15,7 +15,7 @@
 //! artifact stays in the effective desired set, so it remains desired. There
 //! `uninstall` degrades to dropping the direct declaration (exactly like
 //! `grim remove`), keeping the bundle-provided files intact
-//! (`declared_bundle_provides`).
+//! (`declared_parent_provides`).
 
 use clap::Args;
 
@@ -87,15 +87,20 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
         None => None,
     };
 
-    // A directly-declared artifact a declared bundle still provides stays in
-    // the effective desired set once the direct declaration is removed —
-    // deleting its files would orphan something still desired. In that case
-    // `uninstall` degrades to dropping the direct declaration (like `remove`),
-    // leaving the bundle-provided files intact. Decided offline from the lock's
-    // cached bundle snapshots; a pre-cache lock falls back to deleting.
-    let held_by_bundle = lock_io::load(&scope.lock_path).ok().is_some_and(|lock| {
-        crate::lock::effective_set::declared_bundle_provides(&scope.set, &lock.bundles, kind, &args.name)
-    });
+    // An artifact a remaining declaration still reaches stays in the effective
+    // desired set once its direct declaration is removed: a declared bundle
+    // that names it, or a remaining artifact that requires it. Deleting its
+    // files would orphan something still desired, so `uninstall` degrades to
+    // dropping the direct declaration (like `remove`). What only the target
+    // reached is deleted with it. Decided offline from the lock's cached
+    // snapshots and `requires` edges; a closure that cannot be followed
+    // offline deletes the target only.
+    let lock = lock_io::load(&scope.lock_path).ok();
+    let key = (kind, args.name.clone());
+    let held_by_bundle = lock
+        .as_ref()
+        .is_some_and(|lock| crate::lock::effective_set::declared_parent_provides(&scope.set, lock, &key));
+    let plan = plan_hold(&scope.set, lock.as_ref(), &key);
 
     // 1. Delete materialized files + drop the install-state record — UNLESS a
     //    declared bundle still holds the artifact (see above), in which case
@@ -111,61 +116,6 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
     let mut abandoned_entries = Vec::new();
     if !held_by_bundle {
         let mut state = super::grim(scope_resolution::load_state(&scope).map_err(|e| state_io(&scope.state_path, e)))?;
-        // Snapshot before the mutation: the vendor config sync below needs the
-        // outputs this uninstall removes, and the record is gone by then.
-        let before = state.clone();
-        let involved_clients: Vec<crate::install::client_target::ClientTarget> = state
-            .get(kind, &args.name)
-            .map(|r| r.outputs.iter().filter_map(|c| c.client.parse().ok()).collect())
-            .unwrap_or_default();
-        let result = super::grim(
-            uninstall(&mut state, kind, &args.name, &scope.roots, args.force)
-                .map_err(|e| uninstall_error(&scope.workspace, e)),
-        )?;
-        file_removed = result.outcome == UninstallOutcome::Removed;
-        retained = result.retained;
-        abandoned_entries = result.abandoned_entries;
-        if file_removed {
-            // The single `persist` seam handles project-scope dir creation, the
-            // atomic write, and the conditional legacy-file reap in one place.
-            super::grim(
-                state
-                    .persist(
-                        scope.scope,
-                        &scope.workspace,
-                        &scope.roots.grim_home,
-                        &scope.config_path,
-                    )
-                    .map_err(|e| match e {
-                        crate::install::install_state::PersistError::EnsureDir { path, source }
-                        | crate::install::install_state::PersistError::Save { path, source } => state_io(&path, source),
-                    }),
-            )?;
-        }
-
-        // Converge vendor-owned config for every client the removed record
-        // carried (e.g. drops OpenCode's managed `instructions` glob when the
-        // last OpenCode rule is gone). The files and install state are already
-        // gone/persisted, so a config-sync failure is warn-only — the uninstall
-        // succeeds, never a hard failure after the primary action.
-        let retired = crate::install::install_state::retired_outputs(&before, &state);
-        for client in involved_clients {
-            if let Err(e) = client
-                .vendor()
-                .sync_config(&state, &scope.workspace, scope.scope, &retired)
-            {
-                tracing::warn!(
-                    client = %client,
-                    error = %e,
-                    "vendor config sync failed; uninstall completed, deregistration skipped"
-                );
-            }
-        }
-
-        // S-008's deregistration half: converge hooks against the now-shrunken
-        // state, which drops the uninstalled hook's dispatch rows and reaps its
-        // registration from every client that carried one.
-        //
         // The policy is resolved **without** the consent prompt reachable —
         // `grim uninstall` takes no `--trust-hooks` and must never ask a
         // question in order to *remove* something. Survivors converge on the
@@ -177,10 +127,10 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
         // would silently disarm every *surviving* hook as a side effect of
         // removing an unrelated skill.
         //
-        // The files are already gone by here, so a global config that cannot
-        // be loaded must not abort the uninstall halfway (main's uninstall never
-        // read it). Fail closed instead: converge with the feature forced off,
-        // which reaps this root's registrations rather than leaving them armed.
+        // A global config that cannot be loaded must not abort the uninstall
+        // (main's uninstall never read it). Fail closed instead: converge with
+        // the feature forced off, which reaps this root's registrations rather
+        // than leaving them armed.
         let no_declared = std::collections::BTreeSet::new();
         let hook_policy = match super::hook_consent::resolve_without_consent(ctx, &scope, None, &no_declared) {
             Ok(policy) => policy,
@@ -197,13 +147,33 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
                 )
             }
         };
-        crate::install::hook_registrar::converge_for(
-            Some(&hook_policy),
-            &state,
-            &scope.workspace,
-            scope.scope,
-            &scope.roots,
+        let nodes: Vec<_> = std::iter::once(key.clone())
+            .chain(plan.orphans.iter().cloned())
+            .collect();
+        let deletion = delete_nodes(
+            &mut state,
+            &nodes,
+            &DeleteEnv {
+                roots: &scope.roots,
+                scope: scope.scope,
+                workspace: &scope.workspace,
+                config_path: &scope.config_path,
+                force: args.force,
+                hook_policy: &hook_policy,
+            },
         );
+        if let Some(failure) = deletion.failure {
+            return Err(anyhow::Error::from(match failure {
+                DeleteFailure::Uninstall(e) => uninstall_error(&scope.workspace, e),
+                DeleteFailure::Persist(
+                    crate::install::install_state::PersistError::EnsureDir { path, source }
+                    | crate::install::install_state::PersistError::Save { path, source },
+                ) => crate::error::Error::from(state_io(&path, source)),
+            }));
+        }
+        file_removed = deletion.target_removed;
+        retained = deletion.retained;
+        abandoned_entries = deletion.abandoned_entries;
     }
 
     // 2. Undeclare from the config + lock (the `remove` half), so a later
@@ -222,10 +192,13 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
     let status = if file_removed || declared {
         UninstallStatus::Uninstalled
     } else if held_by_bundle {
-        // A bundle-only member: a declared bundle still provides it, so the files
-        // were kept and there was no direct declaration to drop — an intentional
-        // no-op, not a "nothing here" result. Remove the bundle to remove it.
-        UninstallStatus::KeptByBundle
+        // Held with no direct declaration to drop — an intentional no-op, not a
+        // "nothing here" result. Remove the bundle (or the artifact that
+        // requires it) to remove it.
+        match plan.hold {
+            Some(Hold::Dependency) => UninstallStatus::KeptByDependency,
+            _ => UninstallStatus::KeptByBundle,
+        }
     } else {
         UninstallStatus::NotInstalled
     };
@@ -233,6 +206,163 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
         UninstallReport::new(kind, args.name.clone(), status, retained, abandoned_entries),
         ExitCode::Success,
     ))
+}
+
+/// What [`delete_nodes`] needs from its caller's scope.
+pub(crate) struct DeleteEnv<'a> {
+    pub(crate) roots: &'a crate::install::path_anchor::AnchorRoots,
+    pub(crate) scope: crate::config::scope::ConfigScope,
+    pub(crate) workspace: &'a std::path::Path,
+    pub(crate) config_path: &'a std::path::Path,
+    /// `grim uninstall --force`: also remove a managed MCP entry that drifted.
+    pub(crate) force: bool,
+    /// Resolved by the caller without a consent prompt; survivors converge on it.
+    pub(crate) hook_policy: &'a crate::hook::policy::HookPolicy,
+}
+
+/// Why [`delete_nodes`] stopped before the last node.
+pub(crate) enum DeleteFailure {
+    Uninstall(UninstallError),
+    Persist(crate::install::install_state::PersistError),
+}
+
+/// The outcome of [`delete_nodes`]; `failure` is set when it stopped early.
+pub(crate) struct Deletion {
+    /// Whether the first node (the uninstall target) had a record removed.
+    target_removed: bool,
+    retained: Vec<std::path::PathBuf>,
+    abandoned_entries: Vec<crate::install::uninstall::AbandonedEntry>,
+    pub(crate) failure: Option<DeleteFailure>,
+}
+
+/// Delete the files and install-state records of `nodes` (the target first,
+/// then the dependency orphans [`plan_hold`] named), converge vendor config
+/// for every client they carried, and converge hooks against what survives.
+/// The deletion half of `grim uninstall`, shared with the TUI delete paths.
+///
+/// State is persisted after each removed node so a later node's failure never
+/// strands records for files already gone. On failure the nodes already
+/// removed still get the vendor sync and hook convergence (removal has no
+/// later convergence), then `failure` carries the error. The vendor sync is
+/// warn-only: the files are gone, so it never fails the delete.
+pub(crate) fn delete_nodes(
+    state: &mut crate::install::install_state::InstallState,
+    nodes: &[crate::lock::effective_set::NodeKey],
+    env: &DeleteEnv<'_>,
+) -> Deletion {
+    // Snapshot before the mutation: the vendor config sync needs the outputs
+    // these deletes remove, and the records are gone by then.
+    let before = state.clone();
+    let mut involved_clients: Vec<crate::install::client_target::ClientTarget> = Vec::new();
+    let mut out = Deletion {
+        target_removed: false,
+        retained: Vec::new(),
+        abandoned_entries: Vec::new(),
+        failure: None,
+    };
+    for (index, (kind, name)) in nodes.iter().enumerate() {
+        for client in state
+            .get(*kind, name)
+            .map(|r| {
+                r.outputs
+                    .iter()
+                    .filter_map(|c| c.client.parse().ok())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+        {
+            if !involved_clients.contains(&client) {
+                involved_clients.push(client);
+            }
+        }
+        let result = match uninstall(state, *kind, name, env.roots, env.force) {
+            Ok(result) => result,
+            Err(e) => {
+                out.failure = Some(DeleteFailure::Uninstall(e));
+                break;
+            }
+        };
+        out.retained.extend(result.retained);
+        out.abandoned_entries.extend(result.abandoned_entries);
+        if result.outcome == UninstallOutcome::Removed {
+            out.target_removed |= index == 0;
+            // The single `persist` seam handles project-scope dir creation, the
+            // atomic write, and the conditional legacy-file reap in one place.
+            if let Err(e) = state.persist(env.scope, env.workspace, &env.roots.grim_home, env.config_path) {
+                out.failure = Some(DeleteFailure::Persist(e));
+                break;
+            }
+        }
+    }
+    let retired = crate::install::install_state::retired_outputs(&before, state);
+    for client in involved_clients {
+        if let Err(e) = client.vendor().sync_config(state, env.workspace, env.scope, &retired) {
+            tracing::warn!(
+                client = %client,
+                error = %e,
+                "vendor config sync failed; uninstall completed, deregistration skipped"
+            );
+        }
+    }
+    // S-008's deregistration half: drops the uninstalled hook's dispatch rows
+    // and reaps its registration from every client that carried one.
+    crate::install::hook_registrar::converge_for(Some(env.hook_policy), state, env.workspace, env.scope, env.roots);
+    out
+}
+
+/// Why a remaining declaration still holds the target.
+enum Hold {
+    Bundle,
+    Dependency,
+}
+
+/// What undeclaring the target does to the rest of the effective set.
+pub(crate) struct HoldPlan {
+    /// Set when the target stays in the effective set after its direct
+    /// declaration goes; a bundle member wins over a dependency.
+    hold: Option<Hold>,
+    /// Installable nodes only the target reached, in effective-set order.
+    pub(crate) orphans: Vec<crate::lock::effective_set::NodeKey>,
+}
+
+/// Compare the effective set before and after dropping the target's direct
+/// declaration. No plan when the lock is absent or its closure cannot be
+/// followed offline: the target alone is then uninstalled.
+pub(crate) fn plan_hold(
+    set: &crate::config::declaration::DesiredSet,
+    lock: Option<&crate::lock::grimoire_lock::GrimoireLock>,
+    key: &crate::lock::effective_set::NodeKey,
+) -> HoldPlan {
+    use crate::lock::effective_set::{Origin, effective_set};
+
+    let none = HoldPlan {
+        hold: None,
+        orphans: Vec::new(),
+    };
+    let Some(lock) = lock else { return none };
+    let mut after = set.clone();
+    match key.0 {
+        ArtifactKind::Hook => after.hooks.remove(&key.1),
+        ArtifactKind::Skill => after.skills.remove(&key.1),
+        ArtifactKind::Rule => after.rules.remove(&key.1),
+        ArtifactKind::Agent => after.agents.remove(&key.1),
+        ArtifactKind::Mcp => after.mcp.remove(&key.1),
+        ArtifactKind::Bundle => return none,
+    };
+    after.invalidate_declaration_hash_cache();
+    let (Some(before), Some(after)) = (effective_set(set, lock), effective_set(&after, lock)) else {
+        return none;
+    };
+    let hold = after.get(key).map(|origin| match origin {
+        Origin::Implied { contributors, .. } if contributors.is_empty() => Hold::Dependency,
+        _ => Hold::Bundle,
+    });
+    let orphans = before
+        .keys()
+        .filter(|k| *k != key && k.0 != ArtifactKind::Bundle && !after.contains_key(*k))
+        .cloned()
+        .collect();
+    HoldPlan { hold, orphans }
 }
 
 /// Undeclare `name` from the scope's config (when declared) and bring the

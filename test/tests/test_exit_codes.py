@@ -19,6 +19,7 @@ CONFIG_COMMANDS = [
     ("config", "get", "options.default_registry"),
     ("config", "list"),
     ("status",),
+    ("why", "skill", "x"),
     ("install",),
     ("lock",),
 ]

@@ -206,6 +206,48 @@ def push_artifact(
     return PublishedArtifact(repo=repo, tag=tag, digest=manifest_digest, kind=kind)
 
 
+def push_manifest(
+    repo: str,
+    tag: str,
+    layers: list[tuple[str, bytes]],
+    annotations: dict[str, str] | None = None,
+    *,
+    artifact_type: str | None = None,
+) -> str:
+    """Push a manifest over arbitrary ``(media_type, bytes)`` layers; return its digest.
+
+    Each layer blob is uploaded, in order, with no descriptor annotations; the
+    config is the OCI empty config. ``artifact_type`` is omitted unless given,
+    which is grim's own wire shape (:func:`push_artifact` adds one to exercise
+    the legacy read path).
+    """
+    config_blob = b"{}"
+    manifest: dict[str, object] = {
+        "schemaVersion": 2,
+        "mediaType": _MANIFEST_MEDIA_TYPE,
+    }
+    if artifact_type is not None:
+        manifest["artifactType"] = artifact_type
+    manifest["config"] = {
+        "mediaType": _OCI_EMPTY_CONFIG_MEDIA_TYPE,
+        "digest": _push_blob(repo, config_blob),
+        "size": len(config_blob),
+    }
+    manifest["layers"] = [
+        {"mediaType": media_type, "digest": _push_blob(repo, blob), "size": len(blob)}
+        for media_type, blob in layers
+    ]
+    if annotations:
+        manifest["annotations"] = annotations
+    manifest_bytes = json.dumps(manifest).encode()
+    _put(
+        f"{REGISTRY_BASE}/v2/{repo}/manifests/{tag}",
+        manifest_bytes,
+        _MANIFEST_MEDIA_TYPE,
+    )
+    return _sha256(manifest_bytes)
+
+
 def push_gzip_artifact(
     repo: str,
     tag: str,

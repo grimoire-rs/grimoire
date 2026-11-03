@@ -1,0 +1,16 @@
+[options.experimental]
+hooks = true
+
+[bundles]
+local-bundle = "./bundles/local-bundle.toml"
+reg-bundle = "localhost:5000/grim-golden/pre-dependencies-cdeedcaa/reg-bundle:1.0.0"
+
+[skills]
+local-skill = "./skills/local-skill"
+reg-skill = "localhost:5000/grim-golden/pre-dependencies-cdeedcaa/reg-skill:1.0.0"
+
+[hooks]
+reg-hook = "localhost:5000/grim-golden/pre-dependencies-cdeedcaa/reg-hook:1.0.0"
+
+[mcp]
+reg-mcp = "localhost:5000/grim-golden/pre-dependencies-cdeedcaa/reg-mcp:1.0.0"

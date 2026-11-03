@@ -495,6 +495,10 @@ pub struct TuiState {
     /// - Pruned on `merge_catalog_rows` (same bundle-rows-only prune).
     /// - Cleared on scope toggle in `app.rs`.
     pub expanded_bundles: BTreeSet<String>,
+    /// What the active scope's lock says about dependencies: which rows
+    /// expand into their `requires`, and the `Required by:` / `Why:` answers.
+    /// Re-read with the install states; empty until the first load.
+    pub deps: super::bundle_members::DepIndex,
     /// Ephemeral per-repository cache for description companions — the README,
     /// CHANGELOG, and support channels the detail pane's document tabs render.
     ///
@@ -580,6 +584,7 @@ impl Default for TuiState {
             registry_order: Vec::new(),
             bundle_members: HashMap::new(),
             expanded_bundles: BTreeSet::new(),
+            deps: super::bundle_members::DepIndex::default(),
             companions: HashMap::new(),
             detail_tab: super::detail::DetailTab::Overview,
             registry_health: RegistryHealth::default(),
@@ -782,7 +787,7 @@ impl TuiState {
             let live_repos: std::collections::HashSet<&str> = self
                 .rows
                 .iter()
-                .filter(|r| r.kind == "bundle")
+                .filter(|r| r.kind == "bundle" || self.deps.has_children(&r.repo))
                 .map(|r| r.repo.as_str())
                 .collect();
             for (key, cache) in saved_bundle_members {
@@ -1341,7 +1346,14 @@ impl TuiState {
     /// for the current selection. The single input to both the scroll bound and
     /// the paint, so the two cannot disagree about how tall the pane is.
     pub fn active_detail_lines(&self) -> Vec<super::detail::DetailLine> {
-        super::detail::detail_tab_lines(self.selected_row(), self.detail_companion(), self.detail_tab)
+        let row = self.selected_row();
+        let mut lines = super::detail::detail_tab_lines(row, self.detail_companion(), self.detail_tab);
+        if self.detail_tab == super::detail::DetailTab::Overview
+            && let Some(row) = row
+        {
+            lines.extend(super::detail::dependency_lines(&self.deps, &row.repo));
+        }
+        lines
     }
 
     /// The detail viewport for `size`. The tab strip rides the block border, so
@@ -1733,6 +1745,7 @@ impl TuiState {
             &self.bundle_members,
             &self.scope_label,
             &self.rows,
+            &self.deps,
         )
     }
 

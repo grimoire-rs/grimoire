@@ -83,6 +83,10 @@ pub struct LockedBundle {
     pub source: LockedBundleSource,
     /// The member list the bundle carried at resolution time.
     pub members: Vec<BundleMember>,
+    /// Whether this snapshot was reached through a dependency edge rather
+    /// than a `[bundles]` declaration. Serialized `transitive = true` only
+    /// when set; an older grim refuses the lock on the unknown key.
+    pub transitive: bool,
 }
 
 impl LockedBundle {
@@ -164,6 +168,10 @@ struct RawLockedBundle {
     /// with `path`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     hash: Option<Digest>,
+    /// Set when no `[bundles]` declaration names this snapshot: it was
+    /// reached through a dependency edge.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    transitive: bool,
     /// The member list the bundle carried at resolution time.
     #[serde(default, rename = "member")]
     members: Vec<BundleMember>,
@@ -205,6 +213,7 @@ impl TryFrom<RawLockedBundle> for LockedBundle {
             pinned,
             path,
             hash,
+            transitive,
             members,
         } = raw;
         // Whether each arm's field set has *any* member present, so a half-set
@@ -250,13 +259,23 @@ impl TryFrom<RawLockedBundle> for LockedBundle {
                 return Err("a bundle entry must carry either `repo`/`tag`/`pinned` or `path`/`hash`".to_string());
             }
         };
-        Ok(Self { name, source, members })
+        Ok(Self {
+            name,
+            source,
+            members,
+            transitive,
+        })
     }
 }
 
 impl From<LockedBundle> for RawLockedBundle {
     fn from(bundle: LockedBundle) -> Self {
-        let LockedBundle { name, source, members } = bundle;
+        let LockedBundle {
+            name,
+            source,
+            members,
+            transitive,
+        } = bundle;
         let (repo, tag, pinned, path, hash) = match source {
             // Strip the advisory tag so a registry-only lock serializes
             // byte-identical to the pre-discriminant flat shape; the tag
@@ -273,6 +292,7 @@ impl From<LockedBundle> for RawLockedBundle {
             pinned,
             path,
             hash,
+            transitive,
             members,
         }
     }
@@ -300,6 +320,7 @@ mod tests {
                 name: "code-review".to_string(),
                 id: "ghcr.io/acme/code-review:1".to_string(),
             }],
+            transitive: false,
         };
         let toml = toml::to_string_pretty(&bundle).expect("serialize");
         assert!(toml.contains("[[member]]"), "{toml}");
@@ -331,6 +352,7 @@ mod tests {
                 name: "code-review".to_string(),
                 id: "ghcr.io/acme/code-review:1".to_string(),
             }],
+            transitive: false,
         };
         let toml = toml::to_string_pretty(&bundle).expect("serialize");
         let expected = format!(
@@ -377,6 +399,7 @@ mod tests {
                 name: "code-review".to_string(),
                 id: "ghcr.io/acme/code-review:1".to_string(),
             }],
+            transitive: false,
         };
         let toml = toml::to_string_pretty(&bundle).expect("serialize");
         let expected = format!(

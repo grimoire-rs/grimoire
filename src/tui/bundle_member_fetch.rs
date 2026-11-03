@@ -215,7 +215,7 @@ impl BundleMemberChecker {
                 id.clone(),
             );
 
-            let msg = match crate::resolve::resolver::fetch_bundle_members(&bundle_ref, &id, &access, &options).await {
+            let msg = match crate::resolve::members::fetch_bundle_members(&bundle_ref, &id, &access, &options).await {
                 Ok((mut members, _pinned)) => {
                     // Resolve `./`/`../`-relative member ids against the bundle
                     // identifier the layer came from (issue #31) so the member
