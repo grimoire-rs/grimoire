@@ -176,6 +176,13 @@ server `not-representable` (the spec expands nothing there). Any other
 `${VAR}` in `args`, env values or `cwd` is exported with a warning: those
 clients may pass it through literally.
 
+## Requires
+
+A `[requires.<table>]` table (`skills`, `rules`, `agents`, `mcp`, `hooks`,
+`bundles`) declares artifacts the server needs. `grim build` splits it off
+before packing, so the descriptor bytes do not change. Needs grim 0.16.0 or
+later; see [Declaring Dependencies](../SKILL.md#declaring-dependencies).
+
 ## Example
 
 ```toml

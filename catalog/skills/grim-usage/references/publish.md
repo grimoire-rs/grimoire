@@ -151,7 +151,7 @@ version = "1.2.0"    # explicit per-entry version wins
 
 [bundles.dev-stack]
 version = "0.3.0"
-pin = true          # bundle-only: freeze floating member tags to digests
+pin = true          # freeze floating bundle members, or an artifact's requires, to digests
 
 [skills.dev-stack-core]
 announce = false    # publish, but write no index pointer under --announce
@@ -171,8 +171,11 @@ Key behaviors — confirmed invariants, not subject to minor-release drift:
 - **Fail-fast.** The first failing entry stops the batch. The report shows
   all completed entries plus the failed one. Re-run with `--only <name>` to
   resume from a specific entry.
-- **`pin = true` is bundle-only.** Setting it on any other kind — skill,
-  rule, agent, mcp, or hook — is a validation error (exit 65).
+- **`pin = true` applies to every kind.** It freezes a bundle's members or
+  another artifact's declared dependencies, and does nothing for an entry
+  with neither.
+- **Dependency order.** An entry follows the same-manifest entries it
+  requires, then the kind order. A requires cycle exits 65 before any push.
 - **Catalog-wide version.** `--version` is the single version source for a
   run. An optional top-level `version` covers every entry that omits its
   own or sets the literal `${version}`; explicit per-entry versions
@@ -383,7 +386,13 @@ By default member tags stay floating and each consumer's `grim lock`
 re-resolves them fresh. `--pin` instead freezes every floating member to
 a digest at release time, making the bundle reproducible on its own —
 the stronger guarantee for air-gapped or tunneled networks. Re-run the
-pinned release to roll members forward.
+pinned release to roll members forward. `--pin` also freezes the declared
+dependencies of any other kind.
+
+An artifact that declares dependencies needs grim 0.16.0 or later to
+build, release and install: an older grim leaves the declarations out
+when packing. Put the first dependent version under a new major tag
+rather than an existing floating one.
 
 ## Catalog Metadata
 

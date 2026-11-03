@@ -139,16 +139,21 @@ for everyone already on them. Full rules: [Batch publishing][batch-publish].
     say nothing about where it was built.
 
   Confirm the exact behavior with `grim release --help`.
-- **Bundles: `--pin`** resolves every floating member to a digest at
+- **`--pin`** resolves every floating bundle member to a digest at
   release time for a self-contained, reproducible bundle
-  ([pinning][pin]).
+  ([pinning][pin]). For any other kind it freezes the references in the
+  artifact's declared dependencies.
+- **Dependent artifacts need grim 0.16.0 or later** to release, and to
+  install. Release the first dependent version under a new major tag, not an
+  existing floating one.
 
 ## Batch Publish
 
 `grim publish` releases every package declared in a `publish.toml`
 manifest: whole-manifest validation before any push, then a fixed kind
-order (skills → rules → agents → mcp → hooks → bundles) so bundle members
-always exist first. Semantics to know ([full reference][batch-publish]):
+order (skills → rules → agents → mcp → hooks → bundles), moving an entry
+after any same-manifest entry it requires, so members and dependencies
+always exist first. A requires cycle exits 65 before any push. Semantics to know ([full reference][batch-publish]):
 
 - **One version for the catalog.** A top-level `version` covers every
   entry that omits its own (or writes the literal `${version}`); an

@@ -2,7 +2,7 @@
 name: grim-usage
 description: Drive the grim CLI — the OCI package manager for AI skills, rules, agents, MCP servers, hooks, and bundles. Use when installing, updating, searching, rating, or publishing AI-config artifacts with grim; when composing grim init, config, add, lock, install, update, status, context, fetch, describe, export, search, rate, tui, mcp, hook, build, release, publish, login, logout, or completions commands; when adding, pinning, or exporting a plugin marketplace (marketplace.toml); when enabling opt-in telemetry; when configuring settings, multiple registries, or qualified alias/repo references; or when resolving registries, project vs global scope, client targets, or offline mode.
 license: Apache-2.0
-compatibility: grim>=0.15
+compatibility: grim>=0.16
 metadata:
   summary: How to use the grim CLI end to end
   keywords: grim,grimoire,cli,oci,registry,install,update,publish,skills,rules,agents,bundles,mcp,hooks,multi-registry
@@ -88,7 +88,8 @@ To verify a pre-built grim release archive's build provenance:
 | `grim context` | Report the resolved scope, paths, clients, registries | [consume](references/consume.md) |
 | `grim fetch` | Print an artifact's content without installing | [consume](references/consume.md) |
 | `grim describe` | Report an artifact's metadata (kind, annotations, tags) without downloading content | [consume](references/consume.md) |
-| `grim remove` / `uninstall` | Undeclare vs full inverse of install | [consume](references/consume.md) |
+| `grim remove` / `uninstall` | Undeclare vs full inverse of install; both also drop dependencies only the target needed | [consume](references/consume.md) |
+| `grim why` | Explain why an artifact is installed: direct, or required by which others (offline, lock only) | [consume](references/consume.md#dependencies) |
 | `grim export plugin` | Render already-locked artifacts as a Claude-family (Claude Code, Qoder) or Agent Plugins plugin (directory or `--zip`), for a client with no grim install | [publish](references/publish.md#export) |
 | `grim export marketplace` | Regenerate a git marketplace repository from a `marketplace.toml`'s `[marketplace]` table: one marketplace file and one plugin tree per client, plus a root README with the add commands, for consumers with no grim install | [marketplaces](references/marketplaces.md) |
 | `grim search` / `tui` | Browse your declared registries' catalogs | [registries](references/registries.md) |

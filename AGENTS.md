@@ -15,7 +15,7 @@ context automatically; other agents should open those paths directly.
 Grimoire is a package manager for AI-agent config — a CLI to install,
 maintain, and publish AI-agent configuration (skills, rules, prompts)
 distributed through standard OCI registries. The binary is named `grim`;
-the Rust crate/package is `grimoire`. Shipping: full CLI (20 subcommands),
+the Rust crate/package is `grimoire`. Shipping: full CLI (26 subcommands),
 OCI registry pipeline, catalog publishing, MCP server, TUI, experimental
 hooks. A cargo workspace (see Architecture), subsystem modules under `src/`, no stable *library* API — the binary is the only consumer.
 
