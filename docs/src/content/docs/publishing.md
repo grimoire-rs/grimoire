@@ -803,9 +803,11 @@ plus `authors`.
 ## Publishing bundles {#bundles}
 
 A [bundle](./concepts.md#bundles) groups skills, rules, and
-[agents](./agents.md) so consumers declare one reference instead of a dozen.
+[agents](./agents.md), and can also hold MCP servers, hooks and other
+bundles, so consumers declare one reference instead of a dozen.
 You author it as a small TOML file whose `[skills]`/`[rules]`/`[agents]`
-tables list the members, the same shape as a `grimoire.toml`:
+tables list the members, the same shape as a `grimoire.toml`. A `[bundles]`
+table adds [nested bundles](./artifacts.md#bundle-nested):
 
 ```toml
 # python-stack.toml
@@ -848,6 +850,10 @@ and freeze it into the published bundle:
 grim release ./python-stack.toml ghcr.io/acme/python-stack:1.0.0 --pin
 ```
 
+`--pin` is not limited to bundles. On any other kind it freezes the floating
+references in the artifact's [declared dependencies](#requires), and it does
+nothing for an artifact that declares none.
+
 A pinned bundle is reproducible on its own. It always expands to the exact same
 member digests, even on an air-gapped or tunneled network that cannot re-resolve
 a tag. Re-run the release, from a cron job tracking `:stable` for example, to
@@ -855,6 +861,61 @@ roll the pinned members forward. A
 [deployment-relative member](./artifacts.md#bundle-relative-refs) is
 resolved against the release target and then pinned absolute, so
 reproducibility forfeits its late binding.
+
+## Publishing dependencies {#requires}
+
+A skill, rule, agent, MCP server or hook that
+[declares dependencies](./artifacts.md#requires) publishes with
+the same commands as any other artifact. [`grim release`](./commands.md#release)
+packs the declarations into a second layer beside the content, and
+[`grim publish`](./commands.md#publish) does the same for every entry of a
+manifest. An artifact that declares nothing publishes byte-identical to before.
+
+```sh
+grim release ./gws-drive ghcr.io/acme/skills/gws-drive:1.0.0
+grim release ./gws-drive ghcr.io/acme/skills/gws-drive:1.0.0 --pin
+```
+
+`--pin`, or `pin = true` on the `publish.toml` entry, resolves every floating
+reference in the declarations to a digest and freezes it into the published
+artifact, the same as for [bundle members](#pin). A relative reference is
+resolved against the release target first and then pinned absolute.
+
+### Publish order {#requires-publish-order}
+
+`grim publish` orders the manifest so that an entry follows the entries of the
+same manifest it requires, then falls back to the
+[kind order](#batch-publish-ordering). A dependency is therefore on the
+registry before the artifact that names it, whichever kinds are involved.
+Entries that require each other in a cycle exit `65` before anything is
+pushed. A relative reference counts as an edge only when it names the exact
+sibling version tag, so declare `./gws-shared:1.0.0` and not a floating tag if
+you rely on the ordering for a first release.
+
+Nothing checks that a dependency exists when you publish without `--pin`.
+Consumers meet a missing target at [`grim lock`](./commands.md#lock), which
+exits `79`.
+
+### Who can install it {#requires-consumers}
+
+A dependent artifact needs grim 0.16.0 or later to install. Build and release
+it with grim 0.16.0 or later as well: an older grim packs the content layer
+only and silently leaves the declarations out.
+
+An older grim refuses a dependent artifact or locks it without its
+dependencies, depending on the command. The
+[exact matrix](./upgrading.md#dependencies-need-new-grim) is in Upgrading. The
+rule for a publisher:
+
+- Do not add declarations to a version tag consumers already float on. An
+  older grim that follows that tag then either exits `65` at `grim add`, or
+  locks the artifact without its dependencies and writes a lock that a newer
+  grim later refuses.
+- Publish the first dependency-bearing version under a **new major tag**, and
+  let consumers move to it when they upgrade grim.
+- Dependencies stay as shared as the tags they name. A floating reference is
+  resolved when each consumer locks, so two artifacts that name different tags
+  of one dependency can [conflict](./concepts.md#bundle-conflicts).
 
 ## Batch publishing with a manifest {#batch-publish}
 
@@ -897,7 +958,7 @@ version = "1.0.0"
 
 [bundles.grim-essentials]
 version = "0.1.0"
-pin = true                         # optional, bundle entries only; default false
+pin = true                         # optional, any kind; freezes members or requires; default false
 
 [skills.grim-essentials-core]
 version = "0.1.0"
@@ -1285,7 +1346,9 @@ elsewhere.
 
 Entries publish in a fixed kind order: skills, then rules, then agents,
 then [MCP servers](./mcp-servers.md), then [hooks](./hooks.md) (experimental),
-then bundles. Ordering is alphabetical within each kind. Hooks were
+then bundles. Ordering is alphabetical within each kind. An entry that
+[requires](#requires-publish-order) another entry of the same manifest moves
+after it, whatever its kind. Hooks were
 appended after MCP servers and before bundles. No existing kind's relative
 position moved. Bundle entries land last by design, because a bundle holds
 references to already-published members, and consumers resolve those members
@@ -1333,8 +1396,9 @@ published keep their bytes, and only a bumped version packs gzip.
 `grim publish` validates the whole manifest before any push. Every resolved
 `version` must be strict `X.Y.Z` semver, after
 [inheritance and prefix stripping](#batch-publish-version). Every source path
-must exist, and `pin = true` is rejected on non-bundle entries (exit 65 for
-each). Only after the full manifest passes does the first network call happen.
+must exist. `pin = true` is accepted on every kind: it freezes a bundle's
+members or another artifact's declared dependencies, and does nothing for an
+entry with neither. Only after the full manifest passes does the first network call happen.
 
 One check runs **before** every shape check below and exits **64** (usage),
 not 65. A `--version` channel value in grim's reserved namespace, `__grimoire`

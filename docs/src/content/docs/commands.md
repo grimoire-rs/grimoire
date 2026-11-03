@@ -41,6 +41,7 @@ printing noise; see [Broken pipe][json-broken-pipe] for the full contract.
 | [`grim install`](#install) | Materialize the locked artifacts into your AI client(s). |
 | [`grim update`](#update) | Re-resolve floating tags and re-materialize changes. |
 | [`grim status`](#status) | Report the state of every declared artifact. |
+| [`grim why`](#why) | Show why an artifact is installed. |
 | [`grim remove`](#remove) | Undeclare an artifact (config + lock only). |
 | [`grim uninstall`](#uninstall) | Fully remove an artifact (files + record + config). |
 | [`grim search`](#search) | Search the registry catalog. |
@@ -360,6 +361,15 @@ clobber guard — so re-running the *same* `grim add` with `--force` is the
 recovery path for a modified-state refusal. With `--no-install` nothing is
 materialized, so `--force` is inert.
 
+`--force` on `add` covers the artifact you typed, or a bundle's members
+(nested bundles' included), and nothing else. A member you also declare
+directly is yours, not the bundle's, so `--force` on the bundle leaves it alone. You consented to that artifact's files, not to the files of the
+[dependencies](./concepts.md#dependencies) it brings. If one of those would
+overwrite a file grim did not create, `add` still refuses with exit 65 and the
+reason `untracked-destination`. The message names every such dependency
+destination, so one rerun can fix them all. Run
+[`grim install --force`](#install) to overwrite them deliberately.
+
 `--force` **never bypasses path containment.** A refusal carrying the
 [`anchor-escape`](./json-interface.md#error-reason) reason — a recorded path
 that resolves outside the anchor root it was stored against, through a
@@ -415,6 +425,19 @@ grim add ghcr.io/grimoire-rs/mcp/grim:1
 grim add --no-install ghcr.io/acme/code-review:1   # declare + lock only
 ```
 
+Adding an artifact that declares [dependencies](./concepts.md#dependencies)
+locks and installs the whole closure, and declares only the artifact you
+typed. A dependency that is already locked but missing on disk is installed too.
+Plain output adds one stderr line, `pulled in N dependencies: <kind>/<name>, …`,
+naming the dependencies this add brought into the workspace, and
+`--format json` carries the same list in
+[`pulled_in`](./json-interface.md#shapes-single).
+
+Adding is also the consent gesture for a [hook](./hooks.md) you add. It consents
+only to the hooks this add brings: the one you typed and any new hook it
+requires. A hook that was already in the workspace stays as unconsented as it
+was, including when a bundle you add also lists it.
+
 Adding a [bundle](./concepts.md#bundles) declares it in `[bundles]` and expands
 its members into the lock. `grim remove bundle <name>` undeclares the bundle and
 drops the members it contributed — a member another still-declared bundle also
@@ -464,6 +487,18 @@ A bundle has no local-path form via `add`: `grim add --kind bundle
 Resolves the floating tags declared in `grimoire.toml` to concrete digests and
 writes `grimoire.lock`. Run it after editing the config by hand; `grim add`
 already locks what it declares.
+
+The lock covers the whole [dependency](./concepts.md#dependencies) closure: each
+declared artifact's dependencies, and theirs in turn, get their own entries.
+`lock` exits `78` when two sources want different versions of the same artifact
+(the message lists them all and names the direct declaration that settles it),
+and `65` for a dependency cycle, a graph past the
+[limits](./concepts.md#dependency-limits), or an artifact that requires a
+feature this grim does not know (reason `unsupported-artifact-feature`). A
+dependency whose tag does not exist exits `79`, naming the artifact that
+required it. With `--offline`, a dependency list that is not in the local store
+is carried over from the previous lock with a warning, see
+[offline and the store](./concepts.md#dependency-offline).
 
 ## grim install {#install}
 
@@ -681,6 +716,7 @@ with a pointer to `grim update` in the project.
 | Concurrent write on the manifest's lock file | `75` |
 | A malformed `marketplace.lock` | `78` |
 | A selector naming an undeclared plugin, or a member the plugin does not resolve to | `79` |
+| A dependency graph that cannot be walked: a [cycle](./concepts.md#dependency-cycles), a [limit](./concepts.md#dependency-limits), or a feature this grim does not know (`unsupported-artifact-feature`) | `65` |
 | An include's floating tag needs the network under `--offline` | `81` |
 
 Every other failure — registry unreachable, a rejected credential, or the
@@ -709,8 +745,22 @@ vocabularies the [TUI](#tui) and [`grim search`](#search) print, which
 differ from this one. The `Source` column shows each artifact's
 [provenance](./concepts.md#bundles): `direct` for a registry declaration, the
 bundle it came from, `path: <path>` for a declared [local path
-source](#add-path), or `path: <path> (dev)` for a [dev-installed](#install-dev)
-record. Pair with `--format json` to drive automation.
+source](#add-path), `path: <path> (dev)` for a [dev-installed](#install-dev)
+record, or `dependency: <kind>/<name>, …` for an artifact that only another
+artifact's [dependencies](./concepts.md#dependencies) bring in. Pair with
+`--format json` to drive automation.
+
+Every row also carries `direct`, which says whether the artifact is declared in
+this scope's `grimoire.toml`, and `required_by`, which lists the parents that
+require it. A dependency of one artifact appears as its own row with
+`direct: false`. `required_by` is `null`, and `source` reads plain `dependency`,
+when the lock alone cannot work the parents out, for example before the first
+`grim lock`. See [Why an artifact is installed](./json-interface.md#status-provenance)
+for the exact contract, and [`grim why`](#why) for the chains behind a row.
+
+When a directly declared artifact is also required by another artifact at the
+same digest, plain output prints a note on stderr that the declaration can be
+removed. It stays safe to keep: a direct declaration wins over a dependency.
 
 `--format json` output carries an `outputs` array per artifact: the
 per-[client](./concepts.md#clients) locations the artifact was materialized
@@ -948,6 +998,55 @@ including [the JSON `state` field](./json-interface.md#shapes-items), which
 names the five `grim status` values and defines none of them. There is one
 place to fix when the vocabulary moves.
 
+## grim why {#why}
+
+`grim why <kind> <name>` (`<kind>` is `skill`, `rule`, `agent`, `bundle`, `mcp`,
+or the experimental [`hook`](./hooks.md)) shows why an artifact is installed:
+every chain from a declaration in `grimoire.toml` to it, root first. It reads the
+config and the lock and never contacts a registry, so it works offline and costs
+nothing. A [dependency](./concepts.md#dependencies) you never declared is the
+usual reason to ask.
+
+```sh
+grim why skill gws-shared
+```
+
+```text
+Path
+skill/gws-drive -> skill/gws-shared
+skill/review -> skill/gws-shared
+```
+
+Each row is one chain. The first node is something you declared, and the last is
+the artifact you asked about. A [bundle](./concepts.md#bundles) is the root of
+every chain through it. An artifact that you declared directly lists its own
+one-node chain, beside any chain through an artifact that also requires it.
+
+Two extra facts can follow the table. When a direct declaration shadows what an
+artifact asked for, plain output adds an `overrides:` line naming the parent and
+the identifier it wanted. The declaration won, as the
+[conflict policy](./concepts.md#bundle-conflicts) says. When a declared artifact
+is also required at the same digest, a stderr note says the declaration can be
+removed.
+
+Plain output shows the first ten chains and a line counting the rest. With
+`--format json` the report lists up to 256 chains and always carries the exact
+`path_count`, with `truncated` set when the list is shorter. The shape is in
+[the `why` report](./json-interface.md#why-report).
+
+`grim why` accepts the global options. `--global` asks about the global scope.
+
+### Exit codes {#why-exit-codes}
+
+| Situation | Exit |
+|-----------|------|
+| Chains printed | `0` |
+| Unknown `<kind>` | `64` |
+| No project, no lock (reason `no-lock`), or an artifact that is not in the effective set | `79` |
+| The lock's dependency graph cannot be followed offline, or holds a cycle (reason `stale-lock`) | `65` |
+
+Run [`grim lock`](#lock) to repair a `65`.
+
 ## grim context {#context}
 
 `grim context` reports the **resolved invocation context** — read-only,
@@ -1058,6 +1157,19 @@ you to run [`grim lock`](#lock) — never a silently incomplete fresh lock.
 A [dev-installed](#install-dev) record was never declared, so `remove` has
 nothing to undeclare for it — use `grim uninstall` to drop one instead.
 
+`remove` follows [dependencies](./concepts.md#dependencies) the same way. It
+drops the declaration, and from the lock every dependency that only the removed
+artifact reached. A dependency another remaining artifact still requires stays.
+Files stay on disk, as always. An artifact that is only a dependency was never
+declared, so there is nothing to remove: `remove` reports `absent` for it, and
+removing the artifact that requires it is what drops it.
+
+If the lock's dependency graph cannot be followed offline, `remove` acts on the
+target alone. It drops that declaration and its lock entry, touches nothing
+else, and prints `kept N artifacts whose dependency graph could not be computed
+offline; run grim lock`. The lock is then stale until `grim lock` repairs it,
+and `grim install` says so rather than installing from it.
+
 ## grim uninstall {#uninstall}
 
 `grim uninstall <kind> <name>` (`<kind>` is `skill`, `rule`, `agent`, `mcp`, or
@@ -1087,10 +1199,23 @@ such an entry afterwards and it becomes ordinary drift, refused by the
 gate above.
 
 The lock follows the same effective-declaration rule as
-[`grim remove`](#remove): when a declared bundle still names the artifact at
-the same identifier, the files are deleted (that is what you asked for) but
-the lock entry survives via the bundle — the next `grim install`
-rematerializes it.
+[`grim remove`](#remove). Something that is still declared may keep the artifact
+wanted after you undeclare it, and then `uninstall` does not delete its files:
+
+| The artifact is | What `uninstall` does | `status` |
+|---|---|---|
+| Declared directly and also provided by a declared bundle, or required by another artifact | Drops the direct declaration only; files and lock entry stay | `uninstalled` |
+| Not declared directly, provided by a declared bundle | Nothing changes | `kept-by-bundle` |
+| Not declared directly, required by another artifact | Nothing changes | `kept-by-dependency` |
+| Not held by anything | Deletes files, install record, declaration and lock entry | `uninstalled` |
+
+For the two `kept-by-*` rows, remove the bundle or the requiring artifact to
+remove the artifact. When nothing holds the target, `uninstall` also deletes the
+files and install records of every [dependency](./concepts.md#dependencies) that
+only the target reached, and keeps those another artifact still reaches.
+
+If the dependency graph cannot be followed offline, `uninstall` removes the
+target alone and prints the same `kept N artifacts…` line as `remove`.
 
 `uninstall <kind> <name>` is also the removal path for a
 [dev-installed](#install-dev) record: since a dev install writes only an
@@ -1720,6 +1845,11 @@ is a not-found failure (exit 79); an offline run against an uncached
 reference exits 81 instead, since the reference may exist and only the
 network to confirm it is unreachable.
 
+A [dependent artifact](./artifacts.md#requires-layer) prints its content
+layer only; the dependency list is not part of the payload, and
+[`grim describe`](#describe) reports it. A manifest that declares a feature
+this grim does not know exits 65 with reason `unsupported-artifact-feature`.
+
 The 8 MiB limit bounds **decoded content**. A [gzip layer](./artifacts.md#layers)
 is decompressed under the same limit, so a small compressed layer that expands
 past 8 MiB exits 65 and is never truncated. The MCP `grim_fetch` tool and the
@@ -1795,7 +1925,7 @@ beyond the globals.
 {ref, digest, kind, name, title, description, has_description, summary,
  version, license, repository, revision, created, authors, vendor, url,
  documentation, compatibility, support, keywords, deprecated, replaced_by,
- tags, annotations, compression}
+ tags, annotations, compression, requires}
 ```
 
 `kind` is `null` for a foreign / non-Grimoire manifest (describe never
@@ -1818,13 +1948,17 @@ hidden. The
 curated fields follow [`grim search`](#search) semantics: `repository` is kept only when the source annotation is an
 `https://` URL, `deprecated` is the deprecation notice or `null`, and
 `replaced_by` is the [successor reference](./publishing.md#metadata-replaced-by)
-or `null`. `compression` is `"gzip"` for a [gzip-compressed
+or `null`. `requires` lists the artifact's [declared dependencies](./artifacts.md#requires)
+as `{kind, name, id}` entries in canonical order, `[]` when it declares none,
+and `null` when the manifest is foreign. Reading it costs one small extra
+blob fetch, and only for a dependent artifact.
+`compression` is `"gzip"` for a [gzip-compressed
 layer](./artifacts.md#layers), `"none"` for any other single layer grim can
 read, and `null` for a layer it cannot read. See the
 [field reference](./json-interface.md#describe-compression). Plain output is a
 flat key/value table (like [`grim context`](#context)) with `keywords` and
 `tags` comma-joined, plus one `compression` row, which shows `-` when
-`compression` is `null`.
+`compression` is `null`, and one `requires` row listing the dependencies.
 
 ```sh
 grim describe skills/code-review
@@ -1938,6 +2072,20 @@ A [`marketplace.toml`](./configuration.md#marketplace-toml) can point one
 of its plugins at a project with `project = "<dir>"`. The project's lock
 supplies the pins, its `[plugin]` table any field the marketplace leaves
 unset, and `marketplace.lock` records nothing for that plugin.
+
+### Dependencies {#export-plugin-dependencies}
+
+An artifact that [declares dependencies](./artifacts.md#requires) exports as
+its whole closure. The dependencies are copied into the plugin next to the
+artifact, so the plugin installs on its own: the manifest carries no
+`dependencies` key and a client never resolves anything.
+
+- A dependency published on another registry is copied the same way. Export
+  needs read credentials for **every** registry in the closure, not only the
+  one you named.
+- A dependency shared by two exported plugins appears in each of them.
+- A manifest that declares a feature this grim does not know exits `65` with
+  reason `unsupported-artifact-feature` before anything is placed.
 
 ### Client families {#export-plugin-families}
 
@@ -2708,7 +2856,8 @@ A TUI install or update goes through the same seams as the commands: it
 declares the entry in the active scope's `grimoire.toml` and relocks it (like
 [`grim add`](#add)), then materializes just that artifact (like
 [`grim install`](#install)). Delete is the full inverse via the
-[`grim uninstall`](#uninstall) seam. Installing from a tag that has since
+[`grim uninstall`](#uninstall) seam, so it also removes the dependencies only
+that artifact needed. Installing from a tag that has since
 moved past the installed digest flips the row to `outdated` right after the
 install completes.
 
@@ -2720,7 +2869,9 @@ forced retry. Answering it is what supplies `--force`; nothing about the key
 you pressed does. Only a **single-artifact** action offers it: one answer
 cannot speak for several artifacts, so a batch leaves its refusals in the
 aggregate status line instead. An already-forced retry that refuses again does
-not re-open the dialog, so there is no confirm loop to get stuck in.
+not re-open the dialog, so there is no confirm loop to get stuck in. The forced
+retry covers what [`grim add --force`](#add) covers, never a dependency. A
+refused dependency opens no dialog, and the status line names it instead.
 
 **The batch confirmation** stands between one keystroke and a whole catalog.
 An `i`, `u` or `d` that would act on more than one artifact opens a prompt
@@ -2812,8 +2963,9 @@ exact-version tag already exists into a success no-op that pushes nothing —
 for manifest-driven publishers that re-run blanket releases and only want
 bumped versions pushed. A `.toml` path publishes a
 [bundle](./concepts.md#bundles) by default, or an
-[MCP server](./mcp-servers.md) with `--kind mcp`; `--pin` (bundles only)
-freezes floating members to digests. [Build provenance](./publishing.md#git-provenance) (commit revision and
+[MCP server](./mcp-servers.md) with `--kind mcp`; `--pin` freezes floating
+bundle members to digests and, for any other kind, the floating references in
+its [declared dependencies](./artifacts.md#requires). [Build provenance](./publishing.md#git-provenance) (commit revision and
 date) is embedded by default and stays idempotent because neither value comes
 from the clock; `--git` additionally requires it and
 [discloses](./publishing.md#git-disclosure) the `origin` remote and commit
@@ -2853,7 +3005,9 @@ grim release ./python-stack.toml ghcr.io/acme/python-stack:1.0.0 --pin
 
 `grim publish` reads a `publish.toml` manifest and releases every declared
 package in kind order (skills → rules → agents →
-[mcp servers](./mcp-servers.md) → bundles, alphabetical within kind). It
+[mcp servers](./mcp-servers.md) → hooks → bundles, alphabetical within kind),
+except that an entry always follows the same-manifest entries it
+[requires](./publishing.md#requires-publish-order). It
 validates the whole manifest before any push, then composes
 [`grim release`](#release) per entry.
 
@@ -2908,7 +3062,8 @@ reported names keep the manifest `registry` — the canonical pull name —
 see [Push vs pull registries](./publishing.md#batch-publish-push-registry).
 
 Exit codes from the release path propagate per entry. Validation failures
-exit 65 (data error). The report renders for all completed entries plus
+exit 65 (data error), and so do entries that require each other in a cycle,
+before any push. The report renders for all completed entries plus
 the first failed entry; re-run with `--only` for surgical recovery.
 
 ```sh

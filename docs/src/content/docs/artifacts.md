@@ -536,6 +536,7 @@ Top-level keys and member tables:
 | `[rules]` | no | name → ref table | Rule members |
 | `[agents]` | no | name → ref table | Agent members |
 | `[mcp]` | no | name → ref table | MCP server members; the name is the key the server registers under in each client's MCP config |
+| `[bundles]` | no | name → ref table | Bundle members: a bundle that groups another bundle, see [nested bundles](#bundle-nested) |
 
 Each member entry maps the **config binding name** (the name the member is
 declared under when the bundle is added) to a fully-qualified reference —
@@ -545,9 +546,27 @@ re-resolve on `grim update`; digest pins never move
 ([floating versus pinned members](./concepts.md#bundle-pinning)).
 
 Limits enforced at parse time: at most 512 members per bundle, and the
-members document is capped at 512 KiB. Nested bundles are invalid — a
-member's kind may be `skill`, `rule`, `agent`, or `mcp`, and a `bundle`
-member is rejected at expansion.
+members document is capped at 512 KiB.
+
+### Nested bundles {#bundle-nested}
+
+A `[bundles]` table lists other bundles as members. Resolution expands a
+nested bundle exactly as it expands a declared one, to any depth, within the
+[graph limits](./concepts.md#dependency-limits). A bundle that names itself
+fails `grim build` with exit `65`, and a cycle through several bundles is
+refused at lock time. A bundle's members are its dependencies: the members
+document is the same document an artifact publishes as its
+[requires layer](#requires-layer).
+
+```toml
+# full-stack.toml
+[bundles]
+python-stack = "ghcr.io/acme/bundles/python-stack:1"
+web-stack = "./web-stack:1"
+```
+
+A grim before 0.16.0 refuses a bundle with a nested bundle member (exit
+`65`), see [Upgrading](./upgrading.md#dependencies-need-new-grim).
 
 ### Deployment-relative members {#bundle-relative-refs}
 
@@ -601,6 +620,81 @@ reviewer = "registry.example.com/grimoire/agents/reviewer@sha256:8f4b…"
 docs-search = "registry.example.com/grimoire/mcp/docs-search:1"
 ```
 
+## Declaring dependencies {#requires}
+
+A skill, rule, agent, MCP server, or hook can declare the artifacts it needs.
+Installing it then installs them too, and removing it removes what only it
+needed. A [bundle's](#bundles) member list already works this way. See
+[Dependencies](./concepts.md#dependencies) for what resolution does with the
+declarations.
+
+The grammar is the same for every kind: a table per target kind, a binding name
+per entry, and a reference as the value.
+
+| Table | Target kind |
+|-------|-------------|
+| `skills` | skill |
+| `rules` | rule |
+| `agents` | agent |
+| `mcp` | MCP server |
+| `hooks` | hook |
+| `bundles` | bundle |
+
+The binding name is the name the dependency installs under, and it follows the
+[name rules](#names). The reference is a fully-qualified `registry/repo:tag` or
+`registry/repo@sha256:…`, or a
+[deployment-relative reference](#bundle-relative-refs) (`./gws-shared:1`)
+that resolves against the repository the declaring artifact was pulled from.
+Prefer the relative form for artifacts published side by side, because it
+survives a mirror.
+
+Where the declaration lives depends on the kind:
+
+| Kind | Declaration |
+|------|-------------|
+| Skill, rule, agent | `grim.requires.<table>.<name>` keys in the frontmatter `metadata` map |
+| MCP server | `[requires.<table>]` tables in `mcp/<name>.toml` |
+| Hook | `[requires.<table>]` tables in `hook.toml` |
+| Bundle | The `[bundles]` table of the source, see [nested bundles](#bundle-nested) |
+
+```yaml
+---
+name: gws-drive
+description: Read and edit Google Drive files
+metadata:
+  grim.requires.skills.gws-shared: "./gws-shared:1"
+  grim.requires.mcp.gdrive: "ghcr.io/acme/mcp/gdrive:2"
+---
+```
+
+```toml
+# mcp/gdrive.toml
+description = "Google Drive access over MCP."
+
+[server]
+transport = "stdio"
+command = "gdrive-mcp"
+
+[requires.skills]
+gws-shared = "ghcr.io/acme/skills/gws-shared:1"
+```
+
+Metadata values are strings, so each dependency is one flat key. The keys ride
+in the packed skill, rule or agent as ordinary metadata, which no client
+reads. A `[requires]` table in an MCP descriptor is split off before the
+descriptor is packed, so it never changes the descriptor's bytes.
+
+[`grim build`](./commands.md#build) checks every declaration offline. It exits
+`65` for an unknown table, an invalid binding name, an unparseable reference,
+the same `(kind, name)` declared twice, or an artifact that requires itself. [`grim release`](./commands.md#release) additionally checks that each
+relative reference stays under the registry root of the release target. Without
+`--pin` neither looks the dependency up in a registry, so a dependency may be
+published after the artifact that needs it.
+
+Declared dependencies are stored sorted by kind, in the order skill, rule,
+agent, bundle, mcp, hook, and then by name. That order is part of the published
+bytes. It is not the alphabetical order of the table names.
+
 ## Vendor extensions {#vendor-extensions}
 
 Client-specific capabilities are authored as string-valued
@@ -637,8 +731,10 @@ serves several clients
 
 ## Layer encoding {#layers}
 
-A skill, rule, agent or hook publishes as one layer holding a tar archive.
-The layer is either a plain tar or a gzip-compressed tar. A publisher opts in
+A skill, rule, agent or hook publishes as one content layer holding a tar
+archive. When it [declares dependencies](#requires), a second layer follows it,
+see [the requires layer](#requires-layer). The content layer is either a plain
+tar or a gzip-compressed tar. A publisher opts in
 to gzip with [`--compression gzip`](./publishing.md#compression). The default
 stays an uncompressed tar.
 
@@ -677,6 +773,52 @@ an expansion-ratio bound of 100 times the stored bytes, with a floor of
 its stored size. Exceeding either exits `65`.
 
 Bundle and MCP layers are small JSON documents and are never compressed.
+
+### The requires layer {#requires-layer}
+
+An artifact that declares [dependencies](#requires) carries them as a second
+layer, after its content layer:
+
+| Layer | Media type | Holds |
+|-------|------------|-------|
+| 1 | the artifact's own content type | the skill, rule, agent, hook or MCP descriptor, unchanged |
+| 2 | `application/vnd.grimoire.bundle.v1+json` | the dependencies, as a JSON document |
+
+The second layer is the same members document a bundle publishes as its only
+layer. It holds a `members` array of `{kind, name, id}` objects in the
+canonical order. Each `id` is stored exactly as written, so a relative
+`./gws-shared:1` stays relative. The layer is never compressed and its
+descriptor carries no annotations. `--compression` applies to layer 1 only.
+
+An artifact that declares nothing publishes the single layer it always did. Its
+manifest is byte-identical to one built before dependencies existed.
+
+A two-layer manifest is a grim convention, not part of the OCI specification.
+A registry stores it like any other manifest. grim tells the two layers apart
+by media type, not by position. It accepts exactly two shapes:
+
+- one layer, for every kind (for a bundle it is the members document)
+- one content layer and one requires layer, in either order, for every kind
+  except a bundle
+
+grim always writes the content layer first. Any other shape is refused with
+exit `65` and the error reason `unsupported-artifact-feature`, which tells the
+user to update grim. Three layers, two layers of one type, and two layers on a
+bundle are all refused. So is a skill, rule, agent, hook or MCP server whose
+only layer is a requires layer.
+[Stability](./stability.md#limitations-forward-compat) covers how an earlier
+grim meets a two-layer artifact.
+
+A manifest may also list the features a reader must understand in the
+`com.grimoire.requires-features` annotation, a comma-separated list. This grim
+understands `dependencies`. It refuses an artifact that names any other feature,
+with the same exit and reason. It refuses a malformed value the same way: over
+1024 bytes, more than 32 features, or a name outside lowercase letters, digits
+and hyphens.
+
+grim reads the annotation but does not write it today, because a dependent
+artifact is recognized by its layout alone. The key is reserved so that a later
+format can turn readers that predate it away cleanly.
 
 ## Catalog annotations {#annotations}
 
