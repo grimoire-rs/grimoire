@@ -123,11 +123,13 @@ Declaring the same dozen skills and rules in every repository does not scale.
 Teams end up copying a block of `grimoire.toml` between projects, and when the
 approved set changes someone has to chase down every copy.
 
-A **bundle** is a curated set of members — skills, rules, agents, and
-[MCP servers](./mcp-servers.md). You
+A **bundle** is a curated set of members — skills, rules, agents,
+[MCP servers](./mcp-servers.md), and other bundles. You
 declare it once in `[bundles]`, and on [`grim lock`](./commands.md#lock) it
 **expands** into its members, which are pinned into the lock exactly like a
-direct declaration.
+direct declaration. A bundle that lists another bundle expands that one too, so
+bundles nest. A bundle's members are its dependencies; the same mechanism also
+lets a single artifact [require others](#dependencies).
 
 A bundle comes from one of two sources — the same split as an individual
 [reference](#references-tags-and-digests):
@@ -147,8 +149,9 @@ A bundle comes from one of two sources — the same split as an individual
   declaration shape.
 
 Each locked member records its **provenance** — `direct` for something you
-declared yourself, or the bundle it came from — which [`grim status`](./commands.md#status)
-surfaces so you always know why an artifact is installed.
+declared yourself, or the bundle it came from. [`grim status`](./commands.md#status)
+surfaces it, and [`grim why`](./commands.md#why) lists the whole chain, so you
+always know why an artifact is installed.
 
 ### Adding and dropping members {#bundle-membership}
 
@@ -163,30 +166,125 @@ receives; bundles just make it routine.
 
 ### Conflict policy {#bundle-conflicts}
 
-Because a member is keyed by `(kind, name)`, two sources can name the same slot.
-Grimoire resolves that deterministically:
+Because an artifact is keyed by `(kind, name)`, several sources can name the same
+slot: a direct declaration, bundles, and the [dependencies](#dependencies) of
+other artifacts. Grimoire settles it deterministically:
 
-- a **direct** `[skills]`/`[rules]`/`[agents]` declaration always wins over any
-  bundle — this is how you override a single member without forking the bundle;
-- two bundles that name a member at the **same** identifier coalesce to one
-  entry;
-- two bundles that **disagree** fail closed: `grim lock` stops with a conflict
-  error and asks you to declare the member directly to choose one.
+- a **direct** `[skills]`/`[rules]`/`[agents]`/`[mcp]`/`[hooks]` declaration
+  always wins over every bundle and dependency. This is how you override a single
+  member without forking the bundle. If the declaration comes from a different
+  registry or repository than the request it overrides, `grim lock` warns, in case
+  you meant to switch publishers. A path declaration wins silently, with no warning;
+- claims that **agree** merge into one entry. Two claims agree when their
+  references resolve to the same manifest digest, so `:1` and `:1.2` agree while
+  they point at one digest. Every source is recorded;
+- claims that **disagree** fail closed: `grim lock` stops with exit `78`, lists
+  every conflicting source, and asks you to declare the artifact directly to
+  choose one.
 
 Failing closed is deliberate. Silently picking a winner would let an unrelated
 bundle bump change what a project installs without anyone noticing.
 
+Agreement is judged when you lock, not when the sources were published. Two tags
+that point at one digest today can part ways when one of them moves. A later
+`grim update` can then turn a lock that resolved cleanly into a conflict. The fix
+is the one the error names: declare the artifact directly.
+
+A conflicting artifact is never expanded, so its own dependencies do not add
+further conflicts. Cycles are a separate failure, covered under
+[dependencies](#dependency-cycles).
+
 ### Floating versus pinned members {#bundle-pinning}
 
-A bundle's members can themselves be floating tags or exact digests. A floating
-member is re-resolved fresh on every consumer `grim lock`, so reproducibility
-comes from the consumer's own lock. Publishing with
-[`grim release --pin`](./publishing.md#bundles) instead freezes every floating
-member to a digest at publish time, so the bundle is reproducible on its own —
-the stronger guarantee for air-gapped or tunneled networks that cannot
-re-resolve a tag. Pinning also freezes any
-[deployment-relative member](./artifacts.md#bundle-relative-refs) to its
-absolute form. See [Publishing](./publishing.md#bundles).
+A bundle's members, and the dependencies an artifact declares, can themselves be
+floating tags or exact digests. A floating reference is re-resolved fresh on every
+consumer `grim lock`, so reproducibility comes from the consumer's own lock.
+Publishing with [`grim release --pin`](./publishing.md#bundles) instead freezes
+every floating reference to a digest at publish time, so the bundle or artifact
+is reproducible on its own — the stronger guarantee for air-gapped or tunneled
+networks that cannot re-resolve a tag. Pinning also freezes any
+[deployment-relative reference](./artifacts.md#bundle-relative-refs) to its
+absolute form. See [Publishing](./publishing.md#bundles) for a bundle and
+[Publishing dependencies](./publishing.md#requires) for any other kind.
+
+## Dependencies {#dependencies}
+
+A skill, rule, agent, MCP server, or hook can declare other artifacts it needs.
+Its publisher writes the declaration, so you never copy it into your own
+`grimoire.toml`. Adding the artifact is enough:
+
+```sh
+grim add ghcr.io/acme/skills/gws-drive:1
+```
+
+If `gws-drive` requires the `gws-shared` skill and the `gdrive` MCP server,
+[`grim lock`](./commands.md#lock) pins all three, and `grim install` installs all
+three. Dependencies can have dependencies, to any depth. The declaration itself
+is covered under [Artifacts](./artifacts.md#requires). Everything below is about
+what the consumer sees.
+
+Dependencies are a second use of the machinery behind [bundles](#bundles). A
+bundle's member list is the same document an artifact publishes for its
+dependencies, and both expand through one resolver. That is why a bundle can list
+another bundle.
+
+**What lands in the lock.** Each artifact a declaration reaches gets a lock entry
+of its own, and the parent records the dependencies it declared. You only ever
+declare the artifacts you chose. The rest are *dependencies*, and `grim status`
+shows them with `direct: false` and the parents that require them.
+[`grim why`](./commands.md#why) answers the question "why is this installed?"
+with every chain from your `grimoire.toml` to the artifact.
+
+**Removing.** [`grim remove`](./commands.md#remove) drops a declaration and the
+dependencies nothing else reaches, from the lock. [`grim uninstall`](./commands.md#uninstall)
+also deletes their files. A dependency another artifact still requires stays, and
+a dependency you cannot undeclare, because you never declared it, is removed by
+removing the artifact that requires it.
+
+**Floating by default.** A dependency written `./gws-shared:1` is a floating tag,
+re-resolved on each `grim lock` and `grim update` like any other. A publisher who
+wants the closure fixed releases with `--pin`, see
+[Floating versus pinned members](#bundle-pinning). A relative reference resolves
+against the repository the parent was pulled from, so a mirror of the parent
+serves its dependencies from the mirror too. An absolute reference may name
+another registry. Each registry is contacted with its own credentials, and a
+credential is never sent to a different host.
+
+**Same slot, several claims.** When two artifacts require the same dependency, or
+you declare one that another artifact also requires, the
+[conflict policy](#bundle-conflicts) decides. Your direct declaration wins.
+
+### Cycles {#dependency-cycles}
+
+A dependency cycle, such as `a` requiring `b` requiring `a`, is refused with exit
+`65`. The message names the cycle and the repository that published the edge
+closing it. Grimoire refuses a cycle even where the closure would be finite,
+because a cycle leaves no order to install or remove in.
+
+### Limits {#dependency-limits}
+
+Resolution stops at a graph it will not accept, with exit `65`. The message names
+the artifact whose dependencies crossed the line and its publisher. These are the
+limits for one lock:
+
+| Limit | Value |
+|-------|-------|
+| Artifacts reached through dependencies, or through a bundle that was itself reached through one | 2,048 |
+| Levels below your declarations | 32 |
+| Dependency documents read in total | 32 MiB |
+| Dependencies in one document | 512 members, 512 KiB |
+
+The members of a bundle you declare directly do not count toward the first or
+third limit.
+
+### Offline and the store {#dependency-offline}
+
+[`grim lock --offline`](./commands.md#lock) reads each pinned artifact's
+dependencies from the local store when the manifest is there. When it is not,
+grim keeps the dependencies the previous lock recorded for that exact digest,
+prints a warning that they are carried unverified, and moves on.
+[`grim install`](./commands.md#install) checks them against the pinned manifest
+before it writes anything, so a stale carry cannot install the wrong closure.
 
 ## Scopes
 

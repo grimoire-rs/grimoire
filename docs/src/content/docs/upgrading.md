@@ -440,6 +440,55 @@ different manifest digest, for example after a compression flip, adopts the
 existing version from 0.15.0 instead of refusing. That holds for skill, rule, agent and
 hook releases, while bundle and MCP releases still refuse.
 
+## Declared dependencies need grim 0.16.0 {#dependencies-need-new-grim}
+
+A skill, rule, agent, MCP server or hook can now
+[declare the artifacts it needs](./artifacts.md#requires), and a bundle can
+hold other bundles. Nothing changes unless a publisher opts in. An artifact
+without declarations publishes and installs byte-identical to before, and the
+lock format version stays `1`.
+
+**What you will see.** A project that installs a dependent artifact gets the
+dependencies too, and [`grim status`][status] gains `direct` and `required_by`
+on every row. Ask [`grim why`][why] why something is installed.
+[`grim remove`][remove] and [`grim uninstall`][uninstall] now take the
+dependencies that only the removed artifact needed. Uninstall reports an
+artifact another one still needs as `kept-by-dependency`.
+
+**What an older grim does.** Observed on 0.15.1:
+
+| Met by 0.15.1 | Result |
+|---|---|
+| a dependent artifact, installed with `grim add` | exit `65`, `expected a single-layer artifact`; no files are installed |
+| a dependent artifact, met by `grim lock`, `grim update` or `grim add --no-install` | succeeds and writes a lock **without the dependencies**, with no warning |
+| a bundle that lists a nested bundle | exit `65`, `nested bundle member … is not supported` |
+| a lock that records a nested bundle | exit `78` |
+
+The second row is the one to watch. A lock written that way is wrong until a
+newer grim re-locks it. A newer grim that installs from it exits `65` with
+reason `stale-lock`, and asks for `grim lock`.
+
+**What to do.** Upgrade every machine and CI job that installs from a project
+before a publisher adds declarations to an artifact it uses. Never run
+`grim lock` or `grim update` on an old grim in a project that already depends
+on a dependent artifact. If a lock was written that way, run
+[`grim lock`][lock] with 0.16.0 or later and commit the result. As a
+publisher, put the first dependency-bearing version under a
+[new major tag](./publishing.md#requires-consumers) so floating consumers stay
+on a version their grim can read.
+
+Two read paths also changed. [`grim describe`][describe] and
+[`grim fetch`][fetch] on a digest-pinned manifest that is already in the local
+store now succeed offline, where they exited `81` before. The reason
+`unsupported-artifact-feature` is new, and a bundle manifest that does not have
+exactly one layer now carries it instead of a reason-less `65`.
+
+**Hooks are consented per target.** `grim add <bundle>` used to consent every
+hook member of the bundle, including one that was already present and had never
+been consented. It now consents only the target and the hooks it newly pulls
+in. Hooks are experimental, so this ships without a shim. Re-run
+`grim install --trust-hooks` for a hook you had relied on `add` to arm.
+
 ## Index refreshes add a root probe and a sync sidecar {#index-sync}
 
 A refresh of an HTTP [package index](./package-index.md) starts with a
@@ -771,3 +820,8 @@ backoff. Deleting a `<hash>.sync.json` file costs the same one fresh sync.
 [index-stats-rule]: ./package-index.md#consuming-stats
 [data-layout]: ./configuration.md#data-layout
 [commands-context]: ./commands.md#context
+[why]: ./commands.md#why
+[uninstall]: ./commands.md#uninstall
+[lock]: ./commands.md#lock
+[fetch]: ./commands.md#fetch
+[describe]: ./commands.md#describe

@@ -38,7 +38,7 @@ variables row. [Unstable](#unstable) lists both by name.
 | Bundle source manifest | The [bundle member declaration schema][bundles], under the same widening rule as the manifests above |
 | [MCP descriptor][mcp-descriptor] (`mcp/<name>.toml`) | The published descriptor schema, including which fields an older grim rejects rather than drops |
 | Install state (`state.json`) | Schema V2, governed by the same additive-field policy as JSON reports |
-| OCI wire format | [Artifact kinds][artifacts-kinds], the [release/push mechanics][publishing-release], the [`com.grimoire.*` manifest annotations][annotations] written onto pushed artifacts, the [layer media types][artifacts-layers] grim reads (the grimoire and OCI tar and `tar+gzip` types, and the docker rootfs gzip type) and writes (the uncompressed tar type and the `tar+gzip` type), the refusal of any `+zstd` type, and the `com.grimoire.uncompressed.digest` layer annotation |
+| OCI wire format | [Artifact kinds][artifacts-kinds], the [release/push mechanics][publishing-release], the [`com.grimoire.*` manifest annotations][annotations] written onto pushed artifacts, the [layer media types][artifacts-layers] grim reads (the grimoire and OCI tar and `tar+gzip` types, and the docker rootfs gzip type) and writes (the uncompressed tar type and the `tar+gzip` type), the refusal of any `+zstd` type, the `com.grimoire.uncompressed.digest` layer annotation, the [two-layer layout](./artifacts.md#requires-layer) of an artifact that declares dependencies (a grim convention: one content layer and one `application/vnd.grimoire.bundle.v1+json` requires layer, told apart by media type and written content first), and the `com.grimoire.requires-features` annotation grim reads to refuse a feature it does not know |
 | [Package index][package-index] transport | The locators a published index serves. The client contract is [the root][index-root] at `<base>/c/root.json` and [the gzip blobs][index-blobs] it names at `<base>/c/f/sha256/<hex>.json.gz`, whose digest and size cover the inflated JSON. Both are permanent once an index emits them, and under `schema: 1` they grow only by additive fields. Their *presence* is not promised: a `404` is a normal answer that sends grim to `all.json`. Everything else under `c/` is private to the index pipeline. Also served: HTTP `<base>/all.json` and the optional `<base>/stats.json` [ratings sidecar][stats-sidecar], both while the index's `legacy` setting is true (the default), and the git-transport `index/<host>/<ns>/<pkg>/metadata.json` tree. The sidecar's *presence* is not promised either (most indexes publish none, and a `404` is a normal, non-error answer). Its **path and document shape** are promised, under its own monotonic `schema_version` and the consumer rule stated with it |
 | [MCP server][mcp-server] tool surface | Tool names (`grim_search`, `grim_status`, `grim_fetch`, `grim_describe`, `grim_render`) and their argument names — the payloads are covered by the reports row |
 | Published schema URLs | `https://grimoire.rs/schemas/{grimoire-config,grim-publish,grimoire-lock}.schema.json` keep resolving — [`grim init`][init] writes the first into every generated `grimoire.toml` |
@@ -125,6 +125,32 @@ and `truncated` beside `items` and `sources`, so a consumer can tell a
 always present, so a pre-existing client that ignores unknown keys is
 unaffected. See [the `total` and
 `truncated` fields][json-total].
+
+[Declared dependencies](./concepts.md#dependencies) arrived as a set of the
+same additions. [`grim status`][status] rows gained `direct` (a boolean) and
+`required_by` (a list of parents, or `null` when the dependency graph cannot be
+computed offline), and its `source` string gained the values
+`dependency: <kind>/<name>, …` and `dependency`. [`grim add`][add]'s report
+gained `pulled_in`, and [`grim describe`][describe] (and the MCP `grim_describe`
+tool) gained `requires`. All three are always present, `[]` when they apply and
+are empty. [`grim uninstall`][uninstall]'s `status` gained the literal
+`kept-by-dependency`, and the error document gained the reason
+`unsupported-artifact-feature`. A consumer written against the earlier shapes
+keeps parsing, because nothing existing moved. `grimoire.lock` gained the
+optional `[[<kind>.requires]]` tables and a `transitive` flag on a `[[bundle]]`
+entry. Both are omitted when unused, so a lock without dependencies is
+byte-identical to one written before, and `lock_version` stays `1`. The new
+[`grim why`][why] command and its report are covered by the CLI and reports
+rows above from the release that introduced them.
+
+On the input side, `pin = true` in `publish.toml` is accepted on every entry
+kind, where it was once an error outside bundles, and `grim release --pin`
+freezes the dependencies of any kind. A `publish.toml` that parsed before
+parses unchanged.
+
+A bundle that grew a `[bundles]` table and an artifact that grew a second
+layer widen the OCI wire format in the same additive direction. A
+dependency-free artifact and bundle publish the bytes they always did.
 
 Manifest *inputs* are covered by the mirror image of that rule. A minor
 release may widen what a key accepts — a new optional key, a new accepted
@@ -452,6 +478,49 @@ A project that later drops its only hook declaration and re-locks
 downgrades cleanly. The lock carries no `hook` entry any more, so a
 `grim` build that predates the kind reads it exactly as it always has.
 
+[Declared dependencies](./concepts.md#dependencies) hold the line in both
+places they reach an older grim: the lock and the artifact. A lock that holds
+a `[[<kind>.requires]]` table or `transitive = true` on a bundle entry is
+refused by grim 0.15.1 with exit **78**, like any other unknown field, on every
+command that reads it. A project drops back to a lock that 0.15.1 reads by
+removing its last dependency and re-locking. A lock without dependencies stays
+byte-identical to what 0.15.1 wrote and reads on both sides.
+
+The artifact side was checked against a grim 0.15.1 binary:
+
+| An artifact or manifest that has | grim 0.15.1 |
+|---|---|
+| a second (requires) layer, installed with `grim add` | exit `65`, `expected a single-layer artifact`; no files are installed |
+| a second layer, met by `grim lock`, `grim update` or `grim add --no-install` | succeeds and writes a lock that **omits the dependencies**, with no warning |
+| a bundle manifest listing a nested bundle | exit `65`, `nested bundle member … is not supported` |
+| three or more layers | exit `65`, `expected a single-layer artifact` |
+| a `com.grimoire.requires-features` annotation | ignored |
+
+A lock whose bundle member merely has `kind = "bundle"`, without `transitive`,
+is parsed and ignored by 0.15.1. It is not an error there. This grim marks the
+nested snapshot `transitive = true` whenever it writes a nested-bundle lock, so
+0.15.1 refuses that lock with exit **78**.
+
+This grim refuses the formats it does not know in the other direction. A
+manifest that names a feature outside the ones this grim understands, or whose
+layers are not one of the [accepted shapes](./artifacts.md#requires-layer),
+exits `65` with the reason `unsupported-artifact-feature` and a message that
+says to update grim. It does so on every path that reads the content:
+`grim install`, `grim fetch`, a lock or update that has to read its
+dependencies, and both exports. [`grim describe`](./commands.md#describe) only
+reads metadata, so it still describes such an artifact. The same reason now
+also covers a bundle manifest that does not have exactly one layer, which
+reported a reason-less `65` before.
+
+The hole in that table is the second row, and it cannot be closed from this
+side. A project that has any machine on 0.15.1 can lock a dependent artifact
+there without its dependencies. A newer grim that installs from that lock
+refuses it with exit `65` and the reason `stale-lock`, because the lock's
+dependencies do not match the pinned artifact, and asks for `grim lock`. A
+0.15.1 install of the same lock fails at the artifact itself. Nothing is
+installed incompletely, but the lock stays wrong until a newer grim re-locks
+it. See [Upgrading](./upgrading.md#dependencies-need-new-grim) for what to do.
+
 The [MCP descriptor](./mcp-servers.md) layer holds the same line: a
 descriptor published with fields an older grim predates (the refinement
 fields, the `ws` transport, the `oauth` block) fails to parse there —
@@ -554,25 +623,37 @@ boundary any more than [`make`][gnu-make] or [`npm install`][npm-install] do.
 
 ### Offline re-materialization needs a manifest {#limitations-offline-remat}
 
-Grimoire caches a fetched artifact's content layer — content-addressed, so
-identical bytes are never re-downloaded — but not its manifest. An offline
-[`grim install`][install] whose rendered output is still on disk is
+Grimoire caches a fetched artifact's content layer, and the manifest it was
+fetched through, content-addressed so identical bytes are never re-downloaded.
+An offline [`grim install`][install] whose rendered output is still on disk is
 network-free: the integrity gate compares the on-disk content hash against
 the lock and needs nothing from the registry.
 
-Deleting that output and asking `--offline` to re-materialize it is a
-different story. Even a pinned manifest digest has to be *fetched* to learn
-which layer blob to pull, and that fetch always needs the network — grim
-keeps no local manifest cache to serve it from. This is a general
-constraint of the content-cache design, not specific to path sources: it
-applies to every registry-sourced kind (skill, rule, agent, MCP server, or
-bundle member) whose materialized output has gone missing while offline.
-[Local path sources](./concepts.md#references-tags-and-digests) are
+Deleting that output and asking `--offline` to re-materialize it works when
+the store still holds the pinned manifest and its layer. A pinned manifest is
+read from the store before the registry, in both modes, and only when the
+stored bytes hash to the digest. Against a cold store, or one that never
+fetched that digest, the same request exits `81`, because the manifest has to
+be *fetched* to learn which layer blob to pull. A tag reference, as opposed to
+a pinned digest, still needs the network to resolve.
+
+This also widens two read-only commands. An offline
+[`grim describe`](./commands.md#describe) or [`grim fetch`](./commands.md#fetch)
+of a digest-pinned reference whose manifest is stored now succeeds, where it
+exited `81` before. It is a widening and changes no field.
+
+The constraint applies to every registry-sourced kind (skill, rule, agent, MCP
+server, or bundle member) whose materialized output has gone missing while
+offline. [Local path sources](./concepts.md#references-tags-and-digests) are
 unaffected — they read straight from disk and never touch a manifest.
 
 <!-- internal -->
 [json-interface]: ./json-interface.md
 [status]: ./commands.md#status
+[add]: ./commands.md#add
+[describe]: ./commands.md#describe
+[uninstall]: ./commands.md#uninstall
+[why]: ./commands.md#why
 [update]: ./commands.md#update
 [publishing-report]: ./publishing.md#batch-publish-report
 [install]: ./commands.md#install

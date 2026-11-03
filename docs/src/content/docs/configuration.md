@@ -215,8 +215,11 @@ code-review = "ghcr.io/acme/code-review:2"
 
 Bundle references follow the same rules as skills and rules — a bare reference
 defaults to `:latest`. Per `(kind, name)`, a direct declaration wins over any
-bundle, agreeing bundles coalesce, and disagreeing bundles fail closed; see the
-[conflict policy](./concepts.md#bundle-conflicts).
+bundle or dependency, agreeing claims coalesce, and disagreeing ones fail
+closed; see the [conflict policy](./concepts.md#bundle-conflicts). A bundle
+may itself list bundles, and an artifact may require other artifacts: those
+are not declared here, they are reached through the declared ones, see
+[Dependencies](./concepts.md#dependencies).
 
 A `[bundles]` value may also be a [local path](./concepts.md#references-tags-and-digests)
 (`./bundles/x.toml`, `../…`, or absolute) instead of a registry reference —
@@ -914,6 +917,65 @@ on the *effective* declaration: before applying an edit they compute the set
 of artifacts the declaration implies before and after, drop only what no
 remaining declaration holds, and keep everything else. A bundle-free lock
 carries no `[[bundle]]` section at all.
+
+### Dependencies in the lock {#lock-dependencies}
+
+An artifact that [declares dependencies](./artifacts.md#requires) records them
+in the lock, and every dependency it reaches gets a lock entry of its own, in
+the table for its kind. Two additions carry this, and both are omitted when
+unused:
+
+- `[[<kind>.requires]]` follows an entry of `[[skill]]`, `[[rule]]`,
+  `[[agent]]`, `[[mcp]]` or `[[hook]]`. Each table holds the `kind`, `name`
+  and `id` of one declared dependency, sorted by kind (skill, rule, agent,
+  bundle, mcp, hook) and then name. The `id` is stored exactly as the
+  publisher wrote it, so a relative `./gws-shared:1` stays relative and is
+  resolved against the parent's pinned repository each time the lock is read.
+  A mirror switch therefore needs no lock rewrite. An entry from a local path
+  source records its declaration the same way.
+- `transitive = true` marks a `[[bundle]]` snapshot that no `[bundles]` table
+  declares, one reached through a dependency or through another bundle.
+
+```toml
+[[skill]]
+name = "gws-drive"
+pinned = "ghcr.io/acme/skills/gws-drive@sha256:…"
+
+[[skill.requires]]
+kind = "skill"
+name = "gws-shared"
+id = "./gws-shared:1"
+
+[[skill.requires]]
+kind = "mcp"
+name = "gdrive"
+id = "ghcr.io/acme/mcp/gdrive:2"
+
+[[skill]]
+name = "gws-shared"
+pinned = "ghcr.io/acme/skills/gws-shared@sha256:…"
+
+[[bundle]]
+name = "google-extras"
+repo = "ghcr.io/acme/bundles/google-extras"
+tag = "1"
+pinned = "ghcr.io/acme/bundles/google-extras@sha256:…"
+transitive = true
+```
+
+The lock does not record why an entry is there. Which declaration brought it
+in, and through which chain, is computed from the lock each time:
+[`grim status`](./commands.md#status) reports the immediate parents and
+[`grim why`](./commands.md#why) lists the chains. A lock without dependencies
+is byte-identical to one written before they existed, and `lock_version`
+stays `1`.
+
+[`grim install`](./commands.md#install) compares each entry's `requires` with
+the dependencies in the pinned manifest, which is verified by digest, and
+refuses any difference with exit `65` and the reason `stale-lock` before it
+writes anything. That catches a lock written by an older grim, a hand-edited
+one, and one carried forward offline. Run [`grim lock`](./commands.md#lock) to
+repair it.
 
 ### Local path sources {#lock-path-sources}
 
