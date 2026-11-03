@@ -407,9 +407,35 @@ pub struct HookManifest {
     /// entry, so the entries are a set, not independent artifacts.
     #[serde(default)]
     pub hooks: Vec<HookEntry>,
+    /// Artifacts this hook requires: `[requires.<table>]` tables of binding
+    /// name to member reference (`skills`, `rules`, `agents`, `mcp`, `hooks`,
+    /// `bundles`). Read by `grim build` and `grim release`; the consumer parser
+    /// accepts and ignores it, because the resolver reads the published
+    /// requires layer instead.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub requires: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl HookManifest {
+    /// The declared `[requires.*]` entries, validated and sorted by
+    /// `(kind, name)`.
+    ///
+    /// # Errors
+    ///
+    /// [`HookError::Requires`] for an unknown table, an invalid binding name or
+    /// an invalid member reference.
+    pub fn declared_requires(&self) -> Result<Vec<crate::oci::bundle::BundleMember>, HookError> {
+        if self.requires.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut table = toml::Table::new();
+        // A map of string maps always converts; the `Err` arm is unreachable.
+        if let Ok(value) = toml::Value::try_from(&self.requires) {
+            table.insert("requires".to_string(), value);
+        }
+        Ok(crate::oci::requires_decl::from_toml_tables(&table)?)
+    }
+
     /// Parse a `hook.toml` document.
     ///
     /// # Errors
@@ -1003,6 +1029,9 @@ pub enum HookError {
     /// The TOML source did not parse, or carried an unknown top-level key.
     #[error("invalid hook manifest: {0}")]
     Toml(#[source] Box<toml::de::Error>),
+    /// A `[requires.*]` declaration does not parse.
+    #[error(transparent)]
+    Requires(#[from] crate::oci::requires_decl::RequiresDeclError),
     /// The `schema` value is not one this grim understands.
     #[error("hook manifest schema version {found} is not supported (this grim understands {supported})")]
     UnsupportedSchema {
@@ -1413,6 +1442,27 @@ argv    = ["sh", "${GRIM_HOOK_DIR}/guard.sh"]
 timeout = 30
 payload = "stdin"
 "#;
+
+    #[test]
+    fn requires_tables_parse_validate_and_stay_out_of_a_dependency_free_manifest() {
+        let with = format!("{EXAMPLE}\n[requires.skills]\nhelper = \"ghcr.io/acme/helper:1\"\n");
+        let declared = HookManifest::from_toml_str(&with).unwrap().declared_requires().unwrap();
+        assert_eq!(declared.len(), 1);
+        assert_eq!(declared[0].kind, ArtifactKind::Skill);
+        assert!(
+            HookManifest::from_toml_str(EXAMPLE)
+                .unwrap()
+                .declared_requires()
+                .unwrap()
+                .is_empty()
+        );
+        let bad = format!("{EXAMPLE}\n[requires.skills]\nhelper = \"no-registry:1\"\n");
+        let err = HookManifest::from_toml_str(&bad)
+            .unwrap()
+            .declared_requires()
+            .unwrap_err();
+        assert!(matches!(err, HookError::Requires(_)), "{err:?}");
+    }
 
     /// A manifest with one entry, spliced from `body` (entry keys) so each test
     /// states only the field it is about.

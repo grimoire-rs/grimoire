@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
 
-use crate::api::export_report::{ExportReport, MarketplaceExportReport, escape_controls};
+use crate::api::export_report::{ExportReport, MarketplaceExportReport};
 use crate::cli::exit_code::ExitCode;
 use crate::cli::printer::Printable;
 use crate::context::Context;
@@ -25,6 +25,7 @@ use crate::export::marketplace_export::{MarketplaceRequest, export_marketplace};
 use crate::export::stage::{self, ExportMode, ExportOptions, ProjectLock};
 use crate::install::ClientTarget;
 use crate::install::target::parse_client_list;
+use crate::oci::text::escape_controls;
 
 /// `grim export` arguments.
 #[derive(Debug, Args)]
@@ -423,15 +424,6 @@ mod tests {
     use crate::export::export_error::ExportError;
     use crate::oci::access::memory_registry::MemoryRegistry;
 
-    #[test]
-    fn escape_controls_spells_out_terminal_control_characters() {
-        assert_eq!(
-            escape_controls("written /r/\u{1b}[31mred\n/x"),
-            "written /r/\\u{1b}[31mred\\n/x"
-        );
-        assert_eq!(escape_controls("plain ünïcode /a b"), "plain ünïcode /a b");
-    }
-
     const HELLO: &str = "localhost:5000/team/hello:1.0";
     const WORLD: &str = "localhost:5000/team/world:1.0";
 
@@ -686,6 +678,7 @@ mod tests {
                 ErrorReason::AnchorEscape => "anchor-escape",
                 ErrorReason::UnsupportedLayerMediaType => "unsupported-layer-media-type",
                 ErrorReason::NoLock => "no-lock",
+                ErrorReason::UnsupportedArtifactFeature => "unsupported-artifact-feature",
             }
         }
         for code in [
@@ -713,6 +706,7 @@ mod tests {
             ErrorReason::AnchorEscape,
             ErrorReason::UnsupportedLayerMediaType,
             ErrorReason::NoLock,
+            ErrorReason::UnsupportedArtifactFeature,
         ] {
             assert_eq!(literal(reason), reason.to_string(), "{reason:?}");
         }

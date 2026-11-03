@@ -431,6 +431,41 @@ fn support_lines(companion: Option<&CompanionCache>) -> Vec<DetailLine> {
     section
 }
 
+/// The `Required by:` and `Why:` rows for the node at `repo`.
+///
+/// `Required by:` lists the immediate parents, `-` for none and `?` when the
+/// lock's closure cannot be followed offline. `Why:` is the first path from a
+/// direct declaration, with `(+N more)` when others exist; it is left out for
+/// a node that is only declared directly. Empty when the lock carries no
+/// dependency data, so a dependency-free project's pane is unchanged.
+pub fn dependency_lines(deps: &super::bundle_members::DepIndex, repo: &str) -> Vec<DetailLine> {
+    let Some(detail) = deps.detail(repo) else {
+        return Vec::new();
+    };
+    // Binding names come from a publisher's `requires`, so they are sanitized
+    // like every other registry-supplied string.
+    let node = |(kind, name): &crate::lock::effective_set::NodeKey| {
+        format!("{kind}/{}", super::render::sanitize_member_label(name))
+    };
+    let required_by = match &detail.required_by {
+        None => "?".to_string(),
+        Some(parents) if parents.is_empty() => "-".to_string(),
+        Some(parents) => parents.iter().map(node).collect::<Vec<_>>().join(", "),
+    };
+    let mut lines = vec![DetailLine::MetaEntry {
+        label: "Required by:",
+        value: required_by,
+    }];
+    if let Some((path, more)) = &detail.why {
+        let mut value = path.iter().map(node).collect::<Vec<_>>().join(" -> ");
+        if *more > 0 {
+            value.push_str(&format!(" (+{more} more)"));
+        }
+        lines.push(DetailLine::MetaEntry { label: "Why:", value });
+    }
+    lines
+}
+
 /// Build the Detail pane's semantic lines for a selected virtual bundle
 /// member row.
 ///
@@ -1228,5 +1263,88 @@ mod tests {
         // Wrapping at a narrow pane raises the row count.
         let long = vec![DetailLine::Text("a".repeat(100))];
         assert_eq!(scroll_max(&long, (10, 4)), 6);
+    }
+
+    // ── dependency rows ──────────────────────────────────────────────────────
+
+    use crate::config::DeclaredSource;
+    use crate::oci::Identifier;
+    use crate::tui::bundle_members::DepIndex;
+    use crate::tui::bundle_members::test_support::{declared, lock_of};
+
+    fn meta<'a>(lines: &'a [DetailLine], want: &str) -> Option<&'a str> {
+        lines.iter().find_map(|l| match l {
+            DetailLine::MetaEntry { label, value } if *label == want => Some(value.as_str()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn detail_required_by_one_hop() {
+        // top -> mid -> leaf: leaf is required by mid only, one hop.
+        let lock = lock_of(
+            &[
+                ("top", "ghcr.io/acme/top", &[("skill", "mid", "./mid:1")]),
+                ("mid", "ghcr.io/acme/mid", &[("skill", "leaf", "./leaf:1")]),
+                ("leaf", "ghcr.io/acme/leaf", &[]),
+            ],
+            "",
+        );
+        let deps = DepIndex::build(&declared(&[("top", "ghcr.io/acme/top:1")]), Some(&lock));
+
+        let leaf = dependency_lines(&deps, "ghcr.io/acme/leaf");
+        assert_eq!(meta(&leaf, "Required by:"), Some("skill/mid"));
+        // The direct declaration is required by nothing.
+        let top = dependency_lines(&deps, "ghcr.io/acme/top");
+        assert_eq!(meta(&top, "Required by:"), Some("-"));
+        assert_eq!(meta(&top, "Why:"), None, "a direct-only node has no chain to explain");
+        // A repo the lock does not hold shows no dependency rows.
+        assert!(dependency_lines(&deps, "ghcr.io/acme/unlocked").is_empty());
+    }
+
+    #[test]
+    fn detail_required_by_unknown_when_incomputable() {
+        // A declared bundle with no cached snapshot: the closure is unknowable
+        // offline, so the answer is `?`, never a guessed `-`.
+        let lock = lock_of(
+            &[
+                ("top", "ghcr.io/acme/top", &[("skill", "leaf", "./leaf:1")]),
+                ("leaf", "ghcr.io/acme/leaf", &[]),
+            ],
+            "",
+        );
+        let mut set = declared(&[("top", "ghcr.io/acme/top:1")]);
+        set.bundles.insert(
+            "pack".to_string(),
+            DeclaredSource::Registry(Identifier::parse("ghcr.io/acme/pack:1").unwrap()),
+        );
+        let deps = DepIndex::build(&set, Some(&lock));
+
+        let leaf = dependency_lines(&deps, "ghcr.io/acme/leaf");
+        assert_eq!(meta(&leaf, "Required by:"), Some("?"));
+        assert_eq!(meta(&leaf, "Why:"), None);
+    }
+
+    #[test]
+    fn detail_why_first_path_plus_more() {
+        // Two declared parents both require d: the first path is shown and the
+        // other is counted.
+        let both = [("skill", "d", "./d:1")];
+        let lock = lock_of(
+            &[
+                ("p1", "ghcr.io/acme/p1", &both),
+                ("p2", "ghcr.io/acme/p2", &both),
+                ("d", "ghcr.io/acme/d", &[]),
+            ],
+            "",
+        );
+        let deps = DepIndex::build(
+            &declared(&[("p1", "ghcr.io/acme/p1:1"), ("p2", "ghcr.io/acme/p2:1")]),
+            Some(&lock),
+        );
+
+        let d = dependency_lines(&deps, "ghcr.io/acme/d");
+        assert_eq!(meta(&d, "Required by:"), Some("skill/p1, skill/p2"));
+        assert_eq!(meta(&d, "Why:"), Some("skill/p1 -> skill/d (+1 more)"));
     }
 }

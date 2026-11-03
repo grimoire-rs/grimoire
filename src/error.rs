@@ -24,6 +24,7 @@ use crate::install::path_anchor::AnchorError;
 use crate::lock::lock_error::{LockError, LockErrorKind};
 use crate::oci::access::error::{AccessError, AccessErrorKind};
 use crate::oci::digest::error::DigestError;
+use crate::oci::features::ArtifactFeatureError;
 use crate::oci::hook::HookError;
 use crate::oci::identifier::error::IdentifierError;
 use crate::oci::layer::LayerError;
@@ -98,6 +99,10 @@ pub enum Error {
     /// A layer the tar read path cannot decode, or whose decoded bytes it refuses.
     #[error(transparent)]
     Layer(#[from] LayerError),
+
+    /// A manifest requiring features or a layer layout this grim does not know.
+    #[error(transparent)]
+    ArtifactFeature(#[from] ArtifactFeatureError),
 }
 
 /// Machine-readable failure `reason` subtype for the JSON error envelope
@@ -141,6 +146,10 @@ pub enum ErrorReason {
     /// A command that installs from `grimoire.lock` found none
     /// (`CommandError::LockMissing`). The remedy is `grim lock`.
     NoLock,
+    /// A manifest requires features, or uses a layer layout, this grim does
+    /// not know (`ArtifactFeatureError`). Updating grim, not `--force`, is
+    /// the remedy.
+    UnsupportedArtifactFeature,
 }
 
 impl std::fmt::Display for ErrorReason {
@@ -154,6 +163,7 @@ impl std::fmt::Display for ErrorReason {
             Self::AnchorEscape => "anchor-escape",
             Self::UnsupportedLayerMediaType => "unsupported-layer-media-type",
             Self::NoLock => "no-lock",
+            Self::UnsupportedArtifactFeature => "unsupported-artifact-feature",
         })
     }
 }
@@ -274,6 +284,7 @@ pub fn classify(err: &anyhow::Error) -> Classification {
                     | LayerError::UncompressedDigestMismatch { .. }
                     | LayerError::MalformedAnnotation(_) => Classification::new(ExitCode::DataError),
                 },
+                Error::ArtifactFeature(_) => unsupported_feature(),
                 Error::Announce(ae) => Classification::new(match ae {
                     AnnounceError::Io(io) => classify_io(io),
                     AnnounceError::Git { .. }
@@ -396,6 +407,10 @@ fn classify_lock(err: &LockError) -> Classification {
             exit: ExitCode::TempFail,
             reason: Some(ErrorReason::Locked),
         },
+        LockErrorKind::UnfollowableGraph { .. } => Classification {
+            exit: ExitCode::DataError,
+            reason: Some(ErrorReason::StaleLock),
+        },
         LockErrorKind::TomlParse(_)
         | LockErrorKind::TomlSerialize(_)
         | LockErrorKind::FileTooLarge { .. }
@@ -449,9 +464,19 @@ fn classify_access(err: &AccessError) -> ExitCode {
     }
 }
 
-/// Map a resolution-tier error to a classification. The only arm carrying
-/// a reason subtype is `StaleLock` — assigned right here, in the same
-/// match arm that decides its exit code, so the two can never drift apart.
+/// Exit 65 with [`ErrorReason::UnsupportedArtifactFeature`]: the one answer
+/// for every [`ArtifactFeatureError`], however it surfaces.
+fn unsupported_feature() -> Classification {
+    Classification {
+        exit: ExitCode::DataError,
+        reason: Some(ErrorReason::UnsupportedArtifactFeature),
+    }
+}
+
+/// Map a resolution-tier error to a classification. The arms carrying a
+/// reason subtype (`StaleLock`, `UnsupportedFeature`) assign it right here,
+/// in the same match arm that decides the exit code, so the two can never
+/// drift apart.
 fn classify_resolve(err: &ResolveError) -> Classification {
     match &err.kind {
         ResolveErrorKind::TagNotFound | ResolveErrorKind::NotDeclared | ResolveErrorKind::BundleNotFound => {
@@ -465,9 +490,11 @@ fn classify_resolve(err: &ResolveError) -> Classification {
             exit: ExitCode::DataError,
             reason: Some(ErrorReason::StaleLock),
         },
-        ResolveErrorKind::BundleInvalid(_) | ResolveErrorKind::LocalSource(_) => {
-            Classification::new(ExitCode::DataError)
-        }
+        ResolveErrorKind::BundleInvalid(_)
+        | ResolveErrorKind::LocalSource(_)
+        | ResolveErrorKind::DependencyCycle { .. }
+        | ResolveErrorKind::GraphTooLarge { .. } => Classification::new(ExitCode::DataError),
+        ResolveErrorKind::UnsupportedFeature(_) => unsupported_feature(),
         // A bundle conflict is a misconfiguration of the user's own
         // declaration (two bundles disagree), not malformed external data.
         ResolveErrorKind::BundleConflict { .. } => Classification::new(ExitCode::ConfigError),
@@ -492,8 +519,12 @@ fn classify_install(err: &InstallError) -> Classification {
         InstallErrorKind::BlobDigestMismatch { .. }
         | InstallErrorKind::OversizeLayer { .. }
         | InstallErrorKind::MaterializeFailed(_)
-        | InstallErrorKind::LocalSource(_)
-        | InstallErrorKind::LocalContentChanged { .. } => Classification::new(ExitCode::DataError),
+        | InstallErrorKind::LocalSource(_) => Classification::new(ExitCode::DataError),
+        // Both say the lock no longer matches its source; `grim lock` is the remedy.
+        InstallErrorKind::StaleDependencies { .. } | InstallErrorKind::LocalContentChanged { .. } => Classification {
+            exit: ExitCode::DataError,
+            reason: Some(ErrorReason::StaleLock),
+        },
         InstallErrorKind::TargetIo { source, .. } => Classification::new(classify_io(source)),
         // Both are "your client selection cannot work" — one code (78).
         InstallErrorKind::UnsupportedClient(_) | InstallErrorKind::NoInstallableClient => {
@@ -1120,6 +1151,24 @@ mod tests {
     }
 
     #[test]
+    fn unfollowable_lock_graph_classifies_as_stale_lock() {
+        let err: anyhow::Error = Error::from(LockError::new(
+            std::path::PathBuf::from("grimoire.lock"),
+            LockErrorKind::UnfollowableGraph {
+                message: "cannot be computed".to_string(),
+            },
+        ))
+        .into();
+        assert_eq!(
+            classify(&err),
+            Classification {
+                exit: ExitCode::DataError,
+                reason: Some(ErrorReason::StaleLock),
+            }
+        );
+    }
+
+    #[test]
     fn other_errors_carry_no_reason() {
         // A representative data error and a not-found error both classify to
         // an exit code but to no reason subtype — the field must stay absent.
@@ -1518,7 +1567,7 @@ mod tests {
 
     /// Every `ErrorReason` slug at 520c6540, then each slug added since,
     /// appended in order.
-    const FROZEN_REASON_SLUGS: [&str; 8] = [
+    const FROZEN_REASON_SLUGS: [&str; 9] = [
         "stale-lock",
         "modified",
         "untracked-destination",
@@ -1527,6 +1576,7 @@ mod tests {
         "anchor-escape",
         "unsupported-layer-media-type",
         "no-lock",
+        "unsupported-artifact-feature",
     ];
 
     #[test]
@@ -1590,6 +1640,7 @@ mod tests {
                 ErrorReason::AnchorEscape => 5,
                 ErrorReason::UnsupportedLayerMediaType => 6,
                 ErrorReason::NoLock => 7,
+                ErrorReason::UnsupportedArtifactFeature => 8,
             }
         }
         let every = [
@@ -1601,11 +1652,81 @@ mod tests {
             ErrorReason::AnchorEscape,
             ErrorReason::UnsupportedLayerMediaType,
             ErrorReason::NoLock,
+            ErrorReason::UnsupportedArtifactFeature,
         ];
         for (i, r) in every.iter().enumerate() {
             assert_eq!(position(*r), i);
         }
         let listed: Vec<String> = every.iter().map(ToString::to_string).collect();
         assert_eq!(listed, FROZEN_REASON_SLUGS);
+    }
+    #[test]
+    fn unsupported_artifact_feature_is_65_with_its_reason_everywhere() {
+        use crate::oci::ArtifactKind;
+        use crate::oci::features::ArtifactFeatureError;
+
+        let feature = || ArtifactFeatureError::UnknownFeatures {
+            reference: "ghcr.io/acme/x:1".to_string(),
+            features: vec!["future".to_string()],
+            grim_version: "0.0.0",
+        };
+        let top = classify(&anyhow::Error::from(Error::from(feature())));
+        assert_eq!(
+            (top.exit, top.reason),
+            (ExitCode::DataError, Some(ErrorReason::UnsupportedArtifactFeature))
+        );
+        let resolve = ResolveError::unidentified(
+            ArtifactKind::Skill,
+            "x",
+            ResolveErrorKind::UnsupportedFeature(feature()),
+        );
+        let nested = classify(&anyhow::Error::from(Error::from(resolve)));
+        assert_eq!((nested.exit, nested.reason), (top.exit, top.reason));
+        let reason = ErrorReason::UnsupportedArtifactFeature;
+        assert!(!reason.retryable() && !reason.forceable());
+    }
+
+    #[test]
+    fn stale_dependencies_and_changed_local_source_are_65_stale_lock() {
+        use crate::install::install_error::{InstallError, InstallErrorKind};
+        use crate::oci::Algorithm;
+
+        let kinds = [
+            InstallErrorKind::StaleDependencies {
+                kind: crate::oci::ArtifactKind::Skill,
+                name: "dep".to_string(),
+            },
+            InstallErrorKind::LocalContentChanged {
+                name: "dep".to_string(),
+                locked: Algorithm::Sha256.hash(b"a"),
+                actual: Algorithm::Sha256.hash(b"b"),
+            },
+        ];
+        for kind in kinds {
+            let c = classify(&anyhow::Error::from(Error::from(InstallError::without_reference(kind))));
+            assert_eq!((c.exit, c.reason), (ExitCode::DataError, Some(ErrorReason::StaleLock)));
+        }
+    }
+
+    #[test]
+    fn dependency_cycle_and_graph_too_large_are_65_without_a_reason() {
+        use crate::oci::ArtifactKind;
+        use crate::resolve::resolve_error::GraphLimit;
+
+        let kinds = [
+            ResolveErrorKind::DependencyCycle {
+                cycle: vec![(ArtifactKind::Skill, "a".to_string())],
+                publisher: "ghcr.io/acme/a".to_string(),
+            },
+            ResolveErrorKind::GraphTooLarge {
+                limit: GraphLimit::Nodes,
+                via: "skill/a".to_string(),
+            },
+        ];
+        for kind in kinds {
+            let err = ResolveError::unidentified(ArtifactKind::Skill, "a", kind);
+            let c = classify(&anyhow::Error::from(Error::from(err)));
+            assert_eq!((c.exit, c.reason), (ExitCode::DataError, None));
+        }
     }
 }

@@ -30,6 +30,13 @@ impl Printable for DescribeCliReport {
         let opt = |v: &Option<String>| v.clone().unwrap_or_else(|| "-".to_string());
         let list = |v: &[String]| if v.is_empty() { "-".to_string() } else { v.join(",") };
         let compression = d.compression.map_or_else(|| "-".to_string(), |c| c.to_string());
+        let requires = list(
+            &d.requires
+                .iter()
+                .flatten()
+                .map(|m| format!("{}/{}", m.kind, m.name))
+                .collect::<Vec<_>>(),
+        );
         let rows: Vec<Vec<String>> = vec![
             vec!["ref".into(), d.reference.clone()],
             vec!["digest".into(), d.digest.clone()],
@@ -58,6 +65,7 @@ impl Printable for DescribeCliReport {
             vec!["deprecated".into(), opt(&d.deprecated)],
             vec!["replaced_by".into(), opt(&d.replaced_by)],
             vec!["tags".into(), list(&d.tags)],
+            vec!["requires".into(), requires],
         ];
         print_table(w, &["Key", "Value"], &rows)
     }
@@ -105,7 +113,39 @@ mod tests {
             tags: vec!["1.2.0".to_string(), "latest".to_string()],
             annotations,
             compression: Some(crate::oci::layer::Compression::Gzip),
+            requires: Some(vec![crate::oci::bundle::BundleMember {
+                kind: crate::oci::ArtifactKind::Mcp,
+                name: "gdrive".to_string(),
+                id: "./gdrive:2".to_string(),
+            }]),
         })
+    }
+
+    #[test]
+    fn requires_is_null_or_empty_in_json_and_dashed_in_plain() {
+        let row_of = |r: &DescribeCliReport| {
+            let mut buf = Vec::new();
+            r.print_plain(&mut buf).unwrap();
+            let out = String::from_utf8(buf).unwrap();
+            let row = out.lines().find(|l| l.starts_with("requires")).expect("requires row");
+            row.split_whitespace().map(str::to_string).collect::<Vec<_>>()
+        };
+        let mut r = report();
+        assert_eq!(row_of(&r), ["requires", "mcp/gdrive"]);
+
+        r.0.requires = Some(Vec::new());
+        assert_eq!(row_of(&r), ["requires", "-"]);
+        let mut buf = Vec::new();
+        r.print_json(&mut buf).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["requires"], serde_json::json!([]));
+
+        r.0.requires = None;
+        assert_eq!(row_of(&r), ["requires", "-"]);
+        let mut buf = Vec::new();
+        r.print_json(&mut buf).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert!(v.get("requires").expect("key present").is_null());
     }
 
     #[test]

@@ -94,6 +94,12 @@ pub enum LockErrorKind {
     /// plugin (or with a name unsafe to materialize).
     #[error("{message}")]
     ScopeMismatch { message: String },
+
+    /// The lock parses but its dependency graph cannot be followed offline
+    /// (a missing snapshot, or a cycle). `message` says which and names the
+    /// fix.
+    #[error("{message}")]
+    UnfollowableGraph { message: String },
 }
 
 #[cfg(test)]

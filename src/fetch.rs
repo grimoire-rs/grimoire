@@ -46,6 +46,7 @@ use crate::install::materializer::{
 use crate::oci::access::error::{AccessError, AccessErrorKind};
 use crate::oci::access::{OciAccess, Operation};
 use crate::oci::bundle::BUNDLE_LAYER_SIZE_LIMIT;
+use crate::oci::manifest::LayerLayout;
 use crate::oci::mcp::{MCP_LAYER_SIZE_LIMIT, McpDescriptor};
 use crate::oci::{ArtifactKind, ArtifactRef, Identifier, PinnedIdentifier};
 use crate::resolve::{ResolveError, ResolveErrorKind};
@@ -346,12 +347,28 @@ pub async fn fetch_artifact(
             ));
         }
     };
-    let layer = manifest.single_layer().ok_or_else(|| {
-        anyhow!(
-            "expected a single-layer artifact, manifest has {} layers",
-            manifest.layers.len()
-        )
-    })?;
+    // The description companion keeps its single-layer read; an artifact is
+    // gated on the features it requires and read by its layout.
+    let layer = match payload {
+        FetchedPayload::Artifact(kind) => {
+            let reference = pinned.as_identifier().to_string();
+            crate::oci::features::check_required_features(&reference, &manifest).map_err(crate::error::Error::from)?;
+            match manifest
+                .layout(kind)
+                .map_err(|e| crate::error::Error::from(e.for_reference(&reference)))?
+            {
+                LayerLayout::Content(layer)
+                | LayerLayout::ContentWithRequires { content: layer, .. }
+                | LayerLayout::BundleMembers(layer) => layer,
+            }
+        }
+        FetchedPayload::Description => manifest.single_layer().ok_or_else(|| {
+            anyhow!(
+                "expected a single-layer artifact, manifest has {} layers",
+                manifest.layers.len()
+            )
+        })?,
+    };
     let tar_layer = match payload {
         FetchedPayload::Artifact(kind) => crate::oci::layer::is_tar_kind(kind),
         FetchedPayload::Description => true,
@@ -907,6 +924,57 @@ pub struct DescribeReport {
     /// `null` when this grim cannot read the layer (a `+zstd` type, or not
     /// exactly one layer). Read off the manifest, so it costs no request.
     pub compression: Option<crate::oci::layer::Compression>,
+    /// The artifact's declared dependencies, sorted by `(kind, name)` with ids
+    /// exactly as published. `[]` when it has no requires layer; `null` for a
+    /// foreign manifest or a layer layout this grim does not read.
+    pub requires: Option<Vec<crate::oci::bundle::BundleMember>>,
+}
+
+/// Read the requires layer of the artifact `manifest` describes.
+///
+/// `None` when the manifest is not a Grimoire artifact or its layer layout is
+/// unknown to this grim (describe still reports the metadata then). Any
+/// failure to read or validate a layer that is present fails the whole
+/// describe, so a report never carries a partial list.
+async fn read_requires(
+    access: &Arc<dyn OciAccess>,
+    pinned: &PinnedIdentifier,
+    name: &str,
+    manifest: &crate::oci::manifest::OciManifest,
+) -> anyhow::Result<Option<Vec<crate::oci::bundle::BundleMember>>> {
+    use crate::resolve::resolve_error::{ResolveError, ResolveErrorKind};
+
+    let Some(kind) = crate::oci::annotations::kind_from_manifest(manifest) else {
+        return Ok(None);
+    };
+    let Ok(layout) = manifest.layout(kind) else {
+        return Ok(None);
+    };
+    let LayerLayout::ContentWithRequires { requires, .. } = layout else {
+        return Ok(Some(Vec::new()));
+    };
+    let repo = pinned.as_identifier().without_tag();
+    let fail = |kind_: ResolveErrorKind| match kind_ {
+        // Keeps the access taxonomy: unreachable 69, offline 81, auth 80.
+        ResolveErrorKind::RegistryUnreachable(e) => crate::error::Error::from(e),
+        other => crate::error::Error::from(ResolveError::unidentified(kind, name, other)),
+    };
+    let document = crate::resolve::members::fetch_members_blob(access, &repo, requires)
+        .await
+        .map_err(fail)?;
+    let mut members = document.members;
+    for member in &members {
+        let invalid = |what: String| {
+            fail(ResolveErrorKind::BundleInvalid(format!(
+                "requires entry '{}' is invalid: {what}",
+                member.name
+            )))
+        };
+        crate::skill::SkillName::parse(&member.name).map_err(|e| invalid(e.to_string()))?;
+        crate::oci::member_ref::MemberRef::parse(&member.id).map_err(|e| invalid(e.to_string()))?;
+    }
+    members.sort_by(|a, b| (a.kind, a.name.as_str()).cmp(&(b.kind, b.name.as_str())));
+    Ok(Some(members))
 }
 
 /// Resolve `reference` and read its manifest-level metadata — kind, curated
@@ -961,6 +1029,8 @@ pub async fn describe_artifact(
     let manifest = wrap(access.fetch_manifest(&pinned).await)?
         .ok_or_else(|| anyhow!("manifest for '{pinned}' not found on the registry"))?;
 
+    let requires = read_requires(access, &pinned, &name, &manifest).await?;
+
     let a = &manifest.annotations;
     let get = |k: &str| a.get(k).cloned();
     let keywords = crate::oci::annotations::keywords_from_annotations(a);
@@ -1004,6 +1074,7 @@ pub async fn describe_artifact(
         tags,
         annotations: a.clone(),
         compression: crate::oci::layer::compression_of(&manifest),
+        requires,
     })
 }
 

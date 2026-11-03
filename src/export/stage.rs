@@ -1989,6 +1989,7 @@ mod tests {
                 hash: sha('c'),
             },
             bundles: Vec::new(),
+            requires: Vec::new(),
         }
     }
 
@@ -4740,6 +4741,7 @@ mod tests {
                 hash: sha('c'),
             },
             bundles: Vec::new(),
+            requires: Vec::new(),
         }
     }
 

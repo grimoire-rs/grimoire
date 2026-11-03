@@ -14,6 +14,10 @@
 //! | Offline | cache; miss ⇒ `Ok(None)` | cache; miss ⇒ `OfflineMiss` | store; miss ⇒ `OfflineMiss`|
 //! | Online  | inner (fresh)       | inner (fresh); then write cache | store; miss ⇒ inner ⇒ store|
 //!
+//! A manifest is read by its pinned digest, store first in both modes: a
+//! stored copy is used only when it re-hashes to the pin, otherwise it counts
+//! as absent (refetched online, an offline miss).
+//!
 //! `Online` never reads the cached tag pointer — a floating tag always
 //! reflects the registry. The cache is a write-through fallback for later
 //! offline use, persisted for tag pointers only on `Resolve` (a pure
@@ -91,11 +95,24 @@ impl<A: OciAccess> OciAccess for CachedAccess<A> {
     }
 
     async fn fetch_manifest(&self, id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
+        let digest = id.digest();
+        let identifier = id.as_identifier();
+        // A manifest is addressed by its digest, so a stored copy is
+        // authoritative once it re-hashes to the pin. The store trusts its
+        // file names, so a damaged entry is treated as absent: refetched
+        // online, a miss offline.
+        match self.blobs.get(&digest) {
+            Ok(Some(bytes)) if digest.algorithm().hash(&bytes) == digest => {
+                return OciManifest::from_json(&bytes).map(Some).map_err(|e| {
+                    AccessError::with_identifier(identifier.clone(), AccessErrorKind::InvalidManifest(e.0))
+                });
+            }
+            Ok(_) => {}
+            Err(e) => return Err(Self::io_err(identifier, e)),
+        }
         if self.mode == AccessMode::Offline {
-            // The manifest cache below is write-only: `grim status` reads it
-            // straight from the blob store, so offline still refuses here.
             return Err(AccessError::with_identifier(
-                id.as_identifier().clone(),
+                identifier.clone(),
                 AccessErrorKind::OfflineMiss,
             ));
         }
@@ -104,8 +121,6 @@ impl<A: OciAccess> OciAccess for CachedAccess<A> {
         };
         // Stored under the pinned digest, so `put` verifies the registry
         // served the manifest the lock names before anything is cached.
-        let digest = id.digest();
-        let identifier = id.as_identifier();
         if let Err(e) = self.blobs.put(&digest, &bytes) {
             if e.kind() == std::io::ErrorKind::InvalidData {
                 let actual = digest.algorithm().hash(&bytes);
@@ -422,6 +437,83 @@ mod tests {
         let manifest = access.fetch_manifest(&pinned_at(&digest)).await.unwrap().unwrap();
         assert!(manifest.layers.is_empty());
         assert_eq!(blobs.get(&digest).unwrap().as_deref(), Some(MANIFEST));
+    }
+
+    /// Overwrite the stored copy of `digest` with `bytes`, bypassing the
+    /// store's verification, as bit rot or a hostile local write would.
+    fn corrupt(dir: &tempfile::TempDir, digest: &Digest, bytes: &[u8]) {
+        let (algorithm, hex) = digest.parts();
+        let path = dir
+            .path()
+            .join("home")
+            .join("blobs")
+            .join(algorithm)
+            .join(&hex[..2])
+            .join(hex);
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn manifest_inner(digest: &Digest, calls: &Arc<Mutex<usize>>) -> CountingInner {
+        CountingInner {
+            digest: digest.clone(),
+            calls: calls.clone(),
+            blob: MANIFEST.to_vec(),
+        }
+    }
+
+    #[tokio::test]
+    async fn stored_manifest_is_served_without_the_registry_in_both_modes() {
+        for mode in [AccessMode::Online, AccessMode::Offline] {
+            let (_d, tags, blobs) = paths();
+            let digest = Algorithm::Sha256.hash(MANIFEST);
+            blobs.put(&digest, MANIFEST).unwrap();
+            let calls = Arc::new(Mutex::new(0));
+            let access = CachedAccess::new(manifest_inner(&digest, &calls), tags, blobs, mode);
+            let manifest = access.fetch_manifest(&pinned_at(&digest)).await.unwrap().unwrap();
+            assert!(manifest.layers.is_empty());
+            assert_eq!(
+                *calls.lock().unwrap(),
+                0,
+                "{mode:?}: a stored manifest must not reach the registry"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn offline_manifest_absent_from_the_store_is_an_offline_miss() {
+        let (_d, tags, blobs) = paths();
+        let digest = Algorithm::Sha256.hash(MANIFEST);
+        let calls = Arc::new(Mutex::new(0));
+        let access = CachedAccess::new(manifest_inner(&digest, &calls), tags, blobs, AccessMode::Offline);
+        let err = access.fetch_manifest(&pinned_at(&digest)).await.unwrap_err();
+        assert!(matches!(err.kind, AccessErrorKind::OfflineMiss), "{err:?}");
+        assert_eq!(*calls.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn online_ignores_a_corrupted_stored_manifest_and_refetches() {
+        let (d, tags, blobs) = paths();
+        let digest = Algorithm::Sha256.hash(MANIFEST);
+        blobs.put(&digest, MANIFEST).unwrap();
+        corrupt(&d, &digest, br#"{"schemaVersion":2,"layers":[]}"#);
+        let calls = Arc::new(Mutex::new(0));
+        let access = CachedAccess::new(manifest_inner(&digest, &calls), tags, blobs, AccessMode::Online);
+        let manifest = access.fetch_manifest(&pinned_at(&digest)).await.unwrap().unwrap();
+        assert!(manifest.layers.is_empty());
+        assert_eq!(*calls.lock().unwrap(), 1, "a corrupted entry must be refetched");
+    }
+
+    #[tokio::test]
+    async fn offline_refuses_a_corrupted_stored_manifest_as_a_miss() {
+        let (d, tags, blobs) = paths();
+        let digest = Algorithm::Sha256.hash(MANIFEST);
+        blobs.put(&digest, MANIFEST).unwrap();
+        corrupt(&d, &digest, b"not the manifest");
+        let calls = Arc::new(Mutex::new(0));
+        let access = CachedAccess::new(manifest_inner(&digest, &calls), tags, blobs, AccessMode::Offline);
+        let err = access.fetch_manifest(&pinned_at(&digest)).await.unwrap_err();
+        assert!(matches!(err.kind, AccessErrorKind::OfflineMiss), "{err:?}");
+        assert_eq!(*calls.lock().unwrap(), 0);
     }
 
     #[tokio::test]

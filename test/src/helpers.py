@@ -16,6 +16,7 @@ from src.registry import (
     PublishedArtifact,
     push_artifact,
     push_gzip_artifact,
+    push_manifest,
 )
 
 # ---------------------------------------------------------------------------
@@ -120,6 +121,62 @@ def make_bundle(
     doc = {"members": [{"kind": k, "name": n, "id": i} for (k, n, i) in members]}
     layer = json.dumps(doc).encode()
     return push_artifact(repo, tag, layer, "bundle")
+
+
+# The requires layer reuses the bundle members layer type
+# (`BUNDLE_LAYER_MEDIA_TYPE`, src/oci/bundle.rs).
+_REQUIRES_LAYER_MEDIA_TYPE = "application/vnd.grimoire.bundle.v1+json"
+_MCP_LAYER_MEDIA_TYPE = "application/vnd.grimoire.mcp.v1+json"
+# `ArtifactKind` declaration order (src/oci/artifact_kind.rs): grim sorts members
+# by the enum, not by the kind's text; a text sort puts mcp before skill and
+# changes the layer digest.
+_KIND_ORDER = ("skill", "rule", "agent", "bundle", "mcp", "hook")
+
+
+def members_layer(members: list[tuple[str, str, str]]) -> bytes:
+    """The canonical members document: ``BundleManifest::new`` + ``to_layer_bytes``.
+
+    Sorted by ``(kind, name)``, pretty JSON (2-space indent, struct field order
+    ``kind``/``name``/``id``, non-ASCII unescaped like serde_json), trailing
+    newline (src/oci/bundle.rs).
+    """
+    doc = {
+        "members": [
+            {"kind": k, "name": n, "id": i}
+            for (k, n, i) in sorted(
+                members, key=lambda m: (_KIND_ORDER.index(m[0]), m[1])
+            )
+        ]
+    }
+    return (json.dumps(doc, indent=2, ensure_ascii=False) + "\n").encode()
+
+
+def make_dependent(
+    repo: str,
+    tag: str,
+    kind: str,
+    content: dict[str, str | bytes] | bytes,
+    requires: list[tuple[str, str, str]],
+    *,
+    annotations: dict[str, str] | None = None,
+) -> PublishedArtifact:
+    """Push a dependent artifact: the kind's content layer, then a requires layer.
+
+    ``content`` is the file tree for a tar kind (skill, rule, agent, hook) or the
+    raw layer bytes (an MCP descriptor document). ``requires`` is a list of
+    ``(kind, name, id)`` tuples, written in canonical order. The manifest has
+    grim's own shape: empty config, no ``artifactType``, kind via the
+    ``com.grimoire.kind`` annotation, no layer annotations.
+    """
+    blob = content if isinstance(content, bytes) else tar_of(content)
+    content_type = _MCP_LAYER_MEDIA_TYPE if kind == "mcp" else LAYER_MEDIA_TYPE
+    digest = push_manifest(
+        repo,
+        tag,
+        [(content_type, blob), (_REQUIRES_LAYER_MEDIA_TYPE, members_layer(requires))],
+        {"com.grimoire.kind": kind, **(annotations or {})},
+    )
+    return PublishedArtifact(repo=repo, tag=tag, digest=digest, kind=kind)
 
 
 def make_hook(

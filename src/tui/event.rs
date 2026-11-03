@@ -696,24 +696,35 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
             TuiAction::None
         }
         TuiInput::Expand => {
-            // Expand a group if selected; for bundle leaves, insert the leaf
-            // key into expanded_bundles and trigger a lazy member-list fetch
-            // if no cache entry exists yet.
+            // Expand a group if selected; for an expandable leaf or member
+            // (a bundle, or an artifact that requires others), insert its repo
+            // into expanded_bundles and trigger a lazy child-list fetch if no
+            // cache entry exists yet.
             let selected_before = state.selected;
             state.expand_selected();
 
-            // Check whether the selection (before expand) was a bundle leaf.
-            // Only emit LoadBundleMembers when there is no cache entry yet
-            // (no-retry: Loading/Failed/Offline entries are kept as-is).
+            // Check whether the selection (before expand) was an expandable
+            // row. Only emit LoadBundleMembers when there is no cache entry
+            // yet (no-retry: Loading/Failed/Offline entries are kept as-is).
             if state.view_mode == crate::tui::state::ViewMode::Tree {
                 let flat = state.flattened();
-                if let Some(crate::tui::tree::DisplayRow::Leaf { row, key: leaf_key, .. }) = flat.get(selected_before)
-                    && let Some(tui_row) = state.rows.get(*row)
-                    && tui_row.kind == "bundle"
-                {
-                    let row_idx = *row;
-                    let bundle_repo = tui_row.repo.clone();
-                    let _ = leaf_key; // unused after F3 re-keying
+                let target = match flat.get(selected_before) {
+                    Some(crate::tui::tree::DisplayRow::Leaf {
+                        row, expandable: true, ..
+                    }) => state.rows.get(*row).map(|r| (*row, r.repo.clone())),
+                    // A member has no `rows` index; the action's `row` is unused
+                    // by the handler, so a catalog match or 0 is enough.
+                    Some(crate::tui::tree::DisplayRow::Member {
+                        member_repo: Some(repo),
+                        expandable: true,
+                        ..
+                    }) => Some((
+                        state.rows.iter().position(|r| &r.repo == repo).unwrap_or_default(),
+                        repo.clone(),
+                    )),
+                    _ => None,
+                };
+                if let Some((row_idx, bundle_repo)) = target {
                     let cache_key = (state.scope_label.clone(), bundle_repo.clone());
 
                     // F3/P3.4: Insert the FULL bundle repo into expanded_bundles
@@ -753,29 +764,30 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
             TuiAction::None
         }
         TuiInput::Collapse => {
-            // F3/P3.4: `←` on an expanded bundle leaf collapses it (removes
-            // the FULL bundle repo from expanded_bundles, keeps cache).
+            // F3/P3.4: `←` on an expanded expandable leaf or member collapses
+            // it (removes the FULL repo from expanded_bundles, keeps cache).
             // F8: delegates to collapse_bundle_leaf to also re-clamp selection.
             // On any other selection fall through to standard collapse-or-jump-to-parent.
             if state.view_mode == crate::tui::state::ViewMode::Tree {
                 let flat = state.flattened();
-                if let Some(crate::tui::tree::DisplayRow::Leaf {
-                    row,
-                    is_bundle,
-                    collapsed,
-                    ..
-                }) = flat.get(state.selected)
-                    && *is_bundle
-                    && !collapsed
-                {
-                    // Expanded bundle leaf: collapse it.
-                    // Resolve full repo from rows to avoid depending on the
-                    // display-path key (which is elided when default_registry matches).
-                    let row_idx = *row;
-                    let bundle_repo = state.rows.get(row_idx).map(|r| r.repo.clone());
-                    if let Some(repo) = bundle_repo {
-                        state.collapse_bundle_leaf(&repo);
-                    }
+                // Resolve the full repo from rows to avoid depending on the
+                // display-path key (which is elided when default_registry matches).
+                let expanded_repo = match flat.get(state.selected) {
+                    Some(crate::tui::tree::DisplayRow::Leaf {
+                        row,
+                        expandable: true,
+                        collapsed: false,
+                        ..
+                    }) => state.rows.get(*row).map(|r| r.repo.clone()),
+                    Some(crate::tui::tree::DisplayRow::Member {
+                        member_repo: Some(repo),
+                        expanded: true,
+                        ..
+                    }) => Some(repo.clone()),
+                    _ => None,
+                };
+                if let Some(repo) = expanded_repo {
+                    state.collapse_bundle_leaf(&repo);
                     return TuiAction::None;
                 }
             }

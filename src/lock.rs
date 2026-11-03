@@ -19,6 +19,7 @@ pub mod lock_version;
 pub mod locked_artifact;
 pub mod locked_bundle;
 pub mod locked_source;
+pub mod merge_policy;
 
 #[allow(unused_imports)]
 pub use file_lock::ConfigFileLock;

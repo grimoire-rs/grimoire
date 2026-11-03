@@ -24,7 +24,7 @@ use crate::lock::lock_io;
 use crate::lock::locked_artifact::LockedArtifact;
 use crate::oci::access::OciAccess;
 use crate::resolve::resolve_options::ResolveOptions;
-use crate::resolve::resolver::resolve_lock;
+use crate::resolve::resolver::roll_forward;
 
 use super::scope_resolution::{self, ResolvedScope};
 
@@ -53,8 +53,10 @@ pub async fn run(ctx: &Context, _args: &LockArgs) -> anyhow::Result<(LockReport,
     let previous = lock_io::load(&scope.lock_path).ok();
 
     let lock = super::grim(
-        resolve_lock(
+        roll_forward(
             &scope.set,
+            previous.as_ref(),
+            &[],
             &access,
             scope.scope,
             &ResolveOptions::default(),

@@ -1,0 +1,2 @@
+[agents]
+local-bundled-agent = "localhost:5000/grim-golden/pre-dependencies-cdeedcaa/reg-agent:1.0.0"

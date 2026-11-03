@@ -30,6 +30,7 @@ pub mod search_report;
 pub mod status_report;
 pub mod uninstall_report;
 pub mod update_report;
+pub mod why_report;
 
 #[allow(unused_imports)]
 pub use add_report::{AddReport, AddStatus};
@@ -75,6 +76,8 @@ pub use remove_report::{RemoveReport, RemoveStatus};
 #[allow(unused_imports)]
 pub use search_report::{SearchEntry, SearchReport, SearchSourceStatus};
 #[allow(unused_imports)]
-pub use status_report::{HookArming, StatusEntry, StatusReport};
+pub use status_report::{HookArming, RequiredBy, StatusEntry, StatusReport};
 #[allow(unused_imports)]
 pub use update_report::{UpdateEntry, UpdateReport};
+#[allow(unused_imports)]
+pub use why_report::WhyReport;

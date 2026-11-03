@@ -52,15 +52,18 @@ use crate::install::installer::{client_hosts, client_supports_kind};
 use crate::install::launcher::{self, LauncherState};
 use crate::install::path_anchor::{AnchorRoots, Containment};
 use crate::install::target::{InstallTarget, detect_clients_or_all};
+use crate::lock::effective_set::NodeKey;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
 use crate::lock::locked_artifact::LockedArtifact;
 use crate::oci::access::OciAccess;
 use crate::oci::access::error::AccessError;
 use crate::oci::reference::ArtifactRef;
+
 use crate::oci::{ArtifactKind, Digest, Identifier, PinnedIdentifier};
 
 use super::scope_resolution;
+use super::why::Provenance;
 
 /// Maximum concurrent per-artifact update re-resolutions under `--check`.
 /// Mirrors the TUI's `ROW_CHECK_CONCURRENCY`: a polite cap so a large lock
@@ -204,6 +207,8 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
         None
     };
 
+    let prov = Provenance::new(&scope.set, lock.as_ref());
+    let mut notes: Vec<String> = Vec::new();
     let mut entries = Vec::new();
     // Per-artifact update-availability re-resolutions, filled below for every
     // registry-locked row: declared bundles, directly-declared artifacts, and
@@ -270,11 +275,14 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             // hook members carry their own rows and their own verdicts.
             arming: Vec::new(),
             update_available: None,
+            direct: true,
+            required_by: prov.required_by(&(ArtifactKind::Bundle, name.clone())),
         });
     }
 
     // Directly-declared skills and rules.
     let declared: Vec<ArtifactRef> = collect_declared(&scope);
+    let direct_keys: BTreeSet<NodeKey> = declared.iter().map(|d| (d.kind, d.name.clone())).collect();
     for decl in declared {
         let locked = lock.as_ref().and_then(|l| find_locked(l, decl.kind, &decl.name));
         let record = state.get(decl.kind, &decl.name);
@@ -338,6 +346,9 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             });
         }
         let outputs_pending = pending_outputs_for(record, decl.kind, &decl.name, &target, &scope.roots);
+        let key: NodeKey = (decl.kind, decl.name.clone());
+        notes.extend(prov.redundant_note(&key));
+        let required_by = prov.required_by(&key);
         entries.push(StatusEntry {
             kind: decl.kind,
             name: decl.name,
@@ -356,6 +367,8 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             replaced_by: None,
             update_available: None,
             arming,
+            direct: true,
+            required_by,
         });
     }
 
@@ -398,6 +411,8 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             // source carries neither the registry consent names nor the digest
             // the lock pins), so no dev record can carry `ArtifactKind::Hook`.
             arming: Vec::new(),
+            direct: false,
+            required_by: prov.required_by(&(record.kind, record.name.clone())),
         });
     }
 
@@ -406,7 +421,16 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
     // resolves to a `direct` lock entry, so these never duplicate the rows
     // above.
     if let Some(l) = lock.as_ref() {
-        for member in l.iter_artifacts().filter(|a| a.is_from_bundle()) {
+        // A lock that carries no dependency data keeps the bundle-only row
+        // set, so a project without dependencies reports exactly what it did
+        // before; once the lock holds `requires` edges or a nested bundle, a
+        // row reached only through them is a member too.
+        let has_dependency_data =
+            l.iter_artifacts().any(|a| !a.requires.is_empty()) || l.bundles.iter().any(|b| b.transitive);
+        for member in l
+            .iter_artifacts()
+            .filter(|a| a.is_from_bundle() || (has_dependency_data && !direct_keys.contains(&(a.kind, a.name.clone()))))
+        {
             let mut st = derive_state(
                 member.kind,
                 &member.name,
@@ -458,10 +482,16 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
                     locked: pinned.digest(),
                 });
             }
+            let member_key: NodeKey = (member.kind, member.name.clone());
+            let source = if member.is_from_bundle() {
+                format!("bundle: {}", repos.join(", "))
+            } else {
+                prov.dependency_source(&member_key)
+            };
             entries.push(StatusEntry {
                 kind: member.kind,
                 name: member.name.clone(),
-                source: format!("bundle: {}", repos.join(", ")),
+                source,
                 pinned: member.source.pinned().cloned(),
                 state: st,
                 outputs,
@@ -473,6 +503,8 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
                 replaced_by: None,
                 update_available: None,
                 arming,
+                direct: false,
+                required_by: prov.required_by(&member_key),
             });
         }
     }
@@ -527,7 +559,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
         }
     }
 
-    let mut report = StatusReport::new(entries, checked);
+    let mut report = StatusReport::new(entries, checked).with_notes(notes);
     if hook_inputs.is_some() {
         let seen = launcher::inspect(ctx.grim_home());
         report = report.with_launcher(seen.state, seen.path.display().to_string());
@@ -1778,6 +1810,8 @@ mod tests {
             replaced_by: None,
             update_available: None,
             arming: Vec::new(),
+            direct: true,
+            required_by: None,
         }
     }
 
@@ -3048,6 +3082,7 @@ mod tests {
                 hash: Digest::Sha256("a".repeat(64)),
             },
             bundles: Vec::new(),
+            requires: Vec::new(),
         };
         assert!(
             path_source_drifted(&locked, dir.path()).await,

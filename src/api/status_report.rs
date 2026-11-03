@@ -152,15 +152,34 @@ pub struct StatusOutput {
     pub path: PathBuf,
 }
 
+/// One immediate parent of a status row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RequiredBy {
+    #[serde(serialize_with = "serialize_kind")]
+    pub kind: ArtifactKind,
+    pub name: String,
+}
+
 /// One declared artifact's status row.
 #[derive(Debug, Serialize)]
 pub struct StatusEntry {
     #[serde(serialize_with = "serialize_kind")]
     pub kind: ArtifactKind,
     pub name: String,
-    /// Provenance: `"direct"` for a declared artifact, or
-    /// `"bundle: <registry/repo>"` for a member contributed by a bundle.
+    /// Provenance: `"direct"` for a declared artifact, `"path: <p>"` for a
+    /// path declaration, `"bundle: <registry/repo>, …"` for a member a bundle
+    /// contributes, `"dependency: <kind>/<name>, …"` for one reached only
+    /// through requires edges, and a bare `"dependency"` when that graph
+    /// cannot be computed offline. Consumers read `direct` and `required_by`
+    /// instead of parsing this string.
     pub source: String,
+    /// Declared in this scope's config under its own kind table (`[bundles]`
+    /// for a bundle row). Always computable, never null.
+    pub direct: bool,
+    /// Immediate parents (bundles included as `kind: "bundle"`), sorted by
+    /// `(kind, name)`. `[]` = nothing requires this row; `null` = the
+    /// dependency graph cannot be computed offline.
+    pub required_by: Option<Vec<RequiredBy>>,
     /// The locked pin, if the artifact is locked.
     #[serde(serialize_with = "serialize_opt_pinned")]
     pub pinned: Option<PinnedIdentifier>,
@@ -236,7 +255,7 @@ pub struct StatusEntry {
     pub arming: Vec<HookArming>,
 }
 
-fn serialize_kind<S: Serializer>(kind: &ArtifactKind, s: S) -> Result<S::Ok, S::Error> {
+pub(crate) fn serialize_kind<S: Serializer>(kind: &ArtifactKind, s: S) -> Result<S::Ok, S::Error> {
     s.serialize_str(&kind.to_string())
 }
 
@@ -278,6 +297,10 @@ pub struct StatusReport {
     /// current. Skipped in JSON, whose shape is frozen.
     #[serde(skip)]
     launcher_note: Option<(LauncherState, String)>,
+    /// Plain text only: advisory lines for stderr. Skipped in JSON, which
+    /// carries the same facts in `direct` and `required_by`.
+    #[serde(skip)]
+    notes: Vec<String>,
 }
 
 impl StatusReport {
@@ -288,7 +311,15 @@ impl StatusReport {
             items,
             checked,
             launcher_note: None,
+            notes: Vec::new(),
         }
+    }
+
+    /// Have the plain rendering print `notes` on stderr.
+    #[must_use]
+    pub fn with_notes(mut self, notes: Vec<String>) -> Self {
+        self.notes = notes;
+        self
     }
 
     /// Have the plain rendering name a launcher that is not current.
@@ -336,6 +367,10 @@ impl Printable for StatusReport {
                 screen_plain(path)
             )?;
         }
+        // Best effort: a closed stderr must not fail the report.
+        for note in &self.notes {
+            let _ = writeln!(io::stderr(), "{note}");
+        }
         Ok(())
     }
 
@@ -361,6 +396,8 @@ mod tests {
             kind: ArtifactKind::Rule,
             name: name.to_string(),
             source: "direct".to_string(),
+            direct: true,
+            required_by: Some(Vec::new()),
             pinned: None,
             state: ArtifactStatus::Missing,
             outputs: Vec::new(),

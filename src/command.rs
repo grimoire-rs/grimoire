@@ -37,6 +37,7 @@ pub mod status;
 pub mod tui;
 pub mod uninstall;
 pub mod update;
+pub mod why;
 
 #[allow(unused_imports)]
 pub use command_error::CommandError;

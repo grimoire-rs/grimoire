@@ -123,10 +123,37 @@ struct RawPluginHash {
 /// Selects one kind list of a lock document.
 type KindList = fn(&mut GrimoireLock) -> &mut Vec<LockedArtifact>;
 
+/// The suffix naming a newer grim when a lock that failed to parse says it
+/// was written by one. A staleness hint only: the value is read leniently,
+/// accepted only as `grim <semver>`, and no resolve or install decision reads
+/// it.
+fn newer_grim_hint(raw: &str, running: &semver::Version) -> Option<String> {
+    let doc: toml::Table = toml::from_str(raw).ok()?;
+    let written = doc.get("metadata")?.get("generated_by")?.as_str()?;
+    let written = semver::Version::parse(written.strip_prefix("grim ")?).ok()?;
+    (written > *running).then(|| {
+        format!(
+            "; this lock was written by grim {}; update grim",
+            crate::oci::text::registry_text(&written.to_string())
+        )
+    })
+}
+
+/// `err`, carrying the [`newer_grim_hint`] for `raw` when there is one.
+fn with_newer_grim_hint(err: toml::de::Error, raw: &str) -> toml::de::Error {
+    let hint = semver::Version::parse(env!("CARGO_PKG_VERSION"))
+        .ok()
+        .and_then(|running| newer_grim_hint(raw, &running));
+    match hint {
+        Some(hint) => serde::de::Error::custom(format!("{}{hint}", err.to_string().trim_end())),
+        None => err,
+    }
+}
+
 impl RawLock {
     /// Parse the shape both flavors start from.
     fn parse(s: &str) -> Result<Self, LockError> {
-        toml::from_str(s).map_err(|e| in_memory(LockErrorKind::TomlParse(e)))
+        toml::from_str(s).map_err(|e| in_memory(LockErrorKind::TomlParse(with_newer_grim_hint(e, s))))
     }
 
     /// Every entry, grouped by kind in wire order, with the list selector
@@ -517,6 +544,10 @@ struct LockedArtifactView<'a> {
     bundle_tag: Option<&'a str>,
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     bundles: &'a [crate::lock::locked_artifact::BundleProvenance],
+    /// Declared edges, sorted by `(kind, name)`; last so the sub-tables
+    /// follow the entry's own keys and `[[<kind>.bundles]]`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    requires: Vec<&'a crate::oci::bundle::BundleMember>,
 }
 
 fn serialize_artifact_views<S>(items: &&[&LockedArtifact], serializer: S) -> Result<S::Ok, S::Error>
@@ -548,6 +579,12 @@ fn project(a: &LockedArtifact) -> LockedArtifactView<'_> {
         bundle: single.map(|b| b.repo.as_str()),
         bundle_tag: single.map(|b| b.tag.as_str()),
         bundles: if a.bundles.len() > 1 { &a.bundles } else { &[] },
+        requires: {
+            let mut requires: Vec<_> = a.requires.iter().collect();
+            // Enum order, as the bundle members layer sorts.
+            requires.sort_by(|x, y| (x.kind, x.name.as_str()).cmp(&(y.kind, y.name.as_str())));
+            requires
+        },
     }
 }
 
@@ -598,6 +635,8 @@ struct ScopedArtifactView<'a> {
     bundle_tag: Option<&'a str>,
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     bundles: &'a [crate::lock::locked_artifact::BundleProvenance],
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    requires: Vec<&'a crate::oci::bundle::BundleMember>,
 }
 
 impl<'a> ScopedArtifactView<'a> {
@@ -612,6 +651,7 @@ impl<'a> ScopedArtifactView<'a> {
             bundle,
             bundle_tag,
             bundles,
+            requires,
         } = v;
         Self {
             name,
@@ -622,6 +662,7 @@ impl<'a> ScopedArtifactView<'a> {
             bundle,
             bundle_tag,
             bundles,
+            requires,
         }
     }
 }
@@ -994,6 +1035,7 @@ pinned = "ghcr.io/acme/code-reviewer@sha256:{a}"
                     'a',
                 )),
                 bundles: vec![BundleProvenance::new("ghcr.io/acme/stack", "1.0.0")],
+                requires: Vec::new(),
             }],
             rules: vec![],
             agents: vec![],
@@ -1046,6 +1088,7 @@ pinned = "ghcr.io/acme/code-reviewer@sha256:{a}"
                     name: "s".to_string(),
                     id: "ghcr.io/acme/s:1".to_string(),
                 }],
+                transitive: false,
             }],
         };
         let out = lock.to_toml_string().expect("serialize");
@@ -1065,18 +1108,158 @@ pinned = "ghcr.io/acme/code-reviewer@sha256:{a}"
     }
 
     #[test]
-    fn lock_schema_stdout_is_byte_identical_to_the_pre_plugin_build() {
+    fn lock_schema_stdout_matches_the_golden() {
         // C-031.1 / C-005: the golden is `grim schema --kind lock` stdout of
         // main at v0.14.0 (byte-equal, `cmp`, to released grim 0.14.0) —
         // before the wire-only `plugin` fields existed; `schema::run` prints
         // `generate` + "\n". Regenerated once for hooks (C-153): the only
         // structural deltas are the appended `hook` kind literal and the
-        // optional top-level `hook` array — additive.
+        // optional top-level `hook` array — additive. Regenerated again for
+        // dependencies: two optional properties (`requires` on an entry,
+        // `transitive` on a bundle).
         let stdout = format!(
             "{}\n",
             crate::command::schema::generate(crate::command::schema::SchemaKind::Lock).expect("generate")
         );
         assert_eq!(stdout, include_str!("testdata/lock.schema.json"));
+    }
+
+    /// Pins the rendering of the dependency fields: array-of-tables form,
+    /// key order `kind`/`name`/`id`, edges sorted by `(kind, name)` in enum order however
+    /// they were built, `transitive` right after `pinned`, and the edge
+    /// tables after the entry's own keys.
+    #[test]
+    fn requires_and_transitive_render_byte_exact() {
+        use crate::lock::locked_bundle::{LockedBundle, LockedBundleSource};
+        use crate::oci::bundle::BundleMember;
+        let edge = |kind, name: &str, id: &str| BundleMember {
+            kind,
+            name: name.to_string(),
+            id: id.to_string(),
+        };
+        let mut drive = artifact(
+            "gws-drive",
+            ArtifactKind::Skill,
+            pinned("acme/skills/gws-drive", None, 'a'),
+        );
+        drive.requires = vec![
+            edge(ArtifactKind::Mcp, "gdrive", "ghcr.io/acme/mcp/gdrive:2"),
+            edge(ArtifactKind::Skill, "gws-shared", "./gws-shared:1"),
+        ];
+        let lock = GrimoireLock {
+            metadata: metadata(),
+            skills: vec![
+                artifact(
+                    "gws-shared",
+                    ArtifactKind::Skill,
+                    pinned("acme/skills/gws-shared", None, 'b'),
+                ),
+                drive,
+            ],
+            rules: vec![],
+            agents: vec![],
+            mcp: vec![],
+            hooks: vec![],
+            bundles: vec![LockedBundle {
+                name: "google-extras".to_string(),
+                source: LockedBundleSource::Registry {
+                    repo: "ghcr.io/acme/bundles/google-extras".to_string(),
+                    tag: "1".to_string(),
+                    pinned: pinned("acme/bundles/google-extras", Some("1"), 'c'),
+                },
+                members: vec![edge(
+                    ArtifactKind::Skill,
+                    "gws-sheets",
+                    "ghcr.io/acme/skills/gws-sheets:1",
+                )],
+                transitive: true,
+            }],
+        };
+        let expected = format!(
+            r#"rule = []
+agent = []
+
+[metadata]
+lock_version = 1
+declaration_hash_version = 1
+declaration_hash = "sha256:{d}"
+generated_by = "grim 0.1.0"
+generated_at = "2026-04-19T00:00:00Z"
+
+[[skill]]
+name = "gws-drive"
+pinned = "ghcr.io/acme/skills/gws-drive@sha256:{a}"
+
+[[skill.requires]]
+kind = "skill"
+name = "gws-shared"
+id = "./gws-shared:1"
+
+[[skill.requires]]
+kind = "mcp"
+name = "gdrive"
+id = "ghcr.io/acme/mcp/gdrive:2"
+
+[[skill]]
+name = "gws-shared"
+pinned = "ghcr.io/acme/skills/gws-shared@sha256:{b}"
+
+[[bundle]]
+name = "google-extras"
+repo = "ghcr.io/acme/bundles/google-extras"
+tag = "1"
+pinned = "ghcr.io/acme/bundles/google-extras@sha256:{c}"
+transitive = true
+
+[[bundle.member]]
+kind = "skill"
+name = "gws-sheets"
+id = "ghcr.io/acme/skills/gws-sheets:1"
+"#,
+            a = sha('a'),
+            b = sha('b'),
+            c = sha('c'),
+            d = sha('d'),
+        );
+        let out = lock.to_toml_string().expect("serialize");
+        assert_eq!(out, expected);
+
+        let back = GrimoireLock::from_toml_str(&out).expect("reparse");
+        assert_eq!(back.skills[0].requires.len(), 2);
+        assert_eq!(back.skills[1].requires.len(), 0, "gws-shared declares no edges");
+        assert!(back.bundles[0].transitive);
+        assert_eq!(
+            out,
+            back.to_toml_string().expect("second"),
+            "second pass byte-identical"
+        );
+    }
+
+    /// A lock that uses neither field serializes without either key, for a
+    /// bundle-provenance entry too.
+    #[test]
+    fn empty_requires_and_false_transitive_are_omitted() {
+        let mut member = artifact("m", ArtifactKind::Skill, pinned("acme/m", None, 'a'));
+        member.bundles = vec![crate::lock::locked_artifact::BundleProvenance::new(
+            "ghcr.io/acme/stack",
+            "1",
+        )];
+        let lock = GrimoireLock {
+            skills: vec![member],
+            ..GrimoireLock::empty(metadata())
+        };
+        let out = lock.to_toml_string().expect("serialize");
+        assert!(!out.contains("requires") && !out.contains("transitive"), "{out}");
+    }
+
+    /// `deny_unknown_fields` stays on an edge: an extra key is refused.
+    #[test]
+    fn requires_edge_with_unknown_key_is_refused() {
+        let toml = format!(
+            "name = \"m\"\npinned = \"ghcr.io/acme/m@sha256:{}\"\n\n[[requires]]\nkind = \"skill\"\nname = \"x\"\nid = \"./x:1\"\nextra = 1\n",
+            sha('a')
+        );
+        assert!(toml::from_str::<LockedArtifact>(&toml).is_err());
     }
 
     #[test]
@@ -1098,6 +1281,7 @@ pinned = "ghcr.io/acme/code-reviewer@sha256:{a}"
                     'a',
                 )),
                 bundles: provenance.clone(),
+                requires: Vec::new(),
             }],
             rules: vec![],
             agents: vec![],
@@ -1128,5 +1312,92 @@ pinned = "ghcr.io/acme/code-reviewer@sha256:{a}"
             reparsed.to_toml_string().expect("second"),
             "second pass byte-identical"
         );
+    }
+
+    // ── generated_by staleness hint ───────────────────────────────────
+
+    fn lock_text(generated_by: &str, extra: &str) -> String {
+        format!(
+            "{extra}[metadata]\nlock_version = 1\ndeclaration_hash_version = 1\ndeclaration_hash = \"sha256:{a}\"\ngenerated_by = \"{generated_by}\"\ngenerated_at = \"2026-04-19T00:00:00Z\"\n",
+            a = sha('a')
+        )
+    }
+
+    fn running(v: &str) -> semver::Version {
+        semver::Version::parse(v).unwrap()
+    }
+
+    #[test]
+    fn a_newer_grim_is_named_by_semver_precedence() {
+        let hint = newer_grim_hint(&lock_text("grim 0.16.10", ""), &running("0.16.9"));
+        assert_eq!(
+            hint.as_deref(),
+            Some("; this lock was written by grim 0.16.10; update grim")
+        );
+    }
+
+    #[test]
+    fn an_older_or_equal_grim_adds_nothing() {
+        assert_eq!(
+            newer_grim_hint(&lock_text("grim 0.16.9", ""), &running("0.16.10")),
+            None
+        );
+        assert_eq!(
+            newer_grim_hint(&lock_text("grim 0.16.10", ""), &running("0.16.10")),
+            None
+        );
+        // A prerelease sorts below its release.
+        assert_eq!(
+            newer_grim_hint(&lock_text("grim 1.0.0-rc.1", ""), &running("1.0.0")),
+            None
+        );
+    }
+
+    #[test]
+    fn a_garbage_generated_by_adds_nothing() {
+        for value in [
+            "grim banana",
+            "grim 9.9.9 extra",
+            "grim  9.9.9",
+            "other 9.9.9",
+            "9.9.9",
+            "grim 9.9.9\\u001b[31m",
+            "",
+        ] {
+            assert_eq!(
+                newer_grim_hint(&lock_text(value, ""), &running("0.1.0")),
+                None,
+                "{value:?}"
+            );
+        }
+        assert_eq!(newer_grim_hint("not toml at all [[[", &running("0.1.0")), None);
+        assert_eq!(
+            newer_grim_hint("[metadata]\ngenerated_by = 9\n", &running("0.1.0")),
+            None
+        );
+        assert_eq!(newer_grim_hint("", &running("0.1.0")), None);
+    }
+
+    #[test]
+    fn a_parse_failure_carries_the_hint_and_stays_a_toml_parse_error() {
+        let toml = lock_text("grim 999.0.0", "surprise = 1\n");
+        let err = GrimoireLock::from_toml_str(&toml).expect_err("unknown field rejects");
+        assert!(matches!(err.kind, LockErrorKind::TomlParse(_)));
+        let shown = std::error::Error::source(&err).expect("toml cause").to_string();
+        assert!(shown.contains("unknown field `surprise`"), "{shown}");
+        assert!(
+            shown
+                .trim_end()
+                .ends_with("; this lock was written by grim 999.0.0; update grim"),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn a_parse_failure_from_a_current_grim_has_no_hint() {
+        let toml = lock_text(&LockMetadata::generated_by_current(), "surprise = 1\n");
+        let err = GrimoireLock::from_toml_str(&toml).unwrap_err();
+        let shown = std::error::Error::source(&err).unwrap().to_string();
+        assert!(!shown.contains("update grim"), "{shown}");
     }
 }

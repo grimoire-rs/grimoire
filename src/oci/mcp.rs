@@ -219,6 +219,9 @@ pub enum McpError {
     /// The TOML source did not parse or carried unknown fields.
     #[error("invalid MCP descriptor: {0}")]
     Toml(#[source] Box<toml::de::Error>),
+    /// The `[requires.*]` declaration does not parse.
+    #[error(transparent)]
+    Requires(#[from] crate::oci::requires_decl::RequiresDeclError),
     /// The JSON layer blob did not parse.
     #[error("invalid MCP layer: {0}")]
     Json(#[source] serde_json::Error),
@@ -277,10 +280,32 @@ impl McpDescriptor {
     ///
     /// [`McpError`] on TOML/shape/reference violations — see the variant
     /// docs.
+    #[cfg(test)]
     pub fn from_toml_str(raw: &str) -> Result<Self, McpError> {
-        let descriptor: Self = toml::from_str(raw).map_err(|e| McpError::Toml(Box::new(e)))?;
+        Self::from_toml_str_with_requires(raw).map(|(descriptor, _)| descriptor)
+    }
+
+    /// Parse and validate an authored TOML descriptor together with its
+    /// `[requires.<table>]` declaration.
+    ///
+    /// The `requires` table is split off the parsed document before the
+    /// descriptor is deserialized, so the layer bytes of a descriptor are the
+    /// same with or without it. Members are sorted by `(kind, name)`.
+    ///
+    /// # Errors
+    ///
+    /// [`McpError`] as for [`Self::from_toml_str`], plus
+    /// [`McpError::Requires`] for a malformed declaration.
+    pub fn from_toml_str_with_requires(raw: &str) -> Result<(Self, Vec<crate::oci::bundle::BundleMember>), McpError> {
+        let mut table: toml::Table = toml::from_str(raw).map_err(|e| McpError::Toml(Box::new(e)))?;
+        let mut declared = toml::Table::new();
+        if let Some(requires) = table.remove("requires") {
+            declared.insert("requires".to_string(), requires);
+        }
+        let requires = crate::oci::requires_decl::from_toml_tables(&declared)?;
+        let descriptor: Self = table.try_into().map_err(|e| McpError::Toml(Box::new(e)))?;
         descriptor.validate()?;
-        Ok(descriptor)
+        Ok((descriptor, requires))
     }
 
     /// Serialize to the canonical pretty-JSON layer bytes.

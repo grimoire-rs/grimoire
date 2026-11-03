@@ -3101,6 +3101,7 @@ mod tests {
                     hash: crate::oci::Digest::Sha256("c".repeat(64)),
                 },
                 bundles: Vec::new(),
+                requires: Vec::new(),
             }],
             rules: vec![],
             agents: vec![],

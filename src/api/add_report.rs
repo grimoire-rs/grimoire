@@ -6,8 +6,11 @@
 //! Plain format: a single-row 4-column table
 //! (Kind | Name | Pinned | Status).
 //!
-//! JSON format: a single object `{kind, name, pinned, status}` (not an
-//! array — `add` touches exactly one declared entry).
+//! JSON format: a single object `{kind, name, pinned, status, pulled_in}`
+//! (not an array — `add` touches exactly one declared entry). `pulled_in`
+//! is always present: the `{kind, name, pinned}` dependencies the entry
+//! brought into the workspace, `[]` when none. Plain output adds one stderr
+//! line naming them.
 
 use std::io::{self, Write};
 
@@ -32,6 +35,15 @@ impl std::fmt::Display for AddStatus {
     }
 }
 
+/// One dependency an `add` brought into the workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PulledIn {
+    #[serde(serialize_with = "serialize_kind")]
+    pub kind: ArtifactKind,
+    pub name: String,
+    pub pinned: String,
+}
+
 /// The result of adding one declared skill/rule.
 #[derive(Debug, Serialize)]
 pub struct AddReport {
@@ -40,6 +52,7 @@ pub struct AddReport {
     pub name: String,
     pub pinned: String,
     pub status: AddStatus,
+    pub pulled_in: Vec<PulledIn>,
 }
 
 fn serialize_kind<S: serde::Serializer>(kind: &ArtifactKind, s: S) -> Result<S::Ok, S::Error> {
@@ -54,7 +67,14 @@ impl AddReport {
             name,
             pinned,
             status: AddStatus::Added,
+            pulled_in: Vec::new(),
         }
+    }
+
+    /// Name the dependencies the add pulled in.
+    pub fn with_pulled_in(mut self, pulled_in: Vec<PulledIn>) -> Self {
+        self.pulled_in = pulled_in;
+        self
     }
 }
 
@@ -69,7 +89,22 @@ impl Printable for AddReport {
                 self.pinned.clone(),
                 self.status.to_string(),
             ]],
-        )
+        )?;
+        if !self.pulled_in.is_empty() {
+            let names: Vec<String> = self
+                .pulled_in
+                .iter()
+                .map(|p| format!("{}/{}", p.kind, p.name))
+                .collect();
+            // A note, not the result: stdout stays the one table.
+            let _ = writeln!(
+                io::stderr(),
+                "pulled in {} dependencies: {}",
+                names.len(),
+                names.join(", ")
+            );
+        }
+        Ok(())
     }
 
     fn print_json(&self, w: &mut impl Write) -> io::Result<()> {
@@ -100,5 +135,23 @@ mod tests {
         assert_eq!(v["kind"], "rule");
         assert_eq!(v["status"], "added");
         assert_eq!(v["pinned"], "r@sha256:b");
+        assert_eq!(v["pulled_in"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn json_pulled_in_items() {
+        let r = AddReport::new(ArtifactKind::Skill, "s".to_string(), "r@sha256:c".to_string()).with_pulled_in(vec![
+            PulledIn {
+                kind: ArtifactKind::Mcp,
+                name: "gdrive".to_string(),
+                pinned: "r/gdrive@sha256:d".to_string(),
+            },
+        ]);
+        let mut buf = Vec::new();
+        r.print_json(&mut buf).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["pulled_in"][0]["kind"], "mcp");
+        assert_eq!(v["pulled_in"][0]["name"], "gdrive");
+        assert_eq!(v["pulled_in"][0]["pinned"], "r/gdrive@sha256:d");
     }
 }

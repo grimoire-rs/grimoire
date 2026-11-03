@@ -19,6 +19,7 @@ use serde::Serialize;
 use crate::cli::printer::{Printable, print_table};
 use crate::export::family::{Family, OmitReason};
 use crate::oci::ArtifactKind;
+use crate::oci::text::escape_controls;
 
 /// One emitted-or-declared member of an exported plugin.
 #[derive(Debug, Serialize)]
@@ -214,20 +215,6 @@ impl MarketplaceExportReport {
             })
             .collect()
     }
-}
-
-/// `line` with every control character spelled out (`\u{1b}`): a path is
-/// user-controlled text on its way to a terminal.
-pub(crate) fn escape_controls(line: &str) -> String {
-    let mut out = String::with_capacity(line.len());
-    for c in line.chars() {
-        if c.is_control() {
-            out.extend(c.escape_default());
-        } else {
-            out.push(c);
-        }
-    }
-    out
 }
 
 impl Printable for MarketplaceExportReport {

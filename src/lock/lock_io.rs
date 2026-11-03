@@ -435,6 +435,7 @@ mod tests {
                 hash: Digest::Sha256(sha(byte)),
             },
             members,
+            transitive: false,
         }
     }
 
@@ -656,6 +657,30 @@ mod tests {
     fn exit_of(err: LockError) -> u8 {
         let err: anyhow::Error = crate::error::Error::from(err).into();
         crate::error::classify_error(&err) as u8
+    }
+
+    #[test]
+    fn load_of_a_lock_from_a_newer_grim_names_it_and_exits_78() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grimoire.lock");
+        std::fs::write(
+            &path,
+            format!(
+                "[metadata]\nlock_version = 1\ndeclaration_hash_version = 1\ndeclaration_hash = \"sha256:{a}\"\n\
+                 generated_by = \"grim 999.0.0\"\ngenerated_at = \"2026-04-19T00:00:00Z\"\n\
+                 [[skill]]\nname = \"x\"\nfuture_field = 1\n",
+                a = sha('a')
+            ),
+        )
+        .unwrap();
+        let err = load(&path).expect_err("unknown entry field rejects");
+        assert!(matches!(err.kind, LockErrorKind::TomlParse(_)));
+        let shown = std::error::Error::source(&err).unwrap().to_string();
+        assert!(
+            shown.contains("; this lock was written by grim 999.0.0; update grim"),
+            "{shown}"
+        );
+        assert_eq!(exit_of(err), 78);
     }
 
     fn write_lock(dir: &tempfile::TempDir, body: &str) -> std::path::PathBuf {

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::path_source::PathSource;
 use crate::lock::locked_source::LockedSource;
+use crate::oci::bundle::BundleMember;
 use crate::oci::{ArtifactKind, Digest, PinnedIdentifier};
 
 /// One bundle that contributed a lock member: the bundle's
@@ -61,6 +62,12 @@ pub struct LockedArtifact {
     /// more serialize as a `bundles` array (see the lock's serializer).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub bundles: Vec<BundleProvenance>,
+    /// The forward dependency edges this artifact declared, exactly as
+    /// published (a relative `id` stays relative). On the wire
+    /// `[[<kind>.requires]]` after the entry's own keys, sorted by
+    /// `(kind, name)`; omitted when empty, whatever the provenance.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<BundleMember>,
 }
 
 /// Wire shape accepted when deserializing a lock entry: the legacy
@@ -97,6 +104,10 @@ struct RawLockedArtifact {
     /// this member. Mutually exclusive with the `bundle`/`bundle_tag` pair.
     #[serde(default)]
     bundles: Vec<BundleProvenance>,
+    /// Declared dependency edges, as published. Serialized as
+    /// `[[<kind>.requires]]` after the entry's own keys.
+    #[serde(default)]
+    requires: Vec<BundleMember>,
     /// `marketplace.lock` only: the plugin this entry belongs to. Wire-only
     /// — it never reaches [`LockedArtifact`], and it is skipped from the
     /// published `grimoire.lock` schema, which must stay byte-identical.
@@ -214,6 +225,7 @@ impl TryFrom<RawLockedArtifact> for LockedArtifact {
             kind: ArtifactKind::default(),
             source,
             bundles,
+            requires: raw.requires,
         })
     }
 }
@@ -230,6 +242,7 @@ impl LockedArtifact {
             kind,
             source: LockedSource::Registry(pinned),
             bundles: Vec::new(),
+            requires: Vec::new(),
         }
     }
 

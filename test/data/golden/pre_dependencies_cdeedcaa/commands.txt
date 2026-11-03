@@ -1,0 +1,6 @@
+$ grim lock   # cwd=project 
+$ grim install --client claude --trust-hooks   # cwd=project 
+$ grim lock --global   # cwd=grim-home 
+$ grim install --global --client claude   # cwd=grim-home 
+$ grim remove bundle reg-bundle   # cwd=project # after the captures above
+$ grim release <baseline-skill> localhost:5000/grim-golden/pre-dependencies-cdeedcaa/baseline-skill:1.0.0 --no-cascade   # cwd=env, fresh GRIM_HOME, no git tree

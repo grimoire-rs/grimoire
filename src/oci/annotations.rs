@@ -857,6 +857,7 @@ mod tests {
             name: "h".into(),
             description: "d".into(),
             hooks: vec![],
+            requires: Default::default(),
         };
         let defaults = MetadataDefaults {
             license: Some("Apache-2.0".into()),

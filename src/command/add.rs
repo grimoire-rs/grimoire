@@ -30,22 +30,25 @@
 //! another binding name. Re-declaring the exact same identifier stays an
 //! idempotent overwrite.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use clap::Args;
 
-use crate::api::add_report::AddReport;
+use crate::api::add_report::{AddReport, PulledIn};
 use crate::cli::exit_code::ExitCode;
 use crate::command::command_error::CommandError;
 use crate::context::Context;
-use crate::install::installer::{InstallIntent, install_and_persist};
+use crate::install::installer::{ForceScope, InstallIntent, install_and_persist};
 use crate::install::materializer::DefaultMaterializer;
 use crate::install::target::InstallTarget;
+use crate::lock::effective_set::{NodeKey, effective_set};
 use crate::lock::file_lock::ConfigFileLock;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
 use crate::lock::locked_artifact::LockedArtifact;
 use crate::oci::access::{OciAccess, Operation};
+use crate::oci::bundle::BundleMember;
 use crate::oci::{ArtifactKind, Identifier, PinnedIdentifier};
 use crate::resolve::resolve_options::ResolveOptions;
 use crate::resolve::resolver::{resolve_lock, resolve_lock_partial};
@@ -211,15 +214,17 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
 
     // Persist the edited config, then relock — rolling the config back if
     // the relock fails.
-    let new_lock = write_config_and_relock(&scope, &set, kind, &name, &access).await?;
+    let (new_lock, previous) = write_config_and_relock(&scope, &set, kind, &name, &access).await?;
+    let added = Added::new(&scope, previous.as_ref(), &new_lock, kind, &name);
 
     // Default: materialize the freshly-declared artifact into the detected
     // clients right away (opt out with `--no-install`). Declare + relock
-    // already ran above; this mirrors the TUI single-row install — only the
-    // acted-on entry (or, for a bundle, its members) is projected out and
-    // installed, so the rest of a shared lock stays for `grim install`.
+    // already ran above; this mirrors the TUI single-row install — only what
+    // the acted-on entry reaches (itself, or a bundle's members, plus their
+    // dependencies) is projected out and installed, so the rest of a shared
+    // lock stays for `grim install`.
     if args.install.enabled() {
-        install_added(ctx, &scope, kind, &name, &new_lock, &access, args).await?;
+        install_added(ctx, &scope, &added, &access, args).await?;
     }
 
     // A bundle has no single pinned member to report; surface the bundle
@@ -248,7 +253,10 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
         }]
     });
 
-    Ok((AddReport::new(kind, name, pinned), ExitCode::Success))
+    Ok((
+        AddReport::new(kind, name, pinned).with_pulled_in(added.pulled_in()),
+        ExitCode::Success,
+    ))
 }
 
 /// Write the edited declaration to `scope.config_path`, then re-lock it —
@@ -268,6 +276,9 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
 /// bundle expands from the declared set, so the declaration has to be on
 /// disk (and in `set`) before it can be resolved.
 ///
+/// Returns the new lock and the lock it replaced, which tells
+/// [`Added::new`] what the workspace already provided.
+///
 /// # Errors
 ///
 /// An unreadable config (74/78), the config write, or any
@@ -279,7 +290,7 @@ async fn write_config_and_relock(
     kind: ArtifactKind,
     name: &str,
     access: &Arc<dyn OciAccess>,
-) -> anyhow::Result<GrimoireLock> {
+) -> anyhow::Result<(GrimoireLock, Option<GrimoireLock>)> {
     // Snapshot the pre-write config. Absence is the legitimate "nothing to
     // put back" case (a scope whose config `add` is creating); any other
     // read failure aborts rather than risking a rollback that deletes a
@@ -319,7 +330,7 @@ async fn write_config_and_relock(
         }
     };
     super::grim(lock_io::save(&scope.lock_path, &new_lock, previous.as_ref()))?;
-    Ok(new_lock)
+    Ok((new_lock, previous))
 }
 
 /// Put the pre-write config back at `path` after a failed relock: the
@@ -438,10 +449,11 @@ async fn add_path_source(
     }
 
     let access: Arc<dyn OciAccess> = super::access_seam(ctx)?;
-    let new_lock = write_config_and_relock(scope, &set, kind, &name, &access).await?;
+    let (new_lock, previous) = write_config_and_relock(scope, &set, kind, &name, &access).await?;
+    let added = Added::new(scope, previous.as_ref(), &new_lock, kind, &name);
 
     if args.install.enabled() {
-        install_added(ctx, scope, kind, &name, &new_lock, &access, args).await?;
+        install_added(ctx, scope, &added, &access, args).await?;
     }
 
     let pinned = new_lock
@@ -459,23 +471,191 @@ async fn add_path_source(
         }]
     });
 
-    Ok((AddReport::new(kind, name, pinned), ExitCode::Success))
+    Ok((
+        AddReport::new(kind, name, pinned).with_pulled_in(added.pulled_in()),
+        ExitCode::Success,
+    ))
 }
 
-/// Materialize just the freshly-declared `kind`/`name` entry into the
-/// detected clients, reusing the shared install pipeline.
+/// What one `add` touches once it is locked: the target, everything it reaches
+/// that gets installed, and which of those the workspace did not already
+/// provide.
+struct Added {
+    target: NodeKey,
+    /// [`reachable_lock`] of the target; `None` when it is absent from the
+    /// lock (a bundle that resolved to zero members, or a defect).
+    projection: Option<GrimoireLock>,
+    /// Reached nodes the pre-add workspace did not provide, target excluded.
+    newly: BTreeSet<NodeKey>,
+    /// The destinations `--force` may overwrite: the target, or a bundle's
+    /// members. Never a dependency the target merely requires.
+    force: BTreeSet<NodeKey>,
+}
+
+/// The destinations an `add --force` (and the TUI overwrite) may clobber: the
+/// target, or a bundle's members (nested bundles' included, only those
+/// carrying that bundle's stamp, so a directly declared member is spared);
+/// never a dependency it merely requires.
+pub(crate) fn force_nodes(lock: &GrimoireLock, target: &NodeKey) -> BTreeSet<NodeKey> {
+    if target.0 != ArtifactKind::Bundle {
+        return BTreeSet::from([target.clone()]);
+    }
+    let mut nodes: BTreeSet<NodeKey> = seed_lock(lock, target)
+        .iter()
+        .flat_map(GrimoireLock::iter_artifacts)
+        .map(|a| (a.kind, a.name.clone()))
+        .collect();
+    // Nested bundles only through the lock's bundle snapshots, never a
+    // `requires` edge; `seen` keeps a cyclic snapshot graph finite.
+    let mut seen = BTreeSet::from([target.clone()]);
+    let mut queue = vec![target.clone()];
+    while let Some(bundle) = queue.pop() {
+        let Some(snapshot) = lock.bundles.iter().find(|b| b.name == bundle.1) else {
+            continue;
+        };
+        let (repo, tag) = snapshot.provenance_pair();
+        for member in &snapshot.members {
+            let key = (member.kind, member.name.clone());
+            if key.0 == ArtifactKind::Bundle {
+                if seen.insert(key.clone()) {
+                    queue.push(key);
+                }
+            } else if bundle != *target
+                && lock.iter_artifacts().any(|a| {
+                    a.kind == key.0 && a.name == key.1 && a.bundles.iter().any(|b| b.repo == repo && b.tag == tag)
+                })
+            {
+                nodes.insert(key);
+            }
+        }
+    }
+    nodes
+}
+
+/// The installs that hit a refusal `--force` resolves on a node outside
+/// `force`. A forced retry refuses these again, so callers must not offer
+/// one: the CLI names them in its error, the TUI opens no Overwrite dialog.
+pub(crate) fn refusals_outside_force<'a>(
+    outcomes: &'a [crate::install::installer::ArtifactInstall],
+    force: &BTreeSet<NodeKey>,
+) -> Vec<&'a crate::install::installer::ArtifactInstall> {
+    use crate::install::installer::InstallOutcome;
+    outcomes
+        .iter()
+        .filter(|o| !force.contains(&(o.reference.kind, o.reference.name.clone())))
+        .filter(|o| {
+            matches!(
+                o.result,
+                Ok(InstallOutcome::Refused { .. } | InstallOutcome::RefusedUntracked { .. })
+            )
+        })
+        .collect()
+}
+
+impl Added {
+    fn new(
+        scope: &super::scope_resolution::ResolvedScope,
+        previous: Option<&GrimoireLock>,
+        new_lock: &GrimoireLock,
+        kind: ArtifactKind,
+        name: &str,
+    ) -> Self {
+        let target = (kind, name.to_string());
+        let projection = reachable_lock(new_lock, &target);
+        let before = provided_before(scope, previous);
+        let newly = projection
+            .iter()
+            .flat_map(GrimoireLock::iter_artifacts)
+            .map(|a| (a.kind, a.name.clone()))
+            .filter(|node| *node != target && !before.contains(node))
+            .collect();
+        let force = force_nodes(new_lock, &target);
+        Self {
+            target,
+            projection,
+            newly,
+            force,
+        }
+    }
+
+    /// The report rows for [`Self::newly`], in `(kind, name)` order.
+    fn pulled_in(&self) -> Vec<PulledIn> {
+        let Some(projection) = &self.projection else {
+            return Vec::new();
+        };
+        self.newly
+            .iter()
+            .filter_map(|(kind, name)| {
+                let entry = projection
+                    .iter_artifacts()
+                    .find(|a| a.kind == *kind && a.name == *name)?;
+                Some(PulledIn {
+                    kind: *kind,
+                    name: name.clone(),
+                    pinned: entry.source.provenance(),
+                })
+            })
+            .collect()
+    }
+}
+
+/// Every `(kind, name)` the workspace provided before this add.
+///
+/// The pre-add effective set when the previous lock can compute it. When it
+/// cannot (no lock, a bundle without a snapshot, a stale declaration), the
+/// conservative union of everything the config declares and the previous lock
+/// holds, entries and bundle members alike: a node in doubt counts as already
+/// provided, so a cloned repository cannot make `add` treat a planted hook as
+/// new by breaking the graph.
+fn provided_before(
+    scope: &super::scope_resolution::ResolvedScope,
+    previous: Option<&GrimoireLock>,
+) -> BTreeSet<NodeKey> {
+    if let Some(set) = previous.and_then(|lock| effective_set(&scope.set, lock)) {
+        return set.into_keys().collect();
+    }
+    let declared = &scope.set;
+    let mut nodes = BTreeSet::new();
+    for (kind, map) in [
+        (ArtifactKind::Skill, &declared.skills),
+        (ArtifactKind::Rule, &declared.rules),
+        (ArtifactKind::Agent, &declared.agents),
+        (ArtifactKind::Mcp, &declared.mcp),
+        (ArtifactKind::Hook, &declared.hooks),
+    ] {
+        nodes.extend(map.keys().map(|name| (kind, name.clone())));
+    }
+    if let Some(lock) = previous {
+        nodes.extend(lock.iter_artifacts().map(|a| (a.kind, a.name.clone())));
+        nodes.extend(
+            lock.iter_artifacts()
+                .flat_map(|a| &a.requires)
+                .map(|m| (m.kind, m.name.clone())),
+        );
+        nodes.extend(
+            lock.bundles
+                .iter()
+                .flat_map(|b| &b.members)
+                .map(|m| (m.kind, m.name.clone())),
+        );
+    }
+    nodes
+}
+
+/// Materialize what the freshly-declared entry reaches into the detected
+/// clients, reusing the shared install pipeline.
 ///
 /// The lock may carry other declarations; only the acted-on entry (or a
-/// bundle's members) is projected out and installed, so a prior
-/// `--no-install` entry is never materialized as a side effect. The install
-/// state is persisted before any per-artifact failure is surfaced, and a
-/// refusal / hard error propagates as a non-zero exit via the shared
+/// bundle's members) and what they require is projected out and installed, so
+/// a prior `--no-install` entry is never materialized as a side effect. The
+/// install state is persisted before any per-artifact failure is surfaced, and
+/// a refusal / hard error propagates as a non-zero exit via the shared
 /// [`install::finish`](super::install::finish).
 ///
-/// `force` carries `grim install --force` semantics unchanged: it overrides
-/// both the local-modification integrity gate and the untracked-destination
-/// clobber guard, so `grim add --force <same ref>` is the sanctioned
-/// recovery for a modified-state refusal.
+/// `--force` overwrites a locally modified or untracked destination of the
+/// added artifact only (`grim install --force` semantics, scoped): a dependency
+/// that would be clobbered refuses, naming every such destination, because the
+/// user typed one reference and consented to one artifact's files.
 ///
 /// # Errors
 ///
@@ -484,37 +664,33 @@ async fn add_path_source(
 async fn install_added(
     ctx: &Context,
     scope: &super::scope_resolution::ResolvedScope,
-    kind: ArtifactKind,
-    name: &str,
-    new_lock: &GrimoireLock,
+    added: &Added,
     access: &Arc<dyn OciAccess>,
     // `--force` and `--trust-hooks` travel as the parsed args rather than as
-    // two more bare booleans at the end of a seven-argument list.
+    // two more bare booleans at the end of a long argument list.
     args: &AddArgs,
 ) -> anyhow::Result<()> {
-    // Project the acted-on entry out of the (now complete) lock.
-    let single = match kind {
-        ArtifactKind::Bundle => match new_lock.bundles.iter().find(|b| b.name == name) {
-            // The cached expansion's `(repo, tag)` provenance selects exactly
-            // this bundle's members — registry repo/tag or, for a local bundle,
-            // the declared path + members-layer short hash (one encoding, see
-            // `LockedBundle::provenance_pair`).
-            Some(b) => {
-                let (repo, tag) = b.provenance_pair();
-                bundle_members_lock(new_lock, &repo, &tag)
-            }
-            // A bundle that resolved to zero members: nothing to install.
-            None => return Ok(()),
-        },
-        _ => single_entry_lock(new_lock, kind, name)
-            .ok_or_else(|| anyhow::anyhow!("resolved lock is missing '{name}'"))?,
+    let single = match &added.projection {
+        Some(single) => single,
+        // A bundle that resolved to zero members: nothing to install.
+        None if added.target.0 == ArtifactKind::Bundle => return Ok(()),
+        None => anyhow::bail!("resolved lock is missing '{}'", added.target.1),
     };
 
-    // C-110: `grim add <hook>` is where the feature flag and consent are
-    // answered. The declaration gesture is the consent (`resolve_for_add`),
-    // and `single` is the freshly-declared projection only, so adding `B`
-    // cannot consent to an unconsented `A` already in the workspace.
-    let hook_policy = super::hook_consent::resolve_for_add(ctx, scope, &single, args.hook_trust.flag())?;
+    // `grim add <hook>` is where the feature flag and consent are answered.
+    // The declaration gesture is the consent, but only for the hooks this add
+    // brings: the target itself and the hooks it newly reaches. A hook already
+    // sitting in the workspace stays as unconsented as it was.
+    let consentable: BTreeSet<String> = single
+        .iter_artifacts()
+        .filter(|a| a.kind == ArtifactKind::Hook)
+        .filter(|a| {
+            let node = (a.kind, a.name.clone());
+            node == added.target || added.newly.contains(&node)
+        })
+        .filter_map(|a| crate::hook::consent::consent_key(&a.name, &a.source))
+        .collect();
+    let hook_policy = super::hook_consent::resolve_for_add(ctx, scope, single, &consentable, args.hook_trust.flag())?;
     let target = super::grim(InstallTarget::parse(
         &scope.workspace,
         scope.scope,
@@ -529,14 +705,18 @@ async fn install_added(
         super::scope_resolution::load_state(scope).map_err(|e| super::install::state_io(&scope.state_path, e)),
     )?;
     let materializer = DefaultMaterializer;
+    let force = if args.force {
+        ForceScope::Only(added.force.clone())
+    } else {
+        ForceScope::None
+    };
 
     // Reuse the exact pipeline `grim install` runs (materialize + persist +
-    // vendor config sync). `add` differs only in installing a single-entry
-    // projection instead of the whole lock and staying silent (no progress
-    // bar); `--force` passes through with `grim install --force` semantics.
+    // vendor config sync). `add` differs only in installing a projection
+    // instead of the whole lock and staying silent (no progress bar).
     let outcomes = super::grim(
         install_and_persist(
-            &single,
+            single,
             access,
             &materializer,
             &target,
@@ -545,7 +725,7 @@ async fn install_added(
             scope.scope,
             &scope.workspace,
             &scope.config_path,
-            args.force,
+            force,
             InstallIntent::Declared,
             // `--progress auto` stays silent here (add never rendered a
             // bar); `--progress json` emits the NDJSON events on stderr.
@@ -554,9 +734,32 @@ async fn install_added(
         .await,
     )?;
 
-    // Surface the first refusal / hard error (the report is discarded — the
-    // add report already names what was declared).
-    super::install::finish(outcomes, &Default::default())?;
+    // `finish` surfaces the first refusal, which hides the other dependencies
+    // `--force` could not overwrite; name them all so one rerun fixes it.
+    let refused_dependencies: Vec<String> = refusals_outside_force(&outcomes, &added.force)
+        .into_iter()
+        .filter_map(|o| match &o.result {
+            Ok(crate::install::installer::InstallOutcome::RefusedUntracked { path, .. }) => Some(format!(
+                "{} '{}' at {}",
+                o.reference.kind,
+                o.reference.name,
+                path.display()
+            )),
+            _ => None,
+        })
+        .collect();
+    // The report is discarded — the add report already names what was declared.
+    super::install::finish(outcomes, &Default::default()).map_err(|e| {
+        if refused_dependencies.is_empty() {
+            e
+        } else {
+            e.context(format!(
+                "dependencies not created by grim already exist and were not overwritten: {}; \
+                 --force on add covers the added artifact only, run `grim install --force` to overwrite them",
+                refused_dependencies.join(", ")
+            ))
+        }
+    })?;
     Ok(())
 }
 
@@ -584,6 +787,82 @@ pub fn refuse_bad_binding_name(kind: ArtifactKind, name: &str) -> anyhow::Result
     Err(anyhow::Error::from(crate::error::Error::from(
         CommandError::InvalidBindingName { kind, reason },
     )))
+}
+
+/// Project out of `lock` exactly what acting on `target` materializes: the
+/// entry (or a bundle's provenance-stamped members) plus everything they
+/// require, transitively, whether or not it is installed yet. `None` when the
+/// entry is absent, or when a bundle has no cached expansion.
+///
+/// The cached expansion's `(repo, tag)` provenance selects a bundle's members
+/// — registry repo/tag or, for a local bundle, the declared path + members-layer
+/// short hash (one encoding, see `LockedBundle::provenance_pair`).
+///
+/// Dependencies are followed through the lock alone: an entry's `requires`, a
+/// nested bundle's snapshot. An edge naming something the lock does not hold
+/// is skipped (the install-time stale-lock check owns that), so a lock with no
+/// dependency data projects exactly the target.
+///
+/// Shared by `grim add`'s install-on-add path and the TUI install actions.
+pub(crate) fn reachable_lock(lock: &GrimoireLock, target: &NodeKey) -> Option<GrimoireLock> {
+    let seed = seed_lock(lock, target)?;
+    let mut nodes: BTreeSet<NodeKey> = seed.iter_artifacts().map(|a| (a.kind, a.name.clone())).collect();
+    let mut seen = nodes.clone();
+    let mut queue: Vec<NodeKey> = nodes.iter().cloned().collect();
+    if target.0 == ArtifactKind::Bundle {
+        // The target's own members are already in the seed, minus any a direct
+        // declaration overrode; only a nested bundle needs walking from here.
+        seen.insert(target.clone());
+        queue.push(target.clone());
+    }
+    while let Some(node) = queue.pop() {
+        let members: &[BundleMember] = if node.0 == ArtifactKind::Bundle {
+            lock.bundles
+                .iter()
+                .find(|b| b.name == node.1)
+                .map_or(&[], |b| b.members.as_slice())
+        } else {
+            lock.iter_artifacts()
+                .find(|a| a.kind == node.0 && a.name == node.1)
+                .map_or(&[], |a| a.requires.as_slice())
+        };
+        for member in members {
+            let key = (member.kind, member.name.clone());
+            if node == *target && target.0 == ArtifactKind::Bundle && key.0 != ArtifactKind::Bundle {
+                continue;
+            }
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            if key.0 != ArtifactKind::Bundle && lock.iter_artifacts().any(|a| a.kind == key.0 && a.name == key.1) {
+                nodes.insert(key.clone());
+            }
+            queue.push(key);
+        }
+    }
+    let keep = |a: &&LockedArtifact| nodes.contains(&(a.kind, a.name.clone()));
+    Some(GrimoireLock {
+        metadata: lock.metadata.clone(),
+        skills: lock.skills.iter().filter(keep).cloned().collect(),
+        rules: lock.rules.iter().filter(keep).cloned().collect(),
+        agents: lock.agents.iter().filter(keep).cloned().collect(),
+        mcp: lock.mcp.iter().filter(keep).cloned().collect(),
+        hooks: lock.hooks.iter().filter(keep).cloned().collect(),
+        bundles: Vec::new(),
+    })
+}
+
+/// What acting on `target` materializes before any dependency is followed:
+/// a bundle's provenance-stamped members, or the one entry.
+fn seed_lock(lock: &GrimoireLock, target: &NodeKey) -> Option<GrimoireLock> {
+    let (kind, name) = target;
+    match kind {
+        ArtifactKind::Bundle => {
+            let (repo, tag) = lock.bundles.iter().find(|b| &b.name == name)?.provenance_pair();
+            Some(bundle_members_lock(lock, &repo, &tag))
+        }
+        _ => single_entry_lock(lock, *kind, name),
+    }
 }
 
 /// Project the single `kind`/`name` entry out of `lock` as a one-artifact
@@ -3358,5 +3637,93 @@ style = \"ghcr.io/acme/rules/style:1\"
                 "{err:?}"
             );
         }
+    }
+
+    #[test]
+    fn force_nodes_on_a_bundle_covers_stamped_nested_members_never_requires_edges_or_direct_overrides() {
+        use crate::tui::bundle_members::test_support::{lock_of, sha};
+        // `pack` -> `inner` -> `pack` (a cycle): y is a stamped nested member;
+        // x is one a direct declaration overrides (no stamp); d is `s`'s
+        // dependency and not a stamped member of `pack`.
+        let bundles = format!(
+            "[[bundle]]\nname = \"pack\"\nrepo = \"localhost:5050/acme/pack\"\ntag = \"1\"\n\
+             pinned = \"localhost:5050/acme/pack@sha256:{c}\"\n\n\
+             [[bundle.member]]\nkind = \"skill\"\nname = \"m\"\nid = \"localhost:5050/acme/m:1\"\n\n\
+             [[bundle.member]]\nkind = \"bundle\"\nname = \"inner\"\nid = \"localhost:5050/acme/inner:1\"\n\n\
+             [[bundle]]\nname = \"inner\"\nrepo = \"localhost:5050/acme/inner\"\ntag = \"1\"\n\
+             pinned = \"localhost:5050/acme/inner@sha256:{e}\"\ntransitive = true\n\n\
+             [[bundle.member]]\nkind = \"skill\"\nname = \"x\"\nid = \"localhost:5050/acme/x:1\"\n\n\
+             [[bundle.member]]\nkind = \"skill\"\nname = \"y\"\nid = \"localhost:5050/acme/y:1\"\n\n\
+             [[bundle.member]]\nkind = \"bundle\"\nname = \"pack\"\nid = \"localhost:5050/acme/pack:1\"\n\n",
+            c = sha('c'),
+            e = sha('e'),
+        );
+        let mut lock = lock_of(
+            &[
+                ("s", "localhost:5050/acme/s", &[("skill", "d", "./d:1")]),
+                ("d", "localhost:5050/acme/d", &[]),
+                ("m", "localhost:5050/acme/m", &[("skill", "d", "./d:1")]),
+                ("x", "localhost:5050/acme/x", &[]),
+                ("y", "localhost:5050/acme/y", &[]),
+            ],
+            &bundles,
+        );
+        for (name, bundle) in [("m", "pack"), ("y", "inner")] {
+            lock.skills.iter_mut().find(|a| a.name == name).unwrap().bundles.push(
+                crate::lock::locked_artifact::BundleProvenance::new(format!("localhost:5050/acme/{bundle}"), "1"),
+            );
+        }
+        let skill = |n: &str| (ArtifactKind::Skill, n.to_string());
+        assert_eq!(
+            force_nodes(&lock, &(ArtifactKind::Bundle, "pack".to_string())),
+            BTreeSet::from([skill("m"), skill("y")]),
+            "a stamped nested member is forced; the unstamped (directly declared) x and the requires edge m -> d are not"
+        );
+    }
+
+    #[test]
+    fn force_nodes_on_a_bundle_missing_from_the_lock_or_nested_absent_yields_no_members() {
+        use crate::tui::bundle_members::test_support::{lock_of, sha};
+        let bundle = |n: &str| (ArtifactKind::Bundle, n.to_string());
+        // No `[[bundle]]` snapshot at all: no members, no panic.
+        let lock = lock_of(&[("s", "localhost:5050/acme/s", &[])], "");
+        assert!(force_nodes(&lock, &bundle("pack")).is_empty());
+
+        // `pack` lists a nested bundle `inner` that has no snapshot: skipped.
+        let bundles = format!(
+            "[[bundle]]\nname = \"pack\"\nrepo = \"localhost:5050/acme/pack\"\ntag = \"1\"\n\
+             pinned = \"localhost:5050/acme/pack@sha256:{c}\"\n\n\
+             [[bundle.member]]\nkind = \"bundle\"\nname = \"inner\"\nid = \"localhost:5050/acme/inner:1\"\n\n",
+            c = sha('c'),
+        );
+        let lock = lock_of(&[("s", "localhost:5050/acme/s", &[])], &bundles);
+        assert!(force_nodes(&lock, &bundle("pack")).is_empty());
+    }
+
+    #[test]
+    fn refusals_outside_force_names_only_forceable_refusals_off_the_force_set() {
+        use crate::install::installer::{ArtifactInstall, InstallOutcome};
+        let install = |name: &str, result| ArtifactInstall {
+            reference: crate::oci::ArtifactRef::registry(
+                ArtifactKind::Skill,
+                name,
+                crate::oci::Identifier::parse("localhost:5000/acme/x:1").unwrap(),
+            ),
+            target: None,
+            result: Ok(result),
+        };
+        let untracked = || InstallOutcome::RefusedUntracked {
+            client: "claude".to_string(),
+            path: std::path::PathBuf::from("/ws/x"),
+        };
+        let outcomes = vec![
+            install("target", untracked()),
+            install("dep", untracked()),
+            install("clean", InstallOutcome::Installed),
+        ];
+        let force = BTreeSet::from([(ArtifactKind::Skill, "target".to_string())]);
+        let outside = refusals_outside_force(&outcomes, &force);
+        assert_eq!(outside.len(), 1);
+        assert_eq!(outside[0].reference.name, "dep");
     }
 }

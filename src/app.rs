@@ -87,6 +87,11 @@ pub async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 render(&r, format)?;
                 c
             }
+            Command::Why(args) => {
+                let (r, c) = crate::command::why::run(&ctx, &args)?;
+                render(&r, format)?;
+                c
+            }
             Command::Build(args) => {
                 let (r, c) = crate::command::build::run(&ctx, &args).await?;
                 render(&r, format)?;

@@ -72,6 +72,7 @@ use crate::command::status::StatusArgs;
 use crate::command::tui::TuiArgs;
 use crate::command::uninstall::UninstallArgs;
 use crate::command::update::UpdateArgs;
+use crate::command::why::WhyArgs;
 use crate::error::ErrorReason;
 
 #[derive(Parser)]
@@ -127,6 +128,11 @@ pub enum Command {
     /// Report an artifact's metadata (kind, annotations, tags) without
     /// downloading its content.
     Describe(DescribeArgs),
+    // Explicit `about`: a doc comment would drop the trailing period.
+    #[command(
+        about = "Show why an artifact is installed: every chain from a declaration in grimoire.toml to it, root first. Reads the lock; never contacts a registry."
+    )]
+    Why(WhyArgs),
     /// Package locked artifacts as a plugin, or regenerate a plugin
     /// marketplace repository, for Claude-family or Agent Plugins clients.
     Export(ExportArgs),

@@ -1,0 +1,10 @@
+{
+  "command": "grim release <source-dir> <reference> --no-cascade",
+  "manifest": "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"config\":{\"mediaType\":\"application/vnd.oci.empty.v1+json\",\"digest\":\"sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"size\":2},\"layers\":[{\"mediaType\":\"application/vnd.grimoire.artifact.layer.v1.tar\",\"digest\":\"sha256:6d357373589fe0ec63e527087b54c57383f5bbff8b4f5f3aeb2e2d992926df81\",\"size\":2048}],\"annotations\":{\"com.grimoire.kind\":\"skill\",\"org.opencontainers.image.description\":\"Dependency-free skill for the release byte-identity baseline.\",\"org.opencontainers.image.source\":\"localhost:5000/grim-golden/pre-dependencies-cdeedcaa/baseline-skill\",\"org.opencontainers.image.title\":\"baseline-skill\",\"org.opencontainers.image.vendor\":\"grim-golden\",\"org.opencontainers.image.version\":\"1.0.0\"}}",
+  "manifest_digest": "sha256:425b3bf46c2ea70cc8004d16b0ced106d4bc6698342d2e5a6ab83c004a0a96b4",
+  "reference": "localhost:5000/grim-golden/pre-dependencies-cdeedcaa/baseline-skill:1.0.0",
+  "source_dir_name": "baseline-skill",
+  "source_files": {
+    "SKILL.md": "---\nname: baseline-skill\ndescription: Dependency-free skill for the release byte-identity baseline.\n---\n# Baseline skill\n"
+  }
+}

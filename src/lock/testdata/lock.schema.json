@@ -194,6 +194,14 @@
           ],
           "default": null,
           "description": "Resolved registry/repo pinned to a content digest. Mutually\nexclusive with the `path` + `hash` pair."
+        },
+        "requires": {
+          "default": [],
+          "description": "Declared dependency edges, as published. Serialized as\n`[[<kind>.requires]]` after the entry's own keys.",
+          "items": {
+            "$ref": "#/$defs/BundleMember"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -263,6 +271,10 @@
             "string",
             "null"
           ]
+        },
+        "transitive": {
+          "description": "Set when no `[bundles]` declaration names this snapshot: it was\nreached through a dependency edge.",
+          "type": "boolean"
         }
       },
       "required": [

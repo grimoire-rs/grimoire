@@ -39,6 +39,11 @@ pub enum UninstallStatus {
     KeptByBundle,
     /// Nothing was installed or declared for this name (no-op).
     NotInstalled,
+    /// A remaining artifact still requires this dependency and it was not
+    /// directly declared, so its files are kept and nothing was undeclared —
+    /// remove the artifact that requires it to remove it. Appended last: the
+    /// status set is a frozen wire surface and only grows.
+    KeptByDependency,
 }
 
 impl std::fmt::Display for UninstallStatus {
@@ -47,6 +52,7 @@ impl std::fmt::Display for UninstallStatus {
             Self::Uninstalled => "uninstalled",
             Self::KeptByBundle => "kept-by-bundle",
             Self::NotInstalled => "not-installed",
+            Self::KeptByDependency => "kept-by-dependency",
         })
     }
 }
@@ -128,6 +134,21 @@ mod tests {
         let out = String::from_utf8(buf).unwrap();
         assert!(out.lines().next().unwrap().starts_with("Kind"));
         assert!(out.contains("uninstalled"));
+    }
+
+    #[test]
+    fn json_status_kept_by_dependency() {
+        let r = UninstallReport::new(
+            ArtifactKind::Skill,
+            "dep".to_string(),
+            UninstallStatus::KeptByDependency,
+            Vec::new(),
+            Vec::new(),
+        );
+        let mut buf = Vec::new();
+        r.print_json(&mut buf).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["status"], "kept-by-dependency");
     }
 
     #[test]
