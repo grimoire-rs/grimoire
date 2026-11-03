@@ -15,6 +15,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
+use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::oci::bundle::{BUNDLE_LAYER_SIZE_LIMIT, BundleManifest, BundleMember, MAX_BUNDLE_MEMBERS};
@@ -827,6 +828,10 @@ fn oversize_error(bundle_ref: &ArtifactRef, size: u64) -> ResolveError {
     )
 }
 
+/// Upper bound on concurrent direct resolves: an unbounded fan-out over a
+/// large declaration trips registry rate limits and exhausts sockets.
+const RESOLVE_CONCURRENCY: usize = 32;
+
 /// Spawn one task per work item, each wrapped in a per-artifact timeout.
 /// `JoinSet` provides fail-fast: the first error aborts the rest.
 async fn resolve_work(
@@ -838,11 +843,23 @@ async fn resolve_work(
         return Ok(Vec::new());
     }
 
+    let permits = Arc::new(Semaphore::new(RESOLVE_CONCURRENCY));
     let mut set: JoinSet<Result<LockedArtifact, ResolveError>> = JoinSet::new();
     for item in work {
         let access = Arc::clone(access);
         let options = options.clone();
-        set.spawn(async move { resolve_one(item, access, options).await });
+        let permits = Arc::clone(&permits);
+        set.spawn(async move {
+            // Acquired before `resolve_one` so time queued behind the bound
+            // never counts against the per-artifact timeout. The semaphore
+            // is never closed, so acquisition cannot fail.
+            #[allow(clippy::expect_used)]
+            let _permit = permits
+                .acquire_owned()
+                .await
+                .expect("resolve semaphore is never closed");
+            resolve_one(item, access, options).await
+        });
     }
 
     let mut resolved = Vec::new();
@@ -1130,6 +1147,71 @@ mod tests {
 
     fn arc(mock: MockAccess) -> Arc<dyn OciAccess> {
         Arc::new(mock)
+    }
+
+    /// Resolve-only fake that records the peak number of concurrent
+    /// `resolve_digest` calls.
+    struct InFlightAccess {
+        current: std::sync::atomic::AtomicUsize,
+        peak: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl OciAccess for InFlightAccess {
+        async fn resolve_digest(&self, _id: &Identifier, _op: Operation) -> Result<Option<Digest>, AccessError> {
+            use std::sync::atomic::Ordering::SeqCst;
+            let now = self.current.fetch_add(1, SeqCst) + 1;
+            self.peak.fetch_max(now, SeqCst);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            self.current.fetch_sub(1, SeqCst);
+            Ok(Some(digest()))
+        }
+        async fn fetch_manifest(&self, _id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
+            Ok(None)
+        }
+        async fn fetch_blob(&self, _r: &Identifier, _d: &Digest, _m: u64) -> Result<Option<Vec<u8>>, AccessError> {
+            Ok(None)
+        }
+        async fn list_tags(&self, _id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
+            Ok(None)
+        }
+        async fn list_catalog(&self, _registry: &str) -> Result<crate::oci::access::CatalogListing, AccessError> {
+            Ok(Vec::new().into())
+        }
+        async fn push_blob(&self, _repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {
+            Ok(Algorithm::Sha256.hash(bytes))
+        }
+        async fn push_manifest(&self, _repo: &Identifier, _m: &OciManifest) -> Result<Digest, AccessError> {
+            Ok(Algorithm::Sha256.hash(b"manifest"))
+        }
+        async fn put_tag(&self, _repo: &Identifier, _tag: &str, _d: &Digest) -> Result<(), AccessError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_work_bounds_in_flight_resolves() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let work: Vec<WorkItem> = (0..100)
+            .map(|i| {
+                let id = Identifier::parse(&format!("ghcr.io/acme/skill-{i}:stable")).unwrap();
+                WorkItem {
+                    reference: ArtifactRef::registry(ArtifactKind::Skill, format!("skill-{i}"), id.clone()),
+                    id,
+                    bundles: Vec::new(),
+                }
+            })
+            .collect();
+        let fake = Arc::new(InFlightAccess {
+            current: 0.into(),
+            peak: 0.into(),
+        });
+        let access: Arc<dyn OciAccess> = fake.clone();
+        let resolved = resolve_work(work, &access, &fast_options()).await.expect("all resolve");
+        let peak = fake.peak.load(SeqCst);
+        assert_eq!(resolved.len(), 100);
+        assert!(peak > 1, "resolves must still run concurrently, peak was {peak}");
+        assert!(peak <= 32, "peak {peak} exceeds the bound of 32");
     }
 
     #[tokio::test]
