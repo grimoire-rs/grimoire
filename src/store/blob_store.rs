@@ -10,11 +10,10 @@
 //! mutated. `put` verifies the supplied bytes actually hash to the claimed
 //! [`Digest`] before writing, so a corrupt blob can never enter the cache.
 
-use std::io;
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 use crate::oci::Digest;
-use crate::store::atomic_write::atomic_write;
 
 /// A content-addressed blob store rooted at a `blobs` directory.
 #[derive(Debug, Clone)]
@@ -70,7 +69,7 @@ impl BlobStore {
     /// # Errors
     ///
     /// Returns [`io::ErrorKind::InvalidData`] if `bytes` do not hash to
-    /// `digest`, or any I/O error from the atomic write.
+    /// `digest`, or any I/O error from the write.
     pub fn put(&self, digest: &Digest, bytes: &[u8]) -> io::Result<()> {
         let computed = digest.algorithm().hash(bytes);
         if &computed != digest {
@@ -85,7 +84,20 @@ impl BlobStore {
             // construction — nothing to do.
             return Ok(());
         }
-        atomic_write(&path, bytes)
+        let parent = path.parent().unwrap_or(&self.root);
+        std::fs::create_dir_all(parent)?;
+        let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+        tmp.write_all(bytes)?;
+        tmp.as_file().sync_data()?;
+        // Never replace a stored blob: on Windows a replacing rename over a
+        // file another task holds open fails with `Access is denied`, and so
+        // does a concurrent read of the displaced file.
+        match tmp.persist_noclobber(&path) {
+            Ok(_) => Ok(()),
+            // A concurrent writer landed the same digest, so the same bytes.
+            Err(_) if path.is_file() => Ok(()),
+            Err(e) => Err(e.error),
+        }
     }
 }
 
@@ -133,6 +145,28 @@ mod tests {
         // Second put of the same content is a no-op and must not error.
         store.put(&digest, data).unwrap();
         assert_eq!(store.get(&digest).unwrap().as_deref(), Some(&data[..]));
+    }
+
+    /// Two tasks missing the same digest both write it while a third reads
+    /// it. On Windows a replacing rename over a file someone holds open fails
+    /// with `Access is denied`, and so does opening the file it displaced.
+    #[test]
+    fn concurrent_writers_and_readers_of_one_digest_all_succeed() {
+        let (_d, store) = store();
+        for round in 0..200u32 {
+            let data = format!("race {round}").into_bytes();
+            let digest = Algorithm::Sha256.hash(&data);
+            let barrier = std::sync::Barrier::new(8);
+            std::thread::scope(|s| {
+                for _ in 0..8 {
+                    s.spawn(|| {
+                        barrier.wait();
+                        store.put(&digest, &data).unwrap();
+                        assert_eq!(store.get(&digest).unwrap().as_deref(), Some(&data[..]));
+                    });
+                }
+            });
+        }
     }
 
     #[test]
