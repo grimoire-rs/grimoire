@@ -50,7 +50,9 @@ unrecorded pre-existing destination; retry with `--force`),
 `unsupported-layer-media-type` (exit 65 — a skill, rule, agent or hook layer
 has a `+zstd` media type this grim cannot decode; not forceable, not
 retryable, upgrade grim),
-`anchor-escape` (exit 65 — a recorded install path resolved outside its
+`unsupported-artifact-feature` (exit 65 — an artifact declares a feature
+this grim does not know, or has a layer layout it cannot read; not
+retryable, upgrade grim), `anchor-escape` (exit 65 — a recorded install path resolved outside its
 anchor root; **never** fixable with `--force`, see [Containment
 Refusals](#containment-refusals)), `no-config`
 (exit 79 — a project-scope command found no `grimoire.toml` walking up
@@ -63,7 +65,9 @@ unknown one as absent.
 case from the `stale-lock` reason above. If `grimoire.lock`'s
 `declaration_hash` no longer matches `grimoire.toml`, install exits 65
 with no `reason` field at all. Run `grim lock` to refresh it. The
-`stale-lock` reason above fires only on a partial `grim update <name>`.
+`stale-lock` reason above fires on a partial `grim update <name>`, and also
+when a lock's recorded dependencies no longer match the pinned artifacts
+(typically written by a grim older than 0.16.0): run `grim lock`.
 
 A failure that names a key or value grim does not recognize also carries a
 `hint` string (and prints the same line on stderr): grim's formats reject

@@ -2,7 +2,7 @@
 name: grim-authoring
 description: Author, validate, and package grim-publishable artifacts — skill directories, rule files, agent definitions, MCP server descriptors, hook manifests, and bundle TOMLs. Use when creating or editing an artifact for grim build or grim release; when choosing frontmatter or catalog metadata fields; when writing a hook.toml with its events, tiers, matchers, and handlers; when creating or maintaining a plugin marketplace git repository (marketplace.toml, grim export marketplace, regenerate CI) or hosting a package index; when adding a vendor-namespaced metadata key for any client grim supports (claude, opencode, copilot, codex, cursor, kiro, junie, gemini, zed, amp, antigravity, cline, droid, goose, warp, openclaw, kilo, qoder — one namespace per client name); or when grim build fails validation with exit code 65.
 license: Apache-2.0
-compatibility: grim>=0.15
+compatibility: grim>=0.16
 metadata:
   summary: Deep authoring guide for grim skill, rule, agent, mcp, hook, and bundle artifacts
   keywords: grim,grimoire,authoring,frontmatter,validation,vendor-metadata,skill,rule,agent,mcp,hook,bundle,packaging
@@ -55,6 +55,27 @@ re-kinds the payload as a skill. `--kind hook` is accepted on `build` and
 `grim build ./hooks/shell-guard` already reports `hook`. Pass it anyway
 in scripted loops, the way the other kinds are passed, so a manifest
 rename cannot silently reclassify the artifact.
+
+## Declaring Dependencies
+
+Any kind except a bundle can declare the artifacts it needs, and installing it
+installs them too. The grammar is one table per target kind (`skills`,
+`rules`, `agents`, `mcp`, `hooks`, `bundles`) mapping a binding name to a
+reference, relative (`./shared:1`) or fully qualified:
+
+| Kind | Where it lives |
+|---|---|
+| Skill, rule, agent | `grim.requires.<table>.<name>` keys in frontmatter `metadata` |
+| MCP server, hook | `[requires.<table>]` tables in the descriptor / `hook.toml` |
+| Bundle | a `[bundles]` table: nested bundles |
+
+`grim build` checks the declarations offline (65 for a bad table, name,
+reference, duplicate or self-reference). Publishing packs them as a second
+layer, so **author, build and release with grim 0.16.0 or later**: an older grim
+drops them silently. Never add them to a version tag consumers already float
+on; start a new major tag. Details and the cycle and size limits:
+[Artifact Reference § Declaring dependencies][requires],
+[publishing § Publishing dependencies][pub-requires].
 
 ## Which Clients Host Which Kind
 
@@ -332,6 +353,8 @@ Verified against the grim release this package ships beside.
 
 [artifacts]: https://grimoire.rs/artifacts.html
 [grimignore]: https://grimoire.rs/artifacts.html#grimignore
+[requires]: https://grimoire.rs/artifacts.html#requires
+[pub-requires]: https://grimoire.rs/publishing.html#requires
 [vendor]: https://grimoire.rs/vendor-metadata.html
 [publishing]: https://grimoire.rs/publishing.html
 [agents]: https://grimoire.rs/agents.html

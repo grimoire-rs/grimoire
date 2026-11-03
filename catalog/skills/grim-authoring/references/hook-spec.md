@@ -494,6 +494,14 @@ artifact, and a skill reaches clients a hook never will.
   they do for the other kinds — see
   [release-checklist.md](release-checklist.md).
 
+## Requires
+
+`hook.toml` can carry `[requires.<table>]` tables (`skills`, `rules`,
+`agents`, `mcp`, `hooks`, `bundles`) that name artifacts the hook needs.
+Installing the hook installs them; its arming gates are unchanged, and
+`grim add <hook>` consents only the hooks it newly reaches. Needs grim 0.16.0
+or later; see [Declaring Dependencies](../SKILL.md#declaring-dependencies).
+
 ## Validation Pitfalls
 
 Every row below fails `grim build` with **exit 65**.

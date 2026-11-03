@@ -37,7 +37,7 @@ Unlike skill/rule frontmatter, a typo'd bundle key cannot slip through.
 
 ## Member Tables
 
-Five optional tables, each mapping a **config binding name** (the name the
+Six optional tables, each mapping a **config binding name** (the name the
 member installs under when a consumer adds the bundle) to a
 fully-qualified reference:
 
@@ -52,6 +52,8 @@ reviewer = "registry.example.com/grimoire/agents/reviewer@sha256:8f4b..."
 shell-guard = "registry.example.com/grimoire/hooks/shell-guard:1"
 [mcp]
 docs-search = "registry.example.com/grimoire/mcp/docs-search:1"
+[bundles]
+web-stack = "registry.example.com/grimoire/bundles/web-stack:1"
 ```
 
 An `[mcp]` member is a published MCP server descriptor: it materializes no
@@ -84,24 +86,14 @@ Relativity is explicit — a bare registry-less ref (`skills/x:0`) still
 fails validation. `.`/`..` beyond the leading run is an error, and a
 `../` chain past the registry root fails the release (exit 65). `--pin`
 resolves relative members against the release target and freezes them
-absolute. There is no `[bundles]` table — nested bundles are invalid.
+absolute. A `[bundles]` table nests another bundle.
 
-**One of grim's six artifact kinds cannot be a bundle member.** There is no
-`[bundles]` table, and because the parser is strict, writing one is a hard
-error rather than a silently dropped member:
-
-```
-$ grim build ./nested.toml --kind bundle
-unknown field `bundles`, expected one of `skills`, `rules`, `agents`, `hooks`,
-`mcp`, `summary`, `keywords`, `description`, `license`, `repository`,
-`deprecated`, `replaced-by`
-$ echo $?
-78
-```
-
-Note what that accepted-field list includes: **`hooks` and `mcp` are both
-member tables**, exactly as [Member tables](#member-tables) says. Nested
-bundles have no equivalent — flatten them.
+**A bundle can be a bundle member.** A `[bundles]` table lists nested bundles
+by reference, like any member table. Installing the outer bundle expands the
+inner one, and a member both hold is installed once. Grim refuses a cycle
+(exit 65) and has limits on depth and size: see
+[Dependencies][dependencies]. A bundle that nests another needs grim 0.16.0
+or later to install; an older grim exits 65 on it.
 
 ## Floating vs. Pinned
 
@@ -115,7 +107,7 @@ release to roll it forward ([pinning][pin]).
 ## Limits
 
 - At most **512 members** per bundle (parse-time error beyond that).
-- The members document is capped at **512 KiB**; no nesting.
+- The members document is capped at **512 KiB**.
 
 ## Publish Order
 
@@ -155,8 +147,8 @@ docs-search = "ghcr.io/acme/mcp/docs-search:1"
 | Typo'd top-level key (`sumary = …`) | Hard parse error — strict schema, build fails |
 | `keywords` as a TOML array | Hard parse error — must be one string |
 | Member ref not fully qualified | Hard error — invalid reference |
-| Nested bundle member | Invalid — no `[bundles]` table exists |
-| An unknown member table | Hard parse error — `[skills]`, `[rules]`, `[agents]`, `[hooks]` and `[mcp]` are the accepted five |
+| Nested bundle member | Valid via a `[bundles]` table; consumers need grim 0.16.0 or later |
+| An unknown member table | Hard parse error — `[skills]`, `[rules]`, `[agents]`, `[hooks]`, `[mcp]` and `[bundles]` are the accepted six |
 | More than 512 members, or members document > 512 KiB | Rejected |
 | `repository` not `https://` | Hard error, exit 65 |
 | Two declared bundles disagreeing on a member | Consumer-side `BundleConflict` at lock time (exit 78, fail-closed) — keep curated sets disjoint |
@@ -171,3 +163,4 @@ docs-search = "ghcr.io/acme/mcp/docs-search:1"
 [bundles-ref]: https://grimoire.rs/artifacts.html#bundles
 [pub-bundles]: https://grimoire.rs/publishing.html#bundles
 [pin]: https://grimoire.rs/publishing.html#pin
+[dependencies]: https://grimoire.rs/concepts.html#dependencies

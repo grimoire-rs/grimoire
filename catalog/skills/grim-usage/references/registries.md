@@ -897,6 +897,11 @@ one changes what the action keys do:
   offers it, since one answer cannot speak for several artifacts, so a batch
   leaves its refusals in the status line instead. A retry that refuses again
   does not re-open the dialog, so there is no confirm loop to get stuck in.
+  The forced retry covers what `grim add --force` covers: the artifact, or a
+  bundle's members, nested bundles' included, but not a member you also declared
+  directly. It never covers a dependency, so a refused dependency opens no dialog. The status line names it instead.
+- **`d` removes dependencies** only the deleted artifact needed, exactly as
+  `grim uninstall` does. One another artifact still needs is kept.
 - **The batch confirmation** guards `i`/`u`/`d` on more than one artifact —
   a marked set, or a group selected in tree view. It opens a prompt naming
   the count and the source before anything runs, then lists the first few

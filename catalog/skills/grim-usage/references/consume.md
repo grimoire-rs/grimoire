@@ -403,8 +403,9 @@ Two commands with deliberately different depths:
 `remove` only undeclares; `uninstall` is the full inverse of install.
 Both act on the **effective** declaration, fully offline: if a declared
 bundle still names the artifact at the same identifier, the lock entry
-survives via the bundle (and `uninstall` still deletes the files — the
-next `grim install` rematerializes them). When the surviving bundle
+survives via the bundle and `uninstall` keeps the files (a directly
+declared one degrades to `remove`; a bundle-only member is a no-op, so
+remove the bundle to remove it). When the surviving bundle
 binds a *different* identifier, grim drops the entry, leaves the lock
 stale, and tells you to run `grim lock` — never a silently wrong pin.
 
@@ -473,6 +474,32 @@ workspace's consent. `grim add <bundle>` records the members that gesture
 resolves to, so a bundle that later gains a hook member drifts and re-asks
 rather than arming silently. Removing the bundle removes the hook, unless
 you also declared it directly.
+
+## Dependencies
+
+A skill, rule, agent, MCP server or hook can declare the artifacts it needs
+(the author's side: see the `grim-authoring` skill). Adding or locking it then
+pulls the dependencies in, transitively, and a bundle can hold other
+bundles. `grim add` reports what it pulled in as `pulled_in`.
+
+- **`grim status`** rows carry `direct` (you declared it) and `required_by`
+  (the declared artifacts that reach it; `null` means the graph cannot be
+  computed offline, run `grim lock`).
+- **`grim why <kind> <name>`** prints the paths from your declarations to that
+  artifact. It reads only the lock, so it works offline. Exit 79 means the
+  artifact is not in the effective set.
+- **A direct declaration wins** over a dependency edge. Two edges that name
+  different digests for one slot fail closed with exit 78: declare the
+  artifact directly to choose. An edge onto a directly declared artifact is never
+  resolved, so a missing tag on that edge does not fail the lock.
+- **`remove` and `uninstall`** take dependencies only the target needed. One
+  another artifact still needs is kept (`uninstall` reports
+  `kept-by-dependency`). A cycle or a graph over the limits exits 65.
+- **Needs grim 0.16.0 or later.** An older grim refuses a dependent artifact
+  at `grim add`, or locks it silently without its dependencies. A newer grim
+  then exits 65 `stale-lock` on that lock: run `grim lock`.
+
+Details: [Dependencies][dependencies].
 
 ## Hooks
 
@@ -648,6 +675,7 @@ each workspace that uses hooks.
 [commands]: https://grimoire.rs/commands.html
 [lock]: https://grimoire.rs/concepts.html#the-lock
 [bundles]: https://grimoire.rs/concepts.html#bundles
+[dependencies]: https://grimoire.rs/concepts.html#dependencies
 [config-toml]: https://grimoire.rs/configuration.html
 [json-interface]: https://grimoire.rs/json-interface.html
 [artifact-states]: https://grimoire.rs/commands.html#artifact-states
