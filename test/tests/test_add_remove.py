@@ -273,16 +273,16 @@ def test_config_writes_keep_comments_and_layout(
         "[rules]\n"
     )
     config = project_dir / "grimoire.toml"
-    config.write_text(authored)
+    config.write_text(authored, encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     runner.json("add", "--no-install", ru.fq)
-    added = config.read_text()
+    added = config.read_text(encoding="utf-8")
     assert added.startswith(authored), added
     assert added[len(authored):].startswith("rust-style = "), added
 
     runner.run("config", "set", "options.clients", "claude,codex")
     runner.json("remove", "rule", "rust-style")
-    assert config.read_text() == authored.replace(
+    assert config.read_text(encoding="utf-8") == authored.replace(
         'clients = ["claude"] # claude only', 'clients = ["claude", "codex"] # claude only'
     )
