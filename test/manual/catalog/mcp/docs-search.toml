@@ -1,0 +1,8 @@
+description = "Documentation search over MCP (manual-rig dependency target)."
+summary = "Docs search MCP server"
+keywords = "docs,search,mcp"
+
+[server]
+transport = "stdio"
+command = "docs-search-mcp"
+args = ["--stdio"]

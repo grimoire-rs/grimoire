@@ -194,6 +194,22 @@ for record in "${HOOK_MATRIX[@]}"; do
     release_versions "$path" "$kind" "$name" "$versions"
 done
 
+# 4e. DEPENDENCY DEMO artifacts (declared `requires`; see README § Dependencies).
+#     Dependencies are published first for tidiness; `grim release` does not
+#     look them up unless --pin is passed, so the order is not load-bearing.
+#       docs-search (mcp)        <- pr-assistant (skill, also needs rule security-baseline)
+#       commit-helper (skill)    <- commit-conventions (rule) and triage-bot (agent): a diamond
+#       code-reviewer (skill)    <- triage-bot (agent)
+#       cycle-a <-> cycle-b      a cycle (exit 65 at lock)
+#       conflict-demo            wants commit-helper:2 vs triage-bot's :1 (exit 78)
+release "$CATALOG/mcp/docs-search.toml" mcp docs-search 1.0.0 mcp
+release "$CATALOG/skills/pr-assistant" skills pr-assistant 1.0.0
+release "$CATALOG/rules/commit-conventions.md" rules commit-conventions 1.0.0
+release "$CATALOG/agents/triage-bot.md" agents triage-bot 1.0.0 agent
+release "$CATALOG/skills/conflict-demo" skills conflict-demo 1.0.0
+release "$CATALOG/skills/cycle-a" skills cycle-a 1.0.0
+release "$CATALOG/skills/cycle-b" skills cycle-b 1.0.0
+
 # 5. Publish bundles LAST — their members must already exist. The
 #    `starter-pack` bundle ships two versions with differing member sets:
 #      * 1.0.0 (starter-pack.toml):    code-reviewer + rust-style + security-baseline
@@ -214,6 +230,9 @@ release "$bundle_tmp/starter-pack.toml" bundles starter-pack 2.0.0
 # `review-pack` shares its code-reviewer member with starter-pack (same
 # identifier) and adds the reviewer agent — the shared-member demo bundle.
 release "$CATALOG/bundles/review-pack.toml" bundles review-pack 1.0.0
+
+# `dev-suite` groups two dependency-bearing members (nested closure demo).
+release "$CATALOG/bundles/dev-suite.toml" bundles dev-suite 1.0.0
 
 # 6. SECOND REGISTRY (localhost:5051, namespace `tools`) — the multi-registry
 #    demo. Publishes a SMALL distinct subset (one skill, one rule) from the
@@ -285,6 +304,12 @@ Next:
   grim lock && grim install         # materialize into .claude/
   grim status                       # all 'installed'
 
+Dependency demo (see README § Dependencies):
+  cd test/manual/project-deps
+  grim lock && grim install
+  grim status                       # pr-assistant direct; docs-search etc. required_by
+  grim why mcp docs-search
+
 Multi-registry demo (browse-all-declared across two registries):
   cd test/manual/project-multi
   grim search                       # browses BOTH 5050/grimoire and 5051/tools
@@ -314,10 +339,11 @@ Outdated / update demo (lock at an OLD pin, then roll forward):
   grim update                             # rolls :1 -> 1.3.0; back to 'installed'
 
 Bundle add/remove-on-upgrade demo:
-  grim add bundle starter-pack localhost:5050/grimoire/bundles/starter-pack:1
+  grim add localhost:5050/grimoire/bundles/starter-pack:1
   # resolves code-reviewer + rust-style + security-baseline
-  grim add bundle starter-pack localhost:5050/grimoire/bundles/starter-pack:2
-  # :2 ADDS commit-helper and DROPS security-baseline
+  grim add localhost:5050/grimoire/bundles/starter-pack:2
+  # :2 ADDS commit-helper and DROPS security-baseline (visible in a project that
+  # does not declare them directly; project/ does, so there they stay 'direct')
 
 Agent demo (per-client rendering + vendor overrides):
   grim install --client claude,opencode,copilot

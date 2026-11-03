@@ -1,0 +1,14 @@
+# Dependency demo project: declares only the dependents. Everything they
+# require arrives transitively (see ../README.md § Dependencies).
+[options]
+default_registry = "localhost:5050"
+clients = ["claude"]
+
+[skills]
+pr-assistant = "localhost:5050/grimoire/skills/pr-assistant:1"
+
+[agents]
+triage-bot = "localhost:5050/grimoire/agents/triage-bot:1"
+
+[rules]
+commit-conventions = "localhost:5050/grimoire/rules/commit-conventions:1"

@@ -26,11 +26,14 @@ project, and a `teardown.sh`.
 | `catalog/hooks/<name>/hook.toml` | Source-of-truth sample hooks + their payload scripts (committed) |
 | `catalog/bundles/starter-pack.toml` | Bundle v1 member set (committed) |
 | `catalog/bundles/starter-pack-v2.toml` | Bundle v2 member set — adds + removes members (committed) |
+| `catalog/mcp/docs-search.toml` | Sample MCP server descriptor — a dependency target (committed) |
+| `catalog/bundles/dev-suite.toml` | Bundle whose members carry their own dependencies (committed) |
 | `catalog/bundles/review-pack.toml` | Bundle sharing `code-reviewer` with starter-pack + an agent member (committed) |
 | `index/all.json` | Static HTTP index phone book — the same refs the registries serve (committed) |
 | `index/stats.json` | Publisher-statistics sidecar: ratings + download counts (committed) |
 | `index/README.md` | What each fixture row demonstrates, and why the index exists at all |
 | `project/grimoire.toml` | Ready-made consumer project (floating `:1` tags) — the OCI registry plus the static index |
+| `project-deps/grimoire.toml` | Dependency-demo project: declares only dependents, see § 12 |
 | `project-multi/grimoire.toml` | Multi-registry consumer project (`[[registries]]` aliases across 5050 + 5051) |
 | `scripts/env.sh` | `source` it to point `grim` at the rig |
 | `scripts/bootstrap.sh` | Build `grim`, start both registries + the static index, publish the version matrix + multi-registry subset + deep-fold solo package + the annotation showcase, write the global registry config |
@@ -791,6 +794,62 @@ granted, drifted). Restore the rig with `grim hook allow`.
 > is a demonstration: its check is a substring match that any rewording evades,
 > and every layer of this design fails open so a broken guardrail can never deny
 > you a tool call. Copy the shape, never the check.
+
+## 12. Dependencies (declared `requires`)
+
+The catalog ships artifacts that declare what they need. `bootstrap.sh` builds
+the branch `grim` into `test/bin/grim` (rebuilt when `src/**/*.rs` is newer), so
+the rig always runs the requires-aware build.
+
+| Artifact | Requires |
+|---|---|
+| skill `pr-assistant` | mcp `docs-search`, rule `security-baseline` |
+| agent `triage-bot` | skills `code-reviewer`, `commit-helper` |
+| rule `commit-conventions` | skill `commit-helper` (diamond with `triage-bot`) |
+| bundle `dev-suite` | `pr-assistant` + `triage-bot`, each with its own closure |
+| skill `conflict-demo` | `commit-helper:2` (clashes with `:1`) |
+| skills `cycle-a` / `cycle-b` | each other |
+
+`project-deps/` declares only `pr-assistant`, `triage-bot` and
+`commit-conventions`.
+
+```sh
+source test/manual/scripts/env.sh
+cd test/manual/project-deps
+grim lock && grim install          # also installs docs-search, security-baseline, code-reviewer, commit-helper
+grim status                        # Source column: "direct" vs "dependency: <required_by>"
+grim status --format json          # "direct": false + "required_by": [...]
+grim why skill commit-helper       # two chains: the diamond merged into one install
+grim why mcp docs-search           # skill/pr-assistant -> mcp/docs-search
+grim describe localhost:5050/grimoire/skills/pr-assistant:1   # requires row
+
+# Removing a dependent removes what only it needed.
+grim remove skill pr-assistant     # security-baseline + docs-search leave; commit-helper stays
+grim add localhost:5050/grimoire/skills/pr-assistant:1        # "pulled in 2 dependencies"
+
+# Nested closure: bundle -> member -> member's dependency.
+grim add localhost:5050/grimoire/bundles/dev-suite:1
+grim why skill pr-assistant        # direct, and via bundle/dev-suite
+grim remove bundle dev-suite       # members stay: they are declared directly
+
+# Conflict (exit 78): triage-bot wants commit-helper:1, conflict-demo wants :2.
+grim add localhost:5050/grimoire/skills/conflict-demo:1; echo $?
+# Cycle (exit 65): cycle-a -> cycle-b -> cycle-a.
+grim add localhost:5050/grimoire/skills/cycle-a:1; echo $?
+```
+
+Failed adds leave `grimoire.toml` untouched. In `grim tui` (run it in
+`project-deps/`), a dependency's detail pane has a **Required by** row. The
+local index (`index/all.json`) lists the new artifacts too; browse them with
+`grim tui --global`. That index is static JSON served by nginx, not an indexer
+site, so it has no web details page.
+
+**VS Code:** the extension runs the `grim` it finds on its own `PATH`, which
+is not `env.sh`'s. A released grim (0.15.x and older) cannot read a requires
+layer, so the Dependencies panel stays empty and installing a dependent fails
+with exit 65. Point `grimoire.path.executable` at the absolute path of this
+checkout's `test/bin/grim` (the setting takes no `${workspaceFolder}`), then
+open `project-deps/`.
 
 ## Teardown
 
