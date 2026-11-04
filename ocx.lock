@@ -1,9 +1,9 @@
 [metadata]
 lock_version = 3
 declaration_hash_version = 1
-declaration_hash = "sha256:047183044bad77eef766fb36a9ea59bb8380923a332790151c9ae825889a74a1"
+declaration_hash = "sha256:fa86188fc883c1e208b36207300e7aa920e1d3a9e2732854c29ae6a98f769e06"
 generated_by = "ocx 0.6.5"
-generated_at = "2026-10-22T02:06:59Z"
+generated_at = "2026-11-04T16:39:44Z"
 
 [[tool]]
 name = "node"
@@ -17,6 +17,21 @@ repository = "ocx.sh/nodejs/node"
 "linux/arm64+libc.glibc" = "sha256:76aaeb829ea9d40c4092d1c176da35edd1260b75d1bf911f48829da392347a69"
 "windows/amd64" = "sha256:737687a6e9eb4fa7d168529eae2eb291d5c0dee76e02e5758b2d27f6f1b48aa6"
 "windows/arm64" = "sha256:af5f53029aa40b512e7e795adfbdeada4a7d1db362b312982cea58348ad901c2"
+
+[[tool]]
+name = "uv"
+group = "default"
+repository = "ocx.sh/astral-sh/uv"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:21a3dd610feb51da4759dda7b7f83d325293b1d469aaf16ffe5cc4d2ab1ffdd3"
+"darwin/arm64" = "sha256:e9af65e1058065dd26ac6c55beb72a5504cf9ba781eb26c0069bae89920899e9"
+"linux/amd64" = "sha256:32a74f10dfaffe981edcf4371b1cb3df154f6360156ecd10dbfa686c5367f25a"
+"linux/amd64+libc.glibc" = "sha256:981fcbc7e06ff20a401bea31bcb193481a2e2c5c848dd8cedfbcc380d80cacfc"
+"linux/arm64" = "sha256:db665b5953bec2cd920647feeb1a04f583d6179be2eb6cfeb911b5e6504581ce"
+"linux/arm64+libc.glibc" = "sha256:17f7588ddb14773c874331159b73dfa7f8de8ea9e44fe8c2a3038bcc5a1d0207"
+"windows/amd64" = "sha256:dcbc138eecd7dd5143057eec632efd18430e3844a6025b650a366176a0903a02"
+"windows/arm64" = "sha256:34631e9527900cce0ed2dd75a54014e4250c5685d26a6cf580c34f6fa13b723d"
 
 [[tool]]
 name = "zot"
