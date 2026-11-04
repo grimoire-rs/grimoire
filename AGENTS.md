@@ -190,10 +190,10 @@ on a matching `<type>/<topic>` branch (e.g. `../grimoire-wt-status-check` on
 not a fixed roster; whoever creates one removes it. `git worktree list`
 shows what is currently checked out.
 
-**Commits**: Use [Conventional Commits](https://www.conventionalcommits.org/)
-(e.g., `feat:`, `fix:`, `refactor:`, `ci:`, `chore:`). Scopes optional. No
-`Co-Authored-By` trailers. Use `chore:` for AI settings, skills, agent
-context files, and tooling that should not appear in the changelog.
+**Commits**: [Conventional Commits](https://www.conventionalcommits.org/)
+(`feat:`, `fix:`, `ci:`, `chore:`, …), scopes optional, no `Co-Authored-By`.
+**Always sign off** (DCO): `git commit -s`; CI blocks without it (`task git:dco`).
+`chore:` for AI settings, skills, agent context, tooling kept out of the changelog.
 
 **Landing a feature**: When a feature is done, run `/finalize` to clean
 branch history into a sequence of Conventional Commits ready to

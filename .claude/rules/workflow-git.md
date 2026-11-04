@@ -22,6 +22,7 @@ Shared branch-and-commit hygiene for Grimoire. Used by `/commit` skill (working 
 - **Never push.** Push triggers CI, real cost. Human decides when push. No skill, agent, automation push on own.
 - **Never `--no-verify`, `--no-gpg-sign`, or any hook-skipping flag.** Hook fail → fix root cause, new commit — hook fail means commit did not happen, so `--amend` would rewrite *previous* commit.
 - **Never `Co-Authored-By`** in commit messages. Grimoire convention.
+- **Always sign off (DCO).** Every commit needs `Signed-off-by` matching the author: `git commit -s`, also for amends and Checkpoints. Missing → `git rebase --signoff main`; check `task git:dco`. CI's DCO job fails otherwise (CONTRIBUTING.md › License).
 
 ## Two-Phase Model
 
@@ -59,6 +60,7 @@ Branch ready to fast-forward onto `main` when **all** hold:
 
 - [ ] Rebased on top of current `main` (no merge commits in `main..HEAD`)
 - [ ] Every commit in `main..HEAD` has Conventional Commits subject
+- [ ] Every commit in `main..HEAD` is signed off (`task git:dco`)
 - [ ] No `Checkpoint` commits remain
 - [ ] No "bundle" commits mixing unrelated concerns (working-phase bundles must split or squash)
 - [ ] Each commit one concern

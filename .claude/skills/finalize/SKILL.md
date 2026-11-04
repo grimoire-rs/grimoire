@@ -153,7 +153,7 @@ When `--squash-all` passed, skip steps 2–4, instead:
 3. Execute:
    ```sh
    git reset --soft main
-   git commit -m "$(cat <<'EOF'
+   git commit -s -m "$(cat <<'EOF'
    <drafted message>
    EOF
    )"
