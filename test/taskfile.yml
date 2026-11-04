@@ -23,7 +23,7 @@ tasks:
       - task: build
         vars:
           SKIP_BUILD: "{{.SKIP_BUILD}}"
-      # ocx exec puts zot (pinned in the root ocx.toml) on PATH for the suite.
+      # ocx exec puts zot and uv (both pinned in the root ocx.toml) on PATH.
       # index_e2e and bench need inputs the ordinary run lacks; they have their
       # own tasks and deep-verify jobs.
       - ocx exec -- uv run pytest -m "not index_e2e and not bench" {{.CLI_ARGS | default "-v"}}
