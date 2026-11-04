@@ -44,7 +44,7 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 | GitHub issues & PRs / planning artifacts | [workflow-github.md](./rules/workflow-github.md), [workflow-feature.md](./rules/workflow-feature.md) |
 | Commits, branches, rebasing, landing on main | [workflow-git.md](./rules/workflow-git.md), skills `commit`, `finalize` |
 | Plan progress tracking (Status block + `.claude/state/current_plan.md`) | [meta-ai-config.md](./rules/meta-ai-config.md) "Plan Status Protocol", `/hex-plan`, `/hex-execute`, `/hex-review`, skills `commit`, `finalize`, `next` |
-| Multi-agent orchestration | [workflow-feature.md](./rules/workflow-feature.md) — the **hex** bundle (`/hex-plan`, `/hex-execute`, `/hex-review`, `/hex-architect`), installed at user level; swarm memory `.agents/memory/hex.md` |
+| Multi-agent orchestration | [workflow-feature.md](./rules/workflow-feature.md) — the **hex** bundle (`/hex-plan`, `/hex-execute`, `/hex-review`, `/hex-architect`), installed at project scope via the root `grimoire.toml`; swarm memory `.agents/memory/hex.md` |
 | Code quality audit | [quality-core.md](./rules/quality-core.md), `quality-{lang}.md`, skill `code-check` |
 | Source comments, doc comments, help/schema text | [code-docs.md](./rules/code-docs.md) (vendored), skill `code-docs-cleanup` for bulk shortening |
 | Error type design (Rust) | [quality-rust.md](./rules/quality-rust.md), [quality-rust-errors.md](./rules/quality-rust-errors.md) |

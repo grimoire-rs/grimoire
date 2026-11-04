@@ -209,8 +209,8 @@ are committed under `./.agents/`: `adr/`, `specs/`, `plans/` (incl.
 
 ## Skills & Personas
 
-Multi-agent orchestration is the **hex** bundle, installed at user level
-(not in this repo): `/hex-plan`, `/hex-execute`, `/hex-review`,
+Multi-agent orchestration is the **hex** bundle, installed at project
+scope from the committed `grimoire.toml`/`grimoire.lock`: `/hex-plan`, `/hex-execute`, `/hex-review`,
 `/hex-architect`, `/hex-init`. They read swarm memory from
 `.agents/memory/hex.md` — pointers, the model matrix, always-on review
 perspectives, and the cross-model adversary.

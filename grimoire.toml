@@ -1,0 +1,12 @@
+#:schema https://grimoire.rs/schemas/grimoire-config.schema.json
+
+[options]
+clients = ["claude"]
+
+[bundles]
+hex = "ghcr.io/michael-herwig/arcana/hex:latest"
+nox = "ghcr.io/michael-herwig/arcana/nox:latest"
+
+[skills]
+
+[rules]

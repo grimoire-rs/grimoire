@@ -1,0 +1,152 @@
+agent = []
+
+[metadata]
+lock_version = 1
+declaration_hash_version = 1
+declaration_hash = "sha256:e88a823bcacc03aa8821a598c06eee20733add9f8d74a68488eb4fe55eccda13"
+generated_by = "grim 0.15.1"
+generated_at = "2026-11-04T11:46:41Z"
+
+[[skill]]
+name = "hex-architect"
+pinned = "ghcr.io/michael-herwig/arcana/hex-architect@sha256:fe82336b75b7ec77723f95c4280791c166e0a4c5b998c80ec6f5309794ef2bfa"
+bundle = "ghcr.io/michael-herwig/arcana/hex"
+bundle_tag = "latest"
+
+[[skill]]
+name = "hex-core"
+pinned = "ghcr.io/michael-herwig/arcana/hex-core@sha256:64bedd5231c6d5c40bdae408861b53224128e2fec8d761d53e67f019b5fb2c39"
+bundle = "ghcr.io/michael-herwig/arcana/hex"
+bundle_tag = "latest"
+
+[[skill]]
+name = "hex-discuss"
+pinned = "ghcr.io/michael-herwig/arcana/hex-discuss@sha256:b0e014bb782defe9ef3d3cf24836bd6d37ba06de756cc369cc6a9c4d158584ed"
+bundle = "ghcr.io/michael-herwig/arcana/hex"
+bundle_tag = "latest"
+
+[[skill]]
+name = "hex-execute"
+pinned = "ghcr.io/michael-herwig/arcana/hex-execute@sha256:b74c31371e0861a500b15b48b2f80733477ac454b449967d816b19a9ddbe01c2"
+bundle = "ghcr.io/michael-herwig/arcana/hex"
+bundle_tag = "latest"
+
+[[skill]]
+name = "hex-finalize"
+pinned = "ghcr.io/michael-herwig/arcana/hex-finalize@sha256:d2522bd7ec97a6dc8775f1bcdc5c7ad1134df5d89732a5d174d0edc82378fb21"
+bundle = "ghcr.io/michael-herwig/arcana/hex"
+bundle_tag = "latest"
+
+[[skill]]
+name = "hex-init"
+pinned = "ghcr.io/michael-herwig/arcana/hex-init@sha256:1a5635f72309ae4f19ff141440fe29dca59ef924333182de723474a7a157d46b"
+bundle = "ghcr.io/michael-herwig/arcana/hex"
+bundle_tag = "latest"
+
+[[skill]]
+name = "hex-loop"
+pinned = "ghcr.io/michael-herwig/arcana/hex-loop@sha256:59ccc12245adfa8e0f7531ae3edb819acefeda012f8f37b2c8e8df4402b3ff7f"
+bundle = "ghcr.io/michael-herwig/arcana/hex"
+bundle_tag = "latest"
+
+[[skill]]
+name = "hex-plan"
+pinned = "ghcr.io/michael-herwig/arcana/hex-plan@sha256:e594ea45774a01d1cf0e7e09822ebde72bab7000dcbdc5ec53652e2a2b839684"
+bundle = "ghcr.io/michael-herwig/arcana/hex"
+bundle_tag = "latest"
+
+[[skill]]
+name = "hex-retro"
+pinned = "ghcr.io/michael-herwig/arcana/hex-retro@sha256:963b6d3a969afc311d4283ea11ea6a8c31ef56a20a45f5c5cb14101cc223ae88"
+bundle = "ghcr.io/michael-herwig/arcana/hex"
+bundle_tag = "latest"
+
+[[skill]]
+name = "hex-review"
+pinned = "ghcr.io/michael-herwig/arcana/hex-review@sha256:843ba7b434ad2a1d9cc7935b219b79286ce0767c7e1f2d6f95b324bb1acce536"
+bundle = "ghcr.io/michael-herwig/arcana/hex"
+bundle_tag = "latest"
+
+[[skill]]
+name = "nox-review"
+pinned = "ghcr.io/michael-herwig/arcana/nox-review@sha256:a74d455996a2b0f1f8fa3e753ff8000fdeab0138ac55db91ab8a6e7751026668"
+bundle = "ghcr.io/michael-herwig/arcana/nox"
+bundle_tag = "latest"
+
+[[rule]]
+name = "hex-state"
+pinned = "ghcr.io/michael-herwig/arcana/hex-state@sha256:c06128ffd9ea8af07de24f950d351b9fb04358748cc0c3be522be03d8489a52f"
+bundle = "ghcr.io/michael-herwig/arcana/hex"
+bundle_tag = "latest"
+
+[[bundle]]
+name = "hex"
+repo = "ghcr.io/michael-herwig/arcana/hex"
+tag = "latest"
+pinned = "ghcr.io/michael-herwig/arcana/hex@sha256:82a89b7441bc2ac09be18b30a6ac8ce935cd554b8885192f9cb4e1005c59944d"
+
+[[bundle.member]]
+kind = "skill"
+name = "hex-architect"
+id = "ghcr.io/michael-herwig/arcana/hex-architect:latest"
+
+[[bundle.member]]
+kind = "skill"
+name = "hex-core"
+id = "ghcr.io/michael-herwig/arcana/hex-core:latest"
+
+[[bundle.member]]
+kind = "skill"
+name = "hex-discuss"
+id = "ghcr.io/michael-herwig/arcana/hex-discuss:latest"
+
+[[bundle.member]]
+kind = "skill"
+name = "hex-execute"
+id = "ghcr.io/michael-herwig/arcana/hex-execute:latest"
+
+[[bundle.member]]
+kind = "skill"
+name = "hex-finalize"
+id = "ghcr.io/michael-herwig/arcana/hex-finalize:latest"
+
+[[bundle.member]]
+kind = "skill"
+name = "hex-init"
+id = "ghcr.io/michael-herwig/arcana/hex-init:latest"
+
+[[bundle.member]]
+kind = "skill"
+name = "hex-loop"
+id = "ghcr.io/michael-herwig/arcana/hex-loop:latest"
+
+[[bundle.member]]
+kind = "skill"
+name = "hex-plan"
+id = "ghcr.io/michael-herwig/arcana/hex-plan:latest"
+
+[[bundle.member]]
+kind = "skill"
+name = "hex-retro"
+id = "ghcr.io/michael-herwig/arcana/hex-retro:latest"
+
+[[bundle.member]]
+kind = "skill"
+name = "hex-review"
+id = "ghcr.io/michael-herwig/arcana/hex-review:latest"
+
+[[bundle.member]]
+kind = "rule"
+name = "hex-state"
+id = "ghcr.io/michael-herwig/arcana/hex-state:latest"
+
+[[bundle]]
+name = "nox"
+repo = "ghcr.io/michael-herwig/arcana/nox"
+tag = "latest"
+pinned = "ghcr.io/michael-herwig/arcana/nox@sha256:e3f7b7da5585e76ced77bcd5ab8f8efe390e997763a98eb1eb32d86d7332435b"
+
+[[bundle.member]]
+kind = "skill"
+name = "nox-review"
+id = "ghcr.io/michael-herwig/arcana/nox-review:latest"
