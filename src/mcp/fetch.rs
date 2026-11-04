@@ -20,7 +20,7 @@ use super::tool_args::FetchToolArgs;
 /// Run the `grim_fetch` tool: resolve scope + access, then fetch the shape the
 /// flags select. Documents cap at [`crate::fetch::FETCH_DOC_SIZE_LIMIT`] (a
 /// truncated doc is still useful in a tool result); a `description` companion
-/// is bounded by the 8 MiB layer gate instead, with no per-file truncation.
+/// is bounded by the 32 MiB layer gate instead, with no per-file truncation.
 ///
 /// # Errors
 ///

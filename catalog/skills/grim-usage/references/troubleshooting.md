@@ -137,7 +137,7 @@ Common causes, roughly in order of frequency:
 - **Oversize blob.** A registry serving more bytes than its manifest
   declared for a layer aborts the download mid-transfer rather than
   buffering an unbounded body. Reachable from `grim fetch` (also gated by
-  an 8 MiB pre-download check on the declared size; since 0.15 the same
+  a 32 MiB pre-download check on the declared size; since 0.15 the same
   limit also bounds the **decoded** content of a gzip layer, so a small
   compressed layer that expands past it exits 65 — layer encoding rules:
   [artifacts][layers]) and from

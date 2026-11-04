@@ -12,7 +12,7 @@
 //! fetch report.
 //!
 //! Unlike the MCP tool the CLI never truncates: the per-document cap is
-//! the 8 MiB pre-download layer gate, so any layer that passes the gate
+//! the 32 MiB pre-download layer gate, so any layer that passes the gate
 //! prints byte-complete. Non-fatal warnings go to stderr via `tracing` so
 //! the stdout payload stays clean.
 
@@ -98,7 +98,7 @@ pub async fn run(ctx: &Context, args: &FetchArgs, format: OutputFormat) -> anyho
 
     let scope = crate::command::resolve_fetch_scope(ctx, ctx.global(), ctx.config(), None)?;
     let access = crate::command::access_seam(ctx)?;
-    // The layer gate (8 MiB, pre-download) is the effective ceiling, so with
+    // The layer gate (32 MiB, pre-download) is the effective ceiling, so with
     // the same value as the doc cap, truncation is unreachable and the plain
     // payload pipes byte-complete.
     let outcome = crate::fetch::fetch_outcome(

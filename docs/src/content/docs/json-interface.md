@@ -812,7 +812,7 @@ plus inline `content` (base64 for binary members) — so a consumer already
 written against that shape maps onto it directly. Every `files[].path` is
 `/`-separated on every OS, Windows included.
 
-Bounded by the same 8 MiB layer gate as any fetch, with no per-file
+Bounded by the same 32 MiB layer gate as any fetch, with no per-file
 truncation — the whole companion returns in one call. A multi-file bundle
 has no single payload to print, so plain mode requires
 [`--out <dir>`](./commands.md#fetch-description) to unpack the tree to
@@ -1089,7 +1089,7 @@ are **not byte-identical**: the MCP server serializes compact JSON
 same shape as `grim fetch --format json` — except the MCP tool truncates
 `content` at 256 KiB for tool-result budgets, while the CLI never
 truncates a printed payload. Both share the same two download ceilings:
-the manifest's declared layer size is checked against the 8 MiB limit
+the manifest's declared layer size is checked against the 32 MiB limit
 before download, and that declared size then bounds the actual streamed
 bytes — a registry serving more than it declared aborts mid-transfer into
 a data error (exit 65) on either interface. The tool's `description` and

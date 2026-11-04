@@ -58,7 +58,7 @@ use crate::resolve::{ResolveError, ResolveErrorKind};
 /// declared aborts mid-stream into `OversizeBlob` instead of growing an
 /// unbounded body in memory (CWE-770). Skill/rule/agent layers have no
 /// publish-side cap of their own, so this is their only ceiling.
-pub const FETCH_BLOB_SIZE_LIMIT: u64 = 8 * 1024 * 1024;
+pub const FETCH_BLOB_SIZE_LIMIT: u64 = 32 * 1024 * 1024;
 
 /// Upper bound on any single document returned in a tool result. Content
 /// beyond this truncates (with a marker) rather than erroring — a truncated
@@ -224,7 +224,7 @@ pub struct DescriptionFile {
 /// companion with every member inline.
 ///
 /// JSON format: `{ref, digest, kind: "desc", files: [{path, size, content,
-/// encoding?}], warnings?}`. Every member is inline (bounded by the 8 MiB
+/// encoding?}], warnings?}`. Every member is inline (bounded by the 32 MiB
 /// layer gate, no per-file truncation) so the consumer reads the entire
 /// companion in one call.
 #[derive(Debug, Serialize)]
@@ -442,7 +442,7 @@ pub async fn fetch_artifact(
 /// each returned document at `doc_limit`.
 ///
 /// The MCP tool passes [`FETCH_DOC_SIZE_LIMIT`] (a truncated doc is still
-/// useful in a tool result); the `grim fetch` CLI passes the 8 MiB
+/// useful in a tool result); the `grim fetch` CLI passes the 32 MiB
 /// [`FETCH_BLOB_SIZE_LIMIT`], which the pre-download layer gate already
 /// enforces — so CLI truncation is unreachable and the payload pipes
 /// byte-complete.
@@ -693,7 +693,7 @@ async fn companion_support(
 ///
 /// The repository is retargeted to the internal companion tag before
 /// resolution; the result must be a `com.grimoire.kind: desc` companion.
-/// Bounded by the 8 MiB layer gate — no per-file truncation, so the whole
+/// Bounded by the 32 MiB layer gate — no per-file truncation, so the whole
 /// companion returns in one call.
 ///
 /// # Errors
@@ -722,7 +722,7 @@ pub async fn fetch_description(
     }
     let warnings = std::mem::take(&mut fetched.warnings);
 
-    // The whole companion is bounded by the 8 MiB layer gate above, so a
+    // The whole companion is bounded by the 32 MiB layer gate above, so a
     // per-file limit of that size never truncates a member. An empty
     // companion is rejected here (data error, 65) by the unpack guard.
     let entries = wrap(unpack_tar_in_memory(&fetched.blob, FETCH_BLOB_SIZE_LIMIT))?;
@@ -2045,7 +2045,7 @@ mod tests {
         assert!(!files(&gz).is_empty());
     }
 
-    /// A gzip layer that decodes past the 8 MiB fetch cap is a data error on
+    /// A gzip layer that decodes past the 32 MiB fetch cap is a data error on
     /// both tar read paths of `grim fetch`, never a truncated payload.
     #[tokio::test]
     async fn gzip_layer_decoding_past_the_fetch_cap_is_data_error() {
@@ -2083,6 +2083,43 @@ mod tests {
             let c = crate::error::classify(&err);
             assert_eq!((c.exit, c.reason), (crate::cli::exit_code::ExitCode::DataError, None));
         }
+    }
+
+    /// A raw layer past the former 8 MiB gate fetches whole on both tar read
+    /// paths of `grim fetch`: the declared size clears the pre-download gate
+    /// and nothing truncates.
+    #[tokio::test]
+    async fn layer_past_the_former_8_mib_gate_fetches_whole() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = MemoryRegistry::new();
+        let head = "---\nname: demo\ndescription: d.\n---\n";
+        let doc = format!("{head}{}", "x".repeat(8 * 1024 * 1024 + 1 - head.len()));
+        let skill = tar_of(&[("demo/SKILL.md", doc.as_bytes())]);
+        let companion = tar_of(&[("README.md", doc.as_bytes())]);
+        assert!(
+            skill.len() as u64 > 8 * 1024 * 1024,
+            "declared size passes the old gate"
+        );
+        publish(&reg, "test.registry/acme/skills/demo:latest", "skill", &skill).await;
+        publish(&reg, "test.registry/acme/skills/demo:__grimoire", "desc", &companion).await;
+        let (scope, access) = scope_and_access(&reg, tmp.path(), tmp.path());
+        let reference = "test.registry/acme/skills/demo:latest";
+
+        let fetched = fetch_with_limit(&scope, &access, reference, None, None, FETCH_BLOB_SIZE_LIMIT as usize)
+            .await
+            .expect("fetch under the 32 MiB gate");
+        assert!(!fetched.truncated);
+        assert_eq!(fetched.content, doc);
+
+        let description = fetch_description(&scope, &access, reference, None)
+            .await
+            .expect("companion under the 32 MiB gate");
+        let readme = description
+            .files
+            .iter()
+            .find(|f| f.path == "README.md")
+            .expect("README.md");
+        assert_eq!(readme.content, doc);
     }
 
     /// Every layer refusal reaches `fetch_artifact`'s anyhow caller as
