@@ -199,9 +199,9 @@ def test_fetch_agent_readme_listed_and_pullable(
 def test_fetch_large_content_is_not_truncated(
     grim_at, project_dir: Path, registry: str
 ) -> None:
-    """Pins the cap decision: the CLI never truncates below the 8 MiB
+    """Pins the cap decision: the CLI never truncates below the 32 MiB
     layer gate — content past the MCP 256 KiB doc cap prints complete."""
-    big_body = "x" * (300 * 1024)  # > 256 KiB MCP cap, < 8 MiB gate
+    big_body = "x" * (300 * 1024)  # > 256 KiB MCP cap, < 32 MiB gate
     doc = f"---\nname: big\ndescription: d.\n---\n{big_body}\n"
     ns = f"grim-test/{uuid.uuid4().hex[:12]}"
     repo = f"{ns}/skills/big"

@@ -1835,7 +1835,7 @@ stdout a pure payload.
 Unlike the MCP tool — which truncates documents at 256 KiB for tool-result
 budgets — the CLI **never truncates** a printed payload. Two ceilings guard
 the download instead, with different failure modes: the manifest's
-declared layer size is checked against the 8 MiB limit *before* download
+declared layer size is checked against the 32 MiB limit *before* download
 (a cheap reject for an honestly-oversized layer, exit 65), and that same
 declared size then bounds the *actual* streamed bytes — a registry that
 serves more than it declared aborts mid-transfer into a data error (exit
@@ -1850,9 +1850,9 @@ layer only; the dependency list is not part of the payload, and
 [`grim describe`](#describe) reports it. A manifest that declares a feature
 this grim does not know exits 65 with reason `unsupported-artifact-feature`.
 
-The 8 MiB limit bounds **decoded content**. A [gzip layer](./artifacts.md#layers)
+The 32 MiB limit bounds **decoded content**. A [gzip layer](./artifacts.md#layers)
 is decompressed under the same limit, so a small compressed layer that expands
-past 8 MiB exits 65 and is never truncated. The MCP `grim_fetch` tool and the
+past 32 MiB exits 65 and is never truncated. The MCP `grim_fetch` tool and the
 description companion follow the same rule.
 
 ### Description companion (--description) {#fetch-description}
@@ -1871,7 +1871,7 @@ grim fetch ghcr.io/acme/mcp/postgres --description --out ./docs   # unpack the t
 
 The JSON shape is `{ref, digest, kind: "desc", files: [{path, size,
 content, encoding?}], warnings?}` — every member inline (`encoding:
-"base64"` only for a binary member), bounded by the same 8 MiB layer gate
+"base64"` only for a binary member), bounded by the same 32 MiB layer gate
 as any fetch and never per-file truncated, so the whole companion —
 README, logo, changelog, and any README-referenced assets — comes back in
 one report. A multi-file bundle has no single payload to print, so plain
@@ -3196,7 +3196,7 @@ down when the client closes stdin (EOF).
 |------|-------------|------|
 | `grim_search` | Browse/search the resolved scope's registries (no registry override — the configured set is the boundary). Each source's [browse filter](./configuration.md#browse-filters) narrows the results, exactly as for `grim search`; the tool's own description says so, and says that an absent package is still fetchable and installable by direct reference — a filter is a view, never a boundary. Args: `query?`, `refresh?`, `limit?` (positive integer, the same cap as `grim search --limit`), `offset?` (non-negative integer, the same skip as `grim search --offset`; a negative or non-integer value is an invalid-params error), scope. The payload still carries `total` and `truncated`; page with the [recipe][json-search-paging]. An unpaged call on a large index can return tens of megabytes, so pass `limit` and `offset`. `total`, `truncated` and `sources[].capped` report the cut. Same shape as `grim search --format json` (not byte-identical — see [MCP parity][json-mcp-parity]). | always |
 | `grim_status` | Install status of every declared artifact in the requested scope. `check` (optional, default `false`) re-checks the live catalog for deprecation/replacement and re-resolves update availability — same semantics as CLI `grim status --check` (network read; the report's `checked` field says whether it ran). Args: `check?`, scope. Same shape as `grim status --format json` (not byte-identical — see [MCP parity][json-mcp-parity]). | always |
-| `grim_fetch` | Return an artifact's content in the tool result — no install. Canonical bytes by default; `vendor` (any supported client name — see the [client compatibility matrix][clients-matrix]) returns that client's projection; `path` fetches one support file (base64 with `encoding: "base64"` for a binary file); a `files` listing is always included. `description` fetches the repository's [description companion](./publishing.md#description-companion) instead (every member inline); `digest_only` resolves to `{ref, digest}` with no download and composes with `description` to probe the companion tag. Content caps at 256 KiB (truncated content carries a marker); layers over 8 MiB are refused before download, and a registry that streams more bytes than its declared layer size aborts mid-transfer into a data error rather than buffering an unbounded body. Args: `ref`, `vendor?`, `path?`, `description?`, `digest_only?`, scope. | always |
+| `grim_fetch` | Return an artifact's content in the tool result — no install. Canonical bytes by default; `vendor` (any supported client name — see the [client compatibility matrix][clients-matrix]) returns that client's projection; `path` fetches one support file (base64 with `encoding: "base64"` for a binary file); a `files` listing is always included. `description` fetches the repository's [description companion](./publishing.md#description-companion) instead (every member inline); `digest_only` resolves to `{ref, digest}` with no download and composes with `description` to probe the companion tag. Content caps at 256 KiB (truncated content carries a marker); layers over 32 MiB are refused before download, and a registry that streams more bytes than its declared layer size aborts mid-transfer into a data error rather than buffering an unbounded body. Args: `ref`, `vendor?`, `path?`, `description?`, `digest_only?`, scope. | always |
 | `grim_describe` | Report an artifact's manifest-level metadata — kind, curated annotations, tags, `has_description`, and the verbatim annotation map — without downloading its content. Same shape as `grim describe --format json`. Args: `ref`, scope. | always |
 | `grim_render` | Write an artifact's vendor-native files into an arbitrary `dest_dir` (created if absent) — no install state, no client-config edits. Skill → `<dest_dir>/<name>/`, rule/agent → `<dest_dir>/<name>.md`. Args: `ref`, `vendor`, `dest_dir`, scope. | `--allow-writes` |
 

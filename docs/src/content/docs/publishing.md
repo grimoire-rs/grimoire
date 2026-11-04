@@ -229,7 +229,7 @@ grim fetch ghcr.io/acme/mcp/postgres --description --out ./docs                 
 ```
 
 `--format json` reports `kind: "desc"` and every packed file inline in
-`files[]`, in one call, bounded by the same 8 MiB layer gate as any fetch.
+`files[]`, in one call, bounded by the same 32 MiB layer gate as any fetch.
 That covers the README, the logo, the changelog, and any README-referenced
 assets. A repository with no companion published returns a clean *not-found*
 error, so a consumer can fall back to an in-tree README.
