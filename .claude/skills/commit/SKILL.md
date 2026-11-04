@@ -61,8 +61,8 @@ Two sub-cases by working tree state:
 
 | Sub-case | Behavior |
 |---|---|
-| **Dirty tree** (unstaged/untracked changes exist) | **Auto-amend** — stage all changed files by name and `git commit --amend --no-edit`. No question. Rolling Checkpoints absorb all active changes as union. Report what folded in. |
-| **Clean tree** (no changes, Checkpoint holds accumulated work) | Checkpoint itself is deliverable. Draft conventional commit message from Checkpoint diff (`git diff main..HEAD`), show, amend: `git commit --amend -m "<drafted message>"`. "Finalize in place" path — user called `/commit` to give Checkpoint real name. |
+| **Dirty tree** (unstaged/untracked changes exist) | **Auto-amend** — stage all changed files by name and `git commit -s --amend --no-edit`. No question. Rolling Checkpoints absorb all active changes as union. Report what folded in. |
+| **Clean tree** (no changes, Checkpoint holds accumulated work) | Checkpoint itself is deliverable. Draft conventional commit message from Checkpoint diff (`git diff main..HEAD`), show, amend: `git commit -s --amend -m "<drafted message>"`. "Finalize in place" path — user called `/commit` to give Checkpoint real name. |
 
 **Case B — `Checkpoint` exists at HEAD~1..HEAD~5 but not HEAD (stranded)**: warn user. Means previous session made real work inside Checkpoint then landed other commits on top without finalizing. Offer:
 
@@ -80,7 +80,7 @@ On worktree branch, prefer one of:
 
 1. **Amend HEAD** when HEAD is fresh local commit you authored (not yet touching `main`'s reach) **and** new WIP clearly continuation of same concern. Ask first — amending destructive to commit hashes.
 2. **New commit on top** when HEAD already represents distinct concern.
-3. **Start Checkpoint** (`git commit -m "Checkpoint"`) when user says "save progress" or WIP not yet coherent enough to name.
+3. **Start Checkpoint** (`git commit -s -m "Checkpoint"`) when user says "save progress" or WIP not yet coherent enough to name.
 
 On non-worktree branch: never auto-amend. Always create new commit unless `/commit --amend` passed.
 
@@ -95,6 +95,7 @@ Follow **Conventional Commits v1.0.0**. See [`commit_reference.md`](./commit_ref
 - Body explains **why**, not what, when non-obvious
 - Breaking: `!` before colon **and** `BREAKING CHANGE:` footer
 - **Never** `Co-Authored-By` (Grimoire convention)
+- **Always** `-s`: DCO `Signed-off-by` on every commit, CI checks it (`task git:dco`)
 
 **Working-phase bundles legitimate.** If staged diff covers multiple concerns, `chore(claude): bundle <what>` style subject with body honestly listing clusters acceptable. Flag at body end that it will split or reword during `/finalize`.
 
@@ -128,7 +129,7 @@ Otherwise, `AskUserQuestion`:
 - Commit with HEREDOC:
 
   ```sh
-  git commit -m "$(cat <<'EOF'
+  git commit -s -m "$(cat <<'EOF'
   <type>[scope]: <description>
 
   <optional body explaining why>
