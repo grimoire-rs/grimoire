@@ -15,10 +15,10 @@
 //!   (global). Warp's own directory, **not** the shared pool.
 //! - **Pool-capable, and the distinction matters.** Warp scans
 //!   `.agents/skills` at both scopes, first-party confirmed, so it is on
-//!   [`POOL_CAPABLE_VENDORS`](super::vendor) — but *capable* means eligible
-//!   for the `[options.vendors.warp].shared_skills` opt-in, not that grim
-//!   writes the pool by default. Native rendering is always the default, and
-//!   the pool is the fallback of last resort. Warp's `.warp/skills/` is a
+//!   [`POOL_CAPABLE_VENDORS`](super::vendor) — but *capable* means its skills
+//!   join the pool only beside a client that writes it unconditionally, or
+//!   when `[options.vendors.warp].shared_skills` pins the choice. Alone, Warp
+//!   renders natively. Warp's `.warp/skills/` is a
 //!   first-class entry in its own scanned list — not deprecated, unlike
 //!   Goose's `.goose/skills/` — so the owner principle applies and grim writes
 //!   the vendor-specific directory.
@@ -164,9 +164,8 @@ impl Vendor for WarpVendor {
 
     fn skill_index(&self, doc: &str) -> Result<Option<RenderedDoc>, RenderError> {
         // Universal shape (registry empty; verbatim fast path for a plain
-        // skill). Warp renders NATIVELY by default; the empty registry is also
-        // what keeps it safe to opt into the shared pool, where its bytes must
-        // be identical to every other member's.
+        // skill). The empty registry is what keeps it safe in the shared pool,
+        // where its bytes must be identical to every other member's.
         render::render_skill_doc(doc, self)
     }
 
@@ -287,8 +286,8 @@ mod tests {
     fn renders_natively_by_default_despite_being_pool_capable() {
         // The distinction that separates Warp from Goose: both scan the pool,
         // but Warp's own `.warp/skills/` is first-class upstream (Goose's is
-        // labelled back-compat), so Warp renders native and reaches the pool
-        // only through the `shared_skills` opt-in.
+        // labelled back-compat), so Warp's own root is native; the pool is
+        // chosen per install (`expected_outputs::destination`), not here.
         let ws = Path::new("/w");
         assert_eq!(
             WarpVendor.skills_root(ws, ConfigScope::Project),
@@ -300,10 +299,10 @@ mod tests {
                 .starts_with(ws.join(".agents")),
             "pool-capable must not mean pool-by-default"
         );
-        assert!(WarpVendor.pool_capable(), "eligible for the shared_skills opt-in");
+        assert!(WarpVendor.pool_capable(), "eligible to join the shared pool");
         assert!(
             WarpVendor.skill_fields().is_empty(),
-            "an opt-in member must render the universal bytes"
+            "a pool member must render the universal bytes"
         );
     }
 

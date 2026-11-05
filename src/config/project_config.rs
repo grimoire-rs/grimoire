@@ -725,7 +725,8 @@ fn validate_vendors(vendors: &BTreeMap<String, VendorOptions>, path: &Path) -> R
         // on a client that never reads the pool is refused here for the same
         // reason `config set` refuses it — otherwise grim would write where
         // nothing reads, silently.
-        if opts.shared_skills {
+        // `false` is an opt-out and fine on any client.
+        if opts.shared_skills == Some(true) {
             check_pool_capable(name)
                 .map_err(|detail| ConfigError::new(path.to_path_buf(), ConfigErrorKind::VendorsInvalid { detail }))?;
         }
@@ -2625,7 +2626,7 @@ tree_separators = ["/", "::"]
         let cfg = ProjectConfig::from_toml_str("[options.vendors.cursor]\nshared_skills = true\n")
             .expect("a valid authored vendor entry must parse");
         assert!(
-            cfg.options.vendors["cursor"].shared_skills,
+            cfg.options.vendors["cursor"].shared_skills == Some(true),
             "the authored value must survive the parse"
         );
     }
@@ -2650,11 +2651,11 @@ tree_separators = ["/", "::"]
 
     #[test]
     fn vendors_shared_skills_false_on_a_non_pool_client_stays_accepted() {
-        // Only enabling it is refused. `false` is the resting state for every
-        // client, so an authored `false` — however pointless — must not error.
+        // Only enabling it is refused. A client that cannot pool is always
+        // native, so an authored `false` is redundant but must not error.
         let cfg = ProjectConfig::from_toml_str("[options.vendors.claude]\nshared_skills = false\n")
-            .expect("an explicit default must still parse");
-        assert!(!cfg.options.vendors["claude"].shared_skills);
+            .expect("a redundant opt-out must still parse");
+        assert_eq!(cfg.options.vendors["claude"].shared_skills, Some(false));
     }
 
     #[test]

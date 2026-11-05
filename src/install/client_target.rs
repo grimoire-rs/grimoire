@@ -111,7 +111,8 @@ pub enum ClientTarget {
     /// global directories and are not served by this name.
     Antigravity,
     /// Cline — `.cline/skills` and global MCP (rules and agents declined).
-    /// Pool-capable via the `shared_skills` opt-in.
+    /// Pool-capable: joins `.agents/skills` beside a pool writer or via
+    /// `shared_skills`.
     Cline,
     /// Droid (Factory) — `.factory/skills`, `.factory/droids`,
     /// `.factory/mcp.json` (rules declined). The client is `droid`; its
@@ -122,13 +123,15 @@ pub enum ClientTarget {
     /// `.goose/skills` is labelled back-compat upstream.
     Goose,
     /// Warp — `.warp/{skills,.mcp.json}` (skills + MCP). Renders natively but is
-    /// pool-*capable*, so it can be opted into `.agents/skills`.
+    /// pool-*capable*, so beside a pool writer or via `shared_skills` its
+    /// skills go to `.agents/skills`.
     Warp,
     /// OpenClaw — `~/.openclaw/skills`, **global scope only**: its "project"
     /// path is a fixed daemon home that does not track the repository.
     OpenClaw,
     /// Kilo — `.kilo/skills` (skills only). Never writes the deprecated
-    /// `.kilocode`; pool-capable via the `shared_skills` opt-in.
+    /// `.kilocode`; pool-capable (joins beside a pool writer or via
+    /// `shared_skills`).
     Kilo,
     /// Qoder — `.qoder/{skills,rules,agents,settings.json}` (all four kinds
     /// native; Claude Code's config shape under its own root).

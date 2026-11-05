@@ -406,8 +406,9 @@ pub enum ValueType {
     },
     /// `"true"` or `"false"`.
     Bool {
-        /// The runtime default.
-        default: bool,
+        /// The runtime default, `None` when unset means something neither
+        /// literal spells (`shared_skills`: decided per run).
+        default: Option<bool>,
     },
     /// A non-negative integer.
     U32 {
@@ -454,7 +455,7 @@ impl ValueType {
     pub fn default_str(self) -> Option<String> {
         match self {
             Self::String { default } => default.map(String::from),
-            Self::Bool { default } => Some(default.to_string()),
+            Self::Bool { default } => default.map(|d| d.to_string()),
             Self::U32 { default } => Some(default.to_string()),
             Self::Enum { default, .. } => default.map(String::from),
             Self::StringList { default } | Self::StringSet { default, .. } => default.map(|values| values.join(",")),
@@ -1498,7 +1499,7 @@ mod tests {
         let bool_entry = ConfigEntry::new(
             "options.show_deprecated".to_string(),
             Some("true".to_string()),
-            ValueType::Bool { default: false },
+            ValueType::Bool { default: Some(false) },
             "Show deprecated",
             "Controls whether deprecated artifacts appear in `grim search` and the TUI catalog. \
              Hidden by default unless already installed.",
@@ -1581,7 +1582,7 @@ mod tests {
     #[test]
     fn value_type_display_matches_serde() {
         assert_eq!(ValueType::String { default: None }.to_string(), "string");
-        assert_eq!(ValueType::Bool { default: false }.to_string(), "boolean");
+        assert_eq!(ValueType::Bool { default: Some(false) }.to_string(), "boolean");
         assert_eq!(ValueType::U32 { default: 0 }.to_string(), "integer");
         assert_eq!(
             ValueType::Enum {

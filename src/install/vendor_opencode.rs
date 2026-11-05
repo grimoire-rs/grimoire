@@ -89,9 +89,20 @@ pub const OPENCODE_AGENT_FIELDS: &[KnownField] = &[
 /// The common agent fields a lifted `opencode.*` key may silently override.
 const OPENCODE_AGENT_OVERRIDES: &[&str] = &["model"];
 
+/// [`Vendor::reads_pool`] for OpenCode, with the disable flag injected.
+fn reads_pool_from(external_skills_disabled: bool) -> bool {
+    !external_skills_disabled
+}
+
 impl Vendor for OpenCodeVendor {
     fn name(&self) -> &'static str {
         "opencode"
+    }
+
+    /// OpenCode skips the `.claude` and `.agents` skill dirs when
+    /// `OPENCODE_DISABLE_EXTERNAL_SKILLS` is set (v1.18.32 `skill/index.ts`).
+    fn reads_pool(&self, _scope: ConfigScope) -> bool {
+        reads_pool_from(super::vendor::env_disable_flag("OPENCODE_DISABLE_EXTERNAL_SKILLS"))
     }
 
     fn root_dir(&self) -> &'static str {
@@ -825,5 +836,11 @@ mod tests {
             .unwrap();
         assert_eq!(out.warnings.len(), 1);
         assert!(out.warnings[0].contains("opencode.future"));
+    }
+
+    #[test]
+    fn the_external_skills_flag_stops_opencode_reading_the_pool() {
+        assert!(reads_pool_from(false));
+        assert!(!reads_pool_from(true));
     }
 }

@@ -1639,8 +1639,8 @@ fn render_config(
             continue;
         }
         let _ = writeln!(out, "[options.vendors.{}]", toml_key(name));
-        if vendor.shared_skills {
-            let _ = writeln!(out, "shared_skills = true");
+        if let Some(shared) = vendor.shared_skills {
+            let _ = writeln!(out, "shared_skills = {shared}");
         }
         out.push('\n');
     }
@@ -2058,8 +2058,12 @@ mod tests {
             tui: Default::default(),
             experimental: Default::default(),
         };
-        opts.vendors
-            .insert("cursor".to_string(), VendorOptions { shared_skills: true });
+        opts.vendors.insert(
+            "cursor".to_string(),
+            VendorOptions {
+                shared_skills: Some(true),
+            },
+        );
         // An entry holding nothing but defaults carries no information, so it
         // is dropped — the same treatment an all-default `[options.tui]` and a
         // `show_deprecated = false` already get from this serializer.
@@ -2077,7 +2081,7 @@ mod tests {
             vec!["cursor"],
             "a meaningful entry round-trips; a default-only one is not written"
         );
-        assert!(cfg.options.vendors["cursor"].shared_skills);
+        assert_eq!(cfg.options.vendors["cursor"].shared_skills, Some(true));
     }
 
     #[test]

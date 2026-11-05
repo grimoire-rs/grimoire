@@ -9,7 +9,9 @@
 //! - a changed value keeps its position and its trailing comment;
 //! - a new key appends to its table, a new table takes its canonical slot;
 //! - a removed key's own comment goes, a blank-line-separated one moves on;
-//! - an absent `false`/`[]` key stays; an emptied table goes unless commented.
+//! - an absent `false`/`[]` key stays (unless `false` is a set value, as for
+//!   `options.vendors.<name>.shared_skills`); an emptied table goes unless
+//!   commented.
 
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, TableLike, TomlError, Value};
 
@@ -56,7 +58,7 @@ fn merge_table(have: &mut dyn TableLike, want: &dyn TableLike, path: &mut Vec<St
             if prunable(item) {
                 have.remove(key);
             }
-        } else if !item.as_value().is_some_and(reads_as_default) {
+        } else if !item.as_value().is_some_and(|v| reads_as_default(v, path, key)) {
             remove_entry(have, key);
         }
     }
@@ -175,12 +177,20 @@ fn declared(raw: &str) -> Option<DeclaredSource> {
         .map(|id| DeclaredSource::Registry(id.or_latest()))
 }
 
-fn reads_as_default(value: &Value) -> bool {
+/// Whether `value` at `path`.`key` means the same as the key being absent.
+fn reads_as_default(value: &Value, path: &[String], key: &str) -> bool {
     match value {
+        // A tri-state: absent is automatic, so a written `false` is an
+        // opt-out the render dropped on purpose and must not survive.
+        Value::Boolean(_) if is_vendor_shared_skills(path, key) => false,
         Value::Boolean(b) => !*b.value(),
         Value::Array(a) => a.is_empty(),
         _ => false,
     }
+}
+
+fn is_vendor_shared_skills(path: &[String], key: &str) -> bool {
+    key == "shared_skills" && matches!(path, [options, vendors, _] if options == "options" && vendors == "vendors")
 }
 
 fn is_empty_table(item: &Item) -> bool {
@@ -638,6 +648,16 @@ zeta = \"ghcr.io/acme/skills/zeta:1\"
             "[skills]\n\n[rules]\n",
         );
         assert!(!unset.contains("show_deprecated"), "{unset}");
+    }
+
+    #[test]
+    fn an_unset_shared_skills_false_is_removed_with_its_table() {
+        // `false` opts a client out of the pool, so dropping it from the render
+        // must drop it from disk; keeping it would make `config unset` a no-op.
+        let existing = "[options.vendors.cursor]\nshared_skills = false\n\n[skills]\n\n[rules]\n";
+        let unset = merged(existing, "[skills]\n\n[rules]\n");
+        assert!(!unset.contains("shared_skills"), "{unset}");
+        assert!(!unset.contains("[options.vendors.cursor]"), "{unset}");
     }
 
     #[test]

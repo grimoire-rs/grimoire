@@ -143,7 +143,7 @@ fn pending_for_client(
     if is_covered(record, client, target, roots) {
         Vec::new()
     } else {
-        vec![(client, target.path_for(client, kind, name))]
+        vec![(client, destination(target, client, kind, name, record, roots))]
     }
 }
 
@@ -224,6 +224,89 @@ fn is_covered(
         .any(|out| out.client == client.as_str() && output_at_current_layout(out, client, rec, target, roots))
 }
 
+/// The clients an install of `kind`/`name` reaches: the target selection
+/// that hosts the kind, plus every client the record still holds whose anchor
+/// root resolves on this machine.
+///
+/// A recorded client stays in the set because the installer keeps
+/// re-materializing it, so it is a peer for the pool decision as much as a
+/// selected one.
+pub(crate) fn effective_clients(
+    target: &InstallTarget,
+    kind: ArtifactKind,
+    name: &str,
+    recorded: Option<&InstallRecord>,
+    roots: &AnchorRoots,
+) -> Vec<ClientTarget> {
+    let mut set: Vec<ClientTarget> = target
+        .clients()
+        .iter()
+        .copied()
+        .filter(|c| client_hosts(*c, kind, name, target.workspace(), target.scope()))
+        .collect();
+    if let Some(rec) = recorded {
+        for out in &rec.outputs {
+            if let Ok(client) = out.client.parse::<ClientTarget>()
+                && client_hosts(client, kind, name, target.workspace(), target.scope())
+                && out.target.anchor.root(roots).is_some()
+                && !set.contains(&client)
+            {
+                set.push(client);
+            }
+        }
+    }
+    set
+}
+
+/// Where `client`'s output for `kind`/`name` belongs now.
+///
+/// Every kind but a skill is [`InstallTarget::path_for`]. A skill also joins
+/// the shared pool when another effective client already writes it there and
+/// the pool path anchors for `client` (issue #262); install, the integrity
+/// gate and `status` all ask here, so they cannot disagree on the layout.
+pub(crate) fn destination(
+    target: &InstallTarget,
+    client: ClientTarget,
+    kind: ArtifactKind,
+    name: &str,
+    record: Option<&InstallRecord>,
+    roots: &AnchorRoots,
+) -> PathBuf {
+    if kind != ArtifactKind::Skill {
+        return target.path_for(client, kind, name);
+    }
+    let peers = effective_clients(target, kind, name, record, roots);
+    destination_among(target, client, kind, name, &peers, roots)
+}
+
+/// [`destination`] for a caller that already holds the [`effective_clients`]
+/// peer set.
+pub(crate) fn destination_among(
+    target: &InstallTarget,
+    client: ClientTarget,
+    kind: ArtifactKind,
+    name: &str,
+    peers: &[ClientTarget],
+    roots: &AnchorRoots,
+) -> PathBuf {
+    if kind == ArtifactKind::Skill && target.joins_pool(client, name, peers) {
+        let pool = target.pool_path(name);
+        // An unanchorable pool would record nothing, so the skill stays native.
+        if crate::install::path_anchor::AnchoredPath::from_target(
+            &pool,
+            target.scope(),
+            client,
+            ArtifactKind::Skill,
+            roots,
+        )
+        .is_ok()
+        {
+            return pool;
+        }
+    }
+    target.path_for(client, kind, name)
+}
+
 /// Whether a recorded file output still sits at the path the CURRENT
 /// layout produces for its client (structural anchor + relative equality).
 /// A mismatch means the render layout moved since the record was written
@@ -245,7 +328,7 @@ pub fn output_at_current_layout(
     if out.entry.is_some() {
         return true;
     }
-    let dest = target.path_for(client, rec.kind, &rec.name);
+    let dest = destination(target, client, rec.kind, &rec.name, Some(rec), roots);
     match crate::install::path_anchor::AnchoredPath::from_target(&dest, target.scope(), client, rec.kind, roots) {
         Ok(current) => current == out.target,
         Err(_) => true,
@@ -617,6 +700,101 @@ mod tests {
         blobs.put(&manifest_digest, manifest.as_bytes()).unwrap();
         blobs.put(&layer_digest, &layer).unwrap();
         assert!(pending().is_empty(), "{:?}", pending());
+    }
+
+    fn skill_output(client: ClientTarget, target: &InstallTarget, roots: &AnchorRoots, name: &str) -> ClientOutput {
+        let dest = client.path_for(target.workspace(), target.scope(), ArtifactKind::Skill, name);
+        ClientOutput {
+            client: client.as_str().to_string(),
+            target: AnchoredPath::from_target(&dest, target.scope(), client, ArtifactKind::Skill, roots).unwrap(),
+            content_hash: Digest::Sha256("b".repeat(64)),
+            support_dir: None,
+            entry: None,
+            adopted: false,
+        }
+    }
+
+    /// Issue #262: an OpenCode skill recorded natively beside Codex's pool
+    /// copy is pending at the pool, so the next install moves it there and
+    /// the layout reaper removes the duplicate.
+    #[test]
+    fn a_native_pool_reader_beside_a_pool_writer_is_pending_at_the_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        let roots = roots(dir.path());
+        let target = InstallTarget::new(
+            dir.path(),
+            ConfigScope::Project,
+            vec![ClientTarget::OpenCode, ClientTarget::Codex],
+        );
+        let mut rec = record(
+            "pool-skill",
+            vec![
+                skill_output(ClientTarget::OpenCode, &target, &roots, "pool-skill"),
+                skill_output(ClientTarget::Codex, &target, &roots, "pool-skill"),
+            ],
+        );
+        rec.kind = ArtifactKind::Skill;
+        let pending = pending_outputs(Some(&rec), ArtifactKind::Skill, "pool-skill", &target, &roots, None);
+        let pool = ClientTarget::Agents.path_for(dir.path(), ConfigScope::Project, ArtifactKind::Skill, "pool-skill");
+        assert_eq!(pending, vec![(ClientTarget::OpenCode, pool)]);
+    }
+
+    /// A recorded pool writer still counts as a peer when this run did not
+    /// select it, so a joined reader is not pending a move back to native.
+    #[test]
+    fn a_joined_reader_beside_a_recorded_pool_writer_is_not_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let roots = roots(dir.path());
+        let both = InstallTarget::new(
+            dir.path(),
+            ConfigScope::Project,
+            vec![ClientTarget::OpenCode, ClientTarget::Codex],
+        );
+        let pool = ClientTarget::Agents.path_for(dir.path(), ConfigScope::Project, ArtifactKind::Skill, "pool-skill");
+        std::fs::create_dir_all(&pool).unwrap();
+        let joined = ClientOutput {
+            target: AnchoredPath::from_target(
+                &pool,
+                ConfigScope::Project,
+                ClientTarget::OpenCode,
+                ArtifactKind::Skill,
+                &roots,
+            )
+            .unwrap(),
+            ..skill_output(ClientTarget::OpenCode, &both, &roots, "pool-skill")
+        };
+        let mut rec = record(
+            "pool-skill",
+            vec![joined, skill_output(ClientTarget::Codex, &both, &roots, "pool-skill")],
+        );
+        rec.kind = ArtifactKind::Skill;
+        let opencode_only = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::OpenCode]);
+        let pending = pending_outputs(
+            Some(&rec),
+            ArtifactKind::Skill,
+            "pool-skill",
+            &opencode_only,
+            &roots,
+            None,
+        );
+        assert_eq!(pending, vec![], "{pending:?}");
+    }
+
+    /// Only skills share the pool: every other kind keeps its native path
+    /// beside a pool writer.
+    #[test]
+    fn a_non_skill_kind_never_joins_the_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        let roots = roots(dir.path());
+        let peers = [ClientTarget::OpenCode, ClientTarget::Codex];
+        let target = InstallTarget::new(dir.path(), ConfigScope::Project, peers.to_vec());
+        for kind in [ArtifactKind::Rule, ArtifactKind::Agent, ArtifactKind::Mcp] {
+            assert_eq!(
+                destination_among(&target, ClientTarget::OpenCode, kind, "x", &peers, &roots),
+                target.path_for(ClientTarget::OpenCode, kind, "x"),
+                "{kind:?}"
+            );
+        }
     }
 
     /// C-002: `outputs_pending` must be deterministic regardless of

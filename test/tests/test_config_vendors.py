@@ -101,12 +101,12 @@ def test_set_get_unset_round_trip(grim_at: object, project_dir: Path) -> None:
     )
 
 
-def test_set_false_collapses_to_unset(grim_at: object, project_dir: Path) -> None:
-    """``false`` is the built-in default, so setting it reads back as unset.
+def test_set_false_persists_as_an_explicit_opt_out(grim_at: object, project_dir: Path) -> None:
+    """``false`` is not the default: unset auto-joins the shared pool, and
+    ``false`` keeps the client's own directory even beside a pool writer.
 
-    Mirrors ``options.show_deprecated`` / ``options.tui.group_by_type``: a
-    value indistinguishable from the default collapses to unset across
-    ``get`` / ``list``, and is not written to the config.
+    So setting it must be written and read back, and ``unset`` is the only way
+    back to the automatic behaviour.
     """
     write_config(project_dir)
     runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
@@ -115,12 +115,16 @@ def test_set_false_collapses_to_unset(grim_at: object, project_dir: Path) -> Non
     runner.run("config", "set", VENDOR_KEY, "false")
 
     body = (project_dir / "grimoire.toml").read_text()
-    assert "[options.vendors.cursor]" not in body, (
-        f"shared_skills = false must not be written (it is the default); config was:\n{body}"
+    assert "[options.vendors.cursor]" in body and "shared_skills = false" in body, (
+        f"an explicit opt-out must be written; config was:\n{body}"
     )
+    payload = runner.json("config", "get", VENDOR_KEY)
+    assert payload["value"] == "false", f"`false` must read back; got {payload!r}"
+
+    runner.run("config", "unset", VENDOR_KEY)
     result = runner.run("config", "get", VENDOR_KEY, check=False)
     assert result.returncode == 1, (
-        f"a default-valued vendor key must read back as unset (exit 1), got {result.returncode}"
+        f"`unset` restores the automatic default (exit 1 on get), got {result.returncode}"
     )
 
 
@@ -235,19 +239,23 @@ def test_list_all_on_vendorless_config_adds_no_vendor_rows(
 def test_list_all_surfaces_declared_but_default_vendor_entry(
     grim_at: object, project_dir: Path
 ) -> None:
-    """``--all`` surfaces a declared-but-default vendor entry as an unset row."""
+    """An authored ``false`` is an explicit opt-out, so both ``list`` and
+    ``list --all`` show it, and the key has no fixed default: unset means the
+    client joins the pool only beside a pool writer."""
     _write_config_with_vendor(project_dir, "cursor", shared_skills=False)
     runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
 
     without_all = runner.json("config", "list")
-    assert not [i for i in without_all["items"] if i["key"] == VENDOR_KEY], (
-        f"a default-valued vendor row is omitted without --all; got {without_all!r}"
+    rows = [i for i in without_all["items"] if i["key"] == VENDOR_KEY]
+    assert [r["value"] for r in rows] == ["false"], (
+        f"an explicit `false` is a set value; got {without_all!r}"
     )
 
     with_all = runner.json("config", "list", "--all")
     row = next((i for i in with_all["items"] if i["key"] == VENDOR_KEY), None)
     assert row is not None, f"--all must surface the declared entry; got {with_all!r}"
-    assert row["value"] is None, f"a default-valued row is unset; got {row!r}"
+    assert row["value"] == "false", f"the authored opt-out must show; got {row!r}"
+    assert row["default"] is None, f"unset is automatic, not `false`; got {row!r}"
 
 
 # ---------------------------------------------------------------------------

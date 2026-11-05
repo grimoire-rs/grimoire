@@ -46,6 +46,9 @@ pub struct InstallTarget {
     /// Derived in [`Self::parse`] from the resolved scope's `[options.vendors]`
     /// table — never merged across scopes, never overridable by a flag.
     shared_skills: Vec<ClientTarget>,
+    /// Clients opted out of the pool (`shared_skills = false`): their skills
+    /// stay native even beside a client that writes the pool.
+    native_skills: Vec<ClientTarget>,
     /// The resolved hook arming policy, or `None` when this target was not
     /// built by a mutating command. Attached by [`Self::with_hook_policy`] at
     /// the mutating boundary, never by [`Self::parse`] (shared with the
@@ -91,6 +94,7 @@ impl InstallTarget {
             clients,
             generic_fallback: false,
             shared_skills: Vec::new(),
+            native_skills: Vec::new(),
             hook_policy: None,
             grim_home: crate::env::grim_home(),
         }
@@ -145,9 +149,14 @@ impl InstallTarget {
         // whole feature exists to prevent.
         let shared_skills: Vec<ClientTarget> = vendors
             .iter()
-            .filter(|(_, options)| options.shared_skills)
+            .filter(|(_, options)| options.shared_skills == Some(true))
             .filter_map(|(name, _)| name.parse::<ClientTarget>().ok())
             .filter(|client| client.vendor().pool_capable())
+            .collect();
+        let native_skills: Vec<ClientTarget> = vendors
+            .iter()
+            .filter(|(_, options)| options.shared_skills == Some(false))
+            .filter_map(|(name, _)| name.parse::<ClientTarget>().ok())
             .collect();
 
         if clients.is_empty() {
@@ -159,6 +168,7 @@ impl InstallTarget {
                     clients: vec![ClientTarget::Agents],
                     generic_fallback: true,
                     shared_skills,
+                    native_skills,
                     hook_policy: None,
                     grim_home: crate::env::grim_home(),
                 });
@@ -167,6 +177,7 @@ impl InstallTarget {
         }
         let mut target = Self::new(workspace, scope, clients);
         target.shared_skills = shared_skills;
+        target.native_skills = native_skills;
         Ok(target)
     }
 
@@ -248,6 +259,10 @@ impl InstallTarget {
     /// [`Self::grim_home`] via
     /// [`hook_dispatch::payload_dir`](super::hook_dispatch::payload_dir).
     /// Every other kind returns exactly what main's form returns (C-106).
+    ///
+    /// For a skill this is the destination *before* the pool auto-join; a
+    /// caller that writes or compares a skill output goes through
+    /// [`expected_outputs::destination`](super::expected_outputs::destination).
     pub fn path_for(&self, client: ClientTarget, kind: ArtifactKind, name: &str) -> PathBuf {
         if kind == ArtifactKind::Hook {
             return super::hook_dispatch::payload_dir(
@@ -266,6 +281,39 @@ impl InstallTarget {
     /// pool rather than its native skills directory (see [`Self::path_for`]).
     pub fn is_shared_skills(&self, client: ClientTarget) -> bool {
         self.shared_skills.contains(&client)
+    }
+
+    /// Whether `client`'s skill `name` lands in the pool on its own: a
+    /// default pool writer, or a client set to `shared_skills = true`.
+    ///
+    /// Never depends on another client, so two auto-joining readers cannot
+    /// pull each other into the pool.
+    fn lands_in_pool(&self, client: ClientTarget, name: &str) -> bool {
+        self.path_for(client, ArtifactKind::Skill, name) == self.pool_path(name)
+    }
+
+    /// The shared pool path for skill `name` at this target's scope.
+    pub fn pool_path(&self, name: &str) -> PathBuf {
+        ClientTarget::Agents.path_for(&self.workspace, self.scope, ArtifactKind::Skill, name)
+    }
+
+    /// Whether `client` auto-joins the pool for skill `name` because another
+    /// client among `peers` lands there, so the reader would otherwise see the
+    /// skill twice (issue #262).
+    ///
+    /// Only an unset `shared_skills` auto-joins: `false` keeps the native
+    /// layout, and a client that already lands in the pool has nothing to
+    /// join. The reader must also scan the pool in this environment, or a
+    /// joined skill would go unread.
+    pub fn joins_pool(&self, client: ClientTarget, name: &str, peers: &[ClientTarget]) -> bool {
+        let vendor = client.vendor();
+        !self.native_skills.contains(&client)
+            && vendor.pool_capable()
+            && !self.lands_in_pool(client, name)
+            && vendor.reads_pool(self.scope)
+            && peers
+                .iter()
+                .any(|peer| *peer != client && self.lands_in_pool(*peer, name))
     }
 }
 
@@ -576,7 +624,14 @@ mod tests {
         }
         let pooled: BTreeMap<String, VendorOptions> = ClientTarget::ALL
             .iter()
-            .map(|c| (c.as_str().to_string(), VendorOptions { shared_skills: true }))
+            .map(|c| {
+                (
+                    c.as_str().to_string(),
+                    VendorOptions {
+                        shared_skills: Some(true),
+                    },
+                )
+            })
             .collect();
         for scope in [ConfigScope::Project, ConfigScope::Global] {
             for vendors in [BTreeMap::new(), pooled.clone()] {
@@ -693,7 +748,14 @@ mod tests {
     fn pooled(names: &[&str]) -> BTreeMap<String, VendorOptions> {
         names
             .iter()
-            .map(|n| ((*n).to_string(), VendorOptions { shared_skills: true }))
+            .map(|n| {
+                (
+                    (*n).to_string(),
+                    VendorOptions {
+                        shared_skills: Some(true),
+                    },
+                )
+            })
             .collect()
     }
 
@@ -734,9 +796,14 @@ mod tests {
         let cursor_skill = PathBuf::from("/w/.cursor/skills/x");
         for vendors in [
             BTreeMap::new(),
-            [("cursor".to_string(), VendorOptions { shared_skills: false })]
-                .into_iter()
-                .collect(),
+            [(
+                "cursor".to_string(),
+                VendorOptions {
+                    shared_skills: Some(false),
+                },
+            )]
+            .into_iter()
+            .collect(),
         ] {
             let t = InstallTarget::parse(
                 Path::new("/w"),
@@ -903,5 +970,99 @@ mod tests {
         )
         .unwrap();
         assert_eq!(t.clients(), &[ClientTarget::Agents]);
+    }
+
+    // ── pool auto-join (issue #262) ──
+
+    fn target_with(scope: ConfigScope, clients: &[ClientTarget], vendors: &[(&str, bool)]) -> InstallTarget {
+        let names: Vec<String> = clients.iter().map(|c| c.as_str().to_string()).collect();
+        let vendors: BTreeMap<String, VendorOptions> = vendors
+            .iter()
+            .map(|(n, v)| {
+                (
+                    (*n).to_string(),
+                    VendorOptions {
+                        shared_skills: Some(*v),
+                    },
+                )
+            })
+            .collect();
+        InstallTarget::parse(Path::new("/w"), scope, &names, &[], &vendors).unwrap()
+    }
+
+    /// Readers that render natively at `scope`, i.e. the ones that can join.
+    fn native_readers(scope: ConfigScope) -> Vec<ClientTarget> {
+        let t = InstallTarget::new(Path::new("/w"), scope, vec![]);
+        ClientTarget::ALL
+            .into_iter()
+            .filter(|c| c.vendor().pool_capable() && !t.lands_in_pool(*c, "x"))
+            .collect()
+    }
+
+    #[test]
+    fn every_native_pool_reader_joins_beside_a_pool_writer_at_both_scopes() {
+        for scope in [ConfigScope::Project, ConfigScope::Global] {
+            let readers = native_readers(scope);
+            assert!(readers.contains(&ClientTarget::OpenCode), "{scope:?}: {readers:?}");
+            for reader in readers {
+                let peers = [reader, ClientTarget::Codex];
+                let t = target_with(scope, &peers, &[]);
+                // An environment-gated reader (a disable flag set in this
+                // process) stays native; every other one joins.
+                assert_eq!(
+                    t.joins_pool(reader, "x", &peers),
+                    reader.vendor().reads_pool(scope),
+                    "{reader} {scope:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn readers_alone_never_pull_each_other_into_the_pool() {
+        for scope in [ConfigScope::Project, ConfigScope::Global] {
+            let peers = [ClientTarget::OpenCode, ClientTarget::Cursor];
+            let t = target_with(scope, &peers, &[]);
+            assert!(!t.joins_pool(ClientTarget::OpenCode, "x", &peers), "{scope:?}");
+            assert!(!t.joins_pool(ClientTarget::Cursor, "x", &peers), "{scope:?}");
+        }
+    }
+
+    #[test]
+    fn an_explicit_false_keeps_the_reader_native_beside_a_pool_writer() {
+        let peers = [ClientTarget::OpenCode, ClientTarget::Codex];
+        let t = target_with(ConfigScope::Global, &peers, &[("opencode", false)]);
+        assert!(!t.joins_pool(ClientTarget::OpenCode, "x", &peers));
+    }
+
+    #[test]
+    fn a_reader_set_to_true_counts_as_a_pool_writer_for_its_peers() {
+        let peers = [ClientTarget::OpenCode, ClientTarget::Cursor];
+        let t = target_with(ConfigScope::Project, &peers, &[("cursor", true)]);
+        assert!(t.joins_pool(ClientTarget::OpenCode, "x", &peers));
+        assert!(!t.joins_pool(ClientTarget::Cursor, "x", &peers), "already in the pool");
+    }
+
+    #[test]
+    fn an_antigravity_peer_counts_as_a_pool_writer_at_project_scope_only() {
+        let peers = [ClientTarget::OpenCode, ClientTarget::Antigravity];
+        let project = target_with(ConfigScope::Project, &peers, &[]);
+        assert!(project.joins_pool(ClientTarget::OpenCode, "x", &peers));
+        let global = target_with(ConfigScope::Global, &peers, &[]);
+        assert!(!global.joins_pool(ClientTarget::OpenCode, "x", &peers));
+    }
+
+    #[test]
+    fn a_reader_is_not_its_own_peer() {
+        let peers = [ClientTarget::OpenCode];
+        let t = target_with(ConfigScope::Project, &peers, &[]);
+        assert!(!t.joins_pool(ClientTarget::OpenCode, "x", &peers));
+    }
+
+    #[test]
+    fn a_non_pool_capable_client_never_joins() {
+        let peers = [ClientTarget::Claude, ClientTarget::Codex];
+        let t = target_with(ConfigScope::Project, &peers, &[]);
+        assert!(!t.joins_pool(ClientTarget::Claude, "x", &peers));
     }
 }

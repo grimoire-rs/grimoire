@@ -108,6 +108,13 @@ sub-decisions.
 
 ### D1 — Keep native-dir rendering. No pool-first move. {#d1}
 
+> **AMENDED 2026-11-05** by [`adr_shared_pool_auto_join.md`](./adr_shared_pool_auto_join.md)
+> (issue [#262](https://github.com/grimoire-rs/grimoire/issues/262)). Native rendering stays the
+> default, but a pool reader now puts its skills in the pool when another client in the
+> effective set (selected plus recorded) lands there unconditionally. The duplicate this
+> section called harmless turned out to be a reported bug: OpenCode logs a conflict and the
+> last copy wins. The owner principle below still holds when no pool writer is present.
+
 Grim continues to render skills into each vendor's native skills directory.
 The four vendors already on the shared pool stay there; no vendor is moved
 onto or off the pool by default, in either direction.
@@ -130,6 +137,13 @@ is detected at all, and why a vendor that declares its own skill fields is
 disqualified from the pool entirely.
 
 ### D2 — `shared_skills`: per-vendor, opt-in, default off, capability-gated {#d2}
+
+> **AMENDED 2026-11-05** by [`adr_shared_pool_auto_join.md`](./adr_shared_pool_auto_join.md).
+> `shared_skills` is now tri-state, `Option<bool>`: unset means auto (D1 above), `true` means
+> always pool, `false` means always native. `config set … false` now persists instead of
+> collapsing to unset, and `config list --all` reports the default as `null`. That contract
+> change was accepted by the owner. The capability gate and exit codes below are unchanged:
+> only `true` on a client that is not pool-capable is refused.
 
 A new per-vendor config table:
 
@@ -458,6 +472,10 @@ follow-up, not a requirement.
 
 ### Sub-decision A7 — `kept_modified` on a `shared_skills` flip {#a7}
 
+> **NOTE 2026-11-05:** auto-join ([`adr_shared_pool_auto_join.md`](./adr_shared_pool_auto_join.md) D4)
+> is a second trigger for this flip, reached without a config change. A7-a applies unchanged: an
+> edited native copy is kept, and a warning names both paths.
+
 **The interaction.** `reap_moved_outputs` guard 4
 (`src/install/installer.rs:993-999`) preserves an orphaned old output whose
 on-disk hash no longer matches the record — the user edited it. There is no
@@ -728,3 +746,4 @@ fires — **written against `grim update` or `install --force`, never plain
 | 2026-07-26 | architect | **Ownership ruling.** The generic client splits at the vendor/selection seam: W-A ships `vendor_agents.rs`, the enum arm, the anchor row, the docs row, and the `render.rs:874` generalization (it is the first worktree to break that counter); W-C keeps selection only and splits across waves 1 and 2. W-D's `render.rs` carve-out struck — it inherits |
 | 2026-07-26 | architect | **Owner decisions.** Status → Accepted. **D4 replaced**: zero detected clients now fall back to a synthetic skills-only `agents` client writing the shared pool, with exit 78 surviving only when nothing in the set is installable; rationale, the non-poisoning argument (`vendor_gemini.rs:100-105`), and the four out-of-ownership files recorded. D1 gains the owner principle "prefer vendor-specific directories over the pool". Consequences and Risks rewritten around the new D4 and the second (same-pass, `installer.rs:650`) corruption path. Not changed: D1, D2, D3, D5, A7, A8 |
 | 2026-07-26 | architect | Factual corrections from the sub-plan audit (no decision changed): D2 exit codes now record the set-time/load-time 65/78 split through one shared validator plus 64 for an unknown key; D3's "no shipped code covers N→1" retracted — both flip directions are covered, the residual gap is the occupied-pool-path write; D5 cites `stability.md:52,:61` (not `:145-147`); A7 records that the duplicate is reachable only via `grim update` / `install --force`; W-B contract switched to the `ParsedKey::RegistryAlias` dynamic-key pattern; W-E contract promotes the `skill_fields()` rule to a requirement and hands `render.rs` to W-D |
+| 2026-11-05 | maintainer | **Amended by `adr_shared_pool_auto_join.md`** (issue #262): D1 gains pool auto-join beside a pool writer; D2's `shared_skills` becomes tri-state (unset = auto); A7 notes auto-join as a second trigger. D3, D4, D5 and A8 unchanged |

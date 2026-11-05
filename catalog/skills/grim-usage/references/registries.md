@@ -553,7 +553,7 @@ lock on every change.
   grim config set   options.clients claude,opencode
   grim config set   options.tui.default_view tree
   grim config set   options.show_deprecated true   # show deprecated artifacts by default
-  grim config set   options.vendors.cursor.shared_skills true  # per-client: install this client's skills into the shared .agents/skills pool
+  grim config set   options.vendors.cursor.shared_skills true  # per-client: always install this client's skills into the shared .agents/skills pool (false = always native; unset = auto)
   grim config set   options.clients claude,opencode --dry-run  # validate + report, write nothing
   grim config get   options.clients          # bare value on one line; exit 1 if unset
   grim config list                           # every explicitly-set key in this scope
@@ -683,6 +683,15 @@ except by `grim init`, which seeds `[options].clients` with what it detects
 at the moment you create the file. Pin `[options].clients` when you want
 deterministic targets in CI — set it with `grim config set options.clients
 claude,opencode` (see [Managing Config](#managing-config)).
+
+Several clients (Cursor, Copilot, OpenCode, Warp, Droid, Kilo, Cline) also
+read that shared `.agents/skills` pool. When one of them is targeted
+together with a client that writes the pool (Codex, Gemini, Zed, Amp,
+Goose, or one set to `shared_skills = true`), its skills go to the pool
+too, so each skill exists once on disk. On its own it keeps its native
+directory. `grim install` moves an existing native copy for you and keeps
+one you edited. `options.vendors.<name>.shared_skills` pins the choice:
+`true` always uses the pool, `false` always the native directory.
 
 ## Offline Mode
 

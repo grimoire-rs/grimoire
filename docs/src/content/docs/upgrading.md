@@ -531,6 +531,36 @@ cleanup.
 **What to do.** Nothing. `grim search --refresh` forces a sync and ignores a
 backoff. Deleting a `<hash>.sync.json` file costs the same one fresh sync.
 
+## A pool reader joins the pool beside a pool writer {#shared-pool-auto-join}
+
+Some clients read the cross-vendor `.agents/skills` pool but install into a
+directory of their own: [OpenCode][gap-shared-pool], Cursor, Copilot, Warp,
+Droid, Kilo and Cline. Select one of them beside a client that writes the
+pool, such as Codex or Gemini, and earlier versions installed each skill
+twice. OpenCode then logged `duplicate skill name` on every start and kept
+whichever copy it read last.
+
+**What you will see.** Such a reader now installs its skills into the pool
+whenever a pool writer is in the set, so each skill exists once. An existing
+two-copy install moves on the next `grim install` or `grim update`: grim
+removes the reader's own copy, and [`grim status`][status] reads `installed`
+afterwards. A copy you
+edited by hand is never deleted. grim keeps it and warns, naming both paths,
+so you can merge your edit and delete the extra copy yourself.
+
+**`shared_skills = false` now persists.** The
+[`[options.vendors.<name>].shared_skills`][options-vendors] key used to accept
+only `true` as a stored value. Setting `false` removed the entry, because
+`false` was the default. It is now a third answer, "always use the client's
+own directory", so [`grim config set`][config] stores it, `get` prints it, and
+`config list` shows the row. `grim config list --all` reports the key's default
+as `null`, meaning automatic, where it used to report `false`. Unsetting the
+key returns the client to the automatic choice.
+
+**What to do.** Nothing, in most cases. To keep the old layout for one client,
+set its `shared_skills` to `false`. A downgrade to an earlier grim writes the
+reader's own copy again beside the pool copy: two copies, but nothing is lost.
+
 ## Smaller notes {#smaller-notes}
 
 - **The `--dry-run` preview digest equals the real push digest from 0.15.0.**
@@ -825,3 +855,6 @@ backoff. Deleting a `<hash>.sync.json` file costs the same one fresh sync.
 [lock]: ./commands.md#lock
 [fetch]: ./commands.md#fetch
 [describe]: ./commands.md#describe
+[gap-shared-pool]: ./clients.md#gap-shared-pool
+[options-vendors]: ./configuration.md#options-vendors
+[config]: ./commands.md#config

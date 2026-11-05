@@ -586,20 +586,21 @@ pub struct KnownField {
 /// - `codex`, `gemini`, `zed`, `amp`, `agents` already render there by
 ///   default (their [`Vendor::skills_root`] *is* the pool).
 /// - `cursor`, `copilot`, `opencode` scan it **additively**, alongside their
-///   own native skills dir — verified 2026-07-26. They are the members the
-///   opt-in actually buys anything for.
+///   own native skills dir — verified 2026-07-26. They are the members
+///   pool membership changes anything for: beside a pool writer their skills
+///   join the pool (`expected_outputs::destination`), else they stay native.
 /// - `goose` and `warp` scan it at **both** scopes, verified 2026-07-27
 ///   against each vendor's own docs. They differ in what grim writes by
 ///   default: Goose renders *into* the pool (its own `.goose/skills` is
 ///   labelled back-compat upstream, and `.agents/skills` the recommended
-///   location), while Warp renders natively to `.warp/skills` and reaches the
-///   pool only through the opt-in. Membership here is about what a client
+///   location), while Warp renders natively to `.warp/skills` and joins the
+///   pool only beside a pool writer or through `shared_skills`. Membership here is about what a client
 ///   **reads**, not where grim writes — those are separate questions.
 /// - `droid` and `kilo` scan it at **both** scopes, verified 2026-09-27
 ///   (Factory CLI v0.228.0 lists `.agents/skills` as a compatibility source at
 ///   project and personal scope; Kilo v7.8.1 scans project `.agents/skills`
-///   and `~/.agents/skills` by default). Both render natively by default and
-///   reach the pool only through the opt-in, the Warp shape.
+///   and `~/.agents/skills` by default). Both render natively alone and join
+///   the pool beside a pool writer or through `shared_skills`, the Warp shape.
 /// - `cline` scans it at **both** scopes too, source-verified 2026-09-27
 ///   against extension v4.1.21 / CLI v3.0.65: the shared SDK's
 ///   `resolveSkillsConfigSearchPaths` and the VS Code extension's
@@ -1066,8 +1067,9 @@ pub trait Vendor {
     }
 
     /// Whether this client actually **reads** the cross-vendor
-    /// `$HOME/.agents/skills` pool, and may therefore be opted into rendering
-    /// its skills there via `[options.vendors.<name>].shared_skills`.
+    /// `$HOME/.agents/skills` pool, so its skills may render there: beside a
+    /// pool writer automatically, or as `[options.vendors.<name>].shared_skills`
+    /// pins it.
     ///
     /// The default is derived, not overridden per vendor: membership of
     /// [`POOL_CAPABLE_VENDORS`] **and** an empty [`Self::skill_fields`]
@@ -1077,6 +1079,17 @@ pub trait Vendor {
     /// declares a skill field cannot stay pool-capable by oversight.
     fn pool_capable(&self) -> bool {
         pool_capable_from(self.name(), !self.skill_fields().is_empty())
+    }
+
+    /// Whether this client scans the shared `.agents/skills` pool in the
+    /// current environment at `scope`.
+    ///
+    /// Gates the pool auto-join only: a reader that has switched its pool scan
+    /// off keeps its skills native, since joining would hide them from it.
+    /// An explicit `shared_skills = true` is not gated. Implies
+    /// [`Self::pool_capable`]; an override may only narrow it.
+    fn reads_pool(&self, _scope: ConfigScope) -> bool {
+        self.pool_capable()
     }
 
     /// Known `<vendor>.*` rule metadata fields. Same semantics as
@@ -1348,6 +1361,26 @@ pub fn env_dir(var: &str) -> Option<PathBuf> {
     std::env::var_os(var).filter(|v| !v.is_empty()).map(PathBuf::from)
 }
 
+/// Whether a vendor's boolean disable flag reads as set.
+///
+/// Only an unset or empty variable, or an explicit false spelling, counts as
+/// off. A value the vendor might parse differently counts as set, so the
+/// skill stays native and shows twice instead of not loading at all.
+pub(crate) fn disable_flag_from(value: Option<&str>) -> bool {
+    value.is_some_and(|v| {
+        let v = v.trim();
+        !v.is_empty()
+            && !["0", "false", "no", "off", "n"]
+                .iter()
+                .any(|f| v.eq_ignore_ascii_case(f))
+    })
+}
+
+/// [`disable_flag_from`] over the process environment.
+pub(crate) fn env_disable_flag(var: &str) -> bool {
+    disable_flag_from(std::env::var(var).ok().as_deref())
+}
+
 /// `$XDG_CONFIG_HOME`, else `$HOME/.config`, when resolvable.
 pub fn xdg_config_dir() -> Option<PathBuf> {
     env_dir("XDG_CONFIG_HOME").or_else(|| home_dir().map(|h| h.join(".config")))
@@ -1553,6 +1586,49 @@ mod tests {
             !ClientTarget::Claude.vendor().skill_fields().is_empty(),
             "Claude is the live example the rule is written for"
         );
+    }
+
+    #[test]
+    fn a_disable_flag_reads_set_unless_unset_empty_or_spelled_false() {
+        for off in [
+            None,
+            Some(""),
+            Some("  "),
+            Some("0"),
+            Some("false"),
+            Some("FALSE"),
+            Some("no"),
+            Some("off"),
+            Some("n"),
+        ] {
+            assert!(!disable_flag_from(off), "{off:?} must read as unset");
+        }
+        for on in [
+            Some("1"),
+            Some("true"),
+            Some("yes"),
+            Some("on"),
+            Some("2"),
+            Some("anything"),
+        ] {
+            assert!(disable_flag_from(on), "{on:?} must read as set");
+        }
+    }
+
+    /// `reads_pool` may only narrow `pool_capable`: a vendor that reads the
+    /// pool without being pool-capable would auto-join a pool it cannot load.
+    #[test]
+    fn reads_pool_implies_pool_capable_for_every_vendor() {
+        for client in crate::install::ClientTarget::ALL {
+            let vendor = client.vendor();
+            for scope in [ConfigScope::Project, ConfigScope::Global] {
+                assert!(
+                    !vendor.reads_pool(scope) || vendor.pool_capable(),
+                    "'{}' reads the pool at {scope:?} but is not pool-capable",
+                    vendor.name()
+                );
+            }
+        }
     }
 
     /// Every `(client, kind, scope)` whose surface is absent — the complete

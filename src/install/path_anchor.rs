@@ -965,10 +965,10 @@ fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKin
             // bundle) yields the empty set → `UnknownAnchor` at the caller.
             //
             // `AgentsSkills` is appended for a pool-capable client whose
-            // native skills root is NOT already the pool: that client can be
-            // opted into `.agents/skills` with
+            // native skills root is NOT already the pool: that client lands in
+            // `.agents/skills` beside a pool writer or with
             // `[options.vendors.<name>].shared_skills`, and this function
-            // cannot see the config — so the triple must classify BOTH
+            // cannot see either — so the triple must classify BOTH
             // layouts, or a pooled dest would return `UnknownAnchor` and fail
             // the install *after* the files are on disk. It is additive, never
             // a replacement: the longest-root-first loop still lands a native
@@ -982,7 +982,7 @@ fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKin
             // $HOME/.agents` makes the OpenCode skills root the pool itself).
             // Native-first keeps that user's recorded anchor tag exactly where
             // it was; pool-first would silently re-anchor it on upgrade for
-            // someone who never opted in. Where the roots genuinely nest
+            // someone whose skills never joined the pool. Where the roots genuinely nest
             // rather than tie, length decides and this order is irrelevant.
             //
             // Derived from [`Vendor::pool_capable`] rather than a literal
