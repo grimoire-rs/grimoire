@@ -52,8 +52,10 @@ install. When **nothing** is detected, grim targets the generic `agents`
 client — one copy into the shared `.agents/skills` pool — rather than
 writing a directory for every client it knows about; a lock holding only
 rules, agents, or MCP servers then has nowhere to go and exits **78**. And
-a client that reads that shared pool can be moved into it deliberately with
-`options.vendors.<name>.shared_skills`. Both in
+a client that reads that shared pool joins it on its own when another
+selected client writes there, so a skill lands once rather than twice;
+`options.vendors.<name>.shared_skills` pins the answer (`true` always pool,
+`false` always native). Both in
 [references/registries.md](references/registries.md#client-targets).
 
 ## Verify Before Acting

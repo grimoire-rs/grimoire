@@ -81,9 +81,23 @@ pub const COPILOT_AGENT_FIELDS: &[KnownField] = &[
 /// The common agent fields a lifted `copilot.*` key may silently override.
 const COPILOT_AGENT_OVERRIDES: &[&str] = &["tools", "model"];
 
+/// [`Vendor::reads_pool`] for Copilot, with the root divergence injected.
+fn reads_pool_from(scope: ConfigScope, home_diverges: bool) -> bool {
+    scope == ConfigScope::Project || !home_diverges
+}
+
 impl Vendor for CopilotVendor {
     fn name(&self) -> &'static str {
         "copilot"
+    }
+
+    /// Copilot CLI stops scanning `~/.agents/skills` once `COPILOT_HOME`
+    /// diverges from `$HOME/.copilot`; the project pool is unaffected.
+    fn reads_pool(&self, scope: ConfigScope) -> bool {
+        reads_pool_from(
+            scope,
+            copilot_home_diverges_from_default(env_dir("COPILOT_HOME"), home_dir()),
+        )
     }
 
     fn root_dir(&self) -> &'static str {
@@ -1143,5 +1157,15 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(a.document, b.document, "regeneration must be byte-identical");
+    }
+
+    #[test]
+    fn a_diverging_copilot_home_stops_only_the_global_pool_scan() {
+        assert!(reads_pool_from(ConfigScope::Global, false));
+        assert!(!reads_pool_from(ConfigScope::Global, true));
+        assert!(
+            reads_pool_from(ConfigScope::Project, true),
+            "the project pool is unaffected"
+        );
     }
 }

@@ -152,7 +152,13 @@ shared_skills = true
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `shared_skills` | boolean | `false` | When `true`, this client's skills install into the cross-vendor `.agents/skills` pool instead of the client's own skills directory. Absent or `false`, the client keeps its native layout. |
+| `shared_skills` | boolean | unset (automatic) | `true` installs this client's skills into the cross-vendor `.agents/skills` pool instead of the client's own skills directory. `false` keeps its own directory. Unset, a pool-reading client joins the pool only when another selected client already installs there. |
+
+Unset is the usual answer. A client that reads the pool but has its own
+directory then installs natively, unless a pool writer such as `codex` is in
+the set. Beside a writer it joins the pool, so each skill exists once on disk.
+[Shared skills pool visibility](./clients.md#gap-shared-pool) lists the
+writers, the readers and the environment flags that keep a reader native.
 
 Only a client that actually reads the pool may be opted into it — grim never
 writes where nothing reads. Those clients are `codex`, `gemini`, `zed`, `amp`,
@@ -161,10 +167,9 @@ writes where nothing reads. Those clients are `codex`, `gemini`, `zed`, `amp`,
 scan it alongside their own skills directory).
 Setting `true` on any other client is refused: exit 65 (`EX_DATAERR`) from
 [`grim config set`](./commands.md#config), exit 78 (`EX_CONFIG`) at load when
-the value was hand-authored. `false` stays accepted for every client — it is
-their resting state.
+the value was hand-authored. `false` stays accepted for every client.
 
-Flipping the value moves the skill: the next [`grim install`](./commands.md#install)
+Changing the value, or the set of clients, moves the skill: the next [`grim install`](./commands.md#install)
 or [`grim update`](./commands.md#update) writes it at the new location and
 removes the old copy. A copy you edited by hand is **never** deleted — it is
 kept and grim warns, naming both paths, because the client would otherwise
@@ -176,13 +181,13 @@ you curated in `.agents/skills` by hand — the move is refused with exit 65
 [untracked-destination guard](./json-interface.md#error-reason) that protects any install.
 Pass `--force` to overwrite it.
 
-An entry set to `true` round-trips through every `grim` write. One left at the
-default — `shared_skills = false`, or a bare `[options.vendors.<name>]` header —
-is dropped on the next write, like every other default-valued key.
+An entry set to `true` or `false` round-trips through every `grim` write. A
+bare `[options.vendors.<name>]` header with no value set is dropped on the next
+write, like every other default-valued table.
 
 The field has no CLI flag and no `[options]`-level equivalent, so its
 precedence chain is two links long: the resolved scope's
-`[options.vendors.<name>].shared_skills`, else the built-in default `false`.
+`[options.vendors.<name>].shared_skills`, else the automatic choice.
 There is no cross-scope merge — like every other key, each command resolves
 exactly one scope and reads that scope's table whole.
 

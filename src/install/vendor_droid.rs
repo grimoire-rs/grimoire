@@ -24,9 +24,9 @@
 //!   and "Personal compatibility | `~/.agents/skills/**/SKILL.md`,
 //!   `~/.agent/skills/**/SKILL.md`"
 //!   (<https://docs.factory.ai/cli/configuration/skills>). So Droid is on
-//!   [`POOL_CAPABLE_VENDORS`](super::vendor) — eligible for the
-//!   `[options.vendors.droid].shared_skills` opt-in, not pooled by default:
-//!   `.factory/skills/` is the first-class location, so grim writes it. The
+//!   [`POOL_CAPABLE_VENDORS`](super::vendor): its skills join the pool beside
+//!   a pool writer, or as `[options.vendors.droid].shared_skills` pins it.
+//!   Alone, `.factory/skills/` is the first-class location grim writes. The
 //!   singular `.agent/skills/` is a different convention; grim never writes it.
 //!   On a name clash "Droid keeps one effective version and shows the others
 //!   as overridden".
@@ -575,12 +575,12 @@ mod tests {
                 "must not render into {foreign}"
             );
         }
-        // Droid reads `.agents/skills` at both scopes (CLI v0.228.0), so the
-        // pool is reachable — but only through the `shared_skills` opt-in.
-        assert!(DroidVendor.pool_capable(), "eligible for the shared_skills opt-in");
+        // Droid reads `.agents/skills` at both scopes (CLI v0.228.0), so its
+        // skills can join the pool; that choice is made per install, not here.
+        assert!(DroidVendor.pool_capable(), "eligible to join the shared pool");
         assert!(
             DroidVendor.skill_fields().is_empty(),
-            "an opt-in member must render the universal bytes"
+            "a pool member must render the universal bytes"
         );
     }
 

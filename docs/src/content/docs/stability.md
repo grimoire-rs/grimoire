@@ -249,10 +249,11 @@ exclusions are what keep 1.x able to move at all:
   any client's own configuration root, and where an MCP entry lands
   inside a client's own config file, are not a contract. Neither is the
   shared `$HOME/.agents/skills` pool: *which* clients render into it
-  moves as clients adopt or retire the convention, and
-  [`[options.vendors.<name>].shared_skills`][options-vendors] lets a
-  pool-reading client opt in — moving that client's skills out of its own
-  directory and into the pool, or back. The per-client roots are
+  moves as clients adopt or retire the convention. A pool-reading client
+  joins the pool beside a client that writes it, and
+  [`[options.vendors.<name>].shared_skills`][options-vendors] pins that
+  choice either way — moving that client's skills out of its own directory
+  and into the pool, or back. The per-client roots are
   enumerated by the [vendor projection layer][vendor-metadata] and in the
   [client compatibility matrix][clients]; those enumerations are
   documentation, not a promise, and are free to move between minors as

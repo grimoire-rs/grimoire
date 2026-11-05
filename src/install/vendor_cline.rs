@@ -20,9 +20,9 @@
 //!   `.agents/skills` and global `~/.agents/skills` alongside Cline's own
 //!   directory. The earlier "confirmed absence" read the extension's docs
 //!   page only, never its source, and never looked at the CLI at all — Cline
-//!   now joins [`POOL_CAPABLE_VENDORS`](super::vendor). Native `.cline/skills`
-//!   stays the default render; the pool is the `shared_skills` opt-in, the
-//!   Warp shape.
+//!   now joins [`POOL_CAPABLE_VENDORS`](super::vendor). Alone it renders native
+//!   `.cline/skills`; beside a pool writer, or with `shared_skills`, its
+//!   skills go to the pool — the Warp shape.
 //! - **Rules**: **declined for now, and this one is a live candidate.** Unlike
 //!   the other declines in this batch, Cline's `.clinerules/` genuinely
 //!   documents per-file `paths:` frontmatter scoping — the exact capability
@@ -402,9 +402,9 @@ mod tests {
 
     #[test]
     fn skills_root_defaults_to_clines_own_dir_not_the_shared_pool() {
-        // The load-bearing assertion: without the `shared_skills` opt-in,
-        // Cline's default render is byte-identical to before — native
-        // `.cline/skills`, never the pool.
+        // The load-bearing assertion: Cline's own skills root is native
+        // `.cline/skills`, never the pool; joining the pool is decided per
+        // install by `expected_outputs::destination`.
         let ws = Path::new("/w");
         assert_eq!(
             ClineVendor.skills_root(ws, ConfigScope::Project),

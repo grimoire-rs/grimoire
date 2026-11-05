@@ -391,34 +391,66 @@ member at both scopes; [Antigravity] is partial, because its *global* skills
 live under its own `~/.gemini/config/skills`, so a global install for it is a
 separate copy.
 
-*Reading* — several more clients scan the pool without grim writing there by
-default. [Cursor], [Copilot], [OpenCode], [Warp], [Droid], [Kilo] and [Cline]
-all read it at both scopes, but each has a first-class directory of its own
-upstream, and grim prefers a vendor-specific location wherever one exists.
-[Copilot] stops reading the global pool once `COPILOT_HOME` points anywhere
-but `~/.copilot` (verified against CLI 1.0.88) — grim warns at install time
-when `shared_skills` is set for Copilot and that condition holds, since the
-skill still installs into a pool Copilot will not scan. [Kilo] stops reading it when
-`KILO_DISABLE_EXTERNAL_SKILLS` is set. [OpenClaw] reads the **global** pool
-but has no project scope; it is a partial reader, and grim installs it to its
-own directory.
+*Reading* — several more clients scan the pool without grim writing there for
+them alone. [Cursor], [Copilot], [OpenCode], [Warp], [Droid], [Kilo] and
+[Cline] all read it at both scopes. Each also has a first-class directory of
+its own upstream, and grim installs there when no pool writer is present.
+[OpenClaw] reads the **global** pool but has no project scope. It is a partial
+reader, and grim installs it to its own directory.
 
-Set `[options.vendors.<name>].shared_skills` on any full pool reader —
-[Cursor], [Copilot], [OpenCode], [Warp], [Droid], [Kilo] or [Cline] — to move
-that client's skills into the pool instead. The key is refused (exit `65` at
-`grim config set`, `78` when hand-authored) for a client that is not a
-verified pool reader, because enabling it there would write where nothing
-reads. Partial readers are excluded on purpose: membership is scope-blind, so a client that reads the
-pool at only one scope would get skills written where it never scans at the
-other.
+The two lists meet when you select a reader and a writer together. A skill
+installed natively for [OpenCode] and into the pool for [Codex] would sit on
+disk twice. [OpenCode] loads both, logs `duplicate skill name`, and keeps
+whichever copy it read last.
+
+So a reader joins the pool whenever another client in the set already lands
+there. The set is this run's clients plus every client the artifact's install
+record still holds. Readers never pull each other in: [OpenCode] beside
+[Cursor] alone keeps both native.
+
+A reader stays native when its own pool scan is switched off, because a skill
+in the pool would go unread there:
+
+| Client | Stays native when |
+|---|---|
+| [OpenCode] | `OPENCODE_DISABLE_EXTERNAL_SKILLS` is set |
+| [Kilo] | `KILO_DISABLE_EXTERNAL_SKILLS` is set |
+| [Copilot] | global scope, and `COPILOT_HOME` points anywhere but `~/.copilot` (verified against CLI 1.0.88) |
+
+A flag counts as set unless it is empty or one of `0`, `false`, `no`, `off`
+and `n`.
+
+`[options.vendors.<name>].shared_skills` overrides the automatic choice for a
+full pool reader: [Cursor], [Copilot], [OpenCode], [Warp], [Droid], [Kilo] or
+[Cline]. Set `true` to install that client's skills into the pool even with no
+writer present. Set `false` to keep its own directory even beside a writer,
+accepting the second copy. Leave it unset for the automatic choice.
+
+`true` is refused (exit `65` at `grim config set`, `78` when hand-authored) for
+a client that is not a verified pool reader, because it would write where
+nothing reads. Partial readers are excluded on purpose: membership is
+scope-blind, so a client that reads the pool at only one scope would get skills
+written where it never scans at the other. grim warns at install time when
+`shared_skills = true` is set for [Copilot] while `COPILOT_HOME` diverges,
+since the skill still installs into a pool Copilot will not scan.
+
+Changing the set moves skills. The next `grim install` or `grim update` writes
+the new location and removes the old copy. A copy you edited by hand is kept,
+and grim warns, naming both paths. Removing the writer moves the reader back
+to its own directory over two `grim update` runs, with one copy on disk at
+each step. The first move for an existing install is described under
+[Upgrading](./upgrading.md#shared-pool-auto-join).
+
+[OpenCode] also scans `~/.claude/skills`. [Claude] never writes the pool, so
+a global skill installed for both still reaches OpenCode twice. grim does not
+change that pairing.
 
 Which clients *read* the pool is upstream scan behavior, not a grim choice: a
 skill installed for one member is visible to every other member whether or
 not you asked for that. Which clients grim *writes* it for is partly a
-choice — yours. [Goose] and project-scope [Antigravity] land there because
-their own vendors point there, but every opt-in above is you deciding to
-trade a client's native layout for that wider visibility. Left unset, the
-client keeps its own directory.
+choice. [Goose] and project-scope [Antigravity] land there because their own
+vendors point there. A reader joins to avoid a second copy, and
+`shared_skills` decides the rest.
 
 grim refcounts the shared directory so removing one client never deletes a
 skill another client still records — subject to one [documented
@@ -519,8 +551,8 @@ Client-specific detail worth knowing:
   it is the strongest candidate to gain rule support next. Cline reads the
   `.agents` pool at both scopes too — its CLI and VS Code extension source
   both scan project `.agents/skills` and global `~/.agents/skills` alongside
-  `.cline/skills/` — so `[options.vendors.cline].shared_skills` moves its
-  skills there.
+  `.cline/skills/` — so beside a pool writer its skills join the pool, and
+  `[options.vendors.cline].shared_skills` sets the choice outright.
 - **[Goose]** is the one client here that installs into the shared
   `.agents/skills` pool rather than its own directory, because Goose's own docs
   label `.goose/skills/` backward-compatibility and name `.agents/skills` the
@@ -532,8 +564,8 @@ Client-specific detail worth knowing:
   fields. Goose reads `name`, `description` and `model`. An agent's `tools`
   field has no Goose equivalent and is dropped with a warning.
 - **[Warp]** reads the pool too, but its own `.warp/skills/` is a first-class
-  location upstream, so grim installs there by default. Set
-  `[options.vendors.warp].shared_skills` to move them into the pool instead.
+  location upstream, so grim installs there unless a pool writer is selected
+  beside it. `[options.vendors.warp].shared_skills` sets the choice outright.
   `~/.warp/` is the same path on macOS, Linux and Windows. MCP servers go
   into `.warp/.mcp.json`, described under [Warp: MCP](#gap-warp-mcp).
 - **[OpenClaw]** installs at **global scope only**. It has no per-repository
@@ -545,8 +577,9 @@ Client-specific detail worth knowing:
 - **[Kilo]** was formerly Kilo Code, and grim uses the current name. It writes
   `.kilo/` exclusively; the older `.kilocode/` is deprecated upstream and grim
   never writes it, though an existing one is still recognized when detecting
-  whether Kilo is in use. Kilo reads the pool at both scopes, so
-  `[options.vendors.kilo].shared_skills` moves its skills there. Agents go
+  whether Kilo is in use. Kilo reads the pool at both scopes, so its skills
+  join the pool beside a pool writer, and
+  `[options.vendors.kilo].shared_skills` sets the choice outright. Agents go
   to `.kilo/agents/<name>.md`, and globally to
   `$XDG_CONFIG_HOME/kilo/agents/` (`~/.config/kilo/agents/` when the
   variable is unset), not `~/.kilo`. Kilo also loads agents from `~/.kilo/agents/`
@@ -585,7 +618,8 @@ one of the two only.
 [Droid] is Factory's agent. The client is named `droid` but its directory is
 `.factory/` — grim names the client, not the vendor org, the same way it uses
 `claude` rather than `anthropic`. Droid reads the `.agents` pool at both
-scopes, so `[options.vendors.droid].shared_skills` moves its skills there.
+scopes, so its skills join the pool beside a pool writer, and
+`[options.vendors.droid].shared_skills` sets the choice outright.
 Factory also reads a singular `.agent/skills/`, a different convention that
 grim never writes.
 

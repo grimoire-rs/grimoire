@@ -26,11 +26,11 @@
 //!   (<https://github.com/Kilo-Org/kilocode/blob/v7.8.1/packages/kilo-docs/pages/customize/skills.md>).
 //!   `packages/opencode/src/skill/index.ts` scans project `.agents/skills`
 //!   (walk-up) and `~/.agents/skills` unless `KILO_DISABLE_EXTERNAL_SKILLS` is
-//!   set. So Kilo is on [`POOL_CAPABLE_VENDORS`](super::vendor) — eligible for
-//!   the `[options.vendors.kilo].shared_skills` opt-in, not pooled by default:
-//!   `.kilo/skills/` is first-class upstream, so grim writes it, the Warp shape.
-//!   A user who sets `KILO_DISABLE_EXTERNAL_SKILLS` and opts in gets skills
-//!   Kilo does not load; that is their pairing to avoid, not grim's to detect.
+//!   set. So Kilo is on [`POOL_CAPABLE_VENDORS`](super::vendor): its skills
+//!   join the pool beside a pool writer, or as
+//!   `[options.vendors.kilo].shared_skills` pins it. Alone, `.kilo/skills/` is
+//!   first-class upstream, so grim writes it, the Warp shape. With
+//!   `KILO_DISABLE_EXTERNAL_SKILLS` set, `reads_pool` keeps skills native.
 //! - **Rules**: **declined** this wave.
 //! - **Agents**: `.kilo/agents/<name>.md` (project) and
 //!   `$XDG_CONFIG_HOME|~/.config/kilo/agents/<name>.md` (global), verified
@@ -136,9 +136,20 @@ pub const KILO_AGENT_FIELDS: &[KnownField] = &[
 /// The common agent fields a lifted `kilo.*` key may silently override.
 const KILO_AGENT_OVERRIDES: &[&str] = &["model"];
 
+/// [`Vendor::reads_pool`] for Kilo, with the disable flag injected.
+fn reads_pool_from(external_skills_disabled: bool) -> bool {
+    !external_skills_disabled
+}
+
 impl Vendor for KiloVendor {
     fn name(&self) -> &'static str {
         "kilo"
+    }
+
+    /// Kilo skips the external `.claude` and `.agents` skill dirs when
+    /// `KILO_DISABLE_EXTERNAL_SKILLS` is set, as OpenCode does with its own flag.
+    fn reads_pool(&self, _scope: ConfigScope) -> bool {
+        reads_pool_from(super::vendor::env_disable_flag("KILO_DISABLE_EXTERNAL_SKILLS"))
     }
 
     fn root_dir(&self) -> &'static str {
@@ -436,11 +447,12 @@ mod tests {
             ws.join(".kilo/skills")
         );
         // Kilo reads `.agents/skills` at both scopes (v7.8.1), so it is a full
-        // pool member — but pool-capable must not mean pool-by-default.
-        assert!(KiloVendor.pool_capable(), "eligible for the shared_skills opt-in");
+        // pool member — but its own root stays native; the pool is chosen per
+        // install, not here.
+        assert!(KiloVendor.pool_capable(), "eligible to join the shared pool");
         assert!(
             KiloVendor.skill_fields().is_empty(),
-            "an opt-in member must render the universal bytes"
+            "a pool member must render the universal bytes"
         );
     }
 
@@ -478,5 +490,11 @@ mod tests {
         assert!(roots.contains(&home.join(".kilo")), "{roots:?}");
         assert!(roots.contains(&xdg.join("kilo")), "{roots:?}");
         assert!(kilo_config_roots(None, None).is_empty());
+    }
+
+    #[test]
+    fn the_external_skills_flag_stops_kilo_reading_the_pool() {
+        assert!(reads_pool_from(false));
+        assert!(!reads_pool_from(true));
     }
 }

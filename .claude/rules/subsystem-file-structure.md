@@ -411,18 +411,32 @@ client's **native** user-level discovery directory rather than under
 | **Antigravity** | `~/.gemini/config/skills/<name>/` — **not** the pool at global scope | `~/.gemini/config/rules/<name>.md` | `~/.gemini/config/agents/<name>.md` |
 | **Goose** | `$HOME/.agents/skills/<name>/` (shared pool, both scopes) | declined | `~/.goose/agents/<name>.md` |
 | **Cline** | `~/.cline/skills/<name>/` | declined | declined |
-| **Droid** | `~/.factory/skills/<name>/` (native by default; the pool only via `shared_skills`) | declined | `~/.factory/droids/<name>.md` |
-| **Warp** | `~/.warp/skills/<name>/` (native by default; the pool only via `shared_skills`) | declined | declined |
+| **Droid** | `~/.factory/skills/<name>/` (native alone; joins the pool beside a pool writer, `shared_skills` pins it) | declined | `~/.factory/droids/<name>.md` |
+| **Warp** | `~/.warp/skills/<name>/` (native alone; joins the pool beside a pool writer, `shared_skills` pins it) | declined | declined |
 | **OpenClaw** | `<openclaw_root>/skills/<name>/` (`$OPENCLAW_STATE_DIR`, else `$OPENCLAW_HOME/.openclaw`, else `~/.openclaw`) — **global-only client**, project scope writes nothing | declined | declined |
-| **Kilo** | `~/.kilo/skills/<name>/` (native by default; the pool only via `shared_skills`) | declined | `$XDG_CONFIG_HOME\|~/.config/kilo/agents/<name>.md` |
+| **Kilo** | `~/.kilo/skills/<name>/` (native alone; joins the pool beside a pool writer, `shared_skills` pins it) | declined | `$XDG_CONFIG_HOME\|~/.config/kilo/agents/<name>.md` |
 | **Qoder** | `<qoder_root>/skills/<name>/` | `<qoder_root>/rules/<name>.md` | `<qoder_root>/agents/<name>.md` |
 
-`$XDG_CONFIG_HOME` falls back to `~/.config` when unset. A client whose
-`[options.vendors.<name>].shared_skills` is set writes its skills to
-`$HOME/.agents/skills/<name>/` instead of the root above; the opt-in is
-accepted only for a **verified pool reader** (`POOL_CAPABLE_VENDORS` in
-`src/install/vendor.rs`), and setting it on any other client is exit **65**
-at `grim config set` / **78** at load.
+`$XDG_CONFIG_HOME` falls back to `~/.config` when unset.
+
+**Pool auto-join** (`adr_shared_pool_auto_join.md`, issue #262). A **verified
+pool reader** (`POOL_CAPABLE_VENDORS` in `src/install/vendor.rs`: Cursor,
+Copilot, OpenCode, Warp, Droid, Kilo, Cline) writes its *skills* to
+`$HOME/.agents/skills/<name>/` instead of the root above whenever another
+client in the effective set — this run's targets plus the clients the
+artifact's record still holds — lands in the pool **unconditionally** (its
+`path_for` is the pool path, or it is pinned `shared_skills = true`). Readers
+never pull each other in, so OpenCode + Cursor alone stay native. A reader
+that has switched its pool scan off (`Vendor::reads_pool`: OpenCode's and
+Kilo's `*_DISABLE_EXTERNAL_SKILLS`, Copilot global with a diverging
+`COPILOT_HOME`) stays native. `[options.vendors.<name>].shared_skills` is
+tri-state: unset = auto, `true` = always pool, `false` = always native.
+`true` is accepted only for a pool reader; on any other client it is exit
+**65** at `grim config set` / **78** at load. The one seam is
+`expected_outputs::destination`; `InstallTarget::path_for` stays the
+pre-join path. A move in either direction is a layout move the existing
+reapers handle (`reap_moved_outputs`; pool → native converges over two
+`update` runs via `shared_by_surviving_sibling`).
 
 **Vendor config-dir env vars that are NOT honored** (paths hardcode the
 documented native root), each for its own reason:
@@ -469,7 +483,7 @@ variables are honored read-only, `OPENCODE_CONFIG` names a file grim reads
 | Variable | Effect on global paths |
 |----------|------------------------|
 | `CLAUDE_CONFIG_DIR` | Replaces the entire `~/.claude` tree — Claude skills, rules, and agents root there. Also relocates the global MCP registration file to `$CLAUDE_CONFIG_DIR/.claude.json`. **Also read from Claude's own settings `env`** (`vendor_claude::config_dir_override`, the one resolver every Claude path uses): managed `managed-settings.json` then `managed-settings.d/*.json` (name order, last wins) > user `settings.json` in the shell-resolved root > shell > `~/.claude` — settings beat the shell because Claude writes each `env` entry over the inherited value (code.claude.com/docs/en/env-vars "Precedence"). Project/local settings are never read (Claude ≥ 2.1.251 ignores them for this key). Values are untrusted input: absolute, no `..`, nothing expanded; any failure drops that layer at `debug`. Residual gaps: MDM/registry/server-managed policy (unreadable), `claude --settings` (flagSettings, per-session), a second hop (`<new root>/settings.json` setting it again — grim follows one), and a Windows rooted-without-drive `\x` (not `is_absolute`, ignored). Memoized per process (`OnceLock`) so one run never splits across roots. The managed dir is injected (`config_dir_from`) so tests never touch system paths |
-| `COPILOT_HOME` | Replaces `~/.copilot` — Copilot skills and agents land under `$COPILOT_HOME/`. VS Code's embedded Copilot CLI honors it since VS Code 1.132.0 (microsoft/vscode#314917). **Caveat:** set to anything but `~/.copilot`, Copilot stops scanning `~/.agents/skills`, so `shared_skills` output goes unread (watchlist) |
+| `COPILOT_HOME` | Replaces `~/.copilot` — Copilot skills and agents land under `$COPILOT_HOME/`. VS Code's embedded Copilot CLI honors it since VS Code 1.132.0 (microsoft/vscode#314917). **Caveat:** set to anything but `~/.copilot`, Copilot stops scanning `~/.agents/skills`, so `Vendor::reads_pool` keeps Copilot's skills native there (no auto-join), and only an explicit `shared_skills = true` still writes skills it never reads (warned; watchlist) |
 | `OPENCODE_CONFIG_DIR` | OpenCode's additive scan dir — preferred over the XDG default for skills and agents when set |
 | `OPENCODE_CONFIG` | Config **file** path only (global `opencode.json` edit target); no effect on skill/agent paths |
 | `CODEX_HOME` | Replaces `~/.codex` — Codex **agents** root **and** the MCP `config.toml` there. Does **not** relocate Codex skills (those follow the `$HOME/.agents/skills` cross-vendor standard) |
@@ -704,8 +718,8 @@ rule → `cursor-root` + `rules/<name>.mdc`; global · kiro · mcp →
 
 - **Global pool skills anchor at `agents-skills`, never at a vendor
   root** — Codex, Gemini, Zed, Amp, Goose, the generic `agents` client,
-  and any client whose `[options.vendors.<name>].shared_skills` opt-in is
-  active. Goose's `goose-root` hosts only its agents. (At *project* scope every
+  and any pool reader whose skills joined the pool (auto-join beside a
+  pool writer, or `shared_skills = true`). Goose's `goose-root` hosts only its agents. (At *project* scope every
   triple anchors at `workspace`, pool or not; the pool shows up only in
   the `relative` remainder, `.agents/skills/<name>`.)
 - **Antigravity is a partial pool member.** Its *project* skills pool into
@@ -714,13 +728,13 @@ rule → `cursor-root` + `rules/<name>.mdc`; global · kiro · mcp →
   installer or prune assumes scope-uniform pool membership — both key on
   resolved destination paths, not on a roster. **Pool *capability* is
   scope-blind**, though: a partial member must not join
-  `POOL_CAPABLE_VENDORS`, or an opt-in would write global skills where the
+  `POOL_CAPABLE_VENDORS`, or a pool join would write global skills where the
   client never scans, and nothing would fail.
-- **The opt-in classifies both layouts for one triple.**
-  `candidate_anchors` cannot see the config, so a pool-capable client's
+- **Pool membership classifies both layouts for one triple.**
+  `candidate_anchors` cannot see the config or the peer set, so a pool-capable client's
   skill triple returns `[native root, agents-skills, grim-home]` — native
   first, so a root tie keeps the client's own anchor rather than silently
-  re-anchoring a user who never opted in.
+  re-anchoring a user whose skills never joined the pool.
 
 Declined `(client, kind)` pairs are never classified — skipped at the
 `kind_support` gate before anchoring. A pair declined only *at one scope*

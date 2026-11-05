@@ -119,7 +119,7 @@ impl ConfigKey {
         const SHOW_DEPRECATED: KeySpec = KeySpec {
             key: "options.show_deprecated",
             value_type: ValueType::Bool {
-                default: defaults::SHOW_DEPRECATED,
+                default: Some(defaults::SHOW_DEPRECATED),
             },
             title: "Show deprecated",
             description: "Controls whether deprecated artifacts appear in `grim search` and the TUI \
@@ -142,7 +142,7 @@ impl ConfigKey {
         const TUI_GROUP_BY_TYPE: KeySpec = KeySpec {
             key: "options.tui.group_by_type",
             value_type: ValueType::Bool {
-                default: defaults::GROUP_BY_TYPE,
+                default: Some(defaults::GROUP_BY_TYPE),
             },
             title: "Group by type",
             description: "Controls whether a type-level group (skill, rule, agent, mcp, or bundle) appears \
@@ -227,7 +227,7 @@ impl ConfigKey {
             // runtime fallback is `bool::default()` on a plain field, and
             // `experimental_hooks_spec_matches_derived_default` pins this
             // against `ExperimentalOptions::default()`.
-            value_type: ValueType::Bool { default: false },
+            value_type: ValueType::Bool { default: Some(false) },
             title: "Experimental hooks",
             description: "Controls whether `grim install` arms declared hooks in your AI clients. When \
                            unset, install arms nothing and removes grim's existing hook registrations; \
@@ -366,7 +366,7 @@ impl RegistryField {
         // `RegistryConfig`'s own serde-derived `bool` default (`false`).
         const DEFAULT: KeySpec = KeySpec {
             key: "registry.<alias>.default",
-            value_type: ValueType::Bool { default: false },
+            value_type: ValueType::Bool { default: Some(false) },
             title: "Default registry flag",
             description: "Controls whether this registry is the primary one short identifiers expand \
                            against. Only one entry may set this; the first entry wins when none do.",
@@ -377,7 +377,7 @@ impl RegistryField {
         // serde-derived `bool` default, not a `config::defaults` const.
         const INSECURE: KeySpec = KeySpec {
             key: "registry.<alias>.insecure",
-            value_type: ValueType::Bool { default: false },
+            value_type: ValueType::Bool { default: Some(false) },
             title: "Plain-HTTP transport",
             description: "Controls whether this registry is contacted over plain HTTP instead of HTTPS. \
                            Disabled by default; enabling it in a committed `grimoire.toml` downgrades \
@@ -405,17 +405,18 @@ impl RegistryField {
 /// `ConfigKey::ALL` array. `key` is a pattern string — the `<name>` segment
 /// is supplied by the user and validated against the closed client set.
 ///
-/// Like `registry.<alias>.default`, the default is a literal rather than a
-/// `config::defaults` const: the resting value is `VendorOptions`' own
-/// serde-derived `bool` default, which is not const-evaluable. The tripwire
-/// is `vendor_shared_skills_spec_matches_derived_default`.
+/// The default is `None`: unset is neither literal, it lets grim decide per
+/// run whether a pool reader joins a pool another client writes. The
+/// tripwire is `vendor_shared_skills_spec_matches_derived_default`.
 pub const VENDOR_SHARED_SKILLS: KeySpec = KeySpec {
     key: "options.vendors.<name>.shared_skills",
-    value_type: ValueType::Bool { default: false },
+    value_type: ValueType::Bool { default: None },
     title: "Shared skills pool",
     description: "Controls whether this client's skills install into the shared `.agents/skills` \
-                   pool instead of its own directory. Disabled by default, keeping the native \
-                   layout. Enabling it is refused for a client that does not read the pool.",
+                   pool instead of its own directory. Unset, a client that reads the pool joins it \
+                   only when another selected client already writes there, and `false` always keeps \
+                   its own directory. Setting it to `true` is refused for a client that does not \
+                   read the pool.",
     constraints: None,
     section: ConfigSection::Vendors,
 };
@@ -832,9 +833,14 @@ mod tests {
             },
             show_deprecated: true,
             search_min_relevance: Some(30),
-            vendors: [("claude".to_string(), VendorOptions { shared_skills: true })]
-                .into_iter()
-                .collect(),
+            vendors: [(
+                "claude".to_string(),
+                VendorOptions {
+                    shared_skills: Some(true),
+                },
+            )]
+            .into_iter()
+            .collect(),
         }
     }
 
@@ -876,7 +882,10 @@ mod tests {
         // the field set the per-vendor spec declares. A second field added
         // to VendorOptions without a matching spec fails here.
         use crate::config::declaration::VendorOptions;
-        let value = serde_json::to_value(VendorOptions { shared_skills: true }).expect("VendorOptions must serialize");
+        let value = serde_json::to_value(VendorOptions {
+            shared_skills: Some(true),
+        })
+        .expect("VendorOptions must serialize");
         let fields: BTreeSet<String> = value
             .as_object()
             .expect("VendorOptions must serialize as an object")
@@ -902,7 +911,7 @@ mod tests {
         use crate::config::declaration::VendorOptions;
         assert_eq!(
             VENDOR_SHARED_SKILLS.value_type.default_str(),
-            Some(VendorOptions::default().shared_skills.to_string())
+            VendorOptions::default().shared_skills.map(|v| v.to_string())
         );
     }
 
@@ -1218,7 +1227,7 @@ mod tests {
         let spec = ConfigKey::ExperimentalHooks.spec();
         assert_eq!(spec.key, "options.experimental.hooks");
         assert_eq!(spec.title, "Experimental hooks");
-        assert!(matches!(spec.value_type, ValueType::Bool { default: false }));
+        assert!(matches!(spec.value_type, ValueType::Bool { default: Some(false) }));
         assert_eq!(
             spec.description,
             "Controls whether `grim install` arms declared hooks in your AI clients. When unset, install arms \

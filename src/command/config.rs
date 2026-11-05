@@ -464,15 +464,14 @@ fn fixed_value(key: ConfigKey, options: &ConfigOptions) -> Option<String> {
 
 /// The effective value of a per-vendor key, or `None` when unset.
 ///
-/// `false` is the built-in default and indistinguishable from an absent
-/// table entry, so it collapses to unset across `get` / `list` / `unset` —
-/// the same rule `show_deprecated` and `tui.group_by_type` follow.
+/// Unlike `show_deprecated`, `false` is not the default here: unset lets
+/// grim decide per run, and `false` is a stored opt-out.
 fn vendor_value(vendor: &str, options: &ConfigOptions) -> Option<String> {
     options
         .vendors
         .get(vendor)
-        .filter(|v| v.shared_skills)
-        .map(|_| "true".to_string())
+        .and_then(|v| v.shared_skills)
+        .map(|v| v.to_string())
 }
 
 fn get_value(
@@ -830,15 +829,10 @@ fn apply_set(
                 // accepted set with load-time validation via
                 // `check_pool_capable`.
                 crate::config::project_config::check_pool_capable(vendor).map_err(super::config_value)?;
-                options.vendors.entry(vendor.clone()).or_default().shared_skills = true;
-            } else {
-                // `false` is the default, so it is stored as absence rather
-                // than as a table that means nothing — same collapse as
-                // `vendor_value` and `apply_unset`. `VendorOptions` carries a
-                // single field today; a second one would make this a
-                // field-level clear instead of an entry removal.
-                options.vendors.remove(vendor);
             }
+            // `false` is stored, not collapsed: it opts the client out of
+            // joining a pool another client writes, which unset does not.
+            options.vendors.entry(vendor.clone()).or_default().shared_skills = Some(enabled);
             Ok(value_str.to_string())
         }
         ParsedKey::RegistryAlias { alias } => Err(super::config_usage(format!(
@@ -989,9 +983,8 @@ fn apply_unset(
             Ok(())
         }
         ParsedKey::VendorField { vendor } => {
-            // Single-field `VendorOptions`: clearing the field and removing
-            // the entry are the same thing, and an empty table would
-            // round-trip as an unset key anyway.
+            // Single-field `VendorOptions`: removing the entry clears the
+            // field, returning the client to the automatic pool layout.
             options.vendors.remove(vendor);
             Ok(())
         }
@@ -3166,7 +3159,7 @@ mod tests {
 
         let stored = apply_set(&key, "true", &mut options, &mut registries).unwrap();
         assert_eq!(stored, "true");
-        assert!(options.vendors["cursor"].shared_skills);
+        assert_eq!(options.vendors["cursor"].shared_skills, Some(true));
         assert_eq!(
             get_value(&key, &options, &registries).unwrap(),
             Some("true".to_string())
@@ -3194,9 +3187,9 @@ mod tests {
     }
 
     #[test]
-    fn vendor_set_false_collapses_to_unset() {
-        // `false` is the built-in default and indistinguishable from an
-        // absent entry — the same collapse `show_deprecated` performs.
+    fn vendor_set_false_persists_as_an_explicit_opt_out() {
+        // Unset lets grim auto-join a pool reader to a pool another client
+        // writes; `false` refuses that, so it must be stored, not collapsed.
         let key = parse_key("options.vendors.cursor.shared_skills").unwrap();
         let mut options = fresh_options();
         let mut registries: Vec<RegistryConfig> = vec![];
@@ -3204,11 +3197,25 @@ mod tests {
         apply_set(&key, "true", &mut options, &mut registries).unwrap();
         apply_set(&key, "false", &mut options, &mut registries).unwrap();
 
-        assert!(
-            options.vendors.is_empty(),
-            "a default-valued vendor entry must not be stored"
+        assert_eq!(options.vendors["cursor"].shared_skills, Some(false));
+        assert_eq!(
+            get_value(&key, &options, &registries).unwrap(),
+            Some("false".to_string())
         );
-        assert_eq!(get_value(&key, &options, &registries).unwrap(), None);
+
+        apply_unset(&key, &mut options, &mut registries).unwrap();
+        assert!(options.vendors.is_empty(), "unset must drop the entry");
+    }
+
+    #[test]
+    fn vendor_set_false_is_accepted_on_a_client_that_does_not_read_the_pool() {
+        // Opting out needs no pool: `false` keeps the native layout, which
+        // every client has.
+        let key = parse_key("options.vendors.claude.shared_skills").unwrap();
+        let mut options = fresh_options();
+        let mut registries: Vec<RegistryConfig> = vec![];
+        apply_set(&key, "false", &mut options, &mut registries).unwrap();
+        assert_eq!(options.vendors["claude"].shared_skills, Some(false));
     }
 
     #[test]

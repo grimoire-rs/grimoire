@@ -256,13 +256,16 @@ impl ExperimentalOptions {
 #[serde(deny_unknown_fields)]
 pub struct VendorOptions {
     /// Controls whether this client's skills install into the shared
-    /// `.agents/skills` pool instead of its own directory. Disabled by
-    /// default, keeping the native layout. Enabling it is refused for a
-    /// client that does not read the pool. There is no `--client` flag and
-    /// no `[options]`-level equivalent, so the resolved scope's value is the
-    /// only source.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub shared_skills: bool,
+    /// `.agents/skills` pool instead of its own directory. Unset, a client
+    /// that reads the pool joins it only when another selected client
+    /// already writes there, and `false` always keeps its own directory.
+    /// Setting it to `true` is refused for a client that does not read the
+    /// pool. There is no `--client` flag and no `[options]`-level
+    /// equivalent, so the resolved scope's value is the only source.
+    // The schema stays `boolean`: unset is "absent", never a `null` literal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "bool")]
+    pub shared_skills: Option<bool>,
 }
 
 /// Optional config options shared by both scopes.
@@ -655,15 +658,31 @@ mod tests {
         );
 
         let mut populated = ConfigOptions::default();
-        populated
-            .vendors
-            .insert("cursor".to_string(), VendorOptions { shared_skills: true });
+        populated.vendors.insert(
+            "cursor".to_string(),
+            VendorOptions {
+                shared_skills: Some(true),
+            },
+        );
+        populated.vendors.insert(
+            "opencode".to_string(),
+            VendorOptions {
+                shared_skills: Some(false),
+            },
+        );
         let round_tripped: ConfigOptions =
             serde_json::from_value(serde_json::to_value(&populated).expect("serialize")).expect("deserialize");
         assert_eq!(round_tripped, populated, "the vendor table must round-trip unchanged");
 
-        // `false` is the resting state and is skipped on the way out, so an
-        // entry that only carries the default reads back as the default.
+        // An explicit `false` is an opt-out and must survive; only unset is
+        // skipped on the way out.
+        assert_eq!(
+            serde_json::to_value(VendorOptions {
+                shared_skills: Some(false)
+            })
+            .expect("serialize"),
+            serde_json::json!({ "shared_skills": false }),
+        );
         let default_entry = VendorOptions::default();
         let json = serde_json::to_value(default_entry).expect("VendorOptions must serialize");
         assert_eq!(

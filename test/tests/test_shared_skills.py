@@ -942,8 +942,11 @@ def test_a_flip_does_not_refuse_a_pool_dir_a_sibling_client_already_records(
     )
     pool = bare_project_dir / ".agents/skills/sibling-skill"
     config = bare_project_dir / "grimoire.toml"
+    # An explicit `false` keeps cursor native beside codex; unset, it would
+    # auto-join the pool on the first install and there would be no flip.
     config.write_text(
         '[options]\nclients = ["codex", "cursor"]\n\n'
+        "[options.vendors.cursor]\nshared_skills = false\n\n"
         f'[skills]\nsibling-skill = "{v1.fq}"\n'
     )
     runner = grim_at(bare_project_dir)
@@ -1202,3 +1205,216 @@ def test_copilot_pool_gap_warning_absent_without_a_diverging_copilot_home(
     assert "shared_skills is set for copilot" not in result.stderr, (
         f"no divergence, so the pool-gap warning must not fire; got: {result.stderr!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Auto-join: a pool reader beside a pool writer installs once (issue #262)
+# ---------------------------------------------------------------------------
+
+
+def test_opencode_beside_a_pool_writer_installs_a_global_skill_once(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """Issue #262: Codex writes ``~/.agents/skills`` unconditionally and
+    OpenCode scans that pool too, so a native OpenCode copy is a duplicate
+    OpenCode reports as ``duplicate skill name``. With both selected, the
+    skill lands once, in the pool, recorded for both clients.
+
+    Both clients are autodetected from the markers a real install leaves, as
+    in the report, so ``status`` resolves the same pair install did."""
+    name = "oc-codex-skill"
+    sk = _skill(unique_repo, name)
+    (grim_home / "grimoire.toml").write_text(f'[skills]\n{name} = "{sk.fq}"\n')
+    runner = GrimRunner(grim_binary, grim_home)
+    (runner.home / ".codex").mkdir(parents=True)
+    opencode_config = runner.home / ".config/opencode/opencode.json"
+    opencode_config.parent.mkdir(parents=True)
+    opencode_config.write_text("{}\n")
+    runner.json("lock", "--global")
+    rows = runner.json("install", "--global")["items"]
+    assert all(r["status"] == "installed" for r in rows), rows
+
+    pool = runner.home / ".agents/skills" / name
+    native = runner.home / ".config/opencode/skills" / name
+    assert (pool / "SKILL.md").is_file(), "the pool copy Codex reads must exist"
+    assert not native.exists(), "OpenCode reads the pool, so a native copy duplicates it"
+
+    item = next(r for r in runner.json("status", "--global")["items"] if r["name"] == name)
+    assert item["state"] == "installed", item
+    assert item["outputs_pending"] == [], item
+    clients = sorted(o["client"] for o in item["outputs"])
+    assert clients == ["codex", "opencode"], item
+    for output in item["outputs"]:
+        assert output["path"].replace("\\", "/").endswith(f".agents/skills/{name}"), output
+
+
+def _pool_record(project: Path, name: str) -> dict[str, str]:
+    """``client -> recorded relative path`` for ``name``, read from the state
+    file so the assertion does not depend on which clients ``status`` detects."""
+    state = json.loads((project / ".grimoire/state.json").read_text())
+    [record] = [r for r in state["records"] if r["name"] == name]
+    return {o["client"]: o["target"]["relative"] for o in record["outputs"]}
+
+
+def _two_client_project(project: Path, name: str, ref: str, vendors: str = "") -> None:
+    (project / ".codex").mkdir(exist_ok=True)
+    (project / ".opencode").mkdir(exist_ok=True)
+    (project / "grimoire.toml").write_text(
+        f'[options]\nclients = ["opencode", "codex"]\n\n{vendors}[skills]\n{name} = "{ref}"\n'
+    )
+
+
+def test_a_native_opencode_copy_from_an_older_grim_moves_into_the_pool(
+    grim_at, bare_project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Upgrade path for issue #262. ``shared_skills = false`` reproduces what
+    every earlier grim wrote beside a pool writer: OpenCode recorded at its own
+    ``.opencode/skills`` and Codex at the pool. Returning to the automatic
+    layout moves OpenCode into the pool, reaps the native duplicate, and leaves
+    ``status`` clean; ``uninstall`` then removes the one shared directory."""
+    name = "oc-upgrade"
+    sk = _skill(unique_repo, name)
+    native = bare_project_dir / ".opencode/skills" / name
+    pool = bare_project_dir / ".agents/skills" / name
+    _two_client_project(bare_project_dir, name, sk.fq, "[options.vendors.opencode]\nshared_skills = false\n\n")
+    runner = grim_at(bare_project_dir)
+    runner.run("lock", check=False)
+    runner.json("install")
+    assert (native / "SKILL.md").is_file() and (pool / "SKILL.md").is_file()
+    assert _pool_record(bare_project_dir, name)["opencode"] == f".opencode/skills/{name}"
+
+    _two_client_project(bare_project_dir, name, sk.fq)
+    rows = runner.json("install")["items"]
+    assert all(r["status"] in ("installed", "unchanged", "updated") for r in rows), rows
+    assert (pool / "SKILL.md").is_file()
+    assert not native.exists(), "the native duplicate must be reaped"
+    assert set(_pool_record(bare_project_dir, name).values()) == {f".agents/skills/{name}"}
+
+    item = next(r for r in runner.json("status")["items"] if r["name"] == name)
+    assert item["state"] == "installed", item
+    assert item["outputs_pending"] == [], item
+
+    runner.json("uninstall", "skill", name)
+    assert not pool.exists() and not native.exists()
+
+
+def test_an_explicit_false_keeps_both_copies_without_pending_drift(
+    grim_at, bare_project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """``shared_skills = false`` is the opt-out: OpenCode stays native beside
+    Codex's pool copy, and ``status`` reports no pending move."""
+    name = "oc-optout"
+    sk = _skill(unique_repo, name)
+    _two_client_project(bare_project_dir, name, sk.fq, "[options.vendors.opencode]\nshared_skills = false\n\n")
+    runner = grim_at(bare_project_dir)
+    runner.run("lock", check=False)
+    runner.json("install")
+    assert (bare_project_dir / ".opencode/skills" / name / "SKILL.md").is_file()
+    assert (bare_project_dir / ".agents/skills" / name / "SKILL.md").is_file()
+
+    item = next(r for r in runner.json("status")["items"] if r["name"] == name)
+    assert item["state"] == "installed", item
+    assert item["outputs_pending"] == [], item
+    again = runner.json("install")["items"]
+    assert all(r["status"] == "unchanged" for r in again), again
+
+
+def test_auto_join_preserves_an_edited_native_copy_and_warns(
+    grim_at, bare_project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """The move into the pool never deletes a copy the user edited: the edit
+    survives, the warning names both paths, and the run is not refused."""
+    name = "oc-edited"
+    sk = _skill(unique_repo, name)
+    native_doc = bare_project_dir / ".opencode/skills" / name / "SKILL.md"
+    _two_client_project(bare_project_dir, name, sk.fq, "[options.vendors.opencode]\nshared_skills = false\n\n")
+    runner = grim_at(bare_project_dir)
+    runner.run("lock", check=False)
+    runner.json("install")
+    native_doc.write_text(f"---\nname: {name}\ndescription: d\n---\n# MINE\n")
+
+    _two_client_project(bare_project_dir, name, sk.fq)
+    result = runner.run("update", format="json", log_level="warn", check=False)
+    assert result.returncode == 0, result.stderr
+    assert native_doc.read_text().endswith("# MINE\n"), "an edited copy must never be deleted"
+    stderr = result.stderr.replace("\\", "/")
+    assert "preserved" in stderr, stderr
+    for path in (f".opencode/skills/{name}", f".agents/skills/{name}"):
+        assert path in stderr, f"{path} missing from: {stderr!r}"
+
+
+def test_dropping_the_pool_writer_never_leaves_two_copies(
+    grim_at, bare_project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Removing Codex from ``[options].clients`` converges OpenCode back to its
+    native directory. Each ``update`` leaves exactly one copy on disk."""
+    name = "oc-drop"
+    sk = _skill(unique_repo, name)
+    native = bare_project_dir / ".opencode/skills" / name
+    pool = bare_project_dir / ".agents/skills" / name
+    _two_client_project(bare_project_dir, name, sk.fq)
+    runner = grim_at(bare_project_dir)
+    runner.run("lock", check=False)
+    runner.json("install")
+    assert pool.is_dir() and not native.exists()
+
+    (bare_project_dir / "grimoire.toml").write_text(
+        f'[options]\nclients = ["opencode"]\n\n[skills]\n{name} = "{sk.fq}"\n'
+    )
+    for _ in range(2):
+        runner.json("update")
+        assert native.is_dir() != pool.is_dir(), (
+            f"exactly one copy must exist: native={native.is_dir()} pool={pool.is_dir()}"
+        )
+    assert native.is_dir() and not pool.exists(), "OpenCode must end up native once Codex is gone"
+    assert _pool_record(bare_project_dir, name) == {"opencode": f".opencode/skills/{name}"}
+
+
+def test_kilo_with_external_skills_disabled_stays_native(
+    grim_at, bare_project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Kilo does not scan the pool under ``KILO_DISABLE_EXTERNAL_SKILLS``, so a
+    joined skill would be invisible to it: it keeps its native copy."""
+    name = "kilo-gated"
+    sk = _skill(unique_repo, name)
+    (bare_project_dir / "grimoire.toml").write_text(
+        f'[options]\nclients = ["kilo", "codex"]\n\n[skills]\n{name} = "{sk.fq}"\n'
+    )
+    runner = grim_at(bare_project_dir)
+    runner.env["KILO_DISABLE_EXTERNAL_SKILLS"] = "1"
+    runner.run("lock", check=False)
+    runner.json("install")
+    assert (bare_project_dir / ".kilo/skills" / name / "SKILL.md").is_file()
+    assert (bare_project_dir / ".agents/skills" / name / "SKILL.md").is_file()
+
+
+def test_copilot_with_a_diverging_home_stays_native_at_global_scope(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """A diverging ``COPILOT_HOME`` stops Copilot scanning ``~/.agents/skills``,
+    so its global skill stays under ``$COPILOT_HOME/skills``."""
+    name = "cp-gated"
+    sk = _skill(unique_repo, name)
+    (grim_home / "grimoire.toml").write_text(f'[skills]\n{name} = "{sk.fq}"\n')
+    runner = GrimRunner(grim_binary, grim_home)
+    copilot_home = grim_home.parent / "copilot-home-diverged"
+    runner.env["COPILOT_HOME"] = str(copilot_home)
+    runner.json("lock", "--global")
+    runner.json("install", "--global", "--client", "copilot,codex")
+    assert (copilot_home / "skills" / name / "SKILL.md").is_file()
+    assert (runner.home / ".agents/skills" / name / "SKILL.md").is_file()
+
+
+def test_antigravity_and_opencode_share_one_project_pool_copy(
+    grim_at, bare_project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Antigravity writes the project pool, so OpenCode joins it there."""
+    name = "ag-oc"
+    sk = _skill(unique_repo, name)
+    (bare_project_dir / "grimoire.toml").write_text(f'[skills]\n{name} = "{sk.fq}"\n')
+    runner = grim_at(bare_project_dir)
+    runner.run("lock", check=False)
+    runner.json("install", "--client", "antigravity,opencode")
+    assert (bare_project_dir / ".agents/skills" / name / "SKILL.md").is_file()
+    assert not (bare_project_dir / ".opencode/skills" / name).exists()
+    assert set(_pool_record(bare_project_dir, name).values()) == {f".agents/skills/{name}"}

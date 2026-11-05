@@ -32,7 +32,9 @@ use crate::oci::{ArtifactKind, Digest, Identifier};
 #[cfg(test)]
 use super::content_hash::footprint_hash;
 use super::content_hash::{footprint_hash_for_kind, footprint_hash_for_record};
-use super::expected_outputs::{expected_clients, output_at_current_layout, pending_outputs};
+use super::expected_outputs::{
+    destination_among, effective_clients, expected_clients, output_at_current_layout, pending_outputs,
+};
 use super::install_error::{InstallError, InstallErrorKind};
 use super::install_state::{ClientOutput, InstallRecord, InstallState, PersistError};
 use super::materializer::ArtifactMaterializer;
@@ -222,7 +224,7 @@ pub async fn install_all_with_progress<M: ArtifactMaterializer>(
         };
         // The report target and the decline warning must reflect what
         // `install_one` will actually do, which is driven by the SAME
-        // `effective_supporting_clients` set it uses — the current `--client`
+        // `effective_clients` set it uses — the current `--client`
         // selection PLUS every still-resolvable client a prior record
         // materialized — not the raw `--client` set. A narrowed selection
         // naming only kind-declining clients (e.g. `--client codex` for a rule)
@@ -230,7 +232,7 @@ pub async fn install_all_with_progress<M: ArtifactMaterializer>(
         // so it must report their target and must NOT warn "recording no
         // output". Computing this from `target.clients()` alone would lie.
         let recorded_before = state.get(kind, &artifact.name).cloned();
-        let effective = effective_supporting_clients(target, kind, &artifact.name, recorded_before.as_ref(), roots);
+        let effective = effective_clients(target, kind, &artifact.name, recorded_before.as_ref(), roots);
         if effective.is_empty() {
             // No selected client — and no still-resolvable recorded client —
             // can host this kind: the artifact installs nowhere (this is
@@ -259,7 +261,9 @@ pub async fn install_all_with_progress<M: ArtifactMaterializer>(
                 );
             }
         }
-        let report_target = effective.first().map(|c| target.path_for(*c, kind, &artifact.name));
+        let report_target = effective
+            .first()
+            .map(|c| destination_among(target, *c, kind, &artifact.name, &effective, roots));
         let result = install_one(
             artifact,
             kind,
@@ -627,11 +631,14 @@ async fn install_one<M: ArtifactMaterializer>(
     // Fetch-before-gate (plan C3.3): an artifact whose kind NO candidate
     // client (current selection or a still-resolvable recorded one) can
     // host never touches the network or the materializer. The prior-record
-    // half of `effective_supporting_clients` is what keeps this from
+    // half of `effective_clients` is what keeps this from
     // stranding a still-active recorded client at the old pin when a
     // narrowed `--client` selection happens to name only kind-declining
     // clients — see that function's doc comment.
-    if effective_supporting_clients(target, kind, &artifact.name, recorded.as_ref(), roots).is_empty() {
+    // The same peer set decides a skill's pool destination below, so the
+    // materialize loop and `status` agree on where each client lands.
+    let peers = effective_clients(target, kind, &artifact.name, recorded.as_ref(), roots);
+    if peers.is_empty() {
         state.record(InstallRecord {
             kind,
             name: artifact.name.clone(),
@@ -743,7 +750,7 @@ async fn install_one<M: ArtifactMaterializer>(
     let mut adopted = 0usize;
     if !force {
         for client in &materialize_set {
-            let dest = target.path_for(*client, kind, &artifact.name);
+            let dest = destination_among(target, *client, kind, &artifact.name, &peers, roots);
             // "Tracked" must mean tracked **at this destination**, not merely
             // "this client has a record somewhere". A layout move — a release
             // that relocated a render layout, or the user flipping
@@ -927,7 +934,7 @@ async fn install_one<M: ArtifactMaterializer>(
     )]
     let materialize_result = (|| -> Result<(), crate::error::Error> {
         for client in &materialize_set {
-            let dest = target.path_for(*client, kind, &artifact.name);
+            let dest = destination_among(target, *client, kind, &artifact.name, &peers, roots);
             // A global Copilot rule normally routes to the native
             // `$COPILOT_HOME|~/.copilot/instructions/` dir. Only when no root
             // resolves does it fall back to the (inert) workspace layout,
@@ -1426,7 +1433,7 @@ fn skipped_reason(target: &InstallTarget, kind: ArtifactKind, name: &str) -> Str
 /// has no destination anywhere — grim genuinely cannot act, so it says so
 /// (exit 78) instead of fetching every blob to produce zero outputs and exit 0.
 ///
-/// The predicate is [`effective_supporting_clients`] itself, not a narrower
+/// The predicate is [`effective_clients`] itself, not a narrower
 /// re-derivation over `target.clients()`. That matters: the installer also
 /// writes to *recorded* clients whose output is still resolvable, so a
 /// workspace whose marker dir vanished can still be re-pinned by the very
@@ -1449,7 +1456,7 @@ fn refuse_uninstallable_fallback(
     for artifact in lock.iter_artifacts() {
         declared = true;
         let recorded = state.get(artifact.kind, &artifact.name);
-        if !effective_supporting_clients(target, artifact.kind, &artifact.name, recorded, roots).is_empty() {
+        if !effective_clients(target, artifact.kind, &artifact.name, recorded, roots).is_empty() {
             return Ok(());
         }
     }
@@ -1512,33 +1519,6 @@ fn preserved_recorded_clients(
         }
     }
     preserved
-}
-
-fn effective_supporting_clients(
-    target: &InstallTarget,
-    kind: ArtifactKind,
-    name: &str,
-    recorded: Option<&InstallRecord>,
-    roots: &AnchorRoots,
-) -> Vec<crate::install::client_target::ClientTarget> {
-    let mut set: Vec<crate::install::client_target::ClientTarget> = target
-        .clients()
-        .iter()
-        .copied()
-        .filter(|c| client_hosts(*c, kind, name, target.workspace(), target.scope()))
-        .collect();
-    if let Some(rec) = recorded {
-        for out in &rec.outputs {
-            if let Ok(client) = out.client.parse::<crate::install::client_target::ClientTarget>()
-                && client_hosts(client, kind, name, target.workspace(), target.scope())
-                && out.target.anchor.root(roots).is_some()
-                && !set.contains(&client)
-            {
-                set.push(client);
-            }
-        }
-    }
-    set
 }
 
 /// Integrity gate shared by every install path: for every client output a
@@ -5911,7 +5891,7 @@ mod tests {
 
     /// BLOCK-2 (round-2): a narrowed `--client codex` install for a rule at a
     /// NEW pin, with a prior claude record, re-materializes and re-records the
-    /// claude output (pin-change reattachment via `effective_supporting_clients`).
+    /// claude output (pin-change reattachment via `effective_clients`).
     /// The install REPORT must reflect that reality: `target` names the claude
     /// path, NOT `None`. Deriving the report from `target.clients()` alone —
     /// which is only Codex, and Codex declines rules — would falsely report no
@@ -6012,8 +5992,7 @@ mod tests {
             }],
         };
 
-        let effective =
-            effective_supporting_clients(&target, ArtifactKind::Rule, &recorded.name, Some(&recorded), &roots);
+        let effective = effective_clients(&target, ArtifactKind::Rule, &recorded.name, Some(&recorded), &roots);
         assert!(
             effective.is_empty(),
             "a forged codex output for a rule (a kind Codex declines) must never be reattached: {effective:?}"
@@ -6062,7 +6041,7 @@ mod tests {
         // The sharp case: the workspace lost its `.claude` marker, but the
         // rule is still RECORDED for claude at a resolvable path. The
         // installer re-materializes it (that is what
-        // `effective_supporting_clients` is for), so the guard must not
+        // `effective_clients` is for), so the guard must not
         // refuse — otherwise `grim install` would 78 on state that
         // `grim update` happily repairs.
         let pin = PinnedIdentifier::try_from(
