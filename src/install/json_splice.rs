@@ -237,19 +237,17 @@ pub fn remove_member(text: &str, container: &str, member: &str) -> io::Result<Sp
     if inner.members.len() == 1 {
         // Removing the last member: drop the whole container member so an
         // emptied `"mcpServers": {}` husk is not left behind.
-        let cut = cut_range(text, container_member.key_quote, container_member.value.end);
-        let mut out = String::with_capacity(text.len());
-        out.push_str(&text[..cut.start]);
-        out.push_str(&text[cut.end..]);
-        return Ok(Splice::Changed(out));
+        let siblings = root.members.iter().map(Member::span);
+        return Ok(Splice::Changed(cut_among(text, siblings, container_member.span())));
     }
 
-    let cut = cut_range(inner_text, existing.key_quote, existing.value.end);
-    let base = container_member.value.start;
-    let mut out = String::with_capacity(text.len());
-    out.push_str(&text[..base + cut.start]);
-    out.push_str(&text[base + cut.end..]);
-    Ok(Splice::Changed(out))
+    let siblings = inner.members.iter().map(Member::span);
+    let new_inner_text = cut_among(inner_text, siblings, existing.span());
+    Ok(Splice::Changed(splice_span(
+        text,
+        &container_member.value,
+        &new_inner_text,
+    )))
 }
 
 /// Ensure the array at the root member `key` contains the string
@@ -337,18 +335,12 @@ pub fn remove_array_element(text: &str, key: &str, element: &str) -> io::Result<
         return Ok(Splice::Unchanged);
     };
 
-    let mut out = String::with_capacity(text.len());
     if array.elements.len() == 1 {
-        let cut = cut_range(text, key_member.key_quote, key_member.value.end);
-        out.push_str(&text[..cut.start]);
-        out.push_str(&text[cut.end..]);
-        return Ok(Splice::Changed(out));
+        let siblings = root.members.iter().map(Member::span);
+        return Ok(Splice::Changed(cut_among(text, siblings, key_member.span())));
     }
-    let cut = cut_range(array_text, found.start, found.end);
-    let base = key_member.value.start;
-    out.push_str(&text[..base + cut.start]);
-    out.push_str(&text[base + cut.end..]);
-    Ok(Splice::Changed(out))
+    let new_array_text = cut_among(array_text, array.elements.iter().cloned(), found.clone());
+    Ok(Splice::Changed(splice_span(text, &key_member.value, &new_array_text)))
 }
 
 /// `element` rendered as a JSON string literal (escaped).
@@ -719,8 +711,8 @@ pub fn remove_nested_handler(
             .iter()
             .all(|member| member.key == group.group_key || member.key == group.elements_key);
         if !grim_shaped {
-            let cut = cut_range(group_text, elements_entry.key_quote, elements_entry.value.end);
-            let new_group_text = cut_out(group_text, &cut);
+            let siblings = scanned.members.iter().map(Member::span);
+            let new_group_text = cut_among(group_text, siblings, elements_entry.span());
             let new_array_text = splice_span(array_text, &group_span, &new_group_text);
             let new_inner_text = splice_span(inner_text, &member_entry.value, &new_array_text);
             return Ok(Splice::Changed(splice_span(
@@ -736,10 +728,10 @@ pub fn remove_nested_handler(
             // implemented and already tested.
             return remove_member(text, group.container, group.member);
         }
-        cut_out(array_text, &cut_range(array_text, group_span.start, group_span.end))
+        cut_among(array_text, array.elements.iter().cloned(), group_span.clone())
     } else {
-        let cut = cut_range(elements_text, element_span.start, element_span.end);
-        let new_elements_text = cut_out(elements_text, &cut);
+        let siblings = elements.elements.iter().cloned();
+        let new_elements_text = cut_among(elements_text, siblings, element_span.clone());
         let new_group_text = splice_span(group_text, &elements_entry.value, &new_elements_text);
         splice_span(array_text, &group_span, &new_group_text)
     };
@@ -1039,8 +1031,10 @@ fn deeper(indent: &str) -> String {
     format!("{indent}  ")
 }
 
-/// Parse a (possibly JSONC) value span semantically.
+/// Parse a (possibly JSONC) value span semantically, past a leading
+/// byte-order mark, which marks the encoding and holds no content.
 fn parse_value(span: &str) -> Option<serde_json::Value> {
+    let span = span.strip_prefix(BOM).unwrap_or(span);
     serde_json::from_str(span)
         .ok()
         .or_else(|| serde_json::from_str(&sanitize_jsonc(span)).ok())
@@ -1147,35 +1141,20 @@ fn insert_element(text: &str, array: &ScannedArray, rendered: &str, key_indent: 
     out
 }
 
-/// The byte range to delete for the span `start..end`: the span itself, its
-/// separating comma (trailing when present, else the preceding one), and
-/// the whitespace that would otherwise leave a blank line. Shared by object
-/// members (`start` = the key's opening quote) and array elements.
-fn cut_range(text: &str, start: usize, end: usize) -> Range<usize> {
+/// The byte range to delete for `item`: the item itself, the `comma` beside it
+/// when given, and the whitespace that would otherwise leave a blank line.
+/// Shared by object members (from the key's opening quote) and array elements.
+///
+/// `comma` comes from the tokenizer and only whitespace separates it from
+/// `item`. A byte search back from `item` takes the `,` that ends a line
+/// comment instead, so the cut eats into the comment and a closing bracket on
+/// the item's line lands inside it: the file stops parsing.
+fn cut_range(text: &str, item: Range<usize>, comma: Option<usize>) -> Range<usize> {
     let bytes = text.as_bytes();
-    let mut start = start;
-    let mut end = end;
-
-    // Trailing comma (plus horizontal whitespace before it)?
-    let mut j = end;
-    while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\r' || bytes[j] == b'\n') {
-        j += 1;
-    }
-    let has_trailing_comma = j < bytes.len() && bytes[j] == b',';
-    if has_trailing_comma {
-        end = j + 1;
-    } else {
-        // Last member: eat the preceding comma when only whitespace
-        // separates it (comments in between are preserved by leaving the
-        // comma alone — a JSONC trailing comma is tolerated by rescans).
-        let mut k = start;
-        while k > 0 && (bytes[k - 1] == b' ' || bytes[k - 1] == b'\t' || bytes[k - 1] == b'\r' || bytes[k - 1] == b'\n')
-        {
-            k -= 1;
-        }
-        if k > 0 && bytes[k - 1] == b',' {
-            start = k - 1;
-        }
+    let (mut start, mut end) = (item.start, item.end);
+    if let Some(comma) = comma {
+        start = start.min(comma);
+        end = end.max(comma + 1);
     }
 
     // Absorb the member's own line so no blank line is left: extend start
@@ -1214,6 +1193,11 @@ struct Member {
 }
 
 impl Member {
+    /// The member's own bytes, from the key's opening quote to the value's end.
+    fn span(&self) -> Range<usize> {
+        self.key_quote..self.value.end
+    }
+
     /// The whitespace prefix of the line holding the key (used to indent
     /// replacements and siblings consistently).
     fn key_indent(&self, text: &str) -> String {
@@ -1261,10 +1245,7 @@ fn line_indent(text: &str, at: usize) -> String {
 
 /// Scan `text` as a single JSON/JSONC object and index its members.
 fn scan_object(text: &str) -> io::Result<ScannedObject> {
-    let mut s = Scanner {
-        bytes: text.as_bytes(),
-        pos: 0,
-    };
+    let mut s = Scanner::at_start(text);
     s.skip_trivia();
     if s.peek() != Some(b'{') {
         return Err(refused());
@@ -1324,10 +1305,7 @@ struct ScannedArray {
 /// names the member holding it, for the error message.
 fn scan_array(text: &str, key: &str) -> io::Result<ScannedArray> {
     let not_an_array = || invalid_data(format!("'{key}' is not a JSON array; refusing to edit"));
-    let mut s = Scanner {
-        bytes: text.as_bytes(),
-        pos: 0,
-    };
+    let mut s = Scanner::at_start(text);
     s.skip_trivia();
     if s.peek() != Some(b'[') {
         return Err(not_an_array());
@@ -1364,6 +1342,9 @@ fn scan_array(text: &str, key: &str) -> io::Result<ScannedArray> {
     }
 }
 
+/// The byte-order mark some editors write first; it is no part of the document.
+const BOM: char = '\u{feff}';
+
 fn refused() -> io::Error {
     invalid_data("content is not a JSON object grim can edit; refusing to touch it".to_string())
 }
@@ -1373,7 +1354,17 @@ struct Scanner<'a> {
     pos: usize,
 }
 
-impl Scanner<'_> {
+impl<'a> Scanner<'a> {
+    /// A scanner at the start of `text`, past a leading byte-order mark: an
+    /// insert or cut before the mark would move it into the document, which
+    /// no parser then reads.
+    fn at_start(text: &'a str) -> Self {
+        Scanner {
+            bytes: text.as_bytes(),
+            pos: if text.starts_with(BOM) { BOM.len_utf8() } else { 0 },
+        }
+    }
+
     fn peek(&self) -> Option<u8> {
         self.bytes.get(self.pos).copied()
     }
@@ -1689,11 +1680,8 @@ fn remove_in(object: &str, key: &str, rest: &[String]) -> io::Result<Option<Stri
     let Some((next, below)) = rest.split_first() else {
         // Every duplicate goes: a survivor would become the live value, since
         // the last one wins.
-        let duplicates = scanned.members.iter().filter(|member| member.key == key);
-        return Ok(cut_items(
-            object,
-            duplicates.map(|member| member.key_quote..member.value.end),
-        ));
+        let spans: Vec<_> = scanned.members.iter().map(Member::span).collect();
+        return Ok(cut_items(object, &spans, |i| scanned.members[i].key == key));
     };
     let Some(member) = last_member(&scanned.members, key) else {
         return Ok(None);
@@ -1706,28 +1694,53 @@ fn remove_in(object: &str, key: &str, rest: &[String]) -> io::Result<Option<Stri
     Ok(removed.map(|inner| splice_span(object, &member.value, &inner)))
 }
 
-/// `text` without `spans`, given in file order; `None` when there are none.
-/// The last goes first, so the offsets of the others stay valid.
-fn cut_items(text: &str, spans: impl DoubleEndedIterator<Item = Range<usize>>) -> Option<String> {
-    spans
-        .rev()
-        .fold(None, |cut, span| Some(cut_item(cut.as_deref().unwrap_or(text), span)))
+/// `text` without the `items` (spans in file order) whose index `doomed`
+/// picks; `None` when it picks none. The last goes first, so the offsets of
+/// the others stay valid.
+fn cut_items(text: &str, items: &[Range<usize>], doomed: impl Fn(usize) -> bool) -> Option<String> {
+    (0..items.len()).rev().filter(|&i| doomed(i)).fold(None, |cut, i| {
+        let before = i.checked_sub(1).map(|j| items[j].end);
+        Some(cut_item(cut.as_deref().unwrap_or(text), items[i].clone(), before))
+    })
+}
+
+/// `text` without `item`, one of the sibling `items` (spans in file order).
+fn cut_among(text: &str, items: impl Iterator<Item = Range<usize>>, item: Range<usize>) -> String {
+    let before = items.take_while(|sibling| sibling.end <= item.start).last();
+    cut_item(text, item, before.map(|sibling| sibling.end))
 }
 
 /// `text` without the object member or array element at `item`, and without
-/// the comma that follows it.
-fn cut_item(text: &str, item: Range<usize>) -> String {
-    let mut after = Scanner {
-        bytes: text.as_bytes(),
-        pos: item.end,
-    };
-    after.skip_trivia();
-    // `cut_range` stops at a comment, and the comma it would leave behind
-    // follows nothing: the file stops parsing while the op reports a change.
-    if after.peek() == Some(b',') && text[item.end..after.pos].contains('/') {
-        return cut_out(&cut_out(text, &(after.pos..after.pos + 1)), &item);
+/// one comma beside it. `before` ends the sibling ahead of `item`, if any.
+fn cut_item(text: &str, item: Range<usize>, before: Option<usize>) -> String {
+    let is_comma = |at: &usize| text.as_bytes().get(*at) == Some(&b',');
+    let after = Some(trivia_end(text, item.end)).filter(is_comma);
+    match after.or_else(|| before.map(|end| trivia_end(text, end)).filter(is_comma)) {
+        // A comment between the item and its comma stays, so each goes on its
+        // own: a comma left after the item's removal follows nothing, and the
+        // file stops parsing while the op reports a change.
+        Some(comma) if comma >= item.end && text[item.end..comma].contains('/') => {
+            cut_out(&cut_out(text, &(comma..comma + 1)), &item)
+        }
+        // A comment between the comma and the item stays too. Left in place,
+        // the comma gives the sibling a trailing comma a strict reader refuses.
+        Some(comma) if comma < item.start && text[comma..item.start].contains('/') => {
+            let rest = cut_out(text, &cut_range(text, item, None));
+            cut_out(&rest, &(comma..comma + 1))
+        }
+        comma => cut_out(text, &cut_range(text, item, comma)),
     }
-    cut_out(text, &cut_range(text, item.start, item.end))
+}
+
+/// The offset of the first byte at or after `pos` that is not whitespace or
+/// a comment.
+fn trivia_end(text: &str, pos: usize) -> usize {
+    let mut scanner = Scanner {
+        bytes: text.as_bytes(),
+        pos,
+    };
+    scanner.skip_trivia();
+    scanner.pos
 }
 
 /// The span of the value at `path`, which [`value_at`] has read as present.
@@ -1811,11 +1824,9 @@ pub fn remove_array_element_at(text: &str, path: &[String], element: &str) -> io
     let array = scan_array(array_text, key)?;
     // Every copy goes: a read finds the element wherever it sits, so a survivor
     // keeps reading as present.
-    let copies = array
-        .elements
-        .iter()
-        .filter(|item| element_matches(array_text, item, element));
-    let remaining = cut_items(array_text, copies.cloned());
+    let remaining = cut_items(array_text, &array.elements, |i| {
+        element_matches(array_text, &array.elements[i], element)
+    });
     Ok(remaining.map_or(Splice::Unchanged, |rest| {
         Splice::Changed(splice_span(text, &span, &rest))
     }))
@@ -1983,6 +1994,129 @@ mod tests {
         let out = changed(remove_member(text, "mcpServers", "grim").unwrap());
         let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(doc["mcpServers"]["other"]["command"], "x");
+    }
+
+    /// A comment on either side of a separating comma, and the comment. The
+    /// second touches a scalar, which the scanner ends at the `/`.
+    const COMMA_COMMENTS: [(&str, &str); 5] = [
+        (" /* k */, ", "/* k */"),
+        ("/* k */, ", "/* k */"),
+        (", /* k */ ", "/* k */"),
+        (" // k\n  , ", "// k"),
+        (", // k\n  ", "// k"),
+    ];
+
+    /// `items` joined by `", "`, except the gap after item `at`, which is `sep`.
+    fn joined(items: &[&str], at: usize, sep: &str) -> String {
+        let mut out = String::new();
+        for (i, item) in items.iter().enumerate() {
+            if i > 0 {
+                out.push_str(if i - 1 == at { sep } else { ", " });
+            }
+            out.push_str(item);
+        }
+        out
+    }
+
+    /// `out` read as strict JSON once `comment` is gone, so a comma left
+    /// leading, dangling or trailing fails here even where JSONC tolerates it.
+    fn strict_without(out: &str, comment: &str) -> serde_json::Value {
+        serde_json::from_str(&out.replace(comment, "")).unwrap_or_else(|e| panic!("{e}: {out:?}"))
+    }
+
+    /// The cut must find the separating comma past a comment on either side of
+    /// it, or the file is left with a comma no parser reads.
+    #[test]
+    fn remove_member_beside_a_comment_keeps_the_file_readable() {
+        let members = [("a", "\"a\": 1"), ("b", "\"b\": 2"), ("x", "\"x\": 3")];
+        let items = members.map(|(_, item)| item);
+        for (sep, comment) in COMMA_COMMENTS {
+            for at in 0..2 {
+                let text = format!("{{\"mcp\": {{{}}}}}", joined(&items, at, sep));
+                for (key, _) in members {
+                    let out = changed(remove_member(&text, "mcp", key).unwrap());
+                    let mut rest = json!({"mcp": {"a": 1, "b": 2, "x": 3}});
+                    rest["mcp"].as_object_mut().unwrap().remove(key);
+                    assert_eq!(parsed(&out), rest, "{key} from {text:?} gave {out:?}");
+                    assert_eq!(strict_without(&out, comment), rest, "{key} from {text:?}");
+                    assert!(out.contains(comment), "{key} from {text:?} gave {out:?}");
+                }
+            }
+        }
+
+        // The last member takes its container, which is itself a member.
+        let container = "\"mcp\": {\"a\": 1}";
+        for items in [
+            [container, "\"y\": 0", "\"z\": 0"],
+            ["\"y\": 0", container, "\"z\": 0"],
+            ["\"y\": 0", "\"z\": 0", container],
+        ] {
+            for (sep, comment) in COMMA_COMMENTS {
+                for at in 0..2 {
+                    let text = format!("{{{}}}", joined(&items, at, sep));
+                    let out = changed(remove_member(&text, "mcp", "a").unwrap());
+                    assert_eq!(parsed(&out), json!({"y": 0, "z": 0}), "{text:?} gave {out:?}");
+                    assert_eq!(strict_without(&out, comment), json!({"y": 0, "z": 0}), "{text:?}");
+                    assert!(out.contains(comment), "{text:?} gave {out:?}");
+                }
+            }
+        }
+    }
+
+    /// Without a comment every removal cuts exactly what it cut before comments
+    /// were handled, so no comment-free file changes shape.
+    #[test]
+    fn remove_without_a_comment_cuts_the_same_bytes() {
+        let pretty = "{\n  \"mcp\": {\n    \"a\": 1,\n    \"b\": 2,\n    \"x\": 3\n  }\n}\n";
+        let compact = "{\"mcp\": {\"a\": 1, \"b\": 2, \"x\": 3}}";
+        for (text, key, out) in [
+            (pretty, "a", "{\n  \"mcp\": {\n    \"b\": 2,\n    \"x\": 3\n  }\n}\n"),
+            (pretty, "b", "{\n  \"mcp\": {\n    \"a\": 1,\n    \"x\": 3\n  }\n}\n"),
+            (pretty, "x", "{\n  \"mcp\": {\n    \"a\": 1,\n    \"b\": 2\n  }\n}\n"),
+            (compact, "a", "{\"mcp\": { \"b\": 2, \"x\": 3}}"),
+            (compact, "b", "{\"mcp\": {\"a\": 1,  \"x\": 3}}"),
+            (compact, "x", "{\"mcp\": {\"a\": 1, \"b\": 2}}"),
+        ] {
+            assert_eq!(
+                changed(remove_member(text, "mcp", key).unwrap()),
+                out,
+                "{key} from {text:?}"
+            );
+            let at = remove_member_at(text, &path(&["mcp", key])).unwrap();
+            assert_eq!(changed(at), out, "{key} at depth from {text:?}");
+        }
+        for (text, out) in [
+            ("{\"y\": 0, \"mcp\": {\"a\": 1}}", "{\"y\": 0}"),
+            ("{\"mcp\": {\"a\": 1}, \"y\": 0}", "{ \"y\": 0}"),
+            (
+                "{\n  \"y\": 0,\n  \"mcp\": {\n    \"a\": 1\n  },\n  \"z\": 0\n}\n",
+                "{\n  \"y\": 0,\n  \"z\": 0\n}\n",
+            ),
+        ] {
+            assert_eq!(changed(remove_member(text, "mcp", "a").unwrap()), out, "{text:?}");
+        }
+
+        let pretty = "{\n  \"k\": [\n    \"a\",\n    \"b\",\n    \"x\"\n  ]\n}\n";
+        let compact = "{\"k\": [\"a\", \"b\", \"x\"]}";
+        for (text, element, out) in [
+            (pretty, "a", "{\n  \"k\": [\n    \"b\",\n    \"x\"\n  ]\n}\n"),
+            (pretty, "b", "{\n  \"k\": [\n    \"a\",\n    \"x\"\n  ]\n}\n"),
+            (pretty, "x", "{\n  \"k\": [\n    \"a\",\n    \"b\"\n  ]\n}\n"),
+            (compact, "a", "{\"k\": [ \"b\", \"x\"]}"),
+            (compact, "b", "{\"k\": [\"a\",  \"x\"]}"),
+            (compact, "x", "{\"k\": [\"a\", \"b\"]}"),
+        ] {
+            let removed = remove_array_element(text, "k", element).unwrap();
+            assert_eq!(changed(removed), out, "{element} from {text:?}");
+            let at = remove_array_element_at(text, &path(&["k"]), element).unwrap();
+            assert_eq!(changed(at), out, "{element} at depth from {text:?}");
+        }
+        for (text, out) in [
+            ("{\"y\": 0, \"k\": [\"a\"]}", "{\"y\": 0}"),
+            ("{\"k\": [\"a\"], \"y\": 0}", "{ \"y\": 0}"),
+        ] {
+            assert_eq!(changed(remove_array_element(text, "k", "a").unwrap()), out, "{text:?}");
+        }
     }
 
     #[test]
@@ -2228,6 +2362,47 @@ mod tests {
 
         let back = changed(remove_array_element(&out, "instructions", "g.md").unwrap());
         assert_eq!(back, text, "remove undoes upsert exactly");
+    }
+
+    /// The cut must find the separating comma past a comment on either side of
+    /// it, or the file is left with a comma no parser reads.
+    #[test]
+    fn array_remove_beside_a_comment_keeps_the_file_readable() {
+        let items = ["\"a\"", "\"b\"", "\"x\""];
+        for (sep, comment) in COMMA_COMMENTS {
+            for at in 0..2 {
+                let text = format!("{{\"k\": [{}]}}", joined(&items, at, sep));
+                for element in ["a", "b", "x"] {
+                    let out = changed(remove_array_element(&text, "k", element).unwrap());
+                    let rest: Vec<_> = ["a", "b", "x"].into_iter().filter(|e| *e != element).collect();
+                    assert_eq!(parsed(&out)["k"], json!(rest), "{element} from {text:?} gave {out:?}");
+                    assert_eq!(
+                        strict_without(&out, comment)["k"],
+                        json!(rest),
+                        "{element} from {text:?}"
+                    );
+                    assert!(out.contains(comment), "{element} from {text:?} gave {out:?}");
+                }
+            }
+        }
+
+        // The last element takes its array, which is itself a member.
+        let array = "\"k\": [\"a\"]";
+        for items in [
+            [array, "\"y\": 0", "\"z\": 0"],
+            ["\"y\": 0", array, "\"z\": 0"],
+            ["\"y\": 0", "\"z\": 0", array],
+        ] {
+            for (sep, comment) in COMMA_COMMENTS {
+                for at in 0..2 {
+                    let text = format!("{{{}}}", joined(&items, at, sep));
+                    let out = changed(remove_array_element(&text, "k", "a").unwrap());
+                    assert_eq!(parsed(&out), json!({"y": 0, "z": 0}), "{text:?} gave {out:?}");
+                    assert_eq!(strict_without(&out, comment), json!({"y": 0, "z": 0}), "{text:?}");
+                    assert!(out.contains(comment), "{text:?} gave {out:?}");
+                }
+            }
+        }
     }
 
     // ── Key escaping (GitHub #56) ────────────────────────────────────────
@@ -2688,6 +2863,80 @@ mod tests {
         assert_eq!(doc["hooks"]["PreToolUse"][0]["hooks"][1], dispatcher("run"));
         let back = changed(remove_nested_handler(&out, &path, &dispatcher("run")).unwrap());
         assert_eq!(back, text, "remove undoes upsert exactly");
+    }
+
+    /// Each level of the cascade cuts one item from its container, and each cut
+    /// must find its comma past a comment, or the settings file stops parsing.
+    #[test]
+    fn nested_remove_beside_a_comment_keeps_the_file_readable() {
+        let grim = "{\"type\": \"command\", \"command\": \"run\", \"com.grimoire.managed\": \"hook-dispatcher\"}";
+        let user = "{\"type\": \"command\", \"command\": \"user\"}";
+        let path = hook_path("PreToolUse", "Bash");
+        let user_only =
+            json!({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "user"}]}]}});
+        let write_only = json!({"hooks": {"PreToolUse": [{"matcher": "Write", "hooks": []}]}});
+        let stop_only = json!({"hooks": {"Stop": []}});
+        for (text, comment, rest) in [
+            // The element, beside a user element.
+            (
+                format!(
+                    "{{\"hooks\": {{\"PreToolUse\": [{{\"matcher\": \"Bash\", \"hooks\": [{grim} /* e */, {user}]}}]}}}}"
+                ),
+                "/* e */",
+                user_only.clone(),
+            ),
+            (
+                format!(
+                    "{{\"hooks\": {{\"PreToolUse\": [{{\"matcher\": \"Bash\", \"hooks\": [{user}, // e\n{grim}]}}]}}}}"
+                ),
+                "// e",
+                user_only.clone(),
+            ),
+            // The group, beside a user group.
+            (
+                format!(
+                    "{{\"hooks\": {{\"PreToolUse\": [{{\"matcher\": \"Bash\", \"hooks\": [{grim}]}} /* g */, {{\"matcher\": \"Write\", \"hooks\": []}}]}}}}"
+                ),
+                "/* g */",
+                write_only.clone(),
+            ),
+            (
+                format!(
+                    "{{\"hooks\": {{\"PreToolUse\": [{{\"matcher\": \"Write\", \"hooks\": []}}, /* g */ {{\"matcher\": \"Bash\", \"hooks\": [{grim}]}}]}}}}"
+                ),
+                "/* g */",
+                write_only.clone(),
+            ),
+            // The element array of a group that holds authored content.
+            (
+                format!(
+                    "{{\"hooks\": {{\"PreToolUse\": [{{\"hooks\": [{grim}] /* m */, \"matcher\": \"Bash\", \"note\": \"mine\"}}]}}}}"
+                ),
+                "/* m */",
+                json!({"hooks": {"PreToolUse": [{"matcher": "Bash", "note": "mine"}]}}),
+            ),
+            // The event member, beside another event.
+            (
+                format!(
+                    "{{\"hooks\": {{\"PreToolUse\": [{{\"matcher\": \"Bash\", \"hooks\": [{grim}]}}] /* p */, \"Stop\": []}}}}"
+                ),
+                "/* p */",
+                stop_only.clone(),
+            ),
+            (
+                format!(
+                    "{{\"hooks\": {{\"Stop\": [], // p\n\"PreToolUse\": [{{\"matcher\": \"Bash\", \"hooks\": [{grim}]}}]}}}}"
+                ),
+                "// p",
+                stop_only.clone(),
+            ),
+        ] {
+            let out = changed(remove_nested_handler(&text, &path, &dispatcher("run")).unwrap());
+            assert_eq!(parsed(&out), rest, "{text:?} gave {out:?}");
+            assert_eq!(strict_without(&out, comment), rest, "{text:?} gave {out:?}");
+            assert!(!out.contains("hook-dispatcher"), "{out:?}");
+            assert!(out.contains(comment), "{text:?} gave {out:?}");
+        }
     }
 
     #[test]
@@ -3396,6 +3645,269 @@ mod tests {
             assert_eq!(parsed(&out), rest, "{text:?} gave {out:?}");
             assert!(out.contains(comment), "{out:?}");
         }
+    }
+
+    /// The last item's comma sits before it, and past a comment there the cut
+    /// would leave the previous item a trailing comma strict JSON rejects.
+    #[test]
+    fn remove_takes_the_comma_before_a_comment() {
+        let target = path(&["a"]);
+        for (text, out) in [
+            ("{\n  \"z\": 0, // keep\n  \"a\": 1\n}\n", "{\n  \"z\": 0 // keep\n}\n"),
+            ("{\"z\": 0, /* keep */ \"a\": 1}", "{\"z\": 0 /* keep */ }"),
+            (
+                "{\"z\": 0 /* c */, /* keep */ \"a\": 1}",
+                "{\"z\": 0 /* c */ /* keep */ }",
+            ),
+            // A trailing comma the file already had stays.
+            (
+                "{\n  \"z\": 0, // keep\n  \"a\": 1,\n}\n",
+                "{\n  \"z\": 0, // keep\n}\n",
+            ),
+            ("{\"a\": 1, /* keep */ \"z\": 0}", "{ /* keep */ \"z\": 0}"),
+        ] {
+            assert_eq!(changed(remove_member_at(text, &target).unwrap()), out, "{text:?}");
+        }
+        for (text, out) in [
+            (
+                "{\"a\": [\n  \"y\", // keep\n  \"x\"\n]}",
+                "{\"a\": [\n  \"y\" // keep\n]}",
+            ),
+            ("{\"a\": [\"y\", /* keep */ \"x\"]}", "{\"a\": [\"y\" /* keep */ ]}"),
+            (
+                "{\"a\": [\"y\", // keep\n\"x\", /* c */ \"x\"]}",
+                "{\"a\": [\"y\" // keep\n /* c */ ]}",
+            ),
+        ] {
+            assert_eq!(remove_element(text, &target, "x"), out, "{text:?}");
+        }
+    }
+
+    /// A line comment ending in `,` before the last or only item. Its comma is
+    /// no separator, and taking it cuts into the comment, which swallows a
+    /// closing bracket on the item's line.
+    #[test]
+    fn remove_keeps_every_byte_of_a_comment_ending_in_a_comma() {
+        // The input, the removal under test, and the value it must leave.
+        type Row = (String, fn(&str) -> String, serde_json::Value);
+        let grim = "{\"type\": \"command\", \"command\": \"run\", \"com.grimoire.managed\": \"hook-dispatcher\"}";
+        let user = "{\"type\": \"command\", \"command\": \"user\"}";
+        for comment in ["// note,", "// a, b, ", "//,"] {
+            // The closing bracket on the removed item's line, then on its own.
+            for close in ["", "\n"] {
+                let rows: [Row; 9] = [
+                    (
+                        format!("{{\"mcp\": {{\"a\": 1, {comment}\n\"x\": 2{close}}}}}"),
+                        (|t: &str| changed(remove_member_at(t, &path(&["mcp", "x"])).unwrap())),
+                        json!({"mcp": {"a": 1}}),
+                    ),
+                    (
+                        format!("{{\"mcp\": {{{comment}\n\"x\": 2{close}}}}}"),
+                        (|t: &str| changed(remove_member_at(t, &path(&["mcp", "x"])).unwrap())),
+                        json!({"mcp": {}}),
+                    ),
+                    (
+                        format!("{{\"mcp\": {{\"a\": 1, {comment}\n\"x\": 2{close}}}}}"),
+                        (|t: &str| changed(remove_member(t, "mcp", "x").unwrap())),
+                        json!({"mcp": {"a": 1}}),
+                    ),
+                    // The only member takes its container, the only root member.
+                    (
+                        format!("{{{comment}\n\"mcp\": {{\"x\": 2}}{close}}}"),
+                        (|t: &str| changed(remove_member(t, "mcp", "x").unwrap())),
+                        json!({}),
+                    ),
+                    (
+                        format!("{{\"k\": [\"a\", {comment}\n\"x\"{close}]}}"),
+                        (|t: &str| remove_element(t, &path(&["k"]), "x")),
+                        json!({"k": ["a"]}),
+                    ),
+                    (
+                        format!("{{\"k\": [{comment}\n\"x\"{close}]}}"),
+                        (|t: &str| remove_element(t, &path(&["k"]), "x")),
+                        json!({"k": []}),
+                    ),
+                    (
+                        format!("{{\"k\": [\"a\", {comment}\n\"x\"{close}]}}"),
+                        (|t: &str| changed(remove_array_element(t, "k", "x").unwrap())),
+                        json!({"k": ["a"]}),
+                    ),
+                    (
+                        format!("{{{comment}\n\"k\": [\"x\"]{close}}}"),
+                        (|t: &str| changed(remove_array_element(t, "k", "x").unwrap())),
+                        json!({}),
+                    ),
+                    (
+                        format!(
+                            "{{\"hooks\": {{\"PreToolUse\": [{{\"matcher\": \"Bash\", \"hooks\": [{user}, {comment}\n{grim}{close}]}}]}}}}"
+                        ),
+                        |t: &str| {
+                            let path = hook_path("PreToolUse", "Bash");
+                            changed(remove_nested_handler(t, &path, &dispatcher("run")).unwrap())
+                        },
+                        json!({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "user"}]}]}}),
+                    ),
+                ];
+                for (text, remove, rest) in rows {
+                    let out = remove(&text);
+                    assert!(out.contains(comment), "the comment lost a byte: {text:?} gave {out:?}");
+                    assert_eq!(parsed(&out), rest, "{text:?} gave {out:?}");
+                    assert_eq!(strict_without(&out, comment), rest, "{text:?} gave {out:?}");
+                }
+            }
+        }
+    }
+
+    /// Every removal over a bounded grid of comment placements: before and after
+    /// each comma, after the opening bracket and before the closing one, for
+    /// every comment shape and item position. Each result reads as the input
+    /// minus the item, keeps every comment whole, and leaves no stray comma.
+    #[test]
+    fn every_removal_beside_any_comment_parses_and_keeps_the_comment() {
+        const SHAPES: [&str; 6] = ["// k", "// k,", "// k, ", "//,", "/* k */", "/* k, */"];
+        let mut cases = 0;
+        for comment in SHAPES {
+            let line = comment.starts_with("//");
+            let end = if line { "\n" } else { " " };
+            let gaps = [
+                ", ".to_string(),
+                ",\n".to_string(),
+                format!(" {comment}{end}, "),
+                format!(", {comment}{end}"),
+            ];
+            let heads = [String::new(), "\n".to_string(), format!("{comment}\n")];
+            let tails = [String::new(), "\n".to_string(), format!(" {comment}\n")];
+            for count in 1..=3usize {
+                let gap_rows = (0..count.saturating_sub(1)).fold(vec![Vec::new()], |rows, _| {
+                    rows.iter()
+                        .flat_map(|row: &Vec<&String>| gaps.iter().map(move |gap| [row.clone(), vec![gap]].concat()))
+                        .collect()
+                });
+                for gap_row in &gap_rows {
+                    for head in &heads {
+                        for tail in &tails {
+                            for doomed in 0..count {
+                                for (text, out, rest) in removal_rows(count, doomed, head, gap_row, tail) {
+                                    let held = text.matches(comment).count();
+                                    assert_eq!(out.matches(comment).count(), held, "{text:?} gave {out:?}");
+                                    assert_eq!(parsed(&out), rest, "{text:?} gave {out:?}");
+                                    let strict = out.replace(comment, "");
+                                    let read: serde_json::Value = serde_json::from_str(&strict)
+                                        .unwrap_or_else(|e| panic!("{e}: {text:?} gave {out:?}"));
+                                    assert_eq!(read, rest, "{text:?} gave {out:?}");
+                                    cases += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(cases > 5_000, "the grid shrank to {cases} cases");
+    }
+
+    /// A byte-order mark is no part of the document: every read and splice goes
+    /// past it, and every write keeps it first.
+    #[test]
+    fn a_byte_order_mark_is_read_past_and_kept() {
+        let bom = "\u{feff}";
+        let text = format!("{bom}{{\n  // keep\n  \"mcp\": {{\n    \"a\": 1\n  }},\n  \"k\": [\"a\"]\n}}\n");
+        assert_eq!(value_at(&text, &path(&["mcp", "a"])).unwrap(), found(json!(1)));
+        assert_eq!(member_value(&text, "mcp", "a"), Some(json!(1)));
+        let hooks = hook_path("PreToolUse", "Bash");
+        // The splice under test, its insert, and the removal that undoes it.
+        type Pair = (&'static str, Splice, fn(&str) -> Splice);
+        let pairs: [Pair; 5] = [
+            (
+                "member at depth",
+                upsert_member_at(&text, &path(&["mcp", "x"]), &json!(2)).unwrap(),
+                |t| remove_member_at(t, &path(&["mcp", "x"])).unwrap(),
+            ),
+            ("member", upsert_member(&text, "mcp", "x", &json!(2)).unwrap(), |t| {
+                remove_member(t, "mcp", "x").unwrap()
+            }),
+            (
+                "element at depth",
+                upsert_array_element_at(&text, &path(&["k"]), "b").unwrap(),
+                |t| remove_array_element_at(t, &path(&["k"]), "b").unwrap(),
+            ),
+            ("element", upsert_array_element(&text, "k", "b").unwrap(), |t| {
+                remove_array_element(t, "k", "b").unwrap()
+            }),
+            (
+                "nested handler",
+                upsert_nested_handler(&text, &hooks, &dispatcher("run")).unwrap(),
+                |t| remove_nested_handler(t, &hook_path("PreToolUse", "Bash"), &dispatcher("run")).unwrap(),
+            ),
+        ];
+        for (op, upserted, remove) in pairs {
+            let out = changed(upserted);
+            assert!(out.starts_with(bom) && out.matches(bom).count() == 1, "{op}: {out:?}");
+            assert!(out.contains("// keep"), "{op}: {out:?}");
+            assert_ne!(parsed(&out), parsed(&text), "{op}: {out:?}");
+            let back = changed(remove(&out));
+            assert!(
+                back.starts_with(bom) && back.matches(bom).count() == 1,
+                "{op}: {back:?}"
+            );
+            assert_eq!(parsed(&back), parsed(&text), "{op}: {back:?}");
+        }
+    }
+
+    /// One container of `count` items laid out by `head`, `gaps` and `tail`,
+    /// with item `doomed` removed by every removal that cuts inside it: the
+    /// input, the output and the value the output must read as.
+    fn removal_rows(
+        count: usize,
+        doomed: usize,
+        head: &str,
+        gaps: &[&String],
+        tail: &str,
+    ) -> Vec<(String, String, serde_json::Value)> {
+        let lay = |items: Vec<String>, open: &str, close: &str| {
+            let mut body = format!("{open}{head}");
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    body.push_str(gaps[i - 1]);
+                }
+                body.push_str(item);
+            }
+            format!("{{\"c\": {body}{tail}{close}}}")
+        };
+        let members = lay((0..count).map(|i| format!("\"m{i}\": {i}")).collect(), "{", "}");
+        let elements = lay((0..count).map(|i| format!("\"e{i}\"")).collect(), "[", "]");
+        let mut kept = serde_json::Map::new();
+        for i in (0..count).filter(|&i| i != doomed) {
+            kept.insert(format!("m{i}"), json!(i));
+        }
+        let kept_elements: Vec<_> = (0..count).filter(|&i| i != doomed).map(|i| format!("e{i}")).collect();
+        let (member, element) = (format!("m{doomed}"), format!("e{doomed}"));
+        let mut rows = vec![
+            (
+                members.clone(),
+                changed(remove_member_at(&members, &path(&["c", &member])).unwrap()),
+                json!({"c": kept.clone()}),
+            ),
+            (
+                elements.clone(),
+                remove_element(&elements, &path(&["c"]), &element),
+                json!({"c": kept_elements.clone()}),
+            ),
+        ];
+        // The flat removals drop an emptied container whole, comments inside it too.
+        if count > 1 {
+            rows.push((
+                members.clone(),
+                changed(remove_member(&members, "c", &member).unwrap()),
+                json!({"c": kept}),
+            ));
+            rows.push((
+                elements.clone(),
+                changed(remove_array_element(&elements, "c", &element).unwrap()),
+                json!({"c": kept_elements}),
+            ));
+        }
+        rows
     }
 
     #[test]

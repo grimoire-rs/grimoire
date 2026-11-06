@@ -2,7 +2,7 @@
 # Copyright 2026 The Grimoire Authors
 """Regressions for the managed-config splices and `grim status` verdicts.
 
-Five independent defects, all in the same blast radius — grim editing a
+Seven independent defects, all in the same blast radius — grim editing a
 user-owned config file, and grim reporting what it did:
 
 * the Codex TOML splice deleted a hand-authored bare ``[mcp_servers]``
@@ -18,13 +18,22 @@ user-owned config file, and grim reporting what it did:
   *declines* the artifact's kind — drift no grim command can clear;
 * ``status`` classified from live client *detection* rather than from the
   recorded outputs on disk, reporting a healthy install as ``missing`` and
-  hiding a hand-edited one behind ``missing`` too.
+  hiding a hand-edited one behind ``missing`` too;
+* removing an MCP entry took the ``,`` that ends a line comment above it for
+  the separator, cutting a byte of the comment and, with the closing brace on
+  the entry's line, leaving a file no parser reads;
+* a client file that starts with a byte-order mark was refused, and once the
+  splice read past the mark, ``status`` still could not and called the entry
+  ``missing``.
 """
 from __future__ import annotations
 
 import json
+import re
 import tomllib  # stdlib (Python 3.11+)
 from pathlib import Path
+
+import pytest
 
 from src.helpers import make_artifact, write_config
 from src.runner import GrimRunner
@@ -320,6 +329,109 @@ def test_global_opencode_mcp_edits_an_existing_jsonc_instead_of_a_json_sibling(
     removed = cfg.read_text()
     assert "grim-mcp" not in removed, f"uninstall must remove the live entry: {removed}"
     assert "// which model to use" in removed, "the user's config must survive uninstall"
+
+
+# ── (c2) OpenCode JSONC: a comment ending in a comma survives uninstall ────
+
+COMMA_COMMENT = "// managed by grim, see the team notes,"
+
+
+def _loads_jsonc(text: str) -> dict:
+    """Parse JSONC by stripping ``//`` comments; the fixtures below keep
+    comments outside strings."""
+    return json.loads(re.sub(r"//[^\n]*", "", text))
+
+
+@pytest.mark.parametrize(
+    ("layout", "rest"),
+    [
+        # The last member beside a user's own, the brace on the entry's line.
+        (
+            (
+                '{{\n  "model": "anthropic/claude",\n  "mcp": {{\n'
+                '    "keep": {{"type": "local", "command": ["keep"]}},\n'
+                "    {comment}\n"
+                '    "grim-mcp": {entry} }}\n}}\n'
+            ),
+            {"model": "anthropic/claude", "mcp": {"keep": {"type": "local", "command": ["keep"]}}},
+        ),
+        # The only member takes its container, the only root member.
+        (
+            '{{\n  {comment}\n  "mcp": {{"grim-mcp": {entry}}}}}\n',
+            {},
+        ),
+    ],
+    ids=["last-member", "only-member"],
+)
+def test_global_opencode_mcp_uninstall_keeps_a_comment_ending_in_a_comma(
+    grim_binary, grim_home: Path, registry: str, unique_repo: str, tmp_path: Path, layout: str, rest: dict
+) -> None:
+    """A line comment above the entry may end in ``,``. That comma is part of
+    the comment, not the separator: uninstall must leave every byte of the
+    comment and a file that still parses."""
+    runner = GrimRunner(grim_binary, grim_home)
+    ref = _release_mcp(runner, tmp_path / "src", registry, unique_repo)
+
+    # GrimRunner pins XDG_CONFIG_HOME at <home>/.config.
+    cfg = Path(runner.env["XDG_CONFIG_HOME"]) / "opencode" / "opencode.jsonc"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text('{"model": "anthropic/claude"}\n')
+
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n')
+    runner.json("lock", "--global")
+    rows = runner.json("install", "--global", "--client", "opencode")["items"]
+    assert rows[0]["status"] == "installed", rows
+
+    # The user reflows the file around grim's entry; its value is unchanged.
+    entry = json.dumps(json.loads(cfg.read_text())["mcp"]["grim-mcp"])
+    cfg.write_text(layout.format(comment=COMMA_COMMENT, entry=entry))
+    row = next(r for r in runner.json("status", "--global")["items"] if r["name"] == "grim-mcp")
+    assert row["state"] == "installed", row
+
+    runner.json("uninstall", "--global", "mcp", "grim-mcp")
+    removed = cfg.read_text()
+    assert COMMA_COMMENT in removed, f"the comment must keep every byte: {removed!r}"
+    assert _loads_jsonc(removed) == rest, f"the file must still parse: {removed!r}"
+
+
+# ── (c3) a byte-order mark is read past, by the splice and by `status` ─────
+
+
+@pytest.mark.parametrize(
+    ("name", "body"),
+    [
+        ("opencode.json", '{"model": "anthropic/claude"}\n'),
+        ("opencode.jsonc", '{\n  // which model to use\n  "model": "anthropic/claude"\n}\n'),
+    ],
+)
+def test_global_opencode_mcp_reads_past_a_byte_order_mark(
+    grim_binary, grim_home: Path, registry: str, unique_repo: str, tmp_path: Path, name: str, body: str
+) -> None:
+    """Some editors write a byte-order mark first. Install, ``status``, a
+    repeat install and uninstall all read past it, and it stays first."""
+    runner = GrimRunner(grim_binary, grim_home)
+    ref = _release_mcp(runner, tmp_path / "src", registry, unique_repo)
+
+    # GrimRunner pins XDG_CONFIG_HOME at <home>/.config.
+    cfg = Path(runner.env["XDG_CONFIG_HOME"]) / "opencode" / name
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text("\ufeff" + body)
+
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n')
+    runner.json("lock", "--global")
+    rows = runner.json("install", "--global", "--client", "opencode")["items"]
+    assert rows[0]["status"] == "installed", rows
+    added = cfg.read_text()
+    assert added.startswith("\ufeff") and added.count("\ufeff") == 1, repr(added)
+
+    row = next(r for r in runner.json("status", "--global")["items"] if r["name"] == "grim-mcp")
+    assert row["state"] == "installed", row
+    again = runner.json("install", "--global", "--client", "opencode")["items"]
+    assert again[0]["status"] == "unchanged", again
+    assert cfg.read_text() == added, "a repeat install must leave the file alone"
+
+    runner.json("uninstall", "--global", "mcp", "grim-mcp")
+    assert cfg.read_text() == "\ufeff" + body, "uninstall must restore the original bytes"
 
 
 # ── (d) status: a client that declines the kind is not `clients_missing` ───
