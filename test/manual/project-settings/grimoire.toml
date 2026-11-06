@@ -1,0 +1,15 @@
+# Settings demo project: declares one settings package and turns the
+# experimental flag on, the way a team commits it. See ../README.md § Settings.
+#
+# Declaring is not consent. A plain `grim install` in a fresh clone of this
+# file writes nothing until this workspace answers the question once.
+
+[options]
+default_registry = "localhost:5050"
+clients = ["claude"]
+
+[options.experimental]
+settings = true
+
+[settings]
+team-defaults = "localhost:5050/grimoire/settings/team-defaults:1"

@@ -169,6 +169,14 @@ HOOK_MATRIX=(
     "hooks|tool-logger|$CATALOG/hooks/tool-logger|1.0.0"
     "hooks|write-guard|$CATALOG/hooks/write-guard|1.0.0"
 )
+# Settings are one `settings/<name>.toml` document; the name is the file stem.
+# Publishing needs no flag, but a consumer's `grim install` writes nothing until
+# `[options.experimental] settings = true` and the workspace has answered the
+# consent question. A `.toml` builds as a bundle by shape, so the kind is forced.
+# See README § Settings.
+SETTINGS_MATRIX=(
+    "settings|team-defaults|$CATALOG/settings/team-defaults.toml|1.0.0"
+)
 
 # 4a. Publish skills.
 for record in "${SKILL_MATRIX[@]}"; do
@@ -192,6 +200,12 @@ done
 for record in "${HOOK_MATRIX[@]}"; do
     IFS='|' read -r kind name path versions <<<"$record"
     release_versions "$path" "$kind" "$name" "$versions"
+done
+
+# 4d-2. Publish settings (forced kind, see SETTINGS_MATRIX comment).
+for record in "${SETTINGS_MATRIX[@]}"; do
+    IFS='|' read -r kind name path versions <<<"$record"
+    release_versions "$path" "$kind" "$name" "$versions" settings
 done
 
 # 4e. DEPENDENCY DEMO artifacts (declared `requires`; see README § Dependencies).
@@ -303,6 +317,12 @@ Next:
   cd test/manual/project
   grim lock && grim install         # materialize into .claude/
   grim status                       # all 'installed'
+
+Settings demo (experimental; see README § Settings):
+  cd test/manual/project-settings
+  grim lock
+  grim install </dev/null           # gated: nothing is written until this workspace consents
+  grim install --trust-workspace    # writes .claude/settings.local.json
 
 Dependency demo (see README § Dependencies):
   cd test/manual/project-deps

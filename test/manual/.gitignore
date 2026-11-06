@@ -14,3 +14,7 @@ project-deps/.github/
 project-deps/.grimoire/
 project-deps/grimoire.lock
 project-deps/.mcp.json
+project-settings/.claude/
+project-settings/.grimoire/
+project-settings/grimoire.lock
+.settings-roots/
