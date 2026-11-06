@@ -225,7 +225,8 @@ jobs:
   # golden fixtures pin `localhost:5000` into their locks, so they need a
   # registry on exactly that host; `task test` puts zot on a random port and
   # the modules skip there. Here they run alone, required: a skip fails, and
-  # the JUnit report must show every golden test passed. Then `p9:diff` builds origin/main's grim and
+  # the JUnit report must show every golden test passed. Then `p9:diff` runs the differ's self-test
+  # (its own first step, so no gate can diff with an unproven differ), builds origin/main's grim and
   # byte-compares it against this branch's over the hook-free scenarios.
   principle-9:
     name: Principle 9 (golden + p9 diff)

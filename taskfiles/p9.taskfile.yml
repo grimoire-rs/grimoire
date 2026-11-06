@@ -4,10 +4,11 @@
 # branch's grim over one hook-free scenario list, byte-compared after every
 # command. Deep verify only — deliberately NOT part of `task verify`.
 #
-# `task p9:diff` refuses a vacuous run (identical binaries, or no source
-# change against origin/main) with exit 2; `task p9:diff -- --allow-identical`
-# runs it anyway (the baseline). Fetch origin first: MAIN_SHA is the local
-# origin/main ref.
+# `task p9:diff` runs `p9:self-test` before any build, so every gate that
+# diffs also proves the differ. It refuses a vacuous run (identical binaries,
+# or no source change against origin/main) with exit 2;
+# `task p9:diff -- --allow-identical` runs it anyway (the baseline). Fetch
+# origin first: MAIN_SHA is the local origin/main ref.
 
 version: '3'
 
@@ -26,6 +27,9 @@ tasks:
       TOOLCHAIN:
         sh: sha256sum rust-toolchain.toml | cut -c1-12
     cmds:
+      # First, and in sequence: a differ that misses a planted difference
+      # passes every comparison, and nothing else asserts its masks.
+      - task: self-test
       - task: build-main
         vars: { MAIN_SHA: '{{.MAIN_SHA}}', TOOLCHAIN: '{{.TOOLCHAIN}}' }
       - cargo build --release --locked
