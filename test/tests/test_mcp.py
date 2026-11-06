@@ -5,8 +5,8 @@
 Drives the server over a real JSON-RPC-over-stdio handshake (the same wire
 protocol an MCP client speaks) and asserts the advertised tool surface and
 that a read tool's payload matches the equivalent `grim ... --format json`
-output. The server exits on stdin EOF, so a single piped request batch runs
-the whole session.
+output. The server ends the session on stdin EOF, so the driver holds stdin
+open until every request in the batch is answered.
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from src.helpers import (
 from src.index_fixture import index_config, package, write_all_json
 from src.registry import REGISTRY_HOST
 from src.runner import GrimRunner
-from src.stdio_drivers import drive as _drive
+from src.stdio_drivers import drive_until_answered as _drive
 from src.stdio_drivers import initialize as _initialize
 
 

@@ -13,7 +13,6 @@ support-file fetches, truncation, rendered trees, and clean error shapes.
 from __future__ import annotations
 
 import json
-import subprocess
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -21,6 +20,7 @@ from pathlib import Path
 from src.helpers import make_artifact, make_dependent
 from src.registry import REGISTRY_HOST
 from src.runner import GrimRunner
+from src.stdio_drivers import drive_until_answered
 
 _PROTOCOL = "2025-06-18"
 
@@ -42,31 +42,14 @@ def _drive(
     Fetch tests default to *online* (``grim_fetch`` requires network); pass
     ``offline=True`` only to assert the clean offline error.
     """
-    args = [str(runner.binary)]
-    if offline:
-        args.append("--offline")
-    args.append("mcp")
-    if allow_writes:
-        args.append("--allow-writes")
-    payload = "".join(json.dumps(r) + "\n" for r in requests)
-    result = subprocess.run(
-        args,
-        input=payload,
-        capture_output=True,
-        text=True,
-        env=runner.env,
-        cwd=str(cwd),
+    return drive_until_answered(
+        runner,
+        cwd,
+        requests,
+        offline=offline,
+        allow_writes=allow_writes,
         timeout=timeout,
     )
-    responses: dict[int, dict] = {}
-    for line in result.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        msg = json.loads(line)
-        if isinstance(msg.get("id"), int):
-            responses[msg["id"]] = msg
-    return responses
 
 
 def _call_fetch(

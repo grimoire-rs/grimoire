@@ -2,15 +2,18 @@
 # Copyright 2026 The Grimoire Authors
 """Stdio and hook-run drivers shared by the hook-runtime, MCP and telemetry tests.
 
-Moved verbatim from ``tests/test_hook_run_runtime.py`` and ``tests/test_mcp.py``
-so a test module never imports a sibling test module.
+They live here so a test module never imports a sibling test module.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import subprocess
+import threading
+from collections.abc import Iterable
 from pathlib import Path
+from typing import IO
 
 from src.runner import GrimRunner
 
@@ -118,16 +121,14 @@ def drive(
     multi-registry browse (the server then resolves live against the
     configured `[[registries]]`); such a test must take the session
     `registry` fixture and publish its artifacts first.
+
+    Stdin closes as soon as the batch is written, so a tool call still running
+    when the server's post-EOF drain ends gets no response;
+    `drive_until_answered` waits for every answer.
     """
-    args = [str(runner.binary)]
-    if offline:
-        args.append("--offline")
-    args.append("mcp")
-    if allow_writes:
-        args.append("--allow-writes")
     payload = "".join(json.dumps(r) + "\n" for r in requests)
     result = subprocess.run(
-        args,
+        _mcp_argv(runner, offline=offline, allow_writes=allow_writes),
         input=payload,
         capture_output=True,
         text=True,
@@ -136,8 +137,104 @@ def drive(
         timeout=60,
         check=False,
     )
+    return _by_id(result.stdout.splitlines())
+
+
+# Longer than rmcp's 5 s post-EOF drain, so a server finishing a request that
+# outlived the driver's timeout is not killed mid-answer.
+_EXIT_GRACE = 10.0
+
+
+def drive_until_answered(
+    runner: GrimRunner,
+    cwd: Path,
+    requests: list[dict],
+    *,
+    allow_writes: bool = False,
+    offline: bool = True,
+    timeout: float = 60,
+) -> dict[int, dict]:
+    """`drive`, holding stdin open until every request id has a response.
+
+    `grim mcp` reads stdin EOF as the client leaving and drops a request still
+    running a few seconds later. Stdin closes once every id is answered or
+    `timeout` seconds pass; a batch without ids closes it at once. A server
+    still running `_EXIT_GRACE` seconds after that is killed and
+    `subprocess.TimeoutExpired` raised.
+    """
+    pending = {r["id"] for r in requests if isinstance(r.get("id"), int)}
+    lines: list[str] = []
+    answered = threading.Event()
+    if not pending:
+        answered.set()
+    with subprocess.Popen(
+        _mcp_argv(runner, offline=offline, allow_writes=allow_writes),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        encoding="utf-8",
+        env=runner.env,
+        cwd=str(cwd),
+    ) as proc:
+        assert proc.stdin is not None and proc.stdout is not None
+        reader = threading.Thread(
+            target=_collect, args=(proc.stdout, lines, pending, answered), daemon=True
+        )
+        reader.start()
+        # A server that exits before reading its input shows up as missing
+        # responses, as it does under `drive`.
+        with contextlib.suppress(BrokenPipeError):
+            proc.stdin.write("".join(json.dumps(r) + "\n" for r in requests))
+            proc.stdin.flush()
+        answered.wait(timeout)
+        with contextlib.suppress(BrokenPipeError):
+            proc.stdin.close()
+        try:
+            proc.wait(timeout=_EXIT_GRACE)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            # Leaving the block closes stdout, which the reader may still be
+            # iterating: join it first or it dies on a closed file.
+            reader.join()
+            raise
+        reader.join()
+    return _by_id(lines)
+
+
+def _collect(
+    stdout: IO[str], lines: list[str], pending: set[int], answered: threading.Event
+) -> None:
+    """Keep every stdout line; set `answered` once no request id is pending,
+    or at EOF, so a server that died never holds the caller to its timeout."""
+    for line in stdout:
+        lines.append(line)
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # `_by_id` raises it again on the caller's thread
+        if isinstance(msg, dict) and "method" not in msg:
+            pending.discard(msg.get("id"))
+            if not pending:
+                answered.set()
+    answered.set()
+
+
+def _mcp_argv(runner: GrimRunner, *, offline: bool, allow_writes: bool) -> list[str]:
+    args = [str(runner.binary)]
+    if offline:
+        args.append("--offline")
+    args.append("mcp")
+    if allow_writes:
+        args.append("--allow-writes")
+    return args
+
+
+def _by_id(lines: Iterable[str]) -> dict[int, dict]:
+    """The JSON-RPC messages among `lines` that carry an integer id, by id."""
     responses: dict[int, dict] = {}
-    for line in result.stdout.splitlines():
+    for line in lines:
         line = line.strip()
         if not line:
             continue
