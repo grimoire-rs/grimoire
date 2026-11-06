@@ -35,6 +35,7 @@ is open. Anchors (`{#...}`) moved with their sections.
 | [subsystem-install-layout-skills-rules.md](./subsystem-install-layout-skills-rules.md) | Install Layout: Skills, Rules | |
 | [subsystem-install-layout-agents-mcp.md](./subsystem-install-layout-agents-mcp.md) | Install Layout: MCP servers, Agents | `install-layout-mcp`, `install-layout-agents` |
 | [subsystem-install-layout-hooks.md](./subsystem-install-layout-hooks.md) | Install Layout: Hooks | `install-layout-hooks` |
+| [subsystem-install-layout-settings.md](./subsystem-install-layout-settings.md) | Install Layout: Settings | `install-layout-settings` |
 | [subsystem-vendor-paths.md](./subsystem-vendor-paths.md) | Global-scope paths and vendor environment overrides | `global-scope-paths` |
 | [subsystem-client-detection.md](./subsystem-client-detection.md) | Client Detection (default install targets) | `client-detection` |
 | [subsystem-install-state.md](./subsystem-install-state.md) | Install State (project, global) and the path containment guard | `install-state`, `install-state-project`, `install-state-global`, `path-containment-guard` |
@@ -77,6 +78,11 @@ state. A quiet refresh (an unchanged root or flat digest) writes the sidecar
 only and never re-serializes the `CatalogFile`. The uncoordinated fallback
 writes the `CatalogFile` alone, which deliberately breaks the binding. Design
 and contract: `.agents/specs/design_catalog_at_scale.md` §5.4 and §6.3.
+
+A row's `kind_read: true` (omitted when false) marks an OCI manifest that was
+read and names no grimoire kind on any tier, so a refresh reuses that kindless
+row unread; a row naming a kind this grim does not know stays unmarked and is
+read again. 0.13 and 0.14.x refuse a cache holding the field.
 
 ## Constraints
 

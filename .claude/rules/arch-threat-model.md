@@ -43,8 +43,8 @@ chain's.
 |---|---|---|
 | **T1** | **A malicious or compromised artifact publisher.** Content arrives from a registry the user may not control; a legitimate package may be taken over. | This is grim's core exposure. Named incidents across eight ecosystems (npm, RubyGems, PyPI, Homebrew, VS Code, Cargo `build.rs`, GitHub Actions, Bun) are all this attacker. |
 | **T2** | **A mutable-identity swap.** The same reference resolving to different bytes — a force-pushed tag, a re-pushed digest-less ref. | CVE-2025-30066 (tj-actions, 23,000+ repos), trivy-action (75 of 76 tags force-pushed), Bun's name-only trust (CVE-2026-24910). Content-digest resolution is grim's structural answer; anything that resolves outside it reopens the class. |
-| **T3** | **An untrusted repository the user clones or opens.** Cloning a dependency, a fork, a contributor's branch, a sample repo, or opening any of them in an AI client. | The user is *not* vouching for a repo by cloning it. Cursor has 4+ CVEs of this exact shape in 18 months. Anything armable that travels in a repository is exposed to this attacker. |
-| **T4** | **Prompt injection driving the agent.** Untrusted content in a file, a diff, a web page or a tool result steering the agent into authoring or modifying config. | PromptArmor's Claude Code marketplace attack is precisely this: an injected payload drove a hook that rewrote the permission store. The agent is a confused deputy holding the user's privilege. |
+| **T3** | **An untrusted repository the user clones or opens.** Cloning a dependency, a fork, a contributor's branch, a sample repo, or opening any of them in an AI client. | The user is *not* vouching for a repo by cloning it. Cursor has 4+ CVEs of this exact shape in 18 months. Anything armable that travels in a repository is exposed to this attacker. A repository can also declare a `settings` package, so nothing applies before workspace consent and a record it delivers is discarded. |
+| **T4** | **Prompt injection driving the agent.** Untrusted content in a file, a diff, a web page or a tool result steering the agent into authoring or modifying config. | PromptArmor's Claude Code marketplace attack is precisely this: an injected payload drove a hook that rewrote the permission store. The agent is a confused deputy holding the user's privilege. A `grim add` it runs is still a gesture, since grim cannot tell it from the user, so the `settings` kind answers T4 with evidence (I5): the lock diff and the change list. |
 | **T5** | **Another local unprivileged process or user on a shared machine.** Reading `/proc/<pid>/cmdline`, `/proc/<pid>/environ`, crash dumps, CI logs, or a world-readable state file. | Cheap to defend, and it is why secrets never travel in argv or environment variables. |
 
 ## Out of scope — attackers we deliberately do **not** defend against
@@ -65,8 +65,8 @@ these is a **non-goal**, not an open defect — record it as such and move on.
 Design against these directly; they are what the boundary is *for*.
 
 1. **I1 — Nothing armable lives inside a repository.** Anything that causes execution — a
-   registration, a dispatch table, an approval record, a launcher, **and the payload that is
-   executed** — lives in machine-local storage (`$GRIM_HOME`) or in a per-developer repo-resident
+   registration, a dispatch table, an approval record, a settings record, a launcher, **and the
+   payload that is executed** — lives in machine-local storage (`$GRIM_HOME`) or in a per-developer repo-resident
    surface the client treats as local (Claude's `.claude/settings.local.json`).
 
    > **The payload is named explicitly because omitting it was read as a licence.** Until
@@ -80,6 +80,35 @@ Design against these directly; they are what the boundary is *for*.
    > the arming path derives that directory from `$GRIM_HOME` rather than from the record. **A
    > thing is armable if grim will execute it or read arming instructions out of it**; the absence
    > of a category from this list is not permission.
+
+   > **The settings record is named for the same reason** (`adr_settings_artifact_kind.md`).
+   > `$GRIM_HOME/settings/<workspace-key>.json` says what grim wrote into a harness's settings, and
+   > a matching hash lets grim change or remove a value without `--force`. Removal needs no consent,
+   > so a repository-delivered record could authorise removing a user's rule. A local test on git
+   > 2.43 showed `git pull` replacing a gitignored state file, so `.grimoire/state.json` is not safe
+   > storage: settings records read from it are discarded, and project records live only here. A
+   > filter on one kind is not enough, so on load an output its record's kind may not address is
+   > dropped, whatever the kind.
+   > Three settings cases are withheld, not dropped: an OpenCode output that fails only on its file name (`$OPENCODE_CONFIG` moved), an output of a client with no settings file on this host (Warp on Windows, in a `global.json` carried from another machine), and every settings output of a global state under a refused `GRIM_HOME` — the value stays in the file, no consumer reads the output, and the next save keeps it on its record for a run that can judge it. Accepted residual (`plan_settings_follow_ups.md` PD-46): the match compares the path below the anchor, not the anchor, so a Warp output carried between macOS and Linux stays visible at the other platform's root, a file that platform's Warp does not read; a per-host set of producible anchors would close it.
+
+   > **Global settings roots are fenced, by a heuristic.** The vendor variables that place a
+   > global settings file are environment, which a repository can set through the same files. So a
+   > global settings write declines, before any read, a file whose config directory is relative
+   > (`settings-root-relative`) or lies inside the work tree the command runs in
+   > (`settings-root-in-workspace`). That tree is the outermost ancestor of the working directory
+   > holding a `.git` directory, or a regular `.git` file with a `gitdir:` line, that does not hold
+   > `$HOME`; a `.git` of another type (a FIFO, a device) marks nothing and is never opened. A file is inside on its literal
+   > or link-resolved spelling, a spelling with `..` is refused while a tree is fenced, and an
+   > unreadable working directory refuses every global root (fails closed). The row reads
+   > `not-armed`, exit 0, a recorded value is withheld, and no reader (the survey, `status`, the
+   > TUI, the badge) opens a fenced file, judged by its recorded path, selected client or not. Four edges are recorded, not bugs: an absolute root inside a *different*
+   > repository passes (the fence knows only the repository in hand); a root that is, or links
+   > into, a dotfiles repository is refused while the command runs inside it (false positive; run
+   > elsewhere or unset the variable); a `HOME` the repository sets drops the fence, because the
+   > exemption reads `$HOME` from the environment and a trusted source (`getpwuid_r`) is out of
+   > reach under `unsafe_code = "forbid"` (CWE-15); and a checkout with no `.git` (an archive, jj,
+   > hg, Sapling, a `.git` file without `gitdir:`) is not fenced (CWE-15). Both CWE-15 edges are
+   > `plan_settings_artifact_kind.md` PD-33. Other kinds do not take the fence.
 
    This is T3's control, and
    it is why a "portable, committable" form of an executed path is not an acceptable trade: an
@@ -121,6 +150,12 @@ Design against these directly; they are what the boundary is *for*.
    > re-prompt, because the consented set carries no tag and no digest. That is **T1**, its answer
    > is the pin, and its visibility is `git diff` on the lock plus `grim status` — **I5**,
    > evidence, not prevention. State it that way; do not describe consent as preventing it.
+   >
+   > **The `settings` kind shares this exception on the same terms** (`adr_settings_artifact_kind.md`,
+   > trust ADR decision 2). Its bindings sit in the same consent record under a `settings:` prefix,
+   > so there is **no re-ask on a version bump**, and a new version can change what the agent may
+   > do. That is the same T1 residual. Its evidence is the lock diff plus the **change list** every
+   > changing run reports, including `grim install` after a teammate's bump: **I5**, not prevention.
 3. **I3 — Grim never converts its own failure into a verdict.** No forged allow (exit 0), no forged
    block (exit 2). A grim-internal failure is a non-verdict error exit, and the client's documented
    policy decides the direction. Grim's obligations are that no benign state ever errors (flag off,
@@ -142,8 +177,8 @@ Design against these directly; they are what the boundary is *for*.
   non-goal — say so explicitly rather than filing it silently or dropping it silently.
 - **Reviewing a design:** check each invariant that the change touches. A change that moves
   something armable into a repository, or that keys trust on a name, is a Block regardless of how
-  it is mitigated — **unless** it is the hook-consent exception recorded under I2 above, which is
-  a decided trade with its residual named. Re-deriving it as a fresh Block is the churn this file
+  it is mitigated — **unless** it is the hook-consent exception recorded under I2 above, as extended
+  to the `settings` kind, which is a decided trade with its residual named. Re-deriving it as a fresh Block is the churn this file
   exists to stop; disagreeing with it is an ADR amendment, not a finding.
 - **Writing an ADR:** scope the threat table to this file rather than re-deriving a boundary, and
   record any deliberate deviation with the attacker it exposes you to.
@@ -155,8 +190,8 @@ Design against these directly; they are what the boundary is *for*.
 - [`vendor-capability-watchlist.md`](./vendor-capability-watchlist.md) — dated re-verification of
   vendor declines, since a vendor's security posture is an input to these invariants
 - `.agents/adr/adr_hook_workspace_consent.md` — the workspace-consent decision and the I2 trade
-  recorded above; `.agents/adr/adr_artifact_trust_model.md` — what integrity buys and what consent
-  does not
+  recorded above; `.agents/adr/adr_settings_artifact_kind.md` — its extension to a second kind;
+  `.agents/adr/adr_artifact_trust_model.md` — what integrity buys and what consent does not
 - `.agents/adr/adr_hooks_support.md` § Threat model — the worked example this file was extracted
   from; `.agents/research/research_hooks_autoexec_supply_chain.md` carries the incident evidence
   behind T1, T2 and I4

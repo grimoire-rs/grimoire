@@ -89,6 +89,17 @@ pub enum RemovedStatus {
   distinguish "not applicable" from "older grim". The MCP-shaped
   `FetchReport` (`src/fetch.rs`, shared by the CLI `grim fetch` and the MCP
   `grim_fetch`/`grim_render` tools) is exempt.
+- **`settings_changes` is always present, `[]` when empty**, at the top level
+  of the install, update, add and uninstall reports (top level because an
+  orphan removal has no row); `update` also carries an always-present
+  `pieces`. Both row types live in `src/api/settings_report.rs` and append
+  fields only.
+- **The error document is the one omit-when-absent exception.** It is built
+  in `src/main.rs` (`error_document`), not in `src/api/`, and its top-level key
+  set is pinned to `{"error"}`, so a refused or failed settings run adds
+  `error.pieces` and `error.settings_changes` inside `error`, each **omitted**
+  when empty (`attach_settings`) — every other failure keeps its document byte
+  for byte, as `reason`, `retryable`, `forceable` and `hint` already do.
 - Single-object reports serialize as one flat object (e.g.
   `init_report.rs`, `release_report.rs`).
 - Polymorphic types use `#[serde(untagged)]` to produce different JSON shapes per variant.

@@ -4,12 +4,15 @@ paths:
   - "src/oci/mcp.rs"
   - "src/catalog/rating_provider.rs"
   - "docs/src/content/docs/ratings.md"
+  - "src/install/settings_phase.rs"
+  - "docs/src/content/docs/settings.md"
 ---
 
 # Vendor Capability Watchlist
 
-Auto-fires on vendor renderer / MCP descriptor edits, and on the two files
-carrying the ratings feature's own upstream forge claims. Purpose:
+Auto-fires on vendor renderer / MCP descriptor edits, on the two files
+carrying the ratings feature's own upstream forge claims, and on the
+`settings` kind's phase and reference page. Purpose:
 **re-check upstream before patching a decline** — or before touching a
 vendor-version claim. Every skip/warn/decline in a renderer, and every
 dated row in the "Ratings forge capability watchlist" of [the data file](../../.agents/upstream-watchlist.md), encodes an
@@ -90,9 +93,12 @@ the one who knows which — a field whose value never varies only rots (ADR
 Overlap detection in `test_path_overlaps_declared_or_absent` compares
 `paths:` patterns as **exact strings**. This rule's globs
 (`src/install/vendor_*.rs`, `src/oci/mcp.rs`, `src/catalog/rating_provider.rs`,
-`docs/src/content/docs/ratings.md`) are unique strings today, so no declared-overlap
-group is required — but they *semantically* overlap `src/**`/`**/*.rs`
-(the two `src/` entries) and `docs/**` (`docs/src/content/docs/ratings.md`, which
-`docs-style.md` and `product-context.md` already glob-match — editing that
-one file loads all three rules). If another rule ever adopts one of these
-exact strings, a declared group in `.claude/rules.md` becomes mandatory.
+`docs/src/content/docs/ratings.md`, `src/install/settings_phase.rs`,
+`docs/src/content/docs/settings.md`) are unique strings today except
+`src/install/vendor_*.rs`, which `subsystem-vendor-paths.md` shares through a
+declared group in `.claude/rules.md`. They also *semantically* overlap
+`src/**`/`**/*.rs` (the `src/` entries) and `docs/**` (the two docs pages,
+which `docs-style.md` and `product-context.md` already glob-match — editing
+either file loads all three rules). If another rule ever adopts one of the
+other exact strings, a declared group in `.claude/rules.md` becomes mandatory.
+

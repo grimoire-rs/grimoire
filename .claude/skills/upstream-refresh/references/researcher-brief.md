@@ -25,13 +25,34 @@ Claims to re-verify (ledger location → current text):
 <one line per watchlist row / code stamp / docs claim this target owns,
  with file:line>
 
+Settings keys (claude, codex, copilot, cursor, opencode, qoder,
+antigravity, amp, droid, kilo, kiro, gemini, warp; sweep and deep). One
+claim per `settings_fields()` row in src/install/vendor_<target>.rs: the
+key still exists upstream, with the value type and merge class grim gives
+it (domains.md › Settings keys per harness). One claim per "Settings keys
+watchlist" row of `.agents/upstream-watchlist.md` this target owns: the
+key list row, each named limit and each `on-limited` limit still holds,
+and, for claude, the linked-worktree read (both
+`.claude/settings.local.json` files are read, the main checkout's value
+wins on a shared key, a worktree-only file is still read). One claim on
+expansion: whether the harness expands variables or file references in a
+config string (grim refuses `{env:` and `{file:` for opencode and kilo,
+and `$NAME` and `${NAME}` for gemini; a new expansion elsewhere is a
+security finding). One claim on trust gates: no key that switches off a
+workspace or folder trust gate, or pre-trusts a folder, is proposed as a
+row (domains.md › Settings keys per harness names the known ones); report
+a new one as a finding. Never take a key's accepted values from the list in a
+harness's error message. For agents, cline, junie, zed, openclaw and
+goose, one claim: the re-check trigger in that domains.md row has not
+fired.
+
 Feed entries to assess (feed depth only):
 <new tags or headings above the cursor, with URLs>
 
 Sweep/deep only: scan the changelog from <previous Last check, or the
 newest `verified` date among the claims above> to today for entries that
-touch skills, rules, agents, MCP, hooks, frontmatter keys, config paths or
-env vars.
+touch skills, rules, agents, MCP, hooks, frontmatter keys, settings keys,
+config paths or env vars.
 
 Deep only: inventory the vendor's whole current surface per
 deep-pass.md › Full surface inventory <paste that table>. Every

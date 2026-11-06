@@ -53,7 +53,7 @@ is read.
 | `claude` | `claude-root` | the effective `CLAUDE_CONFIG_DIR` (shell or Claude settings `env`) else `~/.claude` — `AnchorRoots::resolve` feeds the row the settings-aware value |
 | `copilot` | `copilot-root` | `$COPILOT_HOME` else `~/.copilot` |
 | `codex` | `codex-root` | `$CODEX_HOME` else `~/.codex` (hosts Codex `agents/` **and** the MCP `config.toml`) |
-| `cursor` | `cursor-root` | `~/.cursor` (`CURSOR_CONFIG_DIR` not honored; hosts skills, `.mdc` rules, agents, `mcp.json`) |
+| `cursor` | `cursor-root` | `~/.cursor`, never moved by `CURSOR_CONFIG_DIR` (hosts skills, `.mdc` rules, agents, `mcp.json`) |
 | `kiro` | `kiro-root` | `$KIRO_HOME` else `~/.kiro` (hosts skills, `steering/` rules, `settings/mcp.json`) |
 | `junie` | `junie-root` | `$JUNIE_HOME` else `~/.junie` (hosts skills, `agents/`, `mcp/mcp.json`) |
 | `gemini` | `gemini-root` | `$GEMINI_CLI_HOME/.gemini` else `~/.gemini` — segment appended either way (hosts `agents/`, `settings.json` MCP; skills use `AgentsSkills`) |
@@ -62,12 +62,17 @@ is read.
 | `antigravity` | `antigravity-root` | `~/.gemini/config` — nested under, and distinct from, the `gemini` row. Each client's candidate set holds only its own root, so the nesting never cross-classifies |
 | `cline` | `cline-root` | `~/.cline` |
 | `droid` | `droid-root` | `~/.factory` — **the tag follows the CLIENT name, the directory follows the vendor's.** Both are frozen and they differ on purpose (hosts skills, `droids/` agents, `mcp.json`) |
-| `warp` | `warp-root` | `~/.warp` (identical on macOS, Linux and Windows, deliberately so upstream; hosts skills, `.mcp.json` MCP) |
+| `warp` | `warp-root` | `~/.warp` (identical on macOS, Linux and Windows, deliberately so upstream; hosts skills, `.mcp.json` MCP, and the macOS `settings.toml`) |
 | `openclaw` | `openclaw-root` | `$OPENCLAW_STATE_DIR`, else `$OPENCLAW_HOME/.openclaw`, else `~/.openclaw` |
 | `kilo` | `kilo-root` | `~/.kilo` (the legacy `.kilocode` is read for detection only, never written) |
-| `kilo-config` | `kilo-config-root` | `$XDG_CONFIG_HOME` else `~/.config`, then `/kilo` — Kilo's **second** root, hosting its global `agents/`. The `opencode-config` precedent: one vendor, two roots, so the second row is not named after the vendor |
+| `kilo-config` | `kilo-config-root` | `$XDG_CONFIG_HOME` else `~/.config`, then `/kilo` — Kilo's **second** root, hosting its global `agents/` and its settings file. The `opencode-config` precedent: one vendor, two roots, so the second row is not named after the vendor |
 | `goose` | `goose-root` | `~/.goose` — hosts Goose's global `agents/` only; its skills anchor at `AgentsSkills` |
 | `qoder` | `qoder-root` | `$QODER_CONFIG_DIR` else `~/.qoder` (hosts skills, rules, agents, `settings.json` MCP) |
+| `opencode-config` | `opencode-config-root` | the directory holding OpenCode's global config **file**: `$OPENCODE_CONFIG`'s parent, else `$XDG_CONFIG_HOME`\|`~/.config`/`opencode` — resolved through `opencode_config::global_config_dir`, the write path's own function. Not `open-code-root`, which follows `$OPENCODE_CONFIG_DIR` away from the file |
+| `cursor-cli` | `cursor-cli-root` | `$CURSOR_CONFIG_DIR` else `~/.cursor` — the Cursor CLI's root, hosting only `cli-config.json` (settings). The one row that reads `CURSOR_CONFIG_DIR` |
+| `cursor-cli-xdg` | `cursor-cli-xdg-root` | `$XDG_CONFIG_HOME`\|`~/.config`, then `/cursor` — answers on every platform so the row stays pure; `settings_config_path` alone applies the Linux-only gate |
+| `antigravity-cli` | `antigravity-cli-root` | `~/.gemini/antigravity-cli` — the Antigravity CLI's own dir, a sibling of the `antigravity` row's `~/.gemini/config`, hosting only `settings.json` (settings) |
+| `warp-config` | `warp-config-root` | `$XDG_CONFIG_HOME`\|`~/.config`, then `/warp-terminal` — Warp's Linux settings dir, hosting only `settings.toml`. Answers on every platform so the row stays pure; `settings_config_path` alone applies the OS gate |
 
 `goose`'s skills render into the shared pool at both scopes and anchor at
 `AgentsSkills`; its `goose-root` row exists for agents alone. The
@@ -116,6 +121,16 @@ Anchors are named below by their **serde tag** — what actually lands in
 | global · opencode · mcp | `open-code-root` | `opencode.json` |
 | global · copilot · mcp | `copilot-root` | `mcp-config.json` |
 | global · codex · mcp | `codex-root` | `config.toml` (same root as the agent anchor — TOML splice, see [install-layout-mcp](./subsystem-install-layout-agents-mcp.md#install-layout-mcp)) |
+| project · claude · settings | `workspace` | `.claude/settings.local.json`; entry output per piece — `entry` is the pointer, `element` the set element (see [Settings](./subsystem-install-layout-settings.md#install-layout-settings)) |
+| global · claude/copilot/qoder · settings | `<name>-root` | `settings.json` |
+| global · codex · settings | `codex-root` | `config.toml`, plus the own file `rules/grim-<binding>.rules` |
+| global · opencode · settings | `opencode-config-root` | the config file's name (`opencode.json`, `.jsonc`, or `$OPENCODE_CONFIG`'s) |
+| global · cursor · settings | `cursor-cli-root`, else `cursor-cli-xdg-root` | `cli-config.json` — the anchor of whichever root held the file at install; `cursor-cli` first, so a variable naming the XDG dir ties to it |
+| global · amp/droid/kiro/gemini · settings | `<name>-root` | `settings.json` (Amp: `settings.jsonc` when that file exists); Kiro `settings/cli.json`. Gemini shares the file with its MCP entry |
+| global · antigravity · settings | `antigravity-cli-root` | `settings.json` — not `antigravity-root`, which is the app's `~/.gemini/config` |
+| global · kilo · settings | `kilo-config-root` | `kilo.jsonc`, or `kilo.json` when only it exists — the root Kilo's global agents use |
+| global · warp · settings | `warp-config-root`, else `warp-root` | `settings.toml` — `warp-config` on Linux, `warp` (`~/.warp`) on macOS; the record keeps the anchor its file sits under. No root on Windows: `settings_config_path` returns `None` |
+| global · any other client · settings | — | **not classified** — `settings_fields()` is empty, so `is_declined_global_pair` gives no candidate (at project scope only Claude writes a settings file) |
 
 **Every other vendor** follows the same `(scope, client, kind)` →
 `(anchor, relative)` shape, with `<name>-root` as its global anchor and the
