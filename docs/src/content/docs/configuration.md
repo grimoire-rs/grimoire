@@ -86,12 +86,13 @@ Under `--registry`, a config that fails to load falls back to the default
 ### `[options.experimental]` {#options-experimental}
 
 The optional `[options.experimental]` sub-table gates features whose shape
-is not frozen yet (see [Unstable surfaces](./stability.md#unstable)). Today
-it holds exactly one key:
+is not frozen yet (see [Unstable surfaces](./stability.md#unstable)). It
+holds two keys, `hooks` and `settings`:
 
 ```toml
 [options.experimental]
 hooks = true
+settings = true
 ```
 
 `hooks` (boolean, default `false`) turns on the [hook](./hooks.md) artifact
@@ -106,6 +107,16 @@ Turning it back off and re-running `grim install` reaps every armed
 registration and dispatch row. It keeps the payload, the launcher, and the
 workspace's consent record. See
 [Feature flag off](./hooks.md#flag-off-retention).
+
+`settings` (boolean, default `false`) turns on the experimental
+[settings][settings-kind] artifact kind for this scope, new in grim 0.16.0.
+Set it with `grim config set options.experimental.settings true`, at project
+or global scope. It is config-only as well, and turning it on is not consent.
+
+Declaring and locking a settings package need no flag. With the flag off,
+`grim status` reads `gated` and `grim install` writes and removes no settings.
+Clearing the flag leaves every written value in place. See
+[Turn the kind on][settings-enable].
 
 ### `[options.tui]` {#options-tui}
 
@@ -931,9 +942,9 @@ the table for its kind. Two additions carry this, and both are omitted when
 unused:
 
 - `[[<kind>.requires]]` follows an entry of `[[skill]]`, `[[rule]]`,
-  `[[agent]]`, `[[mcp]]` or `[[hook]]`. Each table holds the `kind`, `name`
-  and `id` of one declared dependency, sorted by kind (skill, rule, agent,
-  bundle, mcp, hook) and then name. The `id` is stored exactly as the
+  `[[agent]]`, `[[mcp]]`, `[[hook]]` or `[[settings]]`. Each table holds the
+  `kind`, `name` and `id` of one declared dependency, sorted by kind (skill,
+  rule, agent, bundle, mcp, hook, settings) and then name. The `id` is stored exactly as the
   publisher wrote it, so a relative `./gws-shared:1` stays relative and is
   resolved against the parent's pinned repository each time the lock is read.
   A mirror switch therefore needs no lock rewrite. An entry from a local path
@@ -1304,14 +1315,14 @@ file cannot be swapped by accident.
 
 Unlike the two files above, neither carries a published [JSON
 Schema](#editor-schema) yet. `grim schema` covers `config`, `publish`,
-`lock`, and `mcp` only; extending it here is an unclaimed follow-up, not a
-promise.
+`lock`, `mcp`, `hook` and `settings` only. Extending it here is an unclaimed
+follow-up, not a promise.
 
 ## Editor schema support {#editor-schema}
 
-Both author-facing files ship a published [JSON Schema](https://json-schema.org/),
-so an editor can autocomplete keys and flag a mistyped table name the moment
-you save — instead of surfacing the error at the next `grim` run. The schemas
+Each author-facing file ships a published [JSON Schema](https://json-schema.org/).
+An editor can then autocomplete keys and flag a mistyped table name the moment
+you save, rather than at the next `grim` run. The schemas
 are generated from grim's own parser, so they accept exactly what grim accepts.
 
 | File | Schema URL |
@@ -1319,6 +1330,8 @@ are generated from grim's own parser, so they accept exactly what grim accepts.
 | `grimoire.toml` | `https://grimoire.rs/schemas/grimoire-config.schema.json` |
 | `publish.toml` | `https://grimoire.rs/schemas/grim-publish.schema.json` |
 | `grimoire.lock` | `https://grimoire.rs/schemas/grimoire-lock.schema.json` |
+| `mcp/<name>.toml` | `https://grimoire.rs/schemas/grim-mcp.schema.json` |
+| `settings/<name>.toml` | `https://grimoire.rs/schemas/grim-settings.schema.json` |
 
 [Taplo](https://taplo.tamasfe.dev/) and the
 [Even Better TOML](https://marketplace.visualstudio.com/items?itemName=tamasfe.even-better-toml)
@@ -1329,8 +1342,10 @@ VS Code extension bind a file to its schema through a first-line directive:
 ```
 
 To regenerate or inspect a schema locally, use [`grim schema`](./commands.md#schema):
-`grim schema --kind config` prints the `grimoire.toml` schema and
-`grim schema --kind publish` prints the `publish.toml` one.
+`grim schema --kind config` prints the `grimoire.toml` schema,
+`grim schema --kind publish` prints the `publish.toml` one, and
+`grim schema --kind settings` prints the one for a [settings][settings-kind]
+document.
 
 ## Scopes on disk
 
@@ -1343,7 +1358,7 @@ applies.
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `GRIM_HOME` | Root data directory (cache, global config, global install state at `$GRIM_HOME/state/global.json`). Project install state lives at `<workspace>/.grimoire/state.json`, not here. | `~/.grimoire` |
+| `GRIM_HOME` | Root data directory (cache, global config, global install state at `$GRIM_HOME/state/global.json`). Project install state lives at `<workspace>/.grimoire/state.json`, not here. Project [settings records](#data-layout) do live here, at `$GRIM_HOME/settings/<workspace-key>.json`. | `~/.grimoire` |
 | `GRIM_DEFAULT_REGISTRY` | Default registry for short references. | unset |
 | `GRIM_OFFLINE` | Disable all network access (same as `--offline`). | `false` |
 | `GRIM_TELEMETRY` | Opt in to anonymous usage telemetry, sent to the OpenTelemetry collector named by `OTEL_EXPORTER_OTLP_ENDPOINT`. Off unless set; disarmed by `OTEL_SDK_DISABLED`, `DO_NOT_TRACK` and offline mode. Unstable until 1.0 — see [Telemetry](./telemetry.md#enable). | unset |
@@ -1357,19 +1372,30 @@ applies.
 | `OPENCODE_CONFIG_DIR` | OpenCode config-dir override (vendor variable). Preferred over the XDG default (`$XDG_CONFIG_HOME/opencode`) as the global-scope install target for skills and agents — additive, OpenCode scans both. Also drives detection. | unset |
 | `OPENCODE_CONFIG` | OpenCode config **file** that grim edits for global-scope rule and MCP registration (read and written). Falls back to `$XDG_CONFIG_HOME/opencode/opencode.json`. No effect on skill/agent paths. | unset |
 | `CODEX_HOME` | Codex home override (vendor variable). Replaces `~/.codex` for global-scope agents and the MCP `config.toml`. Does **not** relocate Codex skills — those follow the cross-vendor `$HOME/.agents/skills` standard. Also drives detection. | unset |
-| `KIRO_HOME` | Kiro home override (vendor variable). Replaces `~/.kiro` **outright, with no `.kiro` segment appended**, for global-scope skills, `steering/` rules, and `settings/mcp.json`. Also drives detection. grim follows the Kiro **CLI**; the Kiro IDE ignores this variable upstream. | unset |
+| `KIRO_HOME` | Kiro home override (vendor variable). Replaces `~/.kiro` **outright, with no `.kiro` segment appended**, for global-scope skills, `steering/` rules, `settings/mcp.json`, and the settings kind's `settings/cli.json`. Also drives detection. grim follows the Kiro **CLI**; the Kiro IDE ignores this variable upstream. | unset |
 | `QODER_CONFIG_DIR` | Qoder config-dir override (vendor variable). Replaces `~/.qoder` **outright, with no `.qoder` segment appended**, for global-scope skills, rules, agents, and the `settings.json` MCP registration. Also drives detection. | unset |
 | `JUNIE_HOME` | Junie home override (vendor variable). Replaces `~/.junie` **outright, with no `.junie` segment appended**, for global-scope skills, agents, and `mcp/mcp.json`. Also drives detection. | unset |
 | `OPENCLAW_STATE_DIR` | OpenClaw state-dir override (vendor variable). Names OpenClaw's global root itself — skills land in `$OPENCLAW_STATE_DIR/skills/`. Wins over `OPENCLAW_HOME`. A leading `~` expands to the home directory; any other relative value is ignored. Also drives detection. | unset |
 | `OPENCLAW_HOME` | OpenClaw home override (vendor variable). Replaces the **home directory**, so the root is `$OPENCLAW_HOME/.openclaw` — the `GEMINI_CLI_HOME` shape. Ignored when `OPENCLAW_STATE_DIR` is set. | unset |
 | `GEMINI_CLI_HOME` | Gemini CLI home override (vendor variable). It replaces the **home directory**, so Gemini's config root becomes `$GEMINI_CLI_HOME/.gemini` — the segment is still appended, the opposite shape to `CODEX_HOME`/`KIRO_HOME`. Relocates global-scope Gemini agents and its `settings.json` MCP registration, and drives detection. Does **not** relocate the shared `$HOME/.agents/skills` pool, which serves several clients under one refcount. | unset |
-| `XDG_CONFIG_HOME` | Standard XDG base directory. Roots OpenCode's default config dir, Amp's settings dir, and — **on Linux and FreeBSD only** — Zed's. On macOS Zed uses a hardcoded `~/.config/zed`; on Windows, `%APPDATA%\Zed`. Roots Kilo's global agents (`$XDG_CONFIG_HOME/kilo/agents/`), and is one of the candidate roots for Kilo and Goose *detection*. | `~/.config` |
+| `CURSOR_CONFIG_DIR` | Cursor CLI config-dir override (vendor variable, honored read-only). It moves one file only, the `cli-config.json` that the [settings kind][settings-files] edits at global scope. grim edits it under `$CURSOR_CONFIG_DIR` when set, else under `~/.cursor` when the file exists there, else on Linux under `cursor/` in the XDG config directory. grim never creates the file. Cursor skills, rules, agents, `mcp.json` and detection ignore the variable. | unset |
+| `XDG_CONFIG_HOME` | Standard XDG base directory. Roots OpenCode's default config dir, Amp's settings dir, and — **on Linux and FreeBSD only** — Zed's. On macOS Zed uses a hardcoded `~/.config/zed`; on Windows, `%APPDATA%\Zed`. Roots Kilo's global agents (`$XDG_CONFIG_HOME/kilo/agents/`) and its settings file (`kilo/kilo.jsonc`, else `kilo/kilo.json`), roots Warp's Linux settings file (`warp-terminal/settings.toml`) and the Cursor CLI's Linux fallback (`cursor/cli-config.json`), and is one of the candidate roots for Kilo and Goose *detection*. | `~/.config` |
 | `SSL_CERT_FILE` | Path to a PEM bundle of extra CA roots for TLS. Merged with — never replacing — grim's built-in Mozilla roots (see [CA roots](#ca-roots)). | system default |
 | `SSL_CERT_DIR` | Directory of PEM CA-root files for TLS, same merge semantics as `SSL_CERT_FILE`. | system default |
 | `NO_COLOR` | Any non-empty value disables color under [`--color auto`](./commands.md#global-options) — the highest-priority `auto` signal, overriding even `CLICOLOR_FORCE`. Only `--color always` overrides it. | unset |
 | `CLICOLOR_FORCE` | A non-empty value other than `0` forces color on under `--color auto`, even when stdout is not a terminal — beaten only by `NO_COLOR`. | unset |
 | `CLICOLOR` | `0` disables color under `--color auto`. Any other value has no effect (color already follows the terminal check). | unset |
 | `TERM` | `dumb` disables color under `--color auto`, the same terminal-capability convention most color-aware CLIs follow. | unset |
+
+Nine of these variables also place the global file a
+[settings][settings-kind] package writes: `CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
+`COPILOT_HOME`, `CURSOR_CONFIG_DIR`, `OPENCODE_CONFIG`, `QODER_CONFIG_DIR`,
+`KIRO_HOME`, `GEMINI_CLI_HOME` and `XDG_CONFIG_HOME`, as [Where each value
+lands][settings-files] lists. A settings write refuses a file whose config
+directory is a relative path, or that lies inside the repository the command
+runs in. The causes are `settings-root-relative` and
+`settings-root-in-workspace`, and other kinds still follow the variable. See
+[Config roots inside a repository][settings-root-fence].
 
 One further vendor variable is read for **detection only** and never changes
 where grim writes: `$GOOSE_PATH_ROOT`. When it is set it **replaces** Goose's
@@ -1490,6 +1516,13 @@ volume cannot collide. Grim writes a self-managed `.grimoire/.gitignore`
 state file is kept out of version control without touching your root
 `.gitignore`.
 
+**Project settings records** are the exception. grim records each
+[settings][settings-kind] value it writes in a project at
+`$GRIM_HOME/settings/<workspace-key>.json`, keyed by the workspace path, and
+never in `.grimoire/state.json`. A repository therefore cannot supply a record
+that claims a value as grim's. Global-scope settings records sit in
+`$GRIM_HOME/state/global.json` with the rest of the global state.
+
 <!-- internal -->
 [grim-tui]: ./commands.md#tui
 [grim-search]: ./commands.md#search
@@ -1497,6 +1530,10 @@ state file is kept out of version control without touching your root
 [grim-add]: ./commands.md#add
 [grim-remove]: ./commands.md#remove
 [grim-login]: ./authentication.md#login
+[settings-kind]: ./settings.md
+[settings-enable]: ./settings.md#enable
+[settings-files]: ./settings.md#files
+[settings-root-fence]: ./settings.md#root-fence
 
 <!-- external -->
 [agent-plugins]: https://agent-plugins.org/

@@ -45,8 +45,14 @@ no parallel field for other clients. It belongs in `metadata` under its
 vendor namespace.
 
 `keywords` and `summary` stay top-level in every kind (skills, rules,
-bundles) — they are catalog fields shared by all clients and by grim's own
-`grim search` display; they are not vendor-specific.
+bundles, settings). They are catalog fields shared by all clients and by
+grim's own `grim search` display, and they are not vendor-specific.
+
+The experimental [settings][settings-format] kind, new in grim 0.16.0 and
+[unstable][stability-unstable] until 1.0, is vendor-keyed by table instead.
+Each harness gets a table named after its grim client name. Each value in
+it is a typed piece, not a metadata string, and the
+[field table][settings-fields] lists every field a harness takes.
 
 ## Authoring example — skill {#authoring-example}
 
@@ -741,6 +747,9 @@ claude namespace to silence it and gain proper type conversion.
 [publishing-metadata]: ./publishing.md#metadata
 [concepts-clients]: ./concepts.md#clients
 [agents-doc]: ./agents.md
+[settings-format]: ./settings.md#format
+[settings-fields]: ./settings.md#fields
+[stability-unstable]: ./stability.md#unstable
 
 [cline-docs]: https://cline.bot
 [droid-docs]: https://factory.ai

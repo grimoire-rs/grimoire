@@ -198,11 +198,17 @@ def test_every_hook_arming_cause_is_documented() -> None:
     common defect the panel found across this feature. This test is that class
     made mechanical for the one enumeration a consumer is told to rely on.
     """
-    display = (PROJECT_ROOT / "src" / "api" / "artifact_status.rs").read_text(
+    source = (PROJECT_ROOT / "src" / "api" / "artifact_status.rs").read_text(
         encoding="utf-8"
     )
-    impl = display.split("impl std::fmt::Display for HookArmingCause")[1]
-    tokens = set(re.findall(r'=> "([a-z][a-z0-9-]*)"', impl.split("}\n}")[0]))
+    # `as_str` holds the tokens; `Display` writes what it returns.
+    as_str = re.search(
+        r"impl HookArmingCause \{\s*(?:///[^\n]*\s*)*pub fn as_str\(self\) -> &'static str \{(.*?)\n    \}\n\}",
+        source,
+        re.DOTALL,
+    )
+    assert as_str, "HookArmingCause::as_str not found in artifact_status.rs"
+    tokens = set(re.findall(r'=> "([a-z][a-z0-9-]*)"', as_str.group(1)))
     assert len(tokens) >= 9, f"failed to parse the cause tokens: {sorted(tokens)}"
 
     table = (_DOCS_DIR / "json-interface.md").read_text(encoding="utf-8")

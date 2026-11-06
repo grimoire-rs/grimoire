@@ -285,7 +285,7 @@ scripts/                           # (optional) build/validation tooling
 |---|---|---|---|
 | `schema` | integer | yes | Metadata schema version. This document specifies `1`. Consumers MUST skip entries with an unknown `schema` (forward compatibility). |
 | `name` | string | yes | Package name. MUST equal the directory name containing the file. |
-| `kind` | string | yes | One of `skill`, `rule`, `agent`, `mcp`, `bundle`, `hook` (experimental — see [Hooks](./hooks.md)). |
+| `kind` | string | yes | One of `skill`, `rule`, `agent`, `mcp`, `bundle`, `hook` (experimental — see [Hooks](./hooks.md)), `settings` (experimental since grim 0.16.0, see [Settings][settings-kind]). |
 | `ref` | string | yes | Fully-qualified OCI reference **without a tag**: `registry-host[/namespace]/repository`. MUST contain at least one `/`. MUST NOT carry a tag or digest — versions are resolved live. |
 | `description` | string | yes | One line, shown by `grim search` and the TUI. |
 | `summary` | string | no | Short single-line blurb, matched by `grim search` alongside `description` (distinct from it — usually shorter). |
@@ -792,6 +792,7 @@ index can point at public packages.
 [commands-context]: ./commands.md#context
 [json-sources]: ./json-interface.md#search-sources
 [hosting-sync]: ./hosting-an-index.md#sync
+[settings-kind]: ./settings.md
 
 <!-- grimoire -->
 [index-site]: https://index.grimoire.rs

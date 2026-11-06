@@ -1,13 +1,14 @@
 ---
 title: "Artifact Reference"
-description: "Grimoire ships six artifact kinds — skills, rules, agents, MCP servers, bundles, and experimental hooks — each with its own file layout and install target."
+description: "Grimoire ships seven artifact kinds: skills, rules, agents, MCP servers, bundles, and the experimental hooks and settings. Each has its own file layout and install target."
 ---
 <!-- doc_type: reference -->
 
-Grimoire ships six artifact kinds — skills, rules, agents, MCP servers,
-bundles, and (experimental) [hooks](./hooks.md). Each has its own source shape, frontmatter schema, and
-validation rules, and until now those details lived scattered across the
-publishing, agents, and vendor-metadata chapters.
+Grimoire ships seven artifact kinds: skills, rules, agents, MCP servers,
+bundles, and the experimental [hooks](./hooks.md) and [settings][settings]. Each
+has its own source shape, frontmatter schema, and validation rules. Before this
+page, those details lived scattered across the publishing, agents, and
+vendor-metadata chapters.
 
 When you author an artifact you need one page that answers: which fields
 exist, which are required, what values are valid, and what a correct file
@@ -18,7 +19,7 @@ looks like. This page is that reference. Narrative background stays in
 reference lives in its own chapter,
 [MCP Server Artifacts](./mcp-servers.md).
 
-## The six kinds {#kinds}
+## The seven kinds {#kinds}
 
 Every artifact carries its kind in a `com.grimoire.kind` manifest
 annotation, so registries and tooling can distinguish kinds without
@@ -32,6 +33,7 @@ downloading layers.
 | **MCP server** | `mcp/<name>.toml` | `mcp` | Entry registered in each client's own MCP config file — never a materialized file |
 | **Bundle** | `.toml` member list | `bundle` | Never materializes itself — expands to its members |
 | **Hook** (experimental) | Directory with a `hook.toml` index | `hook` | Payload on disk plus a client-native registration, gated behind a feature flag and workspace consent — see [Hooks](./hooks.md) |
+| **Settings** (experimental) | `settings/<name>.toml` document | `settings` | Values merged into each harness's own settings file, gated behind a feature flag and workspace consent. See [Settings][settings] |
 
 The manifest's config descriptor is the OCI empty config
 (`application/vnd.oci.empty.v1+json`) — universally allow-listed, including
@@ -49,6 +51,8 @@ an agent `.md` is indistinguishable from a rule, so `--kind agent` is
 required (see [Agent Artifacts](./agents.md#publishing)); an MCP
 descriptor `.toml` is indistinguishable from a bundle, so `--kind mcp`
 is required (see [MCP Server Artifacts](./mcp-servers.md#publishing)).
+A settings document is a `.toml` file too, so `--kind settings` is
+required (see [Document format][settings-format]).
 
 A third directory shape, `hook.toml`, needs no flag. Inference checks for
 `SKILL.md` before `hook.toml`. So a skill that happens to ship a
@@ -95,6 +99,31 @@ timeout][hooks-exit] says how the limits combine across handlers.
 Unlike every other kind, a hook never arms on its own. See [Hooks](./hooks.md#why-gated)
 for the feature-flag and consent gates every installed hook still has to
 clear before anything runs.
+
+### Settings (experimental) {#settings}
+
+**Experimental pre-1.0**, behind the `[options.experimental] settings` flag
+since grim 0.16.0. See [Stability][stability-unstable].
+
+A **settings** package is one TOML document. Its top level holds descriptive
+keys, and each harness gets a table named after its grim client name:
+
+<!-- doc-norun: a source document, built by the settings reference page -->
+```toml
+description = "Team defaults for Claude Code"
+
+[claude]
+model = "sonnet"
+```
+<!-- /doc-norun -->
+
+grim merges each value into the file the harness reads, and reads that file
+first. A value grim did not write is never replaced without `--force`.
+Like a hook, a settings package applies only past the feature flag and,
+at project scope, workspace consent.
+
+The [Settings reference][settings] covers the format, the merge rules, the
+refusal error and the fields each harness takes.
 
 ## Names {#names}
 
@@ -537,6 +566,8 @@ Top-level keys and member tables:
 | `[agents]` | no | name → ref table | Agent members |
 | `[mcp]` | no | name → ref table | MCP server members; the name is the key the server registers under in each client's MCP config |
 | `[bundles]` | no | name → ref table | Bundle members: a bundle that groups another bundle, see [nested bundles](#bundle-nested) |
+| `[hooks]` | no | name → ref table | Hook members (experimental). A hook arms only past the `[options.experimental] hooks` flag and, at project scope, workspace consent. See [Hooks][hooks] |
+| `[settings]` | no | name → ref table | Settings members (experimental). A package applies only past the `[options.experimental] settings` flag and, at project scope, workspace consent. See [Settings][settings] |
 
 Each member entry maps the **config binding name** (the name the member is
 declared under when the bundle is added) to a fully-qualified reference —
@@ -618,11 +649,18 @@ reviewer = "registry.example.com/grimoire/agents/reviewer@sha256:8f4b…"
 
 [mcp]
 docs-search = "registry.example.com/grimoire/mcp/docs-search:1"
+
+[hooks]
+shell-guard = "registry.example.com/grimoire/hooks/shell-guard:1"
+
+[settings]
+team-defaults = "registry.example.com/grimoire/settings/team-defaults:1"
 ```
 
 ## Declaring dependencies {#requires}
 
-A skill, rule, agent, MCP server, or hook can declare the artifacts it needs.
+A skill, rule, agent, MCP server, hook, or settings package can declare the
+artifacts it needs.
 Installing it then installs them too, and removing it removes what only it
 needed. A [bundle's](#bundles) member list already works this way. See
 [Dependencies](./concepts.md#dependencies) for what resolution does with the
@@ -639,6 +677,7 @@ per entry, and a reference as the value.
 | `mcp` | MCP server |
 | `hooks` | hook |
 | `bundles` | bundle |
+| `settings` | settings |
 
 The binding name is the name the dependency installs under, and it follows the
 [name rules](#names). The reference is a fully-qualified `registry/repo:tag` or
@@ -655,6 +694,7 @@ Where the declaration lives depends on the kind:
 | Skill, rule, agent | `grim.requires.<table>.<name>` keys in the frontmatter `metadata` map |
 | MCP server | `[requires.<table>]` tables in `mcp/<name>.toml` |
 | Hook | `[requires.<table>]` tables in `hook.toml` |
+| Settings | `[requires.<table>]` tables in the settings document, kept out of its layer |
 | Bundle | The `[bundles]` table of the source, see [nested bundles](#bundle-nested) |
 
 ```yaml
@@ -692,8 +732,8 @@ relative reference stays under the registry root of the release target. Without
 published after the artifact that needs it.
 
 Declared dependencies are stored sorted by kind, in the order skill, rule,
-agent, bundle, mcp, hook, and then by name. That order is part of the published
-bytes. It is not the alphabetical order of the table names.
+agent, bundle, mcp, hook, settings, and then by name. That order is part of the
+published bytes. It is not the alphabetical order of the table names.
 
 ## Vendor extensions {#vendor-extensions}
 
@@ -772,7 +812,8 @@ an expansion-ratio bound of 100 times the stored bytes, with a floor of
 64 MiB. The tighter of the two wins, so a small layer cannot inflate far past
 its stored size. Exceeding either exits `65`.
 
-Bundle and MCP layers are small JSON documents and are never compressed.
+Bundle, MCP and settings layers are small JSON documents and are never
+compressed.
 
 ### The requires layer {#requires-layer}
 
@@ -872,7 +913,11 @@ map: they live on the mutable
 updated without re-releasing every published version.
 
 <!-- internal -->
+[hooks]: ./hooks.md
 [hooks-exit]: ./hooks.md#handler-exit
+[settings]: ./settings.md
+[settings-format]: ./settings.md#format
+[stability-unstable]: ./stability.md#unstable
 
 <!-- external -->
 [agentskills-spec]: https://agentskills.io/specification

@@ -8,7 +8,7 @@ Grimoire borrows its mental model from package managers you already use, then
 swaps the transport for an [OCI registry][oci]. This page covers the handful of
 ideas that make the [commands](./commands.md) feel obvious.
 
-## Skills, rules, and agents
+## Skills, rules, and agents {#skills-rules-and-agents}
 
 Grimoire distributes three kinds of installable artifact. A **skill** is a
 directory — a `SKILL.md` plus any supporting scripts or references — that
@@ -35,6 +35,16 @@ agent's tool calls. It is the only kind that does not arm on install
 alone. It also needs a feature flag and a per-workspace consent gesture.
 See [Use hooks](./guides/agent-hooks.md) for a worked example, the [hooks reference](./hooks.md) for the gates, and
 [Stability](./stability.md#unstable) for the experimental carve-out.
+
+A seventh kind, **settings**, is experimental pre-1.0 too. It ships in grim
+0.16.0 behind the `[options.experimental] settings` flag. A settings package
+is one TOML document of typed values for a harness's own configuration, such
+as a permission rule or a default model.
+
+On install, grim merges each value into the file the harness reads. A value grim
+did not write is never replaced without `--force`. Like a hook, it applies at
+project scope only after the workspace consents. See the
+[settings reference][settings] and [Stability][stability-unstable].
 
 ### Rules with a support directory {#rule-support-dir}
 
@@ -67,7 +77,7 @@ rule for Claude it also registers the directory in `claudeMdExcludes` — the
 files stay on disk and stay readable, only the automatic load goes away. See
 [Claude support-directory exclusion](./vendor-metadata.md#claude-md-excludes).
 
-## Artifacts as OCI content
+## Artifacts as OCI content {#artifacts-as-oci-content}
 
 Under the hood every skill, rule, or agent is packed into an OCI artifact and
 addressed by content digest, exactly like a container image layer. Identical
@@ -75,11 +85,12 @@ content is stored once and is immutable: a `sha256:…` digest always names the
 same bytes.
 
 Each artifact declares its kind through a `com.grimoire.kind` manifest
-annotation — `skill`, `rule`, `agent`, `mcp`, `bundle`, or the experimental `hook` — so `grim` (or any
-OCI-aware tool that reads manifest annotations) can tell a Grimoire artifact
-apart without unpacking it. The manifest's config descriptor is the OCI empty
-config, which keeps the wire format acceptable to every registry, including
-GitLab (see [Registry compatibility](./configuration.md#registry-compatibility)).
+annotation (`skill`, `rule`, `agent`, `mcp`, `bundle`, or the experimental
+`hook` and `settings`), so `grim` (or any OCI-aware tool that reads manifest
+annotations) can tell a Grimoire artifact apart without unpacking it. The
+manifest's config descriptor is the OCI empty config, which keeps the wire
+format acceptable to every registry, including GitLab (see
+[Registry compatibility](./configuration.md#registry-compatibility)).
 
 This is why Grimoire needs no server of its own. Any registry that speaks the
 [distribution spec][oci] — [GHCR][ghcr], [Docker Hub][hub], a private
@@ -106,7 +117,7 @@ manifest digest. [`grim add`](./commands.md#add-path) declares one
 permanently; [`grim install <path>`](./commands.md#install-dev) renders one
 once, without declaring it.
 
-## The lock
+## The lock {#the-lock}
 
 `grimoire.lock` records the exact digest each declared tag resolved to, so an
 install is byte-for-byte reproducible until you deliberately upgrade.
@@ -124,7 +135,8 @@ Teams end up copying a block of `grimoire.toml` between projects, and when the
 approved set changes someone has to chase down every copy.
 
 A **bundle** is a curated set of members — skills, rules, agents,
-[MCP servers](./mcp-servers.md), and other bundles. You
+[MCP servers](./mcp-servers.md), hooks, [settings][settings] packages, and
+other bundles. You
 declare it once in `[bundles]`, and on [`grim lock`](./commands.md#lock) it
 **expands** into its members, which are pinned into the lock exactly like a
 direct declaration. A bundle that lists another bundle expands that one too, so
@@ -209,7 +221,8 @@ absolute form. See [Publishing](./publishing.md#bundles) for a bundle and
 
 ## Dependencies {#dependencies}
 
-A skill, rule, agent, MCP server, or hook can declare other artifacts it needs.
+A skill, rule, agent, MCP server, hook, or settings package can declare other
+artifacts it needs.
 Its publisher writes the declaration, so you never copy it into your own
 `grimoire.toml`. Adding the artifact is enough:
 
@@ -286,7 +299,7 @@ prints a warning that they are carried unverified, and moves on.
 [`grim install`](./commands.md#install) checks them against the pinned manifest
 before it writes anything, so a stale carry cannot install the wrong closure.
 
-## Scopes
+## Scopes {#scopes}
 
 Grimoire works in two scopes. The **project** scope is the `grimoire.toml`
 discovered from the current directory — per-repository configuration that lives
@@ -326,7 +339,7 @@ future run's answer, which is exactly why grim no longer falls back to every
 known client. `--client` overrides both and accepts a comma-separated list to
 install into several AI clients at once.
 
-## The catalog
+## The catalog {#the-catalog}
 
 [`grim search`](./commands.md#search) and the [TUI](./commands.md#tui) read a
 **catalog** — an index of the artifacts your browse sources offer, cached
@@ -335,7 +348,7 @@ catalog can span several sources at once: every configured `[[registries]]`
 entry contributes, and out of the box it is fed by the public
 [package index](./package-index.md). Pass `--refresh` to rebuild it.
 
-## Online by default, offline on demand
+## Online by default, offline on demand {#online-by-default-offline-on-demand}
 
 By default Grimoire is **online**: every floating-tag lookup resolves fresh
 against the registry, and the resolved digest is cached as a write-through so
@@ -350,6 +363,10 @@ going offline. `grim lock` resolves references and writes the lockfile without
 downloading content, so an `--offline` run after only a lock exits `81`.
 `--offline` has an environment-variable equivalent described in
 [Configuration](./configuration.md).
+
+<!-- internal -->
+[settings]: ./settings.md
+[stability-unstable]: ./stability.md#unstable
 
 <!-- external -->
 [oci]: https://github.com/opencontainers/distribution-spec

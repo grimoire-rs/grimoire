@@ -34,8 +34,8 @@ To fix it, clear the cause the Detail column names:
 - For `consent-drifted`, read the hooks the warning lists. Run `grim hook allow`
   if you want them, then `grim install`.
 
-In CI, pass `--trust-hooks` to `grim install` instead of writing a record. It
-answers for that one run.
+In CI, pass `--trust-workspace` to `grim install` instead of writing a record.
+It answers for that one run. Its alias `--trust-hooks` works too.
 
 ## Warning: a client hosts hooks at global scope only {#global-only}
 
@@ -159,6 +159,8 @@ This issue occurs when `GRIM_HOME` is not a local path under
 `%USERPROFILE%` or `%LOCALAPPDATA%`, for example a UNC path on a network share.
 Grim makes this check on Windows only. The launcher is a native program built
 for one host, so each host sharing the home would overwrite the other's copy.
+A settings package in `grim status` reads the same cause, because another host
+could change this host's settings records there.
 
 To fix it, give each host its own `GRIM_HOME` on a local disk, then run
 `grim install` again.

@@ -36,7 +36,7 @@ printing noise; see [Broken pipe][json-broken-pipe] for the full contract.
 |---------|---------|
 | [`grim init`](#init) | Create a fresh `grimoire.toml`. |
 | [`grim config`](#config) | Read and write `grimoire.toml` settings and registries. |
-| [`grim add`](#add) | Declare a skill/rule/agent/mcp server, lock it, and install it by default. |
+| [`grim add`](#add) | Declare an artifact of any kind, lock it, and install it by default. |
 | [`grim lock`](#lock) | Resolve declared floating tags to pinned digests. |
 | [`grim install`](#install) | Materialize the locked artifacts into your AI client(s). |
 | [`grim update`](#update) | Re-resolve floating tags and re-materialize changes. |
@@ -93,7 +93,7 @@ grim init --registry ghcr.io/acme
 
 `grim config` reads and writes `grimoire.toml`, modeled on [`git config`][git-config]. Before it existed, querying a setting or scripting a config change required hand-editing TOML and relying on the next command run to catch typos.
 
-The command covers two areas of the file: **settings** (the `[options]` and `[options.tui]` tables) and **named registries** (the `[[registries]]` array). Declarations — the `[skills]`, `[rules]`, `[agents]`, `[mcp]`, and `[bundles]` tables — remain under [`grim add`](#add) and [`grim remove`](#remove), which must re-resolve the lockfile on every change.
+The command covers two areas of the file: **settings** (the `[options]` and `[options.tui]` tables) and **named registries** (the `[[registries]]` array). Declarations remain under [`grim add`](#add) and [`grim remove`](#remove), which must re-resolve the lockfile on every change. Those are the `[skills]`, `[rules]`, `[agents]`, `[mcp]`, `[hooks]`, `[settings]` and `[bundles]` tables.
 
 Scope follows the same rule as every config-aware command: without a flag, `grim config` discovers and edits the project `grimoire.toml` by walking up from the working directory; `--global` targets `$GRIM_HOME/grimoire.toml`; `--config <path>` selects an explicit project file.
 
@@ -320,11 +320,15 @@ string.
 
 ## grim add {#add}
 
-`grim add [--kind <skill|rule|agent|bundle|mcp|hook>] [--name <name>] [--no-install] [--force] <reference>`
+`grim add [--kind <skill|rule|agent|bundle|mcp|hook|settings>] [--name <name>] [--no-install] [--force] [--trust-workspace | --no-trust-workspace] <reference>`
 declares a skill, rule, [agent](./agents.md), [MCP server](./mcp-servers.md),
 bundle, or (experimental) [hook](./hooks.md), pins it in the lock, and — by default — materializes it into your
 detected AI clients in one step. `<reference>` is the only required argument —
 `registry/repo:tag` or `registry/repo@sha256:…`.
+
+A [settings package][settings] is the experimental `settings` kind, behind the
+`[options.experimental] settings` flag since 0.16.0. Its contract is
+[unstable][stability-unstable].
 
 When `--kind` is omitted, the kind is inferred from the artifact's
 `com.grimoire.kind` manifest annotation set at release time (artifacts
@@ -364,11 +368,20 @@ materialized, so `--force` is inert.
 `--force` on `add` covers the artifact you typed, or a bundle's members
 (nested bundles' included), and nothing else. A member you also declare
 directly is yours, not the bundle's, so `--force` on the bundle leaves it alone. You consented to that artifact's files, not to the files of the
-[dependencies](./concepts.md#dependencies) it brings. If one of those would
+[dependencies](./concepts.md#dependencies) it brings.
+
+If one of those would
 overwrite a file grim did not create, `add` still refuses with exit 65 and the
 reason `untracked-destination`. The message names every such dependency
 destination, so one rerun can fix them all. Run
-[`grim install --force`](#install) to overwrite them deliberately.
+[`grim install --force`](#install) to overwrite them deliberately. A settings
+value a dependency wants is named the same way, and the message then starts:
+
+<!-- doc-norun: an error line grim prints, not a command -->
+```text
+dependencies set or changed outside grim were not overwritten: settings 'team' /model in .claude/settings.local.json; --force on add covers the added artifact only, run `grim install --force` to overwrite them
+```
+<!-- /doc-norun -->
 
 `--force` **never bypasses path containment.** A refusal carrying the
 [`anchor-escape`](./json-interface.md#error-reason) reason — a recorded path
@@ -438,6 +451,13 @@ only to the hooks this add brings: the one you typed and any new hook it
 requires. A hook that was already in the workspace stays as unconsented as it
 was, including when a bundle you add also lists it.
 
+The same holds for a settings package, with its flag on. An add records
+[consent][settings-consent] for the package you typed and any new one it
+requires, and for no package already in the workspace.
+`--no-trust-workspace` records nothing. With the flag on and settings in the
+lock, `add` checks for a [conflict][settings-conflicts] before it saves the
+lock. A conflict exits `78`, and the config and lock stay as they were.
+
 Adding a [bundle](./concepts.md#bundles) declares it in `[bundles]` and expands
 its members into the lock. `grim remove bundle <name>` undeclares the bundle and
 drops the members it contributed — a member another still-declared bundle also
@@ -500,6 +520,11 @@ required it. With `--offline`, a dependency list that is not in the local store
 is carried over from the previous lock with a warning, see
 [offline and the store](./concepts.md#dependency-offline).
 
+With the `settings` flag on and a [settings package][settings] in the lock,
+`lock` also checks the packages it would apply before it writes the lock. A
+[conflict][settings-conflicts] among them exits `78`, and a damaged install
+state file exits `74`. Neither writes the lock.
+
 ## grim install {#install}
 
 Materializes every locked artifact into your AI clients' configuration
@@ -531,10 +556,32 @@ A locked [hook](./hooks.md) is experimental. See
 record. Everywhere else it is skipped, with a warning naming the cause, at
 exit 0.
 
-`--trust-hooks` / `--no-trust-hooks` (also on `add` and `update`) answers
-the consent question for this one invocation, with no record written. It
-outranks a stored consent record in both directions. See
+`--trust-workspace` / `--no-trust-workspace` (also on `add` and `update`)
+answers the consent question for this one invocation, with no record written.
+It outranks a stored consent record in both directions. See
 [Control agent commands with hooks](./guides/agent-hooks.md) for a worked example.
+
+A locked [settings package][settings] is experimental too, and applies only
+past the `[options.experimental] settings` flag and [workspace
+consent][settings-consent]. Since 0.16.0 the flag pair is named
+`--trust-workspace` / `--no-trust-workspace`, and the hook names stay as
+aliases. Either name answers for hooks and settings at once. Neither turns a
+kind on, because its flag is checked first.
+
+With the settings flag off, `install`, `update` and `add` warn once for each
+locked settings package, for example:
+
+<!-- doc-norun: a warning grim prints, not a command -->
+```text
+settings package 'team-defaults' not applied: settings are gated; enable them with `grim config set options.experimental.settings true`
+```
+<!-- /doc-norun -->
+
+At global scope the command it names carries `--global`. `add --no-install`
+installs nothing and so prints no warning. The exit code, JSON report, files
+and `grim status` are the same as without the warning. A run that changes a
+value reports it in the [change list][settings-changes], and
+`install --force` overwrites a [refused value][settings-force].
 
 Before any of that, install checks that the lock still describes the config
 it was resolved from. `grimoire.lock` records a `declaration_hash` of the
@@ -659,6 +706,18 @@ silently discarded. `grim update --force` overrides that guard and deletes even
 a locally-modified dropped-client output. Widening the set is symmetric: a
 newly-configured client is materialized on the next `update`.
 
+An MCP entry grim [adopted](#install) rather than wrote is the user's own. A
+reap leaves it in the config file, warns, and names it in the row's
+`abandoned_entries`. The client is still listed under `reaped_clients`, and
+the entry leaves the install record. `grim update --force` removes the entry
+instead.
+
+A new pin can also leave a client that stays selected unable to represent the
+server. Its adopted entry stays in the same way, with `reaped_clients` empty.
+An entry there that grim cannot read stays and is named too, with or without
+`--force`. An entry you edited refuses the row, like any edited output, until
+you pass `--force`. Then it stays in the file and is named as well.
+
 This reap only fires against an **explicitly set** `[options].clients`. When
 it is unset (the default, autodetect), `update` never reaps: the desired
 client set would otherwise be re-derived from live client detection on every
@@ -767,7 +826,9 @@ per-[client](./concepts.md#clients) locations the artifact was materialized
 to, read back from install state. It is empty for a declared-but-not-installed
 artifact. This is the supported way to script "where did grim put this file?"
 — the on-disk layout under each client's directory is an implementation
-detail and may change. Each item also carries `clients_missing` /
+detail and may change.
+
+Each item also carries `clients_missing` /
 `clients_extra`: the project's *explicitly configured* `[options].clients`
 diffed against the artifact's recorded install-state clients, entirely from
 local state (no network) — sorted arrays, `[]` when the two sets agree. When
@@ -777,6 +838,13 @@ detection disagrees with what was recorded, which is not real config drift.
 `clients_missing` also skips any configured client whose vendor cannot host
 that artifact's kind at that scope — a Codex rule, say — since the install
 was never going to record an output for it.
+
+A settings row reports `clients_missing` as `[]`, as a bundle row does. An
+install records nothing for a client the package declares no value for, so a
+diff would never clear. For the same reason a settings row never reports a
+newly selected client: `clients_missing` and `outputs_pending` both stay `[]`.
+Run `grim install` after selecting one, and it applies what the package
+declares for that client.
 
 A separate array, `outputs_pending`, answers a different question: **what
 would `grim install` write right now that the record does not already account
@@ -921,6 +989,9 @@ which any other kind can carry: `gated`, `not-armed`, and `untrusted`. See
 [Hook arming][json-hook-arming] for what each one means and the full
 `cause` table behind it.
 
+A [settings][settings-status] row (experimental) can read `gated` or
+`not-armed` too, and its `arming` array names each harness's cause.
+
 `grim status` derives exactly one state per declared artifact, testing in
 this order and taking the first that matches: `stale`, `missing`,
 `modified`, `outdated`, `installed`.
@@ -963,6 +1034,21 @@ row — and adds four words of its own:
 `pending` ranks below every problem state and only ever replaces
 `installed`.
 
+A settings row in the TUI adds three more, each with its own glyph and a
+hint on the detail pane's `Settings:` line:
+
+| State | Glyph | Meaning |
+|---|---|---|
+| `gated` | `○` | Held back by a gate you can answer: the `settings` flag is off, the workspace has not consented, or no value applies to the selected clients. |
+| `not-armed` | `⊘` | grim refuses to write these settings here, whatever you answer. |
+| `stale` | `≠` | `grimoire.toml` changed since the lock. [`grim lock`](#lock) brings it up to date. |
+
+This `stale` is per row. It marks a settings package the lock has not caught
+up with, and the scope-wide `stale` above still never appears. In a tree
+group `gated` and `not-armed` count as `not-installed`, and `stale` counts
+as `outdated`. [`grim status`](#status) names the cause behind `gated` and
+`not-armed`.
+
 Where several states roll up into one row the worst wins, and the two
 places that happens rank them differently. A **tree group** shows
 
@@ -1001,7 +1087,8 @@ place to fix when the vocabulary moves.
 ## grim why {#why}
 
 `grim why <kind> <name>` (`<kind>` is `skill`, `rule`, `agent`, `bundle`, `mcp`,
-or the experimental [`hook`](./hooks.md)) shows why an artifact is installed:
+or the experimental [`hook`](./hooks.md) or [`settings`][settings]) shows why
+an artifact is installed:
 every chain from a declaration in `grimoire.toml` to it, root first. It reads the
 config and the lock and never contacts a registry, so it works offline and costs
 nothing. A [dependency](./concepts.md#dependencies) you never declared is the
@@ -1141,10 +1228,11 @@ project without `--global` it exits `79` like every other scope command.
 ## grim remove {#remove}
 
 `grim remove <kind> <name>` (`<kind>` is `skill`, `rule`, `agent`, `bundle`,
-`mcp`, or the experimental [`hook`](./hooks.md)) undeclares an artifact from `grimoire.toml` and the lock. It
-leaves already-installed files (or, for an [MCP server](./mcp-servers.md),
-the registered config entry) in place — use [`grim uninstall`](#uninstall)
-to remove those too.
+`mcp`, or the experimental [`hook`](./hooks.md) or [`settings`][settings])
+undeclares an artifact from `grimoire.toml` and the lock. It leaves
+already-installed files (or, for an [MCP server](./mcp-servers.md), the
+registered config entry) in place — use [`grim uninstall`](#uninstall) to
+remove those too.
 
 Removal acts on the **effective** declaration, fully offline: the lock entry
 is dropped only when no remaining declaration holds the artifact. Removing a
@@ -1172,11 +1260,11 @@ and `grim install` says so rather than installing from it.
 
 ## grim uninstall {#uninstall}
 
-`grim uninstall <kind> <name>` (`<kind>` is `skill`, `rule`, `agent`, `mcp`, or
-`hook`) is the full inverse of install: it deletes the materialized files,
-drops the install record, and undeclares the artifact from the config and
-lock. The interactive TUI's delete action reuses the same seam. For an
-[MCP server](./mcp-servers.md#modification-detection), there is no
+`grim uninstall <kind> <name>` (`<kind>` is `skill`, `rule`, `agent`, `mcp`,
+`hook`, or `settings`) is the full inverse of install: it deletes the
+materialized files, drops the install record, and undeclares the artifact from
+the config and lock. The interactive TUI's delete action reuses the same seam.
+For an [MCP server](./mcp-servers.md#modification-detection), there is no
 materialized file to delete — grim splices only the managed entry back out
 of each client's config file, leaving the file itself and every other
 entry untouched.
@@ -1192,11 +1280,19 @@ files are deleted either way — `--force` affects config entries only.
 
 An entry grim *adopted* rather than wrote — it was already there and
 already identical, so the install recorded it without touching a byte —
-is left in the config file untouched, with or without `--force`, while
-the install record is dropped as usual. Uninstall is the inverse of
-install, and the inverse of writing nothing is removing nothing. Edit
-such an entry afterwards and it becomes ordinary drift, refused by the
+is left in the config file untouched, while the install record is dropped
+as usual. Uninstall is the inverse of install, and the inverse of writing
+nothing is removing nothing. A warning names the entry, and so does the
+report's `abandoned_entries`. `grim uninstall --force` removes it instead.
+Edit such an entry afterwards and it becomes ordinary drift, refused by the
 gate above.
+
+A [settings package][settings-uninstall] follows the same gate, and
+`--force` covers its values too. One case differs from an MCP entry. An
+adopted value that still matches its record stays, even under `--force`, and
+is named in `abandoned_entries`. An adopted value you changed refuses, and
+`--force` removes it. Each value grim removes is listed in the report's
+[`settings_changes`][settings-changes].
 
 The lock follows the same effective-declaration rule as
 [`grim remove`](#remove). Something that is still declared may keep the artifact
@@ -1230,6 +1326,11 @@ Three subcommands manage [hooks](./hooks.md). The kind is experimental. See
 [Stability](./stability.md#unstable). Declaring one is still
 `grim add --kind hook <reference>`, exactly like any other kind.
 
+Since 0.16.0 `allow` and `revoke` also cover [settings
+packages][settings-consent], and `grim hook` has the visible alias
+`grim consent`. `grim hook --help` reads "Inspect and consent to lifecycle
+hooks and settings".
+
 - **`grim hook list`**. Declared hooks with their tier, events, and
   per-client arming state (`installed`, `gated`, `untrusted`, `not-armed`).
   Each carries an `arming` array of `{client, cause, message, transient}`
@@ -1240,16 +1341,26 @@ Three subcommands manage [hooks](./hooks.md). The kind is experimental. See
   it. A hook reaped by flag-off keeps its payload and shows up `gated`
   like any other.
 - **`grim hook allow [path]`**. Records this **workspace's** consent to
-  arming the hooks its declaration names. The record lives at
+  the hooks and settings packages its lock pins, whichever flags are on.
+  Its help reads "Consent to the hooks and settings this workspace
+  declares". The record lives at
   `$GRIM_HOME/hooks/consent/<workspace-key>.json`, machine-local and keyed
-  by the resolved workspace path. `--global` exits **64**: global scope is
-  already consented and carries no record.
+  by the resolved workspace path.
+
+  `--global` exits **64**: global scope is
+  already consented and carries no record. With a settings package in the
+  lock, the refusal names `grim consent allow`, and a recorded consent warns
+  ``consent recorded; run `grim install` to apply what it covers``.
 - **`grim hook revoke [path]`** (alias `deny`). Removes the workspace
-  consent record. It is idempotent, so revoking a never-consented workspace
-  exits `0` and reports `not-consented`. There is no fourth "explicitly
+  consent record, for hooks and settings alike. Settings values already
+  written stay in place. Its warning still reads
+  ``consent revoked; run `grim install` to disarm these hooks``.
+
+  It is idempotent, so revoking a never-consented workspace exits `0` and
+  reports `not-consented`. There is no fourth "explicitly
   denied" state, only absent, granted, or drifted. `--global` needs no
   refusal: global scope never writes a consent record, so there is nothing
-  to remove, and it exits `0` reporting `not-consented` like any other
+  to remove. It exits `0` reporting `not-consented` like any other
   never-consented workspace.
 
 ```sh
@@ -1261,8 +1372,8 @@ grim hook revoke
 Neither the feature flag nor a workspace's consent record has an
 environment-variable form. That is deliberate, so nothing in a cloned
 repository can flip either one. The only per-invocation override is the
-`--trust-hooks` / `--no-trust-hooks` flag pair on `add`, `install`, and
-`update`.
+`--trust-workspace` / `--no-trust-workspace` flag pair on `add`, `install`,
+and `update`. Its aliases `--trust-hooks` / `--no-trust-hooks` still work.
 
 ## grim search {#search}
 
@@ -1272,7 +1383,9 @@ Every term must match somewhere.
 
 A bare kind keyword (`skill`, `rule`, `agent`, `mcp`, `bundle`, or the
 experimental [`hook`](./hooks.md), singular or plural) filters by kind instead of matching as text. For example, `grim
-search skill review` finds skills matching "review". When
+search skill review` finds skills matching "review". Since 0.16.0 `setting`
+and `settings` filter to the experimental [settings kind][settings] the same
+way. They no longer match a name or keyword as text. When
 `[[registries]]` are configured, all of them are browsed and the results
 are flattened into one table.
 
@@ -1409,7 +1522,10 @@ until the build finishes. Rows are served only with their full metadata, so a
 repository not yet read is absent, not shown bare. A build that is interrupted
 resumes on the next command and does not re-read rows younger than the
 catalog's one-hour lifetime. A later refresh asks the registry for each
-repository's tag digest and downloads a manifest again only when it changed.
+repository's tag digest and downloads a manifest again when that digest
+changed. It also reads a manifest again when a grim before 0.16.0 cached the
+row without a kind, or when the manifest names a grimoire kind this grim does
+not know.
 
 An `oci` source reads `capped: true` while its listing is incomplete: the
 build is still running or was interrupted, or the `_catalog` walk could not
@@ -2157,6 +2273,12 @@ A hook is never exported, because it needs grim at run time. It is omitted
 `not-representable` for the Claude family and `no-format-surface` for Agent
 Plugins, with one warning per hook per plugin. See [hooks](./hooks.md#export-declines).
 
+A [settings package][settings] is never exported either, because no plugin
+format carries harness settings. It is omitted `no-format-surface` for every
+client and never fetched. One warning per member per plugin names it, the
+README lists it under each client's omissions, and the JSON report lists it
+in `omitted`. A plugin whose only members are settings packages exits `65`.
+
 Junie still omits an agent `not-representable` when its name starts with a
 digit or contains a `.`, the same names a Junie install skips.
 
@@ -2371,7 +2493,9 @@ table naming the marketplace and its owner. Without one the command exits
 
 Each plugin tree follows the [`grim export plugin`](#export-plugin) admission
 rules, so a [hook](./hooks.md#export-declines) member is omitted from every
-tree. A plugin left with only hook members exits `65`.
+tree. A plugin left with only hook members exits `65`. A [settings][settings]
+member is omitted from every tree the same way, and a plugin left with only
+settings members exits `65` too.
 
 ### Flags {#export-marketplace-flags}
 
@@ -2898,6 +3022,39 @@ nothing is out of date — pressing `i` writes the missing outputs and clears th
 badge. `u` and `d` work on a pending row too; it is the one state both action
 sets share. Press `?` for the full status legend.
 
+**A settings row** (experimental) can also read `gated`, `not-armed` or
+`stale`, as [Artifact states](#artifact-states) defines. The detail pane adds
+a `Settings:` line that says what to run next. `i` acts on all three, because
+an install re-reads the gates and a lock catches up. The `?` overlay lists
+the three words under "Status column", for example "settings held back: flag
+off, no consent, or nothing applies here". The status bar does not list
+them, and the overlay drops its blank separator rows so it fits an 80×24
+terminal.
+
+**The Settings panel** opens after an action that changed or refused a
+[settings value][settings-changes]. Its only button is Close, `q` quits, and
+any other key closes it. With nothing refused, the message reads "These
+settings changed." With a value refused, it reads "Refused values were left
+as they are. `grim install --force` overwrites the ones marked overwrite."
+After a delete it ends "`grim uninstall --force` removes them." instead. The
+status line names the outcome `refused (settings set or changed outside grim)`.
+The lines below follow these forms:
+
+<!-- doc-norun: lines the TUI draws, not a command -->
+```text
+changed claude .claude/settings.local.json /model (team-defaults)
+overwrite claude .claude/settings.local.json /model (team-defaults): modified
+  now: opus
+conflict claude /model (other-team)
+```
+<!-- /doc-norun -->
+
+The panel shows at most 12 change lines and 6 refused lines. Past that one
+line counts the rest, which are in `$GRIM_HOME/tui.log`. A change list ends
+with the restart note. That log also holds every warning, so no restart line
+reaches the terminal. When the Overwrite dialog is already open, the same
+lines join its detail instead of opening a second panel.
+
 The `↑ outdated` badge tracks the reference the row is **declared** with —
 the same one [`grim update`](#update) re-resolves — so pressing `u` on a
 badged row always has something to do. A row declared at an exact version
@@ -2930,11 +3087,15 @@ grim tui --registry ghcr.io/acme
 
 `grim build <path>` validates and packs a local skill directory, rule `.md`
 file, [agent](./agents.md) `.md` file, [MCP server](./mcp-servers.md)
-`.toml` file, or bundle `.toml` file without pushing it — a dry run for
-authors. `--kind <skill|rule|agent|bundle|mcp|hook>` forces the artifact kind
+`.toml` file, or bundle `.toml` file without pushing it — a dry run for authors.
+`--kind <skill|rule|agent|bundle|mcp|hook|settings>` forces the artifact kind
 instead of auto-detecting it from the path. An agent always needs `--kind
 agent` — a bare `.md` packs as a rule; an MCP server always needs `--kind
-mcp` — a bare `.toml` packs as a bundle. [Build provenance](./publishing.md#git-provenance) (commit revision and
+mcp` — a bare `.toml` packs as a bundle. A [settings document][settings] is
+a `.toml` file too, so it always needs `--kind settings` and exits `78`
+without it.
+
+[Build provenance](./publishing.md#git-provenance) (commit revision and
 date) is embedded by default so the preflight reflects what a release would
 stamp; `--git` additionally requires it and
 [discloses](./publishing.md#git-disclosure) the `origin` remote and commit
@@ -3005,7 +3166,7 @@ grim release ./python-stack.toml ghcr.io/acme/python-stack:1.0.0 --pin
 
 `grim publish` reads a `publish.toml` manifest and releases every declared
 package in kind order (skills → rules → agents →
-[mcp servers](./mcp-servers.md) → hooks → bundles, alphabetical within kind),
+[mcp servers](./mcp-servers.md) → hooks → settings → bundles, alphabetical within kind),
 except that an entry always follows the same-manifest entries it
 [requires](./publishing.md#requires-publish-order). It
 validates the whole manifest before any push, then composes
@@ -3113,7 +3274,7 @@ grim logout ghcr.io
 
 ## grim schema {#schema}
 
-`grim schema --kind <config|publish|lock|mcp|hook>` prints a [JSON
+`grim schema --kind <config|publish|lock|mcp|hook|settings>` prints a [JSON
 Schema](https://json-schema.org/) for one of grim's TOML files to stdout.
 `--kind config` describes `grimoire.toml`. Its schema carries the
 `[options.experimental]` table additively. `--kind publish` describes
@@ -3123,8 +3284,9 @@ Schema](https://json-schema.org/) for one of grim's TOML files to stdout.
 so tooling can validate or introspect it, additively gaining a `hooks`
 array. `--kind mcp` describes the [MCP server descriptor](./mcp-servers.md)
 (`mcp/<name>.toml`). `--kind hook` describes [`hook.toml`](./hooks.md)
-(experimental). Each schema is generated from grim's own parser, so it
-accepts exactly what grim accepts.
+(experimental). `--kind settings` describes a [settings
+document][settings] (`settings/<name>.toml`, experimental). Each schema is
+generated from grim's own parser, so it accepts exactly what grim accepts.
 
 ```sh
 grim schema --kind config > grimoire-config.schema.json
@@ -3250,6 +3412,14 @@ registers the same entry — in every detected client, not just Claude Code
 [path-source-trust]: ./stability.md#limitations-path-source-trust
 [clients-matrix]: ./clients.md#matrix
 [json-hook-arming]: ./json-interface.md#hook-arming
+[settings]: ./settings.md
+[settings-changes]: ./settings.md#changes
+[settings-conflicts]: ./settings.md#conflicts
+[settings-consent]: ./settings.md#consent
+[settings-force]: ./settings.md#force
+[settings-status]: ./settings.md#status
+[settings-uninstall]: ./settings.md#uninstall
+[stability-unstable]: ./stability.md#unstable
 
 <!-- external -->
 [git-config]: https://git-scm.com/docs/git-config

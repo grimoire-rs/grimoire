@@ -88,9 +88,10 @@ declaration and the feature flag, but not your consent.
 
 Their `grim install` asks before arming the hook, and an accepted prompt records
 their consent. Without a terminal to ask on, it arms nothing and warns. They run
-`grim hook allow`, then `grim install`. In CI, `grim install --trust-hooks`
-answers for that one run and writes no record. [Consent][consent] explains why a
-repository never carries it.
+`grim hook allow`, then `grim install`. In CI,
+`grim install --trust-workspace`, or its alias `--trust-hooks`, answers for that
+one run and writes no record. [Consent][consent] explains why a repository
+never carries it.
 
 ### Take it back out {#remove}
 

@@ -57,15 +57,23 @@ A repository's `grimoire.toml` is written by whoever committed it, so a
 declaration alone never arms a hook. Consent is a separate, machine-local
 record that a clone never carries.
 
+Since grim 0.16.0 the same record also gates the experimental
+[settings][settings-consent] kind. A settings entry carries a `settings:`
+prefix, as in `settings:<binding>@<registry>/<repository>`. Both kinds are
+[unstable][stability-unstable] until 1.0.
+
 Exactly three actions write a consent record:
 
-- `grim hook allow`, run in the workspace.
-- `grim add --kind hook`, because typing the reference is the declaration
-  gesture.
-- An accepted interactive prompt during `grim install`.
+- `grim hook allow`, run in the workspace. It records every hook and settings
+  package the workspace declares, whatever the feature flags say.
+- `grim add` of a hook or a settings package, because typing the reference is
+  the declaration gesture.
+- An accepted interactive prompt during `grim install` or `grim update`.
 
 `grim install` and `grim update` never write one on their own. Without a
-terminal to ask on, they arm nothing. `grim hook revoke` removes the record.
+terminal to ask on, they arm nothing. `grim hook revoke` removes the record for
+both kinds and leaves every written settings value in place. `grim consent` is
+a visible alias of `grim hook`.
 
 The record lives at `$GRIM_HOME/hooks/consent/<workspace-key>.json`, keyed by
 the workspace path. Consent in one clone grants nothing to another clone, or to
@@ -75,20 +83,24 @@ The record names each hook binding and its source repository, without a tag or
 digest. A version bump of a consented hook needs no new consent, because the
 lock pin records which bytes arm. A new binding, or a hook from a new
 repository, is drift, reported as `consent-drifted` until `grim hook allow`
-covers it.
+covers it. A prompt and `grim add` record only the kinds whose flag is on, so
+turning the other flag on later drifts the same way.
 
 Global scope is always consented and writes no record. It has no shared
 checkout a hostile declaration could arrive in.
 
 ### Per-run answers {#trust-flags}
 
-`--trust-hooks` answers the consent question for one invocation of `add`,
-`install` or `update`, and writes no record. `--no-trust-hooks` refuses for one
-run. This is the form CI uses, since it has no terminal and keeps no record.
+`--trust-workspace` answers the consent question for one invocation of `add`,
+`install` or `update`, and writes no record. `--no-trust-workspace` refuses for
+one run. This is the form CI uses, since it has no terminal and keeps no record.
 
-The pair outranks a stored record in both directions. `--no-trust-hooks`
-refuses a consented workspace, and `--trust-hooks` arms an unconsented one.
-Neither flag turns the feature flag on.
+Since grim 0.16.0 `--trust-hooks` and `--no-trust-hooks` are aliases of the
+pair, and each answer covers hooks and settings together.
+
+The pair outranks a stored record in both directions. `--no-trust-workspace`
+refuses a consented workspace, and `--trust-workspace` arms an unconsented one.
+Neither flag turns a feature flag on.
 
 Neither answer can come from a file or an environment variable. A repository
 routinely carries its own environment through `.envrc` or a devcontainer, and
@@ -385,6 +397,7 @@ marketplace, that applies to each plugin on its own.
 [guide]: ./guides/agent-hooks.md
 [troubleshooting]: ./hooks-troubleshooting.md
 [consent]: #consent
+[settings-consent]: ./settings.md#consent
 [artifacts-hooks]: ./artifacts.md#hooks
 [json-hook-arming]: ./json-interface.md#hook-arming
 [clients-hooks]: ./clients.md#gap-codex-hooks
