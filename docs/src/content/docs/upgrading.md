@@ -308,8 +308,11 @@ $ rm -rf "${GRIM_HOME:-$HOME/.grimoire}/catalog"
 
 Upgrading needs nothing — the newer binary rebuilds an older cache
 normally. A cache whose entries carry no rating and no index placement is
-byte-identical to what 0.13 wrote. A user who never browsed a package
-index is not affected in either direction.
+byte-identical to what 0.13 wrote. Since 0.16.0 a direct browse of a
+registry with foreign repositories, such as container images, writes a
+`kind_read` field that 0.14.x and earlier refuse. Online, 0.14.x rebuilds
+that cache once, and offline it fails until an online run or the deletion
+above, which 0.13 needs either way.
 
 ## Publishing stamps provenance without `--git` {#default-provenance}
 

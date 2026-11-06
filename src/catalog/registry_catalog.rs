@@ -248,6 +248,13 @@ pub struct CatalogEntry {
     /// one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// The manifest at [`OciMeta::digest`] was read and named no grimoire kind
+    /// on any tier (or did not parse), so a refresh may reuse this kindless
+    /// row unread. A row naming a kind this grim does not know stays unmarked,
+    /// and an older grim's kindless rows lack the field: both are read again,
+    /// since a later grim may know the kind.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub kind_read: bool,
     /// `org.opencontainers.image.description`, if present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -1325,10 +1332,10 @@ impl Catalog {
     ///
     /// `prior` is this repository's row from the previous build. A `resume`
     /// (continuing an interrupted build) keeps one fetched within the TTL
-    /// without touching the network. Otherwise, when the
-    /// chosen tag still resolves to the digest that row was read from, the row
-    /// is kept as is and the manifest is not downloaded: two round trips
-    /// instead of three.
+    /// without touching the network. Otherwise a row whose chosen tag still
+    /// resolves to the digest it was read from, and whose kind was read, is
+    /// kept as is and the manifest is not downloaded: two round trips instead
+    /// of three.
     async fn build_entry(
         registry: &str,
         repository: &str,
@@ -1346,6 +1353,7 @@ impl Catalog {
             repository: repository.to_string(),
             index_path: None,
             kind: None,
+            kind_read: false,
             description: None,
             summary: None,
             keywords: Vec::new(),
@@ -1390,9 +1398,13 @@ impl Catalog {
             Ok(None) => return bare(Some(tag), version, None),
             Err(_) => return prior.unwrap_or_else(|| bare(Some(tag), version, None)),
         };
-        if let Some(unchanged) =
-            prior.take_if(|p| p.latest_tag.as_deref() == Some(tag.as_str()) && p.oci.digest.as_ref() == Some(&digest))
-        {
+        // A kindless row an older grim cached may hide a kind it did not know,
+        // so it is reused only once this grim has read its manifest.
+        if let Some(unchanged) = prior.take_if(|p| {
+            p.latest_tag.as_deref() == Some(tag.as_str())
+                && p.oci.digest.as_ref() == Some(&digest)
+                && (p.kind.is_some() || p.kind_read)
+        }) {
             return CatalogEntry {
                 version,
                 fetched_at,
@@ -1452,6 +1464,9 @@ impl Catalog {
                     registry: registry.to_string(),
                     repository: repository.to_string(),
                     index_path: None,
+                    // A kind this grim cannot parse leaves the row unmarked, or a
+                    // later grim that knows the kind would reuse it unread.
+                    kind_read: kind.is_none() && !manifest_names_a_grimoire_kind(&m),
                     kind,
                     description,
                     summary,
@@ -1469,8 +1484,23 @@ impl Catalog {
                     fetched_at: fetched_at.clone(),
                 }
             })
-            .unwrap_or_else(|| bare(Some(tag), version, Some(digest)))
+            .unwrap_or_else(|| CatalogEntry {
+                kind_read: true,
+                ..bare(Some(tag), version, Some(digest))
+            })
     }
+}
+
+/// Whether a manifest names a grimoire kind on any tier `kind_from_manifest`
+/// reads: a `com.grimoire.kind` annotation, or an `application/vnd.grimoire.`
+/// artifact or config type. True for a kind this grim does not know.
+fn manifest_names_a_grimoire_kind(m: &crate::oci::manifest::OciManifest) -> bool {
+    const GRIMOIRE_TYPE: &str = "application/vnd.grimoire.";
+    m.annotations.contains_key(crate::oci::artifact_kind::KIND_ANNOTATION)
+        || [&m.artifact_type, &m.config_media_type]
+            .into_iter()
+            .flatten()
+            .any(|t| t.starts_with(GRIMOIRE_TYPE))
 }
 
 /// Split a configured registry string into its host (the first path
@@ -1808,6 +1838,7 @@ mod tests {
                 repository: "acme/code-review".to_string(),
                 index_path: None,
                 kind: Some("skill".to_string()),
+                kind_read: false,
                 description: Some("Review code.".to_string()),
                 summary: Some("review skill".to_string()),
                 keywords: vec!["review".to_string(), "quality".to_string()],
@@ -3178,6 +3209,9 @@ mod tests {
         fail_tags: std::sync::atomic::AtomicBool,
         /// Every resolved digest has no manifest behind it (`Ok(None)`).
         manifest_missing: std::sync::atomic::AtomicBool,
+        /// This repository's manifest does not parse, as an image index's
+        /// does not (`InvalidManifest`).
+        image_index: Mutex<Option<String>>,
         /// The listing stops after this many repositories (0 = all).
         list_limit: std::sync::atomic::AtomicUsize,
         tags: std::sync::atomic::AtomicUsize,
@@ -3220,6 +3254,11 @@ mod tests {
             Knobs::bump(&self.knobs.manifests);
             if self.knobs.manifest_missing.load(std::sync::atomic::Ordering::SeqCst) {
                 return Ok(None);
+            }
+            if self.knobs.image_index.lock().unwrap().as_deref() == Some(id.as_identifier().repository()) {
+                return Err(crate::oci::access::error::AccessError::without_identifier(
+                    crate::oci::access::error::AccessErrorKind::InvalidManifest("image index".to_string()),
+                ));
             }
             self.inner.fetch_manifest(id).await
         }
@@ -3460,9 +3499,28 @@ mod tests {
         };
         let written = serde_json::to_string(&e).unwrap();
         assert!(serde_json::from_str::<OlderEntry>(&written).is_err(), "{written}");
-        // An OCI-backed row (no placement) stays readable by the older shape.
-        let oci = serde_json::to_string(&CatalogEntry { index_path: None, ..e }).unwrap();
-        assert!(serde_json::from_str::<OlderEntry>(&oci).is_ok(), "{oci}");
+        // An OCI-backed row with no placement and no `kind_read` stays
+        // readable by the older shape.
+        let oci = CatalogEntry { index_path: None, ..e };
+        let plain = serde_json::to_string(&oci).unwrap();
+        assert!(serde_json::from_str::<OlderEntry>(&plain).is_ok(), "{plain}");
+
+        // The 0.14.x shape knows `index_path` but not `kind_read`, so a
+        // kindless OCI row this grim marked read is refused there too.
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[expect(dead_code, reason = "the fields exist only to be deserialized")]
+        struct Entry014 {
+            registry: String,
+            repository: String,
+            #[serde(default)]
+            index_path: Option<String>,
+            fetched_at: String,
+        }
+        assert!(serde_json::from_str::<Entry014>(&plain).is_ok(), "{plain}");
+        let marked = serde_json::to_string(&CatalogEntry { kind_read: true, ..oci }).unwrap();
+        assert!(serde_json::from_str::<Entry014>(&marked).is_err(), "{marked}");
+        assert!(serde_json::from_str::<OlderEntry>(&marked).is_err(), "{marked}");
     }
 
     #[tokio::test]
@@ -4136,6 +4194,181 @@ mod tests {
         assert_eq!(described("acme/skill-0001").as_deref(), Some("desc"));
     }
 
+    /// A manifest with the given config media type and annotations.
+    fn manifest_with(config_media_type: &str, annotations: BTreeMap<String, String>) -> OciManifest {
+        OciManifest {
+            config_media_type: Some(config_media_type.to_string()),
+            annotations,
+            ..skill_manifest("kw", "desc")
+        }
+    }
+
+    /// A cache an older grim wrote holds kindless rows whose digests still
+    /// match: each is read once on the next refresh, then never again.
+    #[tokio::test]
+    async fn an_upgraded_cache_reads_each_kindless_row_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let registry = "localhost:5000";
+        let inner = MemoryRegistry::new();
+        let settings = BTreeMap::from([
+            ("com.grimoire.kind".to_string(), "settings".to_string()),
+            (
+                "org.opencontainers.image.description".to_string(),
+                "Team settings.".to_string(),
+            ),
+        ]);
+        let image = BTreeMap::from([("org.opencontainers.image.title".to_string(), "app".to_string())]);
+        let repos = [
+            (
+                "acme/settings-pkg",
+                manifest_with("application/vnd.oci.empty.v1+json", settings),
+            ),
+            (
+                "acme/foreign-image",
+                manifest_with("application/vnd.oci.image.config.v1+json", image.clone()),
+            ),
+            (
+                "acme/foreign-index",
+                manifest_with("application/vnd.oci.image.config.v1+json", image),
+            ),
+        ];
+        let mut rows = serde_json::Map::new();
+        for (repo, manifest) in &repos {
+            let id = Identifier::new_registry(repo.to_string(), registry.to_string());
+            let digest = inner.push_manifest(&id, manifest).await.unwrap();
+            inner.put_tag(&id, "latest", &digest).await.unwrap();
+            // The row as 0.15.1 caches it: a digest, no kind, no `kind_read`.
+            rows.insert(
+                repo.to_string(),
+                serde_json::json!({
+                    "registry": registry,
+                    "repository": repo,
+                    "oci": {"digest": digest},
+                    "latest_tag": "latest",
+                    "fetched_at": "2026-01-01T00:00:00Z",
+                }),
+            );
+        }
+        let old_cache = serde_json::json!({
+            "version": 1,
+            "registry": registry,
+            "scope": "",
+            "truncated": false,
+            "built_at": "2026-01-01T00:00:00Z",
+            "entries": rows,
+        });
+        std::fs::write(&path, serde_json::to_vec(&old_cache).unwrap()).unwrap();
+        let reg = std::sync::Arc::new(CatalogRegistry {
+            inner,
+            repos: repos.iter().map(|(r, _)| r.to_string()).collect(),
+            registry: registry.to_string(),
+            blob_pulled: std::sync::Arc::new(Mutex::new(false)),
+            knobs: Default::default(),
+        });
+        *reg.knobs.image_index.lock().unwrap() = Some("acme/foreign-index".to_string());
+        let access: std::sync::Arc<dyn OciAccess> = reg.clone();
+
+        let upgraded = Catalog::load_or_refresh(&path, registry, "", &access, false, true)
+            .await
+            .unwrap();
+        assert_eq!(Knobs::count(&reg.knobs.manifests), 3, "every kindless row is read once");
+        let kind_of = |repo: &str| {
+            upgraded
+                .entries()
+                .find(|e| e.repository == repo)
+                .and_then(|e| e.kind.clone())
+        };
+        assert_eq!(kind_of("acme/settings-pkg").as_deref(), Some("settings"));
+        assert_eq!(kind_of("acme/foreign-image"), None);
+        assert_eq!(kind_of("acme/foreign-index"), None);
+        let written: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let row = |repo: &str| written["entries"][repo].clone();
+        assert_eq!(row("acme/foreign-image")["kind_read"], serde_json::json!(true));
+        assert_eq!(row("acme/foreign-index")["kind_read"], serde_json::json!(true));
+        assert!(
+            row("acme/settings-pkg").get("kind_read").is_none(),
+            "a row with a kind serializes no `kind_read`"
+        );
+
+        for round in [2, 3] {
+            Catalog::load_or_refresh(&path, registry, "", &access, false, true)
+                .await
+                .unwrap();
+            assert_eq!(
+                Knobs::count(&reg.knobs.manifests),
+                3,
+                "refresh {round} reads no manifest"
+            );
+            assert_eq!(
+                Knobs::count(&reg.knobs.digests),
+                3 * round,
+                "refresh {round} revalidated every row"
+            );
+        }
+    }
+
+    /// A manifest that names a grimoire kind this grim does not know stays
+    /// unmarked, so the grim that knows the kind reads it on its next refresh.
+    #[tokio::test]
+    async fn a_row_naming_an_unknown_grimoire_kind_is_read_on_every_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let registry = "localhost:5000";
+        let inner = MemoryRegistry::new();
+        let empty = "application/vnd.oci.empty.v1+json";
+        let annotated = BTreeMap::from([("com.grimoire.kind".to_string(), "foo".to_string())]);
+        let image = BTreeMap::from([("org.opencontainers.image.title".to_string(), "app".to_string())]);
+        let repos = [
+            ("acme/annotated", manifest_with(empty, annotated)),
+            (
+                "acme/typed",
+                OciManifest {
+                    artifact_type: Some("application/vnd.grimoire.foo.v1".to_string()),
+                    ..manifest_with(empty, BTreeMap::new())
+                },
+            ),
+            (
+                "acme/configured",
+                manifest_with("application/vnd.grimoire.foo.config.v1+json", BTreeMap::new()),
+            ),
+            (
+                "acme/foreign",
+                manifest_with("application/vnd.oci.image.config.v1+json", image),
+            ),
+        ];
+        for (repo, manifest) in &repos {
+            let id = Identifier::new_registry(repo.to_string(), registry.to_string());
+            let digest = inner.push_manifest(&id, manifest).await.unwrap();
+            inner.put_tag(&id, "latest", &digest).await.unwrap();
+        }
+        let reg = std::sync::Arc::new(CatalogRegistry {
+            inner,
+            repos: repos.iter().map(|(r, _)| r.to_string()).collect(),
+            registry: registry.to_string(),
+            blob_pulled: std::sync::Arc::new(Mutex::new(false)),
+            knobs: Default::default(),
+        });
+        let access: std::sync::Arc<dyn OciAccess> = reg.clone();
+
+        for round in 1..=3 {
+            let cat = Catalog::load_or_refresh(&path, registry, "", &access, false, true)
+                .await
+                .unwrap();
+            assert_eq!(
+                Knobs::count(&reg.knobs.manifests),
+                4 + 3 * (round - 1),
+                "refresh {round} reads every row naming a grimoire kind, and the foreign one once"
+            );
+            assert!(cat.entries().all(|e| e.kind.is_none()));
+            let written: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            for repo in ["acme/annotated", "acme/typed", "acme/configured"] {
+                assert!(written["entries"][repo].get("kind_read").is_none(), "{repo}");
+            }
+            assert_eq!(written["entries"]["acme/foreign"]["kind_read"], serde_json::json!(true));
+        }
+    }
+
     #[tokio::test]
     async fn a_transient_failure_keeps_the_prior_entry() {
         let dir = tempfile::tempdir().unwrap();
@@ -4282,8 +4515,8 @@ mod tests {
             .unwrap();
         assert!(
             bare.entries()
-                .all(|e| e.description.is_none() && e.oci.digest.is_none()),
-            "a manifest that 404s leaves no digest to reuse"
+                .all(|e| e.description.is_none() && e.oci.digest.is_none() && !e.kind_read),
+            "a manifest that 404s leaves no digest to reuse and no kind verdict"
         );
 
         // Once it appears, even a forced refresh must read it.
@@ -4561,6 +4794,7 @@ mod tests {
             repository: "acme/code-review".to_string(),
             index_path: None,
             kind: Some("skill".to_string()),
+            kind_read: false,
             description: Some("Review code quality".to_string()),
             summary: Some("terse blurb".to_string()),
             keywords: vec!["lint".to_string()],
