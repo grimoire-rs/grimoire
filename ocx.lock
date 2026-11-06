@@ -1,9 +1,45 @@
 [metadata]
 lock_version = 3
 declaration_hash_version = 1
-declaration_hash = "sha256:fa86188fc883c1e208b36207300e7aa920e1d3a9e2732854c29ae6a98f769e06"
+declaration_hash = "sha256:185a9628c68087563cb8342cfc0d3b95c197c4897057ead4536b4484be870355"
 generated_by = "ocx 0.6.5"
-generated_at = "2026-11-04T16:39:44Z"
+generated_at = "2026-11-05T06:31:38Z"
+
+[[tool]]
+name = "cargo-deny"
+group = "default"
+repository = "ocx.sh/embarkstudios/cargo-deny"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:e8beb3afbbd0ada472ed172077cc7d1fd1296e4cc63bb1045200d825a5b9033a"
+"darwin/arm64" = "sha256:b9cdac6c2e21a37be74db9b3e4a238707cd49ac27ea33c9958670c021a6bdd72"
+"linux/amd64" = "sha256:7b228beaa0774c98a33ea4a2731382939cba04d2d794311c026b840fb25df196"
+"linux/arm64" = "sha256:ba3d708308bff2872f7e0e732d6e57e38cb5bd4f6304254b3b154c343d783956"
+"windows/amd64" = "sha256:a904a2543363de3ded76566ab7b41a29f4b439c11aceb11b65a8ce7cb3558ab5"
+
+[[tool]]
+name = "hawkeye"
+group = "default"
+repository = "ocx.sh/hawkeye/hawkeye"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:eec388d4cb7c4ae32a4ebacb8b71602a34fea47ad88b14aaa69618e6c856b786"
+"darwin/arm64" = "sha256:0598a76b44179b2c6648adf75ad6df7da5b528db1dcab9e3e6a96dc1c10fe379"
+"linux/amd64" = "sha256:6aaf2fb4adc7ddaa9ffa020b0e24f7beef5fcd8c0e73f52b98e7f3ed86bc35c7"
+"linux/arm64" = "sha256:201ad53c04acbed57b91f6ba3e0ff2687776579335078ccc9b9eecd8db8b407c"
+"windows/amd64" = "sha256:a18ec7dae991047f8c7925dc0f422ebfcea3c7996de0fd31fc5ee370d5760b52"
+
+[[tool]]
+name = "lychee"
+group = "default"
+repository = "ocx.sh/lychee/lychee"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:69d2e005250872a67fc687cb88423baf25a496d5f2017aaacce7337d8dd4ef41"
+"darwin/arm64" = "sha256:5fc7b3640f5e5e5404b81baac2aa91acb87e5490a63c2ad79ce94906d4467a6e"
+"linux/amd64" = "sha256:fb090cfaa91ba0fcfbe963185add1c72a1a18a4cfcbe560d84bd003ab9ddbb81"
+"linux/arm64" = "sha256:9e78ff5b9e52cc69e8b8245e655663a462abc05c47d98c691e71d8ba1caa87fa"
+"windows/amd64" = "sha256:b0d8f87626a38fa2c58ff6f69671aa6090f7da791e4c3ae59158960eb809fc65"
 
 [[tool]]
 name = "node"
@@ -17,6 +53,45 @@ repository = "ocx.sh/nodejs/node"
 "linux/arm64+libc.glibc" = "sha256:76aaeb829ea9d40c4092d1c176da35edd1260b75d1bf911f48829da392347a69"
 "windows/amd64" = "sha256:737687a6e9eb4fa7d168529eae2eb291d5c0dee76e02e5758b2d27f6f1b48aa6"
 "windows/arm64" = "sha256:af5f53029aa40b512e7e795adfbdeada4a7d1db362b312982cea58348ad901c2"
+
+[[tool]]
+name = "ruff"
+group = "default"
+repository = "ocx.sh/astral-sh/ruff"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:84eb8b48c56461e83441ff785eeb7559e96a8e281b281d73dbcb628e9b0919fd"
+"darwin/arm64" = "sha256:6599133dfc8522104ad0b29ebfdff6503d67e6e24d42b042d5c8d2a33ff1a1ec"
+"linux/amd64" = "sha256:fbc24515b15587367e00b41d133a81b822d7c8b6bff14b1e6875d5d6cdae02da"
+"linux/amd64+libc.glibc" = "sha256:881ab554f57afc7f6aa009799b942e2b46ebadefb7e85b06250e06daf644a1f2"
+"linux/arm64" = "sha256:4bed3acf9649b4188f07d94a1926deae551b9473e5039fb9363e92a10e11d289"
+"linux/arm64+libc.glibc" = "sha256:1f03fd04d0ea6d5010d27086440853632ba5779e64580ea460439b5a12374fff"
+"windows/amd64" = "sha256:3618b07f30510f79b2b75d65814638a465ec45806ef9b0041c96642be66526c6"
+"windows/arm64" = "sha256:1fccd2b203a37c9671689e853d02ed0f411b953352ea1cf6ed2fa82a3b2cb5db"
+
+[[tool]]
+name = "shellcheck"
+group = "default"
+repository = "ocx.sh/shellcheck/shellcheck"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:3f609d1f8981b9b62804a788fc78c90ec7e8fac8d6a24b5e76b18be14964e08a"
+"darwin/arm64" = "sha256:e1dd86d5905f3979d8de0f02b563d53ce051bf5244422a3592a427161d8d75f2"
+"linux/amd64" = "sha256:3981b442fff3f6bf9ae93e4c293e53322ffc9135e0b654620bc800464bdaf379"
+"linux/arm64" = "sha256:57f540d6f5a6f094f7c4e441e2294cb712abb2991d47736f91a56dde2c8025dd"
+"windows/amd64" = "sha256:ed1c498bddcc23a95ff99af7d17fa60f34e9d505d1557a1ba0c49e20d6d1d26f"
+
+[[tool]]
+name = "shfmt"
+group = "default"
+repository = "ocx.sh/shfmt/shfmt"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:4c0682bda360d9b93602f7cac0c0ba943e0eb6a10888c00883ef43f03cbc4b04"
+"darwin/arm64" = "sha256:aec2dd90b0f74c45a8eaeac52878256b3a1402e983e1668d8b2e152cecdc7401"
+"linux/amd64" = "sha256:66c7244206726e0537ef6f73e218f77be355cd0de85ea67d2cae217b492a18e9"
+"linux/arm64" = "sha256:200d61d2323f6ca1224aa9ee09678e0d3ffb62079643019f639a6016ba9a27d0"
+"windows/amd64" = "sha256:b67b77a08812db83acbe9e8304211f0d601666ee3d1352e09e96dda385537e71"
 
 [[tool]]
 name = "uv"
