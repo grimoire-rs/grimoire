@@ -31,7 +31,7 @@ preferences, not copies. Team-shared — commit it.
 - Key rules: `.claude/rules/arch-principles.md` (boundaries, invariants);
   four `src/**`-scoped subsystem rules (`subsystem-cli.md`,
   `subsystem-cli-api.md`, `subsystem-cli-commands.md`,
-  `subsystem-file-structure.md`) co-fire by design;
+  `subsystem-file-structure.md`, the core and index of seven narrower `subsystem-*.md` parts) co-fire by design;
   `.claude/rules/quality-security.md` for security-sensitive surfaces;
   `.claude/rules/vendor-capability-watchlist.md` (data: `.agents/upstream-watchlist.md`) before patching a vendor
   renderer decline.

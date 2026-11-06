@@ -37,7 +37,7 @@ Follow **contract-first TDD** phases in `.claude/rules/workflow-feature.md`:
 - `.claude/rules/workflow-feature.md` — TDD phases
 - `.claude/rules/subsystem-cli.md` — command pattern, output layer
 - `.claude/rules/subsystem-cli-api.md` — report data layer conventions
-- `.claude/rules/subsystem-file-structure.md` — storage layout constraints
+- `.claude/rules/subsystem-file-structure.md` — storage layout constraints (core and index; install-layout, vendor-path, state and anchor parts: `subsystem-*.md` listed there)
 - `.claude/rules/arch-principles.md` — pattern catalog (auto-load on Rust files)
 
 ## Tool Preferences

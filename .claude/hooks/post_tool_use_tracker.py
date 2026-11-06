@@ -29,7 +29,14 @@ import hook_utils
 
 # (glob_pattern, rule_filename, subsystem_label)
 CONTEXT_REMINDERS: list[tuple[str, str, str]] = [
-    ("src/file_structure/**", "subsystem-file-structure.md", "File Structure"),
+    ("src/store/**", "subsystem-file-structure.md", "File Structure"),
+    ("src/install/path_anchor.rs", "subsystem-path-anchors.md", "Path Anchors"),
+    ("src/install/install_state.rs", "subsystem-install-state.md", "Install State"),
+    ("src/install/target.rs", "subsystem-client-detection.md", "Client Detection"),
+    ("src/install/client_target.rs", "subsystem-client-detection.md", "Client Detection"),
+    ("src/install/vendor*.rs", "subsystem-vendor-paths.md", "Vendor Paths"),
+    ("src/install/hook_*.rs", "subsystem-install-layout-hooks.md", "Install Layout (hooks)"),
+    ("src/hook/**", "subsystem-install-layout-hooks.md", "Install Layout (hooks)"),
     ("src/command/**", "subsystem-cli-commands.md", "CLI Commands"),
     ("src/api/**", "subsystem-cli-api.md", "CLI API"),
     ("src/**", "subsystem-cli.md", "CLI"),

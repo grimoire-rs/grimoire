@@ -28,7 +28,7 @@ Role: security compliance, threat modeling, vulnerability assessment for Grimoir
 
 - `.claude/rules/quality-security.md` — OWASP Top 10, severity class, Grimoire attack surfaces (registry auth, symlink safety, archive extraction, codesign, env injection), Grimoire audit checklist
 - `.claude/rules/quality-core.md` — universal block-tier anti-patterns
-- `.claude/rules/subsystem-file-structure.md` — storage layout, path-safety constraints
+- `.claude/rules/subsystem-file-structure.md` — storage layout, path-safety constraints (index; the containment guard is in `subsystem-install-state.md`, hooks in `subsystem-install-layout-hooks.md`)
 
 ## Tool Preferences
 

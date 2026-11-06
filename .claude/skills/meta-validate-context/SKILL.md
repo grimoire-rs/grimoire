@@ -30,7 +30,7 @@ For each `subsystem-*.md` rule file:
 | `subsystem-cli.md` | CLI context struct, command enum variants, output trait |
 | `subsystem-cli-api.md` | Report data types, output trait conventions |
 | `subsystem-cli-commands.md` | Documented command surface vs implemented commands |
-| `subsystem-file-structure.md` | Storage layout, data-root constraints |
+| `subsystem-file-structure.md` (+ its parts: `subsystem-install-layout-*.md`, `subsystem-vendor-paths.md`, `subsystem-client-detection.md`, `subsystem-install-state.md`, `subsystem-path-anchors.md`) | Storage layout, data-root constraints; install layout, anchors and state in the parts |
 | `subsystem-tests.md` | Fixture names in conftest.py, test file names, runner methods, helper params |
 
 Subsystem rules are provisional placeholders while the implementation is
@@ -60,7 +60,7 @@ grep -rn "^pub struct\|^pub enum\|^pub trait" src/ | grep -v test
 - STALE: [type] — renamed to [new_name] or removed
 - MISSING: [new_type] — not documented in rule
 
-### subsystem-file-structure.md
+### subsystem-file-structure.md and its parts
 ...
 ```
 

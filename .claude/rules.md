@@ -73,7 +73,14 @@ Catalog = single source of truth — `AGENTS.md` may summarize or reference by p
 
 | Subsystem | Rule | Path scope |
 |---|---|---|
-| Storage / file structure | [subsystem-file-structure.md](./rules/subsystem-file-structure.md) | `src/**`, `crates/**` |
+| Storage / file structure (core and index) | [subsystem-file-structure.md](./rules/subsystem-file-structure.md) | `src/**`, `crates/**` |
+| Install layout: skills, rules | [subsystem-install-layout-skills-rules.md](./rules/subsystem-install-layout-skills-rules.md) | `src/install/{materializer,expected_outputs,render,installer}.rs` |
+| Install layout: MCP servers, agents | [subsystem-install-layout-agents-mcp.md](./rules/subsystem-install-layout-agents-mcp.md) | `src/install/{mcp_config,json_splice,toml_splice,cline_lock,vendor_agents}.rs` |
+| Install layout: hooks | [subsystem-install-layout-hooks.md](./rules/subsystem-install-layout-hooks.md) | `src/hook/**`, `src/install/hook_*.rs`, `src/install/launcher.rs`, `crates/grim-hook/**`, `crates/grimoire-hook-core/**` |
+| Vendor paths (global-scope roots, env overrides) | [subsystem-vendor-paths.md](./rules/subsystem-vendor-paths.md) | `src/install/vendor.rs`, `src/install/vendor_*.rs`, `src/install/{prune,claude_config,opencode_config,managed_config}.rs` |
+| Client detection | [subsystem-client-detection.md](./rules/subsystem-client-detection.md) | `src/install/target.rs`, `src/install/client_target.rs` |
+| Install state and path containment | [subsystem-install-state.md](./rules/subsystem-install-state.md) | `src/install/install_state.rs`, `src/path_safety.rs` |
+| Path anchors | [subsystem-path-anchors.md](./rules/subsystem-path-anchors.md) | `src/install/path_anchor.rs` |
 | CLI shell | [subsystem-cli.md](./rules/subsystem-cli.md) | `src/**`, `crates/**` |
 | CLI API / output formats | [subsystem-cli-api.md](./rules/subsystem-cli-api.md) | `src/**`, `crates/**` |
 | CLI command index | [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md) | `src/**`, `crates/**` |
@@ -86,6 +93,11 @@ The four `src/**`+`crates/**`-scoped subsystem rules (`subsystem-cli.md`,
 `subsystem-cli-api.md`, `subsystem-cli-commands.md`,
 `subsystem-file-structure.md`) co-fire while the workspace's crates are
 provisional; the coupling is intended (declared below).
+`subsystem-file-structure.md` is the core and index of the file-structure family;
+the seven parts above carry narrower globs, so each loads only with the code it
+describes. One part shares a glob string: `subsystem-vendor-paths.md` and
+`vendor-capability-watchlist.md` both list `src/install/vendor_*.rs`, a declared
+group below. No other part needs one.
 
 ## By auto-load path — "what fires when you edit"
 
@@ -94,6 +106,13 @@ provisional; the coupling is intended (declared below).
 | `**/*.rs` | [quality-rust.md](./rules/quality-rust.md), [quality-rust-errors.md](./rules/quality-rust-errors.md), [quality-rust-exit_codes.md](./rules/quality-rust-exit_codes.md) [rust-quality.md](./rules/rust-quality.md) (vendored) (+ [arch-principles.md](./rules/arch-principles.md) under `src/**`, `crates/**`, `external/**`) |
 | `**/Cargo.toml`, `**/Cargo.lock` | [quality-rust.md](./rules/quality-rust.md) (+ [rust-cargo.md](./rules/rust-cargo.md) on `**/Cargo.toml`, `**/clippy.toml`, `**/rustfmt.toml`, `**/deny.toml`, `**/rust-toolchain.toml`) |
 | `src/**`, `crates/**` | + [subsystem-cli.md](./rules/subsystem-cli.md), [subsystem-cli-api.md](./rules/subsystem-cli-api.md), [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md), [subsystem-file-structure.md](./rules/subsystem-file-structure.md) |
+| `src/hook/**`, `src/install/hook_*.rs`, `src/install/launcher.rs`, `crates/grim-hook/**`, `crates/grimoire-hook-core/**` | + [subsystem-install-layout-hooks.md](./rules/subsystem-install-layout-hooks.md) |
+| `src/install/{materializer,expected_outputs,render,installer}.rs` | + [subsystem-install-layout-skills-rules.md](./rules/subsystem-install-layout-skills-rules.md) |
+| `src/install/{mcp_config,json_splice,toml_splice,cline_lock,vendor_agents}.rs` | + [subsystem-install-layout-agents-mcp.md](./rules/subsystem-install-layout-agents-mcp.md) |
+| `src/install/vendor.rs`, `src/install/vendor_*.rs`, `src/install/{prune,claude_config,opencode_config,managed_config}.rs` | + [subsystem-vendor-paths.md](./rules/subsystem-vendor-paths.md) |
+| `src/install/target.rs`, `src/install/client_target.rs` | + [subsystem-client-detection.md](./rules/subsystem-client-detection.md) |
+| `src/install/install_state.rs`, `src/path_safety.rs` | + [subsystem-install-state.md](./rules/subsystem-install-state.md) |
+| `src/install/path_anchor.rs` | + [subsystem-path-anchors.md](./rules/subsystem-path-anchors.md) |
 | `src/install/vendor_*.rs`, `src/oci/mcp.rs`, `src/catalog/rating_provider.rs` | + [vendor-capability-watchlist.md](./rules/vendor-capability-watchlist.md) |
 | `src/oci/**`, `src/install/**`, `src/command/hook*`, `src/command/{login,logout}.rs`, `src/command/{publish,release}*`, `catalog/**`, `crates/**` | + [arch-threat-model.md](./rules/arch-threat-model.md) |
 | `src/command/config_keys.rs`, `src/config/declaration.rs` | + [subsystem-config-keys.md](./rules/subsystem-config-keys.md) |
@@ -143,6 +162,7 @@ Exempt from overlap detection (intended broad coupling):
 | `arch-threat-model.md` + `arch-principles.md` + the four `src/**` subsystem rules | `src/oci/**`, `src/install/**`, `src/command/hook*`, `src/command/{login,logout,publish,release}*`, `crates/**` — the security-sensitive subset of `src/**` plus the hook crates (the native launcher runs on every client hook event); the threat model co-fires with them by design, since a boundary question is always also a design question. `src/command/hook*` joined when the dispatcher runtime landed: it executes code a client runs automatically, which is the sharpest edge of the boundary |
 | `code-docs.md` + `rust-quality.md` / `python-quality.md` / `typescript-quality.md` | `**/*.rs`, `**/*.py`, `**/*.pyi`, `**/*.ts`, `**/*.tsx`, `**/*.mts`, `**/*.cts` (vendored comment rule co-fires with each language set; it owns what a comment keeps, they own syntax) |
 | `arch-threat-model.md` + `subsystem-cli.md` + `subsystem-cli-api.md` + `subsystem-cli-commands.md` + `subsystem-file-structure.md` | `crates/**` (hook crates: the launcher is security-sensitive and shares the subsystem scope) |
+| `subsystem-vendor-paths.md` + `vendor-capability-watchlist.md` | `src/install/vendor_*.rs` (the global-scope roots and the upstream re-verify procedure both govern a vendor renderer edit) |
 | `arch-threat-model.md` + `quality-security.md` | `catalog/**` (published artifacts — the boundary scopes the checklist) |
 
 ## Vendored rules — installed, not authored here
