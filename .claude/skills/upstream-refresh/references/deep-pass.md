@@ -17,6 +17,7 @@ the stale watchlist rows. The researcher lists, from primary sources:
 | MCP options (transports, env refs, oauth, headers) | the vendor's MCP projection and `docs/src/content/docs/mcp-servers.md` |
 | Config paths per scope | the renderer's roots and `.claude/rules/subsystem-vendor-paths.md` (index: `subsystem-file-structure.md`) |
 | Env vars (config roots, overrides) | the AGENTS.md env table and the env-var rows of `.agents/upstream-watchlist.md` |
+| Settings keys (the thirteen `settings` harnesses: `claude`, `codex`, `copilot`, `cursor`, `opencode`, `qoder`, `antigravity`, `amp`, `droid`, `kilo`, `kiro`, `gemini`, `warp`; for the six without rows, the re-check trigger in domains.md) | every row of `settings_fields()` in `src/install/vendor_<harness>.rs` (pointer, value type, merge class, scopes), the file `settings_config_path()` picks, `docs/src/content/docs/settings.md#fields`, and the watchlist's Settings keys rows |
 | Hooks | finding only — the hooks artifact kind ([PR #98](https://github.com/grimoire-rs/grimoire/pull/98)) is unmerged and out of scope for the renderer |
 
 Every difference becomes a claim in the researcher's table and is routed
@@ -154,6 +155,66 @@ Known behavior, from `.agents/research/research_live_cli_sandbox_checks.md`:
   and run `copilot -p x --allow-all-tools`: servers start, the model call
   fails on the closed port, no credential exists. `mcp get` shows config
   as written, never expanded, so it cannot prove substitution.
+
+### Settings check
+
+Credential-free, like every check above: the same `env -i` sandbox, a
+scratch `HOME`, `TMPDIR` and config root, no login, stdin from `/dev/null`.
+Only these verbs run, and none calls a model:
+
+| Harness | Verb | Pass when |
+|---|---|---|
+| `claude` | `claude doctor` | the rendered `settings.json` (global) or `.claude/settings.local.json` (project) gets no "Invalid settings" finding |
+| `codex` | `codex mcp list`, `codex debug prompt-input` | the rendered `config.toml` loads, and `prompt-input` shows the rendered `sandbox_mode` and approval policy |
+| `codex` | `codex execpolicy check --rules <file> <argv…>` | the rendered `rules/grim-<binding>.rules` parses and decides each fixture command as written |
+| `copilot` | `COPILOT_OFFLINE=true COPILOT_AUTO_UPDATE=false copilot config <key> <value>` | each rendered value exits 0 and its control exits 1. The verb checks a value, not the rendered file, and refuses some keys (`subagents.disabledSubagents`): those are `skip` |
+| `opencode` | `OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_MODELS_FETCH=1 opencode debug config` | the rendered value is echoed and the run exits 0; a control exits 1 with "Configuration is invalid" |
+| `droid` | `FACTORY_DROID_AUTO_UPDATE_ENABLED=false droid doctor --checks config --json` | no diagnostic for the rendered `settings.json`; a control exits 1 with a named diagnostic. An open-string key (`/outputStyle`) has no control: `skip` for its value. A bad `sandbox` block crashes with a stack trace, still exit 1 |
+| `kilo` | `KILO_DISABLE_AUTOUPDATE=1 kilo debug config` | the resolved config shows the rendered value; a control exits 1 with a named diagnostic |
+| `kiro` | `kiro-cli settings list --all --format json`, `kiro-cli settings <key>` | the rendered keys print back with `(global)`. The CLI validates no value, so a control prints back too: structure only, `skip` for values |
+| `gemini` | `GEMINI_CLI_NO_RELAUNCH=true gemini --version` | no "Invalid configuration" line for the rendered `settings.json`. A bad value still exits 0, so read the output, never only the exit code |
+| `cursor` | `skip` | no Cursor-published npm package; the documented install is a `curl … \| bash` script |
+| `qoder` | `skip` | no config, doctor or validate verb in 1.1.83, and an unknown word starts a session |
+| `antigravity` | `skip` | `agy` 1.5.0 has no settings verb; `mcp list`, `plugin list` and `agents` pass a bad-value control, so they never read `settings.json` |
+| `amp` | `skip` | the npm package installs its native binary in a postinstall script, which `--ignore-scripts` forbids |
+| `warp` | `skip` | a GUI app with no settings verb; the Warp Agent CLI installs only through a script |
+
+Never `exec`, `-p`/`--print` or `login`: each starts a session or calls a
+model. Effective values inside a session (Claude's merged settings, Codex
+loading `rules/`) need one, so they are `skip` with that reason. The
+`skip` rows and their reasons come from the 2026-11-05 research artifacts
+(`research_upstream_*_settings_20261105.md`, Live CLI check); re-try one
+when its reason no longer holds. Droid and Kilo run the native binary
+their npm optional dependency ships (`@factory/cli-<platform>`,
+`@kilocode/cli-<platform>`), Gemini the npm `@google/gemini-cli` package.
+`agy` and `kiro-cli` come from a direct release archive whose published
+checksum was checked. No vendor installer script runs.
+
+**Method.** Give each value its own run, and pair it with a bad-value
+control (a wrong enum spelling, malformed JSON or TOML) that the same verb
+must reject. A control that passes means the verb never read the file: the
+run proves nothing, so record `skip`. Never infer the accepted set from the
+values an error message lists. Claude 2.1.318's `claude doctor` accepts
+`manual` for `/permissions/defaultMode` at both scopes and rejects `Manual`
+and `bogus`, yet its error text lists the valid modes without `manual`.
+
+**Recorded run** (claude 2.1.318 native, codex-cli 0.166.0 from npm with
+`--ignore-scripts`; the opt-in module `test/tests/test_settings_real_harness.py`,
+gated by `GRIM_REAL_CLAUDE_BIN` and `GRIM_REAL_CODEX_BIN`, builds each child
+env from scratch):
+
+- `claude doctor` finds nothing in the rendered file; the bad-enum and
+  truncated-JSON controls are reported.
+- `codex mcp list` exits 0, and `debug prompt-input` shows the rendered
+  sandbox mode and approval policy, including a flip to `read-only`; the bad
+  `approval_policy` and malformed-TOML controls fail to load.
+- `codex execpolicy check` decides `rm` forbidden, `npm test` allow, and
+  leaves `ls` unmatched; a bad rules file errors.
+- **Codex with one bad rules file:** given the good file and a second
+  malformed one, the call exits non-zero with "failed to parse policy" and
+  prints no decision. The whole call is rejected and nothing applies, so a
+  malformed `.rules` file beside grim's disables grim's rules in that call.
+  Whether a session drops every rule the same way is unverified.
 
 ### Recording the result
 

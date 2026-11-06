@@ -40,7 +40,7 @@ narratives, or positioning.
 
 ## The Problem
 
-Reusable AI-agent configuration (skills, rules, hooks, prompt templates)
+Reusable AI-agent configuration (skills, rules, hooks, settings, prompt templates)
 today tends to be copy-pasted between repositories with no versioning,
 provenance, or update path. There is no common, infrastructure-light way
 to publish a skill once and install or upgrade it across many projects.
@@ -106,6 +106,8 @@ Global flags: `--offline`, `--global`, `--config <path>`,
 - **Layout**: cargo workspace — one binary crate (`grimoire`, binary `grim`,
   source under `src/`) plus two hook crates (`crates/grimoire-hook-core`,
   `crates/grim-hook`). No lib/CLI split of the main crate.
+- **Artifact kinds**: skill, rule, agent, mcp, bundle, plus hook and
+  settings, each behind its own `[options.experimental]` flag
 - **Default registry**: configurable via `GRIM_DEFAULT_REGISTRY`
 - **Testing**: pytest acceptance tests under `test/` against a real OCI
   registry

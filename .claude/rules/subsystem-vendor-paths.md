@@ -12,6 +12,12 @@ paths:
 
 Global-scope client roots and the vendor environment overrides. Index: [subsystem-file-structure.md](./subsystem-file-structure.md).
 
+Every `detect()` lives in `src/install/vendor_*.rs`, which never loads the
+detection part, so a root or marker change here also updates
+[subsystem-client-detection.md](./subsystem-client-detection.md#client-detection).
+Each client's settings file is listed in
+[subsystem-install-layout-settings.md](./subsystem-install-layout-settings.md#install-layout-settings).
+
 ### Global-scope paths {#global-scope-paths}
 
 For a **global-scope** install (`--global`), grim writes into each
@@ -65,8 +71,11 @@ reapers handle (`reap_moved_outputs`; pool → native converges over two
 documented native root), each for its own reason:
 
 - `CURSOR_CONFIG_DIR` — documented only as the location of the CLI's own
-  `cli-config.json`, never tied to the directories grim writes (skills,
-  rules, agents, `mcp.json`).
+  `cli-config.json`, so grim reads it for that one file, the settings
+  kind's global target ([Settings](./subsystem-install-layout-settings.md#install-layout-settings), the
+  `cursor-cli` row), and for nothing else: skills, rules, agents, `mcp.json`
+  and detection stay on `~/.cursor`. New with the kind, so no
+  `relocated_vendor_roots` row.
 - the `JUNIE_*_LOCATIONS` family — additive, not untested: it only adds
   search paths, so grim's defaults stay read. (`JUNIE_HOME`, which replaces
   `~/.junie` outright, **is** honored — see the override table.)
@@ -87,7 +96,9 @@ All are watchlisted for re-verification — see
 
 **XDG resolution is platform-dependent for Zed.** Zed and Amp both root
 their global settings under `$XDG_CONFIG_HOME` (falling back to
-`~/.config`), **but Zed consults XDG on Linux and FreeBSD only**:
+`~/.config`), and so do Kilo (`kilo/`, every platform) and Warp on Linux
+only (`warp-terminal/settings.toml`; `~/.warp` on macOS, no root elsewhere,
+`vendor_warp::SettingsRootKind`), **but Zed consults XDG on Linux and FreeBSD only**:
 upstream's `config_dir()` reads XDG on that branch alone, falls to a
 literal `~/.config/zed` on macOS, and uses `%APPDATA%\Zed` on Windows.
 `vendor_zed::zed_root_from` mirrors that split through an explicit
@@ -110,11 +121,17 @@ variables are honored read-only, `OPENCODE_CONFIG` names a file grim reads
 | `OPENCODE_CONFIG_DIR` | OpenCode's additive scan dir — preferred over the XDG default for skills and agents when set |
 | `OPENCODE_CONFIG` | Config **file** path only (global `opencode.json` edit target); no effect on skill/agent paths |
 | `CODEX_HOME` | Replaces `~/.codex` — Codex **agents** root **and** the MCP `config.toml` there. Does **not** relocate Codex skills (those follow the `$HOME/.agents/skills` cross-vendor standard) |
-| `KIRO_HOME` | Replaces `~/.kiro` **outright, no `.kiro` segment appended** — the `CODEX_HOME` shape. Kiro skills, `steering/` rules, and `settings/mcp.json` all follow it. grim follows the Kiro **CLI**; the Kiro **IDE** still hardcodes `~/.kiro` and ignores the variable (kirodotdev/Kiro#9148) — that is an upstream fact, not a limit on what grim honors. A user who sets it *and* uses the IDE gets output where the CLI reads it, not the IDE |
+| `KIRO_HOME` | Replaces `~/.kiro` **outright, no `.kiro` segment appended** — the `CODEX_HOME` shape. Kiro skills, `steering/` rules, `settings/mcp.json` and the settings kind's `settings/cli.json` all follow it. grim follows the Kiro **CLI**; the Kiro **IDE** still hardcodes `~/.kiro` and ignores the variable (kirodotdev/Kiro#9148) — that is an upstream fact, not a limit on what grim honors. A user who sets it *and* uses the IDE gets output where the CLI reads it, not the IDE |
 | `QODER_CONFIG_DIR` | Replaces `~/.qoder` **outright** — the `KIRO_HOME` shape. Qoder skills, rules, agents, and `settings.json` all follow it. Always honored since Qoder support landed, so **no** `relocated_vendor_roots` row |
 | `JUNIE_HOME` | Replaces `~/.junie` **outright** — the `KIRO_HOME` shape. Junie skills, agents, and `mcp/mcp.json` follow it (`vendor_junie::junie_root`, the one resolver) |
 | `OPENCLAW_STATE_DIR`, `OPENCLAW_HOME` | `OPENCLAW_STATE_DIR` names the state root itself and wins; else `OPENCLAW_HOME` replaces the home directory, so the root is `$OPENCLAW_HOME/.openclaw` (the `GEMINI_CLI_HOME` shape). Skills land in `<root>/skills`. A leading `~` expands to the real home (upstream does the same); any other relative value is ignored at `debug`, never CWD-resolved |
 | `GEMINI_CLI_HOME` | **The opposite shape.** It replaces Node's `os.homedir()`, and Gemini then joins `.gemini` onto it — so the root is `$GEMINI_CLI_HOME/.gemini`, with the segment still appended. Relocates Gemini's `agents/` and `settings.json`. Deliberately does **not** relocate the shared `.agents/skills` pool, which stays keyed on the real `$HOME` (see below) |
+
+**The settings kind fences these roots; no other kind does.** A global settings
+file whose root a variable makes relative, or places inside the repository the
+command runs in, is declined (`settings-root-relative` /
+`settings-root-in-workspace`, `settings_phase::root_refusal`). Skills, rules,
+agents and MCP entries still follow the variable there.
 
 **The two shapes are opposites — do not conflate them.** `KIRO_HOME` and
 `CODEX_HOME` *replace* their directory; `GEMINI_CLI_HOME` replaces the

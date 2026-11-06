@@ -28,11 +28,11 @@ for the active scope:
 | **Zed** | `<workspace>/.zed` exists | the platform-resolved Zed config root exists (`$XDG_CONFIG_HOME`\|`~/.config`/`zed` on Linux/FreeBSD, `~/.config/zed` on macOS, `%APPDATA%\Zed` on Windows) |
 | **Amp** | `<workspace>/.amp` exists | `$XDG_CONFIG_HOME`\|`~/.config`/`amp` exists |
 | **agents** | **never** — `false` at both scopes, by design | **never** |
-| **Antigravity** | **never** — `false` by design; all its project surfaces live under the shared `.agents/`, so keying on it would install Antigravity into every workspace that ever used a pool client. Upstream documents no product-specific project marker | `~/.gemini/config` exists |
+| **Antigravity** | **never** — `false` by design; all its project surfaces live under the shared `.agents/`, so keying on it would install Antigravity into every workspace that ever used a pool client. Upstream documents no product-specific project marker | `~/.gemini/config` (the root the App and the CLI share) **or** `~/.gemini/antigravity-cli` (the CLI's settings dir) exists (OR-ed) — a CLI-only home holds just the second |
 | **Cline** | `<workspace>/.clinerules` **or** `<workspace>/.cline` exists | `~/.cline` exists |
 | **Droid** | `<workspace>/.factory` exists | `~/.factory` exists |
 | **Goose** | `<workspace>/.goose` exists — **never** `.agents/`, which is where Goose writes | any candidate config root exists: `$XDG_CONFIG_HOME/goose` or `~/Library/Application Support/goose`, OR-ed — **but `$GOOSE_PATH_ROOT`, when set, *replaces* that list rather than extending it.** `~/.goose` is not a global marker |
-| **Warp** | `<workspace>/.warp` exists | `~/.warp` exists — deliberately the same path on all three platforms; the OS-specific app-data dirs are **not** consulted |
+| **Warp** | `<workspace>/.warp` exists | `~/.warp` exists (the same path on all three platforms) **or**, on Linux only, the XDG settings dir `$XDG_CONFIG_HOME`\|`~/.config`/`warp-terminal` exists (OR-ed, gated on `settings_root_kind() == Xdg`) — the OS-specific app-data dirs are **not** consulted |
 | **OpenClaw** | **never** — it has no project scope, and `kind_surface(Skill, Project)` refuses skills there too | native root (`$OPENCLAW_STATE_DIR`, `$OPENCLAW_HOME/.openclaw`, or `~/.openclaw`) exists |
 | **Kilo** | `<workspace>/.kilo` **or** `<workspace>/.kilocode` exists — `.kilocode` counts for detection only and is **never written** | `~/.kilo` or `$XDG_CONFIG_HOME/kilo` exists (OR-ed) |
 | **Qoder** | `<workspace>/.qoder` exists (its `settings.json` MCP file sits inside it, so no extra clause) | native root (`$QODER_CONFIG_DIR` or `~/.qoder`) exists |
@@ -40,9 +40,9 @@ for the active scope:
 **Never key `detect()` on `.agents/`.** It is a shared multi-client marker,
 and for Goose — which *renders into* the pool — keying on it would make the
 client detect itself after its own first install. Asserted per vendor.
-Where several candidate markers are OR-ed (Cline, Kilo, Goose), that is
-deliberate: detection writes nothing, so OR-ing risks only a missed
-autodetect, never a wrong path. A *write* path would have to resolve to
+Where several candidate markers are OR-ed (Cline, Kilo, Goose, Antigravity,
+Warp), that is deliberate: detection writes nothing, so OR-ing risks only an
+extra autodetect, never a wrong path. A *write* path would have to resolve to
 exactly one location first.
 
 **Known cross-client leak, disclosed not fixed.** Antigravity's global root
@@ -50,7 +50,8 @@ exactly one location first.
 marker — so a global Antigravity install creates a directory that makes
 **gemini** detected on the next autodetected global command, and it
 survives uninstall (grim removes files, not empty directories). The reverse
-is clean: a Gemini install creates `~/.gemini/agents`, never `config/`.
+is clean: a Gemini install creates `~/.gemini/agents`, never `config/` or
+`antigravity-cli/`.
 Fixing it means narrowing `vendor_gemini`'s marker to a Gemini-CLI-exclusive
 file — a shipped client's detection change under the freeze. Documented in
 `docs/src/content/docs/clients.md` `{#gap-antigravity}` and watchlisted.

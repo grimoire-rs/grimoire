@@ -31,7 +31,7 @@ preferences, not copies. Team-shared — commit it.
 - Key rules: `.claude/rules/arch-principles.md` (boundaries, invariants);
   four `src/**`-scoped subsystem rules (`subsystem-cli.md`,
   `subsystem-cli-api.md`, `subsystem-cli-commands.md`,
-  `subsystem-file-structure.md`, the core and index of seven narrower `subsystem-*.md` parts) co-fire by design;
+  `subsystem-file-structure.md`, the core and index of eight narrower `subsystem-*.md` parts) co-fire by design;
   `.claude/rules/quality-security.md` for security-sensitive surfaces;
   `.claude/rules/vendor-capability-watchlist.md` (data: `.agents/upstream-watchlist.md`) before patching a vendor
   renderer decline.
@@ -105,6 +105,38 @@ research-axes:
   `nox-review` has no model flag and inherits that global default.
 
 ## Memory
+
+- **Active subplan (2026-11-05, hex-plan high, goal loop `.agents/goals/config-artifact-type.md`):**
+  `.agents/plans/plan_settings_follow_ups.md`, State `executing`: waves 1 to 3 landed 2026-11-05 (`d2be51d`..wave 3 bookkeeping), integration gate and closing review not started; Next `/hex-execute` (integration gate), refinement 0 of 4. Parent `plan_settings_artifact_kind.md`, same branch and checkout. It folds in #270 and #274–#283, one commit per issue. C-001…C-038 (C-034 split a/b/c), S-001…S-012, PD-1…PD-29. Spec review: Request Changes, 13 Warn, all fixed in one round.
+  - Pipelines: P-283, P-275, P-277, P-274 hard, P-HOOK (#276, #278), P-282, P-CFG (#280, #281), R-A, R-B, R-C research (wave 1) → P-270 review (2) → P-279 (3).
+  - Critical path: longest wave 1 pipeline (P-274 hard, or R-A) → wave 1 landing → P-270 → wave 2 landing → P-279. `/hex-execute` starts only from a clean feature checkout (PD-29): commit this plan, its two research artifacts and this Memory edit first.
+  - Workers capture `git write-tree` per step. Each pipeline proves a full gate in its own worktree before landing, because a red landing gate spends a refinement cycle.
+  **Pitfall:** `stdio_drivers.drive()` must keep EOF semantics: the hook launcher and runtime tests need stdin closed. The MCP wait-for-ids mode is opt-in.
+  **Pitfall:** a settings row for a harness that expands `{env:`/`{file:` or `$NAME` in config strings needs a refusal check (`src/oci/settings.rs`, PD-35, PD-37); a key that switches off a harness's workspace or folder trust gate stays off (PD-41, T3).
+  **Pitfall:** every `.md` under `.claude/rules/`, subdirectories included, loads as a rule. Data files belong outside it (the watchlist rows go to `.agents/upstream-watchlist.md`).
+
+- **Active plan (2026-11-04, hex-plan xhigh, goal loop `.agents/goals/config-artifact-type.md`):**
+  `.agents/plans/plan_settings_artifact_kind.md`, State `executing`, Next `/hex-execute` (resume record in its Schedule log), branch `hex/config-artifact-type` (checkout `/home/mherwig/.herdr/worktrees/grimoire/duo`). ADR `adr_settings_artifact_kind.md`, Accepted the same day, with `adr_artifact_trust_model.md`, `adr_hook_workspace_consent.md` and `arch-threat-model.md` amended. C-001…C-072, S-001…S-032, PD-1…PD-24, deferred F-1…F-4.
+  - Pipelines: P0, PF (wave 1) → CW (2) → P-G, P1 hard, P2, P3 review, P4 review (3) → P5 (4) → P6 hard (5) → P7, P8 (6) → P-X (7) → P9 (8) → P10 (9).
+  - Critical path: PF → CW → P2 → P5 → P6 → P8 → P-X → P9 → P10.
+  - Three `fix:` commits and the `docs:` guide commit land first, each alone.
+  - Security findings live in the ADR and plan by location and class only (C-069, C-070).
+  **Pitfall:** the `settings` rule row order is first-match 7, 3d, 3c, 3a, 3b, 2, 1, 5, 4, so test the cross product, not rows alone.
+  **Pitfall:** every install seat states `SettingsRun`, because a partial lock reads recorded pieces as orphans and removes them.
+  **Pitfall:** AGENTS.md sits at its 280-line budget, so C-067 edits in place only.
+  **Pitfall:** every new report key must join `ADDITIVE_STDOUT_KEYS` in `test/tools/p9_diff.py`, because that gate is deep only and `task verify` never shows the miss.
+
+- **Discussion drained (2026-11-03, → loop):**
+  `.agents/discussions/config-artifact-type.md`. The feature is an experimental `settings` kind that carries harness configuration:
+  - One JSON document with vendor objects in one layer, as for MCP. Vendor keys only, from a typed list with merge classes.
+  - First harnesses: Claude, Codex, Copilot, Cursor, OpenCode, Qoder. A follow-up issue tracks the rest, and `upstream-refresh` reviews key churn.
+  - Consent shares the hook mechanism, per kind with no key logic. Version bumps do not re-ask; the change list is the evidence.
+  - Ownership follows the lock, and the file decides: a value changes without `--force` only if the file still holds what grim recorded. Matching values are `adopted`, so there is no `ownership` error.
+  - Grim's existing status tokens and refusal reasons apply. No hash goes in the lock.
+  - The project-scope record is `$GRIM_HOME/settings/<workspace-key>.json`, never `.grimoire/state.json`.
+  - The loop's first deliverable is an ADR amending the trust ADR and threat model. Docs add a reference page and `guides/share-settings.md`, plus the unrelated `guides/dependencies.md`, which can land first.
+  Research: `.agents/research/research_config_artifact_*.md` (5 files).
+  **Pitfall:** `git pull` silently replaces a gitignored `.grimoire/state.json` with a committed one, exit 0, so a record there is forgeable.
 
 - **Active plan (2026-11-02, hex-plan xhigh, goal loop):**
   `.agents/plans/plan_artifact_dependencies.md`, State `plan-approved`, Next `/hex-execute`, branch `hex/adr-artifact-dependencies` (main checkout). ADR `adr_artifact_dependencies.md` flipped to Accepted the same day (open questions closed on their recommendations, PD-1/PD-2). Pipelines: P0 (`fix(resolve):`, own commit) → CW (lock wire, merge policy, layout/features, ForceScope, test helpers) → P1 ∥ P2 (hard) ∥ P3 ∥ P-G → P4 ∥ P5 ∥ P6 ∥ P7 ∥ P8 → P9 ∥ P-X → P10. Critical path P0 → CW → P2 → P7 → P9 → P10. C-001…C-049, S-001…S-016, PD-1…PD-19. Deferred: F-1 five-registry push, F-2 grimoire-vscode, F-3 release notes, F-4 tag.
@@ -766,3 +798,20 @@ re-arguing settled design while still reporting divergences as information.
 - Retro candidate (project-context): "Document the sccache sandbox workaround" — ledger project-sccache-sandbox, .agents/retro/reports/2026-10-26.md.
 - Retro candidate (project-context): "Brace shell variables before a colon under zsh" — ledger project-zsh-var-modifier, .agents/retro/reports/2026-10-26.md.
 - Retro candidate (project-context): "Run acceptance tests from the repo root" — ledger project-test-taskfile-cwd, .agents/retro/reports/2026-10-26.md.
+- Retro candidate (project-context): "Let hex --no-verify commits through, and match the commit command, not its words" — ledger project-commit-hook-command-matching, .agents/retro/reports/2026-11-05.md.
+- Retro candidate (project-context): "Name a reachable adversary for this machine" — ledger project-hex-md-adversary-unreachable, .agents/retro/reports/2026-11-05.md.
+- Retro candidate (project-context): "Read a clippy incremental-compilation ICE as a stale cache" — ledger project-clippy-incremental-ice, .agents/retro/reports/2026-11-05.md.
+- Retro candidate (project-context): "State the no-owner-credentials rule where every worker reads it" — ledger project-owner-credentials-rule-placement, .agents/retro/reports/2026-11-05.md.
+- Retro candidate (project-context): "Adopt the code-docs baselines, or record that the repo has not" — ledger code-docs-missing-baselines, .agents/retro/reports/2026-11-05.md.
+- Retro candidate (project-context): "Wire ruff into the test tooling, or record that Python lint is ungated" — ledger python-quality-ruff-not-wired, .agents/retro/reports/2026-11-05.md.
+- Retro candidate (checklist-item): "Check plan contracts against the code's own admission rules" — ledger project-plan-contracts-unprobed, .agents/retro/reports/2026-11-05.md.
+- Retro candidate (project-context): "Never wrap ocx exec in rtk proxy" — ledger project-rtk-proxy-ocx-env, .agents/retro/reports/2026-11-05.md.
+- Retro candidate (project-context): "Identify old grim binaries by behaviour, not by --version" — ledger project-old-grim-version-identity, .agents/retro/reports/2026-11-05.md.
+- Retro candidate (project-context): "Name the real dispatch-table readers in the grim status row" — ledger subsystem-cli-commands-stale-symbol, .agents/retro/reports/2026-11-05.md.
+- Retro candidate (project-context): "Describe project_dir as a Claude-marked workspace" — ledger subsystem-tests-project-dir-description, .agents/retro/reports/2026-11-05.md.
+- Retro candidate (project-context): "Save the lock before asserting on scope_policies" — ledger project-scope-policies-lock-on-disk, .agents/retro/reports/2026-11-05.md.
+- Retro candidate (project-context): "Drop a stub's per-variant expect(dead_code) at first reference" — ledger project-stub-expect-dead-code, .agents/retro/reports/2026-11-05.md.
+- Retro candidate (project-context): "Let golden modules run against a per-session registry port" — ledger project-shared-registry-port, .agents/retro/reports/2026-11-05.md.
+- Retro candidate (project-context): "Correct the exit codes in the state_io doc comment" — ledger project-uninstall-state-io-exit-doc, .agents/retro/reports/2026-11-05.md.
+- Retro candidate (project-context): "Fix or quarantine the grim_search stdio flake" — ledger project-mcp-search-flake, .agents/retro/reports/2026-11-05.md.
+- Retro candidate (project-context): "Rerun the docs-reading unit tests when a docs page changes" — ledger subsystem-taskfiles-rust-verify-docs-sources, .agents/retro/reports/2026-11-05-2.md.

@@ -16,8 +16,11 @@ triggers:
 # /upstream-refresh — keep grim's upstream facts current
 
 Re-checks the dated upstream claims grim depends on — harness capabilities,
-metadata keys, config paths and env vars, specs, forge APIs, the product
-landscape, research expiry. Check ledger:
+metadata keys, settings keys, config paths and env vars, specs, forge APIs,
+the product landscape, research expiry. The settings-keys check covers each
+row of a harness's `settings_fields()` (`src/install/vendor_<harness>.rs`):
+the key still exists with the value type and merge class grim gives it, and
+each named limit holds (`.agents/upstream-watchlist.md` › Settings keys watchlist). Check ledger:
 [`.agents/upstream-checks.md`](../../../.agents/upstream-checks.md); per-domain
 registry: [references/domains.md](references/domains.md). Design record:
 [harness-capability-freshness.md](../../../.agents/discussions/harness-capability-freshness.md).
@@ -97,8 +100,9 @@ implement per Routing (b) with tests and run **one** `task verify` before the
 final commit.
 
 **Deep pass** (named harness only): the default run plus
-[deep-pass.md](references/deep-pass.md) — full surface inventory and the
-sandboxed live CLI check.
+[deep-pass.md](references/deep-pass.md) — full surface inventory (settings
+keys included) and the sandboxed live CLI check, with its credential-free
+settings check.
 
 ### Feed procedure (`feed` rung)
 
@@ -110,7 +114,8 @@ sandboxed live CLI check.
 3. Cursor not in the fetched window → escalate to `sweep`, record friction.
    Feed unreachable → keep the cursor, note it, go on.
 4. Relevant entries touch a surface grim renders or documents (skills, rules,
-   agents, MCP, hooks, frontmatter keys, config paths, env vars); others are
+   agents, MCP, hooks, frontmatter keys, settings keys, config paths, env
+   vars); others are
    skipped. Advance the cursor to the newest tag, heading or version seen.
 
 ## Routing
