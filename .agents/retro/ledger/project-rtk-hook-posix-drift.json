@@ -2,20 +2,25 @@
   "artifact": "project",
   "cost_min": 0,
   "entries": [
-    "20260928T222255Z-f2c09c0f.json"
+    "20260928T222255Z-f2c09c0f.json",
+    "20261104T165219Z-49a73eb8.json",
+    "20261105T012500Z-9dc79c14.json",
+    "20261105T124740Z-54b036c7.json"
   ],
   "first_seen": "2026-09-28T22:22:55Z",
   "fixed": null,
-  "folded_at": "2026-09-28T22:23:08Z",
-  "folds": 1,
+  "folded_at": "2026-11-05T12:47:58Z",
+  "folds": 3,
   "id": "project-rtk-hook-posix-drift",
   "kind": "inconvenient",
-  "last_seen": "2026-09-28T22:22:55Z",
-  "occurrences": 1,
+  "last_seen": "2026-11-05T12:47:40Z",
+  "occurrences": 4,
   "scope": "harness",
   "severity": "low",
   "status": "deferred",
   "title": "rtk hook rewrites grep, ls and find into tools with different flags and output",
   "v": 1,
-  "versions": []
+  "versions": [
+    "unknown"
+  ]
 }

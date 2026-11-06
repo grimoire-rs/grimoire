@@ -1,0 +1,26 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20261103T232604Z-8bda2f7f.json",
+    "20261104T154949Z-64eb446b.json",
+    "20261104T185625Z-92874775.json",
+    "20261104T233530Z-911a0b8b.json"
+  ],
+  "first_seen": "2026-11-03T23:26:04Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T01:25:22Z",
+  "folds": 1,
+  "id": "project-commit-hook-command-matching",
+  "kind": "defect",
+  "last_seen": "2026-11-04T23:35:30Z",
+  "occurrences": 4,
+  "scope": "project",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "Commit verify hook matches commit words anywhere in a call, misses git -C, and takes its marker from named worktrees",
+  "v": 1,
+  "versions": [
+    "unknown"
+  ]
+}

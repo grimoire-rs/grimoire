@@ -1,0 +1,23 @@
+{
+  "artifact": "docs-quality",
+  "cost_min": 0,
+  "entries": [
+    "20261104T083120Z-cdcecd08.json"
+  ],
+  "first_seen": "2026-11-04T08:31:20Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T01:25:22Z",
+  "folds": 1,
+  "id": "docs-quality-prose-paragraph-line",
+  "kind": "pitfall",
+  "last_seen": "2026-11-04T08:31:20Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "low",
+  "status": "deferred",
+  "title": "prose.py reports DOC-PLAIN-02 and -03 at the paragraph's first line, so a changed-line filter drops findings",
+  "v": 1,
+  "versions": [
+    "unknown"
+  ]
+}

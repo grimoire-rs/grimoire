@@ -1,0 +1,21 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20261104T112926Z-67d11f42.json"
+  ],
+  "first_seen": "2026-11-04T11:29:26Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T01:25:22Z",
+  "folds": 1,
+  "id": "project-shared-registry-port",
+  "kind": "inconvenient",
+  "last_seen": "2026-11-04T11:29:26Z",
+  "occurrences": 1,
+  "scope": "project",
+  "severity": "low",
+  "status": "deferred",
+  "title": "Golden acceptance modules only run against localhost:5000, one port shared by every worktree and session",
+  "v": 1,
+  "versions": []
+}

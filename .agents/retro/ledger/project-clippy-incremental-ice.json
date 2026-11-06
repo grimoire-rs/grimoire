@@ -1,0 +1,21 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20261103T235437Z-62b35c7f.json"
+  ],
+  "first_seen": "2026-11-03T23:54:37Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T01:25:22Z",
+  "folds": 1,
+  "id": "project-clippy-incremental-ice",
+  "kind": "pitfall",
+  "last_seen": "2026-11-03T23:54:37Z",
+  "occurrences": 1,
+  "scope": "project",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "A clippy incremental-compilation ICE on an expect(dead_code) item reads as red code until cargo clean -p grimoire",
+  "v": 1,
+  "versions": []
+}

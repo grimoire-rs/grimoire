@@ -1,0 +1,24 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20261104T040042Z-2349e115.json",
+    "20261104T042745Z-d4694417.json",
+    "20261105T062613Z-6fbfca6d.json",
+    "20261105T114551Z-20fa6b82.json"
+  ],
+  "first_seen": "2026-11-04T04:00:42Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T12:46:44Z",
+  "folds": 2,
+  "id": "project-rtk-proxy-ocx-env",
+  "kind": "pitfall",
+  "last_seen": "2026-11-05T11:45:51Z",
+  "occurrences": 4,
+  "scope": "project",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "rtk proxy re-sources OCX_GLOBAL=1 from the profile, so ocx exec under it loses the repo toolchain and zot",
+  "v": 1,
+  "versions": []
+}

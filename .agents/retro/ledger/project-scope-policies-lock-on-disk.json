@@ -1,0 +1,21 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20261104T074507Z-66630785.json"
+  ],
+  "first_seen": "2026-11-04T07:45:07Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T01:25:22Z",
+  "folds": 1,
+  "id": "project-scope-policies-lock-on-disk",
+  "kind": "pitfall",
+  "last_seen": "2026-11-04T07:45:07Z",
+  "occurrences": 1,
+  "scope": "project",
+  "severity": "low",
+  "status": "deferred",
+  "title": "scope_policies reads the lock from disk, so a unit test that never saves the lock passes a negative falsely",
+  "v": 1,
+  "versions": []
+}

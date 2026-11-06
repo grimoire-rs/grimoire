@@ -3,22 +3,27 @@
   "cost_min": 0,
   "entries": [
     "20261022T024516Z-a31cd98c.json",
-    "20261022T172713Z-7555598e.json"
+    "20261022T172713Z-7555598e.json",
+    "20261103T232604Z-05c5acbf.json",
+    "20261104T082139Z-61ab20d0.json",
+    "20261105T114408Z-7659d61f.json",
+    "20261105T114412Z-e5f30deb.json"
   ],
   "first_seen": "2026-10-22T02:45:16Z",
   "fixed": null,
-  "folded_at": "2026-10-26T15:16:19Z",
-  "folds": 1,
+  "folded_at": "2026-11-05T12:46:44Z",
+  "folds": 3,
   "id": "hex-execute-idle-suborchestrator",
   "kind": "pitfall",
-  "last_seen": "2026-10-22T17:27:13Z",
-  "occurrences": 2,
+  "last_seen": "2026-11-05T11:44:12Z",
+  "occurrences": 6,
   "scope": "harness",
   "severity": "medium",
   "status": "deferred",
   "title": "Sub-orchestrators go idle waiting on workers or background gates whose completion never wakes them",
   "v": 1,
   "versions": [
-    "ghcr.io/michael-herwig/arcana/hex-execute@sha256:b74c31371e0861a500b15b48b2f80733477ac454b449967d816b19a9ddbe01c2"
+    "ghcr.io/michael-herwig/arcana/hex-execute@sha256:b74c31371e0861a500b15b48b2f80733477ac454b449967d816b19a9ddbe01c2",
+    "unknown"
   ]
 }

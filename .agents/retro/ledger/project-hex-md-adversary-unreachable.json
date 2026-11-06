@@ -1,0 +1,23 @@
+{
+  "artifact": "hex.md",
+  "cost_min": 0,
+  "entries": [
+    "20261103T220224Z-81123951.json"
+  ],
+  "first_seen": "2026-11-03T22:02:24Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T01:25:22Z",
+  "folds": 1,
+  "id": "project-hex-md-adversary-unreachable",
+  "kind": "inconvenient",
+  "last_seen": "2026-11-03T22:02:24Z",
+  "occurrences": 1,
+  "scope": "project",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "hex.md names codex:rescue as the adversary, but no codex CLI or second harness is reachable on this machine",
+  "v": 1,
+  "versions": [
+    "unknown"
+  ]
+}

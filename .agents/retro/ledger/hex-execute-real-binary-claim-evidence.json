@@ -1,0 +1,23 @@
+{
+  "artifact": "hex-execute",
+  "cost_min": 0,
+  "entries": [
+    "20261104T200537Z-0ac0e885.json"
+  ],
+  "first_seen": "2026-11-04T20:05:37Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T01:25:22Z",
+  "folds": 1,
+  "id": "hex-execute-real-binary-claim-evidence",
+  "kind": "pitfall",
+  "last_seen": "2026-11-04T20:05:37Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "A real-binary check inferred a rejected value from another value's error text, and the claim spread into docs",
+  "v": 1,
+  "versions": [
+    "unknown"
+  ]
+}

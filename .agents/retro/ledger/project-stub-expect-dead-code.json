@@ -1,0 +1,21 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20261104T091348Z-cb4a6c5a.json"
+  ],
+  "first_seen": "2026-11-04T09:13:48Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T01:25:22Z",
+  "folds": 1,
+  "id": "project-stub-expect-dead-code",
+  "kind": "pitfall",
+  "last_seen": "2026-11-04T09:13:48Z",
+  "occurrences": 1,
+  "scope": "project",
+  "severity": "low",
+  "status": "deferred",
+  "title": "Per-variant expect(dead_code) in a stub goes unfulfilled as soon as a later phase names the variants",
+  "v": 1,
+  "versions": []
+}

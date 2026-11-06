@@ -1,0 +1,23 @@
+{
+  "artifact": "hex-review",
+  "cost_min": 0,
+  "entries": [
+    "20261105T032925Z-65b8a858.json"
+  ],
+  "first_seen": "2026-11-05T03:29:25Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T12:46:44Z",
+  "folds": 1,
+  "id": "hex-review-seat-probe-full-suite",
+  "kind": "inconvenient",
+  "last_seen": "2026-11-05T03:29:25Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "low",
+  "status": "deferred",
+  "title": "A review seat's probe with an empty test selector ran a whole copied test tree beside the running integration gate",
+  "v": 1,
+  "versions": [
+    "unknown"
+  ]
+}

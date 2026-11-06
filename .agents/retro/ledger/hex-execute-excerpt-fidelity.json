@@ -1,0 +1,25 @@
+{
+  "artifact": "hex-execute",
+  "cost_min": 0,
+  "entries": [
+    "20261104T124746Z-1eeb6212.json",
+    "20261104T143236Z-ced73c65.json",
+    "20261104T143236Z-cff0d63e.json"
+  ],
+  "first_seen": "2026-11-04T12:47:46Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T01:25:22Z",
+  "folds": 1,
+  "id": "hex-execute-excerpt-fidelity",
+  "kind": "pitfall",
+  "last_seen": "2026-11-04T14:32:36Z",
+  "occurrences": 3,
+  "scope": "harness",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "Step excerpts lose an ADR clause's antecedent, cite stale file:line sites, or take test expectations from stubs",
+  "v": 1,
+  "versions": [
+    "unknown"
+  ]
+}

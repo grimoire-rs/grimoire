@@ -1,0 +1,23 @@
+{
+  "artifact": "hex-execute",
+  "cost_min": 0,
+  "entries": [
+    "20261104T133655Z-2115a5cd.json"
+  ],
+  "first_seen": "2026-11-04T13:36:55Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T01:25:22Z",
+  "folds": 1,
+  "id": "hex-execute-return-before-background-done",
+  "kind": "pitfall",
+  "last_seen": "2026-11-04T13:36:55Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "A worker's return file can land while its background mutation runner is still flipping source",
+  "v": 1,
+  "versions": [
+    "unknown"
+  ]
+}

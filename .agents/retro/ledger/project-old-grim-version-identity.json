@@ -1,0 +1,21 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20261104T043038Z-213df8ff.json"
+  ],
+  "first_seen": "2026-11-04T04:30:38Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T01:25:22Z",
+  "folds": 1,
+  "id": "project-old-grim-version-identity",
+  "kind": "pitfall",
+  "last_seen": "2026-11-04T04:30:38Z",
+  "occurrences": 1,
+  "scope": "project",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "An exact --version check cannot tell a dev build from the 0.15.1 release, so it misidentifies old grim binaries",
+  "v": 1,
+  "versions": []
+}

@@ -1,0 +1,28 @@
+{
+  "artifact": "python-quality",
+  "cost_min": 0,
+  "entries": [
+    "20261104T043028Z-ad596525.json",
+    "20261104T061445Z-576af752.json",
+    "20261104T080641Z-378d62e6.json",
+    "20261104T095854Z-d0f2e67d.json",
+    "20261104T115226Z-c3a6c2a4.json",
+    "20261104T153231Z-1d5e6b91.json"
+  ],
+  "first_seen": "2026-11-04T04:30:28Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T01:25:22Z",
+  "folds": 1,
+  "id": "python-quality-ruff-not-wired",
+  "kind": "inconvenient",
+  "last_seen": "2026-11-04T15:32:31Z",
+  "occurrences": 6,
+  "scope": "project",
+  "severity": "low",
+  "status": "deferred",
+  "title": "The python-quality gate names uv run ruff, but this repo wires ruff into no dependency, config or task",
+  "v": 1,
+  "versions": [
+    "unknown"
+  ]
+}

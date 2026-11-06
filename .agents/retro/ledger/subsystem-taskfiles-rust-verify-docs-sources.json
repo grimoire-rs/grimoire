@@ -1,0 +1,23 @@
+{
+  "artifact": "subsystem-taskfiles",
+  "cost_min": 0,
+  "entries": [
+    "20261105T114410Z-76495d6d.json"
+  ],
+  "first_seen": "2026-11-05T11:44:10Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T12:46:44Z",
+  "folds": 1,
+  "id": "subsystem-taskfiles-rust-verify-docs-sources",
+  "kind": "pitfall",
+  "last_seen": "2026-11-05T11:44:10Z",
+  "occurrences": 1,
+  "scope": "project",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "rust:verify caches on Rust sources only, so a docs edit skips the unit tests that read docs pages",
+  "v": 1,
+  "versions": [
+    "unknown"
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "artifact": "hex-review",
+  "cost_min": 0,
+  "entries": [
+    "20261104T102724Z-ab56b29a.json",
+    "20261104T152449Z-41bb6417.json"
+  ],
+  "first_seen": "2026-11-04T10:27:24Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T01:25:22Z",
+  "folds": 1,
+  "id": "hex-review-stalled-seat",
+  "kind": "inconvenient",
+  "last_seen": "2026-11-04T15:24:49Z",
+  "occurrences": 2,
+  "scope": "harness",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "Review seats stall silently or die on API 403; TaskStop refuses, and a replacement overwrites the original's report",
+  "v": 1,
+  "versions": [
+    "unknown"
+  ]
+}
