@@ -130,10 +130,14 @@ tasks:
       assets -- review the diff (`git diff docs/public/`) after re-running
       and commit deliberately. Outside `testpaths`, so `task test` never
       collects it.
+
+      Arguments after `--` reach pytest unchanged (CLI_ARGS), so
+      `task test:demo -- -k registries` records the one cast whose file name
+      matches. With none, every cast is recorded.
     cmds:
       - task: build
         vars:
           SKIP_BUILD: "{{.SKIP_BUILD}}"
-      - ocx exec -- uv run pytest recordings/ -v
+      - ocx exec -- uv run pytest recordings/ -v {{.CLI_ARGS}}
     env:
       GRIM_COMMAND: "{{.GRIM_BINARY}}"
