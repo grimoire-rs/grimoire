@@ -33,7 +33,7 @@ preferences, not copies. Team-shared — commit it.
   `subsystem-cli-api.md`, `subsystem-cli-commands.md`,
   `subsystem-file-structure.md`) co-fire by design;
   `.claude/rules/quality-security.md` for security-sensitive surfaces;
-  `.claude/rules/vendor-capability-watchlist.md` before patching a vendor
+  `.claude/rules/vendor-capability-watchlist.md` (data: `.agents/upstream-watchlist.md`) before patching a vendor
   renderer decline.
 - Security-sensitive paths: `src/oci/**` (registry transport, auth),
   `src/command/login.rs` / `logout.rs` (docker-config credential

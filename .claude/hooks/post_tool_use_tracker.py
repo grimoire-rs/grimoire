@@ -118,7 +118,7 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
         (
             "- docs/src/content/docs/clients.md (support matrix — code-mirrored; the table-parity test in client_target.rs fails on drift)\n"
             "- docs/src/content/docs/agents.md + docs/src/content/docs/mcp-servers.md (emit matrices — every ClientTarget must appear)\n"
-            "- .claude/rules/vendor-capability-watchlist.md (re-check the upstream decline before patching;\n"
+            "- .claude/rules/vendor-capability-watchlist.md + .agents/upstream-watchlist.md (re-check the upstream decline before patching;\n"
             "  classify any gap-compensation as class 1/2/3 and assign a new vendor's support tier)"
         ),
         "a vendor renderer — its kind-support / MCP surface is mirrored in code-checked docs",
@@ -128,7 +128,7 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
         (
             "- docs/src/content/docs/clients.md (support matrix — code-mirrored; the table-parity test here fails on drift)\n"
             "- docs/src/content/docs/agents.md + docs/src/content/docs/mcp-servers.md (emit matrices — every ClientTarget must appear)\n"
-            "- .claude/rules/vendor-capability-watchlist.md (re-check the upstream decline before patching;\n"
+            "- .claude/rules/vendor-capability-watchlist.md + .agents/upstream-watchlist.md (re-check the upstream decline before patching;\n"
             "  classify any gap-compensation as class 1/2/3 and assign a new vendor's support tier)"
         ),
         "the client-target seam — the vendor set feeds the code-checked docs matrices",
