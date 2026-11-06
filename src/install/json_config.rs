@@ -36,10 +36,14 @@ pub fn prefer_jsonc(dir: &Path, stem: &str) -> PathBuf {
 /// (comments, trailing commas). Returns the object and whether the
 /// sanitization changed anything (⇒ rewriting loses comments).
 ///
+/// A leading byte-order mark is read past, as the splice reads past it:
+/// refused here alone, `status` calls an entry the splice wrote `missing`.
+///
 /// # Errors
 ///
 /// `InvalidData` when the content is not a JSON/JSONC object.
 pub fn parse_object(raw: &str, path: &Path) -> io::Result<(serde_json::Map<String, serde_json::Value>, bool)> {
+    let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw);
     let refused = || {
         invalid_data(format!(
             "'{}' is not a JSON object grim can edit; refusing to touch it",
@@ -198,5 +202,16 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         let err = parse_object("[1, 2]", p).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData, "non-object JSON is refused");
+    }
+
+    #[test]
+    fn parse_object_reads_past_a_byte_order_mark() {
+        let p = Path::new("cfg.json");
+        let (map, extras) = parse_object("\u{feff}{\"a\": 1}", p).unwrap();
+        assert_eq!((map["a"].clone(), extras), (serde_json::json!(1), false));
+        let (map, extras) = parse_object("\u{feff}{\n  // c\n  \"a\": 1\n}\n", p).unwrap();
+        assert_eq!((map["a"].clone(), extras), (serde_json::json!(1), true));
+        let err = parse_object("\u{feff}", p).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "a mark alone holds no object");
     }
 }
