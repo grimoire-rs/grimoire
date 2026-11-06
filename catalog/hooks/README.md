@@ -131,6 +131,8 @@ grim config set options.experimental.hooks true
 grim hook allow
 ```
 
+Since grim 0.16.0, `grim consent allow` is the same command.
+
 `grim hook allow` is idempotent here, because **`grim add` already recorded
 consent in step 2** — typing a reference is the declaration gesture, and it
 is one of only three things that write a record. Run it explicitly when the
@@ -140,10 +142,14 @@ for — cloning a repository is not consenting to it.
 
 The record is machine-local, one file per workspace under
 `$GRIM_HOME/hooks/consent/`, and it names this checkout by absolute path.
-Consent in this sandbox arms nothing in any other directory. For a one-off
-run without writing anything, `grim install --trust-hooks` arms for that
-invocation only and `--no-trust-hooks` refuses it; either flag outranks the
-record, in the direction you typed, and neither writes one.
+Consent in this sandbox arms nothing in any other directory.
+
+For a one-off run without writing anything, `grim install --trust-workspace`
+arms for that invocation only and `--no-trust-workspace` refuses it. Either
+flag outranks the record, in the direction you typed, and neither writes one.
+Since grim 0.16.0 the pair also answers for settings packages, once their own
+flag is on. A grim before 0.16.0 spells it `--trust-hooks` /
+`--no-trust-hooks`, and those names still work as aliases.
 
 ### 4. Install — this is the step that arms
 
@@ -272,6 +278,8 @@ Withdraw this workspace's consent as well:
 ```sh
 grim hook revoke
 ```
+
+Since grim 0.16.0, `grim consent revoke` is the same command.
 
 `revoke` is idempotent — running it in a workspace that never consented
 still exits `0` — and, like the feature flag, it does not disarm by itself:

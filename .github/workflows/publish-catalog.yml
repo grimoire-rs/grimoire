@@ -6,19 +6,20 @@ name: Publish Catalog
 # contributor path anyone else uses.
 #
 # Two triggers:
-# - workflow_dispatch: humans publish on demand (version bumps via PR).
+# - workflow_dispatch: humans publish on demand. No package carries its own
+#   version bump: every version is grim's release version (see below).
 # - workflow_call: cargo-dist post-announce job — every grim release
 #   republishes the catalog with the freshly released binary. Idempotent:
-#   unchanged versions re-push the same digest (a no-op); changed content
-#   without a publish.toml bump fails loudly (bump discipline).
+#   grim publish skips each package whose exact-version tag already exists,
+#   whatever its digest. Only a dispatch with `force` moves such a tag.
 #
 # Versions: every catalog package publishes at grim's own release version
 # — derived from the release git tag (workflow_call from the tag-triggered
 # release, or the vX.Y.Z grim_version dispatch input) and passed as
 # `grim publish --version <tag>` (the v prefix is stripped by grim). When
 # no tag is derivable (dispatch with grim_version=latest) the top-level
-# `version` in catalog/publish.toml applies. grim publish releases
-# skills/rules/agents before bundles so bundle members always resolve.
+# `version` in catalog/publish.toml applies. grim publish releases every
+# member kind before bundles so bundle members always resolve.
 #
 # Announce needs a cross-repo credential: GITHUB_TOKEN is repo-scoped, so
 # the PR against grimoire-rs/index uses a short-lived installation token

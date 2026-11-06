@@ -7,7 +7,8 @@ update loop and the two files it maintains.
 Contents: [The Loop](#the-loop) · [The Two Files](#the-two-files) ·
 [Declaring](#declaring) · [Installing](#installing) ·
 [Updating](#updating) · [Inspecting](#inspecting) ·
-[Removing](#removing) · [Bundles](#bundles) · [Hooks](#hooks)
+[Removing](#removing) · [Bundles](#bundles) · [Hooks](#hooks) ·
+[Settings](#settings)
 
 Flags shown here track the release this package ships beside; confirm with
 `grim <cmd> --help` before relying on one.
@@ -37,8 +38,9 @@ forward and `grim status` to see where you stand.
 canonical way to set a default registry via a `default = true` entry, or
 `grim config registry use <alias>`), an `[options]` table for other defaults
 (`clients`, `[options.tui]` for the interactive browser), and `[skills]` /
-`[rules]` / `[agents]` / `[mcp]` / `[hooks]` / `[bundles]` tables mapping a
-binding name to a reference (`[hooks]` takes registry references only).
+`[rules]` / `[agents]` / `[mcp]` / `[hooks]` / `[settings]` / `[bundles]`
+tables mapping a binding name to a reference (`[mcp]`, `[hooks]` and
+`[settings]` take registry references only).
 Manage settings and registries with `grim config` rather than by hand — see [registries.md](registries.md#managing-config); it never
 touches the declaration tables, which stay under `grim add` / `grim remove`.
 You may still edit by hand (run `grim lock` afterwards), but note that any
@@ -63,14 +65,15 @@ grim add --kind bundle ghcr.io/acme/python-stack:1
 grim add --no-install ghcr.io/acme/code-review:1   # declare + lock only
 ```
 
-- `--kind` (skill, rule, agent, bundle, mcp, hook) is normally inferred from
+- `--kind` (skill, rule, agent, bundle, mcp, hook, settings) is normally inferred from
   the artifact's kind metadata set at release time (the `com.grimoire.kind`
   annotation; legacy `artifactType` on older artifacts). If grim cannot
   infer it (a non-Grimoire image), `add` errors and asks for `--kind`.
-  `hook` is **appended** to that value list, never inserted — the accepted
-  set is a frozen CLI surface, so widening it is the only permitted
-  direction. A hook may be added with the experimental flag off: declaring
-  and locking are not arming (see [Hooks](#hooks)).
+  `hook`, then `settings`, are **appended** to that value list, never
+  inserted — the accepted set is a frozen CLI surface, so widening it is the
+  only permitted direction. A hook or a settings package may be added with
+  its experimental flag off: declaring and locking are not arming (see
+  [Hooks](#hooks) and [Settings](#settings)).
 - `--name` defaults to the reference's last path segment. Re-adding a
   declared name from the *same* repository at another tag or digest
   re-pins it — config, lock and installed files all move to the new
@@ -92,7 +95,8 @@ grim add --no-install ghcr.io/acme/code-review:1   # declare + lock only
   locally modified artifact, or a pre-existing destination grim has no
   record of, refuses (exit 65; JSON `reason` `modified` /
   `untracked-destination`). Re-run the same `grim add` with `--force` to
-  overwrite deliberately — identical semantics to `grim install --force`.
+  overwrite deliberately — identical semantics to `grim install --force`,
+  refused [settings](#settings) values included.
   `--force` is inert with `--no-install` (nothing is materialized).
 
 If the reference is deprecated, `add` prints the publisher's deprecation
@@ -109,9 +113,11 @@ grim add ./skills/my-skill
 grim add --kind agent ../shared/reviewer.md
 ```
 
-A **hook** has no path form: the config parser refuses a path value under
-`[hooks]`, and there is no dev-install for the kind — a hook always comes
-from a registry reference. See [Hooks](#hooks).
+An **MCP server**, a **hook** or a **settings package** has no path form: the
+config parser refuses a path value under `[mcp]`, `[hooks]` and `[settings]`,
+and none of the three has a dev-install either (`grim install <path>` takes a
+skill, rule or agent only). All three always come from a registry reference. See
+[Hooks](#hooks) and [Settings](#settings).
 
 The kind infers from the path's shape the same way `grim build` does (a
 directory with `SKILL.md` is a skill, a bare `.md` is a rule; pass
@@ -145,7 +151,8 @@ grim install --client claude,copilot
 
 Install never deletes anything, and it refuses to overwrite an artifact
 you have modified locally — or any pre-existing same-named file it has
-no record of writing — pass `--force` to overwrite deliberately.
+no record of writing — pass `--force` to overwrite deliberately. The same
+gate holds for a [settings](#settings) value that changed after grim wrote it.
 See [troubleshooting.md](troubleshooting.md) for the integrity gates.
 
 Install also refuses when the lock is stale. If `grimoire.lock`'s
@@ -197,7 +204,8 @@ grim update --force   # overwrite my edit deliberately
 ```
 
 One flag therefore governs every way update can destroy hand-edited work:
-this overwrite, the prune below, and the client reap below that.
+this overwrite, a refused [settings](#settings) value, the prune below, and
+the client reap below that.
 
 A refusal does not abandon the pass. Every other artifact is still
 reconciled, the lock still rolls forward, and the report is still
@@ -258,7 +266,9 @@ host-level refusal such as `insecure-transport`, a relative or nested
 `GRIM_HOME`, a client unverified on Windows, or a surface grim cannot register) and
 `untrusted` (client-side trust still pending); the reason is in the
 always-present `arming[].cause` array, see
-[troubleshooting.md](troubleshooting.md#a-hook-that-never-fires). See [artifact
+[troubleshooting.md](troubleshooting.md#a-hook-that-never-fires). A
+[settings](#settings) row can read `gated` or `not-armed` too, with the same
+`arming` array. See [artifact
 states][artifact-states] for what each one means. The
 `Source` column shows provenance: `direct`, the bundle the artifact came
 from, `path: <path>` for a declared local path source, or
@@ -276,7 +286,11 @@ computed locally, no network. Left unset (autodetect), both stay `[]` on
 every item instead of diffing against live client detection.
 `clients_missing` also skips a configured client whose vendor cannot host
 that kind at that scope (Codex declines rules, for one), since no output
-was ever going to be recorded for it.
+was ever going to be recorded for it. On a settings row it is always `[]`,
+as on a bundle row: an install records a client only for the values the
+package declares for it, which `status` cannot see. So a settings row never
+reports a newly selected client, in `clients_missing` or `outputs_pending`;
+run `grim install` and it applies the package to that client.
 
 `outputs_pending` answers a different question: **what would `grim install`
 write right now that the record does not already cover?** Same
@@ -435,7 +449,8 @@ To stop a hook now, use `uninstall` ([remove and uninstall][hooks-remove]).
 ## Bundles
 
 A bundle is a curated set of members. Declare it once and it **expands**
-into its members — skills, rules, agents, and MCP servers — at lock time,
+into its members — skills, rules, agents, MCP servers, hooks, settings
+packages and nested bundles — at lock time,
 each pinned like a direct declaration and tagged with the bundle as its
 provenance:
 
@@ -463,9 +478,9 @@ a manifest digest. Its members must still be registry references: `grim
 lock` rejects a relative (`./`/`../`) member id, since a local bundle has
 no registry identity of its own to resolve one against.
 
-A bundle's member tables are `[skills]`, `[rules]`, `[agents]`, `[mcp]` and
-`[hooks]`; the `[mcp]` key is the name the server registers under in each
-client's MCP config.
+A bundle's member tables are `[skills]`, `[rules]`, `[agents]`, `[mcp]`,
+`[hooks]`, `[settings]` and `[bundles]`; the `[mcp]` key is the name the
+server registers under in each client's MCP config.
 
 A bundle-provided **hook** is declared, never armed: it locks with the
 bundle as its provenance and its own digest-pinned source, then faces the
@@ -473,11 +488,13 @@ same gates a directly declared hook faces — the feature flag, then this
 workspace's consent. `grim add <bundle>` records the members that gesture
 resolves to, so a bundle that later gains a hook member drifts and re-asks
 rather than arming silently. Removing the bundle removes the hook, unless
-you also declared it directly.
+you also declared it directly. A bundle-provided **settings package** is a
+declaration in the same way, and meets the [settings](#settings) gates.
 
 ## Dependencies
 
-A skill, rule, agent, MCP server or hook can declare the artifacts it needs
+A skill, rule, agent, MCP server, hook or settings package can declare the
+artifacts it needs
 (the author's side: see the `grim-authoring` skill). Adding or locking it then
 pulls the dependencies in, transitively, and a bundle can hold other
 bundles. `grim add` reports what it pulled in as `pulled_in`.
@@ -521,7 +538,7 @@ rather than folded into one switch:
 |---|---|---|---|
 | 1 | Is the feature on? | `options.experimental.hooks` in project or global config | `false` |
 | 2 | Has this workspace consented? | a machine-local record under `$GRIM_HOME/hooks/consent/` | absent |
-| 2 | …or did this one invocation get an explicit pass? | `--trust-hooks` on `grim install` / `update` / `add` | off |
+| 2 | …or did this one invocation get an explicit pass? | `--trust-workspace` (alias `--trust-hooks`) on `grim install` / `update` / `add` | off |
 | 2 | …or did you answer the prompt? | asked once per workspace, on a TTY only | — |
 
 The second gate does not ask *whose code is this* — the lock's digest pin
@@ -530,8 +547,10 @@ all**, which a pin cannot answer. Cloning a repository is not vouching for it,
 so a `grimoire.toml` that arrives with a clone declares hooks and arms nothing
 until you say otherwise, in that workspace, by hand.
 
-`--trust-hooks` and `--no-trust-hooks` are a pair — the same question the
-record answers per workspace, asked for one invocation instead. Both are
+`--trust-workspace` and `--no-trust-workspace` are a pair — the same
+question the record answers per workspace, asked for one invocation instead.
+Since 0.16.0 `--trust-hooks` and `--no-trust-hooks` are their aliases, and
+each answer covers hooks and [settings](#settings) together. Both are
 **never persisted**, neither writes a record, when both are given the later
 one wins, and neither turns the feature on: gate 1 must already be open.
 
@@ -582,7 +601,7 @@ One condition answers to no file at all: a hook whose pinned registry host is
 not loopback and is reached over plain HTTP never arms (`insecure-transport`),
 because the first resolution that produces the digest pin is itself
 attacker-influenceable on the wire. Loopback is exempt, and only
-`--trust-hooks` overrides it.
+`--trust-workspace` (alias `--trust-hooks`) overrides it.
 
 Setting `options.experimental.hooks` back to `false` and running `grim install`
 removes every registration and dispatch row at that scope (state returns to
@@ -597,7 +616,8 @@ flag back on re-arms with no new `grim hook allow`
 CI job sharing the project must be on 0.15.0 or later before a hook is
 declared. Dropping the only hook declaration and re-locking makes the lock
 readable to older builds again. The `grim hook` verbs and JSON, the dispatch
-table shape, `--trust-hooks` and the `[hooks]` tables are Unstable until 1.0;
+table shape, `--trust-workspace` / `--trust-hooks` and the `[hooks]` tables
+are Unstable until 1.0;
 the OCI wire format for `hook.toml` `schema = 1` is frozen
 ([stability][stability-unstable]).
 
@@ -663,6 +683,65 @@ scope and needs no `grim` binary. `grim hook list` reports its `launcher`
 (`path`, `sha256`, `state`). After upgrading grim, re-run `grim install` in
 each workspace that uses hooks.
 
+## Settings
+
+A **settings package** writes typed values — a model, permission allow and
+deny rules, a plugin marketplace — into each harness's own settings file. It
+installs no file of its own. The kind is **experimental, off by default**, and
+Unstable until 1.0 ([Settings reference][settings-ref]; worked example:
+[Share settings][share-settings]).
+
+- **Needs grim 0.16.0 or later.** An older grim refuses, with exit 78, a
+  `grimoire.toml` or `grimoire.lock` holding a `[settings]` table, and the
+  `options.experimental.settings` key. Every machine and CI job sharing the
+  project must be on 0.16.0 before a settings package is declared.
+- **Two gates, shared with hooks.** `options.experimental.settings` must be
+  true (`grim config set options.experimental.settings true`, with `--global`
+  for global scope). It is config-only, with no environment variable, and it
+  is not consent. At project scope the workspace must also have consented: the
+  hook consent record holds `settings:<binding>@<registry>/<repository>` keys
+  beside the hook keys. `grim hook allow` (alias `grim consent allow`) records
+  both kinds whatever the flags say. `grim add` of a settings package, and an
+  accepted prompt, record it only while the flag is on. `grim hook revoke`
+  removes consent and leaves written values in place. Global scope is always
+  consented.
+- **Per-run answers.** `--trust-workspace` / `--no-trust-workspace` on `add`,
+  `install` and `update` answer for one run and write no record, exactly as
+  for [hooks](#hooks). A package consent withholds reads `skipped` in the
+  report and warns `settings package '<name>' not applied: <reason>`, exit 0;
+  with no record and no terminal the reason names `grim consent allow` and
+  `--trust-workspace`.
+- **Declaring.** A `[settings]` table, or `grim add --kind settings <ref>`.
+  With the flag off, `install`, `update` and `add` (without `--no-install`)
+  warn once per locked package and write nothing (exit 0); `grim status`
+  reads `gated`.
+- **Where values land.** Claude, Codex, Copilot, Cursor, OpenCode, Qoder,
+  Antigravity, Amp, Droid, Gemini, Kilo, Kiro, and Warp on macOS and Linux
+  only. At project scope only Claude takes settings, in
+  `.claude/settings.local.json`. grim changes only the values it wrote; your
+  own entries in the same file stay. At global scope grim refuses a file
+  whose config directory is relative (`settings-root-relative`) or lies inside
+  the repository the command runs in (`settings-root-in-workspace`): the row
+  reads `not-armed`, exit 0, and nothing is written there.
+- **Refusals.** A value that changed after grim wrote it, or one grim never
+  wrote, is refused: exit 65, `forceable: true`, `reason` `modified` or
+  `untracked-destination`, and a `pieces` array naming each. `--force` writes
+  them and keeps no backup of the value it replaces. A conflict between two
+  packages exits 78, and no `--force` overrides it. A settings file grim
+  cannot parse exits 65 and is not forceable. A file whose value changed
+  during the run is left untouched and exits 75 (`locked`, retryable); one
+  that then no longer parses exits 65.
+- **Evidence.** Every run that changes a value reports it in
+  `settings_changes`, always present on the `install`, `update`, `add` and
+  `uninstall` reports (`update` also carries `pieces`). A version bump of a
+  consented package asks nothing again, so read the lock diff and that list.
+- **Removing.** `grim uninstall settings <name>` removes the values the
+  package wrote, and its `--force` covers settings pieces too. A value grim
+  adopted because it already matched stays, even under `--force`, and is
+  named in `abandoned_entries`.
+
+Confirm the flags with `grim install --help` and `grim hook allow --help`.
+
 ## Further Reading
 
 - [Quickstart][quickstart] — the same loop as a guided walk.
@@ -682,3 +761,5 @@ each workspace that uses hooks.
 [hooks-remove]: https://grimoire.rs/hooks.html#remove-stays-armed
 [hooks-flag-off]: https://grimoire.rs/hooks.html#flag-off-retention
 [stability-unstable]: https://grimoire.rs/stability.html#unstable
+[settings-ref]: https://grimoire.rs/settings.html
+[share-settings]: https://grimoire.rs/guides/share-settings.html

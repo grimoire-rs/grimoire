@@ -1,7 +1,8 @@
 # grim-usage
 
 Teach your AI agent to drive the [grim CLI](https://grimoire.rs) — the OCI
-package manager for AI skills, rules, agents, MCP servers, hooks, and bundles.
+package manager for AI skills, rules, agents, MCP servers, hooks, settings
+packages, and bundles.
 
 The skill covers the full consumer-to-publisher surface: declaring and
 installing artifacts (`init`, `add`, `install`, `update`, `status`),

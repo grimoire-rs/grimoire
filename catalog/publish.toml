@@ -6,15 +6,19 @@
 # version. Entries omit their `version` and inherit the top-level one;
 # CI (publish-catalog.yml) overrides it per release with
 # `--version <git tag>` (the `v` prefix is stripped automatically). The
-# top-level value below is the fallback for local/manual runs — keep it
-# at the next planned release.
+# top-level value below is the fallback for local/manual runs and equals
+# `[workspace.package] version` in Cargo.toml (a test pins it).
+# `task release:prepare` sets both. Between releases that is the last
+# release, so a manual run never mints a tag ahead of a grim release: it
+# skips every package whose exact-version tag already exists, whatever its
+# content, unless `--force` moves that tag.
 #
 # Packages live on GHCR under the grimoire-rs org; discovery goes through
 # the public package index (grim publish --announce opens the index PR —
 # the same path any contributor uses).
 
 registry = "ghcr.io"
-version = "0.15.0"
+version = "0.15.1"
 
 [announce]
 repository = "https://github.com/grimoire-rs/index"

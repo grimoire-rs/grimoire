@@ -14,7 +14,7 @@ Contents: [Inventory](#inventory) · [Fix Names](#fix-names) ·
 ## Inventory
 
 Classify every artifact by the same shape rules `grim build` uses to
-infer kind ([The Six Kinds][six-kinds]):
+infer kind ([The Seven Kinds][seven-kinds]):
 
 - A directory containing `hook.toml` and no `SKILL.md` is a **hook**. The
   skill arm is checked **first**, so a directory carrying both `hook.toml`
@@ -89,11 +89,11 @@ repository = "acme/style"
 repository = "acme/reviewer"
 ```
 
-`publish.toml` also has an `[mcp]` and a `[hooks]` table; their
-conventional source paths are `mcp/<name>.toml` and `hooks/<name>/` (a
-directory). Batch publish walks the kinds in a fixed order — skills, rules,
-agents, mcp, hooks, bundles — so nothing depends on the order you write
-them in the file.
+`publish.toml` also has `[mcp]`, `[hooks]` and `[settings]` tables; their
+conventional source paths are `mcp/<name>.toml`, `hooks/<name>/` (a
+directory) and `settings/<name>.toml`. Batch publish walks the kinds in a
+fixed order — skills, rules, agents, mcp, hooks, settings, bundles — so
+nothing depends on the order you write them in the file.
 
 Write `repository` out verbatim on every entry rather than leaning on
 `repository_prefix` — a renamed or moved artifact then can't silently
@@ -159,7 +159,7 @@ flags with `grim publish --help`.
 - [Batch Publish][batch-publish] — the full `publish.toml` schema.
 - [Exit-65 Triage][exit-65-triage] — symptom → cause → fix table.
 
-[six-kinds]: ../SKILL.md#the-six-kinds
+[seven-kinds]: ../SKILL.md#the-seven-kinds
 [universal-invariants]: ../SKILL.md#universal-invariants
 [asymmetry]: ../SKILL.md#the-metadata-location-asymmetry
 [exit-65-triage]: release-checklist.md#exit-65-triage

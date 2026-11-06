@@ -37,7 +37,7 @@ Unlike skill/rule frontmatter, a typo'd bundle key cannot slip through.
 
 ## Member Tables
 
-Six optional tables, each mapping a **config binding name** (the name the
+Seven optional tables, each mapping a **config binding name** (the name the
 member installs under when a consumer adds the bundle) to a
 fully-qualified reference:
 
@@ -52,6 +52,8 @@ reviewer = "registry.example.com/grimoire/agents/reviewer@sha256:8f4b..."
 shell-guard = "registry.example.com/grimoire/hooks/shell-guard:1"
 [mcp]
 docs-search = "registry.example.com/grimoire/mcp/docs-search:1"
+[settings]
+team-defaults = "registry.example.com/grimoire/settings/team-defaults:1"
 [bundles]
 web-stack = "registry.example.com/grimoire/bundles/web-stack:1"
 ```
@@ -68,6 +70,11 @@ consent — asked once per workspace, never per hook. `grim add <bundle>`
 records the **resolved** member set, so bundling a hook does not pre-approve
 one added later: a bundle that gains a hook member drifts and re-asks. See
 [hook-spec.md](hook-spec.md).
+
+A `[settings]` member (experimental) is a declaration in the same way: it
+locks with the bundle as its provenance, then meets the settings flag and,
+at project scope, the same workspace consent before any value is written.
+See [Settings][settings-ref].
 
 References are fully qualified — `registry/repo:tag` or
 `registry/repo@sha256:…` — or **deployment-relative**: a leading `./`
@@ -148,7 +155,7 @@ docs-search = "ghcr.io/acme/mcp/docs-search:1"
 | `keywords` as a TOML array | Hard parse error — must be one string |
 | Member ref not fully qualified | Hard error — invalid reference |
 | Nested bundle member | Valid via a `[bundles]` table; consumers need grim 0.16.0 or later |
-| An unknown member table | Hard parse error — `[skills]`, `[rules]`, `[agents]`, `[hooks]`, `[mcp]` and `[bundles]` are the accepted six |
+| An unknown member table | Hard parse error — `[skills]`, `[rules]`, `[agents]`, `[hooks]`, `[mcp]`, `[settings]` and `[bundles]` are the accepted seven |
 | More than 512 members, or members document > 512 KiB | Rejected |
 | `repository` not `https://` | Hard error, exit 65 |
 | Two declared bundles disagreeing on a member | Consumer-side `BundleConflict` at lock time (exit 78, fail-closed) — keep curated sets disjoint |
@@ -164,3 +171,4 @@ docs-search = "ghcr.io/acme/mcp/docs-search:1"
 [pub-bundles]: https://grimoire.rs/publishing.html#bundles
 [pin]: https://grimoire.rs/publishing.html#pin
 [dependencies]: https://grimoire.rs/concepts.html#dependencies
+[settings-ref]: https://grimoire.rs/settings.html

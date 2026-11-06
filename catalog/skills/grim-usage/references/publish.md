@@ -1,11 +1,13 @@
 # Publishing Workflow
 
 You loaded this file because you are turning a local skill, rule, agent,
-MCP server, hook, or bundle into a published OCI artifact — the build →
-dry-run → release loop, version tagging, and registry authentication.
+MCP server, hook, settings document, or bundle into a published OCI
+artifact — the build → dry-run → release loop, version tagging, and
+registry authentication.
 (Hook-specific authoring rules live in the `grim-authoring` skill's
 `references/hook-spec.md`; everything on this page applies to a hook
-unchanged.)
+unchanged. The experimental settings document is specified on the
+[Settings][settings-ref] page.)
 
 Contents: [Build, Then Release](#build-then-release) ·
 [Cascade Tags](#cascade-tags) · [Immutability](#immutability) ·
@@ -35,7 +37,9 @@ is checked first), a `.md` file as a **rule**, a `.toml` file as a
 **bundle**. An **agent** always needs `--kind agent`: its `.md` shape is
 indistinguishable from a rule and grim never guesses from content. This
 is the most common publishing mistake — see
-[troubleshooting.md](troubleshooting.md).
+[troubleshooting.md](troubleshooting.md). A **settings** document
+(`settings/<name>.toml`) always needs `--kind settings` too; without it the
+`.toml` is read as a bundle and the build exits 78.
 
 `--dry-run` prints every tag the release would move and the digest each
 would point at, without touching the registry. Make it a habit before
@@ -130,7 +134,8 @@ bundle members before the bundle that references them.
 reads a `publish.toml` manifest that declares every package with a `registry`
 and per-entry `version`, validates the whole set before any push, then
 releases each entry in a fixed kind order: skills first, then rules, then
-agents, then MCP servers, then hooks, then bundles — alphabetical within
+agents, then MCP servers, then hooks, then settings (experimental), then
+bundles — alphabetical within
 each kind. Bundle members always land before the bundles that reference
 them: the kind sequence is fixed so that a bundle's `mcp` and `hooks`
 members are pushed before the bundle that references them.
@@ -159,9 +164,10 @@ announce = false    # publish, but write no index pointer under --announce
 
 Each kind's table maps to a conventional source path under the manifest
 directory: `skills/<name>/`, `rules/<name>.md`, `agents/<name>.md`,
-`mcp/<name>.toml`, `hooks/<name>/`, `bundles/<name>.toml`. Override any
-entry's source with its own `path`. The `[hooks]` table is **additive** —
-a `publish.toml` written before it existed parses unchanged.
+`mcp/<name>.toml`, `hooks/<name>/`, `settings/<name>.toml`,
+`bundles/<name>.toml`. Override any entry's source with its own `path`. The
+`[hooks]` and `[settings]` tables are **additive** — a `publish.toml`
+written before them parses unchanged.
 
 Key behaviors — confirmed invariants, not subject to minor-release drift:
 
@@ -356,9 +362,10 @@ falls to manual maintainer review. Full spec: [The Package Index][package-index]
 
 ## Editor schema support {#editor-schema}
 
-`grim schema --kind config|publish|lock|mcp|hook` prints a JSON Schema for
-`grimoire.toml`, `publish.toml`, `grimoire.lock`, the MCP server
-descriptor (`mcp/<name>.toml`), or the hook manifest (`hook.toml`) —
+`grim schema --kind config|publish|lock|mcp|hook|settings` prints a JSON
+Schema for `grimoire.toml`, `publish.toml`, `grimoire.lock`, the MCP server
+descriptor (`mcp/<name>.toml`), the hook manifest (`hook.toml`), or a
+settings document (`settings/<name>.toml`) —
 generated from grim's own parser, so it
 accepts exactly what grim accepts. The same schemas are published to the docs site; adding a
 `#:schema` directive on the first line of a TOML file gives a supporting editor
@@ -369,9 +376,10 @@ for the hosted URLs.
 ## Bundles
 
 A bundle is a small `.toml` whose `[skills]` / `[rules]` / `[agents]` / `[mcp]` /
-`[hooks]` tables list members by reference — the same shape as a `grimoire.toml`. A
-hook member is declared by the bundle, never armed by it; consent is recorded
-per member. Build and release it like any artifact:
+`[hooks]` / `[settings]` / `[bundles]` tables list members by reference — the
+same shape as a `grimoire.toml`. A hook or settings member is declared by the
+bundle, never armed or applied by it; consent is recorded per member. Build
+and release it like any artifact:
 
 ```sh
 grim build ./python-stack.toml
@@ -466,7 +474,8 @@ boilerplate.
 build with exit 65 rather than being silently dropped. `description` is a
 hook's only catalog-facing field; write it to carry the whole blurb. A
 repository-level README/logo still works via the description companion
-below.
+below. A **settings** document carries the catalog keys as top-level TOML
+keys, above its harness tables, and requires `description`.
 
 ## Description Companion {#description-companion}
 
@@ -601,7 +610,10 @@ Everything above pushes to an OCI registry, which is the right target
 when the consumer runs grim. `grim export plugin` covers the case where
 they do not: it packages already-published artifacts as a plugin — a
 directory or `--zip` archive a teammate installs directly, no registry
-credential or grim binary needed on their end.
+credential or grim binary needed on their end. A positional ref may also be
+a local path (`./skills/code-review`), packed as `grim add` packs one, so an
+unpublished skill, rule or agent exports too; the plugin is then named after
+the packed artifact unless `--name` is given.
 
 ```sh
 grim export plugin ghcr.io/acme/skills/code-review:1 --client claude --zip -o dist
@@ -620,8 +632,8 @@ omitted.
 
 Admission is a design-level invariant, not a flag. Skills and MCP servers
 travel everywhere. **Agents travel only in the Claude family** (and `openclaw`
-drops agents and MCP as `client-declined`). **Rules never travel**
-(`no-format-surface`). **A hook member is always declined**: an exported
+drops agents and MCP as `client-declined`). **Rules and settings packages
+never travel** (`no-format-surface`). **A hook member is always declined**: an exported
 plugin runs without grim and a hook needs grim's own runtime. Declining is one
 warning per member per plugin, a line in the plugin README and an `omitted[]`
 JSON row — exit 0, never an error. If **every** member is omitted for a client,
@@ -716,3 +728,4 @@ reference][commands-export-marketplace] for the layout and ownership rules.
 [artifacts-readme]: https://grimoire.rs/artifacts.html#well-known-assets
 [grimignore]: https://grimoire.rs/artifacts.html#grimignore
 [ci]: https://grimoire.rs/ci.html
+[settings-ref]: https://grimoire.rs/settings.html

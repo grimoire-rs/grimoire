@@ -41,7 +41,12 @@ need to refresh it against a newer grim release.
    `grim hook --help`, `grim hook allow --help`, `grim hook list`.
    `grim hook` has three user-facing subcommands (`list`, `allow`,
    `revoke`); dispatch runs through the `grim-hook` launcher, never a command
-   a person types.
+   a person types. The settings kind shares the consent record and the
+   `--trust-workspace` pair (alias `--trust-hooks`) behind its own flag; check
+   `grim config get options.experimental.settings` and the
+   [settings section](consume.md#settings) and
+   [troubleshooting entry](troubleshooting.md#settings-that-never-apply)
+   against the [Settings][settings-ref] page before widening them.
 7. **Re-verify the marketplace client commands.** The use-a-marketplace guide
    stamps each vendor section "Verified <date>". Vendor CLIs move faster than
    grim, so on each minor re-check the command shapes and the private-repo
@@ -54,8 +59,9 @@ need to refresh it against a newer grim release.
 
 ## What Drifts, and How Fast
 
-Tier-1 invariants (the **six** kinds — skill, rule, agent, mcp, hook,
-bundle — reference syntax, exit-code classes, cascade-tag semantics) are
+Tier-1 invariants (the **seven** kinds — skill, rule, agent, mcp, hook,
+settings, bundle, with hook and settings experimental behind their own
+flags — reference syntax, exit-code classes, cascade-tag semantics) are
 design commitments and rarely move, but "rarely" is not "never": this line
 said *four* while the skill body said *five*, so re-derive the count from
 `grim add --help` rather than trusting either.
@@ -71,6 +77,7 @@ a reference file has accreted one, delete it and link instead.
 - `grim release cascade tags pin bundle`
 - `grim exit codes sysexits`
 - `grim hook list allow revoke arming gated options.experimental.hooks`
+- `grim settings options.experimental.settings settings.local.json trust-workspace pieces settings_changes`
 - `claude plugin marketplace add`, `extraKnownMarketplaces enabledPlugins`,
   `strictKnownMarketplaces`, `copilot plugin marketplace`,
   `codex plugin marketplace add --ref`, `qoder plugins marketplace`,
@@ -104,6 +111,8 @@ a reference file has accreted one, delete it and link instead.
   tutorial][own-index] — registries.md (index sources)
 - [Hooks][hooks] and [Hooks troubleshooting][hooks-troubleshooting] —
   consume.md, troubleshooting.md
+- [Settings][settings-ref] and [Share settings][share-settings] —
+  consume.md, troubleshooting.md
 - [Telemetry][telemetry] — telemetry.md
 - Source of truth for the verbatim workflows and scripts the guides quote:
   the [e2e-marketplace][e2e-marketplace] example repository, and the [GitLab
@@ -129,3 +138,5 @@ a reference file has accreted one, delete it and link instead.
 [marketplace-table]: https://grimoire.rs/configuration.html#marketplace-table
 [e2e-marketplace]: https://github.com/grimoire-rs/e2e-marketplace
 [gitlab-components]: https://gitlab.com/grimoire-rs/components
+[settings-ref]: https://grimoire.rs/settings.html
+[share-settings]: https://grimoire.rs/guides/share-settings.html
