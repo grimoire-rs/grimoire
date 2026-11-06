@@ -315,7 +315,11 @@ def test_global_cline_refuses_a_member_cline_changed_while_grim_waited(
         pass
     cline_member = {"type": "stdio", "command": "cline-wrote-this"}
     settings.write_text(json.dumps({"mcpServers": {"grim-mcp": cline_member}}, indent=2))
-    shutil.rmtree(lock_dir)
+    # Release in one rename: grim's rename takes the lock as soon as it is
+    # empty, so an unlink-then-rmdir release races grim's own release.
+    released = tmp_path / "released-cline-lock"
+    os.rename(lock_dir, released)
+    shutil.rmtree(released)
     _, stderr = proc.communicate(timeout=60)
 
     assert proc.returncode == 75, stderr
