@@ -269,7 +269,7 @@ jobs:
           groups: default
       - name: Golden fixtures (required)
         working-directory: test
-        run: uv run pytest tests/test_golden_pre_hooks.py tests/test_golden_pre_dependencies.py tests/test_dependencies_contract.py -n 0 -v --junit-xml=results/junit.xml
+        run: uv run pytest tests/test_golden_pre_hooks.py tests/test_golden_pre_dependencies.py tests/test_golden_pre_settings.py tests/test_dependencies_contract.py -n 0 -v --junit-xml=results/junit.xml
         env:
           GRIM_TEST_REGISTRY_HOST: localhost:5000
           GRIM_REQUIRE_GOLDEN: "1"
@@ -283,9 +283,9 @@ jobs:
           outcomes = [next((c.tag for c in case if c.tag in bad), "passed") for case in cases]
           passed, skipped = outcomes.count("passed"), outcomes.count("skipped")
           print(f"golden: {passed} passed, {skipped} skipped, {len(outcomes)} total")
-          # 2 pre-hooks + 7 pre-dependencies + 2 dependency contract tests.
-          if (passed, skipped, len(outcomes)) != (11, 0, 11):
-              raise SystemExit("expected exactly 11 passed and 0 skipped golden tests")
+          # 2 pre-hooks + 7 pre-dependencies + 11 pre-settings + 2 dependency contract tests.
+          if (passed, skipped, len(outcomes)) != (22, 0, 22):
+              raise SystemExit("expected exactly 22 passed and 0 skipped golden tests")
           EOF
       - name: Upload Golden Results
         if: ${{ !cancelled() }}
