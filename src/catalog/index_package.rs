@@ -95,6 +95,7 @@ impl IndexPackage {
             repository: repository.to_string(),
             index_path,
             kind: Some(self.kind),
+            kind_read: false,
             description: self.description,
             summary: self.summary,
             keywords: self.keywords,

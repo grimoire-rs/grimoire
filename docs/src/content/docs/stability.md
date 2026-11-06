@@ -569,7 +569,13 @@ to 0.13. From 0.14 this matters for an index that publishes ratings. After
 See [Upgrading][upgrading-catalog-downgrade]. Both a rating and the tree
 placement a package index gives each row add a field to the cache. An
 entry with neither still serializes byte-identically to what 0.13 wrote.
-So a user who only browsed OCI registries directly is not exposed.
+
+A direct OCI browse is exposed too. Since 0.16.0 a row for a foreign
+repository, such as a container image, carries `kind_read` once grim has
+read its manifest. So a registry that holds foreign repositories writes a
+cache that 0.14.x and earlier refuse. Online, 0.14.x pays one rebuild.
+Offline, the refusal shows until an online run or until `$GRIM_HOME/catalog/`
+is deleted, and 0.13 and earlier need that deletion either way.
 
 From this release the loader ignores cache fields it does not know. A cache
 that a later grim extended is read, not refused, so the rebuild above applies
