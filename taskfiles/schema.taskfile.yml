@@ -4,7 +4,7 @@ version: '3'
 
 tasks:
   generate:
-    desc: Generate the JSON Schemas for grimoire.toml, publish.toml, grimoire.lock, and the MCP descriptor into docs/public/schemas/
+    desc: Generate the JSON Schemas for grimoire.toml, publish.toml, grimoire.lock, the MCP descriptor, and the settings document into docs/public/schemas/
     summary: |
       Runs the compiled `grim schema` for each kind and writes the pretty
       JSON into docs/public/schemas/. Astro's `public/` passthrough copies
@@ -24,9 +24,11 @@ tasks:
       - '{{.ROOT_DIR}}/docs/public/schemas/grim-publish.schema.json'
       - '{{.ROOT_DIR}}/docs/public/schemas/grimoire-lock.schema.json'
       - '{{.ROOT_DIR}}/docs/public/schemas/grim-mcp.schema.json'
+      - '{{.ROOT_DIR}}/docs/public/schemas/grim-settings.schema.json'
     cmds:
       - mkdir -p {{.ROOT_DIR}}/docs/public/schemas
       - '{{.ROOT_DIR}}/target/release/grim schema --kind config > {{.ROOT_DIR}}/docs/public/schemas/grimoire-config.schema.json'
       - '{{.ROOT_DIR}}/target/release/grim schema --kind publish > {{.ROOT_DIR}}/docs/public/schemas/grim-publish.schema.json'
       - '{{.ROOT_DIR}}/target/release/grim schema --kind lock > {{.ROOT_DIR}}/docs/public/schemas/grimoire-lock.schema.json'
       - '{{.ROOT_DIR}}/target/release/grim schema --kind mcp > {{.ROOT_DIR}}/docs/public/schemas/grim-mcp.schema.json'
+      - '{{.ROOT_DIR}}/target/release/grim schema --kind settings > {{.ROOT_DIR}}/docs/public/schemas/grim-settings.schema.json'

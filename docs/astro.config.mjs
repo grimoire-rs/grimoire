@@ -207,6 +207,7 @@ export default defineConfig({
             { slug: 'artifacts', label: 'Artifact formats' },
             { slug: 'agents', label: 'Agent Artifacts' },
             { slug: 'mcp-servers', label: 'MCP Server Artifacts' },
+            { slug: 'settings', label: 'Settings Artifacts (experimental)' },
             { slug: 'vendor-metadata', label: 'Vendor-Specific Metadata' },
             { slug: 'package-index', label: 'The Package Index' },
             { slug: 'json-interface', label: 'The JSON Interface' },

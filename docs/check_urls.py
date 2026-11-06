@@ -106,7 +106,13 @@ SITEMAP_URLS = (f"{SITE}/", f"{SITE}/start.html", f"{SITE}/privacy.html")
 
 # Canonical $id is f"{SITE}/schemas/{name}.schema.json"; the file lives at
 # <dist>/schemas/<name>.schema.json.
-SCHEMAS = ("grimoire-config", "grim-mcp", "grim-publish", "grimoire-lock")
+SCHEMAS = (
+    "grimoire-config",
+    "grim-mcp",
+    "grim-publish",
+    "grimoire-lock",
+    "grim-settings",
+)
 
 
 # A fenced block is a markdown sample, so a `{#id}` inside one never becomes a

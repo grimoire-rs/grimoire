@@ -81,7 +81,13 @@ _STATIC_PATHS = (
 )
 
 # Published schemas; each `$id` is its own canonical URL (C-010 item 2).
-_SCHEMAS = ("grimoire-config", "grim-mcp", "grim-publish", "grimoire-lock")
+_SCHEMAS = (
+    "grimoire-config",
+    "grim-mcp",
+    "grim-publish",
+    "grimoire-lock",
+    "grim-settings",
+)
 
 # C-009: the sitemap entries no Astro route produces. Mirrors
 # `check_urls.SITEMAP_URLS`.
