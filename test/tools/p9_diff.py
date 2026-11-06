@@ -49,16 +49,34 @@ FIXTURES = Path(__file__).resolve().parent / "p9_fixtures"
 # command, each with the predicate its value must meet; nothing else may appear.
 # `add`/`update` rows never gain `armed` (D-20). Hook keys: C-153; dependency
 # keys: adr_artifact_dependencies.md Decision 5 (`pulled_in` lists a bundle's
-# members on add).
+# members on add). Settings-kind keys: adr_settings_artifact_kind.md (a run
+# without a settings artifact prints `settings_changes: []`, `pieces: []` and a
+# `null` `element` on the status outputs and on an abandoned entry).
 ADDITIVE_STDOUT_KEYS: dict[str, dict[str, Callable[[object], bool]]] = {
     "status": {
         "arming": lambda v: v == [],
         "direct": lambda v: isinstance(v, bool),
         "required_by": lambda v: v is None or isinstance(v, list),
+        "element": lambda v: v is None,
     },
-    "install": {"armed": lambda v: v is None},
+    "install": {
+        "armed": lambda v: v is None,
+        "settings_changes": lambda v: v == [],
+    },
     "context": {"catalog": lambda v: v is None},
-    "add": {"pulled_in": lambda v: isinstance(v, list)},
+    "add": {
+        "pulled_in": lambda v: isinstance(v, list),
+        "settings_changes": lambda v: v == [],
+    },
+    "update": {
+        "settings_changes": lambda v: v == [],
+        "pieces": lambda v: v == [],
+        "element": lambda v: v is None,
+    },
+    "uninstall": {
+        "settings_changes": lambda v: v == [],
+        "element": lambda v: v is None,
+    },
 }
 
 # Named stdout equivalences (orchestrator decision D-13). Each is one rule, not
@@ -780,6 +798,27 @@ def self_test(root: Path) -> None:
     assert diff_stdout("t", '{"a": 1}', '{"a": 1, "pulled_in": []}', "add") == []
     assert diff_stdout("t", '{"a": 1}', '{"a": 1, "pulled_in": [{"k": "s"}]}', "add") == []
     assert diff_stdout("t", '{"a": 1}', '{"a": 1, "pulled_in": null}', "add")
+    sc = '{"a": 1, "settings_changes": []}'
+    planted = '{"a": 1, "settings_changes": [{"key": "/model"}]}'
+    for cmd in ("install", "add", "update", "uninstall"):
+        assert diff_stdout("t", '{"a": 1}', sc, cmd) == [], cmd
+        assert diff_stdout("t", '{"a": 1}', planted, cmd), f"{cmd}: planted change"
+    assert diff_stdout("t", '{"a": 1}', sc, "status"), "settings_changes is not a status key"
+    assert diff_stdout("t", '{"a": 1}', '{"a": 1, "pieces": []}', "update") == []
+    assert diff_stdout("t", '{"a": 1}', '{"a": 1, "pieces": [{"p": 1}]}', "update")
+    assert diff_stdout("t", '{"a": 1}', '{"a": 1, "pieces": []}', "install")
+    out = '{"items": [{"x": 1, "outputs": [{"path": "p"}]}]}'
+    out_null = '{"items": [{"x": 1, "outputs": [{"path": "p", "element": null}]}]}'
+    out_set = '{"items": [{"x": 1, "outputs": [{"path": "p", "element": "e"}]}]}'
+    assert diff_stdout("t", out, out_null, "status") == []
+    assert diff_stdout("t", out, out_set, "status"), "planted element on a status output"
+    ab = '{"abandoned_entries": [{"pointer": "/a"}]}'
+    ab_null = '{"abandoned_entries": [{"pointer": "/a", "element": null}]}'
+    ab_set = '{"abandoned_entries": [{"pointer": "/a", "element": "e"}]}'
+    for cmd in ("uninstall", "update"):
+        assert diff_stdout("t", ab, ab_null, cmd) == [], f"{cmd}: null element"
+        assert diff_stdout("t", ab, ab_set, cmd), f"{cmd}: planted element on an abandoned entry"
+    assert diff_stdout("t", ab, ab_null, "install"), "element is not an install key"
     ctx = '{"registries": [{"url": "r"}]}'
     assert (
         diff_stdout(

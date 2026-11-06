@@ -175,8 +175,19 @@ pub fn handle(state: &mut TuiState, input: TuiInput) -> TuiAction {
         Mode::ConfirmForce => handle_confirm_force(state, input),
         Mode::ConfirmBatch => handle_confirm_batch(state, input),
         Mode::ConfirmInit => handle_confirm_init(state, input),
+        Mode::SettingsResult => handle_settings_result(state, input),
         Mode::List => handle_browse(state, input),
     }
+}
+
+/// Result-panel keys: `q` quits, anything else closes it. The panel offers no
+/// action, so a queued key costs the reader the list and nothing more.
+fn handle_settings_result(state: &mut TuiState, input: TuiInput) -> TuiAction {
+    if matches!(input, TuiInput::Char('q') | TuiInput::Quit) {
+        return TuiAction::Quit;
+    }
+    state.close_settings_result();
+    TuiAction::None
 }
 
 /// Overwrite-confirmation keys: `←`/`→` (which map to
@@ -415,7 +426,14 @@ fn op_allows(op: BatchOp, state: ArtifactState) -> bool {
         // answer "not installed" on a row that plainly was.
         BatchOp::Install => matches!(
             state,
-            ArtifactState::NotInstalled | ArtifactState::IntegrityMissing | ArtifactState::Pending
+            ArtifactState::NotInstalled
+                | ArtifactState::IntegrityMissing
+                | ArtifactState::Pending
+                // Declared either way, and an action re-reads the gate or
+                // drops the declaration, so these answer to both sets too.
+                | ArtifactState::Gated
+                | ArtifactState::NotArmed
+                | ArtifactState::Stale
         ),
         BatchOp::Update | BatchOp::Uninstall => matches!(
             state,
@@ -425,6 +443,9 @@ fn op_allows(op: BatchOp, state: ArtifactState) -> bool {
                 | ArtifactState::Modified
                 | ArtifactState::Pending
                 | ArtifactState::IntegrityMissing
+                | ArtifactState::Gated
+                | ArtifactState::NotArmed
+                | ArtifactState::Stale
         ),
     }
 }
@@ -562,7 +583,12 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
                     match member_state {
                         // `Pending` belongs here, not with "already installed":
                         // an install genuinely has outputs to write for it.
-                        ArtifactState::NotInstalled | ArtifactState::IntegrityMissing | ArtifactState::Pending => {
+                        ArtifactState::NotInstalled
+                        | ArtifactState::IntegrityMissing
+                        | ArtifactState::Pending
+                        | ArtifactState::Gated
+                        | ArtifactState::NotArmed
+                        | ArtifactState::Stale => {
                             return TuiAction::MemberAction {
                                 op: BatchOp::Install,
                                 repo: repo.clone(),
@@ -606,7 +632,10 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
                         | ArtifactState::Outdated
                         | ArtifactState::Modified
                         | ArtifactState::Pending
-                        | ArtifactState::IntegrityMissing => {
+                        | ArtifactState::IntegrityMissing
+                        | ArtifactState::Gated
+                        | ArtifactState::NotArmed
+                        | ArtifactState::Stale => {
                             return TuiAction::MemberAction {
                                 op: BatchOp::Update,
                                 repo: repo.clone(),
@@ -644,7 +673,10 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
                         | ArtifactState::Outdated
                         | ArtifactState::Modified
                         | ArtifactState::Pending
-                        | ArtifactState::IntegrityMissing => {
+                        | ArtifactState::IntegrityMissing
+                        | ArtifactState::Gated
+                        | ArtifactState::NotArmed
+                        | ArtifactState::Stale => {
                             return TuiAction::MemberAction {
                                 op: BatchOp::Uninstall,
                                 repo: repo.clone(),
@@ -842,6 +874,21 @@ mod tests {
     use crate::config::registry_resolve::RowSource;
     use crate::tui::state::{ArtifactState, TuiRow};
 
+    /// The panel offers no action, so no key may reach the list behind it.
+    #[test]
+    fn a_settings_result_closes_on_any_key_and_q_quits() {
+        let mut s = TuiState::new();
+        s.open_settings_result("These settings changed.", "added claude /model");
+        assert_eq!(handle(&mut s, TuiInput::Char('d')), TuiAction::None);
+        assert_eq!(s.mode, Mode::List);
+        assert!(s.settings_result.is_none());
+
+        s.open_settings_result("These settings changed.", "added claude /model");
+        assert_eq!(handle(&mut s, TuiInput::Char('q')), TuiAction::Quit);
+        s.open_settings_result("These settings changed.", "added claude /model");
+        assert_eq!(handle(&mut s, TuiInput::Quit), TuiAction::Quit);
+    }
+
     /// `op_allows` (the row/batch gate) and the single-Member fast-path gates
     /// in `handle()` must agree on every state. Their doc comments have said
     /// "keep both in sync" from the start, and nothing enforced it: adding
@@ -862,6 +909,9 @@ mod tests {
             ArtifactState::Modified,
             ArtifactState::Pending,
             ArtifactState::IntegrityMissing,
+            ArtifactState::Gated,
+            ArtifactState::NotArmed,
+            ArtifactState::Stale,
         ] {
             let install = op_allows(BatchOp::Install, state);
             let mutate = op_allows(BatchOp::Update, state);

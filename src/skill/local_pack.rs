@@ -58,6 +58,11 @@ pub fn pack_local_artifact(kind: ArtifactKind, path: &Path) -> Result<(String, V
             path,
             SkillErrorKind::ValidationFailed("hooks have no path source and cannot be packed from one".to_string()),
         )),
+        // The same one way here, the same answer: `[settings]` takes no path value.
+        ArtifactKind::Settings => Err(SkillError::new(
+            path,
+            SkillErrorKind::ValidationFailed("settings have no path source and cannot be packed from one".to_string()),
+        )),
         ArtifactKind::Skill => {
             let fm = validate_skill_dir(path)?;
             let warnings = crate::install::render::validate_namespaced_metadata(&fm).map_err(metadata_invalid)?;

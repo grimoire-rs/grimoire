@@ -21,9 +21,12 @@ use crate::skill::rule_frontmatter::ParsedRule;
 
 use super::claude_config;
 use super::render::{self, RenderError, RenderedDoc};
+use super::vendor::MergeClass::{Map, Scalar, Set};
+use super::vendor::SettingsScopes::Both;
+use super::vendor::SettingsValueType as Ty;
 use super::vendor::{
-    FieldType, HOOK_MARKER_KEY, HOOK_MARKER_VALUE, HookSpliceShape, KnownField, SplicedHandler, Vendor, env_dir,
-    home_dir,
+    FieldType, HOOK_MARKER_KEY, HOOK_MARKER_VALUE, HookSpliceShape, KnownField, SettingsField, SplicedHandler, Vendor,
+    env_dir, home_dir,
 };
 
 /// Claude Code.
@@ -197,6 +200,80 @@ pub const CLAUDE_AGENT_FIELDS: &[KnownField] = &[
 /// The common agent fields a lifted `claude.*` key may silently override.
 const CLAUDE_AGENT_OVERRIDES: &[&str] = &["model", "tools"];
 
+/// Claude's settings keys, from the list in `adr_settings_artifact_kind.md`.
+const CLAUDE_SETTINGS_FIELDS: &[SettingsField] = &[
+    SettingsField::new("/model", Ty::String, Scalar, Both),
+    SettingsField::new(
+        "/effortLevel",
+        Ty::Enum(&["low", "medium", "high", "xhigh"]),
+        Scalar,
+        Both,
+    ),
+    SettingsField::new("/outputStyle", Ty::String, Scalar, Both),
+    SettingsField::new("/language", Ty::String, Scalar, Both),
+    SettingsField::new("/spinnerTipsEnabled", Ty::Bool, Scalar, Both),
+    SettingsField::new("/alwaysThinkingEnabled", Ty::Bool, Scalar, Both),
+    SettingsField::new("/includeGitInstructions", Ty::Bool, Scalar, Both),
+    SettingsField::new("/permissions/allow", Ty::StringList, Set, Both),
+    SettingsField::new("/permissions/deny", Ty::StringList, Set, Both),
+    SettingsField::new("/permissions/ask", Ty::StringList, Set, Both),
+    SettingsField {
+        // Claude ignores the other modes from a local file.
+        project_values: Some(&["default", "acceptEdits", "plan"]),
+        ..SettingsField::new(
+            "/permissions/defaultMode",
+            Ty::Enum(&[
+                "default",
+                "acceptEdits",
+                "plan",
+                "auto",
+                "dontAsk",
+                "bypassPermissions",
+                "manual",
+            ]),
+            Scalar,
+            Both,
+        )
+    },
+    SettingsField::new("/sandbox/enabled", Ty::Bool, Scalar, Both),
+    SettingsField::new(
+        "/extraKnownMarketplaces/<name>",
+        Ty::Atomic { keys: &["source"] },
+        Map,
+        Both,
+    ),
+    // `custom:` themes name a theme file, which a package cannot ship.
+    SettingsField::new(
+        "/theme",
+        Ty::Enum(&[
+            "auto",
+            "dark",
+            "light",
+            "dark-daltonized",
+            "light-daltonized",
+            "dark-ansi",
+            "light-ansi",
+        ]),
+        Scalar,
+        Both,
+    ),
+    SettingsField::new("/editorMode", Ty::Enum(&["normal", "vim"]), Scalar, Both),
+    SettingsField::new("/tui", Ty::Enum(&["default", "fullscreen"]), Scalar, Both),
+    // A user's `"attribution": false` is not an object, so a piece below it is
+    // refused as any value of another type is, and `false` stays without `--force`.
+    SettingsField::new("/attribution/commit", Ty::String, Scalar, Both),
+    SettingsField::new("/attribution/pr", Ty::String, Scalar, Both),
+    SettingsField::new("/attribution/sessionUrl", Ty::Bool, Scalar, Both),
+    // A relative entry resolves against the project root in a project or local
+    // file and against `~/.claude` in the user file. An admin-required sandbox
+    // ignores a repository file's `allowWrite` entries, and its `allowRead`
+    // entries under a path a managed, `--settings` or user file denies.
+    SettingsField::new("/sandbox/filesystem/allowWrite", Ty::StringList, Set, Both),
+    SettingsField::new("/sandbox/filesystem/denyWrite", Ty::StringList, Set, Both),
+    SettingsField::new("/sandbox/filesystem/denyRead", Ty::StringList, Set, Both),
+    SettingsField::new("/sandbox/filesystem/allowRead", Ty::StringList, Set, Both),
+];
+
 impl Vendor for ClaudeVendor {
     fn name(&self) -> &'static str {
         "claude"
@@ -304,6 +381,19 @@ impl Vendor for ClaudeVendor {
 
     fn agent_fields(&self) -> &'static [KnownField] {
         CLAUDE_AGENT_FIELDS
+    }
+
+    fn settings_fields(&self) -> &'static [SettingsField] {
+        CLAUDE_SETTINGS_FIELDS
+    }
+
+    /// The file hooks register in at project scope, the one no repository
+    /// tracks, and `settings.json` under the global root.
+    fn settings_config_path(&self, workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
+        match scope {
+            ConfigScope::Project => hook_config_path(workspace, scope),
+            ConfigScope::Global => global_settings_path(global_root(config_dir_override(), home_dir())),
+        }
     }
 
     fn detect(&self, workspace: &Path, scope: ConfigScope) -> bool {
@@ -483,6 +573,13 @@ fn hook_config_path(workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
         ConfigScope::Global => "settings.json",
     };
     Some(scope_root(workspace, scope).join(file))
+}
+
+/// `settings.json` under the resolved global `root`. No root, no file: a
+/// workspace stand-in would be the tracked `.claude/settings.json`, which is
+/// why this does not share [`hook_config_path`]'s fallback.
+fn global_settings_path(root: Option<PathBuf>) -> Option<PathBuf> {
+    root.map(|root| root.join("settings.json"))
 }
 
 pub(crate) fn scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
@@ -949,5 +1046,209 @@ mod tests {
         // host's managed settings can set, so it is not asserted here: the
         // resolution order is covered hermetically by
         // `global_root_resolution_order` and `config_dir_from`'s tests.
+    }
+
+    /// Every key by pointer, value type and scope, in the list's order.
+    #[test]
+    fn settings_rows_match_the_key_list() {
+        use crate::install::vendor::SettingsScopes::Both;
+        use crate::install::vendor::SettingsValueType as Ty;
+
+        let rows: Vec<_> = ClaudeVendor
+            .settings_fields()
+            .iter()
+            .map(|field| (field.pointer, field.ty, field.scopes))
+            .collect();
+        let effort = Ty::Enum(&["low", "medium", "high", "xhigh"]);
+        let mode = Ty::Enum(&[
+            "default",
+            "acceptEdits",
+            "plan",
+            "auto",
+            "dontAsk",
+            "bypassPermissions",
+            "manual",
+        ]);
+        let theme = Ty::Enum(&[
+            "auto",
+            "dark",
+            "light",
+            "dark-daltonized",
+            "light-daltonized",
+            "dark-ansi",
+            "light-ansi",
+        ]);
+        assert_eq!(
+            rows,
+            vec![
+                ("/model", Ty::String, Both),
+                ("/effortLevel", effort, Both),
+                ("/outputStyle", Ty::String, Both),
+                ("/language", Ty::String, Both),
+                ("/spinnerTipsEnabled", Ty::Bool, Both),
+                ("/alwaysThinkingEnabled", Ty::Bool, Both),
+                ("/includeGitInstructions", Ty::Bool, Both),
+                ("/permissions/allow", Ty::StringList, Both),
+                ("/permissions/deny", Ty::StringList, Both),
+                ("/permissions/ask", Ty::StringList, Both),
+                ("/permissions/defaultMode", mode, Both),
+                ("/sandbox/enabled", Ty::Bool, Both),
+                ("/extraKnownMarketplaces/<name>", Ty::Atomic { keys: &["source"] }, Both),
+                ("/theme", theme, Both),
+                ("/editorMode", Ty::Enum(&["normal", "vim"]), Both),
+                ("/tui", Ty::Enum(&["default", "fullscreen"]), Both),
+                ("/attribution/commit", Ty::String, Both),
+                ("/attribution/pr", Ty::String, Both),
+                ("/attribution/sessionUrl", Ty::Bool, Both),
+                ("/sandbox/filesystem/allowWrite", Ty::StringList, Both),
+                ("/sandbox/filesystem/denyWrite", Ty::StringList, Both),
+                ("/sandbox/filesystem/denyRead", Ty::StringList, Both),
+                ("/sandbox/filesystem/allowRead", Ty::StringList, Both),
+            ]
+        );
+    }
+
+    #[test]
+    fn settings_document_checks_each_value_type() {
+        use crate::oci::settings::SettingsDocument;
+
+        let good = concat!(
+            "description = \"d\"\n[claude]\ntheme = \"light-ansi\"\neditorMode = \"vim\"\ntui = \"fullscreen\"\n",
+            "[claude.attribution]\ncommit = \"\"\npr = \"Made with care\"\nsessionUrl = false\n",
+            "[claude.sandbox.filesystem]\nallowWrite = [\"~/.kube\"]\ndenyRead = [\"~/.aws/credentials\"]\n",
+        );
+        let (document, _) = SettingsDocument::from_toml_str_with_requires(good).unwrap();
+        assert_eq!(
+            serde_json::Value::Object(document.vendors["claude"].clone()),
+            serde_json::json!({
+                "theme": "light-ansi",
+                "editorMode": "vim",
+                "tui": "fullscreen",
+                "attribution": {"commit": "", "pr": "Made with care", "sessionUrl": false},
+                "sandbox": {"filesystem": {"allowWrite": ["~/.kube"], "denyRead": ["~/.aws/credentials"]}},
+            })
+        );
+        for bad in [
+            "[claude]\ntheme = \"custom:mine\"",
+            "[claude]\ntheme = \"Dark\"",
+            "[claude]\neditorMode = \"emacs\"",
+            "[claude]\ntui = \"windowed\"",
+            "[claude]\nattribution = false",
+            "[claude.attribution]\ncommit = 5",
+            "[claude.attribution]\nsessionUrl = \"no\"",
+            "[claude.attribution]\nbogus = \"x\"",
+            "[claude.sandbox.filesystem]\nallowRead = \".\"",
+            "[claude.sandbox.filesystem]\nallowManagedReadPathsOnly = true",
+        ] {
+            let text = format!("description = \"d\"\n{bad}\n");
+            assert!(SettingsDocument::from_toml_str_with_requires(&text).is_err(), "{bad}");
+        }
+    }
+
+    /// A user's `"attribution": false` stands where each `/attribution/*` piece
+    /// goes, so the piece lands on the type-conflict row and refuses, and a
+    /// write without `--force` leaves `false` byte for byte.
+    #[test]
+    fn settings_attribution_false_refuses_a_piece_beneath_it() {
+        use crate::install::install_state::settings_value_hash;
+        use crate::install::json_splice::PointerRead;
+        use crate::install::settings_phase::{FileValue, Piece, Row, Verdict};
+        use crate::install::settings_writer::{SettingsOp, apply, read_pointer};
+        use crate::install::vendor::McpConfigFormat;
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        let user = "{\n  \"model\": \"opus\",\n  \"attribution\": false\n}\n";
+        std::fs::write(&file, user).unwrap();
+        for (pointer, value) in [
+            ("/attribution/commit", serde_json::json!("")),
+            ("/attribution/pr", serde_json::json!("Made with care")),
+            ("/attribution/sessionUrl", serde_json::json!(false)),
+        ] {
+            let path: Vec<String> = pointer.trim_start_matches('/').split('/').map(str::to_string).collect();
+            let read = read_pointer(McpConfigFormat::Json, user, &path).unwrap();
+            assert_eq!(
+                read,
+                PointerRead::Blocked {
+                    ancestor: vec!["attribution".to_string()]
+                },
+                "{pointer}"
+            );
+            let held = FileValue::of(read, &path, Some(&value), None);
+            let wanted = settings_value_hash(&value);
+            let piece = Piece {
+                file: &held,
+                wanted: Some(&wanted),
+                recorded: None,
+            };
+            assert_eq!(piece.row(), Row::Blocked, "{pointer}");
+            assert_eq!(piece.verdict(false), Verdict::Refuse { forceable: true }, "{pointer}");
+
+            let upsert = SettingsOp::Upsert { path, value };
+            assert!(
+                apply(&file, McpConfigFormat::Json, &[upsert], &[], false).is_err(),
+                "{pointer}"
+            );
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), user, "{pointer}");
+        }
+    }
+
+    /// Claude ignores any other mode from a local file, so the row says which
+    /// three apply there.
+    #[test]
+    fn settings_default_mode_narrows_to_three_values_at_project_scope() {
+        let narrowed: Vec<_> = ClaudeVendor
+            .settings_fields()
+            .iter()
+            .filter_map(|field| field.project_values.map(|values| (field.pointer, values)))
+            .collect();
+        assert_eq!(
+            narrowed,
+            vec![(
+                "/permissions/defaultMode",
+                ["default", "acceptEdits", "plan"].as_slice()
+            )]
+        );
+    }
+
+    #[test]
+    fn settings_rows_close_no_map_and_require_nothing() {
+        for field in ClaudeVendor.settings_fields() {
+            assert_eq!(field.map_keys, None, "{}", field.pointer);
+            assert!(!field.required_by_client, "{}", field.pointer);
+        }
+    }
+
+    #[test]
+    fn settings_path_at_project_scope_is_the_local_file() {
+        assert_eq!(
+            ClaudeVendor.settings_config_path(Path::new("/w"), ConfigScope::Project),
+            Some(PathBuf::from("/w/.claude/settings.local.json"))
+        );
+    }
+
+    /// `CLAUDE_CONFIG_DIR` moves the file with the rest of the root, and an
+    /// unresolved root has no file: `.claude/settings.json` in a workspace is
+    /// the tracked one.
+    #[test]
+    fn settings_path_at_global_scope_follows_the_config_root() {
+        let home = || Some(PathBuf::from("/home/u"));
+        assert_eq!(
+            global_settings_path(global_root(Some(PathBuf::from("/custom/cl")), home())),
+            Some(PathBuf::from("/custom/cl/settings.json"))
+        );
+        assert_eq!(
+            global_settings_path(global_root(None, home())),
+            Some(PathBuf::from("/home/u/.claude/settings.json"))
+        );
+        assert_eq!(global_settings_path(global_root(None, None)), None);
+    }
+
+    #[test]
+    fn settings_format_is_json() {
+        assert_eq!(
+            ClaudeVendor.settings_config_format(),
+            crate::install::vendor::McpConfigFormat::Json
+        );
     }
 }

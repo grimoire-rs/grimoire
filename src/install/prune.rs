@@ -150,6 +150,37 @@ pub struct PrunedArtifact {
     pub clients: Vec<String>,
 }
 
+/// [`prune_orphans`] on the blocking pool, since deleting an orphan is file
+/// I/O. `state` takes what the pass left, also when it stopped on an error.
+///
+/// # Errors
+///
+/// As [`prune_orphans`], or [`PruneError::Io`] at the workspace when the
+/// blocking task was cancelled; `state` is then unchanged.
+pub(crate) async fn prune_orphans_off_runtime(
+    state: &mut InstallState,
+    lock: &GrimoireLock,
+    roots: &AnchorRoots,
+    force: bool,
+) -> Result<Vec<PrunedArtifact>, PruneError> {
+    let (mut owned, lock, roots_owned) = (state.clone(), lock.clone(), roots.clone());
+    let work = move || {
+        let result = prune_orphans(&mut owned, &lock, &roots_owned, force);
+        (owned, result)
+    };
+    match tokio::task::spawn_blocking(work).await {
+        Ok((pruned, result)) => {
+            *state = pruned;
+            result
+        }
+        Err(join) if join.is_panic() => std::panic::resume_unwind(join.into_panic()),
+        Err(join) => Err(PruneError::Io {
+            path: roots.workspace.clone(),
+            source: io::Error::other(join),
+        }),
+    }
+}
+
 /// Remove every materialized artifact absent from `lock`.
 ///
 /// An orphan whose on-disk content matches its recorded hash (or whose
@@ -205,8 +236,9 @@ pub fn prune_orphans(
     let orphans: Vec<Orphan> = state
         .iter_records()
         // A dev-install record (`grim install <path>`) is intentionally
-        // undeclared — never an orphan.
-        .filter(|r| !r.dev && !declared.contains(&(r.kind, r.name.clone())))
+        // undeclared — never an orphan. A settings record names values inside
+        // a shared file, so deleting it as a footprint would take the user's file.
+        .filter(|r| !r.dev && r.kind != ArtifactKind::Settings && !declared.contains(&(r.kind, r.name.clone())))
         .map(|r| Orphan {
             kind: r.kind,
             name: r.name.clone(),
@@ -362,17 +394,20 @@ fn is_modified(state: &InstallState, kind: ArtifactKind, name: &str, roots: &Anc
 /// [`UninstallError::EntryModified`] is unreachable from here by
 /// construction — the `is_modified` gate above already preserves a drifted
 /// orphan as `KeptModified`, and `force` is passed straight through, so the
-/// uninstall seam's own entry gate can never fire on this path. The arm
-/// exists for exhaustiveness and maps to the same I/O tier as any other
-/// unexpected failure to act on the recorded footprint.
+/// uninstall seam's own entry gate can never fire on this path. So is
+/// [`UninstallError::SettingsDrifted`], because [`prune_orphans`] never takes a
+/// settings record. The arm exists for exhaustiveness and maps to the same I/O
+/// tier as any other unexpected failure to act on the recorded footprint.
 fn prune_error(path: PathBuf, source: UninstallError) -> PruneError {
     match source {
         UninstallError::Anchor(e) => PruneError::Anchor { path, source: e },
         UninstallError::Io(io) => PruneError::Io { path, source: io },
-        UninstallError::EntryModified { .. } => PruneError::Io {
-            path,
-            source: io::Error::new(io::ErrorKind::InvalidData, source.to_string()),
-        },
+        UninstallError::EntryModified { .. } | UninstallError::SettingsDrifted { .. } | UninstallError::Settings(_) => {
+            PruneError::Io {
+                path,
+                source: io::Error::new(io::ErrorKind::InvalidData, source.to_string()),
+            }
+        }
     }
 }
 
@@ -448,18 +483,23 @@ pub fn reap_dropped_clients(
     // A dev-install record is out-of-band from the configured client set
     // (materialized to whatever one-off `--client` list `grim install <path>`
     // chose), so it is never reaped — matching status's dev-row drift contract.
+    // A settings output addresses a value in a shared file, not a footprint.
     let records: Vec<(ArtifactKind, String, Vec<ClientOutput>)> = state
         .iter_records()
-        .filter(|r| !r.dev)
+        .filter(|r| !r.dev && r.kind != ArtifactKind::Settings)
         .map(|r| (r.kind, r.name.clone(), r.outputs.clone()))
         .collect();
 
     let mut acted = Vec::new();
+    // Keyed on the output, never the client: a client's kept-modified output
+    // must stay recorded beside the one reaped, or `--force` can no longer reach it.
+    let mut drops: Vec<(ArtifactKind, &str, Vec<&ClientOutput>)> = Vec::new();
     for (kind, name, outputs) in &records {
         let mut reaped = Vec::new();
         let mut kept_modified = Vec::new();
         let mut retained = Vec::new();
         let mut abandoned_entries = Vec::new();
+        let mut dropped: Vec<&ClientOutput> = Vec::new();
         // Classify every output before deleting anything: the delete pass needs
         // the COMPLETE drop set (`reaped`) so the `.agents/skills` refcount
         // guard can tell a surviving sibling from one dropping in the same pass.
@@ -480,7 +520,7 @@ pub fn reap_dropped_clients(
             }
             // Integrity gate: is the footprint present, and does it still match
             // the recorded hash?
-            let present = match out.is_present(roots, Containment::Strict) {
+            let present = match out.is_present(*kind, roots, Containment::Strict) {
                 Ok(present) => present,
                 Err(e) if is_security_class(&e) => {
                     return Err(PruneError::Anchor {
@@ -510,10 +550,12 @@ pub fn reap_dropped_clients(
                         Some(pointer) => abandoned_entries.push(AbandonedEntry {
                             path: resolved,
                             pointer: pointer.clone(),
+                            element: out.element.clone(),
                         }),
                         None => retained.push(resolved),
                     }
                     reaped.push(out.client.clone());
+                    dropped.push(out);
                     continue;
                 }
                 Err(e) => {
@@ -561,6 +603,7 @@ pub fn reap_dropped_clients(
                 to_delete.push(out);
             }
             reaped.push(out.client.clone());
+            dropped.push(out);
         }
         // Delete each dropped output's footprint UNLESS a surviving sibling
         // still records the same target + support dir — the shared-pool
@@ -595,14 +638,18 @@ pub fn reap_dropped_clients(
                 abandoned_entries.push(AbandonedEntry {
                     path,
                     pointer: pointer.clone(),
+                    element: out.element.clone(),
                 });
                 continue;
             }
             delete_output(out, roots)?;
         }
         if !reaped.is_empty() || !kept_modified.is_empty() {
+            // A client with several outputs is one client in each list.
             reaped.sort();
+            reaped.dedup();
             kept_modified.sort();
+            kept_modified.dedup();
             // Same shared-pool dedup as `uninstall`: several dropped-client
             // outputs can escape to the identical resolved path, each
             // pushing it above — sort and dedup so `retained` (and
@@ -621,21 +668,21 @@ pub fn reap_dropped_clients(
                 abandoned_entries,
             });
         }
+        if !dropped.is_empty() {
+            drops.push((*kind, name, dropped));
+        }
     }
 
     // Mutation pass: drop every reaped output from its record; a record left
     // with no outputs (every client dropped) is removed whole so the
     // "outputs is never empty" invariant holds.
-    for r in &acted {
-        if r.reaped.is_empty() {
-            continue;
-        }
-        let Some(mut rec) = state.get(r.kind, &r.name).cloned() else {
+    for (kind, name, dropped) in drops {
+        let Some(mut rec) = state.get(kind, name).cloned() else {
             continue;
         };
-        rec.outputs.retain(|o| !r.reaped.contains(&o.client));
+        rec.outputs.retain(|o| !dropped.contains(&o));
         if rec.outputs.is_empty() {
-            state.remove(r.kind, &r.name);
+            state.remove(kind, name);
         } else {
             state.record(rec);
         }
@@ -813,6 +860,7 @@ mod tests {
                 support_dir: None,
                 entry: None,
                 adopted: false,
+                element: None,
             }],
         });
         file
@@ -839,6 +887,7 @@ mod tests {
                 support_dir: None,
                 entry: None,
                 adopted: false,
+                element: None,
             }],
         });
         dir
@@ -882,6 +931,7 @@ mod tests {
                 support_dir: None,
                 entry: None,
                 adopted: false,
+                element: None,
             }],
         });
         file
@@ -890,6 +940,7 @@ mod tests {
     fn lock_of(rules: Vec<LockedArtifact>) -> GrimoireLock {
         GrimoireLock {
             hooks: vec![],
+            settings: vec![],
             metadata: LockMetadata {
                 lock_version: LockVersion::V1,
                 declaration_hash_version: 1,
@@ -933,6 +984,7 @@ mod tests {
             support_dir: None,
             entry: None,
             adopted: false,
+            element: None,
         }
     }
 
@@ -1048,6 +1100,7 @@ mod tests {
                     support_dir: None,
                     entry: None,
                     adopted: false,
+                    element: None,
                 })
                 .collect(),
         });
@@ -1112,6 +1165,7 @@ mod tests {
         let payload = install_hook_for(&mut state, ws, "shell-guard", &["claude", "codex"]);
 
         let lock = GrimoireLock {
+            settings: vec![],
             hooks: vec![locked_of_kind(ArtifactKind::Hook, "shell-guard")],
             ..lock_of(vec![])
         };
@@ -1122,6 +1176,21 @@ mod tests {
             state.get(ArtifactKind::Hook, "shell-guard").is_some(),
             "the record must survive a prune pass"
         );
+    }
+
+    #[tokio::test]
+    async fn a_prune_on_the_blocking_pool_hands_its_state_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        let payload = install_hook_for(&mut state, ws, "shell-guard", &["claude"]);
+
+        let acted = prune_orphans_off_runtime(&mut state, &lock_of(vec![]), &roots(ws), false)
+            .await
+            .unwrap();
+        assert_eq!(acted.len(), 1, "{acted:?}");
+        assert!(!payload.exists());
+        assert!(state.get(ArtifactKind::Hook, "shell-guard").is_none());
     }
 
     /// The other direction, so the guard above cannot be satisfied by simply
@@ -1369,6 +1438,7 @@ mod tests {
                 support_dir: None,
                 entry: None,
                 adopted: false,
+                element: None,
             }],
         });
 
@@ -1424,6 +1494,7 @@ mod tests {
                 support_dir: None,
                 entry: None,
                 adopted: false,
+                element: None,
             }],
         });
 
@@ -1486,6 +1557,7 @@ mod tests {
             support_dir: None,
             entry: None,
             adopted: false,
+            element: None,
         }
     }
 
@@ -1754,6 +1826,7 @@ mod tests {
             vec![AbandonedEntry {
                 path: cfg.clone(),
                 pointer: "/mcpServers/mine".to_string(),
+                element: None,
             }]
         );
         assert_eq!(
@@ -1873,6 +1946,96 @@ mod tests {
         );
     }
 
+    /// Copilot's two project files, `(relative, container)`, in the order
+    /// `mcp_config_paths` lists them.
+    const COPILOT_MCP_FILES: [(&str, &str); 2] = [(".vscode/mcp.json", "servers"), (".github/mcp.json", "mcpServers")];
+
+    /// Write Copilot's two files, each holding member `name` as `{"command": <command>}`.
+    fn write_copilot_configs(ws: &std::path::Path, name: &str, commands: [&str; 2]) -> [std::path::PathBuf; 2] {
+        std::array::from_fn(|i| {
+            let ((relative, container), command) = (COPILOT_MCP_FILES[i], commands[i]);
+            let path = ws.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let doc = serde_json::json!({ container: { name: { "command": command } } });
+            std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+            path
+        })
+    }
+
+    /// One Copilot entry output per file, each recorded as `{"command": "grim"}`.
+    fn copilot_outputs(name: &str) -> Vec<ClientOutput> {
+        COPILOT_MCP_FILES
+            .iter()
+            .map(|(relative, container)| {
+                let mut out = entry_output("copilot", name, false);
+                out.target.relative = (*relative).to_string();
+                out.entry = Some(format!("/{container}/{name}"));
+                out
+            })
+            .collect()
+    }
+
+    /// Reaping works per output: the edited file stays recorded beside the
+    /// unedited one that goes, so a later `--force` can still reach it.
+    #[test]
+    fn a_dropped_client_keeps_its_modified_output_recorded_while_the_intact_one_is_reaped() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dunce::canonicalize(dir.path()).unwrap();
+        let [vscode, github] = write_copilot_configs(&ws, "srv", ["grim", "edited"]);
+        let edited = std::fs::read(&github).unwrap();
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        record_mcp(&mut state, "srv", copilot_outputs("srv"));
+
+        let acted = reap_dropped_clients(&mut state, &[ClientTarget::Claude], &roots(&ws), false).unwrap();
+
+        assert_eq!(acted[0].reaped, vec!["copilot".to_string()], "{:?}", acted[0]);
+        assert_eq!(acted[0].kept_modified, vec!["copilot".to_string()], "{:?}", acted[0]);
+        let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&vscode).unwrap()).unwrap();
+        assert!(
+            doc["servers"].get("srv").is_none(),
+            "the intact member is spliced out: {doc}"
+        );
+        assert_eq!(std::fs::read(&github).unwrap(), edited, "the edited file is untouched");
+        let rec = state
+            .get(ArtifactKind::Mcp, "srv")
+            .expect("the modified output was not reaped, so it stays recorded");
+        assert_eq!(rec.outputs, copilot_outputs("srv")[1..].to_vec());
+
+        let forced = reap_dropped_clients(&mut state, &[ClientTarget::Claude], &roots(&ws), true).unwrap();
+
+        assert_eq!(forced[0].reaped, vec!["copilot".to_string()], "{:?}", forced[0]);
+        assert!(state.get(ArtifactKind::Mcp, "srv").is_none(), "--force reaps the rest");
+        let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&github).unwrap()).unwrap();
+        assert!(doc["mcpServers"].get("srv").is_none(), "{doc}");
+    }
+
+    /// A client is one client however many outputs it has: each list names
+    /// it once, sorted beside the others.
+    #[test]
+    fn a_two_output_client_is_listed_once_in_each_list() {
+        for (command, intact) in [("grim", true), ("edited", false)] {
+            let dir = tempfile::tempdir().unwrap();
+            let ws = dunce::canonicalize(dir.path()).unwrap();
+            write_mcp_config(&ws, &[("srv", command)]);
+            write_copilot_configs(&ws, "srv", [command, command]);
+            let mut state = InstallState::empty(&ws.join("state.json"));
+            let mut outputs = copilot_outputs("srv");
+            outputs.push(entry_output("claude", "srv", false));
+            record_mcp(&mut state, "srv", outputs);
+
+            let acted = reap_dropped_clients(&mut state, &[ClientTarget::Cursor], &roots(&ws), false).unwrap();
+
+            let both = vec!["claude".to_string(), "copilot".to_string()];
+            let (listed, other) = if intact {
+                (&acted[0].reaped, &acted[0].kept_modified)
+            } else {
+                (&acted[0].kept_modified, &acted[0].reaped)
+            };
+            assert_eq!(*listed, both, "intact={intact}: {:?}", acted[0]);
+            assert!(other.is_empty(), "intact={intact}: {:?}", acted[0]);
+        }
+    }
+
     // ARCH-4/SC-03: a SECURITY-CLASS AnchorError (a tampered `../` relative)
     // on a dropped-client output is FATAL — it propagates as
     // PruneError::Anchor (→ DataError 65) and is never reaped.
@@ -1896,6 +2059,7 @@ mod tests {
                 support_dir: None,
                 entry: None,
                 adopted: false,
+                element: None,
             }],
         });
 
@@ -1956,6 +2120,7 @@ mod tests {
             support_dir: None,
             entry: None,
             adopted: false,
+            element: None,
         };
         let outputs = [reaping.clone(), surviving];
 
@@ -2005,6 +2170,7 @@ mod tests {
                 support_dir: None,
                 entry: None,
                 adopted: false,
+                element: None,
             }],
         });
 
@@ -2080,6 +2246,7 @@ mod tests {
                     support_dir: None,
                     entry: None,
                     adopted: false,
+                    element: None,
                 },
                 ClientOutput {
                     client: "codex".to_string(),
@@ -2091,6 +2258,7 @@ mod tests {
                     support_dir: None,
                     entry: None,
                     adopted: false,
+                    element: None,
                 },
             ],
         });
@@ -2160,6 +2328,7 @@ mod tests {
                     }),
                     entry: None,
                     adopted: false,
+                    element: None,
                 },
                 ClientOutput {
                     client: "codex".to_string(),
@@ -2171,6 +2340,7 @@ mod tests {
                     support_dir: None,
                     entry: None,
                     adopted: false,
+                    element: None,
                 },
             ],
         });
@@ -2219,6 +2389,7 @@ mod tests {
                 support_dir: None,
                 entry: None,
                 adopted: false,
+                element: None,
             }],
         });
 
@@ -2385,6 +2556,49 @@ mod tests {
         assert!(
             state.get(ArtifactKind::Mcp, "grim").is_none(),
             "every output reaped ⇒ the record drops whole"
+        );
+    }
+
+    /// A settings output names a shared harness file, so a generic seam that
+    /// took it for a footprint would delete or splice a file the user owns.
+    #[test]
+    fn generic_removal_seams_skip_settings_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        let cfg = write_mcp_config(ws, &[("team", "grim")]);
+        let before_bytes = std::fs::read(&cfg).unwrap();
+        state.record(InstallRecord {
+            kind: ArtifactKind::Settings,
+            name: "team".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned("team")),
+            dev: false,
+            outputs: vec![entry_output("claude", "team", false)],
+        });
+        // Positive control: the same pass prunes and reaps a rule.
+        let orphan = install_rule(&mut state, ws, "orphan");
+        let lock = lock_of(vec![]);
+
+        let pruned = prune_orphans(&mut state, &lock, &roots(ws), true).unwrap();
+        assert_eq!(pruned.len(), 1, "{pruned:?}");
+        assert_eq!(pruned[0].kind, ArtifactKind::Rule);
+        assert!(!orphan.exists());
+        assert!(state.get(ArtifactKind::Settings, "team").is_some());
+
+        let kept = install_rule(&mut state, ws, "kept");
+        let reaped = reap_dropped_clients(&mut state, &[ClientTarget::Cursor], &roots(ws), true).unwrap();
+        assert_eq!(reaped.len(), 1, "{reaped:?}");
+        assert_eq!(reaped[0].kind, ArtifactKind::Rule);
+        assert!(!kept.exists());
+        let record = state.get(ArtifactKind::Settings, "team").expect("still recorded");
+        assert_eq!(record.outputs.len(), 1);
+        assert_eq!(std::fs::read(&cfg).unwrap(), before_bytes);
+
+        let before = state.clone();
+        state.remove(ArtifactKind::Settings, "team");
+        assert!(
+            crate::install::install_state::retired_outputs(&before, &state).is_empty(),
+            "a settings output never reaches a vendor sync as retired"
         );
     }
 }

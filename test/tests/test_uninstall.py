@@ -74,11 +74,12 @@ def test_uninstall_report_carries_the_frozen_key_set_with_retained(
 
     out = runner.json("uninstall", "skill", "code-review")
     assert set(out.keys()) == {
-        "kind", "name", "status", "retained", "abandoned_entries",
-    }, f"uninstall must carry exactly the 5 frozen fields; got: {sorted(out.keys())}"
+        "kind", "name", "status", "retained", "abandoned_entries", "settings_changes",
+    }, f"uninstall must carry exactly the 6 frozen fields; got: {sorted(out.keys())}"
     assert out["status"] == "uninstalled"
     assert out["retained"] == [], "a healthy uninstall deletes everything it recorded"
     assert out["abandoned_entries"] == [], "a healthy uninstall leaves no entry un-spliced"
+    assert out["settings_changes"] == [], "no settings value moved"
 
     # A no-op uninstall reports the key too — never an absent key a client
     # would have to version-sniff for.
@@ -86,6 +87,7 @@ def test_uninstall_report_carries_the_frozen_key_set_with_retained(
     assert again["status"] == "not-installed"
     assert again["retained"] == []
     assert again["abandoned_entries"] == []
+    assert again["settings_changes"] == []
 
 
 def test_uninstall_is_idempotent(

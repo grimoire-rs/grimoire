@@ -39,8 +39,11 @@ use crate::api::add_report::{AddReport, PulledIn};
 use crate::cli::exit_code::ExitCode;
 use crate::command::command_error::CommandError;
 use crate::context::Context;
-use crate::install::installer::{ForceScope, InstallIntent, install_and_persist};
+use crate::hook::policy::HookPolicy;
+use crate::install::install_state::SettingsStore;
+use crate::install::installer::{ForceScope, InstallIntent, SettingsRun, install_and_persist};
 use crate::install::materializer::DefaultMaterializer;
+use crate::install::settings_phase::{self, SettingsInput};
 use crate::install::target::InstallTarget;
 use crate::lock::effective_set::{NodeKey, effective_set};
 use crate::lock::file_lock::ConfigFileLock;
@@ -64,15 +67,15 @@ pub struct AddArgs {
     /// the artifact verbatim and pins it by content hash.
     pub reference: String,
 
-    /// The artifact kind (`skill`, `rule`, `agent`, `bundle`, `mcp`, or
-    /// `hook`). Inferred from the published manifest's kind annotation when
-    /// omitted.
+    /// The artifact kind (`skill`, `rule`, `agent`, `bundle`, `mcp`, `hook`,
+    /// or `settings`). Inferred from the published manifest's kind annotation
+    /// when omitted.
     //
     // `hook` is appended, never inserted — the accepted value set is a frozen
     // CLI surface and widening it is the additive direction (Principle 9). A
     // hook may be declared with the feature flag off: declaring and locking are
     // not arming, and the install step is what gates.
-    #[arg(long, short = 'k', value_parser = ["skill", "rule", "agent", "bundle", "mcp", "hook"])]
+    #[arg(long, short = 'k', value_parser = ["skill", "rule", "agent", "bundle", "mcp", "hook", "settings"])]
     pub kind: Option<String>,
 
     /// The config binding name. Defaults to the reference's last path
@@ -86,7 +89,7 @@ pub struct AddArgs {
     #[arg(long)]
     pub force: bool,
 
-    /// `--trust-hooks` / `--no-trust-hooks`: the per-invocation half of the
+    /// `--trust-workspace` / `--no-trust-workspace`: the per-invocation half of the
     /// same question the workspace consent record answers durably.
     #[command(flatten)]
     pub hook_trust: crate::cli::options::HookTrustOpts,
@@ -214,7 +217,13 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
 
     // Persist the edited config, then relock — rolling the config back if
     // the relock fails.
-    let (new_lock, previous) = write_config_and_relock(&scope, &set, kind, &name, &access).await?;
+    let declaration = Declaration {
+        set: &set,
+        kind,
+        name: &name,
+    };
+    let (new_lock, previous) =
+        write_config_and_relock(ctx, &scope, &declaration, args.hook_trust.flag(), &access).await?;
     let added = Added::new(&scope, previous.as_ref(), &new_lock, kind, &name);
 
     // Default: materialize the freshly-declared artifact into the detected
@@ -223,9 +232,11 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     // the acted-on entry reaches (itself, or a bundle's members, plus their
     // dependencies) is projected out and installed, so the rest of a shared
     // lock stays for `grim install`.
-    if args.install.enabled() {
-        install_added(ctx, &scope, &added, &access, args).await?;
-    }
+    let settings_changes = if args.install.enabled() {
+        install_added(ctx, &scope, &added, &new_lock, &access, args).await?
+    } else {
+        Vec::new()
+    };
 
     // A bundle has no single pinned member to report; surface the bundle
     // reference itself. A skill/rule/agent reports the digest it resolved to.
@@ -254,7 +265,9 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     });
 
     Ok((
-        AddReport::new(kind, name, pinned).with_pulled_in(added.pulled_in()),
+        AddReport::new(kind, name, pinned)
+            .with_pulled_in(added.pulled_in())
+            .with_settings_changes(settings_changes),
         ExitCode::Success,
     ))
 }
@@ -281,16 +294,17 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
 ///
 /// # Errors
 ///
-/// An unreadable config (74/78), the config write, or any
-/// [`ResolveError`](crate::resolve::resolve_error::ResolveError) from the
-/// relock — the latter after the rollback has run.
+/// An unreadable config (74/78), the config write, a settings conflict (78), or
+/// any [`ResolveError`](crate::resolve::resolve_error::ResolveError) from the
+/// relock — the last two after the rollback has run.
 async fn write_config_and_relock(
+    ctx: &Context,
     scope: &scope_resolution::ResolvedScope,
-    set: &crate::config::declaration::DesiredSet,
-    kind: ArtifactKind,
-    name: &str,
+    declaration: &Declaration<'_>,
+    trust: Option<bool>,
     access: &Arc<dyn OciAccess>,
 ) -> anyhow::Result<(GrimoireLock, Option<GrimoireLock>)> {
+    let &Declaration { set, kind, name } = declaration;
     // Snapshot the pre-write config. Absence is the legitimate "nothing to
     // put back" case (a scope whose config `add` is creating); any other
     // read failure aborts rather than risking a rollback that deletes a
@@ -329,8 +343,75 @@ async fn write_config_and_relock(
             return super::grim(Err(e));
         }
     };
+    // A lock on disk is what every later run reads, so a conflict refuses before
+    // the save. It rolls the config back as a failed relock does.
+    if let Err(e) = refuse_added_conflict(ctx, scope, declaration, previous.as_ref(), &new_lock, trust, access).await {
+        restore_config(&scope.config_path, original.as_deref());
+        return Err(e);
+    }
     super::grim(lock_io::save(&scope.lock_path, &new_lock, previous.as_ref()))?;
     Ok((new_lock, previous))
+}
+
+/// Run the settings conflict check over the lock this add would save. Past the
+/// flag, what the add brings counts as armed, even under `--no-install`. Told no,
+/// it arms nothing and so conflicts with nothing.
+async fn refuse_added_conflict(
+    ctx: &Context,
+    scope: &scope_resolution::ResolvedScope,
+    declaration: &Declaration<'_>,
+    previous: Option<&GrimoireLock>,
+    lock: &GrimoireLock,
+    trust: Option<bool>,
+    access: &Arc<dyn OciAccess>,
+) -> anyhow::Result<()> {
+    if lock.settings.is_empty() || !scope.options.experimental.settings_enabled() {
+        return Ok(());
+    }
+    let added = Added::new(scope, previous, lock, declaration.kind, declaration.name);
+    let brought = |artifact: &&LockedArtifact| {
+        let node = (artifact.kind, artifact.name.clone());
+        trust != Some(false) && (node == added.target || added.newly.contains(&node))
+    };
+    let names: Vec<_> = lock.settings.iter().filter(brought).map(|a| a.name.clone()).collect();
+    let policy = super::hook_consent::settings_policy(ctx, scope, lock, trust)?;
+    refuse_settings_conflict(scope, lock, policy, &names, access).await
+}
+
+/// Refuse a lock whose armed settings packages conflict, before it is saved.
+/// `added` names what counts as armed without the policy's say.
+///
+/// # Errors
+///
+/// Target parse (65/78), install-state I/O (74), or the conflict itself (78).
+pub(super) async fn refuse_settings_conflict(
+    scope: &scope_resolution::ResolvedScope,
+    lock: &GrimoireLock,
+    policy: HookPolicy,
+    added: &[String],
+    access: &Arc<dyn OciAccess>,
+) -> anyhow::Result<()> {
+    let target = super::grim(InstallTarget::parse(
+        &scope.workspace,
+        scope.scope,
+        &[],
+        &scope.options.clients,
+        &scope.options.vendors,
+    ))?
+    .with_settings_policy(policy);
+    let state =
+        super::grim(scope_resolution::load_state(scope).map_err(|e| super::install::state_io(&scope.state_path, e)))?;
+    // A refused store applies nothing, so nothing it would apply can conflict.
+    if *state.settings_store() == SettingsStore::Refused {
+        return Ok(());
+    }
+    let input = SettingsInput {
+        access,
+        target: &target,
+        roots: &scope.roots,
+        added,
+    };
+    super::grim(settings_phase::preflight(lock, &input).await)
 }
 
 /// Put the pre-write config back at `path` after a failed relock: the
@@ -449,12 +530,20 @@ async fn add_path_source(
     }
 
     let access: Arc<dyn OciAccess> = super::access_seam(ctx)?;
-    let (new_lock, previous) = write_config_and_relock(scope, &set, kind, &name, &access).await?;
+    let declaration = Declaration {
+        set: &set,
+        kind,
+        name: &name,
+    };
+    let (new_lock, previous) =
+        write_config_and_relock(ctx, scope, &declaration, args.hook_trust.flag(), &access).await?;
     let added = Added::new(scope, previous.as_ref(), &new_lock, kind, &name);
 
-    if args.install.enabled() {
-        install_added(ctx, scope, &added, &access, args).await?;
-    }
+    let settings_changes = if args.install.enabled() {
+        install_added(ctx, scope, &added, &new_lock, &access, args).await?
+    } else {
+        Vec::new()
+    };
 
     let pinned = new_lock
         .iter_artifacts()
@@ -472,9 +561,19 @@ async fn add_path_source(
     });
 
     Ok((
-        AddReport::new(kind, name, pinned).with_pulled_in(added.pulled_in()),
+        AddReport::new(kind, name, pinned)
+            .with_pulled_in(added.pulled_in())
+            .with_settings_changes(settings_changes),
         ExitCode::Success,
     ))
+}
+
+/// The desired set an `add` writes, and the node it declares.
+#[derive(Clone, Copy)]
+struct Declaration<'a> {
+    set: &'a crate::config::declaration::DesiredSet,
+    kind: ArtifactKind,
+    name: &'a str,
 }
 
 /// What one `add` touches once it is locked: the target, everything it reaches
@@ -535,6 +634,9 @@ pub(crate) fn force_nodes(lock: &GrimoireLock, target: &NodeKey) -> BTreeSet<Nod
 /// The installs that hit a refusal `--force` resolves on a node outside
 /// `force`. A forced retry refuses these again, so callers must not offer
 /// one: the CLI names them in its error, the TUI opens no Overwrite dialog.
+///
+/// A settings row carries the whole phase's list, so it counts by its pieces,
+/// not by its own name: the piece may be an orphan's, which no lock row names.
 pub(crate) fn refusals_outside_force<'a>(
     outcomes: &'a [crate::install::installer::ArtifactInstall],
     force: &BTreeSet<NodeKey>,
@@ -542,14 +644,22 @@ pub(crate) fn refusals_outside_force<'a>(
     use crate::install::installer::InstallOutcome;
     outcomes
         .iter()
-        .filter(|o| !force.contains(&(o.reference.kind, o.reference.name.clone())))
-        .filter(|o| {
-            matches!(
-                o.result,
-                Ok(InstallOutcome::Refused { .. } | InstallOutcome::RefusedUntracked { .. })
-            )
+        .filter(|o| match &o.result {
+            Ok(InstallOutcome::RefusedSettings { pieces }) => {
+                pieces.iter().any(|piece| !settings_piece_forced(piece, force))
+            }
+            Ok(InstallOutcome::Refused { .. } | InstallOutcome::RefusedUntracked { .. }) => {
+                !force.contains(&(o.reference.kind, o.reference.name.clone()))
+            }
+            _ => false,
         })
         .collect()
+}
+
+/// Whether `force` reaches `piece`. A piece names one declarer, and a shared
+/// piece a forced run reached never refuses, so that name is enough there.
+fn settings_piece_forced(piece: &crate::api::settings_report::RefusedPiece, force: &BTreeSet<NodeKey>) -> bool {
+    force.contains(&(ArtifactKind::Settings, piece.package.clone()))
 }
 
 impl Added {
@@ -622,6 +732,7 @@ fn provided_before(
         (ArtifactKind::Agent, &declared.agents),
         (ArtifactKind::Mcp, &declared.mcp),
         (ArtifactKind::Hook, &declared.hooks),
+        (ArtifactKind::Settings, &declared.settings),
     ] {
         nodes.extend(map.keys().map(|name| (kind, name.clone())));
     }
@@ -665,32 +776,33 @@ async fn install_added(
     ctx: &Context,
     scope: &super::scope_resolution::ResolvedScope,
     added: &Added,
+    // The settings step plans over every package, not the projection.
+    full_lock: &GrimoireLock,
     access: &Arc<dyn OciAccess>,
-    // `--force` and `--trust-hooks` travel as the parsed args rather than as
+    // `--force` and `--trust-workspace` travel as the parsed args rather than as
     // two more bare booleans at the end of a long argument list.
     args: &AddArgs,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<crate::api::settings_report::SettingsChange>> {
     let single = match &added.projection {
         Some(single) => single,
         // A bundle that resolved to zero members: nothing to install.
-        None if added.target.0 == ArtifactKind::Bundle => return Ok(()),
+        None if added.target.0 == ArtifactKind::Bundle => return Ok(Vec::new()),
         None => anyhow::bail!("resolved lock is missing '{}'", added.target.1),
     };
 
-    // `grim add <hook>` is where the feature flag and consent are answered.
-    // The declaration gesture is the consent, but only for the hooks this add
-    // brings: the target itself and the hooks it newly reaches. A hook already
+    // `grim add <ref>` is where the feature flags and consent are answered.
+    // The declaration gesture is the consent, but only for the gated artifacts
+    // this add brings: the target itself and what it newly reaches. One already
     // sitting in the workspace stays as unconsented as it was.
     let consentable: BTreeSet<String> = single
         .iter_artifacts()
-        .filter(|a| a.kind == ArtifactKind::Hook)
         .filter(|a| {
             let node = (a.kind, a.name.clone());
             node == added.target || added.newly.contains(&node)
         })
-        .filter_map(|a| crate::hook::consent::consent_key(&a.name, &a.source))
+        .filter_map(|a| crate::hook::consent::consent_key_for(a.kind, &a.name, &a.source))
         .collect();
-    let hook_policy = super::hook_consent::resolve_for_add(ctx, scope, single, &consentable, args.hook_trust.flag())?;
+    let policies = super::hook_consent::resolve_for_add(ctx, scope, single, &consentable, args.hook_trust.flag())?;
     let target = super::grim(InstallTarget::parse(
         &scope.workspace,
         scope.scope,
@@ -698,7 +810,8 @@ async fn install_added(
         &scope.options.clients,
         &scope.options.vendors,
     ))?
-    .with_hook_policy(hook_policy);
+    .with_hook_policy(policies.hooks)
+    .with_settings_policy(policies.settings);
     ctx.telemetry()
         .record_install_clients(&target, &scope.workspace, scope.scope);
     let mut state = super::grim(
@@ -714,7 +827,7 @@ async fn install_added(
     // Reuse the exact pipeline `grim install` runs (materialize + persist +
     // vendor config sync). `add` differs only in installing a projection
     // instead of the whole lock and staying silent (no progress bar).
-    let outcomes = super::grim(
+    let run = super::grim(
         install_and_persist(
             single,
             access,
@@ -730,50 +843,64 @@ async fn install_added(
             // `--progress auto` stays silent here (add never rendered a
             // bar); `--progress json` emits the NDJSON events on stderr.
             crate::cli::progress::select_progress(ctx.progress(), false).as_ref(),
+            SettingsRun::Full(full_lock),
         )
         .await,
     )?;
 
     // `finish` surfaces the first refusal, which hides the other dependencies
     // `--force` could not overwrite; name them all so one rerun fixes it.
-    let refused_dependencies: Vec<String> = refusals_outside_force(&outcomes, &added.force)
+    let mut refused_dependencies: Vec<String> = refusals_outside_force(&run.items, &added.force)
         .into_iter()
-        .filter_map(|o| match &o.result {
-            Ok(crate::install::installer::InstallOutcome::RefusedUntracked { path, .. }) => Some(format!(
+        .flat_map(|o| match &o.result {
+            Ok(crate::install::installer::InstallOutcome::RefusedUntracked { path, .. }) => vec![format!(
                 "{} '{}' at {}",
                 o.reference.kind,
                 o.reference.name,
                 path.display()
-            )),
-            _ => None,
+            )],
+            Ok(crate::install::installer::InstallOutcome::RefusedSettings { pieces }) => pieces
+                .iter()
+                .filter(|piece| !settings_piece_forced(piece, &added.force))
+                .map(|piece| {
+                    let file = piece.file.as_deref().unwrap_or_default();
+                    format!("settings '{}' {} in {file}", piece.package, piece.pointer)
+                })
+                .collect(),
+            _ => Vec::new(),
         })
         .collect();
-    // The report is discarded — the add report already names what was declared.
-    super::install::finish(outcomes, &Default::default()).map_err(|e| {
+    // Every settings row carries the whole list, so each piece arrives once per row.
+    let mut named = BTreeSet::new();
+    refused_dependencies.retain(|line| named.insert(line.clone()));
+    // Only the change list survives: the add report names what was declared.
+    let (report, _) = super::install::finish(run, &Default::default()).map_err(|e| {
         if refused_dependencies.is_empty() {
             e
         } else {
             e.context(format!(
-                "dependencies not created by grim already exist and were not overwritten: {}; \
+                "dependencies {} were not overwritten: {}; \
                  --force on add covers the added artifact only, run `grim install --force` to overwrite them",
+                crate::install::install_error::CHANGED_OUTSIDE_GRIM,
                 refused_dependencies.join(", ")
             ))
         }
     })?;
-    Ok(())
+    Ok(report.into_settings_changes())
 }
 
 /// Refuse a binding name `grim add` must not accept: one that is not a plain
-/// name (skill/rule/agent/hook — each becomes a directory or file stem), or a
-/// hook binding reserved for grim's own `$GRIM_HOME/hooks/` entries. Both
-/// route through [`CommandError::InvalidBindingName`] (exit 64, C-109).
+/// name (skill/rule/agent/hook/settings — each becomes a directory or file
+/// stem), or a hook binding reserved for grim's own `$GRIM_HOME/hooks/`
+/// entries. Both route through [`CommandError::InvalidBindingName`] (exit 64,
+/// or 65 for a settings binding).
 ///
 /// Called by `run` (both source forms) after the declare seam returns, and by
 /// `oci::hook`'s agreement test.
 pub fn refuse_bad_binding_name(kind: ArtifactKind, name: &str) -> anyhow::Result<()> {
     let reason = if matches!(
         kind,
-        ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent | ArtifactKind::Hook
+        ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent | ArtifactKind::Hook | ArtifactKind::Settings
     ) && let Err(reason) = crate::skill::SkillName::parse(name)
     {
         reason
@@ -848,6 +975,7 @@ pub(crate) fn reachable_lock(lock: &GrimoireLock, target: &NodeKey) -> Option<Gr
         agents: lock.agents.iter().filter(keep).cloned().collect(),
         mcp: lock.mcp.iter().filter(keep).cloned().collect(),
         hooks: lock.hooks.iter().filter(keep).cloned().collect(),
+        settings: lock.settings.iter().filter(keep).cloned().collect(),
         bundles: Vec::new(),
     })
 }
@@ -885,6 +1013,7 @@ pub(crate) fn single_entry_lock(lock: &GrimoireLock, kind: ArtifactKind, name: &
         agents: Vec::new(),
         mcp: Vec::new(),
         hooks: Vec::new(),
+        settings: Vec::new(),
         bundles: Vec::new(),
     };
     match kind {
@@ -893,6 +1022,7 @@ pub(crate) fn single_entry_lock(lock: &GrimoireLock, kind: ArtifactKind, name: &
         ArtifactKind::Agent => single.agents.push(entry),
         ArtifactKind::Mcp => single.mcp.push(entry),
         ArtifactKind::Hook => single.hooks.push(entry),
+        ArtifactKind::Settings => single.settings.push(entry),
         ArtifactKind::Bundle => return None,
     }
     Some(single)
@@ -921,6 +1051,7 @@ pub(crate) fn bundle_members_lock(lock: &GrimoireLock, bundle_repo: &str, bundle
         // `status` until an unrelated `grim install` picked it up.
         mcp: lock.mcp.iter().filter(|a| is_member(a)).cloned().collect(),
         hooks: lock.hooks.iter().filter(|a| is_member(a)).cloned().collect(),
+        settings: lock.settings.iter().filter(|a| is_member(a)).cloned().collect(),
         // A projection feeds the installer only — the bundle cache is not
         // consulted there, so it is not carried over.
         bundles: Vec::new(),
@@ -953,6 +1084,7 @@ pub(crate) fn declare(
         ArtifactKind::Bundle => set.bundles.insert(name, source),
         ArtifactKind::Mcp => set.mcp.insert(name, source),
         ArtifactKind::Hook => set.hooks.insert(name, source),
+        ArtifactKind::Settings => set.settings.insert(name, source),
     };
     set.invalidate_declaration_hash_cache();
     previous
@@ -1329,9 +1461,11 @@ fn invalid_binding(kind: ArtifactKind, binding: &str) -> Option<DeclareError> {
     // `Hook` joins the guarded set (C-109): its binding names a directory under
     // `$GRIM_HOME/hooks/`, a traversal surface. Reserved names are not refused
     // here — see `refuse_bad_binding_name` — so `export` never errors on them.
+    // `Settings` joins because its binding reaches a file path. A hand-edited key
+    // reaches consent unchecked, so the settings phase must refuse it by this grammar.
     if !matches!(
         kind,
-        ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent | ArtifactKind::Hook
+        ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent | ArtifactKind::Hook | ArtifactKind::Settings
     ) {
         return None;
     }
@@ -1648,10 +1782,13 @@ fn render_config(
     // the field's position in `ConfigOptions`. Destructured without `..` for
     // the `[options.tui]` reason: a new field fails to compile here.
     if has_experimental_options {
-        let crate::config::declaration::ExperimentalOptions { hooks } = &options.experimental;
+        let crate::config::declaration::ExperimentalOptions { hooks, settings } = &options.experimental;
         out.push_str("[options.experimental]\n");
         if *hooks {
             let _ = writeln!(out, "hooks = true");
+        }
+        if *settings {
+            let _ = writeln!(out, "settings = true");
         }
         out.push('\n');
     }
@@ -1796,6 +1933,13 @@ fn render_config(
     if !set.hooks.is_empty() {
         out.push_str("\n[hooks]\n");
         for (name, id) in &set.hooks {
+            let _ = writeln!(out, "{} = {}", toml_key(name), toml::Value::String(id.to_string()));
+        }
+    }
+    // `[settings]` follows it on the same terms.
+    if !set.settings.is_empty() {
+        out.push_str("\n[settings]\n");
+        for (name, id) in &set.settings {
             let _ = writeln!(out, "{} = {}", toml_key(name), toml::Value::String(id.to_string()));
         }
     }
@@ -2205,7 +2349,10 @@ mod tests {
         let path = tmp.path().join("grimoire.toml");
         let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
         let opts = ConfigOptions {
-            experimental: ExperimentalOptions { hooks: true },
+            experimental: ExperimentalOptions {
+                hooks: true,
+                settings: true,
+            },
             ..Default::default()
         };
         write_config(&path, &opts, &[], &set).unwrap();
@@ -2215,6 +2362,10 @@ mod tests {
         assert!(
             cfg.options.experimental.hooks,
             "options.experimental.hooks must survive write → parse: {body}"
+        );
+        assert!(
+            cfg.options.experimental.settings,
+            "options.experimental.settings must survive write → parse: {body}"
         );
     }
 
@@ -2263,6 +2414,37 @@ mod tests {
             cfg.set.hooks, set.hooks,
             "every declared hook must survive write → parse: {body}"
         );
+    }
+
+    #[test]
+    fn write_config_round_trips_declared_settings() {
+        // Without the emitter arm a `[settings]` table is deleted by the next
+        // `grim add`, `remove` or `config set`, and the hash changes with it.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("grimoire.toml");
+        let mut set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
+        set.settings.insert(
+            "team-defaults".to_string(),
+            crate::config::declaration::DeclaredSource::Registry(
+                crate::oci::Identifier::parse("ghcr.io/acme/settings/team-defaults:1.0.0").expect("valid identifier"),
+            ),
+        );
+        write_config(&path, &ConfigOptions::default(), &[], &set).unwrap();
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        let cfg = ProjectConfig::from_toml_str(&body).expect("[settings] round-trip must parse");
+        assert_eq!(cfg.set.settings, set.settings, "{body}");
+        assert_eq!(cfg.set.declaration_hash_cached(), set.declaration_hash_cached());
+    }
+
+    #[test]
+    fn write_config_emits_no_settings_table_when_none_is_declared() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("grimoire.toml");
+        let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
+        write_config(&path, &ConfigOptions::default(), &[], &set).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(!body.contains("settings"), "{body}");
     }
 
     #[test]
@@ -2798,6 +2980,24 @@ style = \"ghcr.io/acme/rules/style:1\"
                 assert_eq!(exit, ExitCode::UsageError, "{msg}");
                 assert!(msg.contains(text), "{msg}");
             }
+        }
+
+        /// A settings binding is refused as bad data at both of `add`'s checks,
+        /// and every other kind stays a usage error.
+        #[test]
+        fn a_settings_binding_refusal_is_data_where_other_kinds_stay_usage() {
+            let (exit, msg) = mapped(DeclareError::InvalidBindingName {
+                kind: ArtifactKind::Settings,
+                reason: "bad".to_string(),
+            });
+            assert_eq!(exit, ExitCode::DataError, "{msg}");
+
+            let err = refuse_bad_binding_name(ArtifactKind::Settings, "Team/Defaults").expect_err("bad binding");
+            assert_eq!(crate::error::classify_error(&err), ExitCode::DataError, "{err:#}");
+            refuse_bad_binding_name(ArtifactKind::Settings, "team-defaults").expect("a valid binding");
+
+            let err = refuse_bad_binding_name(ArtifactKind::Skill, "Team/Defaults").expect_err("bad binding");
+            assert_eq!(crate::error::classify_error(&err), ExitCode::UsageError, "{err:#}");
         }
 
         #[test]
@@ -3602,6 +3802,96 @@ style = \"ghcr.io/acme/rules/style:1\"
                 .expect_err("missing path");
             assert!(matches!(err, DeclareError::Source(_)), "{err:?}");
             assert_eq!(access.calls(), 0);
+        }
+
+        /// `--kind settings` over a registry reference declares and locks with
+        /// the flag off. Only the path form stays a usage error: `[settings]`
+        /// holds no path value.
+        #[tokio::test]
+        async fn settings_kind_declares_a_registry_reference() {
+            let reg = MemoryRegistry::new();
+            publish(
+                &reg,
+                "localhost:5000/acme/settings/team-defaults:1.0",
+                &[("com.grimoire.kind", "settings")],
+            )
+            .await;
+            let tmp = tempfile::tempdir().unwrap();
+            let settings = DeclareOverrides {
+                kind: Some(ArtifactKind::Settings),
+                name: None,
+            };
+
+            let declared = declare_with(
+                "localhost:5000/acme/settings/team-defaults:1.0",
+                settings,
+                anchors_at(tmp.path()),
+                &Access::over(reg),
+            )
+            .await
+            .expect("settings declares");
+            assert_eq!(declared.kind, ArtifactKind::Settings);
+            assert_eq!(declared.binding, "team-defaults");
+
+            let mut set = crate::config::declaration::DesiredSet::default();
+            declare(&mut set, declared.kind, declared.binding, declared.source);
+            assert_eq!(set.settings.len(), 1, "the declaration lands in [settings]");
+        }
+
+        #[tokio::test]
+        async fn settings_kind_refuses_a_path_source() {
+            let tmp = tempfile::tempdir().unwrap();
+            let project = project(tmp.path());
+            let err = declare_with(
+                "./skills/code-review",
+                DeclareOverrides {
+                    kind: Some(ArtifactKind::Settings),
+                    name: None,
+                },
+                anchors_at(&project),
+                &Access::over(DeniedAccess),
+            )
+            .await
+            .expect_err("settings path");
+            assert!(
+                matches!(err, DeclareError::UnsupportedPathKind(ArtifactKind::Settings)),
+                "{err:?}"
+            );
+        }
+
+        /// The binding enters the consent key and the record's lookup, so it
+        /// keeps the name grammar the lock load enforces.
+        #[tokio::test]
+        async fn settings_kind_refuses_a_binding_outside_the_name_grammar() {
+            let reg = MemoryRegistry::new();
+            publish(
+                &reg,
+                "localhost:5000/acme/settings/team-defaults:1.0",
+                &[("com.grimoire.kind", "settings")],
+            )
+            .await;
+            let tmp = tempfile::tempdir().unwrap();
+            let err = declare_with(
+                "localhost:5000/acme/settings/team-defaults:1.0",
+                DeclareOverrides {
+                    kind: Some(ArtifactKind::Settings),
+                    name: Some("Team/Defaults".to_string()),
+                },
+                anchors_at(tmp.path()),
+                &Access::over(reg),
+            )
+            .await
+            .expect_err("bad binding");
+            assert!(
+                matches!(
+                    err,
+                    DeclareError::InvalidBindingName {
+                        kind: ArtifactKind::Settings,
+                        ..
+                    }
+                ),
+                "{err:?}"
+            );
         }
 
         #[tokio::test]

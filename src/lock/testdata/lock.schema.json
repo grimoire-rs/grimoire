@@ -32,6 +32,11 @@
           "const": "hook",
           "description": "A hook: a directory artifact whose `hook.toml` manifest declares\nlifecycle handlers (see [`crate::oci::hook`]). The payload\nmaterializes once per scope; activation is a grim-owned dispatcher\nentry registered in each client's own hook surface, never a\nper-client copy of the payload.",
           "type": "string"
+        },
+        {
+          "const": "settings",
+          "description": "Harness settings: typed values for each client, merged key by key into\nthat client's own settings file. Never a materialized file of its own.",
+          "type": "string"
         }
       ]
     },
@@ -332,6 +337,13 @@
     },
     "rule": {
       "description": "Locked rules (`[[rule]]`).",
+      "items": {
+        "$ref": "#/$defs/LockedArtifact"
+      },
+      "type": "array"
+    },
+    "settings": {
+      "description": "Locked settings packages (`[[settings]]`).",
       "items": {
         "$ref": "#/$defs/LockedArtifact"
       },

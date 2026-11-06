@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Grimoire Authors
 
-//! `grim hook revoke` — withdraw this checkout's hook consent.
+//! `grim hook revoke` — withdraw this checkout's consent, hooks and settings
+//! packages alike: they share one record, and this removes it.
 //!
 //! The undo half of [`super::allow`]. Immediately effective in the sense that
 //! matters: the record is read on every arming decision, so the next
 //! `grim install` (or any other converging command) disarms — unless
-//! `--trust-hooks` is passed on that run, which is N4 and deliberate.
+//! `--trust-workspace` is passed on that run, which is N4 and deliberate.
 //!
 //! **It does not disarm anything by itself.** The dispatch table is written by
 //! convergence, not by this command, and re-deriving it here would put a

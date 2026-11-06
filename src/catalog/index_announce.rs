@@ -41,7 +41,8 @@ pub fn index_host(repo_url: &str) -> Option<String> {
 pub struct AnnouncePackage {
     /// Package name (the index directory name).
     pub name: String,
-    /// `skill` / `rule` / `agent` / `mcp` / `bundle`.
+    /// The artifact kind as `ArtifactKind::kind_str` spells it (`skill`,
+    /// `rule`, `agent`, `mcp`, `hook`, `settings` or `bundle`).
     pub kind: String,
     /// Tagless OCI reference (`registry/repository`).
     pub reference: String,

@@ -3107,6 +3107,7 @@ mod tests {
             agents: vec![],
             mcp: vec![],
             hooks: vec![],
+            settings: vec![],
             bundles: vec![],
         };
         crate::lock::lock_io::save(&discovered.lock_path(), &lock, None).unwrap();

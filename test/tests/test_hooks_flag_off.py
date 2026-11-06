@@ -342,6 +342,8 @@ MAIN_ADD_KEYS = {"kind", "name", "pinned", "status"}
 # Fields the dependency release added to every report, additively.
 DEPENDENCY_STATUS_KEYS = {"direct", "required_by"}
 DEPENDENCY_ADD_KEYS = {"pulled_in"}
+# The settings kind's change list, always present and `[]` for every other kind.
+SETTINGS_ADD_KEYS = {"settings_changes"}
 
 
 def _tree(*roots: Path) -> dict[str, bytes]:
@@ -370,7 +372,8 @@ def test_hook_free_upgrade_is_unchanged(grim_at, project_dir: Path) -> None:
     runner = grim_at(project_dir)
     runner.run("init")
     added = runner.json("add", "./skills/demo")
-    assert set(added) == MAIN_ADD_KEYS | DEPENDENCY_ADD_KEYS, sorted(added)
+    assert set(added) == MAIN_ADD_KEYS | DEPENDENCY_ADD_KEYS | SETTINGS_ADD_KEYS, sorted(added)
+    assert added["settings_changes"] == []
 
     roots = (project_dir, Path(runner.grim_home), runner.home)
     before = _tree(*roots)

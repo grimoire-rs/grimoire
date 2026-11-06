@@ -1,0 +1,8 @@
+{
+  "v": 1,
+  "workspace": "<WORKSPACE>",
+  "hooks": [
+    "reg-hook@localhost:5000/grim-golden/pre-settings-47da12f/reg-hook"
+  ],
+  "consented_at": "<NORMALIZED>"
+}

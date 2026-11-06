@@ -337,6 +337,7 @@ mod tests {
                 }),
                 entry: None,
                 adopted: false,
+                element: None,
             }],
         }
     }

@@ -6,16 +6,18 @@
 //! Plain format: a single-row 4-column table
 //! (Kind | Name | Pinned | Status).
 //!
-//! JSON format: a single object `{kind, name, pinned, status, pulled_in}`
-//! (not an array — `add` touches exactly one declared entry). `pulled_in`
-//! is always present: the `{kind, name, pinned}` dependencies the entry
-//! brought into the workspace, `[]` when none. Plain output adds one stderr
-//! line naming them.
+//! JSON format: a single object
+//! `{kind, name, pinned, status, pulled_in, settings_changes}` (not an array —
+//! `add` touches exactly one declared entry). `pulled_in` is always present:
+//! the `{kind, name, pinned}` dependencies the entry brought into the
+//! workspace, `[]` when none. Plain output adds one stderr line naming them.
+//! `settings_changes` is always present, `[]` when no settings value moved.
 
 use std::io::{self, Write};
 
 use serde::Serialize;
 
+use crate::api::settings_report::SettingsChange;
 use crate::cli::printer::{Printable, print_table};
 use crate::oci::ArtifactKind;
 
@@ -53,6 +55,7 @@ pub struct AddReport {
     pub pinned: String,
     pub status: AddStatus,
     pub pulled_in: Vec<PulledIn>,
+    pub settings_changes: Vec<SettingsChange>,
 }
 
 fn serialize_kind<S: serde::Serializer>(kind: &ArtifactKind, s: S) -> Result<S::Ok, S::Error> {
@@ -68,12 +71,19 @@ impl AddReport {
             pinned,
             status: AddStatus::Added,
             pulled_in: Vec::new(),
+            settings_changes: Vec::new(),
         }
     }
 
     /// Name the dependencies the add pulled in.
     pub fn with_pulled_in(mut self, pulled_in: Vec<PulledIn>) -> Self {
         self.pulled_in = pulled_in;
+        self
+    }
+
+    /// Name what the install half changed in harness settings files.
+    pub fn with_settings_changes(mut self, settings_changes: Vec<SettingsChange>) -> Self {
+        self.settings_changes = settings_changes;
         self
     }
 }
@@ -153,5 +163,23 @@ mod tests {
         assert_eq!(v["pulled_in"][0]["kind"], "mcp");
         assert_eq!(v["pulled_in"][0]["name"], "gdrive");
         assert_eq!(v["pulled_in"][0]["pinned"], "r/gdrive@sha256:d");
+    }
+
+    #[test]
+    fn settings_changes_is_always_present_and_serialized_last() {
+        let r = AddReport::new(ArtifactKind::Settings, "team".to_string(), "r@sha256:e".to_string());
+        let empty = serde_json::to_string(&r).unwrap();
+        assert!(empty.ends_with(r#","pulled_in":[],"settings_changes":[]}"#), "{empty}");
+
+        let change = crate::api::settings_report::SettingsChange {
+            package: "team".to_string(),
+            client: "claude".to_string(),
+            file: "~/.claude/settings.json".to_string(),
+            key: "/model".to_string(),
+            element: None,
+            action: crate::api::settings_report::SettingsChangeAction::Added,
+        };
+        let v = serde_json::to_value(r.with_settings_changes(vec![change])).unwrap();
+        assert_eq!(v["settings_changes"][0]["action"], "added");
     }
 }

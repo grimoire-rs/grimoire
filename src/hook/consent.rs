@@ -78,6 +78,7 @@ use serde_repr::{Deserialize_repr, Serialize_repr};
 use crate::config::scope::ConfigScope;
 use crate::install::hook_dispatch;
 use crate::lock::locked_source::LockedSource;
+use crate::oci::ArtifactKind;
 
 /// Timestamp format for [`ConsentRecord::consented_at`] — RFC 3339, UTC,
 /// second precision. Provenance for a human reading the file; nothing reads it
@@ -175,6 +176,36 @@ pub enum Revoked {
 pub fn consent_key(binding: &str, source: &LockedSource) -> Option<String> {
     let pinned = source.pinned()?;
     Some(format!("{binding}@{}/{}", pinned.registry(), pinned.repository()))
+}
+
+/// All that tells a settings key from a hook key in the one record, so
+/// [`consent_key_for`] gives a hook binding that starts with it no key at all.
+const SETTINGS_KEY_PREFIX: &str = "settings:";
+
+/// [`consent_key`] for a gated kind, `None` for any other. A settings key
+/// carries a prefix so one record can gate both kinds, and a hook key keeps
+/// its spelling so every record already on disk stays valid.
+pub fn consent_key_for(kind: ArtifactKind, binding: &str, source: &LockedSource) -> Option<String> {
+    match kind {
+        // The name grammar runs after this key is minted, so without this arm a
+        // repository binding a hook as `settings:x` records consent for package `x`.
+        ArtifactKind::Hook if binding.starts_with(SETTINGS_KEY_PREFIX) => None,
+        ArtifactKind::Hook => consent_key(binding, source),
+        ArtifactKind::Settings => consent_key(binding, source).map(|key| format!("{SETTINGS_KEY_PREFIX}{key}")),
+        ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent | ArtifactKind::Bundle | ArtifactKind::Mcp => {
+            None
+        }
+    }
+}
+
+/// Split a declared set into `(hook keys, settings keys)`. Each kind evaluates
+/// its own half: read as one answer, a settings key the record lacks would
+/// disarm every consented hook.
+pub fn split_by_kind(declared: &BTreeSet<String>) -> (BTreeSet<String>, BTreeSet<String>) {
+    declared
+        .iter()
+        .cloned()
+        .partition(|key| !key.starts_with(SETTINGS_KEY_PREFIX))
 }
 
 /// Resolve consent for one workspace over what it declares. **Pure** — no I/O,
@@ -294,7 +325,7 @@ pub fn record(
 /// Delete `workspace`'s consent record, if it has one.
 ///
 /// Immediately effective: [`load`] reads the file on every arming decision, so
-/// the next converge disarms unless `--trust-hooks` is passed on that run.
+/// the next converge disarms unless `--trust-workspace` is passed on that run.
 ///
 /// **Global scope needs no guard here.** [`record`] refuses to write one, so
 /// there is nothing to remove and the answer is [`Revoked::Absent`] by
@@ -328,6 +359,117 @@ mod tests {
             hooks: set(hooks),
             consented_at: "2026-08-28T10:00:00Z".to_string(),
         }
+    }
+
+    fn pinned_source(registry: &str, repository: &str) -> LockedSource {
+        let id = crate::oci::Identifier::new_registry(repository, registry)
+            .clone_with_digest(crate::oci::Digest::Sha256("a".repeat(64)));
+        LockedSource::Registry(crate::oci::PinnedIdentifier::try_from(id).unwrap())
+    }
+
+    /// A record an older grim wrote stays valid only while a hook key keeps
+    /// the exact spelling it was stamped with.
+    #[test]
+    fn consent_key_for_leaves_a_hook_key_as_it_was() {
+        let source = pinned_source("ghcr.io", "acme/fmt");
+        assert_eq!(
+            consent_key_for(ArtifactKind::Hook, "fmt", &source).as_deref(),
+            Some("fmt@ghcr.io/acme/fmt")
+        );
+        assert_eq!(
+            consent_key_for(ArtifactKind::Hook, "fmt", &source),
+            consent_key("fmt", &source)
+        );
+    }
+
+    #[test]
+    fn consent_key_for_prefixes_a_settings_key() {
+        assert_eq!(
+            consent_key_for(ArtifactKind::Settings, "team", &pinned_source("ghcr.io", "acme/team")).as_deref(),
+            Some("settings:team@ghcr.io/acme/team")
+        );
+    }
+
+    /// One record holds both kinds, so the prefix is all that stops a hook's
+    /// consent reaching a package of the same name, in either direction.
+    #[test]
+    fn a_hook_and_a_settings_package_of_one_name_never_consent_each_other() {
+        let source = pinned_source("ghcr.io", "acme/x");
+        let hook = consent_key_for(ArtifactKind::Hook, "x", &source).unwrap();
+        let settings = consent_key_for(ArtifactKind::Settings, "x", &source).unwrap();
+        assert_ne!(hook, settings);
+        let workspace = Path::new("/w/proj");
+
+        let hook_record = stamped("/w/proj", [hook.as_str()]);
+        assert_eq!(
+            evaluate(Some(&hook_record), workspace, &set([hook.as_str()])),
+            Consent::Granted,
+            "positive control: the record covers its own kind"
+        );
+        assert_eq!(
+            evaluate(Some(&hook_record), workspace, &set([settings.as_str()])),
+            Consent::Drifted(set([settings.as_str()]))
+        );
+
+        let settings_record = stamped("/w/proj", [settings.as_str()]);
+        assert_eq!(
+            evaluate(Some(&settings_record), workspace, &set([settings.as_str()])),
+            Consent::Granted,
+            "positive control: the record covers its own kind"
+        );
+        assert_eq!(
+            evaluate(Some(&settings_record), workspace, &set([hook.as_str()])),
+            Consent::Drifted(set([hook.as_str()]))
+        );
+    }
+
+    #[test]
+    fn split_by_kind_sends_each_key_to_its_own_kind() {
+        let source = pinned_source("ghcr.io", "acme/x");
+        let hook = consent_key_for(ArtifactKind::Hook, "x", &source).unwrap();
+        let settings = consent_key_for(ArtifactKind::Settings, "x", &source).unwrap();
+
+        let (hooks, packages) = split_by_kind(&set([hook.as_str(), settings.as_str()]));
+
+        assert_eq!(hooks, set([hook.as_str()]));
+        assert_eq!(packages, set([settings.as_str()]));
+    }
+
+    /// Only hooks and settings are gated, and a path source has no publisher
+    /// identity under either kind.
+    #[test]
+    fn consent_key_for_answers_none_outside_a_gated_registry_kind() {
+        let pinned = pinned_source("ghcr.io", "acme/fmt");
+        for kind in ArtifactKind::ALL {
+            let gated = matches!(kind, ArtifactKind::Hook | ArtifactKind::Settings);
+            assert_eq!(consent_key_for(kind, "fmt", &pinned).is_some(), gated, "{kind}");
+        }
+
+        let path = LockedSource::Path {
+            path: crate::config::path_source::PathSource::parse("./local").unwrap(),
+            hash: crate::oci::Digest::Sha256("b".repeat(64)),
+        };
+        for kind in [ArtifactKind::Hook, ArtifactKind::Settings] {
+            assert_eq!(consent_key_for(kind, "fmt", &path), None, "{kind}");
+        }
+    }
+
+    /// A hook binding reaches this function before any name grammar does, and
+    /// the prefix alone tells the kinds apart, so a hook must not spell it.
+    #[test]
+    fn a_hook_bound_under_the_settings_prefix_has_no_key() {
+        let source = pinned_source("ghcr.io", "acme/x");
+        assert_eq!(consent_key_for(ArtifactKind::Hook, "settings:x", &source), None);
+        assert_eq!(
+            consent_key_for(ArtifactKind::Hook, "settings", &source).as_deref(),
+            Some("settings@ghcr.io/acme/x"),
+            "positive control: only the prefix itself is refused"
+        );
+        assert_eq!(
+            consent_key_for(ArtifactKind::Hook, "x", &source).as_deref(),
+            Some("x@ghcr.io/acme/x"),
+            "positive control: a valid binding keeps its key"
+        );
     }
 
     /// The predicate's whole table, each row isolated.

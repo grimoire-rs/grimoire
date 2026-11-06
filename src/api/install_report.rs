@@ -8,10 +8,12 @@
 //! unchanged. The Target cell is `—` when nothing was written (every selected
 //! client declined the kind); the Armed cell is `—` for every kind but `hook`.
 //!
-//! JSON format: `{"items": [...]}` where each item is a
-//! `{kind, name, target, status, armed}` object (uniform `items` envelope, per
-//! subsystem-cli-api.md). `target` is `null` when no client wrote a file
-//! (every selected client declined the kind).
+//! JSON format: `{"items": [...], "settings_changes": [...]}` where each item
+//! is a `{kind, name, target, status, armed}` object (uniform `items` envelope,
+//! per subsystem-cli-api.md). `target` is `null` when no client wrote a file
+//! (every selected client declined the kind). `settings_changes` is always
+//! present, `[]` when no settings value moved, and sits at the top level
+//! because an orphan removal has no row.
 //!
 //! ## Why the row names what a hook armed (S-002)
 //!
@@ -39,6 +41,7 @@ use std::path::PathBuf;
 
 use serde::{Serialize, Serializer};
 
+use crate::api::settings_report::SettingsChange;
 use crate::cli::printer::{Printable, print_table};
 use crate::oci::ArtifactKind;
 
@@ -81,12 +84,27 @@ fn serialize_kind<S: Serializer>(kind: &ArtifactKind, s: S) -> Result<S::Ok, S::
 #[derive(Debug, Serialize)]
 pub struct InstallReport {
     items: Vec<InstallEntry>,
+    settings_changes: Vec<SettingsChange>,
 }
 
 impl InstallReport {
     /// Build from operation results.
     pub fn new(items: Vec<InstallEntry>) -> Self {
-        Self { items }
+        Self {
+            items,
+            settings_changes: Vec::new(),
+        }
+    }
+
+    /// Name what the run changed in harness settings files.
+    pub fn with_settings_changes(mut self, settings_changes: Vec<SettingsChange>) -> Self {
+        self.settings_changes = settings_changes;
+        self
+    }
+
+    /// The change list, for a caller that discards the rest of the report.
+    pub fn into_settings_changes(self) -> Vec<SettingsChange> {
+        self.settings_changes
     }
 }
 
@@ -246,5 +264,24 @@ mod tests {
         // object is vacuously always-null and never actually reads the
         // `target` field this test claims to cover.
         assert!(v["items"][0]["target"].is_null());
+    }
+
+    #[test]
+    fn settings_changes_is_always_present_after_items() {
+        let empty = serde_json::to_string(&InstallReport::new(Vec::new())).unwrap();
+        assert_eq!(empty, r#"{"items":[],"settings_changes":[]}"#);
+
+        let change = crate::api::settings_report::SettingsChange {
+            package: "team".to_string(),
+            client: "claude".to_string(),
+            file: "~/.claude/settings.json".to_string(),
+            key: "/model".to_string(),
+            element: None,
+            action: crate::api::settings_report::SettingsChangeAction::Added,
+        };
+        let listed = InstallReport::new(Vec::new()).with_settings_changes(vec![change]);
+        let v = serde_json::to_value(&listed).unwrap();
+        assert_eq!(v["settings_changes"][0]["package"], "team");
+        assert_eq!(listed.into_settings_changes().len(), 1);
     }
 }

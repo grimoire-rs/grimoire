@@ -20,9 +20,9 @@
 //!   needs `type: "stdio"`; env refs `${env:NAME}`; oauth shape ≠ grim block
 //!   → skip; `json_splice`.
 //!
-//! `CURSOR_CONFIG_DIR` is **not** honored: upstream documents it only as the
-//! location of the CLI's own `cli-config.json` (re-verified 2026-09-27 —
-//! watchlisted); paths hardcode the documented `~/.cursor` default.
+//! `CURSOR_CONFIG_DIR` is honored for settings alone: upstream documents it only
+//! as the location of the CLI's own `cli-config.json` (re-verified 2026-09-27 —
+//! watchlisted); every other path hardcodes the documented `~/.cursor` default.
 
 use std::path::{Path, PathBuf};
 
@@ -31,7 +31,10 @@ use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
 use super::render::{self, RenderError, RenderedDoc};
-use super::vendor::{FieldType, KnownField, Vendor, home_dir, provenance};
+use super::vendor::MergeClass::{Scalar, Set};
+use super::vendor::SettingsScopes::GlobalOnly;
+use super::vendor::SettingsValueType as Ty;
+use super::vendor::{FieldType, KnownField, SettingsField, Vendor, env_dir, home_dir, provenance, xdg_config_dir};
 
 /// Cursor.
 pub struct CursorVendor;
@@ -63,6 +66,48 @@ pub const CURSOR_AGENT_FIELDS: &[KnownField] = &[
 /// are Cursor-native and never collide with an emitted common key).
 const CURSOR_AGENT_OVERRIDES: &[&str] = &["model"];
 
+/// The file the CLI keeps its settings in, under either of its roots.
+const CLI_CONFIG_FILE: &str = "cli-config.json";
+
+/// Cursor's settings keys, from the list in `adr_settings_artifact_kind.md`.
+const CURSOR_SETTINGS_FIELDS: &[SettingsField] = &[
+    SettingsField {
+        required_by_client: true,
+        ..SettingsField::new("/permissions/allow", Ty::StringList, Set, GlobalOnly)
+    },
+    SettingsField {
+        required_by_client: true,
+        ..SettingsField::new("/permissions/deny", Ty::StringList, Set, GlobalOnly)
+    },
+    SettingsField::new(
+        "/approvalMode",
+        Ty::Enum(&["allowlist", "auto-review", "unrestricted"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/sandbox/readBoundary",
+        Ty::Enum(&["system", "workspace"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField {
+        required_by_client: true,
+        ..SettingsField::new("/editor/vimMode", Ty::Bool, Scalar, GlobalOnly)
+    },
+    SettingsField::new("/notifications", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/hints", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/rewind", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/suggestNextPrompt", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/maxMode", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/display/showLineNumbers", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/display/showThinkingBlocks", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/display/showStatusIndicators", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/display/showStatusLineRunningTime", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/attribution/attributeCommitsToAgent", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/attribution/attributePRsToAgent", Ty::Bool, Scalar, GlobalOnly),
+];
+
 impl Vendor for CursorVendor {
     fn name(&self) -> &'static str {
         "cursor"
@@ -76,6 +121,19 @@ impl Vendor for CursorVendor {
 
     fn agent_fields(&self) -> &'static [KnownField] {
         CURSOR_AGENT_FIELDS
+    }
+
+    fn settings_fields(&self) -> &'static [SettingsField] {
+        CURSOR_SETTINGS_FIELDS
+    }
+
+    fn settings_config_path(&self, _workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
+        settings_config_path(
+            scope,
+            env_dir("CURSOR_CONFIG_DIR"),
+            home_dir(),
+            settings_xdg_root(xdg_config_dir()),
+        )
     }
 
     fn detect(&self, workspace: &Path, scope: ConfigScope) -> bool {
@@ -253,10 +311,53 @@ fn scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
 }
 
 /// Cursor's user-level config root `~/.cursor`. `CURSOR_CONFIG_DIR` is **not**
-/// honored in wave 1 (watchlisted — possibly CLI-only). The
-/// [`PathAnchor`](super::path_anchor) `CursorRoot` anchor is rooted here.
+/// honored here (watchlisted), only by [`cursor_cli_root`]. The
+/// [`PathAnchor`](super::path_anchor) `cursor-root` anchor is rooted here.
 pub(crate) fn cursor_root(home: Option<PathBuf>) -> Option<PathBuf> {
     home.map(|h| h.join(".cursor"))
+}
+
+/// The Cursor CLI's config root: `$CURSOR_CONFIG_DIR`, else `~/.cursor`. The
+/// `cursor-cli-root` anchor is rooted here.
+pub(crate) fn cursor_cli_root(config_dir: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
+    config_dir.or_else(|| cursor_root(home))
+}
+
+/// The Cursor CLI's XDG config dir. The `cursor-cli-xdg-root` anchor is rooted
+/// here on every platform, so its row stays pure; [`settings_xdg_root`] decides
+/// where the CLI reads it.
+pub(crate) fn cursor_cli_xdg_root(xdg_config: Option<PathBuf>) -> Option<PathBuf> {
+    xdg_config.map(|dir| dir.join("cursor"))
+}
+
+/// [`cursor_cli_xdg_root`] where the CLI reads it: upstream documents that file
+/// for Linux alone.
+fn settings_xdg_root(xdg_config: Option<PathBuf>) -> Option<PathBuf> {
+    cursor_cli_xdg_root(xdg_config).filter(|_| cfg!(target_os = "linux"))
+}
+
+/// The CLI's `cli-config.json`: under `config_dir` when set, else under
+/// `~/.cursor` if that file exists, else under `xdg_root`, else `~/.cursor`'s
+/// absent file. Grim edits only a file that exists, so the caller declines an
+/// absent answer, and a wrong order still finds a file the CLI itself rewrites.
+///
+/// `None` at project scope: `.cursor/cli.json` is committed, so a value there
+/// could reach every cloner.
+fn settings_config_path(
+    scope: ConfigScope,
+    config_dir: Option<PathBuf>,
+    home: Option<PathBuf>,
+    xdg_root: Option<PathBuf>,
+) -> Option<PathBuf> {
+    if scope == ConfigScope::Project {
+        return None;
+    }
+    let overridden = config_dir.is_some();
+    let cli_file = cursor_cli_root(config_dir, home).map(|root| root.join(CLI_CONFIG_FILE));
+    if overridden || cli_file.as_deref().is_some_and(Path::is_file) {
+        return cli_file;
+    }
+    xdg_root.map(|root| root.join(CLI_CONFIG_FILE)).or(cli_file)
 }
 
 #[cfg(test)]
@@ -689,5 +790,147 @@ mod tests {
         let a = CursorVendor.mcp_entry(ConfigScope::Project, "m", &d).unwrap();
         let b = CursorVendor.mcp_entry(ConfigScope::Project, "m", &d).unwrap();
         assert_eq!(a, b, "regeneration must be byte-identical");
+    }
+
+    // ── settings: the key list and `cli-config.json` ──
+
+    /// Every key by pointer, value type and scope, in the list's order.
+    #[test]
+    fn settings_rows_match_the_key_list() {
+        use crate::install::vendor::SettingsScopes::GlobalOnly;
+        use crate::install::vendor::SettingsValueType as Ty;
+
+        let rows: Vec<_> = CursorVendor
+            .settings_fields()
+            .iter()
+            .map(|field| (field.pointer, field.ty, field.scopes))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("/permissions/allow", Ty::StringList, GlobalOnly),
+                ("/permissions/deny", Ty::StringList, GlobalOnly),
+                (
+                    "/approvalMode",
+                    Ty::Enum(&["allowlist", "auto-review", "unrestricted"]),
+                    GlobalOnly
+                ),
+                ("/sandbox/readBoundary", Ty::Enum(&["system", "workspace"]), GlobalOnly),
+                ("/editor/vimMode", Ty::Bool, GlobalOnly),
+                ("/notifications", Ty::Bool, GlobalOnly),
+                ("/hints", Ty::Bool, GlobalOnly),
+                ("/rewind", Ty::Bool, GlobalOnly),
+                ("/suggestNextPrompt", Ty::Bool, GlobalOnly),
+                ("/maxMode", Ty::Bool, GlobalOnly),
+                ("/display/showLineNumbers", Ty::Bool, GlobalOnly),
+                ("/display/showThinkingBlocks", Ty::Bool, GlobalOnly),
+                ("/display/showStatusIndicators", Ty::Bool, GlobalOnly),
+                ("/display/showStatusLineRunningTime", Ty::Bool, GlobalOnly),
+                ("/attribution/attributeCommitsToAgent", Ty::Bool, GlobalOnly),
+                ("/attribution/attributePRsToAgent", Ty::Bool, GlobalOnly),
+            ]
+        );
+    }
+
+    /// `/version`, `/editor` and `/permissions` are required too, but carry no
+    /// row: grim writes none of them, and the rows here keep both containers.
+    #[test]
+    fn settings_rows_mark_the_pointers_the_client_requires() {
+        let required: Vec<_> = CursorVendor
+            .settings_fields()
+            .iter()
+            .filter(|field| field.required_by_client)
+            .map(|field| field.pointer)
+            .collect();
+        assert_eq!(required, ["/permissions/allow", "/permissions/deny", "/editor/vimMode"]);
+    }
+
+    #[test]
+    fn settings_rows_narrow_nothing() {
+        for field in CursorVendor.settings_fields() {
+            assert_eq!(field.map_keys, None, "{}", field.pointer);
+            assert_eq!(field.project_values, None, "{}", field.pointer);
+        }
+    }
+
+    #[test]
+    fn settings_path_has_no_answer_at_project_scope() {
+        let dir = || Some(PathBuf::from("/d"));
+        assert_eq!(settings_config_path(ConfigScope::Project, dir(), dir(), dir()), None);
+        assert_eq!(
+            CursorVendor.settings_config_path(Path::new("/w"), ConfigScope::Project),
+            None
+        );
+    }
+
+    /// `$CURSOR_CONFIG_DIR` ends the search, because the CLI then reads nowhere
+    /// else. Otherwise an existing `~/.cursor` file beats the XDG one.
+    #[test]
+    fn cursor_settings_path_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let xdg_root = tmp.path().join("xdg").join("cursor");
+        let custom = tmp.path().join("custom");
+        let dotted_file = home.join(".cursor").join("cli-config.json");
+        let xdg_file = xdg_root.join("cli-config.json");
+        let path = |config_dir: Option<PathBuf>| {
+            settings_config_path(
+                ConfigScope::Global,
+                config_dir,
+                Some(home.clone()),
+                Some(xdg_root.clone()),
+            )
+        };
+        let write = |file: &Path| {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, "{}\n").unwrap();
+        };
+
+        assert_eq!(path(None), Some(xdg_file.clone()), "no file: the end of the order");
+        write(&xdg_file);
+        assert_eq!(path(None), Some(xdg_file.clone()));
+        write(&dotted_file);
+        assert_eq!(path(None), Some(dotted_file), "an existing ~/.cursor file comes first");
+        assert_eq!(
+            path(Some(custom.clone())),
+            Some(custom.join("cli-config.json")),
+            "the variable wins over two existing files, its own absent"
+        );
+    }
+
+    /// Where no XDG root reaches the order, a missing default file is still the
+    /// answer: the caller declines it. No home and no root has no answer at all.
+    #[test]
+    fn settings_path_off_the_xdg_order_stays_on_the_default_file() {
+        let path = |home: Option<PathBuf>, xdg_root: Option<PathBuf>| {
+            settings_config_path(ConfigScope::Global, None, home, xdg_root)
+        };
+        let home = || Some(PathBuf::from("/nonexistent/home"));
+        assert_eq!(
+            path(home(), None),
+            Some(PathBuf::from("/nonexistent/home/.cursor/cli-config.json"))
+        );
+        assert_eq!(
+            path(None, Some(PathBuf::from("/x"))),
+            Some(PathBuf::from("/x/cli-config.json"))
+        );
+        assert_eq!(path(None, None), None);
+    }
+
+    /// Upstream documents the XDG file for Linux alone.
+    #[test]
+    fn settings_xdg_root_answers_on_linux_only() {
+        assert_eq!(
+            settings_xdg_root(Some(PathBuf::from("/xdg"))),
+            cfg!(target_os = "linux").then(|| PathBuf::from("/xdg/cursor"))
+        );
+    }
+
+    #[test]
+    fn settings_format_is_json() {
+        assert_eq!(
+            CursorVendor.settings_config_format(),
+            crate::install::vendor::McpConfigFormat::Json
+        );
     }
 }

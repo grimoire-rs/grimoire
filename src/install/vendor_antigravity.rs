@@ -5,9 +5,10 @@
 //! global root, native rules, agents and MCP.
 //!
 //! Antigravity 2.0 mapping, verified 2026-07-26 (re-verified 2026-09-27 against 2.17.0) against the doc tree the
-//! antigravity.google nav labels **Antigravity 2.0 (v2.4.2)** — distinct from
-//! its Antigravity CLI (v1.1.x) and Antigravity IDE (v2.1.x) sections, which
-//! document different global directories:
+//! antigravity.google nav labels **Antigravity 2.0 (v2.4.2)**. The App and the
+//! CLI (`agy`) share `~/.gemini/config` (checked live 2026-11-05 on `agy`
+//! 1.5.0), and the IDE reads its skills, rules and MCP there too (its legacy
+//! `~/.gemini/antigravity/skills/` is still read), so this client serves all three.
 //!
 //! | Claim | Source, fetched 2026-07-26 |
 //! |---|---|
@@ -49,6 +50,10 @@
 //!   `~/.gemini/config/mcp_config.json`; remote transports use `serverUrl`
 //!   (not `url`/`httpUrl`). `ws` and `oauth` are declined — see
 //!   [`AntigravityVendor::mcp_entry`]. Spliced with `json_splice`.
+//! - **Settings**: global only, in the Antigravity CLI's own
+//!   `~/.gemini/antigravity-cli/settings.json` ([`antigravity_cli_root`]); the
+//!   desktop app keeps no settings file. The CLI drops every key equal to its
+//!   default when it starts, so such a piece reads `missing` until the next install.
 //!
 //! **This module inherits nothing from `vendor_gemini`, deliberately.**
 //! Antigravity does not read `.gemini/skills`: upstream's own migration note
@@ -70,10 +75,88 @@ use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::{ParsedRule, RuleFrontmatter};
 
 use super::render::{self, RenderError, RenderedDoc};
-use super::vendor::{Vendor, home_dir, provenance};
+use super::vendor::MergeClass::{Scalar, Set};
+use super::vendor::SettingsScopes::GlobalOnly;
+use super::vendor::SettingsValueType as Ty;
+use super::vendor::{SettingsField, Vendor, home_dir, provenance};
 
-/// Google Antigravity (2.0 desktop).
+/// Google Antigravity: the App and the CLI, which share one config root.
 pub struct AntigravityVendor;
+
+/// The Antigravity CLI's settings keys, from
+/// `research_upstream_antigravity_settings_20261105.md`. `/agentMode` leaves
+/// out `""`: it is the default, and the CLI deletes a default-valued key.
+const ANTIGRAVITY_SETTINGS_FIELDS: &[SettingsField] = &[
+    SettingsField::new(
+        "/agentMode",
+        Ty::Enum(&["accept-edits", "auto", "plan"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/toolPermission",
+        Ty::Enum(&["request-review", "proceed-in-sandbox", "always-proceed", "strict"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/artifactReviewPolicy",
+        Ty::Enum(&["asks-for-review", "agent-decides", "always-proceed"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new("/allowNonWorkspaceAccess", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/enableTerminalSandbox", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/permissions/allow", Ty::StringList, Set, GlobalOnly),
+    SettingsField::new("/permissions/ask", Ty::StringList, Set, GlobalOnly),
+    SettingsField::new("/permissions/deny", Ty::StringList, Set, GlobalOnly),
+    SettingsField::new("/model", Ty::String, Scalar, GlobalOnly),
+    SettingsField::new("/verbosity", Ty::Enum(&["high", "medium", "low"]), Scalar, GlobalOnly),
+    SettingsField::new(
+        "/queuedMessages",
+        Ty::Enum(&["queue", "send-immediately"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new("/notifications", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new(
+        "/colorScheme",
+        Ty::Enum(&[
+            "terminal",
+            "light",
+            "solarized light",
+            "colorblind-friendly light",
+            "dark",
+            "solarized dark",
+            "colorblind-friendly dark",
+            "tokyo night",
+        ]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/altScreenMode",
+        Ty::Enum(&["default", "always", "never"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new("/editorMode", Ty::Enum(&["default", "vim"]), Scalar, GlobalOnly),
+    SettingsField::new("/vimInsertFirst", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new(
+        "/runningLightSpeed",
+        Ty::Enum(&["fast", "medium", "slow", "off"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new("/pickerGrouping", Ty::Enum(&["none", "grouped"]), Scalar, GlobalOnly),
+    SettingsField::new("/showTips", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/showFeedbackSurvey", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/hideActiveItems", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/copyOnSelect", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/clearScrollbackOnResize", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/useTerminalCursor", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/disableSlashCommands", Ty::Bool, Scalar, GlobalOnly),
+];
 
 impl Vendor for AntigravityVendor {
     fn name(&self) -> &'static str {
@@ -101,7 +184,7 @@ impl Vendor for AntigravityVendor {
             // explicit request (`--client antigravity`) and by the global
             // signal below.
             ConfigScope::Project => false,
-            ConfigScope::Global => antigravity_root(home_dir()).is_some_and(|p| p.exists()),
+            ConfigScope::Global => detects_globally(home_dir()),
         }
     }
 
@@ -217,6 +300,14 @@ impl Vendor for AntigravityVendor {
         // documented `mcpServers` target here — dropped (pure refinements,
         // nothing auth-critical).
         Some((format!("/mcpServers/{name}"), serde_json::Value::Object(entry)))
+    }
+
+    fn settings_fields(&self) -> &'static [SettingsField] {
+        ANTIGRAVITY_SETTINGS_FIELDS
+    }
+
+    fn settings_config_path(&self, _workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
+        cli_settings_path(scope, antigravity_cli_root(home_dir()))
     }
 
     fn skill_index(&self, doc: &str) -> Result<Option<RenderedDoc>, RenderError> {
@@ -335,6 +426,30 @@ fn antigravity_scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
 /// this stays a pure function of its argument.
 pub(crate) fn antigravity_root(home: Option<PathBuf>) -> Option<PathBuf> {
     home.map(|h| h.join(".gemini").join("config"))
+}
+
+/// The Antigravity CLI's own directory, `~/.gemini/antigravity-cli`, which
+/// holds its `settings.json`. A sibling of [`antigravity_root`], not inside it,
+/// so it carries its own `antigravity-cli-root` anchor.
+pub(crate) fn antigravity_cli_root(home: Option<PathBuf>) -> Option<PathBuf> {
+    home.map(|h| h.join(".gemini").join("antigravity-cli"))
+}
+
+/// The global detection signal under `home`: the shared root the App and the
+/// CLI both read, or the CLI's own settings directory. Detection writes
+/// nothing, so either marker selects the client.
+fn detects_globally(home: Option<PathBuf>) -> bool {
+    antigravity_root(home.clone()).is_some_and(|p| p.exists()) || antigravity_cli_root(home).is_some_and(|p| p.exists())
+}
+
+/// `settings.json` under the resolved CLI `root`: `None` at project scope,
+/// where the CLI reads no settings file, and `None` with no root, never a
+/// workspace stand-in.
+fn cli_settings_path(scope: ConfigScope, root: Option<PathBuf>) -> Option<PathBuf> {
+    match scope {
+        ConfigScope::Project => None,
+        ConfigScope::Global => root.map(|root| root.join("settings.json")),
+    }
 }
 
 #[cfg(test)]
@@ -503,8 +618,8 @@ mod tests {
         let w = Path::new("/w");
         assert_eq!(
             AntigravityVendor.detect(w, ConfigScope::Global),
-            antigravity_root(home_dir()).is_some_and(|p| p.exists()),
-            "global detection must follow ~/.gemini/config exactly"
+            detects_globally(home_dir()),
+            "global detection must follow the markers under $HOME exactly"
         );
 
         // The discriminating half, hermetic: a bare `~/.gemini` — every Gemini
@@ -519,6 +634,27 @@ mod tests {
             "a bare ~/.gemini is Gemini CLI's marker, not this one: {root:?}"
         );
         assert_eq!(antigravity_root(None), None, "no home ⇒ no root");
+        assert!(!detects_globally(Some(tmp.path().join("home"))));
+    }
+
+    /// The App and the CLI share `~/.gemini/config`, so either one's
+    /// directory selects the client: a home with only the CLI is served.
+    #[test]
+    fn detect_global_scope_fires_on_the_shared_root_or_the_cli_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cli_only = tmp.path().join("cli");
+        std::fs::create_dir_all(antigravity_cli_root(Some(cli_only.clone())).unwrap()).unwrap();
+        assert!(
+            detects_globally(Some(cli_only)),
+            "a home holding only ~/.gemini/antigravity-cli must detect antigravity"
+        );
+
+        let app_only = tmp.path().join("app");
+        std::fs::create_dir_all(antigravity_root(Some(app_only.clone())).unwrap()).unwrap();
+        assert!(detects_globally(Some(app_only)));
+
+        assert!(!detects_globally(Some(tmp.path().join("empty"))));
+        assert!(!detects_globally(None), "no home ⇒ nothing detected");
     }
 
     // ── paths ──
@@ -746,5 +882,180 @@ mod tests {
         for key in ["timeout", "cwd", "always_load", "alwaysLoad"] {
             assert!(value.get(key).is_none(), "no Antigravity target for '{key}': {value}");
         }
+    }
+
+    /// Every key by pointer, value type, merge class and scope, in the
+    /// research artifact's order.
+    #[test]
+    fn settings_rows_match_the_key_list() {
+        use crate::install::vendor::MergeClass::{Scalar, Set};
+        use crate::install::vendor::SettingsScopes::GlobalOnly;
+        use crate::install::vendor::SettingsValueType as Ty;
+
+        let rows: Vec<_> = AntigravityVendor
+            .settings_fields()
+            .iter()
+            .map(|field| (field.pointer, field.ty, field.merge, field.scopes))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "/agentMode",
+                    Ty::Enum(&["accept-edits", "auto", "plan"]),
+                    Scalar,
+                    GlobalOnly
+                ),
+                (
+                    "/toolPermission",
+                    Ty::Enum(&["request-review", "proceed-in-sandbox", "always-proceed", "strict"]),
+                    Scalar,
+                    GlobalOnly
+                ),
+                (
+                    "/artifactReviewPolicy",
+                    Ty::Enum(&["asks-for-review", "agent-decides", "always-proceed"]),
+                    Scalar,
+                    GlobalOnly
+                ),
+                ("/allowNonWorkspaceAccess", Ty::Bool, Scalar, GlobalOnly),
+                ("/enableTerminalSandbox", Ty::Bool, Scalar, GlobalOnly),
+                ("/permissions/allow", Ty::StringList, Set, GlobalOnly),
+                ("/permissions/ask", Ty::StringList, Set, GlobalOnly),
+                ("/permissions/deny", Ty::StringList, Set, GlobalOnly),
+                ("/model", Ty::String, Scalar, GlobalOnly),
+                ("/verbosity", Ty::Enum(&["high", "medium", "low"]), Scalar, GlobalOnly),
+                (
+                    "/queuedMessages",
+                    Ty::Enum(&["queue", "send-immediately"]),
+                    Scalar,
+                    GlobalOnly
+                ),
+                ("/notifications", Ty::Bool, Scalar, GlobalOnly),
+                (
+                    "/colorScheme",
+                    Ty::Enum(&[
+                        "terminal",
+                        "light",
+                        "solarized light",
+                        "colorblind-friendly light",
+                        "dark",
+                        "solarized dark",
+                        "colorblind-friendly dark",
+                        "tokyo night",
+                    ]),
+                    Scalar,
+                    GlobalOnly
+                ),
+                (
+                    "/altScreenMode",
+                    Ty::Enum(&["default", "always", "never"]),
+                    Scalar,
+                    GlobalOnly
+                ),
+                ("/editorMode", Ty::Enum(&["default", "vim"]), Scalar, GlobalOnly),
+                ("/vimInsertFirst", Ty::Bool, Scalar, GlobalOnly),
+                (
+                    "/runningLightSpeed",
+                    Ty::Enum(&["fast", "medium", "slow", "off"]),
+                    Scalar,
+                    GlobalOnly
+                ),
+                ("/pickerGrouping", Ty::Enum(&["none", "grouped"]), Scalar, GlobalOnly),
+                ("/showTips", Ty::Bool, Scalar, GlobalOnly),
+                ("/showFeedbackSurvey", Ty::Bool, Scalar, GlobalOnly),
+                ("/hideActiveItems", Ty::Bool, Scalar, GlobalOnly),
+                ("/copyOnSelect", Ty::Bool, Scalar, GlobalOnly),
+                ("/clearScrollbackOnResize", Ty::Bool, Scalar, GlobalOnly),
+                ("/useTerminalCursor", Ty::Bool, Scalar, GlobalOnly),
+                ("/disableSlashCommands", Ty::Bool, Scalar, GlobalOnly),
+            ]
+        );
+    }
+
+    #[test]
+    fn settings_rows_narrow_nothing_and_require_nothing() {
+        for field in AntigravityVendor.settings_fields() {
+            assert_eq!(field.map_keys, None, "{}", field.pointer);
+            assert_eq!(field.project_values, None, "{}", field.pointer);
+            assert!(!field.required_by_client, "{}", field.pointer);
+        }
+    }
+
+    /// The CLI writes a default-valued key out of the file, so `""` (the
+    /// `/agentMode` default) would never stay put.
+    #[test]
+    fn settings_agent_mode_leaves_out_the_default_literal() {
+        let row = AntigravityVendor
+            .settings_fields()
+            .iter()
+            .find(|field| field.pointer == "/agentMode")
+            .expect("agentMode row");
+        let crate::install::vendor::SettingsValueType::Enum(values) = row.ty else {
+            panic!("agentMode is an enum: {:?}", row.ty);
+        };
+        assert!(!values.contains(&""), "{values:?}");
+    }
+
+    /// One value per value type is taken, and the CLI's default-mode `""`
+    /// is refused: a wrong value opens the CLI's blocking error screen.
+    #[test]
+    fn settings_document_checks_each_value_type() {
+        use crate::oci::settings::SettingsDocument;
+
+        let good = concat!(
+            "description = \"d\"\n[antigravity]\n",
+            "agentMode = \"plan\"\ncolorScheme = \"tokyo night\"\n",
+            "model = \"m\"\nnotifications = false\n",
+            "[antigravity.permissions]\ndeny = [\"bash(rm)\"]\n",
+        );
+        let (document, _) = SettingsDocument::from_toml_str_with_requires(good).unwrap();
+        assert_eq!(
+            document.vendors["antigravity"]["permissions"]["deny"],
+            serde_json::json!(["bash(rm)"])
+        );
+        for bad in [
+            "agentMode = \"\"",
+            "colorScheme = \"tokyo\"",
+            "notifications = \"no\"",
+            "model = 1",
+            "historySize = 10",
+        ] {
+            let text = format!("description = \"d\"\n[antigravity]\n{bad}\n");
+            assert!(SettingsDocument::from_toml_str_with_requires(&text).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn settings_path_has_no_answer_at_project_scope() {
+        let root = Some(PathBuf::from("/home/u/.gemini/antigravity-cli"));
+        assert_eq!(cli_settings_path(ConfigScope::Project, root), None);
+        assert_eq!(
+            AntigravityVendor.settings_config_path(Path::new("/w"), ConfigScope::Project),
+            None
+        );
+    }
+
+    /// The CLI's file sits beside the app's `config` root, never inside it, and
+    /// an unresolved home has no file rather than a workspace stand-in.
+    #[test]
+    fn settings_path_at_global_scope_is_the_cli_settings_file() {
+        let home = || Some(PathBuf::from("/home/u"));
+        assert_eq!(
+            cli_settings_path(ConfigScope::Global, antigravity_cli_root(home())),
+            Some(PathBuf::from("/home/u/.gemini/antigravity-cli/settings.json"))
+        );
+        assert_eq!(cli_settings_path(ConfigScope::Global, antigravity_cli_root(None)), None);
+        let app = antigravity_root(home()).unwrap();
+        let cli = antigravity_cli_root(home()).unwrap();
+        assert!(!cli.starts_with(&app), "{cli:?} under {app:?}");
+    }
+
+    #[test]
+    fn settings_format_is_json() {
+        assert_eq!(
+            AntigravityVendor.settings_config_format(),
+            crate::install::vendor::McpConfigFormat::Json
+        );
     }
 }

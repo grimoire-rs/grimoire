@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "registry": "localhost:5000",
+  "repository": "grim-golden/pre-settings-47da12f/reg-rule",
+  "tags": {
+    "1.0.0": "sha256:657ed7566e927d6850b8b993ab883d8f1aef26455f51d3d2e63ae332970fb748"
+  }
+}

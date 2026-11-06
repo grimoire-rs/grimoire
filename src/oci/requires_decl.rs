@@ -4,7 +4,7 @@
 //! The source-side grammar for an artifact's `requires` declaration.
 //!
 //! One grammar everywhere: a table (`skills`, `rules`, `agents`, `mcp`,
-//! `hooks`, `bundles`), a binding name that passes [`SkillName::parse`], and a
+//! `hooks`, `bundles`, `settings`), a binding name that passes [`SkillName::parse`], and a
 //! value that passes [`MemberRef::parse`]. Skills, rules and agents carry it
 //! as flattened frontmatter `metadata` keys (`grim.requires.<table>.<name>`),
 //! mcp and hook sources as `[requires.<table>]` TOML tables, and a bundle
@@ -28,8 +28,8 @@ pub enum RequiresDeclError {
     #[error("requires key '{key}' must be grim.requires.<table>.<name>")]
     MalformedKey { key: String },
 
-    /// The table is not one of the six requires tables.
-    #[error("requires table '{table}' in '{key}' is not one of skills, rules, agents, mcp, hooks, bundles")]
+    /// The table is not one of the seven requires tables.
+    #[error("requires table '{table}' in '{key}' is not one of skills, rules, agents, mcp, hooks, bundles, settings")]
     UnknownTable { key: String, table: String },
 
     /// The binding name fails [`SkillName::parse`].
@@ -227,6 +227,17 @@ mod tests {
     fn a_period_in_the_name_is_part_of_the_name() {
         let got = from_metadata(&meta(&[("grim.requires.skills.socket.io", "./socket.io:1")])).unwrap();
         assert_eq!(got[0].name, "socket.io");
+    }
+
+    #[test]
+    fn settings_is_a_requires_table_and_the_refusal_names_it() {
+        let got = from_metadata(&meta(&[("grim.requires.settings.team", "./team:1")])).unwrap();
+        assert_eq!(got[0].kind, ArtifactKind::Settings);
+        let got = from_toml_tables(&toml_of("[requires.settings]\nteam = \"./team:1\"\n")).unwrap();
+        assert_eq!(got[0].kind, ArtifactKind::Settings);
+
+        let err = from_metadata(&meta(&[("grim.requires.widgets.a", "./a:1")])).unwrap_err();
+        assert!(err.to_string().contains("settings"), "{err}");
     }
 
     #[test]

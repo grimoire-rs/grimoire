@@ -103,6 +103,8 @@ struct RawConfig {
     plugin: Option<PluginMeta>,
     #[serde(default)]
     hooks: BTreeMap<String, String>,
+    #[serde(default)]
+    settings: BTreeMap<String, String>,
 }
 
 /// The JSON Schema (schemars) for the on-disk `grimoire.toml` shape.
@@ -227,6 +229,9 @@ fn parse_config(s: &str, path: PathBuf) -> Result<ProjectConfig, ConfigError> {
     // `unreachable!()` gated on "no code path yields Hook here". Rejecting
     // keeps that gate true, and loosening later is the additive direction.
     let hooks = parse_artifact_map(&raw.hooks, &path, PathValues::Rejected, ArtifactKind::Hook)?;
+    // A settings package has no local-pack path, as `[mcp]` has none, and a
+    // path value would give the workspace consent key no registry to name.
+    let settings = parse_artifact_map(&raw.settings, &path, PathValues::Rejected, ArtifactKind::Settings)?;
     let mut set = DesiredSet::from_maps(skills, rules, agents, bundles);
     set.mcp = mcp;
     let mut plugin = raw.plugin;
@@ -235,6 +240,7 @@ fn parse_config(s: &str, path: PathBuf) -> Result<ProjectConfig, ConfigError> {
             .map_err(|reason| ConfigError::new(path.clone(), ConfigErrorKind::PluginInvalid { reason }))?;
     }
     set.hooks = hooks;
+    set.settings = settings;
     Ok(ProjectConfig {
         options: raw.options,
         registries: raw.registries,
@@ -773,7 +779,7 @@ pub struct BundleMetadata {
 /// A parsed bundle source: validated members plus catalog metadata.
 ///
 /// The source is `grimoire.toml`-shaped — its
-/// `[skills]`/`[rules]`/`[agents]`/`[hooks]`/`[mcp]`/`[bundles]` tables are the members —
+/// `[skills]`/`[rules]`/`[agents]`/`[hooks]`/`[mcp]`/`[bundles]`/`[settings]` tables are the members —
 /// with
 /// optional top-level `summary`/`keywords`/`description`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -809,6 +815,10 @@ pub struct BundleSource {
     /// Bundle members, name → validated member reference: a bundle that groups
     /// another bundle. The resolver expands it like any other member.
     pub bundles: BTreeMap<String, MemberRef>,
+    /// Settings members, name → validated member reference. Like `[hooks]`, a
+    /// declaration: delivery stays the install seam's decision, however the
+    /// package was reached.
+    pub settings: BTreeMap<String, MemberRef>,
     /// Catalog metadata for the bundle artifact.
     pub metadata: BundleMetadata,
 }
@@ -844,7 +854,7 @@ struct RawBundleSource {
     /// `#[serde(default)]` member table is additive (Principle 9), and every
     /// bundle authored before it keeps its exact layer bytes because
     /// `BundleManifest::new` sorts members by `ArtifactKind`'s derived `Ord`,
-    /// where `Hook` is the last variant. Field position here only orders the
+    /// where `Hook` sorts after every older kind. Field position here only orders the
     /// `unknown field` diagnostic's "expected one of" list.
     #[serde(default)]
     hooks: BTreeMap<String, String>,
@@ -874,6 +884,10 @@ struct RawBundleSource {
     homepage: Option<String>,
     #[serde(default)]
     documentation: Option<String>,
+    /// Appended after every other field, for the reason `hooks` gives: `Settings`
+    /// is `ArtifactKind`'s last variant, so an existing bundle keeps its bytes.
+    #[serde(default)]
+    settings: BTreeMap<String, String>,
 }
 
 /// Parse + validate a bundle source: members through [`parse_member_map`]
@@ -888,6 +902,7 @@ fn parse_bundle_source(s: &str, path: PathBuf) -> Result<BundleSource, ConfigErr
     let hooks = parse_member_map(&raw.hooks, &path)?;
     let mcp = parse_member_map(&raw.mcp, &path)?;
     let bundles = parse_member_map(&raw.bundles, &path)?;
+    let settings = parse_member_map(&raw.settings, &path)?;
     Ok(BundleSource {
         skills,
         rules,
@@ -895,6 +910,7 @@ fn parse_bundle_source(s: &str, path: PathBuf) -> Result<BundleSource, ConfigErr
         hooks,
         mcp,
         bundles,
+        settings,
         metadata: BundleMetadata {
             summary: raw.summary,
             keywords: raw.keywords,
@@ -912,9 +928,8 @@ fn parse_bundle_source(s: &str, path: PathBuf) -> Result<BundleSource, ConfigErr
 }
 
 /// Whether an artifact table accepts local path values (`./…`, `../…`,
-/// absolute). Skills, rules, agents, and bundles do; `[mcp]` does not
-/// (descriptors register config entries, they have no packable layer
-/// source on disk).
+/// absolute). Skills, rules, agents, and bundles do; `[mcp]`, `[hooks]` and
+/// `[settings]` do not (they have no packable layer source on disk).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PathValues {
     Allowed,
@@ -958,8 +973,8 @@ fn parse_artifact_map(
                     ConfigErrorKind::ArtifactValuePathInvalid {
                         name: name.clone(),
                         value: value.clone(),
-                        // Named from `kind`, never hardcoded: two tables reject
-                        // path values (`[mcp]` and `[hooks]`), and the literal
+                        // Named from `kind`, never hardcoded: three tables reject
+                        // path values (`[mcp]`, `[hooks]`, `[settings]`), and the literal
                         // `mcp` here told a user who declared a path-sourced hook
                         // about a kind they never wrote. `command::add` already
                         // built this sentence from the real kind, so the two
@@ -1088,16 +1103,17 @@ mod tests {
 
     #[test]
     fn a_rejected_path_value_names_its_own_kind() {
-        for (table, name, expected) in [
-            ("hooks", "local-hook", "hook artifacts"),
-            ("mcp", "local-mcp", "mcp artifacts"),
+        for (table, kind, name, expected) in [
+            ("hooks", ArtifactKind::Hook, "local-hook", "hook artifacts"),
+            ("mcp", ArtifactKind::Mcp, "local-mcp", "mcp artifacts"),
+            (
+                "settings",
+                ArtifactKind::Settings,
+                "local-settings",
+                "settings artifacts",
+            ),
         ] {
             let raw = BTreeMap::from([(name.to_string(), "./somewhere".to_string())]);
-            let kind = if table == "hooks" {
-                ArtifactKind::Hook
-            } else {
-                ArtifactKind::Mcp
-            };
             let error = parse_artifact_map(&raw, Path::new("grimoire.toml"), PathValues::Rejected, kind)
                 .expect_err("a path value must be refused for a Rejected table");
             let rendered = error.to_string();
@@ -2027,12 +2043,34 @@ rust-style = "ghcr.io/acme/rust-style:2"
         );
     }
 
+    #[test]
+    fn settings_table_parses_into_the_desired_set() {
+        let cfg = ProjectConfig::from_toml_str("[settings]\nteam-defaults = \"ghcr.io/acme/settings/team:1\"\n")
+            .expect("[settings] must parse");
+        assert_eq!(cfg.set.settings.len(), 1);
+        assert!(matches!(
+            cfg.set.settings.get("team-defaults"),
+            Some(DeclaredSource::Registry(_))
+        ));
+    }
+
+    #[test]
+    fn a_settings_path_value_exits_at_parse() {
+        let err = ProjectConfig::from_toml_str("[settings]\nlocal = \"./settings/local.toml\"\n")
+            .expect_err("a path value must be refused in [settings]");
+        assert!(
+            matches!(err.kind, ConfigErrorKind::ArtifactValuePathInvalid { .. }),
+            "{:?}",
+            err.kind
+        );
+    }
+
     /// Issue #90: a declaration key is joined under an install root, so a key
     /// with a traversal-capable part must be refused at parse time,
     /// in every table, before anything can be written.
     #[test]
     fn grimoire_toml_rejects_traversal_capable_declaration_keys() {
-        for table in ["skills", "rules", "agents", "bundles", "mcp", "hooks"] {
+        for table in ["skills", "rules", "agents", "bundles", "mcp", "hooks", "settings"] {
             for key in [
                 "../../escaped",
                 "..",
@@ -2137,6 +2175,34 @@ code-review = "ghcr.io/acme/code-review:1"
             "ghcr.io/acme/hooks/shell-guard:1"
         );
         assert!(src.skills.contains_key("code-review"), "sibling tables still parse");
+    }
+
+    #[test]
+    fn bundle_source_reads_settings_members() {
+        let src = BundleSource::from_toml_str(
+            r#"
+[settings]
+bare = "ghcr.io/acme/settings/bare"
+sibling = "./settings/sibling:2"
+
+[skills]
+code-review = "ghcr.io/acme/code-review:1"
+"#,
+        )
+        .expect("a [settings] table parses");
+        assert_eq!(src.settings.len(), 2);
+        assert_eq!(
+            src.settings.get("bare").unwrap().to_string(),
+            "ghcr.io/acme/settings/bare:latest"
+        );
+        assert_eq!(src.settings.get("sibling").unwrap().to_string(), "./settings/sibling:2");
+        assert!(src.skills.contains_key("code-review"), "sibling tables still parse");
+    }
+
+    #[test]
+    fn bundle_source_without_a_settings_table_has_none() {
+        let src = BundleSource::from_toml_str("[skills]\ncode-review = \"ghcr.io/acme/code-review:1\"\n").unwrap();
+        assert!(src.settings.is_empty());
     }
 
     #[test]

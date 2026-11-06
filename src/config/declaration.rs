@@ -219,6 +219,16 @@ pub struct ExperimentalOptions {
     /// key.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hooks: bool,
+    /// Controls whether `grim install` writes declared settings into your AI
+    /// clients' own config files. When unset, install writes and removes no
+    /// settings; no environment variable overrides this.
+    ///
+    /// Set it with `grim config set options.experimental.settings true`, in
+    /// project or global config. Declaring and locking a settings package
+    /// need no flag, and `grim status` reads `gated` while it is unset.
+    /// Enabling the feature is not consent to apply any particular package.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub settings: bool,
 }
 
 impl ExperimentalOptions {
@@ -243,6 +253,14 @@ impl ExperimentalOptions {
     /// project and global config) lands here instead of at every caller.
     pub fn hooks_enabled(&self) -> bool {
         self.hooks
+    }
+
+    /// The effective settings flag: the config key is the whole answer, as
+    /// for [`Self::hooks_enabled`]. An environment variable is repo-carriable,
+    /// so one in the enabling direction would let a cloned repository turn on
+    /// writes into a harness's own config.
+    pub fn settings_enabled(&self) -> bool {
+        self.settings
     }
 }
 
@@ -497,6 +515,9 @@ pub struct DesiredSet {
     /// parser rejects path values under `[hooks]` for now, so no hook
     /// reaches the local-pack path that has no `Hook` arm yet.
     pub hooks: BTreeMap<String, DeclaredSource>,
+    /// Declared settings packages, keyed by config name. Always `Registry` —
+    /// the config parser rejects path values under `[settings]`.
+    pub settings: BTreeMap<String, DeclaredSource>,
 
     /// Lazily-computed canonical declaration hash.
     ///
@@ -519,6 +540,7 @@ impl Clone for DesiredSet {
             bundles: self.bundles.clone(),
             mcp: self.mcp.clone(),
             hooks: self.hooks.clone(),
+            settings: self.settings.clone(),
             declaration_hash_cache: OnceLock::new(),
         }
     }
@@ -533,6 +555,7 @@ impl PartialEq for DesiredSet {
             && self.bundles == other.bundles
             && self.mcp == other.mcp
             && self.hooks == other.hooks
+            && self.settings == other.settings
     }
 }
 
@@ -578,6 +601,7 @@ impl DesiredSet {
             // Assigned after construction by the parser, like `mcp` — the
             // signature stays at the four kinds every fixture already passes.
             hooks: BTreeMap::new(),
+            settings: BTreeMap::new(),
             declaration_hash_cache: OnceLock::new(),
         }
     }
@@ -605,6 +629,35 @@ mod tests {
 
     fn id(s: &str) -> DeclaredSource {
         DeclaredSource::Registry(Identifier::parse(s).expect("valid identifier"))
+    }
+
+    /// The two flags are read apart: one kind's opt-in never enables the other.
+    #[test]
+    fn settings_enabled_reads_only_its_own_flag() {
+        assert!(!ExperimentalOptions::default().settings_enabled());
+        let hooks_only = ExperimentalOptions {
+            hooks: true,
+            ..Default::default()
+        };
+        assert!(!hooks_only.settings_enabled());
+        let settings_only = ExperimentalOptions {
+            settings: true,
+            ..Default::default()
+        };
+        assert!(settings_only.settings_enabled());
+        assert!(!settings_only.hooks_enabled());
+    }
+
+    /// An unset flag serializes nothing, so a config that never opted in
+    /// keeps its bytes through a `grim config` rewrite.
+    #[test]
+    fn unset_settings_flag_serializes_nothing() {
+        let only_hooks = ExperimentalOptions {
+            hooks: true,
+            ..Default::default()
+        };
+        let body = toml::to_string(&only_hooks).unwrap();
+        assert!(!body.contains("settings"), "{body}");
     }
 
     #[test]

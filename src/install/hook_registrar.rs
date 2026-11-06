@@ -96,7 +96,7 @@ use super::client_target::ClientTarget;
 use super::hook_command::{self, HostOs};
 use super::hook_dispatch::{DispatchEntry, DispatchError, DispatchGuard, DispatchWrite, RootScope, RootToken};
 use super::hook_launcher::CommandRefusal;
-use super::install_state::InstallState;
+use super::install_state::{InstallState, SettingsStore};
 use super::json_splice::{self, NestedGroupPath, NestedHandlerPath, Splice};
 use super::vendor::{HOOK_MARKER_KEY, HOOK_MARKER_VALUE, Vendor};
 
@@ -232,6 +232,37 @@ impl ArmRefusal {
             Self::GrimHomeShared => {
                 "on Windows, GRIM_HOME is not a local path under your user profile, so another host could run this host's launcher"
             }
+        }
+    }
+
+    /// [`Self::reason`] on the settings path, where the three `GRIM_HOME`
+    /// causes protect the settings record rather than a launcher or table.
+    /// Each ends with the fix; install, update, uninstall and status share it,
+    /// so the tail names no one command.
+    pub fn settings_reason(self) -> &'static str {
+        // Exhaustive so a new `GRIM_HOME` cause cannot inherit hook wording.
+        match self {
+            Self::GrimHomeRelative => {
+                "GRIM_HOME is a relative path, so the settings record would resolve inside the workspace; set it to \
+                 an absolute path outside the workspace, then re-run the command"
+            }
+            Self::GrimHomeInWorkspace => {
+                "GRIM_HOME resolves inside this workspace, which would make the settings record repo-resident; set \
+                 it to an absolute path outside the workspace, then re-run the command"
+            }
+            Self::GrimHomeShared => {
+                "on Windows, GRIM_HOME is not a local path under your user profile, so another host could change \
+                 this host's settings records; point GRIM_HOME at a local path, then re-run the command"
+            }
+            Self::LauncherPath(_)
+            | Self::LauncherPathUnquotable
+            | Self::DispatchLocked
+            | Self::DispatchTableFull
+            | Self::SurfaceUserOwned
+            | Self::SurfaceUnreadable
+            | Self::PlatformUnsupported
+            | Self::LauncherUnwritable
+            | Self::LauncherPathOccupied => self.reason(),
         }
     }
 }
@@ -643,6 +674,7 @@ fn converge_on(
     // Steps 5 and 6 — converge each client's own surface, then the git-exclude
     // hygiene that is never a gate.
     let mut unregistered: Vec<ClientTarget> = Vec::new();
+    let settings_use_file = settings_use_local_file(state);
     for armed in &per_client {
         let client = armed.client;
         // Read before the converge rewrites it: C-022 compares the strings.
@@ -657,6 +689,7 @@ fn converge_on(
             armed.surface.as_deref(),
             &armed.registrations,
             write,
+            settings_use_file,
         ) {
             Ok(outcome) => outcome,
             Err(e) if !armed.rows.is_empty() => {
@@ -997,6 +1030,10 @@ fn register_desired(
 /// A genuine I/O failure reading or writing the client's config. A policy
 /// refusal is not an error — it is [`HookSync::NotArmed`], and it is decided by
 /// the caller.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "settings_use_file is one fact from the caller's state; a struct for one call site adds nothing"
+)]
 fn sync_for_state(
     vendor: &dyn Vendor,
     workspace: &Path,
@@ -1005,6 +1042,7 @@ fn sync_for_state(
     surface: Option<&Path>,
     registrations: &[crate::oci::hook::HookRegistration],
     table_write: DispatchWrite,
+    settings_use_file: bool,
 ) -> io::Result<HookSync> {
     // `None` ⇒ this client has no hook surface at this scope, so there is
     // nothing to write and nothing to own (codex and copilot at project scope).
@@ -1030,7 +1068,10 @@ fn sync_for_state(
     // ignore rule governs `git add` and `git status`, not reads, so this stops
     // the *user* publishing their own arming; T3 is held by the absolute
     // launcher path, the ownership marker and digest-pinned approval.
-    if scope == ConfigScope::Project && vendor.hook_surface() == Some(HookSurface::SpliceConfig) {
+    let project_splice = scope == ConfigScope::Project && vendor.hook_surface() == Some(HookSurface::SpliceConfig);
+    // Settings share this file and its rule, so losing the last hook drops the
+    // rule only when no settings piece is left in the file either.
+    if project_splice && (!registrations.is_empty() || !settings_use_file) {
         let outcome = if registrations.is_empty() {
             drop_settings_local_exclude(workspace)
         } else {
@@ -1230,9 +1271,30 @@ pub fn surface_user_owned(client: ClientTarget, grim_home: &Path, workspace: &Pa
         .is_some_and(|surface| own_file_owner(vendor, grim_home, &surface) == SurfaceOwner::User)
 }
 
+/// Whether a settings piece sits in Claude's local file, the one file hooks
+/// and settings share. A store grim could not read answers yes, because a rule
+/// dropped on that guess would expose the user's values to `git add`.
+pub(crate) fn settings_use_local_file(state: &InstallState) -> bool {
+    let claude = ClientTarget::Claude.as_str();
+    *state.settings_store() == SettingsStore::Refused
+        || state
+            .iter_records()
+            .filter(|record| record.kind == ArtifactKind::Settings)
+            .flat_map(|record| &record.outputs)
+            .any(|output| output.entry.is_some() && output.client == claude)
+}
+
+/// Whether grim's hook registration sits in Claude's local file. Read from the
+/// file, because a registration is never recorded.
+pub(crate) fn hooks_use_local_file(workspace: &Path, grim_home: &Path) -> bool {
+    let vendor = ClientTarget::Claude.vendor();
+    let surface = vendor.hook_config_path(workspace, ConfigScope::Project);
+    owns_anything(vendor, grim_home, surface.as_deref(), Some(workspace))
+}
+
 /// Where a symlinked splice surface may lead: inside the workspace at project
 /// scope, anywhere (the user's own dotfiles layout) at global scope.
-fn link_confinement(workspace: &Path, scope: ConfigScope) -> Option<&Path> {
+pub(crate) fn link_confinement(workspace: &Path, scope: ConfigScope) -> Option<&Path> {
     (scope == ConfigScope::Project).then_some(workspace)
 }
 
@@ -1243,7 +1305,7 @@ fn link_confinement(workspace: &Path, scope: ConfigScope) -> Option<&Path> {
 /// moves the write as surely as a linked file. Checking only the last component
 /// let a cloned repo aim grim's reap, and this workspace's arming, at another
 /// project's settings.
-fn confined_target(surface: &Path, confine: Option<&Path>) -> io::Result<PathBuf> {
+pub(crate) fn confined_target(surface: &Path, confine: Option<&Path>) -> io::Result<PathBuf> {
     let target = resolve_symlink(surface);
     let Some(workspace) = confine else {
         return Ok(target);
@@ -2124,19 +2186,39 @@ fn exclude_lines(text: &str) -> impl Iterator<Item = &str> {
 /// rule is still appended. That is the right direction for a hygiene step: a
 /// redundant exclude line costs nothing, a missing one is the thing this exists
 /// to prevent.
-fn is_tracked(workspace: &Path, relative: &str) -> bool {
+pub(crate) fn is_tracked(workspace: &Path, relative: &str) -> bool {
     if !workspace.join(relative).exists() {
         return false;
     }
-    std::process::Command::new("git")
+    tracked_probe(workspace, relative)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// [`is_tracked`] for an async caller: `false` on any failure, as there, and
+/// past `deadline`.
+pub(crate) async fn is_tracked_within(workspace: &Path, relative: &str, deadline: std::time::Duration) -> bool {
+    if !tokio::fs::try_exists(workspace.join(relative)).await.unwrap_or(false) {
+        return false;
+    }
+    let mut probe = tokio::process::Command::from(tracked_probe(workspace, relative));
+    // An overrun drops the future, which must kill the child: a `git` left
+    // running keeps the process alive after the report is printed.
+    probe.kill_on_drop(true);
+    matches!(tokio::time::timeout(deadline, probe.status()).await, Ok(Ok(status)) if status.success())
+}
+
+fn tracked_probe(workspace: &Path, relative: &str) -> std::process::Command {
+    let mut probe = std::process::Command::new("git");
+    probe
         .arg("-C")
         .arg(workspace)
         .args(["ls-files", "--error-unmatch", "--"])
         .arg(relative)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+        .stderr(std::process::Stdio::null());
+    probe
 }
 
 /// Remove grim's `.git/info/exclude` line when the last project-scope hook goes.
@@ -2235,6 +2317,7 @@ pub(crate) mod test_fixture {
                     support_dir: None,
                     entry: None,
                     adopted: false,
+                    element: None,
                 })
                 .collect(),
         }
@@ -2306,6 +2389,16 @@ mod tests {
 
     fn git_worktree(root: &Path) {
         std::fs::create_dir_all(root.join(".git/info")).unwrap();
+    }
+
+    #[test]
+    fn a_store_grim_cannot_read_keeps_the_exclude_rule() {
+        let ws = tempfile::tempdir().unwrap();
+        let unread = InstallState::load_project(ws.path(), Path::new(".grimoire"), &ws.path().join("grimoire.toml"));
+        assert!(settings_use_local_file(&unread.unwrap()));
+        assert!(!settings_use_local_file(&InstallState::empty(
+            &ws.path().join("state.json")
+        )));
     }
 
     #[test]
@@ -2447,6 +2540,39 @@ mod tests {
         assert_eq!(reasons.len(), causes.len());
         for reason in reasons {
             assert!(!reason.ends_with('.'), "library style: no trailing period — {reason}");
+        }
+    }
+
+    /// The `GRIM_HOME` causes also stop the settings records, so the settings
+    /// path names those records and ends with the remedy, while the hook text
+    /// keeps every word.
+    #[test]
+    fn a_grim_home_refusal_names_what_it_protects() {
+        let cases = [
+            (
+                ArmRefusal::GrimHomeRelative,
+                "GRIM_HOME is a relative path, so the dispatch table would resolve inside the workspace",
+                "GRIM_HOME is a relative path, so the settings record would resolve inside the workspace; \
+                 set it to an absolute path outside the workspace, then re-run the command",
+            ),
+            (
+                ArmRefusal::GrimHomeInWorkspace,
+                "GRIM_HOME resolves inside this workspace, which would make an armable file repo-resident",
+                "GRIM_HOME resolves inside this workspace, which would make the settings record repo-resident; \
+                 set it to an absolute path outside the workspace, then re-run the command",
+            ),
+            (
+                ArmRefusal::GrimHomeShared,
+                "on Windows, GRIM_HOME is not a local path under your user profile, so another host could run \
+                 this host's launcher",
+                "on Windows, GRIM_HOME is not a local path under your user profile, so another host could \
+                 change this host's settings records; point GRIM_HOME at a local path, then re-run the command",
+            ),
+        ];
+        for (refusal, hook, settings) in cases {
+            assert_eq!(refusal.reason(), hook);
+            assert_eq!(refusal.to_string(), hook);
+            assert_eq!(refusal.settings_reason(), settings);
         }
     }
 
@@ -2940,6 +3066,7 @@ mod tests {
                 Some(&surface),
                 &[registration, slower],
                 DispatchWrite::Unchanged,
+                false,
             )
             .unwrap();
             let text = std::fs::read_to_string(&surface).unwrap();

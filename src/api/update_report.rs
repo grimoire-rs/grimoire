@@ -5,7 +5,8 @@
 //!
 //! Plain format: 5-column table (Kind | Name | Old | New | Action).
 //!
-//! JSON format: `{"items": [...]}` where each item is a
+//! JSON format: `{"items": [...], "settings_changes": [...], "pieces": [...]}`
+//! where each item is a
 //! `{kind, name, old, new, action, reaped_clients, kept_modified_clients,
 //! retained, abandoned_entries, refused, plugin}` object (uniform `items` envelope, per
 //! subsystem-cli-api.md). `old` is `null` for an artifact that had no
@@ -21,12 +22,16 @@
 //! gate refused to overwrite (exit 65, forceable), `false` everywhere else.
 //! `plugin` is always present: the plugin name on a `--marketplace` row,
 //! `null` otherwise; the plain table then shows `Name` as `<plugin>:<name>`.
+//! `settings_changes` and `pieces` are always present, `[]` when empty: update
+//! emits this report with exit 65, so a refused piece has to travel here and
+//! not only in the error document.
 
 use std::io::{self, Write};
 use std::path::PathBuf;
 
 use serde::{Serialize, Serializer};
 
+use crate::api::settings_report::{RefusedPiece, SettingsChange};
 use crate::cli::printer::{Printable, print_table};
 use crate::install::uninstall::AbandonedEntry;
 use crate::oci::{ArtifactKind, Digest};
@@ -100,12 +105,25 @@ fn serialize_opt_digest<S: Serializer>(digest: &Option<Digest>, s: S) -> Result<
 #[derive(Debug, Serialize)]
 pub struct UpdateReport {
     items: Vec<UpdateEntry>,
+    settings_changes: Vec<SettingsChange>,
+    pieces: Vec<RefusedPiece>,
 }
 
 impl UpdateReport {
     /// Build from operation results.
     pub fn new(items: Vec<UpdateEntry>) -> Self {
-        Self { items }
+        Self {
+            items,
+            settings_changes: Vec::new(),
+            pieces: Vec::new(),
+        }
+    }
+
+    /// Name what the run changed and refused in harness settings files.
+    pub fn with_settings(mut self, settings_changes: Vec<SettingsChange>, pieces: Vec<RefusedPiece>) -> Self {
+        self.settings_changes = settings_changes;
+        self.pieces = pieces;
+        self
     }
 
     /// The rows, for a caller concatenating several reports in order.
@@ -217,6 +235,7 @@ mod tests {
                 abandoned_entries: vec![AbandonedEntry {
                     path: PathBuf::from("/elsewhere/.mcp.json"),
                     pointer: "/mcpServers/grim".to_string(),
+                    element: None,
                 }],
                 refused: true,
             },
@@ -245,7 +264,7 @@ mod tests {
         assert_eq!(v["items"][1]["retained"], serde_json::json!(["/elsewhere/rules/b.md"]));
         assert_eq!(
             v["items"][1]["abandoned_entries"],
-            serde_json::json!([{"path": "/elsewhere/.mcp.json", "pointer": "/mcpServers/grim"}])
+            serde_json::json!([{"path": "/elsewhere/.mcp.json", "pointer": "/mcpServers/grim", "element": null}])
         );
     }
 
@@ -323,5 +342,37 @@ mod tests {
             normal.split_whitespace().any(|w| w == "code-review"),
             "a normal row's Name is unprefixed: {out}"
         );
+    }
+
+    #[test]
+    fn settings_changes_and_pieces_are_always_present_after_items() {
+        use crate::api::settings_report::{PieceMark, PieceState, RefusedPiece};
+
+        let empty = serde_json::to_string(&UpdateReport::new(Vec::new())).unwrap();
+        assert_eq!(empty, r#"{"items":[],"settings_changes":[],"pieces":[]}"#);
+
+        let change = crate::api::settings_report::SettingsChange {
+            package: "team".to_string(),
+            client: "claude".to_string(),
+            file: "~/.claude/settings.json".to_string(),
+            key: "/model".to_string(),
+            element: None,
+            action: crate::api::settings_report::SettingsChangeAction::Added,
+        };
+        let piece = RefusedPiece {
+            package: "team".to_string(),
+            client: "claude".to_string(),
+            file: Some("~/.claude/settings.json".to_string()),
+            pointer: "/model".to_string(),
+            element: None,
+            marked: PieceMark::Overwrite,
+            state: Some(PieceState::Modified),
+            wanted: Some("sonnet".to_string()),
+            current: Some("opus".to_string()),
+        };
+        let listed = UpdateReport::new(Vec::new()).with_settings(vec![change], vec![piece]);
+        let v = serde_json::to_value(&listed).unwrap();
+        assert_eq!(v["settings_changes"][0]["package"], "team");
+        assert_eq!(v["pieces"][0]["marked"], "overwrite");
     }
 }

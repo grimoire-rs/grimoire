@@ -6,8 +6,8 @@
 //!
 //! A raw query string is parsed once into a [`SearchQuery`]: Unicode
 //! whitespace splits it into tokens, each lowercased. A bare *kind keyword*
-//! (`skill`, `rule`, `bundle`, `agent`, `mcp` or `hook`, singular or plural) is a
-//! kind **filter** (never a literal text term); every other token is a text
+//! (`skill`, `rule`, `bundle`, `agent`, `mcp`, `hook` or `settings`, singular or
+//! plural) is a kind **filter** (never a literal text term); every other token is a text
 //! term. Matching is an AND across all of them:
 //!
 //! - each text term must independently hit *any* of an entry's fields
@@ -392,14 +392,19 @@ fn without_registry_host(repo: &str) -> &str {
 }
 
 /// Map a lowercased token to a kind filter, accepting both singular and
-/// plural spellings of all six kinds (`skill`, `rule`, `bundle`, `agent`,
-/// `mcp`, `hook`).
+/// plural spellings of every kind (`skill`, `rule`, `bundle`, `agent`, `mcp`,
+/// `hook`, `settings`).
 /// `None` for any other token (it is a text term).
 fn kind_keyword(token: &str) -> Option<ArtifactKind> {
-    // Strip a single trailing plural `s`, then delegate to the canonical
-    // singular parser so the ten spellings share one mapping.
-    let singular = token.strip_suffix('s').unwrap_or(token);
-    ArtifactKind::from_kind_str(singular)
+    // One trailing `s` comes off both sides: `settings` is plural on the wire,
+    // so stripping the token alone would never reach it.
+    fn stem(word: &str) -> &str {
+        word.strip_suffix('s').unwrap_or(word)
+    }
+    let wanted = stem(token);
+    ArtifactKind::ALL
+        .into_iter()
+        .find(|kind| stem(kind.kind_str()) == wanted)
 }
 
 #[cfg(test)]
@@ -505,6 +510,33 @@ mod tests {
         // Singular spellings too.
         assert_eq!(SearchQuery::parse("skill").kinds, vec![ArtifactKind::Skill]);
         assert_eq!(SearchQuery::parse("bundle").kinds, vec![ArtifactKind::Bundle]);
+    }
+
+    #[test]
+    fn every_kind_keyword_maps_in_both_spellings() {
+        for kind in ArtifactKind::ALL {
+            let wire = kind.kind_str();
+            let singular = wire.strip_suffix('s').unwrap_or(wire);
+            assert_eq!(SearchQuery::parse(singular).kinds, vec![kind], "{singular}");
+            let plural = format!("{singular}s");
+            assert_eq!(SearchQuery::parse(&plural).kinds, vec![kind], "{plural}");
+        }
+    }
+
+    #[test]
+    fn settings_is_a_kind_filter_and_not_a_text_term() {
+        for token in ["settings", "setting", "SETTINGS"] {
+            let q = SearchQuery::parse(token);
+            assert_eq!(q.kinds, vec![ArtifactKind::Settings], "{token}");
+            assert!(q.terms.is_empty(), "{token}");
+            assert!(q.matches_fields(Some("settings"), "acme/x", "", "", &[]), "{token}");
+            assert!(
+                !q.matches_fields(Some("skill"), "acme/settings", "", "", &[]),
+                "{token}"
+            );
+        }
+        // One `s` only: anything longer stays a text term.
+        assert_eq!(SearchQuery::parse("settingss").terms, vec!["settingss".to_string()]);
     }
 
     #[test]

@@ -112,6 +112,7 @@ pub fn effective_graph(set: &DesiredSet, lock: &GrimoireLock) -> Option<Effectiv
         (ArtifactKind::Agent, &set.agents),
         (ArtifactKind::Mcp, &set.mcp),
         (ArtifactKind::Hook, &set.hooks),
+        (ArtifactKind::Settings, &set.settings),
     ] {
         for (name, id) in map {
             out.insert((kind, name.clone()), Origin::Direct(id.clone()));
@@ -211,6 +212,7 @@ fn locked_entry<'a>(lock: &'a GrimoireLock, key: &NodeKey) -> Option<&'a LockedA
         ArtifactKind::Agent => &lock.agents,
         ArtifactKind::Mcp => &lock.mcp,
         ArtifactKind::Hook => &lock.hooks,
+        ArtifactKind::Settings => &lock.settings,
         ArtifactKind::Bundle => return None,
     };
     list.iter().find(|a| a.name == key.1)
@@ -562,6 +564,9 @@ pub fn declared_parent_provides(set: &DesiredSet, lock: &GrimoireLock, key: &Nod
         ArtifactKind::Bundle => {
             after.bundles.remove(name);
         }
+        ArtifactKind::Settings => {
+            after.settings.remove(name);
+        }
     }
     after.invalidate_declaration_hash_cache();
     effective_set(&after, lock)
@@ -617,6 +622,7 @@ mod tests {
             agents: Vec::new(),
             mcp: Vec::new(),
             hooks: Vec::new(),
+            settings: Vec::new(),
             bundles: bundles.to_vec(),
         }
     }
@@ -916,6 +922,70 @@ mod tests {
             transitive: true,
             ..snapshot(binding, repo, "1", members)
         }
+    }
+
+    #[test]
+    fn a_declared_settings_binding_joins_the_effective_set() {
+        let mut set = set_with(&[], &[]);
+        set.settings.insert(
+            "team".to_string(),
+            DeclaredSource::Registry(id("ghcr.io/acme/settings/team:1")),
+        );
+        let effective = effective_set(&set, &lock_of(&[])).expect("computable");
+        assert!(
+            effective.contains_key(&key(ArtifactKind::Settings, "team")),
+            "{effective:?}"
+        );
+    }
+
+    #[test]
+    fn a_settings_requires_edge_reads_the_settings_entry() {
+        let team = entry(
+            ArtifactKind::Settings,
+            "team",
+            "ghcr.io/acme/settings/team:1",
+            &[(ArtifactKind::Skill, "gws-shared", "ghcr.io/acme/skills/gws-shared:1")],
+        );
+        let shared = skill_entry("gws-shared", "ghcr.io/acme/skills/gws-shared:1", &[]);
+        let mut lock = lock_with(vec![shared], &[]);
+        lock.settings = vec![team];
+        let mut set = set_with(&[], &[]);
+        set.settings.insert(
+            "team".to_string(),
+            DeclaredSource::Registry(id("ghcr.io/acme/settings/team:1")),
+        );
+        let effective = effective_set(&set, &lock).expect("computable");
+        assert!(
+            effective.contains_key(&key(ArtifactKind::Skill, "gws-shared")),
+            "{effective:?}"
+        );
+    }
+
+    #[test]
+    fn a_settings_member_is_provided_after_its_direct_binding_goes() {
+        let lock = lock_of(&[snapshot(
+            "stack",
+            "ghcr.io/acme/stack",
+            "1",
+            &[(ArtifactKind::Settings, "team", "ghcr.io/acme/settings/team:1")],
+        )]);
+        let mut set = set_with(&[], &[("stack", "ghcr.io/acme/stack:1")]);
+        set.settings.insert(
+            "team".to_string(),
+            DeclaredSource::Registry(id("ghcr.io/acme/settings/team:1")),
+        );
+        assert!(declared_parent_provides(
+            &set,
+            &lock,
+            &key(ArtifactKind::Settings, "team")
+        ));
+        let no_bundle = lock_of(&[]);
+        let mut direct_only = set_with(&[], &[]);
+        direct_only.settings = set.settings.clone();
+        assert!(
+            !declared_parent_provides(&direct_only, &no_bundle, &key(ArtifactKind::Settings, "team")),
+            "a direct binding alone is no parent"
+        );
     }
 
     #[test]

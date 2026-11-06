@@ -1199,6 +1199,9 @@ mod tests {
         let hooks = entry("options.experimental.hooks", ConfigSection::Experimental);
         assert_eq!(hooks["section"], "experimental");
         assert_eq!(hooks["advanced"], false);
+        let settings = entry("options.experimental.settings", ConfigSection::Experimental);
+        assert_eq!(settings["section"], "experimental");
+        assert_eq!(settings["advanced"], false);
     }
 
     #[test]

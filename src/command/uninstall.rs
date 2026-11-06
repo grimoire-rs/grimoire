@@ -19,9 +19,12 @@
 
 use clap::Args;
 
+use crate::api::settings_report::SettingsChange;
 use crate::api::uninstall_report::{UninstallReport, UninstallStatus};
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
+use crate::install::installer::SettingsOutcome;
+use crate::install::settings_phase;
 use crate::install::uninstall::{UninstallError, UninstallOutcome, uninstall};
 use crate::lock::file_lock::ConfigFileLock;
 use crate::lock::lock_io;
@@ -33,19 +36,20 @@ use super::scope_resolution;
 /// `grim uninstall` arguments.
 #[derive(Debug, Args)]
 pub struct UninstallArgs {
-    /// `skill`, `rule`, `agent`, `mcp`, or `hook`.
-    #[arg(value_parser = ["skill", "rule", "agent", "mcp", "hook"])]
+    /// `skill`, `rule`, `agent`, `mcp`, `hook`, or `settings`.
+    #[arg(value_parser = ["skill", "rule", "agent", "mcp", "hook", "settings"])]
     pub kind: String,
 
     /// The config binding name to uninstall.
     pub name: String,
 
-    /// Remove a managed MCP config entry even when it no longer matches
-    /// what grim installed.
+    /// Remove a managed MCP config entry or a settings value even when it no
+    /// longer matches what grim installed.
     ///
     /// Without it such an entry is refused (65) rather than discarded — it
     /// may hold a local customization, or be an entry grim only adopted and
-    /// never wrote. Materialized files are deleted either way.
+    /// never wrote. An adopted settings value that still matches stays, even
+    /// with this flag. Materialized files are deleted either way.
     #[arg(long)]
     pub force: bool,
 }
@@ -114,6 +118,7 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
     // `retained`'s counterpart for a shared, user-owned config file grim
     // never intended to delete — see `UninstallResult::abandoned_entries`.
     let mut abandoned_entries = Vec::new();
+    let mut settings_changes = Vec::new();
     if !held_by_bundle {
         let mut state = super::grim(scope_resolution::load_state(&scope).map_err(|e| state_io(&scope.state_path, e)))?;
         // The policy is resolved **without** the consent prompt reachable —
@@ -150,36 +155,48 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
         let nodes: Vec<_> = std::iter::once(key.clone())
             .chain(plan.orphans.iter().cloned())
             .collect();
-        let deletion = delete_nodes(
-            &mut state,
-            &nodes,
-            &DeleteEnv {
-                roots: &scope.roots,
-                scope: scope.scope,
-                workspace: &scope.workspace,
-                config_path: &scope.config_path,
-                force: args.force,
+        let (roots, workspace, config_path) = (scope.roots.clone(), scope.workspace.clone(), scope.config_path.clone());
+        let (config_scope, force) = (scope.scope, args.force);
+        // Deleting reads, writes and removes files, so it runs on the blocking pool.
+        let work = move || {
+            let env = DeleteEnv {
+                roots: &roots,
+                scope: config_scope,
+                workspace: &workspace,
+                config_path: &config_path,
+                force,
                 hook_policy: &hook_policy,
-            },
-        );
+            };
+            delete_nodes(&mut state, &nodes, &env)
+        };
+        let deletion = match tokio::task::spawn_blocking(work).await {
+            Ok(deletion) => deletion,
+            Err(join) if join.is_panic() => std::panic::resume_unwind(join.into_panic()),
+            Err(join) => {
+                let stopped = state_io(&scope.state_path, std::io::Error::other(join));
+                return Err(crate::error::Error::from(stopped).into());
+            }
+        };
         if let Some(failure) = deletion.failure {
-            return Err(anyhow::Error::from(match failure {
+            let error = match failure {
                 DeleteFailure::Uninstall(e) => uninstall_error(&scope.workspace, e),
                 DeleteFailure::Persist(
                     crate::install::install_state::PersistError::EnsureDir { path, source }
                     | crate::install::install_state::PersistError::Save { path, source },
                 ) => crate::error::Error::from(state_io(&path, source)),
-            }));
+            };
+            return Err(keep_changes(error, deletion.settings_changes).into());
         }
         file_removed = deletion.target_removed;
         retained = deletion.retained;
         abandoned_entries = deletion.abandoned_entries;
+        settings_changes = deletion.settings_changes;
     }
 
     // 2. Undeclare from the config + lock (the `remove` half), so a later
     //    `install` does not silently bring it back.
     let mut set = scope.set.clone();
-    let (declared, _notes) = undeclare_and_unlock(
+    let undeclared = undeclare_and_unlock(
         &scope.config_path,
         &scope.lock_path,
         &scope.options,
@@ -187,7 +204,20 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
         &mut set,
         kind,
         &args.name,
-    )?;
+    );
+    let (declared, _notes) = match undeclared {
+        Ok(done) => done,
+        Err(error) => {
+            return Err(match error.downcast::<crate::error::Error>() {
+                Ok(error) => keep_changes(error, settings_changes).into(),
+                Err(other) => {
+                    settings_phase::warn_restart(&settings_changes);
+                    other
+                }
+            });
+        }
+    };
+    settings_phase::warn_restart(&settings_changes);
 
     let status = if file_removed || declared {
         UninstallStatus::Uninstalled
@@ -203,9 +233,31 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
         UninstallStatus::NotInstalled
     };
     Ok((
-        UninstallReport::new(kind, args.name.clone(), status, retained, abandoned_entries),
+        UninstallReport::new(kind, args.name.clone(), status, retained, abandoned_entries)
+            .with_settings_changes(settings_changes),
         ExitCode::Success,
     ))
+}
+
+/// Puts what the run changed on `error` and closes the run's change list. A
+/// settings file is not rolled back, so a failure still owes the list. The
+/// nodes before the failing one changed theirs first, so they lead.
+fn keep_changes(error: crate::error::Error, changes: Vec<SettingsChange>) -> crate::error::Error {
+    match error {
+        crate::error::Error::Settings(mut failure) => {
+            let later = std::mem::replace(&mut failure.outcome.changes, changes);
+            failure.outcome.changes.extend(later);
+            settings_phase::warn_restart(&failure.outcome.changes);
+            crate::error::Error::Settings(failure)
+        }
+        other => {
+            settings_phase::warn_restart(&changes);
+            other.with_settings(SettingsOutcome {
+                changes,
+                pieces: Vec::new().into(),
+            })
+        }
+    }
 }
 
 /// What [`delete_nodes`] needs from its caller's scope.
@@ -232,6 +284,7 @@ pub(crate) struct Deletion {
     target_removed: bool,
     retained: Vec<std::path::PathBuf>,
     abandoned_entries: Vec<crate::install::uninstall::AbandonedEntry>,
+    pub(crate) settings_changes: Vec<SettingsChange>,
     pub(crate) failure: Option<DeleteFailure>,
 }
 
@@ -258,6 +311,7 @@ pub(crate) fn delete_nodes(
         target_removed: false,
         retained: Vec::new(),
         abandoned_entries: Vec::new(),
+        settings_changes: Vec::new(),
         failure: None,
     };
     for (index, (kind, name)) in nodes.iter().enumerate() {
@@ -284,6 +338,7 @@ pub(crate) fn delete_nodes(
         };
         out.retained.extend(result.retained);
         out.abandoned_entries.extend(result.abandoned_entries);
+        out.settings_changes.extend(result.settings_changes);
         if result.outcome == UninstallOutcome::Removed {
             out.target_removed |= index == 0;
             // The single `persist` seam handles project-scope dir creation, the
@@ -347,6 +402,7 @@ pub(crate) fn plan_hold(
         ArtifactKind::Rule => after.rules.remove(&key.1),
         ArtifactKind::Agent => after.agents.remove(&key.1),
         ArtifactKind::Mcp => after.mcp.remove(&key.1),
+        ArtifactKind::Settings => after.settings.remove(&key.1),
         ArtifactKind::Bundle => return none,
     };
     after.invalidate_declaration_hash_cache();
@@ -406,6 +462,7 @@ pub(crate) fn undeclare_and_unlock(
         ArtifactKind::Agent => set.agents.remove(name).is_some(),
         ArtifactKind::Bundle => set.bundles.remove(name).is_some(),
         ArtifactKind::Mcp => set.mcp.remove(name).is_some(),
+        ArtifactKind::Settings => set.settings.remove(name).is_some(),
     };
     if declared {
         set.invalidate_declaration_hash_cache();
@@ -452,12 +509,23 @@ fn uninstall_error(path: &std::path::Path, source: UninstallError) -> crate::err
                 crate::install::install_error::InstallErrorKind::IntegrityMismatch { recorded, actual },
             ))
         }
+        // The same forceable family, and every drifted piece has a record, so
+        // the reason reads `modified`. The pieces ride to the error document.
+        UninstallError::SettingsDrifted { pieces } => {
+            let outcome = SettingsOutcome {
+                changes: Vec::new(),
+                pieces: pieces.into(),
+            };
+            super::install::settings_refusal(&outcome).with_settings(outcome)
+        }
+        UninstallError::Settings(error) => *error,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::settings_report::{PieceMark, PieceState, RefusedPiece};
     use crate::config::declaration::{ConfigOptions, DesiredSet};
     use crate::lock::grimoire_lock::{GrimoireLock, LockMetadata};
     use crate::lock::lock_version::LockVersion;
@@ -477,6 +545,7 @@ mod tests {
     fn lock_with_skills(declaration_hash: &str, entries: &[(&str, char)]) -> GrimoireLock {
         GrimoireLock {
             hooks: vec![],
+            settings: vec![],
             metadata: LockMetadata {
                 lock_version: LockVersion::V1,
                 declaration_hash_version: 1,
@@ -553,6 +622,49 @@ mod tests {
             set.declaration_hash_cached(),
             "lock hash must match the post-removal declaration"
         );
+    }
+
+    #[test]
+    fn undeclare_drops_a_settings_binding_from_config_and_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("grimoire.toml");
+        let lock_path = tmp.path().join("grimoire.lock");
+
+        let mut set = declared_set(&["alpha"]);
+        set.settings.insert(
+            "team".to_string(),
+            crate::config::declaration::DeclaredSource::Registry(
+                Identifier::parse("localhost:5000/acme/team:latest").unwrap(),
+            ),
+        );
+        set.invalidate_declaration_hash_cache();
+        write_config(&config_path, &ConfigOptions::default(), &[], &set).unwrap();
+        let mut lock = lock_with_skills(set.declaration_hash_cached(), &[("alpha", 'a')]);
+        let pinned = lock.skills[0].source.pinned().unwrap().clone();
+        lock.settings = vec![LockedArtifact::direct(
+            "team".to_string(),
+            ArtifactKind::Settings,
+            pinned,
+        )];
+        lock_io::save(&lock_path, &lock, None).unwrap();
+
+        let (declared, _notes) = undeclare_and_unlock(
+            &config_path,
+            &lock_path,
+            &ConfigOptions::default(),
+            &[],
+            &mut set,
+            ArtifactKind::Settings,
+            "team",
+        )
+        .expect("undeclare succeeds");
+
+        assert!(declared, "team was declared");
+        let body = std::fs::read_to_string(&config_path).unwrap();
+        assert!(!body.contains("team"), "config must drop the entry: {body}");
+        let saved = lock_io::load(&lock_path).unwrap();
+        assert!(saved.settings.is_empty(), "lock must drop the entry");
+        assert_eq!(saved.metadata.declaration_hash, set.declaration_hash_cached());
     }
 
     #[test]
@@ -712,7 +824,7 @@ mod tests {
     /// is a test failure rather than a wrong-target action.
     #[test]
     fn every_accepted_kind_string_resolves_to_that_kind() {
-        for accepted in ["skill", "rule", "agent", "mcp", "hook"] {
+        for accepted in ["skill", "rule", "agent", "mcp", "hook", "settings"] {
             let kind = ArtifactKind::from_kind_str(accepted)
                 .unwrap_or_else(|| panic!("the `uninstall` parser accepts '{accepted}' but no kind parses it"));
             assert_eq!(kind.kind_str(), accepted, "'{accepted}' must not resolve to {kind}");
@@ -757,5 +869,26 @@ mod tests {
         assert_eq!(exit, ExitCode::Success);
         assert!(!claude_marker_present(&ws), "the registration must be reaped");
         assert_eq!(dispatch_rows(&home), 0, "the dispatch row must be reaped");
+    }
+
+    #[test]
+    fn drifted_settings_refuse_as_forceable_modified_with_their_pieces() {
+        let pieces = vec![RefusedPiece {
+            package: "team".to_string(),
+            client: "claude".to_string(),
+            file: Some("~/.claude/settings.json".to_string()),
+            pointer: "/model".to_string(),
+            element: None,
+            marked: PieceMark::Overwrite,
+            state: Some(PieceState::Modified),
+            wanted: None,
+            current: Some("opus".to_string()),
+        }];
+        let err = uninstall_error(std::path::Path::new("/w"), UninstallError::SettingsDrifted { pieces });
+        let err = anyhow::Error::from(err);
+        let c = crate::error::classify(&err);
+        assert_eq!(c.exit, ExitCode::DataError);
+        assert_eq!(c.reason, Some(crate::error::ErrorReason::LocalModified));
+        assert_eq!(crate::error::settings_outcome(&err).map(|o| o.pieces.len()), Some(1));
     }
 }

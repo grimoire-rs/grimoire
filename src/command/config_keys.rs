@@ -3,7 +3,7 @@
 
 //! The typed registry of `grim config` dotted keys.
 //!
-//! Single source of truth for the 11 fixed `options.*` keys, the 6
+//! Single source of truth for the 12 fixed `options.*` keys, the 6
 //! per-registry field names, and the per-vendor field
 //! ([`VENDOR_SHARED_SKILLS`]): their [`crate::api::ValueType`] (which
 //! carries the runtime default alongside the type), title, and
@@ -50,7 +50,7 @@ pub struct KeySpec {
     pub section: ConfigSection,
 }
 
-/// The 11 fixed `options.*` config keys, in listing order.
+/// The 12 fixed `options.*` config keys, in listing order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigKey {
     DefaultRegistry,
@@ -64,6 +64,7 @@ pub enum ConfigKey {
     TuiSortOrder,
     SearchMinRelevance,
     ExperimentalHooks,
+    ExperimentalSettings,
 }
 
 impl ConfigKey {
@@ -72,7 +73,7 @@ impl ConfigKey {
     /// `clients`, `show_deprecated`, then the `tui.*` keys, then
     /// `search_min_relevance`, then the `experimental.*` keys — **append
     /// only**: consumers of `grim config list --all` may index by position.
-    pub const ALL: [ConfigKey; 11] = [
+    pub const ALL: [ConfigKey; 12] = [
         ConfigKey::DefaultRegistry,
         ConfigKey::Clients,
         ConfigKey::ShowDeprecated,
@@ -84,6 +85,7 @@ impl ConfigKey {
         ConfigKey::TuiSortOrder,
         ConfigKey::SearchMinRelevance,
         ConfigKey::ExperimentalHooks,
+        ConfigKey::ExperimentalSettings,
     ];
 
     /// This key's static metadata.
@@ -235,6 +237,16 @@ impl ConfigKey {
             constraints: None,
             section: ConfigSection::Experimental,
         };
+        const EXPERIMENTAL_SETTINGS: KeySpec = KeySpec {
+            key: "options.experimental.settings",
+            value_type: ValueType::Bool { default: Some(false) },
+            title: "Experimental settings",
+            description: "Controls whether `grim install` writes declared settings into your AI clients' own \
+                           config files. When unset, install writes and removes no settings; no environment \
+                           variable overrides this.",
+            constraints: None,
+            section: ConfigSection::Experimental,
+        };
         match self {
             Self::DefaultRegistry => &DEFAULT_REGISTRY,
             Self::Clients => &CLIENTS,
@@ -247,6 +259,7 @@ impl ConfigKey {
             Self::TuiSortOrder => &TUI_SORT_ORDER,
             Self::SearchMinRelevance => &SEARCH_MIN_RELEVANCE,
             Self::ExperimentalHooks => &EXPERIMENTAL_HOOKS,
+            Self::ExperimentalSettings => &EXPERIMENTAL_SETTINGS,
         }
     }
 
@@ -820,7 +833,10 @@ mod tests {
         ConfigOptions {
             // `true`, not `Default::default()`: a defaulted table serde-skips,
             // and this fixture exists precisely to defeat every skip.
-            experimental: ExperimentalOptions { hooks: true },
+            experimental: ExperimentalOptions {
+                hooks: true,
+                settings: true,
+            },
             default_registry: Some("ghcr.io/acme".to_string()),
             clients: vec!["claude".to_string()],
             tui: TuiOptions {
@@ -1161,6 +1177,7 @@ mod tests {
                 ConfigKey::TuiSortOrder => &tui_options["properties"]["sort_order"],
                 ConfigKey::SearchMinRelevance => &config_options["properties"]["search_min_relevance"],
                 ConfigKey::ExperimentalHooks => &experimental_options["properties"]["hooks"],
+                ConfigKey::ExperimentalSettings => &experimental_options["properties"]["settings"],
             };
             assert_description_prefix(node, spec.description, spec.key);
             let type_node = unwrap_nullable(&schema, node);
@@ -1221,7 +1238,7 @@ mod tests {
     /// is the design record's text verbatim.
     #[test]
     fn c153_experimental_hooks_is_the_appended_eleventh_row() {
-        assert_eq!(ConfigKey::ALL.len(), 11);
+        assert_eq!(ConfigKey::ALL.len(), 12);
         assert_eq!(ConfigKey::ALL[9], ConfigKey::SearchMinRelevance);
         assert_eq!(ConfigKey::ALL[10], ConfigKey::ExperimentalHooks);
         let spec = ConfigKey::ExperimentalHooks.spec();
@@ -1232,6 +1249,24 @@ mod tests {
             spec.description,
             "Controls whether `grim install` arms declared hooks in your AI clients. When unset, install arms \
              nothing and removes grim's existing hook registrations; no environment variable overrides this."
+        );
+    }
+
+    /// Appended after the hook row, so `grim config list` gains one row at
+    /// the end of the fixed keys and every existing row keeps its position.
+    #[test]
+    fn experimental_settings_is_the_appended_twelfth_row() {
+        assert_eq!(ConfigKey::ALL.len(), 12);
+        assert_eq!(ConfigKey::ALL[10], ConfigKey::ExperimentalHooks);
+        assert_eq!(ConfigKey::ALL[11], ConfigKey::ExperimentalSettings);
+        let spec = ConfigKey::ExperimentalSettings.spec();
+        assert_eq!(spec.key, "options.experimental.settings");
+        assert_eq!(spec.title, "Experimental settings");
+        assert!(matches!(spec.value_type, ValueType::Bool { default: Some(false) }));
+        assert_eq!(
+            spec.description,
+            "Controls whether `grim install` writes declared settings into your AI clients' own config files. \
+             When unset, install writes and removes no settings; no environment variable overrides this."
         );
     }
 }

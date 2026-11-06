@@ -6,7 +6,9 @@
 //! Generates a JSON Schema (draft 2020-12) from the real `Deserialize`
 //! structs — `RawConfig` for `grimoire.toml`, `PublishManifest` for
 //! `publish.toml` — via `schemars`, so the published schema can never
-//! describe a shape the parser does not accept. The generated document is
+//! describe a shape the parser does not accept. A settings document has no
+//! such struct, so its schema comes from the vendor rows the validator
+//! reads. The generated document is
 //! decorated with the published `$id`, a friendly `title`, and the draft
 //! `$schema` keyword, then pretty-printed to stdout.
 //!
@@ -44,6 +46,9 @@ const MCP_SCHEMA_FILE: &str = "grim-mcp.schema.json";
 /// Published filename of the hook manifest (`hook.toml`) schema.
 const HOOK_SCHEMA_FILE: &str = "grim-hook.schema.json";
 
+/// Published filename of the settings package (`settings/<name>.toml`) schema.
+const SETTINGS_SCHEMA_FILE: &str = "grim-settings.schema.json";
+
 /// Which author-facing TOML format to emit a JSON Schema for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum SchemaKind {
@@ -59,6 +64,8 @@ pub enum SchemaKind {
     Mcp,
     /// The hook manifest (`hook.toml`).
     Hook,
+    /// A settings package (`settings/<name>.toml`).
+    Settings,
 }
 
 /// `grim schema` arguments.
@@ -78,6 +85,7 @@ impl SchemaKind {
             SchemaKind::Lock => LOCK_SCHEMA_FILE,
             SchemaKind::Mcp => MCP_SCHEMA_FILE,
             SchemaKind::Hook => HOOK_SCHEMA_FILE,
+            SchemaKind::Settings => SETTINGS_SCHEMA_FILE,
         };
         format!("{SCHEMA_BASE_URL}/{file}")
     }
@@ -90,6 +98,7 @@ impl SchemaKind {
             SchemaKind::Lock => "grimoire.lock — Grimoire lockfile",
             SchemaKind::Mcp => "mcp/<name>.toml — Grimoire MCP server descriptor",
             SchemaKind::Hook => "hook.toml — Grimoire hook manifest",
+            SchemaKind::Settings => "settings/<name>.toml — Grimoire settings package",
         }
     }
 }
@@ -119,6 +128,7 @@ pub fn generate(kind: SchemaKind) -> anyhow::Result<String> {
         SchemaKind::Lock => crate::lock::grimoire_lock::lock_json_schema(),
         SchemaKind::Mcp => mcp_json_schema()?,
         SchemaKind::Hook => schemars::schema_for!(crate::oci::hook::HookManifest),
+        SchemaKind::Settings => with_requires(crate::oci::settings::document_json_schema(), "package")?,
     };
     decorate(&schema, &kind.id(), kind.title())
 }
@@ -130,24 +140,32 @@ pub fn generate(kind: SchemaKind) -> anyhow::Result<String> {
 /// or without it. The schema still has to declare it, because the descriptor
 /// is `additionalProperties: false`.
 fn mcp_json_schema() -> anyhow::Result<schemars::Schema> {
-    let mut value = serde_json::to_value(schemars::schema_for!(crate::oci::mcp::McpDescriptor))?;
+    with_requires(
+        serde_json::to_value(schemars::schema_for!(crate::oci::mcp::McpDescriptor))?,
+        "server",
+    )
+}
+
+/// Add the authored `[requires.<table>]` table to a schema whose owner's parser
+/// splits it off before the layer is built.
+fn with_requires(mut value: serde_json::Value, owner: &str) -> anyhow::Result<schemars::Schema> {
     let properties = value
         .get_mut("properties")
         .and_then(serde_json::Value::as_object_mut)
-        .ok_or_else(|| anyhow::anyhow!("generated MCP schema has no properties"))?;
+        .ok_or_else(|| anyhow::anyhow!("generated {owner} schema has no properties"))?;
     properties.insert(
         "requires".to_string(),
         serde_json::json!({
-            "description": "Artifacts this server requires: one table per kind (`skills`, `rules`, `agents`, `mcp`, `hooks`, `bundles`), each mapping a binding name to a member reference.",
+            "description": format!("Artifacts this {owner} requires: one table per kind (`skills`, `rules`, `agents`, `mcp`, `hooks`, `bundles`, `settings`), each mapping a binding name to a member reference."),
             "type": "object",
-            "propertyNames": { "enum": ["skills", "rules", "agents", "mcp", "hooks", "bundles"] },
+            "propertyNames": { "enum": ["skills", "rules", "agents", "mcp", "hooks", "bundles", "settings"] },
             "additionalProperties": {
                 "type": "object",
                 "additionalProperties": { "type": "string" }
             }
         }),
     );
-    schemars::Schema::try_from(value).map_err(|v| anyhow::anyhow!("generated MCP schema is not a schema: {v}"))
+    schemars::Schema::try_from(value).map_err(|v| anyhow::anyhow!("generated {owner} schema is not a schema: {v}"))
 }
 
 /// Inject the published `$id`, friendly `title`, and the draft `$schema`
@@ -224,6 +242,19 @@ mod tests {
         // schema declares it by hand and keeps it optional.
         assert_eq!(v["properties"]["requires"]["type"], "object");
         assert!(!required.iter().any(|r| r == "requires"));
+    }
+
+    #[test]
+    fn mcp_requires_tables_name_every_kind() {
+        let v = parsed(SchemaKind::Mcp);
+        let tables: std::collections::BTreeSet<&str> = v["properties"]["requires"]["propertyNames"]["enum"]
+            .as_array()
+            .expect("requires enum")
+            .iter()
+            .map(|table| table.as_str().expect("table name"))
+            .collect();
+        let kinds = crate::oci::ArtifactKind::ALL.iter().map(|k| k.subdir()).collect();
+        assert_eq!(tables, kinds);
     }
 
     #[test]
@@ -408,6 +439,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn settings_schema_is_a_strict_object_requiring_only_a_description() {
+        let v = parsed(SchemaKind::Settings);
+        assert_eq!(v["$id"], "https://grimoire.rs/schemas/grim-settings.schema.json");
+        assert_eq!(v["$schema"], SCHEMA_DRAFT);
+        assert_eq!(v["title"], "settings/<name>.toml — Grimoire settings package");
+        assert_eq!(v["additionalProperties"], serde_json::Value::Bool(false));
+        assert_eq!(v["required"], serde_json::json!(["description"]));
+        assert_eq!(v["properties"]["requires"]["type"], "object");
+    }
+
+    /// `requires` is one definition, so the two kinds carrying it cannot
+    /// disagree on the tables it takes.
+    #[test]
+    fn settings_and_mcp_declare_the_same_requires_tables() {
+        let settings = parsed(SchemaKind::Settings);
+        let mcp = parsed(SchemaKind::Mcp);
+        assert_eq!(
+            settings["properties"]["requires"]["propertyNames"],
+            mcp["properties"]["requires"]["propertyNames"]
+        );
+    }
+
+    /// The settings schema is a published contract too. Golden is
+    /// `grim schema --kind settings` stdout.
+    #[test]
+    fn settings_schema_stdout_is_byte_identical_to_the_golden() {
+        let stdout = format!("{}\n", generate(SchemaKind::Settings).expect("generate"));
+        assert_eq!(stdout, include_str!("testdata/settings.schema.json"));
+    }
+
     /// The hook schema is a published contract: its bytes must not move when the
     /// types behind it change crate. Golden is `grim schema --kind hook` stdout.
     #[test]
@@ -434,6 +496,9 @@ mod tests {
         assert_eq!(experimental["additionalProperties"], serde_json::Value::Bool(false));
         assert_eq!(experimental["properties"]["hooks"]["type"], "boolean");
         assert!(experimental.get("required").is_none(), "{experimental:#}");
+        assert_eq!(v["properties"]["settings"]["type"], "object");
+        assert_eq!(v["properties"]["settings"]["additionalProperties"]["type"], "string");
+        assert_eq!(experimental["properties"]["settings"]["type"], "boolean");
     }
 
     #[test]

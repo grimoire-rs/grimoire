@@ -40,7 +40,7 @@ pub enum CommandError {
     /// `com.grimoire.kind` annotation, or the legacy `artifactType`/config
     /// media type on older artifacts (a non-Grimoire image, or an offline
     /// cache miss). The user must pass `--kind`.
-    #[error("could not infer the kind of '{reference}'; pass --kind skill|rule|agent|bundle|mcp|hook")]
+    #[error("could not infer the kind of '{reference}'; pass --kind skill|rule|agent|bundle|mcp|hook|settings")]
     KindInferenceFailed { reference: String },
 
     /// `add` declared a `(kind, name)` that already exists in the config
@@ -71,7 +71,7 @@ pub enum CommandError {
     /// artifact name grammar (`[a-z0-9]+([.-][a-z0-9]+)*`, a superset of
     /// the Agent Skills name rules) — in particular lowercase-only, which
     /// keeps bindings collision-free on case-insensitive filesystems.
-    /// Exit 64.
+    /// Exit 64, or 65 for a settings binding.
     #[error("invalid {kind} binding name: {reason} (allowed: lowercase letters, digits, hyphens, periods)")]
     InvalidBindingName {
         kind: crate::oci::ArtifactKind,
@@ -118,5 +118,16 @@ mod tests {
         };
         assert!(s.to_string().contains("stale"));
         assert!(s.to_string().contains("grim lock"));
+    }
+
+    #[test]
+    fn kind_inference_failure_names_every_kind() {
+        let message = CommandError::KindInferenceFailed {
+            reference: "ghcr.io/acme/team:1".to_string(),
+        }
+        .to_string();
+        for kind in crate::oci::ArtifactKind::ALL {
+            assert!(message.contains(kind.kind_str()), "{kind} missing from: {message}");
+        }
     }
 }

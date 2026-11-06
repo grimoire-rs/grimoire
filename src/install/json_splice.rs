@@ -20,6 +20,9 @@
 use std::io;
 use std::ops::Range;
 
+use serde::Serialize as _;
+use serde_json::ser::{PrettyFormatter, Serializer};
+
 use super::json_config::{invalid_data, sanitize_jsonc};
 
 /// Split a two-level RFC-6901-style pointer (`/container/member`) into its
@@ -29,6 +32,87 @@ pub fn split_pointer(pointer: &str) -> Option<(&str, &str)> {
     let rest = pointer.strip_prefix('/')?;
     let (container, member) = rest.split_once('/')?;
     (!container.is_empty() && !member.is_empty() && !member.contains('/')).then_some((container, member))
+}
+
+/// Split an RFC 6901 pointer of any depth into its decoded segments: `~1`
+/// reads `/`, `~0` reads `~`, and `""` is the whole document. `None` when the
+/// text is not a pointer, a nonempty one without its leading `/` or a `~`
+/// outside those two escapes.
+///
+/// The record stays a string so the state file keeps one spelling per piece;
+/// [`split_pointer`] stays two-level and raw for MCP entries.
+pub fn split_pointer_path(pointer: &str) -> Option<Vec<String>> {
+    if pointer.is_empty() {
+        return Some(Vec::new());
+    }
+    pointer.strip_prefix('/')?.split('/').map(decode_segment).collect()
+}
+
+/// Decode one pointer segment. One left-to-right pass, because `~01` must
+/// read `~1`: rewriting `~0` first would turn it into `/`.
+fn decode_segment(segment: &str) -> Option<String> {
+    let mut decoded = String::with_capacity(segment.len());
+    let mut chars = segment.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '~' => match chars.next()? {
+                '0' => decoded.push('~'),
+                '1' => decoded.push('/'),
+                _ => return None,
+            },
+            other => decoded.push(other),
+        }
+    }
+    Some(decoded)
+}
+
+/// What [`value_at`] found at a path. Shared by the JSON and TOML readers, so
+/// a caller judges a piece the same way in either format.
+///
+/// Closed internal enum — matches stay total, no `#[non_exhaustive]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PointerRead {
+    /// The path has no value, so a write only has to create it.
+    Absent,
+    /// The value at the path. `null` is a value here.
+    Found(serde_json::Value),
+    /// The value at `ancestor`, the path's own prefix, holds a type the walk
+    /// cannot enter or read, so a write would have to replace it.
+    Blocked {
+        /// The decoded path of the blocking value.
+        ancestor: Vec<String>,
+    },
+}
+
+/// Read the value at `path` in JSON/JSONC `text`, at any depth. Only objects
+/// are entered: an array is a leaf, so a numeric segment never indexes one.
+/// Empty text is [`PointerRead::Absent`], because the splice operations read
+/// it as "no document yet".
+///
+/// # Errors
+///
+/// `InvalidData` when the text is not a JSON/JSONC object. The message never
+/// carries file content.
+pub fn value_at(text: &str, path: &[String]) -> io::Result<PointerRead> {
+    if text.trim().is_empty() {
+        return Ok(PointerRead::Absent);
+    }
+    let document = parse_value(text)
+        .filter(serde_json::Value::is_object)
+        .ok_or_else(refused)?;
+    let mut current = &document;
+    for (depth, segment) in path.iter().enumerate() {
+        let Some(members) = current.as_object() else {
+            return Ok(PointerRead::Blocked {
+                ancestor: path[..depth].to_vec(),
+            });
+        };
+        let Some(next) = members.get(segment) else {
+            return Ok(PointerRead::Absent);
+        };
+        current = next;
+    }
+    Ok(PointerRead::Found(current.clone()))
 }
 
 /// What a splice did to the text.
@@ -1379,10 +1463,11 @@ impl Scanner<'_> {
             }
             Some(_) => {
                 // Scalar: number / true / false / null — runs to a
-                // delimiter.
+                // delimiter. A `/` is one too: no scalar holds it, and a
+                // comment read as part of the value goes when the value does.
                 while self
                     .peek()
-                    .is_some_and(|b| !b.is_ascii_whitespace() && b != b',' && b != b'}' && b != b']')
+                    .is_some_and(|b| !b.is_ascii_whitespace() && b != b',' && b != b'}' && b != b']' && b != b'/')
                 {
                     self.pos += 1;
                 }
@@ -1393,10 +1478,362 @@ impl Scanner<'_> {
     }
 }
 
+/// The line break and indent step of a document. A spliced line copies both,
+/// so an edit to a CRLF or tab-indented file adds no foreign line.
+struct Layout {
+    newline: &'static str,
+    step: String,
+}
+
+impl Layout {
+    /// Read from `text`: its first line break and its root members' indent,
+    /// or two spaces when they have none.
+    fn of(text: &str, root: &ScannedObject) -> Self {
+        let crlf = text.split_once('\n').is_some_and(|(line, _)| line.ends_with('\r'));
+        let step = root.member_indent(text);
+        Self {
+            newline: if crlf { "\r\n" } else { "\n" },
+            step: if step.is_empty() { "  ".to_string() } else { step },
+        }
+    }
+
+    /// `value` pretty-printed for a member whose line starts at `indent`.
+    fn render(&self, value: &serde_json::Value, indent: &str) -> io::Result<String> {
+        let mut bytes = Vec::new();
+        let formatter = PrettyFormatter::with_indent(self.step.as_bytes());
+        value.serialize(&mut Serializer::with_formatter(&mut bytes, formatter))?;
+        let line_start = format!("{}{indent}", self.newline);
+        Ok(String::from_utf8_lossy(&bytes).replace('\n', &line_start))
+    }
+
+    /// `object` with `snippet` as its new last member. `indent` starts the
+    /// member's line and `close_indent` the closing brace of an empty object.
+    fn append(&self, object: &str, scanned: &ScannedObject, snippet: &str, indent: &str, close_indent: &str) -> String {
+        let close = scanned.close_brace;
+        match scanned.members.last() {
+            Some(last) => self.after_last(object, last.key_quote..last.value.end, close, snippet, indent),
+            None => self.on_own_line(object, close, snippet, indent, close_indent),
+        }
+    }
+
+    /// `array` with the string `element` as its new last element. An empty
+    /// array keeps its shape: `[]` stays on its line, `[\n]` gives it one.
+    fn append_element(&self, array: &str, scanned: &ScannedArray, element: &str) -> String {
+        let close = scanned.close_bracket;
+        let snippet = json_string(element);
+        if let Some((first, last)) = scanned.elements.first().zip(scanned.elements.last()) {
+            return self.after_last(array, last.clone(), close, &snippet, &line_indent(array, first.start));
+        }
+        if array[..close].contains('\n') {
+            let close_indent = line_indent(array, close);
+            let indent = format!("{close_indent}{}", self.step);
+            return self.on_own_line(array, close, &snippet, &indent, &close_indent);
+        }
+        let head = without_trailing_blanks(&array[..close]);
+        let after_comment = if head.len() > 1 { " " } else { "" };
+        format!("{head}{after_comment}{snippet}{}", &array[close..])
+    }
+
+    /// `container`, which holds no item yet, with `snippet` on a line of its
+    /// own. `close` is the offset of the closing bracket.
+    fn on_own_line(&self, container: &str, close: usize, snippet: &str, indent: &str, close_indent: &str) -> String {
+        let newline = self.newline;
+        let head = without_trailing_blanks(&container[..close]);
+        let bracket = &container[close..];
+        format!("{head}{newline}{indent}{snippet}{newline}{close_indent}{bracket}")
+    }
+
+    /// `container` with `snippet` after `last`, the span of the item now last.
+    /// `close` is the offset of the closing bracket, and `indent` starts the
+    /// item's line.
+    ///
+    /// The comma goes straight after the last value and the item after
+    /// everything else, so a comment stays on the line of the item it
+    /// describes. A trailing comma stays in style: the new item takes one.
+    fn after_last(&self, container: &str, last: Range<usize>, close: usize, snippet: &str, indent: &str) -> String {
+        let head = without_trailing_blanks(&container[..close]);
+        let mut after_value = Scanner {
+            bytes: container.as_bytes(),
+            pos: last.end,
+        };
+        after_value.skip_trivia();
+        let (comma, trailing_comma) = if after_value.peek() == Some(b',') {
+            ("", ",")
+        } else {
+            (",", "")
+        };
+        // Line breaks are read from the untrimmed span: joining onto a line
+        // that ends in a `//` comment would swallow the new item.
+        let line_start = if container[last.start..close].contains('\n') {
+            format!("{}{indent}", self.newline)
+        } else {
+            " ".to_string()
+        };
+        let (through_value, comments) = head.split_at(last.end);
+        let bracket = &container[head.len()..];
+        format!("{through_value}{comma}{comments}{line_start}{snippet}{trailing_comma}{bracket}")
+    }
+}
+
+/// `text` without the JSON whitespace that ends it. `str::trim_end` would also
+/// stop inside a `//` comment ending in U+3000, and that tail, moved past a new
+/// item, leaves a document no parser reads.
+fn without_trailing_blanks(text: &str) -> &str {
+    text.trim_end_matches([' ', '\t', '\r', '\n'])
+}
+
+/// `value` wrapped in one single-member object per segment of `path`, outermost
+/// first; `value` itself for an empty `path`.
+fn nest_under(path: &[String], value: &serde_json::Value) -> serde_json::Value {
+    path.iter().rev().fold(value.clone(), |inner, key| {
+        serde_json::Value::Object(serde_json::Map::from_iter([(key.clone(), inner)]))
+    })
+}
+
+/// The refusal for an empty path. The whole document is no member, and
+/// splicing it would replace every other key in the file.
+fn no_member() -> io::Error {
+    invalid_data("an empty path names no member; refusing to edit".to_string())
+}
+
+/// Ensure the member at `path` equals `value`, creating each object on the way.
+/// Comments, trailing commas, line endings, indentation and the order of every
+/// other member survive.
+///
+/// Values are compared semantically, so a member already equal to `value` up
+/// to key order and formatting is [`Splice::Unchanged`].
+///
+/// # Errors
+///
+/// `InvalidData` for unparseable `text`, an empty `path`, or a non-object on
+/// the way, which only a caller allowed to replace it may remove first.
+pub fn upsert_member_at(text: &str, path: &[String], value: &serde_json::Value) -> io::Result<Splice> {
+    let Some((key, rest)) = path.split_first() else {
+        return Err(no_member());
+    };
+    if text.trim().is_empty() {
+        return Ok(Splice::Changed(format!("{}\n", pretty(&nest_under(path, value))?)));
+    }
+    // A full semantic parse first: the scanner trusts structure it only skims,
+    // and loops forever on a bare `/` a valid document cannot hold.
+    if !parse_value(text).is_some_and(|v| v.is_object()) {
+        return Err(refused());
+    }
+    let layout = Layout::of(text, &scan_object(text)?);
+    let upserted = upsert_in(text, key, rest, value, &layout, "")?;
+    Ok(upserted.map_or(Splice::Unchanged, Splice::Changed))
+}
+
+/// `object` with `key`, then `rest` below it, set to `value`; `None` when it
+/// already holds that value. `object_indent` starts the line of its opening
+/// brace.
+fn upsert_in(
+    object: &str,
+    key: &str,
+    rest: &[String],
+    value: &serde_json::Value,
+    layout: &Layout,
+    object_indent: &str,
+) -> io::Result<Option<String>> {
+    let scanned = scan_object(object)?;
+    let Some(member) = last_member(&scanned.members, key) else {
+        let indent = scanned.members.last().map_or_else(
+            || format!("{object_indent}{}", layout.step),
+            |last| last.key_indent(object),
+        );
+        let rendered = layout.render(&nest_under(rest, value), &indent)?;
+        let snippet = format!("{}: {rendered}", json_string(key));
+        return Ok(Some(layout.append(object, &scanned, &snippet, &indent, object_indent)));
+    };
+
+    let current = &object[member.value.clone()];
+    let indent = member.key_indent(object);
+    let replacement = match rest.split_first() {
+        None if parse_value(current).as_ref() == Some(value) => return Ok(None),
+        None => layout.render(value, &indent)?,
+        Some(_) if !current.starts_with('{') => return Err(not_an_object(key)),
+        Some((next, below)) => match upsert_in(current, next, below, value, layout, &indent)? {
+            Some(inner) => inner,
+            None => return Ok(None),
+        },
+    };
+    Ok(Some(splice_span(object, &member.value, &replacement)))
+}
+
+/// Remove the member at `path`. An absent member is [`Splice::Unchanged`], and
+/// so is one under a non-object, which holds nothing at `path`.
+///
+/// Unlike [`remove_member`], an emptied container stays: which containers a
+/// harness requires is the caller's knowledge, so pruning is a separate step.
+///
+/// # Errors
+///
+/// `InvalidData` for unparseable `text` or an empty `path`.
+pub fn remove_member_at(text: &str, path: &[String]) -> io::Result<Splice> {
+    let Some((key, rest)) = path.split_first() else {
+        return Err(no_member());
+    };
+    if text.trim().is_empty() {
+        return Ok(Splice::Unchanged);
+    }
+    if !parse_value(text).is_some_and(|v| v.is_object()) {
+        return Err(refused());
+    }
+    Ok(remove_in(text, key, rest)?.map_or(Splice::Unchanged, Splice::Changed))
+}
+
+/// `object` without `key`, or without `rest` below it; `None` when there is
+/// nothing to remove.
+fn remove_in(object: &str, key: &str, rest: &[String]) -> io::Result<Option<String>> {
+    let scanned = scan_object(object)?;
+    let Some((next, below)) = rest.split_first() else {
+        // Every duplicate goes: a survivor would become the live value, since
+        // the last one wins.
+        let duplicates = scanned.members.iter().filter(|member| member.key == key);
+        return Ok(cut_items(
+            object,
+            duplicates.map(|member| member.key_quote..member.value.end),
+        ));
+    };
+    let Some(member) = last_member(&scanned.members, key) else {
+        return Ok(None);
+    };
+    let current = &object[member.value.clone()];
+    if !current.starts_with('{') {
+        return Ok(None);
+    }
+    let removed = remove_in(current, next, below)?;
+    Ok(removed.map(|inner| splice_span(object, &member.value, &inner)))
+}
+
+/// `text` without `spans`, given in file order; `None` when there are none.
+/// The last goes first, so the offsets of the others stay valid.
+fn cut_items(text: &str, spans: impl DoubleEndedIterator<Item = Range<usize>>) -> Option<String> {
+    spans
+        .rev()
+        .fold(None, |cut, span| Some(cut_item(cut.as_deref().unwrap_or(text), span)))
+}
+
+/// `text` without the object member or array element at `item`, and without
+/// the comma that follows it.
+fn cut_item(text: &str, item: Range<usize>) -> String {
+    let mut after = Scanner {
+        bytes: text.as_bytes(),
+        pos: item.end,
+    };
+    after.skip_trivia();
+    // `cut_range` stops at a comment, and the comma it would leave behind
+    // follows nothing: the file stops parsing while the op reports a change.
+    if after.peek() == Some(b',') && text[item.end..after.pos].contains('/') {
+        return cut_out(&cut_out(text, &(after.pos..after.pos + 1)), &item);
+    }
+    cut_out(text, &cut_range(text, item.start, item.end))
+}
+
+/// The span of the value at `path`, which [`value_at`] has read as present.
+fn value_span(text: &str, path: &[String]) -> io::Result<Range<usize>> {
+    path.iter().try_fold(0..text.len(), |span, key| {
+        let scanned = scan_object(&text[span.clone()])?;
+        let member = last_member(&scanned.members, key).ok_or_else(refused)?;
+        Ok(span.start + member.value.start..span.start + member.value.end)
+    })
+}
+
+/// Whether the empty object or array at `path` holds a comment: only blanks and
+/// comments can sit between its brackets, so a `/` opens one.
+///
+/// # Errors
+///
+/// `InvalidData` for unparseable `text`, or a `path` that reads no value.
+pub fn empty_container_has_comment(text: &str, path: &[String]) -> io::Result<bool> {
+    let span = value_span(text, path)?;
+    Ok(text[span].contains('/'))
+}
+
+/// Ensure the array at `path` holds the string `element`, creating the array
+/// and each object on the way. Comments, trailing commas, line endings and the
+/// array's own layout survive.
+///
+/// Identity is the decoded string: other escapes spell the same element, so it
+/// is [`Splice::Unchanged`], and a number or a nested array never matches.
+///
+/// # Errors
+///
+/// `InvalidData` for unparseable `text`, an empty `path`, a non-array at `path`,
+/// or a non-object on the way, which only a caller allowed to replace it may
+/// remove first.
+pub fn upsert_array_element_at(text: &str, path: &[String], element: &str) -> io::Result<Splice> {
+    let Some(key) = path.last() else {
+        return Err(no_member());
+    };
+    match value_at(text, path)? {
+        PointerRead::Found(_) => {}
+        // A member upsert creates what is absent and refuses what is blocked.
+        PointerRead::Absent | PointerRead::Blocked { .. } => {
+            return upsert_member_at(text, path, &serde_json::json!([element]));
+        }
+    }
+    let span = value_span(text, path)?;
+    let array_text = &text[span.clone()];
+    let array = scan_array(array_text, key)?;
+    if array
+        .elements
+        .iter()
+        .any(|item| element_matches(array_text, item, element))
+    {
+        return Ok(Splice::Unchanged);
+    }
+    let appended = Layout::of(text, &scan_object(text)?).append_element(array_text, &array, element);
+    Ok(Splice::Changed(splice_span(text, &span, &appended)))
+}
+
+/// Remove every copy of the string `element` from the array at `path`, matched
+/// as [`upsert_array_element_at`] does. An absent element is
+/// [`Splice::Unchanged`], and so is one under a non-object, which holds nothing
+/// at `path`.
+///
+/// An emptied array stays `[]`: which keys a harness requires is the caller's
+/// knowledge, so pruning is a separate step.
+///
+/// # Errors
+///
+/// `InvalidData` for unparseable `text`, an empty `path`, or a non-array at `path`.
+pub fn remove_array_element_at(text: &str, path: &[String], element: &str) -> io::Result<Splice> {
+    let Some(key) = path.last() else {
+        return Err(no_member());
+    };
+    match value_at(text, path)? {
+        PointerRead::Found(_) => {}
+        PointerRead::Absent | PointerRead::Blocked { .. } => return Ok(Splice::Unchanged),
+    }
+    let span = value_span(text, path)?;
+    let array_text = &text[span.clone()];
+    let array = scan_array(array_text, key)?;
+    // Every copy goes: a read finds the element wherever it sits, so a survivor
+    // keeps reading as present.
+    let copies = array
+        .elements
+        .iter()
+        .filter(|item| element_matches(array_text, item, element));
+    let remaining = cut_items(array_text, copies.cloned());
+    Ok(remaining.map_or(Splice::Unchanged, |rest| {
+        Splice::Changed(splice_span(text, &span, &rest))
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The settings writer codes against these four shapes.
+    #[test]
+    fn the_settings_write_operations_hold_their_signatures() {
+        let _: fn(&str, &[String], &serde_json::Value) -> io::Result<Splice> = upsert_member_at;
+        let _: fn(&str, &[String]) -> io::Result<Splice> = remove_member_at;
+        let _: fn(&str, &[String], &str) -> io::Result<Splice> = upsert_array_element_at;
+        let _: fn(&str, &[String], &str) -> io::Result<Splice> = remove_array_element_at;
+    }
 
     fn changed(s: Splice) -> String {
         match s {
@@ -2439,5 +2876,1130 @@ mod tests {
         // The user's own elements are never owned.
         let owned = owned_nested_handlers(&installed, &group, &[(MARKER, &managed)]);
         assert_eq!(owned.len(), 1, "only grim's element: {owned:?}");
+    }
+
+    // ── RFC 6901 paths and `value_at` ───────────────────────────────────
+
+    fn path(segments: &[&str]) -> Vec<String> {
+        segments.iter().map(ToString::to_string).collect()
+    }
+
+    fn found(value: serde_json::Value) -> PointerRead {
+        PointerRead::Found(value)
+    }
+
+    fn blocked(segments: &[&str]) -> PointerRead {
+        PointerRead::Blocked {
+            ancestor: path(segments),
+        }
+    }
+
+    /// Each row spells a pointer by hand beside the segments it must decode to.
+    const POINTER_ROUND_TRIPS: &[(&str, &[&str])] = &[
+        ("/model", &["model"]),
+        ("/permissions/deny", &["permissions", "deny"]),
+        ("/a/b/c/d/e", &["a", "b", "c", "d", "e"]),
+        ("/amp.mcpServers/grim", &["amp.mcpServers", "grim"]),
+        ("/a~1b", &["a/b"]),
+        ("/m~0n", &["m~n"]),
+        ("/a~1b/c~0d", &["a/b", "c~d"]),
+        ("/~01", &["~1"]),
+        ("/~00", &["~0"]),
+        ("/~10", &["/0"]),
+        ("/~0~1", &["~/"]),
+        ("/~1~0", &["/~"]),
+        ("/~0~0", &["~~"]),
+        ("/~1~1", &["//"]),
+        ("/Bash(rm:*)/ü", &["Bash(rm:*)", "ü"]),
+        ("/", &[""]),
+        ("/a/", &["a", ""]),
+        ("//a", &["", "a"]),
+    ];
+
+    fn encoded(segments: &[&str]) -> String {
+        segments
+            .iter()
+            .map(|segment| format!("/{}", segment.replace('~', "~0").replace('/', "~1")))
+            .collect()
+    }
+
+    fn nested(segments: &[&str], leaf: serde_json::Value) -> serde_json::Value {
+        segments
+            .iter()
+            .rev()
+            .fold(leaf, |inner, segment| serde_json::json!({ *segment: inner }))
+    }
+
+    #[test]
+    fn a_pointer_segment_round_trips_through_the_table() {
+        for (pointer, segments) in POINTER_ROUND_TRIPS {
+            assert_eq!(split_pointer_path(pointer), Some(path(segments)), "pointer: {pointer}");
+            assert_eq!(&encoded(segments), pointer, "segments: {segments:?}");
+        }
+    }
+
+    #[test]
+    fn a_pointer_reads_the_member_value_pointer_reads() {
+        for (pointer, segments) in POINTER_ROUND_TRIPS {
+            let document = nested(segments, serde_json::json!(42));
+            assert_eq!(document.pointer(pointer), Some(&serde_json::json!(42)), "{pointer}");
+            assert_eq!(
+                value_at(&document.to_string(), &split_pointer_path(pointer).unwrap()).unwrap(),
+                found(serde_json::json!(42)),
+                "pointer: {pointer}"
+            );
+        }
+    }
+
+    #[test]
+    fn split_pointer_path_decodes_tilde_one_before_tilde_zero_would_rewrite_it() {
+        assert_eq!(split_pointer_path("/~01"), Some(path(&["~1"])), "never `/`");
+    }
+
+    #[test]
+    fn split_pointer_path_refuses_what_rfc6901_forbids() {
+        for bad in ["model", "a/b", " /a", "~", "/~", "/a~", "/a~2b", "/~x", "/a/~", "/~~1"] {
+            assert_eq!(split_pointer_path(bad), None, "input: {bad}");
+        }
+    }
+
+    #[test]
+    fn split_pointer_path_reads_the_empty_pointer_as_the_whole_document() {
+        assert_eq!(split_pointer_path(""), Some(Vec::new()));
+        assert_eq!(value_at("{\"a\": 1}", &[]).unwrap(), found(serde_json::json!({"a": 1})));
+    }
+
+    #[test]
+    fn split_pointer_stays_two_level_and_undecoded_beside_the_full_path() {
+        assert_eq!(split_pointer("/a/b/c"), None);
+        assert_eq!(split_pointer_path("/a/b/c"), Some(path(&["a", "b", "c"])));
+        assert_eq!(split_pointer("/model"), None);
+        assert_eq!(split_pointer_path("/model"), Some(path(&["model"])));
+        assert_eq!(split_pointer("/a~1b/c"), Some(("a~1b", "c")));
+    }
+
+    #[test]
+    fn value_at_reads_a_member_at_any_depth() {
+        let text = r#"{"model": "opus", "a": {"b": {"c": {"d": [1, 2]}, "n": null}}, "o": {}}"#;
+        assert_eq!(
+            value_at(text, &path(&["model"])).unwrap(),
+            found(serde_json::json!("opus"))
+        );
+        assert_eq!(
+            value_at(text, &path(&["a", "b", "c", "d"])).unwrap(),
+            found(serde_json::json!([1, 2]))
+        );
+        assert_eq!(
+            value_at(text, &path(&["a", "b", "c"])).unwrap(),
+            found(serde_json::json!({"d": [1, 2]}))
+        );
+        assert_eq!(value_at(text, &path(&["o"])).unwrap(), found(serde_json::json!({})));
+        assert_eq!(
+            value_at(text, &path(&["a", "b", "n"])).unwrap(),
+            found(serde_json::Value::Null),
+            "a null value is present"
+        );
+    }
+
+    #[test]
+    fn value_at_reads_jsonc() {
+        let text = "{\n  // a comment\n  \"a\": {\n    /* block */ \"b\": \"http://x\",\n  },\n}\n";
+        assert_eq!(
+            value_at(text, &path(&["a", "b"])).unwrap(),
+            found(serde_json::json!("http://x"))
+        );
+    }
+
+    #[test]
+    fn value_at_tells_absent_from_blocked() {
+        let text = r#"{"a": {"b": 1}}"#;
+        assert_eq!(value_at(text, &path(&["z"])).unwrap(), PointerRead::Absent);
+        assert_eq!(value_at(text, &path(&["a", "z"])).unwrap(), PointerRead::Absent);
+        assert_eq!(value_at(text, &path(&["z", "y", "x"])).unwrap(), PointerRead::Absent);
+        assert_eq!(value_at(text, &path(&["a", "b", "c"])).unwrap(), blocked(&["a", "b"]));
+    }
+
+    #[test]
+    fn value_at_blocks_on_the_first_ancestor_that_is_not_an_object() {
+        let text = r#"{"s": "text", "n": null, "l": [{"x": 1}], "a": {"t": true}}"#;
+        assert_eq!(value_at(text, &path(&["s", "x"])).unwrap(), blocked(&["s"]));
+        assert_eq!(value_at(text, &path(&["n", "x"])).unwrap(), blocked(&["n"]));
+        assert_eq!(
+            value_at(text, &path(&["l", "0"])).unwrap(),
+            blocked(&["l"]),
+            "no array index"
+        );
+        assert_eq!(
+            value_at(text, &path(&["a", "t", "x", "y"])).unwrap(),
+            blocked(&["a", "t"])
+        );
+    }
+
+    #[test]
+    fn value_at_refuses_an_unparseable_or_non_object_document() {
+        assert_eq!(value_at("{}", &path(&["a"])).unwrap(), PointerRead::Absent, "control");
+        for text in [
+            "not json {{{",
+            "[1, 2]",
+            "\"text\"",
+            "3",
+            "{\"a\":",
+            "// only a comment\n",
+        ] {
+            let err = value_at(text, &path(&["a"])).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData, "input: {text}");
+        }
+    }
+
+    #[test]
+    fn value_at_reads_an_empty_file_as_absent() {
+        for text in ["", "  \n"] {
+            assert_eq!(
+                value_at(text, &path(&["a", "b"])).unwrap(),
+                PointerRead::Absent,
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn value_at_takes_the_last_duplicate_key_as_the_splice_engine_does() {
+        let text = r#"{"a": 1, "a": 2}"#;
+        assert_eq!(value_at(text, &path(&["a"])).unwrap(), found(serde_json::json!(2)));
+    }
+
+    #[test]
+    fn value_at_error_does_not_echo_the_file() {
+        let err = value_at("{\"token\": hunter2-sentinel}", &path(&["a"])).unwrap_err();
+        assert!(!err.to_string().contains("hunter2-sentinel"), "{err}");
+    }
+
+    // ── Member splices at any depth ─────────────────────────────────────
+
+    fn parsed(text: &str) -> serde_json::Value {
+        parse_value(text).unwrap_or_else(|| panic!("unparseable: {text}"))
+    }
+
+    #[test]
+    fn upsert_at_depth_creates_containers() {
+        let value = json!("sonnet");
+        let target = path(&["a", "b", "c"]);
+        let skeleton = "{\n  \"a\": {\n    \"b\": {\n      \"c\": \"sonnet\"\n    }\n  }\n}\n";
+        assert_eq!(changed(upsert_member_at("", &target, &value).unwrap()), skeleton);
+        assert_eq!(changed(upsert_member_at("{}\n", &target, &value).unwrap()), skeleton);
+
+        let partial = "{\n  \"a\": {\n    \"keep\": 1\n  },\n  \"z\": 2\n}\n";
+        assert_eq!(
+            changed(upsert_member_at(partial, &target, &value).unwrap()),
+            "{\n  \"a\": {\n    \"keep\": 1,\n    \"b\": {\n      \"c\": \"sonnet\"\n    }\n  },\n  \"z\": 2\n}\n"
+        );
+
+        for text in ["", "  \n", "{}\n", partial] {
+            let out = changed(upsert_member_at(text, &target, &value).unwrap());
+            assert_eq!(value_at(&out, &target).unwrap(), found(value.clone()), "{out}");
+            assert_eq!(
+                upsert_member_at(&out, &target, &value).unwrap(),
+                Splice::Unchanged,
+                "{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn upsert_keeps_comments_and_sibling_order() {
+        let text = "// team config\n{\n  // the model\n  \"model\": \"sonnet\", // pinned\n  \"permissions\": {\n    /* first */\n    \"allow\": [\n      \"Read\", // keep\n    ],\n  }, // end\n  \"zeta\": true // last\n}\n";
+
+        assert_eq!(
+            changed(upsert_member_at(text, &path(&["permissions", "deny"]), &json!(["Bash"])).unwrap()),
+            "// team config\n{\n  // the model\n  \"model\": \"sonnet\", // pinned\n  \"permissions\": {\n    /* first */\n    \"allow\": [\n      \"Read\", // keep\n    ],\n    \"deny\": [\n      \"Bash\"\n    ],\n  }, // end\n  \"zeta\": true // last\n}\n",
+            "a trailing comma stays one, and the new member comes last"
+        );
+        assert_eq!(
+            changed(upsert_member_at(text, &path(&["theme"]), &json!("dark")).unwrap()),
+            "// team config\n{\n  // the model\n  \"model\": \"sonnet\", // pinned\n  \"permissions\": {\n    /* first */\n    \"allow\": [\n      \"Read\", // keep\n    ],\n  }, // end\n  \"zeta\": true, // last\n  \"theme\": \"dark\"\n}\n",
+            "a comment stays on its own member's line"
+        );
+        assert_eq!(
+            changed(upsert_member_at(text, &path(&["model"]), &json!("opus")).unwrap()),
+            text.replace("\"sonnet\"", "\"opus\""),
+            "a replacement touches the value span alone"
+        );
+    }
+
+    #[test]
+    fn upsert_keeps_crlf_and_tabs() {
+        let text = "{\r\n\t\"a\": {\r\n\t\t\"b\": 1\r\n\t}\r\n}\r\n";
+
+        let deep = changed(upsert_member_at(text, &path(&["a", "c", "d"]), &json!({"e": [1]})).unwrap());
+        assert_eq!(
+            deep,
+            "{\r\n\t\"a\": {\r\n\t\t\"b\": 1,\r\n\t\t\"c\": {\r\n\t\t\t\"d\": {\r\n\t\t\t\t\"e\": [\r\n\t\t\t\t\t1\r\n\t\t\t\t]\r\n\t\t\t}\r\n\t\t}\r\n\t}\r\n}\r\n"
+        );
+
+        let replaced = changed(upsert_member_at(text, &path(&["a", "b"]), &json!({"x": 1})).unwrap());
+        assert_eq!(
+            replaced,
+            "{\r\n\t\"a\": {\r\n\t\t\"b\": {\r\n\t\t\t\"x\": 1\r\n\t\t}\r\n\t}\r\n}\r\n"
+        );
+
+        let empty = "{\r\n\t\"a\": {}\r\n}\r\n";
+        assert_eq!(
+            changed(upsert_member_at(empty, &path(&["a", "b"]), &json!(1)).unwrap()),
+            "{\r\n\t\"a\": {\r\n\t\t\"b\": 1\r\n\t}\r\n}\r\n"
+        );
+
+        for out in [deep, replaced] {
+            assert!(!out.replace("\r\n", "").contains('\n'), "a bare line feed: {out:?}");
+        }
+    }
+
+    #[test]
+    fn upsert_copies_the_indent_step_of_the_document() {
+        let text = "{\n    \"a\": 1\n}\n";
+        assert_eq!(
+            changed(upsert_member_at(text, &path(&["b", "c"]), &json!(2)).unwrap()),
+            "{\n    \"a\": 1,\n    \"b\": {\n        \"c\": 2\n    }\n}\n"
+        );
+    }
+
+    #[test]
+    fn upsert_stays_on_one_line_in_a_one_line_object() {
+        assert_eq!(
+            changed(upsert_member_at("{\"a\": {\"b\": 1}}\n", &path(&["a", "c"]), &json!(2)).unwrap()),
+            "{\"a\": {\"b\": 1, \"c\": 2}}\n"
+        );
+        assert_eq!(
+            changed(upsert_member_at("{ \"a\": 1 /* x */, }", &path(&["b"]), &json!(2)).unwrap()),
+            "{ \"a\": 1 /* x */, \"b\": 2, }"
+        );
+    }
+
+    /// A new member after a line comment on the object's only line would land
+    /// inside the comment, and the file would lose it while reporting a change.
+    #[test]
+    fn upsert_never_lands_inside_a_line_comment() {
+        let target = path(&["b"]);
+        let out = changed(upsert_member_at("{\"a\": 1 // note\n}", &target, &json!(2)).unwrap());
+        assert_eq!(value_at(&out, &target).unwrap(), found(json!(2)), "{out}");
+        assert!(out.contains("// note"), "{out}");
+    }
+
+    /// `1/*x*/` is one token to a scanner that runs a scalar to the next
+    /// delimiter, so the comment would go with the replaced value.
+    #[test]
+    fn upsert_keeps_a_comment_touching_a_scalar() {
+        assert_eq!(
+            changed(upsert_member_at("{\"a\":1/*x*/,\"b\":2}", &path(&["a"]), &json!(3)).unwrap()),
+            "{\"a\":3/*x*/,\"b\":2}"
+        );
+        let out = changed(upsert_member_at("{\n  \"a\": 1// note\n}\n", &path(&["b"]), &json!(2)).unwrap());
+        assert_eq!(out, "{\n  \"a\": 1,// note\n  \"b\": 2\n}\n");
+    }
+
+    /// A comment may end in whitespace JSON does not know. Moved past the new
+    /// member it is a stray token and the file stops parsing.
+    #[test]
+    fn upsert_keeps_unicode_whitespace_inside_a_comment() {
+        let target = path(&["b"]);
+        for blank in ['\u{3000}', '\u{a0}', '\u{c}'] {
+            let after_member = format!("{{\n  \"a\": 1 // c{blank}\n}}\n");
+            assert_eq!(
+                changed(upsert_member_at(&after_member, &target, &json!(2)).unwrap()),
+                format!("{{\n  \"a\": 1, // c{blank}\n  \"b\": 2\n}}\n"),
+            );
+            let in_empty_object = format!("{{\n  // c{blank}\n}}\n");
+            assert_eq!(
+                changed(upsert_member_at(&in_empty_object, &target, &json!(2)).unwrap()),
+                format!("{{\n  // c{blank}\n  \"b\": 2\n}}\n"),
+            );
+        }
+    }
+
+    #[test]
+    fn upsert_compares_the_value_semantically() {
+        let text = "{\"a\": {\"b\": {\"y\":  2, /* c */ \"x\": [1,]}}}";
+        assert_eq!(
+            upsert_member_at(text, &path(&["a", "b"]), &json!({"x": [1], "y": 2})).unwrap(),
+            Splice::Unchanged
+        );
+    }
+
+    #[test]
+    fn upsert_follows_the_last_duplicate_key() {
+        let text = "{\"a\": 1, \"a\": {\"b\": 1}}";
+        assert_eq!(
+            changed(upsert_member_at(text, &path(&["a", "b"]), &json!(2)).unwrap()),
+            "{\"a\": 1, \"a\": {\"b\": 2}}"
+        );
+    }
+
+    /// A shape-agnostic check over layouts the scanner has to walk: the file's
+    /// meaning changes at the addressed member and nowhere else, both ways.
+    #[test]
+    fn splices_change_only_the_addressed_member() {
+        let target = path(&["a", "new"]);
+        let value = json!({"x": [1]});
+        for text in [
+            "{\"a\": {}}",
+            "{ \"a\": { } }",
+            "  {\n  \"a\": {}\n}  \n",
+            "// head\n{\"a\": {\"b\": 1}} // tail\n",
+            "/* head */ {\"a\": {\"b\": 1}}",
+            "{\n  \"a\": {\n    // only a comment\n  }\n}\n",
+            "{\n  \"a\": { /* block\n  spanning lines */ },\n}\n",
+            "{\"a\": {\"b\": 1 /* x */, /* y */}, /* z */}",
+            "{\"a\": {\"b\": 1//line\n}}",
+            "{\"a\": {\"b\": 1 // line\n  // more\n}, \"c\": 2}",
+            "{\"a\": {\"b\": \"//not a comment\"}}",
+            "{\"a\": {\"b\": \"}\"}, \"c\": \"{\"}",
+            "{\"a\": {\"esc\\\"aped\": \"\\\\\"}}",
+            "{\"a\": {\"b\": 1,\n  \"c\": [\n    {\"d\": null},\n  ],\n}}",
+            "{\"a\": {\n  \"b\": 1 // ideographic space\u{3000}\n}}",
+            "{\"a\": {\n  \"b\": 1 // no-break space\u{a0}\n}}",
+            "{\"a\": {\n  \"b\": 1 // form feed\u{c}\n}}",
+        ] {
+            let base = parsed(text);
+            let mut expected = base.clone();
+            expected["a"]["new"] = value.clone();
+
+            let out = changed(upsert_member_at(text, &target, &value).unwrap());
+            assert_eq!(parsed(&out), expected, "upsert of {text:?} gave {out:?}");
+            for comment in [
+                "// head",
+                "// tail",
+                "/* head */",
+                "// only a comment",
+                "/* x */",
+                "/* y */",
+            ] {
+                assert_eq!(out.contains(comment), text.contains(comment), "{comment} in {out:?}");
+            }
+
+            let back = changed(remove_member_at(&out, &target).unwrap());
+            assert_eq!(parsed(&back), base, "remove from {out:?} gave {back:?}");
+        }
+    }
+
+    #[test]
+    fn remove_at_depth_leaves_siblings() {
+        let text = "{\n  // keep\n  \"a\": {\n    \"b\": {\n      \"drop\": 1,\n      \"stay\": 2 // note\n    },\n    \"c\": 3\n  },\n  \"z\": 4\n}\n";
+        assert_eq!(
+            changed(remove_member_at(text, &path(&["a", "b", "drop"])).unwrap()),
+            "{\n  // keep\n  \"a\": {\n    \"b\": {\n      \"stay\": 2 // note\n    },\n    \"c\": 3\n  },\n  \"z\": 4\n}\n"
+        );
+        assert_eq!(
+            changed(remove_member_at(text, &path(&["a", "c"])).unwrap()),
+            "{\n  // keep\n  \"a\": {\n    \"b\": {\n      \"drop\": 1,\n      \"stay\": 2 // note\n    }\n  },\n  \"z\": 4\n}\n"
+        );
+
+        let crlf = "{\r\n\t\"a\": {\r\n\t\t\"b\": 1,\r\n\t\t\"c\": 2\r\n\t}\r\n}\r\n";
+        assert_eq!(
+            changed(remove_member_at(crlf, &path(&["a", "b"])).unwrap()),
+            "{\r\n\t\"a\": {\r\n\t\t\"c\": 2\r\n\t}\r\n}\r\n"
+        );
+        assert_eq!(
+            changed(remove_member_at(crlf, &path(&["a", "c"])).unwrap()),
+            "{\r\n\t\"a\": {\r\n\t\t\"b\": 1\r\n\t}\r\n}\r\n"
+        );
+    }
+
+    /// Pruning is its own operation, because only the writer knows which
+    /// containers a harness requires.
+    #[test]
+    fn remove_leaves_an_emptied_container_in_place() {
+        let out = changed(remove_member_at("{\"a\": {\"b\": 1}}", &path(&["a", "b"])).unwrap());
+        assert_eq!(out, "{\"a\": {}}");
+        let out = changed(remove_member_at("{\n  \"a\": {\n    \"b\": 1\n  }\n}\n", &path(&["a", "b"])).unwrap());
+        assert_eq!(parsed(&out), json!({"a": {}}), "{out}");
+    }
+
+    #[test]
+    fn remove_of_an_absent_member_is_unchanged() {
+        let text = "{\"a\": {\"b\": 1}}";
+        assert_eq!(
+            changed(remove_member_at(text, &path(&["a", "b"])).unwrap()),
+            "{\"a\": {}}",
+            "control"
+        );
+        for target in [path(&["z"]), path(&["a", "z"]), path(&["z", "y", "x"])] {
+            assert_eq!(
+                remove_member_at(text, &target).unwrap(),
+                Splice::Unchanged,
+                "{target:?}"
+            );
+        }
+        for text in ["", "  \n"] {
+            assert_eq!(remove_member_at(text, &path(&["a"])).unwrap(), Splice::Unchanged);
+        }
+    }
+
+    /// A value of another type in the way means the path holds nothing, which
+    /// is what a removal asks for, so a forced removal has nothing to fail on.
+    #[test]
+    fn remove_under_a_non_container_is_unchanged() {
+        for text in ["{\"a\": 1}", "{\"a\": [1]}", "{\"a\": null}", "{\"a\": \"s\"}"] {
+            assert_eq!(value_at(text, &path(&["a", "b"])).unwrap(), blocked(&["a"]), "control");
+            assert_eq!(
+                remove_member_at(text, &path(&["a", "b"])).unwrap(),
+                Splice::Unchanged,
+                "{text}"
+            );
+        }
+    }
+
+    /// The last duplicate wins for every reader, so cutting only that one
+    /// would turn the shadowed value into the live one.
+    #[test]
+    fn remove_takes_every_duplicate_of_the_key() {
+        let text = "{\n  \"a\": 1,\n  \"b\": 2,\n  \"a\": 3\n}\n";
+        let target = path(&["a"]);
+        assert_eq!(value_at(text, &target).unwrap(), found(json!(3)), "control");
+        let out = changed(remove_member_at(text, &target).unwrap());
+        assert_eq!(value_at(&out, &target).unwrap(), PointerRead::Absent, "{out}");
+        assert_eq!(out, "{\n  \"b\": 2\n}\n");
+    }
+
+    /// Every reader takes the last duplicate, so a removal below the first one
+    /// would report a change and leave the value a reader sees.
+    #[test]
+    fn remove_below_a_duplicate_key_follows_the_last_one() {
+        let text = "{\"a\": {\"b\": 1}, \"a\": {\"b\": 2, \"c\": 3}}";
+        let target = path(&["a", "b"]);
+        assert_eq!(value_at(text, &target).unwrap(), found(json!(2)), "control");
+        let out = changed(remove_member_at(text, &target).unwrap());
+        assert_eq!(value_at(&out, &target).unwrap(), PointerRead::Absent, "{out}");
+        assert_eq!(value_at(&out, &path(&["a", "c"])).unwrap(), found(json!(3)), "{out}");
+        assert!(out.contains("{\"b\": 1}"), "the shadowed member stays: {out}");
+    }
+
+    /// A comment between a value and its comma hides the comma from the cut,
+    /// and a comma left with nothing before it is a file no parser reads.
+    #[test]
+    fn remove_keeps_a_comment_before_the_comma() {
+        let target = path(&["a"]);
+        for (text, rest, comment) in [
+            ("{\"a\": 1 /* c */, \"b\": 2}", json!({"b": 2}), "/* c */"),
+            (
+                "{\"z\": 0, \"a\": 1 /* c */, \"b\": 2}",
+                json!({"z": 0, "b": 2}),
+                "/* c */",
+            ),
+            (
+                "{\"z\": 0, /* y */ \"a\": 1 /* c */, \"b\": 2}",
+                json!({"z": 0, "b": 2}),
+                "/* c */",
+            ),
+            ("{\n  \"a\": 1 // c\n  , \"b\": 2\n}\n", json!({"b": 2}), "// c"),
+            ("{\"a\": 1 /* c */,}", json!({}), "/* c */"),
+        ] {
+            let out = changed(remove_member_at(text, &target).unwrap());
+            assert_eq!(parsed(&out), rest, "{text:?} gave {out:?}");
+            assert!(out.contains(comment), "{out:?}");
+        }
+    }
+
+    #[test]
+    fn key_with_quote_is_escaped() {
+        let value = json!({"command": "x"});
+        for key in ["a\"b", "a\",\"evil\":\"x", "back\\slash", "ctrl\u{1}", "end\""] {
+            for text in ["", "{}\n", "{\n  \"c\": {\n    \"other\": {}\n  }\n}\n"] {
+                let leaf = path(&["c", key]);
+                let out = changed(upsert_member_at(text, &leaf, &value).unwrap());
+                let document: serde_json::Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+                assert_eq!(document["c"][key], value, "{out}");
+                assert!(document.get("evil").is_none(), "{out}");
+                assert_eq!(upsert_member_at(&out, &leaf, &value).unwrap(), Splice::Unchanged);
+
+                let container = path(&[key, "leaf"]);
+                let out = changed(upsert_member_at(text, &container, &value).unwrap());
+                let document: serde_json::Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+                assert_eq!(document[key]["leaf"], value, "{out}");
+                assert_eq!(
+                    parsed(&changed(remove_member_at(&out, &container).unwrap()))[key],
+                    json!({}),
+                    "an escaped key is found again"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn non_container_ancestor_is_invalid_data() {
+        let value = json!(1);
+        assert_eq!(
+            changed(upsert_member_at("{\"a\": {}}", &path(&["a", "b"]), &value).unwrap()),
+            "{\"a\": {\n  \"b\": 1\n}}",
+            "control"
+        );
+        for text in [
+            "{\"a\": 1}",
+            "{\"a\": \"sentinel-value\"}",
+            "{\"a\": true}",
+            "{\"a\": null}",
+            "{\"a\": [{\"b\": 1}]}",
+        ] {
+            for target in [path(&["a", "b"]), path(&["a", "b", "c"])] {
+                let err = upsert_member_at(text, &target, &value).unwrap_err();
+                assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{text}");
+                assert!(!err.to_string().contains("sentinel-value"), "{err}");
+            }
+        }
+        let deep = upsert_member_at("{\"a\": {\"b\": 1}}", &path(&["a", "b", "c"]), &value).unwrap_err();
+        assert_eq!(deep.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn member_splices_refuse_an_unparseable_document() {
+        let target = path(&["a"]);
+        assert!(upsert_member_at("{}", &target, &json!(1)).is_ok(), "control");
+        assert!(remove_member_at("{}", &target).is_ok(), "control");
+        for text in [
+            "not json {{{",
+            "[1, 2]",
+            "\"text\"",
+            "3",
+            "{\"a\":",
+            "{\"token\": hunter2-sentinel}",
+            "// only a comment\n",
+        ] {
+            for err in [
+                upsert_member_at(text, &target, &json!(1)).unwrap_err(),
+                remove_member_at(text, &target).unwrap_err(),
+            ] {
+                assert_eq!(err.kind(), io::ErrorKind::InvalidData, "input: {text}");
+                assert!(!err.to_string().contains("hunter2-sentinel"), "{err}");
+            }
+        }
+    }
+
+    /// The whole document is not a member: a piece that addresses it would
+    /// replace every other key in the file.
+    #[test]
+    fn member_splices_refuse_the_empty_path() {
+        assert!(upsert_member_at("{}", &path(&["a"]), &json!(1)).is_ok(), "control");
+        for text in ["", "{}", "{\"a\": 1}"] {
+            let upsert = upsert_member_at(text, &[], &json!({"b": 2})).unwrap_err();
+            assert_eq!(upsert.kind(), io::ErrorKind::InvalidData, "{text:?}");
+            let remove = remove_member_at(text, &[]).unwrap_err();
+            assert_eq!(remove.kind(), io::ErrorKind::InvalidData, "{text:?}");
+        }
+    }
+
+    // ── Element splices at any depth ────────────────────────────────────
+
+    fn upsert_element(text: &str, target: &[String], element: &str) -> String {
+        changed(upsert_array_element_at(text, target, element).unwrap())
+    }
+
+    fn remove_element(text: &str, target: &[String], element: &str) -> String {
+        changed(remove_array_element_at(text, target, element).unwrap())
+    }
+
+    /// Every comment the layout tables below carry. A splice keeps exactly the
+    /// ones its input held.
+    const TABLE_COMMENTS: &[&str] = &[
+        "// head",
+        "// tail",
+        "// line",
+        "// more",
+        "// only a comment",
+        "/* block */",
+        "/* block\n  spanning */",
+        "/* x */",
+        "/* y */",
+        "/* z */",
+    ];
+
+    fn assert_comments_survive(text: &str, out: &str) {
+        for comment in TABLE_COMMENTS {
+            assert_eq!(out.contains(comment), text.contains(comment), "{comment} in {out:?}");
+        }
+    }
+
+    #[test]
+    fn element_upsert_is_idempotent() {
+        let target = path(&["permissions", "deny"]);
+        let text = "{\n  \"permissions\": {\n    \"deny\": [\n      \"Read\"\n    ]\n  }\n}\n";
+
+        let once = upsert_element(text, &target, "Bash(rm:*)");
+        assert_eq!(
+            once,
+            "{\n  \"permissions\": {\n    \"deny\": [\n      \"Read\",\n      \"Bash(rm:*)\"\n    ]\n  }\n}\n"
+        );
+        for element in ["Bash(rm:*)", "Read"] {
+            assert_eq!(
+                upsert_array_element_at(&once, &target, element).unwrap(),
+                Splice::Unchanged,
+                "{element}"
+            );
+        }
+
+        let gone = remove_element(&once, &target, "Bash(rm:*)");
+        assert_eq!(gone, text);
+        assert_eq!(
+            remove_array_element_at(&gone, &target, "Bash(rm:*)").unwrap(),
+            Splice::Unchanged
+        );
+    }
+
+    #[test]
+    fn element_upsert_creates_the_array() {
+        let target = path(&["a", "b", "c"]);
+        let skeleton = "{\n  \"a\": {\n    \"b\": {\n      \"c\": [\n        \"x\"\n      ]\n    }\n  }\n}\n";
+        assert_eq!(upsert_element("", &target, "x"), skeleton);
+        assert_eq!(upsert_element("{}\n", &target, "x"), skeleton);
+        assert_eq!(
+            upsert_element(skeleton, &target, "y"),
+            "{\n  \"a\": {\n    \"b\": {\n      \"c\": [\n        \"x\",\n        \"y\"\n      ]\n    }\n  }\n}\n",
+            "an array made here is an array the next element finds"
+        );
+
+        let partial = "{\n  \"a\": {\n    \"keep\": 1\n  },\n  \"z\": 2\n}\n";
+        assert_eq!(
+            upsert_element(partial, &target, "x"),
+            "{\n  \"a\": {\n    \"keep\": 1,\n    \"b\": {\n      \"c\": [\n        \"x\"\n      ]\n    }\n  },\n  \"z\": 2\n}\n"
+        );
+
+        for text in ["", "  \n", "{}\n", partial] {
+            let out = upsert_element(text, &target, "x");
+            assert_eq!(value_at(&out, &target).unwrap(), found(json!(["x"])), "{out}");
+            assert_eq!(
+                upsert_array_element_at(&out, &target, "x").unwrap(),
+                Splice::Unchanged,
+                "{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn element_ops_keep_array_comments() {
+        let target = path(&["deny"]);
+        let text = "{\n  \"deny\": [\n    // shell\n    \"Bash\", // never\n    /* files */\n    \"Write\" // last\n    // tail\n  ]\n}\n";
+        let comments = ["// shell", "// never", "/* files */", "// last", "// tail"];
+
+        assert_eq!(
+            upsert_element(text, &target, "Read"),
+            "{\n  \"deny\": [\n    // shell\n    \"Bash\", // never\n    /* files */\n    \"Write\", // last\n    // tail\n    \"Read\"\n  ]\n}\n",
+            "a comment stays on its own element's line"
+        );
+
+        for (element, rest) in [("Bash", json!(["Write"])), ("Write", json!(["Bash"]))] {
+            let out = remove_element(text, &target, element);
+            assert_eq!(parsed(&out)["deny"], rest, "{out:?}");
+            for comment in comments {
+                assert!(out.contains(comment), "{comment} in {out:?}");
+            }
+        }
+
+        for (text, want) in [
+            (
+                "{\"a\": [\n  // only a comment\n]}",
+                "{\"a\": [\n  // only a comment\n  \"x\"\n]}",
+            ),
+            ("{\"a\": [ /* c */ ]}", "{\"a\": [ /* c */ \"x\"]}"),
+        ] {
+            let out = upsert_element(text, &path(&["a"]), "x");
+            assert_eq!(out, want);
+            assert_eq!(
+                remove_element(&out, &path(&["a"]), "x").replace(' ', ""),
+                text.replace(' ', "")
+            );
+        }
+    }
+
+    /// `Set` removal stops at the element: dropping the emptied array is
+    /// `PruneEmpty`'s step, because only the writer knows which keys are required.
+    #[test]
+    fn element_remove_last_leaves_empty_array() {
+        let target = path(&["a", "b"]);
+        assert_eq!(
+            remove_element("{\"a\": {\"b\": [\"x\"]}, \"z\": 1}", &target, "x"),
+            "{\"a\": {\"b\": []}, \"z\": 1}"
+        );
+        for text in [
+            "{\"a\": {\"b\": [\"x\"]}}",
+            "{\"a\": {\"b\": [\"x\",]}}",
+            "{\"a\": {\"b\": [ /* keep */ \"x\"]}}",
+            "{\n  \"a\": {\n    \"b\": [\n      \"x\"\n    ]\n  }\n}\n",
+            "{\r\n\t\"a\": {\r\n\t\t\"b\": [\r\n\t\t\t\"x\",\r\n\t\t]\r\n\t}\r\n}\r\n",
+        ] {
+            let out = remove_element(text, &target, "x");
+            assert_eq!(value_at(&out, &target).unwrap(), found(json!([])), "{out:?}");
+            assert_eq!(
+                remove_array_element_at(&out, &target, "x").unwrap(),
+                Splice::Unchanged,
+                "{out:?}"
+            );
+            assert_eq!(out.contains("/* keep */"), text.contains("/* keep */"), "{out:?}");
+        }
+    }
+
+    #[test]
+    fn element_upsert_keeps_the_layout_of_the_array() {
+        let target = path(&["a"]);
+        for (text, want) in [
+            ("{\"a\": []}", "{\"a\": [\"x\"]}"),
+            ("{\"a\": [ ]}", "{\"a\": [\"x\"]}"),
+            ("{\"a\": [\"p\", \"q\"]}", "{\"a\": [\"p\", \"q\", \"x\"]}"),
+            ("{\"a\": [\"p\",]}", "{\"a\": [\"p\", \"x\",]}"),
+            ("{\n  \"a\": [\n  ]\n}\n", "{\n  \"a\": [\n    \"x\"\n  ]\n}\n"),
+            (
+                "{\n  \"a\": [\n    \"p\",\n  ]\n}\n",
+                "{\n  \"a\": [\n    \"p\",\n    \"x\",\n  ]\n}\n",
+            ),
+            (
+                "{\n  \"a\": [\n    \"p\", \"q\"\n  ]\n}\n",
+                "{\n  \"a\": [\n    \"p\", \"q\",\n    \"x\"\n  ]\n}\n",
+            ),
+            (
+                "{\n    \"a\": [\n        \"p\"\n    ]\n}\n",
+                "{\n    \"a\": [\n        \"p\",\n        \"x\"\n    ]\n}\n",
+            ),
+        ] {
+            assert_eq!(upsert_element(text, &target, "x"), want, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn element_upsert_keeps_crlf_and_tabs() {
+        let target = path(&["a"]);
+        assert_eq!(
+            upsert_element("{\r\n\t\"a\": [\r\n\t\t\"b\"\r\n\t]\r\n}\r\n", &target, "c"),
+            "{\r\n\t\"a\": [\r\n\t\t\"b\",\r\n\t\t\"c\"\r\n\t]\r\n}\r\n"
+        );
+        assert_eq!(
+            upsert_element("{\r\n\t\"a\": [\r\n\t]\r\n}\r\n", &target, "c"),
+            "{\r\n\t\"a\": [\r\n\t\t\"c\"\r\n\t]\r\n}\r\n"
+        );
+        assert_eq!(
+            upsert_element("{\r\n\t\"z\": 1\r\n}\r\n", &path(&["a", "b"]), "c"),
+            "{\r\n\t\"z\": 1,\r\n\t\"a\": {\r\n\t\t\"b\": [\r\n\t\t\t\"c\"\r\n\t\t]\r\n\t}\r\n}\r\n"
+        );
+        assert_eq!(
+            remove_element(
+                "{\r\n\t\"a\": [\r\n\t\t\"b\",\r\n\t\t\"c\"\r\n\t]\r\n}\r\n",
+                &target,
+                "b"
+            ),
+            "{\r\n\t\"a\": [\r\n\t\t\"c\"\r\n\t]\r\n}\r\n"
+        );
+        assert_eq!(
+            remove_element(
+                "{\r\n\t\"a\": [\r\n\t\t\"b\",\r\n\t\t\"c\"\r\n\t]\r\n}\r\n",
+                &target,
+                "c"
+            ),
+            "{\r\n\t\"a\": [\r\n\t\t\"b\"\r\n\t]\r\n}\r\n"
+        );
+    }
+
+    /// A shape-agnostic check over layouts the scanner has to walk: the file's
+    /// meaning changes at the addressed array and nowhere else, both ways.
+    #[test]
+    fn element_splices_change_only_the_addressed_array() {
+        let target = path(&["a", "list"]);
+        for text in [
+            "{\"a\": {\"list\": []}}",
+            "{ \"a\": { \"list\": [ ] } }",
+            "{\"a\": {\"list\": [\n]}}",
+            "{\n\t\"a\": {\n\t\t\"list\": [\n\t\t]\n\t}\n}\n",
+            "{\"a\": {\"list\": [\"p\"]}}",
+            "{\"a\": {\"list\": [\"p\",]}}",
+            "{\"a\": {\"list\": [\"p\", \"q\"], \"z\": 1}, \"y\": 2}",
+            "{\"a\": {\"list\": [\n  \"p\",\n  \"q\",\n]}}",
+            "{\"a\": {\"list\": [\"p\" // line\n]}}",
+            "{\"a\": {\"list\": [\"p\" // line\n  // more\n], \"z\": 1}}",
+            "{\"a\": {\"list\": [\"p\" /* x */, /* y */ \"q\" /* z */]}}",
+            "{\"a\": {\"list\": [\"p\" /* x */, /* y */]}}",
+            "{\"a\": {\"list\": [\n  // only a comment\n]}}",
+            "{\"a\": {\"list\": [ /* block */ ]}}",
+            "{\"a\": {\"list\": [ /* block\n  spanning */ ]}}",
+            "{\"a\": {\"list\": [1/* x */, {\"k\": \"]\"}, [\"new\"], null, \"//no\"]}}",
+            "{\"a\": {\"list\": [\"p\"// line\n]}}",
+            "// head\n{\"a\": {\"list\": [\"p\"]}} // tail\n",
+            "{\"a\": {\"list\": [\"p\" // ideographic space\u{3000}\n]}}",
+            "{\"a\": {\"list\": [ // no-break space\u{a0}\n]}}",
+            "{\r\n\t\"a\": {\r\n\t\t\"list\": [\r\n\t\t\t\"p\"\r\n\t\t]\r\n\t}\r\n}\r\n",
+        ] {
+            let base = parsed(text);
+            let mut expected = base.clone();
+            expected["a"]["list"]
+                .as_array_mut()
+                .expect("every row holds the array")
+                .push(json!("new"));
+
+            let out = upsert_element(text, &target, "new");
+            assert_eq!(parsed(&out), expected, "upsert of {text:?} gave {out:?}");
+            assert_comments_survive(text, &out);
+            assert_eq!(
+                upsert_array_element_at(&out, &target, "new").unwrap(),
+                Splice::Unchanged,
+                "{out:?}"
+            );
+
+            let back = remove_element(&out, &target, "new");
+            assert_eq!(parsed(&back), base, "remove from {out:?} gave {back:?}");
+            assert_comments_survive(text, &back);
+        }
+    }
+
+    /// A comment may sit on either side of the comma that separates an element
+    /// from its neighbour, and either comma going wrong leaves an unreadable file.
+    #[test]
+    fn element_remove_cuts_one_element_and_one_comma() {
+        let target = path(&["a"]);
+        for (text, rest) in [
+            ("{\"a\": [\"x\", \"y\"]}", json!(["y"])),
+            ("{\"a\": [\"y\", \"x\"]}", json!(["y"])),
+            ("{\"a\": [\"p\", \"x\", \"y\"]}", json!(["p", "y"])),
+            ("{\"a\": [\"p\", \"x\",]}", json!(["p"])),
+            ("{\"a\": [\"x\" /* c */, \"y\"]}", json!(["y"])),
+            ("{\"a\": [\"p\", \"x\" /* c */, \"y\"]}", json!(["p", "y"])),
+            ("{\"a\": [\"p\", /* b */ \"x\" /* c */, \"y\"]}", json!(["p", "y"])),
+            ("{\"a\": [\"p\", /* b */ \"x\" /* c */]}", json!(["p"])),
+            ("{\"a\": [\"p\", /* b */ \"x\"]}", json!(["p"])),
+            ("{\"a\": [\"x\" // c\n, \"y\"]}", json!(["y"])),
+            ("{\"a\": [\n  \"x\", // c\n  \"y\" // d\n]}", json!(["y"])),
+            ("{\"a\": [\n  \"y\", // c\n  \"x\" // d\n]}", json!(["y"])),
+            ("{\"a\": [\"x\" /* c */,]}", json!([])),
+            ("{\"a\": [\"x\" /* b */, /* c */ \"x\"]}", json!([])),
+        ] {
+            let out = remove_element(text, &target, "x");
+            assert_eq!(parsed(&out)["a"], rest, "{text:?} gave {out:?}");
+            for comment in ["/* b */", "/* c */", "// c", "// d"] {
+                assert_eq!(out.contains(comment), text.contains(comment), "{comment} in {out:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn element_remove_leaves_siblings() {
+        let target = path(&["p", "deny"]);
+        let text = "{\n  // keep\n  \"p\": {\n    \"allow\": [\"drop\"],\n    \"deny\": [\n      \"drop\",\n      \"stay\" // note\n    ],\n    \"c\": 3\n  }\n}\n";
+        assert_eq!(
+            remove_element(text, &target, "drop"),
+            "{\n  // keep\n  \"p\": {\n    \"allow\": [\"drop\"],\n    \"deny\": [\n      \"stay\" // note\n    ],\n    \"c\": 3\n  }\n}\n"
+        );
+        for absent in [path(&["p", "z"]), path(&["z", "y"]), path(&["p", "allow", "z"])] {
+            assert_eq!(
+                remove_array_element_at(text, &absent, "drop").unwrap(),
+                Splice::Unchanged,
+                "{absent:?}"
+            );
+        }
+        assert_eq!(
+            remove_array_element_at(text, &target, "absent").unwrap(),
+            Splice::Unchanged
+        );
+        for text in ["", "  \n"] {
+            assert_eq!(remove_array_element_at(text, &target, "x").unwrap(), Splice::Unchanged);
+        }
+    }
+
+    /// A read finds an element wherever it sits, so one survivor of a list that
+    /// held it twice would keep reading as present.
+    #[test]
+    fn element_remove_takes_every_duplicate() {
+        let target = path(&["a"]);
+        let text = "{\n  \"a\": [\n    \"x\",\n    \"y\",\n    \"\\u0078\",\n    \"x\"\n  ]\n}\n";
+        assert_eq!(remove_element(text, &target, "x"), "{\n  \"a\": [\n    \"y\"\n  ]\n}\n");
+        assert_eq!(
+            value_at(&remove_element("{\"a\": [\"x\", \"x\"]}", &target, "x"), &target).unwrap(),
+            found(json!([]))
+        );
+    }
+
+    #[test]
+    fn element_identity_ignores_the_spelling() {
+        let target = path(&["a"]);
+        let text = "{\"a\": [\"\\u0042ash\"]}";
+        assert_eq!(value_at(text, &target).unwrap(), found(json!(["Bash"])), "control");
+        assert_eq!(
+            upsert_array_element_at(text, &target, "Bash").unwrap(),
+            Splice::Unchanged
+        );
+        assert_eq!(remove_element(text, &target, "Bash"), "{\"a\": []}");
+    }
+
+    #[test]
+    fn element_identity_is_a_whole_string() {
+        let target = path(&["a"]);
+        let text = "{\"a\": [1, true, null, {\"x\": \"x\"}, [\"x\"], \"xx\", \" x\"]}";
+        let held = parsed(text)["a"].as_array().expect("control").len();
+        assert_ne!(remove_array_element_at(text, &target, "xx").unwrap(), Splice::Unchanged);
+
+        for element in ["x", "1", "true", "null"] {
+            assert_eq!(
+                remove_array_element_at(text, &target, element).unwrap(),
+                Splice::Unchanged,
+                "{element}"
+            );
+            let out = upsert_element(text, &target, element);
+            let array = parsed(&out)["a"].as_array().expect("still an array").clone();
+            assert_eq!(array.len(), held + 1, "{out}");
+            assert_eq!(array.last(), Some(&json!(element)), "{out}");
+        }
+    }
+
+    #[test]
+    fn element_with_quote_is_escaped() {
+        let target = path(&["c", "list"]);
+        for element in [
+            "a\"b",
+            "x\"],\"evil\":[\"y",
+            "back\\slash",
+            "ctrl\u{1}",
+            "line\nfeed",
+            "end\"",
+            "ü",
+        ] {
+            for text in [
+                "",
+                "{}\n",
+                "{\"c\": {\"list\": []}}",
+                "{\n  \"c\": {\n    \"list\": [\n      \"other\"\n    ]\n  }\n}\n",
+            ] {
+                let out = upsert_element(text, &target, element);
+                let document: serde_json::Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+                let held = document["c"]["list"].as_array().expect("still an array");
+                assert!(held.contains(&json!(element)), "{out}");
+                assert!(document.get("evil").is_none(), "{out}");
+                assert_eq!(
+                    upsert_array_element_at(&out, &target, element).unwrap(),
+                    Splice::Unchanged,
+                    "{out}"
+                );
+
+                let back = parsed(&remove_element(&out, &target, element));
+                let kept = back["c"]["list"].as_array().expect("still an array");
+                assert!(!kept.contains(&json!(element)), "an escaped element is found again");
+            }
+        }
+    }
+
+    #[test]
+    fn element_ops_follow_the_last_duplicate_key() {
+        let target = path(&["a"]);
+        let text = "{\"a\": [\"p\"], \"a\": [\"q\"]}";
+        assert_eq!(
+            upsert_element(text, &target, "x"),
+            "{\"a\": [\"p\"], \"a\": [\"q\", \"x\"]}"
+        );
+        assert_eq!(
+            remove_array_element_at(text, &target, "p").unwrap(),
+            Splice::Unchanged,
+            "a shadowed array reads as absent"
+        );
+        assert_eq!(remove_element(text, &target, "q"), "{\"a\": [\"p\"], \"a\": []}");
+    }
+
+    #[test]
+    fn element_ops_find_a_key_spelled_with_escapes() {
+        let target = path(&["pAth", "list"]);
+        let text = "{\"p\\u0041th\": {\"list\": [\"p\"]}}";
+        assert_eq!(
+            upsert_element(text, &target, "x"),
+            "{\"p\\u0041th\": {\"list\": [\"p\", \"x\"]}}"
+        );
+        assert_eq!(remove_element(text, &target, "p"), "{\"p\\u0041th\": {\"list\": []}}");
+    }
+
+    /// A bare string equal to the element is not the element: the path holds a
+    /// value of another type, and only a caller allowed to replace it may.
+    #[test]
+    fn element_ops_refuse_a_non_array() {
+        let target = path(&["a", "b"]);
+        assert!(
+            upsert_array_element_at("{\"a\": {\"b\": []}}", &target, "x").is_ok(),
+            "control"
+        );
+        assert!(
+            remove_array_element_at("{\"a\": {\"b\": []}}", &target, "x").is_ok(),
+            "control"
+        );
+        for text in [
+            "{\"a\": {\"b\": 1}}",
+            "{\"a\": {\"b\": \"x\"}}",
+            "{\"a\": {\"b\": \"sentinel-value\"}}",
+            "{\"a\": {\"b\": true}}",
+            "{\"a\": {\"b\": null}}",
+            "{\"a\": {\"b\": {\"x\": \"x\"}}}",
+        ] {
+            for err in [
+                upsert_array_element_at(text, &target, "x").unwrap_err(),
+                remove_array_element_at(text, &target, "x").unwrap_err(),
+            ] {
+                assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{text}");
+                assert!(!err.to_string().contains("sentinel-value"), "{err}");
+            }
+        }
+    }
+
+    #[test]
+    fn element_upsert_refuses_a_non_container_ancestor() {
+        let target = path(&["a", "b", "c"]);
+        assert!(upsert_array_element_at("{\"a\": {}}", &target, "x").is_ok(), "control");
+        for text in [
+            "{\"a\": 1}",
+            "{\"a\": null}",
+            "{\"a\": [\"x\"]}",
+            "{\"a\": {\"b\": \"sentinel-value\"}}",
+        ] {
+            let err = upsert_array_element_at(text, &target, "x").unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{text}");
+            assert!(!err.to_string().contains("sentinel-value"), "{err}");
+        }
+    }
+
+    /// Nothing sits at the path, so the element is absent, as it is for a member
+    /// under a value of another type.
+    #[test]
+    fn element_remove_under_a_non_container_is_unchanged() {
+        let target = path(&["a", "b"]);
+        for text in ["{\"a\": 1}", "{\"a\": [\"x\"]}", "{\"a\": null}", "{\"a\": \"x\"}"] {
+            assert_eq!(value_at(text, &target).unwrap(), blocked(&["a"]), "control");
+            assert_eq!(
+                remove_array_element_at(text, &target, "x").unwrap(),
+                Splice::Unchanged,
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn element_splices_refuse_an_unparseable_document() {
+        let target = path(&["a"]);
+        assert!(upsert_array_element_at("{}", &target, "x").is_ok(), "control");
+        assert!(remove_array_element_at("{}", &target, "x").is_ok(), "control");
+        for text in [
+            "not json {{{",
+            "[1, 2]",
+            "\"text\"",
+            "3",
+            "{\"a\":",
+            "{\"a\": [\"x\"",
+            "{\"a\": [/ ]}",
+            "{\"token\": hunter2-sentinel}",
+            "// only a comment\n",
+        ] {
+            for err in [
+                upsert_array_element_at(text, &target, "x").unwrap_err(),
+                remove_array_element_at(text, &target, "x").unwrap_err(),
+            ] {
+                assert_eq!(err.kind(), io::ErrorKind::InvalidData, "input: {text}");
+                assert!(!err.to_string().contains("hunter2-sentinel"), "{err}");
+            }
+        }
+    }
+
+    #[test]
+    fn element_splices_refuse_the_empty_path() {
+        assert!(upsert_array_element_at("{}", &path(&["a"]), "x").is_ok(), "control");
+        for text in ["", "{}", "{\"a\": [\"x\"]}"] {
+            let upsert = upsert_array_element_at(text, &[], "x").unwrap_err();
+            assert_eq!(upsert.kind(), io::ErrorKind::InvalidData, "{text:?}");
+            let remove = remove_array_element_at(text, &[], "x").unwrap_err();
+            assert_eq!(remove.kind(), io::ErrorKind::InvalidData, "{text:?}");
+        }
     }
 }

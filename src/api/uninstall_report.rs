@@ -6,7 +6,7 @@
 //! Plain format: a single-row 3-column table (Kind | Name | Status).
 //!
 //! JSON format: a single object
-//! `{kind, name, status, retained, abandoned_entries}` (not an array —
+//! `{kind, name, status, retained, abandoned_entries, settings_changes}` (not an array —
 //! `uninstall` touches exactly one declared entry). Unlike `remove`,
 //! `uninstall` also deletes the materialized client files and drops the
 //! install-state record (full uninstall). `retained` is an always-present
@@ -15,13 +15,15 @@
 //! `abandoned_entries` is `retained`'s counterpart for a shared, user-owned
 //! config file grim never intended to delete: an always-present array of
 //! `{path, pointer}` objects (`[]` normally) naming a managed MCP entry left
-//! un-spliced while the record was dropped anyway.
+//! un-spliced while the record was dropped anyway. `settings_changes` is
+//! always present, `[]` when no settings value moved.
 
 use std::io::{self, Write};
 use std::path::PathBuf;
 
 use serde::Serialize;
 
+use crate::api::settings_report::SettingsChange;
 use crate::cli::printer::{Printable, print_table};
 use crate::install::uninstall::AbandonedEntry;
 use crate::oci::ArtifactKind;
@@ -77,6 +79,8 @@ pub struct UninstallReport {
     /// `[]` on every normal uninstall
     /// ([`UninstallResult::abandoned_entries`](crate::install::uninstall::UninstallResult)).
     pub abandoned_entries: Vec<AbandonedEntry>,
+    /// What the run changed in harness settings files.
+    pub settings_changes: Vec<SettingsChange>,
 }
 
 fn serialize_kind<S: serde::Serializer>(kind: &ArtifactKind, s: S) -> Result<S::Ok, S::Error> {
@@ -98,7 +102,14 @@ impl UninstallReport {
             status,
             retained,
             abandoned_entries,
+            settings_changes: Vec::new(),
         }
+    }
+
+    /// Name what the run changed in harness settings files.
+    pub fn with_settings_changes(mut self, settings_changes: Vec<SettingsChange>) -> Self {
+        self.settings_changes = settings_changes;
+        self
     }
 }
 
@@ -185,13 +196,21 @@ mod tests {
         let keys: std::collections::BTreeSet<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(
             keys,
-            ["kind", "name", "retained", "abandoned_entries", "status"]
-                .into_iter()
-                .collect(),
+            [
+                "kind",
+                "name",
+                "retained",
+                "abandoned_entries",
+                "status",
+                "settings_changes"
+            ]
+            .into_iter()
+            .collect(),
             "the uninstall object's frozen key set"
         );
         assert_eq!(v["retained"], serde_json::json!([]));
         assert_eq!(v["abandoned_entries"], serde_json::json!([]));
+        assert_eq!(v["settings_changes"], serde_json::json!([]));
 
         let left = UninstallReport::new(
             ArtifactKind::Rule,
@@ -201,6 +220,7 @@ mod tests {
             vec![AbandonedEntry {
                 path: PathBuf::from("/elsewhere/.mcp.json"),
                 pointer: "/mcpServers/grim".to_string(),
+                element: None,
             }],
         );
         let mut buf = Vec::new();
@@ -209,7 +229,55 @@ mod tests {
         assert_eq!(v["retained"], serde_json::json!(["/elsewhere/rules/x.md"]));
         assert_eq!(
             v["abandoned_entries"],
-            serde_json::json!([{"path": "/elsewhere/.mcp.json", "pointer": "/mcpServers/grim"}])
+            serde_json::json!([{"path": "/elsewhere/.mcp.json", "pointer": "/mcpServers/grim", "element": null}])
         );
+    }
+
+    /// `element` reaches JSON, so it is always present and `null` when unset:
+    /// a consumer can tell that from the missing key of an older grim.
+    #[test]
+    fn abandoned_entry_element_is_always_on_the_wire_after_pointer() {
+        let mut entry = AbandonedEntry {
+            path: PathBuf::from("/s.json"),
+            pointer: "/permissions/deny".to_string(),
+            element: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&entry).unwrap(),
+            r#"{"path":"/s.json","pointer":"/permissions/deny","element":null}"#
+        );
+
+        entry.element = Some("Bash(rm:*)".to_string());
+        assert_eq!(
+            serde_json::to_string(&entry).unwrap(),
+            r#"{"path":"/s.json","pointer":"/permissions/deny","element":"Bash(rm:*)"}"#
+        );
+    }
+
+    #[test]
+    fn settings_changes_is_always_present_and_serialized_last() {
+        let r = UninstallReport::new(
+            ArtifactKind::Settings,
+            "team".to_string(),
+            UninstallStatus::Uninstalled,
+            Vec::new(),
+            Vec::new(),
+        );
+        let empty = serde_json::to_string(&r).unwrap();
+        assert!(
+            empty.ends_with(r#","retained":[],"abandoned_entries":[],"settings_changes":[]}"#),
+            "{empty}"
+        );
+
+        let change = crate::api::settings_report::SettingsChange {
+            package: "team".to_string(),
+            client: "claude".to_string(),
+            file: "~/.claude/settings.json".to_string(),
+            key: "/model".to_string(),
+            element: None,
+            action: crate::api::settings_report::SettingsChangeAction::Added,
+        };
+        let v = serde_json::to_value(r.with_settings_changes(vec![change])).unwrap();
+        assert_eq!(v["settings_changes"][0]["key"], "/model");
     }
 }

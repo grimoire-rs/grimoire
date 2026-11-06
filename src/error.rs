@@ -10,6 +10,7 @@
 //! machine-readable [`ErrorReason`]). [`classify_error`] is a thin wrapper
 //! kept for callers that only need the exit code.
 
+use crate::api::settings_report::PieceState;
 use crate::auth::auth_error::AuthError;
 use crate::catalog::catalog_error::{CatalogError, CatalogErrorKind};
 use crate::catalog::index_announce::AnnounceError;
@@ -20,6 +21,7 @@ use crate::command::command_error::CommandError;
 use crate::config::config_error::{ConfigError, ConfigErrorKind};
 use crate::export::export_error::ExportError;
 use crate::install::install_error::{InstallError, InstallErrorKind};
+use crate::install::installer::SettingsOutcome;
 use crate::install::path_anchor::AnchorError;
 use crate::lock::lock_error::{LockError, LockErrorKind};
 use crate::oci::access::error::{AccessError, AccessErrorKind};
@@ -30,6 +32,7 @@ use crate::oci::identifier::error::IdentifierError;
 use crate::oci::layer::LayerError;
 use crate::oci::pinned_identifier::PinnedIdentifierError;
 use crate::oci::release::{ReleaseError, ReleaseErrorKind};
+use crate::oci::settings::{SettingsError, ValidationMode};
 use crate::resolve::resolve_error::{ResolveError, ResolveErrorKind};
 use crate::skill::skill_error::{SkillError, SkillErrorKind};
 
@@ -103,6 +106,48 @@ pub enum Error {
     /// A manifest requiring features or a layer layout this grim does not know.
     #[error(transparent)]
     ArtifactFeature(#[from] ArtifactFeatureError),
+
+    /// An error from a run that also changed or refused settings values.
+    /// Reads and classifies as the error it wraps; only the JSON error
+    /// document sees the difference.
+    #[error(transparent)]
+    Settings(Box<SettingsFailure>),
+
+    /// A settings document a validation gate refused.
+    #[error(transparent)]
+    SettingsDocument(#[from] SettingsError),
+}
+
+impl Error {
+    /// Carry `outcome` on this error. An empty outcome returns `self`, so
+    /// every run the settings step did not touch keeps today's error.
+    pub fn with_settings(self, outcome: SettingsOutcome) -> Self {
+        if outcome.is_empty() {
+            return self;
+        }
+        Self::Settings(Box::new(SettingsFailure { error: self, outcome }))
+    }
+}
+
+/// An [`Error`] plus what the settings step did before it surfaced.
+#[derive(Debug)]
+pub struct SettingsFailure {
+    pub error: Error,
+    pub outcome: SettingsOutcome,
+}
+
+impl std::fmt::Display for SettingsFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::error::Error for SettingsFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        // `error`'s source, not `error` itself: `Display` already forwards to
+        // it, so returning `error` would print its message twice under `{:#}`.
+        self.error.source()
+    }
 }
 
 /// Machine-readable failure `reason` subtype for the JSON error envelope
@@ -132,9 +177,11 @@ pub enum ErrorReason {
     /// from an explicit `--config <path>` that does not exist, which stays
     /// reason-less (see `classify_config`).
     NoConfig,
-    /// A config-file write was refused because another process holds the
-    /// `<file>.lock` advisory sidecar (`LockErrorKind::Locked`). Transient —
-    /// retry may succeed once the other writer releases the lock.
+    /// A write was refused because something else holds or changed the file
+    /// first: another process holds a `<file>.lock` advisory sidecar
+    /// (`LockErrorKind::Locked`, also behind the I/O seam for Cline's MCP
+    /// file), or a settings file changed during the run
+    /// (`InstallErrorKind::SettingsRaced`). Transient: a retry may succeed.
     Locked,
     /// A recorded path resolved outside its anchor root
     /// (`AnchorError::EscapedAnchor`). NEVER forceable: `--force` does not
@@ -214,89 +261,112 @@ impl Classification {
 pub fn classify(err: &anyhow::Error) -> Classification {
     for cause in err.chain() {
         if let Some(e) = cause.downcast_ref::<Error>() {
-            // Exhaustive match: a new variant fails to compile until it is
-            // explicitly classified here.
-            return match e {
-                Error::Identifier(_) => Classification::new(ExitCode::DataError),
-                Error::Digest(_) => Classification::new(ExitCode::DataError),
-                Error::PinnedIdentifier(_) => Classification::new(ExitCode::DataError),
-                Error::Config(ce) => classify_config(ce),
-                Error::Lock(le) => classify_lock(le),
-                Error::Access(ae) => Classification::new(classify_access(ae)),
-                Error::Resolve(re) => classify_resolve(re),
-                Error::Install(ie) => classify_install(ie),
-                Error::Anchor(ae) => classify_anchor(ae),
-                Error::Skill(se) => Classification::new(classify_skill(se)),
-                Error::Release(re) => Classification::new(classify_release(re)),
-                Error::Catalog(ce) => Classification::new(classify_catalog(ce)),
-                Error::Auth(ae) => Classification::new(classify_auth(ae)),
-                Error::Command(ce) => Classification {
-                    exit: match ce {
-                        CommandError::LockMissing { .. } => ExitCode::NotFound,
-                        CommandError::LockStale { .. } => ExitCode::DataError,
-                        CommandError::NoLoginRegistry => ExitCode::ConfigError,
-                        CommandError::LoginInput(_) => ExitCode::UsageError,
-                        CommandError::KindInferenceFailed { .. } => ExitCode::DataError,
-                        CommandError::DeclareConflict { .. } => ExitCode::UsageError,
-                        CommandError::InvalidBindingName { .. } => ExitCode::UsageError,
-                        CommandError::ConfigUsage(_) => ExitCode::UsageError,
-                        CommandError::HookConsentUsage(_) => ExitCode::UsageError,
-                        CommandError::ConfigValue(_) => ExitCode::DataError,
-                    },
-                    reason: matches!(ce, CommandError::LockMissing { .. }).then_some(ErrorReason::NoLock),
-                },
-                // Announce needs remote resources (the index repository, the
-                // GitHub API); a local I/O fault classifies as I/O. A failed
-                // required fork is a remote-resource fault too — the packages
-                // ARE published; only the cross-repo announce needs a retry.
-                // `grim rate` writes to a forge, so its taxonomy spans the
-                // full range: a flag conflict is usage, an unsupported
-                // provider or a GraphQL error is data, a throttled forge is
-                // unavailable, a missing subject is not-found, a rejected
-                // credential is auth, and `--offline` is deliberate policy.
-                Error::Rate(re) => Classification::new(match re {
-                    RateError::MalformedRef { .. } | RateError::Usage(_) => ExitCode::UsageError,
-                    RateError::NotRated { .. }
-                    | RateError::NoProvider { .. }
-                    | RateError::UnsupportedProvider(_)
-                    | RateError::Graphql(_) => ExitCode::DataError,
-                    RateError::Unavailable(_) => ExitCode::Unavailable,
-                    RateError::NoSuchRef { .. } | RateError::NotFound(_) => ExitCode::NotFound,
-                    RateError::TokenHostMismatch { .. }
-                    | RateError::UndeclaredTokenHost { .. }
-                    | RateError::NoCredential(_)
-                    | RateError::Unauthorized(_) => ExitCode::AuthError,
-                    RateError::Offline => ExitCode::OfflineBlocked,
-                }),
-                // Every hook-tier failure is malformed or unsupported input:
-                // a rejected `hook.toml` rule, or a hook artifact reaching a
-                // seam that does not implement the kind. Both are DataError,
-                // never a panic — see `oci::hook::unsupported_kind`.
-                Error::Hook(_) => Classification::new(ExitCode::DataError),
-                Error::Layer(le) => match le {
-                    LayerError::UnsupportedMediaType(_) => Classification {
-                        exit: ExitCode::DataError,
-                        reason: Some(ErrorReason::UnsupportedLayerMediaType),
-                    },
-                    LayerError::DecompressedTooLarge { .. }
-                    | LayerError::UnreadableAsGzip { .. }
-                    | LayerError::Corrupt(_)
-                    | LayerError::UncompressedDigestMismatch { .. }
-                    | LayerError::MalformedAnnotation(_) => Classification::new(ExitCode::DataError),
-                },
-                Error::ArtifactFeature(_) => unsupported_feature(),
-                Error::Announce(ae) => Classification::new(match ae {
-                    AnnounceError::Io(io) => classify_io(io),
-                    AnnounceError::Git { .. }
-                    | AnnounceError::OwnerLookup { .. }
-                    | AnnounceError::Fork { .. }
-                    | AnnounceError::Client(_) => ExitCode::Unavailable,
-                }),
-                Error::Export(ee) => classify_export(ee),
-            };
+            return classify_variant(e);
         }
     }
     Classification::new(ExitCode::Failure)
+}
+
+/// Map one top-level [`Error`] to its [`Classification`].
+fn classify_variant(e: &Error) -> Classification {
+    // Exhaustive match: a new variant fails to compile until it is
+    // explicitly classified here.
+    match e {
+        Error::Identifier(_) => Classification::new(ExitCode::DataError),
+        Error::Digest(_) => Classification::new(ExitCode::DataError),
+        Error::PinnedIdentifier(_) => Classification::new(ExitCode::DataError),
+        Error::Config(ce) => classify_config(ce),
+        Error::Lock(le) => classify_lock(le),
+        Error::Access(ae) => Classification::new(classify_access(ae)),
+        Error::Resolve(re) => classify_resolve(re),
+        Error::Install(ie) => classify_install(ie),
+        Error::Anchor(ae) => classify_anchor(ae),
+        Error::Skill(se) => Classification::new(classify_skill(se)),
+        Error::Release(re) => Classification::new(classify_release(re)),
+        Error::Catalog(ce) => Classification::new(classify_catalog(ce)),
+        Error::Auth(ae) => Classification::new(classify_auth(ae)),
+        Error::Command(ce) => Classification {
+            exit: match ce {
+                CommandError::LockMissing { .. } => ExitCode::NotFound,
+                CommandError::LockStale { .. } => ExitCode::DataError,
+                CommandError::NoLoginRegistry => ExitCode::ConfigError,
+                CommandError::LoginInput(_) => ExitCode::UsageError,
+                CommandError::KindInferenceFailed { .. } => ExitCode::DataError,
+                CommandError::DeclareConflict { .. } => ExitCode::UsageError,
+                CommandError::InvalidBindingName {
+                    kind: crate::oci::ArtifactKind::Settings,
+                    ..
+                } => ExitCode::DataError,
+                CommandError::InvalidBindingName { .. } => ExitCode::UsageError,
+                CommandError::ConfigUsage(_) => ExitCode::UsageError,
+                CommandError::HookConsentUsage(_) => ExitCode::UsageError,
+                CommandError::ConfigValue(_) => ExitCode::DataError,
+            },
+            reason: matches!(ce, CommandError::LockMissing { .. }).then_some(ErrorReason::NoLock),
+        },
+        // Announce needs remote resources (the index repository, the
+        // GitHub API); a local I/O fault classifies as I/O. A failed
+        // required fork is a remote-resource fault too — the packages
+        // ARE published; only the cross-repo announce needs a retry.
+        // `grim rate` writes to a forge, so its taxonomy spans the
+        // full range: a flag conflict is usage, an unsupported
+        // provider or a GraphQL error is data, a throttled forge is
+        // unavailable, a missing subject is not-found, a rejected
+        // credential is auth, and `--offline` is deliberate policy.
+        Error::Rate(re) => Classification::new(match re {
+            RateError::MalformedRef { .. } | RateError::Usage(_) => ExitCode::UsageError,
+            RateError::NotRated { .. }
+            | RateError::NoProvider { .. }
+            | RateError::UnsupportedProvider(_)
+            | RateError::Graphql(_) => ExitCode::DataError,
+            RateError::Unavailable(_) => ExitCode::Unavailable,
+            RateError::NoSuchRef { .. } | RateError::NotFound(_) => ExitCode::NotFound,
+            RateError::TokenHostMismatch { .. }
+            | RateError::UndeclaredTokenHost { .. }
+            | RateError::NoCredential(_)
+            | RateError::Unauthorized(_) => ExitCode::AuthError,
+            RateError::Offline => ExitCode::OfflineBlocked,
+        }),
+        // Every hook-tier failure is malformed or unsupported input:
+        // a rejected `hook.toml` rule, or a hook artifact reaching a
+        // seam that does not implement the kind. Both are DataError,
+        // never a panic — see `oci::hook::unsupported_kind`.
+        Error::Hook(_) => Classification::new(ExitCode::DataError),
+        Error::Layer(le) => match le {
+            LayerError::UnsupportedMediaType(_) => Classification {
+                exit: ExitCode::DataError,
+                reason: Some(ErrorReason::UnsupportedLayerMediaType),
+            },
+            LayerError::DecompressedTooLarge { .. }
+            | LayerError::UnreadableAsGzip { .. }
+            | LayerError::Corrupt(_)
+            | LayerError::UncompressedDigestMismatch { .. }
+            | LayerError::MalformedAnnotation(_) => Classification::new(ExitCode::DataError),
+        },
+        Error::ArtifactFeature(_) => unsupported_feature(),
+        Error::Announce(ae) => Classification::new(match ae {
+            AnnounceError::Io(io) => classify_io(io),
+            AnnounceError::Git { .. }
+            | AnnounceError::OwnerLookup { .. }
+            | AnnounceError::Fork { .. }
+            | AnnounceError::Client(_) => ExitCode::Unavailable,
+        }),
+        Error::Export(ee) => classify_export(ee),
+        Error::Settings(failure) => classify_variant(&failure.error),
+        Error::SettingsDocument(SettingsError::UnknownField {
+            mode: ValidationMode::Consume,
+            ..
+        }) => unsupported_feature(),
+        Error::SettingsDocument(_) => Classification::new(ExitCode::DataError),
+    }
+}
+
+/// The settings outcome a failed run attached to `err`, if any.
+pub fn settings_outcome(err: &anyhow::Error) -> Option<&SettingsOutcome> {
+    err.chain().find_map(|cause| match cause.downcast_ref::<Error>()? {
+        Error::Settings(failure) => Some(&failure.outcome),
+        _ => None,
+    })
 }
 
 /// The guidance line appended to an error chain that names a key or value
@@ -314,8 +384,16 @@ pub fn classify(err: &anyhow::Error) -> Classification {
 /// `grimoire.toml`, the global config, a publish manifest, an MCP
 /// descriptor, install state, a bundle source, and a bundle's members layer
 /// — including the layer naming a member kind this build has no variant for.
+/// A settings document's own unknown-field and unknown-table refusals are
+/// matched by their wording too.
 pub fn unknown_key_hint(message: &str) -> Option<String> {
-    if !message.contains("unknown field") && !message.contains("unknown variant") {
+    let unknown = [
+        "unknown field",
+        "unknown variant",
+        crate::oci::settings::UNKNOWN_SETTING,
+        crate::oci::settings::UNKNOWN_VENDOR_TABLE,
+    ];
+    if !unknown.iter().any(|wording| message.contains(wording)) {
         return None;
     }
     Some(format!(
@@ -516,20 +594,55 @@ fn classify_install(err: &InstallError) -> Classification {
             exit: ExitCode::DataError,
             reason: Some(ErrorReason::UntrackedDestination),
         },
+        InstallErrorKind::SettingsDocument(SettingsError::UnknownField {
+            mode: ValidationMode::Consume,
+            ..
+        }) => unsupported_feature(),
         InstallErrorKind::BlobDigestMismatch { .. }
         | InstallErrorKind::OversizeLayer { .. }
         | InstallErrorKind::MaterializeFailed(_)
+        | InstallErrorKind::SettingsUnparseable { .. }
+        | InstallErrorKind::SettingsBecameUnparseable { .. }
+        | InstallErrorKind::SettingsDocument(_)
         | InstallErrorKind::LocalSource(_) => Classification::new(ExitCode::DataError),
+        // One recorded piece makes the whole refusal a local edit: a mixed
+        // list must not tell the user nothing of theirs is at stake.
+        InstallErrorKind::SettingsRefused { pieces } => Classification {
+            exit: ExitCode::DataError,
+            reason: Some(if pieces.iter().any(|p| p.state == Some(PieceState::Modified)) {
+                ErrorReason::LocalModified
+            } else {
+                ErrorReason::UntrackedDestination
+            }),
+        },
         // Both say the lock no longer matches its source; `grim lock` is the remedy.
         InstallErrorKind::StaleDependencies { .. } | InstallErrorKind::LocalContentChanged { .. } => Classification {
             exit: ExitCode::DataError,
             reason: Some(ErrorReason::StaleLock),
         },
-        InstallErrorKind::TargetIo { source, .. } => Classification::new(classify_io(source)),
-        // Both are "your client selection cannot work" — one code (78).
-        InstallErrorKind::UnsupportedClient(_) | InstallErrorKind::NoInstallableClient => {
-            Classification::new(ExitCode::ConfigError)
+        InstallErrorKind::SettingsRaced { .. } => Classification {
+            exit: ExitCode::TempFail,
+            reason: Some(ErrorReason::Locked),
+        },
+        // A lock refusal behind the I/O seam is retryable, and only its reason says so.
+        InstallErrorKind::TargetIo { source, .. } => {
+            let exit = classify_io(source);
+            Classification {
+                exit,
+                reason: (exit == ExitCode::TempFail).then_some(ErrorReason::Locked),
+            }
         }
+        // Each is "this declaration cannot work": a client selection, or
+        // packages that disagree. One code (78).
+        InstallErrorKind::UnsupportedClient(_)
+        | InstallErrorKind::NoInstallableClient
+        | InstallErrorKind::SettingsConflict { .. } => Classification::new(ExitCode::ConfigError),
+        // The codes `CommandError::InvalidBindingName` exits with at `add`.
+        InstallErrorKind::InvalidBindingName {
+            kind: crate::oci::ArtifactKind::Settings,
+            ..
+        } => Classification::new(ExitCode::DataError),
+        InstallErrorKind::InvalidBindingName { .. } => Classification::new(ExitCode::UsageError),
     }
 }
 
@@ -652,6 +765,7 @@ fn classify_io(io: &std::io::Error) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::settings_report::{PieceMark, PieceState, RefusedPiece};
     use crate::oci::Identifier;
     use crate::oci::digest::Digest;
     use crate::oci::identifier::error::IdentifierErrorKind;
@@ -828,6 +942,22 @@ mod tests {
                 ExitCode::IoError,
                 None,
             ),
+            (
+                InstallErrorKind::InvalidBindingName {
+                    kind: crate::oci::ArtifactKind::Settings,
+                    reason: "r".to_string(),
+                },
+                ExitCode::DataError,
+                None,
+            ),
+            (
+                InstallErrorKind::InvalidBindingName {
+                    kind: crate::oci::ArtifactKind::Skill,
+                    reason: "r".to_string(),
+                },
+                ExitCode::UsageError,
+                None,
+            ),
         ];
         for (kind, expected_exit, expected_reason) in cases {
             let err: anyhow::Error = Error::from(InstallError::without_reference(kind)).into();
@@ -980,16 +1110,35 @@ mod tests {
             source: io,
         }))
         .into();
-        assert_eq!(classify(&err).exit, ExitCode::TempFail);
+        let classified = classify(&err);
+        assert_eq!(
+            classified,
+            Classification {
+                exit: ExitCode::TempFail,
+                reason: Some(ErrorReason::Locked),
+            }
+        );
+        let document = crate::error_document(classified.exit, &format!("{err:#}"), classified.reason, None);
+        assert_eq!(
+            document,
+            serde_json::json!({"error": {
+                "code": "temp-fail",
+                "exit": 75,
+                "message": "I/O error for /h/cline_mcp_settings.json: \
+                            /h/cline_mcp_settings.json.lock: config file is locked by another process",
+                "reason": "locked",
+                "retryable": true,
+            }})
+        );
         let plain: anyhow::Error = Error::from(InstallError::without_reference(InstallErrorKind::TargetIo {
             path: std::path::PathBuf::from("/h/x"),
             source: std::io::Error::other("disk full"),
         }))
         .into();
         assert_eq!(
-            classify(&plain).exit,
-            ExitCode::IoError,
-            "only a lock refusal moves to 75"
+            classify(&plain),
+            Classification::new(ExitCode::IoError),
+            "only a lock refusal moves to 75 and reads locked"
         );
     }
 
@@ -1687,6 +1836,28 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_settings_field_carries_the_reason_only_at_the_consume_gate() {
+        let unknown = |mode| {
+            classify(&anyhow::Error::from(Error::from(SettingsError::UnknownField {
+                vendor: "claude".to_string(),
+                pointer: "/future".to_string(),
+                mode,
+            })))
+        };
+        let consume = unknown(ValidationMode::Consume);
+        assert_eq!(
+            (consume.exit, consume.reason),
+            (ExitCode::DataError, Some(ErrorReason::UnsupportedArtifactFeature))
+        );
+        let author = unknown(ValidationMode::Author);
+        assert_eq!((author.exit, author.reason), (ExitCode::DataError, None));
+        let other = classify(&anyhow::Error::from(Error::from(SettingsError::NullValue {
+            pointer: "/claude/model".to_string(),
+        })));
+        assert_eq!((other.exit, other.reason), (ExitCode::DataError, None));
+    }
+
+    #[test]
     fn stale_dependencies_and_changed_local_source_are_65_stale_lock() {
         use crate::install::install_error::{InstallError, InstallErrorKind};
         use crate::oci::Algorithm;
@@ -1728,5 +1899,111 @@ mod tests {
             let c = classify(&anyhow::Error::from(Error::from(err)));
             assert_eq!((c.exit, c.reason), (ExitCode::DataError, None));
         }
+    }
+
+    fn settings_piece(state: Option<PieceState>) -> RefusedPiece {
+        RefusedPiece {
+            package: "team".to_string(),
+            client: "claude".to_string(),
+            file: Some("~/.claude/settings.json".to_string()),
+            pointer: "/model".to_string(),
+            element: None,
+            marked: PieceMark::Overwrite,
+            state,
+            wanted: Some("sonnet".to_string()),
+            current: Some("opus".to_string()),
+        }
+    }
+
+    fn settings_refusal(states: &[PieceState]) -> Error {
+        let pieces = states.iter().map(|s| settings_piece(Some(*s))).collect();
+        Error::from(InstallError::without_reference(InstallErrorKind::SettingsRefused {
+            pieces,
+        }))
+    }
+
+    fn outcome_with_pieces(pieces: Vec<RefusedPiece>) -> SettingsOutcome {
+        SettingsOutcome {
+            changes: Vec::new(),
+            pieces: pieces.into(),
+        }
+    }
+
+    #[test]
+    fn a_mixed_settings_refusal_reads_modified() {
+        let err = settings_refusal(&[PieceState::UntrackedDestination, PieceState::Modified]);
+        let c = classify(&anyhow::Error::from(err));
+        assert_eq!(
+            (c.exit, c.reason),
+            (ExitCode::DataError, Some(ErrorReason::LocalModified))
+        );
+    }
+
+    #[test]
+    fn a_settings_refusal_with_no_record_reads_untracked_destination() {
+        let err = settings_refusal(&[PieceState::UntrackedDestination, PieceState::UntrackedDestination]);
+        let c = classify(&anyhow::Error::from(err));
+        assert_eq!(
+            (c.exit, c.reason),
+            (ExitCode::DataError, Some(ErrorReason::UntrackedDestination))
+        );
+        assert!(ErrorReason::UntrackedDestination.forceable());
+    }
+
+    #[test]
+    fn a_settings_conflict_is_78_with_no_reason_and_says_conflict() {
+        let err = Error::from(InstallError::without_reference(InstallErrorKind::SettingsConflict {
+            conflicts: vec![settings_piece(None)],
+        }));
+        assert!(err.to_string().contains("conflict"), "{err}");
+        let c = classify(&anyhow::Error::from(err));
+        assert_eq!((c.exit, c.reason), (ExitCode::ConfigError, None));
+    }
+
+    /// The refused pieces stay attached so the user sees them, and the
+    /// reason stays absent because `--force` cannot repair an unreadable file.
+    #[test]
+    fn an_unparseable_settings_file_wins_over_attached_pieces() {
+        let err = Error::from(InstallError::without_reference(InstallErrorKind::SettingsUnparseable {
+            client: "claude".to_string(),
+            path: "/w/.claude/settings.local.json".into(),
+        }))
+        .with_settings(outcome_with_pieces(vec![settings_piece(Some(PieceState::Modified))]));
+        let err = anyhow::Error::from(err);
+        assert!(format!("{err:#}").contains("/w/.claude/settings.local.json"), "{err:#}");
+        let c = classify(&err);
+        assert_eq!((c.exit, c.reason), (ExitCode::DataError, None));
+        assert_eq!(settings_outcome(&err).map(|o| o.pieces.len()), Some(1));
+    }
+
+    #[test]
+    fn a_settings_failure_keeps_the_chain_text_and_the_classification() {
+        let inner = || {
+            Error::from(InstallError::without_reference(InstallErrorKind::TargetIo {
+                path: "/w/state.json".into(),
+                source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            }))
+        };
+        let bare = anyhow::Error::from(inner());
+        let wrapped = anyhow::Error::from(inner().with_settings(outcome_with_pieces(vec![settings_piece(None)])));
+        assert_eq!(format!("{wrapped:#}"), format!("{bare:#}"));
+        assert_eq!(classify(&wrapped), classify(&bare));
+        assert_eq!(classify(&wrapped).exit, ExitCode::NoPermission);
+    }
+
+    #[test]
+    fn an_empty_settings_outcome_leaves_the_error_as_it_was() {
+        let err = settings_refusal(&[PieceState::Modified]).with_settings(SettingsOutcome::default());
+        assert!(matches!(err, Error::Install(_)), "{err:?}");
+        assert!(settings_outcome(&anyhow::Error::from(err)).is_none());
+    }
+
+    #[test]
+    fn settings_outcome_is_found_through_added_context() {
+        let err = settings_refusal(&[PieceState::Modified])
+            .with_settings(outcome_with_pieces(vec![settings_piece(Some(PieceState::Modified))]));
+        let err = anyhow::Error::from(err).context("dependencies were not overwritten");
+        assert_eq!(settings_outcome(&err).map(|o| o.pieces.len()), Some(1));
+        assert_eq!(classify(&err).reason, Some(ErrorReason::LocalModified));
     }
 }

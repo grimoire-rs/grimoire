@@ -41,8 +41,8 @@ use crate::oci::requires_decl;
 use crate::oci::{ArtifactKind, Digest, Identifier};
 use crate::skill::SkillName;
 
-/// Resolve every declared skill, rule, agent, mcp, hook and bundle, with the
-/// dependencies they require, and assemble a fresh lock.
+/// Resolve every declared skill, rule, agent, mcp, hook, settings package and
+/// bundle, with the dependencies they require, and assemble a fresh lock.
 ///
 /// `scope` is currently informational (recorded by the caller); the lock
 /// document itself is scope-agnostic. Fully transactional — either every
@@ -124,6 +124,7 @@ async fn build_roots(
         (&set.agents, ArtifactKind::Agent),
         (&set.mcp, ArtifactKind::Mcp),
         (&set.hooks, ArtifactKind::Hook),
+        (&set.settings, ArtifactKind::Settings),
         (&set.bundles, ArtifactKind::Bundle),
     ];
     for (table, kind) in tables {
@@ -161,7 +162,7 @@ async fn build_roots(
                         provenance: None,
                     }
                 }
-                // `mcp` and `hook` tables reject path values at config parse.
+                // `mcp`, `hook` and `settings` tables reject path values at config parse.
                 (DeclaredSource::Path(_), _) => continue,
             };
             roots.push(GraphRoot {
@@ -354,6 +355,7 @@ fn build_carry(set: &DesiredSet, previous: &GrimoireLock, selected: Option<&[Str
             (&set.agents, ArtifactKind::Agent),
             (&set.mcp, ArtifactKind::Mcp),
             (&set.hooks, ArtifactKind::Hook),
+            (&set.settings, ArtifactKind::Settings),
             (&set.bundles, ArtifactKind::Bundle),
         ]
         .into_iter()
@@ -389,6 +391,7 @@ fn build_carry(set: &DesiredSet, previous: &GrimoireLock, selected: Option<&[Str
         (&set.agents, ArtifactKind::Agent),
         (&set.mcp, ArtifactKind::Mcp),
         (&set.hooks, ArtifactKind::Hook),
+        (&set.settings, ArtifactKind::Settings),
     ] {
         for (name, source) in table {
             if let DeclaredSource::Registry(id) = source {
@@ -432,6 +435,7 @@ fn build_lock(nodes: BTreeMap<NodeKey, GraphNode>, set: &DesiredSet, pins: Local
     let mut agents = Vec::new();
     let mut mcp = Vec::new();
     let mut hooks = Vec::new();
+    let mut settings = Vec::new();
     let mut bundles = Vec::new();
     for ((kind, name), node) in nodes {
         if kind == ArtifactKind::Bundle {
@@ -467,6 +471,7 @@ fn build_lock(nodes: BTreeMap<NodeKey, GraphNode>, set: &DesiredSet, pins: Local
             ArtifactKind::Agent => agents.push(artifact),
             ArtifactKind::Mcp => mcp.push(artifact),
             ArtifactKind::Hook => hooks.push(artifact),
+            ArtifactKind::Settings => settings.push(artifact),
             ArtifactKind::Bundle => {}
         }
     }
@@ -486,6 +491,7 @@ fn build_lock(nodes: BTreeMap<NodeKey, GraphNode>, set: &DesiredSet, pins: Local
         agents,
         mcp,
         hooks,
+        settings,
         bundles,
     }
 }
@@ -558,9 +564,16 @@ fn not_declared(name: &str) -> ResolveError {
 
 /// The names of every declared non-bundle root, registry or path.
 fn declared_names(set: &DesiredSet) -> impl Iterator<Item = &str> {
-    [&set.skills, &set.rules, &set.agents, &set.mcp, &set.hooks]
-        .into_iter()
-        .flat_map(|table| table.keys().map(String::as_str))
+    [
+        &set.skills,
+        &set.rules,
+        &set.agents,
+        &set.mcp,
+        &set.hooks,
+        &set.settings,
+    ]
+    .into_iter()
+    .flat_map(|table| table.keys().map(String::as_str))
 }
 
 /// Roll `set` forward from `previous`: no `names` re-resolves everything;
@@ -680,6 +693,7 @@ fn stale_reference(set: &DesiredSet, names: &[String], kind: ResolveErrorKind) -
         (&set.agents, ArtifactKind::Agent),
         (&set.mcp, ArtifactKind::Mcp),
         (&set.hooks, ArtifactKind::Hook),
+        (&set.settings, ArtifactKind::Settings),
     ];
     for (table, table_kind) in tables {
         if let Some(DeclaredSource::Registry(id)) = table.get(&first) {
@@ -1120,6 +1134,33 @@ mod tests {
         assert_eq!(lock.agents[0].source.content_digest(), digest());
     }
 
+    #[tokio::test]
+    async fn settings_resolve_into_the_settings_list() {
+        let mut set = DesiredSet::from_maps(BTreeMap::new(), BTreeMap::new(), BTreeMap::new(), BTreeMap::new());
+        set.settings.insert(
+            "team-defaults".to_string(),
+            DeclaredSource::Registry(Identifier::parse("ghcr.io/acme/settings/team-defaults:1").unwrap()),
+        );
+        set.invalidate_declaration_hash_cache();
+        let mock = MockAccess::new(vec![Scripted::Ok(Some(digest()))]);
+        let access = arc(mock.clone());
+        let lock = resolve_lock(
+            &set,
+            &access,
+            ConfigScope::Project,
+            &fast_options(),
+            std::path::Path::new("."),
+        )
+        .await
+        .expect("settings resolve");
+        assert!(lock.skills.is_empty());
+        assert_eq!(lock.settings.len(), 1);
+        assert_eq!(lock.settings[0].name, "team-defaults");
+        assert_eq!(lock.settings[0].kind, ArtifactKind::Settings);
+        assert_eq!(lock.settings[0].source.content_digest(), digest());
+        assert_eq!(lock.metadata.declaration_hash, set.declaration_hash_cached());
+    }
+
     // ── Partial ──────────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -1127,6 +1168,7 @@ mod tests {
         let set = single_skill_set();
         let previous = GrimoireLock {
             hooks: vec![],
+            settings: vec![],
             metadata: LockMetadata {
                 lock_version: LockVersion::V1,
                 declaration_hash_version: DECLARATION_HASH_VERSION,
@@ -1192,6 +1234,7 @@ mod tests {
         );
         let previous = GrimoireLock {
             hooks: vec![],
+            settings: vec![],
             metadata: LockMetadata {
                 lock_version: LockVersion::V1,
                 declaration_hash_version: DECLARATION_HASH_VERSION,
@@ -1259,6 +1302,7 @@ mod tests {
         let b = LockedArtifact::direct("b".into(), ArtifactKind::Skill, pin("ghcr.io/acme/b:1", b"b"));
         let lock = GrimoireLock {
             hooks: vec![],
+            settings: vec![],
             metadata: LockMetadata {
                 lock_version: LockVersion::V1,
                 declaration_hash_version: DECLARATION_HASH_VERSION,
@@ -1312,12 +1356,189 @@ mod tests {
         assert_eq!(carry.requires.len(), 1, "parent's edges, keyed by its pinned digest");
     }
 
+    /// `grim update <binding>` finds a settings binding through the declared
+    /// names alone when the lock does not hold it yet, and the unselected
+    /// binding keeps its pin.
+    #[tokio::test]
+    async fn partial_resolves_a_named_settings_binding_and_carries_the_other() {
+        let mut set = DesiredSet::default();
+        for name in ["kept", "picked"] {
+            set.settings.insert(
+                name.to_string(),
+                DeclaredSource::Registry(Identifier::parse(&format!("ghcr.io/acme/{name}:1")).unwrap()),
+            );
+        }
+        set.invalidate_declaration_hash_cache();
+        let entry = |name: &str, seed: &[u8]| {
+            let pinned = Identifier::parse(&format!("ghcr.io/acme/{name}:1"))
+                .unwrap()
+                .clone_with_digest(Algorithm::Sha256.hash(seed));
+            LockedArtifact::direct(
+                name.to_string(),
+                ArtifactKind::Settings,
+                PinnedIdentifier::try_from(pinned).unwrap(),
+            )
+        };
+        let previous = GrimoireLock {
+            hooks: vec![],
+            settings: vec![entry("kept", b"old-kept")],
+            metadata: LockMetadata {
+                lock_version: LockVersion::V1,
+                declaration_hash_version: DECLARATION_HASH_VERSION,
+                declaration_hash: set.declaration_hash_cached().to_string(),
+                generated_by: LockMetadata::generated_by_current(),
+                generated_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+            skills: vec![],
+            rules: vec![],
+            agents: vec![],
+            mcp: vec![],
+            bundles: vec![],
+        };
+
+        let new_digest = Algorithm::Sha256.hash(b"new-picked");
+        let mock = MockAccess::new(vec![Scripted::Ok(Some(new_digest.clone()))]);
+        let access = arc(mock.clone());
+        let lock = resolve_lock_partial(
+            &set,
+            &previous,
+            &access,
+            &["picked".to_string()],
+            ConfigScope::Project,
+            &fast_options(),
+            std::path::Path::new("."),
+        )
+        .await
+        .expect("a named settings binding resolves");
+
+        let digest_of = |name: &str| {
+            lock.settings
+                .iter()
+                .find(|a| a.name == name)
+                .expect("entry")
+                .source
+                .content_digest()
+        };
+        assert_eq!(digest_of("picked"), new_digest);
+        assert_eq!(
+            digest_of("kept"),
+            Algorithm::Sha256.hash(b"old-kept"),
+            "unselected pin carried"
+        );
+    }
+
+    /// A direct declaration names its own identifier, so an edge onto a
+    /// declared settings key keeps no pin of its own.
+    #[test]
+    fn carry_skips_an_edge_onto_a_declared_settings_key() {
+        let mut set = DesiredSet::default();
+        set.skills.insert(
+            "x".to_string(),
+            DeclaredSource::Registry(Identifier::parse("ghcr.io/acme/x:1").unwrap()),
+        );
+        set.settings.insert(
+            "team".to_string(),
+            DeclaredSource::Registry(Identifier::parse("ghcr.io/acme/team:2").unwrap()),
+        );
+        set.invalidate_declaration_hash_cache();
+        let pinned = |raw: &str, seed: &[u8]| {
+            PinnedIdentifier::try_from(
+                Identifier::parse(raw)
+                    .unwrap()
+                    .clone_with_digest(Algorithm::Sha256.hash(seed)),
+            )
+            .unwrap()
+        };
+        let mut x = LockedArtifact::direct("x".to_string(), ArtifactKind::Skill, pinned("ghcr.io/acme/x:1", b"x"));
+        x.requires = vec![crate::oci::bundle::BundleMember {
+            kind: ArtifactKind::Settings,
+            name: "team".to_string(),
+            id: "ghcr.io/acme/team:1".to_string(),
+        }];
+        let previous = GrimoireLock {
+            hooks: vec![],
+            settings: vec![LockedArtifact::direct(
+                "team".to_string(),
+                ArtifactKind::Settings,
+                pinned("ghcr.io/acme/team:2", b"team"),
+            )],
+            metadata: LockMetadata {
+                lock_version: LockVersion::V1,
+                declaration_hash_version: DECLARATION_HASH_VERSION,
+                declaration_hash: set.declaration_hash_cached().to_string(),
+                generated_by: LockMetadata::generated_by_current(),
+                generated_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+            skills: vec![x],
+            rules: vec![],
+            agents: vec![],
+            mcp: vec![],
+            bundles: vec![],
+        };
+
+        let carry = build_carry(&set, &previous, Some(&["x".to_string()]));
+        assert!(
+            carry
+                .digests
+                .contains_key(&Identifier::parse("ghcr.io/acme/team:2").unwrap()),
+            "the declared root keeps its pin"
+        );
+        assert!(
+            !carry
+                .digests
+                .contains_key(&Identifier::parse("ghcr.io/acme/team:1").unwrap()),
+            "{:?}",
+            carry.digests
+        );
+    }
+
+    #[tokio::test]
+    async fn partial_stale_refusal_names_a_settings_binding() {
+        let mut set = DesiredSet::default();
+        set.settings.insert(
+            "team".to_string(),
+            DeclaredSource::Registry(Identifier::parse("ghcr.io/acme/team:1").unwrap()),
+        );
+        set.invalidate_declaration_hash_cache();
+        let previous = GrimoireLock {
+            hooks: vec![],
+            settings: vec![],
+            metadata: LockMetadata {
+                lock_version: LockVersion::V1,
+                declaration_hash_version: DECLARATION_HASH_VERSION,
+                declaration_hash: "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+                generated_by: LockMetadata::generated_by_current(),
+                generated_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+            skills: vec![],
+            rules: vec![],
+            agents: vec![],
+            mcp: vec![],
+            bundles: vec![],
+        };
+        let mock = MockAccess::new(vec![]);
+        let access = arc(mock.clone());
+        let err = resolve_lock_partial(
+            &set,
+            &previous,
+            &access,
+            &["team".to_string()],
+            ConfigScope::Project,
+            &fast_options(),
+            std::path::Path::new("."),
+        )
+        .await
+        .expect_err("stale predecessor must be rejected");
+        assert_eq!(err.reference.kind, ArtifactKind::Settings, "{err}");
+    }
+
     #[tokio::test]
     async fn partial_rejects_undeclared_name() {
         let set = single_skill_set();
         let current = set.declaration_hash_cached().to_string();
         let previous = GrimoireLock {
             hooks: vec![],
+            settings: vec![],
             metadata: LockMetadata {
                 lock_version: LockVersion::V1,
                 declaration_hash_version: DECLARATION_HASH_VERSION,
@@ -1365,6 +1586,7 @@ mod tests {
             agents: vec![],
             mcp: vec![],
             hooks: Vec::new(),
+            settings: Vec::new(),
             bundles: vec![],
         };
         let err = resolve_lock_partial(

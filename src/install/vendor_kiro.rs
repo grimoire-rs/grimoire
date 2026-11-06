@@ -21,6 +21,12 @@
 //! - **MCP**: `.kiro/settings/mcp.json` (project) / `~/.kiro/settings/mcp.json`
 //!   (user), `mcpServers`; env refs `${VARIABLE_NAME}`; oauth shape ≠ grim
 //!   block → skip; `json_splice`.
+//! - **Settings**: global only, `settings/cli.json` under the same root, strict
+//!   JSON. Every key is one flat dotted member (`/chat.defaultModel`). The CLI
+//!   validates no value, so grim's check is the only one. A workspace
+//!   `.kiro/settings/cli.json` value overrides a workspace-overridable key, and
+//!   replaces a `knowledge.default*Patterns` list whole. The CLI writes the
+//!   file beside a `cli.json.lock` that grim does not take.
 //!
 //! `KIRO_HOME` **is** honored: it replaces the `~/.kiro` root outright
 //! (kiro.dev/docs/cli/chat/configuration — "redirect the global `~/.kiro`
@@ -42,10 +48,82 @@ use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
 use super::render::{self, RenderError, RenderedDoc};
-use super::vendor::{KindSupport, Vendor, env_dir, home_dir, provenance};
+use super::vendor::MergeClass::{Scalar, Set};
+use super::vendor::SettingsScopes::GlobalOnly;
+use super::vendor::SettingsValueType as Ty;
+use super::vendor::{KindSupport, SettingsField, Vendor, env_dir, home_dir, provenance};
 
 /// Kiro (AWS).
 pub struct KiroVendor;
+
+/// The harness versions both engine keys take. `v1` is left out: it opens the
+/// retired Classic interface's upgrade prompt.
+const AGENT_ENGINE: Ty = Ty::Enum(&["v3", "v2"]);
+
+/// Kiro's settings keys, from `research_upstream_kiro_settings_20261105.md`.
+/// Each pointer has one segment: the dots are part of the member's name.
+const KIRO_SETTINGS_FIELDS: &[SettingsField] = &[
+    SettingsField::new("/chat.defaultModel", Ty::String, Scalar, GlobalOnly),
+    SettingsField::new("/chat.defaultAgent", Ty::String, Scalar, GlobalOnly),
+    SettingsField::new("/chat.outputStyle", Ty::String, Scalar, GlobalOnly),
+    SettingsField::new("/chat.agentEngine", AGENT_ENGINE, Scalar, GlobalOnly),
+    SettingsField::new("/acp.agentEngine", AGENT_ENGINE, Scalar, GlobalOnly),
+    SettingsField::new(
+        "/chat.notificationMethod",
+        Ty::Enum(&["auto", "bel", "osc9"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/chat.historyMode",
+        Ty::Enum(&["session", "global"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/chat.screenReader",
+        Ty::Enum(&["auto", "on", "off"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/chat.workflowLaunch",
+        Ty::Enum(&["when-asked", "large-tasks", "delegate-all"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/chat.sessionDashboard.scope",
+        Ty::Enum(&["current", "all"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new("/chat.disableGranularTrust", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/chat.enableNotifications", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/chat.greeting.enabled", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/chat.disableWrap", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/chat.disableAutoCompaction", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/chat.enablePromptHints", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/chat.autoExpandToolOutput", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/chat.sessionDashboard.indexResponses", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/chat.allowAnimations", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/chat.allowAsciiArt", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/chat.allowIcons", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/chat.preserveScrollback", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/chat.terminalTitle", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/chat.showThinking", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/chat.enableKnowledge", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/chat.enableCodeIntelligence", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/chat.enableThinking", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/chat.enableWorkflows", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/toolSearch.enabled", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/chat.enableAutoAgentUpgrade", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/app.disableAutoupdates", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/app.warnOnElevatedPrivileges", Ty::Bool, Scalar, GlobalOnly),
+    // A workspace value replaces either list whole, so grim's elements can be masked.
+    SettingsField::new("/knowledge.defaultIncludePatterns", Ty::StringList, Set, GlobalOnly),
+    SettingsField::new("/knowledge.defaultExcludePatterns", Ty::StringList, Set, GlobalOnly),
+];
 
 impl Vendor for KiroVendor {
     fn name(&self) -> &'static str {
@@ -89,6 +167,14 @@ impl Vendor for KiroVendor {
 
     fn mcp_config_path(&self, workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
         Some(scope_root(workspace, scope).join("settings").join("mcp.json"))
+    }
+
+    fn settings_fields(&self) -> &'static [SettingsField] {
+        KIRO_SETTINGS_FIELDS
+    }
+
+    fn settings_config_path(&self, _workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
+        global_settings_path(scope, kiro_root(env_dir("KIRO_HOME"), home_dir()))
     }
 
     fn mcp_entry(
@@ -228,6 +314,16 @@ fn scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
 /// anchor is rooted here.
 pub(crate) fn kiro_root(kiro_home: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
     kiro_home.or_else(|| home.map(|h| h.join(".kiro")))
+}
+
+/// `settings/cli.json` under the resolved `root`: `None` at project scope,
+/// where `.kiro/settings/cli.json` is a repository file, and `None` with no
+/// root, never the workspace stand-in [`scope_root`] falls back to.
+fn global_settings_path(scope: ConfigScope, root: Option<PathBuf>) -> Option<PathBuf> {
+    match scope {
+        ConfigScope::Project => None,
+        ConfigScope::Global => root.map(|root| root.join("settings").join("cli.json")),
+    }
 }
 
 #[cfg(test)]
@@ -507,5 +603,200 @@ mod tests {
         let a = KiroVendor.mcp_entry(ConfigScope::Project, "m", &d).unwrap();
         let b = KiroVendor.mcp_entry(ConfigScope::Project, "m", &d).unwrap();
         assert_eq!(a, b, "regeneration must be byte-identical");
+    }
+
+    // ── settings: global only, `settings/cli.json`, flat dotted members ──
+
+    #[test]
+    fn settings_rows_match_the_key_list() {
+        let rows: Vec<_> = KiroVendor
+            .settings_fields()
+            .iter()
+            .map(|field| (field.pointer, field.ty, field.merge, field.scopes))
+            .collect();
+        let engine = Ty::Enum(&["v3", "v2"]);
+        let bool_row = |pointer| (pointer, Ty::Bool, Scalar, GlobalOnly);
+        assert_eq!(
+            rows,
+            vec![
+                ("/chat.defaultModel", Ty::String, Scalar, GlobalOnly),
+                ("/chat.defaultAgent", Ty::String, Scalar, GlobalOnly),
+                ("/chat.outputStyle", Ty::String, Scalar, GlobalOnly),
+                ("/chat.agentEngine", engine, Scalar, GlobalOnly),
+                ("/acp.agentEngine", engine, Scalar, GlobalOnly),
+                (
+                    "/chat.notificationMethod",
+                    Ty::Enum(&["auto", "bel", "osc9"]),
+                    Scalar,
+                    GlobalOnly
+                ),
+                (
+                    "/chat.historyMode",
+                    Ty::Enum(&["session", "global"]),
+                    Scalar,
+                    GlobalOnly
+                ),
+                (
+                    "/chat.screenReader",
+                    Ty::Enum(&["auto", "on", "off"]),
+                    Scalar,
+                    GlobalOnly
+                ),
+                (
+                    "/chat.workflowLaunch",
+                    Ty::Enum(&["when-asked", "large-tasks", "delegate-all"]),
+                    Scalar,
+                    GlobalOnly
+                ),
+                (
+                    "/chat.sessionDashboard.scope",
+                    Ty::Enum(&["current", "all"]),
+                    Scalar,
+                    GlobalOnly
+                ),
+                bool_row("/chat.disableGranularTrust"),
+                bool_row("/chat.enableNotifications"),
+                bool_row("/chat.greeting.enabled"),
+                bool_row("/chat.disableWrap"),
+                bool_row("/chat.disableAutoCompaction"),
+                bool_row("/chat.enablePromptHints"),
+                bool_row("/chat.autoExpandToolOutput"),
+                bool_row("/chat.sessionDashboard.indexResponses"),
+                bool_row("/chat.allowAnimations"),
+                bool_row("/chat.allowAsciiArt"),
+                bool_row("/chat.allowIcons"),
+                bool_row("/chat.preserveScrollback"),
+                bool_row("/chat.terminalTitle"),
+                bool_row("/chat.showThinking"),
+                bool_row("/chat.enableKnowledge"),
+                bool_row("/chat.enableCodeIntelligence"),
+                bool_row("/chat.enableThinking"),
+                bool_row("/chat.enableWorkflows"),
+                bool_row("/toolSearch.enabled"),
+                bool_row("/chat.enableAutoAgentUpgrade"),
+                bool_row("/app.disableAutoupdates"),
+                bool_row("/app.warnOnElevatedPrivileges"),
+                ("/knowledge.defaultIncludePatterns", Ty::StringList, Set, GlobalOnly),
+                ("/knowledge.defaultExcludePatterns", Ty::StringList, Set, GlobalOnly),
+            ]
+        );
+    }
+
+    #[test]
+    fn settings_rows_narrow_nothing_and_require_nothing() {
+        for field in KiroVendor.settings_fields() {
+            assert_eq!(field.map_keys, None, "{}", field.pointer);
+            assert_eq!(field.project_values, None, "{}", field.pointer);
+            assert!(!field.required_by_client, "{}", field.pointer);
+        }
+    }
+
+    /// `/chat.defaultModel` is one member named `chat.defaultModel`, never a
+    /// `chat` object holding `defaultModel`.
+    #[test]
+    fn settings_pointer_keeps_the_dot_inside_one_segment() {
+        use crate::install::json_splice::{Splice, split_pointer_path, upsert_member_at};
+
+        for field in KiroVendor.settings_fields() {
+            let name = field.pointer.trim_start_matches('/');
+            assert_eq!(
+                split_pointer_path(field.pointer),
+                Some(vec![name.to_string()]),
+                "{}",
+                field.pointer
+            );
+            assert_eq!(crate::oci::settings::segment_at(field, 0), Some(name));
+            assert_eq!(crate::oci::settings::segment_at(field, 1), None);
+        }
+        let path = split_pointer_path("/chat.sessionDashboard.scope").unwrap();
+        let Splice::Changed(text) = upsert_member_at("{}\n", &path, &serde_json::json!("all")).unwrap() else {
+            panic!("an empty object gains the member");
+        };
+        let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(doc, serde_json::json!({"chat.sessionDashboard.scope": "all"}));
+    }
+
+    /// One value per value type is taken, and a wrong one is refused.
+    #[test]
+    fn settings_document_checks_each_value_type() {
+        use crate::oci::settings::SettingsDocument;
+
+        let good = concat!(
+            "description = \"d\"\n[kiro]\n",
+            "\"chat.defaultModel\" = \"m\"\n\"chat.agentEngine\" = \"v2\"\n",
+            "\"chat.disableWrap\" = true\n\"knowledge.defaultExcludePatterns\" = [\"*.lock\"]\n",
+        );
+        let (document, _) = SettingsDocument::from_toml_str_with_requires(good).unwrap();
+        assert_eq!(
+            serde_json::Value::Object(document.vendors["kiro"].clone()),
+            serde_json::json!({
+                "chat.defaultModel": "m",
+                "chat.agentEngine": "v2",
+                "chat.disableWrap": true,
+                "knowledge.defaultExcludePatterns": ["*.lock"],
+            })
+        );
+        for bad in [
+            "\"chat.agentEngine\" = \"v1\"",
+            "\"chat.defaultModel\" = 1",
+            "\"chat.disableWrap\" = \"yes\"",
+            "\"knowledge.defaultIncludePatterns\" = \"*.rs\"",
+            "chat.defaultModel = \"m\"",
+            "\"telemetry.enabled\" = false",
+            "mcpServers = {}",
+        ] {
+            let text = format!("description = \"d\"\n[kiro]\n{bad}\n");
+            assert!(SettingsDocument::from_toml_str_with_requires(&text).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn settings_path_has_no_answer_at_project_scope() {
+        let root = Some(PathBuf::from("/home/u/.kiro"));
+        assert_eq!(global_settings_path(ConfigScope::Project, root), None);
+        assert_eq!(
+            KiroVendor.settings_config_path(Path::new("/w"), ConfigScope::Project),
+            None
+        );
+    }
+
+    /// `KIRO_HOME` moves the file with the root; no home resolves no file,
+    /// never the workspace stand-in MCP falls back to.
+    #[test]
+    fn settings_path_at_global_scope_is_the_cli_settings_file() {
+        let home = Some(PathBuf::from("/home/u"));
+        assert_eq!(
+            global_settings_path(ConfigScope::Global, kiro_root(None, home.clone())),
+            Some(PathBuf::from("/home/u/.kiro/settings/cli.json"))
+        );
+        assert_eq!(
+            global_settings_path(ConfigScope::Global, kiro_root(Some(PathBuf::from("/k")), home)),
+            Some(PathBuf::from("/k/settings/cli.json"))
+        );
+        assert_eq!(global_settings_path(ConfigScope::Global, kiro_root(None, None)), None);
+    }
+
+    /// One root resolution: settings sit beside the global MCP file.
+    #[test]
+    fn settings_sit_beside_the_global_mcp_file() {
+        let w = Path::new("/w");
+        let settings = KiroVendor.settings_config_path(w, ConfigScope::Global);
+        assert!(
+            settings
+                .as_ref()
+                .is_some_and(|file| file.ends_with("settings/cli.json"))
+        );
+        assert_eq!(
+            settings.map(|file| file.with_file_name("mcp.json")),
+            KiroVendor.mcp_config_path(w, ConfigScope::Global)
+        );
+    }
+
+    #[test]
+    fn settings_format_is_json() {
+        assert_eq!(
+            KiroVendor.settings_config_format(),
+            crate::install::vendor::McpConfigFormat::Json
+        );
     }
 }

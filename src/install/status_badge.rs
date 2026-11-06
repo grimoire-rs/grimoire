@@ -17,6 +17,7 @@
 use crate::install::client_target::ClientTarget;
 use crate::install::install_state::{ClientOutput, InstallState, active_outputs};
 use crate::install::path_anchor::{AnchorRoots, Containment};
+use crate::install::settings_phase::report_fence;
 use crate::install::target::InstallTarget;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::locked_artifact::LockedArtifact;
@@ -104,7 +105,12 @@ pub fn derive_badge(
     // Reconcile against the active client set: an output for a client removed
     // since install is ignored. With no output for any active client the
     // repository is not installed here.
-    let outputs: Vec<&ClientOutput> = active_outputs(&record.outputs, active).collect();
+    let mut outputs: Vec<&ClientOutput> = active_outputs(&record.outputs, active).collect();
+    // A file the fence refuses is left out unread: the repository may have
+    // placed it, and a read of it can block the browse for good.
+    if let Some(fence) = report_fence(record, state) {
+        outputs.retain(|out| !fence.refuses(out, roots));
+    }
     if outputs.is_empty() {
         return StatusBadge::NotInstalled;
     }
@@ -114,7 +120,7 @@ pub fn derive_badge(
     // never `?`-propagates an `AnchorError`. Entry outputs (MCP config
     // registrations) count as present only when the managed entry resolves.
     for out in &outputs {
-        match out.is_present(roots, Containment::AllowRelocatedAncestor) {
+        match out.is_present(record.kind, roots, Containment::AllowRelocatedAncestor) {
             Ok(true) => {}
             Ok(false) | Err(_) => return StatusBadge::NotInstalled,
         }
@@ -198,6 +204,7 @@ mod tests {
     fn lock_with(repo: &str, byte: char) -> GrimoireLock {
         GrimoireLock {
             hooks: vec![],
+            settings: vec![],
             metadata: LockMetadata {
                 lock_version: LockVersion::V1,
                 declaration_hash_version: 1,
@@ -245,6 +252,7 @@ mod tests {
                 crate::oci::ArtifactKind::Agent => lock.agents.push(artifact),
                 crate::oci::ArtifactKind::Mcp => lock.mcp.push(artifact),
                 crate::oci::ArtifactKind::Hook => lock.hooks.push(artifact),
+                crate::oci::ArtifactKind::Settings => lock.settings.push(artifact),
                 crate::oci::ArtifactKind::Bundle => unreachable!("skipped above"),
             }
             assert!(
@@ -253,6 +261,60 @@ mod tests {
                  badges every installed artifact of that kind as NotInstalled"
             );
         }
+    }
+
+    /// `client`'s recorded settings value `m` at `pointer` in `relative`.
+    fn settings_output(client: &str, root: &'static str, relative: &str, pointer: &str) -> ClientOutput {
+        ClientOutput {
+            client: client.to_string(),
+            target: AnchoredPath {
+                anchor: PathAnchor::VendorRoot(root),
+                relative: relative.to_string(),
+            },
+            content_hash: crate::install::install_state::settings_value_hash(&serde_json::json!("m")),
+            support_dir: None,
+            entry: Some(pointer.to_string()),
+            adopted: false,
+            element: None,
+        }
+    }
+
+    /// A global settings output the root fence refuses is left out unread, like
+    /// an inactive client's: the badge has no rung for a refused file, and the
+    /// intact rest still answers.
+    #[test]
+    fn a_settings_output_the_fence_refuses_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        std::fs::write(ws.join("settings.json"), r#"{"model": "m"}"#).unwrap();
+        let mut roots = roots(ws);
+        roots.vendor_roots.insert("copilot", ws.to_path_buf());
+        roots.vendor_roots.insert("kiro", PathBuf::from("kiro-rel"));
+        let repo = "acme/team";
+        let mut lock = lock_with(repo, 'a');
+        let locked = lock.skills.remove(0);
+        lock.settings.push(LockedArtifact::direct(
+            locked.name,
+            ArtifactKind::Settings,
+            pinned(repo, 'a'),
+        ));
+        // `empty` keeps settings records inline, as a global state does.
+        let mut state = InstallState::empty(&ws.join("global.json"));
+        state.record(InstallRecord {
+            kind: ArtifactKind::Settings,
+            name: "x".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned(repo, 'a')),
+            dev: false,
+            outputs: vec![
+                settings_output("copilot", "copilot", "settings.json", "/model"),
+                settings_output("kiro", "kiro", "settings/cli.json", "/chat.defaultModel"),
+            ],
+        });
+        let active = [ClientTarget::Copilot, ClientTarget::Kiro];
+
+        let badge = derive_badge("localhost:5000", repo, Some(&lock), &state, &roots, &active, None);
+
+        assert_eq!(badge, StatusBadge::Installed);
     }
 
     /// Build an `InstallState` with one `Workspace`-anchored `ClientOutput`.
@@ -276,6 +338,7 @@ mod tests {
                 support_dir: None,
                 entry: None,
                 adopted: false,
+                element: None,
             }],
         });
         st
@@ -471,12 +534,14 @@ mod tests {
                 support_dir: None,
                 entry: None,
                 adopted: false,
+                element: None,
             }],
         });
 
         // Lock lists the agent — ONLY in the agents array.
         let lk = GrimoireLock {
             hooks: vec![],
+            settings: vec![],
             metadata: LockMetadata {
                 lock_version: LockVersion::V1,
                 declaration_hash_version: 1,
@@ -545,12 +610,14 @@ mod tests {
                 support_dir: None,
                 entry: Some("/mcpServers/grim".to_string()),
                 adopted: false,
+                element: None,
             }],
         });
 
         // The lock lists the server ONLY in the mcp array.
         let lk = GrimoireLock {
             hooks: vec![],
+            settings: vec![],
             metadata: LockMetadata {
                 lock_version: LockVersion::V1,
                 declaration_hash_version: 1,
@@ -608,6 +675,7 @@ mod tests {
                 support_dir: None,
                 entry: None,
                 adopted: false,
+                element: None,
             }],
         });
 

@@ -27,7 +27,10 @@ use crate::skill::rule_frontmatter::ParsedRule;
 
 use super::hook_command::CommandForm;
 use super::render::{self, RenderError, RenderedDoc};
-use super::vendor::{FieldType, KnownField, Vendor, env_dir, home_dir, provenance};
+use super::vendor::MergeClass::{Map, Scalar, Set};
+use super::vendor::SettingsScopes::GlobalOnly;
+use super::vendor::SettingsValueType as Ty;
+use super::vendor::{FieldType, KnownField, SettingsField, Vendor, env_dir, home_dir, provenance};
 
 /// GitHub Copilot.
 pub struct CopilotVendor;
@@ -85,6 +88,125 @@ const COPILOT_AGENT_OVERRIDES: &[&str] = &["tools", "model"];
 fn reads_pool_from(scope: ConfigScope, home_diverges: bool) -> bool {
     scope == ConfigScope::Project || !home_diverges
 }
+
+/// Copilot's settings keys, from the list in `adr_settings_artifact_kind.md`.
+const COPILOT_SETTINGS_FIELDS: &[SettingsField] = &[
+    SettingsField::new("/model", Ty::String, Scalar, GlobalOnly),
+    SettingsField::new(
+        "/effortLevel",
+        Ty::Enum(&["low", "medium", "high", "xhigh"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/theme",
+        Ty::Enum(&["default", "github", "dim", "high-contrast", "colorblind"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/defaultMode",
+        Ty::Enum(&["interactive", "plan", "autopilot"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/defaultPermissionMode",
+        Ty::Enum(&["manual", "assisted", "allow-all"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/permissions/disableBypassPermissionsMode",
+        Ty::Enum(&["disable"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new("/allowedUrls", Ty::StringList, Set, GlobalOnly),
+    SettingsField::new("/deniedUrls", Ty::StringList, Set, GlobalOnly),
+    SettingsField::new("/disabledMcpServers", Ty::StringList, Set, GlobalOnly),
+    SettingsField::new("/disabledSkills", Ty::StringList, Set, GlobalOnly),
+    SettingsField::new("/askUser", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/includeCoAuthoredBy", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/respectGitignore", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/renderMarkdown", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/stream", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/transcriptView", Ty::Enum(&["default", "concise"]), Scalar, GlobalOnly),
+    SettingsField::new("/mergeStrategy", Ty::Enum(&["rebase", "merge"]), Scalar, GlobalOnly),
+    SettingsField::new("/sandbox/enabled", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new(
+        "/extraKnownMarketplaces/<name>",
+        Ty::Atomic {
+            keys: &["source", "autoUpdate"],
+        },
+        Map,
+        GlobalOnly,
+    ),
+    SettingsField::new("/editorMode", Ty::Enum(&["normal", "vim"]), Scalar, GlobalOnly),
+    // Copilot also accepts server-advertised tiers, so a user's value outside
+    // the three stays valid; a package can only set one of the three.
+    SettingsField::new(
+        "/autoTier",
+        Ty::Enum(&["efficiency", "balance", "intelligence"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new("/banner", Ty::Enum(&["always", "once", "never"]), Scalar, GlobalOnly),
+    SettingsField::new("/keepAlive", Ty::Enum(&["on", "off", "busy"]), Scalar, GlobalOnly),
+    SettingsField::new(
+        "/worktreeBaseRef",
+        Ty::Enum(&["head", "defaultBranch"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/autoUpdatesChannel",
+        Ty::Enum(&["stable", "prerelease"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/logLevel",
+        Ty::Enum(&["none", "error", "warning", "info", "debug", "all", "default"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new("/stayInAutopilot", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/continueOnAutoMode", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/showReasoning", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/experimental", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/toolSearch", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/connectors", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/customAgents/defaultLocalOnly", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/autoUpdate", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/beep", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/beepOnSchedule", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/compactPaste", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/copyOnSelect", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/inlineImages", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/mouse", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/pinnedPrompts", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/renderHexColors", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/screenReader", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/scrollbar", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/shellShortcut", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/showTimestamps", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/showTipsOnStartup", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/sidebar", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/streamerMode", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/terminalNotifications", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/terminalProgress", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/updateTerminalTitle", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/taskbarPresence", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/ide/autoConnect", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/ide/openDiffOnEdit", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/dynamicRetrieval/skills", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/tabs/enabled", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/subagents/agents/rubber-duck/autoInvoke", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/subagents/disabledSubagents", Ty::StringList, Set, GlobalOnly),
+    SettingsField::new("/enabledMcpServers", Ty::StringList, Set, GlobalOnly),
+    SettingsField::new("/sandbox/allowBypass", Ty::Bool, Scalar, GlobalOnly),
+];
 
 impl Vendor for CopilotVendor {
     fn name(&self) -> &'static str {
@@ -237,6 +359,14 @@ impl Vendor for CopilotVendor {
 
     fn agent_fields(&self) -> &'static [KnownField] {
         COPILOT_AGENT_FIELDS
+    }
+
+    fn settings_fields(&self) -> &'static [SettingsField] {
+        COPILOT_SETTINGS_FIELDS
+    }
+
+    fn settings_config_path(&self, _workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
+        settings_config_path(scope, global_native_root(env_dir("COPILOT_HOME"), home_dir()))
     }
 
     fn detect(&self, workspace: &Path, scope: ConfigScope) -> bool {
@@ -624,6 +754,18 @@ fn hook_config_path(_workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
         ConfigScope::Global => {
             global_native_root(env_dir("COPILOT_HOME"), home_dir()).map(|root| root.join("hooks").join("grim.json"))
         }
+    }
+}
+
+/// `settings.json` under the resolved global `root`.
+///
+/// `None` at project scope: `.github/copilot/settings.json` is tracked, and
+/// nothing ignores the local file beside it, so a value there could reach every
+/// cloner. `None` with no root: never a workspace fallback.
+fn settings_config_path(scope: ConfigScope, root: Option<PathBuf>) -> Option<PathBuf> {
+    match scope {
+        ConfigScope::Project => None,
+        ConfigScope::Global => root.map(|root| root.join("settings.json")),
     }
 }
 
@@ -1166,6 +1308,233 @@ mod tests {
         assert!(
             reads_pool_from(ConfigScope::Project, true),
             "the project pool is unaffected"
+        );
+    }
+
+    /// Every key by pointer, value type and scope, in the list's order.
+    #[test]
+    fn settings_rows_match_the_key_list() {
+        use crate::install::vendor::SettingsScopes::GlobalOnly;
+        use crate::install::vendor::SettingsValueType as Ty;
+
+        let rows: Vec<_> = CopilotVendor
+            .settings_fields()
+            .iter()
+            .map(|field| (field.pointer, field.ty, field.scopes))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("/model", Ty::String, GlobalOnly),
+                (
+                    "/effortLevel",
+                    Ty::Enum(&["low", "medium", "high", "xhigh"]),
+                    GlobalOnly
+                ),
+                (
+                    "/theme",
+                    Ty::Enum(&["default", "github", "dim", "high-contrast", "colorblind"]),
+                    GlobalOnly
+                ),
+                (
+                    "/defaultMode",
+                    Ty::Enum(&["interactive", "plan", "autopilot"]),
+                    GlobalOnly
+                ),
+                (
+                    "/defaultPermissionMode",
+                    Ty::Enum(&["manual", "assisted", "allow-all"]),
+                    GlobalOnly
+                ),
+                (
+                    "/permissions/disableBypassPermissionsMode",
+                    Ty::Enum(&["disable"]),
+                    GlobalOnly
+                ),
+                ("/allowedUrls", Ty::StringList, GlobalOnly),
+                ("/deniedUrls", Ty::StringList, GlobalOnly),
+                ("/disabledMcpServers", Ty::StringList, GlobalOnly),
+                ("/disabledSkills", Ty::StringList, GlobalOnly),
+                ("/askUser", Ty::Bool, GlobalOnly),
+                ("/includeCoAuthoredBy", Ty::Bool, GlobalOnly),
+                ("/respectGitignore", Ty::Bool, GlobalOnly),
+                ("/renderMarkdown", Ty::Bool, GlobalOnly),
+                ("/stream", Ty::Bool, GlobalOnly),
+                ("/transcriptView", Ty::Enum(&["default", "concise"]), GlobalOnly),
+                ("/mergeStrategy", Ty::Enum(&["rebase", "merge"]), GlobalOnly),
+                ("/sandbox/enabled", Ty::Bool, GlobalOnly),
+                (
+                    "/extraKnownMarketplaces/<name>",
+                    Ty::Atomic {
+                        keys: &["source", "autoUpdate"]
+                    },
+                    GlobalOnly
+                ),
+                ("/editorMode", Ty::Enum(&["normal", "vim"]), GlobalOnly),
+                (
+                    "/autoTier",
+                    Ty::Enum(&["efficiency", "balance", "intelligence"]),
+                    GlobalOnly
+                ),
+                ("/banner", Ty::Enum(&["always", "once", "never"]), GlobalOnly),
+                ("/keepAlive", Ty::Enum(&["on", "off", "busy"]), GlobalOnly),
+                ("/worktreeBaseRef", Ty::Enum(&["head", "defaultBranch"]), GlobalOnly),
+                ("/autoUpdatesChannel", Ty::Enum(&["stable", "prerelease"]), GlobalOnly),
+                (
+                    "/logLevel",
+                    Ty::Enum(&["none", "error", "warning", "info", "debug", "all", "default"]),
+                    GlobalOnly
+                ),
+                ("/stayInAutopilot", Ty::Bool, GlobalOnly),
+                ("/continueOnAutoMode", Ty::Bool, GlobalOnly),
+                ("/showReasoning", Ty::Bool, GlobalOnly),
+                ("/experimental", Ty::Bool, GlobalOnly),
+                ("/toolSearch", Ty::Bool, GlobalOnly),
+                ("/connectors", Ty::Bool, GlobalOnly),
+                ("/customAgents/defaultLocalOnly", Ty::Bool, GlobalOnly),
+                ("/autoUpdate", Ty::Bool, GlobalOnly),
+                ("/beep", Ty::Bool, GlobalOnly),
+                ("/beepOnSchedule", Ty::Bool, GlobalOnly),
+                ("/compactPaste", Ty::Bool, GlobalOnly),
+                ("/copyOnSelect", Ty::Bool, GlobalOnly),
+                ("/inlineImages", Ty::Bool, GlobalOnly),
+                ("/mouse", Ty::Bool, GlobalOnly),
+                ("/pinnedPrompts", Ty::Bool, GlobalOnly),
+                ("/renderHexColors", Ty::Bool, GlobalOnly),
+                ("/screenReader", Ty::Bool, GlobalOnly),
+                ("/scrollbar", Ty::Bool, GlobalOnly),
+                ("/shellShortcut", Ty::Bool, GlobalOnly),
+                ("/showTimestamps", Ty::Bool, GlobalOnly),
+                ("/showTipsOnStartup", Ty::Bool, GlobalOnly),
+                ("/sidebar", Ty::Bool, GlobalOnly),
+                ("/streamerMode", Ty::Bool, GlobalOnly),
+                ("/terminalNotifications", Ty::Bool, GlobalOnly),
+                ("/terminalProgress", Ty::Bool, GlobalOnly),
+                ("/updateTerminalTitle", Ty::Bool, GlobalOnly),
+                ("/taskbarPresence", Ty::Bool, GlobalOnly),
+                ("/ide/autoConnect", Ty::Bool, GlobalOnly),
+                ("/ide/openDiffOnEdit", Ty::Bool, GlobalOnly),
+                ("/dynamicRetrieval/skills", Ty::Bool, GlobalOnly),
+                ("/tabs/enabled", Ty::Bool, GlobalOnly),
+                ("/subagents/agents/rubber-duck/autoInvoke", Ty::Bool, GlobalOnly),
+                ("/subagents/disabledSubagents", Ty::StringList, GlobalOnly),
+                ("/enabledMcpServers", Ty::StringList, GlobalOnly),
+                ("/sandbox/allowBypass", Ty::Bool, GlobalOnly),
+            ]
+        );
+    }
+
+    /// One document carries a value for every row, and each enum refuses a
+    /// value off its list, another case, or another type.
+    #[test]
+    fn settings_document_checks_each_value_type() {
+        use crate::oci::settings::SettingsDocument;
+
+        let good = concat!(
+            "description = \"d\"\n[copilot]\n",
+            "editorMode = \"vim\"\nautoTier = \"balance\"\nbanner = \"never\"\nkeepAlive = \"busy\"\n",
+            "worktreeBaseRef = \"defaultBranch\"\nautoUpdatesChannel = \"prerelease\"\nlogLevel = \"warning\"\n",
+            "stayInAutopilot = false\ncontinueOnAutoMode = true\nshowReasoning = true\nexperimental = false\n",
+            "toolSearch = false\nconnectors = false\nautoUpdate = false\nbeep = false\nbeepOnSchedule = false\n",
+            "compactPaste = false\ncopyOnSelect = true\ninlineImages = false\nmouse = false\n",
+            "pinnedPrompts = false\nrenderHexColors = false\nscreenReader = true\nscrollbar = false\n",
+            "shellShortcut = false\nshowTimestamps = false\nshowTipsOnStartup = false\nsidebar = false\n",
+            "streamerMode = true\nterminalNotifications = true\nterminalProgress = false\n",
+            "updateTerminalTitle = false\ntaskbarPresence = false\n",
+            "enabledMcpServers = [\"github-mcp-server\"]\n",
+            "[copilot.customAgents]\ndefaultLocalOnly = true\n",
+            "[copilot.ide]\nautoConnect = false\nopenDiffOnEdit = false\n",
+            "[copilot.dynamicRetrieval]\nskills = false\n",
+            "[copilot.tabs]\nenabled = false\n",
+            "[copilot.subagents]\ndisabledSubagents = [\"explore\"]\n",
+            "[copilot.subagents.agents.rubber-duck]\nautoInvoke = true\n",
+            "[copilot.sandbox]\nallowBypass = false\n",
+        );
+        let (document, _) = SettingsDocument::from_toml_str_with_requires(good).unwrap();
+        let copilot = serde_json::Value::Object(document.vendors["copilot"].clone());
+        assert_eq!(copilot["autoTier"], "balance");
+        assert_eq!(copilot["subagents"]["agents"]["rubber-duck"]["autoInvoke"], true);
+        assert_eq!(
+            copilot["subagents"]["disabledSubagents"],
+            serde_json::json!(["explore"])
+        );
+        assert_eq!(copilot["sandbox"], serde_json::json!({"allowBypass": false}));
+        for bad in [
+            "[copilot]\neditorMode = \"emacs\"",
+            "[copilot]\nautoTier = \"fast\"",
+            "[copilot]\nautoTier = \"Balance\"",
+            "[copilot]\nbanner = \"sometimes\"",
+            "[copilot]\nkeepAlive = \"maybe\"",
+            "[copilot]\nworktreeBaseRef = \"main\"",
+            "[copilot]\nautoUpdatesChannel = \"beta\"",
+            "[copilot]\nlogLevel = \"trace\"",
+            "[copilot]\nstayInAutopilot = \"off\"",
+            "[copilot]\nenabledMcpServers = \"github-mcp-server\"",
+            "[copilot.sandbox]\nallowBypass = \"sometimes\"",
+            "[copilot.subagents]\nmaxDepth = 3",
+            "[copilot.subagents.agents.explore]\nautoInvoke = true",
+            "[copilot.tabs]\nhide = [\"issues\"]",
+            "[copilot.sandbox.userPolicy.network]\nallowedHosts = [\"example.com\"]",
+        ] {
+            let text = format!("description = \"d\"\n{bad}\n");
+            assert!(SettingsDocument::from_toml_str_with_requires(&text).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn settings_rows_narrow_nothing_and_require_nothing() {
+        for field in CopilotVendor.settings_fields() {
+            assert_eq!(field.map_keys, None, "{}", field.pointer);
+            assert_eq!(field.project_values, None, "{}", field.pointer);
+            assert!(!field.required_by_client, "{}", field.pointer);
+        }
+    }
+
+    #[test]
+    fn settings_path_has_no_answer_at_project_scope() {
+        let root = Some(PathBuf::from("/home/u/.copilot"));
+        assert_eq!(settings_config_path(ConfigScope::Project, root), None);
+        assert_eq!(
+            CopilotVendor.settings_config_path(Path::new("/w"), ConfigScope::Project),
+            None
+        );
+    }
+
+    /// `COPILOT_HOME` moves the file with the root; an unresolved root has none.
+    #[test]
+    fn settings_path_at_global_scope_follows_copilot_home() {
+        let home = || Some(PathBuf::from("/home/u"));
+        assert_eq!(
+            settings_config_path(
+                ConfigScope::Global,
+                global_native_root(Some(PathBuf::from("/custom/cop")), home())
+            ),
+            Some(PathBuf::from("/custom/cop/settings.json"))
+        );
+        assert_eq!(
+            settings_config_path(ConfigScope::Global, global_native_root(None, home())),
+            Some(PathBuf::from("/home/u/.copilot/settings.json"))
+        );
+        assert_eq!(
+            settings_config_path(ConfigScope::Global, global_native_root(None, None)),
+            None
+        );
+    }
+
+    /// One root resolution: the trait answers beside what MCP registers in.
+    #[test]
+    fn settings_sit_beside_the_global_mcp_file() {
+        let w = Path::new("/w");
+        let settings = CopilotVendor.settings_config_path(w, ConfigScope::Global);
+        let mcp = CopilotVendor.mcp_config_path(w, ConfigScope::Global);
+        assert_eq!(settings, mcp.map(|file| file.with_file_name("settings.json")));
+    }
+
+    #[test]
+    fn settings_format_is_json() {
+        assert_eq!(
+            CopilotVendor.settings_config_format(),
+            crate::install::vendor::McpConfigFormat::Json
         );
     }
 }

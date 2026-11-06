@@ -9,7 +9,7 @@
 //! refreshed, filtered with the [`SearchQuery`] matcher (whitespace-split AND
 //! of terms: fuzzy-matched over the repo leaf name, keywords, and kind, by
 //! word prefix over summary / description / namespace, plus bare kind
-//! keywords — `skill`/`rule`/`bundle`/`agent`/`mcp` and plurals — acting as
+//! keywords — `skill`/`rule`/`bundle`/`agent`/`mcp`/`hook`/`settings` and plurals — acting as
 //! kind filters; an empty query lists everything), and badged
 //! against the scope's lock + install-state. An explicit `--registry`
 //! (repeatable / comma-separated) collapses the browse set to exactly those
@@ -73,8 +73,8 @@ pub struct SearchArgs {
     /// Results are ranked by relevance, best match first, and hits scoring
     /// below `options.search_min_relevance` percent of the best (default 50)
     /// are dropped, with a note on stderr saying how many. A bare kind
-    /// keyword (`skill`/`rule`/`bundle`/`agent`/`mcp`/`hook`, singular or plural)
-    /// filters by kind instead of matching as text. Empty ⇒ list the whole
+    /// keyword (`skill`/`rule`/`bundle`/`agent`/`mcp`/`hook`/`settings`, singular
+    /// or plural) filters by kind instead of matching as text. Empty ⇒ list the whole
     /// catalog, unranked, in registry order. Results are narrowed further by
     /// each source's
     /// `include`/`exclude` browse filter — `grim context` shows the active
@@ -891,7 +891,7 @@ mod tests {
             "--help must name the setting, not a hard-coded half; got:\n{collapsed}"
         );
         assert!(
-            collapsed.contains("(`skill`/`rule`/`bundle`/`agent`/`mcp`/`hook`, singular or plural)"),
+            collapsed.contains("(`skill`/`rule`/`bundle`/`agent`/`mcp`/`hook`/`settings`, singular or plural)"),
             "--help must list every kind keyword the parser accepts; got:\n{collapsed}"
         );
     }

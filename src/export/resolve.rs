@@ -187,6 +187,7 @@ fn table(set: &DesiredSet, kind: ArtifactKind) -> &BTreeMap<String, DeclaredSour
         ArtifactKind::Bundle => &set.bundles,
         ArtifactKind::Mcp => &set.mcp,
         ArtifactKind::Hook => &set.hooks,
+        ArtifactKind::Settings => &set.settings,
     }
 }
 
@@ -778,6 +779,7 @@ mod tests {
             agents: vec![],
             mcp: vec![],
             hooks: Vec::new(),
+            settings: Vec::new(),
             bundles: vec![],
         }
     }

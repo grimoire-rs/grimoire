@@ -23,6 +23,13 @@
 //!   maps **sse → `url`, http → `httpUrl`**, stdio → `command`; env refs
 //!   `${VAR}` native; oauth shape ≠ grim block → skip; `timeout` dropped
 //!   with a warning (Gemini bounds every tool call with it); `json_splice`.
+//! - **Settings**: global only, the same `settings.json` the global MCP entry
+//!   edits, so settings pieces sit beside `mcpServers`. A project
+//!   `.gemini/settings.json` and the system settings file override a user
+//!   value, and a project list replaces `/tools/allowed`,
+//!   `/tools/confirmationRequired` and `/tools/sandboxAllowedPaths` whole.
+//!   Gemini resolves `$NAME` and `${NAME}` in every string value, so a
+//!   settings value holding one is refused.
 //!
 //! `GEMINI_CONFIG_DIR` does not exist upstream (FR #2815); `GEMINI_CLI_HOME`
 //! does — it replaces Node's `os.homedir()` at the root, so the config dir is
@@ -38,7 +45,12 @@ use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
 use super::render::{self, RenderError, RenderedDoc};
-use super::vendor::{FieldType, KindSupport, KnownField, Vendor, env_dir, global_skills_root, home_dir, provenance};
+use super::vendor::MergeClass::{Scalar, Set};
+use super::vendor::SettingsScopes::GlobalOnly;
+use super::vendor::SettingsValueType as Ty;
+use super::vendor::{
+    FieldType, KindSupport, KnownField, SettingsField, Vendor, env_dir, global_skills_root, home_dir, provenance,
+};
 
 /// Gemini CLI.
 pub struct GeminiVendor;
@@ -80,6 +92,91 @@ pub const GEMINI_AGENT_FIELDS: &[KnownField] = &[
 /// `timeout_mins` / `kind` are Gemini-native and never collide with an
 /// emitted common key).
 const GEMINI_AGENT_OVERRIDES: &[&str] = &["model"];
+
+/// Gemini's settings keys, from `research_upstream_gemini_settings_20261105.md`.
+const GEMINI_SETTINGS_FIELDS: &[SettingsField] = &[
+    SettingsField::new(
+        "/general/defaultApprovalMode",
+        Ty::Enum(&["default", "auto_edit", "plan"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/general/notificationMethod",
+        Ty::Enum(&["auto", "osc9", "osc777", "bell"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/general/preferredEditor",
+        Ty::Enum(&[
+            "vscode",
+            "vscodium",
+            "windsurf",
+            "cursor",
+            "zed",
+            "antigravity",
+            "sublimetext",
+            "lapce",
+            "nova",
+            "bbedit",
+            "vim",
+            "neovim",
+            "emacs",
+            "hx",
+            "emacsclient",
+            "micro",
+        ]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new("/general/vimMode", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/general/enableNotifications", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/general/checkpointing/enabled", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/general/plan/enabled", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/general/enableAutoUpdate", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/general/enableAutoUpdateNotification", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/model/name", Ty::String, Scalar, GlobalOnly),
+    SettingsField::new("/output/format", Ty::Enum(&["text", "json"]), Scalar, GlobalOnly),
+    SettingsField::new("/ui/inlineThinkingMode", Ty::Enum(&["off", "full"]), Scalar, GlobalOnly),
+    SettingsField::new(
+        "/ui/loadingPhrases",
+        Ty::Enum(&["tips", "witty", "all", "off"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new("/ui/errorVerbosity", Ty::Enum(&["low", "full"]), Scalar, GlobalOnly),
+    SettingsField::new("/ui/hideTips", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/ui/hideBanner", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/ui/showLineNumbers", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/ui/compactToolOutput", Ty::Bool, Scalar, GlobalOnly),
+    // A project list replaces these three whole, so grim's elements can be masked.
+    SettingsField::new("/tools/allowed", Ty::StringList, Set, GlobalOnly),
+    SettingsField::new("/tools/confirmationRequired", Ty::StringList, Set, GlobalOnly),
+    SettingsField::new("/tools/sandboxAllowedPaths", Ty::StringList, Set, GlobalOnly),
+    SettingsField::new("/tools/exclude", Ty::StringList, Set, GlobalOnly),
+    SettingsField::new("/tools/sandboxNetworkAccess", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new(
+        "/tools/shell/backgroundCompletionBehavior",
+        Ty::Enum(&["silent", "inject", "notify"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new("/security/toolSandboxing", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/security/disableYoloMode", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/security/disableAlwaysAllow", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/security/enablePermanentToolApproval", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/security/autoAddToPolicyByDefault", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/security/blockGitExtensions", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/skills/disabled", Ty::StringList, Set, GlobalOnly),
+    SettingsField::new("/context/fileFiltering/respectGitIgnore", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new(
+        "/context/fileFiltering/respectGeminiIgnore",
+        Ty::Bool,
+        Scalar,
+        GlobalOnly,
+    ),
+];
 
 impl Vendor for GeminiVendor {
     fn name(&self) -> &'static str {
@@ -136,6 +233,14 @@ impl Vendor for GeminiVendor {
 
     fn mcp_config_path(&self, workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
         Some(gemini_scope_root(workspace, scope).join("settings.json"))
+    }
+
+    fn settings_fields(&self) -> &'static [SettingsField] {
+        GEMINI_SETTINGS_FIELDS
+    }
+
+    fn settings_config_path(&self, _workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
+        global_settings_path(scope, gemini_root(env_dir("GEMINI_CLI_HOME"), home_dir()))
     }
 
     fn mcp_entry(
@@ -311,6 +416,17 @@ fn gemini_scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
 /// where the other three pool vendors read them.
 pub(crate) fn gemini_root(gemini_cli_home: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
     gemini_cli_home.or(home).map(|h| h.join(".gemini"))
+}
+
+/// `settings.json` under the resolved `root`, the global MCP file: `None` at
+/// project scope, where `.gemini/settings.json` is a repository file, and
+/// `None` with no root, never the workspace stand-in [`gemini_scope_root`]
+/// falls back to.
+fn global_settings_path(scope: ConfigScope, root: Option<PathBuf>) -> Option<PathBuf> {
+    match scope {
+        ConfigScope::Project => None,
+        ConfigScope::Global => root.map(|root| root.join("settings.json")),
+    }
 }
 
 #[cfg(test)]
@@ -608,5 +724,251 @@ mod tests {
         let a = GeminiVendor.mcp_entry(ConfigScope::Project, "m", &d).unwrap();
         let b = GeminiVendor.mcp_entry(ConfigScope::Project, "m", &d).unwrap();
         assert_eq!(a, b, "regeneration must be byte-identical");
+    }
+
+    // ── settings: global only, the `settings.json` MCP also edits ──
+
+    #[test]
+    fn settings_rows_match_the_key_list() {
+        let rows: Vec<_> = GeminiVendor
+            .settings_fields()
+            .iter()
+            .map(|field| (field.pointer, field.ty, field.merge, field.scopes))
+            .collect();
+        let editors = Ty::Enum(&[
+            "vscode",
+            "vscodium",
+            "windsurf",
+            "cursor",
+            "zed",
+            "antigravity",
+            "sublimetext",
+            "lapce",
+            "nova",
+            "bbedit",
+            "vim",
+            "neovim",
+            "emacs",
+            "hx",
+            "emacsclient",
+            "micro",
+        ]);
+        let bool_row = |pointer| (pointer, Ty::Bool, Scalar, GlobalOnly);
+        let list_row = |pointer| (pointer, Ty::StringList, Set, GlobalOnly);
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "/general/defaultApprovalMode",
+                    Ty::Enum(&["default", "auto_edit", "plan"]),
+                    Scalar,
+                    GlobalOnly
+                ),
+                (
+                    "/general/notificationMethod",
+                    Ty::Enum(&["auto", "osc9", "osc777", "bell"]),
+                    Scalar,
+                    GlobalOnly
+                ),
+                ("/general/preferredEditor", editors, Scalar, GlobalOnly),
+                bool_row("/general/vimMode"),
+                bool_row("/general/enableNotifications"),
+                bool_row("/general/checkpointing/enabled"),
+                bool_row("/general/plan/enabled"),
+                bool_row("/general/enableAutoUpdate"),
+                bool_row("/general/enableAutoUpdateNotification"),
+                ("/model/name", Ty::String, Scalar, GlobalOnly),
+                ("/output/format", Ty::Enum(&["text", "json"]), Scalar, GlobalOnly),
+                ("/ui/inlineThinkingMode", Ty::Enum(&["off", "full"]), Scalar, GlobalOnly),
+                (
+                    "/ui/loadingPhrases",
+                    Ty::Enum(&["tips", "witty", "all", "off"]),
+                    Scalar,
+                    GlobalOnly
+                ),
+                ("/ui/errorVerbosity", Ty::Enum(&["low", "full"]), Scalar, GlobalOnly),
+                bool_row("/ui/hideTips"),
+                bool_row("/ui/hideBanner"),
+                bool_row("/ui/showLineNumbers"),
+                bool_row("/ui/compactToolOutput"),
+                list_row("/tools/allowed"),
+                list_row("/tools/confirmationRequired"),
+                list_row("/tools/sandboxAllowedPaths"),
+                list_row("/tools/exclude"),
+                bool_row("/tools/sandboxNetworkAccess"),
+                (
+                    "/tools/shell/backgroundCompletionBehavior",
+                    Ty::Enum(&["silent", "inject", "notify"]),
+                    Scalar,
+                    GlobalOnly
+                ),
+                bool_row("/security/toolSandboxing"),
+                bool_row("/security/disableYoloMode"),
+                bool_row("/security/disableAlwaysAllow"),
+                bool_row("/security/enablePermanentToolApproval"),
+                bool_row("/security/autoAddToPolicyByDefault"),
+                bool_row("/security/blockGitExtensions"),
+                list_row("/skills/disabled"),
+                bool_row("/context/fileFiltering/respectGitIgnore"),
+                bool_row("/context/fileFiltering/respectGeminiIgnore"),
+            ]
+        );
+    }
+
+    #[test]
+    fn settings_rows_narrow_nothing_and_require_nothing() {
+        for field in GeminiVendor.settings_fields() {
+            assert_eq!(field.map_keys, None, "{}", field.pointer);
+            assert_eq!(field.project_values, None, "{}", field.pointer);
+            assert!(!field.required_by_client, "{}", field.pointer);
+        }
+    }
+
+    /// One value per value type is taken, and a wrong one is refused,
+    /// including the allowlist, MCP and folder-trust keys left off.
+    #[test]
+    fn settings_document_checks_each_value_type() {
+        use crate::oci::settings::SettingsDocument;
+
+        let good = concat!(
+            "description = \"d\"\n",
+            "[gemini.general]\npreferredEditor = \"hx\"\nvimMode = true\n",
+            "[gemini.model]\nname = \"gemini-2.5-pro\"\n",
+            "[gemini.tools]\nexclude = [\"web_fetch\"]\n",
+        );
+        let (document, _) = SettingsDocument::from_toml_str_with_requires(good).unwrap();
+        assert_eq!(
+            serde_json::Value::Object(document.vendors["gemini"].clone()),
+            serde_json::json!({
+                "general": {"preferredEditor": "hx", "vimMode": true},
+                "model": {"name": "gemini-2.5-pro"},
+                "tools": {"exclude": ["web_fetch"]},
+            })
+        );
+        for bad in [
+            "general = { preferredEditor = \"notepad\" }",
+            "model = { name = 1 }",
+            "ui = { hideTips = \"yes\" }",
+            "tools = { allowed = \"run_shell_command\" }",
+            "tools = { core = [\"read_file\"] }",
+            "ui = { theme = \"Default\" }",
+            "mcpServers = {}",
+            // Folder trust stays off: `false` would load an untrusted repo's settings.
+            "security = { folderTrust = { enabled = false } }",
+        ] {
+            let text = format!("description = \"d\"\n[gemini]\n{bad}\n");
+            assert!(SettingsDocument::from_toml_str_with_requires(&text).is_err(), "{bad}");
+        }
+    }
+
+    /// Gemini resolves `$NAME`, `${NAME}` and `${NAME:-default}` in every
+    /// string of the file, so a value carrying one would read a variable into
+    /// the config.
+    #[test]
+    fn settings_variable_reference_is_refused() {
+        use crate::oci::settings::tests::assert_refused_alike;
+        use crate::oci::settings::{SettingsDocument, SettingsError};
+
+        for value in ["$GEMINI_API_KEY", "x${HOME}", "${MODEL:-gemini-2.5-pro}"] {
+            assert_refused_alike(
+                serde_json::json!({"gemini": {"model": {"name": value}}}),
+                &SettingsError::ExpansionToken {
+                    pointer: "/gemini/model/name".to_string(),
+                },
+            );
+        }
+        assert_refused_alike(
+            serde_json::json!({"gemini": {"tools": {"sandboxAllowedPaths": ["$HOME/.ssh"]}}}),
+            &SettingsError::ExpansionToken {
+                pointer: "/gemini/tools/sandboxAllowedPaths/0".to_string(),
+            },
+        );
+        // Positive controls: a `$` the resolver skips, and the same text for a
+        // harness that expands nothing.
+        let lone = "description = \"d\"\n[gemini.model]\nname = \"a $ b\"\n";
+        assert!(SettingsDocument::from_toml_str_with_requires(lone).is_ok());
+        let other = "description = \"d\"\n[claude]\nmodel = \"$HOME\"\n";
+        assert!(SettingsDocument::from_toml_str_with_requires(other).is_ok());
+    }
+
+    #[test]
+    fn settings_path_has_no_answer_at_project_scope() {
+        let root = Some(PathBuf::from("/home/u/.gemini"));
+        assert_eq!(global_settings_path(ConfigScope::Project, root), None);
+        assert_eq!(
+            GeminiVendor.settings_config_path(Path::new("/w"), ConfigScope::Project),
+            None
+        );
+    }
+
+    /// `GEMINI_CLI_HOME` replaces the home, so `.gemini` is still appended; no
+    /// home resolves no file, never the workspace stand-in MCP falls back to.
+    #[test]
+    fn settings_path_at_global_scope_follows_gemini_cli_home() {
+        let home = Some(PathBuf::from("/home/u"));
+        assert_eq!(
+            global_settings_path(ConfigScope::Global, gemini_root(None, home.clone())),
+            Some(PathBuf::from("/home/u/.gemini/settings.json"))
+        );
+        assert_eq!(
+            global_settings_path(ConfigScope::Global, gemini_root(Some(PathBuf::from("/g")), home)),
+            Some(PathBuf::from("/g/.gemini/settings.json"))
+        );
+        assert_eq!(global_settings_path(ConfigScope::Global, gemini_root(None, None)), None);
+    }
+
+    /// One file, one root resolution: settings splice into what MCP edits.
+    #[test]
+    fn settings_share_the_global_mcp_file() {
+        let w = Path::new("/w");
+        let settings = GeminiVendor.settings_config_path(w, ConfigScope::Global);
+        assert!(
+            settings
+                .as_ref()
+                .is_some_and(|file| file.ends_with(".gemini/settings.json"))
+        );
+        assert_eq!(settings, GeminiVendor.mcp_config_path(w, ConfigScope::Global));
+    }
+
+    /// A settings write into the shared file leaves grim's MCP entry as it was,
+    /// byte for byte, inline layout included.
+    #[test]
+    fn settings_write_leaves_an_mcp_entry_byte_identical() {
+        use crate::install::settings_writer::{SettingsOp, apply};
+
+        let mcp = "\"mcpServers\": {\n    \"grim\": {\"command\": \"grim\", \"args\": [\"mcp\"]}\n  }";
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        std::fs::write(&file, format!("{{\n  {mcp},\n  \"ui\": {{\"hideTips\": false}}\n}}\n")).unwrap();
+        let ops = [
+            SettingsOp::Upsert {
+                path: vec!["ui".to_string(), "hideTips".to_string()],
+                value: serde_json::json!(true),
+            },
+            SettingsOp::Upsert {
+                path: vec!["general".to_string(), "vimMode".to_string()],
+                value: serde_json::json!(true),
+            },
+            SettingsOp::AddElement {
+                path: vec!["tools".to_string(), "exclude".to_string()],
+                element: "web_fetch".to_string(),
+            },
+        ];
+        apply(&file, GeminiVendor.settings_config_format(), &ops, &[], false).unwrap();
+
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains(mcp), "the MCP entry moved:\n{text}");
+        let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(doc["ui"]["hideTips"], serde_json::json!(true));
+        assert_eq!(doc["general"]["vimMode"], serde_json::json!(true));
+        assert_eq!(doc["tools"]["exclude"], serde_json::json!(["web_fetch"]));
+    }
+
+    #[test]
+    fn settings_format_is_json() {
+        assert_eq!(
+            GeminiVendor.settings_config_format(),
+            crate::install::vendor::McpConfigFormat::Json
+        );
     }
 }

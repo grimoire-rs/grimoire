@@ -1,0 +1,17 @@
+[options.experimental]
+hooks = true
+
+[skills]
+reg-skill = "localhost:5000/grim-golden/pre-settings-47da12f/reg-skill:1.0.0"
+
+[rules]
+reg-rule = "localhost:5000/grim-golden/pre-settings-47da12f/reg-rule:1.0.0"
+
+[agents]
+reg-agent = "localhost:5000/grim-golden/pre-settings-47da12f/reg-agent:1.0.0"
+
+[hooks]
+reg-hook = "localhost:5000/grim-golden/pre-settings-47da12f/reg-hook:1.0.0"
+
+[mcp]
+reg-mcp = "localhost:5000/grim-golden/pre-settings-47da12f/reg-mcp:1.0.0"

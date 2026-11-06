@@ -1,0 +1,6 @@
+$ grim lock   # cwd=project 
+$ grim hook allow   # cwd=project 
+$ grim install --client claude   # cwd=project 
+$ grim lock --global   # cwd=grim-home 
+$ grim install --global --client claude   # cwd=grim-home 
+$ grim remove bundle reg-bundle   # cwd=project # after the captures above

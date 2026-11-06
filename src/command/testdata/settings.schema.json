@@ -1,0 +1,2364 @@
+{
+  "$id": "https://grimoire.rs/schemas/grim-settings.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "amp": {
+      "additionalProperties": false,
+      "properties": {
+        "amp.git.commit.ampThread.enabled": {
+          "type": "boolean"
+        },
+        "amp.git.commit.coauthor.enabled": {
+          "type": "boolean"
+        },
+        "amp.notifications.enabled": {
+          "type": "boolean"
+        },
+        "amp.showCosts": {
+          "type": "boolean"
+        },
+        "amp.terminal.copyOnSelect": {
+          "type": "boolean"
+        },
+        "amp.terminal.detailsExpandedByDefault": {
+          "type": "boolean"
+        },
+        "amp.thread.autoArchiveOnQuit": {
+          "type": "boolean"
+        },
+        "amp.updates.mode": {
+          "enum": [
+            "auto",
+            "warn",
+            "disabled"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "antigravity": {
+      "additionalProperties": false,
+      "properties": {
+        "agentMode": {
+          "enum": [
+            "accept-edits",
+            "auto",
+            "plan"
+          ],
+          "type": "string"
+        },
+        "allowNonWorkspaceAccess": {
+          "type": "boolean"
+        },
+        "altScreenMode": {
+          "enum": [
+            "default",
+            "always",
+            "never"
+          ],
+          "type": "string"
+        },
+        "artifactReviewPolicy": {
+          "enum": [
+            "asks-for-review",
+            "agent-decides",
+            "always-proceed"
+          ],
+          "type": "string"
+        },
+        "clearScrollbackOnResize": {
+          "type": "boolean"
+        },
+        "colorScheme": {
+          "enum": [
+            "terminal",
+            "light",
+            "solarized light",
+            "colorblind-friendly light",
+            "dark",
+            "solarized dark",
+            "colorblind-friendly dark",
+            "tokyo night"
+          ],
+          "type": "string"
+        },
+        "copyOnSelect": {
+          "type": "boolean"
+        },
+        "disableSlashCommands": {
+          "type": "boolean"
+        },
+        "editorMode": {
+          "enum": [
+            "default",
+            "vim"
+          ],
+          "type": "string"
+        },
+        "enableTerminalSandbox": {
+          "type": "boolean"
+        },
+        "hideActiveItems": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "notifications": {
+          "type": "boolean"
+        },
+        "permissions": {
+          "additionalProperties": false,
+          "properties": {
+            "allow": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "ask": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "deny": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "pickerGrouping": {
+          "enum": [
+            "none",
+            "grouped"
+          ],
+          "type": "string"
+        },
+        "queuedMessages": {
+          "enum": [
+            "queue",
+            "send-immediately"
+          ],
+          "type": "string"
+        },
+        "runningLightSpeed": {
+          "enum": [
+            "fast",
+            "medium",
+            "slow",
+            "off"
+          ],
+          "type": "string"
+        },
+        "showFeedbackSurvey": {
+          "type": "boolean"
+        },
+        "showTips": {
+          "type": "boolean"
+        },
+        "toolPermission": {
+          "enum": [
+            "request-review",
+            "proceed-in-sandbox",
+            "always-proceed",
+            "strict"
+          ],
+          "type": "string"
+        },
+        "useTerminalCursor": {
+          "type": "boolean"
+        },
+        "verbosity": {
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ],
+          "type": "string"
+        },
+        "vimInsertFirst": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "authors": {
+      "description": "Comma-separated authors.",
+      "type": "string"
+    },
+    "claude": {
+      "additionalProperties": false,
+      "properties": {
+        "alwaysThinkingEnabled": {
+          "type": "boolean"
+        },
+        "attribution": {
+          "additionalProperties": false,
+          "properties": {
+            "commit": {
+              "type": "string"
+            },
+            "pr": {
+              "type": "string"
+            },
+            "sessionUrl": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "editorMode": {
+          "enum": [
+            "normal",
+            "vim"
+          ],
+          "type": "string"
+        },
+        "effortLevel": {
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "type": "string"
+        },
+        "extraKnownMarketplaces": {
+          "additionalProperties": {
+            "additionalProperties": false,
+            "properties": {
+              "source": true
+            },
+            "type": "object"
+          },
+          "properties": {},
+          "type": "object"
+        },
+        "includeGitInstructions": {
+          "type": "boolean"
+        },
+        "language": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "outputStyle": {
+          "type": "string"
+        },
+        "permissions": {
+          "additionalProperties": false,
+          "properties": {
+            "allow": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "ask": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "defaultMode": {
+              "enum": [
+                "default",
+                "acceptEdits",
+                "plan",
+                "auto",
+                "dontAsk",
+                "bypassPermissions",
+                "manual"
+              ],
+              "type": "string"
+            },
+            "deny": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "sandbox": {
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "filesystem": {
+              "additionalProperties": false,
+              "properties": {
+                "allowRead": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "allowWrite": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "denyRead": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "denyWrite": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "type": "object"
+            }
+          },
+          "type": "object"
+        },
+        "spinnerTipsEnabled": {
+          "type": "boolean"
+        },
+        "theme": {
+          "enum": [
+            "auto",
+            "dark",
+            "light",
+            "dark-daltonized",
+            "light-daltonized",
+            "dark-ansi",
+            "light-ansi"
+          ],
+          "type": "string"
+        },
+        "tui": {
+          "enum": [
+            "default",
+            "fullscreen"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "codex": {
+      "additionalProperties": false,
+      "properties": {
+        "approval_policy": {
+          "enum": [
+            "on-request",
+            "never"
+          ],
+          "type": "string"
+        },
+        "default_permissions": {
+          "type": "string"
+        },
+        "file_opener": {
+          "enum": [
+            "vscode",
+            "vscode-insiders",
+            "windsurf",
+            "cursor",
+            "none"
+          ],
+          "type": "string"
+        },
+        "hide_agent_reasoning": {
+          "type": "boolean"
+        },
+        "history": {
+          "additionalProperties": false,
+          "properties": {
+            "persistence": {
+              "enum": [
+                "save-all",
+                "none"
+              ],
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "marketplaces": {
+          "additionalProperties": {
+            "additionalProperties": false,
+            "properties": {
+              "ref": true,
+              "source": true,
+              "source_type": true,
+              "sparse_paths": true
+            },
+            "type": "object"
+          },
+          "properties": {},
+          "type": "object"
+        },
+        "model": {
+          "type": "string"
+        },
+        "model_reasoning_effort": {
+          "type": "string"
+        },
+        "permissions": {
+          "additionalProperties": {
+            "additionalProperties": false,
+            "properties": {
+              "description": true,
+              "extends": true,
+              "filesystem": true,
+              "network": true,
+              "workspace_roots": true
+            },
+            "type": "object"
+          },
+          "properties": {},
+          "type": "object"
+        },
+        "rules": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "decision": {
+                "enum": [
+                  "allow",
+                  "prompt",
+                  "forbidden"
+                ],
+                "type": "string"
+              },
+              "justification": {
+                "type": "string"
+              },
+              "pattern": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "pattern",
+              "decision"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "sandbox_mode": {
+          "enum": [
+            "read-only",
+            "workspace-write",
+            "danger-full-access"
+          ],
+          "type": "string"
+        },
+        "sandbox_workspace_write": {
+          "additionalProperties": false,
+          "properties": {
+            "exclude_slash_tmp": {
+              "type": "boolean"
+            },
+            "exclude_tmpdir_env_var": {
+              "type": "boolean"
+            },
+            "network_access": {
+              "type": "boolean"
+            },
+            "writable_roots": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "tui": {
+          "additionalProperties": false,
+          "properties": {
+            "alternate_screen": {
+              "enum": [
+                "auto",
+                "always",
+                "never"
+              ],
+              "type": "string"
+            },
+            "animations": {
+              "type": "boolean"
+            },
+            "auto_recap": {
+              "type": "boolean"
+            },
+            "notification_condition": {
+              "enum": [
+                "unfocused",
+                "always"
+              ],
+              "type": "string"
+            },
+            "notification_method": {
+              "enum": [
+                "auto",
+                "osc9",
+                "bel"
+              ],
+              "type": "string"
+            },
+            "raw_output_mode": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "web_search": {
+          "enum": [
+            "disabled",
+            "cached",
+            "indexed",
+            "live"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "copilot": {
+      "additionalProperties": false,
+      "properties": {
+        "allowedUrls": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "askUser": {
+          "type": "boolean"
+        },
+        "autoTier": {
+          "enum": [
+            "efficiency",
+            "balance",
+            "intelligence"
+          ],
+          "type": "string"
+        },
+        "autoUpdate": {
+          "type": "boolean"
+        },
+        "autoUpdatesChannel": {
+          "enum": [
+            "stable",
+            "prerelease"
+          ],
+          "type": "string"
+        },
+        "banner": {
+          "enum": [
+            "always",
+            "once",
+            "never"
+          ],
+          "type": "string"
+        },
+        "beep": {
+          "type": "boolean"
+        },
+        "beepOnSchedule": {
+          "type": "boolean"
+        },
+        "compactPaste": {
+          "type": "boolean"
+        },
+        "connectors": {
+          "type": "boolean"
+        },
+        "continueOnAutoMode": {
+          "type": "boolean"
+        },
+        "copyOnSelect": {
+          "type": "boolean"
+        },
+        "customAgents": {
+          "additionalProperties": false,
+          "properties": {
+            "defaultLocalOnly": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "defaultMode": {
+          "enum": [
+            "interactive",
+            "plan",
+            "autopilot"
+          ],
+          "type": "string"
+        },
+        "defaultPermissionMode": {
+          "enum": [
+            "manual",
+            "assisted",
+            "allow-all"
+          ],
+          "type": "string"
+        },
+        "deniedUrls": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "disabledMcpServers": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "disabledSkills": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "dynamicRetrieval": {
+          "additionalProperties": false,
+          "properties": {
+            "skills": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "editorMode": {
+          "enum": [
+            "normal",
+            "vim"
+          ],
+          "type": "string"
+        },
+        "effortLevel": {
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "type": "string"
+        },
+        "enabledMcpServers": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "experimental": {
+          "type": "boolean"
+        },
+        "extraKnownMarketplaces": {
+          "additionalProperties": {
+            "additionalProperties": false,
+            "properties": {
+              "autoUpdate": true,
+              "source": true
+            },
+            "type": "object"
+          },
+          "properties": {},
+          "type": "object"
+        },
+        "ide": {
+          "additionalProperties": false,
+          "properties": {
+            "autoConnect": {
+              "type": "boolean"
+            },
+            "openDiffOnEdit": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "includeCoAuthoredBy": {
+          "type": "boolean"
+        },
+        "inlineImages": {
+          "type": "boolean"
+        },
+        "keepAlive": {
+          "enum": [
+            "on",
+            "off",
+            "busy"
+          ],
+          "type": "string"
+        },
+        "logLevel": {
+          "enum": [
+            "none",
+            "error",
+            "warning",
+            "info",
+            "debug",
+            "all",
+            "default"
+          ],
+          "type": "string"
+        },
+        "mergeStrategy": {
+          "enum": [
+            "rebase",
+            "merge"
+          ],
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "mouse": {
+          "type": "boolean"
+        },
+        "permissions": {
+          "additionalProperties": false,
+          "properties": {
+            "disableBypassPermissionsMode": {
+              "enum": [
+                "disable"
+              ],
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "pinnedPrompts": {
+          "type": "boolean"
+        },
+        "renderHexColors": {
+          "type": "boolean"
+        },
+        "renderMarkdown": {
+          "type": "boolean"
+        },
+        "respectGitignore": {
+          "type": "boolean"
+        },
+        "sandbox": {
+          "additionalProperties": false,
+          "properties": {
+            "allowBypass": {
+              "type": "boolean"
+            },
+            "enabled": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "screenReader": {
+          "type": "boolean"
+        },
+        "scrollbar": {
+          "type": "boolean"
+        },
+        "shellShortcut": {
+          "type": "boolean"
+        },
+        "showReasoning": {
+          "type": "boolean"
+        },
+        "showTimestamps": {
+          "type": "boolean"
+        },
+        "showTipsOnStartup": {
+          "type": "boolean"
+        },
+        "sidebar": {
+          "type": "boolean"
+        },
+        "stayInAutopilot": {
+          "type": "boolean"
+        },
+        "stream": {
+          "type": "boolean"
+        },
+        "streamerMode": {
+          "type": "boolean"
+        },
+        "subagents": {
+          "additionalProperties": false,
+          "properties": {
+            "agents": {
+              "additionalProperties": false,
+              "properties": {
+                "rubber-duck": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "autoInvoke": {
+                      "type": "boolean"
+                    }
+                  },
+                  "type": "object"
+                }
+              },
+              "type": "object"
+            },
+            "disabledSubagents": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "tabs": {
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "taskbarPresence": {
+          "type": "boolean"
+        },
+        "terminalNotifications": {
+          "type": "boolean"
+        },
+        "terminalProgress": {
+          "type": "boolean"
+        },
+        "theme": {
+          "enum": [
+            "default",
+            "github",
+            "dim",
+            "high-contrast",
+            "colorblind"
+          ],
+          "type": "string"
+        },
+        "toolSearch": {
+          "type": "boolean"
+        },
+        "transcriptView": {
+          "enum": [
+            "default",
+            "concise"
+          ],
+          "type": "string"
+        },
+        "updateTerminalTitle": {
+          "type": "boolean"
+        },
+        "worktreeBaseRef": {
+          "enum": [
+            "head",
+            "defaultBranch"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "cursor": {
+      "additionalProperties": false,
+      "properties": {
+        "approvalMode": {
+          "enum": [
+            "allowlist",
+            "auto-review",
+            "unrestricted"
+          ],
+          "type": "string"
+        },
+        "attribution": {
+          "additionalProperties": false,
+          "properties": {
+            "attributeCommitsToAgent": {
+              "type": "boolean"
+            },
+            "attributePRsToAgent": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "display": {
+          "additionalProperties": false,
+          "properties": {
+            "showLineNumbers": {
+              "type": "boolean"
+            },
+            "showStatusIndicators": {
+              "type": "boolean"
+            },
+            "showStatusLineRunningTime": {
+              "type": "boolean"
+            },
+            "showThinkingBlocks": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "editor": {
+          "additionalProperties": false,
+          "properties": {
+            "vimMode": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "hints": {
+          "type": "boolean"
+        },
+        "maxMode": {
+          "type": "boolean"
+        },
+        "notifications": {
+          "type": "boolean"
+        },
+        "permissions": {
+          "additionalProperties": false,
+          "properties": {
+            "allow": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "deny": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "rewind": {
+          "type": "boolean"
+        },
+        "sandbox": {
+          "additionalProperties": false,
+          "properties": {
+            "readBoundary": {
+              "enum": [
+                "system",
+                "workspace"
+              ],
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "suggestNextPrompt": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "deprecated": {
+      "description": "Deprecation notice.",
+      "type": "string"
+    },
+    "description": {
+      "description": "What this package configures.",
+      "type": "string"
+    },
+    "documentation": {
+      "description": "Documentation URL.",
+      "type": "string"
+    },
+    "droid": {
+      "additionalProperties": false,
+      "properties": {
+        "awaitingInputSoundFocusMode": {
+          "enum": [
+            "always",
+            "focused",
+            "unfocused"
+          ],
+          "type": "string"
+        },
+        "blockOnMcpLoad": {
+          "type": "boolean"
+        },
+        "completionSoundFocusMode": {
+          "enum": [
+            "always",
+            "focused",
+            "unfocused"
+          ],
+          "type": "string"
+        },
+        "diffMode": {
+          "enum": [
+            "github",
+            "unified"
+          ],
+          "type": "string"
+        },
+        "disabledSkills": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "enableDroidShield": {
+          "type": "boolean"
+        },
+        "extraKnownMarketplaces": {
+          "additionalProperties": {
+            "additionalProperties": false,
+            "properties": {
+              "source": true
+            },
+            "type": "object"
+          },
+          "properties": {},
+          "type": "object"
+        },
+        "ideAutoConnect": {
+          "type": "boolean"
+        },
+        "includeCoAuthoredByDroid": {
+          "type": "boolean"
+        },
+        "logoAnimation": {
+          "enum": [
+            "once",
+            "always",
+            "off"
+          ],
+          "type": "string"
+        },
+        "nerdFont": {
+          "type": "boolean"
+        },
+        "outputStyle": {
+          "type": "string"
+        },
+        "overrideTerminalColors": {
+          "type": "boolean"
+        },
+        "sandbox": {
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "filesystem": {
+              "additionalProperties": false,
+              "properties": {
+                "allowWrite": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "denyRead": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "denyWrite": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "type": "object"
+            },
+            "mode": {
+              "enum": [
+                "per-command",
+                "whole-process"
+              ],
+              "type": "string"
+            },
+            "network": {
+              "additionalProperties": false,
+              "properties": {
+                "allowedDomains": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "type": "object"
+            }
+          },
+          "type": "object"
+        },
+        "sessionDefaultSettings": {
+          "additionalProperties": false,
+          "properties": {
+            "autonomyLevel": {
+              "enum": [
+                "off",
+                "low",
+                "medium",
+                "high"
+              ],
+              "type": "string"
+            },
+            "interactionMode": {
+              "enum": [
+                "auto",
+                "spec",
+                "agi"
+              ],
+              "type": "string"
+            },
+            "model": {
+              "type": "string"
+            },
+            "reasoningEffort": {
+              "enum": [
+                "none",
+                "dynamic",
+                "off",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "showThinkingInMainView": {
+          "type": "boolean"
+        },
+        "showTokenUsageIndicator": {
+          "type": "boolean"
+        },
+        "soundFocusMode": {
+          "enum": [
+            "always",
+            "focused",
+            "unfocused"
+          ],
+          "type": "string"
+        },
+        "streamAssistantResponses": {
+          "type": "boolean"
+        },
+        "subagentAutonomyLevel": {
+          "enum": [
+            "inherit",
+            "off",
+            "low",
+            "medium",
+            "high"
+          ],
+          "type": "string"
+        },
+        "toolResultDisplay": {
+          "enum": [
+            "expanded",
+            "compact"
+          ],
+          "type": "string"
+        },
+        "vimMode": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "gemini": {
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "additionalProperties": false,
+          "properties": {
+            "fileFiltering": {
+              "additionalProperties": false,
+              "properties": {
+                "respectGeminiIgnore": {
+                  "type": "boolean"
+                },
+                "respectGitIgnore": {
+                  "type": "boolean"
+                }
+              },
+              "type": "object"
+            }
+          },
+          "type": "object"
+        },
+        "general": {
+          "additionalProperties": false,
+          "properties": {
+            "checkpointing": {
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                }
+              },
+              "type": "object"
+            },
+            "defaultApprovalMode": {
+              "enum": [
+                "default",
+                "auto_edit",
+                "plan"
+              ],
+              "type": "string"
+            },
+            "enableAutoUpdate": {
+              "type": "boolean"
+            },
+            "enableAutoUpdateNotification": {
+              "type": "boolean"
+            },
+            "enableNotifications": {
+              "type": "boolean"
+            },
+            "notificationMethod": {
+              "enum": [
+                "auto",
+                "osc9",
+                "osc777",
+                "bell"
+              ],
+              "type": "string"
+            },
+            "plan": {
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                }
+              },
+              "type": "object"
+            },
+            "preferredEditor": {
+              "enum": [
+                "vscode",
+                "vscodium",
+                "windsurf",
+                "cursor",
+                "zed",
+                "antigravity",
+                "sublimetext",
+                "lapce",
+                "nova",
+                "bbedit",
+                "vim",
+                "neovim",
+                "emacs",
+                "hx",
+                "emacsclient",
+                "micro"
+              ],
+              "type": "string"
+            },
+            "vimMode": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "model": {
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": false,
+          "properties": {
+            "format": {
+              "enum": [
+                "text",
+                "json"
+              ],
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "security": {
+          "additionalProperties": false,
+          "properties": {
+            "autoAddToPolicyByDefault": {
+              "type": "boolean"
+            },
+            "blockGitExtensions": {
+              "type": "boolean"
+            },
+            "disableAlwaysAllow": {
+              "type": "boolean"
+            },
+            "disableYoloMode": {
+              "type": "boolean"
+            },
+            "enablePermanentToolApproval": {
+              "type": "boolean"
+            },
+            "toolSandboxing": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "skills": {
+          "additionalProperties": false,
+          "properties": {
+            "disabled": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "tools": {
+          "additionalProperties": false,
+          "properties": {
+            "allowed": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "confirmationRequired": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "exclude": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "sandboxAllowedPaths": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "sandboxNetworkAccess": {
+              "type": "boolean"
+            },
+            "shell": {
+              "additionalProperties": false,
+              "properties": {
+                "backgroundCompletionBehavior": {
+                  "enum": [
+                    "silent",
+                    "inject",
+                    "notify"
+                  ],
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            }
+          },
+          "type": "object"
+        },
+        "ui": {
+          "additionalProperties": false,
+          "properties": {
+            "compactToolOutput": {
+              "type": "boolean"
+            },
+            "errorVerbosity": {
+              "enum": [
+                "low",
+                "full"
+              ],
+              "type": "string"
+            },
+            "hideBanner": {
+              "type": "boolean"
+            },
+            "hideTips": {
+              "type": "boolean"
+            },
+            "inlineThinkingMode": {
+              "enum": [
+                "off",
+                "full"
+              ],
+              "type": "string"
+            },
+            "loadingPhrases": {
+              "enum": [
+                "tips",
+                "witty",
+                "all",
+                "off"
+              ],
+              "type": "string"
+            },
+            "showLineNumbers": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "homepage": {
+      "description": "Homepage URL.",
+      "type": "string"
+    },
+    "keywords": {
+      "description": "Comma-separated keywords.",
+      "type": "string"
+    },
+    "kilo": {
+      "additionalProperties": false,
+      "properties": {
+        "code_edit_display": {
+          "enum": [
+            "expanded",
+            "collapsed"
+          ],
+          "type": "string"
+        },
+        "default_agent": {
+          "type": "string"
+        },
+        "hide_prompt_training_models": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "privacy_mode": {
+          "type": "boolean"
+        },
+        "reasoning_display": {
+          "enum": [
+            "expanded",
+            "preview",
+            "headline"
+          ],
+          "type": "string"
+        },
+        "small_model": {
+          "type": "string"
+        },
+        "terminal_command_display": {
+          "enum": [
+            "expanded",
+            "collapsed"
+          ],
+          "type": "string"
+        },
+        "web_search": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "kiro": {
+      "additionalProperties": false,
+      "properties": {
+        "acp.agentEngine": {
+          "enum": [
+            "v3",
+            "v2"
+          ],
+          "type": "string"
+        },
+        "app.disableAutoupdates": {
+          "type": "boolean"
+        },
+        "app.warnOnElevatedPrivileges": {
+          "type": "boolean"
+        },
+        "chat.agentEngine": {
+          "enum": [
+            "v3",
+            "v2"
+          ],
+          "type": "string"
+        },
+        "chat.allowAnimations": {
+          "type": "boolean"
+        },
+        "chat.allowAsciiArt": {
+          "type": "boolean"
+        },
+        "chat.allowIcons": {
+          "type": "boolean"
+        },
+        "chat.autoExpandToolOutput": {
+          "type": "boolean"
+        },
+        "chat.defaultAgent": {
+          "type": "string"
+        },
+        "chat.defaultModel": {
+          "type": "string"
+        },
+        "chat.disableAutoCompaction": {
+          "type": "boolean"
+        },
+        "chat.disableGranularTrust": {
+          "type": "boolean"
+        },
+        "chat.disableWrap": {
+          "type": "boolean"
+        },
+        "chat.enableAutoAgentUpgrade": {
+          "type": "boolean"
+        },
+        "chat.enableCodeIntelligence": {
+          "type": "boolean"
+        },
+        "chat.enableKnowledge": {
+          "type": "boolean"
+        },
+        "chat.enableNotifications": {
+          "type": "boolean"
+        },
+        "chat.enablePromptHints": {
+          "type": "boolean"
+        },
+        "chat.enableThinking": {
+          "type": "boolean"
+        },
+        "chat.enableWorkflows": {
+          "type": "boolean"
+        },
+        "chat.greeting.enabled": {
+          "type": "boolean"
+        },
+        "chat.historyMode": {
+          "enum": [
+            "session",
+            "global"
+          ],
+          "type": "string"
+        },
+        "chat.notificationMethod": {
+          "enum": [
+            "auto",
+            "bel",
+            "osc9"
+          ],
+          "type": "string"
+        },
+        "chat.outputStyle": {
+          "type": "string"
+        },
+        "chat.preserveScrollback": {
+          "type": "boolean"
+        },
+        "chat.screenReader": {
+          "enum": [
+            "auto",
+            "on",
+            "off"
+          ],
+          "type": "string"
+        },
+        "chat.sessionDashboard.indexResponses": {
+          "type": "boolean"
+        },
+        "chat.sessionDashboard.scope": {
+          "enum": [
+            "current",
+            "all"
+          ],
+          "type": "string"
+        },
+        "chat.showThinking": {
+          "type": "boolean"
+        },
+        "chat.terminalTitle": {
+          "type": "boolean"
+        },
+        "chat.workflowLaunch": {
+          "enum": [
+            "when-asked",
+            "large-tasks",
+            "delegate-all"
+          ],
+          "type": "string"
+        },
+        "knowledge.defaultExcludePatterns": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "knowledge.defaultIncludePatterns": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "toolSearch.enabled": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "license": {
+      "description": "SPDX license expression.",
+      "type": "string"
+    },
+    "opencode": {
+      "additionalProperties": false,
+      "properties": {
+        "autoupdate": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "notify"
+              ],
+              "type": "string"
+            }
+          ]
+        },
+        "compaction": {
+          "additionalProperties": false,
+          "properties": {
+            "auto": {
+              "type": "boolean"
+            },
+            "prune": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "default_agent": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "permission": {
+          "anyOf": [
+            {
+              "enum": [
+                "allow",
+                "ask",
+                "deny"
+              ],
+              "type": "string"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "bash": {
+                  "anyOf": [
+                    {
+                      "enum": [
+                        "allow",
+                        "ask",
+                        "deny"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "additionalProperties": {
+                        "enum": [
+                          "allow",
+                          "ask",
+                          "deny"
+                        ],
+                        "type": "string"
+                      },
+                      "type": "object"
+                    }
+                  ]
+                },
+                "doom_loop": {
+                  "anyOf": [
+                    {
+                      "enum": [
+                        "allow",
+                        "ask",
+                        "deny"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "additionalProperties": {
+                        "enum": [
+                          "allow",
+                          "ask",
+                          "deny"
+                        ],
+                        "type": "string"
+                      },
+                      "type": "object"
+                    }
+                  ]
+                },
+                "edit": {
+                  "anyOf": [
+                    {
+                      "enum": [
+                        "allow",
+                        "ask",
+                        "deny"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "additionalProperties": {
+                        "enum": [
+                          "allow",
+                          "ask",
+                          "deny"
+                        ],
+                        "type": "string"
+                      },
+                      "type": "object"
+                    }
+                  ]
+                },
+                "external_directory": {
+                  "anyOf": [
+                    {
+                      "enum": [
+                        "allow",
+                        "ask",
+                        "deny"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "additionalProperties": {
+                        "enum": [
+                          "allow",
+                          "ask",
+                          "deny"
+                        ],
+                        "type": "string"
+                      },
+                      "type": "object"
+                    }
+                  ]
+                },
+                "glob": {
+                  "anyOf": [
+                    {
+                      "enum": [
+                        "allow",
+                        "ask",
+                        "deny"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "additionalProperties": {
+                        "enum": [
+                          "allow",
+                          "ask",
+                          "deny"
+                        ],
+                        "type": "string"
+                      },
+                      "type": "object"
+                    }
+                  ]
+                },
+                "grep": {
+                  "anyOf": [
+                    {
+                      "enum": [
+                        "allow",
+                        "ask",
+                        "deny"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "additionalProperties": {
+                        "enum": [
+                          "allow",
+                          "ask",
+                          "deny"
+                        ],
+                        "type": "string"
+                      },
+                      "type": "object"
+                    }
+                  ]
+                },
+                "lsp": {
+                  "anyOf": [
+                    {
+                      "enum": [
+                        "allow",
+                        "ask",
+                        "deny"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "additionalProperties": {
+                        "enum": [
+                          "allow",
+                          "ask",
+                          "deny"
+                        ],
+                        "type": "string"
+                      },
+                      "type": "object"
+                    }
+                  ]
+                },
+                "question": {
+                  "anyOf": [
+                    {
+                      "enum": [
+                        "allow",
+                        "ask",
+                        "deny"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "additionalProperties": {
+                        "enum": [
+                          "allow",
+                          "ask",
+                          "deny"
+                        ],
+                        "type": "string"
+                      },
+                      "type": "object"
+                    }
+                  ]
+                },
+                "read": {
+                  "anyOf": [
+                    {
+                      "enum": [
+                        "allow",
+                        "ask",
+                        "deny"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "additionalProperties": {
+                        "enum": [
+                          "allow",
+                          "ask",
+                          "deny"
+                        ],
+                        "type": "string"
+                      },
+                      "type": "object"
+                    }
+                  ]
+                },
+                "skill": {
+                  "anyOf": [
+                    {
+                      "enum": [
+                        "allow",
+                        "ask",
+                        "deny"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "additionalProperties": {
+                        "enum": [
+                          "allow",
+                          "ask",
+                          "deny"
+                        ],
+                        "type": "string"
+                      },
+                      "type": "object"
+                    }
+                  ]
+                },
+                "task": {
+                  "anyOf": [
+                    {
+                      "enum": [
+                        "allow",
+                        "ask",
+                        "deny"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "additionalProperties": {
+                        "enum": [
+                          "allow",
+                          "ask",
+                          "deny"
+                        ],
+                        "type": "string"
+                      },
+                      "type": "object"
+                    }
+                  ]
+                },
+                "todowrite": {
+                  "anyOf": [
+                    {
+                      "enum": [
+                        "allow",
+                        "ask",
+                        "deny"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "additionalProperties": {
+                        "enum": [
+                          "allow",
+                          "ask",
+                          "deny"
+                        ],
+                        "type": "string"
+                      },
+                      "type": "object"
+                    }
+                  ]
+                },
+                "webfetch": {
+                  "anyOf": [
+                    {
+                      "enum": [
+                        "allow",
+                        "ask",
+                        "deny"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "additionalProperties": {
+                        "enum": [
+                          "allow",
+                          "ask",
+                          "deny"
+                        ],
+                        "type": "string"
+                      },
+                      "type": "object"
+                    }
+                  ]
+                },
+                "websearch": {
+                  "anyOf": [
+                    {
+                      "enum": [
+                        "allow",
+                        "ask",
+                        "deny"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "additionalProperties": {
+                        "enum": [
+                          "allow",
+                          "ask",
+                          "deny"
+                        ],
+                        "type": "string"
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "share": {
+          "enum": [
+            "manual",
+            "disabled"
+          ],
+          "type": "string"
+        },
+        "small_model": {
+          "type": "string"
+        },
+        "snapshot": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "qoder": {
+      "additionalProperties": false,
+      "properties": {
+        "general": {
+          "additionalProperties": false,
+          "properties": {
+            "defaultPermissionMode": {
+              "enum": [
+                "default",
+                "accept_edits",
+                "plan",
+                "auto",
+                "bypass_permissions",
+                "dont_ask"
+              ],
+              "type": "string"
+            },
+            "enableAutoUpdate": {
+              "type": "boolean"
+            },
+            "enableNotifications": {
+              "type": "boolean"
+            },
+            "vimMode": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "model": {
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "reasoningEffort": {
+              "enum": [
+                "disabled",
+                "off",
+                "none",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": false,
+          "properties": {
+            "format": {
+              "enum": [
+                "text",
+                "json"
+              ],
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "permissions": {
+          "additionalProperties": false,
+          "properties": {
+            "allow": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "ask": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "deny": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "security": {
+          "additionalProperties": false,
+          "properties": {
+            "disableYoloMode": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "ui": {
+          "additionalProperties": false,
+          "properties": {
+            "compactToolOutput": {
+              "type": "boolean"
+            },
+            "hideBanner": {
+              "type": "boolean"
+            },
+            "hideTips": {
+              "type": "boolean"
+            },
+            "showLineNumbers": {
+              "type": "boolean"
+            },
+            "theme": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "replaced-by": {
+      "description": "The reference that replaces this package.",
+      "type": "string"
+    },
+    "repository": {
+      "description": "Source repository, an https URL.",
+      "type": "string"
+    },
+    "requires": {
+      "additionalProperties": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "type": "object"
+      },
+      "description": "Artifacts this package requires: one table per kind (`skills`, `rules`, `agents`, `mcp`, `hooks`, `bundles`, `settings`), each mapping a binding name to a member reference.",
+      "propertyNames": {
+        "enum": [
+          "skills",
+          "rules",
+          "agents",
+          "mcp",
+          "hooks",
+          "bundles",
+          "settings"
+        ]
+      },
+      "type": "object"
+    },
+    "summary": {
+      "description": "Short summary for listings.",
+      "type": "string"
+    },
+    "vendor": {
+      "description": "Publishing vendor.",
+      "type": "string"
+    },
+    "warp": {
+      "additionalProperties": false,
+      "properties": {
+        "agents": {
+          "additionalProperties": false,
+          "properties": {
+            "knowledge": {
+              "additionalProperties": false,
+              "properties": {
+                "rules_enabled": {
+                  "type": "boolean"
+                },
+                "warp_drive_context_enabled": {
+                  "type": "boolean"
+                }
+              },
+              "type": "object"
+            },
+            "mcp_servers": {
+              "additionalProperties": false,
+              "properties": {
+                "file_based_mcp_enabled": {
+                  "type": "boolean"
+                }
+              },
+              "type": "object"
+            },
+            "warp_agent": {
+              "additionalProperties": false,
+              "properties": {
+                "active_ai": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "agent_mode_query_suggestions_enabled": {
+                      "type": "boolean"
+                    },
+                    "code_suggestions_enabled": {
+                      "type": "boolean"
+                    },
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "git_operations_autogen_enabled": {
+                      "type": "boolean"
+                    },
+                    "intelligent_autosuggestions_enabled": {
+                      "type": "boolean"
+                    },
+                    "rule_suggestions_enabled": {
+                      "type": "boolean"
+                    },
+                    "shared_block_title_generation_enabled": {
+                      "type": "boolean"
+                    }
+                  },
+                  "type": "object"
+                },
+                "input": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "ai_auto_detection_enabled": {
+                      "type": "boolean"
+                    },
+                    "include_agent_commands_in_history": {
+                      "type": "boolean"
+                    },
+                    "nld_in_terminal_enabled": {
+                      "type": "boolean"
+                    },
+                    "show_agent_tips": {
+                      "type": "boolean"
+                    },
+                    "show_model_selectors_in_prompt": {
+                      "type": "boolean"
+                    }
+                  },
+                  "type": "object"
+                },
+                "is_any_ai_enabled": {
+                  "type": "boolean"
+                },
+                "other": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "agent_attribution_enabled": {
+                      "type": "boolean"
+                    },
+                    "auto_approve_bypasses_command_denylist": {
+                      "type": "boolean"
+                    },
+                    "cloud_agent_computer_use_enabled": {
+                      "type": "boolean"
+                    },
+                    "default_prompt_submission_mode": {
+                      "enum": [
+                        "interrupt",
+                        "queue"
+                      ],
+                      "type": "string"
+                    },
+                    "long_running_command_submission_mode": {
+                      "enum": [
+                        "send_immediately",
+                        "queue_until_command_completes"
+                      ],
+                      "type": "string"
+                    },
+                    "open_conversation_layout_preference": {
+                      "enum": [
+                        "new_tab",
+                        "split_pane"
+                      ],
+                      "type": "string"
+                    },
+                    "orchestration_message_display_mode": {
+                      "enum": [
+                        "show_and_collapse",
+                        "always_show",
+                        "always_collapse"
+                      ],
+                      "type": "string"
+                    },
+                    "should_render_use_agent_toolbar_for_user_commands": {
+                      "type": "boolean"
+                    },
+                    "should_show_oz_updates_in_zero_state": {
+                      "type": "boolean"
+                    },
+                    "show_agent_notifications": {
+                      "type": "boolean"
+                    },
+                    "show_conversation_history": {
+                      "type": "boolean"
+                    },
+                    "thinking_display_mode": {
+                      "enum": [
+                        "show_and_collapse",
+                        "always_show",
+                        "never_show"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              },
+              "type": "object"
+            }
+          },
+          "type": "object"
+        },
+        "general": {
+          "additionalProperties": false,
+          "properties": {
+            "default_session_mode": {
+              "enum": [
+                "terminal",
+                "agent",
+                "cloud_agent",
+                "docker_sandbox"
+              ],
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "required": [
+    "description"
+  ],
+  "title": "settings/<name>.toml — Grimoire settings package",
+  "type": "object"
+}

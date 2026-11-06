@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Grimoire Authors
 
-//! `grim hook allow` — consent to the hooks this checkout declares.
+//! `grim hook allow` — consent to the hooks and settings this checkout declares.
 //!
 //! ## The gesture that was missing
 //!
@@ -14,12 +14,14 @@
 //!
 //! ## What it records, and how that differs from `grim add`
 //!
-//! This records the **whole declared hook set** for the resolved workspace,
-//! replacing whatever the record held. That is correct precisely because it is
-//! the reviewing gesture: the user is shown the workspace and answers for all of
-//! it. `grim add` unions instead, recording only what the added reference
-//! brought in — see [`crate::command::hook_consent`] for why that asymmetry is
-//! the T3 control rather than an inconsistency.
+//! This records the **whole declared set** for the resolved workspace, hooks and
+//! settings packages alike and whatever the feature flags say, replacing whatever
+//! the record held. That is correct precisely because it is the reviewing
+//! gesture: the user is shown the workspace and answers for all of it, and a flag
+//! turned on later has nothing new to ask. `grim add` unions instead, recording
+//! only what the added reference brought in — see
+//! [`crate::command::hook_consent`] for why that asymmetry is the T3 control
+//! rather than an inconsistency.
 //!
 //! ## Global scope is refused, and that is not a failure to write
 //!
@@ -30,6 +32,7 @@
 //! a **usage error** (64) naming the reason — the same shape `ocx shell allow`
 //! uses for its own always-consented tier.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use clap::Args;
@@ -54,7 +57,8 @@ pub struct AllowArgs {
     pub path: Option<PathBuf>,
 }
 
-/// Record consent for the resolved workspace over every hook it declares.
+/// Record consent for the resolved workspace over every hook and settings
+/// package it declares.
 ///
 /// # Errors
 ///
@@ -79,23 +83,31 @@ pub async fn run(ctx: &Context, args: &AllowArgs) -> anyhow::Result<(HookConsent
         Err(e) if e.is_not_found() => None,
         Err(e) => return Err(crate::error::Error::from(e).into()),
     };
-    let hooks = lock.as_ref().map(hook_consent::declared_hooks).unwrap_or_default();
+    let keys = lock
+        .as_ref()
+        .map(hook_consent::reviewed_consent_keys)
+        .unwrap_or_default();
 
     // Replace, not union: this is the reviewing gesture, so the set the user was
-    // shown is the set that lands. A hook that dropped out of the declaration
+    // shown is the set that lands. An artifact that dropped out of the declaration
     // should not linger in the record as a pre-approval for its own return.
-    match consent::record(ctx.grim_home(), scope.scope, &scope.workspace, &hooks)? {
+    match consent::record(ctx.grim_home(), scope.scope, &scope.workspace, &keys)? {
         Recorded::Stamped => {
             // The record is read on every arming decision, but nothing here
             // re-derives the dispatch table — see the module doc. Say so, or a
             // user who runs no further command reasonably expects the hooks
             // to already be live.
-            tracing::warn!("consent recorded; run `grim install` to arm these hooks");
+            let next_step = if consent::split_by_kind(&keys).1.is_empty() {
+                "arm these hooks"
+            } else {
+                "apply what it covers"
+            };
+            tracing::warn!("consent recorded; run `grim install` to {next_step}");
             Ok((
                 HookConsentReport::new(
                     scope.workspace.clone(),
                     HookConsentAction::Consented,
-                    hooks.into_iter().collect(),
+                    keys.into_iter().collect(),
                     Some(hook_dispatch::consent_path(ctx.grim_home(), &scope.workspace)),
                 ),
                 ExitCode::Success,
@@ -104,9 +116,44 @@ pub async fn run(ctx: &Context, args: &AllowArgs) -> anyhow::Result<(HookConsent
         // Not a write failure: the global toolchain is always consented, so
         // declining to record it is the correct outcome. Saying so beats
         // reporting a record that was never written.
-        Recorded::GlobalNeedsNoRecord => Err(crate::command::hook_consent_usage(
-            "the global scope is always consented for hooks and carries no consent record; \
-             run `grim hook allow` inside a workspace instead",
-        )),
+        Recorded::GlobalNeedsNoRecord => Err(crate::command::hook_consent_usage(global_refusal(&keys))),
+    }
+}
+
+/// The refusal for a scope that carries no record. A scope with no settings
+/// keeps its shipped sentence, which also reaches the JSON error document.
+fn global_refusal(keys: &BTreeSet<String>) -> &'static str {
+    if consent::split_by_kind(keys).1.is_empty() {
+        "the global scope is always consented for hooks and carries no consent record; \
+         run `grim hook allow` inside a workspace instead"
+    } else {
+        "the global scope is always consented and carries no consent record; \
+         run `grim consent allow` inside a workspace instead"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The refusal also lands in the JSON error document, so a scope with no
+    /// settings keeps its sentence, and a settings scope is not told about hooks.
+    #[test]
+    fn the_global_refusal_is_worded_for_what_the_scope_declares() {
+        const HOOKS_ONLY: &str = "the global scope is always consented for hooks and carries no consent record; \
+                                  run `grim hook allow` inside a workspace instead";
+        let hook = BTreeSet::from(["guard@ghcr.io/acme/guard".to_string()]);
+        let both = BTreeSet::from([
+            "guard@ghcr.io/acme/guard".to_string(),
+            "settings:team@ghcr.io/acme/team".to_string(),
+        ]);
+
+        assert_eq!(global_refusal(&BTreeSet::new()), HOOKS_ONLY);
+        assert_eq!(global_refusal(&hook), HOOKS_ONLY);
+        assert_eq!(
+            global_refusal(&both),
+            "the global scope is always consented and carries no consent record; \
+             run `grim consent allow` inside a workspace instead"
+        );
     }
 }
