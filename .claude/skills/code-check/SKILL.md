@@ -36,7 +36,7 @@ Role: audit Grimoire code for Clean Code, SOLID, DRY, pattern consistency.
 - `.claude/rules/arch-principles.md` — crate layout, pattern catalog, code style (descriptive type names, no `mod.rs`)
 - `.claude/rules/subsystem-cli.md` — CLI shell + single-table output rule
 - `.claude/rules/subsystem-cli-api.md` — report data layer conventions
-- `.claude/rules/subsystem-file-structure.md` — storage layout constraints
+- `.claude/rules/subsystem-file-structure.md` — storage layout constraints (core and index; install-layout, vendor-path, state and anchor parts: `subsystem-*.md` listed there)
 
 ## Tool Preferences
 
