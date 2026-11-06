@@ -10,7 +10,7 @@ first:
 
 1. **The installed binary** — `grim build` output and `grim build --help`
    reflect the schema actually compiled in. For the TOML surfaces,
-   `grim schema --kind <config|publish|lock|mcp|hook>` emits the schema
+   `grim schema --kind <config|publish|lock|mcp|hook|settings>` emits the schema
    generated from grim's own parse structs, doc comments included — for
    `hook.toml` this is the shortest path to ground truth, shorter than
    reading the source.
@@ -19,6 +19,7 @@ first:
    [Agent Artifacts][agents], [MCP Server Artifacts][mcp],
    [Client Compatibility][clients], [The Package Index][index],
    [Hooks][hooks] (incl. the handler contract), [Hook Troubleshooting][hooks-ts], [Agent Hooks guide][agent-hooks],
+   [Settings][settings] (document format and field table), [Share settings guide][share-settings],
    [Host a plugin marketplace][host-mp], [Host Your Own Index][host-index],
    [Artifact Ratings][ratings], [`grim export marketplace`][export-mp],
    [Hand a team a plugin][team-plugin], [Use a marketplace][use-mp],
@@ -54,7 +55,10 @@ On every grim **minor** release:
    `grim hook list --help` / `grim hook --help` for the user-facing surface.
    `grim hook` has three user-facing subcommands (`list`, `allow`,
    `revoke`); dispatch runs through the `grim-hook` launcher, which is not a
-   `grim` subcommand and not something a person types.
+   `grim` subcommand and not something a person types. Do the same for the
+   settings kind: `options.experimental.settings`, `grim build --kind
+   settings`, and the [Settings][settings] field table behind
+   `../SKILL.md` § Settings Ship Gated.
 6. Bump the `compatibility` frontmatter in `SKILL.md` to the verified
    version line. The prose and the footer stay version-neutral — they
    track the release the package ships beside, so nothing else to bump.
@@ -73,6 +77,7 @@ On every grim **minor** release:
 - `grim hook.toml manifest schema events tiers matcher argv command`
 - `grim hook payload not executable registry 0644 interpreter form`
 - `grim options.experimental.hooks hook allow workspace consent arming gate`
+- `grim settings document harness table settings_fields merge class options.experimental.settings`
 - `agentskills.io specification metadata map string values`
 - `grim export marketplace marketplace.toml marketplace.lock ownership untracked-destination`
 - `grim marketplace regenerate verify required check CODEOWNERS grim/marketplace`
@@ -102,3 +107,5 @@ On every grim **minor** release:
 [config-mp]: https://grimoire.rs/configuration.html#marketplace-table
 [team-plugin]: https://grimoire.rs/guides/team-plugin.html
 [use-mp]: https://grimoire.rs/guides/use-a-marketplace.html
+[settings]: https://grimoire.rs/settings.html
+[share-settings]: https://grimoire.rs/guides/share-settings.html

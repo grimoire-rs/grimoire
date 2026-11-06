@@ -79,7 +79,7 @@ When changing it, **preserve existing groups**.
 Release ceremony is a human-driven process with tooling support:
 
 ```bash
-task release:prepare    # run verify, bump Cargo.toml (git-cliff --bumped-version), regenerate CHANGELOG.md
+task release:prepare    # run verify, bump Cargo.toml and catalog/publish.toml (git-cliff --bumped-version), regenerate CHANGELOG.md
 /changelog              # write the release up on the site changelog (docs/src/content/docs/changelog.md)
 # Human reviews the changes
 git add -A && git commit -m "release: vX.Y.Z"
@@ -103,11 +103,12 @@ then the post-announce jobs.
 `dist-workspace.toml` `post-announce-jobs` runs
 `.github/workflows/publish-catalog.yml` after the GitHub Release: it
 republishes every package in `catalog/publish.toml` to GHCR via `grim
-publish` (skip-existing, so only version-bumped packages actually push).
+publish` (skip-existing, so only packages with a new version actually push).
 Locally the same batch runs as `task catalog:release` (append flags after
-`--`, e.g. `-- --dry-run`). Catalog version bumps are staged in
-`catalog/publish.toml` during feature work (drift duty →
-`catalog/README.md`) and ride out with the next release.
+`--`, e.g. `-- --dry-run`). The catalog's `publish.toml`
+version equals `[workspace.package] version`; `release:prepare` sets both,
+so feature work never bumps it (drift duty → `catalog/README.md`) and
+content changes ride out with the next release.
 
 ### Version Between Releases
 

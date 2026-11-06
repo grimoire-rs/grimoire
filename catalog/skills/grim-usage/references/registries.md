@@ -737,7 +737,8 @@ list all`); `grim config set options.search_min_relevance 0` (or
 `grim config --global set options.search_min_relevance 0` outside a
 project) turns the cutoff off for good. The unqueried browse is unranked
 and lists registry by registry. A bare kind keyword
-(`skill`/`rule`/`bundle`/`agent`/`mcp`, singular or plural) filters by kind
+(`skill`/`rule`/`bundle`/`agent`/`mcp`/`hook`/`settings`, singular or plural)
+filters by kind
 instead of matching as text; an empty query lists the whole catalog.
 Confirm the match fields and kind-filter keywords with `grim search --help`.
 When `[[registries]]` are configured, all of them are browsed and flattened
@@ -909,6 +910,14 @@ one changes what the action keys do:
   The forced retry covers what `grim add --force` covers: the artifact, or a
   bundle's members, nested bundles' included, but not a member you also declared
   directly. It never covers a dependency, so a refused dependency opens no dialog. The status line names it instead.
+- **A settings row** (experimental) can read `gated`, `not-armed` or
+  `stale`. On a single-artifact action a refused settings value opens the
+  Overwrite dialog like any other refusal, and the dialog lists the refused
+  values. With no dialog open, the changes and refusals show in a Settings
+  panel whose only button is Close; `grim install --force` overwrites what
+  it marks overwrite, and after a delete `grim uninstall --force` removes
+  them. The status line reads `refused (settings set or changed outside
+  grim)`.
 - **`d` removes dependencies** only the deleted artifact needed, exactly as
   `grim uninstall` does. One another artifact still needs is kept.
 - **The batch confirmation** guards `i`/`u`/`d` on more than one artifact —

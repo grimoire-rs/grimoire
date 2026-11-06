@@ -1,19 +1,19 @@
 ---
 name: grim-usage
-description: Drive the grim CLI — the OCI package manager for AI skills, rules, agents, MCP servers, hooks, and bundles. Use when installing, updating, searching, rating, or publishing AI-config artifacts with grim; when composing grim init, config, add, lock, install, update, status, context, fetch, describe, export, search, rate, tui, mcp, hook, build, release, publish, login, logout, or completions commands; when adding, pinning, or exporting a plugin marketplace (marketplace.toml); when enabling opt-in telemetry; when configuring settings, multiple registries, or qualified alias/repo references; or when resolving registries, project vs global scope, client targets, or offline mode.
+description: Drive the grim CLI — the OCI package manager for AI skills, rules, agents, MCP servers, hooks, settings packages, and bundles. Use when installing, updating, searching, rating, or publishing AI-config artifacts with grim; when composing grim init, config, add, lock, install, update, status, context, fetch, describe, export, search, rate, tui, mcp, hook, build, release, publish, login, logout, or completions commands; when adding, pinning, or exporting a plugin marketplace (marketplace.toml); when enabling opt-in telemetry; when configuring settings, multiple registries, or qualified alias/repo references; or when resolving registries, project vs global scope, client targets, or offline mode.
 license: Apache-2.0
 compatibility: grim>=0.16
 metadata:
   summary: How to use the grim CLI end to end
-  keywords: grim,grimoire,cli,oci,registry,install,update,publish,skills,rules,agents,bundles,mcp,hooks,multi-registry
+  keywords: grim,grimoire,cli,oci,registry,install,update,publish,skills,rules,agents,bundles,mcp,hooks,settings,multi-registry
   repository: https://github.com/grimoire-rs/grimoire
 ---
 
 # Grim Usage
 
 Grimoire (binary: `grim`) is a package manager for AI-agent configuration.
-It distributes six artifact kinds — **skills**, **rules**, **agents**,
-**MCP servers**, **hooks**, and **bundles** — through any standard OCI
+It distributes seven artifact kinds — **skills**, **rules**, **agents**,
+**MCP servers**, **hooks**, **settings**, and **bundles** — through any standard OCI
 registry (GHCR, Docker Hub, a private Distribution), with lockfile-pinned
 installs into a growing fleet of AI clients plus a vendor-neutral `agents`
 target. The current names are listed in
@@ -46,6 +46,15 @@ rather than assuming.
 > [references/consume.md](references/consume.md#hooks); a hook that stays
 > silent:
 > [references/troubleshooting.md](references/troubleshooting.md#a-hook-that-never-fires).
+
+> **Settings are experimental too, and off by default.** A settings package
+> writes values into each harness's own settings file (Claude, Codex,
+> Copilot, Cursor, OpenCode, Qoder, Antigravity, Amp, Droid, Gemini, Kilo,
+> Kiro, Warp; at project scope only Claude, into
+> `.claude/settings.local.json`). It applies only past
+> `options.experimental.settings` (config-only, no environment variable) and,
+> at project scope, the same workspace consent hooks use. The flag is not
+> consent. Full picture: [references/consume.md](references/consume.md#settings).
 
 Two consequences of that shape are worth knowing before your first
 install. When **nothing** is detected, grim targets the generic `agents`
@@ -84,7 +93,7 @@ To verify a pre-built grim release archive's build provenance:
 | `grim config` | Read/write `grimoire.toml` settings and registries | [registries](references/registries.md) |
 | `grim add` | Declare an artifact and pin it in the lock | [consume](references/consume.md) |
 | `grim lock` | Resolve floating tags to digests | [consume](references/consume.md) |
-| `grim install` | Materialize the lock into AI clients | [consume](references/consume.md) |
+| `grim install` | Materialize the lock into AI clients; `grim install <path>` dev-installs a local skill, rule or agent without declaring it | [consume](references/consume.md) |
 | `grim update` | Re-resolve, re-materialize, prune; `--marketplace <path>` instead rolls a declared plugin's own lock forward and installs nothing | [consume](references/consume.md) |
 | `grim status` | Report each declared artifact's state | [consume](references/consume.md) |
 | `grim context` | Report the resolved scope, paths, clients, registries | [consume](references/consume.md) |
@@ -98,12 +107,12 @@ To verify a pre-built grim release archive's build provenance:
 | `grim rate` | Vote on an artifact through the index's rating forge | [registries](references/registries.md) |
 | `grim mcp` | Run a local STDIO MCP server for AI agent integration | [registries](references/registries.md) |
 | `grim hook list` | Report every declared hook with its tier, events, and per-client arming state | [consume](references/consume.md#hooks) |
-| `grim hook allow` / `grim hook revoke` (alias `deny`) | Record or remove this workspace's consent to arm its hooks | [consume](references/consume.md#hooks) |
+| `grim hook allow` / `grim hook revoke` (alias `deny`) | Record or remove this workspace's consent to arm its hooks and apply its settings packages; `grim consent` is an alias of `grim hook` | [consume](references/consume.md#hooks) |
 | `grim build` | Validate and pack locally, no push | [publish](references/publish.md) |
 | `grim release` | Validate, pack, push with cascade tags | [publish](references/publish.md) |
 | `grim publish` | Batch-release packages from a `publish.toml` manifest | [publish](references/publish.md) |
 | `grim login` / `logout` | Manage registry credentials | [publish](references/publish.md) |
-| `grim schema` | Emit the JSON Schema for `grimoire.toml` / `publish.toml` / `grimoire.lock` / the MCP descriptor / `hook.toml` | [publish](references/publish.md) |
+| `grim schema` | Emit the JSON Schema for `grimoire.toml` / `publish.toml` / `grimoire.lock` / the MCP descriptor / `hook.toml` / a settings document (`settings/<name>.toml`) | [publish](references/publish.md) |
 | `grim completions <shell>` | Print a shell completion script (bash, elvish, fish, powershell, zsh) to stdout; redirect it into your shell's completion dir | `grim completions --help` |
 
 > **Deprecation:** a publisher can retire a package without
@@ -144,13 +153,22 @@ immutable digest). A bare reference defaults to `:latest`.
 
 A third form skips the registry: a **local path** — `./skills/x`,
 `../shared/rule.md`, or an absolute path — names a directory or file on
-disk directly. The discriminant is used everywhere a reference is accepted
-(`grim add`, `grim install`, a `[skills]`/`[rules]`/`[agents]`/`[mcp]`/`[bundles]`
-value): a value starting with `./` or `../`, or an absolute path, is a
-local path source; anything else is an OCI reference. See
-[references/consume.md](references/consume.md#declaring) for how it is
-declared and installed. **`[hooks]` accepts registry references only** — a
-path value there is refused, so a hook always comes from a registry.
+disk directly. A value starting with `./` or `../`, or an absolute path, is
+a local path source; anything else is an OCI reference. Path values are
+accepted in `[skills]`, `[rules]`, `[agents]` and `[bundles]`, and as the
+argument of `grim add`, `grim install` and `grim export plugin`. A path
+given to `grim install` is a dev-install: it renders a local skill, rule or
+agent into your clients without declaring it, and that positional takes no
+registry reference (exit 64). `[mcp]`, `[hooks]` and `[settings]` take registry
+references only — a path value there is refused with exit 65, so an MCP
+server, a hook or a settings package always comes from a registry. See
+[references/consume.md](references/consume.md#declaring) for how a path is
+declared and installed.
+
+A `grimoire.toml` value must be fully qualified (`registry/repository`,
+with an optional tag or digest). The short and qualified forms below are for
+command arguments such as `grim add` and `grim describe`, which expand them
+before anything is written.
 
 A short reference with no registry resolves against the default registry —
 `--registry` flag, then `GRIM_DEFAULT_REGISTRY`, then config, then the

@@ -58,9 +58,17 @@ in `publish.toml` omit their `version` and inherit the top-level one; the
 release CI passes `--version <git tag>` (the `v` prefix is stripped by
 grim), so the published catalog always matches the binary that shipped it.
 The top-level `version` in `publish.toml` is the fallback for local/manual
-runs — keep it at the next planned release. No catalog-specific git tags
-(`cliff.toml`'s unanchored `tag_pattern` would pick them up and corrupt
-`--bumped-version`).
+runs and equals `[workspace.package] version` in `Cargo.toml`, which
+`task release:prepare` sets together with it (a test pins the equality).
+
+Between releases that is the last release, so a manual run never mints a
+tag ahead of a grim release. It skips every package whose exact-version tag
+already exists, whatever its content. It pushes only a package with no tag
+at that version yet, and it re-points each description companion either
+way. Changed content at an existing version waits for the next release,
+unless the run passes `--force`, which moves the existing tag. No
+catalog-specific git tags (`cliff.toml`'s unanchored `tag_pattern` would
+pick them up and corrupt `--bumped-version`).
 
 Content changes therefore need **no per-package version bump** — they ride
 out with the next grim release automatically (skip-existing pushes every
@@ -118,8 +126,9 @@ plain pushes to main.
 
 - `task catalog:verify` runs in CI on every PR — the real parser is the
   schema gate.
-- When `docs/src/content/docs/{artifacts,clients,publishing,vendor-metadata,commands,package-index,configuration,json-interface,stability}.md`
-  or `src/command/**` or `src/mcp/**` or `src/oci/{mcp,hook}.rs` change, review
+- When `docs/src/content/docs/{artifacts,clients,publishing,vendor-metadata,commands,package-index,configuration,json-interface,stability,settings,guides/share-settings}.md`
+  or `src/command/**` or `src/mcp/**` or `src/oci/{mcp,hook,settings}.rs`
+  or a `settings_fields()` table in `src/install/vendor_*.rs` change, review
   `catalog/skills/grim-usage`,
   `catalog/skills/grim-authoring`, and — for `clients.md` and
   `vendor-metadata.md` — `catalog/skills/ai-config-authoring` for drift (each package's
@@ -127,7 +136,9 @@ plain pushes to main.
   `src/oci/hook.rs` is named explicitly because it, not any doc page, *defines*
   the published `hook.toml` format and its closed tier/event vocabularies — a
   schema change there is exactly a `grim-authoring` drift event, and without
-  this entry it would trigger no review at all.
+  this entry it would trigger no review at all. `src/oci/settings.rs` and the
+  vendors' `settings_fields()` tables are named for the same reason: they
+  define the settings document and the harness fields it may set.
 - Hard numbers (vendor limits, activation rates) drift fastest — re-verify
   against the sources in `references/updating.md` before trusting.
 

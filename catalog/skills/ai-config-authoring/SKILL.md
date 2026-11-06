@@ -49,7 +49,9 @@ failure modes, migration paths — in
 | Logic a machine can run rather than prose to read | Hook, or a script inside a skill |
 
 Every row above is *packageable* — grim distributes skills, rules,
-subagents, MCP registrations, and now hooks as artifact kinds. That changes
+subagents, MCP registrations, and now hooks as artifact kinds, plus an
+experimental settings kind that writes values into a client's own settings
+file behind its own flag. That changes
 distribution, never portability: a hook still needs a lifecycle surface in
 the client to be written at all, so it reaches a narrow set (four clients
 today) where a skill reaches all of them. Details in

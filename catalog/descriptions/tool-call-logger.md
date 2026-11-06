@@ -29,9 +29,13 @@ hashes for integrity.
 
 Installing this changes nothing until you turn hooks on deliberately. They
 are off behind the `[options.experimental] hooks` feature flag and gated
-again by your workspace's own consent (`grim hook allow`); until both allow
-it, `grim install` skips the hook with a warning and `grim status` names the
+again by your workspace's own consent (`grim hook allow`). Since grim 0.16.0,
+`grim consent allow` is the same command. Until both allow it,
+`grim install` skips the hook with a warning and `grim status` names the
 gate that is still closed.
+
+With the flag on, `grim install --trust-workspace` arms the hook for one run
+and writes no record. A grim before 0.16.0 spells that flag `--trust-hooks`.
 
 ```sh
 grim add ghcr.io/grimoire-rs/hooks/tool-call-logger:0

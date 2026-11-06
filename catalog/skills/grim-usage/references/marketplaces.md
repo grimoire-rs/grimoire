@@ -118,7 +118,8 @@ which tag to pin. Anchor: [private repositories][private].
 
 ## Pin a team
 
-A repository-committed pin works for Claude Code and Copilot only.
+A repository-committed pin works for Claude Code, Copilot and Codex. Cursor
+has none.
 
 - **Claude Code:** `claude plugin marketplace add <repo>#<tag> --scope project`
   writes `.claude/settings.json` with `extraKnownMarketplaces.<name>.source`
@@ -129,15 +130,17 @@ A repository-committed pin works for Claude Code and Copilot only.
 - **Copilot and VS Code:** the same two keys in `.github/copilot/settings.json`
   (VS Code also reads `.claude/settings.json`). The Copilot cloud agent can
   use it only for a **public** marketplace repository.
-- **Codex** registers per user and a repository cannot commit a registration:
-  put the `codex plugin marketplace add` line in the README or onboarding
-  script. **Cursor** has no repo-level setting.
+- **Codex** reads a marketplace from a committed `.codex/config.toml`:
+  declare it under `[marketplaces.<name>]` with `source_type = "git"`, a
+  `source` and an optional `ref`. Codex loads that file only after the
+  contributor trusts the project. **Cursor** has no repo-level setting.
 - **Claude Code on the web** ignores repo-declared marketplaces and plugins
   and has no `/plugin`. Use server-managed settings (Team or Enterprise admin
   console), or commit the content itself under `.claude/skills|agents|commands|rules`
   and `CLAUDE.md`, which is what `grim install` writes.
 
-Anchors: [team pin][team-pin], [Claude Code on the web][claude-web].
+Anchors: [team pin][team-pin], [Codex and Cursor][team-pin-none],
+[Claude Code on the web][claude-web].
 
 ## Organization rollout
 
@@ -209,6 +212,7 @@ are in [troubleshooting.md](troubleshooting.md#marketplace-and-plugin-export).
 [uam-cursor]: https://grimoire.rs/guides/use-a-marketplace.html#cursor
 [private]: https://grimoire.rs/guides/use-a-marketplace.html#private-repositories
 [team-pin]: https://grimoire.rs/guides/use-a-marketplace.html#team-pin
+[team-pin-none]: https://grimoire.rs/guides/use-a-marketplace.html#team-pin-none
 [claude-web]: https://grimoire.rs/guides/use-a-marketplace.html#claude-web
 [organization]: https://grimoire.rs/guides/use-a-marketplace.html#organization
 [pin-and-update]: https://grimoire.rs/guides/use-a-marketplace.html#pin-and-update
