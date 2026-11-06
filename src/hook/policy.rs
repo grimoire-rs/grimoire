@@ -204,13 +204,16 @@ impl HookPolicy {
     }
 
     /// Why nothing of this kind applies while its flag is off, naming the flag
-    /// of this policy's scope. A settings package at global scope names
-    /// `--global`, because the project flag does not cover it; every other
+    /// of this policy's scope. At global scope either kind names `--global`,
+    /// because the project flag does not cover it; at project scope the
     /// sentence is [`not_armed_message`]'s.
     pub(crate) fn feature_off_message(&self) -> &'static str {
         match (self.kind, self.scope) {
             (ArtifactKind::Settings, ConfigScope::Global) => {
                 "settings are gated; enable them with `grim config set --global options.experimental.settings true`"
+            }
+            (ArtifactKind::Hook, ConfigScope::Global) => {
+                "hooks are gated; enable them with `grim config set --global options.experimental.hooks true`"
             }
             (kind, _) => not_armed_message(kind, NotArmedReason::FeatureOff),
         }
@@ -1188,46 +1191,68 @@ mod tests {
         assert!(message.contains("--no-trust-hooks"), "{message}");
     }
 
-    /// A settings run with its flag off names the flag of its own scope: the
-    /// project flag does not cover `--global`, and the project sentence and
-    /// every hook sentence stay word for word.
-    #[test]
-    fn the_flag_off_remedy_names_the_scope_that_is_off() {
-        let at = |scope| {
-            Run {
-                hooks: false,
-                settings: false,
-                scope,
-                ..Run::default()
-            }
-            .policies()
-        };
-        let project = at(ConfigScope::Project);
-        let global = at(ConfigScope::Global);
+    /// Both kinds' flags off at `scope`.
+    fn flags_off_at(scope: ConfigScope) -> ConsentPolicies {
+        Run {
+            hooks: false,
+            settings: false,
+            scope,
+            ..Run::default()
+        }
+        .policies()
+    }
 
+    /// At global scope each kind names `--global`: the project flag does not
+    /// cover a global run, so the project remedy would change nothing.
+    #[test]
+    fn the_global_flag_off_remedy_names_global_for_both_kinds() {
+        let global = flags_off_at(ConfigScope::Global);
+
+        assert_eq!(
+            global.hooks.feature_off_message(),
+            "hooks are gated; enable them with `grim config set --global options.experimental.hooks true`"
+        );
         assert_eq!(
             global.settings.feature_off_message(),
             "settings are gated; enable them with `grim config set --global options.experimental.settings true`"
+        );
+        // `grim install --global` warns with the refusal, so it names the same flag.
+        assert_eq!(
+            global.hooks.refusal_reason("guard", &guard()).as_deref(),
+            Some(global.hooks.feature_off_message())
+        );
+        assert_eq!(
+            global.settings.refusal_reason("team", &team()).as_deref(),
+            Some(global.settings.feature_off_message())
+        );
+    }
+
+    /// At project scope both sentences stay word for word.
+    #[test]
+    fn the_project_flag_off_remedy_is_unchanged() {
+        let project = flags_off_at(ConfigScope::Project);
+
+        assert_eq!(
+            project.hooks.feature_off_message(),
+            "hooks are gated; enable them with `grim config set options.experimental.hooks true`"
+        );
+        assert_eq!(
+            project.hooks.feature_off_message(),
+            not_armed_message(ArtifactKind::Hook, NotArmedReason::FeatureOff)
         );
         assert_eq!(
             project.settings.feature_off_message(),
             "settings are gated; enable them with `grim config set options.experimental.settings true`"
         );
-        for policies in [&project, &global] {
-            assert_eq!(
-                policies.hooks.feature_off_message(),
-                not_armed_message(ArtifactKind::Hook, NotArmedReason::FeatureOff)
-            );
-            // `grim status` and the TUI read the refusal, so it says what the run line says.
-            assert_eq!(
-                policies.settings.refusal_reason("team", &team()).as_deref(),
-                Some(policies.settings.feature_off_message())
-            );
-            assert_eq!(
-                policies.hooks.refusal_reason("guard", &guard()).as_deref(),
-                Some(not_armed_message(ArtifactKind::Hook, NotArmedReason::FeatureOff))
-            );
-        }
+        // `grim status` and the TUI read the refusal, so it says what the run line says.
+        assert_eq!(
+            project.hooks.refusal_reason("guard", &guard()).as_deref(),
+            Some(project.hooks.feature_off_message())
+        );
+        assert_eq!(
+            project.settings.refusal_reason("team", &team()).as_deref(),
+            Some(project.settings.feature_off_message())
+        );
     }
 
     /// The hook sentences the remedies are read from stay word for word.

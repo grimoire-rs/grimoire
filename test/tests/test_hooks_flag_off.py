@@ -428,3 +428,82 @@ def test_s102_declaring_a_hook_with_the_flag_off_locks_warns_once_and_gates(
     )
     _assert_gated(runner)
     assert not (Path(runner.grim_home) / "hooks").exists()
+
+
+# ---------------------------------------------------------------------------
+# S-006 — the flag-off remedy names the scope that is off
+# ---------------------------------------------------------------------------
+
+PROJECT_REMEDY = "`grim config set options.experimental.hooks true`"
+GLOBAL_REMEDY = "`grim config set --global options.experimental.hooks true`"
+PROJECT_ROW_MESSAGE = (
+    "hooks are disabled for this scope; run grim config set "
+    "options.experimental.hooks true, then grim install"
+)
+GLOBAL_ROW_MESSAGE = (
+    "hooks are disabled for this scope; run grim config set --global "
+    "options.experimental.hooks true, then grim install --global"
+)
+
+
+def _flag_lines(stderr: str) -> list[str]:
+    return [line for line in stderr.splitlines() if FLAG in line]
+
+
+def _flag_off_messages(items: list[dict]) -> set[str]:
+    """Every `feature-flag-off` verdict's message across `items`."""
+    messages = {
+        a["message"]
+        for item in items
+        for a in item["arming"]
+        if a["cause"] == "feature-flag-off"
+    }
+    assert messages, items
+    return messages
+
+
+def test_s006_flag_off_remedy_names_the_scope_that_is_off(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """C-021, C-022: with the flag off, `grim install --global` warns with the
+    `--global` form of the flag, and `grim status --global --format json`
+    names it (and `grim install --global`) in the hook row `message`. The
+    project run keeps today's sentences byte for byte, and the cause token is
+    `feature-flag-off` at both scopes."""
+    hook = _publish_hook(unique_repo)
+    runner = _runner(grim_at, project_dir)
+    runner.run("init")
+    runner.run("add", "--kind", "hook", hook.fq, "--global")
+    runner.run("add", "--kind", "hook", hook.fq)
+
+    install = runner.run("install", "--global")
+    lines = _flag_lines(install.stderr)
+    assert lines and all(GLOBAL_REMEDY in line for line in lines), install.stderr
+    assert _flag_off_messages(_hook_items(runner, "--global")) == {GLOBAL_ROW_MESSAGE}
+
+    install = runner.run("install")
+    lines = _flag_lines(install.stderr)
+    assert lines and all(PROJECT_REMEDY in line for line in lines), install.stderr
+    assert _flag_off_messages(_hook_items(runner)) == {PROJECT_ROW_MESSAGE}
+
+
+@_POSIX_ONLY
+def test_c023_hook_list_global_names_the_global_remedy(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """C-023: `grim hook list --global` reads the verdicts `grim status` does,
+    so a hook whose payload outlived the flag names the `--global` remedy in
+    `arming[].message`."""
+    hook = _publish_hook(unique_repo)
+    runner = _runner(grim_at, project_dir)
+    runner.run("init")
+    runner.run("add", "--kind", "hook", hook.fq, "--global")
+    # Arm once so the payload the listing reads from lands, then gate it again.
+    runner.run("config", "set", FLAG, "true", "--global")
+    runner.run("install", "--global")
+    runner.run("config", "set", FLAG, "false", "--global")
+    runner.run("install", "--global")
+
+    items = runner.json("hook", "list", "--global")["items"]
+    assert items, "the kept payload lists no entry"
+    assert _flag_off_messages(items) == {GLOBAL_ROW_MESSAGE}

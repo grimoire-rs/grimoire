@@ -296,7 +296,8 @@ Work through it in this order:
 1. **The feature flag.** `options.experimental.hooks` is `false` unless
    someone set it, and it is **config-only** — there is no environment
    variable, so exporting something will not turn it on. Set it per scope:
-   `grim config set options.experimental.hooks true`.
+   `grim config set options.experimental.hooks true`, plus `--global` for a
+   global hook (the project flag does not cover a global run).
 
    The flag is written only when `true`, so `config set … false` *removes the
    key*: `config get` can never print `false` for it, and **exit 1 is what
