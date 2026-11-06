@@ -76,7 +76,7 @@ steps:
   # Short-reference expansion: `diff-review` reaches the registry root, two
   # levels short of where the artifact lives.
   - type: grim add diff-review; printf '\nexit status %s\n' "$?"
-    expect: could not infer the kind of '\S+/diff-review:latest'[\s\S]*exit status 65
+    expect: could not infer the kind of '\S+/diff-review:latest'; pass --kind skill\|rule\|agent\|bundle\|mcp\|hook\|settings\s[\s\S]*exit status 65
   - type: grim config registry add public --index https://index.grimoire.rs
     expect: registry-added\s+registry\.public\s+https://index\.grimoire\.rs\s+project\s+false
   # The alias trap: `public/...` expands to the index URL and never reaches it.
