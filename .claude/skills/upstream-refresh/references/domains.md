@@ -14,7 +14,7 @@ Staleness threshold everywhere: a dated claim older than **183 days**, a
 
 ## 1. `vendors` — harness capabilities, metadata keys, config paths, env vars
 
-- **Ledger:** `.claude/rules/vendor-capability-watchlist.md` (every
+- **Ledger:** `.agents/upstream-watchlist.md` (every
   `| Capability |` table; the `## Config roots and env vars` table once the
   first harness pass creates it), plus `//! verified` / `//! live-verified`
   stamps in `src/install/vendor_*.rs`. A section's undated rows take its
@@ -30,7 +30,7 @@ Staleness threshold everywhere: a dated claim older than **183 days**, a
   `docs/src/content/docs/vendor-metadata.md`,
   `docs/src/content/docs/mcp-servers.md`, and the AGENTS.md
   environment-variable table (vendor config-dir override row). Env-var dates
-  live in the watchlist, never in AGENTS.md.
+  live in `.agents/upstream-watchlist.md`, never in AGENTS.md.
 - **Check rows:** one per harness below. **Stale:** the row's newest
   `verified` date (or its section default) is past threshold, or the feed
   shows a relevant entry after the cursor.
@@ -39,7 +39,7 @@ Staleness threshold everywhere: a dated claim older than **183 days**, a
 
 Tier from `.agents/adr/adr_vendor_support_tiers.md`. Config-root variable:
 **honored** means grim follows it today (AGENTS.md); anything else is an
-upstream variable grim does not follow, tracked in the watchlist.
+upstream variable grim does not follow, tracked in `.agents/upstream-watchlist.md`.
 
 | Harness | Tier | Docs | Change feed (cursor = tag or heading) | Config-root variable | Live check (Tier 1) |
 |---|---|---|---|---|---|
@@ -91,7 +91,7 @@ Add a seed here when a finding needs the next pass on a target.
 ## 3. `specs` — MCP and agentskills.io
 
 - **Ledger:** MCP claims in `docs/src/content/docs/mcp-servers.md` and the
-  watchlist's MCP rows (the spec-level row is "HTTP+SSE transport (spec)");
+  MCP rows of `.agents/upstream-watchlist.md` (the spec-level row is "HTTP+SSE transport (spec)");
   every MCP spec link (`/usr/bin/grep -rn modelcontextprotocol.io docs/src
   catalog`); the `agents` client target (agentskills.io pool); the SKILL.md
   field table in `docs/src/content/docs/artifacts.md` (Skills) and its
@@ -117,7 +117,7 @@ Add a seed here when a finding needs the next pass on a target.
 
 ## 4. `forge` — ratings forge claims
 
-- **Ledger:** the watchlist's "Ratings forge capability watchlist" table.
+- **Ledger:** the "Ratings forge capability watchlist" table of `.agents/upstream-watchlist.md`.
 - **Code and docs:** `src/catalog/rating_provider.rs`,
   `docs/src/content/docs/ratings.md`.
 - **Feed:** [GHES release notes](https://docs.github.com/en/enterprise-server@latest/admin/release-notes)

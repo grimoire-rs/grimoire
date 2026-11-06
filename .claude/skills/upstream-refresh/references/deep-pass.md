@@ -16,7 +16,7 @@ the stale watchlist rows. The researcher lists, from primary sources:
 | Frontmatter and metadata keys per kind | the vendor registry in `src/install/vendor_<harness>.rs` and `docs/src/content/docs/vendor-metadata.md` |
 | MCP options (transports, env refs, oauth, headers) | the vendor's MCP projection and `docs/src/content/docs/mcp-servers.md` |
 | Config paths per scope | the renderer's roots and `.claude/rules/subsystem-file-structure.md` |
-| Env vars (config roots, overrides) | the AGENTS.md env table and the watchlist's env-var rows |
+| Env vars (config roots, overrides) | the AGENTS.md env table and the env-var rows of `.agents/upstream-watchlist.md` |
 | Hooks | finding only — the hooks artifact kind ([PR #98](https://github.com/grimoire-rs/grimoire/pull/98)) is unmerged and out of scope for the renderer |
 
 Every difference becomes a claim in the researcher's table and is routed

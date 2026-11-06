@@ -20,7 +20,7 @@ from pathlib import Path
 THRESHOLD_DAYS = 183
 DEEP_AFTER_DAYS = 30
 
-WATCHLIST = ".claude/rules/vendor-capability-watchlist.md"
+WATCHLIST = ".agents/upstream-watchlist.md"
 PRODUCT_CONTEXT = ".claude/rules/product-context.md"
 CHECK_LEDGER = ".agents/upstream-checks.md"
 

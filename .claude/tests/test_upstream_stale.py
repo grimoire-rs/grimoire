@@ -20,7 +20,7 @@ SCRIPT = (
 )
 TODAY = "2026-09-27"
 
-WATCHLIST = ".claude/rules/vendor-capability-watchlist.md"
+WATCHLIST = ".agents/upstream-watchlist.md"
 PRODUCT = ".claude/rules/product-context.md"
 LEDGER = ".agents/upstream-checks.md"
 LEDGER_HEADER = (

@@ -89,7 +89,7 @@ documentation-only edit — the matching `Vendor` change (`kind_support`,
 The `docs/src/content/docs/agents.md` / `docs/src/content/docs/mcp-servers.md` emit matrices carry the
 same row-presence invariant (every `ClientTarget` must appear).
 hex's `doc-reviewer` worker inherits this duty. Underlying rationale for each
-`◐`/`✗` lives in `.claude/rules/vendor-capability-watchlist.md`.
+`◐`/`✗` lives in `.agents/upstream-watchlist.md`.
 
 ## Internal Links
 
