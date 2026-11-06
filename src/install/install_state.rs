@@ -41,7 +41,10 @@ use sha2::Digest as _;
 use crate::config::scope::ConfigScope;
 use crate::install::client_target::ClientTarget;
 use crate::install::content_hash::footprint_hash_for_record;
-use crate::install::path_anchor::{AnchorError, AnchorRoots, AnchoredPath, Containment};
+use crate::install::hook_dispatch::{HOOKS_DIR, PAYLOAD_DIR, RootScope, payload_relative};
+use crate::install::installer::client_supports_kind;
+use crate::install::path_anchor::{AnchorError, AnchorRoots, AnchoredPath, Containment, PathAnchor, candidate_anchors};
+use crate::oci::mcp::McpDescriptor;
 use crate::oci::{ArtifactKind, Digest, PinnedIdentifier};
 use crate::store::atomic_write::atomic_write;
 
@@ -727,6 +730,9 @@ impl InstallState {
     /// dropped any output or whole record (a V2 file is never lossy). The
     /// caller threads it into [`Self::legacy_migration_lossy`] so a lossy
     /// migration skips the legacy-file reap.
+    ///
+    /// With `convert`, every record then passes through
+    /// [`drop_illegal_outputs`]. A drop from a V1 file counts as lossy too.
     fn records_from_bytes(
         bytes: &[u8],
         path: &Path,
@@ -755,7 +761,7 @@ impl InstallState {
                 return Err(Self::invalid_state_data(&e));
             }
         };
-        let (records, lossy) = match probe.version {
+        let (mut records, mut lossy) = match probe.version {
             InstallStateVersion::V2 => {
                 let file: InstallStateFile = serde_json::from_slice(bytes).map_err(|e| Self::invalid_state_data(&e))?;
                 (file.records, false)
@@ -772,6 +778,10 @@ impl InstallState {
                 convert_v1_records(file.records, scope, roots)
             }
         };
+        if let Some((scope, roots)) = convert {
+            let dropped = drop_illegal_outputs(&mut records, scope, roots);
+            lossy |= dropped && probe.version == InstallStateVersion::V1;
+        }
         Ok((
             records.into_iter().map(|r| ((r.kind, r.name.clone()), r)).collect(),
             lossy,
@@ -1255,6 +1265,184 @@ fn convert_v1_records(
     }
 
     (converted, lossy)
+}
+
+/// Stands in for a real descriptor where only the vendor's member pointer is
+/// wanted: a vendor renders this plain stdio shape without a skip or a warning.
+const MCP_POINTER_PROBE: &str = "description = \"probe\"\n[server]\ntransport = \"stdio\"\ncommand = \"probe\"\n";
+
+/// Drop every output its record's kind may not legally address, warning once
+/// per output, and return whether anything was dropped. The record stays: a
+/// zero-output record is sound.
+///
+/// A state file can arrive with a `git clone`, and every consumer acts on the
+/// `target` and `entry` it reads back (`adr_settings_artifact_kind.md`,
+/// Decision 6).
+fn drop_illegal_outputs(records: &mut [InstallRecord], scope: ConfigScope, roots: &AnchorRoots) -> bool {
+    let mut dropped = false;
+    for record in records {
+        let (kind, name) = (record.kind, record.name.as_str());
+        record.outputs.retain(|out| {
+            let legal = output_is_legal(out, kind, name, scope, roots);
+            if !legal {
+                dropped = true;
+                tracing::warn!(
+                    "dropped a recorded output of {kind} '{}': {} at {}/{} is not a surface a {kind} may address",
+                    shown(name),
+                    shown(&out.client),
+                    out.target.anchor,
+                    shown(&out.target.relative),
+                );
+            }
+            legal
+        });
+    }
+    dropped
+}
+
+/// State-file text for a terminal, bounded and escaped for the reasons
+/// [`InstallState::invalid_state_data`] gives.
+fn shown(text: &str) -> String {
+    text.chars().take(128).collect::<String>().escape_debug().to_string()
+}
+
+/// Whether `out` is a surface `client` gives `kind`, read from the kind's
+/// anchor table and the vendor's own paths, never from the path alone: vendor
+/// files overlap, so one file is legal for one kind and client and not another.
+fn output_is_legal(
+    out: &ClientOutput,
+    kind: ArtifactKind,
+    name: &str,
+    scope: ConfigScope,
+    roots: &AnchorRoots,
+) -> bool {
+    // The containment guard owns these: its refusal is a frozen exit code, and
+    // dropping the output here would turn that refusal into a quiet success.
+    let mut recorded = std::iter::once(&out.target).chain(&out.support_dir);
+    if recorded.any(|path| !is_normal_remainder(&path.relative)) {
+        return true;
+    }
+    let Ok(client) = ClientTarget::from_str(&out.client) else {
+        return false;
+    };
+    if !is_normal_remainder(name) || !candidate_anchors(scope, client, kind).contains(&out.target.anchor) {
+        return false;
+    }
+    // Reached at global only, with every project anchor always resolvable: a
+    // root this host lacks cannot act, and the host that has it keeps the output.
+    if out.target.anchor.root(roots).is_none() {
+        return true;
+    }
+    if !client_supports_kind(client, kind, &roots.workspace, scope)
+        || out.entry.is_some() != (kind == ArtifactKind::Mcp)
+        || !support_dir_is_legal(out, kind, name)
+    {
+        return false;
+    }
+    match kind {
+        ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent => {
+            is_file_surface(&out.target, client, kind, name, scope, roots)
+        }
+        ArtifactKind::Mcp => is_own_mcp_member(out, client, name, scope, roots),
+        ArtifactKind::Hook => is_hook_payload(&out.target, name, scope),
+        ArtifactKind::Bundle => false,
+    }
+}
+
+/// The non-empty, `Normal`-only remainder `AnchoredPath::resolve` accepts.
+fn is_normal_remainder(relative: &str) -> bool {
+    let normal = |component| matches!(component, std::path::Component::Normal(_));
+    !relative.is_empty() && Path::new(relative).components().all(normal)
+}
+
+/// A support directory is a rule's, and only the sibling named after it.
+fn support_dir_is_legal(out: &ClientOutput, kind: ArtifactKind, name: &str) -> bool {
+    out.support_dir.as_ref().is_none_or(|dir| {
+        let sibling = Path::new(&out.target.relative).with_file_name(name);
+        kind == ArtifactKind::Rule && dir.anchor == out.target.anchor && Path::new(&dir.relative) == sibling
+    })
+}
+
+fn is_file_surface(
+    target: &AnchoredPath,
+    client: ClientTarget,
+    kind: ArtifactKind,
+    name: &str,
+    scope: ConfigScope,
+    roots: &AnchorRoots,
+) -> bool {
+    let mut surfaces = vec![client.path_for(&roots.workspace, scope, kind, name)];
+    if kind == ArtifactKind::Skill && client.vendor().pool_capable() {
+        surfaces.push(ClientTarget::Agents.path_for(&roots.workspace, scope, kind, name));
+    }
+    // The fallback with no vendor root, and a retired global layout whose
+    // records the reaper still has to find: the workspace shape under `$GRIM_HOME`.
+    if scope == ConfigScope::Global {
+        surfaces.push(client.path_for(&roots.grim_home, ConfigScope::Project, kind, name));
+    }
+    surfaces.iter().any(
+        |path| match AnchoredPath::from_target(path, scope, client, kind, roots) {
+            Ok(surface) => surface == *target,
+            // Same doctrine as `output_at_current_layout`: a global layout that
+            // cannot be computed counts as current. Project roots always anchor.
+            Err(_) => scope == ConfigScope::Global,
+        },
+    )
+}
+
+/// The output is `name`'s member in a config file of `client`'s, never a
+/// sibling key of a settings file the vendor shares with the user.
+fn is_own_mcp_member(
+    out: &ClientOutput,
+    client: ClientTarget,
+    name: &str,
+    scope: ConfigScope,
+    roots: &AnchorRoots,
+) -> bool {
+    let (Some(pointer), Ok((probe, _))) = (
+        out.entry.as_deref(),
+        McpDescriptor::from_toml_str_with_requires(MCP_POINTER_PROBE),
+    ) else {
+        return false;
+    };
+    let vendor = client.vendor();
+    vendor.mcp_config_paths(&roots.workspace, scope).iter().any(|path| {
+        // A vendor variable can repoint a global file between runs, and
+        // `prefer_jsonc` picks by what is on disk now, so neither binds a record.
+        let same_file = scope == ConfigScope::Global
+            || out
+                .target
+                .lexical(roots)
+                .is_some_and(|here| json_spelling(&here) == json_spelling(path));
+        same_file
+            && vendor
+                .mcp_entry_for(scope, path, name, &probe)
+                .is_some_and(|(own, _)| own == pointer)
+    })
+}
+
+fn json_spelling(path: &Path) -> PathBuf {
+    if path.extension().is_some_and(|ext| ext == "jsonc") {
+        path.with_extension("json")
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// A hook payload sits on grim's own layout. The key is checked for shape, not
+/// equality: a moved workspace keeps its record, and the reaper needs the
+/// pre-relocation `.grimoire/hooks/<name>` to find that tree.
+fn is_hook_payload(target: &AnchoredPath, name: &str, scope: ConfigScope) -> bool {
+    match (scope, target.anchor) {
+        (ConfigScope::Global, PathAnchor::GrimHome) => target.relative == payload_relative(RootScope::Global, name),
+        (ConfigScope::Project, PathAnchor::Workspace) => target.relative == format!(".grimoire/hooks/{name}"),
+        (ConfigScope::Project, PathAnchor::GrimHome) => target
+            .relative
+            .strip_prefix(&format!("{HOOKS_DIR}/{PAYLOAD_DIR}/"))
+            .and_then(|rest| rest.strip_suffix(&format!("/{name}")))
+            .is_some_and(|key| key.len() == 64 && key.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -3457,5 +3645,602 @@ mod tests {
                 .unwrap(),
             out.content_hash
         );
+    }
+
+    // ── State load rule ─────────────────────────────────────────────────────
+
+    const ALL_KINDS: [ArtifactKind; 6] = [
+        ArtifactKind::Skill,
+        ArtifactKind::Rule,
+        ArtifactKind::Agent,
+        ArtifactKind::Mcp,
+        ArtifactKind::Bundle,
+        ArtifactKind::Hook,
+    ];
+    const HOOK_KEY: &str = "d6315ff4c8b678d6315ff4c8b678d6315ff4c8b678d6315ff4c8b678d6315ff4";
+
+    fn anchored(client: &str, anchor: PathAnchor, relative: &str) -> ClientOutput {
+        ClientOutput {
+            client: client.to_string(),
+            target: AnchoredPath {
+                anchor,
+                relative: relative.to_string(),
+            },
+            content_hash: Algorithm::Sha256.hash(relative.as_bytes()),
+            support_dir: None,
+            entry: None,
+            adopted: false,
+        }
+    }
+
+    fn workspace_output(client: &str, relative: &str) -> ClientOutput {
+        anchored(client, PathAnchor::Workspace, relative)
+    }
+
+    fn member_output(client: &str, relative: &str, pointer: &str) -> ClientOutput {
+        ClientOutput {
+            entry: Some(pointer.to_string()),
+            ..workspace_output(client, relative)
+        }
+    }
+
+    fn record_of(kind: ArtifactKind, name: &str, outputs: Vec<ClientOutput>) -> InstallRecord {
+        InstallRecord {
+            kind,
+            name: name.to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned(name, 'c')),
+            dev: false,
+            outputs,
+        }
+    }
+
+    fn state_at(path: PathBuf, records: Vec<InstallRecord>) -> InstallState {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        InstallState {
+            path,
+            records: records.into_iter().map(|r| ((r.kind, r.name.clone()), r)).collect(),
+            legacy_migration_lossy: false,
+        }
+    }
+
+    /// `records` through a real save and a real project load.
+    fn reload_project(workspace: &Path, records: Vec<InstallRecord>) -> InstallState {
+        state_at(InstallState::project_state_path(workspace), records)
+            .save()
+            .unwrap();
+        InstallState::load_project(workspace, &workspace.join("grim"), &workspace.join("grimoire.toml")).unwrap()
+    }
+
+    /// The outputs of the one project record `(kind, "x")` after a reload.
+    fn surviving(kind: ArtifactKind, outputs: Vec<ClientOutput>) -> Vec<ClientOutput> {
+        let tmp = tempfile::tempdir().unwrap();
+        let st = reload_project(tmp.path(), vec![record_of(kind, "x", outputs)]);
+        st.get(kind, "x").expect("a zero-output record stays").outputs.clone()
+    }
+
+    fn project_roots(workspace: &Path) -> AnchorRoots {
+        AnchorRoots {
+            workspace: workspace.to_path_buf(),
+            grim_home: workspace.join("grim"),
+            vendor_roots: Default::default(),
+            opencode_skills: None,
+            claude_user_dir: None,
+            agents_skills: None,
+        }
+    }
+
+    /// Global roots agreeing with what `path_for` reads from the environment,
+    /// as `AnchorRoots::resolve` does in production. Nothing here is opened.
+    fn global_roots(grim_home: &Path) -> AnchorRoots {
+        let mut vendor_roots: BTreeMap<&'static str, PathBuf> = ClientTarget::ALL
+            .iter()
+            .map(|c| (c.vendor().name(), grim_home.join("vendor").join(c.as_str())))
+            .collect();
+        vendor_roots.insert(
+            "claude",
+            crate::install::vendor_claude::scope_root(grim_home, ConfigScope::Global),
+        );
+        AnchorRoots {
+            workspace: grim_home.to_path_buf(),
+            grim_home: grim_home.to_path_buf(),
+            vendor_roots,
+            opencode_skills: Some(grim_home.join("opencode").join("skills")),
+            claude_user_dir: Some(grim_home.join("user")),
+            agents_skills: Some(grim_home.join("agents-skills")),
+        }
+    }
+
+    fn reload_global(grim_home: &Path, records: Vec<InstallRecord>) -> InstallState {
+        let path = grim_home.join("state").join("global.json");
+        state_at(path.clone(), records).save().unwrap();
+        InstallState::load_global(&path, &global_roots(grim_home)).unwrap()
+    }
+
+    fn surviving_global(kind: ArtifactKind, output: ClientOutput) -> usize {
+        let tmp = tempfile::tempdir().unwrap();
+        let st = reload_global(tmp.path(), vec![record_of(kind, "x", vec![output])]);
+        st.get(kind, "x").expect("a zero-output record stays").outputs.len()
+    }
+
+    fn sorted(mut outputs: Vec<ClientOutput>) -> Vec<ClientOutput> {
+        outputs.sort_by(|a, b| a.client.cmp(&b.client));
+        outputs
+    }
+
+    /// No kind addresses a file none of the vendor's surfaces name, and the
+    /// ordinary output beside a dropped one stays, in a record that stays.
+    #[test]
+    fn every_kind_loses_an_output_outside_its_surfaces() {
+        for kind in ALL_KINDS {
+            let kept = surviving(
+                kind,
+                vec![
+                    workspace_output("claude", ".claude/settings.json"),
+                    workspace_output("cursor", ".cursor/rules/x.mdc"),
+                ],
+            );
+            let expected = usize::from(kind == ArtifactKind::Rule);
+            assert_eq!(kept.len(), expected, "{kind:?}: {kept:?}");
+        }
+    }
+
+    /// The path alone decides nothing: the same file is one kind's surface and
+    /// another's trespass.
+    #[test]
+    fn a_path_is_legal_only_for_the_kind_and_client_that_own_it() {
+        for (kind, relative) in [
+            (ArtifactKind::Skill, ".claude/rules/x.md"),
+            (ArtifactKind::Rule, ".claude/skills/x"),
+            (ArtifactKind::Agent, ".claude/rules/x.md"),
+            (ArtifactKind::Skill, ".claude/skills/y"),
+            (ArtifactKind::Rule, ".claude/rules/y.md"),
+            (ArtifactKind::Agent, ".claude/agents/y.md"),
+        ] {
+            assert_eq!(
+                surviving(kind, vec![workspace_output("claude", relative)]),
+                [],
+                "{kind:?} {relative}"
+            );
+        }
+        assert_eq!(
+            surviving(
+                ArtifactKind::Skill,
+                vec![workspace_output("cursor", ".claude/skills/x")]
+            ),
+            []
+        );
+    }
+
+    /// A project state names the workspace, or `$GRIM_HOME` for a hook payload,
+    /// and nothing else, whatever root the file's anchor tag would resolve to.
+    #[test]
+    fn a_project_output_outside_the_anchor_table_is_dropped() {
+        for anchor in [
+            PathAnchor::GrimHome,
+            PathAnchor::VendorRoot("claude"),
+            PathAnchor::ClaudeUserDir,
+            PathAnchor::AgentsSkills,
+        ] {
+            let kept = surviving(ArtifactKind::Skill, vec![anchored("claude", anchor, "skills/x")]);
+            assert_eq!(kept, [], "{anchor:?}");
+        }
+    }
+
+    #[test]
+    fn every_hosted_project_output_is_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let roots = project_roots(ws);
+        let scope = ConfigScope::Project;
+        let mut records = Vec::new();
+        for kind in [ArtifactKind::Skill, ArtifactKind::Rule, ArtifactKind::Agent] {
+            let outputs = ClientTarget::ALL
+                .into_iter()
+                .filter(|c| crate::install::installer::client_supports_kind(*c, kind, ws, scope))
+                .map(|client| {
+                    let dest = client.path_for(ws, scope, kind, "x");
+                    let target = AnchoredPath::from_target(&dest, scope, client, kind, &roots).unwrap();
+                    workspace_output(client.as_str(), &target.relative)
+                })
+                .collect::<Vec<_>>();
+            assert!(!outputs.is_empty(), "{kind:?}");
+            records.push(record_of(kind, "x", outputs));
+        }
+        let pooled = ClientTarget::ALL
+            .into_iter()
+            .filter(|c| c.vendor().pool_capable())
+            .map(|c| workspace_output(c.as_str(), ".agents/skills/pooled"))
+            .collect::<Vec<_>>();
+        assert!(!pooled.is_empty());
+        records.push(record_of(ArtifactKind::Skill, "pooled", pooled));
+
+        let st = reload_project(ws, records.clone());
+
+        for record in records {
+            let kept = st.get(record.kind, &record.name).unwrap().outputs.clone();
+            assert_eq!(kept, sorted(record.outputs), "{:?}", record.kind);
+        }
+    }
+
+    #[test]
+    fn every_mcp_surface_keeps_its_member_whatever_the_transport() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let descriptors = [
+            "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"x\"\n",
+            "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://example.com/mcp\"\n",
+            "description = \"d\"\n[server]\ntransport = \"sse\"\nurl = \"https://example.com/sse\"\n",
+        ];
+        let mut outputs = Vec::new();
+        let mut hosted = std::collections::BTreeSet::new();
+        for client in ClientTarget::ALL {
+            let vendor = client.vendor();
+            for path in vendor.mcp_config_paths(ws, ConfigScope::Project) {
+                let relative = path.strip_prefix(ws).unwrap().to_str().unwrap().replace('\\', "/");
+                for raw in descriptors {
+                    let descriptor = crate::oci::mcp::McpDescriptor::from_toml_str(raw).unwrap();
+                    let entry = vendor.mcp_entry_for(ConfigScope::Project, &path, "x", &descriptor);
+                    let Some((pointer, _)) = entry else { continue };
+                    hosted.insert(client.as_str());
+                    let output = member_output(client.as_str(), &relative, &pointer);
+                    if !outputs.contains(&output) {
+                        outputs.push(output);
+                    }
+                }
+            }
+        }
+        assert!(hosted.len() >= 12, "{hosted:?}");
+
+        assert_eq!(surviving(ArtifactKind::Mcp, outputs.clone()), sorted(outputs));
+    }
+
+    /// `prefer_jsonc` picks by what is on disk now, and a user may have renamed
+    /// the file since the record was written.
+    #[test]
+    fn an_mcp_record_survives_the_json_and_jsonc_spellings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let spelled = |file: &str| vec![member_output("opencode", file, "/mcp/x")];
+        std::fs::write(ws.join("opencode.jsonc"), "{}").unwrap();
+        for file in ["opencode.json", "opencode.jsonc"] {
+            let st = reload_project(ws, vec![record_of(ArtifactKind::Mcp, "x", spelled(file))]);
+            assert_eq!(st.get(ArtifactKind::Mcp, "x").unwrap().outputs.len(), 1, "{file}");
+        }
+        assert_eq!(
+            surviving(
+                ArtifactKind::Mcp,
+                vec![member_output("claude", ".claude/settings.jsonc", "/mcpServers/x")]
+            ),
+            []
+        );
+    }
+
+    /// Vendor files overlap: a settings file is an MCP surface for its own
+    /// member only, never for a sibling key or another vendor's file.
+    #[test]
+    fn an_mcp_output_keeps_only_its_own_member() {
+        let kept = member_output("gemini", ".gemini/settings.json", "/mcpServers/x");
+        assert_eq!(surviving(ArtifactKind::Mcp, vec![kept.clone()]), [kept]);
+
+        for output in [
+            member_output("gemini", ".gemini/settings.json", "/general/vimMode"),
+            member_output("gemini", ".gemini/settings.json", "/mcpServers/y"),
+            member_output("gemini", ".gemini/settings.json", "/mcpServers"),
+            member_output("gemini", ".claude/settings.json", "/mcpServers/x"),
+            member_output("claude", ".claude/settings.json", "/mcpServers/x"),
+            member_output("claude", ".gemini/settings.json", "/mcpServers/x"),
+            member_output("copilot", ".vscode/mcp.json", "/mcpServers/x"),
+            member_output("copilot", ".github/mcp.json", "/servers/x"),
+            workspace_output("gemini", ".gemini/settings.json"),
+            workspace_output("claude", ".mcp.json"),
+        ] {
+            assert_eq!(surviving(ArtifactKind::Mcp, vec![output.clone()]), [], "{output:?}");
+        }
+    }
+
+    /// `entry` routes a removal to the splice and `support_dir` adds a second
+    /// recursive removal: each is legal only on the shape that owns it.
+    #[test]
+    fn entry_and_support_dir_stay_on_their_own_kinds() {
+        let with_entry = ClientOutput {
+            entry: Some("/permissions/deny".to_string()),
+            ..workspace_output("claude", ".claude/rules/x.md")
+        };
+        assert_eq!(surviving(ArtifactKind::Rule, vec![with_entry]), []);
+
+        let support = |relative: &str| {
+            Some(AnchoredPath {
+                anchor: PathAnchor::Workspace,
+                relative: relative.to_string(),
+            })
+        };
+        let rule = ClientOutput {
+            support_dir: support(".claude/rules/x"),
+            ..workspace_output("claude", ".claude/rules/x.md")
+        };
+        assert_eq!(
+            surviving(ArtifactKind::Rule, vec![rule.clone()]),
+            std::slice::from_ref(&rule)
+        );
+
+        for support_dir in [support(".claude/rules/y"), support(".claude/skills")] {
+            let forged = ClientOutput {
+                support_dir,
+                ..rule.clone()
+            };
+            assert_eq!(surviving(ArtifactKind::Rule, vec![forged]), []);
+        }
+        let on_a_skill = ClientOutput {
+            support_dir: support(".claude/rules/x"),
+            ..workspace_output("claude", ".claude/skills/x")
+        };
+        assert_eq!(surviving(ArtifactKind::Skill, vec![on_a_skill]), []);
+    }
+
+    #[test]
+    fn an_unknown_client_has_no_surface() {
+        let output = workspace_output("not-a-client", ".claude/skills/x");
+        assert_eq!(surviving(ArtifactKind::Skill, vec![output]), []);
+    }
+
+    /// The containment guard owns a `../`: its refusal is a frozen exit code,
+    /// and dropping the output here would turn it into a silent success.
+    #[test]
+    fn a_traversal_is_left_for_the_containment_guard() {
+        for relative in ["../.claude/rules/x.md", "", "."] {
+            let kept = surviving(ArtifactKind::Rule, vec![workspace_output("claude", relative)]);
+            assert_eq!(kept.len(), 1, "{relative:?}");
+        }
+        let support = ClientOutput {
+            support_dir: Some(AnchoredPath {
+                anchor: PathAnchor::Workspace,
+                relative: "../x".to_string(),
+            }),
+            ..workspace_output("claude", ".claude/rules/x.md")
+        };
+        assert_eq!(surviving(ArtifactKind::Rule, vec![support]).len(), 1);
+    }
+
+    /// The key is a shape, not an equality: a moved workspace keeps its record.
+    #[test]
+    fn a_hook_output_stays_on_its_payload_layout() {
+        for (anchor, relative) in [
+            (PathAnchor::GrimHome, format!("hooks/payload/{HOOK_KEY}/x")),
+            (PathAnchor::Workspace, ".grimoire/hooks/x".to_string()),
+        ] {
+            let kept = surviving(ArtifactKind::Hook, vec![anchored("claude", anchor, &relative)]);
+            assert_eq!(kept.len(), 1, "{relative}");
+        }
+        for (client, anchor, relative) in [
+            ("claude", PathAnchor::GrimHome, format!("hooks/payload/{HOOK_KEY}/y")),
+            ("claude", PathAnchor::GrimHome, "hooks/payload/short/x".to_string()),
+            (
+                "claude",
+                PathAnchor::GrimHome,
+                format!("hooks/payload/{}/x", HOOK_KEY.to_uppercase()),
+            ),
+            ("claude", PathAnchor::GrimHome, "hooks/x".to_string()),
+            ("claude", PathAnchor::GrimHome, "hooks/dispatch.json".to_string()),
+            ("claude", PathAnchor::Workspace, ".claude/hooks/x".to_string()),
+            ("cursor", PathAnchor::GrimHome, format!("hooks/payload/{HOOK_KEY}/x")),
+        ] {
+            let kept = surviving(ArtifactKind::Hook, vec![anchored(client, anchor, &relative)]);
+            assert_eq!(kept, [], "{client} {relative}");
+        }
+    }
+
+    /// Both read sites of `load_project` and the V1 conversion reach the rule,
+    /// and a V1 drop counts as lossy so the legacy original is kept.
+    #[test]
+    fn a_v1_file_passes_through_the_rule_at_both_project_read_sites() {
+        for legacy in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let ws = tmp.path().join("ws");
+            let grim_home = tmp.path().join("grim");
+            std::fs::create_dir_all(&ws).unwrap();
+            let config = ws.join("grimoire.toml");
+            std::fs::write(&config, "").unwrap();
+            let canonical = std::fs::canonicalize(&config).unwrap();
+            let path = if legacy {
+                InstallState::legacy_project_path(&grim_home.join("state"), &canonical)
+            } else {
+                InstallState::project_state_path(&ws)
+            };
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let digest = format!("sha256:{}", "a".repeat(64));
+            let v1 = serde_json::json!({"version": 1, "records": [{
+                "kind": "skill",
+                "name": "x",
+                "pinned": format!("localhost:5000/x@sha256:{}", "b".repeat(64)),
+                "target": ws.join(".claude/skills/x"),
+                "content_hash": digest,
+                "clients": [
+                    {"client": "claude", "target": ws.join(".claude/skills/x"), "content_hash": digest},
+                    {"client": "copilot", "target": ws.join(".claude/settings.json"), "content_hash": digest},
+                ],
+            }]});
+            std::fs::write(&path, serde_json::to_vec(&v1).unwrap()).unwrap();
+
+            let st = InstallState::load_project(&ws, &grim_home, &config).unwrap();
+
+            let outputs = &st.get(ArtifactKind::Skill, "x").unwrap().outputs;
+            assert_eq!(outputs.len(), 1, "legacy={legacy}: {outputs:?}");
+            assert_eq!(outputs[0].client, "claude");
+            assert!(st.legacy_migration_lossy(), "legacy={legacy}");
+        }
+    }
+
+    /// A V2 file is never lossy: the flag reaps a legacy file V2 does not have.
+    #[test]
+    fn a_v2_drop_is_not_a_lossy_migration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let output = workspace_output("claude", ".claude/settings.json");
+        let st = reload_project(tmp.path(), vec![record_of(ArtifactKind::Skill, "x", vec![output])]);
+        assert_eq!(st.get(ArtifactKind::Skill, "x").unwrap().outputs, []);
+        assert!(!st.legacy_migration_lossy());
+    }
+
+    /// The rule holds at global too, where `GRIM_HOME` can come from a
+    /// repository's own environment, and `grim-home` is everyone's fallback.
+    #[test]
+    fn a_global_output_outside_the_surfaces_is_dropped() {
+        let claude = PathAnchor::VendorRoot("claude");
+        for (kind, client, anchor, relative) in [
+            (ArtifactKind::Skill, "claude", claude, "settings.json"),
+            (ArtifactKind::Rule, "claude", claude, "skills/x"),
+            (ArtifactKind::Skill, "claude", PathAnchor::GrimHome, "state/global.json"),
+            (ArtifactKind::Skill, "claude", PathAnchor::Workspace, "skills/x"),
+            (
+                ArtifactKind::Hook,
+                "claude",
+                PathAnchor::GrimHome,
+                "hooks/dispatch.json",
+            ),
+            (ArtifactKind::Hook, "claude", PathAnchor::GrimHome, "hooks/payload/x"),
+            (ArtifactKind::Bundle, "claude", claude, "skills/x"),
+        ] {
+            let output = anchored(client, anchor, relative);
+            assert_eq!(surviving_global(kind, output), 0, "{kind:?} {relative}");
+        }
+    }
+
+    /// A vendor variable can repoint a global config file between runs, which
+    /// exempts the file, never the anchor table, the member or the entry shape.
+    #[test]
+    fn a_global_mcp_output_keeps_only_its_own_member() {
+        let user = PathAnchor::ClaudeUserDir;
+        let member = |anchor, pointer: &str| ClientOutput {
+            entry: Some(pointer.to_string()),
+            ..anchored("claude", anchor, ".claude.json")
+        };
+        assert_eq!(surviving_global(ArtifactKind::Mcp, member(user, "/mcpServers/x")), 1);
+        assert_eq!(
+            surviving_global(ArtifactKind::Mcp, member(user, "/permissions/deny")),
+            0
+        );
+        assert_eq!(
+            surviving_global(ArtifactKind::Mcp, member(PathAnchor::Workspace, "/mcpServers/x")),
+            0
+        );
+        assert_eq!(
+            surviving_global(ArtifactKind::Mcp, anchored("claude", user, ".claude.json")),
+            0
+        );
+    }
+
+    /// Each row is a layout a shipped grim recorded at global scope. The
+    /// `grim-home` rows are also what the layout reaper needs to find.
+    #[test]
+    fn every_recorded_global_layout_is_kept() {
+        let claude = PathAnchor::VendorRoot("claude");
+        for (kind, client, anchor, relative) in [
+            (ArtifactKind::Skill, "claude", claude, "skills/x"),
+            (ArtifactKind::Rule, "claude", claude, "rules/x.md"),
+            (ArtifactKind::Agent, "claude", claude, "agents/x.md"),
+            (ArtifactKind::Skill, "claude", PathAnchor::GrimHome, ".claude/skills/x"),
+            (ArtifactKind::Rule, "claude", PathAnchor::GrimHome, ".claude/rules/x.md"),
+            (
+                ArtifactKind::Rule,
+                "copilot",
+                PathAnchor::GrimHome,
+                ".github/instructions/x.instructions.md",
+            ),
+            (
+                ArtifactKind::Rule,
+                "opencode",
+                PathAnchor::GrimHome,
+                ".opencode/rules/x.md",
+            ),
+            (ArtifactKind::Hook, "claude", PathAnchor::GrimHome, "hooks/x"),
+        ] {
+            let output = anchored(client, anchor, relative);
+            assert_eq!(surviving_global(kind, output), 1, "{kind:?} {relative}");
+        }
+    }
+
+    /// An anchor this host cannot resolve cannot act, and a host where a root
+    /// is missing today must not lose the output for the one where it exists.
+    #[test]
+    fn an_absent_global_root_keeps_its_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("state").join("global.json");
+        let output = anchored("claude", PathAnchor::VendorRoot("claude"), "skills/x");
+        state_at(path.clone(), vec![record_of(ArtifactKind::Skill, "x", vec![output])])
+            .save()
+            .unwrap();
+        let roots = AnchorRoots {
+            vendor_roots: Default::default(),
+            ..global_roots(tmp.path())
+        };
+
+        let st = InstallState::load_global(&path, &roots).unwrap();
+
+        assert_eq!(st.get(ArtifactKind::Skill, "x").unwrap().outputs.len(), 1);
+    }
+
+    /// A state file is external input: a declined pair must reach neither a
+    /// vendor path it has no answer for nor `path_for`'s bundle arm.
+    #[test]
+    fn a_forged_output_never_panics_the_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        for client in ClientTarget::ALL {
+            let outputs: Vec<ClientOutput> = [PathAnchor::Workspace, PathAnchor::GrimHome]
+                .into_iter()
+                .map(|anchor| anchored(client.as_str(), anchor, "x"))
+                .chain(std::iter::once(ClientOutput {
+                    entry: Some("/x/y".to_string()),
+                    ..workspace_output(client.as_str(), "x")
+                }))
+                .collect();
+            let records: Vec<InstallRecord> = ALL_KINDS
+                .into_iter()
+                .map(|kind| record_of(kind, "x", outputs.clone()))
+                .collect();
+            reload_project(tmp.path(), records.clone());
+            reload_global(tmp.path(), records);
+        }
+    }
+
+    fn golden(fixture: &str, name: &str) -> Vec<u8> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("test/data/golden");
+        std::fs::read(root.join(fixture).join("golden").join(name)).unwrap()
+    }
+
+    /// A state file the shipped grim wrote survives a load and a save unchanged,
+    /// whichever workspace reads it: the project hook key is not this one's.
+    #[test]
+    fn a_golden_project_state_reloads_byte_identical() {
+        for (fixture, name) in [
+            ("pre_hooks_03e59b0", "state.project.json"),
+            ("pre_dependencies_cdeedcaa", "state.project.json"),
+            ("pre_dependencies_cdeedcaa", "state.project.after-remove.json"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = InstallState::project_state_path(tmp.path());
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let bytes = golden(fixture, name);
+            std::fs::write(&path, &bytes).unwrap();
+
+            let st = InstallState::load_project(tmp.path(), &tmp.path().join("g"), &tmp.path().join("c")).unwrap();
+            st.save().unwrap();
+
+            assert_eq!(std::fs::read(&path).unwrap(), bytes, "{fixture}/{name}");
+        }
+    }
+
+    #[test]
+    fn a_golden_global_state_reloads_byte_identical() {
+        for fixture in ["pre_hooks_03e59b0", "pre_dependencies_cdeedcaa"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("state").join("global.json");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let bytes = golden(fixture, "state.global.json");
+            std::fs::write(&path, &bytes).unwrap();
+
+            let st = InstallState::load_global(&path, &global_roots(tmp.path())).unwrap();
+            st.save().unwrap();
+
+            assert_eq!(std::fs::read(&path).unwrap(), bytes, "{fixture}");
+        }
     }
 }
