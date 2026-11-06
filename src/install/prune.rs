@@ -385,8 +385,9 @@ pub struct ReapedClients {
     pub kind: ArtifactKind,
     /// The config binding name.
     pub name: String,
-    /// Clients whose unmodified (or `force`-removed) output was deleted and
-    /// dropped from the record, sorted.
+    /// Clients whose unmodified (or `force`-removed) output was dropped from
+    /// the record, sorted. Its footprint was deleted, unless a surviving
+    /// sibling shares it or `retained` or `abandoned_entries` names it.
     pub reaped: Vec<String>,
     /// Clients whose output was locally modified and preserved (no `force`),
     /// sorted. Left in the record so a later `grim update --force` can still
@@ -401,8 +402,8 @@ pub struct ReapedClients {
     pub retained: Vec<std::path::PathBuf>,
     /// The managed config-file entries (`entry` outputs) left un-spliced
     /// while the output was dropped from the record anyway — the `entry`
-    /// counterpart of `retained`. Sorted and deduplicated. Empty on every
-    /// normal reap.
+    /// counterpart of `retained`, plus any intact member grim adopted. Sorted
+    /// and deduplicated. Empty on every normal reap.
     pub abandoned_entries: Vec<AbandonedEntry>,
 }
 
@@ -412,13 +413,13 @@ pub struct ReapedClients {
 ///
 /// For each non-dev record, an output whose client parses to a
 /// [`ClientTarget`] absent from `desired` is a *dropped-client* output:
-/// - unmodified (its on-disk footprint matches the recorded hash, or the
-///   files are already gone) → its file(s) / support dir are deleted, or its
-///   managed MCP entry is spliced out of the shared config, and the output is
-///   dropped from the record;
-/// - locally modified → **preserved** (file kept, output kept in the record,
-///   reported under [`ReapedClients::kept_modified`]) unless `force`, in which
-///   case it is deleted like an unmodified one.
+/// - unmodified (matching the recorded hash, or already gone) → its files and
+///   support dir are deleted, or its managed MCP entry spliced out of the
+///   shared config, and the output is dropped from the record;
+/// - an unmodified entry grim **adopted**, without `force` → the member stays,
+///   the output drops, and [`ReapedClients::abandoned_entries`] names it;
+/// - locally modified → **preserved** (file and output kept, reported under
+///   [`ReapedClients::kept_modified`]) unless `force` deletes it too.
 ///
 /// A record left with zero outputs (every client dropped) is removed whole so
 /// the "outputs is never empty" invariant holds. The caller owns saving
@@ -462,9 +463,9 @@ pub fn reap_dropped_clients(
         // Classify every output before deleting anything: the delete pass needs
         // the COMPLETE drop set (`reaped`) so the `.agents/skills` refcount
         // guard can tell a surviving sibling from one dropping in the same pass.
-        // `to_delete` holds the reaped outputs whose on-disk footprint must
-        // actually be removed (present + unmodified-or-forced); an already-gone
-        // output is reaped from the record without a delete.
+        // `to_delete` holds the reaped outputs whose on-disk footprint is up
+        // for removal (present + unmodified-or-forced); an already-gone output
+        // is reaped from the record without a delete.
         let mut to_delete: Vec<&ClientOutput> = Vec::new();
         for out in outputs {
             // Only a recognized client absent from the desired set is a
@@ -571,6 +572,30 @@ pub fn reap_dropped_clients(
                     "keeping shared footprint of dropped client '{}' of '{name}'; a surviving sibling still references it",
                     out.client
                 );
+                continue;
+            }
+            // Without `force`, `to_delete` holds only intact outputs. An adopted
+            // member is the user's own, so splicing it out deletes their entry,
+            // and this report is its last trace: the output leaves the record below.
+            if !force
+                && out.adopted
+                && let Some(pointer) = &out.entry
+            {
+                let path = out
+                    .resolved_target(roots, Containment::Strict)
+                    .map_err(|source| PruneError::Anchor {
+                        path: roots.workspace.clone(),
+                        source,
+                    })?;
+                tracing::warn!(
+                    "leaving adopted entry '{pointer}' in '{}': grim never wrote it and no longer records it for dropped client '{}' — remove it by hand if it is not wanted",
+                    path.display(),
+                    out.client
+                );
+                abandoned_entries.push(AbandonedEntry {
+                    path,
+                    pointer: pointer.clone(),
+                });
                 continue;
             }
             delete_output(out, roots)?;
@@ -1664,6 +1689,187 @@ mod tests {
         assert!(
             state.get(ArtifactKind::Mcp, "grim").is_none(),
             "the sole output reaped → record removed whole"
+        );
+    }
+
+    // ── Dropped-client entry outputs ────────────────────────────────────────
+
+    /// Write `.mcp.json` holding one `{"command": <value>}` member per pair.
+    fn write_mcp_config(ws: &std::path::Path, members: &[(&str, &str)]) -> std::path::PathBuf {
+        let servers: serde_json::Map<String, serde_json::Value> = members
+            .iter()
+            .map(|(name, command)| ((*name).to_string(), serde_json::json!({"command": command})))
+            .collect();
+        let cfg = ws.join(".mcp.json");
+        let doc = serde_json::json!({"mcpServers": servers});
+        std::fs::write(&cfg, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+        cfg
+    }
+
+    fn mcp_servers(cfg: &std::path::Path) -> serde_json::Value {
+        let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(cfg).unwrap()).unwrap();
+        doc["mcpServers"].clone()
+    }
+
+    /// An `.mcp.json` entry output for `client`, recorded as `{"command": "grim"}`.
+    fn entry_output(client: &str, name: &str, adopted: bool) -> ClientOutput {
+        let recorded =
+            crate::install::install_state::entry_value_hash(&serde_json::json!({"command": "grim"})).unwrap();
+        let mut out = output_ws(client, ".mcp.json", recorded);
+        out.entry = Some(format!("/mcpServers/{name}"));
+        out.adopted = adopted;
+        out
+    }
+
+    fn record_mcp(state: &mut InstallState, name: &str, outputs: Vec<ClientOutput>) {
+        state.record(InstallRecord {
+            kind: ArtifactKind::Mcp,
+            name: name.to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned(name)),
+            dev: false,
+            outputs,
+        });
+    }
+
+    /// The member was the user's before grim recorded it, so the reap leaves it
+    /// and reports it. The grim-written neighbour going in the same pass proves
+    /// the reaper reached this file.
+    #[test]
+    fn an_intact_adopted_entry_stays_and_is_named_abandoned() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dunce::canonicalize(dir.path()).unwrap();
+        let cfg = write_mcp_config(&ws, &[("mine", "grim"), ("written", "grim")]);
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        record_mcp(&mut state, "mine", vec![entry_output("copilot", "mine", true)]);
+        record_mcp(&mut state, "written", vec![entry_output("copilot", "written", false)]);
+
+        let acted = reap_dropped_clients(&mut state, &[ClientTarget::Claude], &roots(&ws), false).unwrap();
+
+        let mine = acted.iter().find(|r| r.name == "mine").expect("the adopted row");
+        assert_eq!(mine.reaped, vec!["copilot".to_string()]);
+        assert!(mine.kept_modified.is_empty(), "{mine:?}");
+        assert!(mine.retained.is_empty(), "the user's config is not grim's footprint");
+        assert_eq!(
+            mine.abandoned_entries,
+            vec![AbandonedEntry {
+                path: cfg.clone(),
+                pointer: "/mcpServers/mine".to_string(),
+            }]
+        );
+        assert_eq!(
+            mcp_servers(&cfg),
+            serde_json::json!({"mine": {"command": "grim"}}),
+            "only the member grim wrote is spliced out"
+        );
+        assert!(
+            state.get(ArtifactKind::Mcp, "mine").is_none(),
+            "the output leaves the record even though the member stays"
+        );
+    }
+
+    #[test]
+    fn an_intact_written_entry_is_spliced_out_and_abandons_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dunce::canonicalize(dir.path()).unwrap();
+        let cfg = write_mcp_config(&ws, &[("written", "grim"), ("user", "x")]);
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        record_mcp(&mut state, "written", vec![entry_output("copilot", "written", false)]);
+
+        let acted = reap_dropped_clients(&mut state, &[ClientTarget::Claude], &roots(&ws), false).unwrap();
+
+        assert_eq!(acted[0].reaped, vec!["copilot".to_string()]);
+        assert!(acted[0].abandoned_entries.is_empty(), "{:?}", acted[0]);
+        assert_eq!(mcp_servers(&cfg), serde_json::json!({"user": {"command": "x"}}));
+        assert!(state.get(ArtifactKind::Mcp, "written").is_none());
+    }
+
+    /// Drift outranks adoption: either way the edit stays and the output stays
+    /// recorded, so a later `--force` can still reach it.
+    #[test]
+    fn a_drifted_entry_is_kept_modified_whether_adopted_or_not() {
+        for adopted in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let ws = dunce::canonicalize(dir.path()).unwrap();
+            let cfg = write_mcp_config(&ws, &[("srv", "edited")]);
+            let mut state = InstallState::empty(&ws.join("state.json"));
+            record_mcp(&mut state, "srv", vec![entry_output("copilot", "srv", adopted)]);
+
+            let acted = reap_dropped_clients(&mut state, &[ClientTarget::Claude], &roots(&ws), false).unwrap();
+
+            assert_eq!(acted[0].kept_modified, vec!["copilot".to_string()], "adopted={adopted}");
+            assert!(acted[0].reaped.is_empty(), "adopted={adopted}: {:?}", acted[0]);
+            assert!(
+                acted[0].abandoned_entries.is_empty(),
+                "adopted={adopted}: {:?}",
+                acted[0]
+            );
+            assert_eq!(mcp_servers(&cfg), serde_json::json!({"srv": {"command": "edited"}}));
+            let rec = state.get(ArtifactKind::Mcp, "srv").expect("the output stays recorded");
+            assert_eq!(rec.outputs.len(), 1, "adopted={adopted}");
+        }
+    }
+
+    /// `--force` removes an adopted member, the rule `uninstall` and the
+    /// relocated-root reaper apply: nothing else could reach it afterwards.
+    #[test]
+    fn force_removes_an_adopted_entry_and_abandons_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dunce::canonicalize(dir.path()).unwrap();
+        let cfg = write_mcp_config(&ws, &[("mine", "grim"), ("user", "x")]);
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        record_mcp(&mut state, "mine", vec![entry_output("copilot", "mine", true)]);
+
+        let acted = reap_dropped_clients(&mut state, &[ClientTarget::Claude], &roots(&ws), true).unwrap();
+
+        assert_eq!(acted[0].reaped, vec!["copilot".to_string()]);
+        assert!(acted[0].abandoned_entries.is_empty(), "{:?}", acted[0]);
+        assert_eq!(mcp_servers(&cfg), serde_json::json!({"user": {"command": "x"}}));
+    }
+
+    /// A member already gone leaves nothing to report: `abandoned_entries`
+    /// names only what is still in the file.
+    #[test]
+    fn an_adopted_entry_already_gone_drops_without_a_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dunce::canonicalize(dir.path()).unwrap();
+        let cfg = write_mcp_config(&ws, &[("user", "x")]);
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        record_mcp(&mut state, "mine", vec![entry_output("copilot", "mine", true)]);
+
+        let acted = reap_dropped_clients(&mut state, &[ClientTarget::Claude], &roots(&ws), false).unwrap();
+
+        assert_eq!(acted[0].reaped, vec!["copilot".to_string()]);
+        assert!(acted[0].abandoned_entries.is_empty(), "{:?}", acted[0]);
+        assert_eq!(mcp_servers(&cfg), serde_json::json!({"user": {"command": "x"}}));
+        assert!(state.get(ArtifactKind::Mcp, "mine").is_none());
+    }
+
+    /// `abandoned_entries` means nothing records the member any more, so a
+    /// surviving client that still records it rules the report out.
+    #[test]
+    fn an_adopted_entry_a_surviving_client_records_is_not_abandoned() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dunce::canonicalize(dir.path()).unwrap();
+        let cfg = write_mcp_config(&ws, &[("mine", "grim")]);
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        record_mcp(
+            &mut state,
+            "mine",
+            vec![
+                entry_output("claude", "mine", true),
+                entry_output("copilot", "mine", true),
+            ],
+        );
+
+        let acted = reap_dropped_clients(&mut state, &[ClientTarget::Claude], &roots(&ws), false).unwrap();
+
+        assert_eq!(acted[0].reaped, vec!["copilot".to_string()]);
+        assert!(acted[0].abandoned_entries.is_empty(), "{:?}", acted[0]);
+        assert_eq!(mcp_servers(&cfg), serde_json::json!({"mine": {"command": "grim"}}));
+        let rec = state.get(ArtifactKind::Mcp, "mine").expect("claude still records it");
+        assert_eq!(
+            rec.outputs.iter().map(|o| o.client.as_str()).collect::<Vec<_>>(),
+            vec!["claude"]
         );
     }
 
