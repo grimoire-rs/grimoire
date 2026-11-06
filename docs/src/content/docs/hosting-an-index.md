@@ -181,7 +181,9 @@ the namespace. There are two ways to add one.
 ```
 
 The field-by-field contract is the
-[index specification][spec-metadata]. Note the ref
+[index specification][spec-metadata], which lists every `kind` literal. The
+experimental `settings` kind joined in grim 0.16.0 and is
+[unstable][stability-unstable] until 1.0. Note the ref
 carries **no tag** — versions resolve live from the registry, so an index
 can never serve a stale one.
 
@@ -595,6 +597,7 @@ browsable catalog, the contribution gate, or both.
 [announcing]: ./package-index.md#announcing
 [gitlab]: ./self-hosted-gitlab.md
 [upgrading]: #upgrading
+[stability-unstable]: ./stability.md#unstable
 
 <!-- grimoire -->
 [index-site]: https://index.grimoire.rs

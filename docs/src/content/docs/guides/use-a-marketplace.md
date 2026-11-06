@@ -223,7 +223,7 @@ marketplace.
 
 A repository can name the marketplace in a committed file, so every
 contributor gets the plugin without typing the add command. Claude
-Code and Copilot support this. Codex and Cursor do not.
+Code, Copilot and Codex support this. Cursor does not.
 
 ### Claude Code {#team-pin-claude}
 
@@ -265,10 +265,13 @@ agent ([community#200387][copilot-cloud]).
 
 ### Codex and Cursor {#team-pin-none}
 
-Codex registers marketplaces per user, and a repository cannot commit a
-registration ([openai/codex#18115][codex-18115], open). Put the
-`codex plugin marketplace add` line in your README or onboarding
-script. Cursor has no repository-level setting at all.
+*Verified 2026-11-05 against the Codex [configuration
+reference][codex-config].*
+
+Codex reads a marketplace from a committed `.codex/config.toml`. Declare
+it under `[marketplaces.<name>]` with `source_type = "git"`, a `source`
+and an optional `ref`. Codex loads that file only after the contributor
+trusts the project. Cursor has no repository-level setting at all.
 
 ### Claude Code on the web {#claude-web}
 
@@ -441,7 +444,7 @@ credential that works without a prompt.
 [chatgpt-import]: https://help.openai.com/en/articles/20001504-importing-and-syncing-plugin-marketplaces-from-github
 [chatgpt-desktop]: https://developers.openai.com/plugins/build/plugins
 [claude-gui]: https://support.claude.com/en/articles/13837440-use-plugins-in-claude
-[codex-18115]: https://github.com/openai/codex/issues/18115
+[codex-config]: https://learn.chatgpt.com/docs/config-file/config-reference
 [codex-19372]: https://github.com/openai/codex/issues/19372
 [qoder-plugins]: https://docs.qoder.com/cli/plugins.md
 [cursor-plugins]: https://cursor.com/docs/plugins

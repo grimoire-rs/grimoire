@@ -605,7 +605,12 @@ grim build ./code-review
 grim build ./rust-style.md --kind rule
 grim build ./code-reviewer.md --kind agent
 grim build ./mcp/acme-search.toml --kind mcp
+grim build ./settings/team-defaults.toml --kind settings
 ```
+
+A [settings][settings-publish] document needs `--kind settings`. The kind is
+experimental, new in grim 0.16.0, and [unstable][stability-unstable] until
+1.0.
 
 ## Release
 
@@ -615,6 +620,9 @@ registry in one step. Give it the source path and the release reference:
 ```sh
 grim release ./code-review ghcr.io/acme/code-review:1.2.3
 ```
+
+An agent, an MCP server or a settings document needs the same `--kind` flag
+as `grim build`.
 
 ### Cascade tags
 
@@ -658,8 +666,8 @@ grim release ./code-review ghcr.io/acme/code-review:1.2.3 --compression gzip
 ```
 
 The default is `none`, and default output stays byte-identical to releases
-before 0.15.0. Bundles and MCP server descriptors ignore the flag. Their layers
-are small JSON documents, so grim never compresses them.
+before 0.15.0. Bundles, MCP server descriptors and settings documents ignore
+the flag. Their layers are small JSON documents, so grim never compresses them.
 
 Grim refuses a gzip release that grim itself could not install. When the tar
 is larger than 64 MiB and more than 100 times the size of its gzip layer, as
@@ -685,9 +693,9 @@ bytes. Re-releasing an existing version after you flip `--compression`, or
 after the compressor itself changes, is therefore not a conflict. When the
 content is otherwise equal, grim adopts the version already on the registry.
 
-Adoption applies to skill, rule, agent and hook releases only. A bundle or MCP
-server release whose digest differs from the one at the tag still refuses,
-because readers never verify its annotation.
+Adoption applies to skill, rule, agent and hook releases only. A bundle, MCP
+server or settings release whose digest differs from the one at the tag still
+refuses, because readers never verify its annotation.
 
 Equality is strict about layers grim cannot vouch for. A layer it cannot read
 (`+zstd`) never equals anything. A gzip layer without the annotation equals
@@ -864,7 +872,7 @@ reproducibility forfeits its late binding.
 
 ## Publishing dependencies {#requires}
 
-A skill, rule, agent, MCP server or hook that
+A skill, rule, agent, MCP server, hook or settings package that
 [declares dependencies](./artifacts.md#requires) publishes with
 the same commands as any other artifact. [`grim release`](./commands.md#release)
 packs the declarations into a second layer beside the content, and
@@ -930,7 +938,7 @@ releases each entry in a fixed order.
 
 ### The publish.toml format {#batch-publish-manifest}
 
-A manifest has one required top-level field, `registry`, and up to five
+A manifest has one required top-level field, `registry`, and up to seven
 kind tables. Each table entry is a sub-table keyed by name with a
 `version` field.
 
@@ -956,6 +964,9 @@ version = "0.1.0"
 [mcp.acme-search]
 version = "1.0.0"
 
+[settings.team-defaults]           # experimental: settings/team-defaults.toml
+version = "0.1.0"
+
 [bundles.grim-essentials]
 version = "0.1.0"
 pin = true                         # optional, any kind; freezes members or requires; default false
@@ -977,8 +988,8 @@ OCI repository.
 The optional top-level `compression` key sets the [layer
 compression](#compression) for every skill, rule, agent and hook entry in
 the run. It takes `none` or `gzip`, and any other value exits `65`. The
-precedence is the `--compression` flag, then this key, then `none`. Bundle
-and MCP entries ignore it, so one key can sit above a mixed manifest.
+precedence is the `--compression` flag, then this key, then `none`. Bundle,
+MCP and settings entries ignore it, so one key can sit above a mixed manifest.
 
 #### One version for the whole catalog {#batch-publish-version}
 
@@ -1337,6 +1348,7 @@ kind, relative to the manifest's directory:
 | agent | `agents/{name}.md` |
 | mcp | `mcp/{name}.toml` |
 | hook | `hooks/{name}/` (experimental — see [Hooks](./hooks.md)) |
+| settings | `settings/{name}.toml` (experimental, see [Settings][settings-publish]) |
 | bundle | `bundles/{name}.toml` |
 
 The `path` field overrides this convention for entries whose source lives
@@ -1346,11 +1358,13 @@ elsewhere.
 
 Entries publish in a fixed kind order: skills, then rules, then agents,
 then [MCP servers](./mcp-servers.md), then [hooks](./hooks.md) (experimental),
-then bundles. Ordering is alphabetical within each kind. An entry that
+then [settings][settings-publish] (experimental), then bundles. Ordering is
+alphabetical within each kind. An entry that
 [requires](#requires-publish-order) another entry of the same manifest moves
 after it, whatever its kind. Hooks were
-appended after MCP servers and before bundles. No existing kind's relative
-position moved. Bundle entries land last by design, because a bundle holds
+appended after MCP servers and before bundles, and settings after hooks. No
+existing kind's relative position moved. Bundle entries land last by design,
+because a bundle holds
 references to already-published members, and consumers resolve those members
 at lock time. Publishing a bundle before its members would produce a bundle
 that references artifacts that do not exist.
@@ -1382,7 +1396,7 @@ published keep their bytes, and only a bumped version packs gzip.
 | `--manifest <path>` | Manifest file to read (default: `./publish.toml`). |
 | `--dry-run` | Validate and plan without pushing. Prints what would be pushed. Companions are still containment- and size-checked and packed, so a bad companion fails the dry run; zero registry mutations occur either way. |
 | `--force` | Move existing exact-version tags instead of skipping them. |
-| `--compression <none\|gzip>` | Layer compression for skill, rule, agent and hook entries; bundles and MCP servers ignore it. Overrides the manifest's `compression` key, and `none` applies when neither is set. A bare `--compression` means `gzip`. Consumers need grim 0.15.0 or later to install gzip layers. See [Compressing layers](#compression). |
+| `--compression <none\|gzip>` | Layer compression for skill, rule, agent and hook entries; bundles, MCP servers and settings ignore it. Overrides the manifest's `compression` key, and `none` applies when neither is set. A bare `--compression` means `gzip`. Consumers need grim 0.15.0 or later to install gzip layers. See [Compressing layers](#compression). |
 | `--only <name>` | Publish only the named entry (repeatable). A name absent from the manifest exits 65. |
 | `--version <version>` | The single version source for the run. A **semver** value overrides the manifest's top-level `version` (entries with their own `version` keep it) and every entry cascades; a **non-semver** value (e.g. `canary`) is a movable channel tag applied to every entry uniformly, with no cascade. A prerelease/build-metadata value, a reserved cascade-float shape (`latest`, a bare major, or `major.minor`), or a value that is not a legal OCI tag exits 65 rather than being treated as a channel — see [Validation and fail-fast](#batch-publish-validation). The manifest's `version_prefix` (default `v`) is stripped first, so `--version v1.2.3` publishes `1.2.3`. See [One version for the whole catalog](#batch-publish-version). |
 | `--cascade` / `--no-cascade` | Control the rolling cascade (`X.Y.Z` → `X.Y`, `X`, `latest`) for the whole run. Neither flag is the default: cascade automatically for a semver `--version`, single tag for a channel. `--cascade` asserts a semver release and exits 65 if combined with a channel value; `--no-cascade` publishes only each exact version tag. |
@@ -1551,4 +1565,6 @@ example with `docker login` against
 <!-- internal -->
 [global-options]: ./commands.md#global-options
 [upgrading-compression]: ./upgrading.md#compressed-layers-need-new-grim
+[settings-publish]: ./settings.md#publish
+[stability-unstable]: ./stability.md#unstable
 [compression-section]: #compression

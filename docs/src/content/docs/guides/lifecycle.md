@@ -159,7 +159,9 @@ grim uninstall skill code-review
 undeclares the artifact.
 
 Both take a kind and a name. The kind is `skill`, `rule`, `agent`, `bundle`,
-`mcp`, or the experimental `hook`, and `grim uninstall` accepts every one of those but `bundle`.
+`mcp`, `hook` or [`settings`][settings-kind]. The last two are experimental
+and [unstable][stability-unstable] until 1.0, and `settings` is new in grim
+0.16.0. `grim uninstall` accepts every kind but `bundle`.
 
 ## See it run
 
@@ -170,3 +172,7 @@ Both take a kind and a name. The kind is `skill`, `rule`, `agent`, `bundle`,
 
 Read [Check an artifact before you install it](./inspect.md) or
 [Choose how far a reference is allowed to move](./versioning.md).
+
+<!-- internal -->
+[settings-kind]: ../settings.md
+[stability-unstable]: ../stability.md#unstable

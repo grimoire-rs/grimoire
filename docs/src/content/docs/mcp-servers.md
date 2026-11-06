@@ -382,7 +382,8 @@ grim release ./mcp/acme-search.toml ghcr.io/acme/mcp/acme-search:1.0.0 --kind mc
 ```
 
 The flag is required because a `.toml` path is [bundle](./concepts.md#bundles)-shaped
-by default — bundles are the other `.toml` artifact kind. When a `.toml`
+by default. Bundles and [settings][settings-kind] are the other `.toml`
+artifact kinds. When a `.toml`
 file carries a `[server]` table but no `--kind mcp` flag, grim reports
 that it looks like an MCP descriptor and asks for the flag, mirroring the
 hint a [publish manifest pointed at `grim release`](./publishing.md#batch-publish-disambiguation)
@@ -392,7 +393,7 @@ On the wire, an MCP descriptor publishes as a single canonical-JSON layer
 (media type `application/vnd.grimoire.mcp.v1+json`, capped at 64 KiB),
 the same OCI empty config every kind uses, and the same
 `com.grimoire.kind: mcp` manifest annotation — see
-[The six kinds](./artifacts.md#kinds) for why the annotation exists.
+[The seven kinds](./artifacts.md#kinds) for why the annotation exists.
 Conventionally it publishes to `<registry>/<namespace>/mcp/<name>:<version>`,
 the same `{kind-subdir}/{name}` layout every other kind uses by default.
 
@@ -484,7 +485,9 @@ the full tool table lives at [`grim mcp`](./commands.md#mcp).
   settings file that `CLINE_MCP_SETTINGS_PATH`, `CLINE_DATA_DIR` or
   `CLINE_DIR` moves outside `~/.cline`. It could not record where it wrote.
   grim takes Cline's own lock on the file first. While another process
-  holds it, the command exits 75 and is safe to retry.
+  holds it, the command exits 75 and is safe to retry. Under
+  `--format json` the [error document][json-error-reason] carries reason
+  `locked` and `retryable` `true`.
 - **`ws` transport is Claude-only.** [OpenCode][opencode-mcp-docs],
   [Copilot][copilot-mcp-docs] (both scopes), and [Codex][codex-mcp-docs]
   document no WebSocket MCP transport; a `transport = "ws"` descriptor is
@@ -542,6 +545,8 @@ the full tool table lives at [`grim mcp`](./commands.md#mcp).
 [stability-forward]: ./stability.md#limitations-forward-compat
 [stability-unstable]: ./stability.md#unstable
 [clients-warp-mcp]: ./clients.md#gap-warp-mcp
+[settings-kind]: ./settings.md
+[json-error-reason]: ./json-interface.md#error-reason
 
 <!-- external -->
 [mcp-spec]: https://modelcontextprotocol.io/specification/latest

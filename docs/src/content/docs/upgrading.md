@@ -40,6 +40,8 @@ invisible until you intervened, which is worse.
 | Global | `~/.cline`, `~/.factory`, `~/.warp`, `~/.kilo` or `$XDG_CONFIG_HOME/kilo`, `~/.openclaw` |
 | Global | Goose's config roots — `$XDG_CONFIG_HOME/goose` and `~/Library/Application Support/goose`, or `$GOOSE_PATH_ROOT` alone when that variable is set, which **replaces** the candidate list rather than extending it |
 | Global | `~/.gemini/config` (Antigravity) |
+| Global | `~/.gemini/antigravity-cli`, the Antigravity CLI's settings directory, since 0.16.0 (Antigravity) |
+| Global | `$XDG_CONFIG_HOME/warp-terminal` on Linux, Warp's settings directory, since 0.16.0 (Warp) |
 | Project | `.qoder` (Qoder) |
 | Global | `~/.qoder`, or `$QODER_CONFIG_DIR` when that variable is set (Qoder) |
 
@@ -54,7 +56,8 @@ sits *inside* Gemini CLI's own `~/.gemini` marker, so a global Antigravity
 install makes **gemini** detected too — and uninstalling does not undo it,
 because grim removes the files it wrote, not the directories they lived in.
 Pass `--client` if you want only one of them. The reverse never happens: a
-Gemini install creates `~/.gemini/agents`, never `config/`.
+Gemini install creates `~/.gemini/agents`, never `config/` or
+`antigravity-cli/`.
 
 Pin `[options].clients` (or pass `--client`) for a deterministic target set.
 
@@ -281,14 +284,19 @@ retires the `64` that combination used to produce.
 
 Background: [Voting against a private instance](./ratings.md#voting-host).
 
-## Downgrading to 0.13 after browsing a package index {#catalog-cache-downgrade}
+## Downgrading to 0.13 or 0.14 after browsing {#catalog-cache-downgrade}
 
 [Artifact ratings][ratings] add one field to the catalog cache
 (`$GRIM_HOME/catalog/<hash>.json`). So does the tree placement a
-[package index](./package-index.md) gives each row. The cache parses strictly: a cache written
-by a newer grim is refused wholesale by an older one. That is a deliberate,
-cheap trade — a cache is not a contract, and a refusal should cost exactly
-one network rebuild.
+[package index](./package-index.md) gives each row. Since 0.16.0 so does the
+`kind_read` marker on a directly browsed row that names no kind, such as a
+container image.
+
+Through 0.14.x the cache parses strictly: a cache written by a newer grim is
+refused wholesale by an older one. That is a deliberate, cheap trade — a
+cache is not a contract, and a refusal should cost exactly one network
+rebuild. From 0.15.0 grim reads past a field it does not know, so only a
+downgrade to 0.13 or 0.14 meets the refusal.
 
 **It did not cost one rebuild in 0.13.0 and earlier.** The parse error was
 raised above the rebuild decision, so a refused cache degraded that
@@ -298,21 +306,23 @@ release fixes it going forward: a cache the loader refuses now reads as
 cold while online, so the next browse simply rewrites it. That fix cannot
 reach a binary that already shipped.
 
-**What to do.** Only if you *downgrade* to 0.13 after browsing a package
-index: delete the cache once. From 0.14 this applies to an index that
-publishes ratings. After 0.14.2 it applies to every index.
+**What to do.** Delete the cache once if you *downgrade* to 0.13 after a
+browse that wrote one of those fields. Three browses do: an index that
+publishes ratings (from 0.14), any index (after 0.14.2), and a registry
+holding a repository with no grimoire kind (since 0.16.0).
 
 ```console
 $ rm -rf "${GRIM_HOME:-$HOME/.grimoire}/catalog"
 ```
 
+After a downgrade, 0.14 refuses the cache that registry browse wrote too,
+and 0.14.0 to 0.14.2 also refuse one any index browse wrote. Online, 0.14
+rebuilds the cache once. Offline, it fails until an online run or the
+deletion above.
+
 Upgrading needs nothing — the newer binary rebuilds an older cache
-normally. A cache whose entries carry no rating and no index placement is
-byte-identical to what 0.13 wrote. Since 0.16.0 a direct browse of a
-registry with foreign repositories, such as container images, writes a
-`kind_read` field that 0.14.x and earlier refuse. Online, 0.14.x rebuilds
-that cache once, and offline it fails until an online run or the deletion
-above, which 0.13 needs either way.
+normally. A cache whose entries carry no rating, no index placement and no
+`kind_read` marker still reads in 0.13.
 
 ## Publishing stamps provenance without `--git` {#default-provenance}
 
@@ -491,6 +501,68 @@ hook member of the bundle, including one that was already present and had never
 been consented. It now consents only the target and the hooks it newly pulls
 in. Hooks are experimental, so this ships without a shim. Re-run
 `grim install --trust-hooks` for a hook you had relied on `add` to arm.
+
+## Install fixes in 0.16.0 {#install-fixes-0-16}
+
+grim 0.16.0 fixes four install paths that wrote, removed or refused the wrong
+thing. None of them changes a flag or a JSON key, and only the byte-order mark
+fix changes an exit code. Each can still change what you see on the first run
+after the upgrade.
+
+**The worktree ignore rule moves to the shared exclude file.** grim adds
+`.claude/settings.local.json` to git's `info/exclude` when it writes that
+file for a hook. In a linked worktree, grim used to write that line to the
+worktree's own git directory. Git reads `info/exclude` only from the common
+directory, so the rule did nothing. Since 0.16.0 grim writes the common
+`info/exclude`, which every checkout of the repository shares.
+
+A linked worktree never removes that line, because a sibling checkout may
+still rely on it. A line written to the per-worktree file before 0.16.0
+stays there and stays inert. The next `grim install` writes the line git reads.
+
+**An adopted MCP entry stays when its client is dropped.** grim adopts an
+entry it finds already holding the value it would write. Before 0.16.0,
+[`grim update`][update] spliced that entry out when it reaped a client that
+`[options].clients` no longer names. Since 0.16.0 it leaves an adopted entry
+in the file and drops only the record. The
+update row names it in [`abandoned_entries`][json-update], and grim logs a
+warning naming the file. An entry grim wrote itself is removed as before, and
+`--force` removes an adopted one too.
+
+The same holds when that update also moves the server's pin. `grim install`,
+`grim add` and an install from `grim tui` read `[options].clients` too. On
+every run, whether the pin moved or not, they leave the adopted entry of a
+client outside that list alone.
+
+When a new pin is one a client can no longer represent, `update`, `install`
+and `add` all leave that client's adopted entry in place. `--force` removes
+it. They also leave an entry grim cannot read, and warn about it. An entry you
+edited refuses the server's row until you pass `--force`, and then stays in
+place with a warning too. Only the `update` row names these entries.
+
+**A JSON file that starts with a byte-order mark is edited.** Some editors
+write a byte-order mark at the start of a JSON file. In 0.15.1 grim refused to
+edit such a client config file and exited `74`, whether the file held MCP
+servers, hooks or the `claudeMdExcludes` list. Since 0.16.0 grim reads past the
+mark, keeps it first in the file, and reads and edits the rest as usual. The
+new settings kind edits such a file the same way.
+
+**A state load drops an output its kind may not address.** An install-state
+file can arrive with a `git clone`. Since 0.16.0 every load checks each
+recorded output against the surfaces its artifact kind may write. An output
+outside them leaves the record, and grim warns once per output with
+`dropped a recorded output of <kind> '<name>'`.
+
+The file at that path is not touched. A state file grim wrote itself loads
+unchanged.
+
+**`grim search settings` filters by kind.** 0.16.0 adds the
+experimental [`settings`][settings] kind, behind
+`[options.experimental] settings` and listed under [Unstable][unstable].
+`settings` and `setting` became kind keywords like `skill` and `rule`, so
+[`grim search settings`][search] lists settings packages only. A skill named
+`vscode-settings` no longer answers the bare word. Search for
+`vscode-settings` to find it again.
 
 ## Index refreshes add a root probe and a sync sidecar {#index-sync}
 
@@ -861,3 +933,6 @@ reader's own copy again beside the pool copy: two copies, but nothing is lost.
 [gap-shared-pool]: ./clients.md#gap-shared-pool
 [options-vendors]: ./configuration.md#options-vendors
 [config]: ./commands.md#config
+[search]: ./commands.md#search
+[settings]: ./settings.md
+[json-update]: ./json-interface.md#shapes-items

@@ -183,7 +183,7 @@ in a fixed order.
 
 | Key | Type | Presence | Example |
 |---|---|---|---|
-| `grim.artifact.kind` | string | always | `skill`, `rule`, `agent`, `bundle`, `mcp`, `hook` |
+| `grim.artifact.kind` | string | always | `skill`, `rule`, `agent`, `bundle`, `mcp`, `hook`, `settings` |
 | `grim.artifact.action` | string | always | `installed`, `updated`, `removed`, `added` |
 | `grim.artifact.ref` | string | omitted for a local path source | `ghcr.io/acme/review:1` |
 

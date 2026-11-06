@@ -22,9 +22,10 @@ each — see [Upgrading](./upgrading.md).
 ## Frozen at 1.0 {#frozen}
 
 Breaking any guarantee below is a major-version change, not a minor one.
-Two exceptions sit inside these rows: the experimental [hook](./hooks.md)
-surface and the [telemetry switches][telemetry-enable] in the environment
-variables row. [Unstable](#unstable) lists both by name.
+Three exceptions sit inside these rows: the experimental [hook](./hooks.md)
+surface, the experimental [settings][settings] surface, and the
+[telemetry switches][telemetry-enable] in the environment variables row.
+[Unstable](#unstable) lists all three by name.
 
 | Area | Guarantee |
 |------|-----------|
@@ -201,8 +202,10 @@ exclusions are what keep 1.x able to move at all:
     source manifest, and the `[hooks.<name>]` entries of `publish.toml`,
   - the `grimoire.lock` `[[hook]]` array and the `[options.experimental] hooks` key,
   - every `grim hook` verb and its report JSON, and `grim schema --kind hook`,
-  - the dispatch table's on-disk shape, and every hook-only CLI flag
-    (`--trust-hooks`, `--no-trust-hooks`).
+  - the dispatch table's on-disk shape. The consent flag pair is no longer
+    hook-only. Since 0.16.0 `--trust-hooks` and `--no-trust-hooks` are
+    aliases of `--trust-workspace` and `--no-trust-workspace`, which the
+    settings entry below lists.
 
   Four launcher contracts are built to be frozen. They are experimental today
   and grim already treats them as fixed, so they join the frozen list when
@@ -244,6 +247,31 @@ exclusions are what keep 1.x able to move at all:
   gates](./hooks.md#why-gated). It graduates to a
   frozen contract once real consumers have shaped it, the same path
   `--progress json` is on below.
+
+- **The experimental [settings][settings] artifact kind.** Settings ship in
+  grim 0.16.0 behind the `[options.experimental] settings` key. While that key
+  exists, these may change in any minor release:
+  - the `[settings]` table of `grimoire.toml`, the `grimoire.lock`
+    `[[settings]]` array, and the `[options.experimental] settings` key,
+  - the [settings document][settings-format] grammar, the typed list of keys
+    grim accepts, and `grim schema --kind settings`,
+  - the `--trust-workspace` and `--no-trust-workspace` flags, and the
+    `consent` alias of `grim hook`,
+  - the `settings_changes` and `pieces` report keys, including both inside
+    the error document,
+  - the exit codes a settings cause returns, `65`, `75`, `78` and `81`,
+  - the file format grim keeps its settings records in.
+
+  grim keeps these additive by choice. The guarantee does not cover them.
+
+  What is **not** exempted: the literals settings rows add to otherwise-frozen
+  reports. They follow the [additive-field policy](#frozen-additive-fields):
+  - the `gated` state on a settings row, and the `no-applicable-settings`,
+    `client-config-absent`, `local-file-tracked`, `settings-root-relative`
+    and `settings-root-in-workspace` causes,
+  - the `element` field on `grim status` outputs and on `abandoned_entries`
+    rows. It is always present, and `null` for every other kind and for a
+    settings value that is not an array element.
 
 - **Vendor render layout.** The exact files and paths grim writes under
   any client's own configuration root, and where an MCP entry lands
@@ -448,10 +476,14 @@ state entry using [local path sources](./concepts.md#references-tags-and-digests
 bundle](./concepts.md#bundles)) is unreadable by a `grim` build that
 predates the feature. It exits 78 (`EX_CONFIG`), the same code any other
 config or lock parse failure uses.
+
 The same holds for an install-state file that records an anchor tag added
 in a newer release, such as `goose-root`, `kilo-config-root` or
 `qoder-root`. A `grim` build that predates the anchor refuses to load that
-file rather than drop the record it cannot place.
+file rather than drop the record it cannot place. That refusal exits 74
+(`EX_IOERR`), not 78, because grim reports a failed state read as an I/O
+error on the install target. A command that reads a config or lock first
+exits 78 when that earlier file is the one refused.
 
 This hard-reject is a deliberate departure from the ecosystem norm:
 [Cargo][cargo-manifest] warns rather than errors on an unrecognized
@@ -478,6 +510,23 @@ project's artifacts as if the hook did not exist.
 A project that later drops its only hook declaration and re-locks
 downgrades cleanly. The lock carries no `hook` entry any more, so a
 `grim` build that predates the kind reads it exactly as it always has.
+
+The experimental [settings][settings] kind, new in 0.16.0, holds the same
+line. grim 0.15.1 predates it and meets each of its surfaces this way:
+
+| What grim 0.15.1 reads | What it does |
+|---|---|
+| a `grimoire.lock` with a `[[settings]]` array | exit `78` |
+| a `grimoire.toml` with a `[settings]` table or the `[options.experimental] settings` key | exit `78` |
+| a bundle with a settings member, or an artifact that requires a settings package | exit `65`, and nothing is installed |
+| `grim add` of a settings artifact | exit `65`, and nothing is declared |
+| a `$GRIM_HOME/state/global.json` holding a settings record | exit `74`, and the file is left as it was |
+| a consent record holding `settings:` keys | `grim hook allow` drops those keys, so a newer grim asks again |
+
+The `74` row reaches only a user who downgrades after a global settings
+install. A project-scope settings record never enters `.grimoire/state.json`,
+so that file stays readable by 0.15.1. The kind adds nothing to the lock or
+state of a project that declares no settings package.
 
 [Declared dependencies](./concepts.md#dependencies) hold the line in both
 places they reach an older grim: the lock and the artifact. A lock that holds
@@ -568,7 +617,7 @@ to 0.13. From 0.14 this matters for an index that publishes ratings. After
 
 See [Upgrading][upgrading-catalog-downgrade]. Both a rating and the tree
 placement a package index gives each row add a field to the cache. An
-entry with neither still serializes byte-identically to what 0.13 wrote.
+entry with neither, and no `kind_read` marker, still reads in 0.13.
 
 A direct OCI browse is exposed too. Since 0.16.0 a row for a foreign
 repository, such as a container image, carries `kind_read` once grim has
@@ -649,9 +698,9 @@ This also widens two read-only commands. An offline
 of a digest-pinned reference whose manifest is stored now succeeds, where it
 exited `81` before. It is a widening and changes no field.
 
-The constraint applies to every registry-sourced kind (skill, rule, agent, MCP
-server, or bundle member) whose materialized output has gone missing while
-offline. [Local path sources](./concepts.md#references-tags-and-digests) are
+The constraint applies to every registry-sourced kind whose materialized
+output has gone missing while offline. That is a skill, rule, agent, MCP
+server, hook, settings package or bundle member. [Local path sources](./concepts.md#references-tags-and-digests) are
 unaffected — they read straight from disk and never touch a manifest.
 
 <!-- internal -->
@@ -712,6 +761,8 @@ unaffected — they read straight from disk and never touch a manifest.
 [plugin-metadata]: ./configuration.md#plugin-metadata
 [json-shapes-items]: ./json-interface.md#shapes-items
 [json-hook-arming-stability]: ./json-interface.md#hook-arming
+[settings]: ./settings.md
+[settings-format]: ./settings.md#format
 
 <!-- external -->
 [gnu-make]: https://www.gnu.org/software/make/manual/make.html

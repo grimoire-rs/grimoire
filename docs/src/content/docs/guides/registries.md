@@ -151,7 +151,7 @@ inserted and nothing is dropped:
 
 ```text
 $ grim add diff-review
-could not infer the kind of 'registry.acme.example/diff-review:latest'; pass --kind skill|rule|agent|bundle|mcp|hook
+could not infer the kind of 'registry.acme.example/diff-review:latest'; pass --kind skill|rule|agent|bundle|mcp|hook|settings
 $ echo $?
 65
 ```
