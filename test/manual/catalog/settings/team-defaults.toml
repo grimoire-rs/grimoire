@@ -1,0 +1,33 @@
+# Manual-rig settings package. Read `test/manual/README.md` § Settings.
+#
+# One package, every merge class the rig shows:
+#   Scalar  /model                        one value, grim owns the key
+#   Set     /permissions/{allow,deny}     grim owns its elements, never the list
+#   Map     /extraKnownMarketplaces/acme  grim owns one entry, never its siblings
+# Only Claude applies at project scope; the codex and copilot tables land at
+# global scope (the README redirects both roots into the rig first).
+
+description = "Team defaults: a model, allow and deny rules, and the acme plugin marketplace."
+summary = "team defaults"
+keywords = "team,defaults,manual-rig"
+
+[claude]
+model = "sonnet"
+
+[claude.permissions]
+allow = ["Bash(git status:*)"]
+deny = ["Bash(rm:*)"]
+
+[claude.extraKnownMarketplaces.acme.source]
+source = "github"
+repo = "acme/tools"
+
+[codex]
+model = "gpt-5"
+
+[codex.marketplaces.acme]
+source = "https://example.com/acme"
+source_type = "git"
+
+[copilot.extraKnownMarketplaces.acme]
+source = "https://example.com/acme"

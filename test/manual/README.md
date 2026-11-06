@@ -24,6 +24,7 @@ project, and a `teardown.sh`.
 | `catalog/agents/<name>.md` | Source-of-truth sample agents (committed) |
 | `catalog/publish.toml` | Batch-publish manifest for the annotation showcase — `[metadata]` defaults, `[description]` companion (README + CHANGELOG), manifest-level `[support]` channels (committed) |
 | `catalog/hooks/<name>/hook.toml` | Source-of-truth sample hooks + their payload scripts (committed) |
+| `catalog/settings/team-defaults.toml` | Source-of-truth sample settings package: a model, allow and deny rules, a marketplace (committed) |
 | `catalog/bundles/starter-pack.toml` | Bundle v1 member set (committed) |
 | `catalog/bundles/starter-pack-v2.toml` | Bundle v2 member set — adds + removes members (committed) |
 | `catalog/mcp/docs-search.toml` | Sample MCP server descriptor — a dependency target (committed) |
@@ -34,12 +35,15 @@ project, and a `teardown.sh`.
 | `index/README.md` | What each fixture row demonstrates, and why the index exists at all |
 | `project/grimoire.toml` | Ready-made consumer project (floating `:1` tags) — the OCI registry plus the static index |
 | `project-deps/grimoire.toml` | Dependency-demo project: declares only dependents, see § 12 |
+| `project-settings/grimoire.toml` | Settings-demo project: the experimental flag on, one settings package declared, see § 13 |
 | `project-multi/grimoire.toml` | Multi-registry consumer project (`[[registries]]` aliases across 5050 + 5051) |
 | `scripts/env.sh` | `source` it to point `grim` at the rig |
 | `scripts/bootstrap.sh` | Build `grim`, start both registries + the static index, publish the version matrix + multi-registry subset + deep-fold solo package + the annotation showcase, write the global registry config |
+| `scripts/settings-env.sh` | `source` it after `env.sh` for the global steps of § 7 and § 13e: redirects `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `COPILOT_HOME` into `.settings-roots/`, which `in_rig` (§ 7) checks |
 | `scripts/release-update.sh` | Publish `code-reviewer` 1.3.0 (post-lock outdated / rolling-release demo) |
 | `scripts/teardown.sh` | Wipe rig state (`--registry` also stops both registries) |
 | `docker-compose.yml` | `registry:2` on `localhost:5050` (primary) and `localhost:5051` (`tools` subset), plus `nginx` on `localhost:5052` serving `index/` |
+| `.settings-roots/` | The three redirected harness roots `settings-env.sh` creates, plus `in_rig`'s scratch `home/` and § 13e's own `GRIM_HOME`, `grim-home/` (gitignored, ephemeral) |
 | `.grim-home/` | Isolated `GRIM_HOME` (gitignored, ephemeral) |
 | `.grim-home/grimoire.toml` | Global config bootstrap writes via `grim config` — three `[[registries]]` (5050/grimoire default + 5051/tools + the 5052 index); browse all of them from anywhere with `--global` |
 
@@ -67,6 +71,7 @@ Published catalog (a small **version matrix** — most artifacts ship one
 | rule | `localhost:5050/grimoire/rules/architecture-guide` | 1.0.0 |
 | agent | `localhost:5050/grimoire/agents/reviewer` | 1.0.0, 1.1.0 |
 | agent | `localhost:5050/grimoire/agents/release-bot` | 1.0.0 (vendor-override demo) |
+| settings | `localhost:5050/grimoire/settings/team-defaults` | 1.0.0 (experimental kind, see § 13) |
 | hook | `localhost:5050/grimoire/hooks/tool-logger` | 1.0.0 (observer; alternation matcher) |
 | hook | `localhost:5050/grimoire/hooks/write-guard` | 1.0.0 (gatekeeper; JSON verdict) |
 | bundle | `localhost:5050/grimoire/bundles/starter-pack` | 1.0.0, 2.0.0 (v2 adds commit-helper, drops security-baseline) |
@@ -487,13 +492,78 @@ cat grimoire.toml grimoire.lock
 
 ### 7. Global scope
 
-`bootstrap.sh` already wrote the global config (`$GRIM_HOME/grimoire.toml`
-with the two registries), so skip `grim --global init` here — it would error
-`config already exists` (exit 64) on the existing file. Just add + install:
+Global scope writes into each client's own directory under your home, so every
+global command in this rig runs through `in_rig`. It hands grim this rig's
+paths and nothing else:
+
+- **`GRIM_HOME`.** `in_rig global` takes `.grim-home/`, where `bootstrap.sh`
+  wrote the global config. `in_rig settings` takes `.settings-roots/grim-home/`,
+  which only § 13e uses, so a package § 13e declares never reaches this section.
+- **Every other root.** `HOME` is `.settings-roots/home/`, and the Claude, Codex
+  and Copilot roots are the ones `settings-env.sh` makes in `.settings-roots/`.
+  grim runs under `env -i` with only these and the registry variables, so no
+  other client variable reaches it.
+- **Refusals.** It exits 1 before grim starts when a client root in this shell
+  is not the rig's, compared after symlinks and `..` resolve. It also refuses
+  when a Claude settings file could move Claude's root: managed settings, or a
+  `CLAUDE_CONFIG_DIR` in the rig's own `settings.json`.
+
+Managed settings are `managed-settings.json` or `managed-settings.d/` under
+`/etc/claude-code` on Linux and `/Library/Application Support/ClaudeCode` on
+macOS. On any other platform `in_rig` refuses, since it has no path to check.
+The TUI's global scope (`g` in § 1a, `grim tui --global` in § 1c) runs without
+this guard: browse there, and install at global scope only through `in_rig`.
+
+Define it once per shell, from `project/` as in § 2 (§ 13e runs the same block
+from `project-settings/`):
 
 ```sh
-grim --global add localhost:5050/grimoire/rules/security-baseline:1
-grim --global install
+source ../scripts/settings-env.sh
+grim_rig="$(cd -P .. >/dev/null && pwd -P)"         # test/manual, symlinks resolved
+in_rig() (
+  case "${1:-}" in
+    global) home="$grim_rig/.grim-home" ;;
+    settings) home="$grim_rig/.settings-roots/grim-home" ;;
+    *) echo "usage: in_rig global|settings <command>..." >&2; exit 2 ;;
+  esac
+  shift
+  roots="$grim_rig/.settings-roots"
+  refuse() { printf 'refusing to run: %s\n' "$*" >&2; exit 1; }
+  at() {
+    case "$1" in /*) [ "$(cd -P -- "$1" >/dev/null 2>&1 && pwd -P)" = "$roots/$2" ] && return ;; esac
+    refuse "'$1' does not resolve to $roots/$2; source scripts/settings-env.sh"
+  }
+  [ -f "$grim_rig/scripts/settings-env.sh" ] || refuse "'$grim_rig' is not test/manual"
+  at "${CLAUDE_CONFIG_DIR:-}" claude
+  at "${CODEX_HOME:-}" codex
+  at "${COPILOT_HOME:-}" copilot
+  case "$(uname -s)" in
+    Linux) managed=/etc/claude-code ;;
+    Darwin) managed="/Library/Application Support/ClaudeCode" ;;
+    *) refuse "no Claude managed-settings path known for $(uname -s)" ;;
+  esac
+  if [ -e "$managed/managed-settings.json" ] || [ -e "$managed/managed-settings.d" ]; then
+    refuse "Claude managed settings in '$managed' can move Claude's root"
+  fi
+  if grep -qs CLAUDE_CONFIG_DIR "$roots/claude/settings.json"; then
+    refuse "'$roots/claude/settings.json' names CLAUDE_CONFIG_DIR"
+  fi
+  mkdir -p "$home" "$roots/home" || exit 1
+  env -i PATH="$PATH" HOME="$roots/home" GRIM_HOME="$home" \
+    GRIM_DEFAULT_REGISTRY="${GRIM_DEFAULT_REGISTRY:-}" GRIM_INSECURE_REGISTRIES="${GRIM_INSECURE_REGISTRIES:-}" \
+    CLAUDE_CONFIG_DIR="$roots/claude" CODEX_HOME="$roots/codex" COPILOT_HOME="$roots/copilot" "$@"
+)
+```
+
+`in_rig` is a subshell, so nothing it sets reaches your shell. `bootstrap.sh`
+already wrote the global config (`.grim-home/grimoire.toml` with the
+registries), so skip `grim --global init`: it exits 64, `config already exists`.
+Add and install:
+
+```sh
+in_rig global grim --global add localhost:5050/grimoire/rules/security-baseline:1
+in_rig global grim --global install
+find ../.settings-roots -type f                    # every client file grim wrote, all in the rig
 ```
 
 ### 8. Offline behavior
@@ -850,6 +920,138 @@ layer, so the Dependencies panel stays empty and installing a dependent fails
 with exit 65. Point `grimoire.path.executable` at the absolute path of this
 checkout's `test/bin/grim` (the setting takes no `${workspaceFolder}`), then
 open `project-deps/`.
+
+## 13. Settings (experimental)
+
+A `settings` package carries harness configuration (a model, permission rules,
+a plugin marketplace) and merges it into the file each client already reads.
+The kind is off by default and needs two answers before it writes anything: the
+feature flag (`[options.experimental] settings = true`) and this workspace's
+consent. `bootstrap.sh` published `team-defaults`; its source is
+`catalog/settings/team-defaults.toml`. It sets, for Claude, a `model` (Scalar),
+`permissions.allow` and `permissions.deny` (Set) and an `acme` marketplace
+(Map), plus the same marketplace for Codex and Copilot.
+
+**Where it writes.** Parts a-d stay at project scope: the only file written is
+`project-settings/.claude/settings.local.json`, inside the rig (gitignored,
+removed by `teardown.sh`). Codex and Copilot apply at global scope only, so part
+e runs each global command through `in_rig settings`, the § 7 guard. grim then
+sees only the rig's client roots, a scratch `HOME` and part e's own `GRIM_HOME`.
+A `grim --global` typed without `in_rig` has no such guard: it writes wherever
+the shell's variables point, which is `~/.claude`, `~/.codex` and `~/.copilot`
+when `settings-env.sh` was not sourced.
+
+```sh
+source test/manual/scripts/env.sh
+cd test/manual/project-settings
+grim lock
+```
+
+**a. The flag is committed, consent is not.** This `grimoire.toml` already turns
+the flag on, as a team would. A fresh clone is still gated. With no terminal to
+ask on, `install` writes nothing and exits 0, and `status` names the cause:
+
+```sh
+grim install </dev/null; echo $?                  # 0, nothing written
+ls .claude/settings.local.json                    # No such file
+grim status --format json | jq -c '.items[] | select(.kind=="settings") | {name, state, arming}'
+```
+
+Expect `state` `gated` and one `arming` cause, `workspace-not-consented`.
+Branch on `cause`, never on `message`. In a terminal, a plain `grim install` asks
+the question instead (`[y/N]`). `y` records consent for this checkout, as
+`grim consent allow` in part b does, so later installs apply without asking;
+`n` writes nothing. Only `--trust-workspace` answers for one run and writes no
+record. `grim add` also counts as the user's own consent, which is why
+`grim add <ref>` in a project with the flag on installs at once.
+
+**b. Consent, then install.** `grim consent allow` (alias of `grim hook allow`)
+records the answer for this checkout under `$GRIM_HOME/hooks/consent/`:
+
+```sh
+grim consent allow
+grim install
+cat .claude/settings.local.json
+```
+
+`install` lists every key it changed on stderr, one line per key, as
+`added claude .claude/settings.local.json /model (team-defaults)`, and closes with
+the note `a running client may need a restart to read its new settings`. Expect
+`/model`, one `/permissions/allow` element, one `/permissions/deny` element
+and `/extraKnownMarketplaces/acme`. The same list is `settings_changes` in
+`--format json`; it carries keys and elements, never values. This project
+selects `clients = ["claude"]`, so grim reads only the `claude` table and says
+nothing about the others. Name Codex as well, `grim install --client claude,codex`,
+and the run also warns `settings package 'team-defaults': codex applies at
+global scope only`, followed by the cause `(no-applicable-settings)`; part e
+applies that table.
+
+**c. A refusal, then `--force`.** Hand-edit a value grim wrote, then install:
+
+```sh
+jq '.model = "opus"' .claude/settings.local.json > .claude/m.tmp && mv -f .claude/m.tmp .claude/settings.local.json
+grim install; echo $?                            # 65, names /model
+grim install --format json 2>/dev/null | jq '.error | {code, exit, reason, forceable, pieces: [.pieces[] | {pointer, state, wanted, current}]}'
+cat .claude/settings.local.json                  # still "opus": nothing was written
+grim install --force; echo $?                   # 0, "overwritten claude … /model"
+```
+
+The refusal is `exit` 65, `reason` `modified`, `forceable` true. `current` is the only
+place the old value ever appears (bounded, control characters escaped); the
+record, the other output and the change list never carry it. The same refusal
+arrives after a teammate bumps the package or a pull changes a value: nothing a
+teammate's `--force` did reaches this machine, only your own flag writes.
+
+**d. Uninstall removes only what grim wrote.** Add entries of your own beside
+grim's, then uninstall:
+
+```sh
+jq '.permissions.deny += ["Bash(curl:*)"] | .extraKnownMarketplaces.mine = {"source": {"source": "github", "repo": "me/own"}}' \
+  .claude/settings.local.json > .claude/m.tmp && mv -f .claude/m.tmp .claude/settings.local.json
+grim uninstall settings team-defaults
+cat .claude/settings.local.json
+```
+
+The list is `removed …` per key. What stays: your `Bash(curl:*)` deny element and
+your `mine` marketplace, in the same arrays and maps grim wrote into. Gone: the
+`model`, grim's two rule elements, the `acme` entry, and any container that
+only held grim's keys. A value that already equalled grim's before the first
+install is adopted, not written, and uninstall leaves that one too.
+
+**e. Global scope: Codex and Copilot.** Declare the package at global scope,
+through the § 7 guard. Nothing here asks the workspace question. From
+`project-settings/`, in the shell that sourced `env.sh`, run § 7's block that
+defines `in_rig` (`..` is `test/manual` from here too), then:
+
+```sh
+in_rig settings grim --global config set options.experimental.settings true
+in_rig settings grim --global config set options.clients claude,codex,copilot
+in_rig settings grim --global add localhost:5050/grimoire/settings/team-defaults:1
+cat "$CLAUDE_CONFIG_DIR/settings.json" "$CODEX_HOME/config.toml" "$COPILOT_HOME/settings.json"
+```
+
+The first `config set` creates part e's own global config,
+`.settings-roots/grim-home/grimoire.toml`. If `source` failed, a variable still
+names a real root, or Claude managed settings exist, every `in_rig` line prints
+`refusing to run` and exits 1 before grim starts.
+
+Claude and Copilot take the marketplace under `/extraKnownMarketplaces/acme`,
+Codex under `/marketplaces/acme` (a `[marketplaces.acme]` table in
+`config.toml`). Pre-seed any of the three files with an entry of your own before
+the `add` to see it survive, then
+`in_rig settings grim --global uninstall settings team-defaults` to take only
+grim's keys back out.
+
+Until that uninstall or `teardown.sh`, part e's global config declares
+`team-defaults` for Claude, Codex and Copilot. Only `in_rig settings` reads it:
+`env.sh` sets `GRIM_HOME` to `.grim-home/`, so § 7 and a new terminal never
+apply the package. Keep every global command behind `in_rig` all the same, since
+a bare `grim --global install` writes the real client directories.
+
+Re-run `scripts/bootstrap.sh` after editing `team-defaults.toml`; it releases with
+`--force` like the rest. Restore the demo state with `teardown.sh`, which also
+removes `project-settings/.claude`, the lock and `.settings-roots/`, part e's
+global config with it.
 
 ## Teardown
 
