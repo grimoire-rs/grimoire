@@ -919,6 +919,12 @@ pub fn hook_arming(
 /// everywhere keeps the generic sentence: `--global` changes nothing for it.
 fn arming_message(cause: HookArmingCause, consent: &Consent, client: ClientTarget, scope: ConfigScope) -> String {
     match (cause, consent) {
+        // The cause's own sentence sets the project flag, which does not cover a global run.
+        (HookArmingCause::FeatureFlagOff, _) if scope == ConfigScope::Global => {
+            "hooks are disabled for this scope; run grim config set --global options.experimental.hooks true, \
+             then grim install --global"
+                .to_string()
+        }
         (HookArmingCause::ConsentDrifted, Consent::Drifted(new)) => {
             format!(
                 "{}. Not yet consented: {}",
@@ -2564,6 +2570,68 @@ mod tests {
             "{verdicts:?}"
         );
         assert_eq!(hook_row_state(&verdicts), Some(ArtifactStatus::NotArmed));
+    }
+
+    /// Hook verdicts with the flag off at `scope`, as `(client, cause, message)`.
+    fn flag_off_verdicts(scope: ConfigScope, clients: Vec<ClientTarget>) -> Vec<(String, HookArmingCause, String)> {
+        let inputs = HookArmingInputs {
+            feature_enabled: false,
+            plain_http_hosts: Vec::new(),
+            consent: Consent::Absent,
+            refusal: None,
+            clients,
+            armed: std::collections::BTreeSet::new(),
+            scope,
+            workspace: std::path::PathBuf::from("/home/dev"),
+            user_owned: Vec::new(),
+            unquotable: Vec::new(),
+        };
+        hook_arming(ArtifactKind::Hook, "g", None, Some(&inputs))
+            .into_iter()
+            .map(|v| (v.client, v.cause, v.message))
+            .collect()
+    }
+
+    /// The project flag does not cover a global run, so a global row names
+    /// `--global` in both the flag and the install it asks for.
+    #[test]
+    fn a_global_flag_off_verdict_names_global() {
+        let message = "hooks are disabled for this scope; run grim config set --global \
+                       options.experimental.hooks true, then grim install --global";
+        assert_eq!(
+            flag_off_verdicts(ConfigScope::Global, vec![ClientTarget::Claude, ClientTarget::Codex]),
+            [
+                (
+                    "claude".to_string(),
+                    HookArmingCause::FeatureFlagOff,
+                    message.to_string()
+                ),
+                (
+                    "codex".to_string(),
+                    HookArmingCause::FeatureFlagOff,
+                    message.to_string()
+                ),
+            ]
+        );
+    }
+
+    /// A project row keeps the cause's own sentence word for word.
+    #[test]
+    fn a_project_flag_off_verdict_is_unchanged() {
+        assert_eq!(
+            flag_off_verdicts(ConfigScope::Project, vec![ClientTarget::Claude]),
+            [(
+                "claude".to_string(),
+                HookArmingCause::FeatureFlagOff,
+                "hooks are disabled for this scope; run grim config set options.experimental.hooks true, \
+                 then grim install"
+                    .to_string(),
+            )]
+        );
+        assert_eq!(
+            HookArmingCause::FeatureFlagOff.message(),
+            "hooks are disabled for this scope; run grim config set options.experimental.hooks true, then grim install"
+        );
     }
 
     /// Deterministic order, like [`hook_arming`]'s own output: the merged array

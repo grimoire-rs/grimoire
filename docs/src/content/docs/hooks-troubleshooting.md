@@ -27,7 +27,7 @@ consented counts as not consented, too.
 To fix it, clear the cause the Detail column names:
 
 - For `feature-flag-off`, run `grim config set options.experimental.hooks true`,
-  then `grim install`.
+  then `grim install`. For a global hook, add `--global` to both commands.
 - For `workspace-not-consented`, run `grim hook allow` in the project directory,
   then `grim install`. A fresh clone always starts here, because consent never
   travels with a repository.
