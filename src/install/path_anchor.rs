@@ -750,7 +750,7 @@ impl AnchoredPath {
 /// Every caller handles `UnknownAnchor`, so an unanchorable persisted record is
 /// a graceful lossy drop, never a panic. Project scope is untouched — it is
 /// unconditionally `[Workspace]` for every `(client, kind)` pair.
-fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKind) -> Vec<PathAnchor> {
+pub(crate) fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: ArtifactKind) -> Vec<PathAnchor> {
     /// `client`'s own global config root — the [`VENDOR_ROOTS`] row keyed by
     /// the vendor's name.
     ///
