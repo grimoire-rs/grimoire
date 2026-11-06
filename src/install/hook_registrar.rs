@@ -112,9 +112,9 @@ pub const CLAUDE_LOCAL_SETTINGS: &str = ".claude/settings.local.json";
 ///
 /// **The path grim writes is not this constant joined onto the workspace**, and
 /// the difference is deliberate: `.git` is a *file* in a linked worktree or a
-/// submodule, so the real target is `$GIT_DIR/info/exclude` as resolved by
-/// `git_info_dir`. This constant is the plain-checkout spelling, for messages
-/// and for `grim status` — never a join source.
+/// submodule, so the real target is `info/exclude` in the directory
+/// `git_info_dir` resolves. This constant is the plain-checkout spelling, for
+/// messages and for `grim status` — never a join source.
 pub const GIT_EXCLUDE_RELATIVE: &str = ".git/info/exclude";
 
 /// Why `sync_config` refused to arm — C-017's `not-armed` causes 1–4.
@@ -1040,7 +1040,8 @@ fn sync_for_state(
             ExcludeOutcome::Added
             | ExcludeOutcome::AlreadyPresent
             | ExcludeOutcome::Removed
-            | ExcludeOutcome::Absent => {
+            | ExcludeOutcome::Absent
+            | ExcludeOutcome::Shared => {
                 tracing::debug!("{} {GIT_EXCLUDE_RELATIVE} hygiene: {outcome:?}", vendor.name());
             }
             // The one outcome worth surfacing: an ignore rule is inert against a
@@ -1993,6 +1994,9 @@ pub enum ExcludeOutcome {
     Removed,
     /// Nothing to remove.
     Absent,
+    /// A linked worktree left the rule in place: `info/exclude` is shared with
+    /// every other checkout of the repository.
+    Shared,
     /// Not a git worktree — no `.git` at all, or a shape grim does not
     /// recognise. Arms anyway.
     NotAGitWorktree,
@@ -2051,29 +2055,52 @@ pub fn ensure_settings_local_excluded(workspace: &Path) -> ExcludeOutcome {
     ExcludeOutcome::Added
 }
 
-/// `$GIT_DIR/info` for `workspace`, or `None` when it is not a git worktree.
+/// The `info` directory git reads for `workspace`, or `None` when it is not a
+/// git worktree.
+///
+/// That is `$GIT_COMMON_DIR/info` (gitrepository-layout(5)), so a linked worktree
+/// shares its repository's file: a rule in the worktree's own `$GIT_DIR/info` is
+/// never read.
+fn git_info_dir(workspace: &Path) -> Option<PathBuf> {
+    Some(git_common_dir(&git_dir(workspace)?)?.join("info"))
+}
+
+/// `$GIT_DIR` for `workspace`.
 ///
 /// Both `.git` shapes, because the linked-worktree one is not exotic — this
 /// repository's own agent worktrees live under `.agents/worktrees/`. A directory
-/// gives `<ws>/.git/info`; a `gitdir: <path>` file (linked worktree, submodule)
-/// gives `<that path>/info`, which is the right target because git reads
-/// `$GIT_DIR/info/exclude`, and `$GIT_DIR` for a linked worktree is its own
-/// per-worktree directory rather than the shared common dir.
-fn git_info_dir(workspace: &Path) -> Option<PathBuf> {
+/// is `$GIT_DIR` itself; a `gitdir: <path>` file (linked worktree, submodule)
+/// names it.
+fn git_dir(workspace: &Path) -> Option<PathBuf> {
     let dot_git = workspace.join(".git");
     let meta = std::fs::metadata(&dot_git).ok()?;
     if meta.is_dir() {
-        return Some(dot_git.join("info"));
+        return Some(dot_git);
     }
     let pointer = std::fs::read_to_string(&dot_git).ok()?;
     let target = pointer.lines().find_map(|line| line.strip_prefix("gitdir:"))?.trim();
     let target = Path::new(target);
-    let git_dir = if target.is_absolute() {
+    Some(if target.is_absolute() {
         target.to_path_buf()
     } else {
         workspace.join(target)
-    };
-    Some(git_dir.join("info"))
+    })
+}
+
+/// `$GIT_COMMON_DIR` for `git_dir`: its `commondir` file, relative to `git_dir`
+/// unless absolute, else `git_dir` itself.
+fn git_common_dir(git_dir: &Path) -> Option<PathBuf> {
+    match std::fs::read_to_string(git_dir.join("commondir")) {
+        Ok(pointer) => Some(git_dir.join(pointer.trim_end_matches(['\r', '\n']))),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Some(git_dir.to_path_buf()),
+        // Falling back to `git_dir` here would write a rule git never reads.
+        Err(_) => None,
+    }
+}
+
+/// Whether `workspace` is a linked worktree, whose `info/exclude` other checkouts share.
+fn is_linked_worktree(workspace: &Path) -> bool {
+    git_dir(workspace).is_some_and(|dir| dir.join("commondir").exists())
 }
 
 /// The exclude file's rule lines — comments and blanks dropped, each trimmed.
@@ -2121,6 +2148,11 @@ pub fn drop_settings_local_exclude(workspace: &Path) -> ExcludeOutcome {
     let Some(info_dir) = git_info_dir(workspace) else {
         return ExcludeOutcome::NotAGitWorktree;
     };
+    // Dropping the line here would expose a sibling checkout's armed settings
+    // file in its `git status` until that checkout next runs grim.
+    if is_linked_worktree(workspace) {
+        return ExcludeOutcome::Shared;
+    }
     let exclude = info_dir.join("exclude");
     let Ok(existing) = std::fs::read_to_string(&exclude) else {
         return ExcludeOutcome::Absent;
@@ -4240,12 +4272,12 @@ mod tests {
     }
 
     #[test]
-    fn a_linked_worktree_writes_to_its_own_git_dir() {
+    fn a_submodule_writes_to_its_own_git_dir() {
         // `.git` is a *file* here, which is the shape a plain
         // `workspace.join(GIT_EXCLUDE_RELATIVE)` would silently miss.
-        let common = tempfile::tempdir().unwrap();
+        let parent = tempfile::tempdir().unwrap();
         let ws = tempfile::tempdir().unwrap();
-        let git_dir = common.path().join("worktrees/impl-i");
+        let git_dir = parent.path().join("modules/sub");
         std::fs::create_dir_all(&git_dir).unwrap();
         std::fs::write(ws.path().join(".git"), format!("gitdir: {}\n", git_dir.display())).unwrap();
 
@@ -4256,6 +4288,69 @@ mod tests {
                 .contains(CLAUDE_LOCAL_SETTINGS)
         );
         assert!(!ws.path().join(".git/info").exists());
+    }
+
+    /// The per-worktree `$GIT_DIR` of a worktree at `ws`, linked to `common` by `pointer`.
+    fn linked_worktree(common: &Path, ws: &Path, pointer: &str) -> PathBuf {
+        let git_dir = common.join("worktrees/impl-i");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(git_dir.join("commondir"), pointer).unwrap();
+        std::fs::write(ws.join(".git"), format!("gitdir: {}\n", git_dir.display())).unwrap();
+        git_dir
+    }
+
+    #[test]
+    fn a_linked_worktree_writes_to_the_common_dir() {
+        let relative = tempfile::tempdir().unwrap();
+        let absolute = tempfile::tempdir().unwrap();
+        for (common, pointer) in [
+            (relative.path(), "../..\r\n".to_owned()),
+            (absolute.path(), format!("{}\n", absolute.path().display())),
+        ] {
+            let ws = tempfile::tempdir().unwrap();
+            let git_dir = linked_worktree(common, ws.path(), &pointer);
+
+            assert_eq!(
+                ensure_settings_local_excluded(ws.path()),
+                ExcludeOutcome::Added,
+                "{pointer}"
+            );
+            let text = std::fs::read_to_string(common.join("info/exclude")).unwrap();
+            assert!(text.contains(CLAUDE_LOCAL_SETTINGS), "{pointer}");
+            assert!(!git_dir.join("info").exists(), "{pointer}");
+        }
+    }
+
+    /// One `info/exclude` serves every checkout, so a worktree that lost its
+    /// last hook must leave the line its siblings still rely on.
+    #[test]
+    fn a_linked_worktree_keeps_the_rule_its_siblings_share() {
+        let common = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        linked_worktree(common.path(), ws.path(), "../..\n");
+        assert_eq!(ensure_settings_local_excluded(ws.path()), ExcludeOutcome::Added);
+
+        assert_eq!(drop_settings_local_exclude(ws.path()), ExcludeOutcome::Shared);
+
+        let text = std::fs::read_to_string(common.path().join("info/exclude")).unwrap();
+        assert!(text.contains(CLAUDE_LOCAL_SETTINGS));
+    }
+
+    /// Falling back to the per-worktree directory here would put the rule back
+    /// in a file git never reads.
+    #[test]
+    fn an_unreadable_commondir_writes_no_rule() {
+        let common = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let git_dir = linked_worktree(common.path(), ws.path(), "../..\n");
+        std::fs::remove_file(git_dir.join("commondir")).unwrap();
+        std::fs::create_dir(git_dir.join("commondir")).unwrap();
+
+        assert_eq!(
+            ensure_settings_local_excluded(ws.path()),
+            ExcludeOutcome::NotAGitWorktree
+        );
+        assert!(!git_dir.join("info").exists());
     }
 
     #[test]
