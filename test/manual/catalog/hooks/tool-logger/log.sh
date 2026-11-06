@@ -17,4 +17,4 @@ printf '%s\t%s\t%s\t%s bytes\n' \
     "${GRIM_HOOK_CLIENT:-?}" \
     "${GRIM_HOOK_TOOL:-?}" \
     "$(printf '%s' "$envelope" | wc -c | tr -d ' ')" \
-    >> "${GRIM_HOOK_DIR:-.}/../tool-calls.log"
+    >>"${GRIM_HOOK_DIR:-.}/../tool-calls.log"
