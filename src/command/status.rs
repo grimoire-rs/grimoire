@@ -31,7 +31,9 @@
 //! nullability contract.
 
 use std::collections::{BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Args;
 use tokio::sync::Semaphore;
@@ -42,20 +44,31 @@ use crate::api::status_report::{HookArming, StatusEntry, StatusOutput, StatusRep
 use crate::catalog::update_availability::{outdated_from_resolve, resolve_declared_digest};
 use crate::catalog::{BadgeContext, CatalogRow};
 use crate::cli::exit_code::ExitCode;
+use crate::config::declaration::{DesiredSet, ExperimentalOptions, RegistryConfig};
 use crate::config::scope::ConfigScope;
 use crate::context::Context;
 use crate::hook::consent::{self, Consent};
+use crate::hook::policy::{ConsentInputs, ConsentPolicies, HookPolicy};
+use crate::hook::trust::{Arming, Interactivity, NotArmedReason};
 use crate::install::client_target::ClientTarget;
-use crate::install::hook_registrar::{ArmRefusal, arming_refusal, client_arms_on_this_host};
-use crate::install::install_state::{ClientOutput, InstallRecord, InstallState, active_outputs};
+use crate::install::hook_registrar::{
+    ArmRefusal, CLAUDE_LOCAL_SETTINGS, arming_refusal, client_arms_on_this_host, is_tracked_within,
+    settings_use_local_file, validate_grim_home,
+};
+use crate::install::install_state::{ClientOutput, InstallRecord, InstallState, SettingsStore, active_outputs};
 use crate::install::installer::{client_hosts, client_supports_kind};
 use crate::install::launcher::{self, LauncherState};
 use crate::install::path_anchor::{AnchorRoots, Containment};
+use crate::install::settings_phase::{
+    RootFence, SettingsDecline, install_command, recorded_refusal, report_fence, settings_surface,
+};
+use crate::install::settings_store;
 use crate::install::target::{InstallTarget, detect_clients_or_all};
 use crate::lock::effective_set::NodeKey;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
 use crate::lock::locked_artifact::LockedArtifact;
+use crate::lock::locked_source::LockedSource;
 use crate::oci::access::OciAccess;
 use crate::oci::access::error::AccessError;
 use crate::oci::reference::ArtifactRef;
@@ -64,6 +77,10 @@ use crate::oci::{ArtifactKind, Digest, Identifier, PinnedIdentifier};
 
 use super::scope_resolution;
 use super::why::Provenance;
+
+/// How long the tracked-file probe may run. Its note is advisory, so a slow
+/// `git` costs the note and never the report.
+const TRACKED_PROBE_DEADLINE: Duration = Duration::from_secs(5);
 
 /// Maximum concurrent per-artifact update re-resolutions under `--check`.
 /// Mirrors the TUI's `ROW_CHECK_CONCURRENCY`: a polite cap so a large lock
@@ -150,8 +167,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
     let state =
         super::grim(scope_resolution::load_state(&scope).map_err(|e| super::install::state_io(&scope.state_path, e)))?;
 
-    let lock_matches_config =
-        lock.as_ref().map(|l| l.metadata.declaration_hash.as_str()) == Some(scope.set.declaration_hash_cached());
+    let lock_matches_config = lock_matches_config(&scope.set, lock.as_ref());
 
     // The currently-active client set: a record's per-client outputs are
     // reconciled against this so a client the user removed since install does
@@ -203,6 +219,12 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
     // carry. `None` therefore means "no hook anywhere", never "unknown".
     let hook_inputs = if declares_a_hook(&scope, lock.as_ref()) {
         Some(HookArmingInputs::resolve(ctx, &scope, &target, lock.as_ref())?)
+    } else {
+        None
+    };
+    // The same shape for settings rows: a project without the kind does no new work.
+    let settings_inputs = if declares_settings(&scope.set, lock.as_ref()) {
+        Some(SettingsArmingInputs::resolve(ctx, &scope, &target, lock.as_ref(), &state).await?)
     } else {
         None
     };
@@ -287,13 +309,27 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
         let locked = lock.as_ref().and_then(|l| find_locked(l, decl.kind, &decl.name));
         let record = state.get(decl.kind, &decl.name);
         let outputs = record_outputs(record, &active, &scope.roots);
-        let mut entry_state = derive_state(
+        let settings_row = settings_arming_for_row(
             decl.kind,
             &decl.name,
             locked,
-            &state,
+            settings_inputs.as_ref(),
+            record,
             &scope.roots,
-            &active,
+        );
+        let mut entry_state = derive_settings_aware(
+            settings_row.as_ref(),
+            || {
+                derive_state(
+                    decl.kind,
+                    &decl.name,
+                    locked,
+                    &state,
+                    &scope.roots,
+                    &active,
+                    lock_matches_config,
+                )
+            },
             lock_matches_config,
         );
         // A path-sourced entry whose local source drifted from the locked
@@ -310,9 +346,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             None => "direct".to_string(),
         };
         let (clients_missing, clients_extra) =
-            client_drift(desired_clients.as_deref(), recorded_clients(record), |c| {
-                client_hosts(c, decl.kind, &decl.name, &scope.workspace, scope.scope)
-            });
+            row_client_drift(desired_clients.as_deref(), record, decl.kind, &decl.name, &scope);
         // C-017: a `hook` row's real state is its per-client arming verdict,
         // not its materialization lifecycle. A hook whose payload is on disk
         // and whose registration was refused is `not-armed`, NOT `installed` —
@@ -323,10 +357,15 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
         // C-022 keys on the **resolved** registry and repository, never on the
         // reference the user typed (B5.4).
         let pinned = locked.and_then(|l| l.source.pinned().cloned());
-        let arming = hook_arming_for_row(decl.kind, &decl.name, pinned.as_ref(), hook_inputs.as_ref(), record);
+        let mut arming = hook_arming_for_row(decl.kind, &decl.name, pinned.as_ref(), hook_inputs.as_ref(), record);
         warn_unarmed(decl.kind, &decl.name, &arming);
         if let Some(state) = hook_row_state(&arming) {
             entry_state = state;
+        }
+        if let Some(row) = settings_row {
+            warn_unarmed(decl.kind, &decl.name, &row.arming);
+            entry_state = settings_row_state(entry_state, &row);
+            arming = row.arming;
         }
         // A registry-locked row is eligible for a fresh update re-resolution
         // (issue #43); path/dev rows carry no pin. Bundle rows and bundle
@@ -406,10 +445,10 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             deprecated: None,
             replaced_by: None,
             update_available: None,
-            // Structurally always empty: a hook is not dev-installable from a
-            // path in v1 (`command::install`'s recorded decision — a path
-            // source carries neither the registry consent names nor the digest
-            // the lock pins), so no dev record can carry `ArtifactKind::Hook`.
+            // Structurally always empty: a hook or settings package is not
+            // dev-installable from a path in v1 (`command::install`'s recorded
+            // decision — a path source carries neither the registry consent
+            // names nor the digest the lock pins), so no dev record has either kind.
             arming: Vec::new(),
             direct: false,
             required_by: prov.required_by(&(record.kind, record.name.clone())),
@@ -431,24 +470,36 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             .iter_artifacts()
             .filter(|a| a.is_from_bundle() || (has_dependency_data && !direct_keys.contains(&(a.kind, a.name.clone()))))
         {
-            let mut st = derive_state(
+            let record = state.get(member.kind, &member.name);
+            let settings_row = settings_arming_for_row(
                 member.kind,
                 &member.name,
                 Some(member),
-                &state,
+                settings_inputs.as_ref(),
+                record,
                 &scope.roots,
-                &active,
+            );
+            let mut st = derive_settings_aware(
+                settings_row.as_ref(),
+                || {
+                    derive_state(
+                        member.kind,
+                        &member.name,
+                        Some(member),
+                        &state,
+                        &scope.roots,
+                        &active,
+                        lock_matches_config,
+                    )
+                },
                 lock_matches_config,
             );
             // Every contributing bundle is listed (a shared member carries
             // multi-provenance), comma-joined in lock order.
             let repos: Vec<&str> = member.bundles.iter().map(|b| b.repo.as_str()).collect();
-            let record = state.get(member.kind, &member.name);
             let outputs = record_outputs(record, &active, &scope.roots);
             let (clients_missing, clients_extra) =
-                client_drift(desired_clients.as_deref(), recorded_clients(record), |c| {
-                    client_hosts(c, member.kind, &member.name, &scope.workspace, scope.scope)
-                });
+                row_client_drift(desired_clients.as_deref(), record, member.kind, &member.name, &scope);
             let outputs_pending = pending_outputs_for(record, member.kind, &member.name, &target, &scope.roots);
             // A bundle-provided hook is a first-class member (`effective_set`
             // lists `(Hook, set.hooks)`), so its arming verdict is reported the
@@ -456,7 +507,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             // report an unarmed bundle hook as `installed` — the same
             // silent-no-op defect C-017 exists to close, reached by a second
             // route.
-            let arming = hook_arming_for_row(
+            let mut arming = hook_arming_for_row(
                 member.kind,
                 &member.name,
                 member.source.pinned(),
@@ -466,6 +517,11 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             warn_unarmed(member.kind, &member.name, &arming);
             if let Some(state) = hook_row_state(&arming) {
                 st = state;
+            }
+            if let Some(row) = settings_row {
+                warn_unarmed(member.kind, &member.name, &row.arming);
+                st = settings_row_state(st, &row);
+                arming = row.arming;
             }
             // A member's own reference can float independently of the bundle
             // that carries it (`stack:1.0.0` listing `code-review:stable`):
@@ -660,8 +716,8 @@ fn update_available_from_resolve(locked: &Digest, resolved: Result<Option<Digest
 /// (`status.rs` and `release.rs`): nothing makes it exhaustive over
 /// [`ArtifactKind`], so a kind omitted here is simply never reported — no
 /// compile error, no failing test, just an artifact the user declared and
-/// `grim status` never mentions. `hooks` is appended last so the pre-hook row
-/// order is byte-stable for anyone diffing plain output.
+/// `grim status` never mentions. `hooks` then `settings` are appended last so
+/// the earlier row order is byte-stable for anyone diffing plain output.
 ///
 /// C-016(b) covers exactly this array and `release.rs`'s two kind
 /// special-cases. It does **not** protect an array added later; that limit is
@@ -674,6 +730,7 @@ fn collect_declared(scope: &scope_resolution::ResolvedScope) -> Vec<ArtifactRef>
         (&scope.set.agents, ArtifactKind::Agent),
         (&scope.set.mcp, ArtifactKind::Mcp),
         (&scope.set.hooks, ArtifactKind::Hook),
+        (&scope.set.settings, ArtifactKind::Settings),
     ];
     for (table, kind) in tables {
         for (name, source) in table.iter() {
@@ -852,27 +909,14 @@ pub fn hook_arming(
         .collect()
 }
 
-/// The per-verdict message, with the drifted entries appended when there are
-/// any, and a `--global` remedy appended for a hook-capable global-only
-/// client that has no surface at **project** scope.
-///
-/// Only drift names anything among the whole-scope causes: every other cause
-/// describes a whole-scope condition with nothing to enumerate, while drift's
-/// remedy (`grim hook allow`) is unhelpful without knowing *what* moved — a
-/// user who already consented is otherwise told to consent again with no hint
-/// why. The names come from [`Consent::Drifted`]'s own set rather than from a
-/// second difference computed here, so the message can never disagree with
-/// the predicate that produced the cause.
-///
-/// [`HookArmingCause::ClientHasNoHookSurface`] gets its own second case: a
-/// client with no project hook surface that still hosts hooks at global scope
-/// (Qoder today; [`crate::install::vendor::Vendor::declines_hooks_everywhere`]
-/// returns `false`) reports this cause at project scope for the ordinary
-/// scope-gap reason, and the generic "nothing to arm" message would leave the
-/// user unaware that `--global` is the fix, unlike installer.rs's own
-/// tracing::warn! for the same gap (commit da0039c4). A client that declines
-/// hooks everywhere gets the generic message: telling it to retry `--global`
-/// would point at a knob that changes nothing for it.
+/// The per-verdict message: the cause's own sentence, except in three cases.
+/// A global flag-off row names the `--global` flag. A drifted row appends what
+/// moved, or a user who already consented is told to consent again with no
+/// hint why; the names come from [`Consent::Drifted`]'s own set, so they cannot
+/// disagree with the cause. A client with no project hook surface that hosts
+/// hooks globally (Qoder; [`crate::install::vendor::Vendor::declines_hooks_everywhere`]
+/// is `false`) names `--global` as the fix. A client that declines hooks
+/// everywhere keeps the generic sentence: `--global` changes nothing for it.
 fn arming_message(cause: HookArmingCause, consent: &Consent, client: ClientTarget, scope: ConfigScope) -> String {
     match (cause, consent) {
         (HookArmingCause::ConsentDrifted, Consent::Drifted(new)) => {
@@ -1021,9 +1065,13 @@ impl HookArmingInputs {
             .map(|locator| crate::oci::access::registry_client::registry_host(locator).to_string())
             .collect();
 
-        // The same seam the installer reads, over the same declared set, so the
-        // report cannot answer a different question than the install would.
-        let declared = lock.map(super::hook_consent::declared_hooks).unwrap_or_default();
+        // The same seam the installer reads, over the same hook half of the
+        // declared set, so the report cannot answer a different question than
+        // the install would.
+        let declared = lock
+            .map(|lock| super::hook_consent::declared_consent_keys(lock, &scope.options.experimental))
+            .map(|declared| consent::split_by_kind(&declared).0)
+            .unwrap_or_default();
         let record = consent::load(ctx.grim_home(), &scope.workspace);
 
         let mut clients = target.clients().to_vec();
@@ -1234,6 +1282,396 @@ fn armed_rows(
 /// i.e. reported as armed. That is C-017's defect reached by a second route.
 pub fn declares_a_hook(scope: &scope_resolution::ResolvedScope, lock: Option<&GrimoireLock>) -> bool {
     !scope.set.hooks.is_empty() || lock.is_some_and(|l| l.iter_artifacts().any(|a| a.kind == ArtifactKind::Hook))
+}
+
+/// Whether a settings package is declared or contributed by a locked bundle.
+/// A bundle member appears in no `[settings]` table, so the lock half is what
+/// reports its gate.
+pub(crate) fn declares_settings(set: &DesiredSet, lock: Option<&GrimoireLock>) -> bool {
+    !set.settings.is_empty() || lock.is_some_and(|l| l.iter_artifacts().any(|a| a.kind == ArtifactKind::Settings))
+}
+
+/// Whether `lock` was written for this declaration; `false` reads `stale`.
+pub(crate) fn lock_matches_config(set: &DesiredSet, lock: Option<&GrimoireLock>) -> bool {
+    lock.map(|l| l.metadata.declaration_hash.as_str()) == Some(set.declaration_hash_cached())
+}
+
+/// Where the settings gates read from, for a caller with no resolved scope.
+pub(crate) struct SettingsGateScope<'a> {
+    pub(crate) flags: &'a ExperimentalOptions,
+    pub(crate) grim_home: &'a Path,
+    pub(crate) scope: ConfigScope,
+    pub(crate) workspace: &'a Path,
+}
+
+/// The file half of [`SettingsArmingInputs`]: the flag, the consent record and
+/// the `GRIM_HOME` refusal. Reading them blocks, so an event loop reads them
+/// off its thread.
+pub(crate) struct SettingsGates {
+    policy: HookPolicy,
+    refusal: Option<ArmRefusal>,
+    /// The project's settings record store, named when it cannot be read.
+    store: PathBuf,
+}
+
+impl SettingsGates {
+    /// Read the gates. Interactivity is fixed at non-interactive and no flag
+    /// answers, so the verdict is what a run asking nobody would do.
+    /// `read_registries` receives whether the global registries may be read.
+    ///
+    /// # Errors
+    ///
+    /// Whatever `read_registries` returns.
+    pub(crate) fn read(
+        at: &SettingsGateScope<'_>,
+        lock: Option<&GrimoireLock>,
+        read_registries: impl FnOnce(bool) -> anyhow::Result<Vec<RegistryConfig>>,
+    ) -> anyhow::Result<Self> {
+        let refusal = validate_grim_home(at.grim_home, at.workspace, at.scope).err();
+        // A repository can supply a refused home, so a consent record or config
+        // read from it would answer for the user. The refusal outranks every
+        // gate those files feed, so skipping them changes no verdict.
+        let readable_home = refusal.is_none();
+        let registries = read_registries(at.flags.settings_enabled() && readable_home)?;
+        let record = if readable_home {
+            consent::load(at.grim_home, at.workspace)
+        } else {
+            None
+        };
+        let declared = lock
+            .map(|lock| super::hook_consent::declared_consent_keys(lock, at.flags))
+            .unwrap_or_default();
+        let inputs = ConsentInputs {
+            flags: at.flags,
+            flag: None,
+            interactivity: Interactivity::NonInteractive,
+            scope: at.scope,
+            workspace: at.workspace,
+            registries: &registries,
+        };
+        let policy = ConsentPolicies::new(&inputs, record.as_ref(), &declared).settings;
+        let store = settings_store::path(at.grim_home, at.workspace);
+        Ok(Self { policy, refusal, store })
+    }
+}
+
+/// What a settings row's verdict reads, resolved once per `grim status` and
+/// once per TUI load.
+///
+/// The settings phase's own seams, asked the same questions in the same order,
+/// so a row cannot promise what the next install would not do.
+#[derive(Debug)]
+pub(crate) struct SettingsArmingInputs {
+    policy: HookPolicy,
+    /// Why the run would read no settings records: the `GRIM_HOME` refusal or
+    /// an unreadable store, with the sentence the install warns with.
+    records_refusal: Option<(HookArmingCause, String)>,
+    /// Every selected client's surface, sorted by client.
+    surfaces: Vec<(ClientTarget, Result<PathBuf, SettingsDecline>)>,
+    /// The fence a recorded settings file is held to; open at project scope.
+    fence: RootFence,
+    scope: ConfigScope,
+    local_file_tracked: bool,
+}
+
+impl SettingsArmingInputs {
+    /// Read the gates, walk the surfaces and probe the local file.
+    ///
+    /// # Errors
+    ///
+    /// A global config that cannot be loaded (78), while the flag is on and
+    /// `GRIM_HOME` is one grim will read from. A failed surface walk.
+    pub(crate) async fn resolve(
+        ctx: &Context,
+        scope: &scope_resolution::ResolvedScope,
+        target: &InstallTarget,
+        lock: Option<&GrimoireLock>,
+        state: &InstallState,
+    ) -> anyhow::Result<Self> {
+        let at = SettingsGateScope {
+            flags: &scope.options.experimental,
+            grim_home: &scope.roots.grim_home,
+            scope: scope.scope,
+            workspace: &scope.workspace,
+        };
+        let gates = SettingsGates::read(&at, lock, |read_global| {
+            super::hook_consent::policy_registries(ctx, scope, read_global)
+        })?;
+        Self::from_gates(gates, target, state).await
+    }
+
+    /// Finish `gates` with what only the target can answer.
+    ///
+    /// # Errors
+    ///
+    /// A failed surface walk.
+    pub(crate) async fn from_gates(
+        gates: SettingsGates,
+        target: &InstallTarget,
+        state: &InstallState,
+    ) -> anyhow::Result<Self> {
+        let SettingsGates { policy, refusal, store } = gates;
+        let (workspace, scope) = (target.workspace(), target.scope());
+        let mut clients = target.clients().to_vec();
+        clients.sort_by_key(ToString::to_string);
+        let walked = workspace.to_path_buf();
+        let (surfaces, fence) = tokio::task::spawn_blocking(move || {
+            let surfaces = clients
+                .into_iter()
+                .map(|client| (client, settings_surface(client, &walked, scope)))
+                .collect::<Vec<_>>();
+            (surfaces, RootFence::of(scope))
+        })
+        .await?;
+        let claude_writes_local = surfaces
+            .iter()
+            .any(|(client, surface)| *client == ClientTarget::Claude && surface.is_ok());
+        let probe =
+            refusal.is_none() && scope == ConfigScope::Project && claude_writes_local && settings_use_local_file(state);
+        // Only a project store can fail to read: a refused home reads none,
+        // and a global state holds its records inline.
+        let unreadable = refusal.is_none() && *state.settings_store() == SettingsStore::Refused;
+        let records_refusal = match refusal {
+            Some(refusal) => Some((
+                cause_from_refusal(refusal),
+                format!("settings left unchanged: {}", refusal.settings_reason()),
+            )),
+            None if unreadable => Some((
+                HookArmingCause::NotRegistered,
+                format!(
+                    "settings left unchanged: their records at {} could not be read; {}",
+                    store.display(),
+                    InstallState::UNREADABLE_STORE_REMEDY
+                ),
+            )),
+            None => None,
+        };
+        Ok(Self {
+            policy,
+            records_refusal,
+            surfaces,
+            fence,
+            scope,
+            local_file_tracked: probe
+                && is_tracked_within(workspace, CLAUDE_LOCAL_SETTINGS, TRACKED_PROBE_DEADLINE).await,
+        })
+    }
+
+    /// The whole-artifact gate holding `binding` back, in the order the phase
+    /// stops in, or `None` when the package may apply.
+    ///
+    /// A path source ranks first because no flag or consent could cure it. The
+    /// flag precedes the records because a flag-off run reads nothing. The
+    /// records precede consent because the run writes nothing without them.
+    fn gate(&self, binding: &str, source: &LockedSource) -> Option<(HookArmingCause, String)> {
+        let cause = match self.policy.verdict(binding, source) {
+            None => HookArmingCause::NotRegistered,
+            Some(Arming::NotArmed(NotArmedReason::FeatureOff)) => HookArmingCause::FeatureFlagOff,
+            _ if self.records_refusal.is_some() => return self.records_refusal.clone(),
+            Some(Arming::Armed(_)) => return None,
+            Some(Arming::NotArmed(NotArmedReason::InsecureTransport)) => HookArmingCause::InsecureTransport,
+            Some(Arming::NotArmed(NotArmedReason::ConsentDrifted)) => HookArmingCause::ConsentDrifted,
+            // Listed so a new reason fails to compile here instead of reading as
+            // absent consent. With no flag and nobody asked, none of these but
+            // the first can occur: a package with no record behind it.
+            Some(
+                Arming::NotArmed(NotArmedReason::NoTtyToAsk)
+                | Arming::ConsentRequired
+                | Arming::NotArmed(NotArmedReason::FlagDenied | NotArmedReason::ConsentDeclined),
+            ) => HookArmingCause::WorkspaceNotConsented,
+        };
+        let message = self.policy.refusal_reason(binding, source);
+        Some((cause, message.unwrap_or_else(|| cause.message().to_string())))
+    }
+}
+
+/// One settings row's verdicts, and the state they impose.
+pub(crate) struct SettingsArming {
+    /// Per client, sorted, shaped exactly as a hook row's.
+    pub(crate) arming: Vec<HookArming>,
+    /// The state these verdicts impose, or `None` to keep the lifecycle's.
+    /// Empty `arming` does not imply `None`, and the two notes never set it.
+    pub(crate) state: Option<ArtifactStatus>,
+}
+
+fn settings_verdict(client: ClientTarget, cause: HookArmingCause, message: String) -> HookArming {
+    HookArming {
+        client: client.to_string(),
+        cause,
+        message,
+        transient: cause.transient(),
+    }
+}
+
+/// A selected client whose surface declined: its decline's cause, by client,
+/// and a message ending with the step that would let the client take pieces,
+/// or none when `record` shows other clients already hold the package.
+fn declined_verdict(
+    client: ClientTarget,
+    decline: &SettingsDecline,
+    scope: ConfigScope,
+    record: Option<&InstallRecord>,
+) -> HookArming {
+    let applied_elsewhere =
+        record.is_some_and(|record| record.outputs.iter().any(|output| output.client != client.as_str()));
+    let remedy = if applied_elsewhere {
+        decline.remedy_beside_applied(client, scope)
+    } else {
+        decline.remedy(client, scope)
+    };
+    settings_verdict(client, decline.arming_cause(), format!("{client} {decline}; {remedy}"))
+}
+
+/// A verdict for each recorded output whose file the fence refuses, judged on
+/// the recorded path and never opened. [`derive_state`] reads such a row
+/// `not-armed` for a client no longer selected too, so that client is named.
+fn recorded_refusals(
+    inputs: &SettingsArmingInputs,
+    record: Option<&InstallRecord>,
+    roots: &AnchorRoots,
+) -> Vec<HookArming> {
+    let outputs = record.into_iter().flat_map(|record| &record.outputs);
+    outputs
+        .filter_map(|output| {
+            let decline = recorded_refusal(output, roots, inputs.scope, &inputs.fence)?;
+            Some(recorded_verdict(&output.client, &decline, inputs.scope, record))
+        })
+        .collect()
+}
+
+/// [`declined_verdict`] for the client a record names. One this build does not
+/// know gets the cause's own message as its remedy, as a run's warning does.
+fn recorded_verdict(
+    client: &str,
+    decline: &SettingsDecline,
+    scope: ConfigScope,
+    record: Option<&InstallRecord>,
+) -> HookArming {
+    if let Ok(known) = client.parse::<ClientTarget>() {
+        return declined_verdict(known, decline, scope, record);
+    }
+    let cause = decline.arming_cause();
+    HookArming {
+        client: client.to_string(),
+        cause,
+        message: format!("{client} {decline}; {}", cause.message()),
+        transient: cause.transient(),
+    }
+}
+
+/// The no-applicable-settings note at `scope`: the cause's own message names
+/// the project install, which exits 79 for a global package.
+fn nothing_applies_message(scope: ConfigScope) -> String {
+    let message = HookArmingCause::NoApplicableSettings.message();
+    match message.strip_suffix(install_command(ConfigScope::Project)) {
+        Some(head) => format!("{head}{}", install_command(scope)),
+        None => message.to_string(),
+    }
+}
+
+/// Why a settings row reads what it reads: every whole-artifact gate, then what
+/// each selected client's surface and the record say, one verdict per client.
+/// Pure over `inputs` but for the fence's look at each recorded path, so the
+/// `grim tui` row can ask the same question. See
+/// `adr_settings_artifact_kind.md` for the indicator table.
+///
+/// A refused surface moves the row whether or not this package declares
+/// anything for that client: a record at the pin reads the same either way, and
+/// status holds no document that could tell them apart.
+pub(crate) fn settings_arming(
+    inputs: &SettingsArmingInputs,
+    binding: &str,
+    locked: &LockedArtifact,
+    record: Option<&InstallRecord>,
+    roots: &AnchorRoots,
+) -> SettingsArming {
+    if let Some((cause, message)) = inputs.gate(binding, &locked.source) {
+        let verdict = |(client, _): &(ClientTarget, _)| settings_verdict(*client, cause, message.clone());
+        return SettingsArming {
+            arming: inputs.surfaces.iter().map(verdict).collect(),
+            state: Some(cause.state()),
+        };
+    }
+    let empty_record = record.filter(|record| record.outputs.is_empty());
+    // The record says nothing applied at an older pin, which is no answer for
+    // this one, and the footprint of an empty record would read `missing`.
+    let behind_the_lock = empty_record.is_some_and(|record| !record.source.eq_content(&locked.source));
+    // With no record yet, an empty record's answer is only knowable when no
+    // client could take a piece: status holds no document to read pieces from.
+    let nothing_applies = match record {
+        Some(_) => empty_record.is_some() && !behind_the_lock,
+        None => inputs.surfaces.iter().all(|(_, surface)| surface.is_err()),
+    };
+    let claude = ClientTarget::Claude.as_str();
+    let claude_holds_a_value = record.is_some_and(|record| {
+        record
+            .outputs
+            .iter()
+            .any(|output| output.entry.is_some() && output.client == claude)
+    });
+    let mut arming: Vec<HookArming> = inputs
+        .surfaces
+        .iter()
+        .filter_map(|(client, surface)| match surface {
+            Err(decline) => Some(declined_verdict(*client, decline, inputs.scope, record)),
+            Ok(_) if nothing_applies => {
+                let cause = HookArmingCause::NoApplicableSettings;
+                Some(settings_verdict(*client, cause, nothing_applies_message(inputs.scope)))
+            }
+            Ok(_) if *client == ClientTarget::Claude && inputs.local_file_tracked && claude_holds_a_value => {
+                let cause = HookArmingCause::LocalFileTracked;
+                Some(settings_verdict(*client, cause, cause.message().to_string()))
+            }
+            Ok(_) => None,
+        })
+        .collect();
+    for verdict in recorded_refusals(inputs, record, roots) {
+        match arming.iter_mut().find(|held| held.client == verdict.client) {
+            // A note there would leave the row's `not-armed` naming no cause.
+            Some(held) if held.cause.state() != ArtifactStatus::NotArmed => *held = verdict,
+            Some(_) => {}
+            None => arming.push(verdict),
+        }
+    }
+    arming.sort_by(|a, b| a.client.cmp(&b.client));
+    let refused = arming
+        .iter()
+        .any(|verdict| verdict.cause.state() == ArtifactStatus::NotArmed);
+    let state = if refused {
+        Some(ArtifactStatus::NotArmed)
+    } else if behind_the_lock {
+        Some(ArtifactStatus::Outdated)
+    } else if nothing_applies {
+        Some(ArtifactStatus::Gated)
+    } else {
+        None
+    };
+    SettingsArming { arming, state }
+}
+
+/// A settings row's state: the lock's `stale` first, then the verdict, then the
+/// lifecycle. Deliberately not [`hook_row_state`], which would let an advisory
+/// cause move the row and a gate hide a stale lock.
+pub(crate) fn settings_row_state(lifecycle: ArtifactStatus, row: &SettingsArming) -> ArtifactStatus {
+    match row.state {
+        Some(state) if lifecycle != ArtifactStatus::Stale => state,
+        _ => lifecycle,
+    }
+}
+
+/// [`settings_arming`] for one `grim status` row. One function so the
+/// directly-declared loop and the bundle-member loop cannot drift. `None` for
+/// any other kind, and for a row the lock does not know yet.
+fn settings_arming_for_row(
+    kind: ArtifactKind,
+    name: &str,
+    locked: Option<&LockedArtifact>,
+    inputs: Option<&SettingsArmingInputs>,
+    record: Option<&InstallRecord>,
+    roots: &AnchorRoots,
+) -> Option<SettingsArming> {
+    let inputs = inputs.filter(|_| kind == ArtifactKind::Settings)?;
+    Some(settings_arming(inputs, name, locked?, record, roots))
 }
 
 /// C-020: a directory at the launcher's path is observable without a write, so
@@ -1463,6 +1901,7 @@ fn record_outputs(record: Option<&InstallRecord>, active: &[ClientTarget], roots
                 .map(|path| StatusOutput {
                     client: out.client.clone(),
                     path,
+                    element: out.element.clone(),
                 })
         })
         .collect()
@@ -1491,6 +1930,7 @@ fn pending_outputs_for(
         .map(|(client, path)| StatusOutput {
             client: client.to_string(),
             path,
+            element: None,
         })
         .collect()
 }
@@ -1528,6 +1968,21 @@ fn unresolved_clients(record: Option<&InstallRecord>, active: &[ClientTarget], r
 /// `None` (never installed) yields no clients.
 fn recorded_clients(record: Option<&InstallRecord>) -> &[ClientOutput] {
     record.map(|r| r.outputs.as_slice()).unwrap_or(&[])
+}
+
+/// [`client_drift`] for one row. A settings package records a client only for
+/// the pieces it declares, which status cannot see without the package, so a
+/// settings row reports no missing client, as a bundle row does.
+fn row_client_drift(
+    desired: Option<&[ClientTarget]>,
+    record: Option<&InstallRecord>,
+    kind: ArtifactKind,
+    name: &str,
+    scope: &scope_resolution::ResolvedScope,
+) -> (Vec<String>, Vec<String>) {
+    client_drift(desired, recorded_clients(record), |c| {
+        kind != ArtifactKind::Settings && client_hosts(c, kind, name, &scope.workspace, scope.scope)
+    })
 }
 
 /// Diff the project's `desired` client target against an artifact's
@@ -1591,6 +2046,20 @@ fn client_drift(
     )
 }
 
+/// [`derive_state`], unless a settings verdict already decides the row: a
+/// refused surface's file may be the repository's, so it is never read.
+pub(crate) fn derive_settings_aware(
+    row: Option<&SettingsArming>,
+    derive: impl FnOnce() -> ArtifactStatus,
+    lock_matches_config: bool,
+) -> ArtifactStatus {
+    let refused = row.is_some_and(|row| row.state == Some(ArtifactStatus::NotArmed));
+    if refused && lock_matches_config {
+        return ArtifactStatus::NotArmed;
+    }
+    derive()
+}
+
 /// Derive the reported state for one declared artifact.
 ///
 /// Precedence: a declaration-hash mismatch makes everything `stale`
@@ -1616,7 +2085,9 @@ pub fn derive_state(
     let Some(record) = state.get(kind, name) else {
         return ArtifactStatus::Missing;
     };
-    match footprint(record, roots, active) {
+    let fence = report_fence(record, state);
+    match footprint(record, roots, active, fence.as_ref()) {
+        Footprint::Fenced => ArtifactStatus::NotArmed,
         Footprint::Missing => ArtifactStatus::Missing,
         Footprint::Modified => ArtifactStatus::Modified,
         Footprint::Intact if record.source.eq_content(&locked.source) => ArtifactStatus::Installed,
@@ -1635,6 +2106,8 @@ enum Footprint {
     Modified,
     /// Nothing is on disk, or an output an active client still wants is gone.
     Missing,
+    /// The root fence refuses a recorded file, so none was read.
+    Fenced,
 }
 
 /// Classify an install record against what is actually on disk.
@@ -1659,15 +2132,28 @@ enum Footprint {
 /// An unresolvable anchored target (corrupt/tampered `relative`, an anchor
 /// root absent on this machine) degrades to `Missing` for a read-only report
 /// rather than `?`-propagating — state is data, and `status` exits 0.
-fn footprint(record: &InstallRecord, roots: &AnchorRoots, active: &[ClientTarget]) -> Footprint {
+fn footprint(
+    record: &InstallRecord,
+    roots: &AnchorRoots,
+    active: &[ClientTarget],
+    fence: Option<&RootFence>,
+) -> Footprint {
     // Reuse the reconciliation predicate rather than restating it, so a change
     // to what counts as active cannot drift between here and the installer.
     let client_is_active = |out: &ClientOutput| active_outputs(std::slice::from_ref(out), active).next().is_some();
+    // Before any open, for every output: a file the fence refuses may be the
+    // repository's, and a read of it can block `status` for good.
+    if fence.is_some_and(|fence| record.outputs.iter().any(|out| fence.refuses(out, roots))) {
+        return Footprint::Fenced;
+    }
 
     let mut any_present = false;
     let mut modified = false;
     for out in &record.outputs {
-        if !matches!(out.is_present(roots, Containment::AllowRelocatedAncestor), Ok(true)) {
+        if !matches!(
+            out.is_present(record.kind, roots, Containment::AllowRelocatedAncestor),
+            Ok(true)
+        ) {
             if client_is_active(out) {
                 return Footprint::Missing;
             }
@@ -1746,7 +2232,9 @@ async fn derive_dev_state(
     active: &[ClientTarget],
     anchor: &std::path::Path,
 ) -> ArtifactStatus {
-    match footprint(record, roots, active) {
+    // A dev install is a skill, rule or agent, which no root fence covers.
+    match footprint(record, roots, active, None) {
+        Footprint::Fenced => return ArtifactStatus::NotArmed,
         Footprint::Missing => return ArtifactStatus::Missing,
         Footprint::Modified => return ArtifactStatus::Modified,
         Footprint::Intact => {}
@@ -1782,6 +2270,7 @@ mod tests {
     use crate::install::install_state::{ClientOutput, InstallRecord};
     use crate::install::installer::client_supports_kind;
     use crate::install::path_anchor::{AnchorRoots, AnchoredPath, PathAnchor};
+    use crate::install::settings_phase::Inside;
     use crate::oci::pinned_identifier::PinnedIdentifier;
     use crate::oci::{Algorithm, Digest, Identifier};
     use std::path::PathBuf;
@@ -1813,6 +2302,38 @@ mod tests {
             direct: true,
             required_by: None,
         }
+    }
+
+    /// Declared but never installed reads as a row, so a `[settings]` binding
+    /// has to reach the declared list or `grim status` hides it.
+    #[test]
+    fn collect_declared_sees_a_settings_binding() {
+        let mut set = crate::config::declaration::DesiredSet::default();
+        set.settings.insert(
+            "team".to_string(),
+            crate::config::declaration::DeclaredSource::Registry(
+                Identifier::parse("ghcr.io/acme/settings/team:1").unwrap(),
+            ),
+        );
+        let scope = scope_resolution::ResolvedScope {
+            scope: crate::config::scope::ConfigScope::Project,
+            set,
+            options: Default::default(),
+            registries: Default::default(),
+            config_path: Default::default(),
+            lock_path: Default::default(),
+            state_path: Default::default(),
+            workspace: Default::default(),
+            roots: AnchorRoots {
+                workspace: PathBuf::from("/tmp/ws"),
+                grim_home: PathBuf::from("/tmp/gh"),
+                ..Default::default()
+            },
+        };
+        let declared = collect_declared(&scope);
+        assert_eq!(declared.len(), 1);
+        assert_eq!(declared[0].kind, ArtifactKind::Settings);
+        assert_eq!(declared[0].name, "team");
     }
 
     fn catalog_row(
@@ -2335,6 +2856,7 @@ mod tests {
             support_dir: None,
             entry: None,
             adopted: false,
+            element: None,
         }
     }
 
@@ -2478,6 +3000,7 @@ mod tests {
                 support_dir: None,
                 entry: None,
                 adopted: false,
+                element: None,
             }],
         });
 
@@ -2553,6 +3076,7 @@ mod tests {
                 support_dir: None,
                 entry: None,
                 adopted: false,
+                element: None,
             }],
         });
 
@@ -2611,6 +3135,7 @@ mod tests {
                     support_dir: None,
                     entry: None,
                     adopted: false,
+                    element: None,
                 },
                 ClientOutput {
                     client: "copilot".to_string(),
@@ -2622,6 +3147,7 @@ mod tests {
                     support_dir: None,
                     entry: None,
                     adopted: false,
+                    element: None,
                 },
                 client_output("codex"),
             ],
@@ -2750,6 +3276,7 @@ mod tests {
                     support_dir: None,
                     entry: None,
                     adopted: false,
+                    element: None,
                 },
                 ClientOutput {
                     client: "opencode".to_string(),
@@ -2761,6 +3288,7 @@ mod tests {
                     support_dir: None,
                     entry: None,
                     adopted: false,
+                    element: None,
                 },
             ],
         });
@@ -2829,6 +3357,7 @@ mod tests {
                 support_dir: None,
                 entry: None,
                 adopted: false,
+                element: None,
             }],
         });
 
@@ -2893,6 +3422,7 @@ mod tests {
             support_dir: None,
             entry: None,
             adopted: false,
+            element: None,
         };
 
         let mut st = InstallState::load(&ws.join("s.json")).unwrap();
@@ -3042,6 +3572,7 @@ mod tests {
                 support_dir: None,
                 entry: None,
                 adopted: false,
+                element: None,
             }],
         });
 
@@ -3088,5 +3619,473 @@ mod tests {
             path_source_drifted(&locked, dir.path()).await,
             "a declared path whose source is unreadable must read as drift, not a clean install"
         );
+    }
+
+    /// One settings row's gates: Claude selected, no consent record.
+    fn settings_inputs(
+        settings: bool,
+        registries: &[RegistryConfig],
+        home_refusal: Option<HookArmingCause>,
+    ) -> SettingsArmingInputs {
+        let workspace = std::path::Path::new("/w/proj");
+        let flags = ExperimentalOptions { hooks: false, settings };
+        let inputs = ConsentInputs {
+            flags: &flags,
+            flag: None,
+            interactivity: Interactivity::NonInteractive,
+            scope: ConfigScope::Project,
+            workspace,
+            registries,
+        };
+        SettingsArmingInputs {
+            policy: ConsentPolicies::new(&inputs, None, &BTreeSet::new()).settings,
+            records_refusal: home_refusal.map(|cause| (cause, cause.message().to_string())),
+            surfaces: vec![(ClientTarget::Claude, Ok(workspace.join(CLAUDE_LOCAL_SETTINGS)))],
+            fence: RootFence::default(),
+            scope: ConfigScope::Project,
+            local_file_tracked: false,
+        }
+    }
+
+    fn settings_package(source: LockedSource) -> LockedArtifact {
+        LockedArtifact {
+            name: "team".to_string(),
+            kind: ArtifactKind::Settings,
+            source,
+            bundles: Vec::new(),
+            requires: Vec::new(),
+        }
+    }
+
+    /// A package on a routable host, which only the unit level can hold: the
+    /// acceptance registry is loopback, and loopback passes the transport gate.
+    fn routable_package() -> LockedArtifact {
+        let id = Identifier::new_registry("acme/team", "evil.dev").clone_with_digest(Digest::Sha256("a".repeat(64)));
+        settings_package(LockedSource::Registry(PinnedIdentifier::try_from(id).unwrap()))
+    }
+
+    /// Several gates can hold at once, and the row names the one the settings
+    /// phase stops at, so its remedy is the next thing a reader has to do.
+    #[test]
+    fn settings_gates_rank_in_the_order_the_phase_stops_in() {
+        let downgraded = RegistryConfig {
+            oci: Some("evil.dev".to_string()),
+            insecure: true,
+            ..RegistryConfig::default()
+        };
+        let plain_http = std::slice::from_ref(&downgraded);
+        let relative = Some(HookArmingCause::GrimHomeRelative);
+        let routable = routable_package();
+        let path_sourced = settings_package(LockedSource::Path {
+            path: crate::config::path_source::PathSource::parse("./team").unwrap(),
+            hash: Digest::Sha256("a".repeat(64)),
+        });
+        let cases = [
+            (
+                "a path source outranks the flag",
+                &path_sourced,
+                settings_inputs(false, plain_http, relative),
+                HookArmingCause::NotRegistered,
+            ),
+            (
+                "the flag outranks a refused home",
+                &routable,
+                settings_inputs(false, plain_http, relative),
+                HookArmingCause::FeatureFlagOff,
+            ),
+            (
+                "a refused home outranks the transport",
+                &routable,
+                settings_inputs(true, plain_http, relative),
+                HookArmingCause::GrimHomeRelative,
+            ),
+            (
+                "the transport outranks consent",
+                &routable,
+                settings_inputs(true, plain_http, None),
+                HookArmingCause::InsecureTransport,
+            ),
+            (
+                "consent comes last",
+                &routable,
+                settings_inputs(true, &[], None),
+                HookArmingCause::WorkspaceNotConsented,
+            ),
+        ];
+        for (case, package, inputs, cause) in cases {
+            let row = settings_arming(&inputs, "team", package, None, &roots(Path::new("/w/proj")));
+            let causes: Vec<_> = row.arming.iter().map(|verdict| verdict.cause).collect();
+            assert_eq!(causes, [cause], "{case}");
+            assert_eq!(row.state, Some(cause.state()), "{case}");
+        }
+    }
+
+    /// A gate holds the package back, not a client, so it is reported for a
+    /// client with no surface too. Under the `agents` fallback nothing else
+    /// would name the cause.
+    #[test]
+    fn a_settings_gate_names_every_selected_client() {
+        let mut inputs = settings_inputs(false, &[], None);
+        inputs
+            .surfaces
+            .push((ClientTarget::Cursor, Err(SettingsDecline::NoFile)));
+        let row = settings_arming(&inputs, "team", &routable_package(), None, &roots(Path::new("/w/proj")));
+        let verdicts: Vec<_> = row
+            .arming
+            .iter()
+            .map(|verdict| (verdict.client.as_str(), verdict.cause))
+            .collect();
+        assert_eq!(
+            verdicts,
+            [
+                ("claude", HookArmingCause::FeatureFlagOff),
+                ("cursor", HookArmingCause::FeatureFlagOff),
+            ]
+        );
+    }
+
+    /// A per-client decline ends with the next step, so a reader of `arming`
+    /// need not look the cause up.
+    #[test]
+    fn a_settings_decline_ends_with_its_remedy() {
+        let file = PathBuf::from("/w/proj/.claude/settings.local.json");
+        let cases = [
+            (
+                ClientTarget::Codex,
+                SettingsDecline::GlobalOnly,
+                "codex applies at global scope only; declare the package at global scope with grim --global add, \
+                 then run grim install --global"
+                    .to_string(),
+            ),
+            (
+                ClientTarget::Zed,
+                SettingsDecline::NoFile,
+                "zed has no settings file here; select a client that takes settings with --client <name> \
+                 or [options].clients"
+                    .to_string(),
+            ),
+            (
+                ClientTarget::Cursor,
+                SettingsDecline::ClientConfigAbsent(file.clone()),
+                format!(
+                    "cursor writes only into an existing {}; start cursor once so it creates that file, \
+                     then run grim install",
+                    file.display()
+                ),
+            ),
+            (
+                ClientTarget::Claude,
+                SettingsDecline::NotRegistered(file.clone()),
+                format!(
+                    "claude cannot take {}, which leads out of bounds; replace the link on that path with \
+                     a regular file, then run grim install",
+                    file.display()
+                ),
+            ),
+        ];
+        for (client, decline, message) in cases {
+            let verdict = declined_verdict(client, &decline, ConfigScope::Project, None);
+            assert_eq!(verdict.cause.to_string(), decline.cause());
+            assert_eq!(verdict.message, message);
+        }
+        // A global row names the global install.
+        let verdict = declined_verdict(
+            ClientTarget::Cursor,
+            &SettingsDecline::ClientConfigAbsent(file.clone()),
+            ConfigScope::Global,
+            None,
+        );
+        assert!(
+            verdict.message.ends_with("then run grim install --global"),
+            "{}",
+            verdict.message
+        );
+    }
+
+    /// A client with no file needs no step once other clients hold the
+    /// package: the selection remedy would drop it from every other kind.
+    #[test]
+    fn a_decline_beside_applied_values_names_no_step() {
+        let record = |client: &str| InstallRecord {
+            kind: ArtifactKind::Settings,
+            name: "team".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned('a')),
+            dev: false,
+            outputs: vec![ClientOutput {
+                client: client.to_string(),
+                target: AnchoredPath {
+                    anchor: PathAnchor::VendorRoot("claude"),
+                    relative: "settings.json".to_string(),
+                },
+                content_hash: Digest::Sha256("a".repeat(64)),
+                support_dir: None,
+                entry: Some("/model".to_string()),
+                adopted: false,
+                element: None,
+            }],
+        };
+        let (zed, global) = (ClientTarget::Zed, ConfigScope::Global);
+        let verdict = declined_verdict(zed, &SettingsDecline::NoFile, global, Some(&record("claude")));
+        assert_eq!(
+            verdict.message,
+            "zed has no settings file here; nothing in this package applies to zed, and other clients hold its \
+             values, so no step is needed"
+        );
+        assert_eq!(verdict.cause, HookArmingCause::NoApplicableSettings);
+        // Positive control: an empty record and no record keep the selection remedy.
+        let empty = InstallRecord {
+            outputs: Vec::new(),
+            ..record("claude")
+        };
+        for record in [Some(&empty), None] {
+            let verdict = declined_verdict(zed, &SettingsDecline::NoFile, global, record);
+            assert!(
+                verdict.message.ends_with("--client <name> or [options].clients"),
+                "{}",
+                verdict.message
+            );
+        }
+    }
+
+    /// The nothing-applies note is the cause's message at project scope, and
+    /// names the global install on a global row.
+    #[test]
+    fn the_nothing_applies_note_names_the_install_of_its_scope() {
+        assert_eq!(
+            nothing_applies_message(ConfigScope::Project),
+            HookArmingCause::NoApplicableSettings.message()
+        );
+        let global = nothing_applies_message(ConfigScope::Global);
+        assert!(global.ends_with("then run grim install --global"), "{global}");
+    }
+
+    /// `stale` says the lock is behind the manifest, which no gate cures, so it
+    /// holds the row. A verdict moves every other state, and no verdict moves none.
+    #[test]
+    fn a_settings_row_reads_stale_then_the_verdict_then_the_lifecycle() {
+        let row = |state| SettingsArming {
+            arming: Vec::new(),
+            state,
+        };
+        let gated = row(Some(ArtifactStatus::Gated));
+        assert_eq!(settings_row_state(ArtifactStatus::Stale, &gated), ArtifactStatus::Stale);
+        assert_eq!(
+            settings_row_state(ArtifactStatus::Modified, &gated),
+            ArtifactStatus::Gated
+        );
+        assert_eq!(
+            settings_row_state(ArtifactStatus::Modified, &row(None)),
+            ArtifactStatus::Modified
+        );
+    }
+
+    // ── A recorded file the root fence refuses ───────────────────────────
+
+    /// A refused surface decides the row before its file is read; a stale lock
+    /// still reads stale.
+    #[test]
+    fn a_refused_surface_reads_not_armed_without_a_read() {
+        let refused = SettingsArming {
+            arming: Vec::new(),
+            state: Some(ArtifactStatus::NotArmed),
+        };
+        let unread = || panic!("a refused surface's file was read");
+        assert_eq!(
+            derive_settings_aware(Some(&refused), unread, true),
+            ArtifactStatus::NotArmed
+        );
+        let stale = derive_settings_aware(Some(&refused), || ArtifactStatus::Stale, false);
+        assert_eq!(stale, ArtifactStatus::Stale);
+    }
+
+    /// Settings record `x` holding Kiro's `/chat.defaultModel`, written as `m`.
+    fn kiro_record() -> InstallRecord {
+        InstallRecord {
+            kind: ArtifactKind::Settings,
+            name: "x".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned('a')),
+            dev: false,
+            outputs: vec![ClientOutput {
+                client: "kiro".to_string(),
+                target: AnchoredPath {
+                    anchor: PathAnchor::VendorRoot("kiro"),
+                    relative: "settings/cli.json".to_string(),
+                },
+                content_hash: crate::install::install_state::settings_value_hash(&serde_json::json!("m")),
+                support_dir: None,
+                entry: Some("/chat.defaultModel".to_string()),
+                adopted: false,
+                element: None,
+            }],
+        }
+    }
+
+    /// `roots(ws)` with Kiro's root at `kiro`.
+    fn kiro_roots(ws: &std::path::Path, kiro: &std::path::Path) -> AnchorRoots {
+        let mut roots = roots(ws);
+        roots.vendor_roots.insert("kiro", kiro.to_path_buf());
+        roots
+    }
+
+    /// A recorded file inside the repository is answered by the fence alone,
+    /// so an edit to it is never seen.
+    #[test]
+    fn a_footprint_the_fence_refuses_is_never_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(dir.path()).unwrap();
+        let (repo, kiro) = (base.join("repo"), base.join("repo").join("kiro"));
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(kiro.join("settings")).unwrap();
+        std::fs::write(
+            kiro.join("settings").join("cli.json"),
+            r#"{"chat.defaultModel": "edited"}"#,
+        )
+        .unwrap();
+        let (record, roots) = (kiro_record(), kiro_roots(&base, &kiro));
+        let fence = RootFence::around(Some(&repo), None);
+
+        assert_eq!(
+            footprint(&record, &roots, &[ClientTarget::Kiro], None),
+            Footprint::Modified
+        );
+        let fenced = footprint(&record, &roots, &[ClientTarget::Kiro], Some(&fence));
+        assert_eq!(fenced, Footprint::Fenced);
+    }
+
+    /// A global state's settings record is held to the fence `status` runs
+    /// under, for a client no longer selected too; a relative root is refused
+    /// from any working directory.
+    #[test]
+    fn a_global_settings_record_under_a_relative_root_reads_not_armed() {
+        let dir = tempfile::tempdir().unwrap();
+        let roots = kiro_roots(dir.path(), std::path::Path::new("kiro-rel"));
+        // `load` keeps settings records inline, as a global state does.
+        let mut st = InstallState::load(&dir.path().join("s.json")).unwrap();
+        st.record(kiro_record());
+        let locked = LockedArtifact::direct("x".to_string(), ArtifactKind::Settings, pinned('a'));
+
+        let active = [ClientTarget::Copilot];
+        let state = derive_state(ArtifactKind::Settings, "x", Some(&locked), &st, &roots, &active, true);
+
+        assert_eq!(state, ArtifactStatus::NotArmed);
+    }
+
+    /// Global gates that pass, with `surfaces` selected and `fence` held.
+    fn global_settings_inputs(
+        surfaces: Vec<(ClientTarget, Result<PathBuf, SettingsDecline>)>,
+        fence: RootFence,
+    ) -> SettingsArmingInputs {
+        let flags = ExperimentalOptions {
+            hooks: false,
+            settings: true,
+        };
+        let inputs = ConsentInputs {
+            flags: &flags,
+            flag: None,
+            interactivity: Interactivity::NonInteractive,
+            scope: ConfigScope::Global,
+            workspace: Path::new("/w/proj"),
+            registries: &[],
+        };
+        SettingsArmingInputs {
+            policy: ConsentPolicies::new(&inputs, None, &BTreeSet::new()).settings,
+            records_refusal: None,
+            surfaces,
+            fence,
+            scope: ConfigScope::Global,
+            local_file_tracked: false,
+        }
+    }
+
+    /// Kiro's record under `<base>/repo/kiro`, and the fence that repository puts up.
+    fn fenced_kiro(base: &Path) -> (InstallRecord, AnchorRoots, RootFence) {
+        let repo = base.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let roots = kiro_roots(base, &repo.join("kiro"));
+        (kiro_record(), roots, RootFence::around(Some(&repo), None))
+    }
+
+    /// A `not-armed` row names every client whose recorded file the fence
+    /// refuses, selected or not, once however many values it holds, sorted by
+    /// client.
+    #[test]
+    fn a_fenced_record_of_an_unselected_client_names_that_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(dir.path()).unwrap();
+        let (mut record, roots, fence) = fenced_kiro(&base);
+        let mut second = record.outputs[0].clone();
+        second.entry = Some("/chat.other".to_string());
+        record.outputs.push(second);
+        let copilot = (ClientTarget::Copilot, Ok(base.join("copilot").join("settings.json")));
+        let zed = (ClientTarget::Zed, Err(SettingsDecline::NoFile));
+        let inputs = global_settings_inputs(vec![copilot, zed], fence);
+
+        let row = settings_arming(&inputs, "x", &routable_package(), Some(&record), &roots);
+
+        let verdicts: Vec<_> = row.arming.iter().map(|v| (v.client.as_str(), v.cause)).collect();
+        assert_eq!(
+            verdicts,
+            [
+                ("kiro", HookArmingCause::SettingsRootInWorkspace),
+                ("zed", HookArmingCause::NoApplicableSettings),
+            ]
+        );
+        assert!(
+            row.arming[0].message.starts_with("kiro cannot take "),
+            "{}",
+            row.arming[0].message
+        );
+        assert_eq!(row.state, Some(ArtifactStatus::NotArmed));
+    }
+
+    /// One verdict per client: a selected surface's own refusal is kept, and a
+    /// note gives way to the refusal that holds the row back.
+    #[test]
+    fn a_fenced_record_of_a_selected_client_keeps_one_verdict() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(dir.path()).unwrap();
+        let (record, roots, fence) = fenced_kiro(&base);
+        let now = base.join("repo").join("kiro-now").join("settings").join("cli.json");
+        let refused = SettingsDecline::RootInWorkspace(now.clone(), Inside::Spelled);
+        let absent = SettingsDecline::ClientConfigAbsent(base.join("elsewhere").join("cli.json"));
+        for (case, decline, names_now) in [("its own refusal", refused, true), ("a note", absent, false)] {
+            let inputs = global_settings_inputs(vec![(ClientTarget::Kiro, Err(decline))], fence.clone());
+
+            let row = settings_arming(&inputs, "x", &routable_package(), Some(&record), &roots);
+
+            let causes: Vec<_> = row.arming.iter().map(|v| (v.client.as_str(), v.cause)).collect();
+            assert_eq!(causes, [("kiro", HookArmingCause::SettingsRootInWorkspace)], "{case}");
+            let message = &row.arming[0].message;
+            assert_eq!(
+                message.contains(&now.display().to_string()),
+                names_now,
+                "{case}: {message}"
+            );
+            assert_eq!(row.state, Some(ArtifactStatus::NotArmed), "{case}");
+        }
+    }
+
+    /// A recorded client this build cannot name still has its refusal named,
+    /// with the cause's own remedy, as a run's warning gives it.
+    #[test]
+    fn a_fenced_record_of_an_unknown_client_is_still_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(dir.path()).unwrap();
+        let (mut record, roots, fence) = fenced_kiro(&base);
+        record.outputs[0].client = "later".to_string();
+        let inputs = global_settings_inputs(Vec::new(), fence);
+
+        let row = settings_arming(&inputs, "x", &routable_package(), Some(&record), &roots);
+
+        let [verdict] = row.arming.as_slice() else {
+            panic!("one verdict expected: {:?}", row.arming);
+        };
+        assert_eq!(
+            (verdict.client.as_str(), verdict.cause),
+            ("later", HookArmingCause::SettingsRootInWorkspace)
+        );
+        let remedy = HookArmingCause::SettingsRootInWorkspace.message();
+        assert!(verdict.message.ends_with(remedy), "{}", verdict.message);
+        assert_eq!(row.state, Some(ArtifactStatus::NotArmed));
     }
 }

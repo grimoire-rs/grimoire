@@ -242,7 +242,7 @@ pub struct CatalogEntry {
     /// source's allowlist.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index_path: Option<String>,
-    /// The artifact kind (`skill`/`rule`/`agent`/`bundle`/`mcp`) as read
+    /// The artifact kind (`skill`/`rule`/`agent`/`bundle`/`mcp`/`hook`/`settings`) as read
     /// from the manifest — the `com.grimoire.kind` annotation, or the
     /// legacy `artifactType`/config media type — if the manifest declared
     /// one.

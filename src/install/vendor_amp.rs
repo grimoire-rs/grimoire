@@ -30,6 +30,10 @@
 //!   global) / global `~/.config/amp/settings.json`, key **`"amp.mcpServers"`**
 //!   (literal dotted JSON key, pointer-safe); env refs `${VAR_NAME}`;
 //!   `json_splice`.
+//! - **Settings**: global only, the same `settings.json[c]` the global MCP
+//!   entry edits. Every key is one flat dotted member (`/amp.showCosts`), and
+//!   which of `settings.json` and `settings.jsonc` wins upstream is unstated,
+//!   so grim edits the `.jsonc` when one exists, as for MCP.
 //!
 //! `$AMP_SETTINGS_FILE` is **contested, not confirmed wrong** (wave-0 V1,
 //! 2026-07-26). grim does not honor it, and that stays unchanged — but the
@@ -81,10 +85,31 @@ use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
 use super::render::{self, RenderError, RenderedDoc};
-use super::vendor::{KindSupport, Vendor, global_skills_root, home_dir, xdg_config_dir};
+use super::vendor::MergeClass::Scalar;
+use super::vendor::SettingsScopes::GlobalOnly;
+use super::vendor::SettingsValueType as Ty;
+use super::vendor::{KindSupport, SettingsField, Vendor, global_skills_root, home_dir, xdg_config_dir};
 
 /// Amp.
 pub struct AmpVendor;
+
+/// Amp's settings keys, from `research_upstream_other_harnesses_settings_20261105.md`.
+/// Each pointer has one segment: the dot is part of the member's name.
+const AMP_SETTINGS_FIELDS: &[SettingsField] = &[
+    SettingsField::new("/amp.showCosts", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/amp.notifications.enabled", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/amp.terminal.copyOnSelect", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/amp.terminal.detailsExpandedByDefault", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/amp.thread.autoArchiveOnQuit", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new(
+        "/amp.updates.mode",
+        Ty::Enum(&["auto", "warn", "disabled"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new("/amp.git.commit.ampThread.enabled", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/amp.git.commit.coauthor.enabled", Ty::Bool, Scalar, GlobalOnly),
+];
 
 impl Vendor for AmpVendor {
     fn name(&self) -> &'static str {
@@ -200,6 +225,14 @@ impl Vendor for AmpVendor {
         Some((format!("/amp.mcpServers/{name}"), serde_json::Value::Object(entry)))
     }
 
+    fn settings_fields(&self) -> &'static [SettingsField] {
+        AMP_SETTINGS_FIELDS
+    }
+
+    fn settings_config_path(&self, _workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
+        global_settings_path(scope, amp_root(xdg_config_dir()))
+    }
+
     fn skill_index(&self, doc: &str) -> Result<Option<RenderedDoc>, RenderError> {
         // Vendor-aware renderer against an EMPTY registry: byte-identical to
         // the vendor-less universal render, so the shared `.agents/skills` file
@@ -245,6 +278,17 @@ fn amp_scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
 /// follow the shared `$HOME/.agents/skills`.
 pub(crate) fn amp_root(xdg_config: Option<PathBuf>) -> Option<PathBuf> {
     xdg_config.map(|c| c.join("amp"))
+}
+
+/// The global MCP file under the resolved `root`, by the same `.jsonc`-first
+/// choice. `None` at project scope, where `.amp/settings.json` is a
+/// repository file, and `None` with no root: never the workspace stand-in
+/// [`amp_scope_root`] falls back to.
+fn global_settings_path(scope: ConfigScope, root: Option<PathBuf>) -> Option<PathBuf> {
+    match scope {
+        ConfigScope::Project => None,
+        ConfigScope::Global => root.map(|root| super::json_config::prefer_jsonc(&root, "settings")),
+    }
 }
 
 #[cfg(test)]
@@ -459,6 +503,127 @@ mod tests {
             got,
             amp.join("settings.jsonc"),
             "when both spellings exist the comment-bearing .jsonc wins (documented policy)"
+        );
+    }
+
+    // ── settings: global only, flat dotted members ──
+
+    #[test]
+    fn settings_rows_match_the_key_list() {
+        use crate::install::vendor::MergeClass::Scalar;
+        use crate::install::vendor::SettingsScopes::GlobalOnly;
+        use crate::install::vendor::SettingsValueType as Ty;
+
+        let rows: Vec<_> = AmpVendor
+            .settings_fields()
+            .iter()
+            .map(|field| (field.pointer, field.ty, field.merge, field.scopes))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("/amp.showCosts", Ty::Bool, Scalar, GlobalOnly),
+                ("/amp.notifications.enabled", Ty::Bool, Scalar, GlobalOnly),
+                ("/amp.terminal.copyOnSelect", Ty::Bool, Scalar, GlobalOnly),
+                ("/amp.terminal.detailsExpandedByDefault", Ty::Bool, Scalar, GlobalOnly),
+                ("/amp.thread.autoArchiveOnQuit", Ty::Bool, Scalar, GlobalOnly),
+                (
+                    "/amp.updates.mode",
+                    Ty::Enum(&["auto", "warn", "disabled"]),
+                    Scalar,
+                    GlobalOnly
+                ),
+                ("/amp.git.commit.ampThread.enabled", Ty::Bool, Scalar, GlobalOnly),
+                ("/amp.git.commit.coauthor.enabled", Ty::Bool, Scalar, GlobalOnly),
+            ]
+        );
+    }
+
+    #[test]
+    fn settings_rows_narrow_nothing_and_require_nothing() {
+        for field in AmpVendor.settings_fields() {
+            assert_eq!(field.map_keys, None, "{}", field.pointer);
+            assert_eq!(field.project_values, None, "{}", field.pointer);
+            assert!(!field.required_by_client, "{}", field.pointer);
+        }
+    }
+
+    /// A dot is not an RFC 6901 separator: each pointer names one member whose
+    /// name keeps its dots, never a nested `amp` object.
+    #[test]
+    fn settings_pointer_keeps_the_dot_inside_one_segment() {
+        for field in AmpVendor.settings_fields() {
+            let name = field.pointer.trim_start_matches('/');
+            assert_eq!(
+                crate::install::json_splice::split_pointer_path(field.pointer),
+                Some(vec![name.to_string()]),
+                "{}",
+                field.pointer
+            );
+            assert_eq!(crate::oci::settings::segment_at(field, 0), Some(name));
+            assert_eq!(crate::oci::settings::segment_at(field, 1), None);
+        }
+        let path = crate::install::json_splice::split_pointer_path("/amp.showCosts").unwrap();
+        let spliced = crate::install::json_splice::upsert_member_at("{}\n", &path, &serde_json::json!(false)).unwrap();
+        let crate::install::json_splice::Splice::Changed(text) = spliced else {
+            panic!("an empty object gains the member");
+        };
+        let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(doc, serde_json::json!({"amp.showCosts": false}));
+    }
+
+    /// The author quotes the dotted key; a bare one is TOML's nested table,
+    /// which names no Amp key and is refused.
+    #[test]
+    fn settings_document_takes_the_quoted_dotted_key_only() {
+        use crate::oci::settings::SettingsDocument;
+
+        let quoted = "description = \"d\"\n[amp]\n\"amp.showCosts\" = false\n\"amp.updates.mode\" = \"warn\"\n";
+        let (document, _) = SettingsDocument::from_toml_str_with_requires(quoted).unwrap();
+        assert_eq!(
+            serde_json::Value::Object(document.vendors["amp"].clone()),
+            serde_json::json!({"amp.showCosts": false, "amp.updates.mode": "warn"})
+        );
+        let nested = "description = \"d\"\n[amp]\namp.showCosts = false\n";
+        assert!(SettingsDocument::from_toml_str_with_requires(nested).is_err());
+        let off_list = "description = \"d\"\n[amp]\n\"amp.updates.mode\" = \"never\"\n";
+        assert!(SettingsDocument::from_toml_str_with_requires(off_list).is_err());
+    }
+
+    #[test]
+    fn settings_path_has_no_answer_at_project_scope() {
+        let root = Some(PathBuf::from("/xdg/amp"));
+        assert_eq!(global_settings_path(ConfigScope::Project, root), None);
+        assert_eq!(
+            AmpVendor.settings_config_path(Path::new("/w"), ConfigScope::Project),
+            None
+        );
+    }
+
+    /// The global MCP file, chosen the same way, and no file when no root
+    /// resolves: the workspace stand-in MCP falls back to is a tracked file.
+    #[test]
+    fn settings_path_at_global_scope_is_the_global_mcp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = amp_root(Some(dir.path().to_path_buf())).unwrap();
+        assert_eq!(
+            global_settings_path(ConfigScope::Global, Some(root.clone())),
+            Some(root.join("settings.json"))
+        );
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("settings.jsonc"), "{\n  // user comment\n}\n").unwrap();
+        assert_eq!(
+            global_settings_path(ConfigScope::Global, Some(root.clone())),
+            Some(root.join("settings.jsonc"))
+        );
+        assert_eq!(global_settings_path(ConfigScope::Global, amp_root(None)), None);
+    }
+
+    #[test]
+    fn settings_format_is_json() {
+        assert_eq!(
+            AmpVendor.settings_config_format(),
+            crate::install::vendor::McpConfigFormat::Json
         );
     }
 }

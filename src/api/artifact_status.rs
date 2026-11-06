@@ -33,18 +33,20 @@ pub enum ArtifactStatus {
     Missing,
     /// Installed, but the installed digest differs from the lock digest.
     Outdated,
-    /// **Hook only.** Locked and materialized, but deliberately not armed:
-    /// the experimental feature flag is off, this workspace has not consented,
-    /// or the client has no hook surface at all
-    /// (S-013's `Declined` reporting path). Nothing failed — the payload is on
-    /// disk and no registration exists, which is exactly what the gate
-    /// promises (invariant I4, default-deny for anything that executes).
+    /// **Hook and settings rows only.** Deliberately not applied. A hook is
+    /// materialized with no registration: the experimental feature flag is off,
+    /// this workspace has not consented, or the client has no hook surface at
+    /// all (S-013's `Declined` reporting path). A settings package reads this
+    /// for the same flag and consent gates, and when none of its pieces applies
+    /// to a selected client; values it already applied stay in place. Nothing
+    /// failed, which is exactly what the gate promises (invariant I4).
     ///
     /// Additive enum literal on the frozen `grim status --format json` schema
     /// (Principle 9): a consumer that predates it sees a token it does not
     /// recognize, never a changed meaning for one it does.
     Gated,
-    /// **Hook only.** Grim *tried* to arm the registration and refused. The
+    /// **Hook and settings rows only.** Grim *tried* to arm the registration, or
+    /// to apply the settings package, and refused. The
     /// specific cause — and its remedy — is the row's
     /// [`HookArming::cause`]; a single undifferentiated `not-armed` is the
     /// defect WP-P0 filed, so this token never travels without one.
@@ -205,6 +207,22 @@ pub enum HookArmingCause {
     /// `$GRIM_HOME/hooks/`: a name grim writes there itself, or one ending in
     /// `.exe`, `.com`, `.bat` or `.cmd`.
     BindingNameReserved,
+    /// A settings package has no piece for this client here. The row reads
+    /// [`ArtifactStatus::Gated`] only when that holds across every selected
+    /// client; otherwise this is a note on its lifecycle state.
+    NoApplicableSettings,
+    /// A client that writes only into a config file of its own creation, whose
+    /// file does not exist. A note on the row's lifecycle state.
+    ClientConfigAbsent,
+    /// Claude's project-scope settings file is tracked by git, so a value grim
+    /// spliced can reach a commit. Advisory: it never moves the row.
+    LocalFileTracked,
+    /// A global settings file hangs off a relative config directory, which
+    /// resolves against wherever the command runs.
+    SettingsRootRelative,
+    /// A global settings file lies inside the repository the command runs in,
+    /// whose own environment can name that directory.
+    SettingsRootInWorkspace,
 }
 
 impl HookArmingCause {
@@ -226,13 +244,18 @@ impl HookArmingCause {
             | Self::LauncherPathOccupied
             | Self::LauncherPathUnquotable
             | Self::GrimHomeShared
-            | Self::BindingNameReserved => ArtifactStatus::NotArmed,
+            | Self::BindingNameReserved
+            | Self::SettingsRootRelative
+            | Self::SettingsRootInWorkspace => ArtifactStatus::NotArmed,
             Self::ClientTrustPending => ArtifactStatus::Untrusted,
             Self::InsecureTransport => ArtifactStatus::NotArmed,
             Self::FeatureFlagOff
             | Self::WorkspaceNotConsented
             | Self::ConsentDrifted
-            | Self::ClientHasNoHookSurface => ArtifactStatus::Gated,
+            | Self::ClientHasNoHookSurface
+            | Self::NoApplicableSettings
+            | Self::ClientConfigAbsent
+            | Self::LocalFileTracked => ArtifactStatus::Gated,
         }
     }
 
@@ -338,6 +361,31 @@ impl HookArmingCause {
                  files, machine key), or one ending in .exe, .com, .bat or .cmd; rename the binding in \
                  grimoire.toml, then re-run grim install"
             }
+            Self::NoApplicableSettings => {
+                "nothing in this settings package applies to this client here; select a client the \
+                 package declares values for with --client <name> or [options].clients, then run grim \
+                 install"
+            }
+            Self::ClientConfigAbsent => {
+                "this client's config file does not exist, so nothing is written for it; start the \
+                 client once, then run grim install"
+            }
+            Self::LocalFileTracked => {
+                "Claude's local settings file is tracked by git, so grim's values can reach a commit; \
+                 run git rm --cached on it, then grim install"
+            }
+            Self::SettingsRootRelative => {
+                "this client's config directory is a relative path, so the settings file it names depends on \
+                 where grim runs and nothing is written there; set the variable that names that directory to \
+                 an absolute path, or unset it, then run grim install --global"
+            }
+            Self::SettingsRootInWorkspace => {
+                "this client's settings file lies inside the repository grim runs in, by its own path or \
+                 through a link, or grim cannot place it outside, so that repository could choose it and \
+                 nothing is written there; point the variable that names its config directory outside the \
+                 repository, then run grim install --global, or run grim install --global from outside the \
+                 repository"
+            }
         }
     }
 
@@ -367,14 +415,20 @@ impl HookArmingCause {
             | Self::LauncherPathOccupied
             | Self::LauncherPathUnquotable
             | Self::GrimHomeShared
-            | Self::BindingNameReserved => false,
+            | Self::BindingNameReserved
+            | Self::NoApplicableSettings
+            | Self::ClientConfigAbsent
+            | Self::LocalFileTracked
+            | Self::SettingsRootRelative
+            | Self::SettingsRootInWorkspace => false,
         }
     }
 }
 
-impl std::fmt::Display for HookArmingCause {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
+impl HookArmingCause {
+    /// The kebab-case token JSON carries, as `Display` writes it.
+    pub fn as_str(self) -> &'static str {
+        match self {
             Self::GrimHomeRelative => "grim-home-relative",
             Self::GrimHomeInWorkspace => "grim-home-in-workspace",
             Self::LauncherPathControlCharacter => "launcher-path-control-character",
@@ -393,7 +447,18 @@ impl std::fmt::Display for HookArmingCause {
             Self::LauncherPathUnquotable => "launcher-path-unquotable",
             Self::GrimHomeShared => "grim-home-shared",
             Self::BindingNameReserved => "binding-name-reserved",
-        })
+            Self::NoApplicableSettings => "no-applicable-settings",
+            Self::ClientConfigAbsent => "client-config-absent",
+            Self::LocalFileTracked => "local-file-tracked",
+            Self::SettingsRootRelative => "settings-root-relative",
+            Self::SettingsRootInWorkspace => "settings-root-in-workspace",
+        }
+    }
+}
+
+impl std::fmt::Display for HookArmingCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -498,7 +563,7 @@ impl std::fmt::Display for InitStatus {
 /// match can express.
 #[cfg(test)]
 impl HookArmingCause {
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 23] = [
         Self::GrimHomeRelative,
         Self::GrimHomeInWorkspace,
         Self::LauncherPathControlCharacter,
@@ -517,6 +582,11 @@ impl HookArmingCause {
         Self::LauncherPathUnquotable,
         Self::GrimHomeShared,
         Self::BindingNameReserved,
+        Self::NoApplicableSettings,
+        Self::ClientConfigAbsent,
+        Self::LocalFileTracked,
+        Self::SettingsRootRelative,
+        Self::SettingsRootInWorkspace,
     ];
 }
 
@@ -627,8 +697,43 @@ mod tests {
             HookArmingCause::LauncherPathUnquotable,
             HookArmingCause::GrimHomeShared,
             HookArmingCause::BindingNameReserved,
+            HookArmingCause::SettingsRootRelative,
+            HookArmingCause::SettingsRootInWorkspace,
         ] {
             assert_eq!(cause.state(), ArtifactStatus::NotArmed, "{cause}");
+        }
+        // Totality only: whether these move a settings row is the row's call,
+        // and the two notes never do.
+        for cause in [
+            HookArmingCause::NoApplicableSettings,
+            HookArmingCause::ClientConfigAbsent,
+            HookArmingCause::LocalFileTracked,
+        ] {
+            assert_eq!(cause.state(), ArtifactStatus::Gated, "{cause}");
+        }
+    }
+
+    /// Selecting another client is the remedy, so the note names both ways to do it.
+    #[test]
+    fn the_no_applicable_note_names_how_to_select_a_client() {
+        let message = HookArmingCause::NoApplicableSettings.message();
+        for route in ["--client <name>", "[options].clients", "declares values for"] {
+            assert!(message.contains(route), "{route} missing from: {message}");
+        }
+    }
+
+    /// The settings causes are frozen spellings, appended after the hook causes.
+    #[test]
+    fn the_settings_cause_tokens_are_spelled_as_documented() {
+        for (cause, token) in [
+            (HookArmingCause::NoApplicableSettings, "no-applicable-settings"),
+            (HookArmingCause::ClientConfigAbsent, "client-config-absent"),
+            (HookArmingCause::LocalFileTracked, "local-file-tracked"),
+            (HookArmingCause::SettingsRootRelative, "settings-root-relative"),
+            (HookArmingCause::SettingsRootInWorkspace, "settings-root-in-workspace"),
+        ] {
+            assert_eq!(cause.to_string(), token);
+            assert_eq!(serde_json::to_string(&cause).unwrap(), format!("\"{token}\""));
         }
     }
 
@@ -645,7 +750,7 @@ mod tests {
             assert_eq!(cause.to_string(), token);
             assert_eq!(serde_json::to_string(&cause).unwrap(), format!("\"{token}\""));
         }
-        assert_eq!(HookArmingCause::ALL.len(), 18);
+        assert_eq!(HookArmingCause::ALL.len(), 23);
     }
 
     /// Only the held dispatch lock is transient. Telling a user to retry a

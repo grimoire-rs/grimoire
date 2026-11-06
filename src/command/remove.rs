@@ -26,11 +26,11 @@ use super::scope_resolution;
 /// `grim remove` arguments.
 #[derive(Debug, Args)]
 pub struct RemoveArgs {
-    /// `skill`, `rule`, `agent`, `bundle`, `mcp`, or `hook`.
+    /// `skill`, `rule`, `agent`, `bundle`, `mcp`, `hook`, or `settings`.
     //
     // `hook` appended, never inserted — an accepted value set is a frozen CLI
     // surface and widening it is the additive direction (Principle 9).
-    #[arg(value_parser = ["skill", "rule", "agent", "bundle", "mcp", "hook"])]
+    #[arg(value_parser = ["skill", "rule", "agent", "bundle", "mcp", "hook", "settings"])]
     pub kind: String,
 
     /// The config binding name to remove.
@@ -74,6 +74,7 @@ pub async fn run(ctx: &Context, args: &RemoveArgs) -> anyhow::Result<(RemoveRepo
         ArtifactKind::Agent => set.agents.remove(&args.name).is_some(),
         ArtifactKind::Bundle => set.bundles.remove(&args.name).is_some(),
         ArtifactKind::Mcp => set.mcp.remove(&args.name).is_some(),
+        ArtifactKind::Settings => set.settings.remove(&args.name).is_some(),
     };
 
     if !removed {
@@ -270,6 +271,9 @@ pub(crate) fn drop_from_lock(
     // declaration is dropped from `set.hooks` above, so `after` no longer holds
     // the key) and removing a bundle that provided a hook member.
     process(&mut lock.hooks);
+    // Same shape: a surviving `[[settings]]` entry under a FRESH restamp is a
+    // package the next `grim install` applies after the user removed it.
+    process(&mut lock.settings);
 
     // Prune cached snapshots for bundles no longer declared (or retagged).
     lock.bundles.retain(|b| {
@@ -313,6 +317,7 @@ fn target_only_drop(
         ArtifactKind::Agent => lock.agents.retain(|a| a.name != name),
         ArtifactKind::Mcp => lock.mcp.retain(|a| a.name != name),
         ArtifactKind::Hook => lock.hooks.retain(|a| a.name != name),
+        ArtifactKind::Settings => lock.settings.retain(|a| a.name != name),
         ArtifactKind::Bundle => lock.bundles.retain(|b| b.name != name),
     }
     let direct = |a: &LockedArtifact| match a.kind {
@@ -321,6 +326,7 @@ fn target_only_drop(
         ArtifactKind::Agent => set_after.agents.contains_key(&a.name),
         ArtifactKind::Mcp => set_after.mcp.contains_key(&a.name),
         ArtifactKind::Hook => set_after.hooks.contains_key(&a.name),
+        ArtifactKind::Settings => set_after.settings.contains_key(&a.name),
         ArtifactKind::Bundle => false,
     };
     let kept = lock.iter_artifacts().filter(|a| !direct(a)).count();
@@ -346,6 +352,7 @@ fn direct_id_of(
         ArtifactKind::Rule => &set.rules,
         ArtifactKind::Agent => &set.agents,
         ArtifactKind::Mcp => &set.mcp,
+        ArtifactKind::Settings => &set.settings,
         ArtifactKind::Bundle => return None,
     };
     // A path-sourced declaration has no registry identifier; the caller's
@@ -420,6 +427,13 @@ fn legacy_drop_from_lock(
                 stale = true;
             } else {
                 lock.mcp.retain(|a| a.name != name);
+            }
+        }
+        ArtifactKind::Settings => {
+            if provided_by_bundle(name, kind) {
+                stale = true;
+            } else {
+                lock.settings.retain(|a| a.name != name);
             }
         }
         ArtifactKind::Bundle => {
@@ -513,6 +527,7 @@ fn evict_bundle_members(lock: &mut GrimoireLock, repo: &str, tag: &str, set: &cr
     // false, so the hash was restamped fresh and the next `grim install`
     // re-armed it — the same re-arm hazard as `drop_from_lock` above.
     lock.hooks.retain_mut(evict);
+    lock.settings.retain_mut(evict);
 }
 
 #[cfg(test)]
@@ -538,6 +553,7 @@ mod tests {
     fn lock_of(skills: Vec<LockedArtifact>) -> GrimoireLock {
         GrimoireLock {
             hooks: vec![],
+            settings: vec![],
             metadata: LockMetadata {
                 lock_version: LockVersion::V1,
                 declaration_hash_version: 1,
@@ -597,6 +613,33 @@ mod tests {
         let mut set = set_of(&[], bundles);
         for (n, i) in hooks {
             set.hooks.insert(
+                (*n).to_string(),
+                crate::config::declaration::DeclaredSource::Registry(Identifier::parse(i).unwrap()),
+            );
+        }
+        set.invalidate_declaration_hash_cache();
+        set
+    }
+
+    fn locked_settings(name: &str, bundles: &[(&str, &str)]) -> LockedArtifact {
+        let id = Identifier::new_registry(name, "localhost:5000").clone_with_digest(Digest::Sha256("a".repeat(64)));
+        let mut a = LockedArtifact::direct(
+            name.to_string(),
+            ArtifactKind::Settings,
+            PinnedIdentifier::try_from(id).unwrap(),
+        );
+        a.bundles = bundles
+            .iter()
+            .map(|(repo, tag)| crate::lock::locked_artifact::BundleProvenance::new(*repo, *tag))
+            .collect();
+        a
+    }
+
+    /// A `DesiredSet` declaring `settings` bindings plus `bundles`.
+    fn settings_set_of(settings: &[(&str, &str)], bundles: &[(&str, &str)]) -> DesiredSet {
+        let mut set = set_of(&[], bundles);
+        for (n, i) in settings {
+            set.settings.insert(
                 (*n).to_string(),
                 crate::config::declaration::DeclaredSource::Registry(Identifier::parse(i).unwrap()),
             );
@@ -998,6 +1041,136 @@ mod tests {
         );
     }
 
+    // ── Settings: an undeclared entry must leave a lock that reads fresh ─
+
+    #[test]
+    fn remove_settings_drops_its_lock_entry() {
+        let mut prev = lock_of(vec![]);
+        prev.settings = vec![locked_settings("team", &[])];
+        let before = settings_set_of(&[("team", "localhost:5000/acme/team:1")], &[]);
+        let after_set = settings_set_of(&[], &[]);
+
+        let out = drop_from_lock(&prev, ArtifactKind::Settings, "team", &before, &after_set);
+        assert!(
+            out.lock.settings.is_empty(),
+            "the undeclared entry must leave the lock: {:?}",
+            out.lock.settings
+        );
+        assert_eq!(
+            out.lock.metadata.declaration_hash,
+            after_set.declaration_hash_cached(),
+            "nothing is stale, so the hash restamps fresh"
+        );
+    }
+
+    #[test]
+    fn remove_settings_keeps_an_unrelated_entry() {
+        let mut prev = lock_of(vec![]);
+        prev.settings = vec![locked_settings("team", &[]), locked_settings("other", &[])];
+        let before = settings_set_of(
+            &[
+                ("team", "localhost:5000/acme/team:1"),
+                ("other", "localhost:5000/acme/other:1"),
+            ],
+            &[],
+        );
+        let after_set = settings_set_of(&[("other", "localhost:5000/acme/other:1")], &[]);
+
+        let out = drop_from_lock(&prev, ArtifactKind::Settings, "team", &before, &after_set);
+        let names: Vec<&str> = out.lock.settings.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, vec!["other"], "only the named entry drops");
+    }
+
+    #[test]
+    fn remove_bundle_via_sets_evicts_its_settings_member() {
+        let mut prev = lock_of(vec![]);
+        prev.settings = vec![locked_settings("team", &[("localhost:5000/acme/stack", "1")])];
+        prev.bundles = vec![snapshot_of_kind(
+            "stack",
+            "localhost:5000/acme/stack",
+            "1",
+            ArtifactKind::Settings,
+            ("team", "localhost:5000/acme/team:1"),
+        )];
+        let before = set_of(&[], &[("stack", "localhost:5000/acme/stack:1")]);
+        let after_set = set_of(&[], &[]);
+
+        let out = drop_from_lock(&prev, ArtifactKind::Bundle, "stack", &before, &after_set);
+        assert!(
+            out.lock.settings.is_empty(),
+            "the removed bundle's settings member must be evicted: {:?}",
+            out.lock.settings
+        );
+    }
+
+    #[test]
+    fn legacy_bundle_eviction_drops_its_settings_member() {
+        // `prev.bundles` empty while a bundle is declared forces the legacy path.
+        let mut prev = lock_of(vec![]);
+        prev.settings = vec![locked_settings("team", &[("ghcr.io/acme/stack-a", "1")])];
+        let before = set_of(&[], &[("a", "ghcr.io/acme/stack-a:1")]);
+        let after_set = set_of(&[], &[]);
+
+        let out = drop_from_lock(&prev, ArtifactKind::Bundle, "a", &before, &after_set);
+        assert!(
+            out.lock.settings.is_empty(),
+            "the sole contributor's removal must evict the member: {:?}",
+            out.lock.settings
+        );
+    }
+
+    #[test]
+    fn legacy_target_drop_removes_a_settings_entry() {
+        // An unrelated path-declared bundle degrades the whole call to the
+        // target-only path, which has its own per-kind fan-out.
+        let mut prev = lock_of(vec![]);
+        prev.settings = vec![locked_settings("team", &[])];
+        let mut before = settings_set_of(
+            &[("team", "localhost:5000/acme/team:1")],
+            &[("a", "ghcr.io/acme/stack-a:1")],
+        );
+        before.invalidate_declaration_hash_cache();
+        let after_set = settings_set_of(&[], &[("a", "ghcr.io/acme/stack-a:1")]);
+
+        let out = drop_from_lock(&prev, ArtifactKind::Settings, "team", &before, &after_set);
+        assert!(out.lock.settings.is_empty(), "{:?}", out.lock.settings);
+    }
+
+    #[test]
+    fn incomputable_graph_drops_only_the_settings_target() {
+        // A `requires` edge makes the lock dependency-bearing, so the
+        // incomputable graph takes the target-only path, not the legacy one.
+        let mut other = locked("other");
+        other.requires = vec![crate::oci::bundle::BundleMember {
+            kind: ArtifactKind::Skill,
+            name: "absent".to_string(),
+            id: "localhost:5000/acme/absent:1".to_string(),
+        }];
+        let mut prev = lock_of(vec![other]);
+        prev.settings = vec![locked_settings("team", &[])];
+        let before = settings_set_of(&[("team", "localhost:5000/acme/team:1")], &[]);
+        let mut after_set = settings_set_of(&[], &[]);
+        after_set.skills.insert(
+            "other".to_string(),
+            crate::config::declaration::DeclaredSource::Registry(
+                Identifier::parse("localhost:5000/acme/other:1").unwrap(),
+            ),
+        );
+        after_set.invalidate_declaration_hash_cache();
+        let mut before = before;
+        before.skills = after_set.skills.clone();
+        before.invalidate_declaration_hash_cache();
+
+        let out = drop_from_lock(&prev, ArtifactKind::Settings, "team", &before, &after_set);
+        assert!(out.lock.settings.is_empty(), "{:?}", out.lock.settings);
+        assert_eq!(out.lock.skills.len(), 1, "every other entry is written untouched");
+        assert_ne!(
+            out.lock.metadata.declaration_hash,
+            after_set.declaration_hash_cached(),
+            "the lock stays honestly stale"
+        );
+    }
+
     // ── Hook: the same fan-out gap, with re-arming as its blast radius ───
 
     #[test]
@@ -1365,7 +1538,7 @@ mod tests {
     /// is a test failure rather than a wrong-target action.
     #[test]
     fn every_accepted_kind_string_resolves_to_that_kind() {
-        for accepted in ["skill", "rule", "agent", "bundle", "mcp", "hook"] {
+        for accepted in ["skill", "rule", "agent", "bundle", "mcp", "hook", "settings"] {
             let kind = ArtifactKind::from_kind_str(accepted)
                 .unwrap_or_else(|| panic!("the `remove` parser accepts '{accepted}' but no kind parses it"));
             assert_eq!(kind.kind_str(), accepted, "'{accepted}' must not resolve to {kind}");

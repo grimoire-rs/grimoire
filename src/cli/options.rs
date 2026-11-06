@@ -128,53 +128,53 @@ impl VerifyOpts {
     }
 }
 
-/// A `--trust-hooks` / `--no-trust-hooks` flag pair resolving to a
-/// **tri-state**, because "neither was typed" is a third answer the arming
-/// table acts on rather than a missing one: it is the only state in which grim
-/// asks. Flatten into a command's args with `#[command(flatten)]`; when both
-/// flags are given, the later one wins (`overrides_with` in both directions).
+/// A `--trust-workspace` / `--no-trust-workspace` flag pair resolving to a
+/// **tri-state**, because "neither was typed" is a third answer the consent
+/// ladder acts on: it is the only state in which grim asks. Flatten into a
+/// command's args with `#[command(flatten)]`; whichever spelling comes last wins.
 ///
-/// The pair keeps its name through the move from registry-scoped trust to
-/// workspace consent (owner decision 2026-08-28): a second rename in two
-/// sessions buys nothing, and the spelling keeps maximum distance from the
-/// permanently forbidden `GRIM_ALLOW_HOOKS`. It and `grim hook allow` answer
-/// the same question — *may a hook arm here* — and differ in reach and
-/// lifetime: the record names one workspace and persists, the flag covers the
-/// whole invocation and is written nowhere.
-///
-/// **The flag beats the record in both directions.** A flag typed on this run
-/// is the most explicit answer there is, and no file can type one — which is
-/// exactly why it may outrank a stored answer where a config key may not
-/// (threat-model N4).
-///
-/// **Flags only.** There is no `GRIM_TRUST_HOOKS`, and `GRIM_ALLOW_HOOKS` was
-/// removed rather than renamed: a repository routinely carries its own
-/// environment (`.envrc`, `.mise.toml`, devcontainer `containerEnv`), so an
-/// env-settable arming gate would let a repo grant itself code execution on a
-/// cloner's machine (CWE-426). A config file cannot type a flag.
+/// It and the consent record answer one question, and the flag beats the record
+/// in both directions: the record persists for one workspace, while the flag
+/// covers one invocation, is written nowhere, and cannot be typed by a file.
+// `--trust-hooks` stays a visible alias: scripts and docs pin that name.
+// Flags only: a repository routinely carries its own environment (`.envrc`,
+// `.mise.toml`, devcontainer `containerEnv`), so a `GRIM_TRUST_WORKSPACE`, a
+// `GRIM_TRUST_HOOKS` or the removed `GRIM_ALLOW_HOOKS` would let it grant
+// itself code execution (CWE-426).
 #[derive(Debug, Clone, Copy, Args)]
 pub struct HookTrustOpts {
-    /// Arm hooks on this invocation whatever the workspace's consent record
-    /// says, including an unconsented or drifted one. **Writes no record** —
-    /// it is per-invocation by contract. Does **not** turn the feature on:
-    /// `[options.experimental] hooks` is answered first, so this is inert
-    /// while hooks are gated.
-    #[arg(long, overrides_with = "no_trust_hooks")]
-    pub trust_hooks: bool,
+    /// Arm hooks and apply settings on this invocation whatever the
+    /// workspace's consent record says, including an unconsented or drifted
+    /// one. **Writes no record**: it lasts this one invocation. Does **not**
+    /// turn a kind on: its `[options.experimental]` key is answered first, so
+    /// this is inert for a kind that key gates.
+    // Each flag overrides itself too: without that, repeating one answer under
+    // its two spellings is clap's "used multiple times" usage error.
+    #[arg(
+        long,
+        visible_alias = "trust-hooks",
+        overrides_with_all = ["trust_workspace", "no_trust_workspace"]
+    )]
+    pub trust_workspace: bool,
 
-    /// Arm no hook on this invocation, whatever the record grants.
-    #[arg(long, overrides_with = "trust_hooks")]
-    pub no_trust_hooks: bool,
+    /// Arm no hook and apply no settings on this invocation, whatever the
+    /// record grants.
+    #[arg(
+        long,
+        visible_alias = "no-trust-hooks",
+        overrides_with_all = ["trust_workspace", "no_trust_workspace"]
+    )]
+    pub no_trust_workspace: bool,
 }
 
 impl HookTrustOpts {
-    /// The effective tri-state: `Some(true)` for `--trust-hooks`,
-    /// `Some(false)` for `--no-trust-hooks`, `None` when neither was typed.
+    /// The effective tri-state: `Some(true)` for `--trust-workspace`,
+    /// `Some(false)` for `--no-trust-workspace`, `None` when neither was typed.
     ///
-    /// `overrides_with` makes both-true unreachable through clap; the arm
+    /// `overrides_with_all` makes both-true unreachable through clap; the arm
     /// order below is defensive, not a precedence rule.
     pub fn flag(self) -> Option<bool> {
-        match (self.trust_hooks, self.no_trust_hooks) {
+        match (self.trust_workspace, self.no_trust_workspace) {
             (true, _) => Some(true),
             (_, true) => Some(false),
             _ => None,
@@ -198,6 +198,71 @@ mod tests {
         }
 
         Harness::command().render_long_help().to_string()
+    }
+
+    /// One command's parse of the trust pair, alone.
+    #[derive(clap::Parser)]
+    struct TrustHarness {
+        #[command(flatten)]
+        trust: HookTrustOpts,
+    }
+
+    /// Both spellings of each answer, with the answer each stands for.
+    const TRUST_SPELLINGS: [(&str, bool); 4] = [
+        ("--trust-workspace", true),
+        ("--trust-hooks", true),
+        ("--no-trust-workspace", false),
+        ("--no-trust-hooks", false),
+    ];
+
+    fn trust_answer(args: &[&str]) -> Option<bool> {
+        use clap::Parser as _;
+
+        let argv = std::iter::once("grim").chain(args.iter().copied());
+        match TrustHarness::try_parse_from(argv) {
+            Ok(parsed) => parsed.trust.flag(),
+            Err(error) => panic!("{args:?} must parse: {error}"),
+        }
+    }
+
+    #[test]
+    fn no_spelling_typed_leaves_the_answer_open() {
+        assert_eq!(trust_answer(&[]), None);
+    }
+
+    #[test]
+    fn every_spelling_stands_for_its_answer() {
+        for (spelling, answer) in TRUST_SPELLINGS {
+            assert_eq!(trust_answer(&[spelling]), Some(answer), "{spelling}");
+        }
+    }
+
+    /// The pair is one question under two names, so a repeated answer is the
+    /// last one typed, never a usage error, whichever spellings a script mixes.
+    #[test]
+    fn the_last_spelling_typed_wins_in_any_order() {
+        for (first, _) in TRUST_SPELLINGS {
+            for (second, _) in TRUST_SPELLINGS {
+                for (third, answer) in TRUST_SPELLINGS {
+                    assert_eq!(trust_answer(&[second, third]), Some(answer), "{second} {third}");
+                    assert_eq!(
+                        trust_answer(&[first, second, third]),
+                        Some(answer),
+                        "{first} {second} {third}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn help_keeps_naming_the_old_pair() {
+        use clap::CommandFactory as _;
+
+        let help = TrustHarness::command().render_long_help().to_string();
+        for (spelling, _) in TRUST_SPELLINGS {
+            assert!(help.contains(spelling), "`--help` must name {spelling}:\n{help}");
+        }
     }
 
     #[test]

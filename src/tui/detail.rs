@@ -361,8 +361,34 @@ pub fn detail_lines(row: Option<&TuiRow>, companion: Option<&CompanionCache>) ->
                 .to_string(),
         });
     }
+    if let Some(hint) = settings_hint(r.state) {
+        lines.push(DetailLine::MetaEntry {
+            label: "Settings:",
+            value: hint.to_string(),
+        });
+    }
     lines.extend(support_lines(companion));
     lines
+}
+
+/// Why a settings row reads as it does. Static for the reason the integrity
+/// line is: `grim status` carries the per-client cause.
+fn settings_hint(state: ArtifactState) -> Option<&'static str> {
+    match state {
+        ArtifactState::Gated => Some(
+            "held back: the settings flag is off, this workspace has not consented, or no value \
+             applies to the selected clients — `grim status` names the cause",
+        ),
+        ArtifactState::NotArmed => Some("grim refuses to write these settings here — `grim status` names the cause"),
+        ArtifactState::Stale => Some("grimoire.toml changed since the lock — `grim lock` brings it up to date"),
+        ArtifactState::NotInstalled
+        | ArtifactState::Installed
+        | ArtifactState::ViaBundle
+        | ArtifactState::Outdated
+        | ArtifactState::Modified
+        | ArtifactState::Pending
+        | ArtifactState::IntegrityMissing => None,
+    }
 }
 
 /// The `Support:` section, from the live companion fetch.
@@ -630,6 +656,26 @@ mod tests {
             member_repo: member_repo.map(|s| s.to_string()),
             state,
             related: false,
+        }
+    }
+
+    /// A settings state is not self-explaining, and the lifecycle states are.
+    #[test]
+    fn only_the_settings_states_carry_a_settings_hint() {
+        for (state, hinted) in [
+            (ArtifactState::Gated, true),
+            (ArtifactState::NotArmed, true),
+            (ArtifactState::Stale, true),
+            (ArtifactState::Installed, false),
+            (ArtifactState::NotInstalled, false),
+            (ArtifactState::Modified, false),
+        ] {
+            let mut row = tui_row(None);
+            row.state = state;
+            let shown = detail_lines(Some(&row), None)
+                .iter()
+                .any(|l| matches!(l, DetailLine::MetaEntry { label: "Settings:", .. }));
+            assert_eq!(shown, hinted, "{state:?}");
         }
     }
 

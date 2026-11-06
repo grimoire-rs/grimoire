@@ -163,6 +163,7 @@ fn content_equal(a: &GrimoireLock, b: &GrimoireLock) -> bool {
         && lists_content_equal(&a.agents, &b.agents)
         && lists_content_equal(&a.mcp, &b.mcp)
         && lists_content_equal(&a.hooks, &b.hooks)
+        && lists_content_equal(&a.settings, &b.settings)
         && bundles_content_equal(&a.bundles, &b.bundles)
 }
 
@@ -249,6 +250,7 @@ mod tests {
     fn lock_with(generated_at: &str, skills: Vec<LockedArtifact>) -> GrimoireLock {
         GrimoireLock {
             hooks: vec![],
+            settings: vec![],
             metadata: LockMetadata {
                 lock_version: LockVersion::V1,
                 declaration_hash_version: 1,
@@ -395,6 +397,44 @@ mod tests {
         prev.mcp = mcp();
         let mut next = lock_with("2099-12-31T23:59:59Z", vec![]);
         next.mcp = mcp();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grimoire.lock");
+        save(&path, &next, Some(&prev)).unwrap();
+        assert_eq!(load(&path).unwrap().metadata.generated_at, "2026-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn generated_at_updated_when_only_settings_differ() {
+        let entry = |byte| {
+            vec![LockedArtifact::direct(
+                "team".to_string(),
+                ArtifactKind::Settings,
+                pinned("acme/team", None, byte),
+            )]
+        };
+        let mut prev = lock_with("2026-01-01T00:00:00Z", vec![]);
+        prev.settings = entry('a');
+        let mut next = lock_with("2026-06-01T12:00:00Z", vec![]);
+        next.settings = entry('b');
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grimoire.lock");
+        save(&path, &next, Some(&prev)).unwrap();
+        assert_ne!(load(&path).unwrap().metadata.generated_at, "2026-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn generated_at_preserved_when_settings_unchanged() {
+        let entry = || {
+            vec![LockedArtifact::direct(
+                "team".to_string(),
+                ArtifactKind::Settings,
+                pinned("acme/team", None, 'a'),
+            )]
+        };
+        let mut prev = lock_with("2026-01-01T00:00:00Z", vec![]);
+        prev.settings = entry();
+        let mut next = lock_with("2099-12-31T23:59:59Z", vec![]);
+        next.settings = entry();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("grimoire.lock");
         save(&path, &next, Some(&prev)).unwrap();
@@ -775,6 +815,7 @@ mod tests {
             agents: of(ArtifactKind::Agent),
             mcp: of(ArtifactKind::Mcp),
             hooks: of(ArtifactKind::Hook),
+            settings: of(ArtifactKind::Settings),
             bundles: vec![],
         }
     }
@@ -1236,6 +1277,29 @@ pinned = \"{p6}\"
         save_marketplace(&path, &lock, None).expect("save");
         let out = std::fs::read_to_string(&path).unwrap();
         assert_eq!(out, reference_wire());
+    }
+
+    #[test]
+    fn marketplace_lock_keeps_a_settings_entry() {
+        let lock = mkt(
+            T1,
+            vec![(
+                "solo",
+                'c',
+                vec![entry_of("team", ArtifactKind::Settings, "acme/team", 'a')],
+            )],
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("marketplace.lock");
+        save_marketplace(&path, &lock, None).expect("save");
+        let out = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            out.contains("[[settings]]\nname = \"team\"\nplugin = \"solo\""),
+            "{out}"
+        );
+        let back = load_marketplace(&path).expect("load");
+        assert_eq!(back.plugins["solo"].settings[0].kind, ArtifactKind::Settings);
+        assert_eq!(back, lock);
     }
 
     #[test]

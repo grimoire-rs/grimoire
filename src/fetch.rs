@@ -48,6 +48,7 @@ use crate::oci::access::{OciAccess, Operation};
 use crate::oci::bundle::BUNDLE_LAYER_SIZE_LIMIT;
 use crate::oci::manifest::LayerLayout;
 use crate::oci::mcp::{MCP_LAYER_SIZE_LIMIT, McpDescriptor};
+use crate::oci::settings::SETTINGS_LAYER_SIZE_LIMIT;
 use crate::oci::{ArtifactKind, ArtifactRef, Identifier, PinnedIdentifier};
 use crate::resolve::{ResolveError, ResolveErrorKind};
 
@@ -386,6 +387,7 @@ pub async fn fetch_artifact(
     let cap = match payload {
         FetchedPayload::Artifact(ArtifactKind::Mcp) => Some(MCP_LAYER_SIZE_LIMIT),
         FetchedPayload::Artifact(ArtifactKind::Bundle) => Some(BUNDLE_LAYER_SIZE_LIMIT),
+        FetchedPayload::Artifact(ArtifactKind::Settings) => Some(SETTINGS_LAYER_SIZE_LIMIT),
         _ => max_layer_size,
     };
     let repo: Identifier = pinned.as_identifier().without_tag();
@@ -620,6 +622,16 @@ pub async fn fetch_with_limit(
                     return Err(anyhow!("bundles carry no support files; omit 'path'"));
                 }
                 // The layer IS the member-list document.
+                report.content = String::from_utf8_lossy(&fetched.blob).into_owned();
+            }
+            ArtifactKind::Settings => {
+                if vendor_client.is_some() {
+                    return Err(anyhow!("settings have no vendor projection; fetch without a vendor"));
+                }
+                if path.is_some() {
+                    return Err(anyhow!("settings carry no support files; omit 'path'"));
+                }
+                // The layer IS the document, one table per vendor.
                 report.content = String::from_utf8_lossy(&fetched.blob).into_owned();
             }
         },
@@ -1122,7 +1134,7 @@ fn project_index(
                 .agent_index(&parsed, &pinned_str)
                 .map_err(|e| anyhow!("agent projection failed: {e}"))?
         }
-        ArtifactKind::Bundle | ArtifactKind::Mcp => unreachable!("tar-backed kinds only"),
+        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Settings => unreachable!("tar-backed kinds only"),
     };
     Ok(rendered.map(|r| {
         warnings.extend(r.warnings);
@@ -1687,6 +1699,52 @@ mod tests {
             .await
             .expect_err("gate");
         assert!(err.to_string().contains("size cap"));
+    }
+
+    /// A settings layer is one document for every vendor and ships no files:
+    /// a vendor or a path is refused by name, and without both it prints whole.
+    #[tokio::test]
+    async fn fetch_settings_refuses_a_vendor_and_a_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = MemoryRegistry::new();
+        let reference = "test.registry/acme/settings/team:latest";
+        let layer = b"{\"claude\":{\"model\":\"opus\"},\"description\":\"d\"}\n";
+        publish(&reg, reference, "settings", layer).await;
+        let (scope, access) = scope_and_access(&reg, tmp.path(), tmp.path());
+
+        let vendor = fetch_with_limit(&scope, &access, reference, Some("claude"), None, FETCH_DOC_SIZE_LIMIT)
+            .await
+            .expect_err("a vendor is refused");
+        assert_eq!(
+            vendor.to_string(),
+            "settings have no vendor projection; fetch without a vendor"
+        );
+        let path = fetch_with_limit(&scope, &access, reference, None, Some("x"), FETCH_DOC_SIZE_LIMIT)
+            .await
+            .expect_err("a path is refused");
+        assert_eq!(path.to_string(), "settings carry no support files; omit 'path'");
+
+        let whole = fetch_with_limit(&scope, &access, reference, None, None, FETCH_DOC_SIZE_LIMIT)
+            .await
+            .unwrap();
+        assert_eq!(whole.content.as_bytes(), layer);
+    }
+
+    /// A settings layer keeps its own cap on the fetch path too: with no
+    /// caller cap the descriptor alone refuses it before any download.
+    #[tokio::test]
+    async fn a_settings_layer_is_gated_at_its_own_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = MemoryRegistry::new();
+        let oversize = crate::oci::settings::SETTINGS_LAYER_SIZE_LIMIT as usize + 1;
+        let reference = "test.registry/acme/settings/big:latest";
+        publish(&reg, reference, "settings", &vec![b' '; oversize]).await;
+        let (scope, access) = scope_and_access(&reg, tmp.path(), tmp.path());
+
+        let err = fetch_artifact(&scope, &access, reference, None)
+            .await
+            .expect_err("gate");
+        assert!(err.to_string().contains("size cap"), "{err:#}");
     }
 
     #[tokio::test]

@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from src.helpers import make_artifact, write_config
+from src.helpers import make_artifact, make_settings, settings_sandbox, write_config
 from src.hook_launcher import run_launcher
 
 # Only the tests that actually arm and inspect the launcher/registration are
@@ -142,12 +142,13 @@ def test_c153_config_list_adds_the_experimental_hooks_row(grim_at, project_dir: 
     --all` — appended to the fixed option keys, after
     `options.search_min_relevance` and before the `plugin.*` table keys — a
     boolean defaulting to false, with the design record's description
-    verbatim. No other row is added, removed or reordered."""
+    verbatim. `options.experimental.settings` follows at row 12, appended after
+    it. No other row is added, removed or reordered."""
     write_config(project_dir)
     runner = grim_at(project_dir)
     items = runner.json("config", "list", "--all")["items"]
     keys = [i["key"] for i in items]
-    assert keys[:10] + keys[11:] == [
+    assert keys[:10] + keys[12:] == [
         "options.default_registry",
         "options.clients",
         "options.show_deprecated",
@@ -179,6 +180,16 @@ def test_c153_config_list_adds_the_experimental_hooks_row(grim_at, project_dir: 
         "arms nothing and removes grim's existing hook registrations; no environment variable "
         "overrides this."
     )
+    settings_row = items[11]
+    assert settings_row["key"] == "options.experimental.settings"
+    assert settings_row["title"] == "Experimental settings"
+    assert settings_row["type"] == "boolean"
+    assert settings_row["default"] == "false"
+    assert settings_row["description"] == (
+        "Controls whether `grim install` writes declared settings into your AI clients' own config "
+        "files. When unset, install writes and removes no settings; no environment variable "
+        "overrides this."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -194,24 +205,84 @@ def test_c154_hook_environment_variables_are_inert(
     """**C-154.** `GRIM_EXPERIMENTAL_HOOKS` and `GRIM_ALLOW_HOOKS` do nothing:
     with the flag off the hook stays `feature-flag-off`; with the flag on in an
     unconsented workspace it stays `workspace-not-consented`. Positive control:
-    `--trust-hooks` arms the same hook in the same workspace."""
+    `--trust-hooks` arms the same hook in the same workspace.
+
+    The flag pair has no env form either. `GRIM_TRUST_HOOKS` and
+    `GRIM_TRUST_WORKSPACE` stay set through the whole test, a run with no flag
+    arms nothing, and `--trust-workspace` arms what `--trust-hooks` arms."""
     hook = _publish_hook(unique_repo)
     write_config(project_dir, hooks={"shell-guard": hook.fq})
     runner = grim_at(project_dir)
     if flag:
         runner.run("config", "set", "options.experimental.hooks", "true")
     runner.run("lock")
-    runner.env.update({"GRIM_EXPERIMENTAL_HOOKS": "1", "GRIM_ALLOW_HOOKS": "1"})
+    runner.env.update(
+        {
+            "GRIM_EXPERIMENTAL_HOOKS": "1",
+            "GRIM_ALLOW_HOOKS": "1",
+            "GRIM_EXPERIMENTAL_SETTINGS": "1",
+            "GRIM_TRUST_HOOKS": "1",
+            "GRIM_TRUST_WORKSPACE": "1",
+        }
+    )
 
     result = runner.run("install", check=False)
     assert result.returncode == 0, result.stderr
     assert _rows(runner) == [] and not _claude_marked(project_dir), "an env var armed a hook"
+    unset = runner.run("config", "get", "options.experimental.settings", check=False)
+    assert unset.returncode == 1, "an env var set the settings flag"
     expected = "workspace-not-consented" if flag else "feature-flag-off"
     assert [a["cause"] for a in _hook_item(runner)["arming"]] == [expected]
 
     if flag:
         runner.run("install", "--trust-hooks")
         assert len(_rows(runner)) == 1, "POSITIVE CONTROL FAILED: --trust-hooks must arm"
+        runner.run("install")
+        assert _rows(runner) == [], "an env var stood in for the flag on the next run"
+        runner.run("install", "--trust-workspace")
+        assert len(_rows(runner)) == 1, "POSITIVE CONTROL FAILED: --trust-workspace must arm"
+        runner.run("config", "set", "options.experimental.settings", "true")
+        got = runner.run("config", "get", "options.experimental.settings", check=False)
+        assert got.returncode == 0, "POSITIVE CONTROL FAILED: the file must set the flag"
+
+
+def test_settings_environment_variables_are_inert(
+    grim_at, project_dir: Path, tmp_path: Path, registry: str, unique_repo: str
+) -> None:
+    """No environment variable turns settings on. With the file flag unset and
+    `--trust-workspace` answering consent, the package stays `feature-flag-off`
+    and writes nothing, so the flag, not consent, is what stops it. Positive
+    control: the file flag alone then applies the same package."""
+    team = make_settings(
+        f"{unique_repo}/team", "1", {"description": "team defaults", "claude": {"model": "sonnet"}}
+    )
+    write_config(project_dir, settings={"team": team.fq}, options={"clients": json.dumps(["claude"])})
+    runner = grim_at(project_dir)
+    runner.env.update(settings_sandbox(tmp_path / "roots", runner.home)[0])
+    runner.run("lock")
+    runner.env.update(
+        {
+            "GRIM_EXPERIMENTAL_SETTINGS": "1",
+            "GRIM_SETTINGS": "1",
+            "GRIM_EXPERIMENTAL_HOOKS": "1",
+            "GRIM_TRUST_WORKSPACE": "1",
+        }
+    )
+    local = project_dir / ".claude" / "settings.local.json"
+
+    result = runner.run("install", "--trust-workspace", check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert not local.exists(), "an env var turned settings on"
+    row = next(i for i in runner.json("status")["items"] if i["kind"] == "settings")
+    assert row["state"] == "gated", row
+    assert [a["cause"] for a in row["arming"]] == ["feature-flag-off"], row["arming"]
+
+    runner.run("config", "set", "options.experimental.settings", "true")
+    runner.run("install", "--trust-workspace")
+    assert json.loads(local.read_text())["model"] == "sonnet", (
+        "POSITIVE CONTROL FAILED: the file flag must apply the package"
+    )
 
 
 # ---------------------------------------------------------------------------

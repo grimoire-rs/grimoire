@@ -783,6 +783,65 @@ pub fn annotations_for_mcp(
     a
 }
 
+/// Build the manifest annotation map for a settings artifact.
+///
+/// The title is the source file's stem; every descriptive field comes from
+/// the document's top level. Deterministic (no wall-clock `created`) so a
+/// re-release is idempotent — see [`annotations_for_skill`].
+pub fn annotations_for_settings(
+    name: &str,
+    document: &crate::oci::settings::SettingsDocument,
+    version: &str,
+    fallback_source: Option<&str>,
+    git: Option<&GitProvenance>,
+    defaults: &MetadataDefaults,
+) -> BTreeMap<String, String> {
+    let mut a = BTreeMap::new();
+    a.insert("org.opencontainers.image.title".to_string(), name.to_string());
+    a.insert(
+        "org.opencontainers.image.description".to_string(),
+        document.description.clone(),
+    );
+    a.insert("org.opencontainers.image.version".to_string(), version.to_string());
+    a.insert(KIND_ANNOTATION.to_string(), ArtifactKind::Settings.to_string());
+    if let Some(license) = document.license.as_deref().or(defaults.license.as_deref()) {
+        a.insert("org.opencontainers.image.licenses".to_string(), license.to_string());
+    }
+    if let Some(src) = source_annotation(SourceInputs {
+        authored: document.repository.as_deref().or(defaults.repository.as_deref()),
+        git,
+        fallback: fallback_source,
+    }) {
+        a.insert("org.opencontainers.image.source".to_string(), src);
+    }
+    insert_git_provenance(&mut a, git);
+    insert_descriptive(
+        &mut a,
+        &DescriptiveInputs {
+            authors: document.authors.as_deref().or(defaults.authors.as_deref()),
+            vendor: document.vendor.as_deref().or(defaults.vendor.as_deref()),
+            url: document.homepage.as_deref().or(defaults.homepage.as_deref()),
+            documentation: document.documentation.as_deref().or(defaults.documentation.as_deref()),
+        },
+        git,
+        document.repository.as_deref(),
+        fallback_source,
+    );
+    if let Some(summary) = &document.summary {
+        a.insert(SUMMARY_ANNOTATION.to_string(), summary.clone());
+    }
+    if let Some(keywords) = &document.keywords {
+        a.insert(KEYWORDS_ANNOTATION.to_string(), keywords.clone());
+    }
+    if let Some(deprecated) = document.deprecated.as_deref().and_then(normalize_deprecated) {
+        a.insert(DEPRECATED_ANNOTATION.to_string(), deprecated);
+    }
+    if let Some(replaced_by) = document.replaced_by.as_deref().and_then(normalize_deprecated) {
+        a.insert(REPLACED_BY_ANNOTATION.to_string(), replaced_by);
+    }
+    a
+}
+
 /// Build the manifest annotation map for a hook artifact.
 ///
 /// The title is the manifest `name` and `description` its required field.
@@ -1098,6 +1157,19 @@ mod tests {
             annotations: BTreeMap::new(),
         };
         assert_eq!(kind_from_manifest(&manifest), Some(crate::oci::ArtifactKind::Rule));
+    }
+
+    #[test]
+    fn kind_from_manifest_reads_a_settings_annotation() {
+        use crate::oci::manifest::OciManifest;
+        let manifest = OciManifest {
+            media_type: None,
+            artifact_type: None,
+            config_media_type: Some("application/vnd.oci.empty.v1+json".to_string()),
+            layers: vec![],
+            annotations: BTreeMap::from([(KIND_ANNOTATION.to_string(), "settings".to_string())]),
+        };
+        assert_eq!(kind_from_manifest(&manifest), Some(crate::oci::ArtifactKind::Settings));
     }
 
     #[test]
@@ -1653,6 +1725,27 @@ mod tests {
         let d = crate::oci::mcp::McpDescriptor::from_toml_str(toml).expect("replaced-by must parse");
         let a = annotations_for_mcp("acme-search", &d, "1.0.0", None, None, &Default::default());
         assert_eq!(a[REPLACED_BY_ANNOTATION], "ghcr.io/acme/mcp/successor");
+    }
+
+    #[test]
+    fn settings_stamp_their_kind_and_prefer_the_document_over_a_default() {
+        let toml = "description = \"d\"\nsummary = \"s\"\nlicense = \"MIT\"\n\
+                    replaced-by = \"ghcr.io/acme/settings/next\"\n";
+        let (document, _) = crate::oci::settings::SettingsDocument::from_toml_str_with_requires(toml).unwrap();
+        let defaults = MetadataDefaults {
+            license: Some("Apache-2.0".to_string()),
+            vendor: Some("entry-vendor".to_string()),
+            ..Default::default()
+        };
+        let a = annotations_for_settings("team", &document, "1.0.0", None, None, &defaults);
+        assert_eq!(a[KIND_ANNOTATION], "settings");
+        assert_eq!(a["org.opencontainers.image.title"], "team");
+        assert_eq!(a["org.opencontainers.image.description"], "d");
+        assert_eq!(a["org.opencontainers.image.version"], "1.0.0");
+        assert_eq!(a["org.opencontainers.image.licenses"], "MIT");
+        assert_eq!(a["org.opencontainers.image.vendor"], "entry-vendor");
+        assert_eq!(a[SUMMARY_ANNOTATION], "s");
+        assert_eq!(a[REPLACED_BY_ANNOTATION], "ghcr.io/acme/settings/next");
     }
 
     #[test]

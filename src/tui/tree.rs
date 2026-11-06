@@ -104,9 +104,10 @@ impl Rollup {
             // member nodes only), but the match must stay total — count it as
             // installed (it is present and intact).
             ArtifactState::Installed | ArtifactState::ViaBundle => self.installed += 1,
-            ArtifactState::NotInstalled => self.not_installed += 1,
+            // Held back or refused: nothing of the package is applied.
+            ArtifactState::NotInstalled | ArtifactState::Gated | ArtifactState::NotArmed => self.not_installed += 1,
             ArtifactState::Pending => self.pending += 1,
-            ArtifactState::Outdated => self.outdated += 1,
+            ArtifactState::Outdated | ArtifactState::Stale => self.outdated += 1,
             ArtifactState::Modified => self.modified += 1,
             ArtifactState::IntegrityMissing => self.integrity_missing += 1,
         }

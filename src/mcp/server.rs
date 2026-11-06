@@ -58,7 +58,7 @@ impl GrimMcpServer {
     /// query and annotated with each repository's install status. Returns the
     /// same JSON payload as `grim search --format json`.
     #[tool(
-        description = "Search the configured Grimoire registries for installable skills, rules, agents, and bundles. Returns a JSON object with an `items` array of matches with kind, repo, summary, version, and install status, plus `total` (every match, counted before `offset` and `limit`) and `truncated` (true when `items` is not the complete answer). Matches are ranked by relevance when a `query` is given; without one the whole catalog is listed unranked, in registry order. Set `limit` to return only N of those results and `offset` to skip the first M before it applies; read the next page at `offset + items.length` while that is below `total`. Pages read the cached catalog, so a refresh between calls can shift them. A large index returns tens of megabytes unbounded, and `total`, `truncated` and `sources[].capped` report the cut. Results may be narrowed by each registry's configured browse filter; a package absent from these results can still be fetched or installed by direct reference."
+        description = "Search the configured Grimoire registries for installable skills, rules, agents, bundles, MCP servers, hooks, and settings packages. Returns a JSON object with an `items` array of matches with kind, repo, summary, version, and install status, plus `total` (every match, counted before `offset` and `limit`) and `truncated` (true when `items` is not the complete answer). Matches are ranked by relevance when a `query` is given; without one the whole catalog is listed unranked, in registry order. Set `limit` to return only N of those results and `offset` to skip the first M before it applies; read the next page at `offset + items.length` while that is below `total`. Pages read the cached catalog, so a refresh between calls can shift them. A large index returns tens of megabytes unbounded, and `total`, `truncated` and `sources[].capped` report the cut. Results may be narrowed by each registry's configured browse filter; a package absent from these results can still be fetched or installed by direct reference."
     )]
     async fn grim_search(&self, Parameters(args): Parameters<SearchToolArgs>) -> Result<String, ErrorData> {
         let search_args = crate::command::search::SearchArgs {
@@ -273,6 +273,28 @@ mod tests {
             !description.contains("best N"),
             "`limit` keeps the best matches only under a query: {description:?}"
         );
+    }
+
+    /// The opening sentence is what tells an agent which kinds a result can
+    /// hold, so a kind missing from it reads as a kind the tool cannot find.
+    #[test]
+    fn grim_search_description_names_every_kind() {
+        let router = build_router(false);
+        let description = router
+            .get("grim_search")
+            .and_then(|tool| tool.description.as_deref())
+            .expect("grim_search must be routed with a description");
+        for kind in [
+            "skills",
+            "rules",
+            "agents",
+            "bundles",
+            "MCP servers",
+            "hooks",
+            "settings",
+        ] {
+            assert!(description.contains(kind), "must name {kind}: {description:?}");
+        }
     }
 
     /// A large index answers an unpaged call with tens of megabytes, which

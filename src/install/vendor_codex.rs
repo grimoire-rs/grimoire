@@ -50,8 +50,12 @@ use crate::skill::rule_frontmatter::ParsedRule;
 
 use super::hook_command::{CommandForm, WindowsShell};
 use super::render::{self, RenderError, RenderedDoc};
+use super::vendor::MergeClass::{Map, OwnFile, Scalar, Set};
+use super::vendor::SettingsScopes::GlobalOnly;
+use super::vendor::SettingsValueType as Ty;
 use super::vendor::{
-    FieldType, KindSupport, KnownField, McpConfigFormat, Vendor, env_dir, global_skills_root, home_dir, toml_provenance,
+    FieldType, KindSupport, KnownField, McpConfigFormat, SettingsField, Vendor, env_dir, global_skills_root, home_dir,
+    toml_provenance,
 };
 
 /// OpenAI Codex CLI.
@@ -105,6 +109,110 @@ struct CodexAgent {
     sandbox_mode: Option<String>,
     developer_instructions: String,
 }
+
+/// Codex's settings keys, from the list in `adr_settings_artifact_kind.md`.
+const CODEX_SETTINGS_FIELDS: &[SettingsField] = &[
+    SettingsField::new("/model", Ty::String, Scalar, GlobalOnly),
+    SettingsField::new("/model_reasoning_effort", Ty::String, Scalar, GlobalOnly),
+    SettingsField::new(
+        "/approval_policy",
+        Ty::Enum(&["on-request", "never"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/sandbox_mode",
+        Ty::Enum(&["read-only", "workspace-write", "danger-full-access"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new("/sandbox_workspace_write/network_access", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new(
+        "/sandbox_workspace_write/writable_roots",
+        Ty::StringList,
+        Set,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/sandbox_workspace_write/exclude_slash_tmp",
+        Ty::Bool,
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/sandbox_workspace_write/exclude_tmpdir_env_var",
+        Ty::Bool,
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new("/default_permissions", Ty::String, Scalar, GlobalOnly),
+    SettingsField::new(
+        "/permissions/<name>",
+        Ty::Atomic {
+            keys: &["description", "extends", "filesystem", "network", "workspace_roots"],
+        },
+        Map,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/tui/alternate_screen",
+        Ty::Enum(&["auto", "always", "never"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new("/tui/animations", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/tui/auto_recap", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/tui/raw_output_mode", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new(
+        "/history/persistence",
+        Ty::Enum(&["save-all", "none"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new("/hide_agent_reasoning", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new(
+        "/marketplaces/<name>",
+        Ty::Atomic {
+            keys: &["source", "source_type", "ref", "sparse_paths"],
+        },
+        Map,
+        GlobalOnly,
+    ),
+    // A file grim owns, not a `config.toml` key, so deliberately no pointer a
+    // splice could address. `ty` describes one entry of the list.
+    SettingsField::new(
+        "rules",
+        Ty::Atomic {
+            keys: &["pattern", "decision", "justification"],
+        },
+        OwnFile,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/file_opener",
+        Ty::Enum(&["vscode", "vscode-insiders", "windsurf", "cursor", "none"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/tui/notification_method",
+        Ty::Enum(&["auto", "osc9", "bel"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/tui/notification_condition",
+        Ty::Enum(&["unfocused", "always"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/web_search",
+        Ty::Enum(&["disabled", "cached", "indexed", "live"]),
+        Scalar,
+        GlobalOnly,
+    ),
+];
 
 impl Vendor for CodexVendor {
     fn name(&self) -> &'static str {
@@ -283,6 +391,18 @@ impl Vendor for CodexVendor {
     fn mcp_config_format(&self) -> McpConfigFormat {
         // Codex's `config.toml` is the first TOML-formatted vendor MCP
         // config — every other vendor writes JSON/JSONC.
+        McpConfigFormat::Toml
+    }
+
+    fn settings_fields(&self) -> &'static [SettingsField] {
+        CODEX_SETTINGS_FIELDS
+    }
+
+    fn settings_config_path(&self, _workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
+        settings_config_path(scope, codex_root(env_dir("CODEX_HOME"), home_dir()))
+    }
+
+    fn settings_config_format(&self) -> McpConfigFormat {
         McpConfigFormat::Toml
     }
 
@@ -572,6 +692,17 @@ fn hook_config_path(_workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
     }
 }
 
+/// `config.toml` under the resolved global `root`, the file MCP registers in.
+///
+/// `None` at project scope: `.codex/config.toml` is tracked, so a value there
+/// would reach every cloner. `None` with no root: never a CWD-relative fallback.
+fn settings_config_path(scope: ConfigScope, root: Option<PathBuf>) -> Option<PathBuf> {
+    match scope {
+        ConfigScope::Project => None,
+        ConfigScope::Global => root.map(|root| root.join("config.toml")),
+    }
+}
+
 pub(crate) fn codex_root(codex_home: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
     codex_home.or_else(|| home.map(|h| h.join(".codex")))
 }
@@ -604,6 +735,185 @@ mod tests {
             Some(PathBuf::from("/home/u/.codex"))
         );
         assert_eq!(codex_root(None, None), None);
+    }
+
+    /// Every key by pointer, value type and scope, in the list's order.
+    #[test]
+    fn settings_rows_match_the_key_list() {
+        use crate::install::vendor::SettingsScopes::GlobalOnly;
+        use crate::install::vendor::SettingsValueType as Ty;
+
+        let rows: Vec<_> = CodexVendor
+            .settings_fields()
+            .iter()
+            .map(|field| (field.pointer, field.ty, field.scopes))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("/model", Ty::String, GlobalOnly),
+                ("/model_reasoning_effort", Ty::String, GlobalOnly),
+                ("/approval_policy", Ty::Enum(&["on-request", "never"]), GlobalOnly),
+                (
+                    "/sandbox_mode",
+                    Ty::Enum(&["read-only", "workspace-write", "danger-full-access"]),
+                    GlobalOnly
+                ),
+                ("/sandbox_workspace_write/network_access", Ty::Bool, GlobalOnly),
+                ("/sandbox_workspace_write/writable_roots", Ty::StringList, GlobalOnly),
+                ("/sandbox_workspace_write/exclude_slash_tmp", Ty::Bool, GlobalOnly),
+                ("/sandbox_workspace_write/exclude_tmpdir_env_var", Ty::Bool, GlobalOnly),
+                ("/default_permissions", Ty::String, GlobalOnly),
+                (
+                    "/permissions/<name>",
+                    Ty::Atomic {
+                        keys: &["description", "extends", "filesystem", "network", "workspace_roots"]
+                    },
+                    GlobalOnly
+                ),
+                (
+                    "/tui/alternate_screen",
+                    Ty::Enum(&["auto", "always", "never"]),
+                    GlobalOnly
+                ),
+                ("/tui/animations", Ty::Bool, GlobalOnly),
+                ("/tui/auto_recap", Ty::Bool, GlobalOnly),
+                ("/tui/raw_output_mode", Ty::Bool, GlobalOnly),
+                ("/history/persistence", Ty::Enum(&["save-all", "none"]), GlobalOnly),
+                ("/hide_agent_reasoning", Ty::Bool, GlobalOnly),
+                (
+                    "/marketplaces/<name>",
+                    Ty::Atomic {
+                        keys: &["source", "source_type", "ref", "sparse_paths"]
+                    },
+                    GlobalOnly
+                ),
+                (
+                    "rules",
+                    Ty::Atomic {
+                        keys: &["pattern", "decision", "justification"]
+                    },
+                    GlobalOnly
+                ),
+                (
+                    "/file_opener",
+                    Ty::Enum(&["vscode", "vscode-insiders", "windsurf", "cursor", "none"]),
+                    GlobalOnly
+                ),
+                (
+                    "/tui/notification_method",
+                    Ty::Enum(&["auto", "osc9", "bel"]),
+                    GlobalOnly
+                ),
+                (
+                    "/tui/notification_condition",
+                    Ty::Enum(&["unfocused", "always"]),
+                    GlobalOnly
+                ),
+                (
+                    "/web_search",
+                    Ty::Enum(&["disabled", "cached", "indexed", "live"]),
+                    GlobalOnly
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn settings_document_checks_each_value_type() {
+        use crate::oci::settings::SettingsDocument;
+
+        let good = concat!(
+            "description = \"d\"\n[codex]\nfile_opener = \"vscode-insiders\"\nweb_search = \"cached\"\n",
+            "[codex.tui]\nnotification_method = \"osc9\"\nnotification_condition = \"always\"\n",
+        );
+        let (document, _) = SettingsDocument::from_toml_str_with_requires(good).unwrap();
+        assert_eq!(
+            serde_json::Value::Object(document.vendors["codex"].clone()),
+            serde_json::json!({
+                "file_opener": "vscode-insiders",
+                "web_search": "cached",
+                "tui": {"notification_method": "osc9", "notification_condition": "always"},
+            })
+        );
+        for bad in [
+            "[codex]\nfile_opener = \"VSCode\"",
+            "[codex]\nfile_opener = \"zed\"",
+            "[codex]\nweb_search = \"Live\"",
+            "[codex]\nweb_search = true",
+            "[codex.tui]\nnotification_method = \"desktop\"",
+            "[codex.tui]\nnotification_condition = \"never\"",
+        ] {
+            let text = format!("description = \"d\"\n{bad}\n");
+            assert!(SettingsDocument::from_toml_str_with_requires(&text).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn settings_rows_narrow_nothing_and_require_nothing() {
+        for field in CodexVendor.settings_fields() {
+            assert_eq!(field.map_keys, None, "{}", field.pointer);
+            assert_eq!(field.project_values, None, "{}", field.pointer);
+            assert!(!field.required_by_client, "{}", field.pointer);
+        }
+    }
+
+    /// `rules` is a file grim owns, so no splice may ever take it for a
+    /// `config.toml` key: unlike every other row it is no pointer at all.
+    #[test]
+    fn settings_own_file_row_is_the_only_one_outside_config_toml() {
+        use crate::install::vendor::MergeClass;
+
+        let outside: Vec<_> = CodexVendor
+            .settings_fields()
+            .iter()
+            .filter(|field| !field.pointer.starts_with('/'))
+            .map(|field| (field.pointer, field.merge))
+            .collect();
+        assert_eq!(outside, vec![("rules", MergeClass::OwnFile)]);
+    }
+
+    #[test]
+    fn settings_path_has_no_answer_at_project_scope() {
+        let root = Some(PathBuf::from("/home/u/.codex"));
+        assert_eq!(settings_config_path(ConfigScope::Project, root), None);
+        assert_eq!(
+            CodexVendor.settings_config_path(Path::new("/w"), ConfigScope::Project),
+            None
+        );
+    }
+
+    /// `CODEX_HOME` moves the file with the root; an unresolved root has none.
+    #[test]
+    fn settings_path_at_global_scope_follows_codex_home() {
+        let home = || Some(PathBuf::from("/home/u"));
+        assert_eq!(
+            settings_config_path(
+                ConfigScope::Global,
+                codex_root(Some(PathBuf::from("/custom/cx")), home())
+            ),
+            Some(PathBuf::from("/custom/cx/config.toml"))
+        );
+        assert_eq!(
+            settings_config_path(ConfigScope::Global, codex_root(None, home())),
+            Some(PathBuf::from("/home/u/.codex/config.toml"))
+        );
+        assert_eq!(settings_config_path(ConfigScope::Global, codex_root(None, None)), None);
+    }
+
+    /// One file, one root resolution: the trait answers what MCP registers in.
+    #[test]
+    fn settings_share_the_global_mcp_file() {
+        let w = Path::new("/w");
+        assert_eq!(
+            CodexVendor.settings_config_path(w, ConfigScope::Global),
+            CodexVendor.mcp_config_path(w, ConfigScope::Global)
+        );
+    }
+
+    #[test]
+    fn settings_format_is_toml() {
+        assert_eq!(CodexVendor.settings_config_format(), McpConfigFormat::Toml);
     }
 
     #[test]

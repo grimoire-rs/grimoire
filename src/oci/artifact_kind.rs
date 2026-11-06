@@ -2,7 +2,7 @@
 // Copyright 2026 The Grimoire Authors
 
 //! The kinds of artifact Grimoire manages: skills, rules, agents,
-//! bundles, MCP server descriptors, and hooks.
+//! bundles, MCP server descriptors, hooks, and harness settings.
 
 use serde::{Deserialize, Serialize};
 
@@ -58,6 +58,9 @@ pub enum ArtifactKind {
     /// entry registered in each client's own hook surface, never a
     /// per-client copy of the payload.
     Hook,
+    /// Harness settings: typed values for each client, merged key by key into
+    /// that client's own settings file. Never a materialized file of its own.
+    Settings,
 }
 
 impl ArtifactKind {
@@ -71,13 +74,14 @@ impl ArtifactKind {
     /// (C-016(a) in `plan_hooks_artifact_kind.md`). An array is not itself
     /// compiler-checked for exhaustiveness — [`all_index`](Self::all_index) is
     /// the total `match` that makes a new variant a `cargo check` failure here.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Skill,
         Self::Rule,
         Self::Agent,
         Self::Bundle,
         Self::Mcp,
         Self::Hook,
+        Self::Settings,
     ];
 
     /// This kind's position in [`ALL`](Self::ALL).
@@ -92,9 +96,9 @@ impl ArtifactKind {
     /// [`from_kind_str`](Self::from_kind_str) all derive from **one** list, so
     /// a kind can no longer be added to one and forgotten in the other
     /// (C-016(a)). It does **not** tie [`ALL`](Self::ALL)'s length to the
-    /// variant count, and the escape is wider than the obvious one: a seventh
+    /// variant count, and the escape is wider than the obvious one: an eighth
     /// variant compiles as long as its arm here returns **any** value —
-    /// `6` (the loop never reaches index 6), *or* a value duplicating an
+    /// `7` (the loop never reaches index 7), *or* a value duplicating an
     /// existing index. Copy-pasting a neighbouring arm to `3` leaves
     /// `ALL[3] == Bundle` and `Bundle.all_index() == 3`, every assertion
     /// passes, `all_index` is silently non-injective, and the new kind is
@@ -109,11 +113,12 @@ impl ArtifactKind {
             Self::Bundle => 3,
             Self::Mcp => 4,
             Self::Hook => 5,
+            Self::Settings => 6,
         }
     }
 
     /// The lowercase kind string (`skill`/`rule`/`agent`/`bundle`/`mcp`/
-    /// `hook`) — the value of the [`KIND_ANNOTATION`] and of the `--kind` CLI
+    /// `hook`/`settings`) — the value of the [`KIND_ANNOTATION`] and of the `--kind` CLI
     /// flag. The single source of truth for the spelling: [`Display`] and
     /// [`from_kind_str`](Self::from_kind_str) both go through it.
     ///
@@ -126,6 +131,7 @@ impl ArtifactKind {
             Self::Bundle => "bundle",
             Self::Mcp => "mcp",
             Self::Hook => "hook",
+            Self::Settings => "settings",
         }
     }
 
@@ -138,11 +144,12 @@ impl ArtifactKind {
             Self::Bundle => "bundles",
             Self::Mcp => "mcp",
             Self::Hook => "hooks",
+            Self::Settings => "settings",
         }
     }
 
     /// Parse the lowercase kind string
-    /// (`skill`/`rule`/`agent`/`bundle`/`mcp`/`hook`) into a kind.
+    /// (`skill`/`rule`/`agent`/`bundle`/`mcp`/`hook`/`settings`) into a kind.
     /// `None` for any other string. Used to interpret the `--kind` CLI flag
     /// and the `com.grimoire.kind` annotation (the on-the-wire discriminator,
     /// see [`KIND_ANNOTATION`]); this string is not itself the wire format.
@@ -163,6 +170,7 @@ impl ArtifactKind {
             Self::Bundle => "application/vnd.grimoire.bundle.v1",
             Self::Mcp => "application/vnd.grimoire.mcp.v1",
             Self::Hook => "application/vnd.grimoire.hook.v1",
+            Self::Settings => "application/vnd.grimoire.settings.v1",
         }
     }
 
@@ -177,10 +185,11 @@ impl ArtifactKind {
             Self::Rule => "application/vnd.grimoire.rule.config.v1+json",
             Self::Agent => "application/vnd.grimoire.agent.config.v1+json",
             Self::Bundle => "application/vnd.grimoire.bundle.config.v1+json",
-            // Mcp and Hook postdate the legacy artifactType/config-media-type
+            // Mcp, Hook and Settings postdate the legacy artifactType/config-media-type
             // wire formats; the strings exist only to keep these methods total.
             Self::Mcp => "application/vnd.grimoire.mcp.config.v1+json",
             Self::Hook => "application/vnd.grimoire.hook.config.v1+json",
+            Self::Settings => "application/vnd.grimoire.settings.config.v1+json",
         }
     }
 
@@ -208,7 +217,7 @@ impl ArtifactKind {
     pub fn is_dir_artifact(self) -> bool {
         match self {
             Self::Skill | Self::Hook => true,
-            Self::Rule | Self::Agent | Self::Bundle | Self::Mcp => false,
+            Self::Rule | Self::Agent | Self::Bundle | Self::Mcp | Self::Settings => false,
         }
     }
 }
@@ -243,6 +252,7 @@ mod tests {
         assert_eq!(ArtifactKind::Bundle.subdir(), "bundles");
         assert_eq!(ArtifactKind::Mcp.subdir(), "mcp");
         assert_eq!(ArtifactKind::Hook.subdir(), "hooks");
+        assert_eq!(ArtifactKind::Settings.subdir(), "settings");
         assert!(ArtifactKind::Skill.is_dir_artifact());
         assert!(!ArtifactKind::Rule.is_dir_artifact());
         assert!(!ArtifactKind::Agent.is_dir_artifact());
@@ -251,6 +261,33 @@ mod tests {
         // A hook is a directory artifact: `hook.toml` plus the payload tree its
         // handlers invoke (C-001).
         assert!(ArtifactKind::Hook.is_dir_artifact());
+        assert!(!ArtifactKind::Settings.is_dir_artifact());
+    }
+
+    /// `BundleManifest::new` sorts members by the derived `Ord`, so a kind
+    /// placed anywhere but last reorders the bytes of a published bundle layer.
+    #[test]
+    fn settings_is_appended_last_and_sorts_last() {
+        use ArtifactKind::{Agent, Bundle, Hook, Mcp, Rule, Settings, Skill};
+        assert_eq!(ArtifactKind::ALL, [Skill, Rule, Agent, Bundle, Mcp, Hook, Settings]);
+        let mut sorted = ArtifactKind::ALL;
+        sorted.sort();
+        assert_eq!(sorted, ArtifactKind::ALL);
+    }
+
+    #[test]
+    fn settings_token_round_trips() {
+        let kind = ArtifactKind::Settings;
+        assert_eq!(kind.kind_str(), "settings");
+        assert_eq!(kind.to_string(), "settings");
+        assert_eq!(ArtifactKind::from_kind_str("settings"), Some(kind));
+        assert_eq!(serde_json::to_string(&kind).unwrap(), "\"settings\"");
+        assert_eq!(serde_json::from_str::<ArtifactKind>("\"settings\"").unwrap(), kind);
+        assert_eq!(kind.artifact_type(), "application/vnd.grimoire.settings.v1");
+        assert_eq!(
+            kind.config_media_type(),
+            "application/vnd.grimoire.settings.config.v1+json"
+        );
     }
 
     /// The runtime half of C-016(a). `all_index`'s total `match` forces an arm

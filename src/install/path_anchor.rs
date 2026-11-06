@@ -134,6 +134,26 @@ const VENDOR_ROOTS: &[VendorRootRow] = &[
     (OPENCODE_CONFIG_ROW, |env, home| {
         opencode_config::global_config_dir(env("OPENCODE_CONFIG"), env("XDG_CONFIG_HOME"), home)
     }),
+    // Cursor's CLI roots, one per place its `cli-config.json` can live. A row
+    // may not look at the disk, so `settings_config_path` picks between them and
+    // the record stores the anchor it picked. `$CURSOR_CONFIG_DIR` stays off the
+    // `cursor` row: upstream documents it for this one file.
+    (CURSOR_CLI_ROW, |env, home| {
+        vendor_cursor::cursor_cli_root(env("CURSOR_CONFIG_DIR"), home)
+    }),
+    (CURSOR_CLI_XDG_ROW, |env, home| {
+        vendor_cursor::cursor_cli_xdg_root(xdg_config_from(env, home))
+    }),
+    // The Antigravity CLI's settings dir, a sibling of the app's `config`
+    // root that the `antigravity` row does not cover.
+    (ANTIGRAVITY_CLI_ROW, |_, home| {
+        vendor_antigravity::antigravity_cli_root(home)
+    }),
+    // Warp's Linux settings dir, outside the `warp` row's `~/.warp`. It answers
+    // on every platform; `settings_config_path` alone applies the OS gate.
+    (WARP_CONFIG_ROW, |env, home| {
+        vendor_warp::warp_config_root(xdg_config_from(env, home))
+    }),
 ];
 
 /// The [`VENDOR_ROOTS`] row naming OpenCode's config-file directory. Named
@@ -144,6 +164,22 @@ const OPENCODE_CONFIG_ROW: &str = "opencode-config";
 /// The [`VENDOR_ROOTS`] row naming Kilo's XDG config dir (global agents).
 /// On-disk tag `kilo-config-root` (Principle 9: append-only).
 const KILO_CONFIG_ROW: &str = "kilo-config";
+
+/// The [`VENDOR_ROOTS`] row naming the Cursor CLI's own config root.
+/// On-disk tag `cursor-cli-root` (Principle 9: append-only).
+const CURSOR_CLI_ROW: &str = "cursor-cli";
+
+/// The [`VENDOR_ROOTS`] row naming the Cursor CLI's XDG config dir.
+/// On-disk tag `cursor-cli-xdg-root` (Principle 9: append-only).
+const CURSOR_CLI_XDG_ROW: &str = "cursor-cli-xdg";
+
+/// The [`VENDOR_ROOTS`] row naming the Antigravity CLI's own settings dir.
+/// On-disk tag `antigravity-cli-root` (Principle 9: append-only).
+const ANTIGRAVITY_CLI_ROW: &str = "antigravity-cli";
+
+/// The [`VENDOR_ROOTS`] row naming Warp's Linux config dir (settings).
+/// On-disk tag `warp-config-root` (Principle 9: append-only).
+const WARP_CONFIG_ROW: &str = "warp-config";
 
 /// `$XDG_CONFIG_HOME`, else `<home>/.config` — the injected-input twin of
 /// [`xdg_config_dir`], so a [`VENDOR_ROOTS`] row that needs an XDG dir stays a
@@ -347,7 +383,7 @@ impl std::fmt::Display for PathAnchor {
 /// A plain vendor config root needs neither: it belongs in the
 /// [`VENDOR_ROOTS`] table and lands in [`Self::vendor_roots`], so adding a
 /// vendor never edits this struct or any fixture that builds it.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct AnchorRoots {
     /// The workspace root project-scope targets are rooted at.
     pub workspace: PathBuf,
@@ -959,6 +995,35 @@ pub(crate) fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: 
                 // no (client, Bundle) pair has an anchor. A legacy/hand-edited
                 // state record carrying one degrades to `UnknownAnchor`.
                 (_, ArtifactKind::Bundle) => None,
+
+                // A listing client's file sits under its own config root.
+                (ClientTarget::Claude, ArtifactKind::Settings)
+                | (ClientTarget::Codex, ArtifactKind::Settings)
+                | (ClientTarget::Copilot, ArtifactKind::Settings)
+                | (ClientTarget::Qoder, ArtifactKind::Settings)
+                | (ClientTarget::Amp, ArtifactKind::Settings)
+                | (ClientTarget::Droid, ArtifactKind::Settings)
+                | (ClientTarget::Kiro, ArtifactKind::Settings)
+                | (ClientTarget::Gemini, ArtifactKind::Settings) => vendor_root(client),
+                // OpenCode's root is the one the file resolves through, not
+                // `OpenCodeRoot`: that follows `$OPENCODE_CONFIG_DIR` away from
+                // the file, and this kind has no shipped record to keep on it.
+                (ClientTarget::OpenCode, ArtifactKind::Settings) => Some(PathAnchor::VendorRoot(OPENCODE_CONFIG_ROW)),
+                // Cursor's file sits on one of two CLI roots; the tail lists both.
+                (ClientTarget::Cursor, ArtifactKind::Settings) => Some(PathAnchor::VendorRoot(CURSOR_CLI_ROW)),
+                // The CLI's file is outside the app's `antigravity` root.
+                (ClientTarget::Antigravity, ArtifactKind::Settings) => {
+                    Some(PathAnchor::VendorRoot(ANTIGRAVITY_CLI_ROW))
+                }
+                // Kilo's file sits on the XDG root its global agents use.
+                (ClientTarget::Kilo, ArtifactKind::Settings) => Some(PathAnchor::VendorRoot(KILO_CONFIG_ROW)),
+                // Warp's file sits on the XDG root on Linux and on `~/.warp` on
+                // macOS; the tail lists both.
+                (ClientTarget::Warp, ArtifactKind::Settings) => Some(PathAnchor::VendorRoot(WARP_CONFIG_ROW)),
+
+                // A client listing no key is answered by the guard above, and a
+                // stray record degrades the same way.
+                (_, ArtifactKind::Settings) => None,
             };
             // `GrimHome` is the universal fallback; deduplicate when the
             // primary already is `GrimHome`. An anchorless pair (declined /
@@ -1009,6 +1074,21 @@ pub(crate) fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: 
                     PathAnchor::VendorRoot(OPENCODE_CONFIG_ROW),
                     PathAnchor::GrimHome,
                 ],
+                // Cursor settings: the file is on whichever CLI root held it at
+                // install. `cursor-cli` stays FIRST: `from_target`'s stable sort
+                // then gives it the tie when the variable names the XDG dir.
+                Some(PathAnchor::VendorRoot(CURSOR_CLI_ROW)) => vec![
+                    PathAnchor::VendorRoot(CURSOR_CLI_ROW),
+                    PathAnchor::VendorRoot(CURSOR_CLI_XDG_ROW),
+                    PathAnchor::GrimHome,
+                ],
+                // Warp settings: one root per platform, and the record keeps the
+                // one its file sits under.
+                Some(PathAnchor::VendorRoot(WARP_CONFIG_ROW)) => vec![
+                    PathAnchor::VendorRoot(WARP_CONFIG_ROW),
+                    PathAnchor::VendorRoot(client.vendor().name()),
+                    PathAnchor::GrimHome,
+                ],
                 Some(anchor) if anchor != PathAnchor::AgentsSkills && pool_opt_in_capable(client, kind) => {
                     vec![anchor, PathAnchor::AgentsSkills, PathAnchor::GrimHome]
                 }
@@ -1049,6 +1129,7 @@ pub(crate) fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: 
 fn is_declined_global_pair(client: ClientTarget, kind: ArtifactKind) -> bool {
     match kind {
         ArtifactKind::Hook => client.vendor().declines_hooks_everywhere(),
+        ArtifactKind::Settings => client.vendor().settings_fields().is_empty(),
         _ => client.vendor().kind_support(kind) == KindSupport::Declined,
     }
 }
@@ -1220,6 +1301,308 @@ pub enum AnchorError {
 // ── T2: Specify resolve containment ─────────────────────────────────────────
 // ── T4: Specify from_target classification ──────────────────────────────────
 #[cfg(test)]
+mod settings_pair_tests {
+    use super::*;
+
+    /// Agrees with `client_supports_kind`'s `Settings` arm: a client listing no
+    /// key has no global candidate, where `kind_support`'s `Native` default
+    /// would turn its decline into an unknown-anchor warning.
+    #[test]
+    fn a_client_listing_no_settings_keys_declines_the_global_pair() {
+        for client in ClientTarget::ALL {
+            let unlisted = client.vendor().settings_fields().is_empty();
+            assert_eq!(
+                is_declined_global_pair(client, ArtifactKind::Settings),
+                unlisted,
+                "{client}"
+            );
+        }
+    }
+
+    /// The thirteen named hosts are the only clients whose global settings
+    /// pair is not declined; the six others get no candidate anchor at all.
+    #[test]
+    fn the_declined_global_settings_pair_is_every_client_but_the_hosts() {
+        let hosts = [
+            "amp",
+            "antigravity",
+            "claude",
+            "codex",
+            "copilot",
+            "cursor",
+            "droid",
+            "gemini",
+            "kilo",
+            "kiro",
+            "opencode",
+            "qoder",
+            "warp",
+        ];
+        let mut declined = 0;
+        for client in ClientTarget::ALL {
+            let listed = hosts.contains(&client.vendor().name());
+            assert_eq!(
+                is_declined_global_pair(client, ArtifactKind::Settings),
+                !listed,
+                "{client}"
+            );
+            let anchors = candidate_anchors(ConfigScope::Global, client, ArtifactKind::Settings);
+            assert_eq!(anchors.is_empty(), !listed, "{client}");
+            declined += usize::from(!listed);
+        }
+        assert_eq!(declined, 6);
+    }
+
+    /// A listing client's file classifies under its own root, wherever the
+    /// vendor variable put it, or the record could not be written.
+    #[test]
+    fn a_listing_client_anchors_its_global_settings_at_its_own_root() {
+        let env = |var: &str| match var {
+            "CLAUDE_CONFIG_DIR" => Some(PathBuf::from("/cl")),
+            "CODEX_HOME" => Some(PathBuf::from("/cx")),
+            "COPILOT_HOME" => Some(PathBuf::from("/cp")),
+            "QODER_CONFIG_DIR" => Some(PathBuf::from("/qd")),
+            "OPENCODE_CONFIG" => Some(PathBuf::from("/oc/custom.json")),
+            "CURSOR_CONFIG_DIR" => Some(PathBuf::from("/cu")),
+            "XDG_CONFIG_HOME" => Some(PathBuf::from("/xdg")),
+            "KIRO_HOME" => Some(PathBuf::from("/ki")),
+            "GEMINI_CLI_HOME" => Some(PathBuf::from("/gh")),
+            _ => None,
+        };
+        let roots = AnchorRoots::resolve_from(
+            PathBuf::from("/ws"),
+            PathBuf::from("/grim"),
+            &env,
+            Some(PathBuf::from("/home/u")),
+        );
+        for (client, file, root, relative) in [
+            (ClientTarget::Claude, "/cl/settings.json", "claude", "settings.json"),
+            (ClientTarget::Codex, "/cx/config.toml", "codex", "config.toml"),
+            (
+                ClientTarget::Codex,
+                "/cx/rules/grim-team.rules",
+                "codex",
+                "rules/grim-team.rules",
+            ),
+            (ClientTarget::Copilot, "/cp/settings.json", "copilot", "settings.json"),
+            (ClientTarget::Qoder, "/qd/settings.json", "qoder", "settings.json"),
+            (
+                ClientTarget::OpenCode,
+                "/oc/custom.json",
+                OPENCODE_CONFIG_ROW,
+                "custom.json",
+            ),
+            (
+                ClientTarget::Cursor,
+                "/cu/cli-config.json",
+                CURSOR_CLI_ROW,
+                "cli-config.json",
+            ),
+            (
+                ClientTarget::Cursor,
+                "/xdg/cursor/cli-config.json",
+                CURSOR_CLI_XDG_ROW,
+                "cli-config.json",
+            ),
+            (ClientTarget::Amp, "/xdg/amp/settings.json", "amp", "settings.json"),
+            (ClientTarget::Amp, "/xdg/amp/settings.jsonc", "amp", "settings.jsonc"),
+            (
+                ClientTarget::Antigravity,
+                "/home/u/.gemini/antigravity-cli/settings.json",
+                ANTIGRAVITY_CLI_ROW,
+                "settings.json",
+            ),
+            (
+                ClientTarget::Droid,
+                "/home/u/.factory/settings.json",
+                "droid",
+                "settings.json",
+            ),
+            (
+                ClientTarget::Kilo,
+                "/xdg/kilo/kilo.jsonc",
+                KILO_CONFIG_ROW,
+                "kilo.jsonc",
+            ),
+            (ClientTarget::Kilo, "/xdg/kilo/kilo.json", KILO_CONFIG_ROW, "kilo.json"),
+            (ClientTarget::Kiro, "/ki/settings/cli.json", "kiro", "settings/cli.json"),
+            (
+                ClientTarget::Gemini,
+                "/gh/.gemini/settings.json",
+                "gemini",
+                "settings.json",
+            ),
+            (
+                ClientTarget::Warp,
+                "/xdg/warp-terminal/settings.toml",
+                WARP_CONFIG_ROW,
+                "settings.toml",
+            ),
+            (
+                ClientTarget::Warp,
+                "/home/u/.warp/settings.toml",
+                "warp",
+                "settings.toml",
+            ),
+        ] {
+            let anchored = AnchoredPath::from_target(
+                Path::new(file),
+                ConfigScope::Global,
+                client,
+                ArtifactKind::Settings,
+                &roots,
+            )
+            .unwrap_or_else(|err| panic!("{file}: {err:?}"));
+            assert_eq!(anchored.anchor, PathAnchor::VendorRoot(root), "{file}");
+            assert_eq!(anchored.relative, relative, "{file}");
+        }
+    }
+
+    /// OpenCode's skills root follows `$OPENCODE_CONFIG_DIR` and its config
+    /// file does not, so a settings record anchored at the first would point at
+    /// another file the moment that variable is set.
+    #[test]
+    fn opencode_settings_stay_on_their_file_when_the_skills_root_moves() {
+        let roots_under = |config_dir: Option<&'static str>| {
+            AnchorRoots::resolve_from(
+                PathBuf::from("/ws"),
+                PathBuf::from("/grim"),
+                &|var: &str| {
+                    (var == "OPENCODE_CONFIG_DIR")
+                        .then_some(config_dir)
+                        .flatten()
+                        .map(PathBuf::from)
+                },
+                Some(PathBuf::from("/nonexistent/home")),
+            )
+        };
+        let file = Path::new("/nonexistent/home/.config/opencode/opencode.json");
+        let anchored = AnchoredPath::from_target(
+            file,
+            ConfigScope::Global,
+            ClientTarget::OpenCode,
+            ArtifactKind::Settings,
+            &roots_under(None),
+        )
+        .unwrap_or_else(|err| panic!("{err:?}"));
+        assert_eq!(anchored.anchor, PathAnchor::VendorRoot(OPENCODE_CONFIG_ROW));
+        assert_eq!(
+            anchored
+                .resolve(&roots_under(Some("/moved")), Containment::Strict)
+                .unwrap_or_else(|err| panic!("{err:?}")),
+            file
+        );
+    }
+
+    /// `$CURSOR_CONFIG_DIR` may name the XDG dir itself. The tie goes to the
+    /// variable's root, so the record follows the variable and not the XDG dir.
+    #[test]
+    fn cursor_settings_tie_goes_to_the_variable_root() {
+        let env = |var: &str| match var {
+            "CURSOR_CONFIG_DIR" => Some(PathBuf::from("/xdg/cursor")),
+            "XDG_CONFIG_HOME" => Some(PathBuf::from("/xdg")),
+            _ => None,
+        };
+        let roots = AnchorRoots::resolve_from(
+            PathBuf::from("/ws"),
+            PathBuf::from("/grim"),
+            &env,
+            Some(PathBuf::from("/home/u")),
+        );
+        let anchored = AnchoredPath::from_target(
+            Path::new("/xdg/cursor/cli-config.json"),
+            ConfigScope::Global,
+            ClientTarget::Cursor,
+            ArtifactKind::Settings,
+            &roots,
+        )
+        .unwrap_or_else(|err| panic!("{err:?}"));
+        assert_eq!(anchored.anchor, PathAnchor::VendorRoot(CURSOR_CLI_ROW));
+    }
+
+    /// A row answers from env and home alone, so only `settings_config_path`
+    /// looks at the disk and a stored anchor means one root whatever exists.
+    #[test]
+    fn cursor_root_is_pure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let cli_root = home.join(".cursor");
+        let xdg_root = home.join(".config").join("cursor");
+        let rows = |env: EnvLookup<'_>| {
+            let roots =
+                AnchorRoots::resolve_from(PathBuf::from("/ws"), PathBuf::from("/grim"), env, Some(home.clone()));
+            (
+                roots.vendor_roots.get(CURSOR_CLI_ROW).cloned(),
+                roots.vendor_roots.get(CURSOR_CLI_XDG_ROW).cloned(),
+            )
+        };
+
+        let unset = rows(&|_| None);
+        assert_eq!(unset, (Some(cli_root.clone()), Some(xdg_root.clone())));
+        for root in [&cli_root, &xdg_root] {
+            std::fs::create_dir_all(root).unwrap();
+            std::fs::write(root.join("cli-config.json"), "{}\n").unwrap();
+        }
+        assert_eq!(rows(&|_| None), unset, "a file on disk moves no root");
+
+        let moved = PathBuf::from("/moved");
+        assert_eq!(
+            rows(&|var: &str| (var == "CURSOR_CONFIG_DIR").then(|| moved.clone())),
+            (Some(moved.clone()), Some(xdg_root)),
+            "the variable moves the CLI root alone"
+        );
+        assert_eq!(
+            rows(&|var: &str| (var == "XDG_CONFIG_HOME").then(|| moved.clone())),
+            (Some(cli_root), Some(moved.join("cursor"))),
+            "XDG moves its row alone"
+        );
+    }
+
+    /// `$CURSOR_CONFIG_DIR` moves the CLI's own file and no other: upstream
+    /// documents it for nothing else, so skills and their siblings stay on
+    /// `~/.cursor`, and a path under the variable classifies as none of them.
+    #[test]
+    fn cursor_skills_ignore_the_variable() {
+        let env = |var: &str| (var == "CURSOR_CONFIG_DIR").then(|| PathBuf::from("/custom"));
+        let roots = AnchorRoots::resolve_from(
+            PathBuf::from("/ws"),
+            PathBuf::from("/grim"),
+            &env,
+            Some(PathBuf::from("/home/u")),
+        );
+        assert_eq!(
+            roots.vendor_roots.get(CURSOR_CLI_ROW),
+            Some(&PathBuf::from("/custom")),
+            "the variable reached the table"
+        );
+        assert_eq!(
+            roots.vendor_roots.get("cursor"),
+            Some(&PathBuf::from("/home/u/.cursor"))
+        );
+
+        let classify = |file: String, kind| {
+            AnchoredPath::from_target(
+                Path::new(&file),
+                ConfigScope::Global,
+                ClientTarget::Cursor,
+                kind,
+                &roots,
+            )
+        };
+        for (kind, file) in [
+            (ArtifactKind::Skill, "skills/demo"),
+            (ArtifactKind::Rule, "rules/demo.mdc"),
+            (ArtifactKind::Agent, "agents/demo.md"),
+            (ArtifactKind::Mcp, "mcp.json"),
+        ] {
+            let anchored = classify(format!("/home/u/.cursor/{file}"), kind).unwrap_or_else(|err| panic!("{err:?}"));
+            assert_eq!(anchored.anchor, PathAnchor::VendorRoot("cursor"), "{kind:?}");
+            assert!(classify(format!("/custom/{file}"), kind).is_err(), "{kind:?}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
 
@@ -1289,6 +1672,10 @@ mod tests {
         "qoder-root",
         "goose-root",
         "kilo-config-root",
+        "cursor-cli-root",
+        "cursor-cli-xdg-root",
+        "antigravity-cli-root",
+        "warp-config-root",
     ];
 
     /// Every shipped tag still loads from a LITERAL JSON string, and
@@ -1359,6 +1746,7 @@ mod tests {
             ArtifactKind::Agent,
             ArtifactKind::Mcp,
             ArtifactKind::Bundle,
+            ArtifactKind::Settings,
         ];
         for scope in [ConfigScope::Project, ConfigScope::Global] {
             for client in ClientTarget::ALL {
@@ -1595,6 +1983,10 @@ mod tests {
             ("qoder", home.join(".qoder")),
             ("goose", home.join(".goose")),
             ("kilo-config", home.join(".config").join("kilo")),
+            ("cursor-cli", home.join(".cursor")),
+            ("cursor-cli-xdg", home.join(".config").join("cursor")),
+            ("antigravity-cli", home.join(".gemini").join("antigravity-cli")),
+            ("warp-config", home.join(".config").join("warp-terminal")),
         ]
         .into();
         if cfg!(all(not(windows), not(target_os = "macos"))) {
@@ -1617,6 +2009,8 @@ mod tests {
             ("CLAUDE_CONFIG_DIR", "claude", PathBuf::from("/ovr")),
             ("COPILOT_HOME", "copilot", PathBuf::from("/ovr")),
             ("CODEX_HOME", "codex", PathBuf::from("/ovr")),
+            // The CLI's own root, not the `cursor` row: see `cursor_skills_ignore_the_variable`.
+            ("CURSOR_CONFIG_DIR", "cursor-cli", PathBuf::from("/ovr")),
             ("KIRO_HOME", "kiro", PathBuf::from("/ovr")),
             ("QODER_CONFIG_DIR", "qoder", PathBuf::from("/ovr")),
             // `GEMINI_CLI_HOME` replaces the home, not the root: the `.gemini`
@@ -1780,6 +2174,7 @@ mod tests {
             ArtifactKind::Agent,
             ArtifactKind::Mcp,
             ArtifactKind::Bundle,
+            ArtifactKind::Settings,
         ];
         for scope in [ConfigScope::Project, ConfigScope::Global] {
             for client in ClientTarget::ALL {
@@ -3269,6 +3664,7 @@ mod tests {
             // MCP descriptors register into client configs, not files —
             // their entry anchors land with the vendor MCP writers.
             (_, _, ArtifactKind::Mcp) => unreachable!("mcp excluded from this loop"),
+            (_, _, ArtifactKind::Settings) => unreachable!("settings excluded from this loop"),
             // Triples with no anchor never reach `from_target` — either the
             // vendor declines the kind outright, or (global Junie rules) it
             // hosts the kind but has no surface at that scope. Both yield an

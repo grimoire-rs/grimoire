@@ -1250,6 +1250,11 @@ pub(crate) async fn stage_members<'a>(
                 "hook '{emitted}' omitted from plugin '{plugin}': exported plugins run without grim, and hooks need grim's hook runtime"
             );
         }
+        if kind == ArtifactKind::Settings {
+            tracing::warn!(
+                "settings '{emitted}' omitted from plugin '{plugin}': plugin formats cannot carry harness settings"
+            );
+        }
         let admitted = clients.iter().any(|&(c, f)| family::admits(f, c, kind).is_ok());
         let content = if !admitted {
             MemberContent::Unfetched
@@ -2041,6 +2046,7 @@ mod tests {
             agents: vec![],
             mcp: vec![],
             hooks: Vec::new(),
+            settings: Vec::new(),
             bundles: vec![],
         };
         for m in members {
@@ -2050,7 +2056,8 @@ mod tests {
                 ArtifactKind::Agent => part.agents.push(m),
                 ArtifactKind::Mcp => part.mcp.push(m),
                 ArtifactKind::Hook => part.hooks.push(m),
-                ArtifactKind::Bundle => unreachable!("bundles are not lock members here"),
+                ArtifactKind::Settings => part.settings.push(m),
+                ArtifactKind::Bundle => unreachable!("not lock members here"),
             }
         }
         part
@@ -4240,6 +4247,30 @@ mod tests {
         .unwrap();
         assert!(matches!(staged[0].content, MemberContent::Unfetched));
         assert_eq!(counter.calls.load(Ordering::SeqCst), 0, "hooks are never fetched");
+    }
+
+    /// No family admits the settings kind, so its layer is never read.
+    #[tokio::test]
+    async fn stage_members_never_fetches_a_settings_member() {
+        let counter = Arc::new(NoNetwork::default());
+        let access: Arc<dyn OciAccess> = counter.clone();
+        let members = vec![(
+            registry_member("team", ArtifactKind::Settings, sha('f')),
+            "team".to_string(),
+        )];
+        let tmp = tempfile::tempdir().unwrap();
+        let staged = stage_members(
+            &members,
+            &[claude(), codex()],
+            &access,
+            tmp.path(),
+            tmp.path(),
+            (&crate::install::SilentProgress, &mut 0, "p"),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(staged[0].content, MemberContent::Unfetched));
+        assert_eq!(counter.calls.load(Ordering::SeqCst), 0, "settings are never fetched");
     }
 
     // ── C-011 layout, soft-empty; R2-21 aside; R2-22 containment ──────────

@@ -42,11 +42,11 @@
 //! 1. a [`LockedSource::Path`] artifact answers `None` — see below;
 //! 2. the transport gate reads the artifact's **pinned registry host**;
 //! 3. a workspace-consent grant arms a hook only if its
-//!    [`consent_key`](super::consent::consent_key) is in the loaded record.
+//!    [`consent_key_for`](super::consent::consent_key_for) is in the loaded record.
 //!    The answer is evaluated against whatever set the caller declared — empty
 //!    for `grim uninstall`, one entry for `grim add` — while convergence arms
 //!    every hook in install state the lock declares; without this check a
-//!    hook that only `--trust-hooks` ever armed re-armed on the next unrelated
+//!    hook that only `--trust-workspace` ever armed re-armed on the next unrelated
 //!    command.
 //!
 //! ## A path-sourced hook can never arm
@@ -59,14 +59,15 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::config::declaration::RegistryConfig;
+use crate::config::declaration::{ExperimentalOptions, RegistryConfig};
 use crate::config::scope::ConfigScope;
 use crate::lock::locked_source::LockedSource;
+use crate::oci::ArtifactKind;
 use crate::oci::access::registry_client::{plain_http_hosts_with, registry_host};
 
 use std::collections::BTreeSet;
 
-use super::consent::{Consent, consent_key};
+use super::consent::{self, Consent, ConsentRecord, consent_key_for, split_by_kind};
 use super::trust::{Arming, ArmingQuery, GrantSource, Interactivity, NotArmedReason, is_loopback};
 
 /// The invocation-level hook arming policy: the feature flag, the
@@ -79,11 +80,15 @@ use super::trust::{Arming, ArmingQuery, GrantSource, Interactivity, NotArmedReas
 /// which is `Clone`.
 #[derive(Debug, Clone)]
 pub struct HookPolicy {
-    /// `[options.experimental] hooks` for the resolved scope. Config only —
-    /// there is deliberately no environment form, so nothing in a cloned
+    /// This kind's `[options.experimental]` flag for the resolved scope. Config
+    /// only — there is deliberately no environment form, so nothing in a cloned
     /// repository can flip it.
     feature_enabled: bool,
-    /// The `--trust-hooks` / `--no-trust-hooks` pair on this one invocation,
+    /// The kind this policy answers for, [`ArtifactKind::Hook`] unless
+    /// [`ConsentPolicies::new`] built it. Picks the key a binding is looked up
+    /// under, and whether a covered binding converges beside an uncovered one.
+    kind: ArtifactKind,
+    /// The `--trust-workspace` / `--no-trust-workspace` pair on this one invocation,
     /// resolved to one tri-state. `None` when neither was typed.
     flag: Option<bool>,
     /// Whether grim may prompt. Classified **once**, at the command boundary,
@@ -115,7 +120,7 @@ pub struct HookPolicy {
     consented: BTreeSet<String>,
     /// Binding names of the hooks the lock declares, when the builder read one.
     /// `grim remove` keeps the install record and the payload, so a record
-    /// outside this set must not arm under any grant, `--trust-hooks` included.
+    /// outside this set must not arm under any grant, `--trust-workspace` included.
     locked: Option<BTreeSet<String>>,
     /// Whether the one-time prompt was **accepted** on this run.
     ///
@@ -158,6 +163,7 @@ impl HookPolicy {
             .collect();
         Self {
             feature_enabled,
+            kind: ArtifactKind::Hook,
             flag,
             interactivity,
             scope,
@@ -195,6 +201,24 @@ impl HookPolicy {
     /// single "not armed" line would point the user at the wrong one.
     pub fn feature_enabled(&self) -> bool {
         self.feature_enabled
+    }
+
+    /// Why nothing of this kind applies while its flag is off, naming the flag
+    /// of this policy's scope. A settings package at global scope names
+    /// `--global`, because the project flag does not cover it; every other
+    /// sentence is [`not_armed_message`]'s.
+    pub(crate) fn feature_off_message(&self) -> &'static str {
+        match (self.kind, self.scope) {
+            (ArtifactKind::Settings, ConfigScope::Global) => {
+                "settings are gated; enable them with `grim config set --global options.experimental.settings true`"
+            }
+            (kind, _) => not_armed_message(kind, NotArmedReason::FeatureOff),
+        }
+    }
+
+    /// Whether this run was told no: a declined prompt or a typed refusal.
+    pub(crate) fn declined(&self) -> bool {
+        self.flag == Some(false) || self.declined_now
     }
 
     /// This workspace's consent answer, for the caller that has to decide
@@ -252,33 +276,38 @@ impl HookPolicy {
     /// defined for it (see the module doc). Every caller treats it as not armed.
     pub fn verdict(&self, binding: &str, source: &LockedSource) -> Option<Arming> {
         let pinned = source.pinned()?;
+        let covered = consent_key_for(self.kind, binding, source).is_some_and(|key| self.consented.contains(&key));
+        // A package answers for itself: a record that misses one package gates
+        // that package while the covered ones converge. Hooks keep their
+        // all-or-none answer, so one new hook gates the covered ones too.
+        let own_answer = (self.kind == ArtifactKind::Settings && covered).then_some(Consent::Granted);
         let base = super::trust::arming(&ArmingQuery {
             feature_enabled: self.feature_enabled,
             flag: self.flag,
             scope: self.scope,
             insecure_transport: self.insecure_transport(pinned.registry()),
-            consent: &self.consent,
+            consent: own_answer.as_ref().unwrap_or(&self.consent),
             interactivity: self.interactivity,
         });
-        // This run's own answer refines the *reported* verdict without ever
-        // widening it. Both rewrites are narrow on purpose:
-        //
-        // - a decline only fires where the ladder was still going to ask, so it
-        //   cannot override `--trust-hooks` or the transport gate;
-        // - a just-accepted consent re-labels an `Armed` verdict's *source*, and
-        //   only the workspace-consent source, so `--trust-hooks` keeps
-        //   reporting the flag rather than claiming a record it did not write.
-        //
-        // A workspace grant only reaches the hooks its record names (module
-        // doc, input 3). A record that exists but does not cover this hook is
-        // the drifted state for it, and says so.
+        // This run's own answer refines the reported verdict and never widens
+        // it, so no rewrite may reach past `--trust-workspace` or the transport gate.
         Some(match base {
             Arming::ConsentRequired if self.declined_now => Arming::NotArmed(NotArmedReason::ConsentDeclined),
+            // A decline skips the whole settings phase, covered packages
+            // included. A covered hook stays armed: disarming it would change a
+            // file, and the prompt promises a decline changes none.
             Arming::Armed(GrantSource::WorkspaceConsent)
-                if consent_key(binding, source).is_none_or(|key| !self.consented.contains(&key)) =>
+                if self.declined_now && self.kind == ArtifactKind::Settings =>
             {
+                Arming::NotArmed(NotArmedReason::ConsentDeclined)
+            }
+            // A grant reaches only what its record names: a record that does
+            // not cover this binding is the drifted state for it.
+            Arming::Armed(GrantSource::WorkspaceConsent) if !covered => {
                 Arming::NotArmed(NotArmedReason::ConsentDrifted)
             }
+            // Only the workspace source: `--trust-workspace` keeps reporting the
+            // flag rather than claiming a record it did not write.
             Arming::Armed(GrantSource::WorkspaceConsent) if self.granted_now => {
                 Arming::Armed(GrantSource::ConsentPrompt)
             }
@@ -301,23 +330,34 @@ impl HookPolicy {
             && matches!(self.verdict(binding, source), Some(Arming::Armed(_)))
     }
 
-    /// Why hooks from `source` are not armed, as a user-facing sentence, or
-    /// `None` when they are.
+    /// Why `binding` from `source` does not take effect, as a user-facing
+    /// sentence in this policy's kind, or `None` when it does.
     ///
     /// Library style (lowercase, no trailing period) so it composes into the
     /// installer's skip warning.
     pub fn refusal_reason(&self, binding: &str, source: &LockedSource) -> Option<String> {
+        let settings = self.kind == ArtifactKind::Settings;
         match self.verdict(binding, source) {
             Some(Arming::Armed(_)) => None,
+            Some(Arming::ConsentRequired) if settings => Some(format!(
+                "settings from '{}' have not been consented; run `grim consent allow`",
+                self.workspace.display()
+            )),
             Some(Arming::ConsentRequired) => Some(format!(
                 "hooks from '{}' have not been consented; run `grim hook allow`",
                 self.workspace.display()
             )),
-            Some(Arming::NotArmed(reason)) => Some(not_armed_message(reason).to_string()),
-            None => Some("a path-sourced hook has no pinned registry and never arms".to_string()),
+            Some(Arming::NotArmed(NotArmedReason::FeatureOff)) => Some(self.feature_off_message().to_string()),
+            Some(Arming::NotArmed(reason)) => Some(not_armed_message(self.kind, reason).to_string()),
+            None if settings => Some(format!("{PATH_SETTINGS}; {PATH_REMEDY}")),
+            None => Some(format!("{PATH_HOOK}; {PATH_REMEDY}")),
         }
     }
 }
+
+const PATH_HOOK: &str = "a path-sourced hook has no pinned registry and never arms";
+const PATH_SETTINGS: &str = "a path-sourced settings package has no pinned registry and never applies";
+const PATH_REMEDY: &str = "publish it with `grim release` and declare it by its registry reference";
 
 /// The remedy sentence for one [`NotArmedReason`].
 ///
@@ -326,11 +366,16 @@ impl HookPolicy {
 /// "why is this row not armed *there*", while these are invocation-wide and
 /// answer "why did this install write nothing at all". Same facts, two
 /// audiences — and the status cell has a token where this has a sentence.
-pub fn not_armed_message(reason: NotArmedReason) -> &'static str {
+pub fn not_armed_message(kind: ArtifactKind, reason: NotArmedReason) -> &'static str {
+    if kind == ArtifactKind::Settings {
+        return settings_not_applied_message(reason);
+    }
     match reason {
         NotArmedReason::FeatureOff => {
             "hooks are gated; enable them with `grim config set options.experimental.hooks true`"
         }
+        // The shipped sentence, whichever spelling was typed: a workspace with
+        // no settings reads word for word as it did.
         NotArmedReason::FlagDenied => "--no-trust-hooks was passed, so nothing arms on this invocation",
         NotArmedReason::InsecureTransport => {
             "this hook's registry is reached over plain HTTP, so its digest pin cannot be trusted; \
@@ -343,7 +388,129 @@ pub fn not_armed_message(reason: NotArmedReason) -> &'static str {
             "this workspace has not been consented for hooks and there is no terminal to ask on; \
              run `grim hook allow` or pass --trust-hooks"
         }
-        NotArmedReason::ConsentDeclined => "hook consent for this workspace was declined",
+        NotArmedReason::ConsentDeclined => {
+            "hook consent for this workspace was declined; run `grim hook allow` or pass --trust-hooks to arm them"
+        }
+    }
+}
+
+/// [`not_armed_message`] for a settings package, which applies rather than arms
+/// and answers to the consent verb rather than the hook one.
+fn settings_not_applied_message(reason: NotArmedReason) -> &'static str {
+    match reason {
+        NotArmedReason::FeatureOff => {
+            "settings are gated; enable them with `grim config set options.experimental.settings true`"
+        }
+        // Clap cannot say which spelling was typed, and claiming the wrong one
+        // sends the reader hunting for a flag they never passed.
+        NotArmedReason::FlagDenied => {
+            "--no-trust-workspace (alias --no-trust-hooks) was passed, so nothing applies on this invocation"
+        }
+        NotArmedReason::InsecureTransport => {
+            "this package's registry is reached over plain HTTP, so its digest pin cannot be trusted; \
+             serve it over HTTPS or pass --trust-workspace"
+        }
+        NotArmedReason::ConsentDrifted => {
+            "this workspace declares settings it was not consented for; re-run `grim consent allow` to review them"
+        }
+        NotArmedReason::NoTtyToAsk => {
+            "this workspace has not been consented for settings and there is no terminal to ask on; \
+             run `grim consent allow` or pass --trust-workspace"
+        }
+        NotArmedReason::ConsentDeclined => {
+            "settings consent for this workspace was declined; \
+             run `grim consent allow` or pass --trust-workspace to apply them"
+        }
+    }
+}
+
+/// The policies of the two gated kinds, resolved together at the mutating
+/// boundary and attached to an
+/// [`InstallTarget`](crate::install::target::InstallTarget) together.
+#[derive(Debug, Clone)]
+pub struct ConsentPolicies {
+    /// Decides which hooks arm.
+    pub hooks: HookPolicy,
+    /// Decides which settings packages apply.
+    pub settings: HookPolicy,
+}
+
+/// What one invocation's two policies share.
+#[derive(Debug, Clone, Copy)]
+pub struct ConsentInputs<'a> {
+    /// `[options.experimental]` for the resolved scope.
+    pub flags: &'a ExperimentalOptions,
+    /// The per-invocation flag pair, one answer for both kinds.
+    pub flag: Option<bool>,
+    /// Whether grim may ask, classified once at the command boundary.
+    pub interactivity: Interactivity,
+    /// The resolved scope.
+    pub scope: ConfigScope,
+    /// The workspace consent is evaluated for.
+    pub workspace: &'a Path,
+    /// Authored entries from both config scopes, see [`HookPolicy::new`].
+    pub registries: &'a [RegistryConfig],
+}
+
+impl ConsentPolicies {
+    /// Both policies from one record read, one flag and one interactivity
+    /// answer. Each kind answers its own feature flag first.
+    ///
+    /// `declared` is the union of the enabled kinds, and each kind evaluates its
+    /// own half: read as one answer, a settings key the record lacks would drift
+    /// every consented hook. A record for another workspace reads as no record.
+    pub fn new(inputs: &ConsentInputs<'_>, record: Option<&ConsentRecord>, declared: &BTreeSet<String>) -> Self {
+        let record = record.filter(|r| r.workspace == inputs.workspace);
+        let (hook_keys, settings_keys) = split_by_kind(declared);
+        let hooks = HookPolicy::new(
+            inputs.flags.hooks_enabled(),
+            inputs.flag,
+            inputs.interactivity,
+            inputs.scope,
+            inputs.workspace,
+            inputs.registries,
+            consent::evaluate(record, inputs.workspace, &hook_keys),
+        )
+        .with_consented(record.map(|r| r.hooks.clone()).unwrap_or_default());
+        let settings = HookPolicy {
+            feature_enabled: inputs.flags.settings_enabled(),
+            kind: ArtifactKind::Settings,
+            consent: consent::evaluate(record, inputs.workspace, &settings_keys),
+            ..hooks.clone()
+        };
+        Self { hooks, settings }
+    }
+
+    /// Whether either kind's feature flag is on.
+    pub fn any_feature_enabled(&self) -> bool {
+        self.hooks.feature_enabled() || self.settings.feature_enabled()
+    }
+
+    /// Fold an accepted answer into the kinds it added a key for: `recorded` is
+    /// the one record. A kind `added` holds no key of stays as this run read it,
+    /// because adding a package vouches for no hook, covered or not.
+    pub fn adopt_consent(&mut self, added: &BTreeSet<String>, recorded: BTreeSet<String>) {
+        let (hooks, settings) = split_by_kind(added);
+        if !settings.is_empty() {
+            self.settings.adopt_consent(recorded.clone());
+        }
+        if !hooks.is_empty() {
+            self.hooks.adopt_consent(recorded);
+        }
+    }
+
+    /// Record that this run's one question was declined, for both kinds.
+    pub fn record_decline(&mut self) {
+        self.hooks.record_decline();
+        self.settings.record_decline();
+    }
+
+    /// Add the bindings each kind's lock declares; only these may arm.
+    #[must_use]
+    pub fn with_locked(mut self, hooks: BTreeSet<String>, settings: BTreeSet<String>) -> Self {
+        self.hooks = self.hooks.with_locked(hooks);
+        self.settings = self.settings.with_locked(settings);
+        self
     }
 }
 
@@ -378,6 +545,445 @@ mod tests {
             .map(|r| format!("guard@{r}"))
             .collect(),
         )
+    }
+
+    const HOOK: &str = "guard@ghcr.io/acme/guard";
+    const TEAM: &str = "settings:team@ghcr.io/acme/team";
+    const EXTRA: &str = "settings:extra@ghcr.io/acme/extra";
+
+    /// One run's two policies: `record` is `None` for no record at all.
+    struct Run<'a> {
+        hooks: bool,
+        settings: bool,
+        flag: Option<bool>,
+        interactivity: Interactivity,
+        scope: ConfigScope,
+        record: Option<&'a [&'a str]>,
+        declared: &'a [&'a str],
+    }
+
+    impl Default for Run<'_> {
+        fn default() -> Self {
+            Self {
+                hooks: true,
+                settings: true,
+                flag: None,
+                interactivity: Interactivity::NonInteractive,
+                scope: ConfigScope::Project,
+                record: None,
+                declared: &[HOOK, TEAM],
+            }
+        }
+    }
+
+    impl Run<'_> {
+        fn policies(&self) -> ConsentPolicies {
+            let workspace = Path::new("/w/proj");
+            let flags = ExperimentalOptions {
+                hooks: self.hooks,
+                settings: self.settings,
+            };
+            let record = self.record.map(|keys| ConsentRecord {
+                v: consent::ConsentVersion::V1,
+                workspace: workspace.to_path_buf(),
+                hooks: keys.iter().map(ToString::to_string).collect(),
+                consented_at: "2026-11-04T10:00:00Z".to_string(),
+            });
+            let inputs = ConsentInputs {
+                flags: &flags,
+                flag: self.flag,
+                interactivity: self.interactivity,
+                scope: self.scope,
+                workspace,
+                registries: &[],
+            };
+            let declared = self.declared.iter().map(ToString::to_string).collect();
+            ConsentPolicies::new(&inputs, record.as_ref(), &declared)
+        }
+    }
+
+    fn guard() -> LockedSource {
+        registry_source("ghcr.io", "acme/guard")
+    }
+
+    fn team() -> LockedSource {
+        registry_source("ghcr.io", "acme/team")
+    }
+
+    fn extra() -> LockedSource {
+        registry_source("ghcr.io", "acme/extra")
+    }
+
+    const NOT_ARMED_DRIFTED: Option<Arming> = Some(Arming::NotArmed(NotArmedReason::ConsentDrifted));
+    const WORKSPACE_GRANT: Option<Arming> = Some(Arming::Armed(GrantSource::WorkspaceConsent));
+
+    /// Each kind answers its own flag first, and nothing reaches past it:
+    /// neither a record nor `--trust-workspace`.
+    #[test]
+    fn each_kind_answers_its_own_feature_flag_first() {
+        let covering: &[&str] = &[HOOK, TEAM];
+        for flag in [None, Some(true)] {
+            let settings_off = Run {
+                settings: false,
+                flag,
+                record: Some(covering),
+                ..Run::default()
+            }
+            .policies();
+            assert_eq!(
+                settings_off.settings.verdict("team", &team()),
+                Some(Arming::NotArmed(NotArmedReason::FeatureOff))
+            );
+            assert!(settings_off.hooks.arms("guard", &guard()), "the other kind is unmoved");
+
+            let hooks_off = Run {
+                hooks: false,
+                flag,
+                record: Some(covering),
+                ..Run::default()
+            }
+            .policies();
+            assert_eq!(
+                hooks_off.hooks.verdict("guard", &guard()),
+                Some(Arming::NotArmed(NotArmedReason::FeatureOff))
+            );
+            assert!(hooks_off.settings.arms("team", &team()), "the other kind is unmoved");
+        }
+    }
+
+    /// The one flag answers for both kinds, in both directions, over any record.
+    #[test]
+    fn the_flag_pair_answers_for_both_kinds_over_any_record() {
+        for record in [None, Some::<&[&str]>(&[]), Some::<&[&str]>(&[HOOK, TEAM])] {
+            let denied = Run {
+                flag: Some(false),
+                record,
+                ..Run::default()
+            }
+            .policies();
+            let refused = Some(Arming::NotArmed(NotArmedReason::FlagDenied));
+            assert_eq!(denied.hooks.verdict("guard", &guard()), refused);
+            assert_eq!(denied.settings.verdict("team", &team()), refused);
+
+            let trusted = Run {
+                flag: Some(true),
+                record,
+                ..Run::default()
+            }
+            .policies();
+            let granted = Some(Arming::Armed(GrantSource::TrustHooksFlag));
+            assert_eq!(trusted.hooks.verdict("guard", &guard()), granted);
+            assert_eq!(trusted.settings.verdict("team", &team()), granted);
+        }
+    }
+
+    /// No record: an interactive run asks about both kinds, one that cannot
+    /// ask gates both.
+    #[test]
+    fn with_no_record_both_kinds_ask_or_gate_together() {
+        let interactive = Run {
+            interactivity: Interactivity::Interactive,
+            ..Run::default()
+        }
+        .policies();
+        assert_eq!(
+            interactive.hooks.verdict("guard", &guard()),
+            Some(Arming::ConsentRequired)
+        );
+        assert_eq!(
+            interactive.settings.verdict("team", &team()),
+            Some(Arming::ConsentRequired)
+        );
+
+        let unattended = Run::default().policies();
+        let no_tty = Some(Arming::NotArmed(NotArmedReason::NoTtyToAsk));
+        assert_eq!(unattended.hooks.verdict("guard", &guard()), no_tty);
+        assert_eq!(unattended.settings.verdict("team", &team()), no_tty);
+    }
+
+    /// The second flag turned on later: the record predates the settings key,
+    /// so the package reads drifted while the hook it covers keeps arming.
+    #[test]
+    fn a_record_without_settings_keys_drifts_settings_and_leaves_hooks_armed() {
+        let older: &[&str] = &[HOOK];
+        let unattended = Run {
+            record: Some(older),
+            ..Run::default()
+        }
+        .policies();
+        assert_eq!(
+            unattended.settings.consent(),
+            &Consent::Drifted([TEAM.to_string()].into())
+        );
+        assert_eq!(unattended.settings.verdict("team", &team()), NOT_ARMED_DRIFTED);
+        assert_eq!(unattended.hooks.consent(), &Consent::Granted);
+        assert_eq!(unattended.hooks.verdict("guard", &guard()), WORKSPACE_GRANT);
+
+        let interactive = Run {
+            interactivity: Interactivity::Interactive,
+            record: Some(older),
+            ..Run::default()
+        }
+        .policies();
+        assert_eq!(
+            interactive.settings.verdict("team", &team()),
+            Some(Arming::ConsentRequired)
+        );
+        assert_eq!(interactive.hooks.verdict("guard", &guard()), WORKSPACE_GRANT);
+    }
+
+    /// The reverse order: a settings-only record drifts hooks and leaves the
+    /// package it covers converging.
+    #[test]
+    fn a_record_without_hook_keys_drifts_hooks_and_leaves_settings_converging() {
+        let policies = Run {
+            record: Some(&[TEAM]),
+            ..Run::default()
+        }
+        .policies();
+        assert_eq!(policies.hooks.verdict("guard", &guard()), NOT_ARMED_DRIFTED);
+        assert_eq!(policies.settings.verdict("team", &team()), WORKSPACE_GRANT);
+    }
+
+    /// `verdict` is per binding: an uncovered package gates, and the covered
+    /// one beside it converges, asked or unattended.
+    #[test]
+    fn a_covered_package_converges_beside_an_uncovered_one() {
+        for interactivity in [Interactivity::NonInteractive, Interactivity::Interactive] {
+            let policies = Run {
+                interactivity,
+                record: Some(&[TEAM]),
+                declared: &[TEAM, EXTRA],
+                ..Run::default()
+            }
+            .policies();
+            assert_eq!(policies.settings.verdict("team", &team()), WORKSPACE_GRANT);
+            assert!(policies.settings.arms("team", &team()));
+            assert!(!policies.settings.arms("extra", &extra()));
+        }
+    }
+
+    /// Hooks keep their shipped all-or-none answer among themselves: a new hook
+    /// gates the covered one too, and settings keys play no part in that.
+    #[test]
+    fn hook_drift_among_hooks_is_unchanged() {
+        let other = "other@ghcr.io/acme/other";
+        let policies = Run {
+            record: Some(&[HOOK, TEAM]),
+            declared: &[HOOK, other, TEAM],
+            ..Run::default()
+        }
+        .policies();
+        assert_eq!(policies.hooks.verdict("guard", &guard()), NOT_ARMED_DRIFTED);
+        assert_eq!(policies.settings.verdict("team", &team()), WORKSPACE_GRANT);
+    }
+
+    /// One record holds both kinds, and a hook's key answers for no package of
+    /// that name, nor the reverse.
+    #[test]
+    fn a_hook_never_consents_a_package_of_one_name_in_either_direction() {
+        let source = registry_source("ghcr.io", "acme/x");
+        let hook = "x@ghcr.io/acme/x";
+        let package = "settings:x@ghcr.io/acme/x";
+
+        let hook_record = Run {
+            record: Some(&[hook]),
+            declared: &[],
+            ..Run::default()
+        }
+        .policies();
+        assert!(hook_record.hooks.arms("x", &source), "positive control");
+        assert!(!hook_record.settings.arms("x", &source));
+
+        let settings_record = Run {
+            record: Some(&[package]),
+            declared: &[],
+            ..Run::default()
+        }
+        .policies();
+        assert!(settings_record.settings.arms("x", &source), "positive control");
+        assert!(!settings_record.hooks.arms("x", &source));
+    }
+
+    /// The record covers the package a hook key would spell, and a hook bound
+    /// under the prefix must not read that key as its own.
+    #[test]
+    fn a_hook_bound_under_the_settings_prefix_is_not_covered_by_a_package_key() {
+        let source = registry_source("ghcr.io", "acme/x");
+        let policies = Run {
+            record: Some(&["settings:x@ghcr.io/acme/x"]),
+            declared: &[],
+            ..Run::default()
+        }
+        .policies();
+
+        assert!(policies.settings.arms("x", &source), "positive control");
+        assert!(!policies.hooks.arms("settings:x", &source));
+    }
+
+    /// Accepting folds one record into both kinds, so everything it holds arms.
+    #[test]
+    fn accepting_arms_both_kinds() {
+        let mut policies = Run {
+            interactivity: Interactivity::Interactive,
+            ..Run::default()
+        }
+        .policies();
+
+        let keys: BTreeSet<String> = [HOOK.to_string(), TEAM.to_string()].into();
+        policies.adopt_consent(&keys, keys.clone());
+
+        let prompted = Some(Arming::Armed(GrantSource::ConsentPrompt));
+        assert_eq!(policies.hooks.verdict("guard", &guard()), prompted);
+        assert_eq!(policies.settings.verdict("team", &team()), prompted);
+    }
+
+    /// `grim add` vouches for what it brought. A package added under hook drift
+    /// leaves the hooks gated, and a hook added beside an uncovered package
+    /// leaves the package gated.
+    #[test]
+    fn adoption_reaches_only_the_kinds_that_gained_a_key() {
+        let other = "other@ghcr.io/acme/other";
+        let mut drifted_hooks = Run {
+            record: Some(&[HOOK]),
+            declared: &[HOOK, other, TEAM],
+            ..Run::default()
+        }
+        .policies();
+        assert_eq!(drifted_hooks.hooks.verdict("guard", &guard()), NOT_ARMED_DRIFTED);
+
+        drifted_hooks.adopt_consent(&[TEAM.to_string()].into(), [HOOK.to_string(), TEAM.to_string()].into());
+
+        assert_eq!(drifted_hooks.hooks.verdict("guard", &guard()), NOT_ARMED_DRIFTED);
+        let prompted = Some(Arming::Armed(GrantSource::ConsentPrompt));
+        assert_eq!(drifted_hooks.settings.verdict("team", &team()), prompted);
+
+        let mut uncovered_package = Run {
+            record: Some(&[]),
+            declared: &[HOOK, TEAM],
+            ..Run::default()
+        }
+        .policies();
+
+        uncovered_package.adopt_consent(&[HOOK.to_string()].into(), [HOOK.to_string()].into());
+
+        assert_eq!(uncovered_package.hooks.verdict("guard", &guard()), prompted);
+        assert_eq!(uncovered_package.settings.verdict("team", &team()), NOT_ARMED_DRIFTED);
+    }
+
+    /// A decline skips the whole settings phase, so a package the record covers
+    /// stops converging too. A hook the record covers keeps arming: disarming
+    /// it would change a file, and the prompt promises a decline changes none.
+    #[test]
+    fn a_decline_stops_every_package_and_leaves_a_covered_hook_armed() {
+        let mut policies = Run {
+            interactivity: Interactivity::Interactive,
+            record: Some(&[HOOK, TEAM]),
+            declared: &[HOOK, TEAM, EXTRA],
+            ..Run::default()
+        }
+        .policies();
+
+        policies.record_decline();
+
+        let declined = Some(Arming::NotArmed(NotArmedReason::ConsentDeclined));
+        assert_eq!(policies.settings.verdict("team", &team()), declined);
+        assert_eq!(policies.settings.verdict("extra", &extra()), declined);
+        assert_eq!(policies.hooks.verdict("guard", &guard()), WORKSPACE_GRANT);
+    }
+
+    /// A hook-only question declined still stops a covered package.
+    #[test]
+    fn a_decline_of_a_hook_question_stops_a_covered_package() {
+        let mut policies = Run {
+            interactivity: Interactivity::Interactive,
+            record: Some(&[TEAM]),
+            ..Run::default()
+        }
+        .policies();
+        assert_eq!(policies.settings.verdict("team", &team()), WORKSPACE_GRANT);
+
+        policies.record_decline();
+
+        let declined = Some(Arming::NotArmed(NotArmedReason::ConsentDeclined));
+        assert_eq!(policies.settings.verdict("team", &team()), declined);
+        assert_eq!(policies.hooks.verdict("guard", &guard()), declined);
+    }
+
+    /// Global scope is consented for both kinds and carries no record.
+    #[test]
+    fn global_scope_reads_consented_for_both_kinds() {
+        let policies = Run {
+            scope: ConfigScope::Global,
+            ..Run::default()
+        }
+        .policies();
+        let global = Some(Arming::Armed(GrantSource::GlobalScope));
+        assert_eq!(policies.hooks.verdict("guard", &guard()), global);
+        assert_eq!(policies.settings.verdict("team", &team()), global);
+    }
+
+    /// A path source has no pinned registry and no key, even under the flag.
+    #[test]
+    fn a_path_source_answers_none_for_a_package_even_under_the_flag() {
+        let path = LockedSource::Path {
+            path: PathSource::parse("./settings/team").unwrap(),
+            hash: Digest::Sha256("b".repeat(64)),
+        };
+        let policies = Run {
+            flag: Some(true),
+            ..Run::default()
+        }
+        .policies();
+        assert_eq!(policies.settings.verdict("team", &path), None);
+        assert!(!policies.settings.arms("team", &path));
+    }
+
+    /// A record naming another workspace is not consent for this one.
+    #[test]
+    fn a_record_for_another_workspace_reads_absent_for_both_kinds() {
+        let flags = ExperimentalOptions {
+            hooks: true,
+            settings: true,
+        };
+        let inputs = ConsentInputs {
+            flags: &flags,
+            flag: None,
+            interactivity: Interactivity::NonInteractive,
+            scope: ConfigScope::Project,
+            workspace: Path::new("/w/proj"),
+            registries: &[],
+        };
+        let elsewhere = ConsentRecord {
+            v: consent::ConsentVersion::V1,
+            workspace: "/w/other".into(),
+            hooks: [HOOK.to_string(), TEAM.to_string()].into(),
+            consented_at: "2026-11-04T10:00:00Z".to_string(),
+        };
+
+        let policies = ConsentPolicies::new(&inputs, Some(&elsewhere), &[HOOK.to_string(), TEAM.to_string()].into());
+
+        assert_eq!(policies.hooks.consent(), &Consent::Absent);
+        assert_eq!(policies.settings.consent(), &Consent::Absent);
+        assert!(!policies.hooks.arms("guard", &guard()));
+        assert!(!policies.settings.arms("team", &team()));
+    }
+
+    /// Each kind arms only what its own half of the lock declares.
+    #[test]
+    fn each_kind_arms_only_what_its_lock_half_declares() {
+        let policies = Run {
+            record: Some(&[HOOK, TEAM]),
+            ..Run::default()
+        }
+        .policies()
+        .with_locked(["guard".to_string()].into(), BTreeSet::new());
+
+        assert!(policies.hooks.arms("guard", &guard()), "positive control");
+        assert!(
+            !policies.settings.arms("team", &team()),
+            "the record outlives `grim remove`"
+        );
     }
 
     /// The happy path, and the one shape that never arms.
@@ -528,15 +1134,152 @@ mod tests {
             NotArmedReason::NoTtyToAsk,
             NotArmedReason::ConsentDeclined,
         ];
-        let messages: std::collections::BTreeSet<&str> = reasons.iter().map(|r| not_armed_message(*r)).collect();
-        assert_eq!(messages.len(), reasons.len(), "two reasons share one sentence");
-        for reason in reasons {
-            let message = not_armed_message(reason);
-            assert!(!message.is_empty());
-            assert!(
-                message.chars().next().is_some_and(|c| !c.is_uppercase()),
-                "library style is lowercase so it composes into the installer warning: {message}"
+        for kind in [ArtifactKind::Hook, ArtifactKind::Settings] {
+            let messages: std::collections::BTreeSet<&str> =
+                reasons.iter().map(|r| not_armed_message(kind, *r)).collect();
+            assert_eq!(messages.len(), reasons.len(), "two reasons share one sentence");
+            for reason in reasons {
+                let message = not_armed_message(kind, reason);
+                assert!(!message.is_empty());
+                assert!(
+                    message.contains("`grim ") || message.contains("--"),
+                    "a refusal names the command or flag that lifts it: {message}"
+                );
+                assert!(
+                    message.chars().next().is_some_and(|c| !c.is_uppercase()),
+                    "library style is lowercase so it composes into the installer warning: {message}"
+                );
+            }
+        }
+    }
+
+    /// A settings refusal never sends its reader to the hook gesture, and each
+    /// remedy it names is one the settings kind answers to.
+    #[test]
+    fn a_settings_refusal_speaks_of_settings() {
+        for reason in [
+            NotArmedReason::FeatureOff,
+            NotArmedReason::FlagDenied,
+            NotArmedReason::InsecureTransport,
+            NotArmedReason::ConsentDrifted,
+            NotArmedReason::NoTtyToAsk,
+            NotArmedReason::ConsentDeclined,
+        ] {
+            let message = not_armed_message(ArtifactKind::Settings, reason).replace("--no-trust-hooks", "");
+            assert!(!message.contains("hook"), "{message}");
+        }
+        assert!(
+            not_armed_message(ArtifactKind::Settings, NotArmedReason::FeatureOff)
+                .contains("options.experimental.settings")
+        );
+        assert!(not_armed_message(ArtifactKind::Settings, NotArmedReason::NoTtyToAsk).contains("--trust-workspace"));
+        assert!(not_armed_message(ArtifactKind::Settings, NotArmedReason::NoTtyToAsk).contains("`grim consent allow`"));
+        assert!(
+            not_armed_message(ArtifactKind::Settings, NotArmedReason::InsecureTransport).contains("--trust-workspace")
+        );
+    }
+
+    /// Clap cannot say which spelling was typed, so a settings refusal names
+    /// both rather than claiming one the user may not have typed.
+    #[test]
+    fn a_refused_settings_flag_is_named_under_both_spellings() {
+        let message = not_armed_message(ArtifactKind::Settings, NotArmedReason::FlagDenied);
+        assert!(message.contains("--no-trust-workspace"), "{message}");
+        assert!(message.contains("--no-trust-hooks"), "{message}");
+    }
+
+    /// A settings run with its flag off names the flag of its own scope: the
+    /// project flag does not cover `--global`, and the project sentence and
+    /// every hook sentence stay word for word.
+    #[test]
+    fn the_flag_off_remedy_names_the_scope_that_is_off() {
+        let at = |scope| {
+            Run {
+                hooks: false,
+                settings: false,
+                scope,
+                ..Run::default()
+            }
+            .policies()
+        };
+        let project = at(ConfigScope::Project);
+        let global = at(ConfigScope::Global);
+
+        assert_eq!(
+            global.settings.feature_off_message(),
+            "settings are gated; enable them with `grim config set --global options.experimental.settings true`"
+        );
+        assert_eq!(
+            project.settings.feature_off_message(),
+            "settings are gated; enable them with `grim config set options.experimental.settings true`"
+        );
+        for policies in [&project, &global] {
+            assert_eq!(
+                policies.hooks.feature_off_message(),
+                not_armed_message(ArtifactKind::Hook, NotArmedReason::FeatureOff)
+            );
+            // `grim status` and the TUI read the refusal, so it says what the run line says.
+            assert_eq!(
+                policies.settings.refusal_reason("team", &team()).as_deref(),
+                Some(policies.settings.feature_off_message())
+            );
+            assert_eq!(
+                policies.hooks.refusal_reason("guard", &guard()).as_deref(),
+                Some(not_armed_message(ArtifactKind::Hook, NotArmedReason::FeatureOff))
             );
         }
+    }
+
+    /// The hook sentences the remedies are read from stay word for word.
+    #[test]
+    fn hook_refusals_keep_their_remedies() {
+        let message = not_armed_message(ArtifactKind::Hook, NotArmedReason::NoTtyToAsk);
+        assert_eq!(
+            message,
+            "this workspace has not been consented for hooks and there is no terminal to ask on; \
+             run `grim hook allow` or pass --trust-hooks"
+        );
+        assert_eq!(
+            not_armed_message(ArtifactKind::Hook, NotArmedReason::FlagDenied),
+            "--no-trust-hooks was passed, so nothing arms on this invocation"
+        );
+    }
+
+    /// The two refusals the ladder has no reason for speak of the policy's kind.
+    #[test]
+    fn a_refusal_outside_the_ladder_names_the_policys_own_kind() {
+        let path = LockedSource::Path {
+            path: PathSource::parse("./x").unwrap(),
+            hash: Digest::Sha256("b".repeat(64)),
+        };
+        let policies = Run::default().policies();
+        assert_eq!(
+            policies.hooks.refusal_reason("guard", &path).as_deref(),
+            Some(
+                "a path-sourced hook has no pinned registry and never arms; \
+                 publish it with `grim release` and declare it by its registry reference"
+            )
+        );
+        assert_eq!(
+            policies.settings.refusal_reason("team", &path).as_deref(),
+            Some(
+                "a path-sourced settings package has no pinned registry and never applies; \
+                 publish it with `grim release` and declare it by its registry reference"
+            )
+        );
+
+        let asking = Run {
+            interactivity: Interactivity::Interactive,
+            ..Run::default()
+        }
+        .policies();
+        assert_eq!(
+            asking.hooks.refusal_reason("guard", &guard()).as_deref(),
+            Some("hooks from '/w/proj' have not been consented; run `grim hook allow`")
+        );
+        assert_eq!(
+            asking.settings.refusal_reason("team", &team()).as_deref(),
+            Some("settings from '/w/proj' have not been consented; run `grim consent allow`")
+        );
     }
 }

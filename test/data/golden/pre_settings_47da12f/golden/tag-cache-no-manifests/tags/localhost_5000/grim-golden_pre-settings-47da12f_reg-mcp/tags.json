@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "registry": "localhost:5000",
+  "repository": "grim-golden/pre-settings-47da12f/reg-mcp",
+  "tags": {
+    "1.0.0": "sha256:3499d7c5f5ceaabdfc627c7f336b4bed736f44dd4bebdceda02d33a586b46de1"
+  }
+}

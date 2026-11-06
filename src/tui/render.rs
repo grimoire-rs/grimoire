@@ -47,6 +47,12 @@ pub enum ColorKey {
     Pending,
     /// Recorded but outputs missing/unreadable.
     IntegrityMissing,
+    /// A settings package held back by a gate the user can answer.
+    Gated,
+    /// A settings package grim refuses to write here.
+    NotArmed,
+    /// A settings package whose declaration moved on from the lock.
+    Stale,
 }
 
 /// Glyph + label + color for an [`ArtifactState`], as projected for
@@ -60,6 +66,9 @@ fn status_view(state: ArtifactState) -> (&'static str, &'static str, ColorKey) {
         ArtifactState::Modified => ("✱", "modified", ColorKey::Modified),
         ArtifactState::Pending => ("+", "pending", ColorKey::Pending),
         ArtifactState::IntegrityMissing => ("✘", "integrity-missing", ColorKey::IntegrityMissing),
+        ArtifactState::Gated => ("○", "gated", ColorKey::Gated),
+        ArtifactState::NotArmed => ("⊘", "not-armed", ColorKey::NotArmed),
+        ArtifactState::Stale => ("≠", "stale", ColorKey::Stale),
     }
 }
 
@@ -346,6 +355,8 @@ pub struct ConfirmView {
     pub action: &'static str,
     /// Whether the action button (not Cancel) is highlighted.
     pub action_selected: bool,
+    /// A panel to read and dismiss: the action is the only button.
+    pub notice: bool,
 }
 
 /// A plain, ratatui-free description of the whole screen.
@@ -1099,12 +1110,14 @@ pub fn frame(state: &TuiState) -> RenderModel {
         .map(|c| ConfirmView {
             title: format!("Overwrite {}?", sanitize_member_label(&c.repo)),
             message: "Reinstalling discards your local changes. This cannot be undone.".to_string(),
-            detail: sanitize_member_label(&c.detail),
+            detail: sanitize_lines(&c.detail),
             action: "Overwrite",
             action_selected: c.overwrite_selected,
+            notice: false,
         })
         .or_else(|| state.pending_batch.as_ref().map(|b| confirm_batch_view(state, b)))
-        .or_else(|| state.pending_init.as_ref().map(confirm_init_view));
+        .or_else(|| state.pending_init.as_ref().map(confirm_init_view))
+        .or_else(|| state.settings_result.as_ref().map(settings_result_view));
 
     // Selected clients render as a quiet span on the legend line; empty
     // selection omits the span (no stray `clients:` label).
@@ -1619,6 +1632,7 @@ fn confirm_batch_view(state: &TuiState, b: &super::state::PendingBatch) -> Confi
         detail: names.join(", "),
         action,
         action_selected: b.proceed_selected,
+        notice: false,
     }
 }
 
@@ -1639,7 +1653,29 @@ fn confirm_init_view(p: &super::state::PendingInit) -> ConfirmView {
         ),
         action: "Initialize",
         action_selected: p.proceed_selected,
+        notice: false,
     }
+}
+
+/// The panel a settings run leaves behind. The title stays generic because the
+/// message says what the list is.
+fn settings_result_view(r: &super::state::SettingsResult) -> ConfirmView {
+    ConfirmView {
+        title: "Settings".to_string(),
+        message: sanitize_member_label(&r.message),
+        detail: sanitize_lines(&r.detail),
+        action: "Close",
+        action_selected: true,
+        notice: true,
+    }
+}
+
+/// [`sanitize_member_label`] per line, so a multi-line detail keeps its breaks.
+fn sanitize_lines(text: &str) -> String {
+    text.split('\n')
+        .map(sanitize_member_label)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// A centered confirmation popup: the consequence sentence, the supporting
@@ -1663,11 +1699,15 @@ fn draw_confirm(f: &mut Frame, c: &ConfirmView) {
         }
     };
 
-    let body = vec![
+    let mut body = vec![
         Line::from(Span::styled(c.message.clone(), Style::default().fg(Color::White))),
         Line::from(""),
-        Line::from(Span::styled(c.detail.clone(), Style::default().fg(Color::DarkGray))),
     ];
+    body.extend(
+        c.detail
+            .split('\n')
+            .map(|line| Line::from(Span::styled(line.to_string(), Style::default().fg(Color::DarkGray)))),
+    );
     let cancel = button("Cancel", !c.action_selected);
     let action = button(c.action, c.action_selected);
     let screen = f.area();
@@ -1680,7 +1720,9 @@ fn draw_confirm(f: &mut Frame, c: &ConfirmView) {
     let row_w = cancel_w + 2 + action_w;
     let inline = row_w + frame_w <= usize::from(screen.width);
     let min_w = if inline { row_w } else { cancel_w.max(action_w) } + frame_w;
-    let (buttons, button_rows): (_, u16) = if inline {
+    let (buttons, button_rows): (_, u16) = if c.notice {
+        (vec![Line::from(action)], 1)
+    } else if inline {
         (vec![Line::from(vec![cancel, Span::raw("  "), action])], 1)
     } else {
         (vec![Line::from(cancel), Line::from(action)], 2)
@@ -1696,7 +1738,8 @@ fn draw_confirm(f: &mut Frame, c: &ConfirmView) {
         area.x = screen.x + (screen.width - area.width) / 2;
     }
     let inner_w = usize::from(area.width).saturating_sub(frame_w).max(1);
-    let wrapped = |text: &str| text.chars().count().div_ceil(inner_w) + 1;
+    let rows = |line: &str| line.chars().count().div_ceil(inner_w);
+    let wrapped = |text: &str| text.split('\n').map(rows).sum::<usize>() + 1;
     // Borders, the top/bottom padding rows, and the content.
     let needed = u16::try_from(4 + wrapped(&c.message) + 1 + wrapped(&c.detail) + 1 + usize::from(button_rows))
         .unwrap_or(u16::MAX);
@@ -1732,7 +1775,11 @@ fn draw_confirm(f: &mut Frame, c: &ConfirmView) {
     };
     f.render_widget(
         Paragraph::new(Span::styled(
-            "enter confirm · esc cancel",
+            if c.notice {
+                "enter close"
+            } else {
+                "enter confirm · esc cancel"
+            },
             Style::default().fg(Color::DarkGray),
         )),
         hint_area,
@@ -1886,19 +1933,38 @@ fn legend_entries() -> [(ArtifactState, &'static str); 7] {
     ]
 }
 
-/// The content lines of the `?` help overlay: a "Keybindings" header, a blank
-/// separator, one row per [`help_entries`] item, then a "Status column"
-/// legend. The count must equal [`crate::tui::state::HELP_BODY_LINES`] (the
-/// scroll-clamp source of truth) — guarded by
-/// `tests::help_body_line_count_matches_state`.
+/// What each status only a settings row reaches means. The `?` overlay lists
+/// these and the status bar does not: the kind is experimental, and three more
+/// entries would push the bar past its width gate on every settings-free screen.
+fn settings_legend_entries() -> [(ArtifactState, &'static str); 3] {
+    [
+        (
+            ArtifactState::Gated,
+            "settings held back: flag off, no consent, or nothing applies here",
+        ),
+        (
+            ArtifactState::NotArmed,
+            "settings grim refuses to write here; `grim status` says why",
+        ),
+        (
+            ArtifactState::Stale,
+            "settings changed in grimoire.toml since the lock; `grim lock` updates it",
+        ),
+    ]
+}
+
+/// The content lines of the `?` help overlay: a "Keybindings" header, one row
+/// per [`help_entries`] item, then a "Status column" legend. The count must
+/// equal [`crate::tui::state::HELP_BODY_LINES`] (the scroll-clamp source of
+/// truth) — guarded by `tests::help_body_line_count_matches_state`.
 fn help_lines() -> Vec<Line<'static>> {
-    let mut lines: Vec<Line<'static>> = vec![
-        Line::from(Span::styled(
-            "Keybindings",
-            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-    ];
+    // No blank separators: a blank row here pushes the last legend entry below
+    // the fold of an 80×24 terminal
+    // (`help_overlay_fits_all_entries_on_standard_terminal`).
+    let mut lines: Vec<Line<'static>> = vec![Line::from(Span::styled(
+        "Keybindings",
+        Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+    ))];
     // Both columns are sized to their widest key plus a two-cell gutter:
     // a fixed width silently ran the longest key (`(shift) tab`,
     // `integrity-missing`) straight into its description.
@@ -1912,19 +1978,17 @@ fn help_lines() -> Vec<Line<'static>> {
             Span::styled(d, Style::default().fg(Color::White)),
         ]));
     }
-    lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "Status column",
         Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
     )));
-    lines.push(Line::from(""));
-    let label_w = legend_entries()
-        .iter()
-        .map(|(s, _)| status_view(*s).1.chars().count())
+    let legend = || legend_entries().into_iter().chain(settings_legend_entries());
+    let label_w = legend()
+        .map(|(s, _)| status_view(s).1.chars().count())
         .max()
         .unwrap_or(0)
         + 2;
-    for (state, meaning) in legend_entries() {
+    for (state, meaning) in legend() {
         let (glyph, label, color) = status_view(state);
         lines.push(Line::from(vec![
             Span::styled(
@@ -2027,8 +2091,9 @@ fn color_for(key: ColorKey) -> Color {
         ColorKey::Modified => Color::Red,
         // Advisory, not a fault: dimmer than the problem colors so a pending
         // row reads as "there is more to install", not "something is wrong".
-        ColorKey::Pending => Color::Blue,
+        ColorKey::Pending | ColorKey::Gated => Color::Blue,
         ColorKey::IntegrityMissing => Color::Magenta,
+        ColorKey::NotArmed | ColorKey::Stale => Color::Yellow,
     }
 }
 
@@ -2403,6 +2468,9 @@ mod tests {
                 "integrity-missing",
                 ColorKey::IntegrityMissing,
             ),
+            (ArtifactState::Gated, "○", "gated", ColorKey::Gated),
+            (ArtifactState::NotArmed, "⊘", "not-armed", ColorKey::NotArmed),
+            (ArtifactState::Stale, "≠", "stale", ColorKey::Stale),
         ] {
             assert_eq!(status_view(st), (glyph, label, color));
         }
@@ -2705,7 +2773,11 @@ mod tests {
     /// exists to prevent — and `Pending` is the one that prompted it.
     #[test]
     fn the_legend_explains_every_status_a_row_can_show() {
-        let explained: Vec<ArtifactState> = legend_entries().iter().map(|(s, _)| *s).collect();
+        let explained: Vec<ArtifactState> = legend_entries()
+            .into_iter()
+            .chain(settings_legend_entries())
+            .map(|(s, _)| s)
+            .collect();
         for state in [
             ArtifactState::Installed,
             ArtifactState::NotInstalled,
@@ -2714,14 +2786,18 @@ mod tests {
             ArtifactState::Pending,
             ArtifactState::ViaBundle,
             ArtifactState::IntegrityMissing,
+            ArtifactState::Gated,
+            ArtifactState::NotArmed,
+            ArtifactState::Stale,
         ] {
             assert!(explained.contains(&state), "{state} has no legend entry");
         }
     }
 
     /// The status-bar legend and the `?` overlay legend must explain the same
-    /// set — they are two views of one list, and the status-bar one had
-    /// already drifted (no `pending`) before it was derived.
+    /// set, bar the settings states the overlay alone carries — they are two
+    /// views of one list, and the status-bar one had already drifted (no
+    /// `pending`) before it was derived.
     #[test]
     fn the_status_bar_legend_explains_every_status_too() {
         let line = legend_line("");

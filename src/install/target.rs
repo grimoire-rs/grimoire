@@ -49,12 +49,19 @@ pub struct InstallTarget {
     /// Clients opted out of the pool (`shared_skills = false`): their skills
     /// stay native even beside a client that writes the pool.
     native_skills: Vec<ClientTarget>,
+    /// The resolved scope's `[options].clients`, parsed before detection;
+    /// `None` when empty (autodetect). Set only by [`Self::parse`].
+    configured: Option<Vec<ClientTarget>>,
     /// The resolved hook arming policy, or `None` when this target was not
     /// built by a mutating command. Attached by [`Self::with_hook_policy`] at
     /// the mutating boundary, never by [`Self::parse`] (shared with the
     /// read-only `status`/`search`/`context`), so a read-only command can
     /// neither arm nor prompt.
     hook_policy: Option<crate::hook::policy::HookPolicy>,
+    /// The resolved settings policy. `None` fails closed: the settings step
+    /// plans nothing. Attached like [`Self::hook_policy`], and for the same
+    /// reason never by [`Self::parse`].
+    settings_policy: Option<crate::hook::policy::HookPolicy>,
     /// `$GRIM_HOME`, the one input a hook destination needs that a client
     /// layout does not (C-106): a hook payload is machine-local at both scopes
     /// (invariant I1), so [`Self::path_for`] routes `Hook` under it.
@@ -95,7 +102,9 @@ impl InstallTarget {
             generic_fallback: false,
             shared_skills: Vec::new(),
             native_skills: Vec::new(),
+            configured: None,
             hook_policy: None,
+            settings_policy: None,
             grim_home: crate::env::grim_home(),
         }
     }
@@ -139,6 +148,17 @@ impl InstallTarget {
         // Both flag and config empty ⇒ reach `new` with an empty list so
         // detection runs (do not inject the literal "claude").
         let mut clients = parse_client_list(source)?;
+        // A `--client` selection narrows one run; only the config list says
+        // which clients the project keeps, so the flag never fills this.
+        let configured = if flag_values.is_empty() {
+            clients.clone()
+        } else {
+            parse_client_list(config_default).unwrap_or_else(|error| {
+                tracing::warn!("ignoring [options].clients for the adopted-entry carry-forward: {error}");
+                Vec::new()
+            })
+        };
+        let configured = (!configured.is_empty()).then_some(configured);
 
         // An unknown client name, or one the capability gate would have
         // refused, is dropped rather than raised: both are already refused at
@@ -169,7 +189,9 @@ impl InstallTarget {
                     generic_fallback: true,
                     shared_skills,
                     native_skills,
+                    configured,
                     hook_policy: None,
+                    settings_policy: None,
                     grim_home: crate::env::grim_home(),
                 });
             }
@@ -178,6 +200,7 @@ impl InstallTarget {
         let mut target = Self::new(workspace, scope, clients);
         target.shared_skills = shared_skills;
         target.native_skills = native_skills;
+        target.configured = configured;
         Ok(target)
     }
 
@@ -192,6 +215,19 @@ impl InstallTarget {
     /// attached one: this invocation neither arms nor reaps.
     pub fn hook_policy(&self) -> Option<&crate::hook::policy::HookPolicy> {
         self.hook_policy.as_ref()
+    }
+
+    /// Attach the resolved settings policy. Only a mutating command does.
+    #[must_use]
+    pub fn with_settings_policy(mut self, policy: crate::hook::policy::HookPolicy) -> Self {
+        self.settings_policy = Some(policy);
+        self
+    }
+
+    /// The resolved settings policy, or `None` when no mutating boundary
+    /// attached one.
+    pub fn settings_policy(&self) -> Option<&crate::hook::policy::HookPolicy> {
+        self.settings_policy.as_ref()
     }
 
     /// The `$GRIM_HOME` a hook destination resolves under (C-106).
@@ -212,6 +248,12 @@ impl InstallTarget {
     /// The client targets, in declared order (deduplicated).
     pub fn clients(&self) -> &[ClientTarget] {
         &self.clients
+    }
+
+    /// The resolved scope's `[options].clients`, parsed; `None` when it is
+    /// empty or unset (autodetect). A `--client` selection never counts.
+    pub fn configured_clients(&self) -> Option<&[ClientTarget]> {
+        self.configured.as_deref()
     }
 
     /// True when nothing selected this target: no `--client`, no config
@@ -610,6 +652,65 @@ mod tests {
         );
     }
 
+    /// `parse` is the seam `grim status`, `grim search` and `grim context`
+    /// share, so a target it builds cannot apply settings.
+    #[test]
+    fn a_target_built_by_parse_carries_no_settings_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (flag, cfg) in [
+            (vec![], vec![]),
+            (vec!["claude".to_string()], vec![]),
+            (vec![], vec!["claude,codex".to_string()]),
+        ] {
+            let t = InstallTarget::parse(tmp.path(), ConfigScope::Project, &flag, &cfg, &BTreeMap::new()).unwrap();
+            assert!(t.settings_policy().is_none());
+        }
+        assert!(
+            InstallTarget::new(tmp.path(), ConfigScope::Project, vec![ClientTarget::Claude])
+                .settings_policy()
+                .is_none()
+        );
+    }
+
+    /// The two policies travel apart: each builder sets its own field.
+    #[test]
+    fn each_policy_builder_sets_only_its_own_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        let policy = |feature_enabled| {
+            crate::hook::policy::HookPolicy::new(
+                feature_enabled,
+                None,
+                crate::hook::trust::Interactivity::NonInteractive,
+                ConfigScope::Project,
+                tmp.path(),
+                &[],
+                crate::hook::consent::Consent::Granted,
+            )
+        };
+        let parsed = || InstallTarget::parse(tmp.path(), ConfigScope::Project, &[], &[], &BTreeMap::new()).unwrap();
+
+        let settings_only = parsed().with_settings_policy(policy(true));
+        assert!(
+            settings_only
+                .settings_policy()
+                .is_some_and(crate::hook::policy::HookPolicy::feature_enabled)
+        );
+        assert!(settings_only.hook_policy().is_none());
+
+        let both = parsed()
+            .with_hook_policy(policy(true))
+            .with_settings_policy(policy(false));
+        assert!(
+            both.hook_policy()
+                .is_some_and(crate::hook::policy::HookPolicy::feature_enabled)
+        );
+        assert!(
+            !both
+                .settings_policy()
+                .is_some_and(crate::hook::policy::HookPolicy::feature_enabled)
+        );
+    }
+
     /// C-106 (a): main's `path_for` body, frozen. Every hook-free
     /// `(client, kind, scope)` — with and without the shared-skills pool —
     /// must resolve exactly as main did, so the `grim_home` field moves no
@@ -970,6 +1071,43 @@ mod tests {
         )
         .unwrap();
         assert_eq!(t.clients(), &[ClientTarget::Agents]);
+    }
+
+    /// The configured set is the config list alone: `--client` narrows one
+    /// run, and an empty list is autodetect, not "no clients".
+    #[test]
+    fn configured_clients_come_from_the_config_list_never_the_flag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parse = |flag: &[&str], config: &[&str]| {
+            InstallTarget::parse(
+                tmp.path(),
+                ConfigScope::Project,
+                &strings(flag),
+                &strings(config),
+                &BTreeMap::new(),
+            )
+            .unwrap()
+        };
+        let (copilot, claude) = (ClientTarget::Copilot, ClientTarget::Claude);
+        assert_eq!(parse(&["copilot"], &[]).configured_clients(), None, "flag only");
+        assert_eq!(parse(&[], &[]).configured_clients(), None, "autodetect");
+        assert_eq!(parse(&[], &[" , "]).configured_clients(), None, "a blank list");
+        assert_eq!(
+            parse(&[], &["copilot,claude"]).configured_clients(),
+            Some(&[copilot, claude][..])
+        );
+        assert_eq!(
+            parse(&["cursor"], &["copilot"]).configured_clients(),
+            Some(&[copilot][..]),
+            "the flag selects this run's clients, not the configured set"
+        );
+        assert_eq!(
+            parse(&["cursor"], &["nope"]).configured_clients(),
+            None,
+            "an unparseable config list under a flag configures nothing"
+        );
+        let built = InstallTarget::new(tmp.path(), ConfigScope::Project, vec![claude]);
+        assert_eq!(built.configured_clients(), None);
     }
 
     // ── pool auto-join (issue #262) ──

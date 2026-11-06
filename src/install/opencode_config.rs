@@ -520,6 +520,7 @@ mod tests {
                 support_dir: None,
                 entry: None,
                 adopted: false,
+                element: None,
             }],
         });
         assert_eq!(

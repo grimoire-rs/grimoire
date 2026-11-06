@@ -137,7 +137,7 @@ pub enum Command {
     /// marketplace repository, for Claude-family or Agent Plugins clients.
     Export(ExportArgs),
     /// Print the JSON Schema for grimoire.toml, publish.toml, grimoire.lock,
-    /// mcp/<name>.toml, or hook.toml.
+    /// mcp/<name>.toml, hook.toml, or settings/<name>.toml.
     Schema(SchemaArgs),
     /// Print a shell completion script (bash, zsh, fish, elvish, powershell).
     Completions(CompletionsArgs),
@@ -145,7 +145,8 @@ pub enum Command {
     Tui(TuiArgs),
     /// Run a local STDIO Model Context Protocol server.
     Mcp(McpArgs),
-    /// Inspect and consent to lifecycle hooks.
+    /// Inspect and consent to lifecycle hooks and settings.
+    #[command(visible_alias = "consent")]
     Hook(HookArgs),
     /// Authenticate to a registry and store the credential.
     Login(LoginArgs),
@@ -192,6 +193,7 @@ fn main() -> std::process::ExitCode {
                 &format!("failed to start async runtime: {err}"),
                 None,
                 None,
+                None,
             );
             return ExitCode::Failure.into();
         }
@@ -223,7 +225,8 @@ fn main() -> std::process::ExitCode {
             if let Some(hint) = &hint {
                 let _ = writeln!(io::stderr(), "{hint}");
             }
-            emit_error_document(format, exit.exit, &chain, exit.reason, hint);
+            let settings = crate::error::settings_outcome(&err);
+            emit_error_document(format, exit.exit, &chain, exit.reason, hint, settings);
             exit.exit.into()
         }
     }
@@ -247,7 +250,8 @@ fn parse_cli(color: ColorMode) -> Result<Cli, clap::Error> {
 }
 
 /// Under `--format json`, print the structured error document to stdout:
-/// `{"error": {"code": "<slug>", "exit": <int>, "message": "<chain>", "reason"?, "retryable"?}}`.
+/// `{"error": {"code": "<slug>", "exit": <int>, "message": "<chain>", "reason"?, "retryable"?,
+/// "pieces"?, "settings_changes"?}}`.
 ///
 /// stdout — not stderr — because stderr carries tracing output and the two
 /// would interleave; a consumer parses stdout and treats a top-level
@@ -259,11 +263,16 @@ fn emit_error_document(
     message: &str,
     reason: Option<ErrorReason>,
     hint: Option<String>,
+    settings: Option<&crate::install::installer::SettingsOutcome>,
 ) {
     if format != OutputFormat::Json {
         return;
     }
-    if let Ok(rendered) = serde_json::to_string_pretty(&error_document(code, message, reason, hint)) {
+    let mut document = error_document(code, message, reason, hint);
+    if let Some(outcome) = settings {
+        attach_settings(&mut document, outcome);
+    }
+    if let Ok(rendered) = serde_json::to_string_pretty(&document) {
         // Best-effort: this is already the error path, and the reader may
         // have closed stdout (the same dead-pipe hazard the stderr write
         // above guards against).
@@ -313,6 +322,24 @@ fn error_document(
     serde_json::json!({ "error": error })
 }
 
+/// Add what a failed run changed and refused to `error`, inside it because the
+/// top level is pinned to that one key. Each key is omit-when-empty, so every
+/// other failure keeps its document byte for byte.
+fn attach_settings(document: &mut serde_json::Value, outcome: &crate::install::installer::SettingsOutcome) {
+    // Best-effort, like the render in `emit_error_document`: this is already
+    // the error path, and these rows are plain strings and unit enums.
+    if !outcome.pieces.is_empty()
+        && let Ok(pieces) = serde_json::to_value(&*outcome.pieces)
+    {
+        document["error"]["pieces"] = pieces;
+    }
+    if !outcome.changes.is_empty()
+        && let Ok(changes) = serde_json::to_value(&outcome.changes)
+    {
+        document["error"]["settings_changes"] = changes;
+    }
+}
+
 /// Initialize tracing from the `GRIM_LOG` env var (falls back to `warn`).
 ///
 /// Installs a [`crate::log_switch::SwitchableWriter`] so the TUI can
@@ -351,6 +378,29 @@ mod build_embed;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_kind_argument_accepts_settings() {
+        let cases: [&[&str]; 6] = [
+            &["grim", "add", "--kind", "settings", "ghcr.io/acme/team:1"],
+            &["grim", "build", "--kind", "settings", "./team.toml"],
+            &[
+                "grim",
+                "release",
+                "--kind",
+                "settings",
+                "./team.toml",
+                "ghcr.io/acme/team:1",
+            ],
+            &["grim", "remove", "settings", "team"],
+            &["grim", "uninstall", "settings", "team"],
+            &["grim", "why", "settings", "team"],
+        ];
+        for argv in cases {
+            let parsed = <Cli as clap::Parser>::try_parse_from(argv);
+            assert!(parsed.is_ok(), "{argv:?} must parse");
+        }
+    }
 
     #[test]
     fn error_document_omits_reason_when_absent() {
@@ -484,5 +534,82 @@ mod tests {
     fn error_document_omits_hint_when_absent() {
         let doc = error_document(ExitCode::DataError, "boom", None, None);
         assert!(doc["error"].get("hint").is_none(), "no hint ⇒ no key: {doc}");
+    }
+
+    fn overwrite_piece() -> crate::api::settings_report::RefusedPiece {
+        use crate::api::settings_report::{PieceMark, PieceState, RefusedPiece};
+        RefusedPiece {
+            package: "team".to_string(),
+            client: "claude".to_string(),
+            file: Some("~/.claude/settings.json".to_string()),
+            pointer: "/model".to_string(),
+            element: None,
+            marked: PieceMark::Overwrite,
+            state: Some(PieceState::Modified),
+            wanted: Some("sonnet".to_string()),
+            current: Some("opus".to_string()),
+        }
+    }
+
+    #[test]
+    fn a_settings_outcome_lands_inside_error() {
+        use crate::api::settings_report::{SettingsChange, SettingsChangeAction};
+        let outcome = crate::install::installer::SettingsOutcome {
+            changes: vec![SettingsChange {
+                package: "team".to_string(),
+                client: "claude".to_string(),
+                file: "~/.claude/settings.json".to_string(),
+                key: "/permissions/allow".to_string(),
+                element: Some("Bash(ls:*)".to_string()),
+                action: SettingsChangeAction::Added,
+            }],
+            pieces: vec![overwrite_piece()].into(),
+        };
+        let mut doc = error_document(ExitCode::DataError, "boom", Some(ErrorReason::LocalModified), None);
+        attach_settings(&mut doc, &outcome);
+        assert_eq!(doc.as_object().unwrap().len(), 1, "the top level stays one key: {doc}");
+        assert_eq!(doc["error"]["pieces"][0]["pointer"], "/model");
+        assert_eq!(doc["error"]["settings_changes"][0]["action"], "added");
+        assert_eq!(doc["error"]["forceable"], true);
+    }
+
+    #[test]
+    fn an_empty_side_of_the_outcome_omits_its_key() {
+        let outcome = crate::install::installer::SettingsOutcome {
+            changes: Vec::new(),
+            pieces: vec![overwrite_piece()].into(),
+        };
+        let mut doc = error_document(ExitCode::DataError, "boom", None, None);
+        attach_settings(&mut doc, &outcome);
+        assert!(doc["error"].get("pieces").is_some(), "{doc}");
+        assert!(doc["error"].get("settings_changes").is_none(), "{doc}");
+
+        let mut doc = error_document(ExitCode::DataError, "boom", None, None);
+        let untouched = doc.clone();
+        attach_settings(&mut doc, &crate::install::installer::SettingsOutcome::default());
+        assert_eq!(doc, untouched, "an empty outcome leaves the document byte-identical");
+    }
+
+    #[test]
+    fn an_unparseable_file_document_has_pieces_but_no_reason_or_forceable() {
+        use crate::install::install_error::{InstallError, InstallErrorKind};
+        let outcome = crate::install::installer::SettingsOutcome {
+            changes: Vec::new(),
+            pieces: vec![overwrite_piece()].into(),
+        };
+        let err = anyhow::Error::from(
+            crate::error::Error::from(InstallError::without_reference(InstallErrorKind::SettingsUnparseable {
+                client: "claude".to_string(),
+                path: "/w/.claude/settings.local.json".into(),
+            }))
+            .with_settings(outcome),
+        );
+        let exit = crate::error::classify(&err);
+        let mut doc = error_document(exit.exit, &format!("{err:#}"), exit.reason, None);
+        attach_settings(&mut doc, crate::error::settings_outcome(&err).unwrap());
+        assert_eq!(doc["error"]["exit"], 65);
+        assert!(doc["error"].get("reason").is_none(), "{doc}");
+        assert!(doc["error"].get("forceable").is_none(), "{doc}");
+        assert_eq!(doc["error"]["pieces"].as_array().map(Vec::len), Some(1));
     }
 }

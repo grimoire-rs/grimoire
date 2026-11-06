@@ -48,11 +48,51 @@ use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
 use super::render::{self, RenderError, RenderedDoc};
-use super::vendor::{HookSpliceShape, SplicedHandler, Vendor, env_dir, home_dir};
+use super::vendor::MergeClass::{Scalar, Set};
+use super::vendor::SettingsScopes::GlobalOnly;
+use super::vendor::SettingsValueType as Ty;
+use super::vendor::{HookSpliceShape, SettingsField, SplicedHandler, Vendor, env_dir, home_dir};
 use super::vendor_claude::ClaudeVendor;
 
 /// Qoder.
 pub struct QoderVendor;
+
+/// Qoder's settings keys, from the list in `adr_settings_artifact_kind.md`.
+const QODER_SETTINGS_FIELDS: &[SettingsField] = &[
+    SettingsField::new("/model/name", Ty::String, Scalar, GlobalOnly),
+    SettingsField::new(
+        "/general/defaultPermissionMode",
+        Ty::Enum(&[
+            "default",
+            "accept_edits",
+            "plan",
+            "auto",
+            "bypass_permissions",
+            "dont_ask",
+        ]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new("/general/vimMode", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/general/enableAutoUpdate", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/general/enableNotifications", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/output/format", Ty::Enum(&["text", "json"]), Scalar, GlobalOnly),
+    SettingsField::new("/ui/theme", Ty::String, Scalar, GlobalOnly),
+    SettingsField::new("/ui/hideTips", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/ui/hideBanner", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/ui/showLineNumbers", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/ui/compactToolOutput", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/permissions/allow", Ty::StringList, Set, GlobalOnly),
+    SettingsField::new("/permissions/ask", Ty::StringList, Set, GlobalOnly),
+    SettingsField::new("/permissions/deny", Ty::StringList, Set, GlobalOnly),
+    SettingsField::new("/security/disableYoloMode", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new(
+        "/model/reasoningEffort",
+        Ty::Enum(&["disabled", "off", "none", "low", "medium", "high", "xhigh", "max"]),
+        Scalar,
+        GlobalOnly,
+    ),
+];
 
 impl Vendor for QoderVendor {
     fn name(&self) -> &'static str {
@@ -163,11 +203,7 @@ impl Vendor for QoderVendor {
     }
 
     fn hook_config_path(&self, _workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
-        match scope {
-            // A1: `.qoder/settings.json` is a tracked repository file.
-            ConfigScope::Project => None,
-            ConfigScope::Global => qoder_root(env_dir("QODER_CONFIG_DIR"), home_dir()).map(|r| r.join("settings.json")),
-        }
+        global_settings_path(scope, qoder_root(env_dir("QODER_CONFIG_DIR"), home_dir()))
     }
 
     // ponytail: Qoder's CLI hook schema is Claude's, so the address and the
@@ -184,6 +220,15 @@ impl Vendor for QoderVendor {
     fn kind_surface(&self, kind: ArtifactKind, scope: ConfigScope) -> bool {
         // A1 (D-2): hooks at global scope only, the codex/copilot reasoning.
         !matches!((kind, scope), (ArtifactKind::Hook, ConfigScope::Project))
+    }
+
+    fn settings_fields(&self) -> &'static [SettingsField] {
+        QODER_SETTINGS_FIELDS
+    }
+
+    /// The file hooks splice into, global-only for the same reason.
+    fn settings_config_path(&self, workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
+        self.hook_config_path(workspace, scope)
     }
 
     fn skill_index(&self, doc: &str) -> Result<Option<RenderedDoc>, RenderError> {
@@ -204,6 +249,17 @@ impl Vendor for QoderVendor {
     fn agent_index(&self, parsed: &ParsedAgent, _pinned: &str) -> Result<Option<RenderedDoc>, RenderError> {
         // Claude-shaped subagent frontmatter: a plain agent installs verbatim.
         render::render_agent_canonical(parsed, self, &[])
+    }
+}
+
+/// `settings.json` under the resolved global `root`.
+///
+/// `None` at project scope: `.qoder/settings.json` is a tracked repository file.
+/// `None` with no root: never the workspace stand-in [`scope_root`] falls back to.
+fn global_settings_path(scope: ConfigScope, root: Option<PathBuf>) -> Option<PathBuf> {
+    match scope {
+        ConfigScope::Project => None,
+        ConfigScope::Global => root.map(|root| root.join("settings.json")),
     }
 }
 
@@ -347,5 +403,129 @@ mod tests {
         ] {
             assert!(QoderVendor.mcp_entry(ConfigScope::Project, "m", &d).is_none(), "{d:?}");
         }
+    }
+
+    /// Every key by pointer, value type and scope, in the list's order.
+    #[test]
+    fn settings_rows_match_the_key_list() {
+        use crate::install::vendor::SettingsScopes::GlobalOnly;
+        use crate::install::vendor::SettingsValueType as Ty;
+
+        let rows: Vec<_> = QoderVendor
+            .settings_fields()
+            .iter()
+            .map(|field| (field.pointer, field.ty, field.scopes))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("/model/name", Ty::String, GlobalOnly),
+                (
+                    "/general/defaultPermissionMode",
+                    Ty::Enum(&[
+                        "default",
+                        "accept_edits",
+                        "plan",
+                        "auto",
+                        "bypass_permissions",
+                        "dont_ask",
+                    ]),
+                    GlobalOnly
+                ),
+                ("/general/vimMode", Ty::Bool, GlobalOnly),
+                ("/general/enableAutoUpdate", Ty::Bool, GlobalOnly),
+                ("/general/enableNotifications", Ty::Bool, GlobalOnly),
+                ("/output/format", Ty::Enum(&["text", "json"]), GlobalOnly),
+                ("/ui/theme", Ty::String, GlobalOnly),
+                ("/ui/hideTips", Ty::Bool, GlobalOnly),
+                ("/ui/hideBanner", Ty::Bool, GlobalOnly),
+                ("/ui/showLineNumbers", Ty::Bool, GlobalOnly),
+                ("/ui/compactToolOutput", Ty::Bool, GlobalOnly),
+                ("/permissions/allow", Ty::StringList, GlobalOnly),
+                ("/permissions/ask", Ty::StringList, GlobalOnly),
+                ("/permissions/deny", Ty::StringList, GlobalOnly),
+                ("/security/disableYoloMode", Ty::Bool, GlobalOnly),
+                (
+                    "/model/reasoningEffort",
+                    Ty::Enum(&["disabled", "off", "none", "low", "medium", "high", "xhigh", "max"]),
+                    GlobalOnly
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn settings_document_checks_each_value_type() {
+        use crate::oci::settings::SettingsDocument;
+
+        let good = "description = \"d\"\n[qoder.model]\nname = \"m\"\nreasoningEffort = \"xhigh\"\n";
+        let (document, _) = SettingsDocument::from_toml_str_with_requires(good).unwrap();
+        assert_eq!(
+            serde_json::Value::Object(document.vendors["qoder"].clone()),
+            serde_json::json!({"model": {"name": "m", "reasoningEffort": "xhigh"}})
+        );
+        for bad in [
+            "reasoningEffort = \"High\"",
+            "reasoningEffort = \"ultra\"",
+            "reasoningEffort = 3",
+        ] {
+            let text = format!("description = \"d\"\n[qoder.model]\n{bad}\n");
+            assert!(SettingsDocument::from_toml_str_with_requires(&text).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn settings_rows_narrow_nothing_and_require_nothing() {
+        for field in QoderVendor.settings_fields() {
+            assert_eq!(field.map_keys, None, "{}", field.pointer);
+            assert_eq!(field.project_values, None, "{}", field.pointer);
+            assert!(!field.required_by_client, "{}", field.pointer);
+        }
+    }
+
+    #[test]
+    fn settings_path_has_no_answer_at_project_scope() {
+        let root = Some(PathBuf::from("/home/u/.qoder"));
+        assert_eq!(global_settings_path(ConfigScope::Project, root), None);
+        assert_eq!(
+            QoderVendor.settings_config_path(Path::new("/w"), ConfigScope::Project),
+            None
+        );
+    }
+
+    /// `QODER_CONFIG_DIR` moves the file with the root, and an unresolved root
+    /// has none: the workspace stand-in MCP falls back to is a tracked file.
+    #[test]
+    fn settings_path_at_global_scope_follows_the_config_dir() {
+        let home = || Some(PathBuf::from("/home/u"));
+        assert_eq!(
+            global_settings_path(
+                ConfigScope::Global,
+                qoder_root(Some(PathBuf::from("/custom/q")), home())
+            ),
+            Some(PathBuf::from("/custom/q/settings.json"))
+        );
+        assert_eq!(
+            global_settings_path(ConfigScope::Global, qoder_root(None, home())),
+            Some(PathBuf::from("/home/u/.qoder/settings.json"))
+        );
+        assert_eq!(global_settings_path(ConfigScope::Global, qoder_root(None, None)), None);
+    }
+
+    /// One file, one root resolution: hooks splice into what settings edit.
+    #[test]
+    fn settings_share_the_global_hook_file() {
+        let w = Path::new("/w");
+        let settings = QoderVendor.settings_config_path(w, ConfigScope::Global);
+        assert!(settings.as_ref().is_some_and(|file| file.ends_with("settings.json")));
+        assert_eq!(settings, QoderVendor.hook_config_path(w, ConfigScope::Global));
+    }
+
+    #[test]
+    fn settings_format_is_json() {
+        assert_eq!(
+            QoderVendor.settings_config_format(),
+            crate::install::vendor::McpConfigFormat::Json
+        );
     }
 }

@@ -567,6 +567,92 @@ pub enum McpConfigFormat {
     Toml,
 }
 
+/// How a settings key merges into a harness file, and so what grim owns of it.
+///
+/// A row's class decides whether its records carry an element, so changing it
+/// is a layout move under the stability contract: a state migration, or the
+/// row re-added under a new pointer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeClass {
+    /// A container reached by recursion: no piece of its own, created when
+    /// missing and pruned when left empty.
+    #[expect(dead_code, reason = "a container is reached by recursion, so no row names it")]
+    Object,
+    /// A string array owned element by element.
+    Set,
+    /// A named entry of an object, owned and compared whole.
+    Map,
+    /// One value owned whole, ordered lists and atomic objects included.
+    Scalar,
+    /// A whole file grim writes and deletes.
+    OwnFile,
+}
+
+/// The scopes a settings key applies at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsScopes {
+    /// Project and global.
+    Both,
+    /// Global only: the key has no effect in a project file.
+    GlobalOnly,
+}
+
+/// The value a settings key accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsValueType {
+    /// A boolean.
+    Bool,
+    /// Any string.
+    String,
+    /// One of a closed set of strings.
+    Enum(&'static [&'static str]),
+    /// An array of strings.
+    StringList,
+    /// Any one of the listed types.
+    OneOf(&'static [SettingsValueType]),
+    /// An object replaced whole. Its first level is closed to `keys`; inner
+    /// values are checked for `null` and floats only.
+    Atomic { keys: &'static [&'static str] },
+    /// An object replaced whole. Its keys are free; every value is one of a
+    /// closed set of strings.
+    EnumMap(&'static [&'static str]),
+}
+
+/// One row of a vendor's settings key list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettingsField {
+    /// The RFC 6901 pointer of the key; an angle-bracketed segment such as
+    /// `<name>` marks a map key.
+    pub pointer: &'static str,
+    /// The accepted value.
+    pub ty: SettingsValueType,
+    /// How the key merges.
+    pub merge: MergeClass,
+    /// The scopes the key applies at.
+    pub scopes: SettingsScopes,
+    /// The map keys accepted, when the vendor closes that set.
+    pub map_keys: Option<&'static [&'static str]>,
+    /// The values accepted at project scope, when narrower than `ty`.
+    pub project_values: Option<&'static [&'static str]>,
+    /// The harness needs this pointer, so grim never removes it.
+    pub required_by_client: bool,
+}
+
+impl SettingsField {
+    /// A row with no narrowed value and no required pointer, which is most of them.
+    pub const fn new(pointer: &'static str, ty: SettingsValueType, merge: MergeClass, scopes: SettingsScopes) -> Self {
+        Self {
+            pointer,
+            ty,
+            merge,
+            scopes,
+            map_keys: None,
+            project_values: None,
+            required_by_client: false,
+        }
+    }
+}
+
 /// One row of a vendor registry: the namespaced field name (the part
 /// after `<vendor>.`), the native frontmatter key it lifts to, and its
 /// native type.
@@ -1182,6 +1268,25 @@ pub trait Vendor {
         McpConfigFormat::Json
     }
 
+    /// Every settings key this vendor accepts, as data. Empty means the client
+    /// hosts no settings, which `client_supports_kind` answers from here rather
+    /// than from [`Self::kind_support`], whose `Native` default says yes to all.
+    fn settings_fields(&self) -> &'static [SettingsField] {
+        &[]
+    }
+
+    /// The vendor's native settings file for `scope`, or `None` when it has no
+    /// file there. Default: no file.
+    fn settings_config_path(&self, _workspace: &Path, _scope: ConfigScope) -> Option<PathBuf> {
+        None
+    }
+
+    /// The format of the [`Self::settings_config_path`] file, which picks the
+    /// splice engine. Independent of [`Self::mcp_config_format`].
+    fn settings_config_format(&self) -> McpConfigFormat {
+        McpConfigFormat::Json
+    }
+
     /// Render the vendor-native MCP config entry for `descriptor` as a
     /// `(pointer, value)` pair — the two-level JSON pointer of the managed
     /// member inside [`Self::mcp_config_path`]'s file (e.g.
@@ -1689,6 +1794,693 @@ mod tests {
         }
     }
 
+    /// The clients that list settings keys, sorted; every other client
+    /// declines the kind outright.
+    const SETTINGS_HOSTS: [&str; 13] = [
+        "amp",
+        "antigravity",
+        "claude",
+        "codex",
+        "copilot",
+        "cursor",
+        "droid",
+        "gemini",
+        "kilo",
+        "kiro",
+        "opencode",
+        "qoder",
+        "warp",
+    ];
+
+    /// `Settings` is limited to [`SETTINGS_HOSTS`] and carries no scope gap:
+    /// `kind_surface` stays `true` at both scopes for every client, and the
+    /// narrowing is the key list. The project-scope answer is the file path's.
+    #[test]
+    fn settings_is_a_listed_vendor_kind_with_no_scope_gap() {
+        use crate::install::client_target::ClientTarget;
+
+        let mut hosts: Vec<&str> = Vec::new();
+        for client in ClientTarget::ALL {
+            let vendor = client.vendor();
+            if !vendor.settings_fields().is_empty() {
+                hosts.push(vendor.name());
+            }
+            for scope in [ConfigScope::Project, ConfigScope::Global] {
+                assert!(
+                    vendor.kind_surface(ArtifactKind::Settings, scope),
+                    "{client} kind_surface(Settings, {scope:?})"
+                );
+            }
+            assert!(
+                !SCOPE_GAPS
+                    .iter()
+                    .any(|(c, k, _)| *c == vendor.name() && *k == ArtifactKind::Settings),
+                "{client}: a settings scope gap belongs in the key list or the path, not SCOPE_GAPS"
+            );
+        }
+        let mut sorted = hosts.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, SETTINGS_HOSTS);
+    }
+
+    /// Appendix A in full: `(vendor, pointer, class)`. A class change is a
+    /// layout move under the stability contract, so a row cannot change class
+    /// without this table changing, and the table is written from the spec.
+    const SETTINGS_GOLDEN: &[(&str, &str, MergeClass)] = &[
+        ("claude", "/model", MergeClass::Scalar),
+        ("claude", "/effortLevel", MergeClass::Scalar),
+        ("claude", "/outputStyle", MergeClass::Scalar),
+        ("claude", "/language", MergeClass::Scalar),
+        ("claude", "/spinnerTipsEnabled", MergeClass::Scalar),
+        ("claude", "/alwaysThinkingEnabled", MergeClass::Scalar),
+        ("claude", "/includeGitInstructions", MergeClass::Scalar),
+        ("claude", "/permissions/allow", MergeClass::Set),
+        ("claude", "/permissions/deny", MergeClass::Set),
+        ("claude", "/permissions/ask", MergeClass::Set),
+        ("claude", "/permissions/defaultMode", MergeClass::Scalar),
+        ("claude", "/sandbox/enabled", MergeClass::Scalar),
+        ("claude", "/extraKnownMarketplaces/<name>", MergeClass::Map),
+        ("claude", "/theme", MergeClass::Scalar),
+        ("claude", "/editorMode", MergeClass::Scalar),
+        ("claude", "/tui", MergeClass::Scalar),
+        ("claude", "/attribution/commit", MergeClass::Scalar),
+        ("claude", "/attribution/pr", MergeClass::Scalar),
+        ("claude", "/attribution/sessionUrl", MergeClass::Scalar),
+        ("claude", "/sandbox/filesystem/allowWrite", MergeClass::Set),
+        ("claude", "/sandbox/filesystem/denyWrite", MergeClass::Set),
+        ("claude", "/sandbox/filesystem/denyRead", MergeClass::Set),
+        ("claude", "/sandbox/filesystem/allowRead", MergeClass::Set),
+        ("codex", "/model", MergeClass::Scalar),
+        ("codex", "/model_reasoning_effort", MergeClass::Scalar),
+        ("codex", "/approval_policy", MergeClass::Scalar),
+        ("codex", "/sandbox_mode", MergeClass::Scalar),
+        ("codex", "/sandbox_workspace_write/network_access", MergeClass::Scalar),
+        ("codex", "/sandbox_workspace_write/writable_roots", MergeClass::Set),
+        (
+            "codex",
+            "/sandbox_workspace_write/exclude_slash_tmp",
+            MergeClass::Scalar,
+        ),
+        (
+            "codex",
+            "/sandbox_workspace_write/exclude_tmpdir_env_var",
+            MergeClass::Scalar,
+        ),
+        ("codex", "/default_permissions", MergeClass::Scalar),
+        ("codex", "/permissions/<name>", MergeClass::Map),
+        ("codex", "/tui/alternate_screen", MergeClass::Scalar),
+        ("codex", "/tui/animations", MergeClass::Scalar),
+        ("codex", "/tui/auto_recap", MergeClass::Scalar),
+        ("codex", "/tui/raw_output_mode", MergeClass::Scalar),
+        ("codex", "/history/persistence", MergeClass::Scalar),
+        ("codex", "/hide_agent_reasoning", MergeClass::Scalar),
+        ("codex", "/marketplaces/<name>", MergeClass::Map),
+        ("codex", "rules", MergeClass::OwnFile),
+        ("codex", "/file_opener", MergeClass::Scalar),
+        ("codex", "/tui/notification_method", MergeClass::Scalar),
+        ("codex", "/tui/notification_condition", MergeClass::Scalar),
+        ("codex", "/web_search", MergeClass::Scalar),
+        ("copilot", "/model", MergeClass::Scalar),
+        ("copilot", "/effortLevel", MergeClass::Scalar),
+        ("copilot", "/theme", MergeClass::Scalar),
+        ("copilot", "/defaultMode", MergeClass::Scalar),
+        ("copilot", "/defaultPermissionMode", MergeClass::Scalar),
+        (
+            "copilot",
+            "/permissions/disableBypassPermissionsMode",
+            MergeClass::Scalar,
+        ),
+        ("copilot", "/allowedUrls", MergeClass::Set),
+        ("copilot", "/deniedUrls", MergeClass::Set),
+        ("copilot", "/disabledMcpServers", MergeClass::Set),
+        ("copilot", "/disabledSkills", MergeClass::Set),
+        ("copilot", "/askUser", MergeClass::Scalar),
+        ("copilot", "/includeCoAuthoredBy", MergeClass::Scalar),
+        ("copilot", "/respectGitignore", MergeClass::Scalar),
+        ("copilot", "/renderMarkdown", MergeClass::Scalar),
+        ("copilot", "/stream", MergeClass::Scalar),
+        ("copilot", "/transcriptView", MergeClass::Scalar),
+        ("copilot", "/mergeStrategy", MergeClass::Scalar),
+        ("copilot", "/sandbox/enabled", MergeClass::Scalar),
+        ("copilot", "/extraKnownMarketplaces/<name>", MergeClass::Map),
+        ("copilot", "/editorMode", MergeClass::Scalar),
+        ("copilot", "/autoTier", MergeClass::Scalar),
+        ("copilot", "/banner", MergeClass::Scalar),
+        ("copilot", "/keepAlive", MergeClass::Scalar),
+        ("copilot", "/worktreeBaseRef", MergeClass::Scalar),
+        ("copilot", "/autoUpdatesChannel", MergeClass::Scalar),
+        ("copilot", "/logLevel", MergeClass::Scalar),
+        ("copilot", "/stayInAutopilot", MergeClass::Scalar),
+        ("copilot", "/continueOnAutoMode", MergeClass::Scalar),
+        ("copilot", "/showReasoning", MergeClass::Scalar),
+        ("copilot", "/experimental", MergeClass::Scalar),
+        ("copilot", "/toolSearch", MergeClass::Scalar),
+        ("copilot", "/connectors", MergeClass::Scalar),
+        ("copilot", "/customAgents/defaultLocalOnly", MergeClass::Scalar),
+        ("copilot", "/autoUpdate", MergeClass::Scalar),
+        ("copilot", "/beep", MergeClass::Scalar),
+        ("copilot", "/beepOnSchedule", MergeClass::Scalar),
+        ("copilot", "/compactPaste", MergeClass::Scalar),
+        ("copilot", "/copyOnSelect", MergeClass::Scalar),
+        ("copilot", "/inlineImages", MergeClass::Scalar),
+        ("copilot", "/mouse", MergeClass::Scalar),
+        ("copilot", "/pinnedPrompts", MergeClass::Scalar),
+        ("copilot", "/renderHexColors", MergeClass::Scalar),
+        ("copilot", "/screenReader", MergeClass::Scalar),
+        ("copilot", "/scrollbar", MergeClass::Scalar),
+        ("copilot", "/shellShortcut", MergeClass::Scalar),
+        ("copilot", "/showTimestamps", MergeClass::Scalar),
+        ("copilot", "/showTipsOnStartup", MergeClass::Scalar),
+        ("copilot", "/sidebar", MergeClass::Scalar),
+        ("copilot", "/streamerMode", MergeClass::Scalar),
+        ("copilot", "/terminalNotifications", MergeClass::Scalar),
+        ("copilot", "/terminalProgress", MergeClass::Scalar),
+        ("copilot", "/updateTerminalTitle", MergeClass::Scalar),
+        ("copilot", "/taskbarPresence", MergeClass::Scalar),
+        ("copilot", "/ide/autoConnect", MergeClass::Scalar),
+        ("copilot", "/ide/openDiffOnEdit", MergeClass::Scalar),
+        ("copilot", "/dynamicRetrieval/skills", MergeClass::Scalar),
+        ("copilot", "/tabs/enabled", MergeClass::Scalar),
+        (
+            "copilot",
+            "/subagents/agents/rubber-duck/autoInvoke",
+            MergeClass::Scalar,
+        ),
+        ("copilot", "/subagents/disabledSubagents", MergeClass::Set),
+        ("copilot", "/enabledMcpServers", MergeClass::Set),
+        ("copilot", "/sandbox/allowBypass", MergeClass::Scalar),
+        ("cursor", "/permissions/allow", MergeClass::Set),
+        ("cursor", "/permissions/deny", MergeClass::Set),
+        ("cursor", "/approvalMode", MergeClass::Scalar),
+        ("cursor", "/sandbox/readBoundary", MergeClass::Scalar),
+        ("cursor", "/editor/vimMode", MergeClass::Scalar),
+        ("cursor", "/notifications", MergeClass::Scalar),
+        ("cursor", "/hints", MergeClass::Scalar),
+        ("cursor", "/rewind", MergeClass::Scalar),
+        ("cursor", "/suggestNextPrompt", MergeClass::Scalar),
+        ("cursor", "/maxMode", MergeClass::Scalar),
+        ("cursor", "/display/showLineNumbers", MergeClass::Scalar),
+        ("cursor", "/display/showThinkingBlocks", MergeClass::Scalar),
+        ("cursor", "/display/showStatusIndicators", MergeClass::Scalar),
+        ("cursor", "/display/showStatusLineRunningTime", MergeClass::Scalar),
+        ("cursor", "/attribution/attributeCommitsToAgent", MergeClass::Scalar),
+        ("cursor", "/attribution/attributePRsToAgent", MergeClass::Scalar),
+        ("opencode", "/model", MergeClass::Scalar),
+        ("opencode", "/small_model", MergeClass::Scalar),
+        ("opencode", "/default_agent", MergeClass::Scalar),
+        ("opencode", "/autoupdate", MergeClass::Scalar),
+        ("opencode", "/snapshot", MergeClass::Scalar),
+        ("opencode", "/compaction/auto", MergeClass::Scalar),
+        ("opencode", "/compaction/prune", MergeClass::Scalar),
+        ("opencode", "/permission", MergeClass::Scalar),
+        ("opencode", "/permission/<tool>", MergeClass::Map),
+        ("opencode", "/share", MergeClass::Scalar),
+        ("qoder", "/model/name", MergeClass::Scalar),
+        ("qoder", "/general/defaultPermissionMode", MergeClass::Scalar),
+        ("qoder", "/general/vimMode", MergeClass::Scalar),
+        ("qoder", "/general/enableAutoUpdate", MergeClass::Scalar),
+        ("qoder", "/general/enableNotifications", MergeClass::Scalar),
+        ("qoder", "/output/format", MergeClass::Scalar),
+        ("qoder", "/ui/theme", MergeClass::Scalar),
+        ("qoder", "/ui/hideTips", MergeClass::Scalar),
+        ("qoder", "/ui/hideBanner", MergeClass::Scalar),
+        ("qoder", "/ui/showLineNumbers", MergeClass::Scalar),
+        ("qoder", "/ui/compactToolOutput", MergeClass::Scalar),
+        ("qoder", "/permissions/allow", MergeClass::Set),
+        ("qoder", "/permissions/ask", MergeClass::Set),
+        ("qoder", "/permissions/deny", MergeClass::Set),
+        ("qoder", "/security/disableYoloMode", MergeClass::Scalar),
+        ("qoder", "/model/reasoningEffort", MergeClass::Scalar),
+        ("antigravity", "/agentMode", MergeClass::Scalar),
+        ("antigravity", "/toolPermission", MergeClass::Scalar),
+        ("antigravity", "/artifactReviewPolicy", MergeClass::Scalar),
+        ("antigravity", "/allowNonWorkspaceAccess", MergeClass::Scalar),
+        ("antigravity", "/enableTerminalSandbox", MergeClass::Scalar),
+        ("antigravity", "/permissions/allow", MergeClass::Set),
+        ("antigravity", "/permissions/ask", MergeClass::Set),
+        ("antigravity", "/permissions/deny", MergeClass::Set),
+        ("antigravity", "/model", MergeClass::Scalar),
+        ("antigravity", "/verbosity", MergeClass::Scalar),
+        ("antigravity", "/queuedMessages", MergeClass::Scalar),
+        ("antigravity", "/notifications", MergeClass::Scalar),
+        ("antigravity", "/colorScheme", MergeClass::Scalar),
+        ("antigravity", "/altScreenMode", MergeClass::Scalar),
+        ("antigravity", "/editorMode", MergeClass::Scalar),
+        ("antigravity", "/vimInsertFirst", MergeClass::Scalar),
+        ("antigravity", "/runningLightSpeed", MergeClass::Scalar),
+        ("antigravity", "/pickerGrouping", MergeClass::Scalar),
+        ("antigravity", "/showTips", MergeClass::Scalar),
+        ("antigravity", "/showFeedbackSurvey", MergeClass::Scalar),
+        ("antigravity", "/hideActiveItems", MergeClass::Scalar),
+        ("antigravity", "/copyOnSelect", MergeClass::Scalar),
+        ("antigravity", "/clearScrollbackOnResize", MergeClass::Scalar),
+        ("antigravity", "/useTerminalCursor", MergeClass::Scalar),
+        ("antigravity", "/disableSlashCommands", MergeClass::Scalar),
+        ("amp", "/amp.showCosts", MergeClass::Scalar),
+        ("amp", "/amp.notifications.enabled", MergeClass::Scalar),
+        ("amp", "/amp.terminal.copyOnSelect", MergeClass::Scalar),
+        ("amp", "/amp.terminal.detailsExpandedByDefault", MergeClass::Scalar),
+        ("amp", "/amp.thread.autoArchiveOnQuit", MergeClass::Scalar),
+        ("amp", "/amp.updates.mode", MergeClass::Scalar),
+        ("amp", "/amp.git.commit.ampThread.enabled", MergeClass::Scalar),
+        ("amp", "/amp.git.commit.coauthor.enabled", MergeClass::Scalar),
+        ("droid", "/sessionDefaultSettings/autonomyLevel", MergeClass::Scalar),
+        ("droid", "/sessionDefaultSettings/interactionMode", MergeClass::Scalar),
+        ("droid", "/sessionDefaultSettings/model", MergeClass::Scalar),
+        ("droid", "/sessionDefaultSettings/reasoningEffort", MergeClass::Scalar),
+        ("droid", "/outputStyle", MergeClass::Scalar),
+        ("droid", "/diffMode", MergeClass::Scalar),
+        ("droid", "/soundFocusMode", MergeClass::Scalar),
+        ("droid", "/completionSoundFocusMode", MergeClass::Scalar),
+        ("droid", "/awaitingInputSoundFocusMode", MergeClass::Scalar),
+        ("droid", "/toolResultDisplay", MergeClass::Scalar),
+        ("droid", "/logoAnimation", MergeClass::Scalar),
+        ("droid", "/subagentAutonomyLevel", MergeClass::Scalar),
+        ("droid", "/includeCoAuthoredByDroid", MergeClass::Scalar),
+        ("droid", "/enableDroidShield", MergeClass::Scalar),
+        ("droid", "/ideAutoConnect", MergeClass::Scalar),
+        ("droid", "/showThinkingInMainView", MergeClass::Scalar),
+        ("droid", "/streamAssistantResponses", MergeClass::Scalar),
+        ("droid", "/vimMode", MergeClass::Scalar),
+        ("droid", "/blockOnMcpLoad", MergeClass::Scalar),
+        ("droid", "/showTokenUsageIndicator", MergeClass::Scalar),
+        ("droid", "/overrideTerminalColors", MergeClass::Scalar),
+        ("droid", "/nerdFont", MergeClass::Scalar),
+        ("droid", "/disabledSkills", MergeClass::Set),
+        ("droid", "/sandbox/enabled", MergeClass::Scalar),
+        ("droid", "/sandbox/mode", MergeClass::Scalar),
+        ("droid", "/sandbox/filesystem/denyRead", MergeClass::Set),
+        ("droid", "/sandbox/filesystem/denyWrite", MergeClass::Set),
+        ("droid", "/sandbox/filesystem/allowWrite", MergeClass::Set),
+        ("droid", "/sandbox/network/allowedDomains", MergeClass::Set),
+        ("droid", "/extraKnownMarketplaces/<name>", MergeClass::Map),
+        ("kilo", "/model", MergeClass::Scalar),
+        ("kilo", "/small_model", MergeClass::Scalar),
+        ("kilo", "/default_agent", MergeClass::Scalar),
+        ("kilo", "/reasoning_display", MergeClass::Scalar),
+        ("kilo", "/terminal_command_display", MergeClass::Scalar),
+        ("kilo", "/code_edit_display", MergeClass::Scalar),
+        ("kilo", "/web_search", MergeClass::Scalar),
+        ("kilo", "/hide_prompt_training_models", MergeClass::Scalar),
+        ("kilo", "/privacy_mode", MergeClass::Scalar),
+        ("kiro", "/chat.defaultModel", MergeClass::Scalar),
+        ("kiro", "/chat.defaultAgent", MergeClass::Scalar),
+        ("kiro", "/chat.outputStyle", MergeClass::Scalar),
+        ("kiro", "/chat.agentEngine", MergeClass::Scalar),
+        ("kiro", "/acp.agentEngine", MergeClass::Scalar),
+        ("kiro", "/chat.notificationMethod", MergeClass::Scalar),
+        ("kiro", "/chat.historyMode", MergeClass::Scalar),
+        ("kiro", "/chat.screenReader", MergeClass::Scalar),
+        ("kiro", "/chat.workflowLaunch", MergeClass::Scalar),
+        ("kiro", "/chat.sessionDashboard.scope", MergeClass::Scalar),
+        ("kiro", "/chat.disableGranularTrust", MergeClass::Scalar),
+        ("kiro", "/chat.enableNotifications", MergeClass::Scalar),
+        ("kiro", "/chat.greeting.enabled", MergeClass::Scalar),
+        ("kiro", "/chat.disableWrap", MergeClass::Scalar),
+        ("kiro", "/chat.disableAutoCompaction", MergeClass::Scalar),
+        ("kiro", "/chat.enablePromptHints", MergeClass::Scalar),
+        ("kiro", "/chat.autoExpandToolOutput", MergeClass::Scalar),
+        ("kiro", "/chat.sessionDashboard.indexResponses", MergeClass::Scalar),
+        ("kiro", "/chat.allowAnimations", MergeClass::Scalar),
+        ("kiro", "/chat.allowAsciiArt", MergeClass::Scalar),
+        ("kiro", "/chat.allowIcons", MergeClass::Scalar),
+        ("kiro", "/chat.preserveScrollback", MergeClass::Scalar),
+        ("kiro", "/chat.terminalTitle", MergeClass::Scalar),
+        ("kiro", "/chat.showThinking", MergeClass::Scalar),
+        ("kiro", "/chat.enableKnowledge", MergeClass::Scalar),
+        ("kiro", "/chat.enableCodeIntelligence", MergeClass::Scalar),
+        ("kiro", "/chat.enableThinking", MergeClass::Scalar),
+        ("kiro", "/chat.enableWorkflows", MergeClass::Scalar),
+        ("kiro", "/toolSearch.enabled", MergeClass::Scalar),
+        ("kiro", "/chat.enableAutoAgentUpgrade", MergeClass::Scalar),
+        ("kiro", "/app.disableAutoupdates", MergeClass::Scalar),
+        ("kiro", "/app.warnOnElevatedPrivileges", MergeClass::Scalar),
+        ("kiro", "/knowledge.defaultIncludePatterns", MergeClass::Set),
+        ("kiro", "/knowledge.defaultExcludePatterns", MergeClass::Set),
+        ("gemini", "/general/defaultApprovalMode", MergeClass::Scalar),
+        ("gemini", "/general/notificationMethod", MergeClass::Scalar),
+        ("gemini", "/general/preferredEditor", MergeClass::Scalar),
+        ("gemini", "/general/vimMode", MergeClass::Scalar),
+        ("gemini", "/general/enableNotifications", MergeClass::Scalar),
+        ("gemini", "/general/checkpointing/enabled", MergeClass::Scalar),
+        ("gemini", "/general/plan/enabled", MergeClass::Scalar),
+        ("gemini", "/general/enableAutoUpdate", MergeClass::Scalar),
+        ("gemini", "/general/enableAutoUpdateNotification", MergeClass::Scalar),
+        ("gemini", "/model/name", MergeClass::Scalar),
+        ("gemini", "/output/format", MergeClass::Scalar),
+        ("gemini", "/ui/inlineThinkingMode", MergeClass::Scalar),
+        ("gemini", "/ui/loadingPhrases", MergeClass::Scalar),
+        ("gemini", "/ui/errorVerbosity", MergeClass::Scalar),
+        ("gemini", "/ui/hideTips", MergeClass::Scalar),
+        ("gemini", "/ui/hideBanner", MergeClass::Scalar),
+        ("gemini", "/ui/showLineNumbers", MergeClass::Scalar),
+        ("gemini", "/ui/compactToolOutput", MergeClass::Scalar),
+        ("gemini", "/tools/allowed", MergeClass::Set),
+        ("gemini", "/tools/confirmationRequired", MergeClass::Set),
+        ("gemini", "/tools/sandboxAllowedPaths", MergeClass::Set),
+        ("gemini", "/tools/exclude", MergeClass::Set),
+        ("gemini", "/tools/sandboxNetworkAccess", MergeClass::Scalar),
+        (
+            "gemini",
+            "/tools/shell/backgroundCompletionBehavior",
+            MergeClass::Scalar,
+        ),
+        ("gemini", "/security/toolSandboxing", MergeClass::Scalar),
+        ("gemini", "/security/disableYoloMode", MergeClass::Scalar),
+        ("gemini", "/security/disableAlwaysAllow", MergeClass::Scalar),
+        ("gemini", "/security/enablePermanentToolApproval", MergeClass::Scalar),
+        ("gemini", "/security/autoAddToPolicyByDefault", MergeClass::Scalar),
+        ("gemini", "/security/blockGitExtensions", MergeClass::Scalar),
+        ("gemini", "/skills/disabled", MergeClass::Set),
+        ("gemini", "/context/fileFiltering/respectGitIgnore", MergeClass::Scalar),
+        (
+            "gemini",
+            "/context/fileFiltering/respectGeminiIgnore",
+            MergeClass::Scalar,
+        ),
+        (
+            "warp",
+            "/agents/warp_agent/other/thinking_display_mode",
+            MergeClass::Scalar,
+        ),
+        (
+            "warp",
+            "/agents/warp_agent/other/open_conversation_layout_preference",
+            MergeClass::Scalar,
+        ),
+        (
+            "warp",
+            "/agents/warp_agent/other/long_running_command_submission_mode",
+            MergeClass::Scalar,
+        ),
+        (
+            "warp",
+            "/agents/warp_agent/other/orchestration_message_display_mode",
+            MergeClass::Scalar,
+        ),
+        (
+            "warp",
+            "/agents/warp_agent/other/default_prompt_submission_mode",
+            MergeClass::Scalar,
+        ),
+        ("warp", "/general/default_session_mode", MergeClass::Scalar),
+        (
+            "warp",
+            "/agents/warp_agent/other/auto_approve_bypasses_command_denylist",
+            MergeClass::Scalar,
+        ),
+        (
+            "warp",
+            "/agents/warp_agent/other/cloud_agent_computer_use_enabled",
+            MergeClass::Scalar,
+        ),
+        ("warp", "/agents/mcp_servers/file_based_mcp_enabled", MergeClass::Scalar),
+        (
+            "warp",
+            "/agents/warp_agent/other/agent_attribution_enabled",
+            MergeClass::Scalar,
+        ),
+        (
+            "warp",
+            "/agents/warp_agent/other/show_agent_notifications",
+            MergeClass::Scalar,
+        ),
+        (
+            "warp",
+            "/agents/warp_agent/other/show_conversation_history",
+            MergeClass::Scalar,
+        ),
+        (
+            "warp",
+            "/agents/warp_agent/other/should_show_oz_updates_in_zero_state",
+            MergeClass::Scalar,
+        ),
+        (
+            "warp",
+            "/agents/warp_agent/other/should_render_use_agent_toolbar_for_user_commands",
+            MergeClass::Scalar,
+        ),
+        ("warp", "/agents/warp_agent/is_any_ai_enabled", MergeClass::Scalar),
+        ("warp", "/agents/warp_agent/active_ai/enabled", MergeClass::Scalar),
+        (
+            "warp",
+            "/agents/warp_agent/active_ai/code_suggestions_enabled",
+            MergeClass::Scalar,
+        ),
+        (
+            "warp",
+            "/agents/warp_agent/active_ai/intelligent_autosuggestions_enabled",
+            MergeClass::Scalar,
+        ),
+        (
+            "warp",
+            "/agents/warp_agent/active_ai/agent_mode_query_suggestions_enabled",
+            MergeClass::Scalar,
+        ),
+        (
+            "warp",
+            "/agents/warp_agent/active_ai/git_operations_autogen_enabled",
+            MergeClass::Scalar,
+        ),
+        (
+            "warp",
+            "/agents/warp_agent/active_ai/rule_suggestions_enabled",
+            MergeClass::Scalar,
+        ),
+        (
+            "warp",
+            "/agents/warp_agent/active_ai/shared_block_title_generation_enabled",
+            MergeClass::Scalar,
+        ),
+        (
+            "warp",
+            "/agents/warp_agent/input/ai_auto_detection_enabled",
+            MergeClass::Scalar,
+        ),
+        (
+            "warp",
+            "/agents/warp_agent/input/nld_in_terminal_enabled",
+            MergeClass::Scalar,
+        ),
+        (
+            "warp",
+            "/agents/warp_agent/input/show_model_selectors_in_prompt",
+            MergeClass::Scalar,
+        ),
+        ("warp", "/agents/warp_agent/input/show_agent_tips", MergeClass::Scalar),
+        (
+            "warp",
+            "/agents/warp_agent/input/include_agent_commands_in_history",
+            MergeClass::Scalar,
+        ),
+        ("warp", "/agents/knowledge/rules_enabled", MergeClass::Scalar),
+        (
+            "warp",
+            "/agents/knowledge/warp_drive_context_enabled",
+            MergeClass::Scalar,
+        ),
+    ];
+
+    fn settings_rows_of(name: &str) -> &'static [SettingsField] {
+        use crate::install::client_target::ClientTarget;
+        ClientTarget::ALL
+            .iter()
+            .map(|c| c.vendor())
+            .find(|v| v.name() == name)
+            .map(|v| v.settings_fields())
+            .unwrap_or_else(|| panic!("no vendor {name}"))
+    }
+
+    #[test]
+    fn the_thirteen_tables_hold_316_rows() {
+        let total: usize = SETTINGS_HOSTS.iter().map(|n| settings_rows_of(n).len()).sum();
+        assert_eq!(total, 316);
+        assert_eq!(SETTINGS_GOLDEN.len(), 316);
+    }
+
+    /// The per-harness field table on `settings.md` lists exactly the
+    /// `(vendor, pointer)` pairs `settings_fields()` declares, both ways. It
+    /// reads the table rows, since a lowercase-token filter misses a key like
+    /// `/permissions/allow`.
+    #[test]
+    fn settings_docs_table_matches_registry() {
+        use std::collections::BTreeSet;
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/content/docs/settings.md");
+        let doc =
+            std::fs::read_to_string(path).expect("docs/src/content/docs/settings.md exists (doc/registry parity)");
+        let mut documented = BTreeSet::new();
+        for line in doc.lines().map(str::trim).filter(|l| l.starts_with('|')) {
+            let cells: Vec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
+            let [vendor, pointer, ..] = cells.as_slice() else {
+                continue;
+            };
+            let vendor = vendor.trim_matches('`').to_ascii_lowercase();
+            if !SETTINGS_HOSTS.contains(&vendor.as_str()) {
+                continue;
+            }
+            if let Some(p) = pointer.strip_prefix('`').and_then(|p| p.strip_suffix('`'))
+                && !p.contains('`')
+            {
+                documented.insert((vendor, p.to_string()));
+            }
+        }
+        let registry: BTreeSet<(String, String)> = SETTINGS_HOSTS
+            .iter()
+            .flat_map(|n| {
+                settings_rows_of(n)
+                    .iter()
+                    .map(move |f| (n.to_string(), f.pointer.to_string()))
+            })
+            .collect();
+        let missing: Vec<_> = registry.difference(&documented).collect();
+        let extra: Vec<_> = documented.difference(&registry).collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "settings.md field table drifted: missing from the page {missing:?}, not in the registry {extra:?}"
+        );
+        assert_eq!(
+            documented.len(),
+            316,
+            "settings.md field table holds one row per registry key"
+        );
+    }
+
+    #[test]
+    fn every_settings_row_keeps_its_pointer_and_class() {
+        for name in SETTINGS_HOSTS {
+            let actual: Vec<(&str, MergeClass)> = settings_rows_of(name).iter().map(|f| (f.pointer, f.merge)).collect();
+            let golden: Vec<(&str, MergeClass)> = SETTINGS_GOLDEN
+                .iter()
+                .filter(|(v, _, _)| *v == name)
+                .map(|(_, p, c)| (*p, *c))
+                .collect();
+            assert_eq!(actual, golden, "{name}");
+        }
+    }
+
+    /// Top-level keys another artifact kind owns (hooks, MCP, rules, plugins)
+    /// on every host.
+    const OWNED_BY_ANOTHER_KIND: [&str; 7] = [
+        "claudeMdExcludes",
+        "hooks",
+        "mcpServers",
+        "mcp",
+        "mcp_servers",
+        "instructions",
+        "enabledPlugins",
+    ];
+
+    /// The keys another kind owns in `vendor`'s files: the shared list, plus the
+    /// top-level key its MCP entry and its hook splice sit under.
+    fn keys_another_kind_owns(vendor: &dyn Vendor) -> Vec<String> {
+        let probe = crate::oci::mcp::McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"",
+        )
+        .unwrap();
+        let mut owned: Vec<String> = OWNED_BY_ANOTHER_KIND.iter().map(|key| key.to_string()).collect();
+        for scope in [ConfigScope::Project, ConfigScope::Global] {
+            if let Some((pointer, _)) = vendor.mcp_entry(scope, "probe", &probe) {
+                owned.extend(pointer.trim_start_matches('/').split('/').next().map(str::to_string));
+            }
+        }
+        owned.extend(vendor.hook_splice_shape().map(|shape| shape.container.to_string()));
+        owned
+    }
+
+    /// Whether settings `pointer` reaches a key in `owned`. A flat dotted key
+    /// (Amp's `amp.mcpServers`) is one segment, so each dotted piece of the
+    /// top-level key is checked against the shared list and each dotted prefix
+    /// against `owned`.
+    fn reaches_owned_key(pointer: &str, owned: &[String]) -> bool {
+        let top = pointer.trim_start_matches('/').split('/').next().unwrap_or("");
+        let pieces: Vec<&str> = top.split('.').collect();
+        pieces.iter().any(|piece| OWNED_BY_ANOTHER_KIND.contains(piece))
+            || (1..=pieces.len()).any(|n| owned.contains(&pieces[..n].join(".")))
+    }
+
+    /// Keys another artifact kind owns are never settings rows, whatever the
+    /// vendor spells them as.
+    #[test]
+    fn no_settings_row_reaches_a_key_another_kind_owns() {
+        use crate::install::client_target::ClientTarget;
+        for vendor in ClientTarget::ALL.iter().map(|c| c.vendor()) {
+            let owned = keys_another_kind_owns(vendor);
+            for field in vendor.settings_fields() {
+                assert!(
+                    !reaches_owned_key(field.pointer, &owned),
+                    "{} {}",
+                    vendor.name(),
+                    field.pointer
+                );
+            }
+        }
+    }
+
+    /// The guard above passes while the tables are clean, so it is only proof
+    /// while it flags the keys it exists for, by each of its two halves.
+    #[test]
+    fn the_owned_key_guard_flags_hook_and_mcp_containers() {
+        use crate::install::client_target::ClientTarget;
+        let owned = |client: ClientTarget| keys_another_kind_owns(client.vendor());
+        assert!(reaches_owned_key("/amp.mcpServers", &owned(ClientTarget::Amp)));
+        assert!(reaches_owned_key("/amp.mcpServers/x", &owned(ClientTarget::Amp)));
+        assert!(reaches_owned_key("/hooks", &owned(ClientTarget::Claude)));
+        assert!(reaches_owned_key("/hooks/PreToolUse", &owned(ClientTarget::Claude)));
+        assert!(reaches_owned_key("/mcp", &owned(ClientTarget::OpenCode)));
+        // A dotted piece naming a shared key, with no host container to match.
+        assert!(reaches_owned_key("/amp.mcpServers", &[]));
+        // A host's own dotted container whose pieces the shared list lacks.
+        assert!(reaches_owned_key("/team.tools.x", &["team.tools".to_string()]));
+        // Positive controls hold only beside a key that passes.
+        assert!(!reaches_owned_key("/amp.mcpServersX", &owned(ClientTarget::Amp)));
+        assert!(!reaches_owned_key("/model", &owned(ClientTarget::Claude)));
+        assert!(!reaches_owned_key("/team.toolsx", &["team.tools".to_string()]));
+    }
+
+    /// The trait arm names the vendor variable itself, which no unit can set:
+    /// the environment is process-wide. Read the arm's source instead, so a
+    /// rename or a swapped variable fails here.
+    #[test]
+    fn each_settings_path_arm_reads_its_own_vendor_variable() {
+        fn arm(source: &'static str) -> &'static str {
+            let start = source.find("fn settings_config_path(&self").expect("trait arm");
+            let rest = &source[start..];
+            &rest[..rest.find("\n    }\n").expect("arm end")]
+        }
+        fn hook_arm(source: &'static str) -> &'static str {
+            let start = source.find("fn hook_config_path(&self").expect("hook arm");
+            let rest = &source[start..];
+            &rest[..rest.find("\n    }\n").expect("arm end")]
+        }
+        assert!(arm(include_str!("vendor_codex.rs")).contains("env_dir(\"CODEX_HOME\")"));
+        assert!(arm(include_str!("vendor_copilot.rs")).contains("env_dir(\"COPILOT_HOME\")"));
+        assert!(arm(include_str!("vendor_cursor.rs")).contains("env_dir(\"CURSOR_CONFIG_DIR\")"));
+        assert!(arm(include_str!("vendor_claude.rs")).contains("global_root(config_dir_override(), home_dir())"));
+        // Qoder's settings arm hands off to the hook arm, which names the variable.
+        let qoder = include_str!("vendor_qoder.rs");
+        assert!(arm(qoder).contains("self.hook_config_path("));
+        assert!(hook_arm(qoder).contains("env_dir(\"QODER_CONFIG_DIR\")"));
+        // OpenCode resolves through the shared config path, which owns the variable.
+        assert!(arm(include_str!("vendor_opencode.rs")).contains("opencode_config::config_path_for_scope("));
+        assert!(include_str!("opencode_config.rs").contains("env_dir(\"OPENCODE_CONFIG\")"));
+        // Amp and Antigravity name no variable: XDG and the home directory.
+        assert!(arm(include_str!("vendor_amp.rs")).contains("amp_root(xdg_config_dir())"));
+        assert!(arm(include_str!("vendor_antigravity.rs")).contains("antigravity_cli_root(home_dir())"));
+        // Droid names no variable and Kilo only XDG's.
+        assert!(arm(include_str!("vendor_droid.rs")).contains("droid_root(home_dir())"));
+        assert!(arm(include_str!("vendor_kilo.rs")).contains("kilo_config_root(xdg_config_dir())"));
+        // Kiro's variable replaces its root, Gemini's the home its root sits in.
+        assert!(arm(include_str!("vendor_kiro.rs")).contains("kiro_root(env_dir(\"KIRO_HOME\"), home_dir())"));
+        assert!(
+            arm(include_str!("vendor_gemini.rs")).contains("gemini_root(env_dir(\"GEMINI_CLI_HOME\"), home_dir())")
+        );
+        // Warp names no variable: the home on macOS, XDG on Linux.
+        assert!(
+            arm(include_str!("vendor_warp.rs"))
+                .contains("settings_root(settings_root_kind(), home_dir(), xdg_config_dir())")
+        );
+    }
+
     #[test]
     fn reserving_a_namespace_never_drops_a_key_silently() {
         use crate::install::client_target::ClientTarget;
@@ -2067,6 +2859,31 @@ mod tests {
                         "{client} hosts no hook, so no tier is honourable at {event}"
                     );
                 }
+            }
+        }
+    }
+
+    /// A vendor opts into settings by listing keys, so one that lists none
+    /// answers the default file and format and gains no surface.
+    #[test]
+    fn a_vendor_listing_no_settings_keys_answers_the_defaults() {
+        use crate::install::client_target::ClientTarget;
+
+        let workspace = Path::new("/nonexistent/ws");
+        let unlisted: Vec<_> = ClientTarget::ALL
+            .into_iter()
+            .filter(|client| client.vendor().settings_fields().is_empty())
+            .collect();
+        assert!(!unlisted.is_empty(), "the check needs a vendor to judge");
+        for client in unlisted {
+            let vendor = client.vendor();
+            assert_eq!(vendor.settings_config_format(), McpConfigFormat::Json, "{client}");
+            for scope in [ConfigScope::Project, ConfigScope::Global] {
+                assert_eq!(
+                    vendor.settings_config_path(workspace, scope),
+                    None,
+                    "{client} at {scope:?}"
+                );
             }
         }
     }

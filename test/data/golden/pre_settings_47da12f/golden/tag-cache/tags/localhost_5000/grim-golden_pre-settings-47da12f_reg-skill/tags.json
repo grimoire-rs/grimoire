@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "registry": "localhost:5000",
+  "repository": "grim-golden/pre-settings-47da12f/reg-skill",
+  "tags": {
+    "1.0.0": "sha256:9f9ab08bc759e57f4b3f98b70ce953819bec42c09a7e195c2bc25df67473c637"
+  }
+}

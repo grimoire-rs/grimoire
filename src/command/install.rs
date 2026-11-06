@@ -16,8 +16,11 @@ use crate::api::install_report::{InstallEntry, InstallReport};
 use crate::cli::exit_code::ExitCode;
 use crate::command::command_error::CommandError;
 use crate::context::Context;
-use crate::install::installer::{ArtifactInstall, InstallIntent, InstallOutcome, install_and_persist};
+use crate::install::installer::{
+    ArtifactInstall, InstallIntent, InstallOutcome, InstallRun, SettingsOutcome, SettingsRun, install_and_persist,
+};
 use crate::install::materializer::DefaultMaterializer;
+use crate::install::settings_phase;
 use crate::install::target::InstallTarget;
 use crate::lock::file_lock::ConfigFileLock;
 use crate::lock::lock_io;
@@ -90,7 +93,7 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
     // downstream seam reads. Deliberately NOT inside `InstallTarget::parse` —
     // that seam is shared with `grim status`, `grim search` and `grim context`,
     // and a prompt there would make a read-only report ask for hook consent.
-    let hook_policy = super::hook_consent::resolve(ctx, &scope, &lock, args.hook_trust.flag())?;
+    let policies = super::hook_consent::resolve(ctx, &scope, &lock, args.hook_trust.flag())?;
     let target = super::grim(InstallTarget::parse(
         &scope.workspace,
         scope.scope,
@@ -98,7 +101,8 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
         &scope.options.clients,
         &scope.options.vendors,
     ))?
-    .with_hook_policy(hook_policy);
+    .with_hook_policy(policies.hooks)
+    .with_settings_policy(policies.settings);
     ctx.telemetry()
         .record_install_clients(&target, &scope.workspace, scope.scope);
     let access = super::access_seam(ctx)?;
@@ -114,7 +118,7 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
     // The shared install pipeline: materialize the whole lock, persist the
     // state, and converge each client's vendor config. `grim add` and the
     // TUI install action funnel through the same seam.
-    let outcomes = super::grim(
+    let run = super::grim(
         install_and_persist(
             &lock,
             &access,
@@ -128,13 +132,14 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
             args.force.into(),
             InstallIntent::Declared,
             progress.as_ref(),
+            SettingsRun::Full(&lock),
         )
         .await,
     )?;
 
-    record_changed(ctx, &outcomes, &scope.set);
+    record_changed(ctx, &run.items, &scope.set);
     let armed = armed_after_convergence(ctx.grim_home(), &scope.workspace, scope.scope);
-    finish(outcomes, &armed)
+    finish(run, &armed)
 }
 
 /// Reports each freshly installed or updated artifact to the usage
@@ -249,7 +254,9 @@ async fn dev_install(
         ArtifactKind::Rule => scope.set.rules.contains_key(&name),
         ArtifactKind::Agent => scope.set.agents.contains_key(&name),
         // Path sources never produce these kinds (shape/--kind gate above).
-        ArtifactKind::Bundle | ArtifactKind::Mcp => unreachable!("dev-install is limited to skill/rule/agent"),
+        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Settings => {
+            unreachable!("dev-install is limited to skill/rule/agent")
+        }
     };
     if already_declared {
         return Err(anyhow::Error::from(crate::error::Error::from(
@@ -315,6 +322,7 @@ async fn dev_install(
     };
     let mut synth = crate::lock::grimoire_lock::GrimoireLock {
         hooks: vec![],
+        settings: vec![],
         metadata: crate::lock::grimoire_lock::LockMetadata {
             lock_version: crate::lock::lock_version::LockVersion::V1,
             declaration_hash_version: crate::config::DECLARATION_HASH_VERSION,
@@ -338,7 +346,9 @@ async fn dev_install(
         ArtifactKind::Rule => synth.rules.push(entry),
         ArtifactKind::Agent => synth.agents.push(entry),
         // Path sources never produce these kinds (shape/--kind gate above).
-        ArtifactKind::Bundle | ArtifactKind::Mcp => unreachable!("dev-install is limited to skill/rule/agent"),
+        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Settings => {
+            unreachable!("dev-install is limited to skill/rule/agent")
+        }
     }
 
     // A dev install's synthetic lock can hold no hook — both `ArtifactKind::Hook`
@@ -346,7 +356,7 @@ async fn dev_install(
     // consent record names nor the digest the lock pins. The policy is still
     // resolved and attached so convergence keeps a hook armed by an earlier
     // `grim install` correctly converged rather than untouched-by-omission.
-    let hook_policy = super::hook_consent::resolve(ctx, scope, &synth, args.hook_trust.flag())?;
+    let policies = super::hook_consent::resolve(ctx, scope, &synth, args.hook_trust.flag())?;
     let target = super::grim(InstallTarget::parse(
         &scope.workspace,
         scope.scope,
@@ -354,13 +364,14 @@ async fn dev_install(
         &scope.options.clients,
         &scope.options.vendors,
     ))?
-    .with_hook_policy(hook_policy);
+    .with_hook_policy(policies.hooks)
+    .with_settings_policy(policies.settings);
     let access = super::access_seam(ctx)?;
     let mut state = super::grim(scope_resolution::load_state(scope).map_err(|e| state_io(&scope.state_path, e)))?;
     let materializer = DefaultMaterializer;
     let progress = crate::cli::progress::select_progress(ctx.progress(), true);
 
-    let outcomes = super::grim(
+    let run = super::grim(
         install_and_persist(
             &synth,
             &access,
@@ -374,12 +385,13 @@ async fn dev_install(
             args.force.into(),
             InstallIntent::Dev,
             progress.as_ref(),
+            SettingsRun::Skip,
         )
         .await,
     )?;
 
     let armed = armed_after_convergence(ctx.grim_home(), &scope.workspace, scope.scope);
-    finish(outcomes, &armed)
+    finish(run, &armed)
 }
 
 /// Wrap an install-state I/O failure as the install-tier `TargetIo` error.
@@ -493,20 +505,25 @@ fn armed_after_convergence(
 }
 
 /// Turn per-artifact outcomes into the report + the worst exit code. A
-/// refusal or a hard error makes the run fail; a clean install/no-op is
-/// success.
+/// refusal or a hard error makes the run fail, carrying `run.settings` to the
+/// JSON error document; a clean install/no-op is success.
 ///
-/// Shared with `grim add`'s install-on-add path (which discards the report
-/// and only propagates the first refusal/error).
+/// Shared with `grim add`'s install-on-add path (which keeps only the report's
+/// change list and propagates the first refusal/error).
 ///
 /// `armed` maps a hook's binding name to the `(client, tier)` pairs the
 /// dispatch table now holds for it, built by [`armed_after_convergence`]. It is
 /// consulted only for `ArtifactKind::Hook`, so every other kind reports `null`
 /// — "the question does not apply" rather than "armed nowhere" (S-002).
 pub(crate) fn finish(
-    outcomes: Vec<ArtifactInstall>,
+    run: InstallRun,
     armed: &std::collections::BTreeMap<String, Vec<crate::api::install_report::ArmedEntry>>,
 ) -> anyhow::Result<(InstallReport, ExitCode)> {
+    let InstallRun {
+        items: outcomes,
+        settings,
+        ..
+    } = run;
     let mut entries = Vec::with_capacity(outcomes.len());
     let mut first_error: Option<crate::error::Error> = None;
 
@@ -521,7 +538,11 @@ pub(crate) fn finish(
             Ok(InstallOutcome::Updated) => InstallStatus::Updated,
             Ok(InstallOutcome::AlreadyInstalled) => InstallStatus::Unchanged,
             Ok(InstallOutcome::Skipped(_)) => InstallStatus::Skipped,
-            Ok(outcome @ (InstallOutcome::Refused { .. } | InstallOutcome::RefusedUntracked { .. })) => {
+            Ok(
+                outcome @ (InstallOutcome::Refused { .. }
+                | InstallOutcome::RefusedUntracked { .. }
+                | InstallOutcome::RefusedSettings { .. }),
+            ) => {
                 if first_error.is_none() {
                     first_error = refusal_error(reference.clone(), outcome);
                 }
@@ -545,11 +566,28 @@ pub(crate) fn finish(
         });
     }
 
-    let report = InstallReport::new(entries);
-    if let Some(err) = first_error {
-        return Err(err.into());
+    // An orphan piece has no lock row, so no row above carried its refusal,
+    // and reading only the rows would exit 0 past a refused value.
+    if first_error.is_none() && !settings.pieces.is_empty() {
+        first_error = Some(settings_refusal(&settings));
     }
-    Ok((report, ExitCode::Success))
+    settings_phase::warn_restart(&settings.changes);
+    if let Some(err) = first_error {
+        return Err(err.with_settings(settings).into());
+    }
+    Ok((
+        InstallReport::new(entries).with_settings_changes(settings.changes),
+        ExitCode::Success,
+    ))
+}
+
+/// The refusal for pieces that belong to no lock row.
+pub(crate) fn settings_refusal(settings: &SettingsOutcome) -> crate::error::Error {
+    use crate::install::install_error::{InstallError, InstallErrorKind};
+
+    crate::error::Error::from(InstallError::without_reference(InstallErrorKind::SettingsRefused {
+        pieces: settings.pieces.clone(),
+    }))
 }
 
 /// Build the integrity error for a refusing [`InstallOutcome`], or `None`
@@ -561,20 +599,35 @@ pub(crate) fn finish(
 /// `update` used to be unable to reach here at all (it forced
 /// unconditionally); keeping one constructor is what stops the two commands
 /// from drifting apart again.
+///
+/// No wildcard: a refusing outcome that fell through to `None` would exit 0
+/// with no diagnostic, because `update` reads `None` as "nothing refused".
 pub(crate) fn refusal_error(reference: ArtifactRef, outcome: InstallOutcome) -> Option<crate::error::Error> {
     use crate::install::install_error::{InstallError, InstallErrorKind};
 
-    let kind = match outcome {
-        InstallOutcome::Refused { recorded, actual } => InstallErrorKind::IntegrityMismatch { recorded, actual },
-        InstallOutcome::RefusedUntracked { client, path } => InstallErrorKind::UntrackedDestination { client, path },
-        _ => return None,
+    let error = match outcome {
+        InstallOutcome::Refused { recorded, actual } => {
+            InstallError::with_reference(reference, InstallErrorKind::IntegrityMismatch { recorded, actual })
+        }
+        InstallOutcome::RefusedUntracked { client, path } => {
+            InstallError::with_reference(reference, InstallErrorKind::UntrackedDestination { client, path })
+        }
+        // The row is one package but the pieces can be several, and the message names each.
+        InstallOutcome::RefusedSettings { pieces } => {
+            InstallError::without_reference(InstallErrorKind::SettingsRefused { pieces })
+        }
+        InstallOutcome::Installed
+        | InstallOutcome::Updated
+        | InstallOutcome::AlreadyInstalled
+        | InstallOutcome::Skipped(_) => return None,
     };
-    Some(crate::error::Error::from(InstallError::with_reference(reference, kind)))
+    Some(crate::error::Error::from(error))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::settings_report::{PieceMark, PieceState, RefusedPiece, SettingsChange, SettingsChangeAction};
     use crate::install::install_error::{InstallError, InstallErrorKind};
     use crate::oci::reference::ArtifactRef;
     use crate::oci::{ArtifactKind, Identifier};
@@ -585,6 +638,181 @@ mod tests {
             name,
             Identifier::parse("localhost:5000/x:latest").unwrap(),
         )
+    }
+
+    fn run_of(items: Vec<ArtifactInstall>) -> InstallRun {
+        run_with(items, SettingsOutcome::default())
+    }
+
+    fn run_with(items: Vec<ArtifactInstall>, settings: SettingsOutcome) -> InstallRun {
+        InstallRun {
+            items,
+            settings,
+            abandoned: Vec::new(),
+            halted: false,
+        }
+    }
+
+    fn refused_piece(state: PieceState) -> RefusedPiece {
+        RefusedPiece {
+            package: "team".to_string(),
+            client: "claude".to_string(),
+            file: Some("~/.claude/settings.json".to_string()),
+            pointer: "/model".to_string(),
+            element: None,
+            marked: PieceMark::Overwrite,
+            state: Some(state),
+            wanted: Some("sonnet".to_string()),
+            current: Some("opus".to_string()),
+        }
+    }
+
+    fn added_change() -> SettingsChange {
+        SettingsChange {
+            package: "team".to_string(),
+            client: "claude".to_string(),
+            file: "~/.claude/settings.json".to_string(),
+            key: "/model".to_string(),
+            element: None,
+            action: SettingsChangeAction::Added,
+        }
+    }
+
+    /// A refusing arm missed here exits 0 with no diagnostic, because
+    /// `grim update` reads `None` as "nothing refused".
+    #[test]
+    fn refusal_error_maps_every_refusing_outcome() {
+        use crate::error::{ErrorReason, classify};
+
+        let digest = |byte: &str| crate::oci::Digest::Sha256(byte.repeat(64));
+        let refusing = [
+            (
+                InstallOutcome::Refused {
+                    recorded: digest("a"),
+                    actual: digest("b"),
+                },
+                ErrorReason::LocalModified,
+            ),
+            (
+                InstallOutcome::RefusedUntracked {
+                    client: "claude".to_string(),
+                    path: "/w/x.md".into(),
+                },
+                ErrorReason::UntrackedDestination,
+            ),
+            (
+                InstallOutcome::RefusedSettings {
+                    pieces: vec![refused_piece(PieceState::Modified)].into(),
+                },
+                ErrorReason::LocalModified,
+            ),
+            (
+                InstallOutcome::RefusedSettings {
+                    pieces: vec![refused_piece(PieceState::UntrackedDestination)].into(),
+                },
+                ErrorReason::UntrackedDestination,
+            ),
+        ];
+        for (outcome, reason) in refusing {
+            let err = refusal_error(aref("a"), outcome.clone()).expect("a refusal builds an error");
+            let c = classify(&anyhow::Error::from(err));
+            assert_eq!((c.exit, c.reason), (ExitCode::DataError, Some(reason)), "{outcome:?}");
+        }
+
+        let passing = [
+            InstallOutcome::Installed,
+            InstallOutcome::Updated,
+            InstallOutcome::AlreadyInstalled,
+            InstallOutcome::Skipped("declined".to_string()),
+        ];
+        for outcome in passing {
+            assert!(refusal_error(aref("a"), outcome.clone()).is_none(), "{outcome:?}");
+        }
+    }
+
+    /// The row a settings refusal arrives on is one package, while its
+    /// pieces can belong to several: the message names each of them.
+    #[test]
+    fn a_settings_refusal_names_every_package_it_holds() {
+        let pieces = vec![
+            refused_piece(PieceState::Modified),
+            RefusedPiece {
+                package: "base".to_string(),
+                ..refused_piece(PieceState::UntrackedDestination)
+            },
+        ];
+        let outcome = InstallOutcome::RefusedSettings { pieces: pieces.into() };
+        let err = refusal_error(aref("team"), outcome).expect("a refusal builds an error");
+        assert_eq!(
+            anyhow::Error::from(err).to_string(),
+            "settings 'base', 'team': 2 settings value(s) were set or changed outside grim; \
+             rerun with --force to change them"
+        );
+    }
+
+    #[test]
+    fn finish_puts_settings_changes_on_the_report() {
+        let settings = SettingsOutcome {
+            changes: vec![added_change()],
+            pieces: Vec::new().into(),
+        };
+        let run = run_with(Vec::new(), settings);
+        let (report, code) = finish(run, &Default::default()).expect("clean run is success");
+        assert_eq!(code, ExitCode::Success);
+        let v = serde_json::to_value(&report).unwrap();
+        assert_eq!(v["settings_changes"][0]["package"], "team");
+    }
+
+    #[test]
+    fn finish_keeps_settings_changes_through_a_later_refusal() {
+        let pieces: std::sync::Arc<[RefusedPiece]> = vec![refused_piece(PieceState::Modified)].into();
+        let items = vec![ArtifactInstall {
+            reference: aref("a"),
+            target: None,
+            result: Ok(InstallOutcome::RefusedSettings { pieces: pieces.clone() }),
+        }];
+        let settings = SettingsOutcome {
+            changes: vec![added_change()],
+            pieces,
+        };
+        let run = run_with(items, settings);
+        let err = finish(run, &Default::default()).expect_err("refusal must fail the run");
+        let outcome = crate::error::settings_outcome(&err).expect("the outcome rides the error");
+        assert_eq!((outcome.changes.len(), outcome.pieces.len()), (1, 1));
+        assert_eq!(
+            crate::error::classify(&err).reason,
+            Some(crate::error::ErrorReason::LocalModified)
+        );
+    }
+
+    /// An orphan piece has no lock row, so no row carries its refusal and a
+    /// run that read only the rows would exit 0 past a refused value.
+    #[test]
+    fn finish_refuses_pieces_no_row_carries() {
+        let settings = SettingsOutcome {
+            changes: Vec::new(),
+            pieces: vec![refused_piece(PieceState::UntrackedDestination)].into(),
+        };
+        let run = run_with(Vec::new(), settings);
+        let err = finish(run, &Default::default()).expect_err("a refused piece fails the run");
+        assert_eq!(
+            crate::error::classify(&err).reason,
+            Some(crate::error::ErrorReason::UntrackedDestination)
+        );
+        assert_eq!(crate::error::settings_outcome(&err).map(|o| o.pieces.len()), Some(1));
+    }
+
+    #[test]
+    fn finish_leaves_an_error_bare_when_settings_changed_nothing() {
+        let run = run_of(vec![ArtifactInstall {
+            reference: aref("a"),
+            target: None,
+            result: Err(crate::error::Error::from(InstallError::without_reference(
+                InstallErrorKind::BlobMissing,
+            ))),
+        }]);
+        let err = finish(run, &Default::default()).expect_err("hard error must propagate");
+        assert!(crate::error::settings_outcome(&err).is_none());
     }
 
     #[test]
@@ -601,7 +829,7 @@ mod tests {
                 result: Ok(InstallOutcome::AlreadyInstalled),
             },
         ];
-        let (report, code) = finish(outcomes, &Default::default()).expect("clean run is success");
+        let (report, code) = finish(run_of(outcomes), &Default::default()).expect("clean run is success");
         assert_eq!(code, ExitCode::Success);
         let v = serde_json::to_value(&report).unwrap();
         assert_eq!(v["items"][0]["status"], "installed");
@@ -618,7 +846,7 @@ mod tests {
                 actual: crate::oci::Digest::Sha256("b".repeat(64)),
             }),
         }];
-        let err = finish(outcomes, &Default::default()).expect_err("refusal must fail the run");
+        let err = finish(run_of(outcomes), &Default::default()).expect_err("refusal must fail the run");
         assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
     }
 
@@ -680,7 +908,7 @@ mod tests {
                 InstallErrorKind::BlobMissing,
             ))),
         }];
-        let err = finish(outcomes, &Default::default()).expect_err("hard error must propagate");
+        let err = finish(run_of(outcomes), &Default::default()).expect_err("hard error must propagate");
         assert_eq!(crate::error::classify_error(&err), ExitCode::NotFound);
     }
 }

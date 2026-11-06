@@ -355,6 +355,12 @@ impl ClientTarget {
                 "hook payloads are machine-local (I1); route through InstallTarget::path_for, \
                  which delegates to install::hook_dispatch::payload_dir"
             ),
+            // Settings merge into the vendor's own file, which is therefore the
+            // reportable target; the workspace stands in where it has none.
+            ArtifactKind::Settings => self
+                .vendor()
+                .settings_config_path(workspace, scope)
+                .unwrap_or_else(|| workspace.to_path_buf()),
         }
     }
 
@@ -396,6 +402,7 @@ impl ClientTarget {
             // MCP descriptors register into client configs; the installer
             // diverges before the materialization path.
             ArtifactKind::Mcp => unreachable!("mcp descriptors register into client configs, never materialize"),
+            ArtifactKind::Settings => unreachable!("settings merge into client configs, never materialize"),
             ArtifactKind::Hook => Self::materialize_hook(artifact_root, dest),
         }
     }
@@ -1002,14 +1009,15 @@ mod tests {
     }
 
     /// Parse the first markdown table of a docs page into `(client, [Skill,
-    /// Rule, Agent, MCP, Hook])` rows. Cell parsing keys on the `✓`/`◐`/`✗`
-    /// token only, whitespace- and formatting-insensitive; an unrecognized cell
-    /// (e.g. a `TODO` placeholder) is a `None` that fails the caller's assert.
+    /// Rule, Agent, MCP, Hook, Settings])` rows. Cell parsing keys on the
+    /// `✓`/`◐`/`✗` token only, whitespace- and formatting-insensitive; an
+    /// unrecognized cell (e.g. a `TODO` placeholder) is a `None` that fails the
+    /// caller's assert.
     ///
     /// A **missing** column is the same `None` as an unrecognized token: cells
     /// are read through `Vec::get`, so a row that stops short still lands in
     /// the returned set and fails the caller's placeholder assert by name.
-    fn parse_first_matrix(md: &str) -> Vec<(String, [Option<Cell>; 5])> {
+    fn parse_first_matrix(md: &str) -> Vec<(String, [Option<Cell>; 6])> {
         let mut rows = Vec::new();
         let mut in_table = false;
         for line in md.lines() {
@@ -1053,7 +1061,7 @@ mod tests {
                 Some(c) if c.contains('✗') => Some(Cell::No),
                 _ => None,
             };
-            rows.push((name, [cell(1), cell(2), cell(3), cell(4), cell(5)]));
+            rows.push((name, [cell(1), cell(2), cell(3), cell(4), cell(5), cell(6)]));
         }
         rows
     }
@@ -1065,8 +1073,9 @@ mod tests {
     /// empty), `◐` ⇔ `Degraded` (rule column), `✓` ⇔ `Native`, and the row
     /// set equals `ClientTarget::ALL` exactly.
     ///
-    /// The **Hook** column is the one cell with a different authority:
-    /// [`hook_matrix_cell`], not `kind_support` — see the assert below.
+    /// The **Hook** and **Settings** columns have their own authorities:
+    /// [`hook_matrix_cell`] and [`settings_matrix_cell`], not `kind_support`,
+    /// which answers `Native` for both kinds on every client.
     #[test]
     fn docs_matrix_row_set_matches_all_and_cells_track_kind_support() {
         let md = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/content/docs/clients.md"))
@@ -1118,6 +1127,30 @@ mod tests {
                 KindSupport::Declined => Cell::No,
             };
             assert_eq!(hook, expected, "{name} Hook cell must track hook_matrix_cell");
+            let settings =
+                cells[5].unwrap_or_else(|| panic!("unparsed Settings cell for '{name}' (TODO placeholder?)"));
+            assert_eq!(
+                settings,
+                settings_matrix_cell(client),
+                "{name} Settings cell must track settings_fields and the project settings file"
+            );
+        }
+    }
+
+    /// The `clients.md` **Settings** cell for `client`: `✗` when the vendor
+    /// lists no settings key, `✓` when it also has a project-scope settings
+    /// file, and `◐` when it takes settings at global scope only.
+    fn settings_matrix_cell(client: ClientTarget) -> Cell {
+        let vendor = client.vendor();
+        if vendor.settings_fields().is_empty() {
+            Cell::No
+        } else if vendor
+            .settings_config_path(Path::new("/w"), ConfigScope::Project)
+            .is_some()
+        {
+            Cell::Yes
+        } else {
+            Cell::Partial
         }
     }
 

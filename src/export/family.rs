@@ -153,13 +153,13 @@ pub fn plugin_client_names() -> String {
 /// [`ArtifactKind::Bundle`] returns [`OmitReason::NoFormatSurface`]
 /// defensively.
 pub fn admits(family: Family, client: ClientTarget, kind: ArtifactKind) -> Result<(), OmitReason> {
-    use ArtifactKind::{Agent, Bundle, Hook, Mcp, Rule, Skill};
+    use ArtifactKind::{Agent, Bundle, Hook, Mcp, Rule, Settings, Skill};
     match (family, kind) {
         // A hook needs grim at run time, which an exported plugin runs without
         // (C-140). The Claude format has a hook file (`hooks/hooks.json`) that
         // cannot express one; Agent Plugins 1.0 has no hook surface at all.
         (Family::Claude, Hook) => Err(OmitReason::NotRepresentable),
-        (_, Rule | Bundle | Hook) | (Family::AgentPlugins, Agent) => Err(OmitReason::NoFormatSurface),
+        (_, Rule | Bundle | Hook | Settings) | (Family::AgentPlugins, Agent) => Err(OmitReason::NoFormatSurface),
         // The Agent Plugins `mcp.json` shape is the family's, not the
         // client's: no install-time `kind_support` gate.
         (Family::AgentPlugins, Mcp) => Ok(()),

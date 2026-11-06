@@ -48,9 +48,9 @@ pub enum HookCommand {
     /// List declared hooks with their tiers, events, and per-client arming
     /// state.
     List(list::ListArgs),
-    /// Consent to arming the hooks this workspace declares.
+    /// Consent to the hooks and settings this workspace declares.
     Allow(allow::AllowArgs),
-    /// Withdraw this workspace's hook consent.
+    /// Withdraw this workspace's consent to hooks and settings.
     ///
     /// Aliased `deny`, because that is the name `direnv` gives the identical
     /// operation — there, `revoke` is itself an alias of `deny`, and both mean

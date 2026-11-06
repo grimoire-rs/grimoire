@@ -26,7 +26,10 @@ use crate::skill::rule_frontmatter::ParsedRule;
 use super::install_state::{ClientOutput, InstallState};
 use super::opencode_config;
 use super::render::{self, RenderError, RenderedDoc};
-use super::vendor::{FieldType, KindSupport, KnownField, Vendor, env_dir, provenance, xdg_config_dir};
+use super::vendor::MergeClass::{Map, Scalar};
+use super::vendor::SettingsScopes::GlobalOnly;
+use super::vendor::SettingsValueType as Ty;
+use super::vendor::{FieldType, KindSupport, KnownField, SettingsField, Vendor, env_dir, provenance, xdg_config_dir};
 
 /// OpenCode.
 pub struct OpenCodeVendor;
@@ -94,6 +97,58 @@ fn reads_pool_from(external_skills_disabled: bool) -> bool {
     !external_skills_disabled
 }
 
+/// What OpenCode accepts as a permission's action.
+const OPENCODE_PERMISSION_ACTIONS: &[&str] = &["allow", "ask", "deny"];
+
+/// OpenCode's settings keys, from the list in `adr_settings_artifact_kind.md`.
+const OPENCODE_SETTINGS_FIELDS: &[SettingsField] = &[
+    SettingsField::new("/model", Ty::String, Scalar, GlobalOnly),
+    SettingsField::new("/small_model", Ty::String, Scalar, GlobalOnly),
+    SettingsField::new("/default_agent", Ty::String, Scalar, GlobalOnly),
+    SettingsField::new(
+        "/autoupdate",
+        Ty::OneOf(&[Ty::Bool, Ty::Enum(&["notify"])]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new("/snapshot", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/compaction/auto", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/compaction/prune", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/permission", Ty::Enum(OPENCODE_PERMISSION_ACTIONS), Scalar, GlobalOnly),
+    SettingsField {
+        map_keys: Some(&[
+            "read",
+            "edit",
+            "glob",
+            "grep",
+            "bash",
+            "task",
+            "todowrite",
+            "skill",
+            "lsp",
+            "question",
+            "webfetch",
+            "websearch",
+            "external_directory",
+            "doom_loop",
+        ]),
+        // A pattern object's keys are the author's globs, and its order is
+        // meaning: the last matching rule wins, so it is compared whole.
+        ..SettingsField::new(
+            "/permission/<tool>",
+            Ty::OneOf(&[
+                Ty::Enum(OPENCODE_PERMISSION_ACTIONS),
+                Ty::EnumMap(OPENCODE_PERMISSION_ACTIONS),
+            ]),
+            Map,
+            GlobalOnly,
+        )
+    },
+    // `auto` publishes every new session to a share link, which only the
+    // user may turn on.
+    SettingsField::new("/share", Ty::Enum(&["manual", "disabled"]), Scalar, GlobalOnly),
+];
+
 impl Vendor for OpenCodeVendor {
     fn name(&self) -> &'static str {
         "opencode"
@@ -123,6 +178,19 @@ impl Vendor for OpenCodeVendor {
 
     fn agent_fields(&self) -> &'static [KnownField] {
         OPENCODE_AGENT_FIELDS
+    }
+
+    fn settings_fields(&self) -> &'static [SettingsField] {
+        OPENCODE_SETTINGS_FIELDS
+    }
+
+    /// The file rules and MCP already edit. `None` at project scope:
+    /// `opencode.json` there is tracked, so a value would reach every cloner.
+    fn settings_config_path(&self, workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
+        match scope {
+            ConfigScope::Project => None,
+            ConfigScope::Global => opencode_config::config_path_for_scope(workspace, scope),
+        }
     }
 
     fn detect(&self, workspace: &Path, scope: ConfigScope) -> bool {
@@ -842,5 +910,134 @@ mod tests {
     fn the_external_skills_flag_stops_opencode_reading_the_pool() {
         assert!(reads_pool_from(false));
         assert!(!reads_pool_from(true));
+    }
+
+    /// Every key by pointer, value type and scope, in the list's order.
+    #[test]
+    fn settings_rows_match_the_key_list() {
+        use crate::install::vendor::SettingsScopes::GlobalOnly;
+        use crate::install::vendor::SettingsValueType as Ty;
+
+        let rows: Vec<_> = OpenCodeVendor
+            .settings_fields()
+            .iter()
+            .map(|field| (field.pointer, field.ty, field.scopes))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("/model", Ty::String, GlobalOnly),
+                ("/small_model", Ty::String, GlobalOnly),
+                ("/default_agent", Ty::String, GlobalOnly),
+                ("/autoupdate", Ty::OneOf(&[Ty::Bool, Ty::Enum(&["notify"])]), GlobalOnly),
+                ("/snapshot", Ty::Bool, GlobalOnly),
+                ("/compaction/auto", Ty::Bool, GlobalOnly),
+                ("/compaction/prune", Ty::Bool, GlobalOnly),
+                ("/permission", Ty::Enum(&["allow", "ask", "deny"]), GlobalOnly),
+                (
+                    "/permission/<tool>",
+                    Ty::OneOf(&[
+                        Ty::Enum(&["allow", "ask", "deny"]),
+                        Ty::EnumMap(&["allow", "ask", "deny"])
+                    ]),
+                    GlobalOnly
+                ),
+                ("/share", Ty::Enum(&["manual", "disabled"]), GlobalOnly),
+            ]
+        );
+    }
+
+    /// `auto` stays out of the value set, so a package cannot share sessions.
+    #[test]
+    fn settings_document_checks_each_value_type() {
+        use crate::oci::settings::SettingsDocument;
+
+        for value in ["manual", "disabled"] {
+            let good = format!("description = \"d\"\n[opencode]\nshare = \"{value}\"\n");
+            let (document, _) = SettingsDocument::from_toml_str_with_requires(&good).unwrap();
+            assert_eq!(
+                serde_json::Value::Object(document.vendors["opencode"].clone()),
+                serde_json::json!({"share": value})
+            );
+        }
+        for bad in ["share = \"auto\"", "share = \"Manual\"", "share = false"] {
+            let text = format!("description = \"d\"\n[opencode]\n{bad}\n");
+            assert!(SettingsDocument::from_toml_str_with_requires(&text).is_err(), "{bad}");
+        }
+    }
+
+    /// The list of tools closes the map, and only that one row has a map.
+    #[test]
+    fn settings_permission_map_closes_on_the_tool_list() {
+        let closed: Vec<_> = OpenCodeVendor
+            .settings_fields()
+            .iter()
+            .filter_map(|field| field.map_keys.map(|keys| (field.pointer, keys)))
+            .collect();
+        assert_eq!(
+            closed,
+            vec![(
+                "/permission/<tool>",
+                [
+                    "read",
+                    "edit",
+                    "glob",
+                    "grep",
+                    "bash",
+                    "task",
+                    "todowrite",
+                    "skill",
+                    "lsp",
+                    "question",
+                    "webfetch",
+                    "websearch",
+                    "external_directory",
+                    "doom_loop",
+                ]
+                .as_slice()
+            )]
+        );
+    }
+
+    #[test]
+    fn settings_rows_narrow_no_scope_and_require_nothing() {
+        for field in OpenCodeVendor.settings_fields() {
+            assert_eq!(field.project_values, None, "{}", field.pointer);
+            assert!(!field.required_by_client, "{}", field.pointer);
+        }
+    }
+
+    /// `opencode.json` in a workspace is tracked, whichever spelling exists.
+    #[test]
+    fn settings_path_has_no_answer_at_project_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("opencode.json"), "{}\n").unwrap();
+        assert_eq!(
+            opencode_config::config_path_for_scope(tmp.path(), ConfigScope::Project),
+            Some(tmp.path().join("opencode.json")),
+            "the control: a project file exists"
+        );
+        assert_eq!(
+            OpenCodeVendor.settings_config_path(tmp.path(), ConfigScope::Project),
+            None
+        );
+    }
+
+    /// One file, one resolution: `OPENCODE_CONFIG`, the XDG directory and the
+    /// `.jsonc` preference all come from what rules and MCP already use.
+    #[test]
+    fn settings_share_the_global_config_file() {
+        let w = Path::new("/w");
+        let settings = OpenCodeVendor.settings_config_path(w, ConfigScope::Global);
+        assert_eq!(settings, opencode_config::config_path_for_scope(w, ConfigScope::Global));
+        assert_eq!(settings, OpenCodeVendor.mcp_config_path(w, ConfigScope::Global));
+    }
+
+    #[test]
+    fn settings_format_is_json() {
+        assert_eq!(
+            OpenCodeVendor.settings_config_format(),
+            crate::install::vendor::McpConfigFormat::Json
+        );
     }
 }

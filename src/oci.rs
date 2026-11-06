@@ -22,6 +22,7 @@ pub mod pinned_identifier;
 pub mod reference;
 pub mod release;
 pub mod requires_decl;
+pub mod settings;
 pub mod tag_cache;
 pub mod text;
 

@@ -10,8 +10,10 @@
 //! the state for display.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
 use crate::catalog::{DownloadSummary, OciMeta, SearchQuery, SortKey, SortMode, SortOrder, browse_sort};
+use crate::command::status::SettingsArmingInputs;
 use crate::config::registry_resolve::RowSource;
 
 use super::bundle_members::{BundleMemberCache, BundleMemberKey};
@@ -50,6 +52,13 @@ pub enum ArtifactState {
     /// An install record exists but one or more client outputs are
     /// missing or unreadable — the integrity record cannot be honored.
     IntegrityMissing,
+    /// A settings package held back by a gate the user can answer: the flag,
+    /// the workspace's consent, or no value applying to the selected clients.
+    Gated,
+    /// A settings package grim refuses to write here, whatever the user answers.
+    NotArmed,
+    /// A settings package whose declaration moved on from the lock.
+    Stale,
 }
 
 impl std::fmt::Display for ArtifactState {
@@ -62,6 +71,9 @@ impl std::fmt::Display for ArtifactState {
             Self::Outdated => "outdated",
             Self::Modified => "modified",
             Self::IntegrityMissing => "integrity-missing",
+            Self::Gated => "gated",
+            Self::NotArmed => "not-armed",
+            Self::Stale => "stale",
         })
     }
 }
@@ -105,6 +117,19 @@ pub enum Mode {
     /// Confirming the creation of a project `grimoire.toml`, offered when the
     /// user switches scope and no project config exists yet.
     ConfirmInit,
+    /// Reading what a finished action did to settings values. The TUI sends
+    /// tracing to a log file, so this panel is where the user sees the list.
+    SettingsResult,
+}
+
+/// What a finished action did to settings values, when
+/// [`Mode::SettingsResult`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingsResult {
+    /// What the list means.
+    pub message: String,
+    /// One line per change or refused value.
+    pub detail: String,
 }
 
 /// A refused install awaiting the user's Overwrite decision.
@@ -417,6 +442,15 @@ pub struct TuiState {
     pub pending_batch: Option<PendingBatch>,
     /// The project init awaiting confirmation, when [`Mode::ConfirmInit`].
     pub pending_init: Option<PendingInit>,
+    /// The panel on screen, when [`Mode::SettingsResult`].
+    pub settings_result: Option<SettingsResult>,
+    /// The settings gates of the current load. `None` until the background
+    /// read lands, and for a load that declares no settings.
+    pub(crate) settings_inputs: Option<Arc<SettingsArmingInputs>>,
+    /// Whether the current load declares settings, so its gates need reading.
+    pub settings_declared: bool,
+    /// A load finished since the event loop last armed the gate read.
+    pub settings_read_due: bool,
     /// The effective default registry; when a row's registry host equals
     /// it the registry prefix is elided from the displayed name (shorter
     /// names) while the stored `repo` keeps the full reference.
@@ -568,6 +602,10 @@ impl Default for TuiState {
             confirm: None,
             pending_batch: None,
             pending_init: None,
+            settings_result: None,
+            settings_inputs: None,
+            settings_declared: false,
+            settings_read_due: false,
             default_registry: None,
             clients: Vec::new(),
             view_mode: ViewMode::default(),
@@ -615,11 +653,10 @@ enum SelectionAnchor {
     None,
 }
 
-/// Body line count of the `?` help overlay: the "Keybindings" header, a blank
-/// separator and one row per keybinding entry, then a blank, the "Status
-/// column" header, another blank and one row per legend entry. Single source
-/// for help-scroll clamping; the entry text lives in
-/// [`super::render::help_entries`] / [`super::render::legend_entries`] and
+/// Body line count of the `?` help overlay: the "Keybindings" header and one
+/// row per keybinding entry, then the "Status column" header and one row per
+/// legend entry. Single source for help-scroll clamping; the entry text lives
+/// in [`super::render::help_entries`] / [`super::render::legend_entries`] and
 /// `render::tests::help_body_line_count_matches_state` guards it against drift.
 pub(crate) const HELP_BODY_LINES: u16 = 22;
 
@@ -2000,6 +2037,21 @@ impl TuiState {
             detail: detail.to_string(),
             overwrite_selected: false,
         });
+    }
+
+    /// Show what a finished action did to settings values.
+    pub fn open_settings_result(&mut self, message: &str, detail: &str) {
+        self.mode = Mode::SettingsResult;
+        self.settings_result = Some(SettingsResult {
+            message: message.to_string(),
+            detail: detail.to_string(),
+        });
+    }
+
+    /// Dismiss the settings panel.
+    pub fn close_settings_result(&mut self) {
+        self.settings_result = None;
+        self.back();
     }
 
     /// Move the confirm selection between Cancel and Overwrite. Any non-zero

@@ -107,7 +107,7 @@ def test_status_json_includes_installed_outputs(
     assert installed["state"] == "installed"
     assert len(installed["outputs"]) > 0
     for output in installed["outputs"]:
-        assert set(output.keys()) == {"client", "path"}
+        assert set(output.keys()) == {"client", "path", "element"}
         assert Path(output["path"]).exists()
 
     assert not_installed["state"] == "missing"
@@ -205,7 +205,7 @@ def test_status_reports_pending_outputs_for_a_client_added_after_install(
         f"a newly-present client is pending work; got {row['outputs_pending']}"
     )
     for output in row["outputs_pending"]:
-        assert set(output.keys()) == {"client", "path"}
+        assert set(output.keys()) == {"client", "path", "element"}
     # Autodetect ⇒ the config-drift fields stay silent, by design.
     assert row["clients_missing"] == []
 
@@ -585,4 +585,4 @@ def test_status_json_lists_new_vendor_client_name_additively(
     clients = {o["client"] for o in row["outputs"]}
     assert "cursor" in clients, f"the new vendor client name must surface in outputs: {clients}"
     for output in row["outputs"]:
-        assert set(output.keys()) == {"client", "path"}, output
+        assert set(output.keys()) == {"client", "path", "element"}, output

@@ -48,6 +48,14 @@
 //! - **MCP**: **declined**. Note for whoever enables it later: Kilo's env
 //!   substitution form is **`{env:VAR}`**, *not* the `${VAR}` shape grim's
 //!   renderer would otherwise assume.
+//! - **Settings**: global only, `kilo.jsonc` in [`kilo_config_root`], or a
+//!   `kilo.json` there when it is the only one, so grim never writes a
+//!   competing sibling. Kilo also deep-merges `kilo.json`, `opencode.json[c]`
+//!   and `config.json` from that directory with unstated precedence, a project
+//!   `kilo.jsonc` or `.kilo/kilo.jsonc` overrides a global value, and Kilo's
+//!   Settings UI removes a cleared key from every config file, which reads
+//!   missing until the next install. Kilo expands `{env:` and `{file:` in
+//!   every config string, so a settings value holding one is refused.
 //!
 //! **`~/.kilo` is not "one side of an unresolved pair" — it is the
 //! source-confirmed answer for skills.** Two different resolvers serve two
@@ -59,8 +67,7 @@
 //!   That governs [`kilo_root`], the skills write root.
 //! - **The config dirs** — `~/.config/kilo/` ([`kilo_config_root`]) plus every
 //!   `.kilo` found — are where agents and `kilo.jsonc` load from. grim writes
-//!   global agents to the XDG one, the path upstream documents; grim never
-//!   writes `kilo.jsonc` because MCP is declined.
+//!   global agents and settings to the XDG one, the path upstream documents.
 //!
 //! So skills and agents take different global roots on purpose, each the one
 //! upstream documents for that kind. Detection ORs both, which is safe
@@ -78,7 +85,10 @@ use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
 use super::render::{self, RenderError, RenderedDoc};
-use super::vendor::{FieldType, KindSupport, KnownField, Vendor, home_dir, provenance, xdg_config_dir};
+use super::vendor::MergeClass::Scalar;
+use super::vendor::SettingsScopes::GlobalOnly;
+use super::vendor::SettingsValueType as Ty;
+use super::vendor::{FieldType, KindSupport, KnownField, SettingsField, Vendor, home_dir, provenance, xdg_config_dir};
 use super::vendor_opencode::drop_invalid_opencode_values;
 
 /// Kilo (formerly Kilo Code).
@@ -141,6 +151,35 @@ fn reads_pool_from(external_skills_disabled: bool) -> bool {
     !external_skills_disabled
 }
 
+/// Kilo's settings keys, from `research_upstream_kilo_settings_20261105.md`.
+const KILO_SETTINGS_FIELDS: &[SettingsField] = &[
+    SettingsField::new("/model", Ty::String, Scalar, GlobalOnly),
+    SettingsField::new("/small_model", Ty::String, Scalar, GlobalOnly),
+    SettingsField::new("/default_agent", Ty::String, Scalar, GlobalOnly),
+    // The three display keys configure the VS Code extension, which reads this file.
+    SettingsField::new(
+        "/reasoning_display",
+        Ty::Enum(&["expanded", "preview", "headline"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/terminal_command_display",
+        Ty::Enum(&["expanded", "collapsed"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/code_edit_display",
+        Ty::Enum(&["expanded", "collapsed"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new("/web_search", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/hide_prompt_training_models", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/privacy_mode", Ty::Bool, Scalar, GlobalOnly),
+];
+
 impl Vendor for KiloVendor {
     fn name(&self) -> &'static str {
         "kilo"
@@ -165,6 +204,14 @@ impl Vendor for KiloVendor {
 
     fn agent_fields(&self) -> &'static [KnownField] {
         KILO_AGENT_FIELDS
+    }
+
+    fn settings_fields(&self) -> &'static [SettingsField] {
+        KILO_SETTINGS_FIELDS
+    }
+
+    fn settings_config_path(&self, _workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
+        global_settings_path(scope, kilo_config_root(xdg_config_dir()))
     }
 
     fn detect(&self, workspace: &Path, scope: ConfigScope) -> bool {
@@ -273,6 +320,27 @@ pub(crate) fn kilo_root(home: Option<PathBuf>) -> Option<PathBuf> {
 /// `kilo-config-root` anchor is rooted here.
 pub(crate) fn kilo_config_root(xdg_config: Option<PathBuf>) -> Option<PathBuf> {
     xdg_config.map(|x| x.join("kilo"))
+}
+
+/// The settings file under the resolved `root`: `None` at project scope, where
+/// `kilo.jsonc` is a repository file, and `None` with no root.
+fn global_settings_path(scope: ConfigScope, root: Option<PathBuf>) -> Option<PathBuf> {
+    match scope {
+        ConfigScope::Project => None,
+        ConfigScope::Global => root.map(|root| kilo_config_file(&root)),
+    }
+}
+
+/// `kilo.json` in `dir` when it is there and `kilo.jsonc` is not, else the
+/// documented `kilo.jsonc`.
+fn kilo_config_file(dir: &Path) -> PathBuf {
+    let json = dir.join("kilo.json");
+    let jsonc = dir.join("kilo.jsonc");
+    if json.is_file() && !jsonc.is_file() {
+        json
+    } else {
+        jsonc
+    }
 }
 
 /// Every plausible Kilo user-level root, for **detection only** — both
@@ -496,5 +564,122 @@ mod tests {
     fn the_external_skills_flag_stops_kilo_reading_the_pool() {
         assert!(reads_pool_from(false));
         assert!(!reads_pool_from(true));
+    }
+
+    // ── settings: global only, the XDG `kilo.jsonc` ──
+
+    #[test]
+    fn settings_rows_match_the_key_list() {
+        let rows: Vec<_> = KiloVendor
+            .settings_fields()
+            .iter()
+            .map(|field| (field.pointer, field.ty, field.merge, field.scopes))
+            .collect();
+        let shown = Ty::Enum(&["expanded", "collapsed"]);
+        assert_eq!(
+            rows,
+            vec![
+                ("/model", Ty::String, Scalar, GlobalOnly),
+                ("/small_model", Ty::String, Scalar, GlobalOnly),
+                ("/default_agent", Ty::String, Scalar, GlobalOnly),
+                (
+                    "/reasoning_display",
+                    Ty::Enum(&["expanded", "preview", "headline"]),
+                    Scalar,
+                    GlobalOnly
+                ),
+                ("/terminal_command_display", shown, Scalar, GlobalOnly),
+                ("/code_edit_display", shown, Scalar, GlobalOnly),
+                ("/web_search", Ty::Bool, Scalar, GlobalOnly),
+                ("/hide_prompt_training_models", Ty::Bool, Scalar, GlobalOnly),
+                ("/privacy_mode", Ty::Bool, Scalar, GlobalOnly),
+            ]
+        );
+    }
+
+    #[test]
+    fn settings_rows_narrow_nothing_and_require_nothing() {
+        for field in KiloVendor.settings_fields() {
+            assert_eq!(field.map_keys, None, "{}", field.pointer);
+            assert_eq!(field.project_values, None, "{}", field.pointer);
+            assert!(!field.required_by_client, "{}", field.pointer);
+        }
+    }
+
+    /// One value per value type is taken, and a wrong one is refused: Kilo
+    /// rejects its whole config on a bad value.
+    #[test]
+    fn settings_document_checks_each_value_type() {
+        use crate::oci::settings::SettingsDocument;
+
+        let good = concat!(
+            "description = \"d\"\n[kilo]\n",
+            "model = \"anthropic/claude\"\nreasoning_display = \"headline\"\nweb_search = false\n",
+        );
+        let (document, _) = SettingsDocument::from_toml_str_with_requires(good).unwrap();
+        assert_eq!(
+            serde_json::Value::Object(document.vendors["kilo"].clone()),
+            serde_json::json!({"model": "anthropic/claude", "reasoning_display": "headline", "web_search": false})
+        );
+        for bad in [
+            "model = 1",
+            "reasoning_display = \"bogus\"",
+            "privacy_mode = \"on\"",
+            "share = \"auto\"",
+        ] {
+            let text = format!("description = \"d\"\n[kilo]\n{bad}\n");
+            assert!(SettingsDocument::from_toml_str_with_requires(&text).is_err(), "{bad}");
+        }
+    }
+
+    /// Kilo's config replacer expands `{env:` and `{file:` in every string, so
+    /// a value carrying one would read a variable or a file into the config.
+    #[test]
+    fn settings_expansion_token_is_refused() {
+        use crate::oci::settings::SettingsError;
+        use crate::oci::settings::tests::assert_refused_alike;
+
+        for value in ["{env:KEY}", "x{file:~/.ssh/id_ed25519}"] {
+            assert_refused_alike(
+                serde_json::json!({"kilo": {"model": value}}),
+                &SettingsError::ExpansionToken {
+                    pointer: "/kilo/model".to_string(),
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn settings_path_has_no_answer_at_project_scope() {
+        let root = Some(PathBuf::from("/xdg/kilo"));
+        assert_eq!(global_settings_path(ConfigScope::Project, root), None);
+        assert_eq!(
+            KiloVendor.settings_config_path(Path::new("/w"), ConfigScope::Project),
+            None
+        );
+    }
+
+    /// The documented `kilo.jsonc`, an existing lone `kilo.json` instead of a
+    /// sibling beside it, and no file when no root resolves.
+    #[test]
+    fn settings_path_at_global_scope_is_the_xdg_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = kilo_config_root(Some(dir.path().to_path_buf())).unwrap();
+        let path = || global_settings_path(ConfigScope::Global, Some(root.clone()));
+        assert_eq!(path(), Some(root.join("kilo.jsonc")));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("kilo.json"), "{}\n").unwrap();
+        assert_eq!(path(), Some(root.join("kilo.json")));
+        std::fs::write(root.join("kilo.jsonc"), "{\n  // user comment\n}\n").unwrap();
+        assert_eq!(path(), Some(root.join("kilo.jsonc")));
+        assert_eq!(global_settings_path(ConfigScope::Global, kilo_config_root(None)), None);
+    }
+
+    #[test]
+    fn settings_format_is_json() {
+        assert_eq!(
+            KiloVendor.settings_config_format(),
+            crate::install::vendor::McpConfigFormat::Json
+        );
     }
 }

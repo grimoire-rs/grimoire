@@ -122,6 +122,13 @@ pub async fn render(ctx: &Context, args: &RenderToolArgs) -> anyhow::Result<Rend
                 "bundles expand into members and render no files; render a member instead"
             ));
         }
+        // Same reason as `Hook`: the vendor-native artifact is a merge into the
+        // client's own config, and an MCP client must not name where it lands.
+        ArtifactKind::Settings => {
+            return Err(anyhow!(
+                "settings merge into client configs and render no files; use grim install"
+            ));
+        }
         ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent => {}
     }
 
@@ -137,7 +144,9 @@ pub async fn render(ctx: &Context, args: &RenderToolArgs) -> anyhow::Result<Rend
     let canonical = match kind {
         ArtifactKind::Skill => materialized_root.join(&fetched.name),
         ArtifactKind::Rule | ArtifactKind::Agent => materialized_root.join(format!("{}.md", fetched.name)),
-        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Hook => unreachable!("rejected above"),
+        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Hook | ArtifactKind::Settings => {
+            unreachable!("rejected above")
+        }
     };
     if !canonical.exists() {
         return Err(anyhow!(
@@ -161,7 +170,9 @@ pub async fn render(ctx: &Context, args: &RenderToolArgs) -> anyhow::Result<Rend
     let dest = match kind {
         ArtifactKind::Skill => args.dest_dir.join(&fetched.name),
         ArtifactKind::Rule | ArtifactKind::Agent => args.dest_dir.join(format!("{}.md", fetched.name)),
-        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Hook => unreachable!("rejected above"),
+        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Hook | ArtifactKind::Settings => {
+            unreachable!("rejected above")
+        }
     };
 
     let pinned_str = fetched.pinned.strip_advisory().to_string();

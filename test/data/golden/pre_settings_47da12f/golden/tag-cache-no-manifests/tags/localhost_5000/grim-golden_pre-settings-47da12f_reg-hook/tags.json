@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "registry": "localhost:5000",
+  "repository": "grim-golden/pre-settings-47da12f/reg-hook",
+  "tags": {
+    "1.0.0": "sha256:bfc583ae855cab3edee6ba3cf8d5354d82ac29635691ce3340b3e6958752de38"
+  }
+}

@@ -22,8 +22,10 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
+use crate::api::settings_report::{RefusedPiece, SettingsChange};
 use crate::install::install_state::{InstallRecord, InstallState};
 use crate::install::path_anchor::{AnchorError, AnchorRoots, Containment};
+use crate::install::settings_phase;
 use crate::oci::{ArtifactKind, Digest};
 
 /// What [`uninstall`] did.
@@ -38,20 +40,25 @@ pub enum UninstallOutcome {
     NotInstalled,
 }
 
-/// A managed config-file entry (an MCP server registration) that an
-/// `EscapedAnchor` tolerance arm left in place: the config file itself is
-/// user-owned and was never grim's to delete or rewrite, so it does not go
-/// to [`UninstallResult::retained`] — reporting it there would tell the
-/// user grim "left behind" a file it never owned. `abandoned_entries`
-/// instead names the config file grim can no longer safely reach the
-/// managed member in, since the record naming it was just dropped.
+/// A managed entry in a user-owned config file that grim stops recording but
+/// leaves in place. The file was never grim's, so it is not reported in
+/// [`UninstallResult::retained`]. One is produced when:
+/// - the record resolves outside its anchor root, so no splice is safe;
+/// - an adopted MCP entry is kept because `--force` was not given;
+/// - a moved client root leaves an edited or adopted entry in the old file;
+/// - a settings value stays: adopted, unparseable, needed by its client, or
+///   left in a file its client no longer reads.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct AbandonedEntry {
     /// The resolved path of the shared config file the entry lives in.
     pub path: PathBuf,
-    /// The two-level JSON pointer of the managed member inside `path` (see
+    /// The JSON pointer of the managed member inside `path` (see
     /// [`ClientOutput::entry`](crate::install::install_state::ClientOutput::entry)).
     pub pointer: String,
+    /// The set element at `pointer`, when the entry is one (see
+    /// [`ClientOutput::element`](crate::install::install_state::ClientOutput::element)).
+    /// Reaches JSON, so it is always present and `null` when `None`.
+    pub element: Option<String>,
 }
 
 /// The outcome plus the paths actually deleted (for the report / status
@@ -81,6 +88,9 @@ pub struct UninstallResult {
     /// vendor root this release relocated. Sorted and deduplicated. Empty
     /// unless something was deliberately left behind.
     pub abandoned_entries: Vec<AbandonedEntry>,
+    /// What the run changed in harness settings files: uninstall runs no
+    /// install pipeline, so nothing else carries this list.
+    pub settings_changes: Vec<SettingsChange>,
 }
 
 /// A failure during uninstall: resolving an anchored target failed (a
@@ -115,6 +125,14 @@ pub enum UninstallError {
         /// The value hash read back from the config file now.
         actual: Digest,
     },
+    /// Settings values no longer hold what grim recorded, so removing them
+    /// would discard a local edit. Refused unless forced.
+    #[error("{} settings value(s) changed since grim wrote them; rerun with --force to remove them", .pieces.len())]
+    SettingsDrifted { pieces: Vec<RefusedPiece> },
+    /// A settings file could not be read or written. Boxed: the classified
+    /// error is far larger than every other variant.
+    #[error(transparent)]
+    Settings(Box<crate::error::Error>),
 }
 
 /// Remove every recorded client output for `(kind, name)` from disk and
@@ -158,12 +176,17 @@ pub fn uninstall(
     roots: &AnchorRoots,
     force: bool,
 ) -> Result<UninstallResult, UninstallError> {
+    // A piece is a value in a file the user owns, never a footprint to delete.
+    if kind == ArtifactKind::Settings {
+        return settings_phase::uninstall(state, name, roots, force);
+    }
     let Some(record) = state.get(kind, name).cloned() else {
         return Ok(UninstallResult {
             outcome: UninstallOutcome::NotInstalled,
             removed: Vec::new(),
             retained: Vec::new(),
             abandoned_entries: Vec::new(),
+            settings_changes: Vec::new(),
         });
     };
 
@@ -207,6 +230,7 @@ pub fn uninstall(
                     Some(pointer) => abandoned_entries.push(AbandonedEntry {
                         path: resolved,
                         pointer: pointer.clone(),
+                        element: out.element.clone(),
                     }),
                     None => retained.push(resolved),
                 }
@@ -248,6 +272,7 @@ pub fn uninstall(
                 abandoned_entries.push(AbandonedEntry {
                     path: target,
                     pointer: pointer.clone(),
+                    element: out.element.clone(),
                 });
                 continue;
             }
@@ -324,6 +349,7 @@ pub fn uninstall(
         removed,
         retained,
         abandoned_entries,
+        settings_changes: Vec::new(),
     })
 }
 
@@ -536,6 +562,7 @@ mod tests {
             support_dir: None,
             entry: None,
             adopted: false,
+            element: None,
         }
     }
 
@@ -565,6 +592,7 @@ mod tests {
             }),
             entry: None,
             adopted: false,
+            element: None,
         }
     }
 
@@ -730,6 +758,7 @@ mod tests {
                     support_dir: None,
                     entry: None,
                     adopted: false,
+                    element: None,
                 },
                 ClientOutput {
                     client: "copilot".to_string(),
@@ -741,6 +770,7 @@ mod tests {
                     support_dir: None,
                     entry: None,
                     adopted: false,
+                    element: None,
                 },
             ],
         });
@@ -862,6 +892,7 @@ mod tests {
             support_dir: None,
             entry: None,
             adopted: false,
+            element: None,
         };
         out.entry = Some("/mcp_servers/grim".to_string());
         state.record(InstallRecord {

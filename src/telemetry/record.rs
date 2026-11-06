@@ -112,12 +112,20 @@ pub fn install_events(outcomes: &[ArtifactInstall], declared: &DesiredSet) -> Ve
 }
 
 /// Every registry identifier the scope declares, for [`reference`]'s tag lookup:
-/// skills, rules, agents, bundles, mcp, hooks, each in binding-name order.
+/// skills, rules, agents, bundles, mcp, hooks, settings, each in binding-name order.
 pub fn declared_identifiers(set: &DesiredSet) -> impl Iterator<Item = &Identifier> {
-    [&set.skills, &set.rules, &set.agents, &set.bundles, &set.mcp, &set.hooks]
-        .into_iter()
-        .flat_map(|section| section.values())
-        .filter_map(|source| source.identifier())
+    [
+        &set.skills,
+        &set.rules,
+        &set.agents,
+        &set.bundles,
+        &set.mcp,
+        &set.hooks,
+        &set.settings,
+    ]
+    .into_iter()
+    .flat_map(|section| section.values())
+    .filter_map(|source| source.identifier())
 }
 
 #[cfg(test)]
@@ -211,6 +219,54 @@ mod tests {
         assert!(line.contains(r#""grim.artifact.ref":"r.io/a/b""#), "{line}");
     }
 
+    /// Nothing a settings run reads past the kind reaches a telemetry payload:
+    /// no pointer, no element, no value, on an applied row or a refused one.
+    #[test]
+    fn a_settings_row_emits_its_kind_and_no_piece() {
+        use crate::api::settings_report::{PieceMark, PieceState, RefusedPiece};
+        use crate::oci::ArtifactRef;
+
+        const SENTINEL: &str = "sentinel-allow-rule";
+        let piece = RefusedPiece {
+            package: "team".to_string(),
+            client: "claude".to_string(),
+            file: Some(".claude/settings.local.json".to_string()),
+            pointer: format!("/permissions/{SENTINEL}"),
+            element: Some(SENTINEL.to_string()),
+            marked: PieceMark::Overwrite,
+            state: Some(PieceState::Modified),
+            wanted: Some(SENTINEL.to_string()),
+            current: Some(SENTINEL.to_string()),
+        };
+        let row = |result| ArtifactInstall {
+            reference: ArtifactRef::registry(ArtifactKind::Settings, "team", id("r.io/acme/team")),
+            target: None,
+            result: Ok(result),
+        };
+        let rows = [
+            row(InstallOutcome::Updated),
+            row(InstallOutcome::RefusedSettings {
+                pieces: std::sync::Arc::from([piece]),
+            }),
+        ];
+
+        let t = armed();
+        t.record_artifacts_with(|| install_events(&rows, &DesiredSet::default()));
+        let s = t.snapshot().unwrap();
+        let outcome = crate::telemetry::payload::Outcome {
+            duration: std::time::Duration::ZERO,
+            exit_code: 0,
+            error_type: None,
+            ci: false,
+        };
+        let line = crate::telemetry::payload::build(Vec::new(), &s, &outcome).to_json_line();
+
+        assert!(!line.contains(SENTINEL), "{line}");
+        assert!(line.contains(r#""grim.artifact.kind":"settings""#), "{line}");
+        assert!(line.contains(r#""grim.artifact.action":"updated""#), "{line}");
+        assert_eq!(s.artifacts.len(), 1, "a refused row changed nothing: {line}");
+    }
+
     #[test]
     fn a_long_lived_session_records_nothing() {
         for name in ["mcp", "tui"] {
@@ -288,6 +344,18 @@ mod tests {
         set.skills.insert("alpha".into(), declare("r.io/acme/review:1"));
         let pinned = id(&format!("r.io/acme/review@sha256:{}", "a".repeat(64)));
         assert_eq!(reference(&pinned, declared_identifiers(&set)), "r.io/acme/review:1");
+    }
+
+    /// A settings binding names its tag like any other kind, so a changed
+    /// package reports `repo:tag` rather than the bare repository.
+    #[test]
+    fn a_settings_binding_supplies_the_tag() {
+        use crate::config::declaration::{DeclaredSource, DesiredSet};
+        let mut set = DesiredSet::default();
+        set.settings
+            .insert("team".into(), DeclaredSource::Registry(id("r.io/acme/team:1")));
+        let pinned = id(&format!("r.io/acme/team@sha256:{}", "a".repeat(64)));
+        assert_eq!(reference(&pinned, declared_identifiers(&set)), "r.io/acme/team:1");
     }
 
     #[test]

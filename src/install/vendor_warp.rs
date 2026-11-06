@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Grimoire Authors
 
-//! Warp's vendor strategy: own-directory skills, pool-eligible; MCP; rules and agents declined.
+//! Warp's vendor strategy: own-directory skills, pool-eligible; MCP; global settings; rules and agents declined.
 //!
 //! Warp is the agentic terminal (<https://docs.warp.dev>), verified 2026-07-27, re-verified 2026-09-27
 //! against Warp's own documentation, quoted directly at both scopes.
@@ -34,12 +34,19 @@
 //!   oauth block is skipped too (Warp runs its own login flow, no config
 //!   keys). Warp can also read Claude's `.mcp.json` / `~/.claude.json` and
 //!   `.agents/.mcp.json`, so selecting both clients can register a server twice.
+//! - **Settings**: global only, TOML v1.1, one `settings.toml`: `~/.warp` on
+//!   macOS, `$XDG_CONFIG_HOME|~/.config` + `/warp-terminal` on Linux (the one
+//!   platform that reads the variable). Windows keeps it under `%LOCALAPPDATA%`,
+//!   which grim has no root for, so the kind declines there. Warp's Settings
+//!   panel and bundled `modify-settings` skill write the same file, Warp reloads
+//!   it live, and an unrecognized value falls back to that setting's default.
+//!   Preview builds use other directories and are not covered.
 //!
-//! **No environment override found.** `~/.warp/` is deliberately
-//! **cross-platform** upstream — identical on macOS, Linux and Windows — while
-//! Warp's app-data and log directories are OS-specific. Detection therefore
-//! keys on `~/.warp/` and never on the platform paths, which is both simpler
-//! and what upstream actually promises to keep stable.
+//! **No environment override found.** Detection keys on `~/.warp/`, the same
+//! path on every platform, and on Linux also on the XDG `warp-terminal/` dir
+//! holding `settings.toml`: upstream does not say a Linux install creates
+//! `~/.warp/`. The OS-specific app-data and log dirs stay out, since upstream
+//! promises nothing about them.
 
 use std::path::{Path, PathBuf};
 
@@ -49,10 +56,175 @@ use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
 use super::render::{self, RenderError, RenderedDoc};
-use super::vendor::{KindSupport, Vendor, home_dir};
+use super::vendor::MergeClass::Scalar;
+use super::vendor::SettingsScopes::GlobalOnly;
+use super::vendor::SettingsValueType as Ty;
+use super::vendor::{KindSupport, McpConfigFormat, SettingsField, Vendor, home_dir, xdg_config_dir};
 
 /// Warp.
 pub struct WarpVendor;
+
+/// Warp's settings keys, from `research_upstream_warp_settings_20261105.md`.
+/// Each pointer segment is a TOML table, so `/agents/warp_agent/other/x` is
+/// key `x` in `[agents.warp_agent.other]`.
+const WARP_SETTINGS_FIELDS: &[SettingsField] = &[
+    SettingsField::new(
+        "/agents/warp_agent/other/thinking_display_mode",
+        Ty::Enum(&["show_and_collapse", "always_show", "never_show"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/agents/warp_agent/other/open_conversation_layout_preference",
+        Ty::Enum(&["new_tab", "split_pane"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/agents/warp_agent/other/long_running_command_submission_mode",
+        Ty::Enum(&["send_immediately", "queue_until_command_completes"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/agents/warp_agent/other/orchestration_message_display_mode",
+        Ty::Enum(&["show_and_collapse", "always_show", "always_collapse"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    // `steer` is in the bundled schema only, not the documented values.
+    SettingsField::new(
+        "/agents/warp_agent/other/default_prompt_submission_mode",
+        Ty::Enum(&["interrupt", "queue"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    // `tab_config` needs a companion path key, so it stays out.
+    SettingsField::new(
+        "/general/default_session_mode",
+        Ty::Enum(&["terminal", "agent", "cloud_agent", "docker_sandbox"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/agents/warp_agent/other/auto_approve_bypasses_command_denylist",
+        Ty::Bool,
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/agents/warp_agent/other/cloud_agent_computer_use_enabled",
+        Ty::Bool,
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/agents/mcp_servers/file_based_mcp_enabled",
+        Ty::Bool,
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/agents/warp_agent/other/agent_attribution_enabled",
+        Ty::Bool,
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/agents/warp_agent/other/show_agent_notifications",
+        Ty::Bool,
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/agents/warp_agent/other/show_conversation_history",
+        Ty::Bool,
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/agents/warp_agent/other/should_show_oz_updates_in_zero_state",
+        Ty::Bool,
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/agents/warp_agent/other/should_render_use_agent_toolbar_for_user_commands",
+        Ty::Bool,
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new("/agents/warp_agent/is_any_ai_enabled", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/agents/warp_agent/active_ai/enabled", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new(
+        "/agents/warp_agent/active_ai/code_suggestions_enabled",
+        Ty::Bool,
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/agents/warp_agent/active_ai/intelligent_autosuggestions_enabled",
+        Ty::Bool,
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/agents/warp_agent/active_ai/agent_mode_query_suggestions_enabled",
+        Ty::Bool,
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/agents/warp_agent/active_ai/git_operations_autogen_enabled",
+        Ty::Bool,
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/agents/warp_agent/active_ai/rule_suggestions_enabled",
+        Ty::Bool,
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/agents/warp_agent/active_ai/shared_block_title_generation_enabled",
+        Ty::Bool,
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/agents/warp_agent/input/ai_auto_detection_enabled",
+        Ty::Bool,
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/agents/warp_agent/input/nld_in_terminal_enabled",
+        Ty::Bool,
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/agents/warp_agent/input/show_model_selectors_in_prompt",
+        Ty::Bool,
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new("/agents/warp_agent/input/show_agent_tips", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new(
+        "/agents/warp_agent/input/include_agent_commands_in_history",
+        Ty::Bool,
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new("/agents/knowledge/rules_enabled", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new(
+        "/agents/knowledge/warp_drive_context_enabled",
+        Ty::Bool,
+        Scalar,
+        GlobalOnly,
+    ),
+];
 
 impl Vendor for WarpVendor {
     fn name(&self) -> &'static str {
@@ -75,9 +247,7 @@ impl Vendor for WarpVendor {
             // `.warp` is product-specific. NEVER key on `.agents/` — Warp scans
             // the pool, so that marker says nothing about Warp specifically.
             ConfigScope::Project => workspace.join(".warp").exists(),
-            // `~/.warp` is cross-platform upstream; the OS-specific app-data
-            // dirs are deliberately not consulted.
-            ConfigScope::Global => warp_root(home_dir()).is_some_and(|p| p.exists()),
+            ConfigScope::Global => detects_globally(settings_root_kind(), home_dir(), xdg_config_dir()),
         }
     }
 
@@ -97,6 +267,18 @@ impl Vendor for WarpVendor {
 
     fn mcp_config_path(&self, workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
         Some(scope_root(workspace, scope).join(".mcp.json"))
+    }
+
+    fn settings_fields(&self) -> &'static [SettingsField] {
+        WARP_SETTINGS_FIELDS
+    }
+
+    fn settings_config_path(&self, _workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
+        global_settings_path(scope, settings_root(settings_root_kind(), home_dir(), xdg_config_dir()))
+    }
+
+    fn settings_config_format(&self) -> McpConfigFormat {
+        McpConfigFormat::Toml
     }
 
     fn mcp_entry(
@@ -200,6 +382,61 @@ fn scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
 /// [`PathAnchor`](super::path_anchor) `VendorRoot("warp")` anchor is rooted here.
 pub(crate) fn warp_root(home: Option<PathBuf>) -> Option<PathBuf> {
     home.map(|h| h.join(".warp"))
+}
+
+/// Warp's Linux config dir `$XDG_CONFIG_HOME|~/.config` + `/warp-terminal`.
+/// Answers on every platform so the [`PathAnchor`](super::path_anchor)
+/// `warp-config-root` row stays pure; [`settings_root`] applies the OS gate.
+pub(crate) fn warp_config_root(xdg_config: Option<PathBuf>) -> Option<PathBuf> {
+    xdg_config.map(|x| x.join("warp-terminal"))
+}
+
+/// The root holding `settings.toml` on a platform.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingsRootKind {
+    /// macOS: [`warp_root`].
+    Home,
+    /// Linux: [`warp_config_root`].
+    Xdg,
+    /// Windows uses `%LOCALAPPDATA%`, which grim has no root for.
+    Unsupported,
+}
+
+/// This target's [`SettingsRootKind`]. `cfg!` rather than `#[cfg]` so every
+/// arm of [`settings_root`] compiles and is tested on every host.
+fn settings_root_kind() -> SettingsRootKind {
+    if cfg!(target_os = "macos") {
+        SettingsRootKind::Home
+    } else if cfg!(target_os = "linux") {
+        SettingsRootKind::Xdg
+    } else {
+        SettingsRootKind::Unsupported
+    }
+}
+
+fn settings_root(kind: SettingsRootKind, home: Option<PathBuf>, xdg_config: Option<PathBuf>) -> Option<PathBuf> {
+    match kind {
+        SettingsRootKind::Home => warp_root(home),
+        SettingsRootKind::Xdg => warp_config_root(xdg_config),
+        SettingsRootKind::Unsupported => None,
+    }
+}
+
+/// The global detection signal on a platform of `kind`: `~/.warp`, or on
+/// Linux the XDG dir that holds `settings.toml`. Detection writes nothing, so
+/// a second marker cannot misplace a file.
+fn detects_globally(kind: SettingsRootKind, home: Option<PathBuf>, xdg_config: Option<PathBuf>) -> bool {
+    warp_root(home).is_some_and(|p| p.exists())
+        || (kind == SettingsRootKind::Xdg && warp_config_root(xdg_config).is_some_and(|p| p.exists()))
+}
+
+/// `settings.toml` under `root`: `None` at project scope, which Warp does not
+/// read, and `None` with no root.
+fn global_settings_path(scope: ConfigScope, root: Option<PathBuf>) -> Option<PathBuf> {
+    match scope {
+        ConfigScope::Project => None,
+        ConfigScope::Global => root.map(|root| root.join("settings.toml")),
+    }
 }
 
 #[cfg(test)]
@@ -327,5 +564,265 @@ mod tests {
         );
         std::fs::create_dir_all(w.join(".warp")).unwrap();
         assert!(WarpVendor.detect(w, ConfigScope::Project));
+    }
+
+    /// `~/.warp` selects Warp everywhere. On Linux the XDG `warp-terminal`
+    /// dir holding `settings.toml` does too; elsewhere it never does.
+    #[test]
+    fn detect_global_adds_the_settings_dir_on_linux_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let xdg = tmp.path().join("xdg");
+        std::fs::create_dir_all(warp_config_root(Some(xdg.clone())).unwrap()).unwrap();
+        let some = |p: &PathBuf| Some(p.clone());
+
+        assert!(
+            detects_globally(SettingsRootKind::Xdg, some(&home), some(&xdg)),
+            "a Linux home with only the XDG warp-terminal dir must detect warp"
+        );
+        for kind in [SettingsRootKind::Home, SettingsRootKind::Unsupported] {
+            assert!(!detects_globally(kind, some(&home), some(&xdg)), "{kind:?}");
+        }
+        assert!(!detects_globally(SettingsRootKind::Xdg, some(&home), None));
+
+        std::fs::create_dir_all(warp_root(some(&home)).unwrap()).unwrap();
+        for kind in [
+            SettingsRootKind::Home,
+            SettingsRootKind::Xdg,
+            SettingsRootKind::Unsupported,
+        ] {
+            assert!(detects_globally(kind, some(&home), None), "{kind:?}");
+        }
+        assert!(!detects_globally(SettingsRootKind::Xdg, None, None));
+    }
+
+    #[test]
+    fn detect_global_follows_this_platform() {
+        assert_eq!(
+            WarpVendor.detect(Path::new("/w"), ConfigScope::Global),
+            detects_globally(settings_root_kind(), home_dir(), xdg_config_dir())
+        );
+    }
+
+    #[test]
+    fn settings_rows_match_the_key_list() {
+        let rows: Vec<_> = WarpVendor
+            .settings_fields()
+            .iter()
+            .map(|field| (field.pointer, field.ty, field.merge, field.scopes))
+            .collect();
+        let other = |key: &str| format!("/agents/warp_agent/other/{key}");
+        let active = |key: &str| format!("/agents/warp_agent/active_ai/{key}");
+        let input = |key: &str| format!("/agents/warp_agent/input/{key}");
+        let mut expected = vec![
+            (
+                other("thinking_display_mode"),
+                Ty::Enum(&["show_and_collapse", "always_show", "never_show"]),
+            ),
+            (
+                other("open_conversation_layout_preference"),
+                Ty::Enum(&["new_tab", "split_pane"]),
+            ),
+            (
+                other("long_running_command_submission_mode"),
+                Ty::Enum(&["send_immediately", "queue_until_command_completes"]),
+            ),
+            (
+                other("orchestration_message_display_mode"),
+                Ty::Enum(&["show_and_collapse", "always_show", "always_collapse"]),
+            ),
+            (
+                other("default_prompt_submission_mode"),
+                Ty::Enum(&["interrupt", "queue"]),
+            ),
+            (
+                "/general/default_session_mode".to_string(),
+                Ty::Enum(&["terminal", "agent", "cloud_agent", "docker_sandbox"]),
+            ),
+        ];
+        let bools = [
+            other("auto_approve_bypasses_command_denylist"),
+            other("cloud_agent_computer_use_enabled"),
+            "/agents/mcp_servers/file_based_mcp_enabled".to_string(),
+            other("agent_attribution_enabled"),
+            other("show_agent_notifications"),
+            other("show_conversation_history"),
+            other("should_show_oz_updates_in_zero_state"),
+            other("should_render_use_agent_toolbar_for_user_commands"),
+            "/agents/warp_agent/is_any_ai_enabled".to_string(),
+            active("enabled"),
+            active("code_suggestions_enabled"),
+            active("intelligent_autosuggestions_enabled"),
+            active("agent_mode_query_suggestions_enabled"),
+            active("git_operations_autogen_enabled"),
+            active("rule_suggestions_enabled"),
+            active("shared_block_title_generation_enabled"),
+            input("ai_auto_detection_enabled"),
+            input("nld_in_terminal_enabled"),
+            input("show_model_selectors_in_prompt"),
+            input("show_agent_tips"),
+            input("include_agent_commands_in_history"),
+            "/agents/knowledge/rules_enabled".to_string(),
+            "/agents/knowledge/warp_drive_context_enabled".to_string(),
+        ];
+        expected.extend(bools.into_iter().map(|pointer| (pointer, Ty::Bool)));
+        let expected: Vec<_> = expected
+            .iter()
+            .map(|(pointer, ty)| (pointer.as_str(), *ty, Scalar, GlobalOnly))
+            .collect();
+        assert_eq!(rows, expected);
+        assert_eq!(rows.len(), 29);
+    }
+
+    #[test]
+    fn settings_rows_narrow_nothing_and_require_nothing() {
+        for field in WarpVendor.settings_fields() {
+            assert_eq!(field.map_keys, None, "{}", field.pointer);
+            assert_eq!(field.project_values, None, "{}", field.pointer);
+            assert!(!field.required_by_client, "{}", field.pointer);
+        }
+    }
+
+    /// A value of each type is taken in its nested table, and a wrong one is
+    /// refused: Warp drops a value it does not recognize back to the default.
+    #[test]
+    fn settings_document_checks_each_value_type() {
+        use crate::oci::settings::SettingsDocument;
+
+        let good = concat!(
+            "description = \"d\"\n",
+            "[warp.general]\ndefault_session_mode = \"agent\"\n",
+            "[warp.agents.warp_agent]\nis_any_ai_enabled = false\n",
+            "[warp.agents.warp_agent.other]\nthinking_display_mode = \"never_show\"\n",
+        );
+        let (document, _) = SettingsDocument::from_toml_str_with_requires(good).unwrap();
+        assert_eq!(
+            serde_json::Value::Object(document.vendors["warp"].clone()),
+            serde_json::json!({
+                "general": {"default_session_mode": "agent"},
+                "agents": {"warp_agent": {"is_any_ai_enabled": false, "other": {"thinking_display_mode": "never_show"}}},
+            })
+        );
+        for bad in [
+            "[warp.general]\ndefault_session_mode = \"tab_config\"",
+            "[warp.agents.warp_agent.other]\ndefault_prompt_submission_mode = \"steer\"",
+            "[warp.agents.warp_agent]\nis_any_ai_enabled = \"yes\"",
+            "[warp.agents.warp_agent.input]\nai_command_denylist = \"ls\"",
+            "[warp.agents.profiles]\nagent_mode_execute_readonly_commands = true",
+            "[warp.agents]\nusage_display_mode = \"cost\"",
+        ] {
+            let text = format!("description = \"d\"\n{bad}\n");
+            assert!(SettingsDocument::from_toml_str_with_requires(&text).is_err(), "{bad}");
+        }
+    }
+
+    /// A pointer lands as a key in its TOML table, beside what the user wrote.
+    #[test]
+    fn settings_write_lands_in_the_nested_table() {
+        use crate::install::settings_writer::{SettingsOp, apply};
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.toml");
+        let user = "[appearance]\ntheme = \"dark\"\n\n[agents.warp_agent]\nis_any_ai_enabled = true\n";
+        std::fs::write(&file, user).unwrap();
+        let upsert = |pointer: &str, value: serde_json::Value| SettingsOp::Upsert {
+            path: pointer.trim_start_matches('/').split('/').map(str::to_string).collect(),
+            value,
+        };
+        let ops = [
+            upsert("/agents/warp_agent/is_any_ai_enabled", serde_json::json!(false)),
+            upsert(
+                "/agents/warp_agent/other/thinking_display_mode",
+                serde_json::json!("always_show"),
+            ),
+            upsert("/general/default_session_mode", serde_json::json!("agent")),
+        ];
+        apply(&file, WarpVendor.settings_config_format(), &ops, &[], false).unwrap();
+
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.starts_with("[appearance]\ntheme = \"dark\"\n"), "{text}");
+        assert!(
+            text.contains("[agents.warp_agent.other]\nthinking_display_mode = \"always_show\"\n"),
+            "{text}"
+        );
+        let doc: toml::Table = text.parse().unwrap();
+        assert_eq!(doc["agents"]["warp_agent"]["is_any_ai_enabled"].as_bool(), Some(false));
+        assert_eq!(doc["general"]["default_session_mode"].as_str(), Some("agent"));
+    }
+
+    #[test]
+    fn settings_path_has_no_answer_at_project_scope() {
+        assert_eq!(
+            WarpVendor.settings_config_path(Path::new("/w"), ConfigScope::Project),
+            None
+        );
+        assert_eq!(
+            global_settings_path(ConfigScope::Project, Some(PathBuf::from("/r"))),
+            None
+        );
+    }
+
+    #[test]
+    fn settings_path_at_global_scope_is_settings_toml_under_the_root() {
+        assert_eq!(
+            global_settings_path(ConfigScope::Global, Some(PathBuf::from("/r"))),
+            Some(PathBuf::from("/r/settings.toml"))
+        );
+        assert_eq!(global_settings_path(ConfigScope::Global, None), None);
+    }
+
+    /// Every platform arm, on any host: macOS keeps the file in `~/.warp`,
+    /// Linux under the XDG dir, and Windows has no root grim knows.
+    #[test]
+    fn settings_root_covers_every_platform_arm() {
+        let home = || Some(PathBuf::from("/home/u"));
+        let xdg = || Some(PathBuf::from("/xdg"));
+        assert_eq!(
+            settings_root(SettingsRootKind::Home, home(), xdg()),
+            Some(PathBuf::from("/home/u/.warp"))
+        );
+        assert_eq!(
+            settings_root(SettingsRootKind::Xdg, home(), xdg()),
+            Some(PathBuf::from("/xdg/warp-terminal"))
+        );
+        assert_eq!(settings_root(SettingsRootKind::Unsupported, home(), xdg()), None);
+        assert_eq!(settings_root(SettingsRootKind::Home, None, xdg()), None);
+        assert_eq!(settings_root(SettingsRootKind::Xdg, home(), None), None);
+    }
+
+    #[test]
+    fn settings_root_answers_per_host_platform() {
+        let root = settings_root(
+            settings_root_kind(),
+            Some(PathBuf::from("/home/u")),
+            Some(PathBuf::from("/xdg")),
+        );
+        let expected = if cfg!(target_os = "macos") {
+            Some(PathBuf::from("/home/u/.warp"))
+        } else if cfg!(target_os = "linux") {
+            Some(PathBuf::from("/xdg/warp-terminal"))
+        } else {
+            None
+        };
+        assert_eq!(root, expected);
+    }
+
+    #[test]
+    fn warp_config_root_is_the_warp_terminal_dir_on_every_platform() {
+        assert_eq!(
+            warp_config_root(Some(PathBuf::from("/xdg"))),
+            Some(PathBuf::from("/xdg/warp-terminal"))
+        );
+        assert_eq!(warp_config_root(None), None);
+    }
+
+    #[test]
+    fn settings_format_is_toml() {
+        assert_eq!(WarpVendor.settings_config_format(), McpConfigFormat::Toml);
+        assert_eq!(
+            WarpVendor.mcp_config_format(),
+            McpConfigFormat::Json,
+            "the MCP file stays JSON"
+        );
     }
 }

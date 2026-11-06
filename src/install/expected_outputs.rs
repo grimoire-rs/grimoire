@@ -123,6 +123,11 @@ fn pending_for_client(
     roots: &AnchorRoots,
     mcp: Option<&McpDescriptor>,
 ) -> Vec<(ClientTarget, PathBuf)> {
+    // The settings phase plans and reports its own pieces. Counting them here
+    // would name drift `outputs_pending` promises never to carry.
+    if kind == ArtifactKind::Settings {
+        return Vec::new();
+    }
     if kind == ArtifactKind::Mcp {
         let surfaces = writable_mcp_surfaces(client, name, target, roots, mcp);
         // One recorded entry must not cover a sibling surface, or a surface
@@ -378,6 +383,7 @@ mod tests {
             support_dir: None,
             entry: None,
             adopted: false,
+            element: None,
         }
     }
 
@@ -577,6 +583,23 @@ mod tests {
         assert!(pending.is_empty(), "{pending:?}");
     }
 
+    /// Settings pieces land through their own phase, never through a path a
+    /// client materializes, so even a client that hosts the kind has no
+    /// pending output: `outputs_pending` stays `[]`.
+    #[test]
+    fn settings_is_never_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Claude]);
+        let roots = roots(dir.path());
+        let client = ClientTarget::Claude;
+        let kind = ArtifactKind::Settings;
+
+        let pending = pending_for_client(None, client, kind, "team-defaults", &target, &roots, None);
+        assert!(pending.is_empty(), "{pending:?}");
+        let pending = pending_outputs(None, kind, "team-defaults", &target, &roots, None);
+        assert!(pending.is_empty(), "{pending:?}");
+    }
+
     /// A Junie agent whose name Junie's grammar rejects is skipped at install,
     /// so it must never be expected or pending — or `grim status` would carry
     /// drift no install could clear. A fitting name still is.
@@ -610,6 +633,7 @@ mod tests {
             support_dir: None,
             entry: Some("/servers/x".to_string()),
             adopted: false,
+            element: None,
         }
     }
 
@@ -711,6 +735,7 @@ mod tests {
             support_dir: None,
             entry: None,
             adopted: false,
+            element: None,
         }
     }
 

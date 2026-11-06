@@ -6,9 +6,10 @@
 //!
 //! Acquires the advisory flock on the config file, resolves the whole
 //! declared set, loads any previous lock for `generated_at` preservation,
-//! writes atomically, and releases. Each report row's action is `locked`
-//! when the pin is new or changed and `unchanged` when the previous lock
-//! already carried the same content.
+//! refuses a conflict among armed settings packages, writes atomically, and
+//! releases. Each report row's action is `locked` when the pin is new or
+//! changed and `unchanged` when the previous lock already carried the same
+//! content.
 
 use std::sync::Arc;
 
@@ -36,8 +37,9 @@ pub struct LockArgs {}
 ///
 /// # Errors
 ///
-/// Config (78), tag-not-found (79), auth (80), registry-unreachable (69),
-/// or flock-contended (75) failures propagate via the typed error chain.
+/// Config (78), a conflict among armed settings packages (78), tag-not-found
+/// (79), auth (80), registry-unreachable (69), or flock-contended (75) failures
+/// propagate via the typed error chain.
 pub async fn run(ctx: &Context, _args: &LockArgs) -> anyhow::Result<(LockReport, ExitCode)> {
     let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
 
@@ -64,6 +66,13 @@ pub async fn run(ctx: &Context, _args: &LockArgs) -> anyhow::Result<(LockReport,
         )
         .await,
     )?;
+    // A resolve asks nothing, so only packages a record covers load a layer: a
+    // fresh clone locks as it did before the kind, and its conflict meets the run
+    // that arms it. Every later run reads this lock, so a known conflict stops here.
+    if !lock.settings.is_empty() && scope.options.experimental.settings_enabled() {
+        let policy = super::hook_consent::settings_policy(ctx, &scope, &lock, None)?;
+        super::add::refuse_settings_conflict(&scope, &lock, policy, &[], &access).await?;
+    }
     super::grim(lock_io::save(&scope.lock_path, &lock, previous.as_ref()))?;
 
     let report = build_report(&lock, previous.as_ref(), &scope);
@@ -122,6 +131,7 @@ mod tests {
     fn lock_of(skills: Vec<LockedArtifact>) -> GrimoireLock {
         GrimoireLock {
             hooks: vec![],
+            settings: vec![],
             metadata: LockMetadata {
                 lock_version: LockVersion::V1,
                 declaration_hash_version: 1,

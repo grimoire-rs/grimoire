@@ -102,11 +102,11 @@ pub fn classify(media_type: &str) -> Result<LayerEncoding, LayerError> {
     }
 }
 
-/// Whether `kind` ships a tar layer; bundle and mcp layers are JSON and never decoded.
+/// Whether `kind` ships a tar layer; bundle, mcp and settings layers are JSON and never decoded.
 pub fn is_tar_kind(kind: ArtifactKind) -> bool {
     match kind {
         ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent | ArtifactKind::Hook => true,
-        ArtifactKind::Mcp | ArtifactKind::Bundle => false,
+        ArtifactKind::Mcp | ArtifactKind::Bundle | ArtifactKind::Settings => false,
     }
 }
 
@@ -810,6 +810,7 @@ mod tests {
         }
         assert!(!is_tar_kind(ArtifactKind::Mcp));
         assert!(!is_tar_kind(ArtifactKind::Bundle));
+        assert!(!is_tar_kind(ArtifactKind::Settings));
     }
 
     // ── exit classification ──

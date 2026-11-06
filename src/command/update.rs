@@ -36,9 +36,16 @@ use crate::context::Context;
 use crate::export::ExportError;
 use crate::export::marketplace;
 use crate::export::resolve::{self, IncludeOrigin, PluginPick, PluginSelection};
-use crate::install::installer::{ArtifactInstall, InstallIntent, install_all_with_progress};
+use crate::install::install_state::InstallState;
+use crate::install::installer::{
+    ArtifactInstall, InstallIntent, InstallRun, SettingsOutcome, SettingsRun, install_all_before_reap,
+    install_all_with_progress,
+};
 use crate::install::materializer::DefaultMaterializer;
-use crate::install::prune::{PruneOutcome, PrunedArtifact, ReapedClients, prune_orphans, reap_dropped_clients};
+use crate::install::prune::{
+    PruneOutcome, PrunedArtifact, ReapedClients, prune_orphans_off_runtime, reap_dropped_clients,
+};
+use crate::install::settings_phase::{self, Abandoned, SettingsInput};
 use crate::install::target::InstallTarget;
 use crate::lock::file_lock::ConfigFileLock;
 use crate::lock::grimoire_lock::GrimoireLock;
@@ -124,7 +131,13 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     // C-112: the hook policy is resolved against the **new** lock, after
     // `roll_forward` — and before the lock is saved, so a failure here (an
     // unloadable global config, 78) leaves nothing on disk changed.
-    let hook_policy = super::hook_consent::resolve(ctx, &scope, &new_lock, args.hook_trust.flag())?;
+    let policies = super::hook_consent::resolve(ctx, &scope, &new_lock, args.hook_trust.flag())?;
+
+    // A saved lock is what every later run reads. A project without the kind
+    // never gets here, so its failure order stays as it was.
+    if !new_lock.settings.is_empty() {
+        super::add::refuse_settings_conflict(&scope, &new_lock, policies.settings.clone(), &[], &access).await?;
+    }
 
     super::grim(lock_io::save(&scope.lock_path, &new_lock, previous.as_ref()))?;
 
@@ -149,7 +162,8 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
         &scope.options.clients,
         &scope.options.vendors,
     ))?
-    .with_hook_policy(hook_policy);
+    .with_hook_policy(policies.hooks)
+    .with_settings_policy(policies.settings);
     ctx.telemetry()
         .record_install_clients(&target, &scope.workspace, scope.scope);
     // `install_and_persist` runs this same check; `update` calls
@@ -173,7 +187,24 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
         target.hook_policy().is_some() || new_lock.hooks.is_empty(),
         "grim update installs hooks without a hook policy"
     );
-    let outcomes = install_all_with_progress(
+    // The reap below keeps `[options].clients` (why, there); a parse error
+    // waits for it, where it surfaced before. The install reads the same list
+    // from `target`, so its settings step keeps what the reap keeps.
+    let desired = (!scope.options.clients.is_empty()).then(|| {
+        InstallTarget::parse(
+            &scope.workspace,
+            scope.scope,
+            &[],
+            &scope.options.clients,
+            &scope.options.vendors,
+        )
+    });
+    let InstallRun {
+        items: mut outcomes,
+        mut settings,
+        mut abandoned,
+        halted,
+    } = install_all_before_reap(
         &new_lock,
         &access,
         &materializer,
@@ -184,12 +215,23 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
         args.force.into(),
         InstallIntent::Declared,
         progress.as_ref(),
+        SettingsRun::Full(&new_lock),
+        target.configured_clients(),
     )
     .await;
+    // A conflict refused the whole pass, so nothing converged: pruning or reaping
+    // from here would remove outputs for a run that never happened.
+    if halted && let Some(ArtifactInstall { result: Err(error), .. }) = outcomes.pop() {
+        return Err(error.into());
+    }
 
     // The single `persist` seam handles project-scope dir creation, the
     // atomic write, and the conditional legacy-file reap in one place.
-    let persist_state = |state: &crate::install::install_state::InstallState| -> anyhow::Result<()> {
+    #[expect(
+        clippy::result_large_err,
+        reason = "the typed error carries the settings outcome to the JSON document"
+    )]
+    let persist_state = |state: &crate::install::install_state::InstallState| -> Result<(), crate::error::Error> {
         state
             .persist(
                 scope.scope,
@@ -200,8 +242,7 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
             .map_err(|e| match e {
                 crate::install::install_state::PersistError::EnsureDir { path, source }
                 | crate::install::install_state::PersistError::Save { path, source } => state_io(&path, source),
-            })?;
-        Ok(())
+            })
     };
 
     // Persist before the reconciliation passes below, which can still fail:
@@ -212,7 +253,7 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     // as `modified` and refused with IntegrityMismatch, and each retry failed
     // on the same orphan. Same persist-before-surfacing doctrine the installer
     // documents (`installer.rs`).
-    persist_state(&state)?;
+    persist_state(&state).map_err(keep_settings(&settings))?;
 
     // Reconcile the materialized tree back to the new lock: an artifact the
     // resolve dropped (most visibly a bundle that stopped including a
@@ -230,7 +271,10 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
         crate::install::prune::PruneError::Anchor { source, .. } => crate::error::Error::Anchor(source),
         crate::install::prune::PruneError::Io { path, source } => state_io(&path, source),
     };
-    let pruned = prune_orphans(&mut state, &new_lock, &scope.roots, args.force).map_err(map_prune_err)?;
+    let mut pruned = prune_orphans_off_runtime(&mut state, &new_lock, &scope.roots, args.force)
+        .await
+        .map_err(map_prune_err)
+        .map_err(keep_settings(&settings))?;
 
     // Reap outputs whose client left the configured client set. The desired
     // set is the project's *explicitly configured* `[options].clients`, NOT
@@ -249,18 +293,45 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     // for the integrity gate to judge. `--force` (not update's implied
     // re-materialize force) governs whether a locally modified output is
     // deleted or preserved.
-    let reaped = if scope.options.clients.is_empty() {
-        Vec::new()
+    let mut reaped = if let Some(desired) = desired {
+        let desired = desired
+            .map_err(crate::error::Error::from)
+            .map_err(keep_settings(&settings))?;
+        let mut reaped = reap_dropped_clients(&mut state, desired.clients(), &scope.roots, args.force)
+            .map_err(map_prune_err)
+            .map_err(keep_settings(&settings))?;
+        // A settings step that refused or failed left its records unjudged, so
+        // a reap here would judge files the plan never read.
+        let settings_failed = outcomes
+            .iter()
+            .any(|row| row.reference.kind == ArtifactKind::Settings && row.result.is_err());
+        if settings.pieces.is_empty() && !settings_failed {
+            let input = SettingsInput {
+                access: &access,
+                target: &target,
+                roots: &scope.roots,
+                added: &[],
+            };
+            let force = args.force.into();
+            let phase = settings_phase::reap_clients(desired.clients(), &new_lock, &input, &force, &mut state).await;
+            outcomes.extend(phase.rows);
+            settings.changes.extend(phase.outcome.changes);
+            settings.pieces = phase.outcome.pieces;
+            abandoned.extend(
+                phase
+                    .abandoned
+                    .into_iter()
+                    .filter(|left| !phase.reaped.iter().any(|row| row.name == left.package))
+                    .map(|left| (ArtifactKind::Settings, left)),
+            );
+            reaped.extend(phase.reaped);
+        }
+        reaped
     } else {
-        let desired = super::grim(InstallTarget::parse(
-            &scope.workspace,
-            scope.scope,
-            &[],
-            &scope.options.clients,
-            &scope.options.vendors,
-        ))?;
-        reap_dropped_clients(&mut state, desired.clients(), &scope.roots, args.force).map_err(map_prune_err)?
+        Vec::new()
     };
+    pruned.extend(settings_orphans(&state_before, &state, &new_lock));
+    attach_abandoned(abandoned, &mut pruned, &mut reaped);
 
     // Refresh dev-installed artifacts (`grim install <path>`): re-pack
     // each recorded local source; on drift, re-materialize through the
@@ -270,7 +341,7 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
 
     // Persist again: prune, reap, and the dev-install refresh all mutate the
     // record set after the pre-prune write above.
-    persist_state(&state)?;
+    persist_state(&state).map_err(keep_settings(&settings))?;
 
     // Converge vendor-owned config on the new state (covers fresh installs,
     // pruned orphans and reaped dropped clients in one pass) for every
@@ -342,7 +413,7 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     for o in outcomes {
         let (kind, name) = (o.reference.kind, o.reference.name.clone());
         match o.result {
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(keep_settings(&settings)(e).into()),
             Ok(outcome) => {
                 if let Some(e) = super::install::refusal_error(o.reference, outcome) {
                     refused = true;
@@ -367,10 +438,94 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
         }
     }
 
-    if refused {
-        return Ok((report, ExitCode::DataError));
+    Ok(settle_settings(report, settings, refused))
+}
+
+/// Keeps what the settings step did on a hard error, so the error document can
+/// report it, and closes the run's change list.
+fn keep_settings(settings: &SettingsOutcome) -> impl Fn(crate::error::Error) -> crate::error::Error + '_ {
+    move |e| {
+        settings_phase::warn_restart(&settings.changes);
+        e.with_settings(settings.clone())
     }
-    Ok((report, ExitCode::Success))
+}
+
+/// The settings records this run dropped because no lock row names them. The
+/// settings step removed them, so no prune saw them, and the report owes each a
+/// row as it does a pruned skill.
+fn settings_orphans(before: &InstallState, after: &InstallState, lock: &GrimoireLock) -> Vec<PrunedArtifact> {
+    let gone = |record: &&crate::install::install_state::InstallRecord| {
+        record.kind == ArtifactKind::Settings
+            && after.get(record.kind, &record.name).is_none()
+            && !lock.settings.iter().any(|artifact| artifact.name == record.name)
+    };
+    before
+        .iter_records()
+        .filter(gone)
+        .map(|record| PrunedArtifact {
+            kind: record.kind,
+            name: record.name.clone(),
+            old: record.source.content_digest(),
+            outcome: PruneOutcome::Pruned,
+            removed: Vec::new(),
+            retained: Vec::new(),
+            abandoned_entries: Vec::new(),
+            clients: record.outputs.iter().map(|output| output.client.clone()).collect(),
+        })
+        .collect()
+}
+
+/// Put each value the run left behind on its artifact's row: the orphan's if
+/// it left the lock, else the row the lock keeps.
+fn attach_abandoned(
+    abandoned: Vec<(ArtifactKind, Abandoned)>,
+    pruned: &mut [PrunedArtifact],
+    reaped: &mut Vec<ReapedClients>,
+) {
+    for (kind, Abandoned { package, entry }) in abandoned {
+        let owner = |row_kind: ArtifactKind, name: &str| row_kind == kind && name == package;
+        if let Some(row) = pruned.iter_mut().find(|row| owner(row.kind, &row.name)) {
+            row.abandoned_entries.push(entry);
+        } else if let Some(row) = reaped.iter_mut().find(|row| owner(row.kind, &row.name)) {
+            row.abandoned_entries.push(entry);
+        } else {
+            reaped.push(ReapedClients {
+                kind,
+                name: package,
+                reaped: Vec::new(),
+                kept_modified: Vec::new(),
+                retained: Vec::new(),
+                abandoned_entries: vec![entry],
+            });
+        }
+    }
+    // The reap already named some entries; json-interface.md promises the
+    // merged list sorted and deduplicated.
+    let rows = pruned.iter_mut().map(|row| &mut row.abandoned_entries);
+    for entries in rows.chain(reaped.iter_mut().map(|row| &mut row.abandoned_entries)) {
+        entries.sort();
+        entries.dedup();
+    }
+}
+
+/// Put what the settings step did on `report` and pick the exit code.
+/// `refused` says whether a row already refused.
+fn settle_settings(report: UpdateReport, settings: SettingsOutcome, refused: bool) -> (UpdateReport, ExitCode) {
+    // An orphan piece has no lock row, so no row refused for it, and reading
+    // only the rows would exit 0 past a refused value.
+    let orphan_refusal = !refused && !settings.pieces.is_empty();
+    if orphan_refusal {
+        tracing::error!("{}", super::install::settings_refusal(&settings));
+    }
+    settings_phase::warn_restart(&settings.changes);
+    let SettingsOutcome { changes, pieces } = settings;
+    let report = report.with_settings(changes, pieces.to_vec());
+    let code = if refused || orphan_refusal {
+        ExitCode::DataError
+    } else {
+        ExitCode::Success
+    };
+    (report, code)
 }
 
 /// Reports what this run wrote (the install outcome, as `grim install` does)
@@ -578,6 +733,7 @@ async fn refresh_dev_installs(
             agents: Vec::new(),
             mcp: Vec::new(),
             hooks: Vec::new(),
+            settings: Vec::new(),
             bundles: Vec::new(),
         };
         let entry = LockedArtifact {
@@ -594,7 +750,7 @@ async fn refresh_dev_installs(
             ArtifactKind::Skill => synth.skills.push(entry),
             ArtifactKind::Rule => synth.rules.push(entry),
             ArtifactKind::Agent => synth.agents.push(entry),
-            ArtifactKind::Mcp | ArtifactKind::Bundle | ArtifactKind::Hook => continue,
+            ArtifactKind::Mcp | ArtifactKind::Bundle | ArtifactKind::Hook | ArtifactKind::Settings => continue,
         }
         let outcomes = install_all_with_progress(
             &synth,
@@ -607,8 +763,10 @@ async fn refresh_dev_installs(
             crate::install::installer::ForceScope::All,
             InstallIntent::Dev,
             &crate::install::progress::SilentProgress,
+            SettingsRun::Skip,
         )
-        .await;
+        .await
+        .items;
         for outcome in &outcomes {
             match &outcome.result {
                 Ok(_) => tracing::info!("dev-installed {} '{}': refreshed from '{path}'", rec.kind, rec.name),
@@ -723,6 +881,7 @@ mod tests {
             agents: vec![],
             mcp: vec![],
             hooks: Vec::new(),
+            settings: Vec::new(),
             bundles: vec![],
         }
     }
@@ -786,6 +945,61 @@ mod tests {
         );
     }
 
+    /// A package that left the lock is one event, kind literal and all, whatever
+    /// keys it held, and those keys stay out: its pieces name what the user allowed.
+    #[test]
+    fn telemetry_reports_a_pruned_settings_package_without_its_pieces() {
+        use crate::install::uninstall::AbandonedEntry;
+        use crate::telemetry::Telemetry;
+        use crate::telemetry::record::{ArtifactAction, ArtifactEvent};
+
+        const SENTINEL: &str = "sentinel-allow-rule";
+        let mut prev = lock_of(Vec::new());
+        prev.settings = vec![locked_kind("team", ArtifactKind::Settings, 'e')];
+        let pruned = [PrunedArtifact {
+            kind: ArtifactKind::Settings,
+            name: "team".to_string(),
+            old: Digest::Sha256("e".repeat(64)),
+            outcome: PruneOutcome::Pruned,
+            removed: Vec::new(),
+            retained: Vec::new(),
+            abandoned_entries: vec![AbandonedEntry {
+                path: PathBuf::from(format!("/workspace/{SENTINEL}.json")),
+                pointer: format!("/permissions/{SENTINEL}"),
+                element: Some(SENTINEL.to_string()),
+            }],
+            clients: vec!["claude".to_string()],
+        }];
+
+        let telemetry = Telemetry::armed_for_test(PathBuf::from("/grim-home"));
+        let ctx = Context::hermetic(PathBuf::from("/grim-home")).with_telemetry(telemetry.clone());
+        let declared = crate::config::declaration::DesiredSet::default();
+        record_changed(&ctx, &[], &pruned, Some(&prev), &declared);
+        // A pulled lock already dropped the package, so its reference is unknown.
+        record_changed(&ctx, &[], &pruned, Some(&lock_of(Vec::new())), &declared);
+
+        let snapshot = telemetry.snapshot().unwrap();
+        let event = |reference: Option<&str>| ArtifactEvent {
+            kind: ArtifactKind::Settings,
+            action: ArtifactAction::Removed,
+            reference: reference.map(str::to_string),
+        };
+        assert_eq!(
+            snapshot.artifacts,
+            vec![event(Some("localhost:5000/team")), event(None)]
+        );
+        let outcome = crate::telemetry::payload::Outcome {
+            duration: std::time::Duration::ZERO,
+            exit_code: 0,
+            error_type: None,
+            ci: false,
+        };
+        let line = crate::telemetry::payload::build(Vec::new(), &snapshot, &outcome).to_json_line();
+        assert!(line.contains(r#""grim.artifact.kind":"settings""#), "{line}");
+        assert!(line.contains(r#""grim.artifact.action":"removed""#), "{line}");
+        assert!(!line.contains(SENTINEL), "{line}");
+    }
+
     #[test]
     fn report_marks_changed_and_unchanged() {
         let prev = lock_of(vec![locked("a", 'a'), locked("b", 'b')]);
@@ -844,6 +1058,120 @@ mod tests {
         assert_eq!(keep["action"], "unchanged");
         assert_eq!(keep["reaped_clients"], serde_json::json!(["copilot"]));
         assert_eq!(keep["kept_modified_clients"], serde_json::json!(["opencode"]));
+    }
+
+    /// An MCP entry the install pass left in place reaches the MCP row, not a
+    /// settings row that shares its name.
+    #[test]
+    fn an_abandoned_mcp_entry_lands_on_its_own_row() {
+        let mut new = lock_of(vec![]);
+        new.mcp = vec![locked_kind("srv", ArtifactKind::Mcp, 'a')];
+        new.settings = vec![locked_kind("srv", ArtifactKind::Settings, 'b')];
+        let entry = crate::install::uninstall::AbandonedEntry {
+            path: std::path::PathBuf::from("/ws/.codex/config.toml"),
+            pointer: "/mcp_servers/srv".to_string(),
+            element: None,
+        };
+        let left = Abandoned {
+            package: "srv".to_string(),
+            entry,
+        };
+        // A settings row of the same name comes first, so only the kind check
+        // keeps the entry off it.
+        let mut reaped = vec![ReapedClients {
+            kind: ArtifactKind::Settings,
+            name: "srv".to_string(),
+            reaped: Vec::new(),
+            kept_modified: Vec::new(),
+            retained: Vec::new(),
+            abandoned_entries: Vec::new(),
+        }];
+        attach_abandoned(vec![(ArtifactKind::Mcp, left)], &mut [], &mut reaped);
+        let v = serde_json::to_value(build_report(None, &new, Some(&new), &[], &reaped)).unwrap();
+        let row = |kind: &str| {
+            v["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["kind"] == kind && e["name"] == "srv")
+                .unwrap()
+                .clone()
+        };
+        let mcp = row("mcp");
+        assert_eq!(mcp["abandoned_entries"][0]["pointer"], "/mcp_servers/srv", "{mcp}");
+        assert_eq!(mcp["reaped_clients"], serde_json::json!([]));
+        assert_eq!(row("settings")["abandoned_entries"], serde_json::json!([]));
+    }
+
+    /// A row's `abandoned_entries` is sorted and deduplicated even when the
+    /// install pass adds to what the reap already named.
+    #[test]
+    fn attached_abandoned_entries_are_sorted_and_deduplicated() {
+        let entry = |path: &str| crate::install::uninstall::AbandonedEntry {
+            path: std::path::PathBuf::from(path),
+            pointer: "/mcp_servers/srv".to_string(),
+            element: None,
+        };
+        let left = |path: &str| {
+            (
+                ArtifactKind::Mcp,
+                Abandoned {
+                    package: "srv".to_string(),
+                    entry: entry(path),
+                },
+            )
+        };
+        let mut reaped = vec![ReapedClients {
+            kind: ArtifactKind::Mcp,
+            name: "srv".to_string(),
+            reaped: vec!["copilot".to_string()],
+            kept_modified: Vec::new(),
+            retained: Vec::new(),
+            abandoned_entries: vec![entry("/ws/b.json")],
+        }];
+        // A pruned row carries entries of its own, out of order.
+        let mut pruned = vec![PrunedArtifact {
+            kind: ArtifactKind::Mcp,
+            name: "gone".to_string(),
+            old: Digest::Sha256("e".repeat(64)),
+            outcome: PruneOutcome::Pruned,
+            removed: vec![],
+            retained: vec![],
+            abandoned_entries: vec![entry("/ws/z.json")],
+            clients: vec![],
+        }];
+        let gone = |path: &str| {
+            (
+                ArtifactKind::Mcp,
+                Abandoned {
+                    package: "gone".to_string(),
+                    entry: entry(path),
+                },
+            )
+        };
+        attach_abandoned(
+            vec![
+                left("/ws/c.toml"),
+                gone("/ws/z.json"),
+                left("/ws/a.json"),
+                gone("/ws/y.json"),
+                left("/ws/b.json"),
+            ],
+            &mut pruned,
+            &mut reaped,
+        );
+        let paths = |entries: &[crate::install::uninstall::AbandonedEntry]| {
+            entries.iter().map(|e| e.path.clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            paths(&reaped[0].abandoned_entries),
+            ["/ws/a.json", "/ws/b.json", "/ws/c.toml"].map(std::path::PathBuf::from)
+        );
+        assert_eq!(
+            paths(&pruned[0].abandoned_entries),
+            ["/ws/y.json", "/ws/z.json"].map(std::path::PathBuf::from),
+            "a pruned row's entries are sorted and deduplicated too"
+        );
     }
 
     #[test]
@@ -1083,8 +1411,8 @@ mod tests {
             client: Vec::new(),
             marketplace: None,
             hook_trust: crate::cli::options::HookTrustOpts {
-                trust_hooks: false,
-                no_trust_hooks: false,
+                trust_workspace: false,
+                no_trust_workspace: false,
             },
         }
     }
@@ -1154,5 +1482,41 @@ mod tests {
         assert_eq!(exit, ExitCode::Success);
         let after = scope_resolution::load_state(&scope).unwrap();
         assert_eq!(after.get(ArtifactKind::Hook, "shell-guard"), Some(&tampered));
+    }
+
+    fn refused_piece() -> crate::api::settings_report::RefusedPiece {
+        use crate::api::settings_report::{PieceMark, PieceState, RefusedPiece};
+        RefusedPiece {
+            package: "team".to_string(),
+            client: "claude".to_string(),
+            file: Some("~/.claude/settings.json".to_string()),
+            pointer: "/model".to_string(),
+            element: None,
+            marked: PieceMark::Overwrite,
+            state: Some(PieceState::Modified),
+            wanted: Some("sonnet".to_string()),
+            current: Some("opus".to_string()),
+        }
+    }
+
+    #[test]
+    fn a_piece_no_row_refused_still_exits_65_with_the_report() {
+        let settings = SettingsOutcome {
+            changes: Vec::new(),
+            pieces: vec![refused_piece()].into(),
+        };
+        let (report, code) = settle_settings(UpdateReport::new(Vec::new()), settings, false);
+        assert_eq!(code, ExitCode::DataError);
+        let v = serde_json::to_value(&report).unwrap();
+        assert_eq!(v["pieces"][0]["pointer"], "/model");
+    }
+
+    #[test]
+    fn a_settled_run_keeps_the_row_verdict() {
+        let quiet = SettingsOutcome::default();
+        let (_, clean) = settle_settings(UpdateReport::new(Vec::new()), quiet.clone(), false);
+        assert_eq!(clean, ExitCode::Success);
+        let (_, refused) = settle_settings(UpdateReport::new(Vec::new()), quiet, true);
+        assert_eq!(refused, ExitCode::DataError);
     }
 }

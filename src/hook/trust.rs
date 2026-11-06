@@ -27,12 +27,12 @@
 //! 1. **Feature off** ⇒ [`NotArmedReason::FeatureOff`]. Default-deny for
 //!    execution capability is the one control with a causal track record across
 //!    every ecosystem surveyed (**I4**), so it is answered first and cannot be
-//!    reached past. The flag pair does **not** open it: `--trust-hooks` answers
+//!    reached past. The flag pair does **not** open it: `--trust-workspace` answers
 //!    *whom to trust*, the feature flag answers *whether the subsystem is on*,
 //!    and conflating them would let a CI escape enable an experimental
 //!    subsystem.
-//! 2. **`--no-trust-hooks`** ⇒ [`NotArmedReason::FlagDenied`].
-//! 3. **`--trust-hooks`** ⇒ [`GrantSource::TrustHooksFlag`]. Typed on this run,
+//! 2. **`--no-trust-workspace`** ⇒ [`NotArmedReason::FlagDenied`].
+//! 3. **`--trust-workspace`** ⇒ [`GrantSource::TrustHooksFlag`]. Typed on this run,
 //!    so it beats every stored answer in both directions (**N4**: a user may
 //!    bypass a gate they were shown). A file cannot type a flag, so nothing a
 //!    repository carries reaches this rung. The negative half is answered before
@@ -63,7 +63,7 @@
 //! That question is orthogonal to *which checkout may arm*, so it did not follow
 //! consent; it became its own rung. The relocation makes it **stronger**: the old
 //! condition could be escaped by writing `trust_hooks = true` in a config file,
-//! and this one cannot be escaped by any file at all — only by `--trust-hooks` on
+//! and this one cannot be escaped by any file at all — only by `--trust-workspace` on
 //! the invocation, which is N4 and consistent with rungs 2 and 3.
 //!
 //! The plain-HTTP host set is computed from **both** config scopes' authored
@@ -83,7 +83,7 @@
 //! that way in every user-facing string and doc page; a silently-absent guardrail
 //! that a user believes is enforcing is worse than no guardrail.
 
-use std::io::{self, IsTerminal as _, Write as _};
+use std::io::{self, IsTerminal as _, Write};
 use std::path::Path;
 
 use crate::config::registry_resolve::normalize_locator;
@@ -119,7 +119,7 @@ pub enum NotArmedReason {
     /// one control with a causal track record across every ecosystem surveyed
     /// (I4), so this is the shipped default state.
     FeatureOff,
-    /// `--no-trust-hooks` on this invocation. The negative half of the
+    /// `--no-trust-workspace` on this invocation. The negative half of the
     /// per-invocation flag pair, and the **only** reason answered before every
     /// stored answer: a user who typed it this run has said no to everything.
     FlagDenied,
@@ -134,7 +134,7 @@ pub enum NotArmedReason {
     ConsentDrifted,
     /// This workspace has no consent record and grim could not ask — no TTY
     /// (C-023). User-facing wording names `grim hook allow` and
-    /// `--trust-hooks`.
+    /// `--trust-workspace`.
     NoTtyToAsk,
     /// grim asked and the user declined. Arms nothing, writes nothing, exits 0.
     ConsentDeclined,
@@ -152,7 +152,7 @@ pub enum GrantSource {
     /// Global scope, which is always consented and carries no record — the
     /// user's own file on the user's own machine.
     GlobalScope,
-    /// `--trust-hooks` on this one invocation. Never persisted, never settable
+    /// `--trust-workspace` on this one invocation. Never persisted, never settable
     /// from a file or the environment.
     TrustHooksFlag,
     /// The one-time prompt, accepted on this run and recorded for the
@@ -192,7 +192,7 @@ pub struct ArmingQuery<'a> {
     /// through [`crate::config::declaration::ExperimentalOptions::hooks_enabled`].
     /// Config only — there is no environment form of this flag.
     pub feature_enabled: bool,
-    /// The `--trust-hooks` / `--no-trust-hooks` pair, resolved to one
+    /// The `--trust-workspace` / `--no-trust-workspace` pair, resolved to one
     /// tri-state: `Some(true)` to arm regardless, `Some(false)` to arm nothing
     /// this run, `None` when neither was typed.
     ///
@@ -307,8 +307,99 @@ pub enum ConsentAnswer {
     Declined,
 }
 
-/// Ask, **once**, whether hooks declared by `workspace` may arm — writing the
-/// prompt to **stderr** and reading the answer from stdin.
+/// What the one consent question names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsentNoun {
+    /// Only hooks need the answer.
+    Hooks,
+    /// Only settings need the answer.
+    Settings,
+    /// Both kinds need the answer.
+    HooksAndSettings,
+}
+
+/// The words one [`ConsentNoun`] puts into the question.
+struct NounWords {
+    /// `Hooks` declared by this workspace.
+    opening: &'static str,
+    /// Allow `hooks` from this workspace.
+    inline: &'static str,
+    /// What the noun does, for a reader meeting it here.
+    gloss: &'static str,
+    /// What one answer covers.
+    coverage: &'static str,
+    /// The two answers that need no terminal.
+    remedy: &'static str,
+    /// What a decline leaves undone.
+    undone: &'static str,
+}
+
+impl ConsentNoun {
+    // `Hooks` keeps the old verb and flag: a workspace with no settings reads
+    // word for word as it did, and a settings noun never sends a reader to a
+    // verb named for hooks.
+    const fn words(self) -> NounWords {
+        match self {
+            Self::Hooks => NounWords {
+                opening: "Hooks",
+                inline: "hooks",
+                gloss: "A hook is code your AI client runs automatically.",
+                coverage: "every hook",
+                remedy: "use 'grim hook allow', or pass --trust-hooks",
+                undone: "nothing armed",
+            },
+            Self::Settings => NounWords {
+                opening: "Settings",
+                inline: "settings",
+                gloss: "Settings change how your AI client behaves and what it may do.",
+                coverage: "every settings package",
+                remedy: "use 'grim consent allow', or pass --trust-workspace",
+                undone: "nothing applied",
+            },
+            Self::HooksAndSettings => NounWords {
+                opening: "Hooks and settings",
+                inline: "hooks and settings",
+                gloss: "A hook is code your AI client runs automatically. \
+                        Settings change how your AI client behaves and what it may do.",
+                coverage: "every hook and settings package",
+                remedy: "use 'grim consent allow', or pass --trust-workspace",
+                undone: "nothing armed or applied",
+            },
+        }
+    }
+
+    /// The log line for a question that could not be asked.
+    pub const fn prompt_failed(self) -> &'static str {
+        match self {
+            Self::Hooks => "hook consent prompt failed; treating as declined",
+            Self::Settings | Self::HooksAndSettings => "consent prompt failed; treating as declined",
+        }
+    }
+
+    /// The log line for an accepted answer whose record at `record` could not
+    /// be written, ending with the fix.
+    pub fn record_failed(self, record: &Path) -> String {
+        let (subject, allow) = match self {
+            Self::Hooks => ("hook", "grim hook allow"),
+            Self::Settings | Self::HooksAndSettings => ("workspace", "grim consent allow"),
+        };
+        format!(
+            "{subject} consent could not be recorded; {}; make {} writable, then run {allow}",
+            self.words().undone,
+            record.display()
+        )
+    }
+
+    /// The warning a declined answer leaves on stderr.
+    pub fn declined_warning(self, workspace: &Path) -> String {
+        let NounWords { inline, undone, .. } = self.words();
+        format!("{inline} in '{}' were declined; {undone}", workspace.display())
+    }
+}
+
+/// Ask, **once**, whether the kinds `noun` names may take effect for
+/// `workspace` — writing the prompt to **stderr** and reading the answer from
+/// stdin.
 ///
 /// `new` is the entries the workspace declares that its record does not already
 /// cover: empty for a first-time question, non-empty on drift, where naming them
@@ -338,39 +429,14 @@ pub enum ConsentAnswer {
 /// Any I/O failure writing the prompt or reading the answer. A caller **must**
 /// treat an error as [`ConsentAnswer::Declined`] and exit 0 (I3) — never as a
 /// hard failure, and never as a deny verdict.
-pub fn prompt_for_workspace(workspace: &Path, record: &Path, new: &[String]) -> io::Result<ConsentAnswer> {
-    // Escaped on the way to a terminal for the same reason `validate_registries`
-    // escapes an authored locator: these values reached grim from a config file
-    // and a lock pin, and a raw ESC or bidi override in one repaints the line the
-    // user is answering (CWE-117 / CWE-150). `escape_debug` covers what
-    // `char::is_control` misses (U+202E).
-    let shown = workspace.display().to_string();
-    let shown = shown.escape_debug();
+pub fn prompt_for_workspace(
+    workspace: &Path,
+    record: &Path,
+    new: &[String],
+    noun: ConsentNoun,
+) -> io::Result<ConsentAnswer> {
     let mut stderr = io::stderr();
-    if new.is_empty() {
-        writeln!(
-            stderr,
-            "Hooks declared by '{shown}' are not consented yet. A hook is code your AI client runs automatically."
-        )?;
-    } else {
-        writeln!(
-            stderr,
-            "'{shown}' declares hooks it was not consented for. A hook is code your AI client runs automatically."
-        )?;
-        for entry in new {
-            writeln!(stderr, "  new: {}", entry.escape_debug())?;
-        }
-    }
-    writeln!(
-        stderr,
-        "Consenting records this checkout in {}, for every hook it declares. It grants nothing to any other checkout.",
-        record.display()
-    )?;
-    writeln!(
-        stderr,
-        "Declining arms nothing and changes no file. Non-interactive runs never ask — use 'grim hook allow', or pass --trust-hooks for one run."
-    )?;
-    write!(stderr, "Allow hooks from '{shown}'? [y/N] ")?;
+    write_question(&mut stderr, workspace, record, new, noun)?;
     stderr.flush()?;
 
     let mut line = String::new();
@@ -383,6 +449,49 @@ pub fn prompt_for_workspace(workspace: &Path, record: &Path, new: &[String]) -> 
     } else {
         Ok(ConsentAnswer::Declined)
     }
+}
+
+/// Writes the whole question, up to and including `[y/N] `, for `noun`.
+fn write_question(
+    out: &mut impl Write,
+    workspace: &Path,
+    record: &Path,
+    new: &[String],
+    noun: ConsentNoun,
+) -> io::Result<()> {
+    // Escaped on the way to a terminal for the same reason `validate_registries`
+    // escapes an authored locator: these values reached grim from a config file
+    // and a lock pin, and a raw ESC or bidi override in one repaints the line the
+    // user is answering (CWE-117 / CWE-150). `escape_debug` covers what
+    // `char::is_control` misses (U+202E).
+    let shown = workspace.display().to_string();
+    let shown = shown.escape_debug();
+    let NounWords {
+        opening,
+        inline,
+        gloss,
+        coverage,
+        remedy,
+        ..
+    } = noun.words();
+    if new.is_empty() {
+        writeln!(out, "{opening} declared by '{shown}' are not consented yet. {gloss}")?;
+    } else {
+        writeln!(out, "'{shown}' declares {inline} it was not consented for. {gloss}")?;
+        for entry in new {
+            writeln!(out, "  new: {}", entry.escape_debug())?;
+        }
+    }
+    writeln!(
+        out,
+        "Consenting records this checkout in {}, for {coverage} it declares. It grants nothing to any other checkout.",
+        record.display()
+    )?;
+    writeln!(
+        out,
+        "Declining arms nothing and changes no file. Non-interactive runs never ask — {remedy} for one run."
+    )?;
+    write!(out, "Allow {inline} from '{shown}'? [y/N] ")
 }
 
 #[cfg(test)]
@@ -404,6 +513,190 @@ mod tests {
 
     fn drifted(entry: &str) -> Consent {
         Consent::Drifted(BTreeSet::from([entry.to_string()]))
+    }
+
+    const ALL_NOUNS: [ConsentNoun; 3] = [ConsentNoun::Hooks, ConsentNoun::Settings, ConsentNoun::HooksAndSettings];
+
+    /// A hook question keeps the line it shipped with, and a question that also
+    /// asked about settings does not claim to be about hooks alone.
+    #[test]
+    fn a_failed_prompt_is_logged_for_what_it_asked() {
+        assert_eq!(
+            ConsentNoun::Hooks.prompt_failed(),
+            "hook consent prompt failed; treating as declined"
+        );
+        for noun in [ConsentNoun::Settings, ConsentNoun::HooksAndSettings] {
+            assert_eq!(noun.prompt_failed(), "consent prompt failed; treating as declined");
+        }
+    }
+
+    /// A hook-only record failure keeps its shipped opening and verb; the other
+    /// two name the workspace. Each names what is left undone, the record, and the fix.
+    #[test]
+    fn a_failed_record_is_logged_for_what_it_asked() {
+        let record = Path::new("/grim/hooks/consent/k.json");
+        let tail = |verb: &str| format!("; make /grim/hooks/consent/k.json writable, then run {verb}");
+        assert_eq!(
+            ConsentNoun::Hooks.record_failed(record),
+            format!(
+                "hook consent could not be recorded; nothing armed{}",
+                tail("grim hook allow")
+            )
+        );
+        assert_eq!(
+            ConsentNoun::Settings.record_failed(record),
+            format!(
+                "workspace consent could not be recorded; nothing applied{}",
+                tail("grim consent allow")
+            )
+        );
+        assert_eq!(
+            ConsentNoun::HooksAndSettings.record_failed(record),
+            format!(
+                "workspace consent could not be recorded; nothing armed or applied{}",
+                tail("grim consent allow")
+            )
+        );
+    }
+
+    fn question(noun: ConsentNoun, new: &[String]) -> String {
+        let mut out = Vec::new();
+        write_question(&mut out, Path::new("/work/app"), Path::new("/grim/k.json"), new, noun).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    /// A workspace with no settings keeps every word: the fragments the
+    /// read-only commands pin absent are only proof while this text holds them.
+    #[test]
+    fn the_hooks_question_keeps_every_word() {
+        assert_eq!(
+            question(ConsentNoun::Hooks, &[]),
+            "Hooks declared by '/work/app' are not consented yet. A hook is code your AI client runs automatically.\n\
+             Consenting records this checkout in /grim/k.json, for every hook it declares. It grants nothing to any other checkout.\n\
+             Declining arms nothing and changes no file. Non-interactive runs never ask — use 'grim hook allow', or pass --trust-hooks for one run.\n\
+             Allow hooks from '/work/app'? [y/N] "
+        );
+        assert_eq!(
+            question(ConsentNoun::Hooks, &["evil@ghcr.io/acme/evil".to_string()]),
+            "'/work/app' declares hooks it was not consented for. A hook is code your AI client runs automatically.\n  \
+             new: evil@ghcr.io/acme/evil\n\
+             Consenting records this checkout in /grim/k.json, for every hook it declares. It grants nothing to any other checkout.\n\
+             Declining arms nothing and changes no file. Non-interactive runs never ask — use 'grim hook allow', or pass --trust-hooks for one run.\n\
+             Allow hooks from '/work/app'? [y/N] "
+        );
+    }
+
+    #[test]
+    fn a_settings_question_names_settings_and_only_settings() {
+        for new in [Vec::new(), vec!["settings:team@ghcr.io/acme/team".to_string()]] {
+            let text = question(ConsentNoun::Settings, &new);
+            assert!(
+                text.contains("Settings change how your AI client behaves and what it may do."),
+                "{text}"
+            );
+            assert!(text.contains("for every settings package it declares"), "{text}");
+            assert!(
+                text.contains("use 'grim consent allow', or pass --trust-workspace for one run"),
+                "{text}"
+            );
+            assert!(text.ends_with("Allow settings from '/work/app'? [y/N] "), "{text}");
+            assert!(!text.contains("A hook is code"), "{text}");
+        }
+        assert!(
+            question(ConsentNoun::Settings, &[]).starts_with("Settings declared by '/work/app' are not consented yet.")
+        );
+        assert!(
+            question(ConsentNoun::Settings, &["x".to_string()])
+                .starts_with("'/work/app' declares settings it was not consented for.")
+        );
+    }
+
+    #[test]
+    fn a_question_about_both_kinds_names_both() {
+        let text = question(ConsentNoun::HooksAndSettings, &[]);
+        assert!(
+            text.starts_with("Hooks and settings declared by '/work/app' are not consented yet."),
+            "{text}"
+        );
+        assert!(
+            text.contains("A hook is code your AI client runs automatically."),
+            "{text}"
+        );
+        assert!(
+            text.contains("Settings change how your AI client behaves and what it may do."),
+            "{text}"
+        );
+        assert!(
+            text.contains("for every hook and settings package it declares"),
+            "{text}"
+        );
+        assert!(
+            text.contains("use 'grim consent allow', or pass --trust-workspace for one run"),
+            "{text}"
+        );
+        assert!(
+            text.ends_with("Allow hooks and settings from '/work/app'? [y/N] "),
+            "{text}"
+        );
+        assert!(
+            question(ConsentNoun::HooksAndSettings, &["x".to_string()])
+                .starts_with("'/work/app' declares hooks and settings it was not consented for.")
+        );
+    }
+
+    /// The promises the question makes hold for every noun: consent stays one
+    /// checkout's, and a decline changes no file, orphans included.
+    #[test]
+    fn every_noun_makes_the_same_promises() {
+        for noun in ALL_NOUNS {
+            let text = question(noun, &[]);
+            assert!(
+                text.contains("Consenting records this checkout in /grim/k.json"),
+                "{text}"
+            );
+            assert!(text.contains("It grants nothing to any other checkout."), "{text}");
+            assert!(text.contains("Declining arms nothing and changes no file."), "{text}");
+            assert!(text.contains("Non-interactive runs never ask"), "{text}");
+            assert_eq!(text.matches("[y/N]").count(), 1, "{text}");
+        }
+    }
+
+    /// Terminal bytes from a key or a path stay escaped under every noun, or a
+    /// raw ESC repaints the line the user is answering.
+    #[test]
+    fn every_noun_escapes_what_it_echoes() {
+        for noun in ALL_NOUNS {
+            let mut out = Vec::new();
+            let new = ["evil\u{1b}[2J@ghcr.io/x".to_string()];
+            write_question(
+                &mut out,
+                Path::new("/work/\u{202e}app"),
+                Path::new("/grim/k.json"),
+                &new,
+                noun,
+            )
+            .unwrap();
+            let text = String::from_utf8(out).unwrap();
+            assert!(!text.contains('\u{1b}') && !text.contains('\u{202e}'), "{text}");
+            assert!(text.contains("\\u{1b}") && text.contains("\\u{202e}"), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_decline_warns_in_the_words_of_the_question() {
+        let workspace = Path::new("/work/app");
+        assert_eq!(
+            ConsentNoun::Hooks.declined_warning(workspace),
+            "hooks in '/work/app' were declined; nothing armed"
+        );
+        assert_eq!(
+            ConsentNoun::Settings.declined_warning(workspace),
+            "settings in '/work/app' were declined; nothing applied"
+        );
+        assert_eq!(
+            ConsentNoun::HooksAndSettings.declined_warning(workspace),
+            "hooks and settings in '/work/app' were declined; nothing armed or applied"
+        );
     }
 
     /// Every rung of the ladder, each isolated by narrowing one field.
@@ -449,7 +742,7 @@ mod tests {
 
     /// **The feature flag is unreachable past, by any other rung.**
     ///
-    /// I4's whole property. `--trust-hooks` answers *whom to trust*; the feature
+    /// I4's whole property. `--trust-workspace` answers *whom to trust*; the feature
     /// flag answers *whether the subsystem is on*, and a CI escape must not be
     /// able to enable an experimental subsystem.
     #[test]
@@ -514,7 +807,7 @@ mod tests {
         );
     }
 
-    /// **The transport gate outranks consent, and only `--trust-hooks` escapes
+    /// **The transport gate outranks consent, and only `--trust-workspace` escapes
     /// it** (W8 · S2-2 · T2).
     ///
     /// Stronger than the condition it replaces: that one could be escaped by

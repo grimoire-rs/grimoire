@@ -4,10 +4,11 @@
 //! `grim status` output.
 //!
 //! Plain format: 5-column table (Kind | Name | Source | Pinned | State), plus
-//! a sixth `Note` column only when a `hook` row is present — so hook-free
-//! output is unchanged. `Note` is `-` for every non-hook row; for a `hook` row
-//! it names the client and the arming cause behind a `gated` / `not-armed` /
-//! `untrusted` state. Plain output carries no compatibility promise
+//! a sixth `Note` column only when a `hook` or `settings` row is present — so
+//! other output is unchanged. `Note` is `-` for every other row; for those two
+//! it names the client and the cause behind a `gated` / `not-armed` /
+//! `untrusted` state, or a note beside a settings row's lifecycle state. Plain
+//! output carries no compatibility promise
 //! (`docs/src/stability.md` § Unstable — "human-readable log or error text"),
 //! unlike the JSON shape below.
 //!
@@ -16,8 +17,8 @@
 //! envelope, per subsystem-cli-api.md). `pinned` is `null` when the
 //! artifact is declared but not yet locked. `source` is `"direct"` for a
 //! declared artifact or `"bundle: <registry/repo>"` for a bundle member.
-//! `outputs` is an array of `{client, path}` — the per-client materialized
-//! locations recorded in install state, reconciled against the
+//! `outputs` is an array of `{client, path, element}` — the per-client
+//! materialized locations recorded in install state, reconciled against the
 //! currently-active client set. Always present; empty for an artifact with
 //! no recorded outputs (not installed, or a bundle row). Vendor on-disk
 //! layout is unstable — this field is the supported discovery channel for
@@ -33,8 +34,11 @@
 //! sorted, both always present, both `[]` when the sets agree — including
 //! for a declared-bundle row (never installs itself) and a dev-install row
 //! (installed out-of-band via `grim install <path>`, independent of the
-//! project's configured client set). When `[options].clients` is unset
-//! (autodetect), there is no explicit target to diff against, so both
+//! project's configured client set). A settings row's `clients_missing` is
+//! always `[]`: install records a client only for the pieces a package
+//! declares, so a client it declares nothing for is not drift. When
+//! `[options].clients` is unset (autodetect), there is no explicit target
+//! to diff against, so both
 //! fields stay `[]` on every item rather than diffing against live client
 //! detection — which is not a sound oracle for "grim installed here" in
 //! either direction (see [`crate::command::status`]'s `client_drift` for
@@ -74,9 +78,9 @@
 //! row with no lock pin (dev-install / path source / path-sourced bundle),
 //! or when the re-resolution failed — absence never lies as `false`.
 //!
-//! `arming` (C-017) is the `hook`-only per-client verdict array:
-//! `[{client, cause, message, transient}]`, sorted by client, **always
-//! present**, `[]` for every non-hook kind and for a hook armed everywhere.
+//! `arming` (C-017) is the per-client verdict array of a `hook` or `settings`
+//! row: `[{client, cause, message, transient}]`, sorted by client, **always
+//! present**, `[]` for every other kind and for a row with nothing to report.
 //! `cause` is the machine-readable
 //! [`HookArmingCause`](crate::api::artifact_status::HookArmingCause) — branch
 //! on it, never on `message`, whose wording is explicitly unstable. It is the
@@ -150,6 +154,9 @@ pub struct StatusOutput {
     /// The resolved on-disk path the artifact was materialized to for this
     /// client.
     pub path: PathBuf,
+    /// The array element a settings piece contributed. Always present, and
+    /// `null` for every other kind and for a settings scalar or own file.
+    pub element: Option<String>,
 }
 
 /// One immediate parent of a status row.
@@ -210,7 +217,7 @@ pub struct StatusEntry {
     /// Clients the project's config targets but this artifact has no
     /// recorded output for (`desired − recorded`). Sorted; `[]` when there
     /// is no such drift, and always `[]` when `[options].clients` is unset
-    /// (autodetect — no explicit target to diff against).
+    /// (autodetect — no explicit target to diff against) and on a settings row.
     pub clients_missing: Vec<String>,
     /// Clients this artifact has a recorded output for but the project's
     /// config no longer targets (`recorded − desired`). Sorted; `[]` when
@@ -240,18 +247,19 @@ pub struct StatusEntry {
     /// did not run, the row has no lock pin, or the re-resolution failed.
     /// See the module doc for the full contract.
     pub update_available: Option<bool>,
-    /// Per-client arming verdicts for a `hook` row (C-017). Sorted by client;
-    /// **always present**, and `[]` for every non-hook kind and for a hook
-    /// armed and running everywhere.
+    /// Per-client verdicts for a `hook` or `settings` row (C-017). Sorted by
+    /// client; **always present**, and `[]` for every other kind and for a row
+    /// with nothing to report.
     ///
     /// `[]` therefore means "nothing to report", never "unknown" — the
     /// always-present-null discipline applied to an array, exactly as
     /// `clients_missing` does it.
     ///
-    /// The row's [`ArtifactStatus`] is derived from these by the precedence in
-    /// [`crate::command::status`]'s `hook_row_state`; this field is what makes
-    /// the state actionable, since the token alone does not say which client or
-    /// which cause.
+    /// A hook row's [`ArtifactStatus`] is derived from these by the precedence
+    /// in [`crate::command::status`]'s `hook_row_state`; a settings row's comes
+    /// from `settings_arming`, and some of its entries are notes that leave the
+    /// state alone. This field is what makes the state actionable, since the
+    /// token alone does not say which client or which cause.
     pub arming: Vec<HookArming>,
 }
 
@@ -332,10 +340,13 @@ impl StatusReport {
 
 impl Printable for StatusReport {
     fn print_plain(&self, w: &mut impl Write) -> io::Result<()> {
-        // The `Note` column appears only when a hook row is present, so a
-        // hook-free table stays byte-identical to what it was before hooks
-        // existed (WP-01 review W4).
-        let has_hook = self.items.iter().any(|e| e.kind == ArtifactKind::Hook);
+        // The `Note` column appears only when a hook or settings row is
+        // present, so any other table stays byte-identical to what it was
+        // before those kinds existed (WP-01 review W4).
+        let has_note = self
+            .items
+            .iter()
+            .any(|e| matches!(e.kind, ArtifactKind::Hook | ArtifactKind::Settings));
         let rows: Vec<Vec<String>> = self
             .items
             .iter()
@@ -350,15 +361,15 @@ impl Printable for StatusReport {
                         .unwrap_or_else(|| "-".to_string()),
                     e.state.to_string(),
                 ];
-                if has_hook {
+                if has_note {
                     row.push(note_cell(&e.arming));
                 }
                 row
             })
             .collect();
         const HEADERS: [&str; 5] = ["Kind", "Name", "Source", "Pinned", "State"];
-        const HOOK_HEADERS: [&str; 6] = ["Kind", "Name", "Source", "Pinned", "State", "Note"];
-        print_table(w, if has_hook { &HOOK_HEADERS } else { &HEADERS }, &rows)?;
+        const NOTE_HEADERS: [&str; 6] = ["Kind", "Name", "Source", "Pinned", "State", "Note"];
+        print_table(w, if has_note { &NOTE_HEADERS } else { &HEADERS }, &rows)?;
         // Every hook row fires through the launcher; the table would not say it is stale.
         if let Some((state, path)) = &self.launcher_note {
             writeln!(
@@ -438,6 +449,21 @@ mod tests {
             with_hook.lines().next().unwrap().trim_end().ends_with("Note"),
             "{with_hook}"
         );
+        let with_settings = plain(vec![StatusEntry {
+            kind: ArtifactKind::Settings,
+            arming: vec![HookArming {
+                client: "claude".to_string(),
+                cause: HookArmingCause::LocalFileTracked,
+                message: String::new(),
+                transient: false,
+            }],
+            ..base_entry("team")
+        }]);
+        assert!(
+            with_settings.lines().next().unwrap().trim_end().ends_with("Note"),
+            "{with_settings}"
+        );
+        assert!(with_settings.contains("claude: local-file-tracked"), "{with_settings}");
     }
 
     #[test]
@@ -484,6 +510,7 @@ mod tests {
                     state: ArtifactStatus::Installed,
                     outputs: vec![StatusOutput {
                         client: "claude".to_string(),
+                        element: None,
                         path: "/w/.claude/skills/code-review".into(),
                     }],
                     ..base_entry("code-review")
@@ -536,6 +563,7 @@ mod tests {
                 state: ArtifactStatus::Installed,
                 outputs: vec![StatusOutput {
                     client: "claude".to_string(),
+                    element: None,
                     path: "/w/.claude/skills/s".into(),
                 }],
                 ..base_entry("s")
@@ -547,6 +575,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         assert_eq!(v["items"][0]["outputs"][0]["client"], "claude");
         assert_eq!(v["items"][0]["outputs"][0]["path"], "/w/.claude/skills/s");
+        assert!(v["items"][0]["outputs"][0]["element"].is_null());
     }
 
     #[test]

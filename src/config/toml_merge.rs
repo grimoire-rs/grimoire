@@ -21,7 +21,7 @@ use crate::install::toml_splice::toml_item_to_json;
 use crate::oci::Identifier;
 
 /// Top-level tables whose leaves are artifact declarations.
-const DECLARATION_TABLES: [&str; 6] = ["bundles", "skills", "rules", "agents", "mcp", "hooks"];
+const DECLARATION_TABLES: [&str; 7] = ["bundles", "skills", "rules", "agents", "mcp", "hooks", "settings"];
 
 /// Merge `desired` (a rendered config) into `existing` (the file on disk).
 ///
@@ -587,6 +587,26 @@ zeta = \"ghcr.io/acme/skills/zeta:1\"
         let agents = out.find("[agents]").expect("agents");
         assert!(tui < registries && registries < skills && rules < agents, "{out}");
         assert!(out.starts_with("#:schema"), "{out}");
+    }
+
+    #[test]
+    fn settings_table_merges_as_a_declaration_table() {
+        let existing = "[skills]\n\n[rules]\n\n[settings]\n# team pick\nteam = \"ghcr.io/acme/settings/team:1\"\n";
+        let desired = "[skills]\n\n[rules]\n\n[settings]\nteam = \"ghcr.io/acme/settings/team:2\"\n";
+        let out = merged(existing, desired);
+        assert_eq!(
+            out,
+            "[skills]\n\n[rules]\n\n[settings]\n# team pick\nteam = \"ghcr.io/acme/settings/team:2\"\n"
+        );
+        assert_eq!(merged(existing, existing), existing);
+
+        let short = "[skills]\n\n[rules]\n\n[settings]\nteam = \"ghcr.io/acme/settings/team\"\n";
+        let rendered = "[skills]\n\n[rules]\n\n[settings]\nteam = \"ghcr.io/acme/settings/team:latest\"\n";
+        assert_eq!(
+            merged(short, rendered),
+            short,
+            "the short form reads as the same declaration"
+        );
     }
 
     #[test]

@@ -19,18 +19,22 @@ use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
 use crate::oci::ArtifactKind;
 use crate::oci::annotations::{
-    annotations_for_agent, annotations_for_hook, annotations_for_rule, annotations_for_skill,
+    annotations_for_agent, annotations_for_hook, annotations_for_rule, annotations_for_settings, annotations_for_skill,
 };
+use crate::oci::bundle::BundleMember;
 use crate::oci::git_provenance::{GitMode, GitProvenance};
+use crate::oci::settings::SettingsDocument;
 use crate::skill::rule_frontmatter::RuleFrontmatter;
 use crate::skill::{
-    pack_agent_file, pack_rule_file, pack_skill_dir, validate_agent_file, validate_rule_file, validate_skill_dir,
+    SkillName, pack_agent_file, pack_rule_file, pack_skill_dir, validate_agent_file, validate_rule_file,
+    validate_skill_dir,
 };
 
 /// `grim build` arguments.
 #[derive(Debug, Args)]
 pub struct BuildArgs {
-    /// Path to a skill directory, a rule `.md` file, or a hook directory.
+    /// Path to a skill or hook directory, a rule or agent `.md` file, or a
+    /// bundle, MCP server, or settings `.toml` file.
     pub path: std::path::PathBuf,
 
     /// Force the artifact kind instead of auto-detecting it.
@@ -41,7 +45,7 @@ pub struct BuildArgs {
     // hook` reachable at all — before this, `Hook` could only arrive from a
     // registry-controlled string, which is why every pre-hook seam could treat
     // it as unreachable.
-    #[arg(long, value_parser = ["skill", "rule", "agent", "bundle", "mcp", "hook"])]
+    #[arg(long, value_parser = ["skill", "rule", "agent", "bundle", "mcp", "hook", "settings"])]
     pub kind: Option<String>,
 
     /// Require git provenance and additionally embed the `origin` remote as
@@ -276,6 +280,8 @@ pub fn validate_and_pack(
         // MCP descriptors ship as a JSON layer (`read_mcp_descriptor`), not
         // a tar layer; they never reach the skill/rule validator either.
         ArtifactKind::Mcp => unreachable!("mcp descriptors are packed via the mcp path, not validate_and_pack"),
+        // Settings documents ship as a JSON layer too (`read_settings_source`).
+        ArtifactKind::Settings => unreachable!("settings are packed via the settings path, not validate_and_pack"),
         ArtifactKind::Skill => {
             let fm = super::grim(validate_skill_dir(path))?;
             // Publish-time gate for the per-client projection: a known
@@ -592,6 +598,13 @@ pub fn read_bundle_members(
             id: id.to_string(),
         });
     }
+    for (name, id) in &source.settings {
+        members.push(BundleMember {
+            kind: ArtifactKind::Settings,
+            name: name.clone(),
+            id: id.to_string(),
+        });
+    }
 
     let name = path
         .file_stem()
@@ -641,6 +654,43 @@ pub fn read_mcp_source(
     Ok((name, descriptor, requires))
 }
 
+/// Parse + validate a settings source file (`settings/<name>.toml`), splitting
+/// off its `[requires.*]` declaration, sorted by `(kind, name)`. The artifact
+/// name is the file stem.
+///
+/// # Errors
+///
+/// A path-attributed `SkillError` (65): a document the author gate refuses, a
+/// stem `grim add` would refuse, a bad `replaced-by`, or a self-reference. An
+/// unreadable file is an I/O error.
+pub fn read_settings_source(path: &Path) -> anyhow::Result<(String, SettingsDocument, Vec<BundleMember>)> {
+    let content = std::fs::read_to_string(path).map_err(|e| {
+        crate::error::Error::from(crate::skill::SkillError::new(path, crate::skill::SkillErrorKind::Io(e)))
+    })?;
+    let (document, requires) =
+        super::grim(SettingsDocument::from_toml_str_with_requires(&content).map_err(metadata_invalid(path)))?;
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    super::grim(
+        SkillName::parse(&name)
+            .map_err(|e| crate::skill::SkillError::new(path, crate::skill::SkillErrorKind::NameInvalid(e))),
+    )?;
+    validate_replaced_by(path, document.replaced_by.as_deref())?;
+    refuse_self_reference(path, ArtifactKind::Settings, &name, &requires)?;
+    Ok((name, document, requires))
+}
+
+/// The canonical JSON layer of a document read from `path`.
+///
+/// # Errors
+///
+/// A document past the layer cap, as a path-attributed `SkillError` (65).
+pub fn settings_layer(path: &Path, document: &SettingsDocument) -> anyhow::Result<Vec<u8>> {
+    super::grim(document.to_layer_bytes().map_err(metadata_invalid(path)))
+}
+
 /// Run `grim build`.
 ///
 /// # Errors
@@ -675,6 +725,23 @@ pub async fn run(_ctx: &Context, args: &BuildArgs) -> anyhow::Result<(BuildRepor
         let annotations = crate::oci::annotations::annotations_for_mcp(
             &name,
             &descriptor,
+            "0.0.0-build",
+            None,
+            git.as_ref(),
+            &args.metadata.defaults(),
+        );
+        let report = BuildReport::new(kind, name, args.path.clone(), layer_digest, annotations.len());
+        return Ok((report, ExitCode::Success));
+    }
+
+    if kind == ArtifactKind::Settings {
+        let git = derive_git_provenance(&args.path, args.git_mode()).await?;
+        let (name, document, _requires) = read_settings_source(&args.path)?;
+        let layer = settings_layer(&args.path, &document)?;
+        let layer_digest = crate::oci::Algorithm::Sha256.hash(&layer).to_string();
+        let annotations = annotations_for_settings(
+            &name,
+            &document,
             "0.0.0-build",
             None,
             git.as_ref(),
@@ -724,6 +791,53 @@ mod tests {
         write(&dir.join("SKILL.md"), "---\nname: code-review\ndescription: d\n---\n");
         assert_eq!(detect_kind(&dir, None).unwrap(), ArtifactKind::Skill);
         assert_eq!(detect_kind(&dir, Some("rule")).unwrap(), ArtifactKind::Rule);
+    }
+
+    #[test]
+    fn a_settings_source_is_named_after_its_stem_and_keeps_its_requires() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("team-defaults.toml");
+        write(&f, "description = \"d\"\n[requires.skills]\ns = \"ghcr.io/acme/s:1\"\n");
+        let (name, document, requires) = read_settings_source(&f).unwrap();
+        assert_eq!(name, "team-defaults");
+        assert_eq!(document.description, "d");
+        assert_eq!(
+            requires,
+            vec![BundleMember {
+                kind: ArtifactKind::Skill,
+                name: "s".into(),
+                id: "ghcr.io/acme/s:1".into(),
+            }]
+        );
+        assert!(!settings_layer(&f, &document).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_settings_stem_outside_the_binding_grammar_exits_65() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("Team_Defaults.toml");
+        write(&f, "description = \"d\"\n");
+        let err = read_settings_source(&f).unwrap_err();
+        assert_eq!(
+            crate::error::classify_error(&err),
+            crate::cli::exit_code::ExitCode::DataError
+        );
+        assert!(err.to_string().contains("Team_Defaults"), "{err:#}");
+    }
+
+    #[test]
+    fn an_oversized_settings_layer_exits_65_naming_the_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("big.toml");
+        write(&f, "description = \"d\"\n");
+        let (_, mut document, _) = read_settings_source(&f).unwrap();
+        document.description = "x".repeat(70_000);
+        let err = settings_layer(&f, &document).unwrap_err();
+        assert_eq!(
+            crate::error::classify_error(&err),
+            crate::cli::exit_code::ExitCode::DataError
+        );
+        assert!(format!("{err:#}").contains("big.toml"), "{err:#}");
     }
 
     #[test]
@@ -796,12 +910,38 @@ mod tests {
     }
 
     #[test]
+    fn read_bundle_members_appends_a_settings_member_to_every_older_kind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let shipped = "[skills]\ncr = \"ghcr.io/acme/cr:1\"\n\n[mcp]\nsrv = \"ghcr.io/acme/srv:1\"\n\n[hooks]\ngd = \"ghcr.io/acme/gd:1\"\n";
+        let before = tmp.path().join("before.toml");
+        write(&before, shipped);
+        let after = tmp.path().join("after.toml");
+        write(
+            &after,
+            &format!("[settings]\nteam = \"ghcr.io/acme/team:1\"\n\n{shipped}"),
+        );
+
+        let sorted = |path: &std::path::Path| {
+            let (_, members, _) = read_bundle_members(path).unwrap();
+            crate::oci::bundle::BundleManifest::new(members).members
+        };
+        let shipped_members = sorted(&before);
+        let members = sorted(&after);
+
+        assert_eq!(members[..shipped_members.len()], shipped_members[..]);
+        assert_eq!(members.len(), shipped_members.len() + 1);
+        let last = members.last().unwrap();
+        assert_eq!(last.kind, ArtifactKind::Settings);
+        assert_eq!((last.name.as_str(), last.id.as_str()), ("team", "ghcr.io/acme/team:1"));
+    }
+
+    #[test]
     fn read_bundle_members_hook_member_is_deterministic_and_leaves_others_byte_identical() {
         // Two Principle-9 obligations in one test. (a) A re-read of the same
         // source produces byte-identical layer bytes, so a re-build of an
         // unchanged bundle keeps its digest. (b) Adding a `[hooks]` table
         // APPENDS to the layer: the pre-hook members keep their exact relative
-        // order and bytes, because `ArtifactKind::Hook` is the last variant and
+        // order and bytes, because `ArtifactKind::Hook` sorts after them and
         // `BundleManifest::new` sorts by its derived `Ord`. If someone reorders
         // that enum, this test is what fails.
         let tmp = tempfile::tempdir().unwrap();

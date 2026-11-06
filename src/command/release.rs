@@ -23,23 +23,28 @@ use crate::api::release_report::ReleaseReport;
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
 use crate::oci::access::{OciAccess, Operation};
-use crate::oci::annotations::{annotations_for_bundle, annotations_for_mcp};
+use crate::oci::annotations::{annotations_for_bundle, annotations_for_mcp, annotations_for_settings};
 use crate::oci::bundle::{BUNDLE_LAYER_MEDIA_TYPE, BundleManifest, BundleMember};
 use crate::oci::layer::{self, Compression};
 use crate::oci::manifest::{Descriptor, OciManifest};
 use crate::oci::mcp::MCP_LAYER_MEDIA_TYPE;
 use crate::oci::reference::ArtifactRef;
 use crate::oci::release::{ReleaseError, ReleaseErrorKind, publish_tags, resolve_cascade};
+use crate::oci::settings::SETTINGS_LAYER_MEDIA_TYPE;
 use crate::oci::{Algorithm, ArtifactKind, Digest, Identifier, PinnedIdentifier};
 use crate::resolve::resolve_error::{ResolveError, ResolveErrorKind};
 use anyhow::Context as _;
 
-use super::build::{derive_git_provenance, detect_kind, read_bundle_members, read_mcp_source, validate_and_pack};
+use super::build::{
+    derive_git_provenance, detect_kind, read_bundle_members, read_mcp_source, read_settings_source, settings_layer,
+    validate_and_pack,
+};
 
 /// `grim release` arguments.
 #[derive(Debug, Args)]
 pub struct ReleaseArgs {
-    /// Path to a skill directory or a rule `.md` file.
+    /// Path to a skill or hook directory, a rule or agent `.md` file, or a
+    /// bundle, MCP server, or settings `.toml` file.
     pub path: std::path::PathBuf,
 
     /// The release reference: `registry/repo:version`.
@@ -49,7 +54,7 @@ pub struct ReleaseArgs {
     //
     // `hook` appended, never inserted — widening an accepted value set is the
     // additive direction on a frozen CLI surface (Principle 9).
-    #[arg(long, value_parser = ["skill", "rule", "agent", "bundle", "mcp", "hook"])]
+    #[arg(long, value_parser = ["skill", "rule", "agent", "bundle", "mcp", "hook", "settings"])]
     pub kind: Option<String>,
 
     /// Print the push plan (tags + digest) without pushing.
@@ -114,7 +119,7 @@ pub struct ReleaseArgs {
     pub push_registry: Option<String>,
 
     /// Layer compression for skill, rule, agent and hook releases; ignored
-    /// for bundles and mcp; a bare `--compression` means gzip. Consumers need
+    /// for bundles, mcp and settings; a bare `--compression` means gzip. Consumers need
     /// a grim that reads gzip layers to install a gzip release.
     #[arg(long, value_enum, default_value_t, num_args = 0..=1, default_missing_value = "gzip")]
     pub compression: Compression,
@@ -242,14 +247,17 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
     // `Hook` deliberately takes the shared path: it genuinely is a directory
     // tree in one tar layer, so `validate_and_pack` describes it exactly (see
     // `build::pack_hook_dir`) and a dedicated `release_hook` would duplicate the
-    // push, tag-cascade, and companion logic to no benefit. `Bundle` and `Mcp`
-    // diverge because their layers are not tars of a directory at all.
+    // push, tag-cascade, and companion logic to no benefit. `Bundle`, `Mcp` and
+    // `Settings` diverge because their layers are not tars of a directory at all.
     match kind {
         ArtifactKind::Bundle => {
             return release_bundle(ctx, args, &id, &repo, &version, &tags, &source, push.as_ref()).await;
         }
         ArtifactKind::Mcp => {
             return release_mcp(ctx, args, &id, &repo, &version, &tags, &source, push.as_ref()).await;
+        }
+        ArtifactKind::Settings => {
+            return release_settings(ctx, args, &id, &repo, &version, &tags, &source, push.as_ref()).await;
         }
         ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent | ArtifactKind::Hook => {}
     }
@@ -558,6 +566,92 @@ async fn release_mcp(
     Ok((report, ExitCode::Success))
 }
 
+/// Release a settings document: parse + validate the TOML source, serialize
+/// the canonical JSON layer, then push blob + manifest + cascade tags exactly
+/// like [`release_mcp`]. Nothing here reads `[options.experimental] settings`:
+/// a publisher writes to a registry and applies nothing on this machine.
+#[expect(clippy::too_many_arguments, reason = "mirrors the shape of release_mcp")]
+async fn release_settings(
+    ctx: &Context,
+    args: &ReleaseArgs,
+    id: &Identifier,
+    repo: &Identifier,
+    version: &str,
+    tags: &[String],
+    source: &str,
+    push: Option<&PushTarget>,
+) -> anyhow::Result<(ReleaseReport, ExitCode)> {
+    let (name, document, mut requires) = read_settings_source(&args.path)?;
+    // Serialized up front so an oversized document refuses before any registry work.
+    let layer = settings_layer(&args.path, &document)?;
+    check_members_resolve(&requires, repo)?;
+    let push_repo = push.map_or_else(|| repo.clone(), |p| p.rewrite(repo));
+    let pushed_to = push.map(|p| p.rewrite(id).to_string());
+
+    let git = derive_git_provenance(&args.path, args.git_mode()).await?;
+
+    let access: Arc<dyn OciAccess> = super::access_seam(ctx)?;
+
+    if args.skip_existing
+        && let Some(existing) = super::grim(resolve_existing_version(&access, &push_repo, version).await)
+            .with_context(|| format!("checking whether {id} already exists"))?
+    {
+        let report =
+            ReleaseReport::new(id.to_string(), existing.to_string(), Vec::new(), false).with_pushed_to(pushed_to);
+        return Ok((report, ExitCode::Success));
+    }
+
+    if args.pin {
+        super::grim(pin_members(&access, &mut requires, repo, push).await)?;
+    }
+    let requires_layer = requires_layer(&requires)?;
+    let annotations = annotations_for_settings(
+        &name,
+        &document,
+        version,
+        Some(source),
+        git.as_ref(),
+        &args.metadata.defaults(),
+    );
+    let oci_manifest = OciManifest {
+        media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
+        // No `artifactType`, OCI empty config — see the skill/rule path in `run`.
+        artifact_type: None,
+        config_media_type: None,
+        layers: std::iter::once(Descriptor {
+            digest: Algorithm::Sha256.hash(&layer),
+            media_type: SETTINGS_LAYER_MEDIA_TYPE.to_string(),
+            size: layer.len() as u64,
+            annotations: None,
+        })
+        .chain(requires_layer.as_ref().map(|(_, d)| d.clone()))
+        .collect(),
+        annotations,
+    };
+
+    if args.dry_run {
+        let preview = preview_manifest_digest(&oci_manifest)?;
+        let report = ReleaseReport::new(id.to_string(), preview, tags.to_vec(), false).with_pushed_to(pushed_to);
+        return Ok((report, ExitCode::Success));
+    }
+
+    super::grim(access.push_blob(&push_repo, &layer).await)?;
+    if let Some((bytes, _)) = &requires_layer {
+        super::grim(access.push_blob(&push_repo, bytes).await)?;
+    }
+    let manifest_digest = super::grim(access.push_manifest(&push_repo, &oci_manifest).await)?;
+
+    let target = if args.force {
+        manifest_digest
+    } else {
+        super::grim(guard_existing_version(&access, &push_repo, version, &manifest_digest, None).await)?
+    };
+    super::grim(move_tags(&access, &push_repo, tags, version, &target).await)?;
+
+    let report = ReleaseReport::new(id.to_string(), target.to_string(), tags.to_vec(), true).with_pushed_to(pushed_to);
+    Ok((report, ExitCode::Success))
+}
+
 /// The `requires` an artifact source declares, sorted by `(kind, name)`; a
 /// bundle's are its members.
 ///
@@ -579,6 +673,7 @@ pub(crate) fn declared_requires(path: &std::path::Path, kind: ArtifactKind) -> a
         ArtifactKind::Agent => decl(&super::grim(validate_agent_file(path))?.metadata),
         ArtifactKind::Mcp => Ok(read_mcp_source(path)?.2),
         ArtifactKind::Bundle => Ok(read_bundle_members(path)?.1),
+        ArtifactKind::Settings => Ok(read_settings_source(path)?.2),
         ArtifactKind::Hook => {
             let manifest_path = path.join(crate::oci::hook::HOOK_MANIFEST_FILE);
             let source = std::fs::read_to_string(&manifest_path)

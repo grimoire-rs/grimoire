@@ -456,7 +456,7 @@ pub struct PublishEntrySpec {
     /// Source path override. When absent, the conventional path relative
     /// to the manifest directory is used:
     /// `skills/{name}/`, `rules/{name}.md`, `agents/{name}.md`,
-    /// `bundles/{name}.toml`.
+    /// `bundles/{name}.toml`, `settings/{name}.toml`.
     pub path: Option<PathBuf>,
 
     /// Full OCI repository path override (registry-relative, no tag), e.g.
@@ -522,7 +522,7 @@ pub struct PublishManifest {
     pub push_registry: Option<String>,
 
     /// Layer compression for skill, rule, agent and hook entries: `none`
-    /// (default) or `gzip`. Ignored for bundles and mcp. Overridden for a run
+    /// (default) or `gzip`. Ignored for bundles, mcp and settings. Overridden for a run
     /// by `grim publish --compression`.
     pub compression: Option<crate::oci::layer::Compression>,
 
@@ -578,6 +578,13 @@ pub struct PublishManifest {
     /// make an author's release pipeline depend on a consumer-side switch.
     #[serde(default)]
     pub hooks: BTreeMap<String, PublishEntrySpec>,
+
+    /// Settings package entries, keyed by name.
+    //
+    // Additive optional table, ungated for the reason `hooks` gives: publishing
+    // applies nothing on this machine.
+    #[serde(default)]
+    pub settings: BTreeMap<String, PublishEntrySpec>,
 
     /// Announcement defaults for `--announce` (target index repository,
     /// namespace, owner id).
@@ -850,6 +857,7 @@ fn resolve_versions(
         &mut manifest.bundles,
         &mut manifest.mcp,
         &mut manifest.hooks,
+        &mut manifest.settings,
     ];
     for table in tables {
         for (name, spec) in table.iter_mut() {
@@ -1573,6 +1581,7 @@ fn kind_str(kind: ArtifactKind) -> &'static str {
         ArtifactKind::Agent => "agent",
         ArtifactKind::Bundle => "bundle",
         ArtifactKind::Mcp => "mcp",
+        ArtifactKind::Settings => "settings",
     }
 }
 
@@ -1767,7 +1776,8 @@ fn validate_manifest(
         + manifest.agents.len()
         + manifest.bundles.len()
         + manifest.mcp.len()
-        + manifest.hooks.len();
+        + manifest.hooks.len()
+        + manifest.settings.len();
     if total_entries == 0 {
         return Err(data_error_at(manifest_path, "no packages declared in manifest"));
     }
@@ -1782,6 +1792,7 @@ fn validate_manifest(
         .chain(manifest.bundles.keys())
         .chain(manifest.mcp.keys())
         .chain(manifest.hooks.keys())
+        .chain(manifest.settings.keys())
         .map(String::as_str)
         .collect();
 
@@ -1828,6 +1839,9 @@ fn validate_manifest(
     }
     for (name, spec) in &manifest.hooks {
         validate_entry(name, spec, ArtifactKind::Hook, manifest_dir, manifest_path)?;
+    }
+    for (name, spec) in &manifest.settings {
+        validate_entry(name, spec, ArtifactKind::Settings, manifest_dir, manifest_path)?;
     }
 
     Ok(())
@@ -1891,7 +1905,7 @@ fn validate_entry(
 /// Resolve the source path for an entry: use the explicit path override if
 /// present (relative to manifest dir), otherwise the convention:
 /// `skills/{name}/`, `rules/{name}.md`, `agents/{name}.md`,
-/// `bundles/{name}.toml` (ADR D2).
+/// `bundles/{name}.toml` (ADR D2), `settings/{name}.toml`.
 fn resolve_source_path(
     name: &str,
     kind: ArtifactKind,
@@ -1954,6 +1968,7 @@ fn conventional_source_path(name: &str, kind: ArtifactKind, manifest_dir: &std::
         ArtifactKind::Agent => manifest_dir.join("agents").join(format!("{name}.md")),
         ArtifactKind::Bundle => manifest_dir.join("bundles").join(format!("{name}.toml")),
         ArtifactKind::Mcp => manifest_dir.join("mcp").join(format!("{name}.toml")),
+        ArtifactKind::Settings => manifest_dir.join("settings").join(format!("{name}.toml")),
     }
 }
 
@@ -2110,6 +2125,9 @@ fn plan_entries(
     // "simplify" it — a bundle naming a hook member needs that member pushed
     // first, exactly as for the three older member kinds.
     add_kind!(manifest.hooks, ArtifactKind::Hook);
+    // After hooks and before bundles: a bundle may name a settings member, and
+    // appending here moves no existing kind.
+    add_kind!(manifest.settings, ArtifactKind::Settings);
     add_kind!(manifest.bundles, ArtifactKind::Bundle);
 
     entries
@@ -2237,6 +2255,7 @@ fn entry_description<'a>(
         ArtifactKind::Agent => &manifest.agents,
         ArtifactKind::Bundle => &manifest.bundles,
         ArtifactKind::Mcp => &manifest.mcp,
+        ArtifactKind::Settings => &manifest.settings,
     };
     table.get(name).and_then(|s| s.description.as_ref())
 }
@@ -2261,6 +2280,7 @@ fn entry_metadata_defaults(
         ArtifactKind::Agent => &manifest.agents,
         ArtifactKind::Bundle => &manifest.bundles,
         ArtifactKind::Mcp => &manifest.mcp,
+        ArtifactKind::Settings => &manifest.settings,
     };
     let flags = args.metadata.defaults();
     let with_entry = match table.get(name).and_then(|s| s.metadata.as_ref()) {
@@ -2714,7 +2734,7 @@ mod tests {
         let mut manifest: PublishManifest = toml::from_str(
             "registry = \"r.example\"\nversion = \"1.2.3\"\n\n\
              [skills.s]\n\n[rules.r]\n\n[agents.a]\n\n\
-             [mcp.m]\n\n[hooks.h]\n\n[bundles.b]\n",
+             [mcp.m]\n\n[hooks.h]\n\n[settings.t]\n\n[bundles.b]\n",
         )
         .unwrap();
         resolve_versions(&mut manifest, None, Path::new("test.toml")).expect("resolves");
@@ -2724,6 +2744,7 @@ mod tests {
             ("agents", manifest.agents["a"].version.as_deref()),
             ("mcp", manifest.mcp["m"].version.as_deref()),
             ("hooks", manifest.hooks["h"].version.as_deref()),
+            ("settings", manifest.settings["t"].version.as_deref()),
             ("bundles", manifest.bundles["b"].version.as_deref()),
         ] {
             assert_eq!(
@@ -3731,6 +3752,14 @@ mod tests {
     }
 
     // ── plan_entries: conventional path construction ───────────────────────
+
+    #[test]
+    fn a_settings_entry_lives_under_settings_as_toml() {
+        assert_eq!(
+            conventional_source_path("team", ArtifactKind::Settings, Path::new("/m")),
+            Path::new("/m/settings/team.toml")
+        );
+    }
 
     #[test]
     fn plan_entries_builds_conventional_paths_relative_to_manifest_dir() {

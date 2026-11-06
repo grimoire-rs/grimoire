@@ -5,7 +5,7 @@
 //!
 //! A bundle is a standard single-layer OCI artifact whose layer blob is a
 //! JSON document listing the members it groups — any installable kind
-//! (skill, rule, agent, mcp, hook), never a nested bundle. It is typed
+//! (skill, rule, agent, mcp, hook, settings), never a nested bundle. It is typed
 //! `bundle` on the wire like any other Grimoire artifact (the
 //! `com.grimoire.kind` annotation; legacy readers may still see the
 //! pre-empty-config `artifactType` `application/vnd.grimoire.bundle.v1`).
@@ -129,6 +129,29 @@ mod tests {
         assert_eq!(a.to_layer_bytes().unwrap(), b.to_layer_bytes().unwrap());
         // Skill sorts before rule.
         assert_eq!(a.members[0].name, "a-skill");
+    }
+
+    #[test]
+    fn a_settings_member_sorts_after_every_other_kind() {
+        let authored = |first: ArtifactKind, second: ArtifactKind| {
+            BundleManifest::new(vec![
+                member(first, "a", "ghcr.io/acme/a:1"),
+                member(second, "z", "ghcr.io/acme/z:1"),
+            ])
+        };
+        for kind in ArtifactKind::ALL.into_iter().filter(|k| *k != ArtifactKind::Settings) {
+            let manifest = authored(ArtifactKind::Settings, kind);
+            assert_eq!(manifest.members[0].kind, kind);
+            assert_eq!(manifest.members[1].kind, ArtifactKind::Settings);
+        }
+    }
+
+    #[test]
+    fn a_settings_member_round_trips_under_its_wire_token() {
+        let m = BundleManifest::new(vec![member(ArtifactKind::Settings, "team", "ghcr.io/acme/team:1")]);
+        let bytes = m.to_layer_bytes().unwrap();
+        assert!(String::from_utf8_lossy(&bytes).contains(r#""kind": "settings""#));
+        assert_eq!(BundleManifest::from_layer_bytes(&bytes).unwrap(), m);
     }
 
     #[test]

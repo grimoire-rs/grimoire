@@ -145,6 +145,7 @@ mod tests {
             (&["hook", "allow"], "hook", Some("allow")),
             (&["hook", "revoke"], "hook", Some("revoke")),
             (&["hook", "deny"], "hook", Some("revoke")),
+            (&["consent", "allow"], "hook", Some("allow")),
             (&["login", "r.example"], "login", None),
             (&["logout", "r.example"], "logout", None),
         ];

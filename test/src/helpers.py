@@ -58,6 +58,8 @@ def write_config(
     agents: dict[str, str] | None = None,
     hooks: dict[str, str] | None = None,
     options: dict[str, str] | None = None,
+    settings: dict[str, str] | None = None,
+    experimental_settings: bool | None = None,
 ) -> Path:
     """Write a ``grimoire.toml`` with the given skill/rule/bundle/agent/hook refs.
 
@@ -71,6 +73,12 @@ def write_config(
 
     ``options`` writes raw ``key = value`` lines into an ``[options]`` table
     (values are passed through verbatim, so a string needs its own quotes).
+
+    ``settings`` is emitted like ``hooks``: only when non-empty, after
+    ``[hooks]``, so a settings-free fixture keeps its declaration hash.
+    ``experimental_settings`` writes ``settings = <bool>`` under
+    ``[options.experimental]``; ``None`` writes nothing, which is the
+    flag-unset state.
     """
     lines: list[str] = []
     if bundles:
@@ -90,10 +98,17 @@ def write_config(
         lines.append("[hooks]")
         for name, ref in hooks.items():
             lines.append(f'{name} = "{ref}"')
+    if settings:
+        lines.append("[settings]")
+        for name, ref in settings.items():
+            lines.append(f'{name} = "{ref}"')
     if options:
         lines.append("[options]")
         for key, value in options.items():
             lines.append(f"{key} = {value}")
+    if experimental_settings is not None:
+        lines.append("[options.experimental]")
+        lines.append(f"settings = {str(experimental_settings).lower()}")
     cfg = project_dir / "grimoire.toml"
     cfg.write_text("\n".join(lines) + "\n")
     return cfg
@@ -130,7 +145,7 @@ _MCP_LAYER_MEDIA_TYPE = "application/vnd.grimoire.mcp.v1+json"
 # `ArtifactKind` declaration order (src/oci/artifact_kind.rs): grim sorts members
 # by the enum, not by the kind's text; a text sort puts mcp before skill and
 # changes the layer digest.
-_KIND_ORDER = ("skill", "rule", "agent", "bundle", "mcp", "hook")
+_KIND_ORDER = ("skill", "rule", "agent", "bundle", "mcp", "hook", "settings")
 
 
 def members_layer(members: list[tuple[str, str, str]]) -> bytes:
@@ -220,6 +235,90 @@ def make_hook(
         }
     )
     return push_artifact(repo, tag, tar_bytes, "hook")
+
+
+# The settings layer type and kind annotation, as `src/oci/settings.rs` and
+# `ArtifactKind::Settings` declare them.
+SETTINGS_LAYER_MEDIA_TYPE = "application/vnd.grimoire.settings.v1+json"
+
+
+def settings_layer(document: dict) -> bytes:
+    """The canonical settings layer: pretty JSON, sorted keys, trailing newline."""
+    return (json.dumps(document, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode()
+
+
+def make_settings(
+    repo: str,
+    tag: str,
+    document: dict,
+    requires: list[tuple[str, str, str]] | None = None,
+) -> PublishedArtifact:
+    """Push a ``settings`` artifact straight through ``push_manifest``.
+
+    ``document`` is the layer's JSON object: ``description`` plus one table per
+    vendor (``{"description": "...", "claude": {"model": "sonnet"}}``). It is
+    serialised as given, with no validation, so a test can publish a document
+    the consumer must refuse. Never built by grim: a broken writer or builder
+    cannot mask a broken reader. ``requires`` appends a requires layer.
+    """
+    layers = [(SETTINGS_LAYER_MEDIA_TYPE, settings_layer(document))]
+    if requires:
+        layers.append((_REQUIRES_LAYER_MEDIA_TYPE, members_layer(requires)))
+    digest = push_manifest(repo, tag, layers, {"com.grimoire.kind": "settings"})
+    return PublishedArtifact(repo=repo, tag=tag, digest=digest, kind="settings")
+
+
+# Vendor config-dir variables for the settings clients that have one, each
+# mapped to the root (relative to the sandbox) it is redirected to.
+_SETTINGS_ROOTS = {
+    "claude": ("CLAUDE_CONFIG_DIR", "claude"),
+    "codex": ("CODEX_HOME", "codex"),
+    "copilot": ("COPILOT_HOME", "copilot"),
+    "kiro": ("KIRO_HOME", "kiro"),
+    "opencode": ("OPENCODE_CONFIG_DIR", "opencode"),
+    "qoder": ("QODER_CONFIG_DIR", "qoder"),
+}
+
+
+def settings_sandbox(base: Path, home: Path | None = None) -> tuple[dict[str, str], dict[str, Path]]:
+    """Seed harness roots for every settings client under ``base`` and ``home``.
+
+    Returns ``(env, roots)``: ``env`` holds the vendor variables to merge into
+    a ``GrimRunner.env``; ``roots`` maps each client to its seeded directory.
+    Clients with no variable root under ``home``, which must be the runner's
+    isolated home: Cursor at ``.cursor`` (``CURSOR_CONFIG_DIR`` moves only its
+    ``cli-config.json``), Amp at ``.config/amp`` (the runner's XDG dir),
+    Antigravity at its CLI's ``.gemini/antigravity-cli``, Droid at
+    ``.factory``, Kilo at ``.config/kilo``, Gemini at ``.gemini`` (no
+    ``GEMINI_CLI_HOME``, which would move the home itself) and Warp at
+    ``.warp`` on macOS, else ``.config/warp-terminal``. Every root exists, so a
+    global-scope run detects the client, and nothing is written outside
+    ``base`` and ``home``.
+    """
+    env: dict[str, str] = {}
+    roots: dict[str, Path] = {}
+    for client, (variable, name) in _SETTINGS_ROOTS.items():
+        root = base / name
+        root.mkdir(parents=True, exist_ok=True)
+        env[variable] = str(root)
+        roots[client] = root
+    home = home if home is not None else base / "home"
+    warp = (".warp",) if sys.platform == "darwin" else (".config", "warp-terminal")
+    for client, relative in (
+        ("cursor", (".cursor",)),
+        ("amp", (".config", "amp")),
+        ("antigravity", (".gemini", "antigravity-cli")),
+        ("droid", (".factory",)),
+        ("kilo", (".config", "kilo")),
+        ("gemini", (".gemini",)),
+        ("warp", warp),
+    ):
+        root = home.joinpath(*relative)
+        root.mkdir(parents=True, exist_ok=True)
+        roots[client] = root
+    # Warp is detected by `~/.warp`, which holds its settings on macOS only.
+    (home / ".warp").mkdir(exist_ok=True)
+    return env, roots
 
 
 def make_description(repo: str, files: dict[str, str | bytes]) -> PublishedArtifact:

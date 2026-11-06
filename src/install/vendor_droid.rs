@@ -56,6 +56,14 @@
 //!   *project* server in Droid's UI "writes a copy to your user config", so
 //!   the same name then sits in `~/.factory/mcp.json` untracked by grim and a
 //!   later global install of it refuses with exit 65 (`--force` replaces it).
+//! - **Settings**: global only, `~/.factory/settings.json` (JSON; Droid 1.3.0
+//!   takes `//` comments and refuses a trailing comma, which the JSONC splice
+//!   never writes). An org value wins over a grim value for a hard control, a
+//!   project or folder value wins for a session default, and
+//!   `~/.factory/settings.local.json` merges on top of the file grim reads, so
+//!   a local override can mask a grim value without changing the file. Droid
+//!   writes its defaults into the file on first run, so a key may already hold
+//!   a value grim did not write.
 //!
 //! **No environment override was found.** Neither a `FACTORY_HOME` nor a
 //! `DROID_HOME` appears on the settings or skills pages checked; both are
@@ -70,7 +78,10 @@ use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
 use super::render::{self, NameGrammar, RenderError, RenderedDoc};
-use super::vendor::{FieldType, KindSupport, KnownField, Vendor, home_dir, provenance};
+use super::vendor::MergeClass::{Map, Scalar, Set};
+use super::vendor::SettingsScopes::GlobalOnly;
+use super::vendor::SettingsValueType as Ty;
+use super::vendor::{FieldType, KindSupport, KnownField, SettingsField, Vendor, home_dir, provenance};
 
 /// `droid.*` agent fields → custom-droid frontmatter
 /// (<https://docs.factory.ai/cli/configuration/custom-droids>). Droid ignores
@@ -83,6 +94,88 @@ pub const DROID_AGENT_FIELDS: &[KnownField] = &[KnownField {
 
 /// Droid (Factory).
 pub struct DroidVendor;
+
+/// The focus modes the three sound-focus keys share.
+const SOUND_FOCUS: Ty = Ty::Enum(&["always", "focused", "unfocused"]);
+
+/// Droid's settings keys, from `research_upstream_droid_settings_20261105.md`.
+const DROID_SETTINGS_FIELDS: &[SettingsField] = &[
+    SettingsField::new(
+        "/sessionDefaultSettings/autonomyLevel",
+        Ty::Enum(&["off", "low", "medium", "high"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/sessionDefaultSettings/interactionMode",
+        Ty::Enum(&["auto", "spec", "agi"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new("/sessionDefaultSettings/model", Ty::String, Scalar, GlobalOnly),
+    // Each model accepts its own subset of these levels.
+    SettingsField::new(
+        "/sessionDefaultSettings/reasoningEffort",
+        Ty::Enum(&[
+            "none", "dynamic", "off", "minimal", "low", "medium", "high", "xhigh", "max",
+        ]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new("/outputStyle", Ty::String, Scalar, GlobalOnly),
+    SettingsField::new("/diffMode", Ty::Enum(&["github", "unified"]), Scalar, GlobalOnly),
+    SettingsField::new("/soundFocusMode", SOUND_FOCUS, Scalar, GlobalOnly),
+    SettingsField::new("/completionSoundFocusMode", SOUND_FOCUS, Scalar, GlobalOnly),
+    SettingsField::new("/awaitingInputSoundFocusMode", SOUND_FOCUS, Scalar, GlobalOnly),
+    SettingsField::new(
+        "/toolResultDisplay",
+        Ty::Enum(&["expanded", "compact"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/logoAnimation",
+        Ty::Enum(&["once", "always", "off"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new(
+        "/subagentAutonomyLevel",
+        Ty::Enum(&["inherit", "off", "low", "medium", "high"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new("/includeCoAuthoredByDroid", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/enableDroidShield", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/ideAutoConnect", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/showThinkingInMainView", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/streamAssistantResponses", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/vimMode", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/blockOnMcpLoad", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/showTokenUsageIndicator", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/overrideTerminalColors", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/nerdFont", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/disabledSkills", Ty::StringList, Set, GlobalOnly),
+    SettingsField::new("/sandbox/enabled", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new(
+        "/sandbox/mode",
+        Ty::Enum(&["per-command", "whole-process"]),
+        Scalar,
+        GlobalOnly,
+    ),
+    SettingsField::new("/sandbox/filesystem/denyRead", Ty::StringList, Set, GlobalOnly),
+    SettingsField::new("/sandbox/filesystem/denyWrite", Ty::StringList, Set, GlobalOnly),
+    // These two union by Droid's general array rule; no per-key statement.
+    SettingsField::new("/sandbox/filesystem/allowWrite", Ty::StringList, Set, GlobalOnly),
+    SettingsField::new("/sandbox/network/allowedDomains", Ty::StringList, Set, GlobalOnly),
+    // Claude's row: the pointer puts it on the marketplace credential check.
+    SettingsField::new(
+        "/extraKnownMarketplaces/<name>",
+        Ty::Atomic { keys: &["source"] },
+        Map,
+        GlobalOnly,
+    ),
+];
 
 impl Vendor for DroidVendor {
     fn name(&self) -> &'static str {
@@ -141,6 +234,14 @@ impl Vendor for DroidVendor {
 
     fn mcp_config_path(&self, workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
         Some(scope_root(workspace, scope).join("mcp.json"))
+    }
+
+    fn settings_fields(&self) -> &'static [SettingsField] {
+        DROID_SETTINGS_FIELDS
+    }
+
+    fn settings_config_path(&self, _workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
+        global_settings_path(scope, droid_root(home_dir()))
     }
 
     fn mcp_entry(
@@ -301,6 +402,16 @@ fn scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
 /// here — note the tag is `droid-root` while the directory is `.factory`.
 pub(crate) fn droid_root(home: Option<PathBuf>) -> Option<PathBuf> {
     home.map(|h| h.join(".factory"))
+}
+
+/// `settings.json` under the resolved `root`: `None` at project scope, where
+/// `.factory/settings.json` is a repository file, and `None` with no root,
+/// never the workspace stand-in [`scope_root`] falls back to.
+fn global_settings_path(scope: ConfigScope, root: Option<PathBuf>) -> Option<PathBuf> {
+    match scope {
+        ConfigScope::Project => None,
+        ConfigScope::Global => root.map(|root| root.join("settings.json")),
+    }
 }
 
 #[cfg(test)]
@@ -606,5 +717,168 @@ mod tests {
         );
         std::fs::create_dir_all(w.join(".factory")).unwrap();
         assert!(DroidVendor.detect(w, ConfigScope::Project));
+    }
+
+    // ── settings: global only, `~/.factory/settings.json` ──
+
+    #[test]
+    fn settings_rows_match_the_key_list() {
+        let rows: Vec<_> = DroidVendor
+            .settings_fields()
+            .iter()
+            .map(|field| (field.pointer, field.ty, field.merge, field.scopes))
+            .collect();
+        let level = Ty::Enum(&["off", "low", "medium", "high"]);
+        let effort = Ty::Enum(&[
+            "none", "dynamic", "off", "minimal", "low", "medium", "high", "xhigh", "max",
+        ]);
+        let focus = Ty::Enum(&["always", "focused", "unfocused"]);
+        let atomic = Ty::Atomic { keys: &["source"] };
+        assert_eq!(
+            rows,
+            vec![
+                ("/sessionDefaultSettings/autonomyLevel", level, Scalar, GlobalOnly),
+                (
+                    "/sessionDefaultSettings/interactionMode",
+                    Ty::Enum(&["auto", "spec", "agi"]),
+                    Scalar,
+                    GlobalOnly
+                ),
+                ("/sessionDefaultSettings/model", Ty::String, Scalar, GlobalOnly),
+                ("/sessionDefaultSettings/reasoningEffort", effort, Scalar, GlobalOnly),
+                ("/outputStyle", Ty::String, Scalar, GlobalOnly),
+                ("/diffMode", Ty::Enum(&["github", "unified"]), Scalar, GlobalOnly),
+                ("/soundFocusMode", focus, Scalar, GlobalOnly),
+                ("/completionSoundFocusMode", focus, Scalar, GlobalOnly),
+                ("/awaitingInputSoundFocusMode", focus, Scalar, GlobalOnly),
+                (
+                    "/toolResultDisplay",
+                    Ty::Enum(&["expanded", "compact"]),
+                    Scalar,
+                    GlobalOnly
+                ),
+                (
+                    "/logoAnimation",
+                    Ty::Enum(&["once", "always", "off"]),
+                    Scalar,
+                    GlobalOnly
+                ),
+                (
+                    "/subagentAutonomyLevel",
+                    Ty::Enum(&["inherit", "off", "low", "medium", "high"]),
+                    Scalar,
+                    GlobalOnly
+                ),
+                ("/includeCoAuthoredByDroid", Ty::Bool, Scalar, GlobalOnly),
+                ("/enableDroidShield", Ty::Bool, Scalar, GlobalOnly),
+                ("/ideAutoConnect", Ty::Bool, Scalar, GlobalOnly),
+                ("/showThinkingInMainView", Ty::Bool, Scalar, GlobalOnly),
+                ("/streamAssistantResponses", Ty::Bool, Scalar, GlobalOnly),
+                ("/vimMode", Ty::Bool, Scalar, GlobalOnly),
+                ("/blockOnMcpLoad", Ty::Bool, Scalar, GlobalOnly),
+                ("/showTokenUsageIndicator", Ty::Bool, Scalar, GlobalOnly),
+                ("/overrideTerminalColors", Ty::Bool, Scalar, GlobalOnly),
+                ("/nerdFont", Ty::Bool, Scalar, GlobalOnly),
+                ("/disabledSkills", Ty::StringList, Set, GlobalOnly),
+                ("/sandbox/enabled", Ty::Bool, Scalar, GlobalOnly),
+                (
+                    "/sandbox/mode",
+                    Ty::Enum(&["per-command", "whole-process"]),
+                    Scalar,
+                    GlobalOnly
+                ),
+                ("/sandbox/filesystem/denyRead", Ty::StringList, Set, GlobalOnly),
+                ("/sandbox/filesystem/denyWrite", Ty::StringList, Set, GlobalOnly),
+                ("/sandbox/filesystem/allowWrite", Ty::StringList, Set, GlobalOnly),
+                ("/sandbox/network/allowedDomains", Ty::StringList, Set, GlobalOnly),
+                ("/extraKnownMarketplaces/<name>", atomic, Map, GlobalOnly),
+            ]
+        );
+    }
+
+    #[test]
+    fn settings_rows_narrow_nothing_and_require_nothing() {
+        for field in DroidVendor.settings_fields() {
+            assert_eq!(field.map_keys, None, "{}", field.pointer);
+            assert_eq!(field.project_values, None, "{}", field.pointer);
+            assert!(!field.required_by_client, "{}", field.pointer);
+        }
+    }
+
+    /// One value per value type is taken, and a wrong one is refused.
+    #[test]
+    fn settings_document_checks_each_value_type() {
+        use crate::oci::settings::SettingsDocument;
+
+        let good = concat!(
+            "description = \"d\"\n[droid]\n",
+            "diffMode = \"unified\"\noutputStyle = \"s\"\nvimMode = true\n",
+            "disabledSkills = [\"a\"]\n",
+            "[droid.sessionDefaultSettings]\nreasoningEffort = \"xhigh\"\n",
+            "[droid.extraKnownMarketplaces.m]\nsource = \"https://example.com/m.git\"\n",
+        );
+        let (document, _) = SettingsDocument::from_toml_str_with_requires(good).unwrap();
+        assert_eq!(
+            document.vendors["droid"]["extraKnownMarketplaces"]["m"],
+            serde_json::json!({"source": "https://example.com/m.git"})
+        );
+        for bad in [
+            "diffMode = \"split\"",
+            "outputStyle = 1",
+            "vimMode = \"yes\"",
+            "disabledSkills = \"a\"",
+            "sessionDefaultSettings = { autonomyLevel = \"auto\" }",
+            "extraKnownMarketplaces = { m = { source = \"x\", ref = \"main\" } }",
+            "hooks = {}",
+        ] {
+            let text = format!("description = \"d\"\n[droid]\n{bad}\n");
+            assert!(SettingsDocument::from_toml_str_with_requires(&text).is_err(), "{bad}");
+        }
+    }
+
+    /// The marketplace row shares Claude's pointer, so a URL carrying a
+    /// credential is refused for Droid as it is for Claude.
+    #[test]
+    fn settings_marketplace_url_with_userinfo_is_refused() {
+        use crate::oci::settings::{SettingsDocument, SettingsError};
+
+        let text = concat!(
+            "description = \"d\"\n",
+            "[droid.extraKnownMarketplaces.m]\nsource = \"https://u:p@example.com/m.git\"\n",
+        );
+        assert_eq!(
+            SettingsDocument::from_toml_str_with_requires(text).unwrap_err(),
+            SettingsError::CredentialInUrl {
+                pointer: "/droid/extraKnownMarketplaces/m/source".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn settings_path_has_no_answer_at_project_scope() {
+        let root = Some(PathBuf::from("/home/u/.factory"));
+        assert_eq!(global_settings_path(ConfigScope::Project, root), None);
+        assert_eq!(
+            DroidVendor.settings_config_path(Path::new("/w"), ConfigScope::Project),
+            None
+        );
+    }
+
+    /// No home resolves no file, never the workspace stand-in MCP falls back to.
+    #[test]
+    fn settings_path_at_global_scope_is_the_factory_settings_file() {
+        assert_eq!(
+            global_settings_path(ConfigScope::Global, droid_root(Some(PathBuf::from("/home/u")))),
+            Some(PathBuf::from("/home/u/.factory/settings.json"))
+        );
+        assert_eq!(global_settings_path(ConfigScope::Global, droid_root(None)), None);
+    }
+
+    #[test]
+    fn settings_format_is_json() {
+        assert_eq!(
+            DroidVendor.settings_config_format(),
+            crate::install::vendor::McpConfigFormat::Json
+        );
     }
 }

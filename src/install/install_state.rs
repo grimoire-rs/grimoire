@@ -42,8 +42,12 @@ use crate::config::scope::ConfigScope;
 use crate::install::client_target::ClientTarget;
 use crate::install::content_hash::footprint_hash_for_record;
 use crate::install::hook_dispatch::{HOOKS_DIR, PAYLOAD_DIR, RootScope, payload_relative};
+use crate::install::hook_registrar::validate_grim_home;
 use crate::install::installer::client_supports_kind;
+use crate::install::json_splice;
 use crate::install::path_anchor::{AnchorError, AnchorRoots, AnchoredPath, Containment, PathAnchor, candidate_anchors};
+use crate::install::settings_store;
+use crate::install::vendor::{MergeClass, SettingsField};
 use crate::oci::mcp::McpDescriptor;
 use crate::oci::{ArtifactKind, Digest, PinnedIdentifier};
 use crate::store::atomic_write::atomic_write;
@@ -84,12 +88,13 @@ pub struct ClientOutput {
     /// Absent for skills and single-file rules.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub support_dir: Option<AnchoredPath>,
-    /// For a config-registration output (an MCP server entry), the
-    /// two-level JSON pointer of the managed member inside the `target`
-    /// config file (e.g. `/mcpServers/grim`). Present ⇒ `target` is a
-    /// shared, user-owned config file: integrity is judged **semantically**
-    /// on the pointed-at value (key order and formatting in the file are
-    /// invisible), and uninstall removes the entry, never the file.
+    /// For a config-registration output, the JSON pointer of the managed
+    /// member inside the `target` config file: two-level for an MCP server
+    /// entry (e.g. `/mcpServers/grim`), RFC 6901 of any depth for a settings
+    /// piece. Present ⇒ `target` is a shared, user-owned config file:
+    /// integrity is judged **semantically** on the pointed-at value (key
+    /// order and formatting in the file are invisible), and uninstall removes
+    /// the entry, never the file.
     /// Absent for every file/dir output — state files without MCP
     /// artifacts stay byte-identical (the `support_dir` precedent; an
     /// older grim cannot parse a state file that carries this field).
@@ -112,6 +117,14 @@ pub struct ClientOutput {
     /// older grim — a breaking change, not an additive one.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub adopted: bool,
+    /// For a settings piece that is one element of a set, the element inside
+    /// the array at [`Self::entry`]; `None` for every other output.
+    ///
+    /// Never serialized when `None`: this struct is `deny_unknown_fields`, so
+    /// an always-emitted key would make every new state file unreadable by an
+    /// older grim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub element: Option<String>,
 }
 
 impl ClientOutput {
@@ -136,7 +149,20 @@ impl ClientOutput {
     ) -> Result<Digest, AnchorError> {
         let target = self.resolved_target(roots, containment)?;
         if let Some(pointer) = &self.entry {
-            return current_entry_hash(&target, pointer, self.mcp_format(), self.mcp_vendor_owned_keys())
+            return current_entry_hash(
+                &target,
+                pointer,
+                kind,
+                self.element.as_deref(),
+                self.entry_format(kind),
+                self.entry_vendor_owned_keys(kind),
+            )
+            .map_err(|source| AnchorError::Io { path: target, source });
+        }
+        // A footprint hash folds the file's name in, and the rule judges bytes.
+        if kind == ArtifactKind::Settings {
+            return std::fs::read(&target)
+                .map(|bytes| own_file_hash(&bytes))
                 .map_err(|source| AnchorError::Io { path: target, source });
         }
         let support = self.resolved_support_dir(roots, containment)?;
@@ -153,22 +179,55 @@ impl ClientOutput {
     /// as missing.
     ///
     /// `containment` is the caller's intent, forwarded to
-    /// [`AnchoredPath::resolve`] — see [`Containment`].
+    /// [`AnchoredPath::resolve`] — see [`Containment`]. `kind` is the owning
+    /// record's kind, which picks how the entry is read.
     ///
     /// # Errors
     ///
     /// [`AnchorError`] from the two-layer containment guard (an unparseable
     /// config file is `Ok(false)`, not an error — absence, not corruption of
     /// grim's own state).
-    pub fn is_present(&self, roots: &AnchorRoots, containment: Containment) -> Result<bool, AnchorError> {
+    pub fn is_present(
+        &self,
+        kind: ArtifactKind,
+        roots: &AnchorRoots,
+        containment: Containment,
+    ) -> Result<bool, AnchorError> {
         let target = self.resolved_target(roots, containment)?;
         if !target.exists() {
             return Ok(false);
         }
         match &self.entry {
             None => Ok(true),
-            Some(pointer) => Ok(read_entry_value(&target, pointer, self.mcp_format()).is_ok_and(|v| v.is_some())),
+            Some(pointer) => {
+                Ok(
+                    read_entry_value(&target, pointer, kind, self.element.as_deref(), self.entry_format(kind))
+                        .is_ok_and(|v| v.is_some()),
+                )
+            }
         }
+    }
+
+    /// The format an entry output of `kind` is read in. Every kind but
+    /// settings is an MCP registration here, whatever the caller passed.
+    fn entry_format(&self, kind: ArtifactKind) -> crate::install::vendor::McpConfigFormat {
+        if kind == ArtifactKind::Settings {
+            return self
+                .client
+                .parse::<ClientTarget>()
+                .map(|c| c.vendor().settings_config_format())
+                .unwrap_or_default();
+        }
+        self.mcp_format()
+    }
+
+    /// The keys the integrity hash ignores in an entry output of `kind`. A
+    /// settings piece is compared whole.
+    fn entry_vendor_owned_keys(&self, kind: ArtifactKind) -> &'static [&'static str] {
+        if kind == ArtifactKind::Settings {
+            return &[];
+        }
+        self.mcp_vendor_owned_keys()
     }
 
     /// The splice format [`Self::client`]'s vendor writes its MCP config
@@ -244,6 +303,62 @@ pub fn entry_value_hash(value: &serde_json::Value) -> Result<Digest, io::Error> 
     Ok(crate::oci::Algorithm::Sha256.hash(canonical.as_bytes()))
 }
 
+/// The canonical semantic hash of a settings piece's value: SHA-256 over the
+/// compact sorted-key serialization, as [`entry_value_hash`], after an
+/// integer-valued float becomes that integer at any depth, because a file may
+/// spell `1` as `1.0`. MCP hashes stay separate: [`entry_value_hash`] tells
+/// the two apart, and recorded hashes must keep matching.
+///
+/// The hash of a set element is this hash of `Value::String(element)`.
+pub fn settings_value_hash(value: &serde_json::Value) -> Digest {
+    let canonical = integers_for_whole_floats(value).to_string();
+    crate::oci::Algorithm::Sha256.hash(canonical.as_bytes())
+}
+
+/// The hash of a file a settings piece owns whole: SHA-256 over its bytes, so
+/// a file of any content has one and none can fail to parse.
+pub fn own_file_hash(bytes: &[u8]) -> Digest {
+    crate::oci::Algorithm::Sha256.hash(bytes)
+}
+
+/// Where `binding`'s own file sits under its client's root. The prefix can
+/// never name a file the client keeps there, such as Codex's `default.rules`.
+pub(crate) fn own_file_relative(binding: &str) -> String {
+    format!("rules/grim-{binding}.rules")
+}
+
+fn integers_for_whole_floats(value: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+
+    match value {
+        Value::Number(number) => Value::Number(whole_float_as_integer(number).unwrap_or_else(|| number.clone())),
+        Value::Array(items) => Value::Array(items.iter().map(integers_for_whole_floats).collect()),
+        Value::Object(members) => Value::Object(
+            members
+                .iter()
+                .map(|(key, member)| (key.clone(), integers_for_whole_floats(member)))
+                .collect(),
+        ),
+        Value::Null | Value::Bool(_) | Value::String(_) => value.clone(),
+    }
+}
+
+/// `number` as an integer when it is a float with no fraction that fits `i64`
+/// or `u64`. The bounds are exclusive above: `as` saturates, so 2^64 would
+/// otherwise hash as `u64::MAX`.
+fn whole_float_as_integer(number: &serde_json::Number) -> Option<serde_json::Number> {
+    const TWO_POW_63: f64 = 9_223_372_036_854_775_808.0;
+    const TWO_POW_64: f64 = 18_446_744_073_709_551_616.0;
+
+    let float = number
+        .as_f64()
+        .filter(|float| number.is_f64() && float.fract() == 0.0)?;
+    if (-TWO_POW_63..TWO_POW_63).contains(&float) {
+        return Some((float as i64).into());
+    }
+    (0.0..TWO_POW_64).contains(&float).then(|| (float as u64).into())
+}
+
 /// `value` without the top-level `keys` the vendor owns inside grim's entry
 /// — the view the integrity hash and the adopt/refuse comparison judge.
 pub fn without_vendor_owned(value: &serde_json::Value, keys: &[&str]) -> serde_json::Value {
@@ -275,15 +390,22 @@ pub fn with_vendor_owned(
 /// Read the managed member `pointer` points at inside the config file at
 /// `target`, using the splice engine `format` names (JSON/JSONC-tolerant,
 /// or TOML). `Ok(None)` when the member (or the `instructions`-style
-/// container) is absent; `Err` on I/O or an unparseable file.
+/// container) is absent; `Err` on I/O or an unparseable file. A settings
+/// piece reads through [`read_settings_value`], every other kind as an MCP
+/// entry; `element` means nothing there.
 fn read_entry_value(
     target: &Path,
     pointer: &str,
+    kind: ArtifactKind,
+    element: Option<&str>,
     format: crate::install::vendor::McpConfigFormat,
 ) -> io::Result<Option<serde_json::Value>> {
     use crate::install::vendor::McpConfigFormat;
 
     let raw = std::fs::read_to_string(target)?;
+    if kind == ArtifactKind::Settings {
+        return read_settings_value(&raw, pointer, element, format);
+    }
     match format {
         McpConfigFormat::Json => {
             let (doc, _) = crate::install::json_config::parse_object(&raw, target)?;
@@ -298,22 +420,62 @@ fn read_entry_value(
     }
 }
 
+/// The settings piece at `pointer` in `raw`, at any depth. With `element`, the
+/// element itself when the array at `pointer` holds it, so a bare string equal
+/// to it reads absent. A malformed pointer or a blocked path reads absent too:
+/// the rule engine asks [`value_at`](crate::install::json_splice::value_at)
+/// for the blocking ancestor.
+fn read_settings_value(
+    raw: &str,
+    pointer: &str,
+    element: Option<&str>,
+    format: crate::install::vendor::McpConfigFormat,
+) -> io::Result<Option<serde_json::Value>> {
+    use crate::install::json_splice::{self, PointerRead};
+    use crate::install::vendor::McpConfigFormat;
+
+    let Some(path) = json_splice::split_pointer_path(pointer) else {
+        return Ok(None);
+    };
+    let read = match format {
+        McpConfigFormat::Json => json_splice::value_at(raw, &path)?,
+        McpConfigFormat::Toml => crate::install::toml_splice::value_at(raw, &path)?,
+    };
+    let value = match read {
+        PointerRead::Found(value) => value,
+        PointerRead::Absent | PointerRead::Blocked { .. } => return Ok(None),
+    };
+    let Some(element) = element else {
+        return Ok(Some(value));
+    };
+    let held = value
+        .as_array()
+        .is_some_and(|items| items.iter().any(|item| item.as_str() == Some(element)));
+    Ok(held.then(|| serde_json::Value::String(element.to_string())))
+}
+
 /// The current semantic hash of the entry at `pointer` in `target`. An
 /// absent file/member surfaces as `NotFound` so the caller's
 /// missing-vs-modified precedence holds.
 fn current_entry_hash(
     target: &Path,
     pointer: &str,
+    kind: ArtifactKind,
+    element: Option<&str>,
     format: crate::install::vendor::McpConfigFormat,
     vendor_owned: &[&str],
 ) -> io::Result<Digest> {
-    let value = read_entry_value(target, pointer, format)?.ok_or_else(|| {
+    let value = read_entry_value(target, pointer, kind, element, format)?.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
             format!("managed entry '{pointer}' not present in '{}'", target.display()),
         )
     })?;
-    entry_value_hash(&without_vendor_owned(&value, vendor_owned))
+    let value = without_vendor_owned(&value, vendor_owned);
+    if kind == ArtifactKind::Settings {
+        return Ok(settings_value_hash(&value));
+    }
+    entry_value_hash(&value)
 }
 
 /// Filter `outputs` to those whose client is in the currently-active set.
@@ -351,9 +513,10 @@ pub fn active_outputs<'a>(
 /// One installed artifact's recorded state.
 ///
 /// `outputs` is the single source of truth for every materialized client
-/// target (no denormalized top-level mirror of the first client). It is
-/// never empty for any consumer: `load` always converts a legacy V1 record
-/// in memory so a synthesized output is present.
+/// target (no denormalized top-level mirror of the first client). `load`
+/// always converts a legacy V1 record in memory so a synthesized output is
+/// present, but no parse rule requires one: a settings record with no piece
+/// applying here holds none, so no consumer may index `outputs[0]`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "RawInstallRecord", into = "RawInstallRecord")]
 pub struct InstallRecord {
@@ -517,17 +680,41 @@ struct ClientRecordV1 {
 /// keep the parse signature under `clippy::type_complexity`).
 type RecordMap = BTreeMap<(ArtifactKind, String), InstallRecord>;
 
+/// Outputs kept out of a [`RecordMap`] for one run, under the same keys.
+type WithheldOutputs = BTreeMap<(ArtifactKind, String), Vec<ClientOutput>>;
+
+/// Where a state's `Settings` records live, decided once at load.
+///
+/// A project's `state.json` can arrive with a `git pull`, so its records live
+/// under `$GRIM_HOME`, and a `$GRIM_HOME` the hook guard refuses cannot hold
+/// them (`adr_settings_artifact_kind.md`, Decision 6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingsStore {
+    /// In the state file itself: global scope.
+    Inline,
+    /// In the record file at `path`, whose envelope names `workspace`.
+    Workspace { path: PathBuf, workspace: PathBuf },
+    /// Nowhere: none is read and none is written. The hook guard refused
+    /// `$GRIM_HOME`, or the store could not be read.
+    Refused,
+}
+
 /// In-memory install state for one scope, with its backing file path.
 #[derive(Debug, Clone)]
 pub struct InstallState {
     path: PathBuf,
     records: RecordMap,
+    settings_store: SettingsStore,
     /// Set when a V1→V2 conversion dropped any output or whole record
     /// (unanchorable). A lossy migration must NOT reap the legacy file —
     /// it is the only remaining record of what was lost, so it is kept as
     /// a recovery breadcrumb. Default `false` (empty state, V2 load, or a
     /// clean V1 conversion that lost nothing).
     legacy_migration_lossy: bool,
+    /// Outputs a load set aside, for [`is_in_another_runs_file`] or a refused
+    /// `GRIM_HOME`: no consumer reads them, and [`Self::write_files`] puts them
+    /// back on their records.
+    withheld: WithheldOutputs,
 }
 
 impl InstallState {
@@ -617,7 +804,9 @@ impl InstallState {
         Self {
             path: scope_path.to_path_buf(),
             records: BTreeMap::new(),
+            settings_store: SettingsStore::Inline,
             legacy_migration_lossy: false,
+            withheld: WithheldOutputs::new(),
         }
     }
 
@@ -650,7 +839,9 @@ impl InstallState {
                 return Ok(Self {
                     path: scope_path.to_path_buf(),
                     records: BTreeMap::new(),
+                    settings_store: SettingsStore::Inline,
                     legacy_migration_lossy: false,
+                    withheld: WithheldOutputs::new(),
                 });
             }
             Err(e) => return Err(e),
@@ -659,7 +850,9 @@ impl InstallState {
         Ok(Self {
             path: scope_path.to_path_buf(),
             records,
+            settings_store: SettingsStore::Inline,
             legacy_migration_lossy,
+            withheld: WithheldOutputs::new(),
         })
     }
 
@@ -684,17 +877,26 @@ impl InstallState {
                 return Ok(Self {
                     path: scope_path.to_path_buf(),
                     records: BTreeMap::new(),
+                    settings_store: SettingsStore::Inline,
                     legacy_migration_lossy: false,
+                    withheld: WithheldOutputs::new(),
                 });
             }
             Err(e) => return Err(e),
         };
-        let (records, legacy_migration_lossy) =
-            Self::records_from_bytes(&bytes, scope_path, Some((ConfigScope::Global, roots)))?;
+        let (mut records, legacy_migration_lossy, mut withheld) =
+            Self::parse_records(&bytes, scope_path, Some((ConfigScope::Global, roots)))?;
+        // Not `roots.workspace`: a project run reads this file too, and at global
+        // scope the home is its own placeholder workspace.
+        if validate_grim_home(&roots.grim_home, &roots.grim_home, ConfigScope::Global).is_err() {
+            withhold_settings_outputs(&mut records, &mut withheld);
+        }
         Ok(Self {
             path: scope_path.to_path_buf(),
             records,
+            settings_store: SettingsStore::Inline,
             legacy_migration_lossy,
+            withheld,
         })
     }
 
@@ -731,13 +933,14 @@ impl InstallState {
     /// caller threads it into [`Self::legacy_migration_lossy`] so a lossy
     /// migration skips the legacy-file reap.
     ///
-    /// With `convert`, every record then passes through
+    /// With `convert`, a project file first loses its settings records
+    /// ([`discard_settings_records`]), then every record passes through
     /// [`drop_illegal_outputs`]. A drop from a V1 file counts as lossy too.
-    fn records_from_bytes(
+    fn parse_records(
         bytes: &[u8],
         path: &Path,
         convert: Option<(ConfigScope, &AnchorRoots)>,
-    ) -> std::io::Result<(RecordMap, bool)> {
+    ) -> std::io::Result<(RecordMap, bool, WithheldOutputs)> {
         let probe: VersionProbe = match serde_json::from_slice(bytes) {
             Ok(probe) => probe,
             Err(e) => {
@@ -778,19 +981,41 @@ impl InstallState {
                 convert_v1_records(file.records, scope, roots)
             }
         };
+        let mut withheld = WithheldOutputs::new();
         if let Some((scope, roots)) = convert {
-            let dropped = drop_illegal_outputs(&mut records, scope, roots);
+            if scope == ConfigScope::Project {
+                discard_settings_records(&mut records, path);
+            }
+            let (dropped, aside) = drop_illegal_outputs(&mut records, scope, roots);
             lossy |= dropped && probe.version == InstallStateVersion::V1;
+            withheld = aside;
         }
         Ok((
             records.into_iter().map(|r| ((r.kind, r.name.clone()), r)).collect(),
             lossy,
+            withheld,
         ))
+    }
+
+    /// [`Self::parse_records`] for a scope that withholds nothing: only a
+    /// global load sets an output aside.
+    fn records_from_bytes(
+        bytes: &[u8],
+        path: &Path,
+        convert: Option<(ConfigScope, &AnchorRoots)>,
+    ) -> std::io::Result<(RecordMap, bool)> {
+        let (records, lossy, _) = Self::parse_records(bytes, path, convert)?;
+        Ok((records, lossy))
     }
 
     /// The recorded state for `(kind, name)`, if installed.
     pub fn get(&self, kind: ArtifactKind, name: &str) -> Option<&InstallRecord> {
         self.records.get(&(kind, name.to_string()))
+    }
+
+    /// The outputs a load set aside for `(kind, name)`: on disk, but in no record.
+    pub(crate) fn set_aside(&self, kind: ArtifactKind, name: &str) -> &[ClientOutput] {
+        self.withheld.get(&(kind, name.to_string())).map_or(&[], Vec::as_slice)
     }
 
     /// Iterate every recorded artifact (order: `(kind, name)`).
@@ -814,11 +1039,20 @@ impl InstallState {
         self.records.insert((record.kind, record.name.clone()), record);
     }
 
+    /// Where this state keeps its settings records.
+    pub(crate) fn settings_store(&self) -> &SettingsStore {
+        &self.settings_store
+    }
+
     /// Drop the record for `(kind, name)`, returning it if present.
     /// Idempotent — removing an absent record is a no-op (`None`).
     pub fn remove(&mut self, kind: ArtifactKind, name: &str) -> Option<InstallRecord> {
         self.records.remove(&(kind, name.to_string()))
     }
+
+    /// The next step after the settings store at a named path cannot be read.
+    pub(crate) const UNREADABLE_STORE_REMEDY: &str =
+        "make that path a file your user can read, then re-run the command";
 
     /// Load the project-scope state for a workspace, with a V1 legacy
     /// fallback.
@@ -829,11 +1063,71 @@ impl InstallState {
     /// file is converted in memory (no disk write). If neither file exists,
     /// an empty state is returned.
     ///
+    /// Either file's settings records are discarded with a warning. The real
+    /// ones are merged from the store unless `validate_grim_home` refuses
+    /// `grim_home` or the store cannot be read, when none is read and
+    /// [`Self::save`] writes none.
+    ///
     /// # Errors
     ///
     /// [`std::io::Error`] for a read failure; an unknown version or a
     /// corrupt file is surfaced as [`std::io::ErrorKind::InvalidData`].
     pub fn load_project(workspace: &Path, grim_home: &Path, config_path: &Path) -> std::io::Result<Self> {
+        let (records, legacy_migration_lossy) = Self::read_project_records(workspace, grim_home, config_path)?;
+        let mut state = Self {
+            path: Self::project_state_path(workspace),
+            records,
+            settings_store: SettingsStore::Refused,
+            legacy_migration_lossy,
+            withheld: WithheldOutputs::new(),
+        };
+        // A refusal stays silent here: a project without the kind must print
+        // what it always did, and the settings gate reports the cause.
+        if validate_grim_home(grim_home, workspace, ConfigScope::Project).is_ok() {
+            let path = settings_store::path(grim_home, workspace);
+            match settings_store::load(&path, workspace) {
+                Ok(stored) => {
+                    state.merge_settings_records(stored);
+                    state.settings_store = SettingsStore::Workspace {
+                        path,
+                        workspace: workspace.to_path_buf(),
+                    };
+                }
+                // `Workspace` here would fail the save of a project without the
+                // kind, or remove a store that is readable again by then.
+                Err(e) => tracing::warn!(
+                    "ignoring the settings records at {}: {e}; this run reads and writes none; {}",
+                    path.display(),
+                    Self::UNREADABLE_STORE_REMEDY
+                ),
+            }
+        }
+        Ok(state)
+    }
+
+    /// Add the store's records. Only the kind the store holds: the output rule
+    /// ran before this merge, so any other kind would arrive unchecked and could
+    /// replace a state record.
+    fn merge_settings_records(&mut self, stored: Vec<InstallRecord>) {
+        for record in stored {
+            if record.kind == ArtifactKind::Settings {
+                self.record(record);
+            } else {
+                tracing::warn!(
+                    "ignored a {} record '{}' in the settings store",
+                    record.kind,
+                    shown(&record.name)
+                );
+            }
+        }
+    }
+
+    /// The records of the project state file, or of its legacy fallback.
+    fn read_project_records(
+        workspace: &Path,
+        grim_home: &Path,
+        config_path: &Path,
+    ) -> std::io::Result<(RecordMap, bool)> {
         let new_path = Self::project_state_path(workspace);
 
         // Project-scope anchoring only ever uses the `Workspace` root, so the
@@ -853,14 +1147,7 @@ impl InstallState {
         // Primary location: <workspace>/.grimoire/state.json. Present ⇒ read
         // it (V2 direct, or V1 converted in memory — never written here).
         match std::fs::read(&new_path) {
-            Ok(bytes) => {
-                let (records, legacy_migration_lossy) = Self::records_from_bytes(&bytes, &new_path, Some(convert))?;
-                return Ok(Self {
-                    path: new_path,
-                    records,
-                    legacy_migration_lossy,
-                });
-            }
+            Ok(bytes) => return Self::records_from_bytes(&bytes, &new_path, Some(convert)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
         }
@@ -875,23 +1162,12 @@ impl InstallState {
         let canonical = std::fs::canonicalize(config_path).unwrap_or_else(|_| config_path.to_path_buf());
         let legacy_path = Self::legacy_project_path(&state_dir, &canonical);
         match std::fs::read(&legacy_path) {
-            Ok(bytes) => {
-                let (records, legacy_migration_lossy) = Self::records_from_bytes(&bytes, &legacy_path, Some(convert))?;
-                // The in-memory state is still backed by the NEW location, so a
-                // later mutating `save` relocates it (the legacy file is reaped
-                // by the migration persist step, not here — and only when the
-                // conversion was non-lossy).
-                Ok(Self {
-                    path: new_path,
-                    records,
-                    legacy_migration_lossy,
-                })
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self {
-                path: new_path,
-                records: BTreeMap::new(),
-                legacy_migration_lossy: false,
-            }),
+            // The state stays backed by the NEW location, so a later mutating
+            // `save` relocates it (the legacy file is reaped by the migration
+            // persist step, not here — and only when the conversion was
+            // non-lossy).
+            Ok(bytes) => Self::records_from_bytes(&bytes, &legacy_path, Some(convert)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((BTreeMap::new(), false)),
             Err(e) => Err(e),
         }
     }
@@ -909,14 +1185,28 @@ impl InstallState {
     /// V1 original, after which `persist` copied the already-converted bytes
     /// into `.v1.bak` and announced that the original had been kept.
     ///
+    /// The same chokepoint splits records by kind, per [`SettingsStore`].
+    ///
     /// # Errors
     ///
     /// Serialization or atomic-write I/O failure.
     pub fn save(&self) -> std::io::Result<()> {
+        self.write_files().map_err(|(_, source)| source)
+    }
+
+    /// [`Self::save`], naming the file that failed.
+    fn write_files(&self) -> Result<(), (PathBuf, std::io::Error)> {
         if self.legacy_migration_lossy() {
             Self::snapshot_lossy_migration(&self.path);
         }
         let mut records: Vec<InstallRecord> = self.records.values().cloned().collect();
+        // Leaving these out would lose them for good: a load judges only what
+        // the file holds.
+        for record in &mut records {
+            if let Some(outputs) = self.withheld.get(&(record.kind, record.name.clone())) {
+                record.outputs.extend_from_slice(outputs);
+            }
+        }
         // Sort records by `(name, kind)` ascending, and each record's outputs
         // by `client` ascending, so the serialized bytes are identical
         // regardless of insertion order.
@@ -924,13 +1214,25 @@ impl InstallState {
         for record in &mut records {
             record.outputs.sort_by(|a, b| a.client.cmp(&b.client));
         }
+        let inline = self.settings_store == SettingsStore::Inline;
+        let (records, settings): (Vec<_>, Vec<_>) = records
+            .into_iter()
+            .partition(|record| inline || record.kind != ArtifactKind::Settings);
         let file = InstallStateFile {
             version: InstallStateVersion::V2,
             records,
         };
-        let bytes =
-            serde_json::to_vec_pretty(&file).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        atomic_write(&self.path, &bytes)
+        serde_json::to_vec_pretty(&file)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+            .and_then(|bytes| atomic_write(&self.path, &bytes))
+            .map_err(|source| (self.path.clone(), source))?;
+        // State first: a store failure in a mid-run save, which only logs, must
+        // not cost the ordinary records this run has already materialized.
+        if let SettingsStore::Workspace { path, workspace } = &self.settings_store {
+            let settings: Vec<&InstallRecord> = settings.iter().collect();
+            settings_store::save(path, workspace, &settings).map_err(|source| (path.clone(), source))?;
+        }
+        Ok(())
     }
 
     /// Best-effort removal of the legacy `$GRIM_HOME/state/projects/<sha>.json`
@@ -973,9 +1275,10 @@ impl InstallState {
     /// # Errors
     ///
     /// [`PersistError::EnsureDir`] when creating `.grimoire/` (or its
-    /// gitignore) fails; [`PersistError::Save`] when the atomic write of the
-    /// state file fails. A reap failure is intentionally never surfaced — the
-    /// relocation already succeeded, so a stale legacy file is the worst case.
+    /// gitignore) fails; [`PersistError::Save`] when the write of the state
+    /// file or the settings store fails. A reap failure is intentionally never
+    /// surfaced — the relocation already succeeded, so a stale legacy file is
+    /// the worst case.
     pub fn persist(
         &self,
         scope: ConfigScope,
@@ -994,10 +1297,8 @@ impl InstallState {
         // breadcrumb. (`save` owns the `.v1.bak` snapshot — it is the one
         // chokepoint every write passes through.)
         let lossy = self.legacy_migration_lossy();
-        self.save().map_err(|source| PersistError::Save {
-            path: self.path.clone(),
-            source,
-        })?;
+        self.write_files()
+            .map_err(|(path, source)| PersistError::Save { path, source })?;
         if scope == ConfigScope::Project && !lossy {
             Self::reap_legacy_project_state(grim_home, config_path);
         }
@@ -1083,6 +1384,8 @@ impl InstallState {
 pub fn retired_outputs(before: &InstallState, after: &InstallState) -> Vec<ClientOutput> {
     before
         .iter_records()
+        // A settings output feeds no vendor sync: the settings phase owns its file.
+        .filter(|rec| rec.kind != ArtifactKind::Settings)
         .flat_map(|rec| {
             let survivor = after.get(rec.kind, &rec.name);
             rec.outputs
@@ -1130,7 +1433,7 @@ pub enum PersistError {
         #[source]
         source: std::io::Error,
     },
-    /// The atomic write of the state file failed.
+    /// The write of the state file or the settings store failed.
     #[error("failed to save install state {path}")]
     Save {
         path: PathBuf,
@@ -1235,6 +1538,7 @@ fn convert_v1_records(
                 support_dir,
                 entry: None,
                 adopted: false,
+                element: None,
             });
         }
 
@@ -1272,32 +1576,126 @@ fn convert_v1_records(
 const MCP_POINTER_PROBE: &str = "description = \"probe\"\n[server]\ntransport = \"stdio\"\ncommand = \"probe\"\n";
 
 /// Drop every output its record's kind may not legally address, warning once
-/// per output, and return whether anything was dropped. The record stays: a
-/// zero-output record is sound.
+/// per output, and return whether anything was dropped, with the outputs
+/// [`is_in_another_runs_file`] set aside. The record stays: a zero-output record
+/// is sound.
 ///
 /// A state file can arrive with a `git clone`, and every consumer acts on the
 /// `target` and `entry` it reads back (`adr_settings_artifact_kind.md`,
 /// Decision 6).
-fn drop_illegal_outputs(records: &mut [InstallRecord], scope: ConfigScope, roots: &AnchorRoots) -> bool {
+fn drop_illegal_outputs(
+    records: &mut [InstallRecord],
+    scope: ConfigScope,
+    roots: &AnchorRoots,
+) -> (bool, WithheldOutputs) {
     let mut dropped = false;
+    let mut withheld = WithheldOutputs::new();
     for record in records {
         let (kind, name) = (record.kind, record.name.as_str());
+        let mut aside = Vec::new();
         record.outputs.retain(|out| {
-            let legal = output_is_legal(out, kind, name, scope, roots);
-            if !legal {
-                dropped = true;
-                tracing::warn!(
-                    "dropped a recorded output of {kind} '{}': {} at {}/{} is not a surface a {kind} may address",
-                    shown(name),
-                    shown(&out.client),
-                    out.target.anchor,
-                    shown(&out.target.relative),
-                );
+            if output_is_legal(out, kind, name, scope, roots) {
+                return true;
             }
-            legal
+            if is_in_another_runs_file(out, kind, name, scope, roots) {
+                aside.push(out.clone());
+                return false;
+            }
+            dropped = true;
+            tracing::warn!(
+                "dropped a recorded output of {kind} '{}': {} at {}/{} is not a surface a {kind} may address",
+                shown(name),
+                shown(&out.client),
+                out.target.anchor,
+                shown(&out.target.relative),
+            );
+            false
         });
+        if !aside.is_empty() {
+            tracing::warn!(
+                "set aside {} recorded output(s) of {kind} '{}': they sit in a file this run does not resolve, and return on a run that does",
+                aside.len(),
+                shown(name),
+            );
+            withheld.insert((kind, name.to_string()), aside);
+        }
     }
-    dropped
+    (dropped, withheld)
+}
+
+/// Set aside every settings output in `records`, whose file may be a
+/// repository's: a matching hash lets a consumer change or remove a value. The
+/// records stay, and the next save keeps the outputs for a home that can judge them.
+fn withhold_settings_outputs(records: &mut RecordMap, withheld: &mut WithheldOutputs) {
+    for record in records
+        .values_mut()
+        .filter(|record| record.kind == ArtifactKind::Settings)
+    {
+        let outputs = std::mem::take(&mut record.outputs);
+        let aside = withheld.entry((record.kind, record.name.clone())).or_default();
+        aside.extend(outputs);
+    }
+}
+
+/// `out` is a piece of a key its client lists, in a file this run does not
+/// resolve: the client has no settings file on this host, or
+/// `$OPENCODE_CONFIG` renamed OpenCode's, and a stored name cannot be told
+/// from a forged one.
+///
+/// Such an output stays recorded and unread. Visible, it would resolve to a
+/// file grim never wrote, where a matching hash lets a consumer change a
+/// value. Dropped, the next save would lose it for good.
+fn is_in_another_runs_file(
+    out: &ClientOutput,
+    kind: ArtifactKind,
+    name: &str,
+    scope: ConfigScope,
+    roots: &AnchorRoots,
+) -> bool {
+    if kind != ArtifactKind::Settings
+        || out.support_dir.is_some()
+        || !is_normal_remainder(name)
+        || !is_normal_remainder(&out.target.relative)
+    {
+        return false;
+    }
+    let Ok(client) = ClientTarget::from_str(&out.client) else {
+        return false;
+    };
+    candidate_anchors(scope, client, kind).contains(&out.target.anchor)
+        && settings_row_of(out, client, name).is_some()
+        && file_is_elsewhere(out, client, settings_file_anchored(client, scope, roots).as_ref())
+}
+
+/// Whether `out`'s file is one this run cannot judge, given the file `here`
+/// it resolves for `client`. Only OpenCode's file takes its name from a
+/// variable, so only a sibling name at its root can be another run's.
+fn file_is_elsewhere(out: &ClientOutput, client: ClientTarget, here: Option<&AnchoredPath>) -> bool {
+    match here {
+        None => true,
+        Some(_) => client == ClientTarget::OpenCode && Path::new(&out.target.relative).components().count() == 1,
+    }
+}
+
+/// Drop every settings record from a project state file, warning once per
+/// record.
+///
+/// `git pull` can replace a gitignored state file, and a matching record lets
+/// grim change or remove a value without `--force`, so these records are only
+/// ever read from the store (`adr_settings_artifact_kind.md`, Decision 6). This
+/// is not lossy: no grim writes the kind to a project state file.
+fn discard_settings_records(records: &mut Vec<InstallRecord>, path: &Path) {
+    records.retain(|record| {
+        let foreign = record.kind == ArtifactKind::Settings;
+        if foreign {
+            tracing::warn!(
+                "discarded settings record '{}' from {}: a project state file cannot carry one",
+                shown(&record.name),
+                path.display()
+            );
+        }
+        !foreign
+    });
 }
 
 /// State-file text for a terminal, bounded and escaped for the reasons
@@ -1334,7 +1732,7 @@ fn output_is_legal(
         return true;
     }
     if !client_supports_kind(client, kind, &roots.workspace, scope)
-        || out.entry.is_some() != (kind == ArtifactKind::Mcp)
+        || (kind != ArtifactKind::Settings && out.entry.is_some() != (kind == ArtifactKind::Mcp))
         || !support_dir_is_legal(out, kind, name)
     {
         return false;
@@ -1345,6 +1743,7 @@ fn output_is_legal(
         }
         ArtifactKind::Mcp => is_own_mcp_member(out, client, name, scope, roots),
         ArtifactKind::Hook => is_hook_payload(&out.target, name, scope),
+        ArtifactKind::Settings => is_settings_piece(out, client, name, scope, roots),
         ArtifactKind::Bundle => false,
     }
 }
@@ -1429,6 +1828,91 @@ fn json_spelling(path: &Path) -> PathBuf {
     }
 }
 
+/// The output is a piece of a key `client` lists, in the file that key lives
+/// in, with an element on a set row and nowhere else.
+///
+/// Project records never get here: a state file's are discarded first, and the
+/// store's merge after this rule.
+fn is_settings_piece(
+    out: &ClientOutput,
+    client: ClientTarget,
+    name: &str,
+    scope: ConfigScope,
+    roots: &AnchorRoots,
+) -> bool {
+    let Some(row) = settings_row_of(out, client, name) else {
+        return false;
+    };
+    row.merge == MergeClass::OwnFile
+        || settings_file_anchored(client, scope, roots)
+            .is_some_and(|here| is_settings_file(client, &out.target.relative, &here.relative))
+}
+
+/// The row `out` is a piece of, when its shape fits that row: an element on a
+/// set row and nowhere else, and an own file only at its binding's name.
+fn settings_row_of(out: &ClientOutput, client: ClientTarget, name: &str) -> Option<&'static SettingsField> {
+    let row = settings_row(client.vendor().settings_fields(), out.entry.as_deref())?;
+    // `GrimHome` only closes the anchor table: no harness reads a file there.
+    let fits = out.target.anchor != PathAnchor::GrimHome
+        && out.element.is_some() == (row.merge == MergeClass::Set)
+        && (row.merge != MergeClass::OwnFile || out.target.relative == own_file_relative(name));
+    fits.then_some(row)
+}
+
+/// The file `client` takes settings in at `scope` on this host, anchored as an
+/// install records it; `None` where it has none here.
+fn settings_file_anchored(client: ClientTarget, scope: ConfigScope, roots: &AnchorRoots) -> Option<AnchoredPath> {
+    let file = super::settings_phase::settings_file_here(client, &roots.workspace, scope).ok()?;
+    AnchoredPath::from_target(&file, scope, client, ArtifactKind::Settings, roots).ok()
+}
+
+/// The row `entry` addresses: a pointer's, or with none the row owning a file.
+fn settings_row<'f>(fields: &'f [SettingsField], entry: Option<&str>) -> Option<&'f SettingsField> {
+    let Some(pointer) = entry else {
+        return fields.iter().find(|row| row.merge == MergeClass::OwnFile);
+    };
+    let path = json_splice::split_pointer_path(pointer)?;
+    fields.iter().find(|row| row_spells(row, &path))
+}
+
+/// `path` is `row`'s pointer, where an angle-bracketed segment stands for one
+/// map key, one of `map_keys` when the row closes them.
+fn row_spells(row: &SettingsField, path: &[String]) -> bool {
+    // The own-file row is no pointer.
+    let Some(pointer) = row.pointer.strip_prefix('/') else {
+        return false;
+    };
+    let segments: Vec<&str> = pointer.split('/').collect();
+    segments.len() == path.len()
+        && segments.iter().zip(path).all(|(segment, key)| {
+            if segment.starts_with('<') {
+                row.map_keys.is_none_or(|keys| keys.contains(&key.as_str()))
+            } else {
+                *segment == key
+            }
+        })
+}
+
+/// `relative` is the file `here` names below its anchor, in either JSON
+/// spelling only where `client` picks one by what is on disk now. The anchor
+/// is not compared: a variable or Cursor's existing-file order moves the file
+/// between roots.
+fn is_settings_file(client: ClientTarget, relative: &str, here: &str) -> bool {
+    if picks_json_spelling_on_disk(client) {
+        json_spelling(Path::new(relative)) == json_spelling(Path::new(here))
+    } else {
+        Path::new(relative) == Path::new(here)
+    }
+}
+
+/// OpenCode and Amp edit `.jsonc` when it exists and Kilo `kilo.json` when
+/// only it exists, so a user's rename moves their recorded file. Every other
+/// client reads one name, and a record spelled otherwise names a file no
+/// harness reads.
+fn picks_json_spelling_on_disk(client: ClientTarget) -> bool {
+    matches!(client, ClientTarget::OpenCode | ClientTarget::Amp | ClientTarget::Kilo)
+}
+
 /// A hook payload sits on grim's own layout. The key is checked for shape, not
 /// equality: a moved workspace keeps its record, and the reaper needs the
 /// pre-relocation `.grimoire/hooks/<name>` to find that tree.
@@ -1472,6 +1956,7 @@ mod tests {
             support_dir: None,
             entry: None,
             adopted: false,
+            element: None,
         }
     }
 
@@ -1583,6 +2068,7 @@ mod tests {
             support_dir: None,
             entry: None,
             adopted: false,
+            element: None,
         }
     }
 
@@ -1709,6 +2195,7 @@ mod tests {
                     support_dir: None,
                     entry: None,
                     adopted: false,
+                    element: None,
                 })
                 .collect(),
         });
@@ -1890,6 +2377,7 @@ mod tests {
                 support_dir: None,
                 entry: None,
                 adopted: false,
+                element: None,
             }],
         });
         st.save().unwrap();
@@ -2912,6 +3400,7 @@ mod tests {
                 }),
                 entry: None,
                 adopted: false,
+                element: None,
             }],
         });
         st.save().unwrap();
@@ -3287,6 +3776,7 @@ mod tests {
                     support_dir: None,
                     entry: None,
                     adopted: false,
+                    element: None,
                 },
                 ClientOutput {
                     client: "copilot".to_string(),
@@ -3298,6 +3788,7 @@ mod tests {
                     support_dir: None,
                     entry: None,
                     adopted: false,
+                    element: None,
                 },
                 ClientOutput {
                     client: "opencode".to_string(),
@@ -3309,6 +3800,7 @@ mod tests {
                     support_dir: None,
                     entry: None,
                     adopted: false,
+                    element: None,
                 },
             ],
         });
@@ -3377,6 +3869,7 @@ mod tests {
             support_dir: None,
             entry: Some(pointer.to_string()),
             adopted: false,
+            element: None,
         };
         (out, roots)
     }
@@ -3406,7 +3899,7 @@ mod tests {
         symlink(&real, tmp.path().join(".mcp.json")).unwrap();
 
         assert!(
-            out.is_present(&roots, Containment::Strict).unwrap(),
+            out.is_present(ArtifactKind::Mcp, &roots, Containment::Strict).unwrap(),
             "the entry must be read through the link"
         );
         assert_eq!(
@@ -3434,7 +3927,7 @@ mod tests {
             "{\n  \"other\": 1,\n  \"mcpServers\": {\n    \"grim\": {\n\t\"args\":   [\"mcp\"],\n      \"command\": \"grim\"\n    }\n  }\n}\n",
         )
         .unwrap();
-        assert!(out.is_present(&roots, Containment::Strict).unwrap());
+        assert!(out.is_present(ArtifactKind::Mcp, &roots, Containment::Strict).unwrap());
         assert_eq!(
             out.current_hash(ArtifactKind::Skill, &roots, Containment::Strict)
                 .unwrap(),
@@ -3447,7 +3940,7 @@ mod tests {
             "{\"mcpServers\": {\"grim\": {\"command\": \"evil\", \"args\": [\"mcp\"]}}}",
         )
         .unwrap();
-        assert!(out.is_present(&roots, Containment::Strict).unwrap());
+        assert!(out.is_present(ArtifactKind::Mcp, &roots, Containment::Strict).unwrap());
         assert_ne!(
             out.current_hash(ArtifactKind::Skill, &roots, Containment::Strict)
                 .unwrap(),
@@ -3462,10 +3955,10 @@ mod tests {
         let (out, roots) = entry_output(tmp.path(), "/mcpServers/grim", &value);
 
         // No file at all.
-        assert!(!out.is_present(&roots, Containment::Strict).unwrap());
+        assert!(!out.is_present(ArtifactKind::Mcp, &roots, Containment::Strict).unwrap());
         // File present, member absent.
         std::fs::write(tmp.path().join(".mcp.json"), "{\"mcpServers\": {\"other\": {}}}").unwrap();
-        assert!(!out.is_present(&roots, Containment::Strict).unwrap());
+        assert!(!out.is_present(ArtifactKind::Mcp, &roots, Containment::Strict).unwrap());
         assert!(
             out.current_hash(ArtifactKind::Skill, &roots, Containment::Strict)
                 .is_err(),
@@ -3473,14 +3966,14 @@ mod tests {
         );
         // Unparseable file: absent, not an error (read-side degradation).
         std::fs::write(tmp.path().join(".mcp.json"), "not json {{{").unwrap();
-        assert!(!out.is_present(&roots, Containment::Strict).unwrap());
+        assert!(!out.is_present(ArtifactKind::Mcp, &roots, Containment::Strict).unwrap());
         // Member present.
         std::fs::write(
             tmp.path().join(".mcp.json"),
             "{\"mcpServers\": {\"grim\": {\"command\": \"grim\"}}}",
         )
         .unwrap();
-        assert!(out.is_present(&roots, Containment::Strict).unwrap());
+        assert!(out.is_present(ArtifactKind::Mcp, &roots, Containment::Strict).unwrap());
     }
 
     #[test]
@@ -3526,6 +4019,7 @@ mod tests {
             support_dir: None,
             entry: None,
             adopted: false,
+            element: None,
         };
         let json = serde_json::to_string(&out).unwrap();
         assert!(!json.contains("entry"), "absent entry must not serialize: {json}");
@@ -3543,16 +4037,38 @@ mod tests {
         let cfg = tmp.path().join("config.toml");
         std::fs::write(&cfg, "[mcp_servers.grim]\ncommand = \"grim\"\n").unwrap();
 
-        let value = read_entry_value(&cfg, "/mcp_servers/grim", McpConfigFormat::Toml)
-            .unwrap()
-            .expect("member present");
+        let value = read_entry_value(
+            &cfg,
+            "/mcp_servers/grim",
+            ArtifactKind::Mcp,
+            None,
+            McpConfigFormat::Toml,
+        )
+        .unwrap()
+        .expect("member present");
         assert_eq!(value["command"], "grim");
 
-        let hash = current_entry_hash(&cfg, "/mcp_servers/grim", McpConfigFormat::Toml, &[]).unwrap();
+        let hash = current_entry_hash(
+            &cfg,
+            "/mcp_servers/grim",
+            ArtifactKind::Mcp,
+            None,
+            McpConfigFormat::Toml,
+            &[],
+        )
+        .unwrap();
         assert_eq!(hash, entry_value_hash(&value).unwrap());
 
         // Absent member surfaces as NotFound (missing-vs-modified precedence).
-        let err = current_entry_hash(&cfg, "/mcp_servers/absent", McpConfigFormat::Toml, &[]).unwrap_err();
+        let err = current_entry_hash(
+            &cfg,
+            "/mcp_servers/absent",
+            ArtifactKind::Mcp,
+            None,
+            McpConfigFormat::Toml,
+            &[],
+        )
+        .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
@@ -3571,7 +4087,7 @@ mod tests {
             "model = \"gpt-5-codex\"\n\n[mcp_servers.grim]\nargs = [\"mcp\"]\ncommand = \"grim\"\n",
         )
         .unwrap();
-        assert!(out.is_present(&roots, Containment::Strict).unwrap());
+        assert!(out.is_present(ArtifactKind::Mcp, &roots, Containment::Strict).unwrap());
         assert_eq!(
             out.current_hash(ArtifactKind::Skill, &roots, Containment::Strict)
                 .unwrap(),
@@ -3606,11 +4122,490 @@ mod tests {
         )
         .unwrap();
         assert!(
-            out.is_present(&roots, Containment::Strict).unwrap(),
+            out.is_present(ArtifactKind::Mcp, &roots, Containment::Strict).unwrap(),
             "JSON fallback must parse the file"
         );
         assert_eq!(
             out.current_hash(ArtifactKind::Skill, &roots, Containment::Strict)
+                .unwrap(),
+            out.content_hash
+        );
+    }
+
+    // ── Settings pieces: the record, the hash, the read path ─────────────
+
+    const SET_POINTER: &str = "/permissions/deny";
+    const SET_ELEMENT: &str = "Bash(rm:*)";
+
+    /// A Claude output recording a settings piece at `settings.json`, hashed
+    /// over `value` the way the rule engine records it.
+    fn settings_output(
+        tmp: &std::path::Path,
+        pointer: &str,
+        element: Option<&str>,
+        value: &serde_json::Value,
+    ) -> (ClientOutput, AnchorRoots) {
+        let (mut out, roots) = entry_output_for(tmp, "claude", "settings.json", pointer, value);
+        out.content_hash = settings_value_hash(value);
+        out.element = element.map(str::to_string);
+        (out, roots)
+    }
+
+    fn set_element_output(tmp: &std::path::Path) -> (ClientOutput, AnchorRoots) {
+        let value = serde_json::Value::String(SET_ELEMENT.to_string());
+        settings_output(tmp, SET_POINTER, Some(SET_ELEMENT), &value)
+    }
+
+    fn read_settings_toml(text: &str, pointer: &str) -> Option<serde_json::Value> {
+        use crate::install::vendor::McpConfigFormat;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("config.toml");
+        std::fs::write(&cfg, text).unwrap();
+        read_entry_value(&cfg, pointer, ArtifactKind::Settings, None, McpConfigFormat::Toml).unwrap()
+    }
+
+    /// Bytes a grim without `element` wrote: every optional output field in
+    /// use, `save`'s `(name, kind)` order, its pretty print, no final newline.
+    fn pre_existing_state() -> String {
+        let (a, b, c, d) = ("a".repeat(64), "b".repeat(64), "c".repeat(64), "d".repeat(64));
+        format!(
+            r#"{{
+  "version": 2,
+  "records": [
+    {{
+      "kind": "mcp",
+      "name": "a-server",
+      "pinned": "localhost:5000/a-server@sha256:{a}",
+      "outputs": [
+        {{
+          "client": "claude",
+          "target": {{
+            "anchor": "workspace",
+            "relative": ".mcp.json"
+          }},
+          "content_hash": "sha256:{b}",
+          "entry": "/mcpServers/a-server",
+          "adopted": true
+        }},
+        {{
+          "client": "codex",
+          "target": {{
+            "anchor": "workspace",
+            "relative": ".codex/config.toml"
+          }},
+          "content_hash": "sha256:{c}",
+          "entry": "/mcp_servers/a-server"
+        }}
+      ]
+    }},
+    {{
+      "kind": "skill",
+      "name": "local",
+      "path": "./skills/local",
+      "hash": "sha256:{d}",
+      "dev": true,
+      "outputs": [
+        {{
+          "client": "claude",
+          "target": {{
+            "anchor": "workspace",
+            "relative": ".claude/skills/local"
+          }},
+          "content_hash": "sha256:{b}"
+        }}
+      ]
+    }},
+    {{
+      "kind": "rule",
+      "name": "style",
+      "pinned": "localhost:5000/style@sha256:{a}",
+      "outputs": [
+        {{
+          "client": "claude",
+          "target": {{
+            "anchor": "workspace",
+            "relative": ".claude/rules/style.md"
+          }},
+          "content_hash": "sha256:{c}",
+          "support_dir": {{
+            "anchor": "workspace",
+            "relative": ".claude/rules/style"
+          }}
+        }}
+      ]
+    }}
+  ]
+}}"#
+        )
+    }
+
+    #[test]
+    fn a_pre_existing_state_file_round_trips_byte_identical() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("state.json");
+        std::fs::write(&path, pre_existing_state()).unwrap();
+
+        let state = InstallState::load(&path).unwrap();
+        assert_eq!(state.records.len(), 3, "the fixture loads whole");
+        std::fs::remove_file(&path).unwrap();
+        state.save().unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), pre_existing_state());
+    }
+
+    #[test]
+    fn element_is_omitted_when_none_and_round_trips_when_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut out, _) = set_element_output(tmp.path());
+
+        let set = serde_json::to_string(&out).unwrap();
+        assert!(set.ends_with(r#""element":"Bash(rm:*)"}"#), "{set}");
+        assert_eq!(serde_json::from_str::<ClientOutput>(&set).unwrap(), out);
+
+        out.element = None;
+        let unset = serde_json::to_string(&out).unwrap();
+        assert!(!unset.contains("element"), "{unset}");
+        assert_eq!(serde_json::from_str::<ClientOutput>(&unset).unwrap(), out);
+    }
+
+    #[test]
+    fn one_and_one_point_zero_hash_equal_under_settings_and_differ_under_mcp() {
+        let (int, float) = (serde_json::json!(1), serde_json::json!(1.0));
+        assert_eq!(settings_value_hash(&int), settings_value_hash(&float));
+        assert_ne!(entry_value_hash(&int).unwrap(), entry_value_hash(&float).unwrap());
+    }
+
+    #[test]
+    fn settings_value_hash_canonicalises_inside_objects_and_arrays() {
+        let file = serde_json::json!({"a": {"b": [1.0, {"c": -2.0}]}, "z": 0.0});
+        let wanted = serde_json::json!({"a": {"b": [1, {"c": -2}]}, "z": 0});
+        assert_eq!(settings_value_hash(&file), settings_value_hash(&wanted));
+    }
+
+    #[test]
+    fn settings_value_hash_canonicalises_across_the_whole_integer_range() {
+        let negative_zero = serde_json::json!(-0.0);
+        assert_eq!(
+            settings_value_hash(&negative_zero),
+            settings_value_hash(&serde_json::json!(0))
+        );
+
+        let below_i64 = serde_json::json!(-9_223_372_036_854_775_808.0_f64);
+        let i64_min = serde_json::json!(i64::MIN);
+        assert_eq!(settings_value_hash(&below_i64), settings_value_hash(&i64_min));
+
+        let above_i64 = serde_json::json!(9_223_372_036_854_775_808.0_f64);
+        let u64_value = serde_json::json!(9_223_372_036_854_775_808_u64);
+        assert_eq!(settings_value_hash(&above_i64), settings_value_hash(&u64_value));
+    }
+
+    #[test]
+    fn settings_value_hash_keeps_a_fraction_and_a_float_past_every_integer() {
+        assert_ne!(
+            settings_value_hash(&serde_json::json!(1.5)),
+            settings_value_hash(&serde_json::json!(1))
+        );
+        let huge = serde_json::json!(1e300);
+        assert_eq!(
+            settings_value_hash(&huge),
+            settings_value_hash(&serde_json::json!(1e300))
+        );
+        let past_u64 = serde_json::json!(18_446_744_073_709_551_616.0_f64);
+        assert_ne!(
+            settings_value_hash(&past_u64),
+            settings_value_hash(&serde_json::json!(u64::MAX)),
+            "2^64 must not saturate onto u64::MAX"
+        );
+    }
+
+    #[test]
+    fn settings_value_hash_is_blind_to_key_order() {
+        let a: serde_json::Value = serde_json::from_str(r#"{"b": 1, "a": 2}"#).unwrap();
+        let b: serde_json::Value = serde_json::from_str(r#"{"a": 2, "b": 1}"#).unwrap();
+        assert_eq!(settings_value_hash(&a), settings_value_hash(&b));
+    }
+
+    #[test]
+    fn a_one_segment_toml_pointer_reads_under_settings_and_stays_absent_under_mcp() {
+        use crate::install::vendor::McpConfigFormat;
+
+        let text = "model = \"gpt-5\"\n";
+        assert_eq!(read_settings_toml(text, "/model"), Some(serde_json::json!("gpt-5")));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("config.toml");
+        std::fs::write(&cfg, text).unwrap();
+        let mcp = read_entry_value(&cfg, "/model", ArtifactKind::Mcp, None, McpConfigFormat::Toml).unwrap();
+        assert_eq!(mcp, None, "the two-segment read path is unchanged");
+    }
+
+    #[test]
+    fn a_deep_toml_pointer_reads_under_settings() {
+        let text = "[tui]\nnotifications.sound.enabled = true\n";
+        assert_eq!(
+            read_settings_toml(text, "/tui/notifications/sound/enabled"),
+            Some(serde_json::json!(true))
+        );
+        assert_eq!(read_settings_toml(text, "/tui/notifications/sound/volume"), None);
+    }
+
+    #[test]
+    fn an_escaped_settings_pointer_reads_its_decoded_member() {
+        let tmp = tempfile::tempdir().unwrap();
+        let value = serde_json::json!(true);
+        let (out, roots) = settings_output(tmp.path(), "/enabledPlugins/a~1b~0c", None, &value);
+        std::fs::write(
+            tmp.path().join("settings.json"),
+            r#"{"enabledPlugins": {"a/b~c": true}}"#,
+        )
+        .unwrap();
+
+        assert!(
+            out.is_present(ArtifactKind::Settings, &roots, Containment::Strict)
+                .unwrap()
+        );
+        assert_eq!(
+            out.current_hash(ArtifactKind::Settings, &roots, Containment::Strict)
+                .unwrap(),
+            out.content_hash
+        );
+    }
+
+    #[test]
+    fn a_settings_pointer_under_a_non_container_reads_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (out, roots) = settings_output(tmp.path(), "/permissions/defaultMode", None, &serde_json::json!("plan"));
+        std::fs::write(tmp.path().join("settings.json"), r#"{"permissions": "none"}"#).unwrap();
+
+        assert!(
+            !out.is_present(ArtifactKind::Settings, &roots, Containment::Strict)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_malformed_settings_pointer_reads_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (out, roots) = settings_output(tmp.path(), "model", None, &serde_json::json!("opus"));
+        std::fs::write(tmp.path().join("settings.json"), r#"{"model": "opus"}"#).unwrap();
+
+        assert!(
+            !out.is_present(ArtifactKind::Settings, &roots, Containment::Strict)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_set_element_reads_present_and_hashes_as_recorded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (out, roots) = set_element_output(tmp.path());
+        std::fs::write(
+            tmp.path().join("settings.json"),
+            r#"{"permissions": {"deny": ["Read(.env)", "Bash(rm:*)"]}}"#,
+        )
+        .unwrap();
+
+        assert!(
+            out.is_present(ArtifactKind::Settings, &roots, Containment::Strict)
+                .unwrap()
+        );
+        assert_eq!(
+            out.current_hash(ArtifactKind::Settings, &roots, Containment::Strict)
+                .unwrap(),
+            out.content_hash,
+            "a foreign sibling is never compared"
+        );
+    }
+
+    #[test]
+    fn a_set_element_reads_from_a_toml_array() {
+        use crate::install::vendor::McpConfigFormat;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("config.toml");
+        std::fs::write(&cfg, "[shell]\nallow = [\"ls\", \"cat\"]\nbare = \"ls\"\n").unwrap();
+        let read = |pointer, element| {
+            read_entry_value(&cfg, pointer, ArtifactKind::Settings, element, McpConfigFormat::Toml).unwrap()
+        };
+
+        assert_eq!(read("/shell/allow", Some("ls")), Some(serde_json::json!("ls")));
+        assert_eq!(read("/shell/allow", Some("rm")), None);
+        assert_eq!(read("/shell/bare", Some("ls")), None);
+    }
+
+    /// Asserts a missing piece the way every reader sees it: not present, and
+    /// `NotFound` so the caller's missing-vs-modified precedence holds.
+    fn assert_reads_missing(out: &ClientOutput, roots: &AnchorRoots, file: &str) {
+        assert!(
+            !out.is_present(ArtifactKind::Settings, roots, Containment::Strict)
+                .unwrap(),
+            "{file}"
+        );
+        match out.current_hash(ArtifactKind::Settings, roots, Containment::Strict) {
+            Err(AnchorError::Io { source, .. }) => assert_eq!(source.kind(), io::ErrorKind::NotFound, "{file}"),
+            other => panic!("expected NotFound for {file}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_set_element_reads_absent_without_its_array() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (out, roots) = set_element_output(tmp.path());
+        for file in ["{}", r#"{"permissions": {}}"#, r#"{"permissions": 3}"#] {
+            std::fs::write(tmp.path().join("settings.json"), file).unwrap();
+            assert_reads_missing(&out, &roots, file);
+        }
+    }
+
+    #[test]
+    fn a_set_element_reads_absent_beside_only_its_siblings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (out, roots) = set_element_output(tmp.path());
+        let file = r#"{"permissions": {"deny": ["Read(.env)", "Bash(rm:*) ", 7]}}"#;
+        std::fs::write(tmp.path().join("settings.json"), file).unwrap();
+
+        assert_reads_missing(&out, &roots, file);
+    }
+
+    #[test]
+    fn a_bare_string_equal_to_the_element_reads_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (out, roots) = set_element_output(tmp.path());
+        let file = r#"{"permissions": {"deny": "Bash(rm:*)"}}"#;
+        std::fs::write(tmp.path().join("settings.json"), file).unwrap();
+
+        assert_reads_missing(&out, &roots, file);
+    }
+
+    #[test]
+    fn a_nested_array_never_answers_for_the_element() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (out, roots) = set_element_output(tmp.path());
+        let file = r#"{"permissions": {"deny": [["Bash(rm:*)"], {"x": "Bash(rm:*)"}]}}"#;
+        std::fs::write(tmp.path().join("settings.json"), file).unwrap();
+
+        assert_reads_missing(&out, &roots, file);
+    }
+
+    #[test]
+    fn a_settings_value_matches_across_number_spellings_on_the_read_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let value = serde_json::json!({"timeout": 1});
+        let (mut out, roots) = settings_output(tmp.path(), "/sandbox/limits", None, &value);
+        std::fs::write(
+            tmp.path().join("settings.json"),
+            r#"{"sandbox": {"limits": {"timeout": 1.0}}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            out.current_hash(ArtifactKind::Settings, &roots, Containment::Strict)
+                .unwrap(),
+            out.content_hash
+        );
+
+        out.content_hash = entry_value_hash(&value).unwrap();
+        assert_ne!(
+            out.current_hash(ArtifactKind::Mcp, &roots, Containment::Strict)
+                .unwrap(),
+            out.content_hash,
+            "the MCP hash keeps telling them apart"
+        );
+    }
+
+    #[test]
+    fn a_settings_read_keeps_a_key_the_mcp_read_strips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wanted = serde_json::json!({"command": "grim"});
+        let (mut out, roots) = entry_output_for(tmp.path(), "droid", "settings.json", "/mcpServers/grim", &wanted);
+        std::fs::write(
+            tmp.path().join("settings.json"),
+            r#"{"mcpServers": {"grim": {"command": "grim", "disabled": true}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            out.current_hash(ArtifactKind::Mcp, &roots, Containment::Strict)
+                .unwrap(),
+            out.content_hash,
+            "control: Droid owns `disabled` inside an MCP entry"
+        );
+
+        out.content_hash = settings_value_hash(&wanted);
+        assert_ne!(
+            out.current_hash(ArtifactKind::Settings, &roots, Containment::Strict)
+                .unwrap(),
+            out.content_hash,
+            "a settings piece has no vendor-owned keys"
+        );
+    }
+
+    #[test]
+    fn an_unparseable_settings_file_errs_to_current_hash_and_reads_absent_to_is_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (out, roots) = set_element_output(tmp.path());
+        std::fs::write(tmp.path().join("settings.json"), "not json {{{").unwrap();
+
+        assert!(
+            !out.is_present(ArtifactKind::Settings, &roots, Containment::Strict)
+                .unwrap()
+        );
+        match out.current_hash(ArtifactKind::Settings, &roots, Containment::Strict) {
+            Err(AnchorError::Io { source, .. }) => assert_eq!(source.kind(), io::ErrorKind::InvalidData),
+            other => panic!("expected InvalidData, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn entry_format_answers_the_settings_format_under_settings() {
+        use crate::install::vendor::McpConfigFormat;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let value = serde_json::json!({});
+        let (codex, _) = entry_output_for(tmp.path(), "codex", "config.toml", "/a/b", &value);
+        assert_eq!(codex.entry_format(ArtifactKind::Mcp), McpConfigFormat::Toml);
+        assert_eq!(
+            codex.entry_format(ArtifactKind::Settings),
+            ClientTarget::Codex.vendor().settings_config_format()
+        );
+
+        let (unknown, _) = entry_output_for(tmp.path(), "not-a-real-client", "x.json", "/a/b", &value);
+        assert_eq!(unknown.entry_format(ArtifactKind::Settings), McpConfigFormat::Json);
+    }
+
+    #[test]
+    fn entry_vendor_owned_keys_are_empty_under_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let value = serde_json::json!({});
+        let (droid, _) = entry_output_for(tmp.path(), "droid", "settings.json", "/a/b", &value);
+        assert!(!droid.entry_vendor_owned_keys(ArtifactKind::Mcp).is_empty(), "control");
+        assert!(droid.entry_vendor_owned_keys(ArtifactKind::Settings).is_empty());
+    }
+
+    #[test]
+    fn an_own_file_settings_output_hashes_the_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("grim-x.rules");
+        let rules = "prefix_rule(pattern = [\"ls\"])\n";
+        std::fs::write(&file, rules).unwrap();
+        let (mut out, roots) = settings_output(tmp.path(), "/", None, &serde_json::json!({}));
+        out.target.relative = "grim-x.rules".to_string();
+        out.entry = None;
+        out.content_hash = own_file_hash(rules.as_bytes());
+
+        assert!(
+            out.is_present(ArtifactKind::Settings, &roots, Containment::Strict)
+                .unwrap()
+        );
+        assert_eq!(
+            out.current_hash(ArtifactKind::Settings, &roots, Containment::Strict)
+                .unwrap(),
+            out.content_hash
+        );
+
+        std::fs::write(&file, "edited\n").unwrap();
+        assert_ne!(
+            out.current_hash(ArtifactKind::Settings, &roots, Containment::Strict)
                 .unwrap(),
             out.content_hash
         );
@@ -3670,6 +4665,7 @@ mod tests {
             support_dir: None,
             entry: None,
             adopted: false,
+            element: None,
         }
     }
 
@@ -3699,7 +4695,9 @@ mod tests {
         InstallState {
             path,
             records: records.into_iter().map(|r| ((r.kind, r.name.clone()), r)).collect(),
+            settings_store: SettingsStore::Inline,
             legacy_migration_lossy: false,
+            withheld: WithheldOutputs::new(),
         }
     }
 
@@ -4178,6 +5176,24 @@ mod tests {
         assert_eq!(st.get(ArtifactKind::Skill, "x").unwrap().outputs.len(), 1);
     }
 
+    /// A root this run resolves somewhere its own layout does not sit: the
+    /// surface cannot be anchored, so it counts as current and the output stays.
+    #[test]
+    fn a_global_surface_this_run_cannot_anchor_keeps_its_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("state").join("global.json");
+        let output = anchored("claude", PathAnchor::VendorRoot("claude"), "skills/x");
+        state_at(path.clone(), vec![record_of(ArtifactKind::Skill, "x", vec![output])])
+            .save()
+            .unwrap();
+        let mut roots = global_roots(tmp.path());
+        roots.vendor_roots.insert("claude", tmp.path().join("elsewhere"));
+
+        let st = InstallState::load_global(&path, &roots).unwrap();
+
+        assert_eq!(st.get(ArtifactKind::Skill, "x").unwrap().outputs.len(), 1);
+    }
+
     /// A state file is external input: a declined pair must reach neither a
     /// vendor path it has no answer for nor `path_for`'s bundle arm.
     #[test]
@@ -4241,6 +5257,1225 @@ mod tests {
             st.save().unwrap();
 
             assert_eq!(std::fs::read(&path).unwrap(), bytes, "{fixture}");
+        }
+    }
+
+    // ── Settings records across a project's two files ───────────────────────
+
+    mod project_settings {
+        use super::*;
+        use crate::cli::exit_code::ExitCode;
+        use crate::install::prune::prune_orphans;
+        use crate::install::settings_store;
+        use crate::install::status_badge::{StatusBadge, derive_badge};
+        use crate::lock::grimoire_lock::{GrimoireLock, LockMetadata};
+        use crate::lock::lock_version::LockVersion;
+        use crate::lock::locked_artifact::LockedArtifact;
+
+        const DENY_RM: &str = "Bash(rm:*)";
+        const DENY_CURL: &str = "Bash(curl:*)";
+
+        fn settings_record(name: &str, element: &str) -> InstallRecord {
+            let output = ClientOutput {
+                element: Some(element.to_string()),
+                ..member_output("claude", ".claude/settings.local.json", "/permissions/deny")
+            };
+            record_of(ArtifactKind::Settings, name, vec![output])
+        }
+
+        fn rule_record() -> InstallRecord {
+            record_of(
+                ArtifactKind::Rule,
+                "style",
+                vec![workspace_output("claude", ".claude/rules/style.md")],
+            )
+        }
+
+        /// State bytes that never passed through `save`.
+        fn state_bytes(records: Vec<InstallRecord>) -> Vec<u8> {
+            serde_json::to_vec_pretty(&InstallStateFile {
+                version: InstallStateVersion::V2,
+                records,
+            })
+            .unwrap()
+        }
+
+        fn v1_state(workspace: &Path) -> String {
+            let (ws, sha, hash) = (workspace.display(), "b".repeat(64), "c".repeat(64));
+            format!(
+                r#"{{"version":1,"records":[
+                {{"kind":"settings","name":"forged","pinned":"localhost:5000/forged@sha256:{sha}","target":"{ws}/.claude/settings.local.json","content_hash":"sha256:{hash}","clients":[]}},
+                {{"kind":"rule","name":"style","pinned":"localhost:5000/style@sha256:{sha}","target":"{ws}/.claude/rules/style.md","content_hash":"sha256:{hash}","clients":[]}}
+                ]}}"#
+            )
+        }
+
+        /// The `kind` of every record in a state file, in file order.
+        fn kinds_in(path: &Path) -> Vec<String> {
+            let file: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            file["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|record| record["kind"].as_str().unwrap().to_string())
+                .collect()
+        }
+
+        fn lock_of(settings: Vec<LockedArtifact>) -> GrimoireLock {
+            GrimoireLock {
+                hooks: vec![],
+                settings,
+                metadata: LockMetadata {
+                    lock_version: LockVersion::V1,
+                    declaration_hash_version: 1,
+                    declaration_hash: format!("sha256:{}", "d".repeat(64)),
+                    generated_by: "grim test".to_string(),
+                    generated_at: "2026-01-01T00:00:00Z".to_string(),
+                },
+                skills: vec![],
+                rules: vec![],
+                agents: vec![],
+                mcp: vec![],
+                bundles: vec![],
+            }
+        }
+
+        pub(super) fn warnings_during<T>(work: impl FnOnce() -> T) -> (T, String) {
+            struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+            impl io::Write for Sink {
+                fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                    self.0.lock().unwrap().extend_from_slice(bytes);
+                    Ok(bytes.len())
+                }
+                fn flush(&mut self) -> io::Result<()> {
+                    Ok(())
+                }
+            }
+            crate::log_switch::tracing_capture::arm();
+            let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let sink = std::sync::Arc::clone(&logs);
+            let guard = tracing::subscriber::set_default(
+                tracing_subscriber::fmt()
+                    .with_writer(move || Sink(std::sync::Arc::clone(&sink)))
+                    .with_max_level(tracing::Level::WARN)
+                    .with_ansi(false)
+                    .finish(),
+            );
+            let result = work();
+            drop(guard);
+            let text = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+            (result, text)
+        }
+
+        /// A workspace and, beside it, a `$GRIM_HOME` the guard accepts.
+        struct Project {
+            _tmp: tempfile::TempDir,
+            workspace: PathBuf,
+            grim_home: PathBuf,
+        }
+
+        impl Project {
+            fn new() -> Self {
+                let tmp = tempfile::tempdir().unwrap();
+                let workspace = tmp.path().join("ws");
+                std::fs::create_dir_all(workspace.join(".grimoire")).unwrap();
+                let grim_home = tmp.path().join("home");
+                Self {
+                    _tmp: tmp,
+                    workspace,
+                    grim_home,
+                }
+            }
+
+            fn config(&self) -> PathBuf {
+                self.workspace.join("grimoire.toml")
+            }
+
+            fn state_path(&self) -> PathBuf {
+                InstallState::project_state_path(&self.workspace)
+            }
+
+            fn store_path(&self) -> PathBuf {
+                settings_store::path(&self.grim_home, &self.workspace)
+            }
+
+            fn legacy_path(&self) -> PathBuf {
+                InstallState::legacy_project_path(&self.grim_home.join("state"), &self.config())
+            }
+
+            fn roots(&self) -> AnchorRoots {
+                AnchorRoots {
+                    grim_home: self.grim_home.clone(),
+                    ..project_roots(&self.workspace)
+                }
+            }
+
+            fn load(&self) -> InstallState {
+                InstallState::load_project(&self.workspace, &self.grim_home, &self.config()).unwrap()
+            }
+
+            fn persist(&self, state: &InstallState) -> Result<(), PersistError> {
+                state.persist(ConfigScope::Project, &self.workspace, &self.grim_home, &self.config())
+            }
+
+            /// A state file a repository can deliver.
+            fn deliver(&self, records: Vec<InstallRecord>) {
+                std::fs::write(self.state_path(), state_bytes(records)).unwrap();
+            }
+
+            fn seed_store(&self, records: &[InstallRecord]) {
+                let refs: Vec<&InstallRecord> = records.iter().collect();
+                settings_store::save(&self.store_path(), &self.workspace, &refs).unwrap();
+            }
+
+            fn stored_names(&self) -> Vec<String> {
+                settings_store::load(&self.store_path(), &self.workspace)
+                    .unwrap()
+                    .into_iter()
+                    .map(|record| record.name)
+                    .collect()
+            }
+
+            /// The harness file a settings record names, holding its value.
+            fn settings_file(&self) -> PathBuf {
+                let path = self.workspace.join(".claude").join("settings.local.json");
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, r#"{"permissions":{"deny":["Bash(rm:*)"]}}"#).unwrap();
+                path
+            }
+        }
+
+        #[test]
+        fn a_project_without_the_kind_stays_byte_identical() {
+            for nested in [false, true] {
+                let mut project = Project::new();
+                if nested {
+                    project.grim_home = project.workspace.join("home");
+                }
+                std::fs::write(project.state_path(), pre_existing_state()).unwrap();
+
+                let (state, warnings) = warnings_during(|| project.load());
+                assert_eq!(state.records.len(), 3, "the fixture loads whole");
+                assert_eq!(warnings, "", "nested: {nested}");
+                std::fs::remove_file(project.state_path()).unwrap();
+                state.save().unwrap();
+                project.persist(&state).unwrap();
+
+                assert_eq!(
+                    std::fs::read_to_string(project.state_path()).unwrap(),
+                    pre_existing_state()
+                );
+                assert!(!project.grim_home.exists(), "nothing to hold leaves no trace");
+            }
+        }
+
+        /// `records` is private, so `get` and `iter_records` are the only way
+        /// out of a state and every consumer reads through them. The rule is the
+        /// control: it reaches each of them.
+        fn assert_forged_record_reaches_no_consumer(project: &Project) {
+            let settings_file = project.settings_file();
+            let settings_bytes = std::fs::read(&settings_file).unwrap();
+            let rule_file = project.workspace.join(".claude").join("rules").join("style.md");
+            std::fs::create_dir_all(rule_file.parent().unwrap()).unwrap();
+            std::fs::write(&rule_file, "# style\n").unwrap();
+
+            let (mut state, warnings) = warnings_during(|| project.load());
+            assert!(warnings.contains("forged"), "{warnings}");
+
+            assert!(state.get(ArtifactKind::Settings, "forged").is_none());
+            assert_eq!(
+                state.iter_records().map(|r| r.kind).collect::<Vec<_>>(),
+                [ArtifactKind::Rule]
+            );
+
+            let retired = retired_outputs(&state, &InstallState::empty(&project.state_path()));
+            assert_eq!(retired.len(), 1, "{retired:?}");
+            assert_eq!(retired[0].target.relative, ".claude/rules/style.md");
+
+            let locked = LockedArtifact::direct("forged".to_string(), ArtifactKind::Settings, pinned("forged", 'c'));
+            let lock = lock_of(vec![locked]);
+            let badge = |state: &InstallState| {
+                derive_badge(
+                    "localhost:5000",
+                    "forged",
+                    Some(&lock),
+                    state,
+                    &project.roots(),
+                    &[ClientTarget::Claude],
+                    None,
+                )
+            };
+            assert_eq!(badge(&state), StatusBadge::NotInstalled);
+            let mut recorded = state.clone();
+            recorded.record(settings_record("forged", DENY_RM));
+            assert_eq!(badge(&recorded), StatusBadge::Modified, "the badge reads a real record");
+
+            state.save().unwrap();
+            assert_eq!(kinds_in(&project.state_path()), ["rule"]);
+            assert!(!project.store_path().exists());
+
+            let pruned = prune_orphans(&mut state, &lock_of(vec![]), &project.roots(), true).unwrap();
+            assert_eq!(pruned.iter().map(|p| p.kind).collect::<Vec<_>>(), [ArtifactKind::Rule]);
+            assert!(!rule_file.exists());
+            assert_eq!(std::fs::read(&settings_file).unwrap(), settings_bytes);
+        }
+
+        #[test]
+        fn a_forged_record_never_reaches_any_consumer() {
+            for dev in [false, true] {
+                let project = Project::new();
+                let forged = InstallRecord {
+                    dev,
+                    ..settings_record("forged", DENY_RM)
+                };
+                project.deliver(vec![forged, rule_record()]);
+                assert_forged_record_reaches_no_consumer(&project);
+            }
+        }
+
+        #[test]
+        fn a_forged_record_in_the_legacy_fallback_never_reaches_any_consumer() {
+            let project = Project::new();
+            let legacy = project.legacy_path();
+            std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+            std::fs::write(
+                &legacy,
+                state_bytes(vec![settings_record("forged", DENY_RM), rule_record()]),
+            )
+            .unwrap();
+            assert_forged_record_reaches_no_consumer(&project);
+        }
+
+        #[test]
+        fn a_forged_record_in_a_v1_file_never_reaches_any_consumer() {
+            for legacy in [false, true] {
+                let project = Project::new();
+                let path = if legacy {
+                    project.legacy_path()
+                } else {
+                    project.state_path()
+                };
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, v1_state(&project.workspace)).unwrap();
+                assert_forged_record_reaches_no_consumer(&project);
+            }
+        }
+
+        /// `git pull` can replace a real state file: what the store holds wins,
+        /// and neither file takes the delivered record in.
+        #[test]
+        fn a_forged_record_over_a_real_one_leaves_the_real_one() {
+            let project = Project::new();
+            project.seed_store(&[settings_record("team", DENY_RM)]);
+            let stored = std::fs::read(project.store_path()).unwrap();
+            project.deliver(vec![settings_record("team", DENY_CURL), rule_record()]);
+
+            let state = project.load();
+            assert_eq!(
+                state.get(ArtifactKind::Settings, "team"),
+                Some(&settings_record("team", DENY_RM))
+            );
+            state.save().unwrap();
+
+            assert_eq!(std::fs::read(project.store_path()).unwrap(), stored);
+            assert_eq!(kinds_in(&project.state_path()), ["rule"]);
+        }
+
+        #[test]
+        fn a_refused_state_persists_nothing_for_the_kind() {
+            let mut project = Project::new();
+            project.grim_home = project.workspace.join("home");
+            project.seed_store(&[settings_record("team", DENY_RM)]);
+            let stored = std::fs::read(project.store_path()).unwrap();
+
+            // Control: the same bytes under a home the guard accepts do load.
+            let accepted = project.workspace.with_file_name("accepted");
+            let copy = settings_store::path(&accepted, &project.workspace);
+            std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+            std::fs::copy(project.store_path(), &copy).unwrap();
+            let read = InstallState::load_project(&project.workspace, &accepted, &project.config()).unwrap();
+            assert!(read.get(ArtifactKind::Settings, "team").is_some());
+
+            project.deliver(vec![settings_record("forged", DENY_RM), rule_record()]);
+            let mut state = project.load();
+            assert_eq!(state.settings_store, SettingsStore::Refused);
+            assert!(state.get(ArtifactKind::Settings, "team").is_none(), "no read");
+            assert!(
+                state.get(ArtifactKind::Settings, "forged").is_none(),
+                "a refusal still discards the state file's record"
+            );
+
+            state.record(settings_record("team", DENY_CURL));
+            state.save().unwrap();
+            project.persist(&state).unwrap();
+
+            assert_eq!(std::fs::read(project.store_path()).unwrap(), stored, "no write");
+            assert_eq!(kinds_in(&project.state_path()), ["rule"], "the rest still saves");
+        }
+
+        #[test]
+        fn a_relative_home_refuses_the_same_way() {
+            let mut project = Project::new();
+            project.grim_home = PathBuf::from("relative-home-the-settings-guard-refuses");
+
+            let mut state = project.load();
+            assert_eq!(state.settings_store, SettingsStore::Refused);
+            state.record(settings_record("team", DENY_RM));
+            state.record(rule_record());
+            state.save().unwrap();
+
+            assert!(!project.grim_home.exists(), "no write");
+            assert_eq!(kinds_in(&project.state_path()), ["rule"], "the rest still saves");
+        }
+
+        /// The installer's mid-run save calls `save` directly, the batch end
+        /// calls `persist`: both must split.
+        #[test]
+        fn save_and_persist_split_records_by_kind() {
+            let project = Project::new();
+            let mut state = project.load();
+            let mut zeta = settings_record("zeta", DENY_RM);
+            zeta.outputs.insert(
+                0,
+                ClientOutput {
+                    client: "kiro".to_string(),
+                    ..zeta.outputs[0].clone()
+                },
+            );
+            state.record(zeta);
+            state.record(settings_record("alpha", DENY_RM));
+            state.record(rule_record());
+
+            state.save().unwrap();
+            assert_eq!(kinds_in(&project.state_path()), ["rule"]);
+            assert_eq!(project.stored_names(), ["alpha", "zeta"]);
+            let stored = settings_store::load(&project.store_path(), &project.workspace).unwrap();
+            let clients: Vec<&str> = stored[1].outputs.iter().map(|out| out.client.as_str()).collect();
+            assert_eq!(clients, ["claude", "kiro"], "the split sees save's sorted records");
+
+            state.remove(ArtifactKind::Settings, "zeta");
+            project.persist(&state).unwrap();
+            assert_eq!(kinds_in(&project.state_path()), ["rule"]);
+            assert_eq!(project.stored_names(), ["alpha"]);
+        }
+
+        #[test]
+        fn a_saved_record_merges_back_on_load() {
+            let project = Project::new();
+            let mut state = project.load();
+            assert_eq!(
+                state.settings_store,
+                SettingsStore::Workspace {
+                    path: project.store_path(),
+                    workspace: project.workspace.clone(),
+                }
+            );
+            state.record(settings_record("team", DENY_RM));
+            state.record(rule_record());
+            state.save().unwrap();
+
+            let reloaded = project.load();
+            assert_eq!(
+                reloaded.get(ArtifactKind::Settings, "team"),
+                Some(&settings_record("team", DENY_RM))
+            );
+            assert_eq!(reloaded.get(ArtifactKind::Rule, "style"), Some(&rule_record()));
+        }
+
+        #[test]
+        fn removing_the_last_record_removes_the_store_file() {
+            let project = Project::new();
+            project.seed_store(&[settings_record("team", DENY_RM)]);
+
+            let mut state = project.load();
+            assert!(state.remove(ArtifactKind::Settings, "team").is_some());
+            state.save().unwrap();
+
+            assert!(!project.store_path().exists());
+        }
+
+        /// The kind rule ran before the merge, so a store record of another kind
+        /// would arrive unchecked and could replace a state record.
+        #[test]
+        fn a_store_record_of_another_kind_does_not_merge() {
+            let project = Project::new();
+            project.deliver(vec![rule_record()]);
+            let replacement = record_of(
+                ArtifactKind::Rule,
+                "style",
+                vec![workspace_output("claude", ".claude/rules/other.md")],
+            );
+            let stray = record_of(
+                ArtifactKind::Skill,
+                "stray",
+                vec![workspace_output("claude", ".claude/skills/stray")],
+            );
+            project.seed_store(&[replacement, stray, settings_record("team", DENY_RM)]);
+
+            let (state, warnings) = warnings_during(|| project.load());
+
+            assert_eq!(state.get(ArtifactKind::Rule, "style"), Some(&rule_record()));
+            assert!(state.get(ArtifactKind::Skill, "stray").is_none());
+            assert!(
+                state.get(ArtifactKind::Settings, "team").is_some(),
+                "the store did load"
+            );
+            assert!(warnings.contains("stray"), "{warnings}");
+        }
+
+        /// Both shapes fail for every uid, root included, and a store denied by
+        /// its mode takes the same branch.
+        #[test]
+        fn a_store_that_cannot_be_read_costs_a_project_without_the_kind_nothing() {
+            let directory_at_the_file = Project::new();
+            std::fs::create_dir_all(directory_at_the_file.store_path()).unwrap();
+            let file_at_the_directory = Project::new();
+            std::fs::create_dir_all(&file_at_the_directory.grim_home).unwrap();
+            std::fs::write(file_at_the_directory.grim_home.join("settings"), "not a directory").unwrap();
+
+            for project in [directory_at_the_file, file_at_the_directory] {
+                let (mut state, warnings) = warnings_during(|| project.load());
+                assert_eq!(state.settings_store, SettingsStore::Refused);
+                assert_eq!(warnings.lines().count(), 1, "{warnings}");
+                assert!(warnings.contains(project.store_path().to_str().unwrap()), "{warnings}");
+
+                state.record(rule_record());
+                project.persist(&state).unwrap();
+
+                assert_eq!(kinds_in(&project.state_path()), ["rule"], "the save did run");
+            }
+        }
+
+        /// A fault can clear inside one command, between the load and the save.
+        #[test]
+        fn a_store_readable_again_by_the_save_keeps_its_bytes() {
+            let project = Project::new();
+            project.seed_store(&[settings_record("team", DENY_RM)]);
+            let bytes = std::fs::read(project.store_path()).unwrap();
+            std::fs::remove_file(project.store_path()).unwrap();
+            std::fs::create_dir(project.store_path()).unwrap();
+
+            let mut state = project.load();
+            std::fs::remove_dir(project.store_path()).unwrap();
+            std::fs::write(project.store_path(), &bytes).unwrap();
+            state.record(rule_record());
+            project.persist(&state).unwrap();
+
+            assert_eq!(kinds_in(&project.state_path()), ["rule"], "the save did run");
+            assert_eq!(std::fs::read(project.store_path()).unwrap(), bytes);
+            let healed = project.load();
+            assert!(healed.get(ArtifactKind::Settings, "team").is_some(), "the control");
+        }
+
+        #[test]
+        fn a_failed_store_write_names_the_store_and_keeps_the_state_file() {
+            let project = Project::new();
+            let mut state = project.load();
+            std::fs::create_dir_all(&project.grim_home).unwrap();
+            std::fs::write(project.grim_home.join("settings"), "a file where the directory goes").unwrap();
+            state.record(settings_record("team", DENY_RM));
+            state.record(rule_record());
+
+            let Err(PersistError::Save { path, source }) = project.persist(&state) else {
+                panic!("a store that cannot be written fails the persist");
+            };
+
+            assert_eq!(path, project.store_path());
+            assert_eq!(kinds_in(&project.state_path()), ["rule"]);
+            let err: anyhow::Error = crate::error::Error::from(crate::command::install::state_io(&path, source)).into();
+            assert_eq!(crate::error::classify(&err).exit, ExitCode::IoError);
+        }
+
+        #[test]
+        fn global_state_keeps_the_kind_in_its_own_file() {
+            let tmp = tempfile::tempdir().unwrap();
+            let state = reload_global(tmp.path(), vec![settings_record("team", DENY_RM)]);
+
+            assert_eq!(state.settings_store, SettingsStore::Inline);
+            assert!(state.get(ArtifactKind::Settings, "team").is_some());
+            state.save().unwrap();
+
+            let global = tmp.path().join("state").join("global.json");
+            assert_eq!(kinds_in(&global), ["settings"]);
+            assert!(!tmp.path().join("settings").exists());
+        }
+    }
+
+    mod global_settings {
+        use super::project_settings::warnings_during;
+        use super::*;
+        use crate::install::vendor::{MergeClass, SettingsField, SettingsScopes, SettingsValueType};
+
+        const BINDING: &str = "team";
+        const DENY_RM: &str = "Bash(rm:*)";
+
+        /// The roots a run on this host resolves, read from the environment
+        /// as `settings_config_path` reads it, so each client's file anchors
+        /// where its answer sits. Nothing here is opened.
+        fn settings_roots(grim_home: &Path) -> AnchorRoots {
+            let context = crate::context::Context::hermetic(grim_home.to_path_buf());
+            AnchorRoots::resolve(grim_home.to_path_buf(), &context)
+        }
+
+        /// Every client listing a settings key, taken from the registry.
+        fn settings_hosts() -> impl Iterator<Item = ClientTarget> {
+            ClientTarget::ALL
+                .into_iter()
+                .filter(|client| !client.vendor().settings_fields().is_empty())
+        }
+
+        /// The file `client` takes settings in on this host, anchored as an
+        /// install records it. `None` where the client has no file here.
+        fn file_here(client: ClientTarget, roots: &AnchorRoots) -> Option<AnchoredPath> {
+            let file = client
+                .vendor()
+                .settings_config_path(&roots.workspace, ConfigScope::Global)?;
+            let anchored = AnchoredPath::from_target(&file, ConfigScope::Global, client, ArtifactKind::Settings, roots);
+            Some(anchored.unwrap_or_else(|error| panic!("{client}'s file anchors: {error}")))
+        }
+
+        fn piece(client: &str, root: &'static str, relative: &str, entry: Option<&str>) -> ClientOutput {
+            ClientOutput {
+                entry: entry.map(str::to_string),
+                ..anchored(client, PathAnchor::VendorRoot(root), relative)
+            }
+        }
+
+        fn element(output: ClientOutput, element: &str) -> ClientOutput {
+            ClientOutput {
+                element: Some(element.to_string()),
+                ..output
+            }
+        }
+
+        /// `records` through a real save and a real global load.
+        fn reload(grim_home: &Path, records: Vec<InstallRecord>) -> InstallState {
+            let path = InstallState::global_path(&grim_home.join("state"));
+            state_at(path.clone(), records).save().unwrap();
+            InstallState::load_global(&path, &settings_roots(grim_home)).unwrap()
+        }
+
+        fn survivors(outputs: Vec<ClientOutput>) -> Vec<ClientOutput> {
+            let tmp = tempfile::tempdir().unwrap();
+            let record = record_of(ArtifactKind::Settings, BINDING, outputs);
+            let state = reload(tmp.path(), vec![record]);
+            let survived = state.get(ArtifactKind::Settings, BINDING);
+            survived.expect("a zero-output record stays").outputs.clone()
+        }
+
+        /// A relative `GRIM_HOME` follows the cwd, so a global file found there
+        /// may be a repository's. Its pieces stay unread, and a save keeps them
+        /// for a run whose home can judge them.
+        #[test]
+        fn a_relative_home_reads_no_global_piece_and_loses_none() {
+            let tmp = tempfile::tempdir().unwrap();
+            let held = piece("claude", "claude", "settings.json", Some("/model"));
+            let record = record_of(ArtifactKind::Settings, BINDING, vec![held.clone()]);
+
+            // Positive control: under the absolute home the piece is there.
+            let state = reload(tmp.path(), vec![record]);
+            let outputs = |state: &InstallState| state.get(ArtifactKind::Settings, BINDING).unwrap().outputs.clone();
+            assert_eq!(outputs(&state), std::slice::from_ref(&held));
+
+            let path = InstallState::global_path(&tmp.path().join("state"));
+            let refused = AnchorRoots {
+                grim_home: PathBuf::from("relative-home-the-settings-guard-refuses"),
+                ..settings_roots(tmp.path())
+            };
+            let state = InstallState::load_global(&path, &refused).unwrap();
+            assert_eq!(outputs(&state), [], "no read");
+
+            state.save().unwrap();
+            let state = InstallState::load_global(&path, &settings_roots(tmp.path())).unwrap();
+            assert_eq!(outputs(&state), [held], "no loss");
+        }
+
+        /// OpenCode's file name, which `$OPENCODE_CONFIG` can change.
+        fn opencode_file() -> String {
+            let vendor = ClientTarget::OpenCode.vendor();
+            let path = vendor.settings_config_path(Path::new("/nonexistent"), ConfigScope::Global);
+            let path = path.expect("a home directory");
+            path.file_name().unwrap().to_string_lossy().into_owned()
+        }
+
+        /// A piece of `row` at `file`: a set element, a map entry, or the
+        /// row's own file beside it.
+        fn piece_of(row: &SettingsField, client: ClientTarget, file: &AnchoredPath) -> ClientOutput {
+            let at = |relative: &str, entry: Option<&str>| ClientOutput {
+                entry: entry.map(str::to_string),
+                ..anchored(client.as_str(), file.anchor, relative)
+            };
+            if row.merge == MergeClass::OwnFile {
+                return at(&own_file_relative(BINDING), None);
+            }
+            let key = row.map_keys.map_or(BINDING, |keys| keys[0]);
+            let pointer: Vec<&str> = row
+                .pointer
+                .split('/')
+                .map(|segment| if segment.starts_with('<') { key } else { segment })
+                .collect();
+            let output = at(&file.relative, Some(&pointer.join("/")));
+            if row.merge == MergeClass::Set {
+                return element(output, DENY_RM);
+            }
+            output
+        }
+
+        /// The first piece of a key `client` lists in its file, never its own file.
+        fn a_piece_in(client: ClientTarget, file: &AnchoredPath) -> ClientOutput {
+            let rows = client.vendor().settings_fields();
+            let row = rows.iter().find(|row| row.merge != MergeClass::OwnFile);
+            piece_of(row.expect("a key in the file"), client, file)
+        }
+
+        #[test]
+        fn a_global_piece_survives_load_for_each_vendor() {
+            let opencode = opencode_file();
+            let pieces = vec![
+                piece("claude", "claude", "settings.json", Some("/model")),
+                element(
+                    piece("claude", "claude", "settings.json", Some("/permissions/deny")),
+                    DENY_RM,
+                ),
+                piece(
+                    "claude",
+                    "claude",
+                    "settings.json",
+                    Some("/extraKnownMarketplaces/team"),
+                ),
+                piece("codex", "codex", "config.toml", Some("/sandbox_mode")),
+                element(
+                    piece(
+                        "codex",
+                        "codex",
+                        "config.toml",
+                        Some("/sandbox_workspace_write/writable_roots"),
+                    ),
+                    "/srv/cache",
+                ),
+                piece("codex", "codex", "config.toml", Some("/permissions/a~1b")),
+                piece("codex", "codex", "rules/grim-team.rules", None),
+                element(
+                    piece("copilot", "copilot", "settings.json", Some("/deniedUrls")),
+                    "https://example.invalid",
+                ),
+                element(
+                    piece("cursor", "cursor-cli", "cli-config.json", Some("/permissions/deny")),
+                    "Shell(rm)",
+                ),
+                piece("cursor", "cursor-cli-xdg", "cli-config.json", Some("/editor/vimMode")),
+                piece("opencode", "opencode-config", &opencode, Some("/permission/bash")),
+                piece("opencode", "opencode-config", &opencode, Some("/permission")),
+                element(
+                    piece("qoder", "qoder", "settings.json", Some("/permissions/ask")),
+                    "Bash(git:*)",
+                ),
+            ];
+
+            assert_eq!(survivors(pieces.clone()), pieces);
+        }
+
+        #[test]
+        fn every_listed_key_survives_load() {
+            let tmp = tempfile::tempdir().unwrap();
+            let roots = settings_roots(tmp.path());
+            let mut pieces = Vec::new();
+            for client in settings_hosts() {
+                let Some(file) = file_here(client, &roots) else {
+                    continue;
+                };
+                let rows = client.vendor().settings_fields();
+                pieces.extend(rows.iter().map(|row| piece_of(row, client, &file)));
+            }
+
+            let kept = survivors(pieces.clone());
+
+            let lost: Vec<String> = pieces
+                .iter()
+                .filter(|output| !kept.contains(output))
+                .map(|output| format!("{} {:?}", output.client, output.entry))
+                .collect();
+            assert_eq!(lost, Vec::<String>::new());
+        }
+
+        /// The path below the anchor binds a record, not the file name: a
+        /// namesake elsewhere under the root is a file no harness reads.
+        #[test]
+        fn a_namesake_of_the_file_elsewhere_under_its_root_is_dropped() {
+            let roots = settings_roots(tempfile::tempdir().unwrap().path());
+            for client in settings_hosts() {
+                let Some(file) = file_here(client, &roots) else {
+                    continue;
+                };
+                let real = a_piece_in(client, &file);
+                let name = Path::new(&file.relative).file_name().unwrap().to_str().unwrap();
+                let mut namesakes = vec![format!("backup/{}", file.relative)];
+                if name != file.relative {
+                    namesakes.push(name.to_string());
+                }
+                for relative in namesakes {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let mut forged = real.clone();
+                    forged.target.relative = relative.clone();
+                    let record = record_of(ArtifactKind::Settings, BINDING, vec![forged]);
+                    reload(tmp.path(), vec![record]).save().unwrap();
+                    assert_eq!(outputs_on_disk(tmp.path()), [], "{client} {relative}");
+                }
+            }
+        }
+
+        /// Only a client that picks `.json` or `.jsonc` by what is on disk can
+        /// have its file renamed between runs. Any other client reads one
+        /// name, so the other spelling is a file no harness reads.
+        #[test]
+        fn the_other_json_spelling_binds_only_a_client_that_picks_it_on_disk() {
+            let roots = settings_roots(tempfile::tempdir().unwrap().path());
+            let by_disk = [ClientTarget::OpenCode, ClientTarget::Amp, ClientTarget::Kilo];
+            let mut seen = Vec::new();
+            for client in settings_hosts() {
+                let Some(file) = file_here(client, &roots) else {
+                    continue;
+                };
+                let path = Path::new(&file.relative);
+                let other = match path.extension().and_then(|ext| ext.to_str()) {
+                    Some("json") => path.with_extension("jsonc"),
+                    Some("jsonc") => path.with_extension("json"),
+                    _ => continue,
+                };
+                let mut renamed = a_piece_in(client, &file);
+                renamed.target.relative = other.to_string_lossy().replace('\\', "/");
+
+                let (kept, warnings) = warnings_during(|| survivors(vec![renamed.clone()]));
+
+                if by_disk.contains(&client) {
+                    assert_eq!(kept, [renamed], "{client}");
+                } else {
+                    assert_eq!(kept, [], "{client} {}", renamed.target.relative);
+                    assert!(warnings.contains("dropped a recorded output of settings"), "{client}");
+                }
+                seen.push(client);
+            }
+            for client in [ClientTarget::Claude, ClientTarget::Kiro].into_iter().chain(by_disk) {
+                assert!(seen.contains(&client), "{client} has a JSON settings file here");
+            }
+        }
+
+        #[test]
+        fn a_global_record_stays_inline_and_keeps_its_element() {
+            let tmp = tempfile::tempdir().unwrap();
+            let home = tmp.path();
+            let deny = element(
+                piece("claude", "claude", "settings.json", Some("/permissions/deny")),
+                DENY_RM,
+            );
+            let model = piece("claude", "claude", "settings.json", Some("/model"));
+            let record = record_of(ArtifactKind::Settings, BINDING, vec![deny.clone(), model.clone()]);
+
+            let state = reload(home, vec![record]);
+
+            assert_eq!(state.settings_store, SettingsStore::Inline);
+            let outputs = &state.get(ArtifactKind::Settings, BINDING).unwrap().outputs;
+            assert_eq!(*outputs, [deny, model]);
+
+            let global = InstallState::global_path(&home.join("state"));
+            let config = home.join("grimoire.toml");
+            state.persist(ConfigScope::Global, home, home, &config).unwrap();
+            let saved = std::fs::read(&global).unwrap();
+            let file: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+            let outputs = &file["records"][0]["outputs"];
+            assert_eq!(file["records"][0]["kind"], "settings");
+            assert_eq!(outputs[0]["element"], DENY_RM);
+            assert!(outputs[1].get("element").is_none(), "a scalar writes no element key");
+            assert!(!home.join("settings").exists(), "global scope has no store");
+
+            let again = InstallState::load_global(&global, &settings_roots(home)).unwrap();
+            again.save().unwrap();
+            assert_eq!(std::fs::read(&global).unwrap(), saved);
+        }
+
+        #[test]
+        fn an_absent_global_file_loads_inline() {
+            let tmp = tempfile::tempdir().unwrap();
+            let global = InstallState::global_path(&tmp.path().join("state"));
+
+            let state = InstallState::load_global(&global, &settings_roots(tmp.path())).unwrap();
+
+            assert_eq!(state.settings_store, SettingsStore::Inline);
+        }
+
+        #[test]
+        fn an_entry_on_a_file_kind_is_dropped() {
+            let tmp = tempfile::tempdir().unwrap();
+            let claude = PathAnchor::VendorRoot("claude");
+            for (kind, anchor, relative) in [
+                (ArtifactKind::Skill, claude, "skills/team"),
+                (ArtifactKind::Rule, claude, "rules/team.md"),
+                (ArtifactKind::Agent, claude, "agents/team.md"),
+                (ArtifactKind::Hook, PathAnchor::GrimHome, "hooks/team"),
+            ] {
+                let legal = anchored("claude", anchor, relative);
+                let forged = ClientOutput {
+                    entry: Some("/model".to_string()),
+                    ..legal.clone()
+                };
+                let record = record_of(kind, BINDING, vec![legal.clone(), forged]);
+
+                let state = reload(tmp.path(), vec![record]);
+
+                let survived = state.get(kind, BINDING).expect("the legal output keeps the record");
+                assert_eq!(survived.outputs, vec![legal], "{kind:?}");
+            }
+        }
+
+        /// Every output the global state file under `grim_home` holds.
+        fn outputs_on_disk(grim_home: &Path) -> Vec<ClientOutput> {
+            let bytes = std::fs::read(InstallState::global_path(&grim_home.join("state"))).unwrap();
+            let file: InstallStateFile = serde_json::from_slice(&bytes).unwrap();
+            file.records.into_iter().flat_map(|record| record.outputs).collect()
+        }
+
+        /// What `$OPENCODE_CONFIG` leaves behind when it changes between runs.
+        /// `current` is this run's name, so one test covers both directions: run
+        /// it plain and with the variable naming `custom.json`.
+        #[test]
+        fn a_piece_of_another_runs_file_stays_recorded_and_out_of_reach() {
+            let tmp = tempfile::tempdir().unwrap();
+            let current = opencode_file();
+            let other = if current == "custom.json" {
+                "opencode.json"
+            } else {
+                "custom.json"
+            };
+            let here = piece("opencode", "opencode-config", &current, Some("/permission/bash"));
+            let there = piece("opencode", "opencode-config", other, Some("/permission/bash"));
+            let record = record_of(ArtifactKind::Settings, BINDING, vec![here.clone(), there.clone()]);
+
+            let state = reload(tmp.path(), vec![record]);
+            let seen: Vec<&ClientOutput> = state.iter_records().flat_map(|record| &record.outputs).collect();
+            assert_eq!(seen, [&here], "a consumer would resolve it through the moved root");
+
+            state.save().unwrap();
+            assert_eq!(outputs_on_disk(tmp.path()), [here.clone(), there.clone()]);
+
+            let path = InstallState::global_path(&tmp.path().join("state"));
+            let next_run = InstallState::load_global(&path, &settings_roots(tmp.path())).unwrap();
+            next_run.save().unwrap();
+            assert_eq!(outputs_on_disk(tmp.path()), [here, there], "a second run loses nothing");
+        }
+
+        /// A rewrite in the gap keeps the piece, and an uninstall takes it along.
+        #[test]
+        fn a_withheld_output_goes_back_on_its_record_and_leaves_with_it() {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = InstallState::global_path(&tmp.path().join("state"));
+            let names = ["kept", "removed"];
+            let records = names.map(|name| record_of(ArtifactKind::Settings, name, vec![]));
+            let mut state = state_at(path, records.to_vec());
+            let output = piece("opencode", "opencode-config", "custom.json", Some("/permission/bash"));
+            for name in names {
+                let key = (ArtifactKind::Settings, name.to_string());
+                state.withheld.insert(key, vec![output.clone()]);
+            }
+
+            state.record(record_of(ArtifactKind::Settings, "kept", vec![]));
+            state.remove(ArtifactKind::Settings, "removed");
+            state.save().unwrap();
+
+            assert_eq!(outputs_on_disk(tmp.path()), [output]);
+        }
+
+        /// A skill's name can spell OpenCode's file, and no variable moves a skill.
+        #[test]
+        fn only_a_settings_output_is_ever_set_aside() {
+            let tmp = tempfile::tempdir().unwrap();
+            let roots = settings_roots(tmp.path());
+            let scope = ConfigScope::Global;
+            let piece = piece("opencode", "opencode-config", "other.json", Some("/permission/bash"));
+            assert!(is_in_another_runs_file(
+                &piece,
+                ArtifactKind::Settings,
+                BINDING,
+                scope,
+                &roots
+            ));
+
+            let skill = anchored("opencode", PathAnchor::OpenCodeSkills, "other");
+            let named_like_the_file = opencode_file();
+            assert!(!is_in_another_runs_file(
+                &skill,
+                ArtifactKind::Skill,
+                &named_like_the_file,
+                scope,
+                &roots
+            ));
+        }
+
+        /// A carried state can name a client with no settings file on this
+        /// host. Its pieces wait for a host that has one; anywhere else only
+        /// OpenCode's renamable file is another run's.
+        #[test]
+        fn a_piece_of_a_client_with_no_file_here_waits_for_one() {
+            let roots = settings_roots(tempfile::tempdir().unwrap().path());
+            let warp = piece(
+                "warp",
+                "warp-config",
+                "settings.toml",
+                Some("/agents/knowledge/rules_enabled"),
+            );
+            assert!(file_is_elsewhere(&warp, ClientTarget::Warp, None));
+
+            for client in settings_hosts() {
+                let Some(file) = file_here(client, &roots) else {
+                    continue;
+                };
+                let mut renamed = a_piece_in(client, &file);
+                renamed.target.relative = "other.json".to_string();
+                let renamable = client == ClientTarget::OpenCode;
+                assert_eq!(file_is_elsewhere(&renamed, client, Some(&file)), renamable, "{client}");
+                renamed.target.relative = "sub/other.json".to_string();
+                assert!(
+                    !file_is_elsewhere(&renamed, client, Some(&file)),
+                    "{client} below the root"
+                );
+            }
+        }
+
+        #[test]
+        fn a_forged_output_a_variable_cannot_explain_leaves_the_file() {
+            let opencode = |root, relative: &str, pointer| piece("opencode", root, relative, Some(pointer));
+            let forged = [
+                (
+                    "below the root",
+                    opencode("opencode-config", "sub/custom.json", "/permission/bash"),
+                ),
+                (
+                    "a key no row lists",
+                    opencode("opencode-config", "custom.json", "/apiKeyHelper"),
+                ),
+                (
+                    "a map key the row closes",
+                    opencode("opencode-config", "custom.json", "/permission/shell"),
+                ),
+                (
+                    "an element on a scalar",
+                    element(opencode("opencode-config", "custom.json", "/permission/bash"), DENY_RM),
+                ),
+                ("another root", opencode("claude", "custom.json", "/permission/bash")),
+                (
+                    "the root skills sit under",
+                    ClientOutput {
+                        entry: Some("/permission/bash".to_string()),
+                        ..anchored("opencode", PathAnchor::OpenCodeRoot, "custom.json")
+                    },
+                ),
+                (
+                    "the grim home",
+                    ClientOutput {
+                        entry: Some("/permission/bash".to_string()),
+                        ..anchored("opencode", PathAnchor::GrimHome, "custom.json")
+                    },
+                ),
+                (
+                    "a sibling of a file no variable renames",
+                    piece("claude", "claude", ".credentials.json", Some("/model")),
+                ),
+                (
+                    "a sibling of Codex's file",
+                    piece("codex", "codex", "other.toml", Some("/sandbox_mode")),
+                ),
+            ];
+            for (label, output) in forged {
+                let tmp = tempfile::tempdir().unwrap();
+                let record = record_of(ArtifactKind::Settings, BINDING, vec![output]);
+                reload(tmp.path(), vec![record]).save().unwrap();
+                assert_eq!(outputs_on_disk(tmp.path()), [], "{label}");
+            }
+
+            let tmp = tempfile::tempdir().unwrap();
+            let kept = opencode("opencode-config", "custom.json", "/permission/bash");
+            let record = record_of(ArtifactKind::Settings, BINDING, vec![kept.clone()]);
+            reload(tmp.path(), vec![record]).save().unwrap();
+            assert_eq!(outputs_on_disk(tmp.path()), [kept], "the control");
+        }
+
+        #[test]
+        fn a_forged_output_is_dropped_beside_a_real_one() {
+            let keyless = ClientTarget::ALL
+                .into_iter()
+                .find(|client| client.vendor().settings_fields().is_empty())
+                .expect("a client that lists no settings key");
+            let real = piece("claude", "claude", "settings.json", Some("/model"));
+            let claude = |pointer| piece("claude", "claude", "settings.json", Some(pointer));
+            let rules = |file| piece("codex", "codex", file, None);
+            let forged = [
+                ("a key a hook owns", claude("/hooks")),
+                ("a member an MCP entry owns", claude("/mcpServers/server")),
+                ("a key no row lists", claude("/apiKeyHelper")),
+                ("a member inside a scalar", claude("/model/name")),
+                (
+                    "a member inside a map entry",
+                    claude("/extraKnownMarketplaces/team/source"),
+                ),
+                ("a pointer with no slash", claude("model")),
+                ("a pointer with a bad escape", claude("/model~2")),
+                ("the whole document", claude("")),
+                (
+                    "a map key the row closes",
+                    piece(
+                        "opencode",
+                        "opencode-config",
+                        &opencode_file(),
+                        Some("/permission/shell"),
+                    ),
+                ),
+                (
+                    "a sibling file in the root",
+                    piece("claude", "claude", ".credentials.json", Some("/model")),
+                ),
+                (
+                    "a namesake below the root",
+                    piece("claude", "claude", "backup/settings.json", Some("/model")),
+                ),
+                (
+                    "the grim home",
+                    ClientOutput {
+                        entry: Some("/model".to_string()),
+                        ..anchored("claude", PathAnchor::GrimHome, "settings.json")
+                    },
+                ),
+                (
+                    "another client's root",
+                    piece("claude", "codex", "settings.json", Some("/model")),
+                ),
+                (
+                    "a client listing no key",
+                    piece(
+                        keyless.as_str(),
+                        keyless.vendor().name(),
+                        "settings.json",
+                        Some("/model"),
+                    ),
+                ),
+                (
+                    "an unknown client",
+                    piece("nobody", "claude", "settings.json", Some("/model")),
+                ),
+                ("an element on a scalar", element(claude("/model"), DENY_RM)),
+                ("a set with no element", claude("/permissions/deny")),
+                (
+                    "an element on a map entry",
+                    element(claude("/extraKnownMarketplaces/team"), DENY_RM),
+                ),
+                (
+                    "a config file with no pointer",
+                    piece("claude", "claude", "settings.json", None),
+                ),
+                (
+                    "a rules file a client does not own",
+                    piece("claude", "claude", "rules/grim-team.rules", None),
+                ),
+                ("codex's own rules", rules("rules/default.rules")),
+                ("another binding's rules", rules("rules/grim-other.rules")),
+                ("a config file as an own file", rules("config.toml")),
+                (
+                    "a rules file with a pointer",
+                    piece("codex", "codex", "rules/grim-team.rules", Some("/sandbox_mode")),
+                ),
+                (
+                    "a rules file with an element",
+                    element(rules("rules/grim-team.rules"), DENY_RM),
+                ),
+                (
+                    "a support directory",
+                    ClientOutput {
+                        support_dir: Some(AnchoredPath {
+                            anchor: PathAnchor::VendorRoot("claude"),
+                            relative: "team".to_string(),
+                        }),
+                        ..claude("/model")
+                    },
+                ),
+            ];
+
+            for (shape, output) in forged {
+                let (kept, warnings) = warnings_during(|| survivors(vec![real.clone(), output]));
+
+                assert_eq!(kept.as_slice(), std::slice::from_ref(&real), "{shape}");
+                assert!(warnings.contains("dropped a recorded output of settings"), "{shape}");
+            }
+        }
+
+        const fn row(pointer: &'static str, merge: MergeClass) -> SettingsField {
+            SettingsField {
+                pointer,
+                ty: SettingsValueType::Bool,
+                merge,
+                scopes: SettingsScopes::Both,
+                map_keys: None,
+                project_values: None,
+                required_by_client: false,
+            }
+        }
+
+        const ROWS: [SettingsField; 5] = [
+            row("/permission", MergeClass::Scalar),
+            SettingsField {
+                map_keys: Some(&["read", "edit"]),
+                ..row("/permission/<tool>", MergeClass::Map)
+            },
+            row("/marketplaces/<name>", MergeClass::Map),
+            row("/sandbox/roots", MergeClass::Set),
+            row("rules", MergeClass::OwnFile),
+        ];
+
+        fn pointer_of(entry: Option<&str>) -> Option<&'static str> {
+            settings_row(&ROWS, entry).map(|row| row.pointer)
+        }
+
+        #[test]
+        fn a_pointer_finds_the_row_that_spells_it() {
+            assert_eq!(pointer_of(Some("/permission")), Some("/permission"));
+            assert_eq!(pointer_of(Some("/sandbox/roots")), Some("/sandbox/roots"));
+            assert_eq!(pointer_of(Some("/sandbox")), None, "a container has no row");
+            assert_eq!(pointer_of(Some("/sandbox/roots/0")), None);
+            assert_eq!(pointer_of(Some("/sandbox/other")), None);
+        }
+
+        #[test]
+        fn a_map_row_takes_one_key_from_the_set_it_closes() {
+            assert_eq!(pointer_of(Some("/permission/read")), Some("/permission/<tool>"));
+            assert_eq!(pointer_of(Some("/permission/shell")), None);
+            assert_eq!(pointer_of(Some("/marketplaces/any~1key")), Some("/marketplaces/<name>"));
+            assert_eq!(pointer_of(Some("/marketplaces")), None);
+            assert_eq!(pointer_of(Some("/marketplaces/a/b")), None);
+        }
+
+        #[test]
+        fn no_pointer_finds_the_row_that_owns_a_file() {
+            assert_eq!(pointer_of(None), Some("rules"));
+            assert_eq!(pointer_of(Some("rules")), None, "the row is not a pointer");
+            assert_eq!(settings_row(&ROWS[..4], None).map(|row| row.pointer), None);
+        }
+
+        #[test]
+        fn a_file_matches_by_its_anchored_path_in_either_json_spelling() {
+            let file = |client, here: &str, relative: &str| is_settings_file(client, relative, here);
+            let (claude, kiro) = (ClientTarget::Claude, ClientTarget::Kiro);
+
+            assert!(file(claude, "settings.json", "settings.json"));
+            assert!(file(ClientTarget::Codex, "config.toml", "config.toml"));
+            assert!(file(ClientTarget::OpenCode, "opencode.json", "opencode.jsonc"));
+            assert!(file(ClientTarget::OpenCode, "opencode.jsonc", "opencode.json"));
+            assert!(file(ClientTarget::Amp, "settings.json", "settings.jsonc"));
+            assert!(file(ClientTarget::Kilo, "kilo.jsonc", "kilo.json"));
+            assert!(file(ClientTarget::OpenCode, "custom.json", "custom.json"));
+            assert!(file(kiro, "settings/cli.json", "settings/cli.json"));
+            assert!(!file(claude, "settings.json", "settings.jsonc"), "one name only");
+            assert!(!file(kiro, "settings/cli.json", "settings/cli.jsonc"), "one name only");
+            assert!(!file(claude, "settings.json", "config.toml"));
+            assert!(!file(claude, "settings.json", "backup/settings.json"));
+            assert!(!file(kiro, "settings/cli.json", "cli.json"), "the name alone");
+            assert!(!file(kiro, "settings/cli.json", "other/cli.json"));
         }
     }
 }

@@ -36,10 +36,10 @@ pub const MARKETPLACE_HASH_VERSION: u8 = 1;
 ///
 /// Algorithm (v1):
 /// 1. Build the canonical JSON object
-///    `{["agents":{…},]["bundles":{…},]["hooks":{…},]["mcp":{…},]"rules":{name:idstr,…},"skills":{name:idstr,…}}`
+///    `{["agents":{…},]["bundles":{…},]["hooks":{…},]["mcp":{…},]"rules":{name:idstr,…},["settings":{…},]"skills":{name:idstr,…}}`
 ///    where every `idstr` is the `Display` form of the parsed identifier
-///    (`registry/repo[:tag][@digest]`). The `agents`, `bundles`, `hooks`
-///    and `mcp` keys are emitted **only when at least one entry of that
+///    (`registry/repo[:tag][@digest]`). The `agents`, `bundles`, `hooks`,
+///    `mcp` and `settings` keys are emitted **only when at least one entry of that
 ///    kind is declared**, so a declaration free of those kinds hashes
 ///    identically to one written before they existed — existing locks stay
 ///    valid with no version bump.
@@ -49,10 +49,10 @@ pub const MARKETPLACE_HASH_VERSION: u8 = 1;
 /// 4. Return `"sha256:<hex>"`.
 pub fn declaration_hash(set: &DesiredSet) -> String {
     // Top-level keys in JCS (sorted) order:
-    // "agents" < "bundles" < "rules" < "skills". "agents" and "bundles"
-    // are omitted entirely when empty so the canonical form — and thus the
-    // hash — matches the pre-agents/pre-bundles algorithm for any config
-    // that declares neither.
+    // "agents" < "bundles" < "hooks" < "mcp" < "rules" < "settings" < "skills".
+    // All but "rules" and "skills" are omitted entirely when empty so the
+    // canonical form — and thus the hash — matches the earlier algorithm for
+    // any config that declares none of them.
     let mut canonical = String::from("{");
     if !set.agents.is_empty() {
         canonical.push_str("\"agents\":");
@@ -83,6 +83,14 @@ pub fn declaration_hash(set: &DesiredSet) -> String {
     canonical.push_str("\"rules\":");
     push_canonical_table(&mut canonical, &set.rules);
     canonical.push(',');
+    // "rules" < "settings" < "skills", so the key sits between the two
+    // required ones: emitted last, a settings hash stops being canonical JCS
+    // and `hash_corpus_settings_sorts_between_rules_and_skills` fails.
+    if !set.settings.is_empty() {
+        canonical.push_str("\"settings\":");
+        push_canonical_table(&mut canonical, &set.settings);
+        canonical.push(',');
+    }
     canonical.push_str("\"skills\":");
     push_canonical_table(&mut canonical, &set.skills);
     canonical.push('}');
@@ -279,6 +287,22 @@ mod tests {
         assert_eq!(declaration_hash(&with_mcp), declaration_hash(&again));
     }
 
+    #[test]
+    fn empty_settings_table_leaves_the_hash() {
+        let mut with_empty = set(&[], &[]);
+        with_empty.settings = BTreeMap::new();
+        assert_eq!(declaration_hash(&with_empty), CASE_EMPTY);
+    }
+
+    #[test]
+    fn declaring_settings_changes_the_hash() {
+        let mut declared = set(&[], &[]);
+        declared.settings.insert("x".to_string(), id("ghcr.io/acme/x:1"));
+        assert_ne!(declaration_hash(&declared), CASE_EMPTY);
+        let as_skill = set(&[("x", "ghcr.io/acme/x:1")], &[]);
+        assert_ne!(declaration_hash(&declared), declaration_hash(&as_skill));
+    }
+
     fn set_with_agents(skills: &[(&str, &str)], agents: &[(&str, &str)]) -> DesiredSet {
         let mut s = BTreeMap::new();
         for (k, v) in skills {
@@ -339,11 +363,20 @@ mod tests {
     // Frozen corpus: captured from a run and baked in by hand. Changing
     // any of these is a BREAKING change requiring a version bump.
     const CASE_EMPTY: &str = "sha256:009e44ee25720a0be5c25fd08ea27798d37fd9ae5c33d4712a4a460d44af3d10";
+    const CASE_SETTINGS: &str = "sha256:1196426884ed2b2dbfadf110830f9190ad6f1f4ee5087e378acfe5a38f6e03bf";
 
     #[test]
     fn hash_corpus_empty() {
         // Canonical JSON: {"rules":{},"skills":{}}
         assert_eq!(declaration_hash(&set(&[], &[])), CASE_EMPTY);
+    }
+
+    #[test]
+    fn hash_corpus_settings_sorts_between_rules_and_skills() {
+        // Canonical JSON: {"rules":{},"settings":{"x":"ghcr.io/acme/x:1"},"skills":{}}
+        let mut declared = set(&[], &[]);
+        declared.settings.insert("x".to_string(), id("ghcr.io/acme/x:1"));
+        assert_eq!(declaration_hash(&declared), CASE_SETTINGS);
     }
 
     #[test]

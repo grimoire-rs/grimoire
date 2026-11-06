@@ -459,6 +459,7 @@ fn fixed_value(key: ConfigKey, options: &ConfigOptions) -> Option<String> {
                 None
             }
         }
+        ConfigKey::ExperimentalSettings => options.experimental.settings.then(|| "true".to_string()),
     }
 }
 
@@ -819,6 +820,12 @@ fn apply_set(
                 options.experimental.hooks = enabled;
                 Ok(value_str.to_string())
             }
+            // A plain write in both directions: flag off removes nothing, so no
+            // later convergence is owed, unlike the hook flag above.
+            ConfigKey::ExperimentalSettings => {
+                options.experimental.settings = parse_bool(value_str, "options.experimental.settings")?;
+                Ok(value_str.to_string())
+            }
         },
         ParsedKey::VendorField { vendor } => {
             let enabled = parse_bool(value_str, &format!("options.vendors.{vendor}.{VENDOR_FIELD_NAME}"))?;
@@ -979,6 +986,7 @@ fn apply_unset(
                     warn_config_write_does_not_disarm("unset options.experimental.hooks");
                     options.experimental.hooks = false;
                 }
+                ConfigKey::ExperimentalSettings => options.experimental.settings = false,
             }
             Ok(())
         }
@@ -2662,8 +2670,8 @@ mod tests {
         let with_all = collect_entries(true, &options, &registries);
         assert_eq!(
             with_all.len(),
-            11,
-            "--all on empty config must emit exactly the 11 fixed keys"
+            12,
+            "--all on empty config must emit exactly the 12 fixed keys"
         );
         for e in &with_all {
             assert_eq!(
