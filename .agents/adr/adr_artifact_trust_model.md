@@ -11,7 +11,7 @@
 - [x] Decision follows Golden Path in `.claude/rules/product-tech-strategy.md` (no new dependency; documents existing behavior)
 **Domain Tags:** security
 **Supersedes:** N/A
-**Superseded By:** N/A (decision 2 amended 2026-08-28 by [`adr_hook_workspace_consent.md`](./adr_hook_workspace_consent.md) — one scoped exception, see the box under Decision)
+**Superseded By:** N/A (decision 2 amended 2026-08-28 by [`adr_hook_workspace_consent.md`](./adr_hook_workspace_consent.md) — one scoped exception — and 2026-11-04 by [`adr_settings_artifact_kind.md`](./adr_settings_artifact_kind.md) — a second scoped exception; see the boxes under Decision)
 
 ## Context
 
@@ -82,6 +82,28 @@ click-through and stops nothing.
 > gesture, and a bundle's hook members inherit it transitively. Transitivity
 > remains the bundle feature, not a loophole in it.
 
+> ### ⛔ AMENDED 2026-11-04 — decision 2 carries a second scoped exception: **settings**
+>
+> [`adr_settings_artifact_kind.md`](./adr_settings_artifact_kind.md) (Accepted 2026-11-04)
+> gates the experimental `settings` kind on the same per-workspace consent
+> record. The owner accepted this amendment in the ratified discussion
+> `.agents/discussions/config-artifact-type.md`.
+>
+> **The reason is release history again, not danger.** The box above says the
+> hook exception is "not an invitation to gate the next kind", and that sentence
+> stands. Settings are not exempted for reaching further than a skill that ships
+> a script. The honest statement is the same one: **this kind has never
+> shipped**, so it can ship gated and break nothing under Principle 9. **A gate
+> on a shipped kind stays prohibited.**
+>
+> The exception widened the way the box above predicted. The record stayed
+> kind-agnostic: settings bindings sit in it with no format change. There is one
+> record, one prompt per command and one answer, never a consent per kind.
+>
+> Decision 1 still holds in full. `grim add` is the gesture, a package arriving
+> through a bundle or a `requires` edge inherits it, and global scope is
+> consented, as for hooks.
+
 **3. Until signatures exist, an artifact is treated as if signed by a
 trusted authority.** The trust anchors grim actually has are registry
 authentication and digest pinning: the lock pins a manifest digest, and a
@@ -114,7 +136,9 @@ references only; the descriptor's OAuth block deliberately has no
 - Compromise of a registry account or of the publisher's toolchain.
 - Anything the *harness* owns: which tools an agent may run, sandboxing,
   approval prompts at execution time. grim installs config; it is not the
-  execution policy layer.
+  execution policy layer. *(Reading kept by the 2026-11-04 amendment: grim
+  delivers harness-owned config, and the harness stays the execution policy
+  layer. grim promises a value was delivered, never that it is enforced.)*
 
 ### When signatures arrive
 
@@ -139,4 +163,6 @@ above holds.
 - **The hook exception above is a decided trade, not an open question.**
   "Hooks are gated, therefore kind X should be too" and "hooks are gated,
   therefore decision 2 is dead" are both misreadings — cite the amendment and
-  move on. Changing it is an ADR amendment, not a review finding.
+  move on. Changing it is an ADR amendment, not a review finding. The settings
+  exception is the same trade for the same reason, and "two kinds are gated,
+  therefore the next one is too" is the same misreading.

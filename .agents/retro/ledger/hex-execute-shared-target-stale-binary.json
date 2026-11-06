@@ -1,0 +1,23 @@
+{
+  "artifact": "hex-execute",
+  "cost_min": 0,
+  "entries": [
+    "20261104T082139Z-faadfa9a.json"
+  ],
+  "first_seen": "2026-11-04T08:21:39Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T01:25:22Z",
+  "folds": 1,
+  "id": "hex-execute-shared-target-stale-binary",
+  "kind": "pitfall",
+  "last_seen": "2026-11-04T08:21:39Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "high",
+  "status": "deferred",
+  "title": "Two source trees sharing one CARGO_TARGET_DIR ran the other tree's test binary, so known-red units passed",
+  "v": 1,
+  "versions": [
+    "unknown"
+  ]
+}

@@ -11,7 +11,7 @@
 - [x] Decision follows Golden Path in `.claude/rules/product-tech-strategy.md` (no new dependency; one JSON file and one pure predicate)
 **Domain Tags:** security
 **Supersedes:** the registry half of [`adr_hooks_support.md`](./adr_hooks_support.md) amendment **A2**, and contract **C-022** in [`plan_hooks_artifact_kind.md`](../plans/plan_hooks_artifact_kind.md) (with its B4 / B5 / B7 / W8 / S2-2 amendments)
-**Superseded By:** N/A
+**Superseded By:** N/A (amended 2026-11-04 by [`adr_settings_artifact_kind.md`](./adr_settings_artifact_kind.md) — the record, the flag and the prompt are kind-neutral; see the box under Technical Details)
 
 ## Context
 
@@ -376,6 +376,35 @@ so keying it on content is not a stricter option — it is the documented bug.
 
 ## Technical Details
 
+> ### ⛔ AMENDED 2026-11-04 — the record, the flag and the prompt are kind-neutral
+>
+> [`adr_settings_artifact_kind.md`](./adr_settings_artifact_kind.md) (Accepted 2026-11-04)
+> puts the experimental `settings` kind behind this mechanism. There is still one
+> record per workspace, one prompt per command and one answer. Where this file
+> says "hook" for those three, read "hook or settings package".
+>
+> - **Record.** The format does not change. A settings binding is stored as
+>   `settings:<binding>@<registry>/<repository>`, so a hook `x` and settings `x`
+>   from one repository stay apart. `:` cannot occur in a binding. The field
+>   stays named `hooks`, and hook keys are unchanged.
+> - **Flag.** `--trust-workspace` / `--no-trust-workspace` is the pair, and
+>   `--trust-hooks` / `--no-trust-hooks` are aliases of it. It answers for both
+>   kinds. It still has no env form, for the reasons in `AGENTS.md`.
+> - **Prompt.** One function with a noun slot (`Hooks`, `Settings`,
+>   `Hooks and settings`). It fires if either kind needs an answer, and accepting
+>   records the union of kinds whose feature flag is on. Declining still changes
+>   no file: a declined run skips the whole settings phase.
+> - **Composition.** Step 1 applies per kind, because each kind has its own
+>   feature flag. Turning the second flag on later reads as drift.
+> - **Verb.** `grim consent allow|revoke|list` is a visible alias of `grim hook`.
+>   `allow` records both kinds regardless of the feature flags. `list` lists hooks.
+> - **Revoke.** It removes the record for both kinds. Applied settings stay in
+>   their files and the package reads `gated`. `grim uninstall` is the undo.
+> - **Older grims.** They read the new keys as opaque. An older `grim hook allow`
+>   replaces the record and drops them, so a newer grim asks again: fail-safe.
+> - **Guard.** `consent::record` and `consent::load` still do not validate
+>   `$GRIM_HOME`. The settings phase calls `validate_grim_home` before either.
+
 ### The gesture
 
 | Command | Behaviour |
@@ -446,6 +475,8 @@ puts it.
 - [`plan_hooks_artifact_kind.md`](../plans/plan_hooks_artifact_kind.md) —
   C-022 (superseded), C-023 (amended: the contract survives, its subject
   changes from registry to workspace)
+- [`adr_settings_artifact_kind.md`](./adr_settings_artifact_kind.md) — amends
+  this record, flag and prompt to be kind-neutral
 - [`arch-threat-model.md`](../../.claude/rules/arch-threat-model.md) — T1, T3,
   N4, and invariants I1–I5
 - [`direnv/direnv#83`](https://github.com/direnv/direnv/issues/83) — the
@@ -460,3 +491,4 @@ puts it.
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-08-28 | Michael Herwig + Claude (hex swarm) | Initial draft, **Accepted**. Reverses the registry half of `adr_hooks_support.md` A2 and restores Decision E point 4's directory binding, keeping A2's coarseness. Supersedes contract C-022 with its B4/B5/B7/W8/S2-2 amendments; amends C-023's subject. Records the I2 relationship, the T1 version residual, the exit-78 residual, and the never-garbage-collected residual. |
+| 2026-11-04 | Michael Herwig + Claude (architect) | Amended by `adr_settings_artifact_kind.md`: kind-neutral use of the record (a `settings:` key prefix, no format change), the flag (`--trust-workspace`, with `--trust-hooks` as its alias) and the prompt (a noun slot). `grim consent` aliases `grim hook`. |

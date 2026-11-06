@@ -1,0 +1,25 @@
+{
+  "artifact": "hex-execute",
+  "cost_min": 0,
+  "entries": [
+    "20261104T063032Z-b46b3143.json",
+    "20261104T084552Z-da315d66.json",
+    "20261104T185416Z-cc71e668.json"
+  ],
+  "first_seen": "2026-11-04T06:30:32Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T01:25:22Z",
+  "folds": 1,
+  "id": "hex-execute-narrow-inner-check",
+  "kind": "pitfall",
+  "last_seen": "2026-11-04T18:54:16Z",
+  "occurrences": 3,
+  "scope": "harness",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "A step's narrowest inner check misses non-test compile, clippy and repo-wide unit tests, so only the gate finds them",
+  "v": 1,
+  "versions": [
+    "unknown"
+  ]
+}

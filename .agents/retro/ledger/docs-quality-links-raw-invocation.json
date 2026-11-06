@@ -1,0 +1,23 @@
+{
+  "artifact": "docs-quality",
+  "cost_min": 0,
+  "entries": [
+    "20261105T114409Z-c059818a.json"
+  ],
+  "first_seen": "2026-11-05T11:44:09Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T12:46:44Z",
+  "folds": 1,
+  "id": "docs-quality-links-raw-invocation",
+  "kind": "pitfall",
+  "last_seen": "2026-11-05T11:44:09Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "low",
+  "status": "deferred",
+  "title": "docs-quality's gate list runs links_raw.py with a trailing positional, which exits 2 with missing input",
+  "v": 1,
+  "versions": [
+    "unknown"
+  ]
+}

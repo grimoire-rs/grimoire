@@ -1,0 +1,21 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20261104T151406Z-0628707e.json"
+  ],
+  "first_seen": "2026-11-04T15:14:06Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T01:25:22Z",
+  "folds": 1,
+  "id": "project-uninstall-state-io-exit-doc",
+  "kind": "pitfall",
+  "last_seen": "2026-11-04T15:14:06Z",
+  "occurrences": 1,
+  "scope": "project",
+  "severity": "low",
+  "status": "deferred",
+  "title": "The state_io doc comment in uninstall.rs says exit 74, but a permission failure classifies as 77",
+  "v": 1,
+  "versions": []
+}

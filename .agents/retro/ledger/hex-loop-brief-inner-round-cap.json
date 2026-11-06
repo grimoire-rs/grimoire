@@ -1,0 +1,23 @@
+{
+  "artifact": "hex-loop",
+  "cost_min": 0,
+  "entries": [
+    "20261105T005315Z-97f49b27.json"
+  ],
+  "first_seen": "2026-11-05T00:53:15Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T01:25:22Z",
+  "folds": 1,
+  "id": "hex-loop-brief-inner-round-cap",
+  "kind": "pitfall",
+  "last_seen": "2026-11-05T00:53:15Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "A meta-orchestrator brief delegating an adversary seat with no round cap ran four inner rounds against a cap of 2",
+  "v": 1,
+  "versions": [
+    "unknown"
+  ]
+}

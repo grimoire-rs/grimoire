@@ -1,0 +1,23 @@
+{
+  "artifact": "hex-execute",
+  "cost_min": 0,
+  "entries": [
+    "20261104T021751Z-77b0b362.json"
+  ],
+  "first_seen": "2026-11-04T02:17:51Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T01:25:22Z",
+  "folds": 1,
+  "id": "hex-execute-stalled-worker-liveness",
+  "kind": "pitfall",
+  "last_seen": "2026-11-04T02:17:51Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "hex-execute waits on a report file a stalled worker never writes; no liveness check pulls the worker",
+  "v": 1,
+  "versions": [
+    "unknown"
+  ]
+}

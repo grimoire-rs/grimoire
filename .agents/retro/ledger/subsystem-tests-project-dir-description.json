@@ -1,0 +1,23 @@
+{
+  "artifact": "subsystem-tests",
+  "cost_min": 0,
+  "entries": [
+    "20261104T134500Z-6c1e9a42.json"
+  ],
+  "first_seen": "2026-11-04T13:45:00Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T01:25:22Z",
+  "folds": 1,
+  "id": "subsystem-tests-project-dir-description",
+  "kind": "defect",
+  "last_seen": "2026-11-04T13:45:00Z",
+  "occurrences": 1,
+  "scope": "project",
+  "severity": "low",
+  "status": "deferred",
+  "title": "subsystem-tests.md calls project_dir an empty workspace, but the fixture seeds a .claude marker",
+  "v": 1,
+  "versions": [
+    "unknown"
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20261104T025206Z-0892d34b.json",
+    "20261104T080912Z-80d764e9.json",
+    "20261104T164325Z-90399d95.json",
+    "20261105T114411Z-2d2e2447.json"
+  ],
+  "first_seen": "2026-11-04T02:52:06Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T12:46:44Z",
+  "folds": 2,
+  "id": "project-plan-contracts-unprobed",
+  "kind": "pitfall",
+  "last_seen": "2026-11-05T11:44:11Z",
+  "occurrences": 4,
+  "scope": "project",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "Settings plan contracts named sites the code rules out: across a step boundary, a DocumentMut render, a path source",
+  "v": 1,
+  "versions": [
+    "unknown"
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "artifact": "code-docs",
+  "cost_min": 0,
+  "entries": [
+    "20261104T012923Z-8cad3472.json",
+    "20261104T033347Z-37867313.json",
+    "20261104T105820Z-907adc3d.json",
+    "20261104T171116Z-42855a61.json"
+  ],
+  "first_seen": "2026-11-04T01:29:23Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T01:25:22Z",
+  "folds": 1,
+  "id": "code-docs-missing-baselines",
+  "kind": "inconvenient",
+  "last_seen": "2026-11-04T17:11:16Z",
+  "occurrences": 4,
+  "scope": "project",
+  "severity": "low",
+  "status": "deferred",
+  "title": "code-docs gate names .code-docs-length.json and .code-docs-linkage.json, which this repo never committed",
+  "v": 1,
+  "versions": [
+    "unknown"
+  ]
+}

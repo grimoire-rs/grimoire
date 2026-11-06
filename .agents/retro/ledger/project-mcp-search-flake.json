@@ -1,0 +1,21 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20261104T182729Z-80f0afaa.json"
+  ],
+  "first_seen": "2026-11-04T18:27:29Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T01:25:22Z",
+  "folds": 1,
+  "id": "project-mcp-search-flake",
+  "kind": "slow",
+  "last_seen": "2026-11-04T18:27:29Z",
+  "occurrences": 1,
+  "scope": "project",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "test_mcp grim_search flakes under parallel load: stdin closes before the tools/call response is written",
+  "v": 1,
+  "versions": []
+}

@@ -1,0 +1,23 @@
+{
+  "artifact": "hex-execute",
+  "cost_min": 0,
+  "entries": [
+    "20261104T064406Z-4a686182.json"
+  ],
+  "first_seen": "2026-11-04T06:44:06Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T01:25:22Z",
+  "folds": 1,
+  "id": "hex-execute-worker-cwd-escape",
+  "kind": "pitfall",
+  "last_seen": "2026-11-04T06:44:06Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "low",
+  "status": "deferred",
+  "title": "A failed && chain skipped a worker's cd, and the later commands built in the orchestrator's checkout",
+  "v": 1,
+  "versions": [
+    "unknown"
+  ]
+}

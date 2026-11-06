@@ -1,0 +1,23 @@
+{
+  "artifact": "nox-review",
+  "cost_min": 0,
+  "entries": [
+    "20261105T085141Z-afeda2b2.json"
+  ],
+  "first_seen": "2026-11-05T08:51:41Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T12:46:44Z",
+  "folds": 1,
+  "id": "nox-review-codex-version-pin",
+  "kind": "defect",
+  "last_seen": "2026-11-05T08:51:41Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "high",
+  "status": "deferred",
+  "title": "nox-review refuses a newer codex CLI because its adapter is pinned to the one version it was verified against",
+  "v": 1,
+  "versions": [
+    "unknown"
+  ]
+}

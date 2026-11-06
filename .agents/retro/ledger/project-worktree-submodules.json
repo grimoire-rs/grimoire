@@ -2,16 +2,17 @@
   "artifact": "project",
   "cost_min": 0,
   "entries": [
-    "20261023T021927Z-67cba0ef.json"
+    "20261023T021927Z-67cba0ef.json",
+    "20261103T212124Z-09a253e4.json"
   ],
   "first_seen": "2026-10-23T02:19:27Z",
   "fixed": null,
-  "folded_at": "2026-10-26T15:16:19Z",
-  "folds": 1,
+  "folded_at": "2026-11-05T01:25:22Z",
+  "folds": 2,
   "id": "project-worktree-submodules",
   "kind": "pitfall",
-  "last_seen": "2026-10-23T02:19:27Z",
-  "occurrences": 1,
+  "last_seen": "2026-11-03T21:21:24Z",
+  "occurrences": 2,
   "scope": "project",
   "severity": "low",
   "status": "deferred",

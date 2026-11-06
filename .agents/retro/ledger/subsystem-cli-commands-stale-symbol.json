@@ -1,0 +1,23 @@
+{
+  "artifact": "subsystem-cli-commands.md",
+  "cost_min": 0,
+  "entries": [
+    "20261104T055245Z-9ffd75f0.json"
+  ],
+  "first_seen": "2026-11-04T05:52:45Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T01:25:22Z",
+  "folds": 1,
+  "id": "subsystem-cli-commands-stale-symbol",
+  "kind": "defect",
+  "last_seen": "2026-11-04T05:52:45Z",
+  "occurrences": 1,
+  "scope": "project",
+  "severity": "low",
+  "status": "deferred",
+  "title": "subsystem-cli-commands.md names armed_pairs as the dispatch-table reader; no such symbol exists in src",
+  "v": 1,
+  "versions": [
+    "unknown"
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "artifact": "hex-execute",
+  "cost_min": 0,
+  "entries": [
+    "20261104T070658Z-affdc6da.json"
+  ],
+  "first_seen": "2026-11-04T07:06:58Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T01:25:22Z",
+  "folds": 1,
+  "id": "hex-execute-sibling-pipeline-dependency",
+  "kind": "inconvenient",
+  "last_seen": "2026-11-04T07:06:58Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "A step's contract read a sibling pipeline's tables that landed on the branch after its worktree was cut",
+  "v": 1,
+  "versions": [
+    "unknown"
+  ]
+}

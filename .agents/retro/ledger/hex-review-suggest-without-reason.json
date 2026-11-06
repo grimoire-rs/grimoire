@@ -1,0 +1,23 @@
+{
+  "artifact": "hex-review",
+  "cost_min": 0,
+  "entries": [
+    "20261104T132537Z-66be225f.json"
+  ],
+  "first_seen": "2026-11-04T13:25:37Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T01:25:22Z",
+  "folds": 1,
+  "id": "hex-review-suggest-without-reason",
+  "kind": "inconvenient",
+  "last_seen": "2026-11-04T13:25:37Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "low",
+  "status": "deferred",
+  "title": "Review Suggest rows reach the fix pass as bare file:line with no reason, after the reviewer reports are gone",
+  "v": 1,
+  "versions": [
+    "unknown"
+  ]
+}

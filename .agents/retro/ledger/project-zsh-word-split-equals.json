@@ -1,0 +1,25 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20261103T231145Z-379da6de.json",
+    "20261104T063701Z-2cefe391.json",
+    "20261105T124619Z-2250ffea.json"
+  ],
+  "first_seen": "2026-11-03T23:11:45Z",
+  "fixed": null,
+  "folded_at": "2026-11-05T12:46:44Z",
+  "folds": 2,
+  "id": "project-zsh-word-split-equals",
+  "kind": "pitfall",
+  "last_seen": "2026-11-05T12:46:19Z",
+  "occurrences": 3,
+  "scope": "harness",
+  "severity": "low",
+  "status": "deferred",
+  "title": "zsh Bash tool shell: unquoted list variables are not word-split, and an unquoted == triggers equals expansion",
+  "v": 1,
+  "versions": [
+    "unknown"
+  ]
+}
