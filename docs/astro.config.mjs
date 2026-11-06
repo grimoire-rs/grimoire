@@ -163,6 +163,7 @@ export default defineConfig({
             { slug: 'guides/lifecycle', label: 'Install, update, status' },
             { slug: 'guides/inspect', label: 'Inspect before you install' },
             { slug: 'guides/versioning', label: 'Versioning' },
+            { slug: 'guides/dependencies', label: 'Bundle or require' },
             {
               slug: 'guides/mcp-everywhere',
               label: 'MCP servers everywhere',
