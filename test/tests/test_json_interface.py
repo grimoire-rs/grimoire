@@ -12,7 +12,6 @@ identity.
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
 from pathlib import Path
 
@@ -20,8 +19,7 @@ import pytest
 
 from src.helpers import make_artifact, make_description, write_config
 from src.registry import REGISTRY_HOST
-
-_PROTOCOL = "2025-06-18"
+from src.stdio_drivers import drive_until_answered, initialize
 
 
 def test_error_document_on_missing_config(
@@ -477,19 +475,11 @@ def test_mcp_and_cli_status_share_data_but_differ_in_bytes(
     assert cli_result.returncode == 0, cli_result.stderr
     cli_bytes = cli_result.stdout
 
-    payload = "".join(
-        json.dumps(r) + "\n"
-        for r in [
-            {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": _PROTOCOL,
-                    "capabilities": {},
-                    "clientInfo": {"name": "pytest", "version": "0"},
-                },
-            },
+    responses = drive_until_answered(
+        runner,
+        project_dir,
+        [
+            initialize(1),
             {"jsonrpc": "2.0", "method": "notifications/initialized"},
             {
                 "jsonrpc": "2.0",
@@ -497,25 +487,9 @@ def test_mcp_and_cli_status_share_data_but_differ_in_bytes(
                 "method": "tools/call",
                 "params": {"name": "grim_status", "arguments": {}},
             },
-        ]
-    )
-    mcp_result = subprocess.run(
-        [str(runner.binary), "--offline", "mcp"],
-        input=payload,
-        capture_output=True,
-        text=True,
-        env=runner.env,
-        cwd=str(project_dir),
+        ],
         timeout=30,
     )
-    responses: dict[int, dict] = {}
-    for line in mcp_result.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        msg = json.loads(line)
-        if isinstance(msg.get("id"), int):
-            responses[msg["id"]] = msg
     assert 2 in responses, (
         f"grim mcp did not answer the tools/call request; got ids {sorted(responses)}"
     )
