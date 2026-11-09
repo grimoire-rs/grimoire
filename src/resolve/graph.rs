@@ -10,8 +10,8 @@
 //! before anything is folded, so the outcome never depends on which request
 //! returned first:
 //!
-//! 1. every requested identifier not yet seen resolves to a digest (the only
-//!    tag resolve it ever gets);
+//! 1. every requested identifier neither a previous pin answers nor this run
+//!    has seen resolves to a digest (the only tag resolve it ever gets);
 //! 2. every node that settled and has not been read yet fetches its manifest
 //!    by that digest and its members layer by descriptor.
 //!
@@ -28,6 +28,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -37,12 +38,16 @@ use super::resolve_error::{
     GraphLimit, MAX_DEPTH, MAX_REQUIRES_BYTES, MAX_TRANSITIVE_NODES, ResolveError, ResolveErrorKind,
 };
 use super::resolve_options::ResolveOptions;
-use super::resolver::{RESOLVE_CONCURRENCY, bundle_provenance_tag, retry_chain};
+use super::resolver::{RESOLVE_CONCURRENCY, retry_chain};
 use crate::config::path_source::PathSource;
 use crate::lock::effective_set::NodeKey;
 use crate::lock::locked_artifact::BundleProvenance;
-use crate::lock::locked_bundle::LockedBundleSource;
+use crate::lock::locked_bundle::{LockedBundle, LockedBundleSource};
 use crate::lock::merge_policy::{DirectClaim, EdgeClaim, Settled, settle};
+use crate::lock::part_stamps::PartStamps;
+use crate::lock::pin_rule::bundle_provenance_tag;
+use crate::lock::pin_rule::{self, EdgeEvidence, HashProof, PinRecord, WalkedEdges};
+use crate::lock::refresh::Refresh;
 use crate::oci::access::OciAccess;
 use crate::oci::access::error::{AccessError, AccessErrorKind};
 use crate::oci::bundle::{BundleManifest, BundleMember};
@@ -117,6 +122,9 @@ pub struct GraphNode {
     pub transitive: bool,
     /// For a registry bundle: the source its lock snapshot records.
     pub bundle_source: Option<LockedBundleSource>,
+    /// A request for this node reached the registry for a tag: it names no
+    /// digest and no carried pin answered it.
+    pub resolved_tag: bool,
 }
 
 impl GraphNode {
@@ -175,6 +183,10 @@ pub struct ExpandedGraph {
     /// Every node, direct or reached through an edge.
     pub nodes: BTreeMap<NodeKey, GraphNode>,
     pub warnings: Vec<GraphWarning>,
+    /// Typed lines whose pin was kept although the walk of the manifest their tag names
+    /// refused or failed ([`expand_graph`]), as `grim lock` keeps it without reading
+    /// that manifest. `grim update` on one of them refuses.
+    pub kept_over_refusal: BTreeSet<NodeKey>,
 }
 
 /// `skill/name`, the name escaped.
@@ -194,6 +206,18 @@ struct Claim {
     parent: NodeKey,
     /// Resolved against the parent's repository.
     id: Identifier,
+    /// The parent was read as the lock's proof shows it, and its row there records
+    /// this edge.
+    listed: bool,
+    /// The parent is a bundle read at the digest a part's stamp records, and the
+    /// node's own row carries that stamp.
+    stamped: bool,
+}
+
+impl Claim {
+    fn claim(&self) -> NodeClaim<'_> {
+        NodeClaim::of_edge(&self.id, self.listed, self.stamped)
+    }
 }
 
 /// What reading a node produced.
@@ -207,6 +231,37 @@ struct Read {
     layer_bytes: u64,
     bundle_pair: Option<BundleProvenance>,
     bundle_source: Option<LockedBundleSource>,
+    /// Read from the manifest at `digest`, so a later pass may reuse it. A gone
+    /// manifest or an offline stand-in is never reused: reusing it would skip
+    /// the registry request and the warning each pass makes for it, which
+    /// `a_gone_member_manifest_is_asked_for_in_every_pass` and
+    /// `an_offline_stand_in_is_built_again_in_every_pass` assert.
+    from_manifest: bool,
+}
+
+/// The manifest reads of the last pass, by key, for the next pass to take back.
+/// The manifest at a digest never changes, the id anchors relative members,
+/// and the roots that decide a declared bundle's byte charge are the same every
+/// pass, so a read at the same id and digest is the read a pass would repeat.
+#[derive(Default)]
+struct Reads(BTreeMap<NodeKey, Vec<Read>>);
+
+impl Reads {
+    /// Keep `key`'s read for the next pass, if it came from its manifest.
+    fn keep(&mut self, key: NodeKey, read: Read) {
+        if read.from_manifest {
+            self.0.entry(key).or_default().push(read);
+        }
+    }
+
+    /// The read `job` would repeat, taken out.
+    fn take(&mut self, job: &Job) -> Option<Read> {
+        let earlier = self.0.get_mut(&job.key)?;
+        let at = earlier
+            .iter()
+            .position(|r| r.id.as_ref() == Some(&job.id) && r.digest.as_ref() == Some(&job.digest))?;
+        Some(earlier.swap_remove(at))
+    }
 }
 
 #[derive(Debug)]
@@ -240,6 +295,19 @@ struct Pending {
     key: NodeKey,
     id: Identifier,
     via: Option<(NodeKey, String)>,
+    /// An edge onto a typed line, read only to show whether it lands on the line's pin.
+    /// Its failure refuses nothing: grim 0.15.1 never reads that tag.
+    probe: bool,
+}
+
+impl Pending {
+    /// Only an edge has a parent to ask through.
+    fn claim(&self) -> NodeClaim<'_> {
+        match self.via {
+            None => NodeClaim::Direct(&self.id),
+            Some(_) => NodeClaim::Edge(&self.id),
+        }
+    }
 }
 
 /// A node to read.
@@ -250,8 +318,33 @@ struct Job {
     /// Root bundle: its layer is outside the byte cap.
     declared_bundle: bool,
     via: Option<String>,
-    /// Named by a bundle's members layer, not by a dependency edge.
-    from_bundle: bool,
+    /// A bundle member its layer names by digest, which locks with no edges once
+    /// its manifest is gone. `id` cannot say so: a kept pin reads under its digest.
+    frozen_member: bool,
+    /// `digest` is a carried pin, which only `grim update` may move.
+    carried: bool,
+}
+
+impl Job {
+    #[expect(clippy::expect_used, reason = "clone_with_digest always sets the digest a pin needs")]
+    fn pinned(&self) -> PinnedIdentifier {
+        PinnedIdentifier::try_from(self.id.clone_with_digest(self.digest.clone()))
+            .expect("clone_with_digest unconditionally sets the digest; PinnedIdentifier cannot fail here")
+    }
+
+    /// The lock row source and member provenance of a bundle node.
+    fn bundle_identity(&self) -> (Option<LockedBundleSource>, Option<BundleProvenance>) {
+        if self.key.0 != ArtifactKind::Bundle {
+            return (None, None);
+        }
+        let source = LockedBundleSource::Registry {
+            repo: self.id.registry_repository(),
+            tag: bundle_provenance_tag(&self.id),
+            pinned: self.pinned(),
+        };
+        let (repo, tag) = source.provenance_pair();
+        (Some(source), Some(BundleProvenance::new(repo, tag)))
+    }
 }
 
 type Task<T> = Pin<Box<dyn Future<Output = Result<T, ResolveError>> + Send>>;
@@ -355,13 +448,10 @@ async fn read_registry(job: &Job, access: &Arc<dyn OciAccess>) -> Result<Read, R
     };
     let text = job.id.to_string();
 
-    #[allow(clippy::expect_used)]
-    let pinned = PinnedIdentifier::try_from(job.id.clone_with_digest(job.digest.clone()))
-        .expect("clone_with_digest unconditionally sets the digest; PinnedIdentifier cannot fail here");
-    // The advisory tag is dropped: a pinned member still carrying a moved
-    // tag would be fetched through that tag and miss its frozen digest.
+    // Dropping the tag changes no fetch: the OCI client builds the URL from the
+    // digest, so a tag that moved cannot change which manifest comes back.
     let fetched = access
-        .fetch_manifest(&pinned.strip_advisory())
+        .fetch_manifest(&job.pinned().strip_advisory())
         .await
         .map_err(|e| fail(access_failure(e)))?;
     let Some(manifest) = fetched else {
@@ -369,7 +459,7 @@ async fn read_registry(job: &Job, access: &Arc<dyn OciAccess>) -> Result<Read, R
         // registry may have dropped a manifest whose tag moved on. The pin
         // still locks (nothing to read means no edges), as it did before
         // members were read at all.
-        if job.from_bundle && kind != ArtifactKind::Bundle && job.id.digest().is_some() {
+        if job.frozen_member && kind != ArtifactKind::Bundle {
             tracing::debug!(member = %text, "pinned bundle member manifest is gone; locking without edges");
             return Ok(Read {
                 id: Some(job.id.clone()),
@@ -379,9 +469,15 @@ async fn read_registry(job: &Job, access: &Arc<dyn OciAccess>) -> Result<Read, R
                 layer_bytes: 0,
                 bundle_pair: None,
                 bundle_source: None,
+                from_manifest: false,
             });
         }
-        return Err(fail(if kind == ArtifactKind::Bundle {
+        return Err(fail(if job.carried {
+            ResolveErrorKind::PinnedManifestGone {
+                digest: job.digest.clone(),
+                name: job.key.1.clone(),
+            }
+        } else if kind == ArtifactKind::Bundle {
             ResolveErrorKind::BundleNotFound
         } else {
             ResolveErrorKind::TagNotFound
@@ -419,17 +515,7 @@ async fn read_registry(job: &Job, access: &Arc<dyn OciAccess>) -> Result<Read, R
         }
     };
 
-    let (bundle_source, bundle_pair) = if kind == ArtifactKind::Bundle {
-        let source = LockedBundleSource::Registry {
-            repo: job.id.registry_repository(),
-            tag: bundle_provenance_tag(&job.id),
-            pinned,
-        };
-        let (repo, tag) = source.provenance_pair();
-        (Some(source), Some(BundleProvenance::new(repo, tag)))
-    } else {
-        (None, None)
-    };
+    let (bundle_source, bundle_pair) = job.bundle_identity();
     Ok(Read {
         id: Some(job.id.clone()),
         digest: Some(job.digest.clone()),
@@ -438,6 +524,7 @@ async fn read_registry(job: &Job, access: &Arc<dyn OciAccess>) -> Result<Read, R
         layer_bytes,
         bundle_pair,
         bundle_source,
+        from_manifest: true,
     })
 }
 
@@ -446,57 +533,629 @@ fn is_offline_miss(err: &ResolveError) -> bool {
     matches!(&err.kind, ResolveErrorKind::RegistryUnreachable(e) if matches!(e.kind, AccessErrorKind::OfflineMiss))
 }
 
-/// The read of a node whose manifest or requires layer the store lacks while
-/// offline: the previous lock's `requires` at this digest, unverified, or no
-/// edges when the lock never saw the node. `grim install` set-compares both
-/// against the pinned layer before it writes anything.
+/// The read of a node whose manifest or layer the store lacks while offline:
+/// `published` is what the previous lock recorded for it, unverified.
+/// `grim install` set-compares a node's `requires` against the pinned layer
+/// before it writes anything.
 fn offline_read(job: &Job, published: Vec<BundleMember>) -> Result<Read, ResolveError> {
     let (kind, name) = job.key.clone();
     let reference = ArtifactRef::registry(kind, name, job.id.clone());
     let edges = resolve_members(&reference, Some(&job.id), &published)?;
     tracing::warn!(
         "{}: not in the local store while offline; its dependencies are carried from the lock unverified",
-        job.id
+        registry_text(&job.id.to_string())
     );
+    let (bundle_source, bundle_pair) = job.bundle_identity();
     Ok(Read {
         id: Some(job.id.clone()),
         digest: Some(job.digest.clone()),
         published,
         edges,
         layer_bytes: 0,
-        bundle_pair: None,
-        bundle_source: None,
+        bundle_pair,
+        bundle_source,
+        from_manifest: false,
     })
+}
+
+/// Read `job` within `timeout`. `offline` stands in for a read the store lacks
+/// while offline; any other failure stays a failure.
+async fn read_node(
+    job: Job,
+    offline: Option<Vec<BundleMember>>,
+    access: Arc<dyn OciAccess>,
+    timeout: Duration,
+) -> Result<(NodeKey, Read), ResolveError> {
+    let read = match (
+        tokio::time::timeout(timeout, read_registry(&job, &access)).await,
+        offline,
+    ) {
+        (Ok(Ok(read)), _) => read,
+        // A stand-in carries the edges the lock records at this digest, none on a lock
+        // grim 0.15.1 wrote, so a row only an unread requires layer names drops, as on
+        // 0.15.1. Held under the declaration's hash, `grim export` and 0.15.1's install act
+        // on it; under any other hash `grim install --offline` exits 65 where 0.15.1 gives 81.
+        (Ok(Err(err)), Some(members)) if is_offline_miss(&err) => offline_read(&job, members)?,
+        (Ok(Err(err)), _) => return Err(err),
+        (Err(_elapsed), _) => {
+            let reference = ArtifactRef::registry(job.key.0, job.key.1.clone(), job.id.clone());
+            return Err(match job.via {
+                Some(via) => ResolveError::new(reference, ResolveErrorKind::ResolveTimeout).required_by(via),
+                None => ResolveError::new(reference, ResolveErrorKind::ResolveTimeout),
+            });
+        }
+    };
+    Ok((job.key, read))
 }
 
 /// What a previous lock lets a resolve skip or fall back on.
 ///
-/// `digests` pre-answers tag resolves for identifiers that must not move
-/// (a partial resolve's unselected nodes); `requires` is consulted only when
-/// the store has no copy of a non-bundle node, offline. Neither is ever read
-/// in place of a registry that answers.
+/// `pins` answers the claims on nodes that must not move, so their tags are
+/// never resolved. `requires` and a carried bundle's row are consulted only
+/// when the store has no copy of the node, offline. A registry that answers
+/// always supplies a node's edges.
 #[derive(Debug, Default, Clone)]
 pub struct Carry {
-    /// Requested identifier to the digest it keeps.
-    pub digests: BTreeMap<Identifier, Digest>,
+    /// Each node's previous pin, unless the node must resolve afresh.
+    pub pins: BTreeMap<NodeKey, CarriedPin>,
     /// A node's `requires` as locked, at the digest it was locked at.
     pub requires: BTreeMap<(NodeKey, Digest), Vec<BundleMember>>,
+    /// Under a proof, each node's digest in the previous lock, selected or not, or
+    /// `None` for a key the proof and this run declare alike, with no pin to compare,
+    /// that the run does not select.
+    pub proven: BTreeMap<NodeKey, Option<Digest>>,
+    /// Whether only a digest `proven` records, or one a listed edge names, proves a
+    /// read. A part keeps no row for a bundle whose digest it never recorded, so a tag
+    /// read of that bundle shows nothing the part saw.
+    pub recorded_only: bool,
+    /// The edge lists the previous lock's rows record, the only edges a read as the
+    /// proof shows it lists.
+    pub walked: WalkedEdges,
+    /// What a marketplace part's stamps carry: a bundle at the digest they record, and
+    /// the edges of such a bundle that a member row's own stamp records. `None` on a
+    /// project and on a whole update.
+    pub part: Option<PartCarry>,
 }
 
-struct Graph {
+/// The part of a [`Carry`] a marketplace part's stamps give. A part keeps no
+/// `[[bundle]]` row, so its stamp stands in for one: it names the bundle's repository
+/// and tag and records the digest it resolved to, and it is the record of every row
+/// that carries it.
+#[derive(Debug, Clone)]
+pub struct PartCarry {
+    /// The digests the part's stamps record, and the rows that carry each stamp.
+    pub stamps: PartStamps,
+    /// The run's refresh: a bundle it selects reads its tag afresh.
+    pub refresh: Refresh,
+    /// The previous part's edges onto each key no pin of the carry covers, which a
+    /// bundle's pin takes as its recorded edges as a project's `[[bundle]]` pin would.
+    pub recorded: BTreeMap<NodeKey, BTreeSet<Identifier>>,
+    /// The keys the part's proof declares directly; `None` for a part whose hash proves
+    /// no declaration.
+    pub declared: Option<BTreeSet<NodeKey>>,
+}
+
+impl PartCarry {
+    /// Whether the part's stamp carries the bundle `key` at its recorded digest, rather than
+    /// the run reading its tag. `below_pick` is whether the walk reached `key` through a
+    /// bundle the run selects.
+    ///
+    /// A bundle the run selects always reads its tag. A recorded bundle nested below a
+    /// selected one keeps its digest too (the lock-pin ADR's "a nested bundle the part
+    /// records keeps its digest on a pick"), so a tag of it that moved adds and drops no
+    /// row. Owner question STOP-A: set [`Self::NESTED_BELOW_PICK_KEEPS_PIN`] to `false` and
+    /// such a bundle reads its tag as a selected one does, so a moved list it brings meets
+    /// the member check and the pick exits 78. The unit
+    /// `a_pick_keeps_a_recorded_bundle_nested_below_the_picked_one_at_its_digest` pins the
+    /// shipped behaviour and is the one expectation that flips.
+    const NESTED_BELOW_PICK_KEEPS_PIN: bool = true;
+
+    fn carries(&self, key: &NodeKey, below_pick: bool) -> bool {
+        !self.refresh.selects(key) && (Self::NESTED_BELOW_PICK_KEEPS_PIN || !below_pick)
+    }
+}
+
+/// One node's previous pin and what it may answer.
+#[derive(Debug, Clone)]
+pub struct CarriedPin {
+    /// The pin the node keeps while a claim is answered.
+    pub pin: PinnedIdentifier,
+    /// The proof's identifier for a key it declares directly. It is all a
+    /// tagless pin has to show which declaration it answered.
+    pub declared: Option<Identifier>,
+    /// A bundle's lock row. Its `repo` and `tag` name what `pin` cannot: the
+    /// row records a bare request as `latest` and a digest one by short digest.
+    /// Its members are read only for a bundle the store lacks while offline.
+    pub snapshot: Option<LockedBundle>,
+    /// What the previous edges onto the key may do, each resolved against its
+    /// parent.
+    pub evidence: EdgeEvidence,
+}
+
+impl CarriedPin {
+    /// The pin as [`pin_rule`] reads it, on `binding`.
+    pub fn record<'a>(&'a self, binding: &'a str) -> PinRecord<'a> {
+        PinRecord {
+            pin: &self.pin,
+            row: self.snapshot.as_ref(),
+            binding,
+        }
+    }
+
+    /// Whether the previous lock shows a digest request behind the pin, which
+    /// holds no tag by design, so it is no leftover of an older lock.
+    pub fn answered_a_digest(&self) -> bool {
+        self.declared
+            .iter()
+            .chain(&self.evidence.requests)
+            .any(|id| id.digest().is_some())
+    }
+}
+
+/// One request for a node. Who makes it decides what may answer it.
+#[derive(Debug, Clone, Copy)]
+pub enum NodeClaim<'a> {
+    /// A declaration of the key.
+    Direct(&'a Identifier),
+    /// A requires or members edge onto the key.
+    Edge(&'a Identifier),
+    /// An edge of a parent read as the lock's proof shows it, which the parent's row
+    /// records there.
+    ListedEdge(&'a Identifier),
+    /// An edge of a bundle a part's stamp records, read at that digest, onto a row whose
+    /// own stamp carries it.
+    StampedEdge(&'a Identifier),
+}
+
+impl<'a> NodeClaim<'a> {
+    fn of_edge(id: &'a Identifier, listed: bool, stamped: bool) -> Self {
+        match (stamped, listed) {
+            (true, _) => Self::StampedEdge(id),
+            (false, true) => Self::ListedEdge(id),
+            (false, false) => Self::Edge(id),
+        }
+    }
+
+    fn id(self) -> &'a Identifier {
+        match self {
+            Self::Direct(id) | Self::Edge(id) | Self::ListedEdge(id) | Self::StampedEdge(id) => id,
+        }
+    }
+}
+
+impl Carry {
+    /// The digest `claim` keeps on `key`, when the key's previous pin answers
+    /// it.
+    ///
+    /// Reads only the carried entry and the claim, so no other claim and no
+    /// order of arrival can change the answer. A rule that read the other
+    /// claims could write a tag beside a digest it never named.
+    pub fn answer(&self, key: &NodeKey, claim: NodeClaim<'_>, below_pick: bool) -> Option<Digest> {
+        // A digest in the claim is its own answer: a pin could only replace it.
+        if claim.id().digest().is_some() {
+            return None;
+        }
+        let carried = self.carried_pin(key, claim.id(), below_pick)?;
+        let answered = Self::answered(&carried, key, claim);
+        answered.then(|| carried.pin.digest())
+    }
+
+    /// Whether `carried`, the previous pin of `key`, answers `claim`.
+    fn answered(carried: &CarriedPin, key: &NodeKey, claim: NodeClaim<'_>) -> bool {
+        let record = carried.record(&key.1);
+        match claim {
+            NodeClaim::Direct(id) => pin_rule::answers_direct(record, carried.declared.as_ref(), id),
+            NodeClaim::Edge(id) => pin_rule::answers_edge(record, &carried.evidence, id),
+            NodeClaim::ListedEdge(id) => pin_rule::answers_listed_edge(record, &carried.evidence, id),
+            NodeClaim::StampedEdge(id) => pin_rule::answers_stamped_edge(record, &carried.evidence, id),
+        }
+    }
+
+    /// The previous pin `key` holds against a request for `id`: its entry in `pins`, or
+    /// for a bundle a part's stamp records, the pin that stamp gives as a `[[bundle]]` row
+    /// would, unless the run selects the bundle. Every answer, keep and release reads
+    /// the pin from here, so a stamp-carried bundle and a project's carried `[[bundle]]`
+    /// pin win and lose their claims by one rule.
+    fn carried_pin(
+        &self,
+        key: &NodeKey,
+        id: &Identifier,
+        below_pick: bool,
+    ) -> Option<std::borrow::Cow<'_, CarriedPin>> {
+        if let Some(carried) = self.pins.get(key) {
+            return Some(std::borrow::Cow::Borrowed(carried));
+        }
+        let part = self.part.as_ref().filter(|_| key.0 == ArtifactKind::Bundle)?;
+        if id.digest().is_some() || !part.carries(key, below_pick) {
+            return None;
+        }
+        let (repo, tag) = (id.registry_repository(), bundle_provenance_tag(id));
+        let digest = part.stamps.recorded(&repo, &tag)?;
+        let pin = PinnedIdentifier::try_from(id.clone_with_digest(digest.clone())).ok()?;
+        let row = LockedBundle {
+            name: key.1.clone(),
+            source: LockedBundleSource::Registry {
+                repo,
+                tag,
+                pinned: pin.clone(),
+            },
+            members: Vec::new(),
+            transitive: false,
+        };
+        let proof = match &part.declared {
+            Some(declared) if declared.contains(key) => HashProof::Direct,
+            Some(_) => HashProof::Indirect,
+            None => HashProof::Stale,
+        };
+        let recorded = part.recorded.get(key).cloned().unwrap_or_default();
+        let record = PinRecord {
+            pin: &pin,
+            row: Some(&row),
+            binding: &key.1,
+        };
+        let evidence = pin_rule::edge_evidence(record, proof, recorded);
+        Some(std::borrow::Cow::Owned(CarriedPin {
+            pin,
+            declared: None,
+            snapshot: Some(row),
+            evidence,
+        }))
+    }
+
+    /// Whether `key` holds a recorded edge of the previous lock that names `id`: the
+    /// evidence a conflicting claim leaves a carried pin standing against.
+    fn records_request(&self, key: &NodeKey, id: &Identifier, below_pick: bool) -> bool {
+        self.carried_pin(key, id, below_pick)
+            .is_some_and(|carried| carried.evidence.requests.contains(id))
+    }
+
+    /// The pin the claims so far leave standing on a key they settled by agreement: its
+    /// entry in `pins` if one of the claims keeps it, else for a stamp-carried bundle
+    /// the pin at the smallest claim the stamp answers.
+    fn kept(
+        &self,
+        key: &NodeKey,
+        claims: &[&Identifier],
+        listed: &[&Identifier],
+        stamped: &[&Identifier],
+        below_pick: bool,
+    ) -> Option<PinnedIdentifier> {
+        if let Some(carried) = self.pins.get(key) {
+            return pin_rule::keeps_pin(carried.record(&key.1), &carried.evidence, claims, listed, stamped)
+                .then(|| carried.pin.clone());
+        }
+        let asked = claims
+            .iter()
+            .map(|id| NodeClaim::Edge(id))
+            .chain(listed.iter().map(|id| NodeClaim::ListedEdge(id)))
+            .chain(stamped.iter().map(|id| NodeClaim::StampedEdge(id)));
+        asked
+            .filter_map(|claim| {
+                let carried = self.carried_pin(key, claim.id(), below_pick)?;
+                Self::answered(&carried, key, claim).then(|| (claim.id(), carried.pin.clone()))
+            })
+            .min_by(|a, b| a.0.cmp(b.0))
+            .map(|(_, pin)| pin)
+    }
+
+    /// What stands in for `job` when the store lacks it while offline: a
+    /// node's `requires` as locked at this digest, none when the lock never saw
+    /// it, or a carried bundle's row. `None` refuses.
+    ///
+    /// A bundle has no edgeless reading: dropping its members from the lock
+    /// is worse than failing. So only a row at this digest and repository
+    /// answers, and not an empty one, which a lock from before the member cache
+    /// holds. `pins` has no entry for a selected or new node.
+    ///
+    /// A stand-in may inform a report, never a consent record: no manifest
+    /// vouches for it, so an offline `grim add` consents to its target alone.
+    fn offline_members(&self, job: &Job) -> Option<Vec<BundleMember>> {
+        if job.key.0 != ArtifactKind::Bundle {
+            let locked = self.requires.get(&(job.key.clone(), job.digest.clone()));
+            return Some(locked.cloned().unwrap_or_default());
+        }
+        let carried = self.pins.get(&job.key)?;
+        let same_pin =
+            carried.pin.digest() == job.digest && carried.pin.registry_repository() == job.id.registry_repository();
+        let row = carried.snapshot.as_ref().filter(|_| same_pin)?;
+        (!row.members.is_empty()).then(|| row.members.clone())
+    }
+}
+
+struct Graph<'a> {
     nodes: BTreeMap<NodeKey, Node>,
-    /// Requested identifier to the digest its tag resolved to.
+    carry: &'a Carry,
+    /// Keys a conflict took out of `carry`. It never shrinks, so a pin stays
+    /// released even if a later pass drops the claim that released it.
+    released: BTreeSet<NodeKey>,
+    /// Direct keys whose pin the edges onto them keep and stamp with the declared
+    /// reference, as `grim lock` before the line was typed would: from the next pass
+    /// on, the declaration reads the pin.
+    attested: BTreeSet<NodeKey>,
+    /// Direct keys whose edges showed no pin answering their line, at once or after
+    /// attesting it. They resolve their line and never attest again, so the passes end.
+    unattested: BTreeSet<NodeKey>,
+    /// Direct keys attested because the edges the carry does not answer resolved onto
+    /// the pin, as `grim lock` settles them (`Graph::confirmable`). Only these count a
+    /// resolve as an answer in `Graph::stamps_declared`.
+    confirmed: BTreeSet<NodeKey>,
+    /// This run's resolves: requested identifier to the digest its tag
+    /// resolved to. Keyed by identifier so one tag resolves once per run; a
+    /// previous pin belongs to one node and stays out of it.
     digests: BTreeMap<Identifier, Digest>,
-    /// Nodes admitted that count toward [`MAX_TRANSITIVE_NODES`].
+    /// The last pass's manifest reads; a pass takes one back for a job at the
+    /// same id and digest instead of reading the store again.
+    reads: Reads,
+    /// Nodes this pass admitted that count toward [`MAX_TRANSITIVE_NODES`].
     transitive: usize,
-    /// Layer bytes admitted toward [`MAX_REQUIRES_BYTES`].
+    /// Layer bytes this pass admitted toward [`MAX_REQUIRES_BYTES`].
     bytes: u64,
+    /// The keys this pass reached through a bundle a part's run selects, which
+    /// [`PartCarry::carries`] asks about.
+    below_pick: BTreeSet<NodeKey>,
 }
 
-impl Graph {
+impl Graph<'_> {
     /// The root bundle's members are exempt from the node cap.
     fn is_declared_bundle(&self, key: &NodeKey) -> bool {
         key.0 == ArtifactKind::Bundle && self.nodes.get(key).is_some_and(|n| n.direct.is_some())
+    }
+
+    /// The digest the previous lock keeps for `claim` on `key`. Every claim asks
+    /// through here: a released pin answers nothing.
+    fn carried(&self, key: &NodeKey, claim: NodeClaim<'_>) -> Option<Digest> {
+        if self.released.contains(key) {
+            return None;
+        }
+        let attested = matches!(claim, NodeClaim::Direct(_)) && self.attested.contains(key);
+        match self.carry.answer(key, claim, self.below_pick.contains(key)) {
+            None if attested => self.carry.pins.get(key).map(|carried| carried.pin.digest()),
+            answer => answer,
+        }
+    }
+
+    /// Whether `grim lock` over the proof keeps `key`'s pin and stamps it with `id`,
+    /// which the typed line then answers: every edge onto it answers the pin and they
+    /// stamp `id`. An edge the pin does not answer would resolve there, so it shows
+    /// nothing, except on a key in `confirmed`, where its resolve onto the pin does.
+    fn stamps_declared(&self, key: &NodeKey, id: &Identifier) -> bool {
+        let (Some(node), Some(carried)) = (self.nodes.get(key), self.carry.pins.get(key)) else {
+            return false;
+        };
+        let resolved = self.confirmed.contains(key);
+        let answered = |c: &Claim| {
+            let lands = || self.digests.get(&c.id) == Some(&carried.pin.digest());
+            self.carried(key, c.claim()).is_some() || (resolved && lands())
+        };
+        node.claims.iter().all(answered) && self.kept_reference(key, &carried.pin) == *id
+    }
+
+    /// Whether the edges onto `key` may yet show that its pin answers the line `id`, as
+    /// [`Self::stamps_declared`] decides once the walk has met them.
+    fn may_attest(&self, key: &NodeKey, id: &Identifier) -> bool {
+        !self.unattested.contains(key) && self.may_take_stamp(key, id)
+    }
+
+    /// Whether the line `id` on `key` could read a pin its edges stamp: a tagless pin in
+    /// the line's repository the carry does not answer, which a recorded edge at `id` or
+    /// a listed edge the pin takes could stamp with it.
+    fn may_take_stamp(&self, key: &NodeKey, id: &Identifier) -> bool {
+        let Some(carried) = self.carry.pins.get(key).filter(|_| id.digest().is_none()) else {
+            return false;
+        };
+        let stampable = carried.evidence.takes_listed_edges || carried.evidence.requests.contains(id);
+        carried.pin.tag().is_none()
+            && carried.pin.registry_repository() == id.registry_repository()
+            && stampable
+            && self
+                .carry
+                .answer(key, NodeClaim::Direct(id), self.below_pick.contains(key))
+                .is_none()
+    }
+
+    /// Whether an edge onto the direct key `key` the carry does not answer is read for
+    /// its digest alone, which [`Self::confirmable`] compares with the pin.
+    fn probes_onto(&self, key: &NodeKey) -> bool {
+        match self.nodes.get(key).and_then(|n| n.direct.as_ref()) {
+            Some(Direct::Registry(id)) => self.may_take_stamp(key, id),
+            _ => false,
+        }
+    }
+
+    /// The typed lines this walk resolved whose pin `grim lock` keeps: the line's own
+    /// tag read, and every edge onto the key the carry does not answer resolved onto the
+    /// pin, as `grim lock` settles such an edge before the line is typed. A line whose
+    /// tag is gone has refused by now, as it does on grim 0.15.1. The walk may have
+    /// stopped on an error, so the graph may hold a pass half walked.
+    ///
+    /// Keeping a pin reads it at its own digest, so the walk that keeps it never meets
+    /// an edge only the line's manifest brought in ([`Self::walked_without`]). Such an
+    /// edge stays out of this verdict. The kept walk's own check judges the edges it
+    /// does meet (`a_kept_pin_whose_own_manifest_asks_another_digest_leaves_the_lines_walk`).
+    fn confirmable(&self) -> BTreeSet<NodeKey> {
+        let lands = |key: &NodeKey, pin: &Digest, c: &Claim| {
+            self.carried(key, c.claim()).is_some() || self.digests.get(&c.id) == Some(pin)
+        };
+        let confirms = |key: &NodeKey, node: &Node| {
+            let (Some(Direct::Registry(id)), Some(carried)) = (&node.direct, self.carry.pins.get(key)) else {
+                return false;
+            };
+            let pin = carried.pin.digest();
+            self.unattested.contains(key) && self.may_take_stamp(key, id) && self.digests.contains_key(id) && {
+                // The stamp the kept walk takes rests on the edges it meets too.
+                let met = self.walked_without(key);
+                let reached = |c: &Claim| met.contains(&c.parent);
+                self.kept_reference_among(key, &carried.pin, reached) == *id
+                    && node.claims.iter().filter(|c| reached(c)).all(|c| lands(key, &pin, c))
+            }
+        };
+        let keys = self.nodes.iter().filter(|(key, node)| confirms(key, node));
+        keys.map(|(key, _)| key.clone()).collect()
+    }
+
+    /// The nodes whose edges a walk meets that reads `key` at its pin, and so drops the
+    /// edges of the manifest its line names: those reachable from a direct declaration
+    /// without crossing `key`. `key` itself is not among them.
+    fn walked_without(&self, key: &NodeKey) -> BTreeSet<&NodeKey> {
+        let mut met = BTreeSet::new();
+        let mut open: Vec<&NodeKey> = self
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.direct.is_some())
+            .map(|(root, _)| root)
+            .collect();
+        while let Some(next) = open.pop() {
+            if next == key || !met.insert(next) {
+                continue;
+            }
+            let read = self.nodes.get(next).and_then(|node| node.read.as_ref());
+            open.extend(read.into_iter().flat_map(|r| r.edges.iter().map(|e| &e.key)));
+        }
+        met
+    }
+
+    /// Whether the line `id` on `key` waits for the walk rather than read its tag: a
+    /// read of the tag would add the edges of a manifest the pin may then replace, and
+    /// a tag that is gone would refuse a line `grim lock` keeps
+    /// (`a_typed_line_its_edges_stamp_needs_no_tag`).
+    fn awaits_attestation(&self, key: &NodeKey, id: &Identifier) -> bool {
+        !self.attested.contains(key) && self.may_attest(key, id)
+    }
+
+    /// Settle each direct key [`Self::may_attest`]: attest it when
+    /// [`Self::stamps_declared`] shows its line answered, else let it resolve its line
+    /// from now on, a key attested earlier included
+    /// (`a_line_no_edge_stamps_any_more_resolves_its_tag`). False once neither set grew,
+    /// which ends the passes.
+    fn attest_direct_claims(&mut self) -> bool {
+        let shown: Vec<(NodeKey, bool)> = self
+            .nodes
+            .iter()
+            .filter_map(|(key, node)| match &node.direct {
+                Some(Direct::Registry(id)) if self.may_attest(key, id) => {
+                    Some((key.clone(), self.stamps_declared(key, id)))
+                }
+                _ => None,
+            })
+            .collect();
+        let mut grew = false;
+        for (key, shows) in shown {
+            if shows {
+                grew |= self.attested.insert(key);
+            } else {
+                self.attested.remove(&key);
+                grew |= self.unattested.insert(key);
+            }
+        }
+        grew
+    }
+
+    /// The digest `claim` settles at on `key`: the carried pin when it answers
+    /// the claim, else this run's resolve of the identifier.
+    fn digest_of(&self, key: &NodeKey, claim: NodeClaim<'_>) -> Option<Digest> {
+        self.carried(key, claim)
+            .or_else(|| self.digests.get(claim.id()).cloned())
+    }
+
+    /// The pin an agreeing `key` keeps. A released pin keeps nothing.
+    fn kept(&self, key: &NodeKey) -> Option<PinnedIdentifier> {
+        if self.released.contains(key) {
+            return None;
+        }
+        let node = self.nodes.get(key)?;
+        let ids = |listed: bool, stamped: bool| -> Vec<&Identifier> {
+            let claims = node
+                .claims
+                .iter()
+                .filter(|c| c.stamped == stamped && (stamped || c.listed == listed));
+            claims.map(|c| &c.id).collect()
+        };
+        let below_pick = self.below_pick.contains(key);
+        self.carry.kept(
+            key,
+            &ids(false, false),
+            &ids(true, false),
+            &ids(false, true),
+            below_pick,
+        )
+    }
+
+    /// Whether `key`, read at `digest`, was read as the lock's proof shows it: the
+    /// digest is the proven one, no pin exists to differ, or it has no row and a listed
+    /// edge led here. Of its edges only those its row records count as listed
+    /// ([`Self::walked`]): grim 0.15.1 never met a `requires` edge. Under
+    /// [`Carry::recorded_only`] the edge that led here must name the digest read: a tag
+    /// read of a key with no recorded digest would let its moved list stamp a member's
+    /// new tag beside the digest the old one resolved. A parent the proof never saw, or
+    /// one that moved, lists a request no pin answered.
+    fn read_as_proven(&self, key: &NodeKey, digest: Option<&Digest>) -> bool {
+        let recorded_only = self.carry.recorded_only;
+        let attests = |c: &Claim| {
+            let names_the_read = c.id.digest().is_some_and(|at| Some(&at) == digest);
+            c.listed && (!recorded_only || names_the_read)
+        };
+        match self.carry.proven.get(key) {
+            Some(Some(at)) => Some(at) == digest,
+            Some(None) if !recorded_only => true,
+            _ => self.nodes.get(key).is_some_and(|n| n.claims.iter().any(attests)),
+        }
+    }
+
+    /// Whether the previous lock's writer walked `edge` when it read `key` as `read`
+    /// did: a row of `key` at that digest records it. A key with no row, a declared
+    /// bundle with no `[[bundle]]` row, has no list to check, so its read stands as
+    /// [`Self::read_as_proven`] judged it.
+    fn walked(&self, key: &NodeKey, read: &Read, edge: &GraphEdge) -> bool {
+        let (digest, anchor) = (read.digest.as_ref(), read.id.as_ref());
+        let walked = self.carry.walked.records(key, digest, anchor, &edge.key, &edge.id);
+        walked.unwrap_or(true)
+    }
+
+    /// The pair a bundle's edges are stamped with, when `read` is `key` read at the
+    /// digest a part's stamp records for its pair.
+    fn stamp_of(&self, key: &NodeKey, read: &Read) -> Option<(String, String)> {
+        let part = self.carry.part.as_ref().filter(|_| key.0 == ArtifactKind::Bundle)?;
+        let (pair, digest) = read.bundle_pair.as_ref().zip(read.digest.as_ref())?;
+        (part.stamps.recorded(&pair.repo, &pair.tag) == Some(digest)).then(|| (pair.repo.clone(), pair.tag.clone()))
+    }
+
+    /// Whether `key` is a bundle a part's run selects.
+    fn is_picked_bundle(&self, key: &NodeKey) -> bool {
+        key.0 == ArtifactKind::Bundle && self.carry.part.as_ref().is_some_and(|part| part.refresh.selects(key))
+    }
+
+    /// Whether the row of `key` carries the stamp `pair` with its recorded digest.
+    fn carries_stamp(&self, key: &NodeKey, pair: &(String, String)) -> bool {
+        self.carry
+            .part
+            .as_ref()
+            .and_then(|part| part.stamps.rows.get(key))
+            .is_some_and(|pairs| pairs.contains(pair))
+    }
+
+    /// What a kept pin reads and records: its own reference, or for a tagless
+    /// pin the settled request in its repository, the stamp. The graph's winner
+    /// never relabels a kept tag, because that tag resolved this digest and the
+    /// winner may not have, and relative children anchor on this repository.
+    fn kept_reference(&self, key: &NodeKey, pin: &PinnedIdentifier) -> Identifier {
+        self.kept_reference_among(key, pin, |_| true)
+    }
+
+    /// [`Self::kept_reference`] over the claims `reached` admits: an edge a walk never
+    /// meets stamps nothing there, whatever it asks.
+    fn kept_reference_among(
+        &self,
+        key: &NodeKey,
+        pin: &PinnedIdentifier,
+        reached: impl Fn(&Claim) -> bool,
+    ) -> Identifier {
+        if pin.tag().is_some() {
+            return pin.as_identifier().clone();
+        }
+        let claims = self.nodes.get(key).into_iter().flat_map(|n| n.claims.iter());
+        pin_rule::stamp_request(pin, claims.filter(|c| reached(c)).map(|c| &c.id))
+            .unwrap_or(pin.as_identifier())
+            .clone()
     }
 
     fn id_of(&self, key: &NodeKey) -> Option<&Identifier> {
@@ -554,6 +1213,7 @@ impl Graph {
                         key: key.clone(),
                         id: id.clone(),
                         via: None,
+                        probe: false,
                     });
                     touched.insert(key.clone());
                     self.nodes.insert(key, Node::new(Some(Direct::Registry(id)), 0));
@@ -585,6 +1245,7 @@ impl Graph {
                             layer_bytes: 0,
                             bundle_pair,
                             bundle_source: None,
+                            from_manifest: false,
                         },
                     ));
                 }
@@ -600,11 +1261,14 @@ impl Graph {
         access: &Arc<dyn OciAccess>,
         options: &ResolveOptions,
     ) -> Result<(), ResolveError> {
-        pending.sort_by(|a, b| (&a.key, &a.via, &a.id).cmp(&(&b.key, &b.via, &b.id)));
+        // A probe sorts after every read that refuses, so the one read `seen` keeps
+        // for an identifier both ask for still refuses when its tag is gone.
+        pending.sort_by(|a, b| (a.probe, &a.key, &a.via, &a.id).cmp(&(b.probe, &b.key, &b.via, &b.id)));
         let mut seen = BTreeSet::new();
-        let mut tasks: Vec<Task<(Identifier, Digest)>> = Vec::new();
+        let mut tasks: Vec<Task<Option<(Identifier, Digest)>>> = Vec::new();
         for p in pending {
-            if self.digests.contains_key(&p.id) || !seen.insert(p.id.clone()) {
+            let waits = p.via.is_none() && self.awaits_attestation(&p.key, &p.id);
+            if waits || self.digest_of(&p.key, p.claim()).is_some() || !seen.insert(p.id.clone()) {
                 continue;
             }
             let (access, options) = (Arc::clone(access), options.clone());
@@ -620,13 +1284,14 @@ impl Graph {
                     Err(_elapsed) => Err(ResolveError::new(reference, ResolveErrorKind::ResolveTimeout)),
                 };
                 match (result, p.via) {
-                    (Ok(digest), _) => Ok((p.id, digest)),
+                    (Ok(digest), _) => Ok(Some((p.id, digest))),
+                    (Err(_), _) if p.probe => Ok(None),
                     (Err(e), Some((_, via))) => Err(e.required_by(via)),
                     (Err(e), None) => Err(e),
                 }
             }));
         }
-        self.digests.extend(run_bounded(tasks).await?);
+        self.digests.extend(run_bounded(tasks).await?.into_iter().flatten());
         Ok(())
     }
 
@@ -638,7 +1303,7 @@ impl Graph {
         let direct = match &node.direct {
             Some(Direct::Registry(id)) => Some(DirectClaim {
                 id: Some(id.clone()),
-                digest: self.digests.get(id).cloned(),
+                digest: self.digest_of(key, NodeClaim::Direct(id)),
             }),
             Some(Direct::Path(_)) => Some(DirectClaim { id: None, digest: None }),
             None => None,
@@ -649,7 +1314,7 @@ impl Graph {
             .map(|c| EdgeClaim {
                 parent: c.parent.clone(),
                 requested_id: c.id.clone(),
-                digest: self.digests.get(&c.id).cloned(),
+                digest: self.digest_of(key, c.claim()),
             })
             .collect();
         (direct, edges)
@@ -660,6 +1325,18 @@ impl Graph {
         settle(direct.as_ref(), &edges)
     }
 
+    /// Whether `key` holds a claim only the registry could answer. An edge onto
+    /// a direct key is shadowed and never resolved, so it does not count.
+    fn resolved_tag(&self, key: &NodeKey, node: &Node) -> bool {
+        let reaches_registry =
+            |claim: NodeClaim<'_>| claim.id().digest().is_none() && self.carried(key, claim).is_none();
+        match &node.direct {
+            Some(Direct::Registry(id)) => reaches_registry(NodeClaim::Direct(id)),
+            Some(Direct::Path(_)) => false,
+            None => node.claims.iter().any(|c| reaches_registry(c.claim())),
+        }
+    }
+
     /// Pass two input: the touched keys that now deserve a read.
     fn schedule(&mut self, touched: &BTreeSet<NodeKey>) -> Vec<Job> {
         let mut jobs = Vec::new();
@@ -667,16 +1344,29 @@ impl Graph {
             if self.nodes.get(key).is_none_or(|n| n.queued) {
                 continue;
             }
-            let id = match self.settled(key) {
+            let (id, digest, carried, by_digest) = match self.settled(key) {
                 Some(Settled::Direct { .. }) => match self.nodes.get(key).and_then(|n| n.direct.as_ref()) {
-                    Some(Direct::Registry(id)) => id.clone(),
+                    Some(Direct::Registry(id)) => {
+                        let claim = NodeClaim::Direct(id);
+                        let carried = self.carried(key, claim).is_some();
+                        (id.clone(), self.digest_of(key, claim), carried, false)
+                    }
                     _ => continue,
                 },
-                Some(Settled::Agreed { winner_id, .. }) => winner_id,
+                Some(Settled::Agreed { winner_id, .. }) => {
+                    let by_digest = winner_id.digest().is_some();
+                    match self.kept(key) {
+                        Some(pin) => (self.kept_reference(key, &pin), Some(pin.digest()), true, by_digest),
+                        None => {
+                            let digest = self.digest_of(key, NodeClaim::Edge(&winner_id));
+                            (winner_id, digest, false, by_digest)
+                        }
+                    }
+                }
                 // A conflicted node is never read.
                 Some(Settled::Conflict { .. }) | None => continue,
             };
-            let Some(digest) = self.digests.get(&id).cloned() else {
+            let Some(digest) = digest else {
                 continue;
             };
             let via = self
@@ -686,14 +1376,15 @@ impl Graph {
                 .map(|parent| self.via_of(parent))
                 .filter(|_| self.nodes.get(key).is_none_or(|n| n.direct.is_none()));
             let declared_bundle = self.is_declared_bundle(key);
-            let from_bundle = self.nodes.get(key).is_some_and(|n| {
-                n.direct.is_none()
-                    && n.claims
-                        .iter()
-                        .map(|c| &c.parent)
-                        .min()
-                        .is_some_and(|p| p.0 == ArtifactKind::Bundle)
-            });
+            let frozen_member = by_digest
+                && self.nodes.get(key).is_some_and(|n| {
+                    n.direct.is_none()
+                        && n.claims
+                            .iter()
+                            .map(|c| &c.parent)
+                            .min()
+                            .is_some_and(|p| p.0 == ArtifactKind::Bundle)
+                });
             if let Some(node) = self.nodes.get_mut(key) {
                 node.queued = true;
             }
@@ -703,7 +1394,8 @@ impl Graph {
                 digest,
                 declared_bundle,
                 via,
-                from_bundle,
+                frozen_member,
+                carried,
             });
         }
         jobs
@@ -748,21 +1440,35 @@ impl Graph {
                 self.nodes.insert(child, Node::new(None, depth + 1));
             }
             let via = self.via_of(&key);
+            let proven = self.read_as_proven(&key, read.digest.as_ref());
+            let stamp = self.stamp_of(&key, &read);
+            let picked_parent = self.is_picked_bundle(&key) || self.below_pick.contains(&key);
             for edge in &read.edges {
+                let listed = proven && self.walked(&key, &read, edge);
+                let stamped = stamp.as_ref().is_some_and(|pair| self.carries_stamp(&edge.key, pair));
+                if picked_parent {
+                    self.below_pick.insert(edge.key.clone());
+                }
                 if let Some(node) = self.nodes.get_mut(&edge.key) {
                     node.claims.push(Claim {
                         parent: key.clone(),
                         id: edge.id.clone(),
+                        listed,
+                        stamped,
                     });
                 }
                 touched.insert(edge.key.clone());
-                // A direct declaration wins, so an edge onto it is never resolved.
+                // A direct declaration wins, so an edge onto it is never resolved for the
+                // node, only probed where it may show the line's pin kept.
                 let onto_direct = self.nodes.get(&edge.key).is_some_and(|n| n.direct.is_some());
-                if !onto_direct && !self.digests.contains_key(&edge.id) {
+                let claim = NodeClaim::of_edge(&edge.id, listed, stamped);
+                let probe = onto_direct && self.probes_onto(&edge.key);
+                if (!onto_direct || probe) && self.digest_of(&edge.key, claim).is_none() {
                     pending.push(Pending {
                         key: edge.key.clone(),
                         id: edge.id.clone(),
                         via: Some((key.clone(), via.clone())),
+                        probe,
                     });
                 }
             }
@@ -773,15 +1479,99 @@ impl Graph {
         Ok((pending, touched))
     }
 
-    /// After expansion: conflicts (78), then cycles (65), then the result.
-    fn finish(self) -> Result<ExpandedGraph, ResolveError> {
-        let mut conflicts = Vec::new();
-        for key in self.nodes.keys() {
-            if let Some(Settled::Conflict { contributors }) = self.settled(key) {
-                conflicts.push((key.clone(), contributors));
+    /// One pass: walk `roots` wave by wave until nothing is left to read.
+    async fn expand(
+        &mut self,
+        roots: Vec<GraphRoot>,
+        access: &Arc<dyn OciAccess>,
+        options: &ResolveOptions,
+    ) -> Result<(), ResolveError> {
+        let (mut pending, mut touched, mut reads) = self.seed(roots)?;
+        loop {
+            self.resolve_digests(std::mem::take(&mut pending), access, options)
+                .await?;
+            let jobs = self.schedule(&touched);
+            if jobs.is_empty() && reads.is_empty() {
+                return Ok(());
+            }
+            let mut tasks: Vec<Task<(NodeKey, Read)>> = Vec::new();
+            for job in jobs {
+                if let Some(read) = self.reads.take(&job) {
+                    reads.push((job.key, read));
+                    continue;
+                }
+                let offline = self.carry.offline_members(&job);
+                let timeout = options.per_artifact_timeout;
+                tasks.push(Box::pin(read_node(job, offline, Arc::clone(access), timeout)));
+            }
+            reads.extend(run_bounded(tasks).await?);
+            reads.sort_by(|a, b| a.0.cmp(&b.0));
+            (pending, touched) = self.fold(std::mem::take(&mut reads))?;
+        }
+    }
+
+    /// Every key whose claims disagree, with those claims.
+    fn conflicts(&self) -> Vec<(NodeKey, Vec<EdgeClaim>)> {
+        self.nodes
+            .keys()
+            .filter_map(|key| match self.settled(key) {
+                Some(Settled::Conflict { contributors }) => Some((key.clone(), contributors)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Release every conflicted key a carried pin answers a claim on while a
+    /// claim the previous lock never recorded disputes it: the pin may only have
+    /// lost to a moved tag. A dispute among recorded edges releases nothing, or a
+    /// tag moving under one of them would move the pin outside `grim update`.
+    /// False once nothing joined the released set, which ends the passes.
+    fn release_conflicts(&mut self) -> bool {
+        let mut grew = false;
+        for (key, contributors) in self.conflicts() {
+            // The claim as the node holds it: listed or stamped when its parent's read made it so.
+            let answered = |c: &EdgeClaim| {
+                let claims = self.nodes.get(&key).map(|n| n.claims.as_slice()).unwrap_or_default();
+                claims
+                    .iter()
+                    .filter(|n| n.parent == c.parent && n.id == c.requested_id)
+                    .any(|n| self.carried(&key, n.claim()).is_some())
+            };
+            let recorded = |c: &EdgeClaim| {
+                self.carry
+                    .records_request(&key, &c.requested_id, self.below_pick.contains(&key))
+            };
+            if contributors.iter().any(answered) && contributors.iter().any(|c| !answered(c) && !recorded(c)) {
+                grew |= self.released.insert(key);
             }
         }
-        if let Some(error) = self.conflict_error(&conflicts) {
+        grew
+    }
+
+    /// Forget the pass, whose nodes may rest on what a released pin's manifest
+    /// claimed. The caps count one pass, or a graph that fits would add up to a
+    /// false `GraphTooLarge`. `digests` stays, or a later pass would resolve a
+    /// tag a second time and could see it moved. Each manifest read moves to
+    /// `reads`, for the next pass to reuse at the same id and digest.
+    fn restart(&mut self) {
+        let mut reads = Reads::default();
+        for (key, node) in std::mem::take(&mut self.nodes) {
+            if let Some(read) = node.read {
+                reads.keep(key, read);
+            }
+        }
+        // Replaced, never merged: merging would hold the layers of every pass,
+        // up to one byte cap per pass, where replacing holds one pass's worth.
+        // `a_read_the_last_pass_did_not_reach_is_not_kept` fails on a merge.
+        self.reads = reads;
+        self.transitive = 0;
+        self.bytes = 0;
+        self.below_pick.clear();
+    }
+
+    /// After expansion: conflicts (78), then cycles (65), then the result.
+    fn finish(self) -> Result<ExpandedGraph, ResolveError> {
+        if let Some(error) = self.conflict_error(&self.conflicts()) {
             return Err(error);
         }
         if let Some(cycle) = self.find_cycle() {
@@ -832,6 +1622,10 @@ impl Graph {
             )
         };
         let id = claims.iter().map(|c| &c.requested_id).min()?.clone();
+        let from_bundles = claims.iter().all(|c| c.parent.0 == ArtifactKind::Bundle);
+        let mut locations: Vec<String> = claims.iter().map(|c| c.requested_id.registry_repository()).collect();
+        locations.sort();
+        locations.dedup();
         Some(ResolveError::new(
             ArtifactRef::registry(*kind, name.clone(), id),
             ResolveErrorKind::BundleConflict {
@@ -839,6 +1633,8 @@ impl Graph {
                 name: name.clone(),
                 sources: sources(claims),
                 others,
+                locations,
+                from_bundles,
             },
         ))
     }
@@ -898,11 +1694,13 @@ impl Graph {
     }
 
     /// Re-pick each merged node's id over all final claims, so a smaller id
-    /// that arrived in a later wave wins exactly as it does offline.
+    /// that arrived in a later wave wins exactly as it does offline. A kept pin
+    /// with a tag keeps it.
     fn settle_winners(&mut self) {
         let winners: Vec<(NodeKey, Identifier)> = self
             .nodes
             .keys()
+            .filter(|key| self.kept(key).is_none_or(|pin| pin.tag().is_none()))
             .filter_map(|key| match self.settled(key) {
                 Some(Settled::Agreed { winner_id, .. }) => Some((key.clone(), winner_id)),
                 _ => None,
@@ -977,78 +1775,151 @@ impl Graph {
                     provenance,
                     transitive: key.0 == ArtifactKind::Bundle && !direct,
                     bundle_source: read.bundle_source.clone(),
+                    resolved_tag: self.resolved_tag(key, node),
                 },
             );
         }
-        ExpandedGraph { nodes, warnings }
+        ExpandedGraph {
+            nodes,
+            warnings,
+            kept_over_refusal: BTreeSet::new(),
+        }
     }
 }
 
 /// Expand `roots` into the whole dependency graph.
 ///
 /// Reads the registry through `access` only: one tag resolve per distinct
-/// requested identifier, the manifest by that digest, and the members layer by
-/// descriptor. Nothing is written.
+/// requested identifier `carry` does not answer, the manifest by the settled
+/// digest, and the members layer by descriptor. Nothing is written.
+///
+/// Each pass but the last releases, attests or takes back one carried key, each at
+/// most once, so at most `3 * carry.pins.len() + 1` passes run; the caps bound one
+/// pass each. A pass reuses the reads of the pass before at the same id and digest.
+/// A second walk as long, with no tag read the first made, runs only to keep a pin
+/// the edges onto a typed line resolved onto, after the first walk settled a refusal or
+/// stopped on an error too; its own failure leaves the first's result, and the keys it
+/// kept over the first's failure come back in [`ExpandedGraph::kept_over_refusal`].
 ///
 /// # Errors
 ///
 /// The error of the smallest failing `(kind, name)` of the first wave that
 /// has one; a cap breach (`GraphTooLarge`, 65) at the wave where it occurs;
-/// otherwise, once expansion ends, `BundleConflict` (78) for keys whose edges
-/// resolve to different digests, then `DependencyCycle` (65).
+/// otherwise, once expansion ends, `BundleConflict` (78) for keys whose claims
+/// disagree and that no unrecorded claim released, then `DependencyCycle` (65).
 pub async fn expand_graph(
     roots: Vec<GraphRoot>,
     access: &Arc<dyn OciAccess>,
     options: &ResolveOptions,
     carry: &Carry,
 ) -> Result<ExpandedGraph, ResolveError> {
-    let mut graph = Graph {
-        nodes: BTreeMap::new(),
-        digests: carry.digests.clone(),
-        transitive: 0,
-        bytes: 0,
-    };
-    let (mut pending, mut touched, mut reads) = graph.seed(roots)?;
-    loop {
-        graph
-            .resolve_digests(std::mem::take(&mut pending), access, options)
-            .await?;
-        let jobs = graph.schedule(&touched);
-        if jobs.is_empty() && reads.is_empty() {
-            break;
-        }
-        let tasks: Vec<Task<(NodeKey, Read)>> = jobs
-            .into_iter()
-            .map(|job| {
-                let access = Arc::clone(access);
-                let timeout = options.per_artifact_timeout;
-                let carried = carry.requires.get(&(job.key.clone(), job.digest.clone())).cloned();
-                Box::pin(async move {
-                    let read = match tokio::time::timeout(timeout, read_registry(&job, &access)).await {
-                        Ok(Ok(read)) => read,
-                        Ok(Err(err)) if is_offline_miss(&err) && job.key.0 != ArtifactKind::Bundle => {
-                            offline_read(&job, carried.unwrap_or_default())?
-                        }
-                        Ok(Err(err)) => return Err(err),
-                        Err(_elapsed) => {
-                            let reference = ArtifactRef::registry(job.key.0, job.key.1.clone(), job.id.clone());
-                            return Err(match job.via {
-                                Some(via) => {
-                                    ResolveError::new(reference, ResolveErrorKind::ResolveTimeout).required_by(via)
-                                }
-                                None => ResolveError::new(reference, ResolveErrorKind::ResolveTimeout),
-                            });
-                        }
-                    };
-                    Ok((job.key, read))
-                }) as Task<(NodeKey, Read)>
-            })
-            .collect();
-        reads.extend(run_bounded(tasks).await?);
-        reads.sort_by(|a, b| a.0.cmp(&b.0));
-        (pending, touched) = graph.fold(std::mem::take(&mut reads))?;
+    expand_counting_passes(roots, access, options, carry).await.0
+}
+
+/// Whether `kind` is a dependency the walk needs and the registry no longer holds: a
+/// tag, a bundle or a pinned manifest (79). The manifest a typed line moved to may ask
+/// one, and `grim lock` never reads that manifest, so the pin it keeps stands. A registry
+/// that is down, refuses the credential or never answers (69, 80) fails `grim lock` too,
+/// and a graph cap (65) is the walk's own. What `finish` finds, a conflict or a cycle
+/// (65), is not a walk error and walks on as it did before.
+fn is_gone_dependency(kind: &ResolveErrorKind) -> bool {
+    matches!(
+        kind,
+        ResolveErrorKind::TagNotFound | ResolveErrorKind::BundleNotFound | ResolveErrorKind::PinnedManifestGone { .. }
+    )
+}
+
+/// [`expand_graph`], and how many passes it ran.
+async fn expand_counting_passes(
+    roots: Vec<GraphRoot>,
+    access: &Arc<dyn OciAccess>,
+    options: &ResolveOptions,
+    carry: &Carry,
+) -> (Result<ExpandedGraph, ResolveError>, usize) {
+    let mut graph = Graph::new(carry);
+    let (walked, mut passes) = graph.walk_until_settled(&roots, access, options).await;
+    let confirmable = graph.confirmable();
+    let digests = graph.digests.clone();
+    // A walk that stopped on anything but a gone dependency keeps its error
+    // (`a_walk_error_other_than_a_gone_tag_below_the_moved_manifest_keeps_its_exit`).
+    let beyond_gone = walked.as_ref().is_err_and(|e| !is_gone_dependency(&e.kind));
+    let resolved = walked.and_then(|()| graph.finish());
+    // A refusal or a failed walk still walks on: `grim lock` keeps the pin where the line's
+    // moved manifest refuses or leads to a tag that is gone, since it never reads that
+    // manifest (`a_typed_line_keeps_a_pin_where_its_moved_manifest_refuses`).
+    if confirmable.is_empty() || beyond_gone {
+        return (resolved, passes);
     }
-    graph.finish()
+    // The pins the edges confirm are kept only where that walk succeeds: keeping one reads
+    // its manifest's edges, which may refuse where the line's tag and grim 0.15.1 exit 0
+    // (`a_typed_line_keeps_a_pin_an_unrecorded_edge_resolves_onto`).
+    let mut kept = Graph::new(carry);
+    kept.digests = digests;
+    kept.attested.clone_from(&confirmable);
+    kept.confirmed = confirmable;
+    let (walked, more) = kept.walk_until_settled(&roots, access, options).await;
+    passes += more;
+    // A key that walk took back resolved its line after releases the kept pin's edges made,
+    // so its result can move a pin the line's walk keeps
+    // (`a_kept_pin_its_walk_stops_attesting_leaves_the_lines_walk`). The verdict above may
+    // rest on a pass half walked, so this check is what keeps a pin, not that verdict.
+    let held = kept.confirmed.is_subset(&kept.attested);
+    let refused = resolved.is_err().then(|| kept.confirmed.clone());
+    match walked.and_then(|()| kept.finish()) {
+        Ok(mut graph) if held => {
+            graph.kept_over_refusal = refused.unwrap_or_default();
+            (Ok(graph), passes)
+        }
+        _ => (resolved, passes),
+    }
+}
+
+impl<'a> Graph<'a> {
+    fn new(carry: &'a Carry) -> Self {
+        Graph {
+            nodes: BTreeMap::new(),
+            carry,
+            released: BTreeSet::new(),
+            attested: BTreeSet::new(),
+            unattested: BTreeSet::new(),
+            confirmed: BTreeSet::new(),
+            digests: BTreeMap::new(),
+            reads: Reads::default(),
+            transitive: 0,
+            bytes: 0,
+            below_pick: BTreeSet::new(),
+        }
+    }
+
+    /// Walk `roots` pass after pass until none releases, attests or takes back a key,
+    /// and how many passes ran.
+    async fn walk_until_settled(
+        &mut self,
+        roots: &[GraphRoot],
+        access: &Arc<dyn OciAccess>,
+        options: &ResolveOptions,
+    ) -> (Result<(), ResolveError>, usize) {
+        let mut passes = 1;
+        loop {
+            if let Err(e) = self.expand(roots.to_vec(), access, options).await {
+                return (Err(e), passes);
+            }
+            if !self.settle_pass() {
+                return (Ok(()), passes);
+            }
+            self.restart();
+            passes += 1;
+        }
+    }
+
+    /// Settle what the pass walked, true when another pass must run. A pass that
+    /// settled a typed line commits no release: it read the line's tag or nothing for
+    /// it, and a conflict either shows can vanish once the line reads what it settled
+    /// at, leaving a pin moved that no request disputes.
+    /// `a_pass_that_settles_a_line_releases_nothing` fails on such a release.
+    fn settle_pass(&mut self) -> bool {
+        self.attest_direct_claims() || self.release_conflicts()
+    }
 }
 
 #[cfg(test)]
@@ -1078,6 +1949,25 @@ mod tests {
         blob_fetches: AtomicUsize,
         /// Manifests are absent from the store: every manifest read is an `OfflineMiss`.
         store_empty: std::sync::atomic::AtomicBool,
+        /// Manifest reads `store_empty` refused.
+        offline_misses: AtomicUsize,
+        /// A blob absent here is an `OfflineMiss`, as a store read offline answers.
+        blobs_offline: std::sync::atomic::AtomicBool,
+        /// A tag absent here is an `OfflineMiss`, as an offline tag cache answers.
+        tags_offline: std::sync::atomic::AtomicBool,
+        /// Tags whose resolve fails as the entry says, whatever they point at.
+        tag_failures: Mutex<BTreeMap<String, Failure>>,
+    }
+
+    /// How a resolve that [`Fake::tag_failures`] names fails.
+    #[derive(Clone, Copy)]
+    enum Failure {
+        /// The registry refuses the credential: `AuthFailure`.
+        Auth,
+        /// The registry is down: `RegistryUnreachable`.
+        Down,
+        /// The registry never answers: `ResolveTimeout`.
+        Hangs,
     }
 
     fn key(id: &Identifier) -> String {
@@ -1183,6 +2073,29 @@ mod tests {
                 .filter(|r| r.as_str() == id)
                 .count()
         }
+
+        /// Point the tag of `id` at `digest`.
+        fn retag(&self, id: &str, digest: &Digest) {
+            let id = Identifier::parse(id).unwrap();
+            self.tags.lock().unwrap().insert(key(&id), digest.clone());
+        }
+
+        /// Delete the tag of `id`; its manifest stays by digest.
+        fn untag(&self, id: &str) {
+            let id = Identifier::parse(id).unwrap();
+            self.tags.lock().unwrap().remove(&key(&id));
+        }
+
+        /// How often the manifest at `digest` was read.
+        fn reads_of(&self, digest: &Digest) -> usize {
+            let digest = digest.to_string();
+            self.manifest_fetches
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|d| **d == digest)
+                .count()
+        }
     }
 
     fn manifest_key(m: &OciManifest) -> Vec<(String, u64)> {
@@ -1196,10 +2109,28 @@ mod tests {
                 return Ok(Some(d));
             }
             self.resolves.lock().unwrap().push(key(id));
-            Ok(self.tags.lock().unwrap().get(&key(id)).cloned())
+            let failure = self.tag_failures.lock().unwrap().get(&key(id)).copied();
+            match failure {
+                Some(Failure::Auth) => {
+                    let denied = AccessErrorKind::Authentication("denied".into());
+                    return Err(AccessError::with_identifier(id.clone(), denied));
+                }
+                Some(Failure::Down) => {
+                    let down = AccessErrorKind::Registry("connection refused".into());
+                    return Err(AccessError::with_identifier(id.clone(), down));
+                }
+                Some(Failure::Hangs) => std::future::pending().await,
+                None => {}
+            }
+            let digest = self.tags.lock().unwrap().get(&key(id)).cloned();
+            if digest.is_none() && self.tags_offline.load(Ordering::SeqCst) {
+                return Err(AccessError::with_identifier(id.clone(), AccessErrorKind::OfflineMiss));
+            }
+            Ok(digest)
         }
         async fn fetch_manifest(&self, id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
             if self.store_empty.load(Ordering::SeqCst) {
+                self.offline_misses.fetch_add(1, Ordering::SeqCst);
                 return Err(AccessError::with_identifier(
                     id.as_identifier().clone(),
                     AccessErrorKind::OfflineMiss,
@@ -1209,9 +2140,13 @@ mod tests {
             self.manifest_ids.lock().unwrap().push(id.to_string());
             Ok(self.manifests.lock().unwrap().get(&id.digest().to_string()).cloned())
         }
-        async fn fetch_blob(&self, _r: &Identifier, d: &Digest, _max: u64) -> Result<Option<Vec<u8>>, AccessError> {
+        async fn fetch_blob(&self, r: &Identifier, d: &Digest, _max: u64) -> Result<Option<Vec<u8>>, AccessError> {
             self.blob_fetches.fetch_add(1, Ordering::SeqCst);
-            Ok(self.blobs.lock().unwrap().get(&d.to_string()).cloned())
+            let blob = self.blobs.lock().unwrap().get(&d.to_string()).cloned();
+            if blob.is_none() && self.blobs_offline.load(Ordering::SeqCst) {
+                return Err(AccessError::with_identifier(r.clone(), AccessErrorKind::OfflineMiss));
+            }
+            Ok(blob)
         }
         async fn list_tags(&self, _id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
             Ok(None)
@@ -2244,6 +3179,889 @@ mod tests {
         carry
     }
 
+    fn carried_pin(id: &str, digest: &Digest) -> CarriedPin {
+        CarriedPin {
+            pin: PinnedIdentifier::try_from(Identifier::parse(id).unwrap().clone_with_digest(digest.clone())).unwrap(),
+            declared: None,
+            snapshot: None,
+            evidence: EdgeEvidence::default(),
+        }
+    }
+
+    /// One repository path on two registries is two publishers, so a declaration
+    /// and an edge the lock never recorded answer only on the pin's own registry.
+    /// A recorded edge says a resolve gave this digest, wherever it asked.
+    #[test]
+    fn a_pin_answers_another_registry_only_for_a_recorded_edge() {
+        let digest = Algorithm::Sha256.hash(b"x as locked");
+        let node = k(Skill, "x");
+        let answer = |pin: CarriedPin, claim: NodeClaim<'_>| {
+            let pins = BTreeMap::from([(node.clone(), pin)]);
+            Carry {
+                pins,
+                ..Carry::default()
+            }
+            .answer(&node, claim, false)
+        };
+        for (registry, expected) in [("ghcr.io", Some(digest.clone())), ("quay.io", None)] {
+            let id = Identifier::parse(&format!("{registry}/acme/x:1")).unwrap();
+            let unrecorded = carried_pin("ghcr.io/acme/x:1", &digest);
+            let mut tagless = carried_pin("ghcr.io/acme/x", &digest);
+            tagless.declared = Some(id.clone());
+            let mut recorded = carried_pin("ghcr.io/acme/x:1", &digest);
+            recorded.evidence.requests.insert(id.clone());
+
+            assert_eq!(answer(unrecorded, NodeClaim::Edge(&id)), expected, "unrecorded");
+            assert_eq!(answer(tagless, NodeClaim::Direct(&id)), expected, "declared");
+            assert_eq!(answer(recorded, NodeClaim::Edge(&id)), Some(digest.clone()), "recorded");
+        }
+    }
+
+    /// A pin that answers no claim costs no second pass.
+    #[tokio::test]
+    async fn a_pin_no_claim_answers_costs_no_second_pass() {
+        let fake = Fake::default();
+        let held = fake.publish(pubd(Skill, "ghcr.io/acme/x:9", &[]));
+        fake.publish(pubd(Skill, "ghcr.io/acme/x:1", &[(Skill, "z", "ghcr.io/acme/z:1")]));
+        fake.publish(pubd(Skill, "ghcr.io/acme/z:1", &[]));
+        fake.publish(pubd(Skill, "ghcr.io/acme/p:1", &[(Skill, "x", "ghcr.io/acme/x:1")]));
+        let (fake, access) = fake.arc();
+        let carry = Carry {
+            pins: BTreeMap::from([(k(Skill, "x"), carried_pin("ghcr.io/acme/x:9", &held))]),
+            ..Carry::default()
+        };
+
+        let graph = expand_graph(vec![direct(Skill, "p", "ghcr.io/acme/p:1")], &access, &opts(), &carry)
+            .await
+            .unwrap();
+
+        assert_eq!(names(&graph), ["skill/p", "skill/x", "skill/z"]);
+        assert_eq!(fake.manifest_fetches.lock().unwrap().len(), 3, "one manifest per node");
+    }
+
+    const HELD: &str = "ghcr.io/acme/held";
+    const PACK1: &str = "ghcr.io/acme/pack:1";
+
+    /// A row of `key` at a digest, recording each `(kind, name, id)` edge.
+    type Row<'a> = (NodeKey, &'a Digest, &'a [(ArtifactKind, &'a str, &'a str)]);
+
+    /// The edge lists `rows` record.
+    fn walked(rows: &[Row<'_>]) -> WalkedEdges {
+        let mut walked = WalkedEdges::default();
+        for (key, digest, edges) in rows {
+            let members = edges.iter().map(|(kind, name, id)| BundleMember {
+                kind: *kind,
+                name: (*name).to_string(),
+                id: (*id).to_string(),
+            });
+            walked.insert(key.clone(), Some((*digest).clone()), members.collect());
+        }
+        walked
+    }
+
+    /// `held`'s tagless pin at `old`, which an edge of a parent read as the proof
+    /// shows answers, under the proof `proven`.
+    fn held_at(old: &Digest, proven: BTreeMap<NodeKey, Option<Digest>>, recorded_only: bool) -> Carry {
+        let mut held = carried_pin(HELD, old);
+        held.evidence.takes_listed_edges = true;
+        Carry {
+            pins: BTreeMap::from([(k(Skill, "held"), held)]),
+            proven,
+            recorded_only,
+            ..Carry::default()
+        }
+    }
+
+    /// A part records no digest for `pack`, required by a parent read at the digest the
+    /// part records or declared with no row, so its tag read shows nothing the part saw:
+    /// `held` follows the list `pack:1` moved to rather than stamp `held:2` beside the
+    /// digest `held:1` resolved. A project lock takes the read on trust.
+    #[tokio::test]
+    async fn a_part_attests_no_pin_through_a_bundle_tag_it_never_recorded() {
+        for (recorded_only, follows) in [(true, true), (false, false)] {
+            for declared in [false, true] {
+                let fake = Fake::default();
+                let old = fake.publish(pubd(Skill, "ghcr.io/acme/held:1", &[]));
+                let new = fake.publish(pubd(Skill, "ghcr.io/acme/held:2", &[]));
+                fake.publish(pubd(Bundle, PACK1, &[(Skill, "held", "ghcr.io/acme/held:2")]));
+                let p = fake.publish(pubd(Skill, "ghcr.io/acme/p:1", &[(Bundle, "pack", PACK1)]));
+                let (_, access) = fake.arc();
+                let (root, proven) = match declared {
+                    true => (direct(Bundle, "pack", PACK1), (k(Bundle, "pack"), None)),
+                    false => (direct(Skill, "p", "ghcr.io/acme/p:1"), (k(Skill, "p"), Some(p.clone()))),
+                };
+                let mut carry = held_at(&old, BTreeMap::from([proven]), recorded_only);
+                carry.walked = walked(&[(k(Skill, "p"), &p, &[(Bundle, "pack", PACK1)])]);
+
+                let graph = expand_graph(vec![root], &access, &opts(), &carry).await.unwrap();
+
+                let held = graph.nodes[&k(Skill, "held")].pinned.as_ref().unwrap();
+                let expected = if follows { &new } else { &old };
+                assert_eq!(
+                    &held.digest(),
+                    expected,
+                    "recorded_only = {recorded_only}, declared = {declared}"
+                );
+            }
+        }
+    }
+
+    /// A bundle a parent read at its recorded digest names by digest is read as the
+    /// proof read it, so in a part too its list keeps `held`'s pin though `held:1`
+    /// has moved, and the moved tag is never read. A parent row that records no edge,
+    /// as grim 0.15.1 writes one, shows nothing its writer walked, so `held` reads the
+    /// tag its list names now, never stamping it beside a digest it may not serve.
+    #[tokio::test]
+    async fn a_part_attests_a_pin_through_a_bundle_named_by_digest() {
+        for recorded in [true, false] {
+            let fake = Fake::default();
+            let old = fake.publish(pubd(Skill, "ghcr.io/acme/held:1", &[]));
+            let moved = fake.publish(pubd(Skill, "ghcr.io/acme/held:9", &[]));
+            fake.retag("ghcr.io/acme/held:1", &moved);
+            let pack = fake.publish(pubd(Bundle, PACK1, &[(Skill, "held", "ghcr.io/acme/held:1")]));
+            let by_digest = format!("ghcr.io/acme/pack@{pack}");
+            let edge = [(Bundle, "pack", by_digest.as_str())];
+            let p = fake.publish(pubd(Skill, "ghcr.io/acme/p:1", &edge));
+            let (fake, access) = fake.arc();
+            let mut carry = held_at(&old, BTreeMap::from([(k(Skill, "p"), Some(p.clone()))]), true);
+            let lists: &[_] = if recorded { &edge } else { &[] };
+            carry.walked = walked(&[(k(Skill, "p"), &p, lists)]);
+
+            let graph = expand_graph(vec![direct(Skill, "p", "ghcr.io/acme/p:1")], &access, &opts(), &carry)
+                .await
+                .unwrap();
+
+            let held = graph.nodes[&k(Skill, "held")].pinned.as_ref().unwrap();
+            let expected = if recorded { &old } else { &moved };
+            assert_eq!(&held.digest(), expected, "recorded = {recorded}");
+            assert_eq!(
+                fake.resolve_count("ghcr.io/acme/held:1"),
+                usize::from(!recorded),
+                "recorded = {recorded}: the moved tag is read only for an unwalked edge"
+            );
+        }
+    }
+
+    /// `x:1` requires `held:0` and `pack:1` lists `held:1`, which a lock grim 0.15.1
+    /// wrote pins tagless with `pack`'s list recorded and none of `x`'s edges: it never
+    /// read a `requires` layer. Read at its recorded digest, `x` lists nothing its row
+    /// does not record, so `held:0` resolves, `grim lock` and a part's pick refuse the
+    /// conflict, and a line typed at `held:0` resolves it. Counted as listed, the edge
+    /// stamped `held:0` beside `held:1`'s digest at exit 0.
+    #[tokio::test]
+    async fn an_edge_its_parents_row_does_not_record_answers_no_pin() {
+        const HELD0: &str = "ghcr.io/acme/held:0";
+        for case in ["project", "part", "typed"] {
+            let fake = Fake::default();
+            let h1 = fake.publish(pubd(Skill, "ghcr.io/acme/held:1", &[]));
+            let h0 = fake.publish(pubd(Skill, HELD0, &[]));
+            let pack = fake.publish(pubd(Bundle, PACK1, &[(Skill, "held", "ghcr.io/acme/held:1")]));
+            let x = fake.publish(pubd(Skill, "ghcr.io/acme/x:1", &[(Skill, "held", HELD0)]));
+            let (_, access) = fake.arc();
+            let part = case == "part";
+            let mut proven = BTreeMap::from([(k(Skill, "x"), Some(x.clone()))]);
+            let mut rows = vec![(k(Skill, "x"), &x, &[][..])];
+            let mut carry = held_at(&h1, BTreeMap::new(), part);
+            if !part {
+                // A part keeps no `[[bundle]]` row, so only a project lock records the list.
+                proven.insert(k(Bundle, "pack"), Some(pack.clone()));
+                rows.push((k(Bundle, "pack"), &pack, &[(Skill, "held", "ghcr.io/acme/held:1")][..]));
+                let listed = Identifier::parse("ghcr.io/acme/held:1").unwrap();
+                let held = carry.pins.get_mut(&k(Skill, "held")).unwrap();
+                held.evidence.requests.insert(listed);
+            }
+            carry.proven = proven;
+            carry.walked = walked(&rows);
+            let mut roots = vec![direct(Skill, "x", "ghcr.io/acme/x:1"), direct(Bundle, "pack", PACK1)];
+            if case == "typed" {
+                roots.push(direct(Skill, "held", HELD0));
+            }
+
+            let result = expand_graph(roots, &access, &opts(), &carry).await;
+
+            match result {
+                Ok(graph) if case == "typed" => {
+                    let held = graph.nodes[&k(Skill, "held")].pinned.as_ref().unwrap();
+                    assert_eq!(held.digest(), h0, "{case}: {held}");
+                }
+                Err(err) if case != "typed" => {
+                    assert!(
+                        matches!(err.kind, ResolveErrorKind::BundleConflict { .. }),
+                        "{case}: {err}"
+                    );
+                    assert_eq!(err.reference.name, "held", "{case}: {err}");
+                }
+                other => {
+                    let pinned = other.map(|graph| graph.nodes[&k(Skill, "held")].pinned.clone());
+                    panic!("{case}: {pinned:?}")
+                }
+            }
+        }
+    }
+
+    /// `pack:1` lists `held:1`, which the lock records and which stamps `held`'s
+    /// tagless pin, and both `held` tags moved to one digest. `x:1` requires a `held`
+    /// tag, an edge grim 0.15.1 never read. At `held:2` it resolves elsewhere, so
+    /// `grim lock` releases the pin, and a line typed at `held:1` resolves as well. At
+    /// `held:1` the pin answers it, so `grim lock` and the line both keep the pin.
+    #[tokio::test]
+    async fn a_line_at_the_stamp_of_a_pin_keeps_it_only_where_grim_lock_does() {
+        const HELD1: &str = "ghcr.io/acme/held:1";
+        const HELD2: &str = "ghcr.io/acme/held:2";
+        for (asks, keeps) in [(HELD2, false), (HELD1, true)] {
+            for typed in [false, true] {
+                let fake = Fake::default();
+                let old = fake.publish(pubd(Skill, HELD1, &[]));
+                let moved = fake.publish(pubd(Skill, "ghcr.io/acme/held:9", &[]));
+                let pack = fake.publish(pubd(Bundle, PACK1, &[(Skill, "held", HELD1)]));
+                let x = fake.publish(pubd(Skill, "ghcr.io/acme/x:1", &[(Skill, "held", asks)]));
+                fake.retag(HELD1, &moved);
+                fake.retag(HELD2, &moved);
+                let (_, access) = fake.arc();
+                let proven = [
+                    (k(Skill, "x"), Some(x.clone())),
+                    (k(Bundle, "pack"), Some(pack.clone())),
+                ];
+                let mut carry = held_at(&old, BTreeMap::from(proven), false);
+                let held = carry.pins.get_mut(&k(Skill, "held")).unwrap();
+                let recorded = BTreeSet::from([Identifier::parse(HELD1).unwrap()]);
+                let evidence = pin_rule::edge_evidence(held.record("held"), pin_rule::HashProof::Indirect, recorded);
+                held.evidence = evidence;
+                carry.walked = walked(&[
+                    (k(Skill, "x"), &x, &[]),
+                    (k(Bundle, "pack"), &pack, &[(Skill, "held", HELD1)]),
+                ]);
+                let mut roots = vec![direct(Skill, "x", "ghcr.io/acme/x:1"), direct(Bundle, "pack", PACK1)];
+                if typed {
+                    roots.push(direct(Skill, "held", HELD1));
+                }
+
+                let graph = expand_graph(roots, &access, &opts(), &carry).await.unwrap();
+
+                let held = graph.nodes[&k(Skill, "held")].pinned.as_ref().unwrap();
+                let expected = if keeps { &old } else { &moved };
+                assert_eq!(&held.digest(), expected, "x asks {asks}, typed = {typed}: {held}");
+            }
+        }
+    }
+
+    /// `pack:1` lists `held:1`, which stamps `held`'s tagless pin, and `x:1` requires
+    /// `held:2`, an edge grim 0.15.1 never read, at the digest `held:1` named before it
+    /// moved. `grim lock` resolves that edge onto the pin and keeps it, so a line typed
+    /// at `held:1` keeps it once the line's own tag reads. A gone line refuses; where
+    /// `held:2` cannot be read, or the kept pin's walk refuses, the line takes its tag.
+    #[tokio::test]
+    async fn a_typed_line_keeps_a_pin_an_unrecorded_edge_resolves_onto() {
+        const HELD1: &str = "ghcr.io/acme/held:1";
+        const HELD2: &str = "ghcr.io/acme/held:2";
+        const Z1: &str = "ghcr.io/acme/z:1";
+        for case in ["kept", "line-gone", "asked-gone", "asked-uncached", "pin-refuses"] {
+            for typed in [false, true] {
+                let fake = Fake::default();
+                let requires: &[_] = if case == "pin-refuses" {
+                    &[(Skill, "z", Z1)]
+                } else {
+                    &[]
+                };
+                let old = fake.publish(pubd(Skill, HELD1, requires));
+                fake.publish(pubd(Skill, Z1, &[]));
+                fake.untag(Z1);
+                let moved = fake.publish(pubd(Skill, "ghcr.io/acme/held:9", &[]));
+                let pack = fake.publish(pubd(Bundle, PACK1, &[(Skill, "held", HELD1)]));
+                let x = fake.publish(pubd(Skill, "ghcr.io/acme/x:1", &[(Skill, "held", HELD2)]));
+                fake.retag(HELD2, &old);
+                fake.retag(HELD1, &moved);
+                match case {
+                    "line-gone" => fake.untag(HELD1),
+                    "asked-gone" => fake.untag(HELD2),
+                    "asked-uncached" => {
+                        fake.untag(HELD2);
+                        fake.tags_offline.store(true, Ordering::SeqCst);
+                    }
+                    _ => {}
+                }
+                let (_, access) = fake.arc();
+                let proven = [
+                    (k(Skill, "x"), Some(x.clone())),
+                    (k(Bundle, "pack"), Some(pack.clone())),
+                ];
+                let mut carry = held_at(&old, BTreeMap::from(proven), false);
+                let held = carry.pins.get_mut(&k(Skill, "held")).unwrap();
+                let recorded = BTreeSet::from([Identifier::parse(HELD1).unwrap()]);
+                held.evidence = pin_rule::edge_evidence(held.record("held"), pin_rule::HashProof::Indirect, recorded);
+                carry.walked = walked(&[
+                    (k(Skill, "x"), &x, &[]),
+                    (k(Bundle, "pack"), &pack, &[(Skill, "held", HELD1)]),
+                ]);
+                let mut roots = vec![direct(Skill, "x", "ghcr.io/acme/x:1"), direct(Bundle, "pack", PACK1)];
+                if typed {
+                    roots.push(direct(Skill, "held", HELD1));
+                }
+
+                let result = expand_graph(roots, &access, &opts(), &carry).await;
+
+                let expected = match (case, typed) {
+                    ("kept" | "line-gone", false) | ("kept", true) => Some(&old),
+                    (_, true) if case != "line-gone" => Some(&moved),
+                    _ => None,
+                };
+                let pinned = result.map(|graph| graph.nodes[&k(Skill, "held")].pinned.clone().unwrap().digest());
+                match (pinned, expected) {
+                    (Ok(digest), Some(expected)) => assert_eq!(&digest, expected, "{case}, typed = {typed}"),
+                    (Err(err), None) if case == "line-gone" => {
+                        assert!(matches!(err.kind, ResolveErrorKind::TagNotFound), "{case}: {err}");
+                        assert_eq!(err.reference.name, "held", "{case}: {err}");
+                    }
+                    (Err(_), None) => {}
+                    (pinned, _) => panic!("{case}, typed = {typed}: {pinned:?}"),
+                }
+            }
+        }
+    }
+
+    /// The shape above, where the manifest `held:1` moved to refuses: it asks `z:3`
+    /// beside the list's `z:1`, or `x:1`, which asks `held` back. `grim lock` keeps the
+    /// pin and never reads that manifest, so the typed line keeps it at exit 0 too, and
+    /// the graph says the pin outlived a refusal.
+    #[tokio::test]
+    async fn a_typed_line_keeps_a_pin_where_its_moved_manifest_refuses() {
+        for (case, asks) in [
+            ("conflict", (Skill, "z", "ghcr.io/acme/z:3")),
+            ("cycle", (Skill, "x", "ghcr.io/acme/x:1")),
+        ] {
+            for typed in [false, true] {
+                let (old, result) = moved_line(typed, &[], &[asks], |fake| {
+                    fake.publish(pubd(Skill, "ghcr.io/acme/z:3", &[]));
+                })
+                .await;
+
+                let graph = result.unwrap_or_else(|err| panic!("{case}, typed = {typed}: {err}"));
+                let held = graph.nodes[&k(Skill, "held")].pinned.as_ref().unwrap();
+                assert_eq!(held.digest(), old, "{case}, typed = {typed}: {held}");
+                let kept = BTreeSet::from([k(Skill, "held")]);
+                assert_eq!(
+                    graph.kept_over_refusal,
+                    if typed { kept } else { BTreeSet::new() },
+                    "{case}"
+                );
+            }
+        }
+    }
+
+    /// A node only the moved manifest reaches asks `held` back at a digest no other edge
+    /// reaches: `w:1` asks `held:7`, `held:0` (a smaller tag) or `held` at a digest alone,
+    /// or the manifest asks one of them itself. `grim lock` never reads that manifest, so
+    /// it meets no such edge and keeps the pin; the typed line keeps it too, whichever of
+    /// the requests sorts first. A manifest that refuses nothing leaves the graph saying so.
+    #[tokio::test]
+    async fn a_typed_line_keeps_a_pin_where_only_its_moved_manifest_asks_another_digest() {
+        let held7 = Fake::default().publish(pubd(Skill, "ghcr.io/acme/held:7", &[]));
+        let at_digest = format!("ghcr.io/acme/held@{held7}");
+        let w = &[(Skill, "w", "ghcr.io/acme/w:1")];
+        for asked in ["ghcr.io/acme/held:7", "ghcr.io/acme/held:0", at_digest.as_str()] {
+            for via_w in [true, false] {
+                let asks_held = [(Skill, "held", asked)];
+                let moved_asks: &[_] = if via_w { w } else { &asks_held };
+                for typed in [false, true] {
+                    let publish = |fake: &Fake| {
+                        fake.publish(pubd(Skill, "ghcr.io/acme/held:7", &[]));
+                        fake.publish(pubd(Skill, "ghcr.io/acme/held:0", &[]));
+                        fake.publish(pubd(Skill, "ghcr.io/acme/w:1", &asks_held));
+                    };
+                    let (old, result) = moved_line(typed, &[], moved_asks, publish).await;
+
+                    let case = format!("{asked} via w = {via_w}, typed = {typed}");
+                    let graph = result.unwrap_or_else(|err| panic!("{case}: {err}"));
+                    let held = graph.nodes[&k(Skill, "held")].pinned.as_ref().unwrap();
+                    assert_eq!(held.digest(), old, "{case}: {held}");
+                    let kept = BTreeSet::from([k(Skill, "held")]);
+                    assert_eq!(
+                        graph.kept_over_refusal,
+                        if typed { kept } else { BTreeSet::new() },
+                        "{case}"
+                    );
+                }
+            }
+        }
+        for typed in [false, true] {
+            let (old, result) = moved_line(typed, &[], &[], publish_held7).await;
+
+            let graph = result.unwrap_or_else(|err| panic!("nothing refused, typed = {typed}: {err}"));
+            let held = graph.nodes[&k(Skill, "held")].pinned.as_ref().unwrap();
+            assert_eq!(held.digest(), old, "nothing refused, typed = {typed}: {held}");
+            assert!(graph.kept_over_refusal.is_empty(), "nothing refused, typed = {typed}");
+        }
+    }
+
+    /// The pin's own manifest reaches the node that asks `held:7`, so the kept walk meets
+    /// that edge, finds it does not land on the pin, and leaves the line's walk: its
+    /// refusal where the moved manifest asks the node too, else the line's own pin.
+    /// The guard judges the edges, not the trigger.
+    #[tokio::test]
+    async fn a_kept_pin_whose_own_manifest_asks_another_digest_leaves_the_lines_walk() {
+        let w = &[(Skill, "w", "ghcr.io/acme/w:1")];
+        for (case, moved_asks) in [("both ask w", &w[..]), ("only the pin asks w", &[][..])] {
+            let (old, result) = moved_line(true, w, moved_asks, publish_held7).await;
+
+            match (case, result) {
+                ("both ask w", Err(err)) => assert!(!matches!(err.kind, ResolveErrorKind::TagNotFound), "{err}"),
+                ("only the pin asks w", Ok(graph)) => {
+                    let held = graph.nodes[&k(Skill, "held")].pinned.as_ref().unwrap();
+                    assert_ne!(held.digest(), old, "{case}: {held}");
+                    assert!(graph.kept_over_refusal.is_empty(), "{case}");
+                }
+                (case, other) => panic!("{case}: {:?}", other.map(|graph| graph.kept_over_refusal)),
+            }
+        }
+    }
+
+    /// `held:7`, and `w:1` asking it: what a node reached by the moved manifest can ask.
+    fn publish_held7(fake: &Fake) {
+        fake.publish(pubd(Skill, "ghcr.io/acme/held:7", &[]));
+        fake.publish(pubd(
+            Skill,
+            "ghcr.io/acme/w:1",
+            &[(Skill, "held", "ghcr.io/acme/held:7")],
+        ));
+    }
+
+    /// A tag below the moved manifest is gone, directly or under a node it asks: the
+    /// line's walk stops on it before it settles, where `grim lock` never reads that
+    /// manifest and keeps the pin. The typed line keeps the pin too. Where the pin's own
+    /// manifest asks the gone tag, the kept walk stops on it as well, and so does
+    /// `grim lock`: the error stands.
+    #[tokio::test]
+    async fn a_typed_line_keeps_a_pin_where_a_tag_below_its_moved_manifest_is_gone() {
+        let gone = &[(Skill, "gone", "ghcr.io/acme/gone:1")];
+        let w = &[(Skill, "w", "ghcr.io/acme/w:1")];
+        let cases: [(&str, &[_], &[_], bool); 3] = [
+            ("direct", &[], gone, true),
+            ("deep", &[], w, true),
+            ("below the pin too", gone, gone, false),
+        ];
+        for (case, pin_asks, moved_asks, keeps) in cases {
+            let publish = |fake: &Fake| {
+                fake.publish(pubd(Skill, "ghcr.io/acme/gone:1", &[]));
+                fake.untag("ghcr.io/acme/gone:1");
+                fake.publish(pubd(Skill, "ghcr.io/acme/w:1", gone));
+            };
+            for typed in [false, true] {
+                let (old, result) = moved_line(typed, pin_asks, moved_asks, publish).await;
+
+                match result {
+                    Ok(graph) if keeps => {
+                        let held = graph.nodes[&k(Skill, "held")].pinned.as_ref().unwrap();
+                        assert_eq!(held.digest(), old, "{case}, typed = {typed}: {held}");
+                        let kept = BTreeSet::from([k(Skill, "held")]);
+                        let expected = if typed { kept } else { BTreeSet::new() };
+                        assert_eq!(graph.kept_over_refusal, expected, "{case}, typed = {typed}");
+                    }
+                    Err(err) if !keeps => {
+                        assert!(matches!(err.kind, ResolveErrorKind::TagNotFound), "{case}: {err}");
+                        assert_eq!(err.reference.name, "gone", "{case}: {err}");
+                    }
+                    other => panic!("{case}, typed = {typed}: {:?}", other.map(|g| g.kept_over_refusal)),
+                }
+            }
+        }
+    }
+
+    /// The walk of the moved manifest stops on something other than a gone tag or a cycle:
+    /// the registry is down, refuses the credential or never answers, or the graph crosses
+    /// a cap. Only a gone tag and a cycle are failures `grim lock` shrugs off by never
+    /// reading that manifest, so every other error keeps the exit it has without the kept
+    /// pin: 69, 80, 69 and 65. A gone tag beside them keeps the pin.
+    #[tokio::test]
+    async fn a_walk_error_other_than_a_gone_tag_below_the_moved_manifest_keeps_its_exit() {
+        let bad = &[(Skill, "bad", "ghcr.io/acme/bad:1")];
+        let chain = &[(Skill, "c1", "ghcr.io/acme/c1:1")];
+        let hurried = ResolveOptions {
+            per_artifact_timeout: std::time::Duration::from_millis(100),
+            ..opts()
+        };
+        let cases: [(&str, &[_], Option<Failure>); 5] = [
+            ("down", bad, Some(Failure::Down)),
+            ("auth", bad, Some(Failure::Auth)),
+            ("timeout", bad, Some(Failure::Hangs)),
+            ("cap", chain, None),
+            ("gone", bad, None),
+        ];
+        let mut wrong = Vec::new();
+        for (case, moved_asks, failure) in cases {
+            let publish = |fake: &Fake| {
+                fake.publish(pubd(Skill, "ghcr.io/acme/bad:1", &[]));
+                let bad = key(&Identifier::parse("ghcr.io/acme/bad:1").unwrap());
+                if let Some(failure) = failure {
+                    fake.tag_failures.lock().unwrap().insert(bad, failure);
+                }
+                if case == "gone" {
+                    fake.untag("ghcr.io/acme/bad:1");
+                }
+                // A chain one level deeper than the depth cap allows.
+                for level in (1..=MAX_DEPTH + 2).rev().filter(|_| case == "cap") {
+                    let (name, next) = (format!("c{}", level + 1), format!("ghcr.io/acme/c{}:1", level + 1));
+                    let asks = [(Skill, name.as_str(), next.as_str())];
+                    fake.publish(pubd(Skill, &format!("ghcr.io/acme/c{level}:1"), &asks));
+                }
+            };
+            // Only a typed line reads the tag that moved; an untyped pin keeps without it.
+            let (old, result) = moved_line_within(&hurried, true, &[], moved_asks, publish).await;
+
+            let held = |graph: &ExpandedGraph| graph.nodes[&k(Skill, "held")].pinned.as_ref().unwrap().digest();
+            let as_expected = match (case, &result) {
+                ("down", Err(err)) => matches!(err.kind, ResolveErrorKind::RegistryUnreachable(_)),
+                ("auth", Err(err)) => matches!(err.kind, ResolveErrorKind::AuthFailure(_)),
+                ("timeout", Err(err)) => matches!(err.kind, ResolveErrorKind::ResolveTimeout),
+                ("cap", Err(err)) => matches!(err.kind, ResolveErrorKind::GraphTooLarge { .. }),
+                ("gone", Ok(graph)) => held(graph) == old,
+                _ => false,
+            };
+            if !as_expected {
+                wrong.push(format!("{case}: {:?}", result.map(|graph| held(&graph))));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// `pack:1` lists `held:1` and `z:1`, and `x:1` requires `held:2` at the digest
+    /// `held:1` named: a lock grim 0.15.1 wrote, where `held` holds a tagless pin at that
+    /// digest and no row records an edge. Then the tag `held:1` moved to a manifest
+    /// requiring `moved_asks`, `publish` having put what it needs in the registry; the
+    /// pin's own manifest requires `pin_asks`. `typed` adds the line `held:1`. The pin's
+    /// digest, and the walk's result.
+    async fn moved_line(
+        typed: bool,
+        pin_asks: &[(ArtifactKind, &str, &str)],
+        moved_asks: &[(ArtifactKind, &str, &str)],
+        publish: impl FnOnce(&Fake),
+    ) -> (Digest, Result<ExpandedGraph, ResolveError>) {
+        moved_line_within(&opts(), typed, pin_asks, moved_asks, publish).await
+    }
+
+    /// [`moved_line`] under `options`.
+    async fn moved_line_within(
+        options: &ResolveOptions,
+        typed: bool,
+        pin_asks: &[(ArtifactKind, &str, &str)],
+        moved_asks: &[(ArtifactKind, &str, &str)],
+        publish: impl FnOnce(&Fake),
+    ) -> (Digest, Result<ExpandedGraph, ResolveError>) {
+        const HELD1: &str = "ghcr.io/acme/held:1";
+        const HELD2: &str = "ghcr.io/acme/held:2";
+        const Z1: &str = "ghcr.io/acme/z:1";
+        let fake = Fake::default();
+        let old = fake.publish(pubd(Skill, HELD1, pin_asks));
+        fake.publish(pubd(Skill, Z1, &[]));
+        publish(&fake);
+        let moved = fake.publish(pubd(Skill, "ghcr.io/acme/held:9", moved_asks));
+        let pack = fake.publish(pubd(Bundle, PACK1, &[(Skill, "held", HELD1), (Skill, "z", Z1)]));
+        let x = fake.publish(pubd(Skill, "ghcr.io/acme/x:1", &[(Skill, "held", HELD2)]));
+        fake.retag(HELD2, &old);
+        fake.retag(HELD1, &moved);
+        let (_, access) = fake.arc();
+        let proven = [
+            (k(Skill, "x"), Some(x.clone())),
+            (k(Bundle, "pack"), Some(pack.clone())),
+        ];
+        let mut carry = held_at(&old, BTreeMap::from(proven), false);
+        let held = carry.pins.get_mut(&k(Skill, "held")).unwrap();
+        let recorded = BTreeSet::from([Identifier::parse(HELD1).unwrap()]);
+        held.evidence = pin_rule::edge_evidence(held.record("held"), pin_rule::HashProof::Indirect, recorded);
+        carry.walked = walked(&[
+            (k(Skill, "x"), &x, &[]),
+            (k(Bundle, "pack"), &pack, &[(Skill, "held", HELD1), (Skill, "z", Z1)]),
+        ]);
+        let mut roots = vec![direct(Skill, "x", "ghcr.io/acme/x:1"), direct(Bundle, "pack", PACK1)];
+        if typed {
+            roots.push(direct(Skill, "held", HELD1));
+        }
+        (old, expand_graph(roots, &access, options, &carry).await)
+    }
+
+    /// `pack:1` lists `held:1` and `z:1`, `x:1` requires `held:2` at `held`'s pin, and
+    /// no skill's row records an edge, as grim 0.15.1 writes them. The pin a line typed
+    /// at `held:1` keeps requires `z:2`, which releases `z`'s pin, and `z` read at its
+    /// moved tag asks `held:7`, which lands elsewhere. That walk ends on the line's own
+    /// digest with `z` released, so the line's walk stands, where `z` keeps its pin.
+    #[tokio::test]
+    async fn a_kept_pin_its_walk_stops_attesting_leaves_the_lines_walk() {
+        const HELD1: &str = "ghcr.io/acme/held:1";
+        const HELD2: &str = "ghcr.io/acme/held:2";
+        const Z1: &str = "ghcr.io/acme/z:1";
+        const Z2: &str = "ghcr.io/acme/z:2";
+        let fake = Fake::default();
+        let old = fake.publish(pubd(Skill, HELD1, &[(Skill, "z", Z2)]));
+        let old_z = fake.publish(pubd(Skill, Z1, &[]));
+        fake.retag(Z2, &old_z);
+        let pack = fake.publish(pubd(Bundle, PACK1, &[(Skill, "held", HELD1), (Skill, "z", Z1)]));
+        let x = fake.publish(pubd(Skill, "ghcr.io/acme/x:1", &[(Skill, "held", HELD2)]));
+        fake.publish(pubd(Skill, "ghcr.io/acme/held:7", &[]));
+        let new_z = fake.publish(pubd(
+            Skill,
+            "ghcr.io/acme/z:9",
+            &[(Skill, "held", "ghcr.io/acme/held:7")],
+        ));
+        fake.retag(Z1, &new_z);
+        fake.retag(Z2, &new_z);
+        let moved = fake.publish(pubd(Skill, "ghcr.io/acme/held:9", &[]));
+        fake.retag(HELD2, &old);
+        fake.retag(HELD1, &moved);
+        let (_, access) = fake.arc();
+        let proven = [
+            (k(Skill, "x"), Some(x.clone())),
+            (k(Bundle, "pack"), Some(pack.clone())),
+        ];
+        let mut carry = held_at(&old, BTreeMap::from(proven), false);
+        let held = carry.pins.get_mut(&k(Skill, "held")).unwrap();
+        let recorded = BTreeSet::from([Identifier::parse(HELD1).unwrap()]);
+        held.evidence = pin_rule::edge_evidence(held.record("held"), pin_rule::HashProof::Indirect, recorded);
+        let mut z = carried_pin("ghcr.io/acme/z", &old_z);
+        let recorded = BTreeSet::from([Identifier::parse(Z1).unwrap()]);
+        z.evidence = pin_rule::edge_evidence(z.record("z"), pin_rule::HashProof::Indirect, recorded);
+        carry.pins.insert(k(Skill, "z"), z);
+        carry.walked = walked(&[
+            (k(Skill, "x"), &x, &[]),
+            (k(Skill, "held"), &old, &[]),
+            (k(Skill, "z"), &old_z, &[]),
+            (k(Bundle, "pack"), &pack, &[(Skill, "held", HELD1), (Skill, "z", Z1)]),
+        ]);
+        let roots = vec![
+            direct(Skill, "x", "ghcr.io/acme/x:1"),
+            direct(Bundle, "pack", PACK1),
+            direct(Skill, "held", HELD1),
+        ];
+
+        let graph = expand_graph(roots, &access, &opts(), &carry).await.unwrap();
+
+        let digest = |name: &str| graph.nodes[&k(Skill, name)].pinned.as_ref().unwrap().digest();
+        assert_eq!((digest("held"), digest("z")), (moved, old_z));
+    }
+
+    /// A line typed at the reference a declared bundle with no row lists keeps the
+    /// member's tagless pin though its tag moved, as `grim lock` stamps it before the
+    /// line is typed and keeps it after. A line at another tag, or an edge the pin does
+    /// not answer, resolves the line. Either way the line waits for the edges onto it,
+    /// which costs one more pass.
+    #[tokio::test]
+    async fn a_typed_line_keeps_a_tagless_pin_its_edges_stamp_with_it() {
+        let cases = [
+            ("ghcr.io/acme/held:1", None, true),
+            ("ghcr.io/acme/held:2", None, false),
+            ("ghcr.io/acme/held:1", Some("ghcr.io/acme/held:3"), false),
+        ];
+        for (typed, other, keeps) in cases {
+            let fake = Fake::default();
+            let old = fake.publish(pubd(Skill, "ghcr.io/acme/held:1", &[]));
+            let moved = fake.publish(pubd(Skill, "ghcr.io/acme/held:9", &[]));
+            fake.retag("ghcr.io/acme/held:1", &moved);
+            fake.publish(pubd(Skill, "ghcr.io/acme/held:2", &[]));
+            fake.publish(pubd(Skill, "ghcr.io/acme/held:3", &[]));
+            fake.publish(pubd(Bundle, PACK1, &[(Skill, "held", "ghcr.io/acme/held:1")]));
+            let mut roots = vec![direct(Skill, "held", typed), direct(Bundle, "pack", PACK1)];
+            if let Some(other) = other {
+                fake.publish(pubd(Skill, "ghcr.io/acme/q:1", &[(Skill, "held", other)]));
+                roots.push(direct(Skill, "q", "ghcr.io/acme/q:1"));
+            }
+            let (_, access) = fake.arc();
+            let carry = held_at(&old, BTreeMap::from([(k(Bundle, "pack"), None)]), false);
+
+            let (graph, passes) = expand_counting_passes(roots, &access, &opts(), &carry).await;
+
+            let graph = graph.unwrap();
+            let held = graph.nodes[&k(Skill, "held")].pinned.as_ref().unwrap();
+            assert_eq!(held.digest() == old, keeps, "{typed} beside {other:?}: {held}");
+            assert_eq!(passes, 2, "{typed} beside {other:?}");
+            assert_eq!(
+                graph.nodes[&k(Skill, "held")].resolved_tag,
+                !keeps,
+                "{typed} beside {other:?}"
+            );
+        }
+    }
+
+    /// Tagless pins on `names` at `digests`, members of a declared bundle with no row
+    /// in a lock whose hash proves the declaration: a lock 0.15.1 wrote.
+    fn pre_cache_members(pins: &[(&str, &Digest)]) -> Carry {
+        let mut proven = BTreeMap::from([(k(Bundle, "pack"), None)]);
+        let mut carried = BTreeMap::new();
+        for (name, digest) in pins {
+            let mut pin = carried_pin(&format!("ghcr.io/acme/{name}"), digest);
+            pin.evidence.takes_listed_edges = true;
+            carried.insert(k(Skill, name), pin);
+            proven.insert(k(Skill, name), Some((*digest).clone()));
+        }
+        Carry {
+            pins: carried,
+            proven,
+            ..Carry::default()
+        }
+    }
+
+    /// `x:1` moved onto a manifest that requires `y:2`, and `y:1` moved there too. A
+    /// line typed at `x:1` keeps `x`'s pin as `grim lock` keeps it, so what the moved
+    /// manifest asks for moves no pin: `y` keeps its own. A line no edge stamps, or a
+    /// newcomer that asks `y:2` itself, still moves `y`.
+    #[tokio::test]
+    async fn a_typed_line_its_edges_stamp_moves_no_pin_its_moved_tag_asks_for() {
+        for (typed, newcomer, y_moves) in [("x:1", false, false), ("x:1", true, true), ("x:2", false, true)] {
+            let fake = Fake::default();
+            let old_x = fake.publish(pubd(Skill, "ghcr.io/acme/x:1", &[]));
+            let old_y = fake.publish(pubd(Skill, "ghcr.io/acme/y:1", &[]));
+            let members = [(Skill, "x", "ghcr.io/acme/x:1"), (Skill, "y", "ghcr.io/acme/y:1")];
+            fake.publish(pubd(Bundle, PACK1, &members));
+            let requires_y2 = [(Skill, "y", "ghcr.io/acme/y:2")];
+            fake.publish(pubd(Skill, "ghcr.io/acme/x:1", &requires_y2));
+            fake.publish(pubd(Skill, "ghcr.io/acme/x:2", &requires_y2));
+            let new_y = fake.publish(pubd(Skill, "ghcr.io/acme/y:2", &[]));
+            fake.retag("ghcr.io/acme/y:1", &new_y);
+            let typed_at = format!("ghcr.io/acme/{typed}");
+            let mut roots = vec![direct(Skill, "x", &typed_at), direct(Bundle, "pack", PACK1)];
+            if newcomer {
+                fake.publish(pubd(Skill, "ghcr.io/acme/q:1", &requires_y2));
+                roots.push(direct(Skill, "q", "ghcr.io/acme/q:1"));
+            }
+            let (_, access) = fake.arc();
+            let carry = pre_cache_members(&[("x", &old_x), ("y", &old_y)]);
+
+            let graph = expand_graph(roots, &access, &opts(), &carry).await.unwrap();
+
+            let digest = |name: &str| graph.nodes[&k(Skill, name)].pinned.as_ref().unwrap().digest();
+            let case = format!("{typed}, newcomer = {newcomer}");
+            assert_eq!(digest("x") == old_x, typed == "x:1", "{case}");
+            assert_eq!(digest("y"), if y_moves { new_y } else { old_y }, "{case}");
+        }
+    }
+
+    /// `p:1` attests the line typed at `x:1` until a newcomer's moved dependency `c`
+    /// asks `p:2`, and `p` released then reads a manifest that asks `x:2`. Nothing then
+    /// stamps `x`'s pin, so the line resolves its moved tag. The pass that attests `x`
+    /// releases nothing, and each release waits for a pass that settled no line.
+    #[tokio::test]
+    async fn a_line_no_edge_stamps_any_more_resolves_its_tag() {
+        let fake = Fake::default();
+        let old_x = fake.publish(pubd(Skill, "ghcr.io/acme/x:1", &[]));
+        let new_x = fake.publish(pubd(Skill, "ghcr.io/acme/x:9", &[]));
+        fake.retag("ghcr.io/acme/x:1", &new_x);
+        fake.publish(pubd(Skill, "ghcr.io/acme/x:2", &[]));
+        let old_p = fake.publish(pubd(Skill, "ghcr.io/acme/p:1", &[(Skill, "x", "ghcr.io/acme/x:1")]));
+        let new_p = fake.publish(pubd(Skill, "ghcr.io/acme/p:2", &[(Skill, "x", "ghcr.io/acme/x:2")]));
+        fake.retag("ghcr.io/acme/p:1", &new_p);
+        let old_c = fake.publish(pubd(Skill, "ghcr.io/acme/c:1", &[]));
+        let new_c = fake.publish(pubd(Skill, "ghcr.io/acme/c:9", &[(Skill, "p", "ghcr.io/acme/p:2")]));
+        fake.retag("ghcr.io/acme/c:1", &new_c);
+        let members = [(Skill, "p", "ghcr.io/acme/p:1"), (Skill, "c", "ghcr.io/acme/c:1")];
+        fake.publish(pubd(Bundle, PACK1, &members));
+        fake.publish(pubd(Skill, "ghcr.io/acme/b:1", &[(Skill, "c", "ghcr.io/acme/c:1")]));
+        let roots = vec![
+            direct(Skill, "x", "ghcr.io/acme/x:1"),
+            direct(Bundle, "pack", PACK1),
+            direct(Skill, "b", "ghcr.io/acme/b:1"),
+        ];
+        let (fake, access) = fake.arc();
+        let carry = pre_cache_members(&[("x", &old_x), ("p", &old_p), ("c", &old_c)]);
+
+        let (graph, passes) = expand_counting_passes(roots, &access, &opts(), &carry).await;
+
+        let graph = graph.unwrap();
+        let digest = |name: &str| graph.nodes[&k(Skill, name)].pinned.as_ref().unwrap().digest();
+        assert_eq!((digest("x"), digest("p"), digest("c")), (new_x, new_p, new_c));
+        assert_eq!(fake.resolve_count("ghcr.io/acme/x:1"), 1);
+        assert_eq!(passes, 5, "attest x, release c, release p, take x back, resolve x");
+    }
+
+    /// The pass that attests `x` holds back the release a conflict on `c` calls for, though
+    /// that release is ready in the same pass: the conflicts it shows can vanish once `x`
+    /// is settled. Same graph as `a_line_no_edge_stamps_any_more_resolves_its_tag`. The
+    /// pass count alone cannot say which pass committed what: both orders end alike.
+    #[tokio::test]
+    async fn a_pass_that_settles_a_line_releases_nothing() {
+        let fake = Fake::default();
+        let old_x = fake.publish(pubd(Skill, "ghcr.io/acme/x:1", &[]));
+        let new_x = fake.publish(pubd(Skill, "ghcr.io/acme/x:9", &[]));
+        fake.retag("ghcr.io/acme/x:1", &new_x);
+        fake.publish(pubd(Skill, "ghcr.io/acme/x:2", &[]));
+        let old_p = fake.publish(pubd(Skill, "ghcr.io/acme/p:1", &[(Skill, "x", "ghcr.io/acme/x:1")]));
+        let new_p = fake.publish(pubd(Skill, "ghcr.io/acme/p:2", &[(Skill, "x", "ghcr.io/acme/x:2")]));
+        fake.retag("ghcr.io/acme/p:1", &new_p);
+        let old_c = fake.publish(pubd(Skill, "ghcr.io/acme/c:1", &[]));
+        let new_c = fake.publish(pubd(Skill, "ghcr.io/acme/c:9", &[(Skill, "p", "ghcr.io/acme/p:2")]));
+        fake.retag("ghcr.io/acme/c:1", &new_c);
+        let members = [(Skill, "p", "ghcr.io/acme/p:1"), (Skill, "c", "ghcr.io/acme/c:1")];
+        fake.publish(pubd(Bundle, PACK1, &members));
+        fake.publish(pubd(Skill, "ghcr.io/acme/b:1", &[(Skill, "c", "ghcr.io/acme/c:1")]));
+        let roots = vec![
+            direct(Skill, "x", "ghcr.io/acme/x:1"),
+            direct(Bundle, "pack", PACK1),
+            direct(Skill, "b", "ghcr.io/acme/b:1"),
+        ];
+        let (_, access) = fake.arc();
+        let carry = pre_cache_members(&[("x", &old_x), ("p", &old_p), ("c", &old_c)]);
+        let mut graph = Graph::new(&carry);
+        graph.expand(roots, &access, &opts()).await.unwrap();
+
+        assert!(graph.settle_pass(), "the first pass attests x");
+
+        assert!(graph.attested.contains(&k(Skill, "x")));
+        assert!(graph.released.is_empty(), "{:?}", graph.released);
+        assert!(graph.release_conflicts(), "a release was ready in that pass");
+        assert!(graph.released.contains(&k(Skill, "c")));
+    }
+
+    /// The tag a line is typed at is gone, or offline the tag cache never held it,
+    /// while its manifest stays by digest. A pin every edge stamps with the line keeps
+    /// it and the tag is never asked, as under `grim lock`. With an edge the pin does
+    /// not answer the line resolves, and the missing tag refuses as it always did.
+    #[tokio::test]
+    async fn a_typed_line_its_edges_stamp_needs_no_tag() {
+        for offline in [false, true] {
+            for answered in [true, false] {
+                let fake = Fake::default();
+                let old = fake.publish(pubd(Skill, "ghcr.io/acme/held:1", &[]));
+                fake.publish(pubd(Bundle, PACK1, &[(Skill, "held", "ghcr.io/acme/held:1")]));
+                fake.untag("ghcr.io/acme/held:1");
+                fake.tags_offline.store(offline, Ordering::SeqCst);
+                let mut roots = vec![
+                    direct(Skill, "held", "ghcr.io/acme/held:1"),
+                    direct(Bundle, "pack", PACK1),
+                ];
+                if !answered {
+                    fake.publish(pubd(Skill, "ghcr.io/acme/held:3", &[]));
+                    fake.publish(pubd(
+                        Skill,
+                        "ghcr.io/acme/q:1",
+                        &[(Skill, "held", "ghcr.io/acme/held:3")],
+                    ));
+                    roots.push(direct(Skill, "q", "ghcr.io/acme/q:1"));
+                }
+                let (fake, access) = fake.arc();
+                let carry = pre_cache_members(&[("held", &old)]);
+
+                let result = expand_graph(roots, &access, &opts(), &carry).await;
+
+                let case = format!("offline = {offline}, answered = {answered}");
+                match result {
+                    Ok(graph) if answered => {
+                        let held = graph.nodes[&k(Skill, "held")].pinned.as_ref().unwrap();
+                        assert_eq!(held.digest(), old, "{case}");
+                        assert_eq!(fake.resolve_count("ghcr.io/acme/held:1"), 0, "{case}");
+                    }
+                    Err(err) if !answered => {
+                        assert_eq!(err.reference.name, "held", "{case}: {err}");
+                        let refused = match &err.kind {
+                            ResolveErrorKind::TagNotFound => !offline,
+                            ResolveErrorKind::RegistryUnreachable(e) => {
+                                offline && matches!(e.kind, AccessErrorKind::OfflineMiss)
+                            }
+                            _ => false,
+                        };
+                        assert!(refused, "{case}: {err}");
+                    }
+                    other => panic!("{case}: {other:?}"),
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn lock_requires_never_trusted_cache() {
         let fake = Fake::default();
@@ -2286,6 +4104,228 @@ mod tests {
         assert_eq!(graph.nodes[&k(Skill, "b")].parents, [k(Skill, "a")]);
     }
 
+    /// 0.15.1 locks `p` with no edge, and its `add` stores `p`'s manifest alone. An
+    /// offline relock cannot read what `p` requires, so `p` requires what its row
+    /// records, nothing, as grim 0.15.1 reads it: every row nothing else reaches drops,
+    /// whatever its kind, with no warning. Held under the declaration's hash, `grim
+    /// export` and 0.15.1's install acted on a line deleted by hand; under a hash no
+    /// declaration produces, `grim install --offline` exited 65 where 0.15.1 exits 81.
+    /// Found by review.
+    #[tokio::test]
+    async fn offline_an_unread_requires_layer_holds_no_row_nothing_else_reaches() {
+        const P: &str = "ghcr.io/acme/p:1";
+        const M: &str = "ghcr.io/acme/m:1";
+        const C: &str = "ghcr.io/acme/c:1";
+        const H: &str = "ghcr.io/acme/h:1";
+        const S: &str = "ghcr.io/acme/s:1";
+        const X: &str = "ghcr.io/acme/x:1";
+        let fake = Fake::default();
+        let p = fake.publish(pubd(Skill, P, &[(Skill, "m", M), (Bundle, "pack", PACK1)]));
+        let m = fake.publish(pubd(Skill, M, &[]));
+        let c = fake.publish(pubd(Mcp, C, &[]));
+        let h = fake.publish(pubd(Hook, H, &[]));
+        let s = fake.publish(pubd(Settings, S, &[]));
+        let x = fake.publish(pubd(Skill, X, &[]));
+        let pack = fake.publish(pubd(Bundle, PACK1, &[(Skill, "x", X)]));
+        fake.blobs.lock().unwrap().clear();
+        fake.blobs_offline.store(true, Ordering::SeqCst);
+        let (_fake, access) = fake.arc();
+        let mut row = carried_pin(PACK1, &pack);
+        let pinned = row.pin.clone();
+        row.snapshot = Some(LockedBundle {
+            name: "pack".to_string(),
+            source: LockedBundleSource::Registry {
+                repo: pinned.registry_repository(),
+                tag: "1".to_string(),
+                pinned,
+            },
+            members: vec![BundleMember {
+                kind: Skill,
+                name: "x".to_string(),
+                id: X.to_string(),
+            }],
+            transitive: false,
+        });
+        let carry = Carry {
+            pins: BTreeMap::from([
+                (k(Skill, "p"), carried_pin(P, &p)),
+                (k(Skill, "m"), carried_pin(M, &m)),
+                (k(Mcp, "c"), carried_pin(C, &c)),
+                (k(Hook, "h"), carried_pin(H, &h)),
+                (k(Settings, "s"), carried_pin(S, &s)),
+                (k(Skill, "x"), carried_pin(X, &x)),
+                (k(Bundle, "pack"), row),
+            ]),
+            ..Carry::default()
+        };
+
+        let graph = expand_graph(vec![direct(Skill, "p", P)], &access, &opts(), &carry)
+            .await
+            .unwrap();
+
+        assert_eq!(names(&graph), ["skill/p"]);
+        assert!(graph.nodes[&k(Skill, "p")].published.is_empty(), "no edge is made up");
+        assert!(graph.warnings.is_empty(), "{:?}", graph.warnings);
+    }
+
+    /// A dependent whose manifest the store never read counts as a leaf, as grim 0.15.1
+    /// reads it, so `m`, which nothing else reaches, drops with no warning. Held, a row
+    /// whose line was deleted by hand stayed under the declaration's hash, and `grim
+    /// install` restored it. Found by review.
+    #[tokio::test]
+    async fn offline_a_manifest_the_store_lacks_reads_as_a_leaf() {
+        const P: &str = "ghcr.io/acme/p:1";
+        const M: &str = "ghcr.io/acme/m:1";
+        let fake = Fake::default();
+        let p = fake.publish(pubd(Skill, P, &[(Skill, "m", M)]));
+        let m = fake.publish(pubd(Skill, M, &[]));
+        let (fake, access) = fake.arc();
+        fake.store_empty.store(true, Ordering::SeqCst);
+        let carry = Carry {
+            pins: BTreeMap::from([(k(Skill, "p"), carried_pin(P, &p)), (k(Skill, "m"), carried_pin(M, &m))]),
+            ..Carry::default()
+        };
+
+        let graph = expand_graph(vec![direct(Skill, "p", P)], &access, &opts(), &carry)
+            .await
+            .unwrap();
+
+        assert_eq!(names(&graph), ["skill/p"]);
+        assert!(graph.warnings.is_empty(), "{:?}", graph.warnings);
+    }
+
+    /// [`Fake`] with one manifest gone from the store, offline.
+    struct OneManifestMissing {
+        fake: Arc<Fake>,
+        missing: Digest,
+    }
+
+    #[async_trait]
+    impl OciAccess for OneManifestMissing {
+        async fn resolve_digest(&self, id: &Identifier, op: Operation) -> Result<Option<Digest>, AccessError> {
+            self.fake.resolve_digest(id, op).await
+        }
+        async fn fetch_manifest(&self, id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
+            if id.digest() == self.missing {
+                return Err(AccessError::with_identifier(
+                    id.as_identifier().clone(),
+                    AccessErrorKind::OfflineMiss,
+                ));
+            }
+            self.fake.fetch_manifest(id).await
+        }
+        async fn fetch_blob(&self, r: &Identifier, d: &Digest, max: u64) -> Result<Option<Vec<u8>>, AccessError> {
+            self.fake.fetch_blob(r, d, max).await
+        }
+        async fn list_tags(&self, id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
+            self.fake.list_tags(id).await
+        }
+        async fn list_catalog(&self, registry: &str) -> Result<CatalogListing, AccessError> {
+            self.fake.list_catalog(registry).await
+        }
+        async fn push_blob(&self, repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {
+            self.fake.push_blob(repo, bytes).await
+        }
+        async fn push_manifest(&self, repo: &Identifier, m: &OciManifest) -> Result<Digest, AccessError> {
+            self.fake.push_manifest(repo, m).await
+        }
+        async fn put_tag(&self, repo: &Identifier, tag: &str, d: &Digest) -> Result<(), AccessError> {
+            self.fake.put_tag(repo, tag, d).await
+        }
+    }
+
+    /// The lock's edges stand in for a manifest the store lacks, so `p` is read and
+    /// `m`, which nothing reaches, drops as before.
+    #[tokio::test]
+    async fn offline_a_manifest_the_store_lacks_holds_nothing_the_locked_edges_leave_out() {
+        const P: &str = "ghcr.io/acme/p:1";
+        const Q: &str = "ghcr.io/acme/q:1";
+        const M: &str = "ghcr.io/acme/m:1";
+        let fake = Fake::default();
+        let p = fake.publish(pubd(Skill, P, &[(Skill, "q", Q)]));
+        let q = fake.publish(pubd(Skill, Q, &[]));
+        let m = fake.publish(pubd(Skill, M, &[]));
+        let (fake, _) = fake.arc();
+        let access: Arc<dyn OciAccess> = Arc::new(OneManifestMissing {
+            fake,
+            missing: p.clone(),
+        });
+        let mut carry = carried_requires(k(Skill, "p"), &p, &[(Skill, "q", Q)]);
+        carry.pins = BTreeMap::from([
+            (k(Skill, "p"), carried_pin(P, &p)),
+            (k(Skill, "q"), carried_pin(Q, &q)),
+            (k(Skill, "m"), carried_pin(M, &m)),
+        ]);
+
+        let graph = expand_graph(vec![direct(Skill, "p", P)], &access, &opts(), &carry)
+            .await
+            .unwrap();
+
+        assert_eq!(names(&graph), ["skill/p", "skill/q"]);
+        assert!(graph.warnings.is_empty(), "{:?}", graph.warnings);
+    }
+
+    /// Every other read a cold store misses offline keeps its outcome: a new key typed
+    /// as a line stands in with no edge and reads as a leaf, exit 0; a carried bundle
+    /// stands in from its row, exit 0; a bundle with no row refuses with the store's
+    /// miss, exit 69.
+    #[tokio::test]
+    async fn offline_every_other_manifest_the_store_lacks_keeps_its_outcome() {
+        const P: &str = "ghcr.io/acme/p:1";
+        const M: &str = "ghcr.io/acme/m:1";
+        const X: &str = "ghcr.io/acme/x:1";
+        let fake = Fake::default();
+        fake.publish(pubd(Skill, P, &[(Skill, "m", M)]));
+        let m = fake.publish(pubd(Skill, M, &[]));
+        let x = fake.publish(pubd(Skill, X, &[]));
+        let pack = fake.publish(pubd(Bundle, PACK1, &[(Skill, "x", X)]));
+        let (fake, access) = fake.arc();
+        fake.store_empty.store(true, Ordering::SeqCst);
+        let held_m = BTreeMap::from([(k(Skill, "m"), carried_pin(M, &m))]);
+        let mut row = carried_pin(PACK1, &pack);
+        let pinned = row.pin.clone();
+        row.snapshot = Some(LockedBundle {
+            name: "pack".to_string(),
+            source: LockedBundleSource::Registry {
+                repo: pinned.registry_repository(),
+                tag: "1".to_string(),
+                pinned,
+            },
+            members: vec![BundleMember {
+                kind: Skill,
+                name: "x".to_string(),
+                id: X.to_string(),
+            }],
+            transitive: false,
+        });
+        let mut with_row = Carry {
+            pins: BTreeMap::from([(k(Bundle, "pack"), row.clone()), (k(Skill, "x"), carried_pin(X, &x))]),
+            ..Carry::default()
+        };
+        let graph = expand_graph(vec![direct(Bundle, "pack", PACK1)], &access, &opts(), &with_row)
+            .await
+            .unwrap();
+        assert_eq!(names(&graph), ["skill/x", "bundle/pack"], "a bundle with a row");
+        assert!(graph.warnings.is_empty(), "{:?}", graph.warnings);
+
+        row.snapshot = None;
+        with_row.pins.insert(k(Bundle, "pack"), row);
+        let err = expand_graph(vec![direct(Bundle, "pack", PACK1)], &access, &opts(), &with_row)
+            .await
+            .unwrap_err();
+        assert!(is_offline_miss(&err), "a bundle with no row: {err:?}");
+
+        let new_key = Carry {
+            pins: held_m,
+            ..Carry::default()
+        };
+        let graph = expand_graph(vec![direct(Skill, "p", P)], &access, &opts(), &new_key)
+            .await
+            .unwrap();
+        assert_eq!(names(&graph), ["skill/p"], "a new line");
+        assert!(graph.warnings.is_empty(), "{:?}", graph.warnings);
+    }
+
     #[tokio::test]
     async fn offline_with_a_store_miss_and_no_previous_entry_locks_without_edges() {
         let fake = Fake::default();
@@ -2299,6 +4339,32 @@ mod tests {
 
         assert_eq!(names(&graph), ["skill/a"]);
         assert!(graph.nodes[&k(Skill, "a")].published.is_empty());
+    }
+
+    /// The same refusal as a ring the registry serves, on edges only the lock
+    /// vouches for: nothing else stops the walk.
+    #[tokio::test]
+    async fn offline_a_ring_in_the_locks_requires_is_refused() {
+        const A: &str = "ghcr.io/acme/a:1";
+        const B: &str = "ghcr.io/acme/b:1";
+        let (a, b) = (Algorithm::Sha256.hash(b"a"), Algorithm::Sha256.hash(b"b"));
+        let (fake, access) = Fake::default().arc();
+        fake.store_empty.store(true, Ordering::SeqCst);
+        let mut carry = carried_requires(k(Skill, "a"), &a, &[(Skill, "b", B)]);
+        carry
+            .requires
+            .extend(carried_requires(k(Skill, "b"), &b, &[(Skill, "a", A)]).requires);
+        carry.pins.insert(k(Skill, "a"), carried_pin(A, &a));
+        carry.pins.insert(k(Skill, "b"), carried_pin(B, &b));
+
+        let err = expand_graph(vec![direct(Skill, "a", A)], &access, &opts(), &carry)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&err.kind, ResolveErrorKind::DependencyCycle { cycle, .. } if cycle == &[k(Skill, "a"), k(Skill, "b")]),
+            "{err}"
+        );
     }
 
     #[tokio::test]
@@ -2332,11 +4398,9 @@ mod tests {
         // The previous lock pinned b through `b:1` and c through `c:1`.
         let mut carry = Carry::default();
         carry
-            .digests
-            .insert(Identifier::parse("ghcr.io/acme/b:1").unwrap(), old_b.clone());
-        carry
-            .digests
-            .insert(Identifier::parse("ghcr.io/acme/c:1").unwrap(), c.clone());
+            .pins
+            .insert(k(Skill, "b"), carried_pin("ghcr.io/acme/b:1", &old_b));
+        carry.pins.insert(k(Skill, "c"), carried_pin("ghcr.io/acme/c:1", &c));
 
         let graph = expand_graph(
             vec![direct(Skill, "parent", "ghcr.io/acme/parent:1")],
@@ -2355,6 +4419,307 @@ mod tests {
             "the unchanged edge keeps its pin"
         );
         assert_eq!(graph.nodes[&k(Skill, "c")].pinned.as_ref().unwrap().digest(), c);
+    }
+
+    // ── release: a conflict with a carried claim re-expands ──────
+
+    const LEFT: &str = "ghcr.io/acme/left:1";
+    const RIGHT: &str = "ghcr.io/acme/right:1";
+    const X1: &str = "ghcr.io/acme/x:1";
+    const X13: &str = "ghcr.io/acme/x:1.3";
+
+    /// Roots on `fake` that disagree on `x` until its pin is released: `left`
+    /// claims `x:1`, carried at an older digest, and `right` claims `x:1.3`, the
+    /// digest `x:1` moved to. Returns that digest too.
+    fn disagreeing_on_x(fake: &Fake) -> (Vec<GraphRoot>, Carry, Digest) {
+        fake.publish(pubd(Skill, LEFT, &[(Skill, "x", X1)]));
+        fake.publish(pubd(Skill, RIGHT, &[(Skill, "x", X13)]));
+        let moved = fake.publish(pubd(Skill, X13, &[]));
+        fake.retag(X1, &moved);
+        let mut carry = Carry::default();
+        let old = Algorithm::Sha256.hash(b"x as locked");
+        carry.pins.insert(k(Skill, "x"), carried_pin(X1, &old));
+        let roots = vec![direct(Skill, "left", LEFT), direct(Skill, "right", RIGHT)];
+        (roots, carry, moved)
+    }
+
+    #[tokio::test]
+    async fn a_conflict_with_no_carried_claim_takes_one_pass() {
+        let fake = Fake::default();
+        fake.publish(pubd(Skill, LEFT, &[(Skill, "x", "ghcr.io/acme/x:2")]));
+        fake.publish(pubd(Skill, RIGHT, &[(Skill, "x", "ghcr.io/acme/x:3")]));
+        fake.publish(pubd(Skill, "ghcr.io/acme/x:2", &[]));
+        fake.publish(pubd(Skill, "ghcr.io/acme/x:3", &[]));
+        let (_, access) = fake.arc();
+        let mut carry = Carry::default();
+        let old = Algorithm::Sha256.hash(b"x as locked");
+        carry.pins.insert(k(Skill, "x"), carried_pin(X1, &old));
+
+        let roots = vec![direct(Skill, "left", LEFT), direct(Skill, "right", RIGHT)];
+        let (result, passes) = expand_counting_passes(roots, &access, &opts(), &carry).await;
+        let err = result.unwrap_err();
+
+        assert!(matches!(err.kind, ResolveErrorKind::BundleConflict { .. }), "{err:?}");
+        assert_eq!(passes, 1, "releasing x could change neither claim");
+    }
+
+    /// `left` claims `x:1` and `y:1`, both carried, and `right` claims `x:1.3`.
+    /// Only `x` conflicts until its new digest claims `y:1.3`.
+    #[tokio::test]
+    async fn each_pass_releases_what_the_last_one_exposed() {
+        let fake = Fake::default();
+        let y1 = "ghcr.io/acme/y:1";
+        let y13 = "ghcr.io/acme/y:1.3";
+        let left = fake.publish(pubd(Skill, LEFT, &[(Skill, "x", X1), (Skill, "y", y1)]));
+        fake.publish(pubd(Skill, RIGHT, &[(Skill, "x", X13)]));
+        let moved_x = fake.publish(pubd(Skill, X13, &[(Skill, "y", y13)]));
+        fake.retag(X1, &moved_x);
+        let moved_y = fake.publish(pubd(Skill, y13, &[]));
+        fake.retag(y1, &moved_y);
+        let old_y = fake.publish(pubd(Skill, "ghcr.io/acme/y:0", &[]));
+        let (fake, access) = fake.arc();
+        let mut carry = Carry::default();
+        let old_x = Algorithm::Sha256.hash(b"x as locked");
+        carry.pins.insert(k(Skill, "x"), carried_pin(X1, &old_x));
+        carry.pins.insert(k(Skill, "y"), carried_pin(y1, &old_y));
+
+        let roots = vec![direct(Skill, "left", LEFT), direct(Skill, "right", RIGHT)];
+        let (result, passes) = expand_counting_passes(roots, &access, &opts(), &carry).await;
+        let graph = result.unwrap();
+
+        let digest = |name: &str| graph.nodes[&k(Skill, name)].pinned.as_ref().unwrap().digest();
+        assert_eq!(digest("x"), moved_x);
+        assert_eq!(digest("y"), moved_y);
+        assert_eq!(passes, carry.pins.len() + 1, "one pass per release, then the last");
+        assert_eq!(fake.reads_of(&left), 1, "no release changed left's read");
+    }
+
+    /// A pass after a release reads only what the release changed: `left` and
+    /// `right` are read once, and the second pass reads the moved `x` alone.
+    #[tokio::test]
+    async fn a_release_pass_reads_only_what_the_release_changed() {
+        let fake = Fake::default();
+        let (roots, carry, moved) = disagreeing_on_x(&fake);
+        let (fake, access) = fake.arc();
+
+        let (result, passes) = expand_counting_passes(roots, &access, &opts(), &carry).await;
+
+        let x = &result.unwrap().nodes[&k(Skill, "x")];
+        assert_eq!(x.pinned.as_ref().unwrap().digest(), moved);
+        assert_eq!(passes, 2);
+        assert_eq!(fake.manifest_fetches.lock().unwrap().len(), 3, "left, right, then x");
+        assert_eq!(
+            fake.blob_fetches.load(Ordering::SeqCst),
+            2,
+            "the layers of left and right"
+        );
+    }
+
+    /// A member manifest the registry no longer serves is asked for in every
+    /// pass: only a manifest that was read is reused.
+    #[tokio::test]
+    async fn a_gone_member_manifest_is_asked_for_in_every_pass() {
+        let fake = Fake::default();
+        let (mut roots, carry, _) = disagreeing_on_x(&fake);
+        let gone = Algorithm::Sha256.hash(b"gone");
+        let member = format!("ghcr.io/acme/b:stable@{gone}");
+        fake.publish(pubd(Bundle, "ghcr.io/acme/stack:1", &[(Skill, "b", &member)]));
+        roots.push(direct(Bundle, "stack", "ghcr.io/acme/stack:1"));
+        let (fake, access) = fake.arc();
+
+        let (result, passes) = expand_counting_passes(roots, &access, &opts(), &carry).await;
+
+        assert!(result.unwrap().nodes[&k(Skill, "b")].edges.is_empty());
+        assert_eq!(passes, 2);
+        assert_eq!(fake.reads_of(&gone), passes, "one request a pass");
+    }
+
+    /// Offline, a node the store lacks stands in from the lock in every pass:
+    /// only a manifest that was read is reused, so each pass warns again.
+    #[tokio::test]
+    async fn an_offline_stand_in_is_built_again_in_every_pass() {
+        let fake = Fake::default();
+        let left = fake.publish(pubd(Skill, LEFT, &[(Skill, "x", X1)]));
+        let right = fake.publish(pubd(Skill, RIGHT, &[(Skill, "x", X13)]));
+        let moved = fake.publish(pubd(Skill, X13, &[]));
+        fake.retag(X1, &moved);
+        let (fake, access) = fake.arc();
+        fake.store_empty.store(true, Ordering::SeqCst);
+        let mut carry = carried_requires(k(Skill, "left"), &left, &[(Skill, "x", X1)]);
+        carry
+            .requires
+            .extend(carried_requires(k(Skill, "right"), &right, &[(Skill, "x", X13)]).requires);
+        let old = Algorithm::Sha256.hash(b"x as locked");
+        carry.pins.insert(k(Skill, "x"), carried_pin(X1, &old));
+        let roots = vec![direct(Skill, "left", LEFT), direct(Skill, "right", RIGHT)];
+
+        let (result, passes) = expand_counting_passes(roots, &access, &opts(), &carry).await;
+
+        let x = &result.unwrap().nodes[&k(Skill, "x")];
+        assert_eq!(x.pinned.as_ref().unwrap().digest(), moved);
+        assert_eq!(passes, 2);
+        assert_eq!(
+            fake.offline_misses.load(Ordering::SeqCst),
+            5,
+            "left and right, then left, right and x"
+        );
+    }
+
+    /// A node a release pass settles at the same digest under another winner is
+    /// read again: its id anchors the node's repository and relative members.
+    #[tokio::test]
+    async fn a_release_pass_reads_a_node_again_under_its_new_winner() {
+        let fake = Fake::default();
+        fake.publish(pubd(Skill, LEFT, &[(Skill, "m", "ghcr.io/acme/m:1"), (Skill, "x", X1)]));
+        fake.publish(pubd(Skill, RIGHT, &[(Skill, "x", X13)]));
+        fake.publish(pubd(Skill, "ghcr.io/acme/m:1", &[(Skill, "y", "ghcr.io/zzz/y:1")]));
+        let moved = fake.publish(pubd(Skill, X13, &[(Skill, "y", "ghcr.io/aaa/y:1")]));
+        fake.retag(X1, &moved);
+        fake.publish(pubd(Skill, "ghcr.io/zzz/y:1", &[]));
+        alias_tag(&fake, "ghcr.io/aaa/y:1", "ghcr.io/zzz/y:1");
+        let (_, access) = fake.arc();
+        let mut carry = Carry::default();
+        let old = Algorithm::Sha256.hash(b"x as locked");
+        carry.pins.insert(k(Skill, "x"), carried_pin(X1, &old));
+        let roots = vec![direct(Skill, "left", LEFT), direct(Skill, "right", RIGHT)];
+
+        let (result, passes) = expand_counting_passes(roots, &access, &opts(), &carry).await;
+
+        let y = &result.unwrap().nodes[&k(Skill, "y")];
+        assert_eq!(passes, 2);
+        assert_eq!(y.pinned.as_ref().unwrap().as_identifier().repository(), "aaa/y");
+    }
+
+    /// A pass keeps only the reads of the pass before it: `y`, which the second
+    /// pass never reached because `p` disagreed there, is read again in the
+    /// third, so what a run holds stays within one pass's caps.
+    #[tokio::test]
+    async fn a_read_the_last_pass_did_not_reach_is_not_kept() {
+        const P1: &str = "ghcr.io/acme/p:1";
+        const P13: &str = "ghcr.io/acme/p:1.3";
+        const Y1: &str = "ghcr.io/acme/y:1";
+        let fake = Fake::default();
+        fake.publish(pubd(Skill, LEFT, &[(Skill, "a", "ghcr.io/acme/a:1"), (Skill, "x", X1)]));
+        fake.publish(pubd(Skill, RIGHT, &[(Skill, "x", X13)]));
+        fake.publish(pubd(Skill, "ghcr.io/acme/a:1", &[(Skill, "p", P1)]));
+        let moved_x = fake.publish(pubd(Skill, X13, &[(Skill, "p", P13)]));
+        fake.retag(X1, &moved_x);
+        let old_p = fake.publish(pubd(Skill, "ghcr.io/acme/p:0", &[(Skill, "y", Y1)]));
+        let moved_p = fake.publish(pubd(Skill, P13, &[(Skill, "y", Y1)]));
+        fake.retag(P1, &moved_p);
+        let y = fake.publish(pubd(Skill, Y1, &[]));
+        let (fake, access) = fake.arc();
+        let mut carry = Carry::default();
+        let old_x = Algorithm::Sha256.hash(b"x as locked");
+        carry.pins.insert(k(Skill, "x"), carried_pin(X1, &old_x));
+        carry.pins.insert(k(Skill, "p"), carried_pin(P1, &old_p));
+        let roots = vec![direct(Skill, "left", LEFT), direct(Skill, "right", RIGHT)];
+
+        let (result, passes) = expand_counting_passes(roots, &access, &opts(), &carry).await;
+
+        let p = &result.unwrap().nodes[&k(Skill, "p")];
+        assert_eq!(p.pinned.as_ref().unwrap().digest(), moved_p);
+        assert_eq!(passes, 3);
+        assert_eq!(fake.reads_of(&y), 2, "the first and the third pass read y");
+    }
+
+    #[tokio::test]
+    async fn the_node_cap_counts_each_pass_from_zero() {
+        // 1104 nodes a pass: under the cap once, over it if two passes added up.
+        let fake = fanout([275; 4]);
+        let (mut roots, carry, moved) = disagreeing_on_x(&fake);
+        roots.push(direct(Skill, "a", "ghcr.io/acme/a:1"));
+        let (_, access) = fake.arc();
+
+        let graph = expand_graph(roots, &access, &opts(), &carry).await.unwrap();
+
+        assert_eq!(graph.nodes[&k(Skill, "x")].pinned.as_ref().unwrap().digest(), moved);
+    }
+
+    #[tokio::test]
+    async fn the_byte_cap_counts_each_pass_from_zero() {
+        // 20 MiB a pass: under the cap once, over it if two passes added up.
+        let fake = weighted(&[LAYER_MAX; 40]);
+        let (mut roots, carry, moved) = disagreeing_on_x(&fake);
+        roots.push(direct(Skill, "a", "ghcr.io/acme/a:1"));
+        let (_, access) = fake.arc();
+
+        let graph = expand_graph(roots, &access, &opts(), &carry).await.unwrap();
+
+        assert_eq!(graph.nodes[&k(Skill, "x")].pinned.as_ref().unwrap().digest(), moved);
+    }
+
+    /// How a cap error names `x`, which only a release pass reads.
+    const RELEASED: &str = "skill/x (ghcr.io/acme/x)";
+
+    /// `left` and `right`, each with a layer of `side` bytes, disagree on `x`.
+    /// The moved `x` requires `y` through `grown` bytes. A conflicted node is never
+    /// read, so only the release pass sees that layer and that node.
+    fn growing_on_release(fake: &Fake, side: u64, grown: u64) -> (Vec<GraphRoot>, Carry) {
+        let weighs = |p: Pub<'static>, size: u64| Pub {
+            layer_size: Some(size),
+            ..p
+        };
+        fake.publish(weighs(pubd(Skill, LEFT, &[(Skill, "x", X1)]), side));
+        fake.publish(weighs(pubd(Skill, RIGHT, &[(Skill, "x", X13)]), side));
+        let moved = fake.publish(weighs(pubd(Skill, X13, &[(Skill, "y", "ghcr.io/acme/y:1")]), grown));
+        fake.publish(pubd(Skill, "ghcr.io/acme/y:1", &[]));
+        fake.retag(X1, &moved);
+        let mut carry = Carry::default();
+        let old = Algorithm::Sha256.hash(b"x as locked");
+        carry.pins.insert(k(Skill, "x"), carried_pin(X1, &old));
+        let roots = vec![
+            direct(Skill, "a", "ghcr.io/acme/a:1"),
+            direct(Skill, "left", LEFT),
+            direct(Skill, "right", RIGHT),
+        ];
+        (roots, carry)
+    }
+
+    #[tokio::test]
+    async fn a_release_pass_is_held_to_the_node_cap() {
+        // `a`'s four mids plus `x` and `y` leave 2042 for the leaves.
+        let at_the_cap = fanout([510, 510, 511, 511]);
+        let (roots, carry) = growing_on_release(&at_the_cap, 8, 8);
+        let (_, access) = at_the_cap.arc();
+        let graph = expand_graph(roots, &access, &opts(), &carry).await.unwrap();
+        assert_eq!(graph.nodes.len(), 3 + 2048);
+
+        let over = fanout([510, 511, 511, 511]);
+        let (roots, carry) = growing_on_release(&over, 8, 8);
+        let (_, access) = over.arc();
+        let err = expand_graph(roots, &access, &opts(), &carry).await.unwrap_err();
+        assert_eq!(too_large(&err), (GraphLimit::Nodes, RELEASED.to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_release_pass_is_held_to_the_byte_cap() {
+        const SIDE: u64 = 1024;
+        let fits = LAYER_MAX - 2 * SIDE;
+        let at_the_cap = weighted(&[LAYER_MAX; 63]);
+        let (roots, carry) = growing_on_release(&at_the_cap, SIDE, fits);
+        let (_, access) = at_the_cap.arc();
+        expand_graph(roots, &access, &opts(), &carry).await.unwrap();
+
+        let over = weighted(&[LAYER_MAX; 63]);
+        let (roots, carry) = growing_on_release(&over, SIDE, fits + 1);
+        let (_, access) = over.arc();
+        let err = expand_graph(roots, &access, &opts(), &carry).await.unwrap_err();
+        assert_eq!(too_large(&err), (GraphLimit::RequiresBytes, RELEASED.to_string()));
+    }
+
+    /// A released pin is not carried: nothing promised it, so a missing manifest
+    /// reads as a resolve that failed and never names `grim update`.
+    #[tokio::test]
+    async fn a_released_pin_with_a_gone_manifest_is_not_a_gone_pin() {
+        let fake = Fake::default();
+        let (roots, carry, moved) = disagreeing_on_x(&fake);
+        fake.manifests.lock().unwrap().remove(&moved.to_string());
+        let (_, access) = fake.arc();
+
+        let err = expand_graph(roots, &access, &opts(), &carry).await.unwrap_err();
+
+        assert!(matches!(err.kind, ResolveErrorKind::TagNotFound), "{err:?}");
     }
 
     fn path_root(name: &str) -> GraphRoot {
@@ -2517,5 +4882,282 @@ mod tests {
         };
         assert_eq!(id.to_string(), "ghcr.io/acme/x:1");
         assert_eq!(x.pinned.as_ref().unwrap().as_identifier().tag_or_latest(), "1");
+    }
+
+    // ── a part's stamps stand in for the [[bundle]] rows it does not keep ──
+
+    const OUTER: &str = "ghcr.io/acme/outer:1";
+    const BRIDGE: &str = "ghcr.io/acme/bridge:1";
+    const BRIDGE_ONE: &str = "ghcr.io/acme/bridge-one:1";
+    const INNER1: &str = "ghcr.io/acme/inner:1";
+    const INNER2: &str = "ghcr.io/acme/inner:2";
+    const SX: &str = "ghcr.io/acme/sx:1";
+    const SZ: &str = "ghcr.io/acme/sz:1";
+
+    /// A part whose stamp records `inner:1` at `at`, the proof declaring `declared`.
+    fn stamped_inner(at: &Digest, declared: &[NodeKey]) -> Carry {
+        let id = Identifier::parse(INNER1).unwrap();
+        let pair = (id.registry_repository(), bundle_provenance_tag(&id));
+        Carry {
+            part: Some(PartCarry {
+                stamps: PartStamps {
+                    pins: BTreeMap::from([(pair, at.clone())]),
+                    rows: BTreeMap::new(),
+                },
+                refresh: Refresh::Nothing,
+                recorded: BTreeMap::new(),
+                declared: Some(declared.iter().cloned().collect()),
+            }),
+            ..Carry::default()
+        }
+    }
+
+    /// A project whose `[[bundle]]` row records `inner:1` at `at`, listing `members`.
+    fn rowed_inner(at: &Digest, members: &[(ArtifactKind, &str, &str)]) -> Carry {
+        let id = Identifier::parse(INNER1).unwrap();
+        let pin = PinnedIdentifier::try_from(id.clone_with_digest(at.clone())).unwrap();
+        let row = LockedBundle {
+            name: "inner".to_string(),
+            source: LockedBundleSource::Registry {
+                repo: id.registry_repository(),
+                tag: bundle_provenance_tag(&id),
+                pinned: pin.clone(),
+            },
+            members: members
+                .iter()
+                .map(|(kind, name, id)| BundleMember {
+                    kind: *kind,
+                    name: (*name).to_string(),
+                    id: (*id).to_string(),
+                })
+                .collect(),
+            transitive: false,
+        };
+        let record = PinRecord {
+            pin: &pin,
+            row: Some(&row),
+            binding: "inner",
+        };
+        let evidence = pin_rule::edge_evidence(record, HashProof::Indirect, BTreeSet::new());
+        let carried = CarriedPin {
+            pin,
+            declared: None,
+            snapshot: Some(row),
+            evidence,
+        };
+        Carry {
+            pins: BTreeMap::from([(k(Bundle, "inner"), carried)]),
+            ..Carry::default()
+        }
+    }
+
+    /// `inner:1` served `[x]` when locked and `[z]` now, `inner:2` serving the same manifest as
+    /// `inner:1` now. Returns the registry, the old digest and the new one.
+    fn inner_moved() -> (Arc<Fake>, Arc<dyn OciAccess>, Digest, Digest) {
+        let fake = Fake::default();
+        fake.publish(pubd(Skill, SX, &[]));
+        fake.publish(pubd(Skill, SZ, &[]));
+        let old = fake.publish(pubd(Bundle, INNER1, &[(Skill, "x", SX)]));
+        fake.publish(pubd(Bundle, OUTER, &[(Bundle, "inner", INNER1)]));
+        fake.publish(pubd(Bundle, BRIDGE, &[(Bundle, "inner", INNER2)]));
+        fake.publish(pubd(Bundle, BRIDGE_ONE, &[(Bundle, "inner", INNER1)]));
+        let new = fake.publish(pubd(Bundle, INNER1, &[(Skill, "z", SZ)]));
+        fake.retag(INNER2, &new);
+        let (fake, access) = fake.arc();
+        (fake, access, old, new)
+    }
+
+    type Outcome = Result<(Vec<String>, Option<Digest>), String>;
+
+    async fn outcome(access: &Arc<dyn OciAccess>, roots: Vec<GraphRoot>, carry: &Carry) -> Outcome {
+        match expand_graph(roots, access, &opts(), carry).await {
+            Ok(graph) => Ok((
+                names(&graph),
+                graph
+                    .nodes
+                    .get(&k(Bundle, "inner"))
+                    .and_then(|n| n.pinned.as_ref())
+                    .map(|p| p.digest()),
+            )),
+            Err(err) => Err(format!("{:?}", err.kind)),
+        }
+    }
+
+    /// A bundle a part's stamp carries wins and loses a diamond as the project's carried
+    /// `[[bundle]]` row at the same digest, repository and tag does. `outer` lists `inner:1` and a
+    /// second parent lists `inner:2` (the carried pin cannot answer it: released, both tags read
+    /// the new digest) or `inner:1` again (both answered: held at the recorded digest).
+    #[tokio::test]
+    async fn a_stamp_carried_bundle_meets_a_diamond_as_a_carried_bundle_row_does() {
+        let (_fake, access, old, new) = inner_moved();
+        let declared = [k(Bundle, "outer"), k(Bundle, "bridge"), k(Bundle, "bridge-one")];
+        for (label, second, second_id, expected) in [
+            ("an unrecorded second tag releases the pin", "bridge", BRIDGE, &new),
+            ("the same tag holds it", "bridge-one", BRIDGE_ONE, &old),
+        ] {
+            let roots = || vec![direct(Bundle, "outer", OUTER), direct(Bundle, second, second_id)];
+            let part = outcome(&access, roots(), &stamped_inner(&old, &declared)).await;
+            let project = outcome(&access, roots(), &rowed_inner(&old, &[(Skill, "x", SX)])).await;
+
+            assert_eq!(part, project, "{label}: the part follows the project");
+            let (_, at) = part.as_ref().expect(label);
+            assert_eq!(at.as_ref(), Some(expected), "{label}");
+        }
+    }
+
+    /// The H2 core: a recorded bundle reached below a parent that records none reads at its
+    /// recorded digest, so the list the tag moved onto never arrives.
+    #[tokio::test]
+    async fn a_recorded_bundle_below_an_unrecorded_parent_reads_at_its_recorded_digest() {
+        let (_fake, access, old, new) = inner_moved();
+        let roots = || vec![direct(Bundle, "outer", OUTER)];
+
+        let carried = outcome(&access, roots(), &stamped_inner(&old, &[k(Bundle, "outer")])).await;
+        let unrecorded = outcome(&access, roots(), &Carry::default()).await;
+
+        assert_eq!(
+            carried,
+            Ok((
+                vec!["skill/x".into(), "bundle/inner".into(), "bundle/outer".into()],
+                Some(old)
+            )),
+        );
+        assert_eq!(
+            unrecorded,
+            Ok((
+                vec!["skill/z".into(), "bundle/inner".into(), "bundle/outer".into()],
+                Some(new)
+            )),
+            "with no stamp the tag is read",
+        );
+    }
+
+    /// A bundle the run selects reads its tag though the part records it, and so does an include
+    /// the run names directly.
+    #[tokio::test]
+    async fn a_selected_bundle_reads_its_tag_though_the_part_records_it() {
+        let (_fake, access, old, new) = inner_moved();
+        let mut carry = stamped_inner(&old, &[k(Bundle, "outer")]);
+        carry.part.as_mut().unwrap().refresh = Refresh::Names(BTreeSet::from([crate::lock::refresh::Selected {
+            kind: Some(Bundle),
+            name: "inner".to_string(),
+        }]));
+
+        let selected = outcome(&access, vec![direct(Bundle, "outer", OUTER)], &carry).await;
+
+        assert_eq!(selected.map(|(_, at)| at), Ok(Some(new)));
+    }
+
+    /// Offline, a project's `[[bundle]]` row stands in for a manifest the store lacks; a part's
+    /// stamp holds a digest and no list, so it has none and the read is the store's miss.
+    #[tokio::test]
+    async fn an_offline_bundle_carried_by_its_stamp_has_no_stand_in() {
+        let (fake, access, old, _new) = inner_moved();
+        fake.store_empty.store(true, Ordering::SeqCst);
+        let x = Algorithm::Sha256.hash(b"x as locked");
+        let mut project = rowed_inner(&old, &[(Skill, "x", SX)]);
+        project.pins.insert(k(Skill, "x"), carried_pin(SX, &x));
+        let roots = || vec![direct(Bundle, "inner", INNER1)];
+
+        let rowed = expand_graph(roots(), &access, &opts(), &project).await.unwrap();
+        let stamped = expand_graph(roots(), &access, &opts(), &stamped_inner(&old, &[k(Bundle, "inner")]))
+            .await
+            .unwrap_err();
+
+        assert_eq!(names(&rowed), ["skill/x", "bundle/inner"], "the row stands in");
+        assert!(is_offline_miss(&stamped), "{stamped:?}");
+    }
+
+    const SM1: &str = "ghcr.io/acme/sm:1";
+    const SM2: &str = "ghcr.io/acme/sm:2";
+    const SP: &str = "ghcr.io/acme/sp:1";
+
+    /// `id` locked at `at` as a part row whose own stamp records a bundle, under `proof`: the
+    /// evidence the pin rule derives for it, not a literal.
+    fn stamped_part_pin(id: &str, at: &Digest, proof: HashProof) -> CarriedPin {
+        let mut carried = carried_pin(id, at);
+        let record = PinRecord {
+            pin: &carried.pin,
+            row: None,
+            binding: "sm",
+        };
+        let evidence = pin_rule::stamped_edge_evidence(record, proof, BTreeSet::new(), true);
+        carried.evidence = evidence;
+        carried
+    }
+
+    /// `inner:1` recorded at its served digest, listing `sm:2`; `sp:1` requires `sm:1`. The
+    /// part's stamp on `sm` names `inner:1`, so `inner`'s edge onto `sm:2` is a stamped edge.
+    /// `sm` is carried at `sm:1`'s digest, with a tag or without, under `proof`; returns the
+    /// graph and that digest.
+    async fn stamped_edge_onto_sm(
+        declared: Option<&[NodeKey]>,
+        proof: HashProof,
+        tagged: bool,
+        with_stamps: bool,
+    ) -> (Result<ExpandedGraph, ResolveError>, Digest) {
+        let fake = Fake::default();
+        let held = fake.publish(pubd(Skill, SM1, &[]));
+        fake.publish(pubd(Skill, SM2, &[]));
+        fake.publish(pubd(Skill, SP, &[(Skill, "sm", SM1)]));
+        let at = fake.publish(pubd(Bundle, INNER1, &[(Skill, "sm", SM2)]));
+        let (_fake, access) = fake.arc();
+        let id = Identifier::parse(INNER1).unwrap();
+        let pair = (id.registry_repository(), bundle_provenance_tag(&id));
+        let pin = stamped_part_pin(if tagged { SM1 } else { "ghcr.io/acme/sm" }, &held, proof);
+        let mut carry = Carry {
+            pins: BTreeMap::from([(k(Skill, "sm"), pin)]),
+            ..Carry::default()
+        };
+        if with_stamps {
+            carry.part = Some(PartCarry {
+                stamps: PartStamps {
+                    pins: BTreeMap::from([(pair.clone(), at)]),
+                    rows: BTreeMap::from([(k(Skill, "sm"), BTreeSet::from([pair]))]),
+                },
+                refresh: Refresh::Nothing,
+                recorded: BTreeMap::new(),
+                declared: declared.map(|keys| keys.iter().cloned().collect()),
+            });
+        }
+        let roots = vec![direct(Bundle, "inner", INNER1), direct(Skill, "sp", SP)];
+        (expand_graph(roots, &access, &opts(), &carry).await, held)
+    }
+
+    fn sm_digest(graph: &ExpandedGraph) -> Digest {
+        graph.nodes[&k(Skill, "sm")].pinned.as_ref().unwrap().digest()
+    }
+
+    /// A member row whose own stamp records the bundle that lists it keeps its pin against that
+    /// bundle's edge onto another tag of it: the stamp shows the edge settled the pin, so the
+    /// diamond with `sp`'s edge onto `sm:1` is no conflict. Without the stamp the edge onto
+    /// `sm:2` answers nothing and the diamond exits 78.
+    #[tokio::test]
+    async fn a_stamped_edge_keeps_a_diamond_member_whose_pin_names_the_other_tag() {
+        let declared = [k(Bundle, "inner"), k(Skill, "sp")];
+
+        let (stamped, held) = stamped_edge_onto_sm(Some(&declared), HashProof::Indirect, true, true).await;
+        let (unstamped, _) = stamped_edge_onto_sm(Some(&declared), HashProof::Indirect, true, false).await;
+
+        assert_eq!(sm_digest(&stamped.expect("the stamped edge keeps the pin")), held);
+        assert!(
+            matches!(unstamped.unwrap_err().kind, ResolveErrorKind::BundleConflict { .. }),
+            "no part stamp, no stamped edge"
+        );
+    }
+
+    /// Under a proof that declares nothing (`Stale`), a stamped edge answers only a pin that
+    /// carries a tag; a tagless pin has no tag to have come from a claim, so it resolves and the
+    /// diamond conflicts.
+    #[tokio::test]
+    async fn a_stamped_edge_on_a_stale_part_answers_only_a_tagged_pin() {
+        let (tagged, held) = stamped_edge_onto_sm(None, HashProof::Stale, true, true).await;
+        let (tagless, _) = stamped_edge_onto_sm(None, HashProof::Stale, false, true).await;
+
+        assert_eq!(sm_digest(&tagged.expect("a tagged pin")), held);
+        assert!(matches!(
+            tagless.unwrap_err().kind,
+            ResolveErrorKind::BundleConflict { .. }
+        ));
     }
 }

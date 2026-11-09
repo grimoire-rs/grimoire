@@ -19,6 +19,7 @@ use crate::cli::exit_code::ExitCode;
 use crate::cli::printer::StdoutPipeClosed;
 use crate::command::command_error::CommandError;
 use crate::config::config_error::{ConfigError, ConfigErrorKind};
+use crate::config::scope::Invocation;
 use crate::export::export_error::ExportError;
 use crate::install::install_error::{InstallError, InstallErrorKind};
 use crate::install::installer::SettingsOutcome;
@@ -147,6 +148,19 @@ impl std::error::Error for SettingsFailure {
         // `error`'s source, not `error` itself: `Display` already forwards to
         // it, so returning `error` would print its message twice under `{:#}`.
         self.error.source()
+    }
+}
+
+impl Error {
+    /// Name `grim` in the remedy of an error raised below the scope. Every other
+    /// error prints no command, or built its own from the scope it was raised in.
+    #[must_use]
+    pub fn naming(self, grim: &Invocation) -> Self {
+        match self {
+            Self::Resolve(e) => Self::Resolve(e.naming(grim)),
+            Self::Install(e) => Self::Install(e.naming(grim)),
+            other => other,
+        }
     }
 }
 
@@ -403,6 +417,18 @@ pub fn unknown_key_hint(message: &str) -> Option<String> {
     ))
 }
 
+/// An error chain as the terminal shows it, in `main`'s error report and in a
+/// warning that quotes a failed read. The chain can quote a lock or registry reply
+/// verbatim. A TOML message is a single line that can quote a key whose line break
+/// the surrounding layout would otherwise pass as its own.
+pub fn printed_chain(err: &anyhow::Error) -> String {
+    let mut chain = format!("{err:#}");
+    for parse in err.chain().filter_map(|cause| cause.downcast_ref::<toml::de::Error>()) {
+        chain = chain.replace(parse.message(), &crate::oci::text::escape_controls(parse.message()));
+    }
+    crate::oci::text::escape_chain(&chain)
+}
+
 /// Maps an error chain to a process exit code.
 ///
 /// Thin wrapper over [`classify`] for callers that only need the exit
@@ -493,7 +519,8 @@ fn classify_lock(err: &LockError) -> Classification {
         | LockErrorKind::TomlSerialize(_)
         | LockErrorKind::FileTooLarge { .. }
         | LockErrorKind::UnsupportedVersion { .. }
-        | LockErrorKind::ScopeMismatch { .. } => Classification::new(ExitCode::ConfigError),
+        | LockErrorKind::ScopeMismatch { .. }
+        | LockErrorKind::InvalidEntryName { .. } => Classification::new(ExitCode::ConfigError),
         LockErrorKind::Io(io) => Classification::new(classify_io(io)),
     }
 }
@@ -557,9 +584,11 @@ fn unsupported_feature() -> Classification {
 /// drift apart.
 fn classify_resolve(err: &ResolveError) -> Classification {
     match &err.kind {
-        ResolveErrorKind::TagNotFound | ResolveErrorKind::NotDeclared | ResolveErrorKind::BundleNotFound => {
-            Classification::new(ExitCode::NotFound)
-        }
+        ResolveErrorKind::TagNotFound
+        | ResolveErrorKind::NotDeclared
+        | ResolveErrorKind::BundleNotFound
+        | ResolveErrorKind::PinnedManifestGone { .. }
+        | ResolveErrorKind::MarketplacePinGone { .. } => Classification::new(ExitCode::NotFound),
         ResolveErrorKind::AuthFailure(_) => Classification::new(ExitCode::AuthError),
         ResolveErrorKind::RegistryUnreachable(_) | ResolveErrorKind::ResolveTimeout => {
             Classification::new(ExitCode::Unavailable)
@@ -569,13 +598,16 @@ fn classify_resolve(err: &ResolveError) -> Classification {
             reason: Some(ErrorReason::StaleLock),
         },
         ResolveErrorKind::BundleInvalid(_)
+        | ResolveErrorKind::LocalBundleInvalid(_)
         | ResolveErrorKind::LocalSource(_)
         | ResolveErrorKind::DependencyCycle { .. }
         | ResolveErrorKind::GraphTooLarge { .. } => Classification::new(ExitCode::DataError),
         ResolveErrorKind::UnsupportedFeature(_) => unsupported_feature(),
         // A bundle conflict is a misconfiguration of the user's own
         // declaration (two bundles disagree), not malformed external data.
-        ResolveErrorKind::BundleConflict { .. } => Classification::new(ExitCode::ConfigError),
+        ResolveErrorKind::BundleConflict { .. }
+        | ResolveErrorKind::PluginConflict { .. }
+        | ResolveErrorKind::HeldRequirement { .. } => Classification::new(ExitCode::ConfigError),
     }
 }
 
@@ -766,16 +798,40 @@ fn classify_io(io: &std::io::Error) -> ExitCode {
 mod tests {
     use super::*;
     use crate::api::settings_report::{PieceMark, PieceState, RefusedPiece};
-    use crate::oci::Identifier;
     use crate::oci::digest::Digest;
     use crate::oci::identifier::error::IdentifierErrorKind;
     use crate::oci::pinned_identifier::PinnedIdentifier;
+    use crate::oci::{ArtifactKind, Identifier};
 
     #[test]
     fn identifier_error_classifies_as_data_error() {
         let inner = IdentifierError::new("bad", IdentifierErrorKind::MissingRegistry);
         let err: anyhow::Error = Error::from(inner).into();
         assert_eq!(classify_error(&err), ExitCode::DataError);
+    }
+
+    #[test]
+    fn a_plugin_conflict_and_a_held_requirement_classify_as_config_errors() {
+        let plugin = ResolveErrorKind::PluginConflict {
+            kind: ArtifactKind::Skill,
+            name: "x".to_string(),
+            sources: "acme/x:1, acme/x:2".to_string(),
+            others: String::new(),
+            plugin: "team".to_string(),
+            manifest: std::path::PathBuf::from("marketplace.toml"),
+            from_bundles: false,
+        };
+        let held = ResolveErrorKind::HeldRequirement {
+            required: "skill 'held'".to_string(),
+            moved: "skill 'held'".to_string(),
+            to: "acme/held:2".to_string(),
+            dependent: "y".to_string(),
+            retry: "update 'team'".to_string(),
+        };
+        for kind in [plugin, held] {
+            let err: anyhow::Error = Error::from(ResolveError::unidentified(ArtifactKind::Skill, "x", kind)).into();
+            assert_eq!(classify_error(&err), ExitCode::ConfigError);
+        }
     }
 
     #[test]
@@ -1072,6 +1128,7 @@ mod tests {
     fn lock_missing_classifies_reason_as_no_lock() {
         let err: anyhow::Error = Error::from(CommandError::LockMissing {
             path: std::path::PathBuf::from("/w/grimoire.lock"),
+            grim: crate::config::scope::Invocation::WALKED,
         })
         .into();
         assert_eq!(
@@ -1637,6 +1694,7 @@ mod tests {
                     name: s("x"),
                     first: s("a/x:1"),
                     second: s("b/x:1"),
+                    nested: None,
                 },
                 ExitCode::ConfigError,
                 None,
@@ -1778,6 +1836,18 @@ mod tests {
     }
 
     #[test]
+    fn gone_pin_is_79_not_found() {
+        use crate::oci::ArtifactKind;
+        let kind = ResolveErrorKind::PinnedManifestGone {
+            digest: crate::oci::Algorithm::Sha256.hash(b"gone"),
+            name: "ghost".to_string(),
+        };
+        let err = ResolveError::unidentified(ArtifactKind::Skill, "ghost", kind);
+        let c = classify(&anyhow::Error::from(Error::from(err)));
+        assert_eq!((c.exit, c.reason), (ExitCode::NotFound, None));
+    }
+
+    #[test]
     fn c031_4_no_new_error_reason_slug() {
         fn position(r: ErrorReason) -> usize {
             match r {
@@ -1866,6 +1936,7 @@ mod tests {
             InstallErrorKind::StaleDependencies {
                 kind: crate::oci::ArtifactKind::Skill,
                 name: "dep".to_string(),
+                relock: None,
             },
             InstallErrorKind::LocalContentChanged {
                 name: "dep".to_string(),

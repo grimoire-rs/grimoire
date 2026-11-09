@@ -789,13 +789,10 @@ def test_relative_out_of_tree_path_source_warns_security(
 def test_update_named_path_entry_is_not_rejected_as_undeclared(
     grim_at, project_dir: Path
 ) -> None:
-    # W4 coverage: `resolve_lock_partial`'s per-name guard
-    # (`all_work.iter().any(...) || has_path_entry(set, name)`) must accept
-    # a path-sourced binding name in a NAMED `grim update <name>` — it must
-    # not be rejected with `TagNotFound` ("tag not found") just because a
-    # path entry produces no registry work item. May already pass today
-    # (the `has_path_entry` guard already exists) — coverage, not proven
-    # regression, until run.
+    # `unknown_names`, the per-name guard of `target_lock`, must accept a
+    # path-sourced binding name in a NAMED `grim update <name>`: a path entry
+    # is declared even though it produces no registry work item, so it is
+    # never refused as an unknown name.
     _skill(project_dir, "my-skill")
     _config(project_dir, "skills", "my-skill", "./skills/my-skill")
 

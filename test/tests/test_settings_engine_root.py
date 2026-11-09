@@ -29,7 +29,7 @@ pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
 KIRO = {"chat.defaultModel": "m"}
 COPILOT = {"model": "m"}
 INSIDE = "(settings-root-in-workspace)"
-FROM_OUTSIDE = "run grim install --global from outside this repository"
+FROM_OUTSIDE = "run grim --global install from outside this repository"
 
 
 def _package(repo: str) -> PublishedArtifact:
@@ -116,7 +116,7 @@ def test_a_root_inside_the_repository_is_refused(
     runner.env["KIRO_HOME"] = str(inside)
 
     remedy = (
-        "set KIRO_HOME to a path outside this repository, or unset it, then run grim install --global, "
+        "set KIRO_HOME to a path outside this repository, or unset it, then run grim --global install, "
         f"or {FROM_OUTSIDE}"
     )
 

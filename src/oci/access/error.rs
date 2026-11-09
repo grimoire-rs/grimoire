@@ -15,6 +15,7 @@
 use std::io;
 use std::path::PathBuf;
 
+use crate::oci::text::escape_controls;
 use crate::oci::{Digest, Identifier};
 
 /// An OCI-access operation failed, optionally on a specific identifier.
@@ -47,7 +48,7 @@ impl AccessError {
 impl std::fmt::Display for AccessError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.identifier {
-            Some(id) => write!(f, "{id}: {}", self.kind),
+            Some(id) => write!(f, "{}: {}", escape_controls(&id.to_string()), self.kind),
             None => write!(f, "{}", self.kind),
         }
     }
@@ -76,7 +77,7 @@ pub enum AccessErrorKind {
 
     /// A manifest was fetched but could not be parsed into the Grimoire
     /// subset (e.g. an image index where an image manifest was expected).
-    #[error("invalid manifest: {0}")]
+    #[error("invalid manifest: {}", escape_controls(.0))]
     InvalidManifest(String),
 
     /// Fetched blob bytes did not hash to the requested digest.

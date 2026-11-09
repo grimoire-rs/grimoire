@@ -18,6 +18,11 @@ The lock is the sharpest target: the hook kind inserts ``[[hook]]`` between
 ``"mcp"`` in the JCS declaration document.  Both golden locks contain
 ``[[mcp]]`` *and* ``[[bundle]]``, so that adjacency is present in the data
 rather than merely implied.
+
+An artifact's ``pinned`` line now records the tag that resolved it, and the
+fixture predates that. The one named equivalence, ``pinned-advisory-tag``
+(C-018), drops the tag from the actual lock before the byte compare; it is
+asserted on its own against the declaration. State files compare unmasked.
 """
 
 from __future__ import annotations
@@ -30,8 +35,10 @@ import shutil
 from pathlib import Path
 
 import pytest
+from test_golden_pre_dependencies import assert_pins_carry_declared_tags
 
 from src import registry as reg
+from tools.p9_diff import strip_pinned_tags
 
 FIXTURE = Path(__file__).resolve().parents[1] / "data" / "golden" / "pre_hooks_03e59b0"
 
@@ -137,7 +144,7 @@ def _replay_registry() -> None:
 # `generated_by = "grim <version>"` is stamped by every lock save (main's
 # `lock_io::save` too), so it moves at every release, not with the format. It
 # is the fixture's one named mask: the line must still be present and shaped as
-# before, only the version digits are blanked. Nothing else is normalized.
+# before, only the version digits are blanked.
 _GENERATED_BY = re.compile(rb'^generated_by = "grim \d+\.\d+\.\d+[^"]*"$', re.MULTILINE)
 
 
@@ -152,7 +159,9 @@ def _assert_identical(name: str, expected: bytes, actual_path: Path) -> None:
         assert _GENERATED_BY.search(expected) and _GENERATED_BY.search(actual), (
             f"{name}: the `generated_by` line changed shape"
         )
+        assert_pins_carry_declared_tags(actual_path)
         expected, actual = _mask_version(expected), _mask_version(actual)
+        actual = strip_pinned_tags(actual)
     if actual == expected:
         return
     diff = "\n".join(

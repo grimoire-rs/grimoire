@@ -11,6 +11,8 @@
 use std::borrow::Cow;
 use std::io::{self, IsTerminal, Write};
 
+use crate::oci::text::{is_hidden, rewrite_hidden};
+
 /// Marker error: grim's own stdout was closed by the downstream reader
 /// (`grim … | head`). `main.rs` maps it to a silent exit 0. A network or
 /// file EPIPE never carries this type, so a mid-push connection reset can
@@ -136,72 +138,15 @@ pub(crate) fn screen_plain(s: &str) -> Cow<'_, str> {
     if !s.chars().any(is_hidden) {
         return Cow::Borrowed(s);
     }
-    let mut out = String::with_capacity(s.len() + 8);
-    let mut changed = false;
-    let mut rest = s;
-    while let Some(c) = rest.chars().next() {
-        rest = &rest[c.len_utf8()..];
-        if c == FLAG_BASE {
-            out.push(c);
-            if let Some(len) = flag_tag_len(rest) {
-                out.push_str(&rest[..len]);
-                rest = &rest[len..];
-            }
-        } else if matches!(c, '\t' | '\n') {
+    let out = rewrite_hidden(s, |c, out| {
+        if matches!(c, '\t' | '\n') {
             out.push(' ');
-            changed = true;
-        } else if is_hidden(c) {
-            out.extend(c.escape_unicode());
-            changed = true;
         } else {
-            out.push(c);
+            out.extend(c.escape_unicode());
         }
-    }
+    });
     // A string whose only hidden code points form flag sequences is unchanged.
-    if changed { Cow::Owned(out) } else { Cow::Borrowed(s) }
-}
-
-/// Waving black flag, the base of the emoji flag tag sequences (England,
-/// Scotland, Wales).
-const FLAG_BASE: char = '\u{1F3F4}';
-
-/// Fewest and most tag characters a flag sequence carries before its cancel tag.
-const FLAG_TAG_RUN: std::ops::RangeInclusive<usize> = 3..=7;
-
-fn is_hidden(c: char) -> bool {
-    matches!(
-        c,
-        '\0'..='\u{1F}'
-            | '\u{7F}'..='\u{9F}'
-            | '\u{61C}'
-            | '\u{180E}'
-            | '\u{200B}'
-            | '\u{2060}'..='\u{2064}'
-            | '\u{202A}'..='\u{202E}'
-            | '\u{2066}'..='\u{2069}'
-            | '\u{FEFF}'
-            | '\u{FFF9}'..='\u{FFFB}'
-            | '\u{E0001}'
-            | '\u{E0020}'..='\u{E007F}'
-    )
-}
-
-/// Byte length of the tag run and cancel tag that complete a flag sequence at
-/// the start of `rest`, or `None` when the run is not well formed.
-fn flag_tag_len(rest: &str) -> Option<usize> {
-    let mut tags = 0;
-    let mut bytes = 0;
-    for c in rest.chars() {
-        match c {
-            '\u{E0030}'..='\u{E0039}' | '\u{E0061}'..='\u{E007A}' => {
-                tags += 1;
-                bytes += c.len_utf8();
-            }
-            '\u{E007F}' => return FLAG_TAG_RUN.contains(&tags).then_some(bytes + c.len_utf8()),
-            _ => return None,
-        }
-    }
-    None
+    if out == s { Cow::Borrowed(s) } else { Cow::Owned(out) }
 }
 
 fn write_row<'a>(

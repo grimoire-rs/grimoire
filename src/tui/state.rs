@@ -15,6 +15,7 @@ use std::sync::Arc;
 use crate::catalog::{DownloadSummary, OciMeta, SearchQuery, SortKey, SortMode, SortOrder, browse_sort};
 use crate::command::status::SettingsArmingInputs;
 use crate::config::registry_resolve::RowSource;
+use crate::lock::effective_set::NodeKey;
 
 use super::bundle_members::{BundleMemberCache, BundleMemberKey};
 
@@ -130,30 +131,102 @@ pub struct SettingsResult {
     pub message: String,
     /// One line per change or refused value.
     pub detail: String,
+    /// The body's scroll offset, in wrapped rows.
+    pub scroll: u16,
 }
 
-/// A refused install awaiting the user's Overwrite decision.
+/// A refused action awaiting the user's forced-retry decision: Overwrite for an
+/// install or update, Uninstall for a delete `grim uninstall` cannot repeat.
 ///
 /// The trigger is not an error: an install refusal arrives as
 /// `Ok(InstallOutcome::Refused { .. } | RefusedUntracked { .. })`, so it can
 /// only be caught where the outcome is reduced to a label, never on the error
 /// channel. Only a single-artifact action opens this — a multi-row batch
-/// reports its refusals in the aggregate status line, since one Overwrite
-/// answer cannot speak for several artifacts.
+/// reports its refusals in the aggregate status line, since one answer
+/// cannot speak for several artifacts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingForce {
     /// The `rows` index to re-issue with `force`.
     pub row: usize,
-    /// Whether the refused action was an update (vs. a fresh install).
-    pub is_update: bool,
+    /// The refused action, re-issued as it was: an update never comes back as
+    /// an install, and a delete's retry discards the values it refused.
+    pub op: BatchOp,
     /// The refused row's reference, shown in the prompt title.
     pub repo: String,
     /// grim's own description of the refusal, shown verbatim in the body.
     pub detail: String,
-    /// Whether the **Overwrite** button is selected. Starts `false` so a
+    /// Whether the action button, not Cancel, is selected. Starts `false` so a
     /// queued Enter cancels — a destructive default is how a stray keypress
     /// discards the user's local edits.
     pub overwrite_selected: bool,
+    /// What the refused attempt's relock already changed. Its lock is saved,
+    /// so the forced retry moves nothing and would otherwise never name them,
+    /// nor prune what the attempt dropped.
+    pub pins: PinChanges,
+    /// What the retry overrides: the nodes its dialog listed, so it overwrites
+    /// or removes nothing the user was never shown.
+    pub force: crate::install::installer::ForceScope,
+    /// The body's scroll offset, in wrapped rows.
+    pub scroll: u16,
+    /// Whether scrolling has brought the body's last row on screen since the
+    /// body was last laid out. Until then a body taller than the popup leaves
+    /// the action unconfirmable.
+    pub read: bool,
+}
+
+impl PendingForce {
+    /// The action button's label.
+    pub fn action(&self) -> &'static str {
+        match self.op {
+            BatchOp::Uninstall => self.op.verb(),
+            BatchOp::Install | BatchOp::Update => "Overwrite",
+        }
+    }
+
+    /// The consequence sentence the body opens with.
+    pub fn message(&self) -> String {
+        let consequence = match self.op {
+            BatchOp::Uninstall => "Uninstalling",
+            BatchOp::Install | BatchOp::Update => "Reinstalling",
+        };
+        format!("{consequence} discards your local changes. This cannot be undone.")
+    }
+
+    /// The popup as a `screen`-sized terminal draws it.
+    pub fn layout(&self, screen: (u16, u16)) -> super::confirm::Layout {
+        let detail = super::render::sanitize_lines(&self.detail);
+        super::confirm::gated_layout(screen, &self.message(), &detail, self.action())
+    }
+}
+
+/// The pins one action changed against the lock it replaced: moved to another
+/// digest, or dropped. A key new to the lock is neither.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PinChanges {
+    pub moved: Vec<NodeKey>,
+    pub dropped: Vec<NodeKey>,
+    /// The warning `grim update <name>` prints with no lock to replace: the
+    /// Update's relock pinned every declared artifact.
+    pub no_lock: Option<String>,
+    /// The dropped pins the action may prune. Its saved lock no longer holds
+    /// them, so a forced retry, which relocks from that lock, prunes these too.
+    pub prunable: Vec<NodeKey>,
+}
+
+impl PinChanges {
+    pub fn is_empty(&self) -> bool {
+        self.moved.is_empty() && self.dropped.is_empty() && self.no_lock.is_none() && self.prunable.is_empty()
+    }
+
+    /// Fold in a later action's changes, as a batch does row by row.
+    pub fn extend(&mut self, other: &PinChanges) {
+        self.moved.extend(other.moved.iter().cloned());
+        self.dropped.extend(other.dropped.iter().cloned());
+        self.prunable.extend(other.prunable.iter().cloned());
+        if self.no_lock.is_none() {
+            self.no_lock.clone_from(&other.no_lock);
+        }
+    }
 }
 
 /// Which batch operation to run over the target rows. Lives with the state
@@ -218,6 +291,8 @@ pub struct PendingBatch {
     /// reason as [`PendingForce::overwrite_selected`]: a letter typed into the
     /// list by mistake must not be the key that confirms.
     pub proceed_selected: bool,
+    /// The body's scroll offset, in wrapped rows.
+    pub scroll: u16,
 }
 
 /// A project init awaiting the user's go-ahead, when [`Mode::ConfirmInit`].
@@ -228,6 +303,8 @@ pub struct PendingInit {
     /// Whether the Initialize button is selected. Starts `false`: the prompt
     /// writes a file, so a stray Enter must cancel.
     pub proceed_selected: bool,
+    /// The body's scroll offset, in wrapped rows.
+    pub scroll: u16,
 }
 
 /// The modal version picker: the row it targets, the fetched tags, and the
@@ -434,6 +511,9 @@ pub struct TuiState {
     pub marked: std::collections::BTreeSet<usize>,
     /// The active scope label (`project` / `global`), shown in the title.
     pub scope_label: String,
+    /// The `grim` the settings hint and legend name, `--global` or
+    /// `--config <path>` included, so the command acts on this scope.
+    pub invocation: crate::config::scope::Invocation,
     /// The active version picker, when [`Mode::VersionPick`].
     pub picker: Option<VersionPicker>,
     /// The refused install awaiting confirmation, when [`Mode::ConfirmForce`].
@@ -598,6 +678,7 @@ impl Default for TuiState {
             status_line: String::new(),
             marked: std::collections::BTreeSet::new(),
             scope_label: String::new(),
+            invocation: crate::config::scope::Invocation::WALKED,
             picker: None,
             confirm: None,
             pending_batch: None,
@@ -1066,6 +1147,11 @@ impl TuiState {
         self.scope_label = label.into();
     }
 
+    /// Set the `grim` the active scope's hints name.
+    pub fn set_invocation(&mut self, grim: &crate::config::scope::Invocation) {
+        self.invocation = grim.clone();
+    }
+
     /// Set the active scope's effective selected client names (display only).
     pub fn set_clients(&mut self, clients: Vec<String>) {
         self.clients = clients;
@@ -1384,7 +1470,8 @@ impl TuiState {
     /// the paint, so the two cannot disagree about how tall the pane is.
     pub fn active_detail_lines(&self) -> Vec<super::detail::DetailLine> {
         let row = self.selected_row();
-        let mut lines = super::detail::detail_tab_lines(row, self.detail_companion(), self.detail_tab);
+        let mut lines =
+            super::detail::detail_tab_lines(row, self.detail_companion(), self.detail_tab, &self.invocation);
         if self.detail_tab == super::detail::DetailTab::Overview
             && let Some(row) = row
         {
@@ -1442,12 +1529,32 @@ impl TuiState {
     }
 
     /// Record the live terminal size (initial + every resize), re-clamping
-    /// the detail scroll — a grown pane may shrink the scroll range.
+    /// the detail scroll — a grown pane may shrink the scroll range — and
+    /// sending an open dialog back to the top of its body.
     pub fn set_term_size(&mut self, size: (u16, u16)) {
+        let resized = size != self.term_size;
         self.term_size = size;
         let lines = self.active_detail_lines();
         let max = super::detail::scroll_max(&lines, self.detail_viewport(size));
         self.detail_scroll = self.detail_scroll.min(max);
+        // A resize can re-wrap the dialog body, so an offset kept across it
+        // could skip rows: reading starts again at the top.
+        if resized && let Some(c) = self.confirm.as_mut() {
+            c.scroll = 0;
+            c.read = false;
+            c.overwrite_selected &= c.layout(size).shows_end(0);
+        }
+        if resized {
+            if let Some(b) = self.pending_batch.as_mut() {
+                b.scroll = 0;
+            }
+            if let Some(p) = self.pending_init.as_mut() {
+                p.scroll = 0;
+            }
+            if let Some(r) = self.settings_result.as_mut() {
+                r.scroll = 0;
+            }
+        }
     }
 
     /// Set the effective default registry (elided from displayed names).
@@ -2026,16 +2133,55 @@ impl TuiState {
         self.mode = Mode::List;
     }
 
-    /// Open the Overwrite confirmation for a refused single-artifact install.
+    /// Open the forced-retry confirmation for a refused single-artifact action,
+    /// whose retry forces `nodes`, the ones `detail` lists, and no other.
     /// Cancel is preselected — see [`PendingForce::overwrite_selected`].
-    pub fn open_confirm_force(&mut self, row: usize, is_update: bool, repo: &str, detail: &str) {
+    pub fn open_confirm_force(
+        &mut self,
+        row: usize,
+        op: BatchOp,
+        repo: &str,
+        detail: &str,
+        pins: PinChanges,
+        nodes: BTreeSet<NodeKey>,
+    ) {
+        let force = crate::install::installer::ForceScope::Only(nodes);
+        self.open_confirm(row, op, repo, detail, pins, force);
+    }
+
+    /// Open the forced-retry confirmation for a refused delete, whose retry
+    /// forces `nodes` and no other. Cancel is preselected.
+    pub fn open_confirm_delete(
+        &mut self,
+        row: usize,
+        repo: &str,
+        detail: &str,
+        pins: PinChanges,
+        nodes: BTreeSet<NodeKey>,
+    ) {
+        self.open_confirm_force(row, BatchOp::Uninstall, repo, detail, pins, nodes);
+    }
+
+    fn open_confirm(
+        &mut self,
+        row: usize,
+        op: BatchOp,
+        repo: &str,
+        detail: &str,
+        pins: PinChanges,
+        force: crate::install::installer::ForceScope,
+    ) {
         self.mode = Mode::ConfirmForce;
         self.confirm = Some(PendingForce {
             row,
-            is_update,
+            op,
             repo: repo.to_string(),
             detail: detail.to_string(),
             overwrite_selected: false,
+            pins,
+            force,
+            scroll: 0,
+            read: false,
         });
     }
 
@@ -2045,6 +2191,7 @@ impl TuiState {
         self.settings_result = Some(SettingsResult {
             message: message.to_string(),
             detail: detail.to_string(),
+            scroll: 0,
         });
     }
 
@@ -2055,21 +2202,53 @@ impl TuiState {
     }
 
     /// Move the confirm selection between Cancel and Overwrite. Any non-zero
-    /// delta flips it — there are only two buttons.
+    /// delta flips it — there are only two buttons. Overwrite cannot be chosen
+    /// before [`Self::confirm_force_ready`].
     pub fn confirm_force_move(&mut self, delta: i64) {
+        let ready = self.confirm_force_ready();
         if let Some(c) = self.confirm.as_mut()
             && delta != 0
+            && (ready || c.overwrite_selected)
         {
             c.overwrite_selected = !c.overwrite_selected;
         }
+    }
+
+    /// Whether the open dialog's action may be confirmed: the screen holds the
+    /// whole body, or scrolling has shown its last row. The retry forces every
+    /// node the body names, so confirming earlier forces some unseen.
+    pub fn confirm_force_ready(&self) -> bool {
+        self.confirm
+            .as_ref()
+            .is_some_and(|c| c.read || c.layout(self.term_size).shows_end(c.scroll))
+    }
+
+    /// Scroll the dialog body by `rows`, at most one view per call, so reading
+    /// down never skips a row. Reaching the last row makes the action
+    /// confirmable.
+    pub fn scroll_confirm(&mut self, rows: i64) {
+        let size = self.term_size;
+        if let Some(c) = self.confirm.as_mut() {
+            let layout = c.layout(size);
+            c.scroll = layout.scrolled(c.scroll, rows);
+            c.read |= layout.shows_end(c.scroll);
+        }
+    }
+
+    /// The rows one page of the dialog body moves.
+    pub fn confirm_page(&self) -> i64 {
+        self.confirm
+            .as_ref()
+            .map_or(1, |c| i64::from(c.layout(self.term_size).view.max(1)))
     }
 
     /// Close the confirmation, yielding the pending retry only when the user
     /// actually chose **Overwrite**. Cancelling yields `None` and shows no
     /// toast — a declined destructive prompt needs no acknowledgement.
     pub fn take_confirm_force(&mut self) -> Option<PendingForce> {
+        let ready = self.confirm_force_ready();
         self.mode = Mode::List;
-        self.confirm.take().filter(|c| c.overwrite_selected)
+        self.confirm.take().filter(|c| c.overwrite_selected && ready)
     }
 
     /// Hold a multi-artifact batch for confirmation. Cancel is preselected —
@@ -2084,21 +2263,27 @@ impl TuiState {
             source,
             candidates,
             proceed_selected: false,
+            scroll: 0,
         });
     }
 
-    /// Flip the batch confirmation between Cancel and the proceed button.
+    /// Flip the batch confirmation between Cancel and the proceed button. A
+    /// screen too narrow for the buttons never offers the proceed button.
     pub fn confirm_batch_move(&mut self) {
-        if let Some(b) = self.pending_batch.as_mut() {
+        let narrow = self.popup_too_narrow();
+        if let Some(b) = self.pending_batch.as_mut()
+            && (b.proceed_selected || !narrow)
+        {
             b.proceed_selected = !b.proceed_selected;
         }
     }
 
     /// Close the batch confirmation, yielding the batch only when the user
-    /// chose to proceed.
+    /// chose to proceed on a screen that shows the button whole.
     pub fn take_confirm_batch(&mut self) -> Option<PendingBatch> {
+        let narrow = self.popup_too_narrow();
         self.mode = Mode::List;
-        self.pending_batch.take().filter(|b| b.proceed_selected)
+        self.pending_batch.take().filter(|b| b.proceed_selected && !narrow)
     }
 
     /// Ask before creating the project config at `config_path`. Cancel is
@@ -2108,21 +2293,63 @@ impl TuiState {
         self.pending_init = Some(PendingInit {
             config_path: config_path.to_string(),
             proceed_selected: false,
+            scroll: 0,
         });
     }
 
-    /// Flip the init confirmation between Cancel and Initialize.
+    /// Flip the init confirmation between Cancel and Initialize. A screen too
+    /// narrow for the buttons never offers Initialize.
     pub fn confirm_init_move(&mut self) {
-        if let Some(p) = self.pending_init.as_mut() {
+        let narrow = self.popup_too_narrow();
+        if let Some(p) = self.pending_init.as_mut()
+            && (p.proceed_selected || !narrow)
+        {
             p.proceed_selected = !p.proceed_selected;
         }
     }
 
     /// Close the init confirmation, returning whether the user chose to
-    /// initialize.
+    /// initialize on a screen that shows the button whole.
     pub fn take_confirm_init(&mut self) -> bool {
+        let narrow = self.popup_too_narrow();
         self.mode = Mode::List;
-        self.pending_init.take().is_some_and(|p| p.proceed_selected)
+        self.pending_init.take().is_some_and(|p| p.proceed_selected && !narrow)
+    }
+
+    /// The open batch, init or settings popup as a `term_size` terminal draws it.
+    fn popup_layout(&self) -> Option<super::confirm::Layout> {
+        super::render::plain_popup_view(self).map(|view| view.layout(self.term_size))
+    }
+
+    /// Whether the open batch or init popup's buttons do not fit the screen,
+    /// which clips the chosen one.
+    fn popup_too_narrow(&self) -> bool {
+        super::render::plain_popup_view(self)
+            .is_some_and(|view| super::confirm::too_narrow(self.term_size.0, view.action))
+    }
+
+    /// Scroll the open batch, init or settings popup by `rows`, at most one view
+    /// per call.
+    pub fn scroll_popup(&mut self, rows: i64) {
+        let Some(layout) = self.popup_layout() else {
+            return;
+        };
+        let offset = match (
+            &mut self.pending_batch,
+            &mut self.pending_init,
+            &mut self.settings_result,
+        ) {
+            (Some(b), _, _) => &mut b.scroll,
+            (None, Some(p), _) => &mut p.scroll,
+            (None, None, Some(r)) => &mut r.scroll,
+            (None, None, None) => return,
+        };
+        *offset = layout.scrolled(*offset, rows);
+    }
+
+    /// The rows one page of the batch, init or settings popup moves.
+    pub fn popup_page(&self) -> i64 {
+        self.popup_layout().map_or(1, |layout| i64::from(layout.view.max(1)))
     }
 
     /// The currently selected row, if any.
@@ -2992,7 +3219,14 @@ mod tests {
         assert!(s.pending_batch.is_none());
         assert_eq!(s.mode, Mode::List);
 
-        s.open_confirm_force(1, false, "r/beta", "modified locally");
+        s.open_confirm_force(
+            1,
+            BatchOp::Install,
+            "r/beta",
+            "modified locally",
+            PinChanges::default(),
+            std::collections::BTreeSet::new(),
+        );
         s.merge_catalog_rows(seeded().rows);
         assert!(s.confirm.is_none());
         assert_eq!(s.mode, Mode::List);

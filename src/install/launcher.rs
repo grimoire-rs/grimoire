@@ -279,12 +279,24 @@ pub fn ensure(grim_home: &Path, _guard: &DispatchGuard) -> Result<Ensured, ArmRe
     Ok(Ensured { state: entry })
 }
 
+/// The pre-native `sh` shim's place under any `$GRIM_HOME`.
+const LEGACY_SHIM: &str = "/hooks/bin/grim-hook";
+
+/// Whether `registration`, a client's registration text, runs the pre-native
+/// `sh` shim. No current grim serves the shim's `grim hook run`, so such a
+/// registration fails open (CWE-636).
+pub fn runs_legacy_shim(registration: &str) -> bool {
+    registration.contains(LEGACY_SHIM)
+}
+
 /// Delete the pre-native `sh` shim at `$GRIM_HOME/hooks/bin/grim-hook` (C-N12).
 ///
-/// Run under the same guard as [`ensure`], once per convergence that arms
-/// something. A registration written by an older grim and still pointing at it hits
-/// the shim's own `[ -f ] && [ -x ] || exit 0` guard and does nothing until `grim install`
-/// rewrites it. `bin` stays a reserved name, so the emptied directory is left alone.
+/// Run under the same guard as [`ensure`], once per whole-set convergence that
+/// arms something: another workspace may still register the shim, and a run
+/// scoped to a closure rewrites only its own workspace's registrations. A
+/// registration that still points at a deleted shim fails open (CWE-636) until a
+/// convergence rewrites it.
+/// `bin` stays a reserved name, so the emptied directory is left alone.
 /// Never fails arming: NotFound is the steady state, and anything else is a warning.
 pub fn retire_legacy_shim(grim_home: &Path, _guard: &DispatchGuard) {
     let shim = hooks_dir(grim_home).join("bin").join("grim-hook");
@@ -519,6 +531,18 @@ mod tests {
         assert!(!shim.exists());
         assert!(bin.join("other").exists(), "only the shim is grim's to delete");
         retire_legacy_shim(home.path(), &guard);
+    }
+
+    /// The shim is told by its own place, so a `$GRIM_HOME` that merely ends in
+    /// `hooks/bin` never reads as one.
+    #[test]
+    fn only_a_registration_naming_the_shim_runs_it() {
+        assert!(runs_legacy_shim(
+            "L='/home/u/.grimoire/hooks/bin/grim-hook'\n\"$L\" run"
+        ));
+        let odd_home = Path::new("/srv/hooks/bin");
+        let current = format!("{} claude PreToolUse t", path(odd_home).display());
+        assert!(!runs_legacy_shim(&current), "{current}");
     }
 
     #[test]

@@ -36,15 +36,43 @@ def _snapshot(*roots: Path) -> dict[str, bytes]:
     return seen
 
 
-def _stale(result) -> dict:
+def _stale_error(result) -> dict:
     assert result.returncode == 65, result.stderr
     error = json.loads(result.stdout)["error"]
     assert error["exit"] == 65 and error["reason"] == "stale-lock", error
+    return error
+
+
+def _stale(result) -> dict:
+    error = _stale_error(result)
     assert (
-        "skill 'dep': the lock's dependencies do not match the pinned artifact; run grim lock"
+        "skill 'dep': the lock's dependencies do not match the pinned artifact; run `grim lock`"
         in error["message"]
     ), error
     return error
+
+
+def test_a_config_install_names_its_config_in_the_stale_remedy(
+    grim_at, project_dir: Path, tmp_path: Path, unique_repo: str
+) -> None:
+    """Followed from the shell's own project, a plain `grim lock` relocks that one."""
+    dep = make_dependent(
+        f"{unique_repo}/dep", "1", "skill", {"dep/SKILL.md": SKILL_DOC}, [EDGE]
+    )
+    make_artifact(f"{unique_repo}/base", "skill", {"base/SKILL.md": BASE_DOC}, tag="1")
+    config = write_config(project_dir, skills={"dep": dep.fq})
+    grim_at(project_dir).run("lock")
+    lock = project_dir / "grimoire.lock"
+    lock.write_text(REQUIRES_BLOCK.sub("\n", lock.read_text()))
+    away = tmp_path / "away"
+    away.mkdir()
+
+    result = grim_at(away).run(
+        "--format", "json", "--config", str(config), "install", check=False
+    )
+
+    message = _stale_error(result)["message"]
+    assert f"do not match the pinned artifact; run `grim --config {config} lock`" in message
 
 
 def test_install_refuses_mismatched_requires(

@@ -102,7 +102,7 @@ pub async fn run(ctx: &Context, args: &AllowArgs) -> anyhow::Result<(HookConsent
             } else {
                 "apply what it covers"
             };
-            tracing::warn!("consent recorded; run `grim install` to {next_step}");
+            tracing::warn!("consent recorded; run `{} install` to {next_step}", scope.invocation);
             Ok((
                 HookConsentReport::new(
                     scope.workspace.clone(),

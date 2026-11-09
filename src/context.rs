@@ -418,6 +418,13 @@ impl Context {
         self
     }
 
+    /// Scope a context to `config`, so a `run()` over an injected registry
+    /// never walks up from the test's working directory.
+    pub fn with_config(mut self, config: std::path::PathBuf) -> Self {
+        self.config = Some(config);
+        self
+    }
+
     /// Mark a hermetic context `--offline`, so a test reads the cache only.
     pub fn with_offline(mut self) -> Self {
         self.offline = true;

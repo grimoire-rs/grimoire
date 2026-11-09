@@ -172,3 +172,31 @@ def test_add_force_bundle_spares_directly_declared_nested_member(
     assert error["reason"] == "untracked-destination", error
     assert (mine / "SKILL.md").read_text() == "mine\n"
     assert "mine" not in (_skill_dir(project_dir, "t") / "SKILL.md").read_text()
+
+
+def test_add_names_a_pin_it_dropped(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A new version that no longer requires `x` takes it out of the lock while
+    its files stay on disk and `status` stops showing it. Found by probe: exit 0
+    and no output named the orphan. The report is the one place that can."""
+    x = _leaf(unique_repo, "x")
+    first = make_dependent(f"{unique_repo}/par", "1", "skill", _skill_files("par"), [("skill", "x", "./x:1")])
+    second = make_artifact(f"{unique_repo}/par", "skill", _skill_files("par", "two"), tag="2")
+    write_config(project_dir)
+    runner = grim_at(project_dir)
+    runner.run("add", first.fq)
+
+    result = runner.run("--format", "json", "add", second.fq)
+
+    dropped = json.loads(result.stdout)["dropped"]
+    assert [(p["kind"], p["name"]) for p in dropped] == [("skill", "x")]
+    assert dropped[0]["pinned"].endswith(x.digest)
+    assert _skill_dir(project_dir, "x").is_dir()
+
+    runner.run("add", first.fq)
+    plain = runner.run("add", second.fq)
+    assert "dropped 1 pin: skill/x" in plain.stderr, plain.stderr
+
+    runner.run("update")
+    assert not _skill_dir(project_dir, "x").exists(), "the note names this route"

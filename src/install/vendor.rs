@@ -26,10 +26,12 @@
 //! location cannot be resolved (no `$HOME`) or does not exist for the
 //! artifact kind.
 
+use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::config::scope::ConfigScope;
+use crate::lock::effective_set::NodeKey;
 use crate::oci::ArtifactKind;
 use crate::oci::hook::{
     CanonicalEvent, HookEntry, HookRegistration, HookSurface, HookTier, matcher_char_allowed, projection_for,
@@ -552,6 +554,30 @@ fn matcher_may_select_shell_command_tool(client: &str, matcher: Option<&str>) ->
 fn starts_with_ignore_ascii_case(tool: &str, alternative: &str) -> bool {
     let (tool, alternative) = (tool.as_bytes(), alternative.as_bytes());
     tool.len() >= alternative.len() && tool[..alternative.len()].eq_ignore_ascii_case(alternative)
+}
+
+/// The recorded rules whose managed vendor config entry a sync may add.
+/// Removal never consults it: a retired entry goes whatever this says.
+#[derive(Debug, Clone, Copy)]
+pub enum SyncAdds<'a> {
+    /// Every recorded rule, so an install or a bare update converges the set.
+    Every,
+    /// Only the rules in a named update's closure; every other entry stays as
+    /// the user left it.
+    Within(&'a BTreeSet<NodeKey>),
+    /// No rule: a removal deletes entries and never writes one back.
+    Nothing,
+}
+
+impl SyncAdds<'_> {
+    /// Whether the managed entry of rule `name` may be added.
+    pub fn admits(self, name: &str) -> bool {
+        match self {
+            Self::Every => true,
+            Self::Within(closure) => closure.contains(&(ArtifactKind::Rule, name.to_owned())),
+            Self::Nothing => false,
+        }
+    }
 }
 
 /// Which splice engine renders a vendor's [`Vendor::mcp_config_path`] file.
@@ -1381,21 +1407,14 @@ pub trait Vendor {
         self.agent_index(parsed, pinned)
     }
 
-    /// Converge vendor-owned configuration on the current install state —
-    /// the reversible config-registration seam (hooks ADR pattern).
-    /// Called after install/update/uninstall mutated `state` for every
-    /// involved vendor. Default: no-op.
+    /// Converge vendor-owned configuration on `state` after a command mutated it. Default: no-op.
     ///
-    /// `retired` carries the [`ClientOutput`]s the triggering operation
-    /// removed from the state — every client's, not just this vendor's;
-    /// [`super::install_state::retired_outputs`] computes it once per
-    /// command from a pre-mutation snapshot. `state` alone cannot answer
-    /// "what went away": an uninstalled artifact's record, and its name with
-    /// it, is already gone by the time the sync runs, so a vendor that must
-    /// **deregister** something needs the removal evidence handed to it
-    /// rather than guessed from the filesystem. Empty on a pure install; a
-    /// vendor whose managed config is a pure function of `state` (OpenCode's
-    /// single `instructions` glob) ignores it.
+    /// `retired` holds every client's [`ClientOutput`]s the operation removed
+    /// ([`super::install_state::retired_outputs`]), empty on a pure install: a
+    /// removed record is already gone from `state`, so a vendor deregisters from
+    /// this evidence, never from a filesystem guess. `adds` names the recorded
+    /// rules whose managed entry may be added: a named update passes its
+    /// closure, a removal none.
     ///
     /// # Errors
     ///
@@ -1407,6 +1426,7 @@ pub trait Vendor {
         _workspace: &Path,
         _scope: ConfigScope,
         _retired: &[ClientOutput],
+        _adds: SyncAdds<'_>,
     ) -> io::Result<()> {
         Ok(())
     }

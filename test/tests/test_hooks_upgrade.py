@@ -2,9 +2,10 @@
 # Copyright 2026 The Grimoire Authors
 """Upgrading from the `sh`-shim launcher to the native one (C-N5, C-N12).
 
-Hooks are experimental, so there is no migration engine: convergence deletes the
-old `$GRIM_HOME/hooks/bin/grim-hook` shim once, rewrites every registration to the
-new shape, and `launcher::ensure` writes the native launcher iff its bytes differ.
+Hooks are experimental, so there is no migration engine: a whole convergence deletes
+the old `$GRIM_HOME/hooks/bin/grim-hook` shim once, any convergence rewrites each
+registration that still runs it, and `launcher::ensure` writes the native launcher iff
+its bytes differ.
 
 These tests do not depend on the launcher dispatching: the embedded launcher is
 only compared as bytes.
@@ -183,6 +184,110 @@ def test_s003_a_workspace_not_revisited_keeps_its_old_registration_and_does_not_
     runner_b.run("install", "--trust-hooks")
     (healed,) = _elements(project_b)
     assert str(hooks / "grim-hook") in json.dumps(healed), healed
+
+
+def _gatekeeper_beside_a_skill(grim_at, project_dir: Path, unique_repo: str):
+    """A consented gatekeeper at `Bash`, and a skill a named run can reach without it."""
+    hook = make_artifact(
+        f"{unique_repo}/shell-guard",
+        "hook",
+        {
+            "shell-guard/hook.toml": GATEKEEPER_TOML,
+            "shell-guard/guard.sh": '#!/bin/sh\ncat > /dev/null\necho \'{"decision":"deny","reason":"guarded"}\'\n',
+        },
+        tag="1",
+    )
+    skill = make_artifact(
+        f"{unique_repo}/carrier",
+        "skill",
+        {"carrier/SKILL.md": "---\nname: carrier\ndescription: d\n---\n# carrier\n"},
+        tag="1",
+    )
+    write_config(project_dir, skills={"carrier": skill.fq}, hooks={"shell-guard": hook.fq})
+    runner = grim_at(project_dir)
+    runner.run("config", "set", "options.experimental.hooks", "true")
+    runner.run("lock")
+    runner.run("hook", "allow")
+    runner.run("install")
+    return runner
+
+
+def _fire(project_dir: Path) -> subprocess.CompletedProcess[str]:
+    """Run the one grim registration at `Bash` the way Claude runs it."""
+    (element,) = _elements(project_dir)
+    return subprocess.run(
+        ["/bin/sh", "-c", element["command"]],
+        input=json.dumps(
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "ls"},
+                "cwd": "/repo",
+                "session_id": "s-1",
+            }
+        ),
+        capture_output=True,
+        text=True,
+        cwd=str(project_dir),
+    )
+
+
+OLD_GRIM = (
+    "#!/bin/sh\n"
+    "# Stands in for a pre-native grim kept beside the new one, which still serves `hook run`.\n"
+    '[ "$1 $2" = "hook run" ] || exit 64\n'
+    "cat > /dev/null\n"
+    'echo \'{"decision":"deny","reason":"old grim"}\'\n'
+)
+
+
+@pytest.mark.parametrize(
+    "run", [("update", "--", "carrier"), ("uninstall", "skill", "carrier")], ids=["named-update", "uninstall"]
+)
+@pytest.mark.parametrize("layout", ["in-place", "side-by-side"])
+def test_s003_a_run_outside_the_closure_rewrites_a_registration_the_old_shim_cannot_fire(
+    grim_at, project_dir: Path, tmp_path: Path, registry: str, unique_repo: str, layout: str, run: tuple[str, ...]
+) -> None:
+    """Upgraded in place, the shim execs a grim without `hook run`, so the old registration
+    fails open (CWE-636). Side by side, the old grim still answers, until a run deletes the
+    shim. Either way the registration has to move, whatever the run named. The shim stays for
+    a workspace this run did not touch, until a whole convergence retires it."""
+    runner = _gatekeeper_beside_a_skill(grim_at, project_dir, unique_repo)
+    assert "guarded" in _fire(project_dir).stdout, "precondition: the gatekeeper denies"
+
+    if layout == "in-place":
+        recorded = runner.binary
+    else:
+        recorded = tmp_path / "old" / "grim"
+        recorded.parent.mkdir()
+        recorded.write_text(OLD_GRIM)
+        recorded.chmod(0o755)
+    shim = Path(runner.grim_home) / "hooks" / "bin" / "grim-hook"
+    shim.parent.mkdir(parents=True, exist_ok=True)
+    shim.write_text(OLD_SHIM.replace("/old/grim", str(recorded)))
+    shim.chmod(0o755)
+    _seed_old_registration(project_dir, shim)
+    before = _fire(project_dir).stdout
+    if layout == "in-place":
+        assert "deny" not in before, "precondition: the old string cannot deny"
+    else:
+        assert "old grim" in before, "precondition: the old grim still answers"
+
+    done = runner.run(*run)
+
+    fired = _fire(project_dir)
+    assert "guarded" in fired.stdout, f"the gatekeeper stopped denying\nstderr: {done.stderr}"
+    assert "bin/grim-hook" not in json.dumps(_elements(project_dir)), _elements(project_dir)
+    assert shim.exists(), "a run with a closure retired a shim another workspace may reach"
+    rewrote = [line for line in done.stderr.splitlines() if "launcher script" in line]
+    assert len(rewrote) == 1, done.stderr
+    assert "rewrote the claude registration of hook 'shell-guard' too" in rewrote[0], rewrote[0]
+    assert "closure" not in rewrote[0], "an uninstall has no closure to be outside of"
+    assert "because a hook inside it shares them" not in done.stderr, done.stderr
+
+    runner.run("install")
+    assert not shim.exists(), "a whole convergence retires the shim"
+    assert "guarded" in _fire(project_dir).stdout
 
 
 def test_ensure_leaves_a_current_launcher_alone_and_rewrites_foreign_bytes(

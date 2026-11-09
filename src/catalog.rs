@@ -31,7 +31,7 @@ pub mod registry_catalog;
 pub mod search_match;
 pub mod sync_state;
 #[cfg(test)]
-mod test_hosts;
+pub(crate) mod test_hosts;
 pub mod update_availability;
 pub mod vote_store;
 

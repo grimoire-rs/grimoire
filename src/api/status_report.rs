@@ -48,8 +48,8 @@
 //! `publish`'s `announce`) is `true` only when `--check` was passed **and**
 //! the invocation ran online; `false` on a plain `grim status` (no `--check`
 //! ⇒ no network, ever) or a `--check` run that is offline (degrades with one
-//! stderr warning). This is the consumer rule for the three
-//! catalog-derived item fields below: **`checked == false` implies every one
+//! stderr warning). This is the consumer rule for the four
+//! `--check`-derived item fields below: **`checked == false` implies every one
 //! of them is `null` on every item.** `checked == true` means the check ran
 //! online across the scope's registries — one registry's catalog refresh
 //! failing falls back to *that* registry's cached catalog, so its rows carry
@@ -68,15 +68,19 @@
 //! (issue #43): for a registry-locked item grim re-resolves the reference
 //! that row declares and compares its digest to the lock pin. `true` when
 //! the registry is newer, `false` when it matches (or the tag vanished — a
-//! completed re-resolve that finds nothing newer). Three row kinds carry a
-//! declared reference: a directly-declared item (what `grimoire.toml`
-//! names), a **declared bundle** (its own reference against the
-//! `[[bundle]]` snapshot's manifest digest — the only signal an added or
-//! dropped member emits, since the members already locked keep their pins),
-//! and a **bundle member** (the id its bundle listed, which can float
-//! independently of the bundle). `null` when `checked` is `false`, for a
-//! row with no lock pin (dev-install / path source / path-sourced bundle),
-//! or when the re-resolution failed — absence never lies as `false`.
+//! completed re-resolve that finds nothing newer). Four row kinds carry a
+//! reference: a directly-declared item (what `grimoire.toml` names), a
+//! **declared bundle** (its own reference against the `[[bundle]]` snapshot's
+//! manifest digest — the only signal an added or dropped member emits, since
+//! the members already locked keep their pins), a **bundle member** (the id
+//! its bundle listed, which can float independently of the bundle), and a
+//! **dependency** (the tag its pin carries, or a tagless pin's recorded edge).
+//! `null` when `checked` is `false`, for a row with no lock pin (dev-install /
+//! path source / path-sourced bundle) or no recorded reference, or when the
+//! re-resolution failed — absence never lies as `false`. The answer is that
+//! row's own: `grim update -- <name>` moves that pin and clears it. A **nested
+//! bundle** has no row, so `moved_nested_bundles` carries it, as
+//! [`MovedNestedBundle`] says.
 //!
 //! `arming` (C-017) is the per-client verdict array of a `hook` or `settings`
 //! row: `[{client, cause, message, transient}]`, sorted by client, **always
@@ -108,6 +112,7 @@ use std::path::PathBuf;
 use serde::{Serialize, Serializer};
 
 use crate::cli::printer::{Printable, print_table, screen_plain};
+use crate::config::scope::Invocation;
 use crate::install::launcher::LauncherState;
 use crate::oci::{ArtifactKind, PinnedIdentifier};
 
@@ -157,6 +162,23 @@ pub struct StatusOutput {
     /// The array element a settings piece contributed. Always present, and
     /// `null` for every other kind and for a settings scalar or own file.
     pub element: Option<String>,
+}
+
+/// A nested bundle, a `[[bundle]]` only an edge reaches, whose recorded reference
+/// moved past its pin. `moved_nested_bundles` lists, sorted by name, the ones a
+/// row reaches through nodes with no row of their own. `[]` when nothing moved or
+/// nothing applies. `null` when `checked` is `false`, when a reached bundle has no
+/// answer and none reached moved, or when grim cannot place one under its rows
+/// (the graph cannot be computed offline, or the listing passed its work budget).
+/// A list is what is known to have moved, so a failed re-resolve beside a moved
+/// bundle leaves it out. `grim update -- <name>` with a listed name moves that
+/// bundle's pin; the row's own pin stays.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MovedNestedBundle {
+    /// The `[[bundle]]` name, which `grim update -- <name>` takes.
+    pub name: String,
+    /// The reference grim re-resolved for it.
+    pub reference: String,
 }
 
 /// One immediate parent of a status row.
@@ -244,8 +266,8 @@ pub struct StatusEntry {
     pub replaced_by: Option<String>,
     /// Whether the registry carries a newer digest than the lock pin, from
     /// `--check`'s fresh per-artifact re-resolution. `null` when the check
-    /// did not run, the row has no lock pin, or the re-resolution failed.
-    /// See the module doc for the full contract.
+    /// did not run, the row has no lock pin or recorded reference, or the
+    /// re-resolution failed. See the module doc for the full contract.
     pub update_available: Option<bool>,
     /// Per-client verdicts for a `hook` or `settings` row (C-017). Sorted by
     /// client; **always present**, and `[]` for every other kind and for a row
@@ -261,6 +283,10 @@ pub struct StatusEntry {
     /// state alone. This field is what makes the state actionable, since the
     /// token alone does not say which client or which cause.
     pub arming: Vec<HookArming>,
+    /// The nested bundles this row reaches whose reference moved, from
+    /// `--check`. `[]` when none did, `null` when the check did not run or
+    /// could not answer. See [`MovedNestedBundle`] for the full contract.
+    pub moved_nested_bundles: Option<Vec<MovedNestedBundle>>,
 }
 
 pub(crate) fn serialize_kind<S: Serializer>(kind: &ArtifactKind, s: S) -> Result<S::Ok, S::Error> {
@@ -305,8 +331,12 @@ pub struct StatusReport {
     /// current. Skipped in JSON, whose shape is frozen.
     #[serde(skip)]
     launcher_note: Option<(LauncherState, String)>,
+    /// Plain text only: the `grim` the launcher note names.
+    #[serde(skip)]
+    grim: Invocation,
     /// Plain text only: advisory lines for stderr. Skipped in JSON, which
-    /// carries the same facts in `direct` and `required_by`.
+    /// carries the same facts in `direct`, `required_by`, `update_available`
+    /// and `moved_nested_bundles`.
     #[serde(skip)]
     notes: Vec<String>,
 }
@@ -319,8 +349,16 @@ impl StatusReport {
             items,
             checked,
             launcher_note: None,
+            grim: Invocation::WALKED,
             notes: Vec::new(),
         }
+    }
+
+    /// Name `grim` in every command the plain rendering prints.
+    #[must_use]
+    pub fn naming(mut self, grim: Invocation) -> Self {
+        self.grim = grim;
+        self
     }
 
     /// Have the plain rendering print `notes` on stderr.
@@ -374,19 +412,26 @@ impl Printable for StatusReport {
         if let Some((state, path)) = &self.launcher_note {
             writeln!(
                 w,
-                "\nLauncher {state}: {} (run grim install to write it)",
-                screen_plain(path)
+                "\nLauncher {state}: {} (run {} install to write it)",
+                screen_plain(path),
+                self.grim
             )?;
         }
-        // Best effort: a closed stderr must not fail the report.
-        for note in &self.notes {
-            let _ = writeln!(io::stderr(), "{note}");
-        }
+        print_notes(&mut io::stderr(), &self.notes);
         Ok(())
     }
 
     fn print_json(&self, w: &mut impl Write) -> io::Result<()> {
         crate::cli::printer::write_json_pretty(w, self)
+    }
+}
+
+/// One line per advisory note, screened: a note quotes names and references
+/// from the lock, and these lines bypass the table that screens its cells.
+pub(crate) fn print_notes(w: &mut impl Write, notes: &[String]) {
+    // Best effort: a closed stderr must not fail the report.
+    for note in notes {
+        let _ = writeln!(w, "{}", screen_plain(note));
     }
 }
 
@@ -420,6 +465,7 @@ mod tests {
             replaced_by: None,
             update_available: None,
             arming: Vec::new(),
+            moved_nested_bundles: None,
         }
     }
 
@@ -484,6 +530,17 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         let keys: Vec<&str> = json.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(keys, ["checked", "items"]);
+    }
+
+    #[test]
+    fn a_launcher_note_names_the_run() {
+        let r = StatusReport::new(vec![base_entry("x")], false)
+            .with_launcher(LauncherState::Missing, "/h/hooks/grim-hook".to_string())
+            .naming(Invocation::GLOBAL);
+        let mut buf = Vec::new();
+        r.print_plain(&mut buf).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(text.contains("(run grim --global install to write it)"), "{text}");
     }
 
     #[test]
@@ -612,9 +669,50 @@ mod tests {
         assert!(item.as_object().unwrap().contains_key("deprecated"));
         assert!(item.as_object().unwrap().contains_key("replaced_by"));
         assert!(item.as_object().unwrap().contains_key("update_available"));
+        assert!(item.as_object().unwrap().contains_key("moved_nested_bundles"));
         assert!(item["deprecated"].is_null());
         assert!(item["replaced_by"].is_null());
         assert!(item["update_available"].is_null());
+        assert!(item["moved_nested_bundles"].is_null());
+    }
+
+    #[test]
+    fn json_lists_a_moved_nested_bundle_by_name_and_reference() {
+        let r = StatusReport::new(
+            vec![
+                StatusEntry {
+                    moved_nested_bundles: Some(vec![MovedNestedBundle {
+                        name: "inner".to_string(),
+                        reference: "ghcr.io/acme/inner:1".to_string(),
+                    }]),
+                    ..base_entry("outer")
+                },
+                StatusEntry {
+                    moved_nested_bundles: Some(Vec::new()),
+                    ..base_entry("stays")
+                },
+            ],
+            true,
+        );
+        let mut buf = Vec::new();
+        r.print_json(&mut buf).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(
+            v["items"][0]["moved_nested_bundles"],
+            serde_json::json!([{"name": "inner", "reference": "ghcr.io/acme/inner:1"}])
+        );
+        assert_eq!(v["items"][1]["moved_nested_bundles"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn a_note_is_screened_on_its_way_to_stderr() {
+        let mut buf = Vec::new();
+        print_notes(
+            &mut buf,
+            &["note: \u{1b}[2J\u{202e}x\ry".to_string(), "plain".to_string()],
+        );
+        let text = String::from_utf8(buf).unwrap();
+        assert_eq!(text, "note: \\u{1b}[2J\\u{202e}x\\u{d}y\nplain\n");
     }
 
     /// `checked: true` carries populated `deprecated`/`replaced_by` on a

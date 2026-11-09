@@ -23,7 +23,7 @@ use crate::cli::exit_code::ExitCode;
 use crate::config::declaration::{ConfigOptions, DefaultView, RegistryConfig};
 use crate::config::plugin_meta::{self, PluginMeta};
 use crate::config::project_config::validate_registries;
-use crate::config::scope::ConfigScope;
+use crate::config::scope::{ConfigScope, Invocation};
 use crate::context::Context;
 use crate::install::client_target::ClientTarget;
 use crate::lock::file_lock::ConfigFileLock;
@@ -479,6 +479,7 @@ fn get_value(
     parsed: &ParsedKey,
     options: &ConfigOptions,
     registries: &[RegistryConfig],
+    grim: &Invocation,
 ) -> anyhow::Result<Option<String>> {
     Ok(match parsed {
         ParsedKey::Fixed(k) => fixed_value(*k, options),
@@ -491,7 +492,9 @@ fn get_value(
         }
         ParsedKey::RegistryAliasField { alias, field } => {
             let rc = find_registry(registries, alias).ok_or_else(|| {
-                super::config_usage(format!("no registry '{alias}'; add it with `grim config registry add`"))
+                super::config_usage(format!(
+                    "no registry '{alias}'; add it with `{grim} config registry add`"
+                ))
             })?;
             registry_field_value(rc, *field)
         }
@@ -621,7 +624,7 @@ fn check_filter_pattern(value: &str, key: &str, site: WriteSite) -> anyhow::Resu
 /// validation (exit 78) reports it for a hand-edited file, where no `grim
 /// config` verb applies — so the remedy is attached here, at the one
 /// boundary that knows `unset` is what the user meant.
-fn check_set_filter_pattern(value: &str, key: &str) -> anyhow::Result<()> {
+fn check_set_filter_pattern(value: &str, key: &str, grim: &Invocation) -> anyhow::Result<()> {
     if value.trim().is_empty() {
         // Escaped twice over, and the second one is the one that matters: this
         // message hands the user a command to copy and run, so an unescaped
@@ -629,7 +632,7 @@ fn check_set_filter_pattern(value: &str, key: &str) -> anyhow::Result<()> {
         let key = key.escape_debug();
         return Err(super::config_value(format!(
             "invalid value for {key}: must not be empty or whitespace-only; \
-             clear the filter with `grim config unset {key}`"
+             clear the filter with `{grim} config unset {key}`"
         )));
     }
     check_filter_pattern(value, key, WriteSite::Set)
@@ -671,15 +674,15 @@ fn check_filter_flags(alias: &str, include: &[String], exclude: &[String]) -> an
 /// surviving pattern leaves the filter *partially* correct, the
 /// `filter admitted M of N` diagnostic stays silent too. Naming the count is
 /// the point: "one of them worked" is exactly why the loss goes unnoticed.
-fn warn_on_discarded_patterns(alias: &str, field: RegistryField, previous: &[String]) {
+fn warn_on_discarded_patterns(alias: &str, field: RegistryField, previous: &[String], grim: &Invocation) {
     if previous.len() > 1 {
         // Escaped like every other message quoting the alias — `parse_key`
         // screens control characters, but not U+202E.
         let shown = alias.escape_debug();
         tracing::warn!(
-            "registry.{shown}.{}: `grim config set` writes ONE pattern and replaces the whole list — \
+            "registry.{shown}.{}: `{grim} config set` writes ONE pattern and replaces the whole list — \
              the {} patterns already stored are discarded, not appended to. To write several, use \
-             `grim config registry set {shown}` with repeated --include/--exclude flags, which edits \
+             `{grim} config registry set {shown}` with repeated --include/--exclude flags, which edits \
              the entry in place; or edit `grimoire.toml` by hand.",
             field.field_name(),
             previous.len()
@@ -721,10 +724,10 @@ fn has_bare_comma(pattern: &str) -> bool {
 /// a disarm** — without leaving a one-way door. `grim config` stays a config
 /// editor: giving it authority to converge would hand a config command the
 /// installer's privileges, which is a larger change than the problem needs.
-fn warn_config_write_does_not_disarm(attempted: &str) {
+fn warn_config_write_does_not_disarm(attempted: &str, grim: &Invocation) {
     tracing::warn!(
-        "`grim config {attempted}` cleared the feature flag, but hooks already armed stay armed \
-         until convergence runs — run `grim install` to disarm them"
+        "`{grim} config {attempted}` cleared the feature flag, but hooks already armed stay armed \
+         until convergence runs — run `{grim} install` to disarm them"
     );
 }
 
@@ -735,6 +738,7 @@ fn apply_set(
     value_str: &str,
     options: &mut ConfigOptions,
     registries: &mut [RegistryConfig],
+    grim: &Invocation,
 ) -> anyhow::Result<String> {
     match parsed {
         ParsedKey::Fixed(k) => match k {
@@ -815,7 +819,7 @@ fn apply_set(
             ConfigKey::ExperimentalHooks => {
                 let enabled = parse_bool(value_str, "options.experimental.hooks")?;
                 if !enabled {
-                    warn_config_write_does_not_disarm("set options.experimental.hooks false");
+                    warn_config_write_does_not_disarm("set options.experimental.hooks false", grim);
                 }
                 options.experimental.hooks = enabled;
                 Ok(value_str.to_string())
@@ -850,7 +854,7 @@ fn apply_set(
         ParsedKey::RegistryAliasField { alias, field } => {
             if find_registry(registries, alias).is_none() {
                 return Err(super::config_usage(format!(
-                    "no registry '{alias}'; add it with `grim config registry add`"
+                    "no registry '{alias}'; add it with `{grim} config registry add`"
                 )));
             }
             match field {
@@ -900,20 +904,20 @@ fn apply_set(
                 // written with repeated `registry add --include` (C-013) or
                 // by editing `grimoire.toml`.
                 RegistryField::Include => {
-                    check_set_filter_pattern(value_str, &format!("registry.{alias}.include"))?;
+                    check_set_filter_pattern(value_str, &format!("registry.{alias}.include"), grim)?;
                     // After validation, so a rejected pattern never warns
                     // about a list it was never going to replace.
                     if let Some(rc) = find_registry(registries, alias) {
-                        warn_on_discarded_patterns(alias, *field, &rc.include);
+                        warn_on_discarded_patterns(alias, *field, &rc.include, grim);
                     }
                     let replacement = vec![value_str.to_string()];
                     set_registry_field(registries, alias, |rc| rc.include = replacement);
                     Ok(value_str.to_string())
                 }
                 RegistryField::Exclude => {
-                    check_set_filter_pattern(value_str, &format!("registry.{alias}.exclude"))?;
+                    check_set_filter_pattern(value_str, &format!("registry.{alias}.exclude"), grim)?;
                     if let Some(rc) = find_registry(registries, alias) {
-                        warn_on_discarded_patterns(alias, *field, &rc.exclude);
+                        warn_on_discarded_patterns(alias, *field, &rc.exclude, grim);
                     }
                     let replacement = vec![value_str.to_string()];
                     set_registry_field(registries, alias, |rc| rc.exclude = replacement);
@@ -965,6 +969,7 @@ fn apply_unset(
     parsed: &ParsedKey,
     options: &mut ConfigOptions,
     registries: &mut Vec<RegistryConfig>,
+    grim: &Invocation,
 ) -> anyhow::Result<()> {
     match parsed {
         ParsedKey::Fixed(k) => {
@@ -983,7 +988,7 @@ fn apply_unset(
                 // exactly as `set … false` does — clearing the key silently would
                 // disarm nothing while claiming to (S-012).
                 ConfigKey::ExperimentalHooks => {
-                    warn_config_write_does_not_disarm("unset options.experimental.hooks");
+                    warn_config_write_does_not_disarm("unset options.experimental.hooks", grim);
                     options.experimental.hooks = false;
                 }
                 ConfigKey::ExperimentalSettings => options.experimental.settings = false,
@@ -1019,7 +1024,7 @@ fn apply_unset(
                 if rc.index.is_none() {
                     return Err(super::config_usage(format!(
                         "cannot unset registry.{alias}.oci: the entry would have no source; \
-                         set registry.{alias}.index first or use `grim config registry rm {alias}`"
+                         set registry.{alias}.index first or use `{grim} config registry rm {alias}`"
                     )));
                 }
                 set_registry_field(registries, alias, |rc| rc.oci = None);
@@ -1032,7 +1037,7 @@ fn apply_unset(
                 if rc.oci.is_none() {
                     return Err(super::config_usage(format!(
                         "cannot unset registry.{alias}.index: the entry would have no source; \
-                         set registry.{alias}.oci first or use `grim config registry rm {alias}`"
+                         set registry.{alias}.oci first or use `{grim} config registry rm {alias}`"
                     )));
                 }
                 set_registry_field(registries, alias, |rc| rc.index = None);
@@ -1581,7 +1586,7 @@ fn run_get(ctx: &Context, key: &str) -> anyhow::Result<(ConfigReport, ExitCode)>
         ));
     }
     let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
-    let value = get_value(&parsed, &scope.options, &scope.registries)?;
+    let value = get_value(&parsed, &scope.options, &scope.registries, &scope.invocation)?;
     let exit_code = if value.is_some() {
         ExitCode::Success
     } else {
@@ -1618,7 +1623,7 @@ fn run_set(ctx: &Context, key: &str, value: &str, dry_run: bool) -> anyhow::Resu
 
     let mut options = scope.options.clone();
     let mut registries = scope.registries.clone();
-    let stored = apply_set(&parsed, value, &mut options, &mut registries)?;
+    let stored = apply_set(&parsed, value, &mut options, &mut registries, &scope.invocation)?;
 
     if dry_run {
         // The validate half of `commit_config`, without the write.
@@ -1660,7 +1665,7 @@ fn run_unset(ctx: &Context, key: &str) -> anyhow::Result<(ConfigReport, ExitCode
 
     let mut options = scope.options.clone();
     let mut registries = scope.registries.clone();
-    apply_unset(&parsed, &mut options, &mut registries)?;
+    apply_unset(&parsed, &mut options, &mut registries, &scope.invocation)?;
     commit_config(&scope, &options, &registries)?;
 
     Ok((
@@ -1753,11 +1758,12 @@ fn run_registry_add(
         // the whole list rather than appending to it (B-2). `registry set`
         // takes the same repeated flags this invocation already carries, so
         // naming it turns the error into a one-word edit.
+        let grim = &scope.invocation;
         return Err(super::config_usage(format!(
-            "registry '{shown}' already exists; edit it in place with `grim config registry set \
+            "registry '{shown}' already exists; edit it in place with `{grim} config registry set \
              {shown}`, which takes these same --oci/--index/--include/--exclude/--default flags, \
-             or remove it with `grim config registry rm {shown}`. To change its browse filter use \
-             that verb's repeated --include/--exclude flags, not `grim config set \
+             or remove it with `{grim} config registry rm {shown}`. To change its browse filter use \
+             that verb's repeated --include/--exclude flags, not `{grim} config set \
              registry.{shown}.include`, which writes ONE pattern and replaces the whole list"
         )));
     }
@@ -1888,12 +1894,19 @@ fn run_registry_set(
         && !clear_exclude
         && insecure.is_none()
     {
+        // From the flags alone: resolving the scope first would turn this 64
+        // into a discovery failure outside a project.
+        let grim = if ctx.global() {
+            Invocation::GLOBAL
+        } else {
+            ctx.config().map_or(Invocation::WALKED, Invocation::config)
+        };
         return Err(super::config_usage(format!(
             "nothing to change for registry '{}'; name at least one of \
              --oci/--index, --include, --exclude, --clear-include, \
              --clear-exclude, --default, --insecure/--no-insecure. To clear a \
              browse filter use --clear-include/--clear-exclude, or with \
-             `grim config unset registry.{}.include`",
+             `{grim} config unset registry.{}.include`",
             alias.escape_debug(),
             alias.escape_debug()
         )));
@@ -1921,8 +1934,9 @@ fn run_registry_set(
     // the alias, not a value error about a pattern with nowhere to go.
     let Some(existing) = find_registry(&scope.registries, alias) else {
         return Err(super::config_usage(format!(
-            "no registry '{}'; add it with `grim config registry add`",
-            alias.escape_debug()
+            "no registry '{}'; add it with `{} config registry add`",
+            alias.escape_debug(),
+            scope.invocation
         )));
     };
     check_filter_flags(alias, include, exclude)?;
@@ -2148,7 +2162,8 @@ fn run_registry_use(ctx: &Context, alias: &str) -> anyhow::Result<(ConfigReport,
     let mut registries = scope.registries.clone();
     if !registries.iter().any(|r| r.alias.as_deref() == Some(alias)) {
         return Err(super::config_usage(format!(
-            "no registry '{alias}'; add it with `grim config registry add`"
+            "no registry '{alias}'; add it with `{} config registry add`",
+            scope.invocation
         )));
     }
     clear_all_defaults(&mut registries);
@@ -2171,8 +2186,12 @@ fn run_registry_use(ctx: &Context, alias: &str) -> anyhow::Result<(ConfigReport,
 
 fn run_registry_show(ctx: &Context, alias: &str) -> anyhow::Result<(ConfigReport, ExitCode)> {
     let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
-    let rc = find_registry(&scope.registries, alias)
-        .ok_or_else(|| super::config_usage(format!("no registry '{alias}'; add it with `grim config registry add`")))?;
+    let rc = find_registry(&scope.registries, alias).ok_or_else(|| {
+        super::config_usage(format!(
+            "no registry '{alias}'; add it with `{} config registry add`",
+            scope.invocation
+        ))
+    })?;
     Ok((
         ConfigReport::RegistryShow(RegistryShowReport {
             alias: alias.to_string(),
@@ -2271,7 +2290,7 @@ mod tests {
 
         for message in [
             // The empty-value arm, which carries the copy-pasteable command.
-            check_set_filter_pattern("   ", &key).expect_err("whitespace-only is rejected"),
+            check_set_filter_pattern("   ", &key, &Invocation::WALKED).expect_err("whitespace-only is rejected"),
             // The glob-compile arm, which carries the key once.
             check_filter_pattern("acme{unclosed", &key, WriteSite::Set).expect_err("an unclosed group is rejected"),
         ] {
@@ -2612,17 +2631,26 @@ mod tests {
         let mut options = ConfigOptions::default();
         let mut registries: Vec<RegistryConfig> = vec![];
 
-        assert_eq!(get_value(&key, &options, &registries).unwrap(), None);
-        assert_eq!(apply_set(&key, "0", &mut options, &mut registries).unwrap(), "0");
+        assert_eq!(
+            get_value(&key, &options, &registries, &Invocation::WALKED).unwrap(),
+            None
+        );
+        assert_eq!(
+            apply_set(&key, "0", &mut options, &mut registries, &Invocation::WALKED).unwrap(),
+            "0"
+        );
         assert_eq!(options.search_min_relevance, Some(0), "explicit 0 turns the cutoff off");
-        assert_eq!(apply_set(&key, "100", &mut options, &mut registries).unwrap(), "100");
-        assert!(apply_set(&key, "101", &mut options, &mut registries).is_err());
+        assert_eq!(
+            apply_set(&key, "100", &mut options, &mut registries, &Invocation::WALKED).unwrap(),
+            "100"
+        );
+        assert!(apply_set(&key, "101", &mut options, &mut registries, &Invocation::WALKED).is_err());
         assert_eq!(
             options.search_min_relevance,
             Some(100),
             "a rejected value writes nothing"
         );
-        apply_unset(&key, &mut options, &mut registries).unwrap();
+        apply_unset(&key, &mut options, &mut registries, &Invocation::WALKED).unwrap();
         assert_eq!(options.search_min_relevance, None);
     }
 
@@ -2634,13 +2662,19 @@ mod tests {
         let mut registries: Vec<RegistryConfig> = vec![];
 
         // Unset by default → get returns None (so `get` exits 1, `list` omits).
-        assert_eq!(get_value(&key, &options, &registries).unwrap(), None);
+        assert_eq!(
+            get_value(&key, &options, &registries, &Invocation::WALKED).unwrap(),
+            None
+        );
 
         // Set stores the value; get echoes it back.
-        let stored = apply_set(&key, "2", &mut options, &mut registries).unwrap();
+        let stored = apply_set(&key, "2", &mut options, &mut registries, &Invocation::WALKED).unwrap();
         assert_eq!(stored, "2");
         assert_eq!(options.tui.expand_levels, Some(2));
-        assert_eq!(get_value(&key, &options, &registries).unwrap(), Some("2".to_string()));
+        assert_eq!(
+            get_value(&key, &options, &registries, &Invocation::WALKED).unwrap(),
+            Some("2".to_string())
+        );
         assert!(
             collect_entries(false, &options, &registries)
                 .iter()
@@ -2649,12 +2683,15 @@ mod tests {
         );
 
         // A bad value is rejected (config_value → exit 65).
-        assert!(apply_set(&key, "nope", &mut options, &mut registries).is_err());
+        assert!(apply_set(&key, "nope", &mut options, &mut registries, &Invocation::WALKED).is_err());
 
         // Unset clears it back to None.
-        apply_unset(&key, &mut options, &mut registries).unwrap();
+        apply_unset(&key, &mut options, &mut registries, &Invocation::WALKED).unwrap();
         assert_eq!(options.tui.expand_levels, None);
-        assert_eq!(get_value(&key, &options, &registries).unwrap(), None);
+        assert_eq!(
+            get_value(&key, &options, &registries, &Invocation::WALKED).unwrap(),
+            None
+        );
     }
 
     // ── STEP A: collect_entries --all semantics ──────────────────────────────
@@ -2921,6 +2958,7 @@ mod tests {
             "claude, ,opencode",
             &mut options,
             &mut registries,
+            &Invocation::WALKED,
         );
         // FIX 3: empty segment must be rejected with an error (exit 65).
         assert!(result.is_err(), "whitespace segment in clients must be rejected");
@@ -2955,9 +2993,15 @@ mod tests {
         let key = ParsedKey::Fixed(ConfigKey::Clients);
         let mut options = fresh_options();
         let mut registries = vec![];
-        let msg = apply_set(&key, "cursor\u{202e}evil", &mut options, &mut registries)
-            .expect_err("an unknown client must be rejected")
-            .to_string();
+        let msg = apply_set(
+            &key,
+            "cursor\u{202e}evil",
+            &mut options,
+            &mut registries,
+            &Invocation::WALKED,
+        )
+        .expect_err("an unknown client must be rejected")
+        .to_string();
         assert!(
             !msg.contains('\u{202e}'),
             "message must not embed the raw override byte: {msg:?}"
@@ -2968,7 +3012,7 @@ mod tests {
         );
 
         // A plain unknown name keeps its exact shipped message text.
-        let msg = apply_set(&key, "vscode", &mut options, &mut registries)
+        let msg = apply_set(&key, "vscode", &mut options, &mut registries, &Invocation::WALKED)
             .expect_err("an unknown client must be rejected")
             .to_string();
         assert_eq!(
@@ -2989,6 +3033,7 @@ mod tests {
             "claude,vscode",
             &mut options,
             &mut registries,
+            &Invocation::WALKED,
         );
         let msg = result.expect_err("unknown client must be rejected").to_string();
         assert!(
@@ -3010,6 +3055,7 @@ mod tests {
             "claude,opencode,claude",
             &mut options,
             &mut registries,
+            &Invocation::WALKED,
         );
         let msg = result.expect_err("duplicate client must be rejected").to_string();
         assert!(
@@ -3031,13 +3077,20 @@ mod tests {
             "opencode,claude",
             &mut options,
             &mut registries,
+            &Invocation::WALKED,
         )
         .expect("valid multi-value set must succeed");
         // Input order preserved on store — not ClientTarget::ALL canonical order.
         assert_eq!(stored, "opencode,claude");
         assert_eq!(options.clients, vec!["opencode".to_string(), "claude".to_string()]);
         assert_eq!(
-            get_value(&ParsedKey::Fixed(ConfigKey::Clients), &options, &registries).unwrap(),
+            get_value(
+                &ParsedKey::Fixed(ConfigKey::Clients),
+                &options,
+                &registries,
+                &Invocation::WALKED
+            )
+            .unwrap(),
             Some("opencode,claude".to_string())
         );
     }
@@ -3047,8 +3100,14 @@ mod tests {
         let mut options = fresh_options();
         options.clients = vec!["claude".to_string()];
         let mut registries = vec![];
-        let stored = apply_set(&ParsedKey::Fixed(ConfigKey::Clients), "", &mut options, &mut registries)
-            .expect("empty value must clear, not error");
+        let stored = apply_set(
+            &ParsedKey::Fixed(ConfigKey::Clients),
+            "",
+            &mut options,
+            &mut registries,
+            &Invocation::WALKED,
+        )
+        .expect("empty value must clear, not error");
         assert_eq!(stored, "");
         assert!(options.clients.is_empty());
     }
@@ -3163,13 +3222,16 @@ mod tests {
         let mut registries: Vec<RegistryConfig> = vec![];
 
         // Unset by default → get returns None (so `get` exits 1, `list` omits).
-        assert_eq!(get_value(&key, &options, &registries).unwrap(), None);
+        assert_eq!(
+            get_value(&key, &options, &registries, &Invocation::WALKED).unwrap(),
+            None
+        );
 
-        let stored = apply_set(&key, "true", &mut options, &mut registries).unwrap();
+        let stored = apply_set(&key, "true", &mut options, &mut registries, &Invocation::WALKED).unwrap();
         assert_eq!(stored, "true");
         assert_eq!(options.vendors["cursor"].shared_skills, Some(true));
         assert_eq!(
-            get_value(&key, &options, &registries).unwrap(),
+            get_value(&key, &options, &registries, &Invocation::WALKED).unwrap(),
             Some("true".to_string())
         );
         assert!(
@@ -3181,7 +3243,7 @@ mod tests {
 
         // A bad value is rejected (config_value → exit 65), and the message
         // names the fully-qualified key rather than the pattern.
-        let msg = apply_set(&key, "yes", &mut options, &mut registries)
+        let msg = apply_set(&key, "yes", &mut options, &mut registries, &Invocation::WALKED)
             .expect_err("a non-boolean must be rejected")
             .to_string();
         assert!(
@@ -3189,9 +3251,12 @@ mod tests {
             "error must name the key and the accepted values; got: {msg}"
         );
 
-        apply_unset(&key, &mut options, &mut registries).unwrap();
+        apply_unset(&key, &mut options, &mut registries, &Invocation::WALKED).unwrap();
         assert!(options.vendors.is_empty(), "unset must drop the entry");
-        assert_eq!(get_value(&key, &options, &registries).unwrap(), None);
+        assert_eq!(
+            get_value(&key, &options, &registries, &Invocation::WALKED).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -3202,16 +3267,16 @@ mod tests {
         let mut options = fresh_options();
         let mut registries: Vec<RegistryConfig> = vec![];
 
-        apply_set(&key, "true", &mut options, &mut registries).unwrap();
-        apply_set(&key, "false", &mut options, &mut registries).unwrap();
+        apply_set(&key, "true", &mut options, &mut registries, &Invocation::WALKED).unwrap();
+        apply_set(&key, "false", &mut options, &mut registries, &Invocation::WALKED).unwrap();
 
         assert_eq!(options.vendors["cursor"].shared_skills, Some(false));
         assert_eq!(
-            get_value(&key, &options, &registries).unwrap(),
+            get_value(&key, &options, &registries, &Invocation::WALKED).unwrap(),
             Some("false".to_string())
         );
 
-        apply_unset(&key, &mut options, &mut registries).unwrap();
+        apply_unset(&key, &mut options, &mut registries, &Invocation::WALKED).unwrap();
         assert!(options.vendors.is_empty(), "unset must drop the entry");
     }
 
@@ -3222,7 +3287,7 @@ mod tests {
         let key = parse_key("options.vendors.claude.shared_skills").unwrap();
         let mut options = fresh_options();
         let mut registries: Vec<RegistryConfig> = vec![];
-        apply_set(&key, "false", &mut options, &mut registries).unwrap();
+        apply_set(&key, "false", &mut options, &mut registries, &Invocation::WALKED).unwrap();
         assert_eq!(options.vendors["claude"].shared_skills, Some(false));
     }
 
@@ -3235,6 +3300,7 @@ mod tests {
             "true",
             &mut options,
             &mut registries,
+            &Invocation::WALKED,
         )
         .unwrap();
         apply_set(
@@ -3242,12 +3308,14 @@ mod tests {
             "true",
             &mut options,
             &mut registries,
+            &Invocation::WALKED,
         )
         .unwrap();
         apply_unset(
             &parse_key("options.vendors.cursor.shared_skills").unwrap(),
             &mut options,
             &mut registries,
+            &Invocation::WALKED,
         )
         .unwrap();
 
@@ -3374,7 +3442,7 @@ mod tests {
         for field in ["include", "exclude"] {
             let key = parse_key(&format!("registry.acme.{field}")).unwrap();
             assert_eq!(
-                get_value(&key, &options, &registries).unwrap(),
+                get_value(&key, &options, &registries, &Invocation::WALKED).unwrap(),
                 None,
                 "an empty {field} list must read as unset, not as an empty string"
             );
@@ -3389,11 +3457,23 @@ mod tests {
         let options = fresh_options();
         let registries = filtered_registries();
         assert_eq!(
-            get_value(&parse_key("registry.acme.include").unwrap(), &options, &registries).unwrap(),
+            get_value(
+                &parse_key("registry.acme.include").unwrap(),
+                &options,
+                &registries,
+                &Invocation::WALKED
+            )
+            .unwrap(),
             Some("acme/platform/**,acme/tools/**".to_string())
         );
         assert_eq!(
-            get_value(&parse_key("registry.acme.exclude").unwrap(), &options, &registries).unwrap(),
+            get_value(
+                &parse_key("registry.acme.exclude").unwrap(),
+                &options,
+                &registries,
+                &Invocation::WALKED
+            )
+            .unwrap(),
             Some("acme/platform/legacy/**".to_string())
         );
     }
@@ -3410,6 +3490,7 @@ mod tests {
             "acme/next/**",
             &mut options,
             &mut registries,
+            &Invocation::WALKED,
         )
         .expect("a valid pattern must be accepted");
         assert_eq!(stored, "acme/next/**");
@@ -3434,6 +3515,7 @@ mod tests {
             "acme/{platform,tools}/**",
             &mut options,
             &mut registries,
+            &Invocation::WALKED,
         )
         .expect("brace alternation must survive intact");
         assert_eq!(
@@ -3461,6 +3543,7 @@ mod tests {
                 value,
                 &mut options,
                 &mut registries,
+                &Invocation::WALKED,
             )
             .expect_err("an invalid pattern must be rejected");
             assert_eq!(
@@ -3489,6 +3572,7 @@ mod tests {
                 value,
                 &mut options,
                 &mut registries,
+                &Invocation::WALKED,
             )
             .expect_err("a hostile pattern must be rejected")
             .to_string();
@@ -3531,6 +3615,7 @@ mod tests {
             "a/**,b/**",
             &mut options,
             &mut registries,
+            &Invocation::WALKED,
         )
         .expect("a comma is legal in a pattern — warn, do not reject");
         assert_eq!(stored, "a/**,b/**");
@@ -3585,6 +3670,7 @@ mod tests {
                 "acme/platform/**,acme/tools/**",
                 &mut options,
                 &mut registries,
+                &Invocation::WALKED,
             )
             .expect("a comma is legal in a pattern — warn, do not reject");
         });
@@ -3619,6 +3705,7 @@ mod tests {
                 "acme/tools/**",
                 &mut options,
                 &mut registries,
+                &Invocation::WALKED,
             )
             .expect("a valid pattern must be accepted");
         });
@@ -3658,6 +3745,7 @@ mod tests {
                     "acme/tools/**",
                     &mut options,
                     &mut registries,
+                    &Invocation::WALKED,
                 )
                 .expect("a valid pattern must be accepted");
             });
@@ -3715,6 +3803,7 @@ mod tests {
             &huge,
             &mut options,
             &mut registries,
+            &Invocation::WALKED,
         )
         .expect_err("an over-long pattern must be rejected")
         .to_string();
@@ -3742,7 +3831,7 @@ mod tests {
             let parsed = parse_key(&key).expect("a bidi override is a legal alias character");
             let mut options = fresh_options();
             let mut registries: Vec<RegistryConfig> = vec![];
-            let msg = apply_unset(&parsed, &mut options, &mut registries)
+            let msg = apply_unset(&parsed, &mut options, &mut registries, &Invocation::WALKED)
                 .expect_err("no such registry")
                 .to_string();
             assert!(
@@ -3754,7 +3843,7 @@ mod tests {
         // The bare-alias form is the one `parse_key` does NOT validate, so a
         // raw ESC reaches its message too.
         let parsed = parse_key("registry.a\u{1b}[2Jb").expect("a bare alias is parsed unvalidated");
-        let msg = apply_unset(&parsed, &mut fresh_options(), &mut vec![])
+        let msg = apply_unset(&parsed, &mut fresh_options(), &mut vec![], &Invocation::WALKED)
             .expect_err("no such registry")
             .to_string();
         assert!(
@@ -3777,12 +3866,13 @@ mod tests {
                 value,
                 &mut options,
                 &mut registries,
+                &Invocation::WALKED,
             )
             .expect_err("an empty pattern must be rejected");
             assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
             let msg = err.to_string();
             assert!(
-                msg.contains("grim config unset registry.acme.include"),
+                msg.contains(" config unset registry.acme.include`"),
                 "an empty value must name the command that clears the filter: {msg}"
             );
         }
@@ -3794,12 +3884,12 @@ mod tests {
         // Written against `RegistryField::ALL` for the same reason the
         // unknown-field message is — a sixth field cannot be silently omitted.
         let key = parse_key("registry.acme").unwrap();
-        let get_msg = get_value(&key, &fresh_options(), &unfiltered_registries())
+        let get_msg = get_value(&key, &fresh_options(), &unfiltered_registries(), &Invocation::WALKED)
             .expect_err("a bare alias is not a readable key")
             .to_string();
         let mut options = fresh_options();
         let mut registries = unfiltered_registries();
-        let set_msg = apply_set(&key, "x", &mut options, &mut registries)
+        let set_msg = apply_set(&key, "x", &mut options, &mut registries, &Invocation::WALKED)
             .expect_err("a bare alias is not a writable key")
             .to_string();
         for field in RegistryField::ALL {
@@ -3816,9 +3906,10 @@ mod tests {
         let mut options = fresh_options();
         let mut registries: Vec<RegistryConfig> = vec![];
         let key = parse_key("registry.ghost.include").unwrap();
-        let err = apply_set(&key, "acme/**", &mut options, &mut registries).expect_err("no such registry");
+        let err = apply_set(&key, "acme/**", &mut options, &mut registries, &Invocation::WALKED)
+            .expect_err("no such registry");
         assert_eq!(crate::error::classify_error(&err), ExitCode::UsageError);
-        let err = apply_unset(&key, &mut options, &mut registries).expect_err("no such registry");
+        let err = apply_unset(&key, &mut options, &mut registries, &Invocation::WALKED).expect_err("no such registry");
         assert_eq!(crate::error::classify_error(&err), ExitCode::UsageError);
     }
 
@@ -3831,6 +3922,7 @@ mod tests {
             &parse_key("registry.acme.include").unwrap(),
             &mut options,
             &mut registries,
+            &Invocation::WALKED,
         )
         .expect("unset must succeed");
         assert!(registries[0].include.is_empty(), "unset must clear the list");
@@ -3840,7 +3932,13 @@ mod tests {
             "unsetting one side must not disturb the other"
         );
         assert_eq!(
-            get_value(&parse_key("registry.acme.include").unwrap(), &options, &registries).unwrap(),
+            get_value(
+                &parse_key("registry.acme.include").unwrap(),
+                &options,
+                &registries,
+                &Invocation::WALKED
+            )
+            .unwrap(),
             None,
             "a cleared list reads back as unset"
         );
@@ -3880,7 +3978,7 @@ mod tests {
                 .iter()
                 .find(|e| e.key == key)
                 .unwrap_or_else(|| panic!("--all must emit {key}"));
-            let got = get_value(&parse_key(&key).unwrap(), &options, &registries).unwrap();
+            let got = get_value(&parse_key(&key).unwrap(), &options, &registries, &Invocation::WALKED).unwrap();
             assert_eq!(row.value, got, "list and get must agree on {key}");
         }
         // And the filter rows really carry the patterns (not just agree on
@@ -4329,6 +4427,32 @@ mod tests {
         );
     }
 
+    /// A plain `grim config` edits the project the shell stands in, and this
+    /// run's config stays as it was.
+    #[test]
+    fn a_config_remedy_names_the_run_it_failed_in() {
+        let (_tmp, config_path, ctx) = project_scope();
+        let grim = Invocation::config(&config_path);
+        let capture = crate::catalog::test_hosts::LogCapture::start();
+
+        let empty = check_set_filter_pattern(" ", "registry.acme.include", &grim).expect_err("an empty pattern");
+        let no_field = run_registry_set(&ctx, "acme", None, None, false, &[], false, &[], false, None)
+            .map(|_| ())
+            .expect_err("a set naming no field");
+        let unknown = run_registry_use(&ctx, "acme").map(|_| ()).expect_err("no such alias");
+        warn_config_write_does_not_disarm("unset options.experimental.hooks", &grim);
+
+        let unset = format!("`{grim} config unset registry.acme.include`");
+        assert!(empty.to_string().contains(&unset), "{empty}");
+        assert!(no_field.to_string().contains(&unset), "{no_field}");
+        assert!(
+            unknown.to_string().contains(&format!("`{grim} config registry add`")),
+            "{unknown}"
+        );
+        let logs = capture.text();
+        assert!(logs.contains(&format!("run `{grim} install` to disarm them")), "{logs}");
+    }
+
     #[test]
     fn registry_set_naming_no_field_is_a_usage_error() {
         // A no-op `set` would take the lock, rewrite the file and report a
@@ -4346,7 +4470,8 @@ mod tests {
             .expect_err("a set naming no field must be refused");
         assert_eq!(crate::error::classify_error(&err), ExitCode::UsageError);
         assert!(
-            err.to_string().contains("grim config unset"),
+            err.to_string()
+                .contains(&format!("{} config unset", Invocation::config(&config_path))),
             "clearing a filter is the adjacent intent, so the message must route it: {err}"
         );
         assert_eq!(
@@ -5042,7 +5167,7 @@ mod tests {
             );
         }
         assert!(
-            msg.contains("grim config unset registry.acme.include"),
+            msg.contains(" config unset registry.acme.include`"),
             "the second clearing route stays valid and stays named: {msg}"
         );
     }

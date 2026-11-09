@@ -81,15 +81,19 @@
 //! reported state with no refusal arms the thing B1 forbids. **The status token
 //! and its message text are WP-H's; the refusal is this module's.**
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::config::ConfigScope;
+use crate::config::scope::Invocation;
 use crate::hook::policy::HookPolicy;
 use crate::install::path_anchor::{AnchorRoots, AnchoredPath, Containment, PathAnchor};
+use crate::lock::effective_set::NodeKey;
 use crate::lock::locked_source::LockedSource;
 use crate::oci::ArtifactKind;
 use crate::oci::hook::{CanonicalEvent, HOOK_MANIFEST_FILE, HookEntry, HookManifest, HookSurface};
+use crate::oci::text::escape_controls;
 use crate::store::atomic_write::{atomic_write, resolve_symlink};
 
 use super::client_target::ClientTarget;
@@ -98,7 +102,7 @@ use super::hook_dispatch::{DispatchEntry, DispatchError, DispatchGuard, Dispatch
 use super::hook_launcher::CommandRefusal;
 use super::install_state::{InstallState, SettingsStore};
 use super::json_splice::{self, NestedGroupPath, NestedHandlerPath, Splice};
-use super::vendor::{HOOK_MARKER_KEY, HOOK_MARKER_VALUE, Vendor};
+use super::vendor::{HOOK_MARKER_KEY, HOOK_MARKER_VALUE, SplicedHandler, Vendor};
 
 /// The repo-resident file Claude writes its project-scope hook registration
 /// into — the only armable thing grim writes inside a workspace, and the reason
@@ -216,7 +220,7 @@ impl ArmRefusal {
             Self::DispatchLocked => "another grim install holds the dispatch table lock",
             Self::DispatchTableFull => {
                 "the hook dispatch table is at its size limit, so this workspace's hooks were not added; run \
-                 grim uninstall hook <name> in projects that no longer need theirs, then re-run grim install"
+                 grim uninstall hook <name> in projects that no longer need theirs, then re-run this command"
             }
             Self::SurfaceUserOwned => {
                 "the client's hook file exists and grim did not write it, so grim will neither overwrite nor delete it"
@@ -328,11 +332,11 @@ pub enum HookSync {
 /// Naming the *hook* as well as the client is WP-H's, and it needs the status
 /// surface to do it — causes 1–3 are properties of `$GRIM_HOME`, not of any one
 /// hook, so there is no hook to name from here.
-pub fn log_sync(client: &str, outcome: &HookSync) {
+pub fn log_sync(client: &str, outcome: &HookSync, grim: &Invocation) {
     match outcome {
         HookSync::NotArmed(ArmRefusal::SurfaceUserOwned) => {
             tracing::warn!(
-                "hooks not armed for {client}: {}; move that file aside, then re-run grim install",
+                "hooks not armed for {client}: {}; move that file aside, then re-run {grim} install",
                 ArmRefusal::SurfaceUserOwned.reason()
             );
         }
@@ -346,7 +350,7 @@ pub fn log_sync(client: &str, outcome: &HookSync) {
         HookSync::DisarmFailed => {
             tracing::warn!(
                 "hooks for {client} could not be disarmed: a registration grim wrote earlier may still fire; \
-                 re-run grim install"
+                 re-run {grim} install"
             );
         }
         // `uninstall` and a TUI delete converge too, and report nothing else
@@ -364,16 +368,33 @@ pub fn log_sync(client: &str, outcome: &HookSync) {
 /// touches nothing. It takes the policy rather than an `InstallTarget` because
 /// `grim uninstall` and the TUI delete paths hold only a scope and must not
 /// build a target just to carry one.
+///
+/// `only` is the closure of a run that writes no more than it names, empty for
+/// a delete: the run writes the hooks it holds, and a standing one whose element
+/// runs the retired shim. Every other hook keeps its registration and rows as they
+/// read, losing them only where the policy or its own payload no longer arms it.
+/// A hook that left `state` loses both either way. `None` converges every recorded hook.
 pub fn converge_for(
     policy: Option<&HookPolicy>,
     state: &InstallState,
     workspace: &Path,
     scope: ConfigScope,
     roots: &AnchorRoots,
+    only: Option<&BTreeSet<NodeKey>>,
 ) -> Vec<(ClientTarget, HookSync)> {
-    match policy {
-        Some(policy) => converge_clients(state, workspace, scope, roots, policy),
-        None => Vec::new(),
+    match (policy, only) {
+        (None, _) => Vec::new(),
+        (Some(policy), None) => converge_clients(state, workspace, scope, roots, policy),
+        (Some(policy), only) => converge_on(
+            HOST_IS_WINDOWS,
+            HOOKS_WINDOWS_VERIFIED,
+            state,
+            workspace,
+            scope,
+            roots,
+            policy,
+            only,
+        ),
     }
 }
 
@@ -455,6 +476,7 @@ pub fn converge_clients(
         scope,
         roots,
         policy,
+        None,
     )
 }
 
@@ -491,8 +513,12 @@ fn platform_allows(windows: bool, verified: &[ClientTarget], client: ClientTarge
     !windows || verified.contains(&client)
 }
 
-/// [`converge_clients`] with the platform verdict passed in, so a Linux test
-/// can drive the Windows branch.
+/// [`converge_for`] with the platform verdict passed in, so a Linux test can
+/// drive the Windows branch.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the platform verdict and a named run's closure join the five convergence coordinates"
+)]
 fn converge_on(
     windows: bool,
     verified: &[ClientTarget],
@@ -501,6 +527,7 @@ fn converge_on(
     scope: ConfigScope,
     roots: &AnchorRoots,
     policy: &HookPolicy,
+    only: Option<&BTreeSet<NodeKey>>,
 ) -> Vec<(ClientTarget, HookSync)> {
     let clients = hook_clients(scope);
     if clients.is_empty() {
@@ -551,7 +578,9 @@ fn converge_on(
         {
             tracing::warn!("hooks not armed: {}", refusal.reason());
         }
-        return disarm_all(&surfaces, grim_home, confine, |_| HookSync::NotArmed(refusal));
+        return disarm_all(&surfaces, grim_home, confine, policy.invocation(), |_| {
+            HookSync::NotArmed(refusal)
+        });
     }
 
     // Step 3 — the desired set, per client, filtered structurally by the policy.
@@ -577,13 +606,13 @@ fn converge_on(
     // A held lock or an I/O failure lands here, before any launcher byte is written.
     let guard = match DispatchGuard::try_acquire(grim_home) {
         Ok(guard) => guard,
-        Err(e) => return dispatch_failure(e, &surfaces, grim_home, confine),
+        Err(e) => return dispatch_failure(e, &surfaces, grim_home, confine, policy.invocation()),
     };
     let token = match super::hook_dispatch::root_token(grim_home, root) {
         Ok(token) => token,
         Err(e) => {
             tracing::warn!(error = %e, "hook root token could not be derived; nothing armed");
-            return disarm_all(&surfaces, grim_home, confine, reaped);
+            return disarm_all(&surfaces, grim_home, confine, policy.invocation(), reaped);
         }
     };
     let armed_paths = ArmedPaths {
@@ -591,8 +620,24 @@ fn converge_on(
         token: &token,
         host_os: HostOs::current(),
     };
+    // Read under the guard, so a named run compares against the rows the table
+    // held when it took the lock. Quiet: `converge_root` reports a table it
+    // cannot update.
+    let standing: Vec<DispatchEntry> = match only {
+        Some(_) => grimoire_hook_core::table::read_table_diagnosed(
+            &super::hook_dispatch::dispatch_path(grim_home),
+            &mut Vec::new(),
+        )
+        .0
+        .roots
+        .get(&token)
+        .map(|entry| entry.hooks.clone())
+        .unwrap_or_default(),
+        None => Vec::new(),
+    };
 
     let mut per_client: Vec<ArmedClient> = Vec::new();
+    let mut retired: Vec<(ClientTarget, Vec<String>)> = Vec::new();
     let mut outcomes: Vec<(ClientTarget, HookSync)> = Vec::new();
     for (client, surface) in surfaces.iter().cloned() {
         if !platform_allows(windows, verified, client) {
@@ -606,15 +651,23 @@ fn converge_on(
                     ArmRefusal::PlatformUnsupported.reason()
                 );
             }
-            outcomes.extend(disarm_all(&[(client, surface)], grim_home, confine, |_| {
-                HookSync::NotArmed(ArmRefusal::PlatformUnsupported)
-            }));
+            outcomes.extend(disarm_all(
+                &[(client, surface)],
+                grim_home,
+                confine,
+                policy.invocation(),
+                |_| HookSync::NotArmed(ArmRefusal::PlatformUnsupported),
+            ));
             continue;
         }
         if hook_command::check(client.vendor().hook_command_form(), &launcher, armed_paths.host_os).is_err() {
-            outcomes.extend(disarm_all(&[(client, surface)], grim_home, confine, |_| {
-                HookSync::NotArmed(ArmRefusal::LauncherPathUnquotable)
-            }));
+            outcomes.extend(disarm_all(
+                &[(client, surface)],
+                grim_home,
+                confine,
+                policy.invocation(),
+                |_| HookSync::NotArmed(ArmRefusal::LauncherPathUnquotable),
+            ));
             continue;
         }
         // A user-owned own-file surface is never registered on (security
@@ -623,29 +676,21 @@ fn converge_on(
         let user_owned = surface
             .as_deref()
             .is_some_and(|surface| own_file_owner(client.vendor(), grim_home, surface) == SurfaceOwner::User);
-        match desired_entries(client.vendor(), state, roots, root, &trust) {
-            Ok(desired) if user_owned => {
-                let outcome = if desired.is_empty() {
-                    HookSync::NoHooks
-                } else {
-                    HookSync::NotArmed(ArmRefusal::SurfaceUserOwned)
-                };
-                log_sync(client.vendor().name(), &outcome);
-                outcomes.push((client, outcome));
+        let desired = desired_entries(client.vendor(), state, roots, root, &trust, policy.invocation());
+        if user_owned {
+            let outcome = if desired.is_empty() {
+                HookSync::NoHooks
+            } else {
+                HookSync::NotArmed(ArmRefusal::SurfaceUserOwned)
+            };
+            log_sync(client.vendor().name(), &outcome, policy.invocation());
+            outcomes.push((client, outcome));
+        } else {
+            let mut armed = register_desired(client, surface, &desired, &armed_paths);
+            if let Some(closure) = only {
+                retired.push((client, armed.narrow(closure, &standing)));
             }
-            Ok(desired) => per_client.push(register_desired(client, surface, &desired, &armed_paths)),
-            Err(e) => {
-                // A payload directory grim cannot read, or a `hook.toml` that no
-                // longer parses. Warn-only, exactly as a `sync_config` failure
-                // has always been: the artifacts and state are already on disk,
-                // and blocking here would trade the user's agent for a
-                // convergence detail (I3).
-                tracing::warn!(
-                    client = client.vendor().name(),
-                    error = %e,
-                    "hook desired-set projection failed; registration skipped"
-                );
-            }
+            per_client.push(armed);
         }
     }
 
@@ -656,9 +701,15 @@ fn converge_on(
     if !union.is_empty() {
         if let Err(refusal) = super::launcher::ensure(grim_home, &guard) {
             tracing::warn!("hooks not armed: {}", refusal.reason());
-            return disarm_all(&surfaces, grim_home, confine, |_| HookSync::NotArmed(refusal));
+            return disarm_all(&surfaces, grim_home, confine, policy.invocation(), |_| {
+                HookSync::NotArmed(refusal)
+            });
         }
-        super::launcher::retire_legacy_shim(grim_home, &guard);
+        // A named run or a delete keeps the shim: another workspace's registration
+        // may still reach an old grim through it, and without it that one fails open.
+        if only.is_none() {
+            super::launcher::retire_legacy_shim(grim_home, &guard);
+        }
     }
 
     // Step 4 — write the dispatch entry wholesale under the lock, once, with the
@@ -668,7 +719,7 @@ fn converge_on(
     // in which a client can invoke a launcher that finds nothing to do.
     let write = match super::hook_dispatch::converge_root(grim_home, &guard, &token, root, &union) {
         Ok(write) => write,
-        Err(e) => return dispatch_failure(e, &surfaces, grim_home, confine),
+        Err(e) => return dispatch_failure(e, &surfaces, grim_home, confine, policy.invocation()),
     };
 
     // Steps 5 and 6 — converge each client's own surface, then the git-exclude
@@ -688,6 +739,7 @@ fn converge_on(
             grim_home,
             armed.surface.as_deref(),
             &armed.registrations,
+            &armed.every,
             write,
             settings_use_file,
         ) {
@@ -701,10 +753,11 @@ fn converge_on(
                 hooks.sort_unstable();
                 hooks.dedup();
                 tracing::warn!(
-                    "hook '{}' not armed for {}: {} ({e}); fix or move that file, then re-run grim install",
+                    "hook '{}' not armed for {}: {} ({e}); fix or move that file, then re-run {} install",
                     hooks.join("', '"),
                     client.vendor().name(),
                     ArmRefusal::SurfaceUnreadable.reason(),
+                    policy.invocation(),
                 );
                 unregistered.push(client);
                 outcomes.push((client, HookSync::NotArmed(ArmRefusal::SurfaceUnreadable)));
@@ -720,18 +773,32 @@ fn converge_on(
         {
             warn_codex_retrust(&retrusted_gatekeepers(armed, before));
         }
-        log_sync(client.vendor().name(), &outcome);
+        if matches!(outcome, HookSync::Armed(_))
+            && let Some((_, hooks)) = retired.iter().find(|(c, hooks)| *c == client && !hooks.is_empty())
+        {
+            // A named update, an uninstall and a TUI delete all print this, so it
+            // names no closure.
+            tracing::warn!(
+                "rewrote the {} registration of hook '{}' too: it ran an older grim's launcher script, which this \
+                 grim no longer ships; nothing to do",
+                client.vendor().name(),
+                hooks.join("', '"),
+            );
+        }
+        log_sync(client.vendor().name(), &outcome, policy.invocation());
         outcomes.push((client, outcome));
     }
-    // Step 4 again, minus the clients whose registration never landed: the
-    // table is the arming authority every report reads, so it must not keep a
-    // row for a client nothing will ever invoke it from.
+    // Step 4 again, minus the rows this run wrote for clients whose registration
+    // never landed: the table is the arming authority every report reads, so it
+    // must not keep a row for a client nothing will ever invoke it from.
     if !unregistered.is_empty() {
-        let kept: Vec<ArmedClient> = per_client
-            .into_iter()
-            .filter(|armed| !unregistered.contains(&armed.client))
-            .collect();
-        if let Err(e) = super::hook_dispatch::converge_root(grim_home, &guard, &token, root, &union_of(&kept)) {
+        for armed in per_client
+            .iter_mut()
+            .filter(|armed| unregistered.contains(&armed.client))
+        {
+            armed.rows.clear();
+        }
+        if let Err(e) = super::hook_dispatch::converge_root(grim_home, &guard, &token, root, &union_of(&per_client)) {
             tracing::warn!(error = %e, "dispatch table could not drop the unregistered clients' rows");
         }
     }
@@ -778,26 +845,27 @@ fn dispatch_failure(
     surfaces: &[(ClientTarget, Option<PathBuf>)],
     grim_home: &Path,
     confine: Option<&Path>,
+    grim: &Invocation,
 ) -> Vec<(ClientTarget, HookSync)> {
     match error {
         // Cause 4. Reported rather than written over — the loser of a race
         // must not believe it armed. The table stays as the winner leaves
         // it; this client's own registrations are stripped, so a disarm
         // that lost the race does not leave them firing (W1).
-        DispatchError::Locked => disarm_all(surfaces, grim_home, confine, |_| {
+        DispatchError::Locked => disarm_all(surfaces, grim_home, confine, grim, |_| {
             HookSync::NotArmed(ArmRefusal::DispatchLocked)
         }),
         // Issue #93. Nothing written: every other root keeps arming off the
         // previous table, and this root reports not-armed with the remedy.
         DispatchError::TableFull { size } => {
             tracing::debug!(size, "dispatch table write refused at the size cap");
-            disarm_all(surfaces, grim_home, confine, |_| {
+            disarm_all(surfaces, grim_home, confine, grim, |_| {
                 HookSync::NotArmed(ArmRefusal::DispatchTableFull)
             })
         }
         e @ DispatchError::Io(_) => {
             tracing::warn!(error = %e, "dispatch table write failed; nothing armed");
-            disarm_all(surfaces, grim_home, confine, reaped)
+            disarm_all(surfaces, grim_home, confine, grim, reaped)
         }
     }
 }
@@ -815,6 +883,7 @@ fn disarm_all(
     surfaces: &[(ClientTarget, Option<PathBuf>)],
     grim_home: &Path,
     confine: Option<&Path>,
+    grim: &Invocation,
     on_success: impl Fn(SurfaceWrite) -> HookSync,
 ) -> Vec<(ClientTarget, HookSync)> {
     surfaces
@@ -836,7 +905,7 @@ fn disarm_all(
                     HookSync::DisarmFailed
                 }
             };
-            log_sync(vendor.name(), &outcome);
+            log_sync(vendor.name(), &outcome, grim);
             (*client, outcome)
         })
         .collect()
@@ -896,9 +965,13 @@ fn hook_clients(scope: ConfigScope) -> Vec<ClientTarget> {
 /// byte-identical and `converge_root` can answer `Unchanged` — Principle 9's
 /// self-heal obligation. `client` is the last key, and it has to be *a* key:
 /// without it two clients' rows for one hook compare equal on the first three
-/// and the sort is unstable across runs.
+/// and the sort is unstable across runs. The rows a named run carries join the
+/// same sort, so carrying a table unchanged rewrites nothing.
 fn union_of(per_client: &[ArmedClient]) -> Vec<DispatchEntry> {
-    let mut union: Vec<DispatchEntry> = per_client.iter().flat_map(|armed| armed.rows.iter().cloned()).collect();
+    let mut union: Vec<DispatchEntry> = per_client
+        .iter()
+        .flat_map(|armed| armed.rows.iter().chain(&armed.carried).cloned())
+        .collect();
     union.sort_by(|a, b| {
         (&a.artifact, &a.id, a.event.as_str(), &a.client).cmp(&(&b.artifact, &b.id, b.event.as_str(), &b.client))
     });
@@ -937,18 +1010,85 @@ struct DesiredHook {
 /// One client's set **after** the registration verdict: what its surface will
 /// carry, and the dispatch rows those registrations authorize.
 ///
-/// The two vectors are parallel by construction — [`register_desired`] pushes to
-/// both or to neither — and that is the whole invariant P-1 was the absence of.
-/// A declined hook is in neither, so it is neither registered nor dispatchable.
+/// `registrations` and `rows` are parallel by construction — [`register_desired`]
+/// pushes to both or to neither — and that is the whole invariant P-1 was the
+/// absence of. A declined hook is in neither, so it is neither registered nor
+/// dispatchable, and in neither of the fields a named run reads.
 struct ArmedClient {
     client: ClientTarget,
     /// Where this client's registrations live, or `None` when it hosts none at
     /// this scope.
     surface: Option<PathBuf>,
-    /// What [`Vendor::hook_registration`] accepted.
+    /// What [`Vendor::hook_registration`] accepted for the hooks this run writes.
     registrations: Vec<crate::oci::hook::HookRegistration>,
     /// The dispatch rows of exactly those accepted registrations.
     rows: Vec<DispatchEntry>,
+    /// Everything accepted, in desired order. On a named run it also holds the
+    /// hooks outside the closure: the order and timeouts a surface must keep.
+    every: Vec<crate::oci::hook::HookRegistration>,
+    /// The rows a named run keeps for accepted hooks outside its closure.
+    carried: Vec<DispatchEntry>,
+}
+
+impl ArmedClient {
+    /// Scope this client's set to a named run's `closure`. A hook outside it
+    /// keeps a row only where `standing` holds one, so a row removed by hand
+    /// stays removed, and that row comes from the payload the verdict just read,
+    /// so a stale gatekeeper row does not outlive the run. Such a hook keeps its
+    /// registration as it reads, unless that still runs the retired shim, which
+    /// this grim does not serve: then it is written as a whole converge writes it.
+    ///
+    /// Returns the hooks rewritten for that reason, each once.
+    fn narrow(&mut self, closure: &BTreeSet<NodeKey>, standing: &[DispatchEntry]) -> Vec<String> {
+        let text = self.surface.as_deref().and_then(|s| std::fs::read_to_string(s).ok());
+        let vendor = self.client.vendor();
+        let rows = std::mem::take(&mut self.rows);
+        let registrations = std::mem::take(&mut self.registrations);
+        let stands = |row: &DispatchEntry| {
+            standing.iter().any(|stood| {
+                stood.client == row.client
+                    && stood.artifact == row.artifact
+                    && stood.id == row.id
+                    && stood.event == row.event
+            })
+        };
+        let mut retired: Vec<String> = Vec::new();
+        for (row, registration) in rows.into_iter().zip(registrations) {
+            let named = closure.contains(&(ArtifactKind::Hook, row.artifact.clone()));
+            if named || (stands(&row) && runs_retired_shim(vendor, text.as_deref(), &registration)) {
+                if !named && !retired.contains(&row.artifact) {
+                    retired.push(row.artifact.clone());
+                }
+                self.rows.push(row);
+                self.registrations.push(registration);
+            } else if stands(&row) {
+                self.carried.push(row);
+            }
+        }
+        retired
+    }
+}
+
+/// Whether the element `text` carries for `registration` runs the retired `sh`
+/// shim. A spliced element is read at its event and matcher; an own file is
+/// rendered whole by one grim, so one entry naming the shim means all do.
+fn runs_retired_shim(
+    vendor: &dyn Vendor,
+    text: Option<&str>,
+    registration: &crate::oci::hook::HookRegistration,
+) -> bool {
+    let Some(text) = text else {
+        return false;
+    };
+    match vendor.hook_surface() {
+        Some(HookSurface::SpliceConfig) => vendor.hook_spliced_handler(registration).is_some_and(|handler| {
+            spliced_elements(text, &handler)
+                .iter()
+                .any(|element| super::launcher::runs_legacy_shim(&element.to_string()))
+        }),
+        Some(HookSurface::OwnFile) => super::launcher::runs_legacy_shim(text),
+        Some(HookSurface::CodegenModule) | None => false,
+    }
 }
 
 /// Run the registration verdict over one client's desired set, keeping only
@@ -998,6 +1138,8 @@ fn register_desired(
     ArmedClient {
         client,
         surface,
+        every: registrations.clone(),
+        carried: Vec::new(),
         registrations,
         rows,
     }
@@ -1025,6 +1167,10 @@ fn register_desired(
 /// - [`HookSurface::OwnFile`] — grim owns the whole file: the desired set is
 ///   rendered wholesale, and an empty set removes the file.
 ///
+/// `registrations` is what this run writes and `every` all that was accepted.
+/// They differ only on a named run, where a hook outside the closure gets no
+/// element it lacks and keeps the one it has.
+///
 /// # Errors
 ///
 /// A genuine I/O failure reading or writing the client's config. A policy
@@ -1032,7 +1178,8 @@ fn register_desired(
 /// the caller.
 #[expect(
     clippy::too_many_arguments,
-    reason = "settings_use_file is one fact from the caller's state; a struct for one call site adds nothing"
+    reason = "a named run's accepted set joins the seven surface coordinates, and settings_use_file is one \
+              fact from the caller's state; a struct for one call site adds nothing"
 )]
 fn sync_for_state(
     vendor: &dyn Vendor,
@@ -1041,6 +1188,7 @@ fn sync_for_state(
     grim_home: &Path,
     surface: Option<&Path>,
     registrations: &[crate::oci::hook::HookRegistration],
+    every: &[crate::oci::hook::HookRegistration],
     table_write: DispatchWrite,
     settings_use_file: bool,
 ) -> io::Result<HookSync> {
@@ -1050,11 +1198,26 @@ fn sync_for_state(
         return Ok(HookSync::NoHooks);
     };
 
-    let registrations = &one_per_matcher(registrations);
+    // Merged over everything accepted: an element this run shares with a hook
+    // outside its closure has to cover that hook's timeout too.
+    let every = &one_per_matcher(every);
+    let writes =
+        |merged: &crate::oci::hook::HookRegistration| registrations.iter().any(|own| same_element(own, merged));
     let surface_write = match vendor.hook_surface() {
-        Some(HookSurface::OwnFile) => converge_own_file(vendor, grim_home, surface, registrations)?,
+        // Rendered whole, so what stays has to be in the document, in desired
+        // order: Codex keys its stored trust on an entry's position.
+        Some(HookSurface::OwnFile) => {
+            let text = std::fs::read_to_string(surface).ok();
+            let kept: Vec<_> = every
+                .iter()
+                .filter(|m| writes(m) || element_on(vendor, text.as_deref(), m))
+                .cloned()
+                .collect();
+            converge_own_file(vendor, grim_home, surface, &kept)?
+        }
         Some(HookSurface::SpliceConfig) => {
-            converge_splice(vendor, surface, registrations, link_confinement(workspace, scope))?
+            let (written, held): (Vec<_>, Vec<_>) = every.iter().cloned().partition(writes);
+            converge_splice_holding(vendor, surface, &written, &held, link_confinement(workspace, scope))?
         }
         // `CodegenModule` ships no template in v1 and `None` has no surface at
         // all. A decline plus a warning, never a panic (I3).
@@ -1071,8 +1234,8 @@ fn sync_for_state(
     let project_splice = scope == ConfigScope::Project && vendor.hook_surface() == Some(HookSurface::SpliceConfig);
     // Settings share this file and its rule, so losing the last hook drops the
     // rule only when no settings piece is left in the file either.
-    if project_splice && (!registrations.is_empty() || !settings_use_file) {
-        let outcome = if registrations.is_empty() {
+    if project_splice && (!every.is_empty() || !settings_use_file) {
+        let outcome = if every.is_empty() {
             drop_settings_local_exclude(workspace)
         } else {
             ensure_settings_local_excluded(workspace)
@@ -1098,14 +1261,14 @@ fn sync_for_state(
         }
     }
 
-    Ok(match (registrations.is_empty(), surface_write, table_write) {
+    Ok(match (every.is_empty(), surface_write, table_write) {
         // Nothing wanted and nothing was owned: a genuine no-op.
         (true, SurfaceWrite::Unchanged, _) => HookSync::NoHooks,
         // Nothing wanted and something went away.
         (true, SurfaceWrite::Changed, _) => HookSync::Disarmed,
         // Something wanted, and neither the registration nor the table moved.
         (false, SurfaceWrite::Unchanged, DispatchWrite::Unchanged) => HookSync::Unchanged,
-        (false, _, _) => HookSync::Armed(registrations.len()),
+        (false, _, _) => HookSync::Armed(every.len()),
     })
 }
 
@@ -1202,9 +1365,7 @@ fn one_per_matcher(registrations: &[crate::oci::hook::HookRegistration]) -> Vec<
     let effective = |timeout: Option<u64>| timeout.unwrap_or(crate::oci::hook::DEFAULT_TIMEOUT_SECS);
     let mut merged: Vec<crate::oci::hook::HookRegistration> = Vec::with_capacity(registrations.len());
     for registration in registrations {
-        match merged.iter_mut().find(|m| {
-            m.event == registration.event && m.matcher == registration.matcher && m.command == registration.command
-        }) {
+        match merged.iter_mut().find(|m| same_element(m, registration)) {
             Some(existing) => {
                 if effective(registration.timeout) > effective(existing.timeout) {
                     existing.timeout = registration.timeout;
@@ -1214,6 +1375,11 @@ fn one_per_matcher(registrations: &[crate::oci::hook::HookRegistration]) -> Vec<
         }
     }
     merged
+}
+
+/// Whether two registrations land on one surface element.
+fn same_element(a: &crate::oci::hook::HookRegistration, b: &crate::oci::hook::HookRegistration) -> bool {
+    a.event == b.event && a.matcher == b.matcher && a.command == b.command
 }
 
 /// `Ok(())` for a `NotFound` removal — the target is already gone, which is
@@ -1373,6 +1539,20 @@ fn converge_splice(
     registrations: &[crate::oci::hook::HookRegistration],
     confine: Option<&Path>,
 ) -> io::Result<SurfaceWrite> {
+    converge_splice_holding(vendor, surface, registrations, &[], confine)
+}
+
+/// [`converge_splice`], leaving the elements of `held` as they read: neither
+/// written nor reaped. An element is keyed on its event and matcher rather than
+/// its rendering, so one a client or an older grim spelled differently stays
+/// too, where reaping it would silently disarm that hook.
+fn converge_splice_holding(
+    vendor: &dyn Vendor,
+    surface: &Path,
+    registrations: &[crate::oci::hook::HookRegistration],
+    held: &[crate::oci::hook::HookRegistration],
+    confine: Option<&Path>,
+) -> io::Result<SurfaceWrite> {
     let Some(shape) = vendor.hook_splice_shape() else {
         return Err(io::Error::other(format!(
             "{} declares a splice hook surface but no splice shape",
@@ -1420,6 +1600,11 @@ fn converge_splice(
         }
         wanted.push((handler.member.clone(), handler.element.clone()));
     }
+    let held: Vec<(String, String)> = held
+        .iter()
+        .filter_map(|registration| vendor.hook_spliced_handler(registration))
+        .map(|handler| (handler.member, handler.group_value))
+        .collect();
 
     // Then reap `owned − desired`, over EVERY event member this client can
     // spell — not only the members the desired set names. An element left under
@@ -1438,7 +1623,10 @@ fn converge_splice(
         for (group_value, element) in json_splice::owned_nested_handlers(&text, &group, &owner_ref) {
             let keep = wanted
                 .iter()
-                .any(|(wanted_member, wanted_element)| wanted_member == member && *wanted_element == element);
+                .any(|(wanted_member, wanted_element)| wanted_member == member && *wanted_element == element)
+                || held
+                    .iter()
+                    .any(|(held_member, held_group)| held_member == member && *held_group == group_value);
             if keep {
                 continue;
             }
@@ -1583,6 +1771,295 @@ fn root_in_table(grim_home: &Path, root: RootScope<'_>) -> bool {
         return false;
     };
     read_table_logged(grim_home).0.roots.contains_key(&token)
+}
+
+/// Each hook client's registration surface at one scope, as it read at one moment.
+#[derive(Debug, Default)]
+pub(crate) struct SurfaceSnapshot(Vec<(ClientTarget, Option<String>)>);
+
+impl SurfaceSnapshot {
+    /// What `client`'s surface read, or `None` when it was absent or unreadable.
+    fn text(&self, client: ClientTarget) -> Option<&str> {
+        self.0
+            .iter()
+            .find(|(c, _)| *c == client)
+            .and_then(|(_, text)| text.as_deref())
+    }
+}
+
+/// Read every hook client's registration surface at `scope`, writing nothing.
+/// A project surface resolving outside the workspace reads as absent, as no
+/// convergence writes it.
+pub(crate) fn surface_snapshot(workspace: &Path, scope: ConfigScope) -> SurfaceSnapshot {
+    let confine = link_confinement(workspace, scope);
+    SurfaceSnapshot(
+        hook_clients(scope)
+            .into_iter()
+            .filter_map(|client| {
+                let surface = client.vendor().hook_config_path(workspace, scope)?;
+                let text = confined_target(&surface, confine)
+                    .ok()
+                    .and_then(|_| std::fs::read_to_string(&surface).ok());
+                Some((client, text))
+            })
+            .collect(),
+    )
+}
+
+/// One row the dispatch table arms, with the element its client's surface should
+/// carry for it. Two hooks sharing an element each get one.
+struct ArmedElement {
+    client: ClientTarget,
+    row: DispatchEntry,
+    /// Merged, because the surface carries the loosest timeout of the group.
+    registration: crate::oci::hook::HookRegistration,
+}
+
+/// Every [`ArmedElement`] of the clients `surfaces` reads, writing nothing.
+///
+/// Each is recomputed through the convergence's own steps, so the two cannot
+/// disagree about what a registration is.
+fn armed_elements(
+    surfaces: &SurfaceSnapshot,
+    state: &InstallState,
+    workspace: &Path,
+    scope: ConfigScope,
+    roots: &AnchorRoots,
+    grim: &Invocation,
+) -> Vec<ArmedElement> {
+    let mut elements = Vec::new();
+    let grim_home = roots.grim_home.as_path();
+    let root = root_scope_for(workspace, scope);
+    let Ok(Some(token)) = super::hook_dispatch::existing_root_token(grim_home, root) else {
+        return elements;
+    };
+    // Quiet: the convergence that wrote this table already reported its diagnostics.
+    let (table, _degrade) = grimoire_hook_core::table::read_table_diagnosed(
+        &super::hook_dispatch::dispatch_path(grim_home),
+        &mut Vec::new(),
+    );
+    let Some(entry) = table.roots.get(&token) else {
+        return elements;
+    };
+    let launcher = super::launcher::path(grim_home);
+    let paths = ArmedPaths {
+        launcher: &launcher,
+        token: &token,
+        host_os: HostOs::current(),
+    };
+    for (client, _) in &surfaces.0 {
+        let vendor = client.vendor();
+        let rows: Vec<&DispatchEntry> = entry.hooks.iter().filter(|row| row.client == vendor.name()).collect();
+        let armed_row = |hook: &DesiredHook| {
+            rows.iter().any(|row| {
+                row.artifact == hook.entry.artifact && row.id == hook.entry.id && row.event == hook.entry.event
+            })
+        };
+        // Only what the table arms passes, so no record and no declined entry warns twice.
+        let armed = |name: &str, _: &LockedSource| rows.iter().any(|row| row.artifact == name);
+        let desired: Vec<DesiredHook> = desired_entries(vendor, state, roots, root, &armed, grim)
+            .into_iter()
+            .filter(armed_row)
+            .collect();
+        let registered = register_desired(*client, None, &desired, &paths);
+        let written = one_per_matcher(&registered.registrations);
+        for (row, registration) in registered.rows.iter().zip(&registered.registrations) {
+            if let Some(merged) = written.iter().find(|m| same_element(m, registration)) {
+                elements.push(ArmedElement {
+                    client: *client,
+                    row: row.clone(),
+                    registration: merged.clone(),
+                });
+            }
+        }
+    }
+    elements
+}
+
+/// The hooks whose registration a client surface carries now and `before` did
+/// not, read-only: what a convergence restored or rewrote, per binding.
+///
+/// One registration two hooks share names both. One that ran the retired shim
+/// before names none: the convergence that rewrote it said so itself. Call it
+/// right after a convergence armed something, so the rows it reads are that run's.
+pub(crate) fn rewritten_registrations(
+    before: &SurfaceSnapshot,
+    state: &InstallState,
+    workspace: &Path,
+    scope: ConfigScope,
+    roots: &AnchorRoots,
+    grim: &Invocation,
+) -> BTreeSet<String> {
+    let now = surface_snapshot(workspace, scope);
+    armed_elements(&now, state, workspace, scope, roots, grim)
+        .into_iter()
+        .filter(|armed| {
+            let vendor = armed.client.vendor();
+            let was = before.text(armed.client);
+            registered_on(vendor, now.text(armed.client), &armed.registration)
+                && !registered_on(vendor, was, &armed.registration)
+                && !runs_retired_shim(vendor, was, &armed.registration)
+        })
+        .map(|armed| armed.row.artifact)
+        .collect()
+}
+
+/// The gatekeepers with a dispatch row and no element on their client's surface,
+/// read-only, per binding, each with the clients whose surface lacks it: a
+/// client never runs them while `grim status`, which reads the table, calls
+/// them installed.
+///
+/// Empty under an arming refusal: that run stripped every surface and said why,
+/// and no convergence restores a registration until the cause is fixed.
+pub(crate) fn unregistered_gatekeepers(
+    state: &InstallState,
+    workspace: &Path,
+    scope: ConfigScope,
+    roots: &AnchorRoots,
+    grim: &Invocation,
+) -> BTreeMap<String, Vec<ClientTarget>> {
+    let mut gatekeepers: BTreeMap<String, Vec<ClientTarget>> = BTreeMap::new();
+    if arming_refusal(&roots.grim_home, workspace, scope).is_some() {
+        return gatekeepers;
+    }
+    let now = surface_snapshot(workspace, scope);
+    let unregistered = armed_elements(&now, state, workspace, scope, roots, grim)
+        .into_iter()
+        .filter(|armed| armed.row.tier == crate::oci::hook::HookTier::Gatekeeper)
+        .filter(|armed| !element_on(armed.client.vendor(), now.text(armed.client), &armed.registration));
+    for armed in unregistered {
+        let clients = gatekeepers.entry(armed.row.artifact).or_default();
+        if !clients.contains(&armed.client) {
+            clients.push(armed.client);
+        }
+    }
+    gatekeepers
+}
+
+/// The registration surfaces of `clients` at `scope` that are no JSON object
+/// grim can edit, read the way [`surface_snapshot`] reads. A convergence
+/// registers nothing on one until it is fixed or moved.
+pub(crate) fn unparseable_surfaces(workspace: &Path, scope: ConfigScope, clients: &[ClientTarget]) -> Vec<PathBuf> {
+    let confine = link_confinement(workspace, scope);
+    hook_clients(scope)
+        .into_iter()
+        .filter(|client| clients.contains(client))
+        .filter_map(|client| client.vendor().hook_config_path(workspace, scope))
+        .filter(|surface| {
+            confined_target(surface, confine).is_ok()
+                && match std::fs::read_to_string(surface) {
+                    Ok(text) => json_splice::value_at(&text, &[]).is_err(),
+                    Err(e) => e.kind() != io::ErrorKind::NotFound,
+                }
+        })
+        .collect()
+}
+
+/// What restores a gatekeeper's missing client registration, as a warning
+/// names it: `install`, the run that registers it. That run registers nothing on
+/// an `unparseable` client file, so the remedy names each one first. An install
+/// that refuses another artifact's edit exits 65 naming `--force`, which would
+/// discard that edit, so the remedy says the restore happens anyway.
+pub(crate) fn registration_remedy(unparseable: &[PathBuf], install: &str) -> String {
+    const BESIDE_A_REFUSAL: &str =
+        "even when it refuses another artifact's local edit, so the restore needs no `--force`";
+    match unparseable {
+        [] => format!("`{install}` restores it, {BESIDE_A_REFUSAL}"),
+        files => {
+            let files: Vec<String> = files
+                .iter()
+                .map(|file| format!("'{}'", escape_controls(&file.display().to_string())))
+                .collect();
+            format!(
+                "grim cannot parse {}; fix or move it, then run `{install}`, which restores it \
+                 {BESIDE_A_REFUSAL}",
+                files.join(", ")
+            )
+        }
+    }
+}
+
+/// Whether `text`, one client surface's contents, carries `registration` as grim writes it.
+fn registered_on(vendor: &dyn Vendor, text: Option<&str>, registration: &crate::oci::hook::HookRegistration) -> bool {
+    let Some(text) = text else {
+        return false;
+    };
+    match vendor.hook_surface() {
+        Some(HookSurface::SpliceConfig) => vendor
+            .hook_spliced_handler(registration)
+            .is_some_and(|handler| spliced_elements(text, &handler).contains(&handler.element)),
+        Some(HookSurface::OwnFile) => {
+            let part = vendor.hook_file_document(std::slice::from_ref(registration));
+            let whole = serde_json::from_str::<serde_json::Value>(text);
+            matches!((part, whole), (Some(part), Ok(whole)) if json_contains(&whole, &part))
+        }
+        Some(HookSurface::CodegenModule) | None => false,
+    }
+}
+
+/// Whether `text` carries an element for `registration`, read the way a named run
+/// holds one: a spliced element by event and matcher and an own-file entry under
+/// any timeout, so one a user retimed still counts.
+fn element_on(vendor: &dyn Vendor, text: Option<&str>, registration: &crate::oci::hook::HookRegistration) -> bool {
+    if vendor.hook_surface() == Some(HookSurface::SpliceConfig) {
+        return text
+            .zip(vendor.hook_spliced_handler(registration))
+            .is_some_and(|(text, handler)| !spliced_elements(text, &handler).is_empty());
+    }
+    let bare = crate::oci::hook::HookRegistration {
+        timeout: None,
+        ..registration.clone()
+    };
+    registered_on(vendor, text, &bare)
+}
+
+/// The grim-owned elements of `text` at `handler`'s event and matcher.
+fn spliced_elements(text: &str, handler: &SplicedHandler) -> Vec<serde_json::Value> {
+    let group = NestedGroupPath {
+        container: handler.shape.container,
+        member: &handler.member,
+        group_key: handler.shape.group_key,
+        elements_key: handler.shape.elements_key,
+    };
+    let marker = serde_json::Value::String(HOOK_MARKER_VALUE.to_string());
+    json_splice::owned_nested_handlers(text, &group, &[(HOOK_MARKER_KEY, &marker)])
+        .into_iter()
+        .filter(|(value, _)| *value == handler.group_value)
+        .map(|(_, element)| element)
+        .collect()
+}
+
+/// Whether `part` is in `whole`: objects key by key, an array element only as
+/// [`same_entry`] reads it.
+fn json_contains(whole: &serde_json::Value, part: &serde_json::Value) -> bool {
+    match (whole, part) {
+        (serde_json::Value::Object(whole), serde_json::Value::Object(part)) => part
+            .iter()
+            .all(|(key, value)| whole.get(key).is_some_and(|held| json_contains(held, value))),
+        (serde_json::Value::Array(whole), serde_json::Value::Array(part)) => part
+            .iter()
+            .all(|value| whole.iter().any(|held| same_entry(held, value))),
+        _ => whole == part,
+    }
+}
+
+/// Whether `held` is `part` whole, but for a number `part` leaves out: a timeout
+/// rendered as `None`, under whichever key its client spells it. Any other
+/// missing key differs, so a match-all entry never reads as a matched one.
+fn same_entry(held: &serde_json::Value, part: &serde_json::Value) -> bool {
+    match (held, part) {
+        (serde_json::Value::Object(held), serde_json::Value::Object(part)) => {
+            part.keys().all(|key| held.contains_key(key))
+                && held.iter().all(|(key, value)| match part.get(key) {
+                    Some(wanted) => same_entry(value, wanted),
+                    None => value.is_number(),
+                })
+        }
+        (serde_json::Value::Array(held), serde_json::Value::Array(part)) => {
+            held.len() == part.len() && held.iter().zip(part).all(|(held, part)| same_entry(held, part))
+        }
+        _ => held == part,
+    }
 }
 
 /// Whether `state` records a hook artifact with an output for this client.
@@ -1841,28 +2318,22 @@ fn resolved(path: &Path) -> PathBuf {
 /// so the table key and the payload location cannot disagree about which
 /// workspace is being armed.
 ///
-/// # Errors
+/// # One record at a time
 ///
-/// An I/O failure reading a payload directory, or a `hook.toml` that no longer
-/// parses — the second is *not* tolerated silently: a manifest that changed
-/// under grim means the payload drifted, and arming a set derived from an
-/// unparsable manifest is worse than reporting it. Both reach the caller as a
-/// per-client `warn` and zero armed entries, never as a failed command (I3).
-///
-/// A manifest that parses but fails
+/// A record whose payload directory, bytes or `hook.toml` cannot be read, whose
+/// payload changed since install, or whose manifest fails
 /// [`HookManifest::validate_installed`](crate::oci::hook::HookManifest::validate_installed)
-/// is **not** an error here (P-3): it costs that one artifact its rows, with a
-/// warning, and every other artifact still arms. The difference is deliberate —
-/// an unparsable manifest means grim cannot tell what the payload is at all,
-/// while an invalid one is a publisher who skipped `grim build`, and one such
-/// publisher must not disarm a user's other hooks.
+/// costs that hook its rows, with a warning naming it, and every other record
+/// still arms. Failing the whole client instead empties its dispatch rows while
+/// its registrations stay, so an intact gatekeeper stops denying at exit 0.
 fn desired_entries(
     vendor: &dyn Vendor,
     state: &InstallState,
     roots: &AnchorRoots,
     root: RootScope<'_>,
     trust: &dyn Fn(&str, &LockedSource) -> bool,
-) -> io::Result<Vec<DesiredHook>> {
+    grim: &Invocation,
+) -> Vec<DesiredHook> {
     let mut entries = Vec::new();
     for record in state.iter_records() {
         if record.kind != ArtifactKind::Hook || !trust(&record.name, &record.source) {
@@ -1897,38 +2368,26 @@ fn desired_entries(
             anchor: PathAnchor::GrimHome,
             relative: super::hook_dispatch::payload_relative(root, &record.name),
         };
-        let payload_dir = anchored
-            .resolve(roots, Containment::Strict)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-
-        for output in record.outputs.iter().filter(|o| o.client == vendor.name()) {
-            // I5 — the payload must still be the bytes install recorded before
-            // its manifest may arm anything. The install integrity gate refuses
-            // a modified payload (65), but convergence runs after it — and after
-            // every uninstall and TUI action — so without this check an edited
-            // `hook.toml` would reach the dispatch table through the very run
-            // that refused it. Hashed over the derived `payload_dir`, never the
-            // recorded target (SEC-1).
-            // ponytail: re-hashes each payload per convergence; payloads are small.
-            let actual = super::content_hash::footprint_hash_for_record(
-                ArtifactKind::Hook,
-                &payload_dir,
-                None,
-                &output.content_hash,
-            )?;
-            if actual != output.content_hash {
+        let payload_dir = match anchored.resolve(roots, Containment::Strict) {
+            Ok(payload_dir) => payload_dir,
+            Err(e) => {
                 tracing::warn!(
                     client = vendor.name(),
-                    "hook '{}' is not armed: its payload was modified since install; \
-                     restore it with `grim install --force`",
+                    "hook '{}' is not armed: its payload directory is refused ({e})",
                     record.name,
                 );
                 continue;
             }
-            let manifest_path = payload_dir.join(HOOK_MANIFEST_FILE);
-            let source = std::fs::read_to_string(&manifest_path)?;
-            let manifest = HookManifest::from_toml_str(&source)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{}: {e}", manifest_path.display())))?;
+        };
+
+        for output in record.outputs.iter().filter(|o| o.client == vendor.name()) {
+            let manifest = match armable_manifest(&payload_dir, &output.content_hash, grim) {
+                Ok(manifest) => manifest,
+                Err(reason) => {
+                    tracing::warn!(client = vendor.name(), "hook '{}' is not armed: {reason}", record.name);
+                    continue;
+                }
+            };
 
             // P-3 — re-apply the vendor-independent build rules against the
             // MATERIALIZED payload, because `HookManifest::validate`'s only
@@ -2014,7 +2473,41 @@ fn desired_entries(
             b.entry.event.as_str(),
         ))
     });
-    Ok(entries)
+    entries
+}
+
+/// The manifest at `payload_dir`, read only once the payload still hashes to
+/// `recorded`; otherwise why the hook cannot arm, worded to follow "is not armed: ".
+fn armable_manifest(
+    payload_dir: &Path,
+    recorded: &crate::oci::Digest,
+    grim: &Invocation,
+) -> Result<HookManifest, String> {
+    // Convergence runs after the install integrity gate refused a modified payload,
+    // so without this hash an edited `hook.toml` arms through that very run.
+    // `payload_dir` is derived, never the recorded target a cloned repository can name.
+    // ponytail: re-hashes each payload per convergence; payloads are small.
+    let actual = match super::content_hash::footprint_hash_for_record(ArtifactKind::Hook, payload_dir, None, recorded) {
+        Ok(actual) => actual,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(format!("its payload is gone; restore it with `{grim} install`"));
+        }
+        Err(e) => return Err(format!("its payload cannot be read ({e})")),
+    };
+    if &actual != recorded {
+        return Err(format!(
+            "its payload was modified since install; restore it with `{grim} install --force`"
+        ));
+    }
+    let source = std::fs::read_to_string(payload_dir.join(HOOK_MANIFEST_FILE))
+        .map_err(|e| format!("its {HOOK_MANIFEST_FILE} cannot be read ({e})"))?;
+    // The parse error quotes publisher bytes on their way to a terminal.
+    HookManifest::from_toml_str(&source).map_err(|e| {
+        format!(
+            "its {HOOK_MANIFEST_FILE} does not parse: {}",
+            crate::oci::text::registry_text(&e.to_string())
+        )
+    })
 }
 
 /// The semantic root `scope` arms for — [`RootScope::Global`] at global scope,
@@ -2688,6 +3181,7 @@ mod tests {
             ws.path(),
             ConfigScope::Project,
             &roots_for(home.path(), ws.path()),
+            None,
         );
         assert!(outcomes.is_empty());
         assert_eq!(std::fs::read_to_string(&surface).unwrap(), body);
@@ -2744,8 +3238,10 @@ mod tests {
             );
             checked += syncs;
         }
-        // Four since the TUI delete paths share `uninstall::delete_nodes`.
-        assert!(checked >= 4, "expected at least four sync loops, found {checked}");
+        // Two since `grim update` shares `installer::persist_and_converge` and
+        // every TUI delete path, the member delete included, shares
+        // `uninstall::delete_nodes`; fewer means the walk found nothing to check.
+        assert!(checked >= 2, "expected at least two sync loops, found {checked}");
     }
 
     #[test]
@@ -2861,6 +3357,7 @@ mod tests {
             ws.path(),
             ConfigScope::Project,
             &roots_for(home.path(), ws.path()),
+            None,
         );
         assert!(outcomes.is_empty(), "{outcomes:?}");
         assert_eq!(
@@ -3058,13 +3555,15 @@ mod tests {
             let mut slower = registration.clone();
             slower.timeout = Some(99);
             let surface = ws.path().join(vendor.name()).join(file);
+            let both = [registration, slower];
             sync_for_state(
                 vendor,
                 ws.path(),
                 ConfigScope::Global,
                 home.path(),
                 Some(&surface),
-                &[registration, slower],
+                &both,
+                &both,
                 DispatchWrite::Unchanged,
                 false,
             )
@@ -3141,6 +3640,8 @@ mod tests {
                 row("gate", crate::oci::hook::HookTier::Gatekeeper),
                 row("watch", crate::oci::hook::HookTier::Observer),
             ],
+            every: Vec::new(),
+            carried: Vec::new(),
         };
         let old = r#"{"hooks":{"Stop":[{"hooks":[{"command":"/old/grim-hook.sh"}]}]}}"#;
         assert_eq!(retrusted_gatekeepers(&armed, old), vec!["g/gate".to_string()]);
@@ -3629,8 +4130,8 @@ mod tests {
                 .with_ansi(false)
                 .finish(),
         );
-        log_sync("claude", &HookSync::Disarmed);
-        log_sync("claude", &HookSync::NoHooks);
+        log_sync("claude", &HookSync::Disarmed, &Invocation::WALKED);
+        log_sync("claude", &HookSync::NoHooks, &Invocation::WALKED);
         drop(guard);
         let text = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
         assert_eq!(text.lines().count(), 1, "{text}");
@@ -3925,16 +4426,15 @@ mod tests {
 
         let trust = |_: &str, _: &LockedSource| true;
         assert!(
-            desired_entries(&ClaudeVendor, &state, &roots, root, &trust).is_err(),
+            desired_entries(&ClaudeVendor, &state, &roots, root, &trust, &Invocation::WALKED).is_empty(),
             "the manifest must be read from $GRIM_HOME, where nothing was installed — \
              a record must never be able to redirect that read"
         );
-        // No outcome row at all, which is the shape a failed per-client
-        // projection already had: the client is dropped from the loop with a
-        // `warn` and nothing is written for it (I3 — a convergence detail never
-        // fails the command).
-        assert!(
-            converge_clients(&state, ws.path(), ConfigScope::Project, &roots, &arming_policy()).is_empty(),
+        // The record costs itself its rows, with a `warn`: the client reports no
+        // hooks and nothing is written for it.
+        assert_eq!(
+            converge_clients(&state, ws.path(), ConfigScope::Project, &roots, &arming_policy()),
+            vec![(ClientTarget::Claude, HookSync::NoHooks)],
             "a repo-resident payload must not arm"
         );
         assert!(
@@ -3958,6 +4458,52 @@ mod tests {
             converge_clients(&armed_state, ws.path(), ConfigScope::Project, &roots, &arming_policy()),
             vec![(ClientTarget::Claude, HookSync::Armed(1))]
         );
+    }
+
+    /// Run from a project, a remedy without `--global` restores that project's
+    /// hook and leaves the global payload broken.
+    #[test]
+    fn a_global_hook_remedy_names_the_global_flag() {
+        every_hook_remedy_names(&Invocation::GLOBAL);
+    }
+
+    /// A plain `grim install` restores the payload of whatever project the
+    /// shell stands in, and this one stays broken.
+    #[test]
+    fn a_config_hook_remedy_names_its_path() {
+        every_hook_remedy_names(&Invocation::config(Path::new("/srv/my team/grimoire.toml")));
+    }
+
+    fn every_hook_remedy_names(grim: &Invocation) {
+        let home = tempfile::tempdir().unwrap();
+        let roots = roots_for(home.path(), home.path());
+        let mut state = InstallState::empty(&home.path().join("state.json"));
+        for name in ["gone", "edited"] {
+            state.record(hook_record_named(
+                home.path(),
+                RootScope::Global,
+                &["claude"],
+                name,
+                "localhost:5000",
+                &format!("acme/{name}"),
+            ));
+        }
+        let payload = |name| crate::install::hook_dispatch::payload_dir(home.path(), RootScope::Global, name);
+        std::fs::remove_dir_all(payload("gone")).unwrap();
+        std::fs::write(payload("edited").join(HOOK_MANIFEST_FILE), "edited = true\n").unwrap();
+        let trust = |_: &str, _: &LockedSource| true;
+        let capture = crate::catalog::test_hosts::LogCapture::start();
+
+        let desired = desired_entries(&ClaudeVendor, &state, &roots, RootScope::Global, &trust, grim);
+
+        assert!(desired.is_empty(), "{desired:?}");
+        let logs = capture.text();
+        assert!(logs.contains(&format!("restore it with `{grim} install`")), "{logs}");
+        assert!(
+            logs.contains(&format!("restore it with `{grim} install --force`")),
+            "{logs}"
+        );
+        assert!(!logs.contains("`grim install"), "{logs}");
     }
 
     /// The trust predicate is evaluated against **each hook record's own**
@@ -3994,7 +4540,14 @@ mod tests {
         // `HookPolicy` produces from a single global `[[registries]]` grant.
         let trust =
             |_: &str, source: &LockedSource| source.pinned().is_some_and(|pin| pin.registry() == "trusted.example");
-        let desired = desired_entries(&ClaudeVendor, &state, &roots, RootScope::Global, &trust).unwrap();
+        let desired = desired_entries(
+            &ClaudeVendor,
+            &state,
+            &roots,
+            RootScope::Global,
+            &trust,
+            &Invocation::GLOBAL,
+        );
 
         let armed: Vec<&str> = desired.iter().map(|d| d.entry.artifact.as_str()).collect();
         assert_eq!(
@@ -4071,7 +4624,8 @@ mod tests {
                 ws.path(),
                 ConfigScope::Project,
                 &roots,
-                &arming_policy()
+                &arming_policy(),
+                None
             ),
             declined
         );
@@ -4089,7 +4643,8 @@ mod tests {
                 ws.path(),
                 ConfigScope::Project,
                 &roots,
-                &arming_policy()
+                &arming_policy(),
+                None
             ),
             vec![(ClientTarget::Claude, HookSync::Armed(1))]
         );
@@ -4103,7 +4658,8 @@ mod tests {
                 ws.path(),
                 ConfigScope::Project,
                 &roots,
-                &arming_policy()
+                &arming_policy(),
+                None
             ),
             declined
         );
@@ -4282,8 +4838,22 @@ mod tests {
         let roots = roots_for(home.path(), home.path());
 
         let trust = |_: &str, _: &LockedSource| true;
-        let claude = desired_entries(&ClaudeVendor, &state, &roots, RootScope::Global, &trust).unwrap();
-        let codex = desired_entries(&CodexVendor, &state, &roots, RootScope::Global, &trust).unwrap();
+        let claude = desired_entries(
+            &ClaudeVendor,
+            &state,
+            &roots,
+            RootScope::Global,
+            &trust,
+            &Invocation::GLOBAL,
+        );
+        let codex = desired_entries(
+            &CodexVendor,
+            &state,
+            &roots,
+            RootScope::Global,
+            &trust,
+            &Invocation::GLOBAL,
+        );
 
         assert_eq!(claude.len(), 1, "{claude:?}");
         assert_eq!(codex.len(), 1, "{codex:?}");
@@ -4320,13 +4890,27 @@ mod tests {
             register_desired(
                 ClientTarget::Codex,
                 None,
-                &desired_entries(&CodexVendor, &state, &roots, RootScope::Global, &trust).unwrap(),
+                &desired_entries(
+                    &CodexVendor,
+                    &state,
+                    &roots,
+                    RootScope::Global,
+                    &trust,
+                    &Invocation::GLOBAL,
+                ),
                 &armed_paths.borrow(),
             ),
             register_desired(
                 ClientTarget::Claude,
                 None,
-                &desired_entries(&ClaudeVendor, &state, &roots, RootScope::Global, &trust).unwrap(),
+                &desired_entries(
+                    &ClaudeVendor,
+                    &state,
+                    &roots,
+                    RootScope::Global,
+                    &trust,
+                    &Invocation::GLOBAL,
+                ),
                 &armed_paths.borrow(),
             ),
         ];
@@ -4752,5 +5336,811 @@ mod tests {
             vec![(ClientTarget::Claude, HookSync::Armed(1))],
             "a binding renamed away from the published name must still arm: {outcomes:?}"
         );
+    }
+
+    /// The bindings the dispatch table arms under any root, sorted.
+    fn armed_bindings(grim_home: &Path) -> Vec<String> {
+        let Ok(text) = std::fs::read_to_string(crate::install::hook_dispatch::dispatch_path(grim_home)) else {
+            return Vec::new();
+        };
+        let table: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let mut armed: Vec<String> = table["roots"]
+            .as_object()
+            .unwrap()
+            .values()
+            .flat_map(|root| root["hooks"].as_array().cloned().unwrap_or_default())
+            .map(|row| row["artifact"].as_str().unwrap().to_string())
+            .collect();
+        armed.sort();
+        armed.dedup();
+        armed
+    }
+
+    /// Arm `keep` and `broken` for claude in one workspace, let `damage` break
+    /// `broken`'s payload (and its record, for a new version), and converge again.
+    fn converge_with_one_broken_hook(
+        damage: impl FnOnce(&Path, &mut crate::install::install_state::InstallRecord),
+    ) -> (Vec<(ClientTarget, HookSync)>, Vec<String>, bool) {
+        let ws = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let roots = roots_for(home.path(), ws.path());
+        let root = RootScope::Workspace(ws.path());
+        let record = |name: &str| {
+            hook_record_named(
+                home.path(),
+                root,
+                &["claude"],
+                name,
+                "localhost:5000",
+                &format!("acme/{name}"),
+            )
+        };
+        let mut state = InstallState::empty(&ws.path().join("state.json"));
+        state.record(record("keep"));
+        let mut broken = record("broken");
+        state.record(broken.clone());
+        converge_clients(&state, ws.path(), ConfigScope::Project, &roots, &arming_policy());
+        assert_eq!(
+            armed_bindings(home.path()),
+            ["broken", "keep"],
+            "precondition: both arm"
+        );
+
+        damage(
+            &crate::install::hook_dispatch::payload_dir(home.path(), root, "broken"),
+            &mut broken,
+        );
+        state.record(broken);
+        let outcomes = converge_clients(&state, ws.path(), ConfigScope::Project, &roots, &arming_policy());
+        (
+            outcomes,
+            armed_bindings(home.path()),
+            super::test_fixture::claude_marker_present(ws.path()),
+        )
+    }
+
+    /// One recorded hook whose payload is gone costs that hook its row and no
+    /// other: the intact hook keeps its row and its registration.
+    #[test]
+    fn a_deleted_hook_payload_disarms_that_hook_alone() {
+        let (outcomes, armed, registered) =
+            converge_with_one_broken_hook(|payload, _| std::fs::remove_dir_all(payload).unwrap());
+
+        assert_eq!(armed, ["keep"], "the intact hook must keep its dispatch row");
+        assert!(registered, "the intact hook must keep its registration");
+        assert_eq!(
+            outcomes,
+            vec![(ClientTarget::Claude, HookSync::Armed(1))],
+            "{outcomes:?}"
+        );
+    }
+
+    /// A new version whose `hook.toml` is not TOML, is absent, or is a directory
+    /// costs that hook its row and no other. The record is re-stamped, as an
+    /// install of that version leaves it, so only the manifest read can refuse.
+    #[test]
+    fn a_hook_whose_manifest_cannot_be_read_disarms_that_hook_alone() {
+        let garbage = |payload: &Path| std::fs::write(payload.join(HOOK_MANIFEST_FILE), "not = = toml [[[").unwrap();
+        let absent = |payload: &Path| std::fs::remove_file(payload.join(HOOK_MANIFEST_FILE)).unwrap();
+        let directory = |payload: &Path| {
+            std::fs::remove_file(payload.join(HOOK_MANIFEST_FILE)).unwrap();
+            std::fs::create_dir_all(payload.join(HOOK_MANIFEST_FILE)).unwrap();
+            std::fs::write(payload.join(HOOK_MANIFEST_FILE).join("x"), "x").unwrap();
+        };
+        for (variant, break_manifest) in [
+            ("garbage", garbage as fn(&Path)),
+            ("absent", absent),
+            ("directory", directory),
+        ] {
+            let (outcomes, armed, registered) = converge_with_one_broken_hook(|payload, record| {
+                break_manifest(payload);
+                super::test_fixture::restamp(record, payload);
+            });
+
+            assert_eq!(armed, ["keep"], "{variant}: the intact hook must keep its dispatch row");
+            assert!(registered, "{variant}: the intact hook must keep its registration");
+            assert_eq!(
+                outcomes,
+                vec![(ClientTarget::Claude, HookSync::Armed(1))],
+                "{variant}: {outcomes:?}"
+            );
+        }
+    }
+
+    /// A converge that writes back a deleted registration names every hook that
+    /// registration serves, and one that writes nothing new names none.
+    #[test]
+    fn a_restored_registration_names_every_hook_it_serves() {
+        let ws = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let roots = roots_for(home.path(), ws.path());
+        let root = RootScope::Workspace(ws.path());
+        let mut state = InstallState::empty(&ws.path().join("state.json"));
+        for name in ["a", "b"] {
+            state.record(hook_record_named(
+                home.path(),
+                root,
+                &["claude"],
+                name,
+                "localhost:5000",
+                &format!("acme/{name}"),
+            ));
+        }
+        let converge = || converge_clients(&state, ws.path(), ConfigScope::Project, &roots, &arming_policy());
+        let rewritten = |before: &SurfaceSnapshot| {
+            rewritten_registrations(
+                before,
+                &state,
+                ws.path(),
+                ConfigScope::Project,
+                &roots,
+                &Invocation::WALKED,
+            )
+        };
+        converge();
+        std::fs::remove_file(ws.path().join(CLAUDE_LOCAL_SETTINGS)).unwrap();
+
+        let deleted = surface_snapshot(ws.path(), ConfigScope::Project);
+        converge();
+        assert_eq!(
+            rewritten(&deleted),
+            std::collections::BTreeSet::from(["a".to_string(), "b".to_string()])
+        );
+
+        let intact = surface_snapshot(ws.path(), ConfigScope::Project);
+        assert_eq!(converge(), vec![(ClientTarget::Claude, HookSync::Unchanged)]);
+        assert!(rewritten(&intact).is_empty(), "nothing came back, so nothing is named");
+    }
+
+    /// A registration the surface already carried is never named, even when the
+    /// same converge writes a new one for a sibling.
+    #[test]
+    fn only_the_hook_whose_registration_was_missing_is_named() {
+        let ws = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let roots = roots_for(home.path(), ws.path());
+        let root = RootScope::Workspace(ws.path());
+        let mut state = InstallState::empty(&ws.path().join("state.json"));
+        let record = |name: &str| {
+            hook_record_named(
+                home.path(),
+                root,
+                &["claude"],
+                name,
+                "localhost:5000",
+                &format!("acme/{name}"),
+            )
+        };
+        state.record(record("a"));
+        converge_clients(&state, ws.path(), ConfigScope::Project, &roots, &arming_policy());
+        let before = surface_snapshot(ws.path(), ConfigScope::Project);
+        let mut b = record("b");
+        let payload = crate::install::hook_dispatch::payload_dir(home.path(), root, "b");
+        std::fs::write(
+            payload.join(HOOK_MANIFEST_FILE),
+            "schema = 1\nname = \"b\"\ndescription = \"a guard\"\n\n\
+             [[hooks]]\nid = \"guard\"\nevent = \"PreToolUse\"\ntier = \"observer\"\n\
+             matcher = \"Write\"\ncommand = \"sh guard.sh\"\n",
+        )
+        .unwrap();
+        super::test_fixture::restamp(&mut b, &payload);
+        state.record(b);
+
+        converge_clients(&state, ws.path(), ConfigScope::Project, &roots, &arming_policy());
+
+        assert_eq!(
+            rewritten_registrations(
+                &before,
+                &state,
+                ws.path(),
+                ConfigScope::Project,
+                &roots,
+                &Invocation::WALKED
+            ),
+            std::collections::BTreeSet::from(["b".to_string()])
+        );
+    }
+
+    /// An own-file surface carries a registration only when its document holds
+    /// that registration's entry whole.
+    #[test]
+    fn an_own_file_registration_is_found_entry_by_entry() {
+        let registration = |matcher: &str| crate::oci::hook::HookRegistration {
+            event: "PreToolUse".to_string(),
+            matcher: Some(matcher.to_string()),
+            command: crate::oci::hook::HookCommand::Shell("/h/grim-hook codex PreToolUse t".to_string()),
+            shell: None,
+            timeout: Some(30),
+        };
+        let (bash, write) = (registration("Bash"), registration("Write"));
+        let document = |registrations: &[crate::oci::hook::HookRegistration]| {
+            serde_json::to_string(&CodexVendor.hook_file_document(registrations).unwrap()).unwrap()
+        };
+
+        let both = document(&[bash.clone(), write.clone()]);
+        assert!(registered_on(&CodexVendor, Some(&both), &bash));
+        assert!(registered_on(&CodexVendor, Some(&both), &write));
+        let write_only = document(std::slice::from_ref(&write));
+        assert!(!registered_on(&CodexVendor, Some(&write_only), &bash));
+        assert!(!registered_on(&CodexVendor, None, &bash));
+    }
+
+    /// A hook record for claude whose one entry registers at `matcher`, with
+    /// `timeout` seconds when given.
+    fn guard_at(
+        home: &Path,
+        root: RootScope<'_>,
+        name: &str,
+        tier: &str,
+        matcher: &str,
+        timeout: Option<u64>,
+    ) -> crate::install::install_state::InstallRecord {
+        let mut record = hook_record_named(home, root, &["claude"], name, "localhost:5000", &format!("acme/{name}"));
+        let payload = crate::install::hook_dispatch::payload_dir(home, root, name);
+        let timeout = timeout.map(|t| format!("timeout = {t}\n")).unwrap_or_default();
+        std::fs::write(
+            payload.join(HOOK_MANIFEST_FILE),
+            format!(
+                "schema = 1\nname = \"{name}\"\ndescription = \"a guard\"\n\n[[hooks]]\nid = \"guard\"\n\
+                 event = \"PreToolUse\"\ntier = \"{tier}\"\nmatcher = \"{matcher}\"\ncommand = \"sh guard.sh\"\n\
+                 {timeout}"
+            ),
+        )
+        .unwrap();
+        super::test_fixture::restamp(&mut record, &payload);
+        record
+    }
+
+    /// A project where `inside` (at `Bash`) and `outside` (at `outside_matcher`)
+    /// armed for claude through one whole-state converge.
+    struct NamedRun {
+        ws: tempfile::TempDir,
+        home: tempfile::TempDir,
+        roots: AnchorRoots,
+        state: InstallState,
+    }
+
+    impl NamedRun {
+        fn armed(outside_matcher: &str, timeouts: (Option<u64>, Option<u64>)) -> Self {
+            Self::armed_as("observer", outside_matcher, timeouts)
+        }
+
+        fn armed_as(inside_tier: &str, outside_matcher: &str, timeouts: (Option<u64>, Option<u64>)) -> Self {
+            let ws = tempfile::tempdir().unwrap();
+            let home = tempfile::tempdir().unwrap();
+            let roots = roots_for(home.path(), ws.path());
+            let root = RootScope::Workspace(ws.path());
+            let mut state = InstallState::empty(&ws.path().join("state.json"));
+            state.record(guard_at(home.path(), root, "inside", inside_tier, "Bash", timeouts.0));
+            state.record(guard_at(
+                home.path(),
+                root,
+                "outside",
+                "observer",
+                outside_matcher,
+                timeouts.1,
+            ));
+            converge_clients(&state, ws.path(), ConfigScope::Project, &roots, &arming_policy());
+            assert_eq!(
+                armed_bindings(home.path()),
+                ["inside", "outside"],
+                "precondition: both arm"
+            );
+            Self { ws, home, roots, state }
+        }
+
+        fn surface(&self) -> PathBuf {
+            self.ws.path().join(CLAUDE_LOCAL_SETTINGS)
+        }
+
+        fn table(&self) -> PathBuf {
+            crate::install::hook_dispatch::dispatch_path(self.home.path())
+        }
+
+        /// Converge as a run whose closure is `closure`, under `policy`.
+        fn converge(&self, policy: &HookPolicy, closure: &[NodeKey]) -> Vec<(ClientTarget, HookSync)> {
+            let closure: BTreeSet<NodeKey> = closure.iter().cloned().collect();
+            converge_for(
+                Some(policy),
+                &self.state,
+                self.ws.path(),
+                ConfigScope::Project,
+                &self.roots,
+                Some(&closure),
+            )
+        }
+
+        fn document(&self) -> serde_json::Value {
+            serde_json::from_str(&std::fs::read_to_string(self.surface()).unwrap()).unwrap()
+        }
+    }
+
+    fn hook_key(name: &str) -> NodeKey {
+        (ArtifactKind::Hook, name.to_string())
+    }
+
+    /// With no hook in the closure a named run creates no registration file and
+    /// drops no exclude rule: the rows it carries still name that file.
+    #[test]
+    fn a_named_converge_without_a_hook_leaves_a_deleted_registration_file_deleted() {
+        let run = NamedRun::armed("Write", (None, None));
+        git_worktree(run.ws.path());
+        assert_eq!(ensure_settings_local_excluded(run.ws.path()), ExcludeOutcome::Added);
+        std::fs::remove_file(run.surface()).unwrap();
+        let table = std::fs::read(run.table()).unwrap();
+
+        let outcomes = run.converge(&arming_policy(), &[(ArtifactKind::Skill, "carrier".to_string())]);
+
+        assert!(!run.surface().exists(), "{outcomes:?}");
+        assert_eq!(std::fs::read(run.table()).unwrap(), table);
+        assert_eq!(
+            ensure_settings_local_excluded(run.ws.path()),
+            ExcludeOutcome::AlreadyPresent
+        );
+    }
+
+    /// An element outside the closure is left alone, not re-rendered: a timeout
+    /// the user changed and a key an older grim wrote both stay.
+    #[test]
+    fn a_named_converge_rewrites_no_byte_of_an_unnamed_element() {
+        let run = NamedRun::armed("Write", (Some(5), Some(9)));
+        let mut doc = run.document();
+        let element = doc["hooks"]["PreToolUse"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|group| group["matcher"] == "Write")
+            .map(|group| &mut group["hooks"][0])
+            .unwrap();
+        element["timeout"] = 77.into();
+        element["statusMessage"] = "mine".into();
+        std::fs::write(run.surface(), serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+        let surface = std::fs::read(run.surface()).unwrap();
+
+        run.converge(&arming_policy(), &[hook_key("inside")]);
+
+        assert_eq!(std::fs::read(run.surface()).unwrap(), surface);
+    }
+
+    /// The element a pre-native grim wrote for `matcher`, and the shim it runs.
+    fn seed_retired_element(run: &NamedRun, matcher: &str) -> PathBuf {
+        let shim = run.home.path().join("hooks/bin/grim-hook");
+        let command = format!(
+            "L='{}'\n[ -f \"$L\" ] && [ -x \"$L\" ] || exit 0\n\"$L\" run --client claude --event PreToolUse \
+             --table '/old/dispatch.json' --root deadbeef\ns=$?\ncase \"$s\" in 0) exit 0 ;; *) exit 0 ;; esac",
+            shim.display()
+        );
+        let mut doc = run.document();
+        let element = doc["hooks"]["PreToolUse"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|group| group["matcher"] == matcher)
+            .map(|group| &mut group["hooks"][0])
+            .unwrap();
+        element["command"] = command.into();
+        element.as_object_mut().unwrap().remove("args");
+        std::fs::write(run.surface(), serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+        std::fs::create_dir_all(shim.parent().unwrap()).unwrap();
+        std::fs::write(&shim, "#!/bin/sh\n").unwrap();
+        shim
+    }
+
+    /// A registration still running the retired shim cannot fire, so holding it
+    /// would leave a gatekeeper allowing. Any run that reaches its client rewrites
+    /// it, named or deleting, as convergence always has.
+    #[test]
+    fn a_named_converge_rewrites_an_unnamed_element_that_runs_the_retired_shim() {
+        for closure in [vec![hook_key("inside")], vec![]] {
+            let run = NamedRun::armed("Write", (None, None));
+            seed_retired_element(&run, "Write");
+
+            run.converge(&arming_policy(), &closure);
+
+            let text = std::fs::read_to_string(run.surface()).unwrap();
+            assert!(!text.contains("bin/grim-hook"), "{closure:?}: {text}");
+            assert_eq!(armed_bindings(run.home.path()), ["inside", "outside"], "{closure:?}");
+        }
+    }
+
+    /// The rewrite needs the row: an element with none cannot arm anything, and a
+    /// row removed by hand stays removed.
+    #[test]
+    fn a_retired_element_with_no_row_stays_as_it_reads() {
+        let run = NamedRun::armed("Write", (None, None));
+        seed_retired_element(&run, "Write");
+        let mut doc: serde_json::Value = serde_json::from_slice(&std::fs::read(run.table()).unwrap()).unwrap();
+        for root in doc["roots"].as_object_mut().unwrap().values_mut() {
+            root["hooks"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|row| row["artifact"] != "outside");
+        }
+        std::fs::write(run.table(), serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
+        let surface = std::fs::read(run.surface()).unwrap();
+
+        run.converge(&arming_policy(), &[hook_key("inside")]);
+
+        assert_eq!(std::fs::read(run.surface()).unwrap(), surface);
+        assert_eq!(armed_bindings(run.home.path()), ["inside"]);
+    }
+
+    /// The own-file twin: every entry of a file the old grim rendered runs the shim.
+    #[test]
+    fn a_named_run_rewrites_a_carried_own_file_entry_that_runs_the_retired_shim() {
+        let file = OwnFile::new();
+        std::fs::write(&file.surface, r#"{"command":"L='/h/hooks/bin/grim-hook'"}"#).unwrap();
+        let row = DispatchEntry {
+            artifact: "outside".to_string(),
+            id: "guard".to_string(),
+            client: "codex".to_string(),
+            event: CanonicalEvent::PreToolUse,
+            tier: crate::oci::hook::HookTier::Gatekeeper,
+            matcher: None,
+            handler: crate::oci::hook::HookHandler::Argv(vec!["true".to_string()]),
+            timeout: None,
+            payload: crate::oci::hook::HookPayloadMode::Stdin,
+            payload_dir: PathBuf::from("/p"),
+            resolved_digest: None,
+            policy: None,
+        };
+        let standing = vec![row.clone()];
+        let mut armed = ArmedClient {
+            client: ClientTarget::Codex,
+            surface: Some(file.surface.clone()),
+            registrations: vec![codex_entry("Write", None)],
+            rows: vec![row],
+            every: vec![codex_entry("Write", None)],
+            carried: Vec::new(),
+        };
+
+        armed.narrow(&BTreeSet::new(), &standing);
+
+        assert_eq!(armed.rows.len(), 1, "written, not carried");
+        assert!(armed.carried.is_empty());
+    }
+
+    /// The shim serves every workspace on the machine, and one a named run or a
+    /// delete does not touch may still reach it, so only a whole converge retires it.
+    #[test]
+    fn only_a_whole_converge_retires_the_legacy_shim() {
+        let run = NamedRun::armed("Write", (None, None));
+        let shim = seed_retired_element(&run, "Write");
+
+        run.converge(&arming_policy(), &[hook_key("inside")]);
+        assert!(shim.exists(), "a named converge keeps it");
+        run.converge(&arming_policy(), &[]);
+        assert!(shim.exists(), "a delete keeps it");
+
+        converge_clients(
+            &run.state,
+            run.ws.path(),
+            ConfigScope::Project,
+            &run.roots,
+            &arming_policy(),
+        );
+        assert!(!shim.exists(), "a whole converge retires it");
+    }
+
+    /// Claude's local file also holds settings pieces, which the rewrite of a
+    /// retired element must leave as they read.
+    #[test]
+    fn a_retired_element_rewrite_leaves_the_settings_pieces_beside_it() {
+        let run = NamedRun::armed("Write", (None, None));
+        seed_retired_element(&run, "Write");
+        let hooks = serde_json::to_string_pretty(&run.document()["hooks"]).unwrap();
+        let (head, tail) = (
+            "{\n  \"permissions\": {\"allow\": [\"Bash(ls:*)\"],   \"deny\": []},\n  \"hooks\": ",
+            ",\n  \"model\":   \"opus\"\n}\n",
+        );
+        std::fs::write(run.surface(), format!("{head}{hooks}{tail}")).unwrap();
+
+        run.converge(&arming_policy(), &[hook_key("inside")]);
+
+        let text = std::fs::read_to_string(run.surface()).unwrap();
+        assert!(!text.contains("bin/grim-hook"), "{text}");
+        assert!(text.starts_with(head) && text.ends_with(tail), "{text}");
+    }
+
+    /// A stale row outside the closure comes back as its verified payload says,
+    /// so a run cannot leave a gatekeeper dispatching a handler it no longer has.
+    #[test]
+    fn a_named_converge_refreshes_a_standing_row_from_the_payload() {
+        let run = NamedRun::armed("Write", (None, None));
+        let table = std::fs::read(run.table()).unwrap();
+        let mut doc: serde_json::Value = serde_json::from_slice(&table).unwrap();
+        for root in doc["roots"].as_object_mut().unwrap().values_mut() {
+            for row in root["hooks"].as_array_mut().unwrap() {
+                row["timeout"] = 1.into();
+            }
+        }
+        std::fs::write(run.table(), serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
+
+        run.converge(&arming_policy(), &[hook_key("inside")]);
+
+        assert_eq!(std::fs::read(run.table()).unwrap(), table);
+    }
+
+    /// A registration the closure shares with a hook outside it is written with
+    /// the larger timeout, so the client never cuts that hook short.
+    #[test]
+    fn a_shared_registration_keeps_the_timeout_of_the_hook_outside_the_closure() {
+        let run = NamedRun::armed("Bash", (Some(5), Some(30)));
+        std::fs::remove_file(run.surface()).unwrap();
+
+        run.converge(&arming_policy(), &[hook_key("inside")]);
+
+        let doc = run.document();
+        let groups = doc["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(groups.len(), 1, "{groups:?}");
+        assert_eq!(groups[0]["hooks"][0]["timeout"], 30, "{groups:?}");
+    }
+
+    /// A pruned closure hook takes its timeout with it, and a hook outside the
+    /// closure that shared the element keeps it: reaping it on the changed
+    /// rendering would leave a gatekeeper unregistered with its row standing.
+    #[test]
+    fn a_pruned_sibling_leaves_the_unnamed_hook_its_shared_element() {
+        let mut run = NamedRun::armed("Bash", (Some(60), Some(5)));
+        run.state.remove(ArtifactKind::Hook, "inside");
+        let surface = std::fs::read(run.surface()).unwrap();
+
+        run.converge(&arming_policy(), &[hook_key("inside")]);
+
+        assert_eq!(armed_bindings(run.home.path()), ["outside"]);
+        assert_eq!(std::fs::read(run.surface()).unwrap(), surface);
+    }
+
+    /// A surface grim cannot edit withdraws the rows of the hooks this run writes
+    /// there and no other, so a hook outside the closure stays as it read. A run
+    /// that writes no hook there never hits the edit, which is what a delete is.
+    #[test]
+    fn an_unparseable_surface_drops_only_the_rows_the_run_writes() {
+        let run = NamedRun::armed("Write", (None, None));
+        std::fs::write(run.surface(), "{ not json").unwrap();
+
+        assert_eq!(
+            run.converge(&arming_policy(), &[hook_key("inside")]),
+            vec![(ClientTarget::Claude, HookSync::NotArmed(ArmRefusal::SurfaceUnreadable))]
+        );
+        assert_eq!(armed_bindings(run.home.path()), ["outside"]);
+        assert_eq!(std::fs::read_to_string(run.surface()).unwrap(), "{ not json");
+
+        assert_eq!(
+            run.converge(&arming_policy(), &[]),
+            vec![(ClientTarget::Claude, HookSync::Unchanged)]
+        );
+        assert_eq!(armed_bindings(run.home.path()), ["outside"]);
+    }
+
+    /// A gatekeeper is unregistered only while no element stands at its event and
+    /// matcher. A retimed element still registers it, an observer is never named,
+    /// and a hook whose row went is not one a client could run.
+    #[test]
+    fn only_a_gatekeeper_with_a_row_and_no_element_is_unregistered() {
+        let run = NamedRun::armed_as("gatekeeper", "Write", (Some(5), None));
+        let unregistered = || {
+            unregistered_gatekeepers(
+                &run.state,
+                run.ws.path(),
+                ConfigScope::Project,
+                &run.roots,
+                &Invocation::WALKED,
+            )
+        };
+        assert!(unregistered().is_empty(), "both elements stand");
+
+        let mut doc = run.document();
+        let groups = doc["hooks"]["PreToolUse"].as_array_mut().unwrap();
+        let bash = groups.iter_mut().find(|group| group["matcher"] == "Bash").unwrap();
+        bash["hooks"][0]["timeout"] = 77.into();
+        std::fs::write(run.surface(), serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+        assert!(unregistered().is_empty(), "a retimed element still registers it");
+
+        std::fs::write(run.surface(), "{}").unwrap();
+        let inside = BTreeMap::from([("inside".to_string(), vec![ClientTarget::Claude])]);
+        assert_eq!(unregistered(), inside);
+
+        std::fs::remove_file(run.surface()).unwrap();
+        assert_eq!(unregistered(), inside);
+
+        let mut table: serde_json::Value = serde_json::from_slice(&std::fs::read(run.table()).unwrap()).unwrap();
+        for root in table["roots"].as_object_mut().unwrap().values_mut() {
+            root["hooks"] = serde_json::json!([]);
+        }
+        std::fs::write(run.table(), serde_json::to_vec_pretty(&table).unwrap()).unwrap();
+        assert!(unregistered().is_empty(), "with no row nothing claims it is armed");
+    }
+
+    /// A refused run stripped the surface and said why. No convergence restores
+    /// it until the cause is fixed, so naming one as the remedy would be false.
+    #[test]
+    fn an_arming_refusal_names_no_unregistered_gatekeeper() {
+        let ws = tempfile::tempdir().unwrap();
+        let home = ws.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let roots = roots_for(&home, ws.path());
+        let root = RootScope::Workspace(ws.path());
+        let mut state = InstallState::empty(&ws.path().join("state.json"));
+        state.record(guard_at(&home, root, "gate", "gatekeeper", "Bash", None));
+        let trust = |_: &str, _: &LockedSource| true;
+        let rows: Vec<DispatchEntry> =
+            desired_entries(&ClaudeVendor, &state, &roots, root, &trust, &Invocation::WALKED)
+                .into_iter()
+                .map(|hook| hook.entry)
+                .collect();
+        let guard = DispatchGuard::try_acquire(&home).unwrap();
+        let token = crate::install::hook_dispatch::root_token(&home, root).unwrap();
+        crate::install::hook_dispatch::converge_root(&home, &guard, &token, root, &rows).unwrap();
+        assert_eq!(armed_bindings(&home), ["gate"], "precondition: a row stands");
+        assert_eq!(
+            arming_refusal(&home, ws.path(), ConfigScope::Project),
+            Some(ArmRefusal::GrimHomeInWorkspace)
+        );
+
+        assert!(
+            unregistered_gatekeepers(&state, ws.path(), ConfigScope::Project, &roots, &Invocation::WALKED).is_empty()
+        );
+    }
+
+    /// One codex registration per name: `Read`, `Write` and `Bash` entries of one
+    /// own-file surface, driven straight through `sync_for_state`.
+    fn codex_entry(matcher: &str, timeout: Option<u64>) -> crate::oci::hook::HookRegistration {
+        crate::oci::hook::HookRegistration {
+            event: "PreToolUse".to_string(),
+            matcher: Some(matcher.to_string()),
+            command: crate::oci::hook::HookCommand::Shell("/h/grim-hook codex PreToolUse t".to_string()),
+            shell: None,
+            timeout,
+        }
+    }
+
+    struct OwnFile {
+        ws: tempfile::TempDir,
+        home: tempfile::TempDir,
+        surface: PathBuf,
+    }
+
+    impl OwnFile {
+        fn new() -> Self {
+            let ws = tempfile::tempdir().unwrap();
+            let surface = ws.path().join("hooks.json");
+            Self {
+                ws,
+                home: tempfile::tempdir().unwrap(),
+                surface,
+            }
+        }
+
+        fn sync(
+            &self,
+            own: &[crate::oci::hook::HookRegistration],
+            every: &[crate::oci::hook::HookRegistration],
+        ) -> HookSync {
+            sync_for_state(
+                &CodexVendor,
+                self.ws.path(),
+                ConfigScope::Global,
+                self.home.path(),
+                Some(&self.surface),
+                own,
+                every,
+                DispatchWrite::Unchanged,
+                false,
+            )
+            .unwrap()
+        }
+
+        fn matchers(&self) -> Vec<String> {
+            let doc: serde_json::Value = serde_json::from_slice(&std::fs::read(&self.surface).unwrap()).unwrap();
+            doc["hooks"]["PreToolUse"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|group| group["matcher"].as_str().unwrap().to_string())
+                .collect()
+        }
+    }
+
+    /// Codex keys its stored trust on an entry's position, so carrying an
+    /// unchanged own file must not reorder it around the closure.
+    #[test]
+    fn a_named_run_rewrites_no_byte_of_an_own_file_it_carries() {
+        let file = OwnFile::new();
+        let every = [
+            codex_entry("Read", None),
+            codex_entry("Write", None),
+            codex_entry("Bash", None),
+        ];
+        file.sync(&every, &every);
+        let bytes = std::fs::read(&file.surface).unwrap();
+
+        let outcome = file.sync(&every[1..2], &every);
+
+        assert_eq!(outcome, HookSync::Unchanged);
+        assert_eq!(std::fs::read(&file.surface).unwrap(), bytes);
+    }
+
+    /// A hook outside the closure gets no entry the file lacks, and the file
+    /// keeps the ones it has in desired order.
+    #[test]
+    fn a_named_run_adds_no_unnamed_entry_to_an_own_file() {
+        let file = OwnFile::new();
+        let every = [
+            codex_entry("Read", None),
+            codex_entry("Write", None),
+            codex_entry("Bash", None),
+        ];
+        file.sync(&every[..1], &every[..1]);
+
+        file.sync(&every[2..], &every);
+
+        assert_eq!(file.matchers(), ["Read", "Bash"]);
+
+        std::fs::remove_file(&file.surface).unwrap();
+        file.sync(&every[2..], &every);
+
+        assert_eq!(file.matchers(), ["Bash"]);
+    }
+
+    /// The own-file twin of the pruned sibling: the entry survives whatever
+    /// timeout the sibling left on it.
+    #[test]
+    fn a_pruned_sibling_leaves_an_own_file_entry_it_timed() {
+        let file = OwnFile::new();
+        let (gone, kept) = (codex_entry("Bash", Some(60)), codex_entry("Bash", Some(5)));
+        file.sync(&[gone.clone(), kept.clone()], &[gone, kept.clone()]);
+
+        file.sync(&[], std::slice::from_ref(&kept));
+
+        assert_eq!(file.matchers(), ["Bash"]);
+        let text = std::fs::read_to_string(&file.surface).unwrap();
+        assert!(registered_on(&CodexVendor, Some(&text), &kept), "{text}");
+    }
+
+    /// A delete writes no entry: the render drops the deleted hook's and keeps a
+    /// survivor's, and the last hook out takes the file with it.
+    #[test]
+    fn a_delete_drops_its_own_file_entry_and_keeps_the_survivors() {
+        let file = OwnFile::new();
+        let every = [codex_entry("Bash", None), codex_entry("Write", None)];
+        file.sync(&every, &every);
+
+        file.sync(&[], &every[..1]);
+        assert_eq!(file.matchers(), ["Bash"]);
+
+        assert_eq!(file.sync(&[], &[]), HookSync::Disarmed);
+        assert!(!file.surface.exists());
+    }
+
+    /// A timeout rendered as `None` matches an entry under any timeout, on
+    /// either client's spelling; nothing else may differ.
+    #[test]
+    fn a_registration_rendered_bare_reads_an_entry_under_any_timeout() {
+        let document = |registrations: &[crate::oci::hook::HookRegistration]| {
+            serde_json::to_string(&CodexVendor.hook_file_document(registrations).unwrap()).unwrap()
+        };
+        let timed = document(&[codex_entry("Bash", Some(60))]);
+        assert!(element_on(&CodexVendor, Some(&timed), &codex_entry("Bash", Some(5))));
+        assert!(!element_on(&CodexVendor, Some(&timed), &codex_entry("Write", Some(60))));
+        assert!(registered_on(&CodexVendor, Some(&timed), &codex_entry("Bash", None)));
+        assert!(!registered_on(
+            &CodexVendor,
+            Some(&timed),
+            &codex_entry("Bash", Some(5))
+        ));
+        assert!(!registered_on(&CodexVendor, Some(&timed), &codex_entry("Write", None)));
+        let mut match_all = codex_entry("Bash", None);
+        match_all.matcher = None;
+        assert!(!registered_on(&CodexVendor, Some(&timed), &match_all));
+
+        let copilot = crate::install::vendor_copilot::CopilotVendor;
+        let exec = |matcher: &str, timeout| crate::oci::hook::HookRegistration {
+            command: crate::oci::hook::HookCommand::Argv(vec!["/h/grim-hook".to_string(), "copilot".to_string()]),
+            ..codex_entry(matcher, timeout)
+        };
+        let timed = serde_json::to_string(&copilot.hook_file_document(&[exec("Bash", Some(60))]).unwrap()).unwrap();
+        assert!(registered_on(&copilot, Some(&timed), &exec("Bash", None)));
+        assert!(!registered_on(&copilot, Some(&timed), &exec("Write", None)));
     }
 }

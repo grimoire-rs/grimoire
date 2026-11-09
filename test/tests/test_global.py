@@ -90,6 +90,25 @@ def test_global_install_without_lock_exits_79(
     )
 
 
+def test_global_install_on_a_stale_lock_names_the_global_lock(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """Followed from a project, a plain `grim lock` relocks that project instead."""
+    first = make_artifact(f"{unique_repo}/r", "rule", {"r.md": "# r\n"}, tag="v1")
+    second = make_artifact(f"{unique_repo}/s", "rule", {"s.md": "# s\n"}, tag="v1")
+    (grim_home / "grimoire.toml").write_text(f'[rules]\nr = "{first.fq}"\n')
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.run("lock", "--global")
+    (grim_home / "grimoire.toml").write_text(
+        f'[rules]\nr = "{first.fq}"\ns = "{second.fq}"\n'
+    )
+
+    result = runner.run("install", "--global", check=False)
+
+    assert result.returncode == 65, result.stderr
+    assert "run `grim --global lock` before installing" in result.stderr, result.stderr
+
+
 def test_global_install_claude_skill_lands_in_home_dot_claude(
     grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
 ) -> None:

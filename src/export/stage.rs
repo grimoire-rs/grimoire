@@ -18,12 +18,12 @@ use crate::api::export_report::{ExportItem, ExportMember, ExportOmission, Export
 use crate::cli::exit_code::ExitCode;
 use crate::config::is_path_value;
 use crate::config::plugin_meta::{PluginMeta, PluginProfile};
-use crate::config::scope::ConfigScope;
+use crate::config::scope::{ConfigScope, Invocation, shell_word};
 use crate::export::export_error::ExportError;
 use crate::export::family::{self, Family, OmitReason};
 use crate::export::marketplace::{self, MarketplaceManifest, PluginDecl, declaration_hashes};
 use crate::export::resolve::{
-    self, IncludeOrigin, MarketplaceResolution, PluginPick, PluginSelection, is_stale, resolve_marketplace,
+    self, IncludeOrigin, MarketplaceResolution, PluginSelection, is_stale, resolve_marketplace,
 };
 use crate::export::{archive, rename};
 use crate::fetch::FetchScope;
@@ -74,11 +74,24 @@ pub(crate) struct ProjectLock {
     /// `[plugin]`; `None` when the table is absent (always, for the
     /// global scope).
     pub meta: Option<PluginMeta>,
+    /// The `grim` that relocks this project.
+    pub grim: Invocation,
+}
+
+/// The config a project path names: the `grimoire.toml` of a directory, else
+/// the file itself.
+pub(crate) fn project_config(path: &Path) -> PathBuf {
+    if path.is_dir() {
+        path.join("grimoire.toml")
+    } else {
+        path.to_path_buf()
+    }
 }
 
 impl ProjectLock {
     /// Load the project at `path` — a directory or its `grimoire.toml` —
-    /// with its lock, which must be fresh.
+    /// with its lock, which must be fresh. A stale lock's remedy names `grim`,
+    /// or `path` when `None`: a project reached by name is not the shell's.
     ///
     /// # Errors
     ///
@@ -88,14 +101,11 @@ impl ProjectLock {
         clippy::result_large_err,
         reason = "crate::error::Error is the classified error every command returns"
     )]
-    pub(crate) fn load(path: &Path) -> Result<ProjectLock, crate::error::Error> {
-        let config_path = if path.is_dir() {
-            path.join("grimoire.toml")
-        } else {
-            path.to_path_buf()
-        };
+    pub(crate) fn load(path: &Path, grim: Option<&Invocation>) -> Result<ProjectLock, crate::error::Error> {
+        let config_path = project_config(path);
         let discovered = crate::config::ProjectConfig::discover(Some(&config_path))?;
-        let lock = crate::command::install::fresh_lock(&discovered.lock_path(), &discovered.config.set)?;
+        let grim = grim.map_or_else(|| Invocation::config(discovered.config_path()), Invocation::clone);
+        let lock = crate::command::install::fresh_lock(&discovered.lock_path(), &discovered.config.set, &grim)?;
         let dir = config_path
             .parent()
             .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
@@ -103,6 +113,7 @@ impl ProjectLock {
             dir,
             lock,
             meta: discovered.config.plugin,
+            grim,
         })
     }
 
@@ -182,8 +193,8 @@ pub(crate) struct ExportOptions<'a> {
 /// AdHoc)`. Declared: `marketplace::load`, `ConfigFileLock::try_acquire(M)`
 /// held to the end, `resolve::load_lock`, `--plugin` checked against M
 /// (`PluginNotFound` 79; none declared → `NoneDeclared` 65), then
-/// `resolve_marketplace` always — `Some{stale → Whole}`, or `Some{}` (carry
-/// and drop only, no network) when nothing is stale. Per exported plugin
+/// `resolve_marketplace` always — `Reconcile{stale}`, which with nothing
+/// stale only carries and drops, no network. Per exported plugin
 /// [`plugin_input`], then [`export_plugins`]; after placement, `L` is saved
 /// with `save_marketplace(path, &lock, previous)` when an exported plugin
 /// was stale, `L` holds a part for a plugin no longer in M, or `L` was
@@ -294,7 +305,7 @@ pub(crate) async fn run(
                 (opts.version, opts.description),
                 (None, None),
             )?;
-            input.project_dir = Some(project.dir.clone());
+            input.take_project(project);
             let items = export_plugins(&request(std::slice::from_ref(&input), &project.dir, None), access).await?;
             Ok(ExportReport::new(items))
         }
@@ -379,8 +390,8 @@ impl DeclaredPlan {
 /// names into [`PluginInput`]s (C-010): `marketplace::load`,
 /// `ConfigFileLock::try_acquire`, `resolve::load_lock`, `select` (the
 /// caller's own emptiness and `--plugin` checks), then `resolve_marketplace`
-/// always — `Some{stale → Whole}`, or `Some{}` (carry and drop only, no
-/// network) when nothing is stale. `project` plugins take their pins from
+/// always — `Reconcile{stale}`, which with nothing stale only carries and
+/// drops, no network. `project` plugins take their pins from
 /// the project's own lock; the lock and the resolver only ever see the
 /// `include` plugins. `flags` are the `--version` / `--description`
 /// overrides. With `contain` (R2-22, the canonical manifest directory) every
@@ -413,10 +424,7 @@ pub(crate) async fn resolve_declared(
     let mut projects: BTreeMap<String, ProjectLock> = BTreeMap::new();
     for name in all_selected.iter().filter(|p| !m.plugins.contains_key(*p)) {
         let rel = full.plugins[name].project.clone().unwrap_or_default();
-        projects.insert(
-            name.clone(),
-            load_project_plugin(&full.path, name, &anchor.join(&rel), &rel)?,
-        );
+        projects.insert(name.clone(), load_project_plugin(&full.path, name, &anchor.join(&rel))?);
     }
     let selected: BTreeSet<String> = all_selected
         .iter()
@@ -424,15 +432,15 @@ pub(crate) async fn resolve_declared(
         .cloned()
         .collect();
     let hashes = declaration_hashes(&m, scope)?;
-    let stale: BTreeMap<String, PluginPick> = selected
+    let stale: BTreeSet<String> = selected
         .iter()
         .filter(|p| is_stale(p, previous.as_ref(), &hashes))
-        .map(|p| (p.clone(), PluginPick::Whole))
+        .cloned()
         .collect();
     let res = resolve_marketplace(
         &m,
         previous.as_ref(),
-        &PluginSelection::Some(stale.clone()),
+        &PluginSelection::Reconcile(stale.clone()),
         scope,
         access,
         IncludeOrigin::Declared,
@@ -445,7 +453,7 @@ pub(crate) async fn resolve_declared(
             Some(project) => {
                 let decl = merged_decl(&full.plugins[p], project);
                 let mut input = plugin_input(p, &project.members(), Some(&decl), flags, (None, None))?;
-                input.project_dir = Some(project.dir.clone());
+                input.take_project(project);
                 input
             }
             None => plugin_input(p, &part_members(&res, p), m.plugins.get(p), flags, (None, None))?,
@@ -512,26 +520,18 @@ fn contain_declared_inputs(
 }
 
 /// Load a marketplace `project` plugin's project. A stale project lock
-/// becomes a manifest error naming where to re-lock (still 65); every other
-/// failure keeps its classification.
+/// becomes a manifest error naming the relock of that project's config (still
+/// 65); every other failure keeps its classification.
 #[allow(
     clippy::result_large_err,
     reason = "crate::error::Error is the classified error every command returns"
 )]
-fn load_project_plugin(
-    manifest: &Path,
-    plugin: &str,
-    path: &Path,
-    rel: &Path,
-) -> Result<ProjectLock, crate::error::Error> {
-    ProjectLock::load(path).map_err(|e| match e {
-        crate::error::Error::Command(crate::command::command_error::CommandError::LockStale { .. }) => {
+fn load_project_plugin(manifest: &Path, plugin: &str, path: &Path) -> Result<ProjectLock, crate::error::Error> {
+    ProjectLock::load(path, None).map_err(|e| match e {
+        crate::error::Error::Command(crate::command::command_error::CommandError::LockStale { grim, .. }) => {
             ExportError::Manifest {
                 path: manifest.to_path_buf(),
-                message: format!(
-                    "plugin '{plugin}': the lock of project {} is stale; run `grim lock` there",
-                    rel.display()
-                ),
+                message: format!("plugin '{plugin}': its project's lock is stale; run `{grim} lock`"),
             }
             .into()
         }
@@ -702,6 +702,7 @@ pub(crate) fn plugin_input(
         profile: decl.map(PluginDecl::profile).unwrap_or_default(),
         fallback_logo: None,
         project_dir: None,
+        project_grim: None,
         renamed,
     })
 }
@@ -736,9 +737,18 @@ pub(crate) struct PluginInput {
     /// `--logo` nor a declared `logo` names one.
     pub fallback_logo: Option<(&'static str, Vec<u8>)>,
     /// The project whose lock supplied the members (`--project`, a
-    /// marketplace `project` plugin): anchor of their path sources, and
-    /// where a drifted local source is re-locked.
+    /// marketplace `project` plugin): anchor of their path sources.
     pub project_dir: Option<PathBuf>,
+    /// The `grim` that relocks that project when a local source drifted.
+    pub project_grim: Option<Invocation>,
+}
+
+impl PluginInput {
+    /// Take the members' anchor and relock command from `project`.
+    fn take_project(&mut self, project: &ProjectLock) {
+        self.project_dir = Some(project.dir.clone());
+        self.project_grim = Some(project.grim.clone());
+    }
 }
 
 /// Where a run's trees land under its output directory (C-011).
@@ -1154,43 +1164,68 @@ fn aside_path(staging: &Path, final_path: &Path, layout: Layout) -> PathBuf {
     staging.join(format!(".replaced-{leaf}"))
 }
 
+/// The update that relocks the stale row `name` of `plugin` and its dependencies,
+/// backticked with what it spares. The whole-plugin update would also move every
+/// sibling pin whose tag moved, which the remedy would not say.
+fn pick_update(manifest: &Path, plugin: &str, name: &str) -> String {
+    format!(
+        "`grim update --marketplace {} {}`, which relocks only it and its dependencies",
+        shell_word(&manifest.to_string_lossy()),
+        shell_word(&format!("{plugin}:{name}"))
+    )
+}
+
 /// Re-point a drifted local source's hint (decision 42). The installer's
 /// names `grim update <x>` / `grim lock`, which act on `grimoire.toml`; a
-/// declared member is refreshed by `grim update --marketplace <M> <P>`, an
-/// ad-hoc one (`manifest` `None`) by re-running the export. Still 65; any
-/// other error passes through.
+/// declared member is refreshed by the pick of its row, `grim update --marketplace <M> <P>:<name>`, an
+/// ad-hoc one (`manifest` `None`) by re-running the export. Still 65; a stale
+/// dependency keeps its kind, naming the lock that holds it; any other error
+/// passes through.
 fn local_drift_hint(err: crate::error::Error, manifest: Option<&Path>, input: &PluginInput) -> crate::error::Error {
     let plugin = input.name.as_str();
+    let err = match err {
+        crate::error::Error::Install(InstallError {
+            reference,
+            kind: InstallErrorKind::StaleDependencies { kind, name, relock },
+            grim,
+        }) => {
+            // A project-backed plugin is re-locked in its project, even when a manifest declared it.
+            let (relock, grim) = match &input.project_grim {
+                Some(project) => (relock, project.clone()),
+                None => (relock.or_else(|| manifest.map(|m| pick_update(m, plugin, &name))), grim),
+            };
+            let kind = InstallErrorKind::StaleDependencies { kind, name, relock };
+            return InstallError { reference, kind, grim }.into();
+        }
+        other => other,
+    };
     let crate::error::Error::Install(InstallError {
         reference,
         kind: InstallErrorKind::LocalContentChanged { name, locked, actual },
+        grim,
     }) = err
     else {
         return err;
     };
     let drift = format!("local source '{name}' changed (locked {locked}, found {actual})");
-    if let Some(dir) = &input.project_dir {
+    if let Some(relock) = &input.project_grim {
         return InstallError {
             reference,
-            kind: InstallErrorKind::MaterializeFailed(format!(
-                "plugin '{plugin}': {drift}; run `grim lock` in {}",
-                dir.display()
-            )),
+            kind: InstallErrorKind::MaterializeFailed(format!("plugin '{plugin}': {drift}; run `{relock} lock`")),
+            grim,
         }
         .into();
     }
     match manifest {
         Some(m) => ExportError::Manifest {
             path: m.to_path_buf(),
-            message: format!(
-                "plugin '{plugin}': {drift}; run `grim update --marketplace {} {plugin}`",
-                m.display()
-            ),
+            message: format!("plugin '{plugin}': {drift}; run {}", pick_update(m, plugin, &name)),
         }
         .into(),
         None => InstallError {
             reference,
             kind: InstallErrorKind::MaterializeFailed(format!("{drift}; re-run the export")),
+            grim,
         }
         .into(),
     }
@@ -2690,9 +2725,9 @@ mod tests {
         let team = input("team", Vec::new());
         let declared = local_drift_hint(drift(), Some(m), &team);
         assert!(
-            declared
-                .to_string()
-                .ends_with("run `grim update --marketplace /w/market.toml team`"),
+            declared.to_string().ends_with(
+                "run `grim update --marketplace /w/market.toml team:x`, which relocks only it and its dependencies"
+            ),
             "{declared}"
         );
         assert_eq!(exit_of(declared), ExitCode::DataError);
@@ -2706,13 +2741,80 @@ mod tests {
         // A project-backed plugin is re-locked in its project, even when a
         // manifest declared it.
         let mut from_project = input("team", Vec::new());
-        from_project.project_dir = Some(PathBuf::from("/w/team"));
+        from_project.project_dir = Some(PathBuf::from("/w/my team"));
+        from_project.project_grim = Some(Invocation::config(Path::new("/w/my team/grimoire.toml")));
         let project = local_drift_hint(drift(), Some(m), &from_project);
-        assert!(project.to_string().ends_with("run `grim lock` in /w/team"), "{project}");
+        assert!(
+            project
+                .to_string()
+                .ends_with("run `grim --config '/w/my team/grimoire.toml' lock`"),
+            "{project}"
+        );
         assert_eq!(exit_of(project), ExitCode::DataError);
         // Any other failure passes through untouched.
         let other = local_drift_hint(ExportError::Usage("u".into()).into(), Some(m), &team);
         assert!(matches!(other, Error::Export(ExportError::Usage(_))), "{other:?}");
+    }
+
+    /// A part's lock is `marketplace.lock`, which `grim lock` never writes, so a part
+    /// whose lock misses its dependencies names the marketplace update, and a
+    /// project-backed plugin its own project's lock. Still 65 with its reason. Found
+    /// by review: both named a plain `grim lock`.
+    #[test]
+    fn a_stale_dependency_names_the_lock_that_holds_it() {
+        let stale = || {
+            Error::from(InstallError::without_reference(InstallErrorKind::StaleDependencies {
+                kind: ArtifactKind::Skill,
+                name: "dep".into(),
+                relock: None,
+            }))
+        };
+        let m = Path::new("/w/market.toml");
+        let mut from_project = input("team", Vec::new());
+        from_project.project_grim = Some(Invocation::config(Path::new("/w/my team/grimoire.toml")));
+        let cases = [
+            (
+                local_drift_hint(stale(), Some(m), &input("team", Vec::new())),
+                "run `grim update --marketplace /w/market.toml team:dep`, which relocks only it and its dependencies",
+            ),
+            (
+                local_drift_hint(stale(), Some(m), &from_project),
+                "run `grim --config '/w/my team/grimoire.toml' lock`",
+            ),
+            (
+                local_drift_hint(stale(), None, &input("team", Vec::new())),
+                "run `grim lock`",
+            ),
+        ];
+        for (hinted, remedy) in cases {
+            let shown = hinted.to_string();
+            assert!(shown.ends_with(remedy), "{shown}");
+            let class = crate::error::classify(&anyhow::Error::from(hinted));
+            assert_eq!(
+                (class.exit, class.reason),
+                (ExitCode::DataError, Some(crate::error::ErrorReason::StaleLock))
+            );
+        }
+    }
+
+    /// A shell splits an unquoted manifest path at a space.
+    #[test]
+    fn a_drift_hint_quotes_the_manifest_path() {
+        let drift = Error::from(InstallError::without_reference(InstallErrorKind::LocalContentChanged {
+            name: "x".into(),
+            locked: sha('a'),
+            actual: sha('b'),
+        }));
+        let hint = local_drift_hint(
+            drift,
+            Some(Path::new("/w/my market/market.toml")),
+            &input("team", Vec::new()),
+        );
+        assert!(
+            hint.to_string()
+                .ends_with("run `grim update --marketplace '/w/my market/market.toml' team:x`, which relocks only it and its dependencies"),
+            "{hint}"
+        );
     }
 
     // ── C-025 manifest write ──────────────────────────────────────
@@ -3621,6 +3723,7 @@ mod tests {
             dir: PathBuf::from("/p"),
             lock: part(Vec::new()),
             meta: Some(meta),
+            grim: Invocation::WALKED,
         };
         let mut declared = decl(None, None, None);
         declared.set_profile(profiled("https://decl.example"));
@@ -3792,6 +3895,7 @@ mod tests {
             profile: PluginProfile::default(),
             fallback_logo: None,
             project_dir: None,
+            project_grim: None,
         }
     }
 
@@ -4876,6 +4980,48 @@ mod tests {
                 if message.contains("project directory") && message.contains("manifest directory")),
             "{err:?}"
         );
+    }
+
+    /// A stale part relocks through the local tag cache, so export names what
+    /// that moved, and only for the plugin it moved in.
+    #[tokio::test]
+    async fn an_offline_stage_warns_per_plugin_about_a_pin_it_moved() {
+        let (_guard, root, _outside) = manifest_dir();
+        let manifest = root.join("marketplace.toml");
+        let reg = MemoryRegistry::new();
+        for tag in ["1", "2"] {
+            publish_skill(&reg, &format!("{REG}/team/a:{tag}"), &[]).await;
+        }
+        publish_skill(&reg, &format!("{REG}/team/b:1"), &[]).await;
+        let access: Arc<dyn OciAccess> = Arc::new(reg);
+        let declare = |a_tag: &str| {
+            let body = format!(
+                "[plugins.moved]\ninclude = [\"{REG}/team/a:{a_tag}\"]\n\
+                 [plugins.kept]\ninclude = [\"{REG}/team/b:1\"]\n"
+            );
+            std::fs::write(&manifest, body).unwrap();
+        };
+        let resolve = |offline| {
+            let (scope, access) = (fetch_scope(), Arc::clone(&access));
+            let manifest = manifest.clone();
+            async move {
+                let select = |m: &MarketplaceManifest| Ok(m.plugins.keys().cloned().collect());
+                resolve_declared(&manifest, select, (None, None), None, &scope, &access, offline)
+                    .await
+                    .expect("the plugins resolve")
+            }
+        };
+
+        declare("1");
+        resolve(false).await.commit_lock().unwrap();
+        declare("2");
+        let capture = crate::catalog::test_hosts::LogCapture::start();
+        drop(resolve(true).await);
+
+        let logs = capture.text();
+        assert_eq!(logs.matches("local tag cache").count(), 1, "{logs}");
+        assert!(logs.contains("plugin 'moved' skill 'a'"), "{logs}");
+        assert!(!logs.contains("plugin 'kept'"), "{logs}");
     }
 
     #[tokio::test]

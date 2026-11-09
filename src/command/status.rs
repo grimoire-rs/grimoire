@@ -21,16 +21,17 @@
 //! `crate::catalog::load_catalog` seam `grim search`/`tui`/`mcp` share) that
 //! populates `deprecated`/`replaced_by` on every registry-sourced row,
 //! matched by `(registry, repository)`; and, for every registry-locked row
-//! — directly-declared artifacts, declared bundles, and bundle members — a
-//! fresh per-artifact tag re-resolution (bounded
+//! — directly-declared artifacts, declared bundles, bundle members and
+//! dependencies — a fresh per-artifact tag re-resolution (bounded
 //! concurrency, the `crate::catalog::update_availability` seam the TUI's
-//! `↑ outdated` badge uses) that populates `update_available`. Both are
+//! `↑ outdated` badge uses) that populates `update_available` and, for nested
+//! bundles, which have no row, `moved_nested_bundles`. Both are
 //! skipped entirely when the invocation is offline (`--offline` or
 //! `$GRIM_OFFLINE`): the report's top-level `checked` stays `false` and one
 //! stderr warning explains why. See `src/api/status_report.rs` for the full
 //! nullability contract.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,14 +39,16 @@ use std::time::Duration;
 use clap::Args;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
+use tokio::time::Instant;
 
 use crate::api::artifact_status::{ArtifactStatus, HookArmingCause};
-use crate::api::status_report::{HookArming, StatusEntry, StatusOutput, StatusReport};
+use crate::api::status_report::{HookArming, MovedNestedBundle, StatusEntry, StatusOutput, StatusReport};
 use crate::catalog::update_availability::{outdated_from_resolve, resolve_declared_digest};
 use crate::catalog::{BadgeContext, CatalogRow};
 use crate::cli::exit_code::ExitCode;
 use crate::config::declaration::{DesiredSet, ExperimentalOptions, RegistryConfig};
-use crate::config::scope::ConfigScope;
+use crate::config::path_source::PathSource;
+use crate::config::scope::{ConfigScope, Invocation};
 use crate::context::Context;
 use crate::hook::consent::{self, Consent};
 use crate::hook::policy::{ConsentInputs, ConsentPolicies, HookPolicy};
@@ -59,19 +62,22 @@ use crate::install::install_state::{ClientOutput, InstallRecord, InstallState, S
 use crate::install::installer::{client_hosts, client_supports_kind};
 use crate::install::launcher::{self, LauncherState};
 use crate::install::path_anchor::{AnchorRoots, Containment};
-use crate::install::settings_phase::{
-    RootFence, SettingsDecline, install_command, recorded_refusal, report_fence, settings_surface,
-};
+use crate::install::settings_phase::{RootFence, SettingsDecline, recorded_refusal, report_fence, settings_surface};
 use crate::install::settings_store;
 use crate::install::target::{InstallTarget, detect_clients_or_all};
-use crate::lock::effective_set::NodeKey;
+use crate::lock::effective_set::{EffectiveGraph, NodeKey};
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
 use crate::lock::locked_artifact::LockedArtifact;
 use crate::lock::locked_source::LockedSource;
+use crate::lock::pin_rule::recorded_reference;
 use crate::oci::access::OciAccess;
 use crate::oci::access::error::AccessError;
+use crate::oci::identifier::is_valid_oci_tag;
 use crate::oci::reference::ArtifactRef;
+use crate::oci::text::{escape_controls, registry_text};
+use crate::resolve::resolve_error::MAX_TRANSITIVE_NODES;
+use crate::resolve::resolve_options::DEFAULT_PER_ARTIFACT_TIMEOUT;
 
 use crate::oci::{ArtifactKind, Digest, Identifier, PinnedIdentifier};
 
@@ -87,15 +93,84 @@ const TRACKED_PROBE_DEADLINE: Duration = Duration::from_secs(5);
 /// never opens hundreds of simultaneous registry connections at once.
 const UPDATE_CHECK_CONCURRENCY: usize = 8;
 
-/// One directly-declared, registry-locked artifact scheduled for a fresh
-/// update-availability re-resolution: where to write the result back
-/// (`index` into the entries vec), the **declared** identifier to re-resolve
-/// — verbatim from `grimoire.toml`, tag and all — and the lock pin the fresh
-/// digest is compared against.
+/// Work one run may spend listing nested bundles on rows: a unit per edge
+/// walked, one per byte listed. A lock chooses both, and the listing is rows
+/// times bundles at worst, so past this every row reads `null`.
+const NESTED_LISTING_BUDGET: usize = 1 << 20;
+
+/// Wall time one `--check` sweep may spend re-resolving. A full sweep of 2048
+/// references, 8 at a time, leaves about 1.2 s for each, several registry round
+/// trips, so a healthy registry finishes well inside it and a stalling one costs
+/// this, not hours.
+const CHECK_RUN_DEADLINE: Duration = Duration::from_secs(300);
+
+/// One reference scheduled for a fresh update-availability re-resolution:
+/// `index` names its row or nested bundle in the list the caller scheduled it
+/// from, `declared` is what `grim update` would re-resolve, tag and all, and
+/// `locked` is the pin the fresh digest is compared against. A row can have
+/// several, one per reference ([`row_references`]).
 struct UpdateCheck {
     index: usize,
     declared: Identifier,
     locked: Digest,
+}
+
+/// What a `--check` note may tell the user to run. A note names a command only
+/// where following it moves the pin it is about.
+#[derive(Debug, Clone)]
+struct NoteScope {
+    /// The scope's `grim` invocation; a global or `--config` note without it
+    /// acts on whatever project it is run from.
+    grim: Invocation,
+    /// The lock matches the declaration; otherwise a named update refuses.
+    fresh: bool,
+}
+
+/// A `[[bundle]]` row only an edge reaches. It has no report row, so a moved tag
+/// would stay silent until a bare `grim update` changed its members.
+struct NestedBundle {
+    name: String,
+    /// The reference that update re-resolves and the pin it is compared against,
+    /// `None` when the lock records no reference a registry could answer for.
+    check: Option<(Identifier, Digest)>,
+}
+
+/// What bounds one `--check` sweep. Every number is reachable from a lock, so
+/// each has a limit; fields so a test can reach one without a 30 s wait.
+struct CheckLimits {
+    /// Deadline on one re-resolution. The registry client sets none, so a host
+    /// that accepts and stays silent would hang the report forever (CWE-400).
+    per_call: Duration,
+    /// Deadline on the whole check, the catalog load, rows and nested bundles
+    /// together; what it cuts off reads `null`.
+    run: Duration,
+    /// Re-resolutions one run sends, rows before nested bundles (CWE-770).
+    checks: usize,
+    /// See [`NESTED_LISTING_BUDGET`].
+    listing: usize,
+    /// When `run` starts counting. The default starts it on construction, so
+    /// build the limits before the catalog load: built after it, a load that
+    /// never answers holds the report open without end.
+    since: Instant,
+}
+
+impl CheckLimits {
+    /// When the check stops waiting on any registry.
+    fn deadline(&self) -> Instant {
+        self.since + self.run
+    }
+}
+
+impl Default for CheckLimits {
+    fn default() -> Self {
+        Self {
+            per_call: DEFAULT_PER_ARTIFACT_TIMEOUT,
+            run: CHECK_RUN_DEADLINE,
+            checks: MAX_TRANSITIVE_NODES,
+            listing: NESTED_LISTING_BUDGET,
+            since: Instant::now(),
+        }
+    }
 }
 
 /// `grim status` arguments.
@@ -111,11 +186,13 @@ pub struct StatusArgs {
 
     /// Re-check every registry-sourced artifact against the live catalog
     /// for deprecation / replacement, and re-resolve each registry-locked
-    /// row's declared reference — directly-declared artifacts, declared
-    /// bundles, and bundle members — to report update availability.
+    /// row's reference — directly-declared artifacts, declared bundles,
+    /// bundle members, and dependencies — to report update availability.
     /// Requires network; skipped with a stderr warning when combined with
     /// `--offline` (or `$GRIM_OFFLINE`) — the report's `checked` field
-    /// reports whether the check actually ran.
+    /// reports whether the check actually ran. The answers land in
+    /// `--format json`; the plain table prints what `grim status` prints, and
+    /// stderr names each row with an update and each nested bundle that moved.
     #[arg(long)]
     pub check: bool,
 
@@ -233,9 +310,11 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
     let mut notes: Vec<String> = Vec::new();
     let mut entries = Vec::new();
     // Per-artifact update-availability re-resolutions, filled below for every
-    // registry-locked row: declared bundles, directly-declared artifacts, and
-    // bundle members alike.
+    // registry-locked row: declared bundles, directly-declared artifacts,
+    // bundle members and dependencies alike.
     let mut update_checks: Vec<UpdateCheck> = Vec::new();
+    // Rows whose `--check` reference comes from `requires` edges, by entry index.
+    let mut edge_rows: Vec<(usize, NodeKey)> = Vec::new();
 
     // Declared bundles: one row each so the user sees what they declared.
     // A bundle never installs itself — its state reflects whether it has
@@ -299,6 +378,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             update_available: None,
             direct: true,
             required_by: prov.required_by(&(ArtifactKind::Bundle, name.clone())),
+            moved_nested_bundles: None,
         });
     }
 
@@ -400,7 +480,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             clients_extra,
             clients_unresolved: unresolved_clients(record, &active, &scope.roots),
             // Populated below by `apply_catalog_check` (deprecated/replaced_by)
-            // and `resolve_update_availability` (update_available) when
+            // and `check_updates` (update_available, moved_nested_bundles) when
             // `--check` ran online; stays null otherwise.
             deprecated: None,
             replaced_by: None,
@@ -408,6 +488,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             arming,
             direct: true,
             required_by,
+            moved_nested_bundles: None,
         });
     }
 
@@ -452,6 +533,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             arming: Vec::new(),
             direct: false,
             required_by: prov.required_by(&(record.kind, record.name.clone())),
+            moved_nested_bundles: None,
         });
     }
 
@@ -527,18 +609,25 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             // that carries it (`stack:1.0.0` listing `code-review:stable`):
             // `grim update` re-resolves every member id, so a moved member tag
             // is an available update even when the bundle pin never budges.
-            // Re-resolve the id the `[[bundle]]` snapshot recorded — the
-            // declared reference, tag and all — against the member's lock pin.
-            if let (Some(pinned), Some(declared)) =
-                (member.source.pinned(), member_declared_id(l, member.kind, &member.name))
-            {
-                update_checks.push(UpdateCheck {
-                    index: entries.len(),
-                    declared,
-                    locked: pinned.digest(),
-                });
-            }
+            // Re-resolve the id the `[[bundle]]` snapshot recorded, or for a
+            // row no bundle lists its `dependency_reference`, against the pin.
             let member_key: NodeKey = (member.kind, member.name.clone());
+            if let Some(pinned) = member.source.pinned() {
+                let listed = member_declared_id(l, member.kind, &member.name);
+                let by_edge = listed.is_none();
+                if let Some(declared) = listed.or_else(|| dependency_reference(l, member.kind, &member.name, pinned)) {
+                    if by_edge {
+                        edge_rows.push((entries.len(), member_key.clone()));
+                    }
+                    let locked = pinned.digest();
+                    let references = row_references(l, &member_key, declared);
+                    update_checks.extend(references.into_iter().map(|declared| UpdateCheck {
+                        index: entries.len(),
+                        declared,
+                        locked: locked.clone(),
+                    }));
+                }
+            }
             let source = if member.is_from_bundle() {
                 format!("bundle: {}", repos.join(", "))
             } else {
@@ -561,6 +650,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
                 arming,
                 direct: false,
                 required_by: prov.required_by(&member_key),
+                moved_nested_bundles: None,
             });
         }
     }
@@ -584,12 +674,14 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             active: &active,
             target: Some(&target),
         };
+        let limits = CheckLimits::default();
         // `Complete`, never `Browse` (plan C-007, ADR D5): this load exists
         // solely to populate `deprecated` / `replaced_by` on **declared**
         // artifacts, so a per-registry browse filter hiding one of them would
         // be a silent correctness bug, not a display change (S-005).
-        match crate::catalog::load_catalog(
-            &ctx.paths(),
+        let paths = ctx.paths();
+        let load = crate::catalog::load_catalog(
+            &paths,
             &registries,
             "",
             &access,
@@ -597,28 +689,46 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             ctx.offline(),
             false,
             crate::catalog::CatalogScope::Complete,
-        )
-        .await
+        );
+        apply_catalog_load(&mut entries, load, &limits).await;
+        if let Some(l) = lock.as_ref()
+            && !edge_rows.is_empty()
         {
-            Ok(results) => apply_catalog_check(&mut entries, &results.into_flat_rows()),
-            Err(e) => {
-                tracing::warn!("`--check` catalog load failed; deprecation/replacement fields stay null: {e:#}");
-            }
+            let store = super::map_access_io(
+                ctx,
+                ctx.access_with_mode(crate::oci::access::AccessMode::Offline, Vec::new()),
+            )?;
+            let unconfirmed = rows_the_store_does_not_confirm(&store, l, &edge_rows).await;
+            update_checks.retain(|check| !unconfirmed.contains(&check.index));
         }
         // Fresh per-artifact update-availability re-resolution of each row's
         // declared reference — independent of the catalog load above (issue
         // #21: the cached catalog tag can hide a newer release). A failed
-        // re-resolve leaves that row's `update_available` null; every other
-        // row's stays null too.
-        for (index, avail) in resolve_update_availability(&access, update_checks).await {
-            entries[index].update_available = avail;
-        }
+        // re-resolve leaves that row's `update_available` null.
+        let scope_notes = NoteScope {
+            grim: scope.invocation.clone(),
+            fresh: lock_matches_config,
+        };
+        notes.extend(
+            check_updates(
+                &access,
+                update_checks,
+                lock.as_ref(),
+                prov.graph(),
+                &mut entries,
+                &limits,
+                scope_notes,
+            )
+            .await,
+        );
     }
 
     let mut report = StatusReport::new(entries, checked).with_notes(notes);
     if hook_inputs.is_some() {
         let seen = launcher::inspect(ctx.grim_home());
-        report = report.with_launcher(seen.state, seen.path.display().to_string());
+        report = report
+            .with_launcher(seen.state, seen.path.display().to_string())
+            .naming(scope.invocation.clone());
     }
     Ok((report, ExitCode::Success))
 }
@@ -629,6 +739,24 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
 /// `src/api/status_report.rs` for the full consumer contract.
 fn should_check(check: bool, offline: bool) -> bool {
     check && !offline
+}
+
+/// Fill `deprecated` / `replaced_by` from `load`, `--check`'s one catalog load.
+/// A load that fails, or has not answered by the run's deadline, leaves both
+/// null and warns once.
+async fn apply_catalog_load(
+    entries: &mut [StatusEntry],
+    load: impl std::future::Future<Output = Result<crate::catalog::CatalogResults, crate::catalog::CatalogError>>,
+    limits: &CheckLimits,
+) {
+    // The registry client sets no deadline, so a host that accepts and stays
+    // silent would hold the report open forever (CWE-400).
+    let failure = match tokio::time::timeout_at(limits.deadline(), load).await {
+        Ok(Ok(results)) => return apply_catalog_check(entries, &results.into_flat_rows()),
+        Ok(Err(e)) => format!("{e:#}"),
+        Err(_) => format!("no answer within {} s", limits.run.as_secs()),
+    };
+    tracing::warn!("`--check` catalog load failed; deprecation/replacement fields stay null: {failure}");
 }
 
 /// Populate `deprecated` / `replaced_by` on every registry-sourced entry
@@ -652,46 +780,358 @@ fn apply_catalog_check(entries: &mut [StatusEntry], rows: &[CatalogRow]) {
     }
 }
 
-/// Re-resolve every scheduled artifact's **declared** reference fresh with
-/// bounded concurrency, mapping each to its `update_available`. Mirrors the
+/// Whether a registry could answer for `id`. A tag outside the OCI grammar names
+/// nothing, so asking would read as a vanished tag, `false` where `null` is true.
+fn answerable(id: &Identifier) -> bool {
+    id.digest().is_some() || id.tag().is_none_or(is_valid_oci_tag)
+}
+
+/// The `--check` sweep: every row's own answer, then each nested bundle's, listed
+/// on the rows that reach it. Returns the advisory lines for plain output.
+async fn check_updates(
+    access: &Arc<dyn OciAccess>,
+    rows: Vec<UpdateCheck>,
+    lock: Option<&GrimoireLock>,
+    graph: Option<&EffectiveGraph>,
+    entries: &mut [StatusEntry],
+    limits: &CheckLimits,
+    scope: NoteScope,
+) -> Vec<String> {
+    for entry in entries.iter_mut() {
+        entry.moved_nested_bundles = Some(Vec::new());
+    }
+    let nested = lock.map_or_else(Vec::new, nested_bundles);
+    let nested_checks = nested.iter().enumerate().filter_map(|(index, bundle)| {
+        let (declared, locked) = bundle.check.clone()?;
+        Some(UpdateCheck {
+            index,
+            declared,
+            locked,
+        })
+    });
+    let nested_checks: Vec<UpdateCheck> = nested_checks.collect();
+
+    let mut scheduled: BTreeMap<usize, usize> = BTreeMap::new();
+    for check in &rows {
+        *scheduled.entry(check.index).or_default() += 1;
+    }
+    let mut room = limits.checks;
+    let mut skipped = 0;
+    let rows = within_cap(rows, &mut room, &mut skipped);
+    let nested_checks = within_cap(nested_checks, &mut room, &mut skipped);
+    if skipped > 0 {
+        tracing::warn!(
+            "`--check` re-resolves at most {} references a run; {skipped} more are not checked",
+            limits.checks
+        );
+    }
+
+    let deadline = limits.deadline();
+    let Swept {
+        answers: row_answers,
+        late: late_rows,
+    } = fresh_digests(access, rows, limits.per_call, deadline).await;
+    let mut by_row: BTreeMap<usize, Vec<ReferenceAnswer>> = BTreeMap::new();
+    for (check, fresh) in row_answers {
+        by_row
+            .entry(check.index)
+            .or_default()
+            .push((check, fresh.and_then(Result::ok)));
+    }
+    let mut split = Vec::new();
+    for (index, mut answers) in by_row {
+        answers.sort_by(|(a, _), (b, _)| a.declared.cmp(&b.declared));
+        match row_answer(&answers, scheduled[&index]) {
+            RowAnswer::Read(avail) => entries[index].update_available = avail,
+            RowAnswer::Split => split.push(split_note(&entries[index], &answers, &scope.grim)),
+        }
+    }
+    let (answers, late_nested) = resolve_update_availability(access, nested_checks, limits.per_call, deadline).await;
+    if !late_rows.is_empty() || !late_nested.is_empty() {
+        tracing::warn!("{}", late_warning(limits.run, late_rows.len(), late_nested.len()));
+    }
+    let advice = NoteAdvice::of(scope, lock);
+    let mut notes = update_notes(entries, &advice);
+    notes.extend(split);
+    notes.extend(apply_nested_answers(
+        &nested,
+        &answers.into_iter().collect(),
+        graph,
+        entries,
+        limits.listing,
+        &advice,
+    ));
+    notes
+}
+
+/// What the notes of one sweep may promise: [`NoteScope`], plus the keys the
+/// lock records more than one reference for, where a named update can meet a
+/// reference that did not move with the checked one and refuse.
+struct NoteAdvice {
+    scope: NoteScope,
+    shared: HashSet<NodeKey>,
+}
+
+/// What a note about a moved key tells the user to run.
+#[derive(Debug, PartialEq, Eq)]
+enum Remedy {
+    /// The lock does not match the declaration, so `grim lock` comes first.
+    LockFirst,
+    /// Other references require the key too: no command is promised.
+    Unpromised,
+    /// `grim update -- <name>` moves the pin.
+    Update,
+}
+
+impl NoteAdvice {
+    fn of(scope: NoteScope, lock: Option<&GrimoireLock>) -> Self {
+        Self {
+            scope,
+            shared: lock.map(shared_keys).unwrap_or_default(),
+        }
+    }
+
+    /// A declaration answers for a `direct` key alone, so its edges never stop
+    /// an update of it.
+    fn remedy(&self, key: &NodeKey, direct: bool) -> Remedy {
+        if !self.scope.fresh {
+            Remedy::LockFirst
+        } else if !direct && self.shared.contains(key) {
+            Remedy::Unpromised
+        } else {
+            Remedy::Update
+        }
+    }
+
+    fn lock_first(&self) -> String {
+        format!(
+            "the lock does not match grimoire.toml, so run `{} lock` first",
+            self.scope.grim
+        )
+    }
+}
+
+/// The keys the lock records more than one distinct reference for, in one pass
+/// over its edges: asked per moved row, a crafted lock makes it quadratic.
+fn shared_keys(lock: &GrimoireLock) -> HashSet<NodeKey> {
+    let mut first: HashMap<NodeKey, Identifier> = HashMap::new();
+    let mut shared = HashSet::new();
+    for (edge, parent) in lock.recorded_edges() {
+        let Some(id) = edge.absolute_id(parent) else {
+            continue;
+        };
+        let key = (edge.kind, edge.name.clone());
+        match first.get(&key) {
+            Some(seen) if *seen != id => {
+                shared.insert(key);
+            }
+            Some(_) => {}
+            None => {
+                first.insert(key, id);
+            }
+        }
+    }
+    shared
+}
+
+/// What a member or dependency row re-resolves: `declared`, or every reference the
+/// lock records for a key more than one requires, since a named update meets each
+/// one and exits 78 where they name different digests.
+fn row_references(lock: &GrimoireLock, key: &NodeKey, declared: Identifier) -> Vec<Identifier> {
+    let recorded = recorded_edges(lock, key.0, &key.1);
+    if recorded.len() > 1 {
+        recorded.into_iter().collect()
+    } else {
+        vec![declared]
+    }
+}
+
+/// One reference and its fresh digest: `None` when the resolve failed, `Some(None)`
+/// when its tag is gone.
+type ReferenceAnswer = (UpdateCheck, Option<Option<Digest>>);
+
+/// What one row's references answered.
+#[derive(Debug, PartialEq, Eq)]
+enum RowAnswer {
+    /// The row's `update_available`.
+    Read(Option<bool>),
+    /// Two references name different digests, so `grim update` refuses (78).
+    Split,
+}
+
+/// A row's answer from the fresh digests of its references, `scheduled` of them
+/// sent. One the cap or the tag grammar kept back, a failed resolve, or a tag gone
+/// beside one that resolves leaves nothing to compare, so the row reads `null`.
+fn row_answer(answers: &[ReferenceAnswer], scheduled: usize) -> RowAnswer {
+    let fresh: Option<Vec<&Option<Digest>>> = answers.iter().map(|(_, fresh)| fresh.as_ref()).collect();
+    let (Some(fresh), Some((check, _))) = (fresh, answers.first()) else {
+        return RowAnswer::Read(None);
+    };
+    if answers.len() < scheduled {
+        return RowAnswer::Read(None);
+    }
+    let resolved: Vec<&Digest> = fresh.iter().filter_map(|digest| digest.as_ref()).collect();
+    match resolved.split_first() {
+        // A vanished tag is never a newer pin.
+        None => RowAnswer::Read(Some(false)),
+        Some((first, rest)) if rest.iter().any(|digest| digest != first) => RowAnswer::Split,
+        Some(_) if resolved.len() < fresh.len() => RowAnswer::Read(None),
+        Some((first, _)) => RowAnswer::Read(Some(outdated_from_resolve(&check.locked, Some(*first)))),
+    }
+}
+
+/// The note of a row whose references name different digests.
+fn split_note(entry: &StatusEntry, answers: &[ReferenceAnswer], grim: &Invocation) -> String {
+    let references: Vec<String> = answers
+        .iter()
+        .map(|(check, _)| registry_text(&check.declared.to_string()))
+        .collect();
+    let references = match references.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => references.concat(),
+    };
+    format!(
+        "{} '{}': {references} name different digests; `{grim} update` exits 78 until grimoire.toml declares one",
+        entry.kind,
+        registry_text(&entry.name)
+    )
+}
+
+/// The `checks` a registry can answer, up to `room`, which shrinks by what is
+/// kept; what the cap turned away adds to `skipped`, and its row stays `null`.
+fn within_cap(checks: Vec<UpdateCheck>, room: &mut usize, skipped: &mut usize) -> Vec<UpdateCheck> {
+    let mut kept: Vec<UpdateCheck> = checks.into_iter().filter(|c| answerable(&c.declared)).collect();
+    *skipped += kept.len().saturating_sub(*room);
+    kept.truncate(*room);
+    *room -= kept.len();
+    kept
+}
+
+/// One line per row whose reference moved: the plain table has no column for
+/// `update_available`, so without this a plain `--check` says nothing about it.
+fn update_notes(entries: &[StatusEntry], advice: &NoteAdvice) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|entry| entry.update_available == Some(true))
+        .map(|entry| {
+            let name = registry_text(&entry.name);
+            let remedy = match advice.remedy(&(entry.kind, entry.name.clone()), entry.direct) {
+                Remedy::LockFirst => advice.lock_first(),
+                Remedy::Unpromised => "its tag moved, and more than one reference requires it".to_string(),
+                Remedy::Update => format!("`{}` moves its pin", advice.scope.grim.update(&entry.name)),
+            };
+            format!("update available: {} '{name}': {remedy}", entry.kind)
+        })
+        .collect()
+}
+
+/// Re-resolve every scheduled reference fresh with bounded concurrency,
+/// mapping each to its `update_available`. Mirrors the
 /// TUI's per-row background sweep ([`crate::tui::update_check`]): a
 /// [`Semaphore`]-bounded [`JoinSet`], the same
 /// [`resolve_declared_digest`]/[`outdated_from_resolve`] seam, the lock pin as
-/// the comparison baseline. Returns `(index, update_available)` pairs — the
-/// caller writes each back into `entries[index]`; collecting into a `Vec`
-/// after every task joins makes the merge deterministic regardless of task
-/// completion order.
+/// the comparison baseline. Returns `(index, update_available)` pairs for the
+/// caller to read by [`UpdateCheck::index`], and [`Swept::late`]; collecting
+/// into a `Vec` after every task joins makes the merge deterministic regardless
+/// of task completion order.
 async fn resolve_update_availability(
     access: &Arc<dyn OciAccess>,
     checks: Vec<UpdateCheck>,
-) -> Vec<(usize, Option<bool>)> {
+    per_call: Duration,
+    deadline: Instant,
+) -> (Vec<(usize, Option<bool>)>, BTreeSet<usize>) {
+    let swept = fresh_digests(access, checks, per_call, deadline).await;
+    let answers = swept
+        .answers
+        .into_iter()
+        .map(|(check, resolved)| {
+            let avail = resolved.and_then(|resolved| update_available_from_resolve(&check.locked, resolved));
+            (check.index, avail)
+        })
+        .collect();
+    (answers, swept.late)
+}
+
+/// A registry's answer for one reference: the digest its tag names now, `None`
+/// inside when the tag is gone, and `None` outside past a deadline.
+type FreshDigest = Option<Result<Option<Digest>, AccessError>>;
+
+/// One sweep's answers, joined in completion order.
+struct Swept {
+    answers: Vec<(UpdateCheck, FreshDigest)>,
+    /// The [`UpdateCheck::index`]es of the checks the run's deadline cut off.
+    late: BTreeSet<usize>,
+}
+
+/// What a registry says of each check's reference now: the bounded sweep
+/// [`resolve_update_availability`] reads.
+async fn fresh_digests(
+    access: &Arc<dyn OciAccess>,
+    checks: Vec<UpdateCheck>,
+    per_call: Duration,
+    deadline: Instant,
+) -> Swept {
     let permits = Arc::new(Semaphore::new(UPDATE_CHECK_CONCURRENCY));
-    let mut set: JoinSet<(usize, Option<bool>)> = JoinSet::new();
+    let mut set = JoinSet::new();
     for check in checks {
         let access = Arc::clone(access);
         let permits = Arc::clone(&permits);
         set.spawn(async move {
-            // Hold a permit for the lifetime of the registry call so
-            // concurrency stays bounded. `acquire_owned` fails only on a closed
-            // semaphore, which never happens (we hold the `Arc`); degrade that
-            // impossible case to a null result rather than an unbounded call.
-            let _permit = match permits.acquire_owned().await {
-                Ok(p) => p,
-                Err(_) => return (check.index, None),
+            // The timeout below polls the call once before it fires, so a task
+            // that starts past the deadline would still send a request.
+            if Instant::now() >= deadline {
+                return (check, None, true);
+            }
+            let call = async {
+                // Hold a permit for the lifetime of the registry call so
+                // concurrency stays bounded. `acquire_owned` fails only on a
+                // closed semaphore, which never happens (we hold the `Arc`);
+                // degrade that impossible case to a null result.
+                let _permit = permits.acquire_owned().await.ok()?;
+                tokio::time::timeout(per_call, resolve_declared_digest(&*access, &check.declared))
+                    .await
+                    .ok()
             };
-            let resolved = resolve_declared_digest(&*access, &check.declared).await;
-            (check.index, update_available_from_resolve(&check.locked, resolved))
+            // A call still waiting or open at the run's deadline is dropped, so
+            // one sweep ends in bounded wall time (CWE-400).
+            match tokio::time::timeout_at(deadline, call).await {
+                Ok(fresh) => (check, fresh, false),
+                Err(_) => (check, None, true),
+            }
         });
     }
-    let mut out = Vec::new();
+    let mut swept = Swept {
+        answers: Vec::new(),
+        late: BTreeSet::new(),
+    };
     while let Some(joined) = set.join_next().await {
         // A panicked task degrades to no result for that row (`update_available`
         // stays null); a read-only status report never fails on a check.
-        if let Ok(pair) = joined {
-            out.push(pair);
+        if let Ok((check, fresh, late)) = joined {
+            if late {
+                swept.late.insert(check.index);
+            }
+            swept.answers.push((check, fresh));
         }
     }
-    out
+    swept
+}
+
+/// The warning of a sweep its run deadline cut short.
+fn late_warning(run: Duration, rows: usize, nested: usize) -> String {
+    let count = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    let mut unanswered = Vec::new();
+    if rows > 0 {
+        unanswered.push(count(rows, "row", "rows"));
+    }
+    if nested > 0 {
+        unanswered.push(count(nested, "nested bundle", "nested bundles"));
+    }
+    format!(
+        "`--check` waits on registries for at most {} s a run; {} got no answer in time and were not checked",
+        run.as_secs(),
+        unanswered.join(" and ")
+    )
 }
 
 /// Map a per-artifact re-resolution outcome to `update_available`.
@@ -707,6 +1147,143 @@ fn update_available_from_resolve(locked: &Digest, resolved: Result<Option<Digest
         Ok(fresh) => Some(outdated_from_resolve(locked, fresh.as_ref())),
         Err(_) => None,
     }
+}
+
+/// Every nested bundle of `lock` with a registry pin. Edges are grouped once:
+/// asking the lock for one bundle's scans every edge it records.
+fn nested_bundles(lock: &GrimoireLock) -> Vec<NestedBundle> {
+    let mut edges: HashMap<&str, BTreeSet<Identifier>> = HashMap::new();
+    for (edge, parent) in lock.recorded_edges() {
+        if edge.kind == ArtifactKind::Bundle
+            && let Some(id) = edge.absolute_id(parent)
+        {
+            edges.entry(edge.name.as_str()).or_default().insert(id);
+        }
+    }
+    lock.bundles
+        .iter()
+        .filter(|bundle| bundle.transitive)
+        .filter_map(|bundle| {
+            let pinned = bundle.pinned()?;
+            let edges = edges.remove(bundle.name.as_str()).unwrap_or_default();
+            Some(NestedBundle {
+                name: bundle.name.clone(),
+                check: recorded_reference(edges, pinned, bundle.tag()).map(|id| (id, pinned.digest())),
+            })
+        })
+        .collect()
+}
+
+/// Fold each nested bundle's answer, keyed by its index in `nested`, into
+/// `moved_nested_bundles`, and return one note per moved bundle. Rows are only
+/// walked when a bundle moved or has no answer, so a clean lock costs nothing.
+fn apply_nested_answers(
+    nested: &[NestedBundle],
+    answers: &BTreeMap<usize, Option<bool>>,
+    graph: Option<&EffectiveGraph>,
+    entries: &mut [StatusEntry],
+    budget: usize,
+    advice: &NoteAdvice,
+) -> Vec<String> {
+    let mut notes = Vec::new();
+    // By name, and `None` for a bundle with no answer: that is not "held still".
+    let mut open: BTreeMap<&str, Option<MovedNestedBundle>> = BTreeMap::new();
+    for (index, bundle) in nested.iter().enumerate() {
+        let moved = answers.get(&index).copied().flatten();
+        if moved == Some(false) {
+            continue;
+        }
+        let listed = bundle.check.as_ref().filter(|_| moved == Some(true));
+        open.insert(
+            bundle.name.as_str(),
+            listed.map(|(declared, _)| MovedNestedBundle {
+                name: bundle.name.clone(),
+                reference: declared.to_string(),
+            }),
+        );
+        if moved == Some(true) {
+            let name = registry_text(&bundle.name);
+            let remedy = match advice.remedy(&(ArtifactKind::Bundle, bundle.name.clone()), false) {
+                Remedy::LockFirst => advice.lock_first(),
+                Remedy::Unpromised => "more than one reference requires it".to_string(),
+                Remedy::Update => format!(
+                    "`{}` moves its pin and can change its members",
+                    advice.scope.grim.update(&bundle.name)
+                ),
+            };
+            notes.push(format!("nested bundle '{name}' has moved: {remedy}"));
+        }
+    }
+    if open.is_empty() {
+        return notes;
+    }
+    match graph.and_then(|graph| nested_listings(graph, entries, &open, budget)) {
+        Some(listings) => {
+            for (entry, listing) in entries.iter_mut().zip(listings) {
+                entry.moved_nested_bundles = listing;
+            }
+        }
+        None => {
+            tracing::warn!(
+                "`--check` could not place every nested bundle under its rows, so each row's moved nested bundles are not checked"
+            );
+            for entry in entries.iter_mut() {
+                entry.moved_nested_bundles = None;
+            }
+        }
+    }
+    notes
+}
+
+/// What `moved_nested_bundles` reads on each of `entries`, in order: walk down
+/// from each row through the nodes with no row of their own, so a bundle lands
+/// on the rows nearest it. `None` once `budget` runs out.
+///
+/// Down, not up: `seen` is per row, so a cycle a hostile lock planted ends the
+/// walk with nothing to memoize wrongly, and a chain under one row costs its
+/// length however many of its bundles moved.
+fn nested_listings(
+    graph: &EffectiveGraph,
+    entries: &[StatusEntry],
+    open: &BTreeMap<&str, Option<MovedNestedBundle>>,
+    mut budget: usize,
+) -> Option<Vec<Option<Vec<MovedNestedBundle>>>> {
+    let rows: HashSet<NodeKey> = entries.iter().map(|entry| (entry.kind, entry.name.clone())).collect();
+    let mut listings = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let own = (entry.kind, entry.name.clone());
+        let mut reached: BTreeSet<&str> = BTreeSet::new();
+        let mut seen: HashSet<&NodeKey> = HashSet::new();
+        let mut stack = vec![&own];
+        while let Some(node) = stack.pop() {
+            let Some(kids) = graph.children.get(node) else {
+                continue;
+            };
+            budget = budget.checked_sub(kids.len())?;
+            for kid in kids {
+                if rows.contains(kid) || !seen.insert(kid) {
+                    continue;
+                }
+                if kid.0 == ArtifactKind::Bundle && open.contains_key(kid.1.as_str()) {
+                    reached.insert(kid.1.as_str());
+                }
+                stack.push(kid);
+            }
+        }
+        let mut moved = Vec::new();
+        let mut unanswered = false;
+        for name in reached {
+            match open.get(name) {
+                Some(Some(listed)) => {
+                    budget = budget.checked_sub(listed.name.len() + listed.reference.len())?;
+                    moved.push(listed.clone());
+                }
+                _ => unanswered = true,
+            }
+        }
+        listings.push((!moved.is_empty() || !unanswered).then_some(moved));
+    }
+    Some(listings)
 }
 
 /// Every declared artifact (skills, then rules, then agents, then mcp, then
@@ -858,7 +1435,7 @@ pub fn hook_arming(
                 return requires_client_approval(*client).then(|| HookArming {
                     client: client.to_string(),
                     cause,
-                    message: arming_message(cause, &inputs.consent, *client, inputs.scope),
+                    message: arming_message(cause, inputs, *client),
                     transient: cause.transient(),
                 });
             }
@@ -902,45 +1479,49 @@ pub fn hook_arming(
             Some(HookArming {
                 client: client.to_string(),
                 cause,
-                message: arming_message(cause, &inputs.consent, *client, inputs.scope),
+                message: arming_message(cause, inputs, *client),
                 transient: cause.transient(),
             })
         })
         .collect()
 }
 
-/// The per-verdict message: the cause's own sentence, except in three cases.
-/// A global flag-off row names the `--global` flag. A drifted row appends what
-/// moved, or a user who already consented is told to consent again with no
-/// hint why; the names come from [`Consent::Drifted`]'s own set, so they cannot
-/// disagree with the cause. A client with no project hook surface that hosts
-/// hooks globally (Qoder; [`crate::install::vendor::Vendor::declines_hooks_everywhere`]
-/// is `false`) names `--global` as the fix. A client that declines hooks
-/// everywhere keeps the generic sentence: `--global` changes nothing for it.
-fn arming_message(cause: HookArmingCause, consent: &Consent, client: ClientTarget, scope: ConfigScope) -> String {
-    match (cause, consent) {
-        // The cause's own sentence sets the project flag, which does not cover a global run.
-        (HookArmingCause::FeatureFlagOff, _) if scope == ConfigScope::Global => {
-            "hooks are disabled for this scope; run grim config set --global options.experimental.hooks true, \
-             then grim install --global"
-                .to_string()
-        }
+/// The per-verdict message, with the drifted entries appended when there are
+/// any, and a `--global` remedy appended for a hook-capable global-only
+/// client that has no surface at **project** scope.
+///
+/// Only drift names anything among the whole-scope causes: every other cause
+/// describes a whole-scope condition with nothing to enumerate, while drift's
+/// remedy (`grim hook allow`) is unhelpful without knowing *what* moved — a
+/// user who already consented is otherwise told to consent again with no hint
+/// why. The names come from [`Consent::Drifted`]'s own set rather than from a
+/// second difference computed here, so the message can never disagree with
+/// the predicate that produced the cause.
+///
+/// [`HookArmingCause::ClientHasNoHookSurface`] gets its own second case: a
+/// client with no project hook surface that still hosts hooks at global scope
+/// (Qoder today; [`crate::install::vendor::Vendor::declines_hooks_everywhere`]
+/// returns `false`) reports this cause at project scope for the ordinary
+/// scope-gap reason, and the generic "nothing to arm" message would leave the
+/// user unaware that `--global` is the fix, unlike installer.rs's own
+/// tracing::warn! for the same gap (commit da0039c4). A client that declines
+/// hooks everywhere gets the generic message: telling it to retry `--global`
+/// would point at a knob that changes nothing for it.
+fn arming_message(cause: HookArmingCause, inputs: &HookArmingInputs, client: ClientTarget) -> String {
+    let message = cause.message(&inputs.grim);
+    match (cause, &inputs.consent) {
         (HookArmingCause::ConsentDrifted, Consent::Drifted(new)) => {
             format!(
-                "{}. Not yet consented: {}",
-                cause.message(),
+                "{message}. Not yet consented: {}",
                 new.iter().cloned().collect::<Vec<_>>().join(", ")
             )
         }
         (HookArmingCause::ClientHasNoHookSurface, _)
-            if scope == ConfigScope::Project && !client.vendor().declines_hooks_everywhere() =>
+            if inputs.scope == ConfigScope::Project && !client.vendor().declines_hooks_everywhere() =>
         {
-            format!(
-                "{} {client} hosts hooks at global scope only; install with --global",
-                cause.message()
-            )
+            format!("{message} {client} hosts hooks at global scope only; install with --global")
         }
-        _ => cause.message().to_string(),
+        _ => message,
     }
 }
 
@@ -959,6 +1540,8 @@ fn arming_message(cause: HookArmingCause, consent: &Consent, client: ClientTarge
 /// registry set, the `$GRIM_HOME` refusal and the client set are all properties
 /// of the invocation, not of the artifact.
 pub struct HookArmingInputs {
+    /// The `grim` an arming message names.
+    pub grim: Invocation,
     /// `[options.experimental] hooks` for the resolved scope, read through the
     /// one seam ([`crate::config::declaration::ExperimentalOptions::hooks_enabled`]).
     feature_enabled: bool,
@@ -1100,6 +1683,7 @@ impl HookArmingInputs {
             })
             .collect();
         Ok(Self {
+            grim: scope.invocation.clone(),
             feature_enabled: scope.options.experimental.hooks_enabled(),
             plain_http_hosts: crate::oci::access::registry_client::plain_http_hosts_with(&declared_insecure),
             consent: consent::evaluate(record.as_ref(), &scope.workspace, &declared),
@@ -1194,6 +1778,7 @@ pub fn merge_not_registered(
     arming: Vec<HookArming>,
     installed: &std::collections::BTreeSet<String>,
     armed: impl Fn(&str) -> bool,
+    grim: &Invocation,
 ) -> Vec<HookArming> {
     let cause = HookArmingCause::NotRegistered;
     let mut merged: Vec<HookArming> = arming
@@ -1208,7 +1793,7 @@ pub fn merge_not_registered(
         merged.push(HookArming {
             client: client.clone(),
             cause,
-            message: cause.message().to_string(),
+            message: cause.message(grim),
             transient: cause.transient(),
         });
     }
@@ -1241,7 +1826,12 @@ fn hook_arming_for_row(
     };
     let installed: std::collections::BTreeSet<String> =
         recorded_clients(record).iter().map(|o| o.client.clone()).collect();
-    merge_not_registered(arming, &installed, |client| inputs.arms_artifact(client, name))
+    merge_not_registered(
+        arming,
+        &installed,
+        |client| inputs.arms_artifact(client, name),
+        &inputs.grim,
+    )
 }
 
 /// The `(client, artifact, entry-id)` triples the dispatch table already arms
@@ -1308,6 +1898,8 @@ pub(crate) struct SettingsGateScope<'a> {
     pub(crate) grim_home: &'a Path,
     pub(crate) scope: ConfigScope,
     pub(crate) workspace: &'a Path,
+    /// The `grim` a gated row's remedy names, `--config` included.
+    pub(crate) invocation: &'a Invocation,
 }
 
 /// The file half of [`SettingsArmingInputs`]: the flag, the consent record and
@@ -1355,7 +1947,9 @@ impl SettingsGates {
             workspace: at.workspace,
             registries: &registries,
         };
-        let policy = ConsentPolicies::new(&inputs, record.as_ref(), &declared).settings;
+        let policy = ConsentPolicies::new(&inputs, record.as_ref(), &declared)
+            .naming(at.invocation)
+            .settings;
         let store = settings_store::path(at.grim_home, at.workspace);
         Ok(Self { policy, refusal, store })
     }
@@ -1399,6 +1993,7 @@ impl SettingsArmingInputs {
             grim_home: &scope.roots.grim_home,
             scope: scope.scope,
             workspace: &scope.workspace,
+            invocation: &scope.invocation,
         };
         let gates = SettingsGates::read(&at, lock, |read_global| {
             super::hook_consent::policy_registries(ctx, scope, read_global)
@@ -1487,7 +2082,10 @@ impl SettingsArmingInputs {
             ) => HookArmingCause::WorkspaceNotConsented,
         };
         let message = self.policy.refusal_reason(binding, source);
-        Some((cause, message.unwrap_or_else(|| cause.message().to_string())))
+        Some((
+            cause,
+            message.unwrap_or_else(|| cause.message(self.policy.invocation())),
+        ))
     }
 }
 
@@ -1515,15 +2113,15 @@ fn settings_verdict(client: ClientTarget, cause: HookArmingCause, message: Strin
 fn declined_verdict(
     client: ClientTarget,
     decline: &SettingsDecline,
-    scope: ConfigScope,
+    grim: &Invocation,
     record: Option<&InstallRecord>,
 ) -> HookArming {
     let applied_elsewhere =
         record.is_some_and(|record| record.outputs.iter().any(|output| output.client != client.as_str()));
     let remedy = if applied_elsewhere {
-        decline.remedy_beside_applied(client, scope)
+        decline.remedy_beside_applied(client, grim)
     } else {
-        decline.remedy(client, scope)
+        decline.remedy(client, grim)
     };
     settings_verdict(client, decline.arming_cause(), format!("{client} {decline}; {remedy}"))
 }
@@ -1540,7 +2138,12 @@ fn recorded_refusals(
     outputs
         .filter_map(|output| {
             let decline = recorded_refusal(output, roots, inputs.scope, &inputs.fence)?;
-            Some(recorded_verdict(&output.client, &decline, inputs.scope, record))
+            Some(recorded_verdict(
+                &output.client,
+                &decline,
+                inputs.policy.invocation(),
+                record,
+            ))
         })
         .collect()
 }
@@ -1550,28 +2153,18 @@ fn recorded_refusals(
 fn recorded_verdict(
     client: &str,
     decline: &SettingsDecline,
-    scope: ConfigScope,
+    grim: &Invocation,
     record: Option<&InstallRecord>,
 ) -> HookArming {
     if let Ok(known) = client.parse::<ClientTarget>() {
-        return declined_verdict(known, decline, scope, record);
+        return declined_verdict(known, decline, grim, record);
     }
     let cause = decline.arming_cause();
     HookArming {
         client: client.to_string(),
         cause,
-        message: format!("{client} {decline}; {}", cause.message()),
+        message: format!("{client} {decline}; {}", cause.message(grim)),
         transient: cause.transient(),
-    }
-}
-
-/// The no-applicable-settings note at `scope`: the cause's own message names
-/// the project install, which exits 79 for a global package.
-fn nothing_applies_message(scope: ConfigScope) -> String {
-    let message = HookArmingCause::NoApplicableSettings.message();
-    match message.strip_suffix(install_command(ConfigScope::Project)) {
-        Some(head) => format!("{head}{}", install_command(scope)),
-        None => message.to_string(),
     }
 }
 
@@ -1615,18 +2208,19 @@ pub(crate) fn settings_arming(
             .iter()
             .any(|output| output.entry.is_some() && output.client == claude)
     });
+    let grim = inputs.policy.invocation();
     let mut arming: Vec<HookArming> = inputs
         .surfaces
         .iter()
         .filter_map(|(client, surface)| match surface {
-            Err(decline) => Some(declined_verdict(*client, decline, inputs.scope, record)),
+            Err(decline) => Some(declined_verdict(*client, decline, grim, record)),
             Ok(_) if nothing_applies => {
                 let cause = HookArmingCause::NoApplicableSettings;
-                Some(settings_verdict(*client, cause, nothing_applies_message(inputs.scope)))
+                Some(settings_verdict(*client, cause, cause.message(grim)))
             }
             Ok(_) if *client == ClientTarget::Claude && inputs.local_file_tracked && claude_holds_a_value => {
                 let cause = HookArmingCause::LocalFileTracked;
-                Some(settings_verdict(*client, cause, cause.message().to_string()))
+                Some(settings_verdict(*client, cause, cause.message(grim)))
             }
             Ok(_) => None,
         })
@@ -1844,9 +2438,10 @@ fn warn_unarmed(kind: ArtifactKind, name: &str, arming: &[HookArming]) {
         match arming_severity(state) {
             ArmingSeverity::Refused | ArmingSeverity::ClientWithheld => {
                 tracing::warn!(
-                    "{kind} '{name}' is {state} on client '{}': {}",
-                    verdict.client,
-                    verdict.message
+                    "{kind} '{}' is {state} on client '{}': {}",
+                    registry_text(name),
+                    registry_text(&verdict.client),
+                    escape_controls(&verdict.message)
                 );
             }
             // A gated hook is the documented default under invariant I4, not a
@@ -1854,9 +2449,10 @@ fn warn_unarmed(kind: ArtifactKind, name: &str, arming: &[HookArming]) {
             // ignore the channel the refusals arrive on.
             ArmingSeverity::Gated | ArmingSeverity::NotAnArmingState => {
                 tracing::debug!(
-                    "{kind} '{name}' is {state} on client '{}': {}",
-                    verdict.client,
-                    verdict.message
+                    "{kind} '{}' is {state} on client '{}': {}",
+                    registry_text(name),
+                    registry_text(&verdict.client),
+                    escape_controls(&verdict.message)
                 );
             }
         }
@@ -1887,6 +2483,81 @@ fn member_declared_id(lock: &GrimoireLock, kind: ArtifactKind, name: &str) -> Op
         .flat_map(|b| b.members.iter())
         .find(|m| m.kind == kind && m.name == name)
         .and_then(|m| Identifier::parse(&m.id).ok())
+}
+
+/// The reference `grim update` would re-resolve for a row only `requires`
+/// edges reach: the tag its pin carries while an edge names it, else the
+/// smallest edge, the one the resolver settles on. `None` when the lock records
+/// neither, so the row reports no update availability.
+fn dependency_reference(
+    lock: &GrimoireLock,
+    kind: ArtifactKind,
+    name: &str,
+    pinned: &PinnedIdentifier,
+) -> Option<Identifier> {
+    recorded_reference(recorded_edges(lock, kind, name), pinned, pinned.tag())
+}
+
+/// The entries among `rows` whose edges the user's own store does not confirm:
+/// each parent recording an edge onto a row must be stored at its pin and list
+/// exactly those edges onto it. [`dependency_reference`] reads the lock's edges,
+/// and a lock is a workspace file, so a planted digest edge would read `false`
+/// however far the tag moved (CWE-345). `store` never reaches a registry.
+async fn rows_the_store_does_not_confirm(
+    store: &Arc<dyn OciAccess>,
+    lock: &GrimoireLock,
+    rows: &[(usize, NodeKey)],
+) -> BTreeSet<usize> {
+    let artifacts = lock.iter_artifacts().map(|a| (a.kind, a.source.pinned(), &a.requires));
+    let bundles = lock
+        .bundles
+        .iter()
+        .map(|b| (ArtifactKind::Bundle, b.pinned(), &b.members));
+    let parents: Vec<_> = artifacts.chain(bundles).collect();
+    let mut stored: HashMap<(ArtifactKind, String), Vec<(NodeKey, Identifier)>> = HashMap::new();
+    let mut unconfirmed = BTreeSet::new();
+    for (index, key) in rows {
+        let onto = |kind: ArtifactKind, name: &str| kind == key.0 && name == key.1;
+        for (kind, pin, members) in parents
+            .iter()
+            .filter(|(_, _, m)| m.iter().any(|m| onto(m.kind, &m.name)))
+        {
+            let Some(pin) = pin else {
+                unconfirmed.insert(*index);
+                break;
+            };
+            let recorded: BTreeSet<Identifier> = members
+                .iter()
+                .filter(|m| onto(m.kind, &m.name))
+                .filter_map(|m| m.absolute_id(Some(pin.as_identifier())))
+                .collect();
+            let slot = (*kind, pin.strip_advisory().to_string());
+            if !stored.contains_key(&slot) {
+                let members = super::add::stored_members(store, *kind, pin).await;
+                stored.insert(slot.clone(), members);
+            }
+            let listed: BTreeSet<Identifier> = stored[&slot]
+                .iter()
+                .filter(|((kind, name), _)| onto(*kind, name))
+                .map(|(_, id)| id.clone())
+                .collect();
+            if recorded != listed {
+                unconfirmed.insert(*index);
+                break;
+            }
+        }
+    }
+    unconfirmed
+}
+
+/// Every edge the lock records onto `(kind, name)`, a `requires` row or a bundle
+/// member, absolute and sorted. A relative edge resolves against its parent's
+/// pin; one that cannot be read, or sits under a path parent, names no reference.
+fn recorded_edges(lock: &GrimoireLock, kind: ArtifactKind, name: &str) -> BTreeSet<Identifier> {
+    lock.recorded_edges()
+        .filter(|(edge, _)| edge.kind == kind && edge.name == name)
+        .filter_map(|(edge, parent)| edge.absolute_id(parent))
+        .collect()
 }
 
 /// Build the reported `outputs` list for one declared artifact: the
@@ -2216,17 +2887,24 @@ async fn path_source_drifted(locked: &LockedArtifact, anchor: &std::path::Path) 
     match packed {
         Ok((_, layer)) => &crate::oci::Algorithm::Sha256.hash(&layer) != hash,
         Err(e) => {
-            tracing::warn!(
-                "local source '{path}' for {} '{}' is missing or invalid: {e:#}",
-                locked.kind,
-                locked.name
-            );
+            warn_unpackable(path, &locked.kind.to_string(), &locked.name, &format!("{e:#}"));
             // A source that no longer packs is not a clean install: surface
             // it as drift (→ `Outdated`), consistent with `derive_dev_state`'s
             // Err arm — remediation is `grim update`.
             true
         }
     }
+}
+
+/// Warn that a local source will not pack. The path is lock text and `cause`
+/// quotes it, and a log line keeps a raw line break, which forges a line (CWE-117).
+fn warn_unpackable(path: &PathSource, what: &str, name: &str, cause: &str) {
+    tracing::warn!(
+        "local source '{}' for {what} '{}' is missing or invalid: {}",
+        escape_controls(path.as_str()),
+        registry_text(name),
+        escape_controls(cause)
+    );
 }
 
 /// State for a dev-install record (no declaration, no lock entry):
@@ -2255,11 +2933,8 @@ async fn derive_dev_state(
         Ok((_, layer)) if &crate::oci::Algorithm::Sha256.hash(&layer) != hash => ArtifactStatus::Outdated,
         Ok(_) => ArtifactStatus::Installed,
         Err(e) => {
-            tracing::warn!(
-                "local source '{path}' for dev-installed {} '{}' is missing or invalid: {e:#}",
-                record.kind,
-                record.name
-            );
+            let what = format!("dev-installed {}", record.kind);
+            warn_unpackable(path, &what, &record.name, &format!("{e:#}"));
             // A source that no longer packs is not a clean install: surface
             // it as outdated (rendered files still exist, so not `Missing`),
             // consistent with the drift arm above and the declared-path
@@ -2307,6 +2982,7 @@ mod tests {
             arming: Vec::new(),
             direct: true,
             required_by: None,
+            moved_nested_bundles: None,
         }
     }
 
@@ -2335,6 +3011,7 @@ mod tests {
                 grim_home: PathBuf::from("/tmp/gh"),
                 ..Default::default()
             },
+            invocation: Invocation::WALKED,
         };
         let declared = collect_declared(&scope);
         assert_eq!(declared.len(), 1);
@@ -2368,6 +3045,1363 @@ mod tests {
             downloads: None,
             badge: crate::install::status_badge::StatusBadge::NotInstalled,
         }
+    }
+
+    /// The reference a lock whose `parent` records `edges` onto a `dep` pinned
+    /// at `pin` resolves for `dep`.
+    fn dependency_reference_of(pin: &str, edges: &[&str]) -> Option<String> {
+        let mut text = format!(
+            "[metadata]\nlock_version = 1\ndeclaration_hash_version = 1\n\
+             declaration_hash = \"sha256:{hash}\"\ngenerated_by = \"grim 0.1.0\"\n\
+             generated_at = \"2026-04-19T00:00:00Z\"\n\n\
+             [[skill]]\nname = \"dep\"\npinned = \"{pin}\"\n\n\
+             [[skill]]\nname = \"parent\"\npinned = \"ghcr.io/acme/parent@sha256:{hash}\"\n",
+            hash = "d".repeat(64),
+        );
+        for id in edges {
+            text += &format!("\n[[skill.requires]]\nkind = \"skill\"\nname = \"dep\"\nid = \"{id}\"\n");
+        }
+        let lock = GrimoireLock::from_toml_str(&text).unwrap();
+        let pinned = find_locked(&lock, ArtifactKind::Skill, "dep")?.source.pinned()?;
+        dependency_reference(&lock, ArtifactKind::Skill, "dep", pinned).map(|id| id.to_string())
+    }
+
+    /// `outer` lists the bundle `inner`; `user` requires it; `pack` holds a
+    /// bundle `deep` that holds `mid`, so only `deep` is a nested row's parent.
+    fn nested_lock() -> GrimoireLock {
+        let pin = "d".repeat(64);
+        let bundle = |name: &str, transitive: &str, members: &[(&str, &str)]| {
+            let mut out = format!(
+                "\n[[bundle]]\nname = \"{name}\"\nrepo = \"ghcr.io/acme/{name}\"\ntag = \"1\"\n\
+                 pinned = \"ghcr.io/acme/{name}@sha256:{pin}\"\n{transitive}"
+            );
+            for (member, id) in members {
+                out += &format!("\n[[bundle.member]]\nkind = \"bundle\"\nname = \"{member}\"\nid = \"{id}\"\n");
+            }
+            out
+        };
+        let nested = "transitive = true\n";
+        let text = format!(
+            "[metadata]\nlock_version = 1\ndeclaration_hash_version = 1\n\
+             declaration_hash = \"sha256:{pin}\"\ngenerated_by = \"grim 0.1.0\"\n\
+             generated_at = \"2026-04-19T00:00:00Z\"\n\n\
+             [[skill]]\nname = \"user\"\npinned = \"ghcr.io/acme/user@sha256:{pin}\"\n\n\
+             [[skill.requires]]\nkind = \"bundle\"\nname = \"lone\"\nid = \"./lone:1\"\n{}{}{}{}{}{}",
+            bundle("deep", nested, &[("mid", "ghcr.io/acme/mid:1")]),
+            bundle("inner", nested, &[]),
+            bundle("lone", nested, &[]),
+            bundle("mid", nested, &[]),
+            bundle("outer", "", &[("inner", "ghcr.io/acme/inner:1")],),
+            bundle("pack", "", &[("deep", "ghcr.io/acme/deep:1")],),
+        );
+        GrimoireLock::from_toml_str(&text).unwrap()
+    }
+
+    fn bundle_row(name: &str) -> StatusEntry {
+        StatusEntry {
+            kind: ArtifactKind::Bundle,
+            name: name.to_string(),
+            ..check_entry(None)
+        }
+    }
+
+    fn skill_entry(name: &str) -> StatusEntry {
+        StatusEntry {
+            kind: ArtifactKind::Skill,
+            name: name.to_string(),
+            ..check_entry(None)
+        }
+    }
+
+    fn declaring_outer_pack_user() -> crate::config::declaration::DesiredSet {
+        let source = |name: &str| {
+            crate::config::declaration::DeclaredSource::Registry(
+                Identifier::parse(&format!("ghcr.io/acme/{name}:1")).unwrap(),
+            )
+        };
+        let mut set = crate::config::declaration::DesiredSet::default();
+        set.bundles.insert("outer".to_string(), source("outer"));
+        set.bundles.insert("pack".to_string(), source("pack"));
+        set.skills.insert("user".to_string(), source("user"));
+        set
+    }
+
+    /// `top` holds a chain of `depth` nested bundles.
+    fn chain_lock(depth: usize) -> (GrimoireLock, crate::config::declaration::DesiredSet) {
+        let pin = "d".repeat(64);
+        let link = |name: &str, next: Option<String>, transitive: bool| {
+            let nested = if transitive { "transitive = true\n" } else { "" };
+            let mut out = format!(
+                "\n[[bundle]]\nname = \"{name}\"\nrepo = \"ghcr.io/acme/{name}\"\ntag = \"1\"\n\
+                 pinned = \"ghcr.io/acme/{name}@sha256:{pin}\"\n{nested}"
+            );
+            if let Some(next) = next {
+                out += &format!(
+                    "\n[[bundle.member]]\nkind = \"bundle\"\nname = \"{next}\"\nid = \"ghcr.io/acme/{next}:1\"\n"
+                );
+            }
+            out
+        };
+        let mut text = format!(
+            "[metadata]\nlock_version = 1\ndeclaration_hash_version = 1\n\
+             declaration_hash = \"sha256:{pin}\"\ngenerated_by = \"grim 0.1.0\"\n\
+             generated_at = \"2026-04-19T00:00:00Z\"\n"
+        );
+        text += &link("top", Some("b0".to_string()), false);
+        for at in 0..depth {
+            let next = (at + 1 < depth).then(|| format!("b{}", at + 1));
+            text += &link(&format!("b{at}"), next, true);
+        }
+        let mut set = crate::config::declaration::DesiredSet::default();
+        set.bundles.insert(
+            "top".to_string(),
+            crate::config::declaration::DeclaredSource::Registry(Identifier::parse("ghcr.io/acme/top:1").unwrap()),
+        );
+        (GrimoireLock::from_toml_str(&text).unwrap(), set)
+    }
+
+    /// Rows as `check_updates` leaves them before any nested answer lands.
+    fn swept_rows() -> [StatusEntry; 3] {
+        let rows = [bundle_row("outer"), bundle_row("pack"), skill_entry("user")];
+        rows.map(|row| StatusEntry {
+            update_available: Some(false),
+            moved_nested_bundles: Some(Vec::new()),
+            ..row
+        })
+    }
+
+    /// Rows as `run` hands them to `check_updates`.
+    fn unchecked_rows() -> [StatusEntry; 3] {
+        [bundle_row("outer"), bundle_row("pack"), skill_entry("user")]
+    }
+
+    fn listed_names(entry: &StatusEntry) -> Option<Vec<&str>> {
+        let listing = entry.moved_nested_bundles.as_ref()?;
+        Some(listing.iter().map(|b| b.name.as_str()).collect())
+    }
+
+    fn every_bundle_moved(nested: &[NestedBundle]) -> BTreeMap<usize, Option<bool>> {
+        (0..nested.len()).map(|index| (index, Some(true))).collect()
+    }
+
+    /// A project run over a lock that matches its declaration.
+    const PROJECT: NoteScope = NoteScope {
+        grim: Invocation::WALKED,
+        fresh: true,
+    };
+
+    fn project_advice() -> NoteAdvice {
+        NoteAdvice::of(PROJECT, None)
+    }
+
+    /// `dep` is required by `p` at `p_tag` and by `q` at `q_tag`.
+    fn diamond_lock(p_tag: &str, q_tag: &str) -> GrimoireLock {
+        let pin = "d".repeat(64);
+        let parent = |name: &str, tag: &str| {
+            format!(
+                "\n[[skill]]\nname = \"{name}\"\npinned = \"ghcr.io/acme/{name}@sha256:{pin}\"\n\n\
+                 [[skill.requires]]\nkind = \"skill\"\nname = \"dep\"\nid = \"ghcr.io/acme/dep:{tag}\"\n"
+            )
+        };
+        let text = format!(
+            "[metadata]\nlock_version = 1\ndeclaration_hash_version = 1\n\
+             declaration_hash = \"sha256:{pin}\"\ngenerated_by = \"grim 0.1.0\"\n\
+             generated_at = \"2026-04-19T00:00:00Z\"\n\n\
+             [[skill]]\nname = \"dep\"\npinned = \"ghcr.io/acme/dep:{p_tag}@sha256:{pin}\"\n{}{}",
+            parent("p", p_tag),
+            parent("q", q_tag),
+        );
+        GrimoireLock::from_toml_str(&text).unwrap()
+    }
+
+    fn moved(entry: StatusEntry, direct: bool) -> StatusEntry {
+        StatusEntry {
+            update_available: Some(true),
+            direct,
+            ..entry
+        }
+    }
+
+    #[test]
+    fn a_global_note_names_the_global_flag() {
+        let advice = NoteAdvice::of(
+            NoteScope {
+                grim: Invocation::GLOBAL,
+                fresh: true,
+            },
+            None,
+        );
+        let notes = update_notes(&[moved(skill_entry("x"), true)], &advice);
+        assert_eq!(
+            notes,
+            ["update available: skill 'x': `grim --global update -- x` moves its pin"]
+        );
+
+        let mut lock = nested_lock();
+        lock.bundles.retain(|b| b.name == "inner");
+        let nested = nested_bundles(&lock);
+        let notes = apply_nested_answers(&nested, &BTreeMap::from([(0, Some(true))]), None, &mut [], 0, &advice);
+        assert!(notes[0].contains("`grim --global update -- inner`"), "{notes:?}");
+    }
+
+    /// Followed from another project's directory, a plain `grim` moves that
+    /// project's pin.
+    #[test]
+    fn a_config_note_names_the_config_path() {
+        let advice = NoteAdvice::of(
+            NoteScope {
+                grim: Invocation::config(std::path::Path::new("/srv/my team/grimoire.toml")),
+                fresh: true,
+            },
+            None,
+        );
+        let notes = update_notes(&[moved(skill_entry("x"), true)], &advice);
+        assert_eq!(
+            notes,
+            ["update available: skill 'x': `grim --config '/srv/my team/grimoire.toml' update -- x` moves its pin"]
+        );
+
+        let mut lock = nested_lock();
+        lock.bundles.retain(|b| b.name == "inner");
+        let nested = nested_bundles(&lock);
+        let notes = apply_nested_answers(&nested, &BTreeMap::from([(0, Some(true))]), None, &mut [], 0, &advice);
+        assert!(
+            notes[0].contains("`grim --config '/srv/my team/grimoire.toml' update -- inner`"),
+            "{notes:?}"
+        );
+    }
+
+    #[test]
+    fn a_stale_lock_names_grim_lock_first_and_promises_no_update() {
+        let config = Invocation::config(std::path::Path::new("/srv/team/grimoire.toml"));
+        for (grim, lock_cmd) in [
+            (Invocation::WALKED, "`grim lock`".to_string()),
+            (Invocation::GLOBAL, "`grim --global lock`".to_string()),
+            (config.clone(), format!("`{config} lock`")),
+        ] {
+            let advice = NoteAdvice::of(NoteScope { grim, fresh: false }, None);
+            let notes = update_notes(&[moved(skill_entry("x"), true)], &advice);
+            assert_eq!(notes.len(), 1, "{notes:?}");
+            assert!(notes[0].contains(&format!("run {lock_cmd} first")), "{notes:?}");
+            assert!(!notes[0].contains("update --"), "{notes:?}");
+
+            let mut lock = nested_lock();
+            lock.bundles.retain(|b| b.name == "inner");
+            let nested = nested_bundles(&lock);
+            let notes = apply_nested_answers(&nested, &BTreeMap::from([(0, Some(true))]), None, &mut [], 0, &advice);
+            assert!(notes[0].contains(&format!("run {lock_cmd} first")), "{notes:?}");
+            assert!(!notes[0].contains("update --"), "{notes:?}");
+        }
+    }
+
+    /// `grim update -- dep` re-resolves both edges, and when only one tag moved
+    /// they disagree and the run refuses, so the note promises nothing.
+    #[test]
+    fn a_key_two_references_require_promises_no_update() {
+        let lock = diamond_lock("1", "2");
+        let advice = NoteAdvice::of(PROJECT, Some(&lock));
+
+        let notes = update_notes(&[moved(skill_entry("dep"), false)], &advice);
+
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("more than one reference requires it"), "{notes:?}");
+        assert!(!notes[0].contains("grim update"), "{notes:?}");
+        let direct = update_notes(&[moved(skill_entry("dep"), true)], &advice);
+        assert!(direct[0].contains("`grim update -- dep` moves its pin"), "{direct:?}");
+    }
+
+    /// A nested bundle two bundles list at different tags has no single
+    /// reference a named update could follow, so its note promises nothing.
+    #[test]
+    fn a_nested_bundle_two_references_list_promises_no_update() {
+        let mut lock = nested_lock();
+        let pack = lock.bundles.iter_mut().find(|b| b.name == "pack").unwrap();
+        let mut second = pack.members[0].clone();
+        second.name = "inner".to_string();
+        second.id = "ghcr.io/acme/inner:2".to_string();
+        pack.members.push(second);
+        let advice = NoteAdvice::of(PROJECT, Some(&lock));
+        lock.bundles.retain(|b| b.name == "inner");
+        let nested = nested_bundles(&lock);
+
+        let notes = apply_nested_answers(&nested, &BTreeMap::from([(0, Some(true))]), None, &mut [], 0, &advice);
+
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("more than one reference requires it"), "{notes:?}");
+        assert!(!notes[0].contains("grim update"), "{notes:?}");
+    }
+
+    #[test]
+    fn one_reference_from_two_parents_is_not_shared() {
+        let lock = diamond_lock("1", "1");
+        let advice = NoteAdvice::of(PROJECT, Some(&lock));
+
+        let notes = update_notes(&[moved(skill_entry("dep"), false)], &advice);
+
+        assert_eq!(
+            notes,
+            ["update available: skill 'dep': `grim update -- dep` moves its pin"]
+        );
+    }
+
+    /// The row of [`diamond_lock`]'s `dep`, which only its parents reach.
+    fn dependency_row() -> StatusEntry {
+        StatusEntry {
+            direct: false,
+            ..skill_entry("dep")
+        }
+    }
+
+    /// `p` asks `dep:1` and `q` asks `dep:2`, each re-resolved for the one row.
+    fn diamond_checks() -> Vec<UpdateCheck> {
+        ["1", "2"]
+            .iter()
+            .map(|tag| UpdateCheck {
+                index: 0,
+                declared: Identifier::parse(&format!("ghcr.io/acme/dep:{tag}")).unwrap(),
+                locked: Digest::Sha256("d".repeat(64)),
+            })
+            .collect()
+    }
+
+    /// A registry where `dep:1` and `dep:2` name the given digests.
+    async fn diamond_registry(one: &Digest, two: &Digest) -> Arc<dyn OciAccess> {
+        let access = ScriptedAccess::default();
+        let repo = Identifier::new_registry("acme/dep", "ghcr.io");
+        access.inner.put_tag(&repo, "1", one).await.unwrap();
+        access.inner.put_tag(&repo, "2", two).await.unwrap();
+        Arc::new(access)
+    }
+
+    /// No tag moved, and the pin is one reference's digest: `grim update` meets two
+    /// digests and exits 78, so the row answers nothing and the note says why.
+    #[tokio::test]
+    async fn a_key_whose_references_name_different_digests_reads_null() {
+        let lock = diamond_lock("1", "2");
+        let pin = Digest::Sha256("d".repeat(64));
+        let other = Algorithm::Sha256.hash(b"two");
+        for (one, two) in [(&pin, &other), (&other, &pin)] {
+            let access = diamond_registry(one, two).await;
+            let mut entries = [dependency_row()];
+
+            let notes = check_updates(
+                &access,
+                diamond_checks(),
+                Some(&lock),
+                None,
+                &mut entries,
+                &CheckLimits::default(),
+                PROJECT,
+            )
+            .await;
+
+            assert_eq!(entries[0].update_available, None, "{notes:?}");
+            assert_eq!(notes.len(), 1, "{notes:?}");
+            assert!(
+                notes[0].contains("ghcr.io/acme/dep:1 and ghcr.io/acme/dep:2 name different digests"),
+                "{notes:?}"
+            );
+            assert!(
+                notes[0].contains("`grim update` exits 78 until grimoire.toml declares one"),
+                "{notes:?}"
+            );
+            assert!(!notes[0].contains("tag moved"), "{notes:?}");
+        }
+    }
+
+    /// Both references moved to one digest: an update is there, and only the
+    /// shared key's note promises no command.
+    #[tokio::test]
+    async fn a_key_whose_references_agree_answers_for_its_pin() {
+        let lock = diamond_lock("1", "2");
+        let moved = Algorithm::Sha256.hash(b"moved");
+        let access = diamond_registry(&moved, &moved).await;
+        let mut entries = [dependency_row()];
+
+        let notes = check_updates(
+            &access,
+            diamond_checks(),
+            Some(&lock),
+            None,
+            &mut entries,
+            &CheckLimits::default(),
+            PROJECT,
+        )
+        .await;
+
+        assert_eq!(entries[0].update_available, Some(true));
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].contains("its tag moved, and more than one reference requires it"),
+            "{notes:?}"
+        );
+    }
+
+    /// A cap that sends one of a row's two references leaves nothing to compare.
+    #[tokio::test]
+    async fn a_row_the_cap_cuts_short_reads_null() {
+        let lock = diamond_lock("1", "2");
+        let pin = Digest::Sha256("d".repeat(64));
+        let access = diamond_registry(&pin, &Algorithm::Sha256.hash(b"two")).await;
+        let mut entries = [dependency_row()];
+        let limits = CheckLimits {
+            checks: 1,
+            ..CheckLimits::default()
+        };
+
+        let notes = check_updates(
+            &access,
+            diamond_checks(),
+            Some(&lock),
+            None,
+            &mut entries,
+            &limits,
+            PROJECT,
+        )
+        .await;
+
+        assert_eq!(entries[0].update_available, None);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    /// A registry that answers every tag, except it fails the `down` tags, never
+    /// returns on `stuck` ones, and counts the calls that reach it. With
+    /// `stuck_catalog` its catalog listing never returns either.
+    #[derive(Default)]
+    struct ScriptedAccess {
+        inner: crate::oci::access::memory_registry::MemoryRegistry,
+        down: BTreeSet<String>,
+        stuck: BTreeSet<String>,
+        stuck_catalog: bool,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl OciAccess for ScriptedAccess {
+        async fn resolve_digest(
+            &self,
+            id: &Identifier,
+            op: crate::oci::access::Operation,
+        ) -> Result<Option<Digest>, AccessError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let name = id.repository().rsplit('/').next().unwrap_or_default();
+            if self.stuck.contains(name) {
+                std::future::pending::<()>().await;
+            }
+            if self.down.contains(name) {
+                return Err(AccessError::with_identifier(
+                    id.clone(),
+                    crate::oci::access::error::AccessErrorKind::OfflineMiss,
+                ));
+            }
+            self.inner.resolve_digest(id, op).await
+        }
+        async fn fetch_manifest(
+            &self,
+            id: &PinnedIdentifier,
+        ) -> Result<Option<crate::oci::manifest::OciManifest>, AccessError> {
+            self.inner.fetch_manifest(id).await
+        }
+        async fn fetch_blob(
+            &self,
+            repo: &Identifier,
+            digest: &Digest,
+            max: u64,
+        ) -> Result<Option<Vec<u8>>, AccessError> {
+            self.inner.fetch_blob(repo, digest, max).await
+        }
+        async fn list_tags(&self, id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
+            self.inner.list_tags(id).await
+        }
+        async fn list_catalog(&self, registry: &str) -> Result<crate::oci::access::CatalogListing, AccessError> {
+            if self.stuck_catalog {
+                std::future::pending::<()>().await;
+            }
+            self.inner.list_catalog(registry).await
+        }
+        async fn push_blob(&self, repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {
+            self.inner.push_blob(repo, bytes).await
+        }
+        async fn push_manifest(
+            &self,
+            repo: &Identifier,
+            m: &crate::oci::manifest::OciManifest,
+        ) -> Result<Digest, AccessError> {
+            self.inner.push_manifest(repo, m).await
+        }
+        async fn put_tag(&self, repo: &Identifier, tag: &str, digest: &Digest) -> Result<(), AccessError> {
+            self.inner.put_tag(repo, tag, digest).await
+        }
+    }
+
+    /// A registry where every bundle of [`nested_lock`] still resolves to its pin,
+    /// but each of `moved` now answers a new digest.
+    async fn nested_registry(moved: &[&str]) -> ScriptedAccess {
+        let access = ScriptedAccess::default();
+        for name in ["deep", "inner", "lone", "mid", "outer", "pack", "user"] {
+            let repo = Identifier::new_registry(format!("acme/{name}"), "ghcr.io");
+            let digest = if moved.contains(&name) {
+                Algorithm::Sha256.hash(name.as_bytes())
+            } else {
+                Digest::Sha256("d".repeat(64))
+            };
+            access.inner.put_tag(&repo, "1", &digest).await.unwrap();
+        }
+        access
+    }
+
+    /// One check per row of [`swept_rows`], each locked at the digest it answers.
+    fn row_checks() -> Vec<UpdateCheck> {
+        ["outer", "pack", "user"]
+            .iter()
+            .enumerate()
+            .map(|(index, name)| UpdateCheck {
+                index,
+                declared: Identifier::parse(&format!("ghcr.io/acme/{name}:1")).unwrap(),
+                locked: Digest::Sha256("d".repeat(64)),
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_rows_own_pin_answers_for_it_beside_a_moved_nested_bundle() {
+        let lock = nested_lock();
+        let set = declaring_outer_pack_user();
+        let prov = Provenance::new(&set, Some(&lock));
+        let access: Arc<dyn OciAccess> = Arc::new(nested_registry(&["mid"]).await);
+        let mut entries = unchecked_rows();
+
+        let notes = check_updates(
+            &access,
+            row_checks(),
+            Some(&lock),
+            prov.graph(),
+            &mut entries,
+            &CheckLimits::default(),
+            PROJECT,
+        )
+        .await;
+
+        let flags: Vec<Option<bool>> = entries.iter().map(|e| e.update_available).collect();
+        assert_eq!(
+            flags,
+            [Some(false), Some(false), Some(false)],
+            "each row answers for its own pin"
+        );
+        assert_eq!(listed_names(&entries[0]), Some(vec![]));
+        assert_eq!(
+            entries[1].moved_nested_bundles,
+            Some(vec![MovedNestedBundle {
+                name: "mid".to_string(),
+                reference: "ghcr.io/acme/mid:1".to_string(),
+            }])
+        );
+        assert_eq!(listed_names(&entries[2]), Some(vec![]));
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("bundle 'mid'"), "{notes:?}");
+    }
+
+    #[tokio::test]
+    async fn the_sweep_names_a_moved_row_for_plain_output() {
+        let lock = nested_lock();
+        let set = declaring_outer_pack_user();
+        let prov = Provenance::new(&set, Some(&lock));
+        let access: Arc<dyn OciAccess> = Arc::new(nested_registry(&["user"]).await);
+        let mut entries = unchecked_rows();
+
+        let notes = check_updates(
+            &access,
+            row_checks(),
+            Some(&lock),
+            prov.graph(),
+            &mut entries,
+            &CheckLimits::default(),
+            PROJECT,
+        )
+        .await;
+
+        assert_eq!(entries[2].update_available, Some(true));
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("skill 'user'"), "{notes:?}");
+    }
+
+    #[tokio::test]
+    async fn only_a_rows_own_failed_resolve_reads_null() {
+        let lock = nested_lock();
+        let set = declaring_outer_pack_user();
+        let prov = Provenance::new(&set, Some(&lock));
+        let mut access = nested_registry(&[]).await;
+        access.down = BTreeSet::from(["inner".to_string(), "user".to_string()]);
+        let access: Arc<dyn OciAccess> = Arc::new(access);
+        let mut entries = unchecked_rows();
+
+        check_updates(
+            &access,
+            row_checks(),
+            Some(&lock),
+            prov.graph(),
+            &mut entries,
+            &CheckLimits::default(),
+            PROJECT,
+        )
+        .await;
+
+        let flags: Vec<Option<bool>> = entries.iter().map(|e| e.update_available).collect();
+        assert_eq!(
+            flags,
+            [Some(false), Some(false), None],
+            "only `user` failed its own resolve"
+        );
+        assert_eq!(
+            listed_names(&entries[0]),
+            None,
+            "`inner` has no answer, and that is not `[]`"
+        );
+        assert_eq!(listed_names(&entries[1]), Some(vec![]));
+    }
+
+    /// A clean sweep never walks, so its `[]` comes from the sweep alone.
+    #[tokio::test]
+    async fn a_clean_sweep_reads_empty_on_every_row() {
+        let lock = nested_lock();
+        let set = declaring_outer_pack_user();
+        let prov = Provenance::new(&set, Some(&lock));
+        let access: Arc<dyn OciAccess> = Arc::new(nested_registry(&[]).await);
+        let mut entries = unchecked_rows();
+
+        let notes = check_updates(
+            &access,
+            row_checks(),
+            Some(&lock),
+            prov.graph(),
+            &mut entries,
+            &CheckLimits::default(),
+            PROJECT,
+        )
+        .await;
+
+        assert!(notes.is_empty(), "{notes:?}");
+        for entry in &entries {
+            assert_eq!(listed_names(entry), Some(vec![]), "{}", entry.name);
+        }
+    }
+
+    #[test]
+    fn a_failed_nested_resolve_never_reads_as_held_still() {
+        let lock = nested_lock();
+        let set = declaring_outer_pack_user();
+        let prov = Provenance::new(&set, Some(&lock));
+        let mut entries = swept_rows();
+        let nested = nested_bundles(&lock);
+        let index = |name: &str| nested.iter().position(|b| b.name == name).unwrap();
+        // `deep` failed and `mid` moved, both under `pack`; `inner` failed alone
+        // under `outer`; `lone` held still under `user`.
+        let answers = BTreeMap::from([
+            (index("deep"), None),
+            (index("inner"), None),
+            (index("lone"), Some(false)),
+            (index("mid"), Some(true)),
+        ]);
+
+        let notes = apply_nested_answers(
+            &nested,
+            &answers,
+            prov.graph(),
+            &mut entries,
+            NESTED_LISTING_BUDGET,
+            &project_advice(),
+        );
+
+        assert_eq!(
+            listed_names(&entries[0]),
+            None,
+            "no answer, and nothing known to have moved"
+        );
+        assert_eq!(listed_names(&entries[1]), Some(vec!["mid"]), "what moved stays known");
+        assert_eq!(listed_names(&entries[2]), Some(vec![]));
+        let flags: Vec<Option<bool>> = entries.iter().map(|e| e.update_available).collect();
+        assert_eq!(
+            flags,
+            [Some(false), Some(false), Some(false)],
+            "a nested answer never touches a row's own"
+        );
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("`grim update -- mid`"), "{notes:?}");
+    }
+
+    #[test]
+    fn a_nested_bundle_lands_on_the_rows_nearest_it() {
+        let lock = nested_lock();
+        let set = declaring_outer_pack_user();
+        let prov = Provenance::new(&set, Some(&lock));
+        let mut entries = swept_rows();
+        let nested = nested_bundles(&lock);
+
+        apply_nested_answers(
+            &nested,
+            &every_bundle_moved(&nested),
+            prov.graph(),
+            &mut entries,
+            NESTED_LISTING_BUDGET,
+            &project_advice(),
+        );
+
+        assert_eq!(listed_names(&entries[0]), Some(vec!["inner"]));
+        assert_eq!(
+            listed_names(&entries[1]),
+            Some(vec!["deep", "mid"]),
+            "a nested parent has no row"
+        );
+        assert_eq!(listed_names(&entries[2]), Some(vec!["lone"]));
+    }
+
+    #[test]
+    fn a_row_stops_the_walk_so_a_bundle_lands_only_on_its_nearest_row() {
+        let lock = nested_lock();
+        let set = declaring_outer_pack_user();
+        let prov = Provenance::new(&set, Some(&lock));
+        let nested = nested_bundles(&lock);
+        // `deep` given a row of its own takes `mid` off `pack`.
+        let mut entries = vec![bundle_row("pack"), bundle_row("deep")];
+        for entry in &mut entries {
+            entry.moved_nested_bundles = Some(Vec::new());
+        }
+
+        apply_nested_answers(
+            &nested,
+            &every_bundle_moved(&nested),
+            prov.graph(),
+            &mut entries,
+            NESTED_LISTING_BUDGET,
+            &project_advice(),
+        );
+
+        assert_eq!(listed_names(&entries[0]), Some(vec![]));
+        assert_eq!(listed_names(&entries[1]), Some(vec!["mid"]));
+    }
+
+    #[test]
+    fn a_graph_that_cannot_be_computed_reads_null_and_keeps_the_note() {
+        let lock = nested_lock();
+        let nested = nested_bundles(&lock);
+        let mut entries = swept_rows();
+
+        let notes = apply_nested_answers(
+            &nested,
+            &every_bundle_moved(&nested),
+            None,
+            &mut entries,
+            NESTED_LISTING_BUDGET,
+            &project_advice(),
+        );
+
+        assert!(entries.iter().all(|e| e.moved_nested_bundles.is_none()), "{entries:?}");
+        assert_eq!(notes.len(), nested.len(), "{notes:?}");
+    }
+
+    #[test]
+    fn nothing_moved_costs_no_walk_and_reads_empty() {
+        let lock = nested_lock();
+        let nested = nested_bundles(&lock);
+        let mut entries = swept_rows();
+        let answers: BTreeMap<usize, Option<bool>> = (0..nested.len()).map(|index| (index, Some(false))).collect();
+
+        // No graph and no budget: either would read null if the walk ran.
+        let notes = apply_nested_answers(&nested, &answers, None, &mut entries, 0, &project_advice());
+
+        assert!(notes.is_empty(), "{notes:?}");
+        assert!(entries.iter().all(|e| e.moved_nested_bundles == Some(Vec::new())));
+    }
+
+    /// The walk costs one unit per edge plus the bytes it lists, so a chain costs
+    /// its length: the exact budget passes and one unit less does not.
+    #[test]
+    fn the_nested_walk_is_linear_in_a_chain() {
+        for depth in [25_usize, 50, 100, 200, 400] {
+            let (lock, set) = chain_lock(depth);
+            let prov = Provenance::new(&set, Some(&lock));
+            let graph = prov.graph().unwrap();
+            let nested = nested_bundles(&lock);
+            assert_eq!(nested.len(), depth);
+            let listed: Vec<MovedNestedBundle> = nested
+                .iter()
+                .map(|b| MovedNestedBundle {
+                    name: b.name.clone(),
+                    reference: b.check.as_ref().unwrap().0.to_string(),
+                })
+                .collect();
+            let open: BTreeMap<&str, Option<MovedNestedBundle>> = nested
+                .iter()
+                .zip(&listed)
+                .map(|(b, l)| (b.name.as_str(), Some(l.clone())))
+                .collect();
+            let entries = [bundle_row("top")];
+            let bytes: usize = listed.iter().map(|l| l.name.len() + l.reference.len()).sum();
+            let exact = depth + bytes;
+            assert!(exact <= 32 * depth, "depth {depth} takes {exact} units");
+
+            let listings = nested_listings(graph, &entries, &open, exact).expect("the exact budget is enough");
+            assert_eq!(listings[0].as_ref().map(Vec::len), Some(depth));
+            assert!(nested_listings(graph, &entries, &open, exact - 1).is_none());
+        }
+    }
+
+    #[test]
+    fn a_listing_past_its_budget_reads_null_on_every_row() {
+        let lock = nested_lock();
+        let set = declaring_outer_pack_user();
+        let prov = Provenance::new(&set, Some(&lock));
+        let nested = nested_bundles(&lock);
+        let mut entries = swept_rows();
+
+        let notes = apply_nested_answers(
+            &nested,
+            &every_bundle_moved(&nested),
+            prov.graph(),
+            &mut entries,
+            3,
+            &project_advice(),
+        );
+
+        assert!(entries.iter().all(|e| e.moved_nested_bundles.is_none()), "{entries:?}");
+        assert_eq!(notes.len(), nested.len(), "the notes still name every bundle");
+    }
+
+    /// Bytes count as well as edges: one huge reference repeated per row would
+    /// otherwise turn an 8 MiB lock into a report of many gigabytes.
+    #[test]
+    fn a_huge_reference_spends_the_budget_by_its_size() {
+        let lock = nested_lock();
+        let set = declaring_outer_pack_user();
+        let prov = Provenance::new(&set, Some(&lock));
+        let graph = prov.graph().unwrap();
+        let huge = MovedNestedBundle {
+            name: "inner".to_string(),
+            reference: "r".repeat(1024),
+        };
+        let open = BTreeMap::from([("inner", Some(huge))]);
+        let entries = swept_rows();
+
+        assert!(nested_listings(graph, &entries, &open, 512).is_none());
+        assert!(nested_listings(graph, &entries, &open, 2048).is_some());
+    }
+
+    /// A lock the resolver would refuse can still hold a loop of nested bundles,
+    /// and `status` reads it anyway: the walk ends and the loop's bundles land.
+    #[test]
+    fn a_cycle_of_nested_bundles_ends_the_walk() {
+        let mut children: BTreeMap<NodeKey, BTreeSet<NodeKey>> = BTreeMap::new();
+        let bundle = |name: &str| (ArtifactKind::Bundle, name.to_string());
+        children.entry(bundle("top")).or_default().insert(bundle("a"));
+        children.entry(bundle("a")).or_default().insert(bundle("b"));
+        children.entry(bundle("b")).or_default().insert(bundle("a"));
+        let graph = EffectiveGraph {
+            nodes: BTreeMap::new(),
+            children,
+        };
+        let open = BTreeMap::from([("a", None), ("b", None)]);
+        let entries = [bundle_row("top")];
+
+        let listings = nested_listings(&graph, &entries, &open, 64).unwrap();
+
+        assert_eq!(listings, vec![None], "both unanswered, and the walk came back");
+    }
+
+    #[test]
+    fn a_nested_bundle_reads_its_recorded_reference() {
+        let lock = nested_lock();
+
+        let nested = nested_bundles(&lock);
+
+        let (declared, locked) = nested
+            .iter()
+            .find(|b| b.name == "inner")
+            .unwrap()
+            .check
+            .clone()
+            .unwrap();
+        assert_eq!(declared.to_string(), "ghcr.io/acme/inner:1");
+        assert_eq!(locked, Digest::Sha256("d".repeat(64)));
+    }
+
+    #[test]
+    fn a_digest_bearing_edge_holds_a_nested_bundle() {
+        let pin = format!("sha256:{}", "e".repeat(64));
+        let mut lock = nested_lock();
+        lock.bundles.iter_mut().find(|b| b.name == "outer").unwrap().members[0].id =
+            format!("ghcr.io/acme/inner:1@{pin}");
+
+        let nested = nested_bundles(&lock);
+
+        let (declared, _) = nested
+            .iter()
+            .find(|b| b.name == "inner")
+            .unwrap()
+            .check
+            .clone()
+            .unwrap();
+        assert_eq!(declared.digest().map(|d| d.to_string()), Some(pin));
+    }
+
+    #[test]
+    fn a_nested_bundle_name_is_neutralized_in_its_note() {
+        let mut lock = nested_lock();
+        lock.bundles.retain(|b| b.name == "inner");
+        lock.bundles[0].name = "in\u{1b}[2Jner".to_string();
+        let nested = nested_bundles(&lock);
+
+        let notes = apply_nested_answers(
+            &nested,
+            &BTreeMap::from([(0, Some(true))]),
+            None,
+            &mut [],
+            0,
+            &project_advice(),
+        );
+
+        assert!(notes[0].contains("bundle 'in\\u{1b}[2Jner'"), "{notes:?}");
+        assert!(!notes[0].contains('\u{1b}'), "{notes:?}");
+    }
+
+    #[test]
+    fn plain_output_names_each_row_with_an_update() {
+        let mut entries = swept_rows();
+        entries[1].update_available = Some(true);
+        entries[2].update_available = None;
+        entries[1].name = "pa\u{1b}[2Jck".to_string();
+
+        let notes = update_notes(&entries, &project_advice());
+
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("bundle 'pa\\u{1b}[2Jck'"), "{notes:?}");
+        assert!(notes[0].contains("`grim update -- <name>`"), "{notes:?}");
+    }
+
+    /// The warnings of a `--check` that stopped short say the rows were not
+    /// checked: `null` is the JSON word, and a plain reader has no such column.
+    #[test]
+    fn the_warnings_of_a_check_cut_short_say_not_checked() {
+        let late = late_warning(Duration::from_secs(30), 2, 1);
+
+        assert!(late.contains("2 rows and 1 nested bundle"), "{late}");
+        assert!(late.contains("were not checked"), "{late}");
+        assert!(!late.contains("null"), "{late}");
+    }
+
+    /// A host that accepts the connection and stays silent reads `null` at the
+    /// deadline instead of hanging the report.
+    #[tokio::test]
+    async fn a_silent_registry_reads_null_at_the_deadline() {
+        let mut access = nested_registry(&[]).await;
+        access.stuck = BTreeSet::from(["pack".to_string(), "deep".to_string()]);
+        let access: Arc<dyn OciAccess> = Arc::new(access);
+        let lock = nested_lock();
+        let set = declaring_outer_pack_user();
+        let prov = Provenance::new(&set, Some(&lock));
+        let mut entries = unchecked_rows();
+        let limits = CheckLimits {
+            per_call: Duration::from_millis(20),
+            ..CheckLimits::default()
+        };
+
+        let sweep = check_updates(
+            &access,
+            row_checks(),
+            Some(&lock),
+            prov.graph(),
+            &mut entries,
+            &limits,
+            PROJECT,
+        );
+        tokio::time::timeout(Duration::from_secs(5), sweep)
+            .await
+            .expect("every call carries a deadline");
+
+        let flags: Vec<Option<bool>> = entries.iter().map(|e| e.update_available).collect();
+        assert_eq!(flags, [Some(false), None, Some(false)]);
+        assert_eq!(listed_names(&entries[1]), None, "`deep` under `pack` timed out too");
+    }
+
+    /// A host that holds every call open costs the sweep its run deadline, not
+    /// calls times the per-call one, and what it never answered reads `null`.
+    #[tokio::test]
+    async fn a_silent_registry_ends_the_sweep_at_the_run_deadline() {
+        let mut access = nested_registry(&[]).await;
+        access.stuck = BTreeSet::from(["pack".to_string(), "deep".to_string()]);
+        let access: Arc<dyn OciAccess> = Arc::new(access);
+        let lock = nested_lock();
+        let set = declaring_outer_pack_user();
+        let prov = Provenance::new(&set, Some(&lock));
+        let mut entries = unchecked_rows();
+        let limits = CheckLimits {
+            per_call: Duration::from_secs(60),
+            run: Duration::from_millis(50),
+            ..CheckLimits::default()
+        };
+        let capture = crate::catalog::test_hosts::LogCapture::start();
+
+        let sweep = check_updates(
+            &access,
+            row_checks(),
+            Some(&lock),
+            prov.graph(),
+            &mut entries,
+            &limits,
+            PROJECT,
+        );
+        tokio::time::timeout(Duration::from_secs(5), sweep)
+            .await
+            .expect("the run deadline ends the sweep");
+
+        let flags: Vec<Option<bool>> = entries.iter().map(|e| e.update_available).collect();
+        assert_eq!(flags, [Some(false), None, Some(false)]);
+        assert_eq!(listed_names(&entries[1]), None, "`deep` under `pack` got no answer");
+        let logs = capture.text();
+        assert!(
+            logs.contains("1 row") && logs.contains("got no answer in time"),
+            "{logs}"
+        );
+    }
+
+    /// A catalog listing that never returns costs `--check` the run deadline the
+    /// re-resolves share, not forever, and the deprecation fields stay `null`.
+    #[tokio::test]
+    async fn a_stuck_catalog_load_ends_at_the_run_deadline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+        let paths = crate::store::GrimPaths::new(tmp.path().to_path_buf());
+        let state = InstallState::empty(tmp.path());
+        let roots = AnchorRoots::resolve(PathBuf::new(), &ctx);
+        let badges = BadgeContext {
+            lock: None,
+            state: &state,
+            roots: &roots,
+            active: &ClientTarget::ALL,
+            target: None,
+        };
+        let registries = vec![crate::config::registry_resolve::ResolvedRegistry {
+            insecure: false,
+            url: "ghcr.io".to_string(),
+            alias: None,
+            is_default: true,
+            kind: crate::config::registry_resolve::SourceKind::Registry,
+            filter: crate::config::registry_filter::RegistryFilter::default(),
+        }];
+        let access: Arc<dyn OciAccess> = Arc::new(ScriptedAccess {
+            stuck_catalog: true,
+            ..ScriptedAccess::default()
+        });
+        let limits = CheckLimits {
+            run: Duration::from_millis(50),
+            ..CheckLimits::default()
+        };
+        let mut entries = [check_entry(Some(pinned('a')))];
+        let capture = crate::catalog::test_hosts::LogCapture::start();
+
+        let load = crate::catalog::load_catalog(
+            &paths,
+            &registries,
+            "",
+            &access,
+            &badges,
+            false,
+            false,
+            crate::catalog::CatalogScope::Complete,
+        );
+        tokio::time::timeout(Duration::from_secs(5), apply_catalog_load(&mut entries, load, &limits))
+            .await
+            .expect("the run deadline ends the catalog load");
+
+        assert_eq!(
+            (entries[0].deprecated.as_ref(), entries[0].replaced_by.as_ref()),
+            (None, None)
+        );
+        let logs = capture.text();
+        assert!(logs.contains("catalog load failed"), "{logs}");
+    }
+
+    /// The cap counts rows before nested bundles, so a declared row keeps its
+    /// answer and what the cap turned away reads `null`, never `false`.
+    #[tokio::test]
+    async fn the_sweep_stops_at_its_cap_and_reads_null_past_it() {
+        let lock = nested_lock();
+        let set = declaring_outer_pack_user();
+        let prov = Provenance::new(&set, Some(&lock));
+        let access = Arc::new(nested_registry(&[]).await);
+        let shared: Arc<dyn OciAccess> = access.clone();
+        let mut entries = unchecked_rows();
+        let limits = CheckLimits {
+            checks: 2,
+            ..CheckLimits::default()
+        };
+
+        check_updates(
+            &shared,
+            row_checks(),
+            Some(&lock),
+            prov.graph(),
+            &mut entries,
+            &limits,
+            PROJECT,
+        )
+        .await;
+
+        assert_eq!(access.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let flags: Vec<Option<bool>> = entries.iter().map(|e| e.update_available).collect();
+        assert_eq!(flags, [Some(false), Some(false), None]);
+        assert!(
+            entries.iter().all(|e| e.moved_nested_bundles.is_none()),
+            "no nested bundle was asked"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reference_no_registry_can_answer_reads_null_with_no_request() {
+        let access = Arc::new(ScriptedAccess::default());
+        let shared: Arc<dyn OciAccess> = access.clone();
+        let hostile = Identifier::new_registry("acme/x", "ghcr.io").clone_with_tag("..\\..\\v1\\x?y=1");
+        let digest = Digest::Sha256("d".repeat(64));
+        let held = Identifier::parse(&format!("ghcr.io/acme/x:a b@{digest}")).unwrap();
+        let mut entries = [skill_entry("tag"), skill_entry("held")];
+        let checks = vec![
+            UpdateCheck {
+                index: 0,
+                declared: hostile,
+                locked: digest.clone(),
+            },
+            UpdateCheck {
+                index: 1,
+                declared: held,
+                locked: digest,
+            },
+        ];
+
+        check_updates(
+            &shared,
+            checks,
+            None,
+            None,
+            &mut entries,
+            &CheckLimits::default(),
+            PROJECT,
+        )
+        .await;
+
+        assert_eq!(
+            entries[0].update_available, None,
+            "a false `false` would read as a vanished tag"
+        );
+        assert_eq!(entries[1].update_available, Some(false), "a digest answers for itself");
+        assert_eq!(access.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// Lock text reaches stderr through these warnings.
+    #[test]
+    fn a_control_character_in_a_hook_row_is_neutralized_in_its_warning() {
+        let capture = crate::catalog::test_hosts::LogCapture::start();
+        let verdict = HookArming {
+            client: "cla\nude".to_string(),
+            cause: HookArmingCause::GrimHomeRelative,
+            message: "see\rthis".to_string(),
+            transient: false,
+        };
+
+        warn_unarmed(ArtifactKind::Hook, "evil\u{1b}[2J\nname", &[verdict]);
+
+        let logs = capture.text();
+        assert!(logs.contains("hook 'evil\\u{1b}[2J\\nname'"), "{logs}");
+        assert!(logs.contains("client 'cla\\nude'"), "{logs}");
+        assert!(logs.contains("see\\rthis"), "{logs}");
+        assert_eq!(logs.trim_end().lines().count(), 1, "{logs}");
+    }
+
+    #[test]
+    fn a_redundant_note_neutralizes_both_names() {
+        let hostile = "evil\u{1b}[2J\nname";
+        let pin = "d".repeat(64);
+        let text = format!(
+            "[metadata]\nlock_version = 1\ndeclaration_hash_version = 1\n\
+             declaration_hash = \"sha256:{pin}\"\ngenerated_by = \"grim 0.1.0\"\n\
+             generated_at = \"2026-04-19T00:00:00Z\"\n\n\
+             [[skill]]\nname = \"evil\\u001b[2J\\nname\"\npinned = \"ghcr.io/acme/evil@sha256:{pin}\"\n\n\
+             [[skill.requires]]\nkind = \"skill\"\nname = \"t\"\nid = \"ghcr.io/acme/t:1\"\n\n\
+             [[skill]]\nname = \"t\"\npinned = \"ghcr.io/acme/t@sha256:{pin}\"\n"
+        );
+        let lock = GrimoireLock::from_toml_str(&text).unwrap();
+        let source = |name: &str| {
+            crate::config::declaration::DeclaredSource::Registry(
+                Identifier::parse(&format!("ghcr.io/acme/{name}:1")).unwrap(),
+            )
+        };
+        let mut set = crate::config::declaration::DesiredSet::default();
+        set.skills.insert(hostile.to_string(), source("evil"));
+        set.skills.insert("t".to_string(), source("t"));
+        let prov = Provenance::new(&set, Some(&lock));
+
+        let note = prov
+            .redundant_note(&(ArtifactKind::Skill, "t".to_string()))
+            .expect("the edge asks for what the declaration pins");
+
+        assert!(note.contains("skill/evil\\u{1b}[2J\\nname"), "{note}");
+        assert!(!note.contains('\u{1b}') && !note.contains('\n'), "{note:?}");
+    }
+
+    /// Removing the declaration hands `dep` to both edges, which disagree, so
+    /// the conflict it held off comes back.
+    #[test]
+    fn a_declaration_that_overrides_an_edge_gets_no_removal_note() {
+        let source = |name: &str| {
+            crate::config::declaration::DeclaredSource::Registry(
+                Identifier::parse(&format!("ghcr.io/acme/{name}")).unwrap(),
+            )
+        };
+        let mut set = crate::config::declaration::DesiredSet::default();
+        set.skills.insert("dep".to_string(), source("dep:1"));
+        set.skills.insert("p".to_string(), source("p:1"));
+        set.skills.insert("q".to_string(), source("q:1"));
+        let overridden = diamond_lock("1", "2");
+        let agreeing = diamond_lock("1", "1");
+        let key = (ArtifactKind::Skill, "dep".to_string());
+
+        let prov = Provenance::new(&set, Some(&overridden));
+        assert_eq!(prov.overrides(&key).len(), 1, "q asked for tag 2");
+        assert_eq!(prov.redundant_note(&key), None);
+
+        let note = Provenance::new(&set, Some(&agreeing)).redundant_note(&key);
+        assert!(note.is_some_and(|n| n.contains("skill/p, skill/q")));
+    }
+
+    #[test]
+    fn the_default_limits_match_the_resolver() {
+        let limits = CheckLimits::default();
+        assert_eq!(limits.checks, MAX_TRANSITIVE_NODES);
+        assert_eq!(limits.per_call, DEFAULT_PER_ARTIFACT_TIMEOUT);
+        assert_eq!(limits.run, CHECK_RUN_DEADLINE);
+    }
+
+    #[test]
+    fn dependency_reference_reads_the_pin_tag_without_its_digest() {
+        let pin = format!("ghcr.io/acme/dep:1@sha256:{}", "a".repeat(64));
+        assert_eq!(
+            dependency_reference_of(&pin, &["./dep:1"]).as_deref(),
+            Some("ghcr.io/acme/dep:1")
+        );
+        assert_eq!(
+            dependency_reference_of(&pin, &[]).as_deref(),
+            Some("ghcr.io/acme/dep:1"),
+            "with no edge to fall through to, only the strip keeps the digest out"
+        );
+    }
+
+    #[test]
+    fn dependency_reference_of_a_tagless_pin_is_the_smallest_edge() {
+        let pin = format!("ghcr.io/acme/dep@sha256:{}", "a".repeat(64));
+        assert_eq!(
+            dependency_reference_of(&pin, &["./dep:2", "./dep:1"]).as_deref(),
+            Some("ghcr.io/acme/dep:1")
+        );
+    }
+
+    #[test]
+    fn dependency_reference_of_a_tagless_pin_with_no_edge_is_unknown() {
+        let pin = format!("ghcr.io/acme/dep@sha256:{}", "a".repeat(64));
+        assert_eq!(dependency_reference_of(&pin, &[]), None);
+    }
+
+    /// A tag outside the OCI grammar never reaches a request: the row reads the
+    /// edge a registry can answer for, or nothing, and nothing reads `null`.
+    #[test]
+    fn dependency_reference_skips_a_tag_outside_the_grammar() {
+        let pin = format!("ghcr.io/acme/dep:a b@sha256:{}", "a".repeat(64));
+        assert_eq!(
+            dependency_reference_of(&pin, &["./dep:1"]).as_deref(),
+            Some("ghcr.io/acme/dep:1")
+        );
+        assert_eq!(dependency_reference_of(&pin, &[]), None);
+    }
+
+    #[test]
+    fn dependency_reference_keeps_a_digest_bearing_edge() {
+        let held = format!("ghcr.io/acme/dep:1@sha256:{}", "a".repeat(64));
+        assert_eq!(
+            dependency_reference_of(&held, &[held.as_str(), "./dep:1"]).as_deref(),
+            Some(held.as_str())
+        );
+    }
+
+    /// CWE-345: `--check` answers a dependency row only on edges the user's own
+    /// store lists for each parent that records one.
+    #[tokio::test]
+    async fn a_dependency_row_answers_only_on_edges_the_store_lists() {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+        use crate::oci::bundle::{BUNDLE_LAYER_MEDIA_TYPE, BundleManifest, BundleMember};
+        use crate::oci::manifest::{Descriptor, OciManifest};
+
+        let reg = MemoryRegistry::new();
+        let parent_id = Identifier::parse("ghcr.io/acme/parent:1").unwrap();
+        let requires = BundleManifest::new(vec![BundleMember {
+            kind: ArtifactKind::Skill,
+            name: "dep".to_string(),
+            id: "./dep:1".to_string(),
+        }])
+        .to_layer_bytes()
+        .unwrap();
+        let layers = vec![
+            Descriptor {
+                digest: Digest::Sha256("a".repeat(64)),
+                media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),
+                size: 10,
+                annotations: None,
+            },
+            Descriptor {
+                digest: reg.push_blob(&parent_id, &requires).await.unwrap(),
+                media_type: BUNDLE_LAYER_MEDIA_TYPE.to_string(),
+                size: requires.len() as u64,
+                annotations: None,
+            },
+        ];
+        let manifest = OciManifest {
+            media_type: None,
+            artifact_type: None,
+            config_media_type: None,
+            layers,
+            annotations: BTreeMap::new(),
+        };
+        let parent = reg.push_manifest(&parent_id, &manifest).await.unwrap();
+        let store: Arc<dyn OciAccess> = Arc::new(reg);
+        let held = format!("ghcr.io/acme/dep:1@sha256:{}", "b".repeat(64));
+        async fn unconfirmed(store: &Arc<dyn OciAccess>, held: &str, rows: &str) -> bool {
+            let lock = GrimoireLock::from_toml_str(&format!(
+                "[metadata]\nlock_version = 1\ndeclaration_hash_version = 1\n\
+                 declaration_hash = \"sha256:{hash}\"\ngenerated_by = \"grim 0.1.0\"\n\
+                 generated_at = \"2026-04-19T00:00:00Z\"\n\n\
+                 [[skill]]\nname = \"dep\"\npinned = \"{held}\"\n{rows}",
+                hash = "d".repeat(64),
+            ))
+            .unwrap();
+            let rows = [(4, (ArtifactKind::Skill, "dep".to_string()))];
+            !rows_the_store_does_not_confirm(store, &lock, &rows).await.is_empty()
+        }
+        let parent_row = |name: &str, pin: &str, id: &str| {
+            format!(
+                "\n[[skill]]\nname = \"{name}\"\npinned = \"{pin}\"\n\n\
+                 [[skill.requires]]\nkind = \"skill\"\nname = \"dep\"\nid = \"{id}\"\n"
+            )
+        };
+        let stored = format!("ghcr.io/acme/parent:1@{parent}");
+        let unstored = format!("ghcr.io/acme/x@sha256:{}", "f".repeat(64));
+
+        let honest = parent_row("parent", &stored, "./dep:1");
+        let edited = parent_row("parent", &stored, &held);
+        let lacking = parent_row("x", &unstored, "./dep:1");
+        let planted = honest.clone() + &parent_row("x", &unstored, &held);
+        assert!(
+            !unconfirmed(&store, &held, &honest).await,
+            "the stored manifest lists it"
+        );
+        assert!(unconfirmed(&store, &held, &edited).await, "an edited edge");
+        assert!(unconfirmed(&store, &held, &lacking).await, "a parent the store lacks");
+        assert!(unconfirmed(&store, &held, &planted).await, "a planted second parent");
     }
 
     /// C3 spec: `checked` is `true` only when `--check` was passed AND the
@@ -2426,7 +4460,7 @@ mod tests {
         HookArming {
             client: client.to_string(),
             cause,
-            message: cause.message().to_string(),
+            message: cause.message(&crate::config::scope::Invocation::WALKED),
             transient: cause.transient(),
         }
     }
@@ -2451,7 +4485,12 @@ mod tests {
     #[test]
     fn a_client_with_no_dispatch_row_reads_not_registered() {
         // Rule 1 + 3: installed for claude, armed for nobody.
-        let merged = merge_not_registered(Vec::new(), &installed_on(&["claude"]), |_| false);
+        let merged = merge_not_registered(
+            Vec::new(),
+            &installed_on(&["claude"]),
+            |_| false,
+            &crate::config::scope::Invocation::WALKED,
+        );
         assert_eq!(
             merged.iter().map(|v| (v.client.as_str(), v.cause)).collect::<Vec<_>>(),
             [("claude", HookArmingCause::NotRegistered)],
@@ -2459,12 +4498,28 @@ mod tests {
         );
 
         // Rule 3 satisfied: a row exists, so there is nothing to report.
-        assert!(merge_not_registered(Vec::new(), &installed_on(&["claude"]), |_| true).is_empty());
+        assert!(
+            merge_not_registered(
+                Vec::new(),
+                &installed_on(&["claude"]),
+                |_| true,
+                &crate::config::scope::Invocation::WALKED
+            )
+            .is_empty()
+        );
 
         // Rule 1 unsatisfied: no install ever recorded an output, so the row's
         // own `missing`/`stale` lifecycle token is the honest story — reporting
         // "not registered" for a hook nothing installed would be noise.
-        assert!(merge_not_registered(Vec::new(), &installed_on(&[]), |_| false).is_empty());
+        assert!(
+            merge_not_registered(
+                Vec::new(),
+                &installed_on(&[]),
+                |_| false,
+                &crate::config::scope::Invocation::WALKED
+            )
+            .is_empty()
+        );
 
         // Rule 2: an existing verdict already carries the actionable cause AND
         // explains the missing row, so it is never overwritten.
@@ -2472,6 +4527,7 @@ mod tests {
             vec![verdict("claude", HookArmingCause::FeatureFlagOff)],
             &installed_on(&["claude"]),
             |_| false,
+            &crate::config::scope::Invocation::WALKED,
         );
         assert_eq!(
             gated.iter().map(|v| v.cause).collect::<Vec<_>>(),
@@ -2489,6 +4545,7 @@ mod tests {
             vec![verdict("codex", HookArmingCause::ClientTrustPending)],
             &installed_on(&["codex"]),
             |_| false,
+            &crate::config::scope::Invocation::WALKED,
         );
         assert_eq!(
             merged.iter().map(|v| (v.client.as_str(), v.cause)).collect::<Vec<_>>(),
@@ -2502,6 +4559,7 @@ mod tests {
             vec![verdict("codex", HookArmingCause::ClientTrustPending)],
             &installed_on(&["codex"]),
             |_| true,
+            &crate::config::scope::Invocation::WALKED,
         );
         assert_eq!(
             armed.iter().map(|v| v.cause).collect::<Vec<_>>(),
@@ -2531,6 +4589,7 @@ mod tests {
             workspace: std::path::PathBuf::from("/home/dev"),
             user_owned: Vec::new(),
             unquotable: Vec::new(),
+            grim: crate::config::scope::Invocation::WALKED,
         };
         let verdicts = hook_arming(ArtifactKind::Hook, "g", None, Some(&inputs));
         assert_eq!(
@@ -2540,6 +4599,39 @@ mod tests {
                 .collect::<Vec<_>>(),
             [("codex", HookArmingCause::ClientTrustPending)],
             "{verdicts:?}"
+        );
+    }
+
+    /// `status` is how a user learns what to run next: a plain `grim` there
+    /// arms the project the shell stands in, not the one reported on.
+    #[test]
+    fn an_arming_message_names_the_run_it_reports_on() {
+        let grim = Invocation::config(std::path::Path::new("/srv/my team/grimoire.toml"));
+        let inputs = HookArmingInputs {
+            feature_enabled: false,
+            plain_http_hosts: Vec::new(),
+            consent: Consent::Granted,
+            refusal: None,
+            clients: vec![ClientTarget::Claude],
+            armed: std::collections::BTreeSet::new(),
+            scope: ConfigScope::Project,
+            workspace: std::path::PathBuf::from("/srv/my team"),
+            user_owned: Vec::new(),
+            unquotable: Vec::new(),
+            grim: grim.clone(),
+        };
+
+        let gated = hook_arming(ArtifactKind::Hook, "g", None, Some(&inputs));
+        let unregistered = merge_not_registered(Vec::new(), &installed_on(&["claude"]), |_| false, &grim);
+
+        assert_eq!(gated[0].cause, HookArmingCause::FeatureFlagOff, "{gated:?}");
+        assert!(
+            gated[0].message.contains(&format!("run {grim} config set")),
+            "{gated:?}"
+        );
+        assert!(
+            unregistered[0].message.contains(&format!("{grim} install")),
+            "{unregistered:?}"
         );
     }
 
@@ -2556,6 +4648,7 @@ mod tests {
             workspace: std::path::PathBuf::from("/home/dev"),
             user_owned: Vec::new(),
             unquotable: Vec::new(),
+            grim: crate::config::scope::Invocation::WALKED,
         };
         let verdicts = hook_arming(ArtifactKind::Hook, "g", None, Some(&inputs));
         assert_eq!(
@@ -2575,6 +4668,10 @@ mod tests {
     /// Hook verdicts with the flag off at `scope`, as `(client, cause, message)`.
     fn flag_off_verdicts(scope: ConfigScope, clients: Vec<ClientTarget>) -> Vec<(String, HookArmingCause, String)> {
         let inputs = HookArmingInputs {
+            grim: match scope {
+                ConfigScope::Global => Invocation::GLOBAL,
+                ConfigScope::Project => Invocation::WALKED,
+            },
             feature_enabled: false,
             plain_http_hosts: Vec::new(),
             consent: Consent::Absent,
@@ -2593,11 +4690,11 @@ mod tests {
     }
 
     /// The project flag does not cover a global run, so a global row names
-    /// `--global` in both the flag and the install it asks for.
+    /// `grim --global` in both the flag and the install it asks for.
     #[test]
     fn a_global_flag_off_verdict_names_global() {
-        let message = "hooks are disabled for this scope; run grim config set --global \
-                       options.experimental.hooks true, then grim install --global";
+        let message = "hooks are disabled for this scope; run grim --global config set \
+                       options.experimental.hooks true, then grim --global install";
         assert_eq!(
             flag_off_verdicts(ConfigScope::Global, vec![ClientTarget::Claude, ClientTarget::Codex]),
             [
@@ -2629,7 +4726,7 @@ mod tests {
             )]
         );
         assert_eq!(
-            HookArmingCause::FeatureFlagOff.message(),
+            HookArmingCause::FeatureFlagOff.message(&Invocation::WALKED),
             "hooks are disabled for this scope; run grim config set options.experimental.hooks true, then grim install"
         );
     }
@@ -2643,6 +4740,7 @@ mod tests {
             vec![verdict("copilot", HookArmingCause::FeatureFlagOff)],
             &installed_on(&["codex", "claude"]),
             |_| false,
+            &crate::config::scope::Invocation::WALKED,
         );
         assert_eq!(
             merged.iter().map(|v| v.client.as_str()).collect::<Vec<_>>(),
@@ -2827,9 +4925,10 @@ mod tests {
                 locked: b1,
             },
         ];
-        let mut got = resolve_update_availability(&access, checks).await;
+        let (mut got, late) = resolve_update_availability(&access, checks, DEFAULT_PER_ARTIFACT_TIMEOUT, far()).await;
         got.sort_by_key(|(i, _)| *i);
         assert_eq!(got, vec![(2, Some(false)), (5, Some(true))]);
+        assert!(late.is_empty());
     }
 
     /// Regression: `update_available` answers "would `grim update` move this
@@ -2879,7 +4978,7 @@ mod tests {
                 locked: v12.clone(),
             },
         ];
-        let mut got = resolve_update_availability(&access, checks).await;
+        let (mut got, _) = resolve_update_availability(&access, checks, DEFAULT_PER_ARTIFACT_TIMEOUT, far()).await;
         got.sort_by_key(|(i, _)| *i);
         assert_eq!(
             got,
@@ -2895,9 +4994,16 @@ mod tests {
                 declared: repo.clone_with_tag("latest"),
                 locked: v12,
             }],
+            DEFAULT_PER_ARTIFACT_TIMEOUT,
+            far(),
         )
         .await;
-        assert_eq!(moved, vec![(0, Some(true))]);
+        assert_eq!(moved.0, vec![(0, Some(true))]);
+    }
+
+    /// A run deadline no test reaches.
+    fn far() -> Instant {
+        Instant::now() + CHECK_RUN_DEADLINE
     }
 
     fn locked(byte: char) -> LockedArtifact {
@@ -3707,7 +5813,7 @@ mod tests {
         };
         SettingsArmingInputs {
             policy: ConsentPolicies::new(&inputs, None, &BTreeSet::new()).settings,
-            records_refusal: home_refusal.map(|cause| (cause, cause.message().to_string())),
+            records_refusal: home_refusal.map(|cause| (cause, cause.message(&Invocation::WALKED))),
             surfaces: vec![(ClientTarget::Claude, Ok(workspace.join(CLAUDE_LOCAL_SETTINGS)))],
             fence: RootFence::default(),
             scope: ConfigScope::Project,
@@ -3822,7 +5928,7 @@ mod tests {
                 ClientTarget::Codex,
                 SettingsDecline::GlobalOnly,
                 "codex applies at global scope only; declare the package at global scope with grim --global add, \
-                 then run grim install --global"
+                 then run grim --global install"
                     .to_string(),
             ),
             (
@@ -3852,7 +5958,7 @@ mod tests {
             ),
         ];
         for (client, decline, message) in cases {
-            let verdict = declined_verdict(client, &decline, ConfigScope::Project, None);
+            let verdict = declined_verdict(client, &decline, &Invocation::WALKED, None);
             assert_eq!(verdict.cause.to_string(), decline.cause());
             assert_eq!(verdict.message, message);
         }
@@ -3860,11 +5966,11 @@ mod tests {
         let verdict = declined_verdict(
             ClientTarget::Cursor,
             &SettingsDecline::ClientConfigAbsent(file.clone()),
-            ConfigScope::Global,
+            &Invocation::GLOBAL,
             None,
         );
         assert!(
-            verdict.message.ends_with("then run grim install --global"),
+            verdict.message.ends_with("then run grim --global install"),
             "{}",
             verdict.message
         );
@@ -3892,7 +5998,7 @@ mod tests {
                 element: None,
             }],
         };
-        let (zed, global) = (ClientTarget::Zed, ConfigScope::Global);
+        let (zed, global) = (ClientTarget::Zed, &Invocation::GLOBAL);
         let verdict = declined_verdict(zed, &SettingsDecline::NoFile, global, Some(&record("claude")));
         assert_eq!(
             verdict.message,
@@ -3915,16 +6021,143 @@ mod tests {
         }
     }
 
-    /// The nothing-applies note is the cause's message at project scope, and
-    /// names the global install on a global row.
+    /// Project gates passed by `--trust-workspace`, naming `grim` in every remedy.
+    fn named_inputs(
+        surfaces: Vec<(ClientTarget, Result<PathBuf, SettingsDecline>)>,
+        local_file_tracked: bool,
+        grim: &Invocation,
+    ) -> SettingsArmingInputs {
+        let flags = ExperimentalOptions {
+            hooks: false,
+            settings: true,
+        };
+        let inputs = ConsentInputs {
+            flags: &flags,
+            flag: Some(true),
+            interactivity: Interactivity::NonInteractive,
+            scope: ConfigScope::Project,
+            workspace: Path::new("/w/proj"),
+            registries: &[],
+        };
+        SettingsArmingInputs {
+            policy: ConsentPolicies::new(&inputs, None, &BTreeSet::new())
+                .naming(grim)
+                .settings,
+            records_refusal: None,
+            surfaces,
+            fence: RootFence::default(),
+            scope: ConfigScope::Project,
+            local_file_tracked,
+        }
+    }
+
+    /// `team` at `locked`'s pin, holding `outputs`.
+    fn team_record(locked: &LockedArtifact, outputs: Vec<ClientOutput>) -> InstallRecord {
+        InstallRecord {
+            kind: ArtifactKind::Settings,
+            name: "team".to_string(),
+            source: locked.source.clone(),
+            dev: false,
+            outputs,
+        }
+    }
+
+    /// The `--config` run these notes are read under.
+    fn config_run() -> Invocation {
+        Invocation::config(Path::new("/srv/team/grimoire.toml"))
+    }
+
+    /// `client`'s note on `row`, empty when it has none.
+    fn note(row: &SettingsArming, client: &str) -> String {
+        let verdict = row.arming.iter().find(|verdict| verdict.client == client);
+        verdict.map(|verdict| verdict.message.clone()).unwrap_or_default()
+    }
+
+    /// A declined client names the install as the run was invoked, and a value
+    /// only global scope takes the global commands whatever the run.
     #[test]
-    fn the_nothing_applies_note_names_the_install_of_its_scope() {
-        assert_eq!(
-            nothing_applies_message(ConfigScope::Project),
-            HookArmingCause::NoApplicableSettings.message()
+    fn a_declined_settings_note_names_the_runs_grim() {
+        let locked = routable_package();
+        let local = PathBuf::from("/w/proj").join(CLAUDE_LOCAL_SETTINGS);
+        let declined = named_inputs(
+            vec![
+                (ClientTarget::Claude, Err(SettingsDecline::NotRegistered(local))),
+                (ClientTarget::Codex, Err(SettingsDecline::GlobalOnly)),
+            ],
+            false,
+            &config_run(),
         );
-        let global = nothing_applies_message(ConfigScope::Global);
-        assert!(global.ends_with("then run grim install --global"), "{global}");
+
+        let row = settings_arming(&declined, "team", &locked, None, &AnchorRoots::default());
+
+        let claude = note(&row, "claude");
+        assert!(
+            claude.ends_with("then run grim --config /srv/team/grimoire.toml install"),
+            "{claude}"
+        );
+        let codex = note(&row, "codex");
+        assert!(
+            codex.ends_with("with grim --global add, then run grim --global install"),
+            "{codex}"
+        );
+    }
+
+    /// The nothing-applies note names the install as the run was invoked, a
+    /// global row's included.
+    #[test]
+    fn a_nothing_applies_note_names_the_runs_grim() {
+        let locked = routable_package();
+        let roots = AnchorRoots::default();
+        let surface = vec![(
+            ClientTarget::Claude,
+            Ok(PathBuf::from("/w/proj").join(CLAUDE_LOCAL_SETTINGS)),
+        )];
+        let empty = team_record(&locked, Vec::new());
+
+        let project = named_inputs(surface.clone(), false, &config_run());
+        let row = settings_arming(&project, "team", &locked, Some(&empty), &roots);
+        let nothing = note(&row, "claude");
+        assert!(
+            nothing.ends_with("then run grim --config /srv/team/grimoire.toml install"),
+            "{nothing}"
+        );
+
+        let global = global_settings_inputs(surface, RootFence::default());
+        let row = settings_arming(&global, "team", &locked, Some(&empty), &roots);
+        let nothing = note(&row, "claude");
+        assert!(nothing.ends_with("then run grim --global install"), "{nothing}");
+    }
+
+    /// The tracked-local-file note names the install as the run was invoked.
+    #[test]
+    fn a_tracked_local_file_note_names_the_runs_grim() {
+        let locked = routable_package();
+        let surface = vec![(
+            ClientTarget::Claude,
+            Ok(PathBuf::from("/w/proj").join(CLAUDE_LOCAL_SETTINGS)),
+        )];
+        let value = ClientOutput {
+            client: "claude".to_string(),
+            target: AnchoredPath {
+                anchor: PathAnchor::Workspace,
+                relative: CLAUDE_LOCAL_SETTINGS.to_string(),
+            },
+            content_hash: Digest::Sha256("a".repeat(64)),
+            support_dir: None,
+            entry: Some("/model".to_string()),
+            adopted: false,
+            element: None,
+        };
+        let held = team_record(&locked, vec![value]);
+        let tracked = named_inputs(surface, true, &config_run());
+
+        let row = settings_arming(&tracked, "team", &locked, Some(&held), &AnchorRoots::default());
+
+        let tracked = note(&row, "claude");
+        assert!(
+            tracked.ends_with("then grim --config /srv/team/grimoire.toml install"),
+            "{tracked}"
+        );
     }
 
     /// `stale` says the lock is behind the manifest, which no gate cures, so it
@@ -4152,8 +6385,39 @@ mod tests {
             (verdict.client.as_str(), verdict.cause),
             ("later", HookArmingCause::SettingsRootInWorkspace)
         );
-        let remedy = HookArmingCause::SettingsRootInWorkspace.message();
-        assert!(verdict.message.ends_with(remedy), "{}", verdict.message);
+        let remedy = HookArmingCause::SettingsRootInWorkspace.message(&Invocation::GLOBAL);
+        assert!(verdict.message.ends_with(&remedy), "{}", verdict.message);
+        assert!(
+            verdict.message.contains("then run grim --global install"),
+            "{}",
+            verdict.message
+        );
         assert_eq!(row.state, Some(ArtifactStatus::NotArmed));
+    }
+
+    /// The path is lock text, and the error quotes it as well.
+    #[tokio::test]
+    async fn a_control_character_in_a_path_source_is_neutralized_in_its_warning() {
+        use crate::lock::locked_source::LockedSource;
+
+        let capture = crate::catalog::test_hosts::LogCapture::start();
+        let dir = tempfile::tempdir().unwrap();
+        let locked = LockedArtifact {
+            name: "x".to_string(),
+            kind: ArtifactKind::Skill,
+            source: LockedSource::Path {
+                path: PathSource::parse("./evil\u{1b}[2J\nforged").unwrap(),
+                hash: Digest::Sha256("a".repeat(64)),
+            },
+            bundles: Vec::new(),
+            requires: Vec::new(),
+        };
+
+        assert!(path_source_drifted(&locked, dir.path()).await);
+
+        let logs = capture.text();
+        assert!(logs.contains("local source './evil\\u{1b}[2J\\nforged'"), "{logs:?}");
+        assert!(!logs.contains('\u{1b}'), "{logs:?}");
+        assert_eq!(logs.trim_end().lines().count(), 1, "{logs:?}");
     }
 }

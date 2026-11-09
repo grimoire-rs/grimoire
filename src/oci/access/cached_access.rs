@@ -139,6 +139,27 @@ impl<A: OciAccess> OciAccess for CachedAccess<A> {
             .map_err(|e| AccessError::with_identifier(identifier.clone(), AccessErrorKind::InvalidManifest(e.0)))
     }
 
+    /// Asks the source and never the store: [`Self::fetch_manifest`] answers by
+    /// digest whatever repository asks, so only this says `id`'s repository
+    /// serves its digest. `Ok(None)` offline, where no source can answer.
+    async fn fetch_manifest_bytes(&self, id: &PinnedIdentifier) -> Result<Option<Vec<u8>>, AccessError> {
+        if self.mode == AccessMode::Offline {
+            return Ok(None);
+        }
+        let bytes = self.inner.fetch_manifest_bytes(id).await?;
+        let digest = id.digest();
+        match bytes.as_deref().map(|b| digest.algorithm().hash(b)) {
+            Some(actual) if actual != digest => Err(AccessError::with_identifier(
+                id.as_identifier().clone(),
+                AccessErrorKind::DigestMismatch {
+                    expected: digest,
+                    actual,
+                },
+            )),
+            _ => Ok(bytes),
+        }
+    }
+
     async fn fetch_blob(
         &self,
         repo: &Identifier,
@@ -417,6 +438,61 @@ mod tests {
     }
 
     const MANIFEST: &[u8] = br#"{"schemaVersion":2,"config":{"mediaType":"application/vnd.oci.empty.v1+json","digest":"sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a","size":2},"layers":[]}"#;
+
+    /// The store holding a digest says nothing about which repository serves it.
+    #[tokio::test]
+    async fn manifest_bytes_come_from_the_source_with_the_digest_stored() {
+        let (_d, tags, blobs) = paths();
+        let bytes = b"{}".to_vec();
+        let digest = Algorithm::Sha256.hash(&bytes);
+        blobs.put(&digest, &bytes).unwrap();
+        let calls = Arc::new(Mutex::new(0));
+        let inner = CountingInner {
+            digest: digest.clone(),
+            calls: calls.clone(),
+            blob: bytes.clone(),
+        };
+        let access = CachedAccess::new(inner, tags, blobs, AccessMode::Online);
+
+        let served = access.fetch_manifest_bytes(&pinned_at(&digest)).await.unwrap();
+
+        assert_eq!(served, Some(bytes));
+        assert_eq!(*calls.lock().unwrap(), 1, "asked the source");
+    }
+
+    #[tokio::test]
+    async fn manifest_bytes_offline_have_no_answer() {
+        let (_d, tags, blobs) = paths();
+        let bytes = b"{}".to_vec();
+        let digest = Algorithm::Sha256.hash(&bytes);
+        blobs.put(&digest, &bytes).unwrap();
+        let calls = Arc::new(Mutex::new(0));
+        let inner = CountingInner {
+            digest: digest.clone(),
+            calls: calls.clone(),
+            blob: bytes,
+        };
+        let access = CachedAccess::new(inner, tags, blobs, AccessMode::Offline);
+
+        assert_eq!(access.fetch_manifest_bytes(&pinned_at(&digest)).await.unwrap(), None);
+        assert_eq!(*calls.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn manifest_bytes_that_hash_elsewhere_are_refused() {
+        let (_d, tags, blobs) = paths();
+        let digest = Algorithm::Sha256.hash(b"expected");
+        let inner = CountingInner {
+            digest: digest.clone(),
+            calls: Arc::new(Mutex::new(0)),
+            blob: b"served".to_vec(),
+        };
+        let access = CachedAccess::new(inner, tags, blobs, AccessMode::Online);
+
+        let err = access.fetch_manifest_bytes(&pinned_at(&digest)).await.unwrap_err();
+
+        assert!(matches!(err.kind, AccessErrorKind::DigestMismatch { .. }), "{err}");
+    }
 
     fn pinned_at(digest: &Digest) -> PinnedIdentifier {
         PinnedIdentifier::try_from(id().clone_with_digest(digest.clone())).unwrap()

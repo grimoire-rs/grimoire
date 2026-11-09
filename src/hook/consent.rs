@@ -78,7 +78,7 @@ use serde_repr::{Deserialize_repr, Serialize_repr};
 use crate::config::scope::ConfigScope;
 use crate::install::hook_dispatch;
 use crate::lock::locked_source::LockedSource;
-use crate::oci::ArtifactKind;
+use crate::oci::{ArtifactKind, Identifier};
 
 /// Timestamp format for [`ConsentRecord::consented_at`] — RFC 3339, UTC,
 /// second precision. Provenance for a human reading the file; nothing reads it
@@ -178,6 +178,21 @@ pub fn consent_key(binding: &str, source: &LockedSource) -> Option<String> {
     Some(format!("{binding}@{}/{}", pinned.registry(), pinned.repository()))
 }
 
+/// [`consent_key_for`] over a declaration, which names the same registry and
+/// repository as the pin the lock will hold, so a config can be judged before
+/// the lock catches up with it.
+pub fn declared_consent_key_for(kind: ArtifactKind, binding: &str, id: &Identifier) -> Option<String> {
+    let key = format!("{binding}@{}/{}", id.registry(), id.repository());
+    match kind {
+        ArtifactKind::Hook if binding.starts_with(SETTINGS_KEY_PREFIX) => None,
+        ArtifactKind::Hook => Some(key),
+        ArtifactKind::Settings => Some(format!("{SETTINGS_KEY_PREFIX}{key}")),
+        ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent | ArtifactKind::Bundle | ArtifactKind::Mcp => {
+            None
+        }
+    }
+}
+
 /// All that tells a settings key from a hook key in the one record, so
 /// [`consent_key_for`] gives a hook binding that starts with it no key at all.
 const SETTINGS_KEY_PREFIX: &str = "settings:";
@@ -202,10 +217,12 @@ pub fn consent_key_for(kind: ArtifactKind, binding: &str, source: &LockedSource)
 /// its own half: read as one answer, a settings key the record lacks would
 /// disarm every consented hook.
 pub fn split_by_kind(declared: &BTreeSet<String>) -> (BTreeSet<String>, BTreeSet<String>) {
-    declared
-        .iter()
-        .cloned()
-        .partition(|key| !key.starts_with(SETTINGS_KEY_PREFIX))
+    declared.iter().cloned().partition(|key| !is_settings_key(key))
+}
+
+/// Whether `key` is a settings package's key rather than a hook's.
+pub fn is_settings_key(key: &str) -> bool {
+    key.starts_with(SETTINGS_KEY_PREFIX)
 }
 
 /// Resolve consent for one workspace over what it declares. **Pure** — no I/O,
@@ -265,7 +282,9 @@ fn load_at(path: &Path) -> Option<ConsentRecord> {
 ///
 /// - `grim hook allow` — the explicit gesture;
 /// - `grim add` — typing a reference *is* the declaration gesture
-///   (`adr_artifact_trust_model.md` decision 1);
+///   (`adr_artifact_trust_model.md` decision 1), written ahead of its install
+///   because a failed install keeps the declaration — and the TUI's Install that
+///   declares a row, its TUI form;
 /// - an **accepted** interactive prompt.
 ///
 /// No command writes here on its own initiative. `grim install` and
@@ -273,8 +292,9 @@ fn load_at(path: &Path) -> Option<ConsentRecord> {
 /// an accepted prompt, and only when there was a terminal to ask on. A
 /// non-interactive run of either writes nothing, which is the state every CI
 /// run and every fresh clone is in. `grim lock`, `grim status`,
-/// `grim context`, `grim hook list`, the `grim-hook` launcher, the TUI and
-/// the MCP server never reach it at all.
+/// `grim context`, `grim hook list`, the `grim-hook` launcher, a TUI Update,
+/// delete or Install that declares nothing, and the MCP server never reach it
+/// at all.
 ///
 /// **This is the T3 control**: `grim install` materializes what is already
 /// declared, and a cloned repository's `grimoire.toml` is not the user's

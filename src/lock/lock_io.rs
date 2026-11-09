@@ -15,8 +15,8 @@
 use std::path::Path;
 
 use crate::config;
-use crate::lock::grimoire_lock::{GrimoireLock, MarketplaceLock};
-use crate::lock::lock_error::{LockError, LockErrorKind};
+use crate::lock::grimoire_lock::{self, GrimoireLock, MarketplaceLock};
+use crate::lock::lock_error::{LockError, LockErrorKind, LockRecovery};
 use crate::lock::locked_artifact::LockedArtifact;
 use crate::store::atomic_write::atomic_write_through_symlink;
 
@@ -32,8 +32,61 @@ pub fn now_rfc3339() -> String {
 /// [`LockErrorKind::Io`] (including not-found), [`LockErrorKind::FileTooLarge`],
 /// or any parse/version error — all with `path` context.
 pub fn load(path: &Path) -> Result<GrimoireLock, LockError> {
-    let content = read_capped(path)?;
-    GrimoireLock::from_toml_str(&content).map_err(|e| LockError::new(path, e.kind))
+    read_capped(path)
+        .and_then(|content| GrimoireLock::from_toml_str(&content).map_err(|e| LockError::new(path, e.kind)))
+        .map_err(with_recovery)
+}
+
+/// `err` naming what keeps the pins, the one wording of every lock reader. A
+/// missing lock and a plugin-scoped one hold no pin to keep.
+fn with_recovery(err: LockError) -> LockError {
+    if err.is_not_found() || matches!(err.kind, LockErrorKind::ScopeMismatch { .. }) {
+        return err;
+    }
+    let recovery = if needs_newer_grim(&err) {
+        LockRecovery::UpgradeGrim
+    } else {
+        LockRecovery::RestoreOrRepair
+    };
+    LockError {
+        recovery: Some(recovery),
+        ..err
+    }
+}
+
+/// Load the lock a relock starts from, `None` when there is none.
+///
+/// A missing file is absent, and so is a plugin-scoped one, with a warning
+/// naming it: its entries pin nothing in this scope. Every other failure
+/// refuses, because a relock with no previous lock moves every pin.
+///
+/// # Errors
+///
+/// As [`load`], except not-found and [`LockErrorKind::ScopeMismatch`].
+pub fn load_existing(path: &Path) -> Result<Option<GrimoireLock>, LockError> {
+    match load(path) {
+        Ok(lock) => Ok(Some(lock)),
+        Err(e) if e.is_not_found() => Ok(None),
+        Err(e) if matches!(e.kind, LockErrorKind::ScopeMismatch { .. }) => {
+            tracing::warn!("{e}; reading it as no lock, so every pin resolves fresh");
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether `err`, a failed load, is a lock only a newer grim reads, so that
+/// restoring it returns the same file and repairing it edits a file this build
+/// does not understand.
+fn needs_newer_grim(err: &LockError) -> bool {
+    match err.kind {
+        LockErrorKind::UnsupportedVersion { .. } => true,
+        // Only the file tells a future `lock_version` or key from a typo.
+        LockErrorKind::TomlParse(_) => {
+            read_capped(&err.path).is_ok_and(|raw| grimoire_lock::written_by_newer_grim(&raw))
+        }
+        _ => false,
+    }
 }
 
 /// Atomically save `lock` to `path`.
@@ -185,7 +238,7 @@ fn bundles_content_equal(
         x.name == y.name
             && x.repo() == y.repo()
             && x.tag() == y.tag()
-            // Registry arm: advisory tag stripped (like every pin comparison).
+            // Registry arm: compared without the advisory tag, like every pin.
             // Path arm: `pinned()`/`path()` are None/Some, and
             // `content_digest()` compares the members-layer hash.
             && x.pinned().map(|p| p.strip_advisory()) == y.pinned().map(|p| p.strip_advisory())
@@ -225,6 +278,8 @@ fn bump_one_second(iso: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
     use crate::config::FILE_SIZE_LIMIT_BYTES;
     use crate::lock::grimoire_lock::LockMetadata;
     use crate::lock::lock_version::LockVersion;
@@ -279,8 +334,8 @@ mod tests {
         assert_eq!(loaded.skills.len(), 1);
         assert_eq!(
             loaded.skills[0].source.pinned().unwrap().tag(),
-            None,
-            "advisory tag stripped on disk"
+            Some("stable"),
+            "the disk records the tag that resolved the pin"
         );
     }
 
@@ -637,6 +692,32 @@ mod tests {
         );
     }
 
+    /// No pin is at stake in either, so neither names a recovery.
+    #[test]
+    fn only_a_lock_with_pins_to_keep_names_the_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grimoire.lock");
+        assert_eq!(load(&path).expect_err("no file").recovery, None);
+
+        std::fs::write(&path, "not a lock\n").unwrap();
+        assert!(load(&path).expect_err("not TOML").recovery.is_some());
+
+        std::fs::write(
+            &path,
+            format!(
+                "[metadata]\nlock_version = 1\ndeclaration_hash_version = 1\n\
+                 declaration_hash = \"sha256:{a}\"\ngenerated_by = \"grim 0.1.0\"\n\
+                 generated_at = \"2026-04-19T00:00:00Z\"\n\n[[plugin]]\nname = \"p\"\n\
+                 declaration_hash = \"sha256:{a}\"\n",
+                a = sha('a')
+            ),
+        )
+        .unwrap();
+        let scoped = load(&path).expect_err("the other flavor");
+        assert!(matches!(scoped.kind, LockErrorKind::ScopeMismatch { .. }), "{scoped}");
+        assert_eq!(scoped.recovery, None);
+    }
+
     #[test]
     fn load_rejects_oversized() {
         let dir = tempfile::tempdir().unwrap();
@@ -914,6 +995,199 @@ pinned = \"{p6}\"
             p5 = pin("rust-style", '5'),
             p6 = pin("mcp/server", '6'),
         )
+    }
+
+    /// Everything logged on this thread at any level while `work` runs.
+    fn logged_by<T>(work: impl FnOnce() -> T) -> (T, String) {
+        #[derive(Clone)]
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Sink {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .expect("log buffer is never poisoned")
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        crate::log_switch::tracing_capture::arm();
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let sink = Sink(Arc::clone(&logs));
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(move || sink.clone())
+                .with_ansi(false)
+                .without_time()
+                .finish(),
+        );
+        let out = work();
+        drop(guard);
+        let text = String::from_utf8(logs.lock().expect("log buffer is never poisoned").clone());
+        (out, text.expect("tracing writes UTF-8"))
+    }
+
+    #[test]
+    fn load_existing_cases() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grimoire.lock");
+
+        let (missing, logs) = logged_by(|| load_existing(&path));
+        assert!(missing.unwrap().is_none(), "a missing file is absent");
+        assert!(logs.is_empty(), "absence is normal: {logs}");
+
+        let lock = lock_with("2026-04-19T00:00:00Z", vec![artifact("x", pinned("acme/x", None, 'a'))]);
+        save(&path, &lock, None).unwrap();
+        assert_eq!(load_existing(&path).unwrap(), Some(load(&path).unwrap()));
+
+        let scoped = [
+            format!("{}{}", mkt_metadata(1), entry("skill", "x", Some("team"))),
+            format!("{}{}", mkt_metadata(1), plugin_row("team", 'b')),
+        ];
+        for body in &scoped {
+            std::fs::write(&path, body).unwrap();
+            let (absent, logs) = logged_by(|| load_existing(&path));
+            assert!(absent.unwrap().is_none(), "a plugin-scoped file is absent:\n{body}");
+            assert!(logs.contains("WARN"), "{logs}");
+            assert!(
+                logs.contains(path.to_str().unwrap()),
+                "the warning names the path: {logs}"
+            );
+            assert!(
+                logs.contains("every pin resolves fresh"),
+                "the warning names the cost: {logs}"
+            );
+        }
+
+        for name in ["../escaped", "", "/abs"] {
+            std::fs::write(&path, format!("{}{}", mkt_metadata(1), entry("skill", name, None))).unwrap();
+            let err = load_existing(&path).expect_err("an invalid entry name refuses");
+            assert!(
+                matches!(err.kind, LockErrorKind::InvalidEntryName { .. }),
+                "{:?}",
+                err.kind
+            );
+            let expected = format!("invalid skill name `{}`: ", name.escape_default());
+            assert!(err.to_string().contains(&expected), "{err}");
+            assert_eq!(exit_of(err), 78);
+        }
+
+        for (body, label) in [
+            ("<<<<<<< HEAD\n".to_string(), "conflict markers"),
+            (mkt_metadata(2), "a future declaration_hash_version"),
+            (
+                mkt_metadata(1).replace("lock_version = 1", "lock_version = 2"),
+                "a future lock_version",
+            ),
+        ] {
+            std::fs::write(&path, body).unwrap();
+            let err = load_existing(&path).expect_err(label);
+            assert_eq!(exit_of(err), 78, "{label}");
+        }
+
+        std::fs::write(&path, " ".repeat(FILE_SIZE_LIMIT_BYTES as usize + 1)).unwrap();
+        let err = load_existing(&path).expect_err("an oversize file refuses");
+        assert!(matches!(err.kind, LockErrorKind::FileTooLarge { .. }), "{:?}", err.kind);
+
+        let err = load_existing(dir.path()).expect_err("a directory is not an absent file");
+        assert!(matches!(err.kind, LockErrorKind::Io(_)), "{:?}", err.kind);
+        assert_eq!(exit_of(err), 74);
+    }
+
+    /// `load_existing` reads a missing lock as no lock, and a relock with no lock
+    /// moves every pin, so damage must never land there.
+    #[test]
+    fn a_damaged_lock_refuses_rather_than_reading_as_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grimoire.lock");
+        let lock = lock_with(
+            "2026-01-01T00:00:00Z",
+            vec![artifact("x", pinned("acme/x", Some("1"), 'a'))],
+        );
+        save(&path, &lock, None).unwrap();
+        let good = std::fs::read_to_string(&path).unwrap();
+        let pin = format!("ghcr.io/acme/x:1@sha256:{}", sha('a'));
+        assert!(good.contains(&pin), "{good}");
+        let repin = |value: &str| good.replace(&format!("\"{pin}\""), value);
+        let repinned = |value: String| repin(&format!("\"{value}\""));
+
+        let parse_failures = [
+            ("an empty file", String::new()),
+            (
+                "a cut inside a string",
+                good[..good.find(&pin).unwrap() + 8].to_string(),
+            ),
+            (
+                "a cut before metadata ends",
+                good[..good.find("generated_by").unwrap()].to_string(),
+            ),
+            ("a number for a pin", repin("3")),
+            ("a table for a pin", repin("{ repo = \"acme/x\" }")),
+            (
+                "a string for lock_version",
+                good.replace("lock_version = 1", "lock_version = \"1\""),
+            ),
+            ("a table for an array", good.replace("[[skill]]", "[skill]")),
+            (
+                "a duplicate key",
+                good.replace("name = \"x\"", "name = \"x\"\nname = \"y\""),
+            ),
+            ("a second metadata table", format!("{good}\n[metadata]\n")),
+            ("a pin with no digest", repinned("ghcr.io/acme/x:1".to_string())),
+            ("a short digest", repinned("ghcr.io/acme/x:1@sha256:abc".to_string())),
+            (
+                "a digest of an unknown algorithm",
+                repinned(format!("ghcr.io/acme/x:1@md5:{}", sha('a'))),
+            ),
+            (
+                "a digest of the wrong length",
+                repinned(format!("ghcr.io/acme/x:1@sha512:{}", sha('a'))),
+            ),
+            (
+                "an unknown field",
+                good.replace("name = \"x\"", "name = \"x\"\nextra = 1"),
+            ),
+        ];
+        for (label, body) in parse_failures {
+            std::fs::write(&path, body).unwrap();
+            let err = load_existing(&path).expect_err(label);
+            assert!(
+                matches!(err.kind, LockErrorKind::TomlParse(_)),
+                "{label}: {:?}",
+                err.kind
+            );
+            assert_eq!(exit_of(err), 78, "{label}");
+        }
+
+        let mut bytes = good.clone().into_bytes();
+        bytes[0] = 0xff;
+        std::fs::write(&path, bytes).unwrap();
+        let err = load_existing(&path).expect_err("a non-UTF-8 byte");
+        assert!(!err.is_not_found(), "{:?}", err.kind);
+        assert_eq!(exit_of(err), 74);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_existing_of_a_lock_it_may_not_read_exits_77() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grimoire.lock");
+        let lock = lock_with("2026-01-01T00:00:00Z", vec![artifact("x", pinned("acme/x", None, 'a'))]);
+        save(&path, &lock, None).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root reads through 0o000, so the failure cannot be provoked.
+        if std::fs::File::open(&path).is_ok() {
+            return;
+        }
+
+        let err = load_existing(&path).expect_err("a lock it may not read is not an absent lock");
+
+        assert_eq!(exit_of(err), 77);
     }
 
     // C-006 — `grimoire.lock` refuses the marketplace flavor (S-024 unit).
@@ -1311,6 +1585,23 @@ pinned = \"{p6}\"
         let dst = dir.path().join("again.lock");
         save_marketplace(&dst, &lock, None).unwrap();
         assert_eq!(std::fs::read_to_string(&dst).unwrap(), reference_wire());
+    }
+
+    #[test]
+    fn marketplace_lock_keeps_a_recorded_tag() {
+        let body = format!(
+            "{}{}{}",
+            mkt_metadata(MARKETPLACE_HASH_VERSION),
+            plugin_row("team", 'b'),
+            entry("skill", "x", Some("team")).replace("/x@", "/x:1.0@")
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let lock = load_marketplace(&write_lock(&dir, &body)).unwrap();
+        let dst = dir.path().join("again.lock");
+
+        save_marketplace(&dst, &lock, None).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), body);
     }
 
     #[test]

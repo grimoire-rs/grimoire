@@ -34,7 +34,7 @@ use crate::context::Context;
 use crate::error::classify_error;
 use crate::glob::expand_description_glob;
 use crate::oci::ArtifactKind;
-use crate::oci::identifier::{MAX_REPOSITORY_LENGTH, RepositoryPathIssue, repository_path_issue};
+use crate::oci::identifier::{MAX_REPOSITORY_LENGTH, RepositoryPathIssue, is_valid_oci_tag, repository_path_issue};
 use crate::oci::release::resolve_cascade;
 
 /// `grim publish` arguments.
@@ -798,21 +798,6 @@ fn is_reserved_float_tag(s: &str) -> bool {
 /// True when `s` is a non-empty run of ASCII digits.
 fn is_all_digits(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
-}
-
-/// OCI tag grammar: `[A-Za-z0-9_][A-Za-z0-9._-]{0,127}`.
-fn is_valid_oci_tag(s: &str) -> bool {
-    if s.len() > 128 {
-        return false;
-    }
-    let mut chars = s.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !(first.is_ascii_alphanumeric() || first == '_') {
-        return false;
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 /// Resolve every entry's version in place (issue #29).

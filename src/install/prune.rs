@@ -18,7 +18,7 @@
 //! File deletion + record drop reuse the shared [`uninstall`] seam so the
 //! "remove an installed artifact" logic lives in exactly one place.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::io;
 use std::path::PathBuf;
 
@@ -26,6 +26,7 @@ use crate::install::client_target::ClientTarget;
 use crate::install::install_state::{ClientOutput, InstallState};
 use crate::install::path_anchor::{AnchorError, AnchorRoots, Containment};
 use crate::install::uninstall::{AbandonedEntry, UninstallError, uninstall};
+use crate::lock::effective_set::NodeKey;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::oci::{ArtifactKind, Digest};
 
@@ -161,11 +162,12 @@ pub(crate) async fn prune_orphans_off_runtime(
     state: &mut InstallState,
     lock: &GrimoireLock,
     roots: &AnchorRoots,
+    only: Option<BTreeSet<NodeKey>>,
     force: bool,
 ) -> Result<Vec<PrunedArtifact>, PruneError> {
     let (mut owned, lock, roots_owned) = (state.clone(), lock.clone(), roots.clone());
     let work = move || {
-        let result = prune_orphans(&mut owned, &lock, &roots_owned, force);
+        let result = prune_orphans(&mut owned, &lock, &roots_owned, only.as_ref(), force);
         (owned, result)
     };
     match tokio::task::spawn_blocking(work).await {
@@ -181,17 +183,15 @@ pub(crate) async fn prune_orphans_off_runtime(
     }
 }
 
-/// Remove every materialized artifact absent from `lock`.
+/// Remove every materialized artifact absent from `lock`: an orphan whose files
+/// match its recorded hash, or are gone, loses its outputs and its record via
+/// [`uninstall`]; a drifted one is kept as [`PruneOutcome::KeptModified`]
+/// unless `force`.
 ///
-/// An orphan whose on-disk content matches its recorded hash (or whose
-/// files are already gone) is pruned: its outputs are deleted and its
-/// record dropped via [`uninstall`]. An orphan whose content has drifted is
-/// preserved and reported as [`PruneOutcome::KeptModified`] unless `force`
-/// is set, in which case it is pruned regardless.
-///
-/// Returns one entry per orphan acted on, in deterministic `(kind, name)`
-/// order (the [`InstallState`] iteration order). The caller owns saving
-/// `state`.
+/// `only` narrows the orphans to those nodes, so `force` reaches no further
+/// than a named update's closure; `None` considers every record and an empty
+/// set prunes nothing. Returns one entry per orphan acted on, in `(kind, name)`
+/// order. The caller saves `state`.
 ///
 /// # Errors
 ///
@@ -202,6 +202,7 @@ pub fn prune_orphans(
     state: &mut InstallState,
     lock: &GrimoireLock,
     roots: &AnchorRoots,
+    only: Option<&BTreeSet<NodeKey>>,
     force: bool,
 ) -> Result<Vec<PrunedArtifact>, PruneError> {
     // Keys the lock still declares; everything recorded but not here is an
@@ -239,6 +240,7 @@ pub fn prune_orphans(
         // undeclared — never an orphan. A settings record names values inside
         // a shared file, so deleting it as a footprint would take the user's file.
         .filter(|r| !r.dev && r.kind != ArtifactKind::Settings && !declared.contains(&(r.kind, r.name.clone())))
+        .filter(|r| only.is_none_or(|nodes| nodes.contains(&(r.kind, r.name.clone()))))
         .map(|r| Orphan {
             kind: r.kind,
             name: r.name.clone(),
@@ -587,7 +589,7 @@ pub fn reap_dropped_clients(
                     // Locally modified: preserve the user's edit and keep the
                     // output in the record so `--force` can still reap it later.
                     tracing::warn!(
-                        "keeping locally-modified output for dropped client '{}' of '{name}'; re-run `grim update --force` to remove it",
+                        "keeping locally-modified output for dropped client '{}' of '{name}'; re-run with `--force` to remove it",
                         out.client
                     );
                     kept_modified.push(out.client.clone());
@@ -1169,7 +1171,7 @@ mod tests {
             hooks: vec![locked_of_kind(ArtifactKind::Hook, "shell-guard")],
             ..lock_of(vec![])
         };
-        let acted = prune_orphans(&mut state, &lock, &roots(ws), false).unwrap();
+        let acted = prune_orphans(&mut state, &lock, &roots(ws), None, false).unwrap();
         assert!(acted.is_empty(), "a declared hook is not an orphan: {acted:?}");
         assert!(payload.is_dir(), "the payload must survive a prune pass");
         assert!(
@@ -1185,12 +1187,51 @@ mod tests {
         let mut state = InstallState::empty(&ws.join("state.json"));
         let payload = install_hook_for(&mut state, ws, "shell-guard", &["claude"]);
 
-        let acted = prune_orphans_off_runtime(&mut state, &lock_of(vec![]), &roots(ws), false)
+        let acted = prune_orphans_off_runtime(&mut state, &lock_of(vec![]), &roots(ws), None, false)
             .await
             .unwrap();
         assert_eq!(acted.len(), 1, "{acted:?}");
         assert!(!payload.exists());
         assert!(state.get(ArtifactKind::Hook, "shell-guard").is_none());
+    }
+
+    /// A real orphan survives an empty `only`, the scope of a named update
+    /// with no previous lock.
+    #[test]
+    fn an_empty_only_prunes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        let payload = install_hook_for(&mut state, ws, "shell-guard", &["claude"]);
+
+        let only = BTreeSet::new();
+        let acted = prune_orphans(&mut state, &lock_of(vec![]), &roots(ws), Some(&only), false).unwrap();
+
+        assert!(acted.is_empty(), "{acted:?}");
+        assert!(payload.is_dir(), "the orphan's payload must stay");
+        assert!(state.get(ArtifactKind::Hook, "shell-guard").is_some());
+    }
+
+    /// Of two real orphans the one outside `only` stays, and `force` does not
+    /// widen that.
+    #[test]
+    fn only_narrows_the_orphans_a_prune_considers() {
+        for force in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let ws = dir.path();
+            let mut state = InstallState::empty(&ws.join("state.json"));
+            let inside = install_hook_for(&mut state, ws, "inside", &["claude"]);
+            let outside = install_hook_for(&mut state, ws, "outside", &["claude"]);
+
+            let only = BTreeSet::from([(ArtifactKind::Hook, "inside".to_string())]);
+            let acted = prune_orphans(&mut state, &lock_of(vec![]), &roots(ws), Some(&only), force).unwrap();
+
+            assert_eq!(acted.len(), 1, "force = {force}: {acted:?}");
+            assert_eq!(acted[0].name, "inside");
+            assert!(!inside.exists(), "force = {force}: the candidate is pruned");
+            assert!(outside.is_dir(), "force = {force}: the orphan outside `only` stays");
+            assert!(state.get(ArtifactKind::Hook, "outside").is_some());
+        }
     }
 
     /// The other direction, so the guard above cannot be satisfied by simply
@@ -1203,7 +1244,7 @@ mod tests {
         let mut state = InstallState::empty(&ws.join("state.json"));
         let payload = install_hook_for(&mut state, ws, "shell-guard", &["claude"]);
 
-        let acted = prune_orphans(&mut state, &lock_of(vec![]), &roots(ws), false).unwrap();
+        let acted = prune_orphans(&mut state, &lock_of(vec![]), &roots(ws), None, false).unwrap();
         assert_eq!(acted.len(), 1, "{acted:?}");
         assert!(!payload.exists(), "an undeclared hook's payload is released");
         assert!(state.get(ArtifactKind::Hook, "shell-guard").is_none());
@@ -1251,7 +1292,7 @@ mod tests {
         // Lock declares only "keep"; "drop" is an orphan.
         let lock = lock_of(vec![locked_rule("keep")]);
         let roots = roots(ws);
-        let acted = prune_orphans(&mut state, &lock, &roots, false).unwrap();
+        let acted = prune_orphans(&mut state, &lock, &roots, None, false).unwrap();
 
         assert_eq!(acted.len(), 1);
         assert_eq!(acted[0].name, "drop");
@@ -1273,7 +1314,7 @@ mod tests {
 
         let lock = lock_of(vec![]);
         let roots = roots(ws);
-        let acted = prune_orphans(&mut state, &lock, &roots, false).unwrap();
+        let acted = prune_orphans(&mut state, &lock, &roots, None, false).unwrap();
 
         assert_eq!(acted.len(), 1);
         assert_eq!(acted[0].outcome, PruneOutcome::KeptModified);
@@ -1295,7 +1336,7 @@ mod tests {
 
         let lock = lock_of(vec![]);
         let roots = roots(ws);
-        let acted = prune_orphans(&mut state, &lock, &roots, true).unwrap();
+        let acted = prune_orphans(&mut state, &lock, &roots, None, true).unwrap();
 
         assert_eq!(acted.len(), 1);
         assert_eq!(acted[0].outcome, PruneOutcome::Pruned);
@@ -1311,7 +1352,7 @@ mod tests {
         install_rule(&mut state, ws, "keep");
         let lock = lock_of(vec![locked_rule("keep")]);
         let roots = roots(ws);
-        let acted = prune_orphans(&mut state, &lock, &roots, false).unwrap();
+        let acted = prune_orphans(&mut state, &lock, &roots, None, false).unwrap();
         assert!(acted.is_empty());
     }
 
@@ -1333,7 +1374,7 @@ mod tests {
         lock.agents = vec![locked_of_kind(ArtifactKind::Agent, "reviewer")];
         lock.mcp = vec![locked_of_kind(ArtifactKind::Mcp, "grim-mcp")];
         let roots = roots(ws);
-        let acted = prune_orphans(&mut state, &lock, &roots, false).unwrap();
+        let acted = prune_orphans(&mut state, &lock, &roots, None, false).unwrap();
 
         assert!(
             acted.is_empty(),
@@ -1355,7 +1396,7 @@ mod tests {
         // Lock declares nothing; the skill directory is an orphan.
         let lock = lock_of(vec![]);
         let roots = roots(ws);
-        let acted = prune_orphans(&mut state, &lock, &roots, false).unwrap();
+        let acted = prune_orphans(&mut state, &lock, &roots, None, false).unwrap();
 
         assert_eq!(acted.len(), 1);
         assert_eq!(acted[0].outcome, PruneOutcome::Pruned);
@@ -1374,7 +1415,7 @@ mod tests {
 
         let lock = lock_of(vec![]);
         let roots = roots(ws);
-        let acted = prune_orphans(&mut state, &lock, &roots, false).unwrap();
+        let acted = prune_orphans(&mut state, &lock, &roots, None, false).unwrap();
 
         assert_eq!(acted.len(), 1);
         assert_eq!(acted[0].outcome, PruneOutcome::KeptModified);
@@ -1382,7 +1423,7 @@ mod tests {
         assert!(state.get(ArtifactKind::Skill, "code-review").is_some());
 
         // --force prunes the modified skill tree.
-        let acted = prune_orphans(&mut state, &lock, &roots, true).unwrap();
+        let acted = prune_orphans(&mut state, &lock, &roots, None, true).unwrap();
         assert_eq!(acted[0].outcome, PruneOutcome::Pruned);
         assert!(!skill.exists());
     }
@@ -1398,7 +1439,7 @@ mod tests {
 
         let lock = lock_of(vec![]);
         let roots = roots(ws);
-        let acted = prune_orphans(&mut state, &lock, &roots, false).unwrap();
+        let acted = prune_orphans(&mut state, &lock, &roots, None, false).unwrap();
         assert_eq!(acted.len(), 1);
         assert_eq!(acted[0].outcome, PruneOutcome::Pruned);
         assert!(state.get(ArtifactKind::Rule, "drop").is_none());
@@ -1447,7 +1488,7 @@ mod tests {
         // is_modified() + the uninstall interception absorb AnchorRootAbsent →
         // treat as absent → Pruned. prune_orphans MUST return Ok (the absence
         // case is reaped, never an Err — so the Err branch here is falsifiable).
-        let acted = prune_orphans(&mut state, &lock, &roots, false)
+        let acted = prune_orphans(&mut state, &lock, &roots, None, false)
             .expect("AnchorRootAbsent must be absorbed → reaped; prune_orphans must return Ok");
         // T10 contract: an absence-unresolvable record is reaped, never retained.
         assert_eq!(acted.len(), 1, "unresolvable orphan must be reaped");
@@ -1503,7 +1544,7 @@ mod tests {
 
         // Drive the real flow: a security-class traversal must PROPAGATE, never
         // be reaped.
-        let err = prune_orphans(&mut state, &lock, &roots, false)
+        let err = prune_orphans(&mut state, &lock, &roots, None, false)
             .expect_err("a security-class TraversalAttempt must propagate, not be reaped");
         assert!(
             matches!(err, PruneError::Anchor { .. }),
@@ -2175,7 +2216,7 @@ mod tests {
         });
 
         // An empty lock declares nothing, so the record is an orphan.
-        let acted = prune_orphans(&mut state, &lock_of(vec![]), &roots(&ws), false)
+        let acted = prune_orphans(&mut state, &lock_of(vec![]), &roots(&ws), None, false)
             .expect("a relocated ancestor must not turn a prune pass into exit 65");
         assert_eq!(acted.len(), 1);
         assert_eq!(acted[0].name, "orphan");
@@ -2269,7 +2310,7 @@ mod tests {
         );
 
         // End to end: the preserve-user-edits gate fires, so the edit survives.
-        let acted = prune_orphans(&mut state, &lock_of(vec![]), &roots(&ws), false).expect("prune completes");
+        let acted = prune_orphans(&mut state, &lock_of(vec![]), &roots(&ws), None, false).expect("prune completes");
         assert_eq!(acted.len(), 1);
         assert_eq!(acted[0].outcome, PruneOutcome::KeptModified);
         assert_eq!(
@@ -2579,7 +2620,7 @@ mod tests {
         let orphan = install_rule(&mut state, ws, "orphan");
         let lock = lock_of(vec![]);
 
-        let pruned = prune_orphans(&mut state, &lock, &roots(ws), true).unwrap();
+        let pruned = prune_orphans(&mut state, &lock, &roots(ws), None, true).unwrap();
         assert_eq!(pruned.len(), 1, "{pruned:?}");
         assert_eq!(pruned[0].kind, ArtifactKind::Rule);
         assert!(!orphan.exists());

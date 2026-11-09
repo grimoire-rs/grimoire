@@ -84,15 +84,14 @@ def test_transitive_chain_locks(
     assert lock.count("[[skill.requires]]") == 2
     assert 'id = "./b:1"' in lock and 'id = "./c:1"' in lock
 
-    # A transitive node rolls forward when its tag moves. `lock` re-resolves
-    # without materializing; `update` would install a two-layer artifact,
-    # which the installer does not read yet.
+    # A transitive node keeps its pin when its tag moves: only `grim update`
+    # moves a pin, and `grim lock` reads the carried node by digest.
     c2 = make_artifact(
         f"{unique_repo}/c", "skill", _skill_files("c", "v2"), tag="2"
     )
     retag(f"{unique_repo}/c", "1", c2.digest)
     runner.run("lock")
-    assert _entries(_lock(project_dir))["c"].endswith(c2.digest)
+    assert _entries(_lock(project_dir))["c"].endswith(c.digest)
 
 
 def test_add_no_install_locks_the_closure(
@@ -275,7 +274,7 @@ def test_relative_ref_after_mirror(
     runner.run("lock")
 
     pins = _entries(_lock(project_dir))
-    assert pins["b"] == f"{REGISTRY_HOST}/{mirror}/b@{mirrored_b.digest}"
+    assert pins["b"] == f"{REGISTRY_HOST}/{mirror}/b:1@{mirrored_b.digest}"
 
 
 def test_cross_registry_edge(
@@ -295,7 +294,7 @@ def test_cross_registry_edge(
     runner.run("lock")
 
     pins = _entries(_lock(project_dir))
-    assert pins["b"] == f"{other}/{unique_repo}/b@{b.digest}"
+    assert pins["b"] == f"{other}/{unique_repo}/b:1@{b.digest}"
     assert pins["a"].startswith(f"{REGISTRY_HOST}/")
 
 

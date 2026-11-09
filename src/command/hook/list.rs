@@ -142,7 +142,7 @@ pub async fn run(ctx: &Context, _args: &ListArgs) -> anyhow::Result<(HookListRep
     if !status::declares_a_hook(&scope, lock.as_ref()) {
         tracing::debug!("grim hook list: no hooks are declared for this scope");
         return Ok((
-            HookListReport::new(Vec::new(), launcher_report(ctx.grim_home())),
+            HookListReport::new(Vec::new(), launcher_report(ctx.grim_home())).naming(scope.invocation.clone()),
             ExitCode::Success,
         ));
     }
@@ -212,7 +212,7 @@ pub async fn run(ctx: &Context, _args: &ListArgs) -> anyhow::Result<(HookListRep
     let root = root_scope_for(&scope.workspace, scope.scope);
     let items = assemble(ctx.grim_home(), root, subjects, Some(&inputs)).await;
     Ok((
-        HookListReport::new(items, launcher_report(ctx.grim_home())),
+        HookListReport::new(items, launcher_report(ctx.grim_home())).naming(scope.invocation.clone()),
         ExitCode::Success,
     ))
 }
@@ -259,9 +259,12 @@ async fn assemble(
             // so the refusal is legible here — and only here, because this is the
             // only surface with an entry dimension to put it on.
             let arming = match inputs {
-                Some(inputs) => status::merge_not_registered(subject.arming.clone(), &subject.installed, |client| {
-                    inputs.arms_entry(client, &subject.name, &entry.id)
-                }),
+                Some(inputs) => status::merge_not_registered(
+                    subject.arming.clone(),
+                    &subject.installed,
+                    |client| inputs.arms_entry(client, &subject.name, &entry.id),
+                    &inputs.grim,
+                ),
                 None => subject.arming.clone(),
             };
             // The roll-up: an arming verdict outranks the lifecycle token for the
@@ -385,7 +388,7 @@ command = "sh guard.sh"
         HookArming {
             client: client.to_string(),
             cause,
-            message: cause.message().to_string(),
+            message: cause.message(&crate::config::scope::Invocation::WALKED),
             transient: cause.transient(),
         }
     }

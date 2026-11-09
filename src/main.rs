@@ -74,6 +74,7 @@ use crate::command::uninstall::UninstallArgs;
 use crate::command::update::UpdateArgs;
 use crate::command::why::WhyArgs;
 use crate::error::ErrorReason;
+use crate::error::printed_chain;
 
 #[derive(Parser)]
 #[command(
@@ -98,7 +99,7 @@ pub enum Command {
     Context(ContextArgs),
     /// Create a fresh `grimoire.toml`.
     Init(InitArgs),
-    /// Resolve declared floating tags to pinned digests in `grimoire.lock`.
+    /// Pin new declarations in `grimoire.lock` and keep existing pins; `grim update` moves them.
     Lock(LockArgs),
     /// Materialize the locked artifacts into the configured AI client(s).
     Install(InstallArgs),
@@ -216,7 +217,7 @@ fn main() -> std::process::ExitCode {
             // stderr (a `tracing::error!` here would duplicate the line —
             // the default filter also writes to stderr). Best-effort: a
             // closed stderr must not itself panic this error path.
-            let chain = format!("{err:#}");
+            let chain = printed_chain(&err);
             let _ = writeln!(io::stderr(), "{chain}");
             // A second line, only when the chain names something grim does
             // not recognise: serde's bare `unknown field` says nothing about
@@ -349,6 +350,7 @@ fn attach_settings(document: &mut serde_json::Value, outcome: &crate::install::i
 /// threading it through every call frame.
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::fmt::MakeWriter;
     use tracing_subscriber::prelude::*;
 
     let filter = EnvFilter::try_from_env("GRIM_LOG").unwrap_or_else(|_| EnvFilter::new("warn"));
@@ -361,10 +363,11 @@ fn init_tracing() {
     // Build and install the subscriber. `try_init` is used so a
     // second call (e.g., in a test binary that also calls init_tracing)
     // silently returns the error rather than panicking.
+    let stored = stored.clone();
     let _ = tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer()
-                .with_writer(stored.clone())
+                .with_writer(move || crate::oci::text::EventLine(stored.make_writer()))
                 .with_filter(filter),
         )
         .try_init();
@@ -378,6 +381,75 @@ mod build_embed;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A TOML parse error quotes the offending line, so a lock nobody here
+    /// wrote reaches the terminal through it.
+    #[test]
+    fn printed_chain_escapes_what_it_quotes_and_keeps_its_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grimoire.lock");
+        std::fs::write(&path, "[metadata]\nlock_version = \"\u{1b}[2J\"\n").unwrap();
+        let err = crate::command::lock::load_previous(&path).expect_err("no TOML string holds a raw escape");
+
+        let printed = printed_chain(&err);
+
+        assert!(!printed.contains('\u{1b}'), "{printed:?}");
+        assert!(printed.contains("\\u{1b}[2J"), "{printed:?}");
+        assert!(printed.contains('\n'), "a parse error spans lines: {printed:?}");
+    }
+
+    /// serde quotes an unknown key verbatim, and a quoted TOML key can hold a line
+    /// break, inside the one error whose lines must survive.
+    #[test]
+    fn printed_chain_keeps_a_quoted_toml_key_on_its_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grimoire.lock");
+        std::fs::write(&path, "\"a\\nerror: forged\u{202e}\" = 1\n").unwrap();
+        let err = crate::command::lock::load_previous(&path).expect_err("no lock holds that key");
+
+        let printed = printed_chain(&err);
+
+        assert!(
+            !printed.lines().any(|line| line.starts_with("error: forged")),
+            "{printed}"
+        );
+        assert!(printed.contains("unknown field `a\\nerror: forged"), "{printed}");
+        assert!(
+            printed.lines().count() > 1,
+            "the quoted file keeps its lines: {printed}"
+        );
+    }
+
+    /// The whole chain, access tier included: a kind's own cause prints its id.
+    #[test]
+    fn printed_chain_never_lets_a_tag_forge_a_line() {
+        use crate::oci::access::error::{AccessError, AccessErrorKind};
+        use crate::oci::reference::ArtifactRef;
+        use crate::oci::{ArtifactKind, Identifier};
+        use crate::resolve::resolve_error::{ResolveError, ResolveErrorKind};
+
+        let id = Identifier::parse("ghcr.io/acme/tool:1\nerror: forged\u{202e}").unwrap();
+        let cause = AccessError::with_identifier(
+            id.clone(),
+            AccessErrorKind::InvalidManifest("2\nerror: forged".to_string()),
+        );
+        let err = ResolveError::new(
+            ArtifactRef::registry(ArtifactKind::Skill, "tool", id),
+            ResolveErrorKind::RegistryUnreachable(cause),
+        );
+
+        let printed = printed_chain(&anyhow::Error::new(err));
+
+        assert!(!printed.contains('\n'), "{printed:?}");
+        assert!(!printed.contains('\u{202e}'), "{printed:?}");
+    }
+
+    #[test]
+    fn printed_chain_leaves_a_chain_with_no_control_character_as_it_was() {
+        let err = anyhow::anyhow!("line one\n\tline two").context("outer: ünïcode");
+
+        assert_eq!(printed_chain(&err), format!("{err:#}"));
+    }
 
     #[test]
     fn every_kind_argument_accepts_settings() {

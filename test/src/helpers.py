@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import shlex
 import sys
 import tarfile
 from collections.abc import Iterator
@@ -121,12 +122,12 @@ def make_bundle(
 ) -> PublishedArtifact:
     """Build and push a bundle artifact.
 
-    ``members`` is a list of ``(kind, name, id)`` tuples, where ``kind`` is any
-    installable kind — ``"skill"``, ``"rule"``, ``"agent"``, ``"mcp"``, or
-    ``"hook"`` (never ``"bundle"``; grim rejects nesting at expansion) — ``name``
-    is the binding name, and ``id`` is the fully-qualified member reference
-    (floating tag or ``@digest``). The bundle's single layer is the JSON members
-    document Grimoire reads on expansion.
+    ``members`` is a list of ``(kind, name, id)`` tuples, where ``kind`` is
+    ``"skill"``, ``"rule"``, ``"agent"``, ``"mcp"``, ``"hook"`` or ``"bundle"``
+    (grim expands a nested bundle) — ``name`` is the binding name, and ``id`` is
+    the fully-qualified member reference (floating tag or ``@digest``). The
+    bundle's single layer is the JSON members document Grimoire reads on
+    expansion.
 
     Members are written in the caller's order, deliberately: grim sorts them by
     ``(kind, name)`` when it authors a bundle, so passing an unsorted list here
@@ -472,3 +473,41 @@ def paged_namespace(count: int) -> str:
     namespace = f"grim-test/paged-{count}"
     make_repos(namespace, count)
     return namespace
+
+
+# PowerShell closes a single-quoted word on any of these, and grim doubles each.
+_SINGLE_QUOTES = "'\u2018\u2019\u201a\u201b"
+
+
+def printed_argv(command: str) -> list[str]:
+    """The words of a command grim printed, split as the host's shell reads them.
+
+    On Windows grim quotes for PowerShell and cmd.exe (`windows_word` in
+    `src/config/scope.rs`), where a backslash is a path separator that POSIX
+    splitting would drop: a word is bare, double-quoted, or single-quoted with
+    each quote character doubled.
+    """
+    if sys.platform != "win32":
+        return shlex.split(command)
+    words: list[str] = []
+    i = 0
+    while i < len(command):
+        if command[i] == " ":
+            i += 1
+        elif command[i] == '"':
+            end = command.index('"', i + 1)
+            words.append(command[i + 1 : end])
+            i = end + 1
+        elif command[i] == "'":
+            word, i = [], i + 1
+            while command[i] not in _SINGLE_QUOTES or command[i + 1 : i + 2] == command[i]:
+                word.append(command[i])
+                i += 2 if command[i] in _SINGLE_QUOTES else 1
+            words.append("".join(word))
+            i += 1
+        else:
+            end = command.find(" ", i)
+            end = len(command) if end == -1 else end
+            words.append(command[i:end])
+            i = end
+    return words

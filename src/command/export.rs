@@ -17,6 +17,7 @@ use clap::{Args, Subcommand};
 use crate::api::export_report::{ExportReport, MarketplaceExportReport};
 use crate::cli::exit_code::ExitCode;
 use crate::cli::printer::Printable;
+use crate::config::scope::Invocation;
 use crate::context::Context;
 use crate::export::export_error::ExportError;
 use crate::export::family::{Family, family_of};
@@ -325,18 +326,20 @@ fn project_lock(ctx: &Context, path: Option<&std::path::Path>) -> Result<Project
             )
             .into());
         }
-        return ProjectLock::load(path);
+        return ProjectLock::load(path, None);
     }
     if ctx.global() {
         let scope = super::scope_resolution::resolve(ctx, true, None)?;
         return Ok(ProjectLock {
             dir: scope.config_dir().to_path_buf(),
-            lock: crate::command::install::fresh_lock(&scope.lock_path, &scope.set)?,
+            lock: crate::command::install::fresh_lock(&scope.lock_path, &scope.set, &scope.invocation)?,
             meta: None,
+            grim: scope.invocation.clone(),
         });
     }
     let discovered = crate::config::ProjectConfig::discover(ctx.config())?;
-    ProjectLock::load(discovered.config_path())
+    let walked = ctx.config().is_none().then_some(&Invocation::WALKED);
+    ProjectLock::load(discovered.config_path(), walked)
 }
 
 /// `[options].clients` of the resolved project scope, or of the global

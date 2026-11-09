@@ -44,6 +44,7 @@ use crate::oci::ArtifactKind;
 use super::client_target::ClientTarget;
 use super::json_config::prefer_jsonc;
 use super::managed_config::{self, ArraySync};
+use super::vendor::SyncAdds;
 
 /// The workspace-relative glob grim manages for project-scope installs.
 pub const MANAGED_PROJECT_GLOB: &str = ".opencode/rules/*.md";
@@ -134,7 +135,8 @@ fn global_config_path(
 
 /// Converge the vendor config on the state's needs: ensure the managed
 /// glob is present while any OpenCode rule is recorded for this scope,
-/// absent otherwise. With no OpenCode rule left, the now-empty managed
+/// absent otherwise. While no recorded rule passes `adds`, a wanted glob is
+/// left as found. With no OpenCode rule left, the now-empty managed
 /// `.opencode/rules/` directory is reaped too (best-effort — a non-empty
 /// dir is never touched). Call after install/update/uninstall mutated
 /// `state`.
@@ -143,11 +145,22 @@ fn global_config_path(
 ///
 /// An I/O failure reading/writing the config, or `InvalidData` when the
 /// existing config cannot be parsed (grim refuses to clobber it).
-pub fn sync_for_state(state: &InstallState, workspace: &Path, scope: ConfigScope) -> io::Result<ArraySync> {
+pub fn sync_for_state(
+    state: &InstallState,
+    workspace: &Path,
+    scope: ConfigScope,
+    adds: SyncAdds<'_>,
+) -> io::Result<ArraySync> {
     let opencode = ClientTarget::OpenCode.to_string();
-    let want = state
+    let mut rules = state
         .iter_records()
-        .any(|r| r.kind == ArtifactKind::Rule && r.outputs.iter().any(|c| c.client == opencode));
+        .filter(|r| r.kind == ArtifactKind::Rule && r.outputs.iter().any(|c| c.client == opencode))
+        .map(|r| r.name.as_str())
+        .peekable();
+    let want = rules.peek().is_some();
+    if want && !rules.any(|rule| adds.admits(rule)) {
+        return Ok(ArraySync::Unchanged);
+    }
     // The managed rules dir mirrors the managed glob: when the last
     // OpenCode rule for this scope is gone, reap the now-empty
     // `.opencode/rules/` directory (it exists only because a rule install
@@ -499,7 +512,7 @@ mod tests {
         let mut state = InstallState::empty(&ws.join("state.json"));
         // No opencode rule yet ⇒ no write.
         assert_eq!(
-            sync_for_state(&state, ws, ConfigScope::Project).unwrap(),
+            sync_for_state(&state, ws, ConfigScope::Project, SyncAdds::Every).unwrap(),
             ArraySync::Unchanged
         );
         assert!(!ws.join("opencode.json").exists());
@@ -524,14 +537,63 @@ mod tests {
             }],
         });
         assert_eq!(
-            sync_for_state(&state, ws, ConfigScope::Project).unwrap(),
+            sync_for_state(&state, ws, ConfigScope::Project, SyncAdds::Every).unwrap(),
             ArraySync::Added
         );
 
         state.remove(ArtifactKind::Rule, "r");
         assert_eq!(
-            sync_for_state(&state, ws, ConfigScope::Project).unwrap(),
+            sync_for_state(&state, ws, ConfigScope::Project, SyncAdds::Every).unwrap(),
             ArraySync::Removed
+        );
+    }
+
+    /// A named update with no OpenCode rule in its closure leaves the glob as
+    /// found, absent included; one with such a rule writes it.
+    #[test]
+    fn a_named_sync_writes_the_glob_only_for_a_closure_rule() {
+        use crate::install::install_state::{ClientOutput, InstallRecord};
+        use crate::install::path_anchor::{AnchoredPath, PathAnchor};
+        use crate::oci::pinned_identifier::PinnedIdentifier;
+        use crate::oci::{Digest, Identifier};
+        use std::collections::BTreeSet;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let pinned = PinnedIdentifier::try_from(
+            Identifier::new_registry("acme/r", "localhost:5000").clone_with_digest(Digest::Sha256("a".repeat(64))),
+        )
+        .unwrap();
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        state.record(InstallRecord {
+            kind: ArtifactKind::Rule,
+            name: "r".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned),
+            dev: false,
+            outputs: vec![ClientOutput {
+                client: "opencode".to_string(),
+                target: AnchoredPath {
+                    anchor: PathAnchor::Workspace,
+                    relative: ".opencode/rules/r.md".to_string(),
+                },
+                content_hash: Digest::Sha256("b".repeat(64)),
+                support_dir: None,
+                entry: None,
+                adopted: false,
+                element: None,
+            }],
+        });
+        let elsewhere = BTreeSet::from([(ArtifactKind::Skill, "carrier".to_string())]);
+        let closure = BTreeSet::from([(ArtifactKind::Rule, "r".to_string())]);
+
+        assert_eq!(
+            sync_for_state(&state, ws, ConfigScope::Project, SyncAdds::Within(&elsewhere)).unwrap(),
+            ArraySync::Unchanged
+        );
+        assert!(!ws.join("opencode.json").exists());
+        assert_eq!(
+            sync_for_state(&state, ws, ConfigScope::Project, SyncAdds::Within(&closure)).unwrap(),
+            ArraySync::Added
         );
     }
 
@@ -544,20 +606,20 @@ mod tests {
         // Empty managed dir + no opencode rule recorded ⇒ reaped.
         std::fs::create_dir_all(&rules_dir).unwrap();
         let state = InstallState::empty(&ws.join("state.json"));
-        sync_for_state(&state, ws, ConfigScope::Project).unwrap();
+        sync_for_state(&state, ws, ConfigScope::Project, SyncAdds::Every).unwrap();
         assert!(!rules_dir.exists(), "empty rules dir is reaped");
         assert!(ws.join(".opencode").exists(), "only the rules dir itself goes");
 
         // A dir holding user files is never touched.
         std::fs::create_dir_all(&rules_dir).unwrap();
         std::fs::write(rules_dir.join("mine.md"), "user content\n").unwrap();
-        sync_for_state(&state, ws, ConfigScope::Project).unwrap();
+        sync_for_state(&state, ws, ConfigScope::Project, SyncAdds::Every).unwrap();
         assert!(rules_dir.join("mine.md").is_file(), "non-empty dir is preserved");
 
         // An absent dir stays a silent no-op (idempotent).
         std::fs::remove_file(rules_dir.join("mine.md")).unwrap();
         std::fs::remove_dir(&rules_dir).unwrap();
-        sync_for_state(&state, ws, ConfigScope::Project).unwrap();
+        sync_for_state(&state, ws, ConfigScope::Project, SyncAdds::Every).unwrap();
         assert!(!rules_dir.exists());
     }
 

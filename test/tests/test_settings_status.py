@@ -331,7 +331,7 @@ def test_a_partial_decline_is_a_note_on_the_lifecycle_state(
     assert [entry["message"] for entry in row["arming"]] == [
         (
             "codex applies at global scope only; declare the package at global scope with grim --global add, "
-            "then run grim install --global"
+            "then run grim --global install"
         )
     ]
 
@@ -436,7 +436,7 @@ def test_a_global_row_names_the_global_install(grim, grim_home: Path, tmp_path: 
     claude = _verdict(_row(runner.json("--global", "status"), "other"), "claude")
 
     assert claude["cause"] == "no-applicable-settings"
-    assert claude["message"].endswith("then run grim install --global"), claude["message"]
+    assert claude["message"].endswith("then run grim --global install"), claude["message"]
 
 
 def test_no_surface_anywhere_reads_gated(grim_at, tmp_path: Path, unique_repo: str) -> None:
@@ -843,7 +843,7 @@ def test_flag_off_names_the_flag_of_its_own_scope(
     assert row["state"] == "gated"
     assert _causes(row) == [("claude", "feature-flag-off")]
     assert row["arming"][0]["message"] == (
-        "settings are gated; enable them with `grim config set --global options.experimental.settings true`"
+        "settings are gated; enable them with `grim --global config set options.experimental.settings true`"
     )
     # Positive control: the project row, gated by the same cause, keeps the project sentence word for word.
     project = _row(runner.json("status"), "team")
@@ -851,6 +851,28 @@ def test_flag_off_names_the_flag_of_its_own_scope(
     assert _causes(project) == [("claude", "feature-flag-off")]
     assert project["arming"][0]["message"] == (
         "settings are gated; enable them with `grim config set options.experimental.settings true`"
+    )
+
+
+def test_flag_off_names_the_config_it_ran_under(
+    grim_at, project_dir: Path, tmp_path: Path, unique_repo: str
+) -> None:
+    """Followed from where it was printed, the remedy sets the flag of the project the row is in."""
+    team = _package(unique_repo, "team", {"claude": {"model": "sonnet"}})
+    config = write_config(project_dir, settings={"team": team.fq}, options=CLAUDE_ONLY)
+    runner = grim_at(project_dir)
+    runner.env.update(settings_sandbox(tmp_path / "s", runner.home)[0])
+    runner.run("lock")
+    away = tmp_path / "away"
+    away.mkdir()
+    elsewhere = grim_at(away)
+    elsewhere.env = runner.env
+
+    row = _row(elsewhere.json("--config", str(config), "status"), "team")
+
+    assert _causes(row) == [("claude", "feature-flag-off")]
+    assert row["arming"][0]["message"] == (
+        f"settings are gated; enable them with `grim --config {config} config set options.experimental.settings true`"
     )
 
 

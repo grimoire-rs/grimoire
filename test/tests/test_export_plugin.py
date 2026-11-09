@@ -553,7 +553,7 @@ def test_c007_update_without_upstream_change_keeps_the_lock_and_export_leaves_it
 
 def test_c010_changed_local_member_exits_65_until_update_marketplace(grim_at, work: Path) -> None:
     """C-010 / decision 42: a declared path member edited after the lock was
-    written is 65 with the `grim update --marketplace <M> <P>` hint (not the
+    written is 65 with the `grim update --marketplace <M> <P>:<name>` hint (not the
     grimoire.toml `grim update x` / `grim lock` one), and that command clears it."""
     runner = grim_at(work)
     local = work / "skills" / "team-plan"
@@ -567,10 +567,10 @@ def test_c010_changed_local_member_exits_65_until_update_marketplace(grim_at, wo
     assert result.returncode == 65, result.stderr
     err = _error(result)
     shown = f"{err['message']} {err.get('hint') or ''}"
-    assert f"grim update --marketplace {work / 'marketplace.toml'} team" in shown, shown
+    assert f"grim update --marketplace {work / 'marketplace.toml'} team:team-plan`" in shown, shown
     assert "grim lock" not in shown, shown
 
-    runner.run("update", "--marketplace", "marketplace.toml", "team")
+    runner.run("update", "--marketplace", "marketplace.toml", "team:team-plan")
     _ok(_export(runner, "--client", "claude", "-o", "dist", "--force"))
     assert "# Edited" in (work / "dist" / "team.claude" / "skills" / "team-plan" / "SKILL.md").read_text()
 
@@ -1249,9 +1249,11 @@ def test_s029_hand_edited_lock_name_is_refused_78(grim_at, tmp_path: Path, work:
 def test_s030_only_the_edited_plugin_is_reresolved(grim_at, work: Path, registry: str, unique_repo: str) -> None:
     runner = grim_at(work)
     reg = f"{registry}/{unique_repo}"
-    _skill(f"{unique_repo}/a-skill", "a-skill", heading="A1", tag="stable")
+    a1 = _skill(f"{unique_repo}/a-skill", "a-skill", heading="A1", tag="stable")
     b1 = _skill(f"{unique_repo}/b-skill", "b-skill", heading="B1", tag="stable")
-    retag(f"{unique_repo}/b-skill", "keep", b1)  # zot drops a manifest once its last tag moves
+    # zot drops a manifest once its last tag moves
+    retag(f"{unique_repo}/a-skill", "keep", a1)
+    retag(f"{unique_repo}/b-skill", "keep", b1)
     _skill(f"{unique_repo}/a2", "a2")
     m = work / "marketplace.toml"
     lock_path = work / "marketplace.lock"
@@ -1261,7 +1263,7 @@ def test_s030_only_the_edited_plugin_is_reresolved(grim_at, work: Path, registry
     b_before = _lock_part(lock_path, "b")
     b_tree = _tree(work / "dist" / "b.claude")
 
-    a_new = _skill(f"{unique_repo}/a-skill", "a-skill", heading="A2", tag="stable")
+    _skill(f"{unique_repo}/a-skill", "a-skill", heading="A2", tag="stable")
     _skill(f"{unique_repo}/b-skill", "b-skill", heading="B2", tag="stable")
     _write_marketplace(
         m, {"a": {"include": [f"{reg}/a-skill:stable", f"{reg}/a2:1"]}, "b": {"include": [f"{reg}/b-skill:stable"]}}
@@ -1271,7 +1273,7 @@ def test_s030_only_the_edited_plugin_is_reresolved(grim_at, work: Path, registry
     a_after, a_row_after = _lock_part(lock_path, "a")
     assert a_row_after["declaration_hash"] != a_row_before["declaration_hash"]
     assert {e["name"] for e in a_after} == {"a-skill", "a2"}
-    assert next(e for e in a_after if e["name"] == "a-skill")["pinned"].endswith(a_new)
+    assert next(e for e in a_after if e["name"] == "a-skill")["pinned"].endswith(a1)
     assert a_after != a_before
     assert _lock_part(lock_path, "b") == b_before
 
@@ -1675,7 +1677,29 @@ def test_s035_drifted_local_member_names_grim_lock(grim_at, tmp_path: Path) -> N
     result = _export(runner, "--project", "--client", "claude", "-o", "dist")
 
     assert result.returncode == 65, result.stderr
-    assert f"run `grim lock` in {proj}" in _error(result)["message"]
+    assert _error(result)["message"].endswith("run `grim lock`"), _error(result)["message"]
+
+
+def test_s035_drifted_member_of_a_named_config_names_that_config(grim_at, tmp_path: Path) -> None:
+    """A plain `grim lock` in the project's directory reads its `grimoire.toml`, not a config
+    under another name, so the remedy names the config the export read."""
+    proj = tmp_path / "proj"
+    (proj / "skills" / "local").mkdir(parents=True)
+    (proj / "skills" / "local" / "SKILL.md").write_text(_skill_md("local", "Local"))
+    write_config(proj, skills={"local": "./skills/local"})
+    config = proj / "team.toml"
+    (proj / "grimoire.toml").rename(config)
+    config.write_text(config.read_text() + '\n[plugin]\nname = "team"\n')
+    away = tmp_path / "away"
+    away.mkdir()
+    runner = grim_at(away)
+    runner.run("--config", str(config), "lock")
+    (proj / "skills" / "local" / "SKILL.md").write_text(_skill_md("local", "Edited"))
+
+    result = _export(runner, "--project", str(config), "--client", "claude", "-o", "dist")
+
+    assert result.returncode == 65, result.stderr
+    assert _error(result)["message"].endswith(f"run `grim --config {config} lock`"), _error(result)["message"]
 
 
 def test_s035_config_schema_documents_the_plugin_table(grim_at, work: Path) -> None:
@@ -1723,7 +1747,7 @@ def test_s036_stale_project_lock_is_65(grim_at, tmp_path: Path, work: Path, regi
     result = _export(grim_at(work), "--client", "claude", "-o", "dist")
 
     assert result.returncode == 65, result.stderr
-    assert "run `grim lock` there" in _error(result)["message"]
+    assert f"run `grim --config {work / 'proj' / 'grimoire.toml'} lock`" in _error(result)["message"]
     assert not (work / "dist").exists()
 
 
@@ -1735,7 +1759,8 @@ def test_s036_update_marketplace_leaves_project_plugins_to_the_project(
 
     named = runner.run("update", "--marketplace", "marketplace.toml", "team", format="json", check=False)
     assert named.returncode == 64, named.stderr
-    assert "run `grim update` there" in json.loads(named.stdout)["error"]["message"]
+    message = json.loads(named.stdout)["error"]["message"]
+    assert f"`grim --config {work / 'proj' / 'grimoire.toml'} update`" in message, message
 
     everything = runner.run("update", "--marketplace", "marketplace.toml", format="json", check=False)
     assert everything.returncode == 0, everything.stderr

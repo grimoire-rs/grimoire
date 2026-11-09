@@ -16,7 +16,7 @@ use crate::config::config_error::{ConfigError, ConfigErrorKind};
 use crate::config::declaration::{ConfigOptions, DesiredSet, RegistryConfig};
 use crate::config::global_config::GlobalConfig;
 use crate::config::project_config::ProjectConfig;
-use crate::config::scope::ConfigScope;
+use crate::config::scope::{ConfigScope, Invocation};
 use crate::context::Context;
 use crate::install::install_state::InstallState;
 use crate::install::path_anchor::AnchorRoots;
@@ -43,6 +43,9 @@ pub struct ResolvedScope {
     /// Every anchor root resolved once for this scope, so all consumers
     /// resolve anchored install paths from one source.
     pub roots: AnchorRoots,
+    /// The `grim` every remedy this scope prints names, built here so no
+    /// remedy works out the scope again.
+    pub invocation: Invocation,
 }
 
 impl ResolvedScope {
@@ -130,8 +133,13 @@ fn resolve_unrecorded(
             workspace,
             roots,
             config_path,
+            invocation: Invocation::GLOBAL,
         })
     } else {
+        // Plain `grim` finds this config only when the working directory's
+        // walk-up did. Anything else needs the path, or the remedy acts on
+        // whatever project the shell stands in.
+        let walked = config.is_none() && workspace.is_none();
         let discovered = ProjectConfig::discover_from(config, workspace)?;
         let config_path = discovered.config_path().to_path_buf();
         let lock_path = discovered.lock_path();
@@ -147,6 +155,11 @@ fn resolve_unrecorded(
             lock_path,
             workspace,
             roots,
+            invocation: if walked {
+                Invocation::WALKED
+            } else {
+                Invocation::config(&config_path)
+            },
             config_path,
         })
     }
@@ -511,6 +524,27 @@ mod tests {
         assert_eq!(scope.lock_path, lock_path_for(&cfg));
         assert_eq!(scope.workspace, dir.path());
         assert_eq!(scope.set.skills.len(), 1);
+    }
+
+    /// Followed from another directory, a remedy acts on the config this run
+    /// used: plain `grim` only where the working directory finds it again.
+    #[test]
+    fn each_scope_names_the_grim_that_finds_it_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("grimoire.toml");
+        std::fs::write(&cfg, "").unwrap();
+        let ctx = Context::hermetic(dir.path().join("home"));
+
+        let global = resolve(&ctx, true, None).unwrap();
+        assert_eq!(global.invocation.to_string(), "grim --global");
+        let explicit = resolve(&ctx, false, Some(&cfg)).unwrap();
+        assert_eq!(explicit.invocation, Invocation::config(&cfg));
+        let seeded = resolve_in(&ctx, false, None, Some(dir.path())).unwrap();
+        assert_eq!(
+            seeded.invocation,
+            Invocation::config(&cfg),
+            "a seeded walk-up is not the cwd's"
+        );
     }
 
     #[test]

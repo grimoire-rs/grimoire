@@ -17,6 +17,9 @@ use crate::oci::{ArtifactKind, Digest, PinnedIdentifier};
 pub struct BundleProvenance {
     /// The bundle's `registry/repo`.
     pub repo: String,
+    // In a `marketplace.lock` part this may read `<tag>@<digest>`. A match against a
+    // declared tag that skips `export::resolve::read_stamps` finds no bundle and reads
+    // its tag again.
     /// The declared bundle tag that resolved this member.
     pub tag: String,
 }
@@ -49,10 +52,10 @@ pub struct LockedArtifact {
     /// deserialization (`ArtifactKind::default()`) is always overwritten.
     #[serde(skip)]
     pub kind: ArtifactKind,
-    /// The pinned source: a registry manifest digest
-    /// (`pinned = "registry/repo@sha256:…"`, advisory tag stripped at
-    /// write time) or a local path + content hash of its canonical packed
-    /// layer (`path` + `hash` on the wire).
+    /// The pinned source: a registry manifest digest with the tag that
+    /// resolved it, when there was one (`pinned =
+    /// "registry/repo:tag@sha256:…"`), or a local path + content hash of its
+    /// canonical packed layer (`path` + `hash` on the wire).
     pub source: LockedSource,
     /// Provenance: every declared bundle that contributed this member
     /// (agreeing bundles coalesce to one entry but ALL contributors are
@@ -78,8 +81,9 @@ pub struct LockedArtifact {
 struct RawLockedArtifact {
     /// Config binding name (TOML key from `grimoire.toml`).
     name: String,
-    /// Resolved registry/repo pinned to a content digest. Mutually
-    /// exclusive with the `path` + `hash` pair.
+    /// Resolved registry/repo pinned to a content digest, with the tag that
+    /// resolved it when there was one. Mutually exclusive with the `path` +
+    /// `hash` pair.
     #[serde(default)]
     pinned: Option<PinnedIdentifier>,
     /// Local path source (relative to the config file's directory, or
@@ -173,8 +177,9 @@ impl schemars::JsonSchema for LockedArtifact {
         schema.insert(
             "description".to_string(),
             serde_json::Value::String(
-                "One locked artifact, pinned either to a registry manifest digest (`pinned`) or to a \
-                 local path source (`path` + `hash`, set together) — never both on one entry. Bundle \
+                "One locked artifact, pinned either to a registry manifest digest (`pinned`, which also \
+                 records the tag that resolved it) or to a local path source (`path` + `hash`, set \
+                 together) — never both on one entry. Bundle \
                  provenance is either the legacy `bundle` + `bundle_tag` pair (set together) or the \
                  `bundles` array — never both, and never on a path-sourced entry"
                     .to_string(),

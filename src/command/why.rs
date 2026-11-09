@@ -8,6 +8,8 @@
 //! `required_by` and the dependency source literals, so both commands answer
 //! from one graph.
 
+use std::collections::HashMap;
+
 use clap::Args;
 
 use crate::api::status_report::RequiredBy;
@@ -20,7 +22,7 @@ use crate::lock::effective_set::{
 };
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
-use crate::oci::member_ref::MemberRef;
+use crate::oci::text::registry_text;
 use crate::oci::{ArtifactKind, Identifier};
 use crate::resolve::resolve_error::{ResolveError, ResolveErrorKind};
 
@@ -43,6 +45,10 @@ pub struct WhyArgs {
 pub(super) struct Provenance<'a> {
     lock: Option<&'a GrimoireLock>,
     graph: Option<EffectiveGraph>,
+    /// Each child's parents, sorted. Built once because `status` asks per row,
+    /// and a scan of the graph per question is quadratic on a crafted lock
+    /// (CWE-407).
+    parents: HashMap<NodeKey, Vec<NodeKey>>,
 }
 
 impl<'a> Provenance<'a> {
@@ -50,7 +56,18 @@ impl<'a> Provenance<'a> {
     /// computable offline.
     pub(super) fn new(set: &DesiredSet, lock: Option<&'a GrimoireLock>) -> Self {
         let graph = lock.and_then(|l| effective_graph(set, l));
-        Self { lock, graph }
+        let mut parents: HashMap<NodeKey, Vec<NodeKey>> = HashMap::new();
+        for (parent, kids) in graph.iter().flat_map(|g| &g.children) {
+            for kid in kids {
+                parents.entry(kid.clone()).or_default().push(parent.clone());
+            }
+        }
+        Self { lock, graph, parents }
+    }
+
+    /// The parents of `key`, sorted by `(kind, name)`.
+    fn parents_of(&self, key: &NodeKey) -> &[NodeKey] {
+        self.parents.get(key).map_or(&[], Vec::as_slice)
     }
 
     pub(super) fn graph(&self) -> Option<&EffectiveGraph> {
@@ -60,18 +77,10 @@ impl<'a> Provenance<'a> {
     /// Immediate parents of `key`, sorted by `(kind, name)`; `None` when the
     /// graph is incomputable.
     pub(super) fn required_by(&self, key: &NodeKey) -> Option<Vec<RequiredBy>> {
-        let mut parents: Vec<&NodeKey> = self
-            .graph
-            .as_ref()?
-            .children
-            .iter()
-            .filter(|(_, kids)| kids.contains(key))
-            .map(|(parent, _)| parent)
-            .collect();
-        parents.sort();
+        self.graph.as_ref()?;
         Some(
-            parents
-                .into_iter()
+            self.parents_of(key)
+                .iter()
                 .map(|(kind, name)| RequiredBy {
                     kind: *kind,
                     name: name.clone(),
@@ -100,18 +109,15 @@ impl<'a> Provenance<'a> {
     /// parent's own pin; `None` when the lock does not say.
     fn requested_id(&self, parent: &NodeKey, child: &NodeKey) -> Option<Identifier> {
         let lock = self.lock?;
-        let (members, parent_id) = if parent.0 == ArtifactKind::Bundle {
+        let (members, parent_pin) = if parent.0 == ArtifactKind::Bundle {
             let b = lock.bundles.iter().find(|b| b.name == parent.1)?;
-            (&b.members, b.pinned().map(|p| p.as_identifier().clone()))
+            (&b.members, b.pinned())
         } else {
             let a = find_locked(lock, parent.0, &parent.1)?;
-            (&a.requires, a.source.pinned().map(|p| p.as_identifier().clone()))
+            (&a.requires, a.source.pinned())
         };
         let member = members.iter().find(|m| m.kind == child.0 && m.name == child.1)?;
-        match MemberRef::parse(&member.id).ok()? {
-            MemberRef::Absolute(id) => Some(id),
-            relative => relative.resolve(&parent_id?).ok(),
-        }
+        member.absolute_id(parent_pin.map(|p| p.as_identifier()))
     }
 
     /// Whether `requested` is what the direct declaration of `key` already
@@ -148,10 +154,7 @@ impl<'a> Provenance<'a> {
         if !matches!(graph.nodes.get(key), Some(Origin::Direct(_))) {
             return (same, overrides);
         }
-        for (parent, kids) in &graph.children {
-            if !kids.contains(key) {
-                continue;
-            }
+        for parent in self.parents_of(key) {
             let Some(id) = self.requested_id(parent, key) else {
                 continue;
             };
@@ -174,19 +177,24 @@ impl<'a> Provenance<'a> {
     }
 
     /// One note per direct artifact that an artifact also requires at the
-    /// digest the declaration already pins. Bundle parents never count, so a
-    /// project without dependencies prints nothing.
+    /// digest the declaration already pins, and that no parent asks for at
+    /// another version. Bundle parents never count as the requiring artifact,
+    /// so a project without dependencies prints nothing.
     pub(super) fn redundant_note(&self, key: &NodeKey) -> Option<String> {
-        let mut parents = self.direct_edges(key).0;
-        if parents.is_empty() {
+        let (parents, overrides) = self.direct_edges(key);
+        // Removing the declaration hands the key to every edge, so an override
+        // brings back the version it held off: `install` 65, `lock` 78.
+        if parents.is_empty() || !overrides.is_empty() {
             return None;
         }
-        parents.sort();
-        let by: Vec<String> = parents.iter().map(|(k, n)| format!("{k}/{n}")).collect();
+        let by: Vec<String> = parents
+            .iter()
+            .map(|(k, n)| format!("{k}/{}", registry_text(n)))
+            .collect();
         Some(format!(
             "note: {}/{} is declared directly and also required by {} at the same digest; the declaration can be removed",
             key.0,
-            key.1,
+            registry_text(&key.1),
             by.join(", ")
         ))
     }
@@ -238,25 +246,27 @@ pub fn run(ctx: &Context, args: &WhyArgs) -> anyhow::Result<(WhyReport, ExitCode
         Err(e) if e.is_not_found() => {
             return Err(crate::error::Error::from(CommandError::LockMissing {
                 path: scope.lock_path.clone(),
+                grim: scope.invocation.clone(),
             })
             .into());
         }
         Err(e) => return Err(crate::error::Error::from(e).into()),
     };
 
+    let grim = &scope.invocation;
     let prov = Provenance::new(&scope.set, Some(&lock));
     let Some(graph) = prov.graph() else {
         return Err(stale(
             &scope.lock_path,
-            "the lock's dependency graph cannot be computed offline; run `grim lock`".to_string(),
+            format!("the lock's dependency graph cannot be computed offline; run `{grim} lock`"),
         ));
     };
     if let Some(cycle) = find_cycle(graph) {
-        let chain: Vec<String> = cycle.iter().map(|(k, n)| format!("{k}/{n}")).collect();
+        let chain: Vec<String> = cycle.iter().map(|(k, n)| format!("{k}/{}", registry_text(n))).collect();
         return Err(stale(
             &scope.lock_path,
             format!(
-                "the lock's dependency graph has a cycle: {}; run `grim lock`",
+                "the lock's dependency graph has a cycle: {}; run `{grim} lock`",
                 chain.join(" -> ")
             ),
         ));
@@ -291,6 +301,7 @@ pub fn run(ctx: &Context, args: &WhyArgs) -> anyhow::Result<(WhyReport, ExitCode
         truncated: found.truncated,
         overrides: prov.overrides(&key),
         notes: prov.redundant_note(&key).into_iter().collect(),
+        grim: scope.invocation.clone(),
     };
     Ok((report, ExitCode::Success))
 }

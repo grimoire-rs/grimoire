@@ -101,7 +101,9 @@ fn serialize_opt_digest<S: Serializer>(digest: &Option<Digest>, s: S) -> Result<
     }
 }
 
-/// The result of an update pass: one row per re-resolved/carried artifact.
+/// The result of an update pass: one row per locked artifact, or on a named run
+/// one per artifact in its closure and per lock change outside it, plus the
+/// orphans the prune pass acted on.
 #[derive(Debug, Serialize)]
 pub struct UpdateReport {
     items: Vec<UpdateEntry>,

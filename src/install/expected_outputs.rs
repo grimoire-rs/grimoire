@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use crate::install::client_target::ClientTarget;
 use crate::install::install_state::{ClientOutput, InstallRecord};
 use crate::install::installer::client_hosts;
-use crate::install::path_anchor::AnchorRoots;
+use crate::install::path_anchor::{AnchorRoots, AnchoredPath};
 use crate::install::target::InstallTarget;
 use crate::oci::ArtifactKind;
 use crate::oci::manifest::{LayerLayout, OciManifest};
@@ -180,6 +180,39 @@ fn writable_mcp_surfaces(
         })
         .filter(|path| mcp.is_none_or(|d| vendor.mcp_entry_for(target.scope(), path, name, d).is_some()))
         .collect()
+}
+
+/// Whether an install over `target` writes the recorded `out` of `client`: the
+/// client still hosts the artifact, and the file sits where the layout puts it
+/// or the entry sits on a surface the vendor can write. An edited old copy a
+/// layout left behind is `reap_moved_outputs`' to preserve, with no `--force`
+/// override, since deletion is the unrecoverable direction.
+///
+/// A client with one writable surface keeps the client-level rule of
+/// [`pending_for_client`], so a vendor variable that repoints its file still
+/// writes the entry there.
+pub fn writes_output(
+    out: &ClientOutput,
+    client: ClientTarget,
+    rec: &InstallRecord,
+    target: &InstallTarget,
+    roots: &AnchorRoots,
+    mcp: Option<&McpDescriptor>,
+) -> bool {
+    if !client_hosts(client, rec.kind, &rec.name, target.workspace(), target.scope()) {
+        return false;
+    }
+    if rec.kind != ArtifactKind::Mcp {
+        return output_at_current_layout(out, client, rec, target, roots);
+    }
+    match writable_mcp_surfaces(client, &rec.name, target, roots, mcp).as_slice() {
+        [] => false,
+        [_] => true,
+        surfaces => surfaces.iter().any(|path| {
+            AnchoredPath::from_target(path, target.scope(), client, rec.kind, roots)
+                .is_ok_and(|anchored| anchored == out.target)
+        }),
+    }
 }
 
 /// The `surfaces` no recorded entry output of `client` sits at. An
@@ -344,7 +377,7 @@ pub fn output_at_current_layout(
 mod tests {
     use super::*;
     use crate::config::scope::ConfigScope;
-    use crate::install::path_anchor::{AnchoredPath, PathAnchor};
+    use crate::install::path_anchor::PathAnchor;
     use crate::oci::{Digest, Identifier, PinnedIdentifier};
 
     fn roots(ws: &std::path::Path) -> AnchorRoots {

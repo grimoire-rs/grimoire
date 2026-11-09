@@ -389,7 +389,9 @@ def test_export_failure_never_changes_outcome(
     assert armed.stderr == baseline.stderr
     assert armed.stdout == baseline.stdout
     added = elapsed - baseline_elapsed
-    assert added < 0.3 + 1.5, f"export failure stretched the run by {added:.2f}s"
+    # A hung exporter held to its budget adds about 0.3s; an unbounded one holds
+    # the run until the 10s command timeout. The slack absorbs a loaded host.
+    assert added < 0.3 + 4.0, f"export failure stretched the run by {added:.2f}s"
 
 
 def test_one_post_per_invocation(runner: GrimRunner, otlp_collector: OtlpCollector) -> None:

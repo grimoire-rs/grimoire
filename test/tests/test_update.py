@@ -4,12 +4,13 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 
 from src.assertions import assert_not_exists, assert_path_exists
-from src.helpers import make_artifact, write_config
-from src.registry import retag
+from src.helpers import make_artifact, make_bundle, printed_argv, write_config
+from src.registry import retag, tag_digest
 
 
 def _write_rule_config(project_dir: Path, rule_ref: str, clients: list[str]) -> None:
@@ -92,7 +93,8 @@ def test_update_named_only_touches_that_artifact(
     rows = runner.json("update", "a")["items"]
     by_name = {r["name"]: r for r in rows}
     assert by_name["a"]["action"] == "updated"
-    assert by_name["b"]["action"] == "unchanged"
+    # An unnamed binding the run left alone has no row (issue #269).
+    assert "b" not in by_name, rows
     # A partial update carries non-named entries forward in the lock, so the
     # prune pass must not treat "b" as an orphan and delete it.
     assert all(r["action"] != "removed" for r in rows), "partial update must not prune the unnamed entry"
@@ -147,7 +149,7 @@ def test_update_installs_newly_declared_rule(
     assert (project_dir / ".claude/rules/a.md").read_text() == "a1\n"
 
     # Declare a second rule AND re-lock so the lock is not stale, then run a
-    # full update (no names) to exercise the add path via resolve_lock.
+    # full update (no names) to exercise the add path via target_lock.
     b_repo = f"{unique_repo}/b"
     make_artifact(b_repo, "rule", {"b.md": "b1\n"}, tag="latest")
     write_config(
@@ -164,10 +166,9 @@ def test_update_installs_newly_declared_rule(
     rows = runner.json("update")["items"]
     by_name = {r["name"]: r for r in rows}
     # The newly declared rule appears in the update report with a real pin.
-    # Its action is `unchanged` (the re-lock above already established the
-    # pin, so the digest does not move during update) — the add-on-upgrade
-    # contract is the disk materialization below, not the diff label.
-    assert "b" in by_name
+    # The re-lock above already established the pin, so it does not move during
+    # update: the rule is `restored`, since its output came from this run.
+    assert by_name["b"]["action"] == "restored", by_name
     assert by_name["b"]["new"] is not None, "the locked rule carries a pin"
     # The addition is materialized by the update; the pre-existing rule is
     # untouched.
@@ -409,3 +410,138 @@ def test_update_autodetect_never_reaps_on_detection_drift(
     assert _recorded_clients(project_dir) == {"claude", "opencode"}, (
         "autodetect must never reap a client from state on detection drift"
     )
+
+
+def test_a_global_named_update_names_cleanup_that_stays_in_the_global_scope(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Every command a global run prints carries `--global`.
+
+    Without it the command acts on the project in the working directory, or
+    on no config at all. Following the printed command removes the files.
+    """
+
+    def skill(name: str):
+        files = {f"{name}/SKILL.md": f"---\nname: {name}\ndescription: d\n---\n# {name}\n"}
+        return make_artifact(f"{unique_repo}/{name}", "skill", files, tag="1")
+
+    runner = grim_at(project_dir)
+    runner.run("--global", "add", skill("keep").fq)
+    runner.run("--global", "add", skill("stray").fq)
+    runner.run("--global", "remove", "skill", "stray")
+
+    named = runner.run("--global", "update", "--", "keep", check=False)
+
+    assert named.returncode == 0, named.stderr
+    assert "skill 'stray'" in named.stderr, named.stderr
+    assert "`grim --global uninstall skill stray`" in named.stderr, named.stderr
+    assert "`grim uninstall" not in named.stderr, named.stderr
+    assert "`grim update" not in named.stderr, named.stderr
+
+    followed = runner.run("--global", "uninstall", "skill", "stray", check=False)
+    assert followed.returncode == 0, followed.stderr
+    again = runner.run("--global", "update", "--", "keep", check=False)
+    assert "skill 'stray'" not in again.stderr, again.stderr
+
+
+def test_a_config_run_names_cleanup_that_stays_in_the_named_config(
+    grim_at, project_dir: Path, tmp_path: Path, registry: str, unique_repo: str
+) -> None:
+    """A `--config` run prints commands that act on that config from any directory.
+
+    The shell stands in another project that declares the same skill and holds
+    its own edits. Followed from there, a bare `grim uninstall --force` would
+    delete that project's edited file and undeclare it.
+    """
+
+    def skill(name: str):
+        files = {f"{name}/SKILL.md": f"---\nname: {name}\ndescription: d\n---\n# {name}\n"}
+        return make_artifact(f"{unique_repo}/{name}", "skill", files, tag="1")
+
+    m, k = skill("m"), skill("k")
+    bundle = f"{unique_repo}/b"
+    member = lambda name: f"{registry}/{unique_repo}/{name}:1"
+    pack = make_bundle(bundle, [("skill", "m", member("m")), ("skill", "k", member("k"))], tag="1")
+
+    write_config(project_dir, skills={"m": m.fq})
+    here = grim_at(project_dir)
+    here.run("lock")
+    here.run("install")
+    mine = project_dir / ".claude/skills/m/SKILL.md"
+    mine.write_text("the cwd project's own edits\n")
+
+    other = tmp_path / "other"
+    (other / ".claude").mkdir(parents=True)
+    config = write_config(other, bundles={"b": pack.fq})
+    # Relative, as typed: the printed command must still hold from any directory.
+    flag = ("--config", str(config.relative_to(project_dir.parent).as_posix()))
+    away = grim_at(project_dir.parent)
+    away.run(*flag, "lock")
+    away.run(*flag, "install")
+    kept = other / ".claude/skills/m/SKILL.md"
+    kept.write_text("the other project's edits\n")
+
+    retag(bundle, "keep", tag_digest(bundle, "1"))
+    make_bundle(bundle, [("skill", "k", member("k"))], tag="1")
+    named = here.run("--config", str(config), "update", "--", "b", check=False)
+
+    assert named.returncode == 0, named.stderr
+    assert "skill 'm'" in named.stderr, named.stderr
+    commands = re.findall(r"`(grim [^`]*)`", named.stderr)
+    uninstall = next((c for c in commands if " uninstall --force " in c), None)
+    assert uninstall is not None, named.stderr
+    argv = printed_argv(uninstall)[1:]
+    assert argv == ["--config", str(config), "uninstall", "--force", "skill", "m"], named.stderr
+    assert all(printed_argv(c)[1:3] == ["--config", str(config)] for c in commands), commands
+
+    followed = here.run(*argv, check=False)
+
+    assert followed.returncode == 0, followed.stderr
+    assert mine.read_text() == "the cwd project's own edits\n"
+    assert 'm = "' in (project_dir / "grimoire.toml").read_text()
+    assert not kept.exists(), "the named config's kept file is the one removed"
+
+
+def test_a_relative_config_remedy_still_names_that_file_from_another_directory(
+    grim_at, project_dir: Path, tmp_path: Path, registry: str, unique_repo: str
+) -> None:
+    """A path typed relative to one directory names another file from the next.
+
+    Printed as typed, the command run from the project resolves the path against
+    that project's directory and exits 79, and the kept file stays.
+    """
+
+    def skill(name: str):
+        files = {f"{name}/SKILL.md": f"---\nname: {name}\ndescription: d\n---\n# {name}\n"}
+        return make_artifact(f"{unique_repo}/{name}", "skill", files, tag="1")
+
+    skill("m"), skill("k")
+    bundle = f"{unique_repo}/b"
+    member = lambda name: f"{registry}/{unique_repo}/{name}:1"
+    pack = make_bundle(bundle, [("skill", "m", member("m")), ("skill", "k", member("k"))], tag="1")
+
+    other = tmp_path / "other"
+    (other / ".claude").mkdir(parents=True)
+    config = write_config(other, bundles={"b": pack.fq})
+    typed = ("--config", "other/grimoire.toml")
+    beside = grim_at(tmp_path)
+    beside.run(*typed, "lock")
+    beside.run(*typed, "install")
+    kept = other / ".claude/skills/m/SKILL.md"
+    kept.write_text("the other project's edits\n")
+
+    retag(bundle, "keep", tag_digest(bundle, "1"))
+    make_bundle(bundle, [("skill", "k", member("k"))], tag="1")
+    named = beside.run(*typed, "update", "--", "b", check=False)
+
+    assert named.returncode == 0, named.stderr
+    commands = re.findall(r"`(grim [^`]*)`", named.stderr)
+    uninstall = next((c for c in commands if " uninstall --force " in c), None)
+    assert uninstall is not None, named.stderr
+    argv = printed_argv(uninstall)[1:]
+    assert argv == ["--config", str(config), "uninstall", "--force", "skill", "m"], named.stderr
+
+    followed = grim_at(project_dir).run(*argv, check=False)
+
+    assert followed.returncode == 0, followed.stderr
+    assert not kept.exists(), "the file the relative path named is the one removed"

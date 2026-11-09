@@ -1211,8 +1211,8 @@ pub enum HookError {
     /// [`Self::UnsupportedKind`] for that case). The TUI has no surface to show
     /// what arming a hook consents to, so it never installs, updates, or
     /// uninstalls one; `grim add` then `grim install` is the supported path.
-    #[error("the 'hook' artifact kind is not installable from the TUI; use `grim add <reference>` then `grim install`")]
-    TuiInstallUnsupported,
+    #[error("the 'hook' artifact kind is not installable from the TUI; use `{0} add <reference>` then `{0} install`")]
+    TuiInstallUnsupported(crate::config::scope::Invocation),
     /// A hook reached the dev/path-install seam, which refuses the kind by
     /// design: a path source carries no registry or digest to arm against
     /// (invariant I4), and a dev install's source is a working-tree path,
@@ -1221,9 +1221,9 @@ pub enum HookError {
     /// supported path.
     #[error(
         "the 'hook' artifact kind is not dev-installable from a path; \
-         run `grim build`, `grim release`, then `grim add <reference>` and `grim install`"
+         run `grim build`, `grim release`, then `{0} add <reference>` and `{0} install`"
     )]
-    DevInstallUnsupported,
+    DevInstallUnsupported(crate::config::scope::Invocation),
 }
 
 /// The one refusal every not-yet-implemented `ArtifactKind::Hook` seam returns.
@@ -1246,14 +1246,14 @@ pub fn unsupported_kind() -> crate::error::Error {
 /// The refusal for a seam where hooks **are** implemented but the TUI does
 /// not install, update, or uninstall one by design — see
 /// [`HookError::TuiInstallUnsupported`].
-pub fn tui_install_unsupported() -> crate::error::Error {
-    crate::error::Error::Hook(HookError::TuiInstallUnsupported)
+pub fn tui_install_unsupported(grim: &crate::config::scope::Invocation) -> crate::error::Error {
+    crate::error::Error::Hook(HookError::TuiInstallUnsupported(grim.clone()))
 }
 
 /// The refusal for a seam where hooks **are** implemented but a path/dev
 /// install refuses one by design — see [`HookError::DevInstallUnsupported`].
-pub fn dev_install_unsupported() -> crate::error::Error {
-    crate::error::Error::Hook(HookError::DevInstallUnsupported)
+pub fn dev_install_unsupported(grim: &crate::config::scope::Invocation) -> crate::error::Error {
+    crate::error::Error::Hook(HookError::DevInstallUnsupported(grim.clone()))
 }
 
 #[cfg(test)]

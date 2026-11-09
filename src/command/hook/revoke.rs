@@ -66,7 +66,10 @@ pub async fn run(ctx: &Context, args: &RevokeArgs) -> anyhow::Result<(HookConsen
             // Disarming, like arming, only takes effect on the next
             // convergence — see the module doc's "does not disarm anything
             // by itself".
-            tracing::warn!("consent revoked; run `grim install` to disarm these hooks");
+            tracing::warn!(
+                "consent revoked; run `{} install` to disarm these hooks",
+                scope.invocation
+            );
             HookConsentAction::Revoked
         }
         Revoked::Absent => HookConsentAction::NotConsented,

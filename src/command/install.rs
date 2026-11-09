@@ -131,6 +131,7 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
             &scope.config_path,
             args.force.into(),
             InstallIntent::Declared,
+            crate::install::vendor::SyncAdds::Every,
             progress.as_ref(),
             SettingsRun::Full(&lock),
         )
@@ -170,7 +171,8 @@ async fn dev_install(
     if !crate::config::is_path_value(raw) {
         return Err(anyhow::Error::from(crate::error::Error::from(
             crate::command::command_error::CommandError::ConfigUsage(format!(
-                "'{raw}' is not a path source; dev-install paths start with ./ or ../ (did you mean `grim add {raw}`?)"
+                "'{raw}' is not a path source; dev-install paths start with ./ or ../ (did you mean `{} add {raw}`?)",
+                scope.invocation
             )),
         )));
     }
@@ -249,7 +251,7 @@ async fn dev_install(
         // a live path — which is why it refuses (DataError/65) instead of
         // `unreachable!()`. Authoring loop for a hook author: `grim build` to
         // validate, `grim release` to a local registry, then `grim add`.
-        ArtifactKind::Hook => return Err(crate::oci::hook::dev_install_unsupported().into()),
+        ArtifactKind::Hook => return Err(crate::oci::hook::dev_install_unsupported(&scope.invocation).into()),
         ArtifactKind::Skill => scope.set.skills.contains_key(&name),
         ArtifactKind::Rule => scope.set.rules.contains_key(&name),
         ArtifactKind::Agent => scope.set.agents.contains_key(&name),
@@ -341,7 +343,7 @@ async fn dev_install(
         // dev-installable from a path in v1) — the guard is repeated because
         // this match builds the synthetic lock and the one above only checked
         // for a colliding declaration, so neither subsumes the other.
-        ArtifactKind::Hook => return Err(crate::oci::hook::dev_install_unsupported().into()),
+        ArtifactKind::Hook => return Err(crate::oci::hook::dev_install_unsupported(&scope.invocation).into()),
         ArtifactKind::Skill => synth.skills.push(entry),
         ArtifactKind::Rule => synth.rules.push(entry),
         ArtifactKind::Agent => synth.agents.push(entry),
@@ -384,6 +386,7 @@ async fn dev_install(
             &scope.config_path,
             args.force.into(),
             InstallIntent::Dev,
+            crate::install::vendor::SyncAdds::Every,
             progress.as_ref(),
             SettingsRun::Skip,
         )
@@ -412,12 +415,13 @@ pub(crate) fn state_io(path: &std::path::Path, source: std::io::Error) -> crate:
 /// Lock missing ⇒ NotFound (79); declaration drift ⇒ DataError (65). Both
 /// messages tell the user to run `grim lock`.
 pub(crate) fn require_fresh_lock(scope: &ResolvedScope) -> anyhow::Result<crate::lock::grimoire_lock::GrimoireLock> {
-    Ok(fresh_lock(&scope.lock_path, &scope.set)?)
+    Ok(fresh_lock(&scope.lock_path, &scope.set, &scope.invocation)?)
 }
 
 /// [`require_fresh_lock`] for any lock path and declared set — also how
 /// `grim export plugin` reads a project's lock (`--project`, a
-/// marketplace `project` plugin).
+/// marketplace `project` plugin). Artifact pins come back tagless: install
+/// state records the pin it is given, so a tag here moves `state.json` bytes.
 ///
 /// # Errors
 ///
@@ -431,6 +435,7 @@ pub(crate) fn require_fresh_lock(scope: &ResolvedScope) -> anyhow::Result<crate:
 pub(crate) fn fresh_lock(
     lock_path: &std::path::Path,
     set: &crate::config::DesiredSet,
+    grim: &crate::config::scope::Invocation,
 ) -> Result<crate::lock::grimoire_lock::GrimoireLock, crate::error::Error> {
     let lock = lock_io::load(lock_path).map_err(|e| {
         // A missing lock surfaces as the lock-tier Io(NotFound); re-key it
@@ -440,6 +445,7 @@ pub(crate) fn fresh_lock(
         {
             return crate::error::Error::from(CommandError::LockMissing {
                 path: lock_path.to_path_buf(),
+                grim: grim.clone(),
             });
         }
         crate::error::Error::from(e)
@@ -450,9 +456,10 @@ pub(crate) fn fresh_lock(
         return Err(crate::error::Error::from(CommandError::LockStale {
             locked: lock.metadata.declaration_hash.clone(),
             current: current.to_string(),
+            grim: grim.clone(),
         }));
     }
-    Ok(lock)
+    Ok(lock.without_advisory_tags())
 }
 
 /// The `(client, tier)` pairs the dispatch table holds per hook, after
@@ -526,6 +533,8 @@ pub(crate) fn finish(
     } = run;
     let mut entries = Vec::with_capacity(outcomes.len());
     let mut first_error: Option<crate::error::Error> = None;
+    // The error names one artifact, so the other refused ones are named beside it.
+    let mut also_refused: Vec<String> = Vec::new();
 
     for ArtifactInstall {
         reference,
@@ -543,8 +552,17 @@ pub(crate) fn finish(
                 | InstallOutcome::RefusedUntracked { .. }
                 | InstallOutcome::RefusedSettings { .. }),
             ) => {
+                // A refused settings pass marks every settings row refused and has
+                // already warned of each piece, so only a file row is named again.
+                let settings_row = matches!(outcome, InstallOutcome::RefusedSettings { .. });
                 if first_error.is_none() {
                     first_error = refusal_error(reference.clone(), outcome);
+                } else if !settings_row {
+                    also_refused.push(format!(
+                        "{} '{}'",
+                        reference.kind,
+                        crate::oci::text::registry_text(&reference.name)
+                    ));
                 }
                 InstallStatus::Refused
             }
@@ -573,6 +591,15 @@ pub(crate) fn finish(
     }
     settings_phase::warn_restart(&settings.changes);
     if let Some(err) = first_error {
+        // Every name, uncapped: a refusal left unnamed is an edit the user loses to `--force`.
+        if let Some((last, rest)) = also_refused.split_last() {
+            let (names, verb, them) = if rest.is_empty() {
+                (last.clone(), "is", "it")
+            } else {
+                (format!("{} and {last}", rest.join(", ")), "are", "them")
+            };
+            tracing::warn!("{names} {verb} also refused; rerun with --force to overwrite {them}");
+        }
         return Err(err.with_settings(settings).into());
     }
     Ok((
@@ -650,6 +677,7 @@ mod tests {
             settings,
             abandoned: Vec::new(),
             halted: false,
+            kept_beside: std::collections::BTreeSet::new(),
         }
     }
 
@@ -815,6 +843,53 @@ mod tests {
         assert!(crate::error::settings_outcome(&err).is_none());
     }
 
+    /// One tagged pin per artifact kind, plus a `[[bundle]]`, whose `tag` the
+    /// parser re-attaches to its pin.
+    fn tagged_lock(declaration_hash: &str) -> String {
+        let hex = "a".repeat(64);
+        let mut lock = format!(
+            "[metadata]\nlock_version = 1\ndeclaration_hash_version = 1\n\
+             declaration_hash = \"{declaration_hash}\"\ngenerated_by = \"grim 0.1.0\"\n\
+             generated_at = \"2026-04-19T00:00:00Z\"\n"
+        );
+        for kind in ["skill", "rule", "agent", "mcp", "hook", "settings"] {
+            let pin = format!("r.example/acme/{kind}:1@sha256:{hex}");
+            lock.push_str(&format!("\n[[{kind}]]\nname = \"{kind}\"\npinned = \"{pin}\"\n"));
+        }
+        lock.push_str(&format!(
+            "\n[[bundle]]\nname = \"b\"\nrepo = \"r.example/acme/b\"\ntag = \"2\"\n\
+             pinned = \"r.example/acme/b@sha256:{hex}\"\n"
+        ));
+        lock
+    }
+
+    #[test]
+    fn fresh_lock_drops_tags() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grimoire.lock");
+        let set = crate::config::DesiredSet::default();
+        std::fs::write(&path, tagged_lock(set.declaration_hash_cached())).unwrap();
+        let on_disk = crate::lock::lock_io::load(&path).unwrap();
+        assert_eq!(on_disk.iter_artifacts().count(), 6);
+        assert!(
+            on_disk
+                .iter_artifacts()
+                .all(|a| a.source.pinned().unwrap().tag() == Some("1")),
+            "the plain load keeps the recorded tags"
+        );
+
+        let lock = fresh_lock(&path, &set, &crate::config::scope::Invocation::WALKED).unwrap();
+
+        assert_eq!(lock.iter_artifacts().count(), 6);
+        for artifact in lock.iter_artifacts() {
+            assert_eq!(artifact.source.pinned().unwrap().tag(), None, "{}", artifact.name);
+        }
+        assert_eq!(
+            lock.bundles, on_disk.bundles,
+            "a bundle snapshot reads as it always did"
+        );
+    }
+
     #[test]
     fn finish_maps_outcomes_to_statuses() {
         let outcomes = vec![
@@ -848,6 +923,57 @@ mod tests {
         }];
         let err = finish(run_of(outcomes), &Default::default()).expect_err("refusal must fail the run");
         assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
+    }
+
+    /// The error names the first refused artifact; a user with two edited files
+    /// must learn of the second in the same run, and the exit stays 65.
+    #[test]
+    fn finish_names_every_refused_artifact_and_keeps_the_exit() {
+        let refused = |name: &str| ArtifactInstall {
+            reference: aref(name),
+            target: Some("/t".into()),
+            result: Ok(InstallOutcome::Refused {
+                recorded: crate::oci::Digest::Sha256("a".repeat(64)),
+                actual: crate::oci::Digest::Sha256("b".repeat(64)),
+            }),
+        };
+        let capture = crate::catalog::test_hosts::LogCapture::start();
+
+        let names = ["first", "second", "third", "fourth", "fifth"];
+        let err = finish(run_of(names.map(refused).into()), &Default::default()).expect_err("refusals fail the run");
+
+        let logs = capture.text();
+        assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
+        assert!(err.to_string().contains("first"), "{err}");
+        assert!(
+            logs.contains("rule 'second', rule 'third', rule 'fourth' and rule 'fifth' are also refused"),
+            "{logs}"
+        );
+        assert!(!logs.contains("'first'"), "{logs}");
+
+        let capture = crate::catalog::test_hosts::LogCapture::start();
+        finish(run_of(vec![refused("only")]), &Default::default()).expect_err("a refusal fails the run");
+        assert!(!capture.text().contains("also refused"), "{}", capture.text());
+    }
+
+    /// A refused settings pass marks every settings row refused with the same
+    /// pieces, and the phase has already warned of each piece: a second
+    /// package held only by that pass is not "also refused".
+    #[test]
+    fn finish_names_no_settings_row_a_refused_pass_holds() {
+        let pieces: std::sync::Arc<[RefusedPiece]> = vec![refused_piece(PieceState::Modified)].into();
+        let held = |name: &str| ArtifactInstall {
+            reference: aref(name),
+            target: None,
+            result: Ok(InstallOutcome::RefusedSettings { pieces: pieces.clone() }),
+        };
+        let capture = crate::catalog::test_hosts::LogCapture::start();
+
+        let err = finish(run_of(vec![held("team"), held("base")]), &Default::default())
+            .expect_err("a settings refusal fails the run");
+
+        assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
+        assert!(!capture.text().contains("also refused"), "{}", capture.text());
     }
 
     #[test]

@@ -7,8 +7,8 @@
 //! In memory the artifacts are one `Vec<LockedArtifact>` per kind so
 //! consumers iterate uniformly; on the wire they split into kind-named
 //! arrays via a borrowed serialize view (the OCX `SerializableView`
-//! pattern) so byte-stable output costs no clone. The writer strips the
-//! advisory tag from every `pinned` value and sorts each list by `name`.
+//! pattern) so byte-stable output costs no clone. The writer keeps the tag
+//! each `pinned` value records and sorts each list by `name`.
 
 use std::collections::BTreeMap;
 
@@ -18,7 +18,10 @@ use crate::config::hash::{DECLARATION_HASH_VERSION, MARKETPLACE_HASH_VERSION};
 use crate::lock::lock_error::{LockError, LockErrorKind};
 use crate::lock::lock_version::LockVersion;
 use crate::lock::locked_artifact::{LockedArtifact, ScopedEntry};
-use crate::oci::ArtifactKind;
+use crate::lock::locked_source::LockedSource;
+use crate::oci::bundle::BundleMember;
+use crate::oci::identifier::is_valid_oci_tag;
+use crate::oci::{ArtifactKind, Identifier, NodeKey, PinnedIdentifier};
 use crate::skill::skill_name::SkillName;
 
 /// Lock metadata header.
@@ -29,12 +32,16 @@ pub struct LockMetadata {
     pub lock_version: LockVersion,
     /// Canonicalization-contract version for [`Self::declaration_hash`].
     pub declaration_hash_version: u8,
-    /// `sha256:<hex>` of the RFC 8785 JCS-canonicalized declaration.
+    /// `sha256:<hex>` of the RFC 8785 JCS-canonicalized declaration. An edit that
+    /// leaves the lock stale can write one no declaration produces, which every
+    /// reader takes for stale.
     pub declaration_hash: String,
     /// Tooling version string that wrote the lock, e.g. `"grim 0.1.0"`.
     pub generated_by: String,
     /// RFC3339 UTC timestamp. Preserved verbatim when the resolved
     /// content of every artifact is unchanged between two lock runs.
+    // A tag is not resolved content: one arriving on a pin rewrites `pinned`
+    // and keeps this stamp.
     pub generated_at: String,
 }
 
@@ -145,12 +152,27 @@ fn newer_grim_hint(raw: &str, running: &semver::Version) -> Option<String> {
     })
 }
 
+/// The [`newer_grim_hint`] for `raw` against this build.
+fn running_grim_hint(raw: &str) -> Option<String> {
+    semver::Version::parse(env!("CARGO_PKG_VERSION"))
+        .ok()
+        .and_then(|running| newer_grim_hint(raw, &running))
+}
+
+/// Whether a lock that failed to parse comes from a newer grim: its
+/// `lock_version` is past this build's, or its `generated_by` is. Read as
+/// leniently as [`newer_grim_hint`], and no resolve or install decision reads it.
+pub(crate) fn written_by_newer_grim(raw: &str) -> bool {
+    let future_format = toml::from_str::<toml::Table>(raw)
+        .ok()
+        .and_then(|doc| doc.get("metadata")?.get("lock_version")?.as_integer())
+        .is_some_and(|version| version > i64::from(LockVersion::V1 as u8));
+    future_format || running_grim_hint(raw).is_some()
+}
+
 /// `err`, carrying the [`newer_grim_hint`] for `raw` when there is one.
 fn with_newer_grim_hint(err: toml::de::Error, raw: &str) -> toml::de::Error {
-    let hint = semver::Version::parse(env!("CARGO_PKG_VERSION"))
-        .ok()
-        .and_then(|running| newer_grim_hint(raw, &running));
-    match hint {
+    match running_grim_hint(raw) {
         Some(hint) => serde::de::Error::custom(format!("{}{hint}", err.to_string().trim_end())),
         None => err,
     }
@@ -236,8 +258,9 @@ pub(crate) fn is_contained_mcp_name(name: &str) -> bool {
 /// document shape sharing this module's private raw parse and serialize
 /// projection; `lock_io` only moves bytes. `metadata.declaration_hash` is
 /// the whole-marketplace hash; each part's metadata is a copy of it
-/// carrying its own plugin's hash. Parts never hold `bundles` (pins travel
-/// in memory only).
+/// carrying its own plugin's hash. Parts never hold `bundles`: a bundle's pin
+/// travels in its members' stamps, `<tag>@<digest>` in `bundle_tag` and
+/// `bundles[].tag`, and `export::resolve` reads it back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarketplaceLock {
     /// Top-level `[metadata]` header.
@@ -385,7 +408,9 @@ impl GrimoireLock {
     /// [`LockErrorKind::TomlParse`] for structural/version-discriminant
     /// failures; [`LockErrorKind::UnsupportedVersion`] for a future
     /// declaration-hash version; [`LockErrorKind::ScopeMismatch`] for an
-    /// entry `plugin` or any `plugin` key at the top level.
+    /// entry `plugin` or any `plugin` key at the top level;
+    /// [`LockErrorKind::InvalidEntryName`] for a name unsafe as an install
+    /// path segment.
     pub fn from_toml_str(s: &str) -> Result<Self, LockError> {
         let mut raw = RawLock::parse(s)?;
         let scoped = raw.plugins.is_some()
@@ -416,10 +441,9 @@ impl GrimoireLock {
                 .iter()
                 .find_map(|e| crate::path_safety::path_segment_refusal(&e.artifact.name).map(|r| (&e.artifact.name, r)))
             {
-                return Err(scope_mismatch(format!(
-                    "invalid {kind} name `{}`: {reason}",
-                    name.escape_default()
-                )));
+                return Err(in_memory(LockErrorKind::InvalidEntryName {
+                    message: format!("invalid {kind} name `{}`: {reason}", name.escape_default()),
+                }));
             }
             // Re-stamp the kind that `#[serde(skip)]` left at its default.
             list(&mut lock).extend(entries.into_iter().map(|e| LockedArtifact { kind, ..e.artifact }));
@@ -458,10 +482,72 @@ impl GrimoireLock {
             .chain(self.settings.iter())
     }
 
+    /// [`Self::iter_artifacts`], mutably and in the same order.
+    pub fn iter_artifacts_mut(&mut self) -> impl Iterator<Item = &mut LockedArtifact> {
+        self.tables_mut().into_iter().flat_map(|(_, table)| table.iter_mut())
+    }
+
+    /// Every artifact table with the kind its entries carry, in
+    /// [`Self::iter_artifacts`]' order, for every mutable walk over them.
+    pub fn tables_mut(&mut self) -> [(ArtifactKind, &mut Vec<LockedArtifact>); 6] {
+        // Naming every field makes a table a new kind adds a compile error here
+        // until it is listed; `..` would let the walk skip it.
+        let Self {
+            metadata: _,
+            skills,
+            rules,
+            agents,
+            mcp,
+            hooks,
+            settings,
+            bundles: _,
+        } = self;
+        [
+            (ArtifactKind::Skill, skills),
+            (ArtifactKind::Rule, rules),
+            (ArtifactKind::Agent, agents),
+            (ArtifactKind::Mcp, mcp),
+            (ArtifactKind::Hook, hooks),
+            (ArtifactKind::Settings, settings),
+        ]
+    }
+
+    /// Every node the lock records, bundle snapshots included.
+    pub fn node_keys(&self) -> impl Iterator<Item = NodeKey> {
+        let artifacts = self.iter_artifacts().map(|a| (a.kind, a.name.clone()));
+        let bundles = self.bundles.iter().map(|b| (ArtifactKind::Bundle, b.name.clone()));
+        artifacts.chain(bundles)
+    }
+
+    /// Every edge the lock records, a `requires` row or a bundle member, with
+    /// its parent's pin. A path parent has none.
+    pub fn recorded_edges(&self) -> impl Iterator<Item = (&BundleMember, Option<&Identifier>)> {
+        let artifacts = self.iter_artifacts().map(|a| (a.source.pinned(), &a.requires));
+        let bundles = self.bundles.iter().map(|b| (b.pinned(), &b.members));
+        artifacts.chain(bundles).flat_map(|(parent, members)| {
+            let parent = parent.map(PinnedIdentifier::as_identifier);
+            members.iter().map(move |member| (member, parent))
+        })
+    }
+
+    /// This lock with every artifact pin reduced to `registry/repo@digest`,
+    /// which is what an install records. A `[[bundle]]` pin keeps its tag: the
+    /// parser re-attaches it from the sibling `tag` field.
+    #[must_use]
+    pub fn without_advisory_tags(mut self) -> Self {
+        for artifact in self.iter_artifacts_mut() {
+            if let LockedSource::Registry(pinned) = &mut artifact.source {
+                *pinned = pinned.strip_advisory();
+            }
+        }
+        self
+    }
+
     /// Serialize to deterministic, byte-stable TOML.
     ///
     /// Each list is sorted by `name` and every `pinned` value is written
-    /// with its advisory tag stripped (`registry/repo@sha256:…`).
+    /// with the tag it records (`registry/repo:tag@sha256:…`), or tagless
+    /// when it records none or one outside the OCI grammar.
     ///
     /// # Errors
     ///
@@ -504,7 +590,7 @@ impl GrimoireLock {
 /// Borrowed serialize view: emits `[metadata]` + sorted `[[skill]]` /
 /// `[[rule]]` / `[[agent]]` arrays without cloning the document. Each
 /// entry projects through [`LockedArtifactView`] so the on-wire `pinned`
-/// is the stripped-advisory `registry/repo@digest`.
+/// carries only a tag the OCI grammar accepts.
 #[derive(Serialize)]
 struct SerializableView<'a> {
     metadata: &'a LockMetadata,
@@ -547,8 +633,8 @@ struct SerializableView<'a> {
 }
 
 /// On-wire projection of a [`LockedArtifact`]: borrows `name`, emits a
-/// stripped-advisory copy of `pinned`, and the bundle provenance only for
-/// members that came from a bundle. `kind` is intentionally absent — the
+/// copy of `pinned` as [`wire_pin`] writes it, and the bundle provenance only
+/// for members that came from a bundle. `kind` is intentionally absent — the
 /// array name carries it. A direct entry omits the bundle fields entirely,
 /// so its on-disk form is byte-identical to a pre-bundles lock; exactly one
 /// provenance keeps the legacy `bundle` + `bundle_tag` pair (byte-identical
@@ -556,9 +642,9 @@ struct SerializableView<'a> {
 #[derive(Serialize)]
 struct LockedArtifactView<'a> {
     name: &'a str,
-    /// Registry pin (`registry/repo@sha256:…`); absent for a path entry
-    /// so a registry-only lock stays byte-identical to the pre-path
-    /// format.
+    /// Registry pin (`registry/repo:tag@sha256:…`, the tag optional);
+    /// absent for a path entry so a registry-only lock keeps the pre-path
+    /// shape.
     #[serde(skip_serializing_if = "Option::is_none")]
     pinned: Option<crate::oci::PinnedIdentifier>,
     /// Path-source arm: the declared path plus its content hash. Both
@@ -591,13 +677,22 @@ where
     seq.end()
 }
 
+/// `pinned` as written. Parse refuses no tag, so the grammar check sits here:
+/// without it a control byte or a 1 MiB tag in a hand-edited lock is written
+/// back by every save.
+fn wire_pin(pinned: &PinnedIdentifier) -> PinnedIdentifier {
+    match pinned.tag() {
+        Some(tag) if !is_valid_oci_tag(tag) => pinned.strip_advisory(),
+        _ => pinned.clone(),
+    }
+}
+
 /// The single wire projection of a [`LockedArtifact`], shared by both lock
 /// flavors.
 fn project(a: &LockedArtifact) -> LockedArtifactView<'_> {
-    use crate::lock::locked_source::LockedSource;
     let single = (a.bundles.len() == 1).then(|| &a.bundles[0]);
     let (pinned, path, hash) = match &a.source {
-        LockedSource::Registry(pinned) => (Some(pinned.strip_advisory()), None, None),
+        LockedSource::Registry(pinned) => (Some(wire_pin(pinned)), None, None),
         LockedSource::Path { path, hash } => (None, Some(path), Some(hash)),
     };
     LockedArtifactView {
@@ -793,7 +888,7 @@ pinned = "ghcr.io/acme/rust-style@sha256:{b}"
                 );
                 let err = GrimoireLock::from_toml_str(&toml).expect_err(&format!("{table} {name:?} must be refused"));
                 assert!(
-                    matches!(err.kind, LockErrorKind::ScopeMismatch { .. }),
+                    matches!(err.kind, LockErrorKind::InvalidEntryName { .. }),
                     "{:?}",
                     err.kind
                 );
@@ -851,7 +946,7 @@ generated_at = "2099-01-01T00:00:00Z"
     }
 
     #[test]
-    fn serialize_sorts_by_name_and_strips_advisory_tag() {
+    fn serialize_sorts_by_name_and_keeps_the_recorded_tag() {
         let lock = GrimoireLock {
             hooks: vec![],
             settings: vec![],
@@ -869,8 +964,95 @@ generated_at = "2099-01-01T00:00:00Z"
         let alpha = out.find("name = \"alpha\"").expect("alpha present");
         let zeta = out.find("name = \"zeta\"").expect("zeta present");
         assert!(alpha < zeta, "skills must be sorted by name");
-        assert!(!out.contains(":v1@"), "advisory tag must be stripped");
-        assert!(!out.contains(":v9@"), "advisory tag must be stripped");
+        assert!(out.contains(&format!("acme/alpha:v1@sha256:{}", sha('1'))), "{out}");
+        assert!(out.contains(&format!("acme/zeta:v9@sha256:{}", sha('2'))), "{out}");
+    }
+
+    fn lock_of_skill(pin: crate::oci::PinnedIdentifier) -> GrimoireLock {
+        GrimoireLock {
+            hooks: vec![],
+            settings: vec![],
+            metadata: metadata(),
+            skills: vec![artifact("s", ArtifactKind::Skill, pin)],
+            rules: vec![],
+            agents: vec![],
+            mcp: vec![],
+            bundles: vec![],
+        }
+    }
+
+    #[test]
+    fn round_trip_keeps_a_recorded_tag() {
+        let lock = lock_of_skill(pinned("acme/s", Some("1.2.3"), 'a'));
+
+        let out = lock.to_toml_string().expect("serialize");
+
+        let line = format!("pinned = \"ghcr.io/acme/s:1.2.3@sha256:{}\"", sha('a'));
+        assert!(out.contains(&line), "{out}");
+        let reparsed = GrimoireLock::from_toml_str(&out).expect("reparse");
+        assert_eq!(reparsed, lock);
+        assert_eq!(reparsed.to_toml_string().expect("second"), out);
+    }
+
+    #[test]
+    fn tagless_pin_round_trips_tagless() {
+        let lock = lock_of_skill(pinned("acme/s", None, 'a'));
+
+        let out = lock.to_toml_string().expect("serialize");
+
+        let line = format!("pinned = \"ghcr.io/acme/s@sha256:{}\"", sha('a'));
+        assert!(out.contains(&line), "{out}");
+        let reparsed = GrimoireLock::from_toml_str(&out).expect("reparse");
+        assert_eq!(reparsed.skills[0].source.pinned().and_then(|p| p.tag()), None);
+        assert_eq!(reparsed.to_toml_string().expect("second"), out);
+    }
+
+    #[test]
+    fn project_drops_a_tag_outside_the_grammar() {
+        let tagless = format!("pinned = \"ghcr.io/acme/s@sha256:{}\"", sha('a'));
+        let too_long = "a".repeat(129);
+        for tag in [
+            "",
+            ".hidden",
+            "-dash",
+            "a b",
+            "ctrl\u{7}",
+            "line\nbreak",
+            "é",
+            too_long.as_str(),
+        ] {
+            let lock = lock_of_skill(pinned("acme/s", Some(tag), 'a'));
+            let out = lock.to_toml_string().expect("serialize");
+            assert!(out.contains(&tagless), "{tag:?} must not reach the lock: {out}");
+        }
+        let longest = "a".repeat(128);
+        for tag in ["_x", "0", "A-b_c.d", longest.as_str()] {
+            let lock = lock_of_skill(pinned("acme/s", Some(tag), 'a'));
+            let out = lock.to_toml_string().expect("serialize");
+            assert!(
+                out.contains(&format!("/s:{tag}@sha256:")),
+                "{tag:?} is a valid tag: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_accepts_a_tag_the_writer_refuses() {
+        let body = format!("pinned = \"ghcr.io/acme/s:ba\\u0007d@sha256:{}\"", sha('a'));
+        let good = lock_of_skill(pinned("acme/s", Some("1"), 'a'))
+            .to_toml_string()
+            .unwrap();
+        let hand_edited = good.replace(&format!("pinned = \"ghcr.io/acme/s:1@sha256:{}\"", sha('a')), &body);
+        assert_ne!(hand_edited, good, "the fixture line must be the one replaced");
+
+        let lock = GrimoireLock::from_toml_str(&hand_edited).expect("parse adds no refusal");
+
+        assert_eq!(lock.skills[0].source.pinned().and_then(|p| p.tag()), Some("ba\u{7}d"));
+        let out = lock.to_toml_string().expect("serialize");
+        assert!(
+            out.contains(&format!("pinned = \"ghcr.io/acme/s@sha256:{}\"", sha('a'))),
+            "{out}"
+        );
     }
 
     #[test]
@@ -1293,10 +1475,12 @@ member = []
 
     #[test]
     fn lock_schema_stdout_matches_the_golden() {
-        // The golden is `grim schema --kind lock` stdout (`generate` + "\n"): released
-        // grim 0.14.0, which predates the wire-only `plugin` fields, plus additive
-        // regenerations for the `hook` kind literal and top-level array, `requires` on
-        // an entry, `transitive` on a bundle, and the `settings` kind literal and array.
+        // The golden is `grim schema --kind lock` stdout; `schema::run` prints
+        // `generate` + "\n". It began byte-equal to released grim 0.14.0, before
+        // the wire-only `plugin` fields, and every regeneration since is
+        // additive: the `hook` kind and array, `requires` on an entry,
+        // `transitive` on a bundle, the `settings` kind literal and array, and
+        // the text of the `pinned` and `declaration_hash` descriptions.
         let stdout = format!(
             "{}\n",
             crate::command::schema::generate(crate::command::schema::SchemaKind::Lock).expect("generate")

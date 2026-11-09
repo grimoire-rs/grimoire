@@ -44,7 +44,7 @@ PROJECT_GATED = (
 )
 GLOBAL_GATED = (
     "settings package '{}' not applied: settings are gated; "
-    "enable them with `grim config set --global options.experimental.settings true`"
+    "enable them with `grim --global config set options.experimental.settings true`"
 )
 
 

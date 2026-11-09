@@ -21,8 +21,15 @@ from subprocess import CompletedProcess
 
 import pytest
 
-from src.helpers import make_artifact, make_settings, settings_sandbox, write_config
-from src.registry import PublishedArtifact
+from src.helpers import (
+    SETTINGS_LAYER_MEDIA_TYPE,
+    make_artifact,
+    make_bundle,
+    make_settings,
+    settings_sandbox,
+    write_config,
+)
+from src.registry import REGISTRY_HOST, PublishedArtifact, fetch_manifest, push_manifest, retag, tag_digest
 from src.runner import GrimRunner
 
 TRUST = "--trust-workspace"
@@ -227,7 +234,7 @@ def test_offline_uncached_does_not_claim_values_for_an_uncovered_client(
     # Claude has no piece, and offline nothing on this machine says so.
     assert "not applied for claude" not in result.stderr
     assert "could not check" in result.stderr
-    assert "grim install" in result.stderr
+    assert "run `grim --global install` online" in result.stderr
 
 
 def test_offline_changed_plan_with_cached_layers_is_a_normal_run(
@@ -348,6 +355,492 @@ def test_orphan_removal_is_listed_on_add_with_no_consent(
     assert _file(target) == {}
     assert _listed(report["settings_changes"]) == [("team", "/model", None, "removed")]
     assert _records(runner) == {}
+
+
+def test_a_named_update_leaves_an_orphan_outside_its_closure(
+    grim_at, project_dir: Path, tmp_path: Path, unique_repo: str
+) -> None:
+    """A named update prunes at the previous lock's closure, settings values included."""
+    team = _package(unique_repo, "team", {"claude": {"model": "sonnet"}})
+    good = _skill(unique_repo)
+    runner = _workspace(grim_at, project_dir, tmp_path / "s", {"team": team}, skills={"good": good.fq})
+    runner.run("install", TRUST)
+    target = project_dir / LOCAL
+    assert _file(target) == {"model": "sonnet"}
+    runner.run("remove", "settings", "team")
+
+    result = runner.run("update", "good", format="json")
+
+    assert _file(target) == {"model": "sonnet"}
+    assert json.loads(result.stdout)["settings_changes"] == []
+    assert [key[0] for key in _records(runner)] == ["team"]
+    assert "the lock no longer holds settings 'team'" in result.stderr, result.stderr
+
+    # Positive control: a bare update prunes the orphan.
+    report = runner.json("update")
+    assert _file(target) == {}
+    assert _listed(report["settings_changes"]) == [("team", "/model", None, "removed")]
+
+
+def _team_beside_good(grim_at, project_dir: Path, tmp_path: Path, unique_repo: str) -> tuple[GrimRunner, Path]:
+    """`team` setting Claude's model beside the skill `good`, both installed."""
+    team = _package(unique_repo, "team", {"claude": {"model": "sonnet"}})
+    good = _skill(unique_repo)
+    runner = _workspace(grim_at, project_dir, tmp_path / "s", {"team": team}, skills={"good": good.fq})
+    runner.run("install", TRUST)
+    target = project_dir / LOCAL
+    assert _file(target) == {"model": "sonnet"}
+    return runner, target
+
+
+# Each named update below passes the flag: without it a package nothing consented
+# to is withheld, and the run leaves its value alone whatever its closure.
+def test_a_named_update_leaves_an_unnamed_settings_edit(
+    grim_at, project_dir: Path, tmp_path: Path, unique_repo: str
+) -> None:
+    runner, target = _team_beside_good(grim_at, project_dir, tmp_path, unique_repo)
+    _put(target, {"model": "opus"})
+
+    result = runner.run("update", TRUST, "good", format="json", check=False)
+
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert (report["pieces"], report["settings_changes"]) == ([], [])
+    assert _file(target) == {"model": "opus"}
+
+    # Positive control: the whole lock's run refuses the same edit.
+    assert runner.run("install", TRUST, check=False).returncode == 65
+
+
+def test_force_on_a_named_update_leaves_an_unnamed_settings_edit(
+    grim_at, project_dir: Path, tmp_path: Path, unique_repo: str
+) -> None:
+    runner, target = _team_beside_good(grim_at, project_dir, tmp_path, unique_repo)
+    _put(target, {"model": "opus"})
+
+    result = runner.run("update", TRUST, "--force", "good", format="json", check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["settings_changes"] == []
+    assert _file(target) == {"model": "opus"}
+
+    # Positive control: a forced run over the whole lock takes the value back.
+    runner.run("install", TRUST, "--force")
+    assert _file(target) == {"model": "sonnet"}
+
+
+def test_a_named_update_leaves_a_deleted_unnamed_settings_value(
+    grim_at, project_dir: Path, tmp_path: Path, unique_repo: str
+) -> None:
+    runner, target = _team_beside_good(grim_at, project_dir, tmp_path, unique_repo)
+    target.unlink()
+
+    report = runner.json("update", TRUST, "good")
+
+    assert not target.exists()
+    assert report["settings_changes"] == []
+
+    # Positive control: the whole lock's run restores it.
+    report = runner.json("install", TRUST)
+    assert _file(target) == {"model": "sonnet"}
+    assert _listed(report["settings_changes"]) == [("team", "/model", None, "added")]
+
+
+def test_a_named_update_writes_its_closure_beside_an_unnamed_edit(
+    grim_at, project_dir: Path, tmp_path: Path, unique_repo: str
+) -> None:
+    team = _package(unique_repo, "team", {"claude": {"model": "sonnet"}}, tag="stable")
+    other = _package(unique_repo, "other", {"claude": {"language": "en"}})
+    runner = _workspace(grim_at, project_dir, tmp_path / "s", {"team": team, "other": other})
+    runner.run("install", TRUST)
+    target = project_dir / LOCAL
+    _put(target, {"model": "sonnet", "language": "de"})
+    _package(unique_repo, "team", {"claude": {"model": "opus"}}, tag="stable")
+
+    result = runner.run("update", TRUST, "team", format="json", check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert _file(target) == {"model": "opus", "language": "de"}
+    assert _listed(json.loads(result.stdout)["settings_changes"]) == [("team", "/model", None, "changed")]
+
+
+def test_a_named_update_refuses_an_edit_inside_its_closure(
+    grim_at, project_dir: Path, tmp_path: Path, unique_repo: str
+) -> None:
+    team = _package(unique_repo, "team", {"claude": {"model": "sonnet"}}, tag="stable")
+    runner = _workspace(grim_at, project_dir, tmp_path / "s", {"team": team})
+    runner.run("install", TRUST)
+    target = project_dir / LOCAL
+    _put(target, {"model": "opus"})
+    _package(unique_repo, "team", {"claude": {"model": "haiku"}}, tag="stable")
+
+    result = runner.run("update", TRUST, "team", format="json", check=False)
+
+    assert result.returncode == 65, result.stderr
+    report = json.loads(result.stdout)
+    assert _row(report, "team")["refused"] is True
+    assert [piece["pointer"] for piece in report["pieces"]] == ["/model"]
+    assert _file(target) == {"model": "opus"}
+
+    report = runner.json("update", TRUST, "--force", "team")
+
+    assert _file(target) == {"model": "haiku"}
+    assert _listed(report["settings_changes"]) == [("team", "/model", None, "overwritten")]
+
+
+def test_a_named_update_refuses_a_conflict_outside_its_closure(
+    grim_at, project_dir: Path, tmp_path: Path, unique_repo: str
+) -> None:
+    team = _package(unique_repo, "team", {"claude": {"model": "sonnet"}}, tag="stable")
+    other = _package(unique_repo, "other", {"claude": {"language": "en"}})
+    runner = _workspace(grim_at, project_dir, tmp_path / "s", {"team": team, "other": other})
+    runner.run("install", TRUST)
+    target, lock = project_dir / LOCAL, project_dir / "grimoire.lock"
+    held = lock.read_bytes()
+    _package(unique_repo, "team", {"claude": {"language": "de"}}, tag="stable")
+
+    result = runner.run("update", TRUST, "team", format="json", check=False)
+
+    assert result.returncode == 78, result.stderr
+    assert "other" in result.stdout
+    assert lock.read_bytes() == held
+    assert _file(target) == {"model": "sonnet", "language": "en"}
+
+
+def test_a_named_update_keeps_an_element_a_package_outside_it_holds(
+    grim_at, project_dir: Path, tmp_path: Path, unique_repo: str
+) -> None:
+    shared = {"permissions": {"deny": [DENY]}}
+    team = _package(unique_repo, "team", {"claude": {**shared, "model": "sonnet"}}, tag="stable")
+    other = _package(unique_repo, "other", {"claude": shared})
+    runner = _workspace(grim_at, project_dir, tmp_path / "s", {"team": team, "other": other})
+    runner.run("install", TRUST)
+    target = project_dir / LOCAL
+    _package(unique_repo, "team", {"claude": {"model": "sonnet"}}, tag="stable")
+
+    report = runner.json("update", TRUST, "team")
+
+    assert _file(target) == {"model": "sonnet", **shared}
+    assert report["settings_changes"] == []
+    held = {key[0] for key in _records(runner) if key[2] == "/permissions/deny"}
+    assert held == {"other"}
+
+
+def _team_dropping_model_beside_other(
+    grim_at, project_dir: Path, tmp_path: Path, unique_repo: str, *consent: str
+) -> tuple[GrimRunner, Path]:
+    """`team` installed setting model and language, `other` declared with the same
+    model and no record, then `team`'s tag moved to a version without the model.
+
+    ``consent`` is run after the install and before `other` is declared."""
+    team = _package(unique_repo, "team", {"claude": {"model": "sonnet", "language": "en"}}, tag="stable")
+    runner = _workspace(grim_at, project_dir, tmp_path / "s", {"team": team})
+    runner.run("install", TRUST)
+    if consent:
+        runner.run(*consent)
+    other = _package(unique_repo, "other", {"claude": {"model": "sonnet"}})
+    runner.run("add", "--kind", "settings", "--name", "other", other.fq, "--no-install")
+    _package(unique_repo, "team", {"claude": {"language": "en"}}, tag="stable")
+    return runner, project_dir / LOCAL
+
+
+def test_a_named_update_keeps_a_value_an_armed_package_outside_it_declares(
+    grim_at, project_dir: Path, tmp_path: Path, unique_repo: str
+) -> None:
+    runner, target = _team_dropping_model_beside_other(grim_at, project_dir, tmp_path, unique_repo)
+
+    result = runner.run("update", TRUST, "team", format="json")
+
+    assert _file(target) == {"model": "sonnet", "language": "en"}
+    report = json.loads(result.stdout)
+    assert (report["pieces"], report["settings_changes"]) == ([], [])
+    assert [item["name"] for item in report["items"]] == ["team"]
+    assert "other" not in {key[0] for key in _records(runner)}
+    kept = (
+        "settings package 'team' drops /model, but the value stays: 'other' outside this update also sets it; "
+        f"run `grim install {TRUST}` to apply 'other'"
+    )
+    assert kept in result.stderr, result.stderr
+
+    # The whole lock's run hands the value to `other` as grim's own, not adopted.
+    report = runner.json("install", TRUST)
+    assert _file(target) == {"model": "sonnet", "language": "en"}
+    assert report["settings_changes"] == []
+    assert _records(runner) == {
+        ("team", "claude", "/language", None): False,
+        ("other", "claude", "/model", None): False,
+    }
+
+
+def test_a_named_update_removes_a_value_only_an_unconsented_package_declares(
+    grim_at, project_dir: Path, tmp_path: Path, unique_repo: str
+) -> None:
+    """The record covers `team` alone, so `other` is not armed and holds nothing."""
+    runner, target = _team_dropping_model_beside_other(
+        grim_at, project_dir, tmp_path, unique_repo, "consent", "allow"
+    )
+
+    report = runner.json("update", "team")
+
+    assert _file(target) == {"language": "en"}
+    assert _listed(report["settings_changes"]) == [("team", "/model", None, "removed")]
+
+
+def _pack_dropping_team(
+    grim_at,
+    project_dir: Path,
+    tmp_path: Path,
+    unique_repo: str,
+    *,
+    beside_other: bool,
+    skills: dict[str, str] | None = None,
+) -> tuple[GrimRunner, Path]:
+    """Bundle `pack` holding settings `team` (model) and skill `good`, installed,
+    then `pack:1` moved to a version without `team`. With ``beside_other``,
+    `other` declares the same model, added with no install and no record.
+    ``skills`` are declared beside `pack` and installed with it."""
+    team = _package(unique_repo, "team", {"claude": {"model": "sonnet"}})
+    good = _skill(unique_repo)
+    members = [("settings", "team", team.fq), ("skill", "good", good.fq)]
+    pack = make_bundle(f"{unique_repo}/pack", members, tag="1")
+    runner = _workspace(grim_at, project_dir, tmp_path / "s", {}, bundles={"pack": pack.fq}, skills=skills or {})
+    runner.run("install", TRUST)
+    target = project_dir / LOCAL
+    assert _file(target) == {"model": "sonnet"}
+    if beside_other:
+        other = _package(unique_repo, "other", {"claude": {"model": "sonnet"}})
+        runner.run("add", "--kind", "settings", "--name", "other", other.fq, "--no-install")
+    retag(f"{unique_repo}/pack", "kept", pack.digest)
+    make_bundle(f"{unique_repo}/pack", [("skill", "good", good.fq)], tag="1")
+    return runner, target
+
+
+def test_a_named_update_keeps_a_value_the_one_armed_package_outside_it_declares(
+    grim_at, project_dir: Path, tmp_path: Path, unique_repo: str
+) -> None:
+    """A bundle that drops a settings member left a value only that member held,
+    while the one other armed package, outside the update, declares it. The
+    value stays until `grim install` hands it over, with no window where the
+    file lacks it."""
+    runner, target = _pack_dropping_team(grim_at, project_dir, tmp_path, unique_repo, beside_other=True)
+
+    result = runner.run("update", TRUST, "pack", format="json")
+
+    assert _file(target) == {"model": "sonnet"}
+    assert json.loads(result.stdout)["settings_changes"] == []
+    assert "'other'" in result.stderr, result.stderr
+    assert f"run `grim install {TRUST}`" in result.stderr, result.stderr
+    # One remedy for the kept record: uninstalling it would remove what `other` declares.
+    assert "uninstall settings team" not in result.stderr, result.stderr
+
+    report = runner.json("install", TRUST)
+    assert _file(target) == {"model": "sonnet"}
+    assert report["settings_changes"] == []
+    assert _records(runner) == {("other", "claude", "/model", None): False}
+
+
+def test_the_kept_value_remedy_repeats_the_answer_that_armed_the_package_outside(
+    grim_at, project_dir: Path, tmp_path: Path, unique_repo: str
+) -> None:
+    """No consent record and no terminal: only `--trust-workspace` armed `other`.
+    The printed install has to carry that answer, or it applies nothing for
+    `other` and removes the value the warning said stays."""
+    runner, target = _pack_dropping_team(grim_at, project_dir, tmp_path, unique_repo, beside_other=True)
+
+    result = runner.run("update", TRUST, "pack", format="json")
+
+    printed = _printed(result.stderr, "to apply 'other'")
+    assert printed == ["install", TRUST], result.stderr
+    runner.run(*printed)
+    assert _file(target) == {"model": "sonnet"}
+    assert _records(runner) == {("other", "claude", "/model", None): False}
+
+
+def test_the_kept_value_remedy_clears_a_value_changed_outside_grim_first(
+    grim_at, project_dir: Path, tmp_path: Path, unique_repo: str
+) -> None:
+    """The kept value was edited by hand, so `other`'s install refuses it without
+    `--force`. The printed step deletes it first, then runs that install as
+    printed: it applies `other` and keeps the hand edit of the unrelated skill
+    `u`. The warning names `--force` as the other route, with all it reaches.
+    Found by review: it printed `--force` alone, which also removes the edited
+    values of packages that left the lock."""
+    u = make_artifact(f"{unique_repo}/u", "skill", {"u/SKILL.md": "---\nname: u\ndescription: d\n---\n# U\n"}, tag="1")
+    runner, target = _pack_dropping_team(
+        grim_at, project_dir, tmp_path, unique_repo, beside_other=True, skills={"u": u.fq}
+    )
+    skill = project_dir / ".claude" / "skills" / "u" / "SKILL.md"
+    skill.write_text(skill.read_text(encoding="utf-8") + "\nmy edit\n", encoding="utf-8")
+    target.write_text(json.dumps({"model": "opus"}))
+
+    result = runner.run("update", TRUST, "pack", format="json")
+
+    assert _file(target) == {"model": "opus"}
+    [warning] = [line for line in result.stderr.splitlines() if "to apply 'other'" in line]
+    assert "delete or restore it to the value grim wrote, then run" in warning, warning
+    assert "removes those of artifacts that left the lock" in warning, warning
+    printed = _printed(result.stderr, "to apply 'other'")
+    assert printed == ["install", TRUST], warning
+    target.write_text(json.dumps({}))
+    followed = runner.run(*printed, check=False)
+    assert followed.returncode == 65, followed.stderr
+    assert "skill 'u'" in followed.stderr or "/u" in followed.stderr, followed.stderr
+    assert _file(target) == {"model": "sonnet"}
+    assert _records(runner) == {("other", "claude", "/model", None): False}
+    assert skill.read_text(encoding="utf-8").endswith("my edit\n"), "the printed step overwrote another edit"
+
+
+@pytest.mark.parametrize("left", [False, True], ids=["in-lock", "left-the-lock"])
+def test_the_kept_value_remedy_says_another_edited_value_holds_the_install_back(
+    grim_at, project_dir: Path, tmp_path: Path, unique_repo: str, left: bool
+) -> None:
+    """Package `x`'s value at the same scope was also edited by hand, with `x`
+    in the lock or gone from it. The printed install refuses that value and
+    writes no settings, so the step's deleted value stays empty. The warning
+    says so, and once `x`'s value is restored to the one grim wrote, the
+    install applies `other`. Found by review: nothing said why the value
+    the user deleted was not replaced."""
+    team = _package(unique_repo, "team", {"claude": {"model": "sonnet"}})
+    good = _skill(unique_repo)
+    pack = make_bundle(f"{unique_repo}/pack", [("settings", "team", team.fq), ("skill", "good", good.fq)], tag="1")
+    x = _package(unique_repo, "x", {"claude": {"language": "en"}})
+    runner = _workspace(grim_at, project_dir, tmp_path / "s", {"x": x}, bundles={"pack": pack.fq})
+    runner.run("install", TRUST)
+    target = project_dir / LOCAL
+    assert _file(target) == {"model": "sonnet", "language": "en"}
+    if left:
+        config = project_dir / "grimoire.toml"
+        config.write_text(re.sub(r"(?m)^x\s*=.*\n", "", config.read_text(encoding="utf-8")), encoding="utf-8")
+        runner.run("lock")
+    other = _package(unique_repo, "other", {"claude": {"model": "haiku"}})
+    runner.run("add", "--kind", "settings", "--name", "other", other.fq, "--no-install")
+    retag(f"{unique_repo}/pack", "kept", pack.digest)
+    make_bundle(f"{unique_repo}/pack", [("skill", "good", good.fq)], tag="1")
+    target.write_text(json.dumps({"model": "opus", "language": "fr"}))
+
+    result = runner.run("update", TRUST, "pack", format="json")
+
+    [warning] = [line for line in result.stderr.splitlines() if "to apply 'other'" in line]
+    assert "restore it to the value grim wrote" in warning, warning
+    assert "writes no settings while it refuses any other settings value at this scope" in warning, warning
+    printed = _printed(result.stderr, "to apply 'other'")
+    target.write_text(json.dumps({"language": "fr"}))
+    held = runner.run(*printed, check=False)
+    assert held.returncode == 65, held.stderr
+    assert _file(target) == {"language": "fr"}
+    target.write_text(json.dumps({"language": "en"}))
+    runner.run(*printed)
+    assert _file(target) == ({"model": "haiku"} if left else {"model": "haiku", "language": "en"})
+
+
+def _drop_stored_layer(runner: GrimRunner, repo: str, tag: str) -> None:
+    """Delete any stored copy of `repo:tag`'s layer, keeping its manifest."""
+    layer = fetch_manifest(repo, tag)["layers"][0]["digest"].split(":")[1]
+    for root, _, names in os.walk(runner.grim_home):
+        for name in names:
+            if layer in name:
+                (Path(root) / name).unlink()
+
+
+def test_an_offline_named_update_keeps_a_value_an_unread_package_outside_it_may_set(
+    grim_at, project_dir: Path, tmp_path: Path, unique_repo: str
+) -> None:
+    """Offline, the one armed package outside the update has no stored layer, so
+    nothing says whether it sets the value the dropped member held. The run
+    stops with 81 and keeps the value, where it used to remove it at exit 0."""
+    runner, target = _pack_dropping_team(grim_at, project_dir, tmp_path, unique_repo, beside_other=True)
+    # Another project on the same home reads the moved tag, so the offline run follows it.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    write_config(elsewhere, bundles={"pack": f"{REGISTRY_HOST}/{unique_repo}/pack:1"})
+    GrimRunner(runner.binary, Path(runner.grim_home), cwd=elsewhere).run("lock")
+    _drop_stored_layer(runner, f"{unique_repo}/other", "1")
+
+    result = runner.run("--offline", "update", TRUST, "pack", format="json", check=False)
+
+    assert result.returncode == 81, result.stderr
+    assert _file(target) == {"model": "sonnet"}
+    assert "settings package 'team' keeps /model: 'other' outside this update" in result.stderr, result.stderr
+    # One remedy for the kept record: uninstalling it would remove what `other` may set.
+    assert _printed(result.stderr, "once its layer can be") == ["install", TRUST], result.stderr
+    assert "uninstall settings team" not in result.stderr, result.stderr
+
+    # Positive control: online, the install reads the layer and hands the value over.
+    report = runner.json("install", TRUST)
+    assert _file(target) == {"model": "sonnet"}
+    assert report["settings_changes"] == []
+    assert _records(runner) == {("other", "claude", "/model", None): False}
+
+
+def test_a_named_update_keeps_a_value_a_package_outside_it_with_an_unreadable_layer_may_set(
+    grim_at, project_dir: Path, tmp_path: Path, unique_repo: str
+) -> None:
+    """Online, the registry serves `other`'s manifest but no reader accepts its
+    layer. The run stops on that layer's own error and keeps the value, as the
+    whole-lock run does, where it used to remove it at exit 0."""
+    runner, target = _pack_dropping_team(grim_at, project_dir, tmp_path, unique_repo, beside_other=True)
+    unreadable = push_manifest(
+        f"{unique_repo}/other",
+        "broken",
+        [(SETTINGS_LAYER_MEDIA_TYPE, b"{not json")],
+        {"com.grimoire.kind": "settings"},
+    )
+    lock = project_dir / "grimoire.lock"
+    intact = lock.read_text(encoding="utf-8")
+    pinned = tag_digest(f"{unique_repo}/other", "1")
+    assert pinned in intact
+    lock.write_text(intact.replace(pinned, unreadable), encoding="utf-8")
+
+    result = runner.run("update", TRUST, "pack", format="json", check=False)
+
+    assert result.returncode == 65, result.stderr
+    assert "other" in json.loads(result.stdout)["error"]["message"]
+    assert _file(target) == {"model": "sonnet"}
+    assert "settings package 'team' keeps /model: 'other' outside this update" in result.stderr, result.stderr
+    assert "uninstall settings team" not in result.stderr, result.stderr
+
+
+def test_a_named_force_removes_an_edited_value_its_bundle_dropped(
+    grim_at, project_dir: Path, tmp_path: Path, unique_repo: str
+) -> None:
+    """A named `--force` reaches the values the run prunes, as it reaches the
+    files it prunes: an edited value of a dropped member goes on the first run."""
+    runner, target = _pack_dropping_team(grim_at, project_dir, tmp_path, unique_repo, beside_other=False)
+    _put(target, {"model": "opus"})
+
+    result = runner.run("update", TRUST, "--force", "pack", format="json", check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert _file(target) == {}
+    assert _listed(json.loads(result.stdout)["settings_changes"]) == [("team", "/model", None, "removed")]
+    assert _records(runner) == {}
+
+
+def test_a_named_refusal_names_the_uninstall_that_clears_a_dropped_value(
+    grim_at, project_dir: Path, tmp_path: Path, unique_repo: str
+) -> None:
+    """The run saved the lock without the member, so a named rerun cannot reach
+    the refused value; the warning names the command that can."""
+    runner, target = _pack_dropping_team(grim_at, project_dir, tmp_path, unique_repo, beside_other=False)
+    _put(target, {"model": "opus"})
+
+    result = runner.run("update", TRUST, "pack", format="json", check=False)
+
+    assert result.returncode == 65, result.stderr
+    assert _file(target) == {"model": "opus"}
+    remedy = re.search(r"`grim (uninstall --force settings team)`", result.stderr)
+    assert remedy, result.stderr
+    # One remedy: without `--force` the uninstall refuses the edited value too,
+    # and a named rerun with `--force` no longer prunes `team`.
+    assert "`grim uninstall settings team`" not in result.stderr, result.stderr
+    assert "rerun with --force" not in result.stderr, result.stderr
+
+    # The printed command clears it, and moves no pin.
+    lock = (project_dir / "grimoire.lock").read_bytes()
+    runner.run(*remedy.group(1).split())
+    assert _file(target) == {}
+    assert _records(runner) == {}
+    assert (project_dir / "grimoire.lock").read_bytes() == lock
 
 
 def test_a_projected_install_leaves_other_packages_alone(
@@ -784,7 +1277,7 @@ def test_a_narrowed_install_after_a_pin_roll_keeps_the_record_on_the_old_pin(
     assert _row(grim.json("--global", "status"), "team")["state"] == "outdated"
     assert "settings package 'team': codex still holds the previous version's values" in result.stderr
     remedy = _printed(result.stderr, "to move them")
-    assert remedy == ["install", "--global", "--client", "codex"]
+    assert remedy == ["--global", "install", "--client", "codex"]
 
     # Positive control: the printed step, typed as shown away from any project,
     # moves codex and the record, and sends nobody back to claude.
@@ -810,7 +1303,7 @@ def test_a_narrowed_install_names_every_client_left_behind_in_one_step(
 
     assert "settings package 'team': codex, copilot still hold the previous version's values" in result.stderr
     remedy = _printed(result.stderr, "to move them")
-    assert remedy == ["install", "--global", "--client", "codex", "--client", "copilot"]
+    assert remedy == ["--global", "install", "--client", "codex", "--client", "copilot"]
 
 
 def test_a_narrowed_install_moves_the_record_when_the_others_keep_their_values(
@@ -850,7 +1343,7 @@ def test_a_client_dropped_from_the_config_is_sent_to_update(
     )
     assert "--client codex" not in result.stderr
     remedy = _printed(result.stderr, "to take them out")
-    assert remedy == ["update", "--global"]
+    assert remedy == ["--global", "update"]
 
     # Positive control: the printed step reaps codex, and the record moves.
     grim.cwd = tmp_path
@@ -898,6 +1391,31 @@ def test_a_pin_roll_that_drops_a_client_moves_the_record(
     assert "--client codex" not in result.stderr
     assert _file(roots["claude"] / "settings.json") == {"model": "opus"}
     assert _row(grim.json("--global", "status"), "team")["state"] == "installed"
+
+
+def test_a_named_update_keeps_the_pin_a_dropped_client_holds(
+    grim, grim_home: Path, tmp_path: Path, unique_repo: str
+) -> None:
+    first = _package(unique_repo, "team", {"claude": {"model": "sonnet"}, "codex": {"model": "gpt"}})
+    roots = _global(grim, grim_home, tmp_path / "s", first, ["claude", "codex"])
+    grim.run("--global", "install")
+    codex = roots["codex"] / "config.toml"
+    # The same tag, so the declaration still matches the lock a named run refreshes.
+    _package(unique_repo, "team", {"claude": {"model": "opus"}, "codex": {"model": "gpt-5"}})
+    _declare(grim_home, first, ["claude"])
+
+    result = grim.run("--global", "update", "team", format="json")
+
+    # A named run reaps nothing, so codex keeps the old value and the record its pin.
+    assert _row(json.loads(result.stdout), "team")["reaped_clients"] == []
+    assert codex.read_text(encoding="utf-8") == 'model = "gpt"\n'
+    assert "codex still holds the previous version's values but is no longer in" in result.stderr
+    assert _row(grim.json("--global", "status"), "team")["state"] == "outdated"
+
+    # Positive control: with codex selected again, the record's old pin moves codex too.
+    _declare(grim_home, first, ["claude", "codex"])
+    grim.run("--global", "install")
+    assert codex.read_text(encoding="utf-8") == 'model = "gpt-5"\n'
 
 
 def test_zero_output_record_converges_when_the_cursor_file_appears(

@@ -148,6 +148,7 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
         offline: ctx.offline(),
         force_refresh: args.refresh,
         scope: scope.scope,
+        invocation: scope.invocation.clone(),
         workspace: scope.workspace.clone(),
         lock_path: scope.lock_path.clone(),
         state_path: scope.state_path.clone(),
@@ -206,6 +207,7 @@ fn scope_swap(ctx: &Context, other: scope_resolution::ResolvedScope) -> anyhow::
     let primary_registry = crate::config::primary_registry(&registries).to_string();
     Ok(ScopeSwap {
         scope: other.scope,
+        invocation: other.invocation.clone(),
         workspace: other.workspace.clone(),
         lock_path: other.lock_path.clone(),
         state_path: other.state_path.clone(),

@@ -5,6 +5,7 @@
 
 use crate::config::declaration::DeclaredSource;
 
+use super::text::escape_controls;
 use super::{ArtifactKind, Identifier};
 
 /// An artifact as referenced from config: its kind, its config key (name),
@@ -27,6 +28,20 @@ impl ArtifactRef {
             name: name.into(),
             source: DeclaredSource::Registry(id),
         }
+    }
+}
+
+/// `skill 'name' (source)`, as an error names the artifact it is about. Neither
+/// field is validated by the time one is printed.
+impl std::fmt::Display for ArtifactRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} '{}' ({})",
+            self.kind,
+            escape_controls(&self.name),
+            escape_controls(&self.source.to_string())
+        )
     }
 }
 

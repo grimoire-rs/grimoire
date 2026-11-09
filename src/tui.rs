@@ -7,7 +7,8 @@
 //! without a TTY: [`state`] holds the screen model and pure transitions
 //! (no ratatui / crossterm / I/O imports), [`event`] maps inputs to
 //! actions (pure), [`detail`] builds the detail pane's semantic content
-//! and scroll geometry (pure, shared by state and render), [`render`] is
+//! and scroll geometry (pure, shared by state and render), [`confirm`]
+//! holds the confirm popup's geometry (pure, shared the same way), [`render`] is
 //! a thin pure projection of state into a plain [`render::RenderModel`]
 //! plus the only ratatui-specific draw
 //! function, and [`app`] owns the terminal, the async catalog load, and
@@ -33,6 +34,7 @@ pub mod bundle_member_fetch;
 pub mod bundle_members;
 pub mod companion;
 pub mod companion_fetch;
+pub mod confirm;
 pub mod detail;
 pub mod event;
 pub mod install_progress;
