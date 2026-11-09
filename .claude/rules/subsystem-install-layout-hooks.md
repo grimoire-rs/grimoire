@@ -19,8 +19,10 @@ tree with a real recorded `ClientOutput`) and **registers like Mcp**
 (foreign config, written through `sync_config`) — except more restrained,
 because *the registration is never recorded at all*, plus a consent gate no
 other kind has any precedent for — **workspace-scoped**, machine-local, and
-written by exactly three seams (`grim hook allow`, `grim add`, an accepted
-prompt). `grim install` deliberately writes none: it converges what is already
+written by exactly three seams (`grim hook allow`, `grim add`, an accepted prompt),
+as accepted. The shipped code also writes it from a TUI Install that declares a row, as
+`grim add`'s TUI form: a proposed amendment awaiting the owner (`adr_hook_workspace_consent.md`,
+after decision 4; plan RD4-3). `grim install` deliberately writes none: it converges what is already
 declared, and a cloned repository's `grimoire.toml` is not the user's gesture
 (**T3**). Global scope is always consented and carries no record at all.
 
@@ -96,7 +98,7 @@ that path and stops every hook on the machine from arming:
 |---|---|
 | `$GRIM_HOME/hooks/dispatch.json` | The dispatch table — schema-versioned, keyed by an opaque per-install root token, each root carrying its `root` path and a `hooks` array of `(artifact, id, client, event, tier, matcher, handler, timeout, payload, payload_dir, resolved_digest)` rows. Sorted on `(artifact, id, event, client)` so a no-change rewrite is byte-identical |
 | `$GRIM_HOME/hooks/grim-hook` (`grim-hook.exe` on Windows) | The native launcher, the bytes embedded in grim, mode `0o755`. `launcher::ensure` rewrites it iff the bytes differ; a directory here refuses with `launcher-path-occupied` and nothing is written or reaped |
-| `$GRIM_HOME/hooks/bin/grim-hook` | The retired `sh` shim. A convergence that arms something deletes it under the same guard (`launcher::retire_legacy_shim`, NotFound ignored); `bin` stays reserved. A registration an older grim wrote still points at it and exits 0 until `grim install` rewrites that workspace |
+| `$GRIM_HOME/hooks/bin/grim-hook` | The retired `sh` shim. A whole-set convergence that arms something deletes it under the same guard (`launcher::retire_legacy_shim`, NotFound ignored); a named run or a delete keeps it, since another workspace's registration may still reach an old grim through it. `bin` stays reserved. A registration an older grim wrote still runs it and fails open (CWE-636), so every convergence rewrites one whose hook has a standing dispatch row, named runs and deletes included (`ArmedClient::narrow`). A workspace no convergence reaches keeps that registration until one does |
 | `$GRIM_HOME/hooks/root-key` | The root-token map backing the opaque `<root>` operand — a `0o600` regular file; a directory here is unrecoverable, since the mint path is `create_new` on the same path |
 | `$GRIM_HOME/hooks/dispatch.json.lock` | The table's advisory-lock sidecar (`AdvisoryFileLock` appends `.lock` to the **full** file name). Reserved: a directory here makes `try_acquire` fail `EISDIR`, so no table is written for as long as the offending artifact is installed |
 | `$GRIM_HOME/hooks/owned_files/<path-key>` | The **own-file ownership record**: the hex SHA-256 of the bytes grim last wrote to one own-file hook surface (Codex `hooks.json`, Copilot `hooks/grim.json`), keyed by `hook_dispatch::workspace_key` of the surface path. A surface is grim's only while it is a regular file whose bytes match; otherwise it is never written or deleted. The underscore keeps it outside the binding grammar, so it needs no reservation |

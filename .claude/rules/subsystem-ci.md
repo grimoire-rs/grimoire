@@ -75,7 +75,7 @@ Test results > lint results. Pattern: `continue-on-error: true` on linters + fin
 
 ### 4. Share artifacts, don't rebuild
 
-Build binary **once** in smoke job, upload with `compression-level: 0` and `retention-days: 1`. Downstream jobs `download-artifact` not rebuild.
+Build binary **once** in smoke job, upload with `compression-level: 0` and `retention-days: 3`, so rerunning one failed shard days later still finds it. Downstream jobs `download-artifact` not rebuild.
 
 ### 5. Security
 
@@ -94,6 +94,8 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 ```
+
+Exception: a reusable workflow (`acceptance.yml`) declares none. Inside it `github.workflow` is the caller's name, so the same group collides with the caller's and GitHub cancels the run as a deadlock. The caller's block covers its jobs.
 
 ### 7. The embedded hook launcher is size-gated
 
@@ -116,13 +118,34 @@ Launcher execution is gated in `verify-deep.yml`, not `verify-basic.yml`:
 
 Reproduce `hooks-windows` locally with the grim-wintest `run.sh` before dispatching.
 
+### 8. The acceptance suite is sharded
+
+`acceptance.yml` is the one reusable workflow that runs the suite: four shards, one merge, one published check. The floor is a property of the whole suite, so the merge judges it, never a shard.
+
+| Job | Token | Does |
+|---|---|---|
+| `plan` | none | Lists the shard indices from the `shard-count` input (default 4) |
+| `shards` | `contents: read` | `fail-fast: false` matrix on the caller's runner, so every shard reports: downloads the caller's binary, moves it to `test/bin/grim`, runs `task test:shard`, uploads `accept-junit-<os>-shard-<i>` (3 days, `overwrite: true`) |
+| `merge` | `contents: read` | On `ubuntu-latest`, also after a failed shard: runs `task test:floor` over `accept-junit-<os>-shard-*`, uploads the merged `junit.xml` under the caller's artifact name |
+| `publish` | `contents: read`, `checks: write`, `pull-requests: write` | The one write-scoped job, with no checkout, so no repository code runs beside the token |
+
+| Caller | Runs | Check | Merged artifact |
+|---|---|---|---|
+| `acceptance-tests` in `verify-basic.yml` | `ubuntu-latest`, binary `grim-binary` | `Acceptance Test Results` | `acceptance-junit` |
+| `acceptance-tests` in `verify-deep.yml` | one matrix leg each for Linux and macOS, binary `grim-<target>` | `Acceptance Test Results (<leg>)` | `deep-tests-<leg>`, which `test-results` reads as `artifacts/**/junit.xml` |
+
+`platform-check-windows` in `verify-deep.yml` stays one job outside the floor: it has no registry, so most of the suite skips there.
+`principle-9` in `verify-deep.yml` runs `task test:old-grim` against the v0.15.1 release binary, checked against the SHA-256 pinned in its fetch step; a skip fails there, while the ordinary suite counts those skips under `SKIP_CEILING`.
+
+`test/SUITE_FLOOR`, `test/SKIP_CEILING` and `test/XFAIL_CEILING` are one set for every leg, so `SKIP_CEILING` holds the macOS count, which is the Linux count plus 4: three `test_broken_pipe.py` cases need Linux's `F_SETPIPE_SZ`, and one `test_export_marketplace.py` case needs a case-sensitive filesystem. A leg that adds a platform skip raises it in the same commit. The case count is the same on both legs, because a platform skip here skips each test, never a whole module at collection.
+
 ## Cost Factors
 
 | Factor | Impact | Guidance |
 |--------|--------|----------|
 | **Job count** | 1 min minimum per job + ~8s startup | Combine short steps; split only when parallelism saves wall-clock |
 | **Runner OS** | Linux $0.006, Windows $0.010, macOS $0.062 per min | Linux default; gate macOS/Windows behind Linux passing |
-| **Artifact retention** | $0.008/GB/day; default 90 days | `retention-days: 1` inter-job, `7` debugging |
+| **Artifact retention** | $0.008/GB/day; default 90 days | `retention-days: 1` inter-job, `3` where a rerun must find it, `7` debugging |
 | **Cache** | 10 GB free, $0.07/GiB/month overage | `Swatinem/rust-cache` + `save-if: github.ref == 'refs/heads/main'` |
 | **Duplicate builds** | A full Rust release build = 5-15 min | Share binaries via upload/download-artifact |
 | **Matrix breadth** | N entries = N x job cost | `fail-fast: true` default |
@@ -213,7 +236,7 @@ Creating, modifying, auditing GitHub Actions workflow → follow sequence:
 | `@v4` tag without SHA | Pin by full commit SHA |
 | Lint failure blocks test execution | `continue-on-error` + final gate |
 | Binary rebuilt in every job | `upload-artifact` + `download-artifact` |
-| Default 90-day artifact retention | `retention-days: 1` inter-job |
+| Default 90-day artifact retention | `retention-days: 1` inter-job, `3` where a rerun must find it |
 | No concurrency control | Add `concurrency:` block |
 | `fetch-depth: 0` when not needed | Default `fetch-depth: 1` |
 | `pull_request_target` + checkout of PR head | Use `pull_request` trigger for untrusted code |

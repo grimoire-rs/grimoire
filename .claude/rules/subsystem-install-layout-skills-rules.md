@@ -81,7 +81,9 @@ Per-client rule transforms:
   `rules/` recursively and auto-loads every unscoped file, so grim's own
   verbatim copy would otherwise be unconditional context. Managed like
   OpenCode's `instructions` glob and through the same driver
-  (`managed_config.rs`) — added while the rule's output is recorded, removed
+  (`managed_config.rs`) — added by an install or a bare `grim update` while the
+  rule's output is recorded (a named `grim update` adds only its closure's
+  elements, `grim uninstall` and the TUI delete add none), removed
   when that output is **retired**, never a blanket `rules/*/**`. Removal is
   record-driven, never a filesystem probe for ownership: `sync_config` is handed the
   outputs the operation removed (`install_state::retired_outputs`), so grim
@@ -101,7 +103,8 @@ Per-client rule transforms:
   comment followed by the rule body. Marked `generated: true`. Loading is
   wired through a managed glob entry in `opencode.json` (or `opencode.jsonc`
   when present). grim adds the entry when the first OpenCode rule installs
-  and removes it when the last one uninstalls; the target file is
+  (a named update only when its closure holds an OpenCode rule, a removal
+  never) and removes it when the last one uninstalls; the target file is
   `.opencode/rules/<name>.md`.
 - **Copilot**: written to `.github/instructions/<name>.instructions.md`.
   Frontmatter maps `paths` → `applyTo` (comma-joined into a single string)
