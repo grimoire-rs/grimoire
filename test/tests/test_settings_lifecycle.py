@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import sys
 from pathlib import Path
 from subprocess import CompletedProcess
 
@@ -1239,7 +1240,12 @@ def test_a_relocated_root_leaves_the_old_value_named(grim, grim_home: Path, tmp_
     value = {"approvalMode": "allowlist"}
     old = Path(grim.env["XDG_CONFIG_HOME"]) / "cursor" / "cli-config.json"
     _put(old, {})
-    grim.run("--global", "install")
+    result = grim.run("--global", "install")
+    if sys.platform != "linux":
+        # Only Linux falls back to the XDG file, so elsewhere the root never moves from it.
+        assert _file(old) == {}
+        assert "client-config-absent" in result.stderr
+        return
     assert _file(old) == value
     new = roots["cursor"] / "cli-config.json"
     _put(new, {})
