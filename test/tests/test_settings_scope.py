@@ -18,6 +18,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from subprocess import CompletedProcess
 
@@ -237,6 +238,8 @@ def test_cursor_absent_file_declines(grim, grim_home: Path, tmp_path: Path, uniq
     team = _package(unique_repo, "team", {"claude": {"model": "sonnet"}, "cursor": {"approvalMode": "allowlist"}})
     roots = _global(grim, grim_home, tmp_path / "s", team, ["claude", "cursor"])
     xdg = Path(grim.env["XDG_CONFIG_HOME"]) / "cursor" / "cli-config.json"
+    # Only Linux falls back to the XDG file; elsewhere the decline names `~/.cursor`'s.
+    named = xdg if sys.platform == "linux" else roots["cursor"] / "cli-config.json"
 
     result = grim.run("--global", "install")
 
@@ -245,7 +248,7 @@ def test_cursor_absent_file_declines(grim, grim_home: Path, tmp_path: Path, uniq
     assert "(client-config-absent); start cursor once so it creates that file, then run grim --global install" in (
         result.stderr
     )
-    assert str(xdg) in result.stderr
+    assert str(named) in result.stderr
     assert not xdg.exists()
     assert not (roots["cursor"] / "cli-config.json").exists()
     assert _file(roots["claude"] / "settings.json") == {"model": "sonnet"}
