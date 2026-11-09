@@ -332,12 +332,15 @@ On a conflict in the second slot, the run returns one synthetic `ArtifactInstall
 does no artifact work, so `finish` gives 78. `Settings` leaves the per-artifact work list.
 
 **Seats.** `install_and_persist` and `install_all_with_progress` take a required `SettingsRun<'_>`,
-so a seat cannot forget it. `Full(&lock)` plans over the whole lock. `Skip` runs no settings step.
+so a seat cannot forget it. `Full(&lock)` plans over the whole lock. `Named` keeps the whole lock
+for consent and the conflict check, arms only the closure's packages, and removes a leftover only
+inside the previous lock's closure. `Skip` runs no settings step.
 
 | Seat | Lock it installs | `SettingsRun` |
 |---|---|---|
-| `install.rs:119`, `update.rs:177` | The full lock | `Full` |
-| `add.rs:718`, `tui/app.rs:2893,3030` | A projection | `Full(&full_lock)` |
+| `install.rs:119`, a bare `grim update` | The full lock | `Full` |
+| A named `grim update`, TUI Update | The closure's projection | `Named { lock, install, prune }`, the closure and the previous lock's closure |
+| `add.rs:718`, TUI Install | A projection | `Full(&full_lock)` |
 | `install.rs:365`, `update.rs:600`, `tui/app.rs:3135` | A dev synthetic lock | `Skip` |
 
 **Generic removal seams.** `prune_orphans`, `reap_dropped_clients`, `reap_relocated_roots` and
@@ -394,6 +397,28 @@ wins, in the order 7, 3d, 3c, 3a, 3b, 2, 1, 5, 4.**
 | 7a | File unparseable, a piece adds or changes | Whole phase refuses: 65, no reason, not forceable; the file is never replaced | unchanged | No |
 | 7b | File unparseable, only removals | Drop the record, report `abandoned_entries` | gone | No |
 | 8 | No L, no record | Never a piece. User keys and elements are never compared | n/a | No |
+
+> **Amendment to rule row 6 (lock pin stability, RF5, 2026-11-06; fix round 2026-11-07).** The
+> Accepted row stands for every run that reads the whole lock. A named `grim update` judges only
+> its closure and prune (Decision 5, `Named` seat), so a piece that only leaving records hold gets
+> a holder outside the closure:
+>
+> - **An armed package outside the closure that declares the piece.** The piece gets no verdict.
+>   The leaving record keeps it on its previous pin, and a warning names `grim install`, which
+>   hands it over. That install carries `--trust-workspace` when only the flag armed the declarer.
+>   This holds for a package the run prunes, and for a lone armed package, whose layer the pass
+>   reads store first.
+> - **An armed package outside the closure whose layer cannot be read** (fix round). Nothing says
+>   whether it declares the piece, so the pass stops before any write and keeps the value. The run
+>   exits with the read's own code, `81` offline, as c5e3824's whole-lock run does. A warning names
+>   the piece and `grim install`. This replaces the RF5 row's "a layer that does not load protects
+>   nothing".
+> - **A package consent leaves out** protects nothing.
+>
+> A named `--force` reaches the closure and its prune, the file prune's own reach. A refused value
+> of a pruned package names `grim uninstall --force settings <name>` in its refusal line, not a
+> rerun with `--force`. A value that record keeps beside it is named too, since that uninstall
+> removes it.
 
 A set element has no "different value": it is present or absent, so row 4 reaches it only through
 row 5. All judging happens before any write. Any row 4, 5 or 7a outcome refuses the whole phase,
@@ -546,6 +571,18 @@ settings phase, orphans included.
 **Gesture.** `grim add` is the gesture and global scope is consented, as for hooks. A `settings:`
 key joins `consentable` in `resolve_for_add`. `disclose_bundle_hooks` becomes `disclose_transitive`,
 at warn level, naming settings packages that arrive through a bundle or `requires`.
+
+> **Proposed amendment to Gesture, awaiting the owner (lock pin stability, RF5, 2026-11-06; fix
+> round 2026-11-07).** It is goal-loop decision RB-4 of the plan, not an owner decision, and it
+> sits in the trust narrowing the Proposed block under `adr_artifact_trust_model.md` decision 1
+> lists. Until the owner ratifies it, the Accepted text above is the decision; the shipped code
+> follows this proposal. A carried settings target consents only while its pin checks out, as a
+> carried hook's does (`kept_pin_check`, plan RB-4): its tag still names the pin's digest, or for a
+> tagless pin its repository still serves the digest. Otherwise the add consents to nothing for it,
+> and one warning says the tag now names another digest than the pin the add kept. It names
+> `grim update <name>`, which moves the pin or says why it cannot, and then `grim consent allow`,
+> which takes the lock as it stands (RF8). The fix round changed
+> that name from `grim hook allow`, the same command, to the spelling settings refusals use.
 
 **`GRIM_HOME` guard.** The phase calls `validate_grim_home` directly before reading any consent or
 record. A refusal means `not-armed`, exit 0, causes `grim-home-relative`, `grim-home-in-workspace`
@@ -1006,6 +1043,10 @@ extension work on the kind; a paired extension release.
 | 2026-11-04 | Claude (plan re-validation) | **Accepted**, per the plan's PD-15. Requires `install_and_persist` to return `InstallRun`, and places `pieces` inside the error document's `error` object. |
 | 2026-11-05 | Claude (closing-review fix pass) | Decision 6 withholds a third case: a settings output carried from another host whose file this host does not resolve. The Principle 9 matrix names the two anchors #270 appended. Appendix B gives Copilot `trustedFolders` and Cursor `autoAcceptWebSearch` a verdict, and the trust-gate rule names its four keys. The threat table's T3 row gains the global root fence and its two first edges (plan PD-28), and the Performance row says when a layer is read (PD-30). |
 | 2026-11-05 | Claude (closing review 3 fix pass) | Decision 7 describes the root fence as it now stands: the outermost work tree, a regular `.git` only, a `..` spelling refused, an unreadable working directory failing closed, and evidence-led remedies. Decision 8 lists the fence's two causes, and the token count is 23. Decision 11, the exit table and the contracts block take PD-32: `SettingsRaced` (75), `SettingsBecameUnparseable` (65), and `InvalidBindingName` at install (65). The T3 row records two more fence edges, a repository-set `HOME` and a checkout with no `.git` (PD-33). The Performance row names the second layer read on `add` and `update`. The Principle 9 matrix records the byte-order mark a JSON vendor file may now start with. |
+| 2026-11-06 | Claude (lock pin stability, RF4) | Decision 5's seat table gains `Named`, per the pin stability plan's RD4-12. A named `grim update` and TUI Update arm only the closure's packages: writes, restores, the edited-value refusal, `--force`, pin moves and rows stop there, and the prune stays at the previous closure. Consent, the conflict check, the removal guard and one verdict per shared piece still read the whole lock. Residual: an outside package with no record does not hold a value the closure drops, and `grim install` writes it back. |
+| 2026-11-06 | Claude (lock pin stability, RF5) | Amendment as landed, superseding the RF4 row's residual (plan RD4-14 and the RF5 pass). Rule row 6 gains a holder on a named run: a piece that only leaving records hold, which an armed package outside the closure declares, gets no verdict. The value stays, the leaving record keeps it on its previous pin, and a warning names `grim install`, which hands it over. This holds for a package the run prunes too, and for a lone armed package, whose layer the run reads store first since the conflict check reads none. Only a package consent leaves out, or a layer that does not load, protects nothing. A named `--force` reaches the closure and its prune, the file prune's own reach, and a refused value of a pruned package names `grim uninstall --force settings <name>`. Gesture (Decision 7): a carried settings target consents only while its pin checks out, as a hook's does (`kept_pin_check`, plan RB-4). The amendment blocks after the rule table and after Gesture carry this text. |
+| 2026-11-07 | Claude (lock pin stability, RF5 fix round) | Both amendment blocks gain the fix round. An armed package outside a named closure whose layer cannot be read now stops the pass and keeps the value, exiting with the read's code (`81` offline), as c5e3824 does; this replaces the RF5 row's "a layer that does not load protects nothing". The kept-value remedy repeats `--trust-workspace` when only the flag armed the declarer. A pruned package's refusal names its forced uninstall and the value it also removes. The kept-pin warning names `grim consent allow`. |
+| 2026-11-07 | Claude (lock pin stability, RF6) | The amendment to Gesture is marked Proposed, awaiting the owner: it is goal-loop decision RB-4, part of the trust narrowing the trust ADR's Proposed block lists, and the Accepted text stays the decision until the owner ratifies it. No behaviour changed. |
 
 ---
 
