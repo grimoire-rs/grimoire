@@ -154,9 +154,203 @@ pub fn contain(base: &Path, relative: &Path) -> Result<PathBuf, ContainmentError
     Ok(candidate)
 }
 
+/// `path` with every link in its longest existing prefix followed and the rest
+/// appended as spelled; `path` itself when that rest is not all plain names or
+/// no prefix resolves.
+pub(crate) fn resolved_prefix(path: &Path) -> PathBuf {
+    match existing_prefix(path) {
+        Some((mut resolved, rest)) => {
+            resolved.extend(rest);
+            resolved
+        }
+        None => path.to_path_buf(),
+    }
+}
+
+/// Where `path` lands once its missing part is created, when that is known
+/// without creating it: [`resolved_prefix`] while the missing part is plain
+/// names hanging off a directory without the first of them, so none is a link.
+///
+/// The one form two paths are compared in when either may not exist yet:
+/// [`contain`] and `AnchoredPath::resolve` return a canonical path for a file
+/// that exists and the plain join for one that does not.
+pub(crate) fn landing(path: &Path) -> Option<PathBuf> {
+    let (mut resolved, rest) = existing_prefix(path)?;
+    if let Some(first) = rest.first() {
+        // A prefix that is no directory holds no name, and a name there that
+        // does not canonicalize is a dangling link or one grim cannot read.
+        let absent = || {
+            matches!(std::fs::symlink_metadata(resolved.join(first)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+        };
+        if !resolved.is_dir() || !absent() {
+            return None;
+        }
+    }
+    resolved.extend(rest);
+    Some(resolved)
+}
+
+/// `path` split at its longest prefix that canonicalizes, when every component
+/// after it is a plain name: that prefix canonical, and those names.
+fn existing_prefix(path: &Path) -> Option<(PathBuf, Vec<Component<'_>>)> {
+    let mut rest = Vec::new();
+    let mut existing = path;
+    loop {
+        if let Ok(resolved) = dunce::canonicalize(existing) {
+            rest.reverse();
+            return plain_names(&rest).then_some((resolved, rest));
+        }
+        let (Some(parent), Some(last)) = (existing.parent(), existing.components().next_back()) else {
+            return None;
+        };
+        rest.push(last);
+        existing = parent;
+    }
+}
+
+/// Whether every part is a plain name: a `..`, a `.`, a root or a prefix after
+/// a missing part would need that part to resolve, so where it leads is unknown.
+fn plain_names(parts: &[Component<'_>]) -> bool {
+    parts.iter().all(|part| matches!(part, Component::Normal(_)))
+}
+
+/// `path` relative to `base`, as spelled or else where both [`landing`] puts
+/// them, so a link in either spelling does not hide that `path` lies under `base`.
+pub(crate) fn relative_to(path: &Path, base: &Path) -> Option<PathBuf> {
+    if let Ok(relative) = path.strip_prefix(base) {
+        return Some(relative.to_path_buf());
+    }
+    let path = landing(path)?;
+    path.strip_prefix(landing(base)?).ok().map(Path::to_path_buf)
+}
+
+/// A directory spelled through a link, as macOS spells its temp directory
+/// (`/var` → `/private/var`): `real` is canonical and `link` reaches it. A
+/// symlink on Unix, a junction on Windows, which needs no privilege.
+#[cfg(test)]
+pub(crate) struct LinkedRoot {
+    _dir: tempfile::TempDir,
+    pub(crate) real: PathBuf,
+    pub(crate) link: PathBuf,
+}
+
+#[cfg(test)]
+impl LinkedRoot {
+    pub(crate) fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dunce::canonicalize(dir.path()).unwrap().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = dir.path().join("link");
+        link_dir(&real, &link);
+        assert_ne!(link, real, "the fixture spells one directory two ways");
+        Self { _dir: dir, real, link }
+    }
+}
+
+/// A directory link at `link` leading to `target`: a symlink on Unix, a
+/// junction on Windows.
+#[cfg(test)]
+pub(crate) fn link_dir(target: &Path, link: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+    #[cfg(windows)]
+    {
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "mklink /J: {made:?}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Under a linked root, a path that does not exist yet resolves to the
+    /// spelling an existing one canonicalizes to, so the two compare equal.
+    #[test]
+    fn a_linked_root_resolves_and_relativizes_in_one_form() {
+        let root = LinkedRoot::new();
+        std::fs::create_dir(root.real.join("ws")).unwrap();
+        std::fs::write(root.real.join("ws/file"), "").unwrap();
+        let linked_ws = root.link.join("ws");
+
+        assert_eq!(
+            resolved_prefix(&linked_ws.join("missing/home")),
+            root.real.join("ws/missing/home")
+        );
+        assert_eq!(resolved_prefix(&linked_ws.join("file")), root.real.join("ws/file"));
+        let climbs = linked_ws.join("missing/../../x");
+        if cfg!(unix) {
+            assert_eq!(
+                resolved_prefix(&climbs),
+                climbs,
+                "a `..` after a missing part stays as spelled"
+            );
+            assert_eq!(landing(&climbs), None);
+        }
+        assert_eq!(
+            landing(&linked_ws.join("missing/home")),
+            Some(root.real.join("ws/missing/home"))
+        );
+        assert_eq!(landing(&linked_ws.join("file")), Some(root.real.join("ws/file")));
+        assert_eq!(landing(&linked_ws.join("file/below")), None, "a file holds no name");
+
+        let existing = dunce::canonicalize(linked_ws.join("file")).unwrap();
+        let real_ws = root.real.join("ws");
+        assert_eq!(relative_to(&existing, &linked_ws), Some(PathBuf::from("file")));
+        assert_eq!(
+            relative_to(&linked_ws.join("file"), &real_ws),
+            Some(PathBuf::from("file"))
+        );
+        assert_eq!(
+            relative_to(&linked_ws.join("missing/x"), &real_ws),
+            Some(PathBuf::from("missing/x"))
+        );
+        assert_eq!(
+            relative_to(&root.real, &linked_ws),
+            None,
+            "a parent is not under its child"
+        );
+    }
+
+    /// Only plain names after the existing prefix are resolved: a `.`, a `..`,
+    /// a root or a prefix there answers as spelled. A Unix path drops an inner
+    /// `.`, so the parts are built by hand.
+    #[test]
+    fn only_plain_names_after_the_existing_prefix_are_resolved() {
+        let name = |name: &'static str| Component::Normal(std::ffi::OsStr::new(name));
+        assert!(plain_names(&[]));
+        assert!(plain_names(&[name("missing"), name("home")]));
+        for part in [Component::CurDir, Component::ParentDir, Component::RootDir] {
+            assert!(!plain_names(&[name("missing"), part, name("home")]), "{part:?}");
+        }
+        #[cfg(windows)]
+        {
+            let prefix = Path::new(r"C:\").components().next().unwrap();
+            assert!(!plain_names(&[name("missing"), prefix]), "{prefix:?}");
+        }
+    }
+
+    /// A verbatim path keeps an inner `.` as a part; after a missing part it
+    /// resolves nothing, so the path answers as spelled.
+    #[cfg(windows)]
+    #[test]
+    fn a_verbatim_dot_after_a_missing_part_stays_as_spelled() {
+        let root = LinkedRoot::new();
+        let path = PathBuf::from(format!(r"\\?\{}\missing\.\home", root.link.display()));
+        assert!(
+            path.components().any(|part| part == Component::CurDir),
+            "the `.` is a part"
+        );
+        assert_eq!(resolved_prefix(&path), path);
+        assert_eq!(landing(&path), None);
+        assert_eq!(relative_to(&path, &root.real), None);
+    }
 
     /// Issue #90 review B1: nested keys main installs stay legal; traversal
     /// shapes are refused per part.

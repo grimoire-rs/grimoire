@@ -60,6 +60,7 @@ use crate::oci::settings::{
 };
 use crate::oci::text::{escape_controls, registry_text};
 use crate::oci::{ArtifactKind, ArtifactRef, Digest};
+use crate::path_safety::{relative_to, resolved_prefix};
 
 /// The most of a file's value a refusal shows, in characters.
 const CURRENT_TEXT_LIMIT: usize = 200;
@@ -1225,23 +1226,6 @@ fn holds_git(dir: &Path) -> bool {
             read.is_ok() && head.lines().any(|line| line.starts_with("gitdir:"))
         }
         Ok(_) | Err(_) => false,
-    }
-}
-
-/// `path` with every link in its longest existing prefix followed, and the
-/// rest appended unchanged; `path` itself when no prefix resolves.
-fn resolved_prefix(path: &Path) -> PathBuf {
-    let mut rest = Vec::new();
-    let mut existing = path;
-    loop {
-        if let Ok(base) = dunce::canonicalize(existing) {
-            return rest.iter().rev().fold(base, |acc, name| acc.join(name));
-        }
-        let (Some(parent), Some(name)) = (existing.parent(), existing.file_name()) else {
-            return path.to_path_buf();
-        };
-        rest.push(name);
-        existing = parent;
     }
 }
 
@@ -3204,16 +3188,16 @@ fn pointer_of(path: &[String]) -> String {
 fn shown_file(file: &Path, target: &InstallTarget, fence: &RootFence) -> String {
     let slashes = |path: &Path| path.to_string_lossy().replace('\\', "/");
     if target.scope() == ConfigScope::Project
-        && let Ok(relative) = file.strip_prefix(target.workspace())
+        && let Some(relative) = relative_to(file, target.workspace())
     {
-        return slashes(relative);
+        return slashes(&relative);
     }
     if fence.home_in_tree {
         return slashes(&resolved_prefix(file));
     }
     let home = crate::env::home_dir();
-    if let Some(relative) = home.as_deref().and_then(|home| file.strip_prefix(home).ok()) {
-        return format!("~/{}", slashes(relative));
+    if let Some(relative) = home.as_deref().and_then(|home| relative_to(file, home)) {
+        return format!("~/{}", slashes(&relative));
     }
     slashes(file)
 }
@@ -3804,6 +3788,30 @@ mod tests {
                 current: None,
             }
         );
+    }
+
+    /// A file that exists resolves to its canonical spelling and one that does
+    /// not keeps the workspace's: both show workspace-relative under a link.
+    #[test]
+    fn a_file_under_a_linked_workspace_is_shown_relative() {
+        let root = crate::path_safety::LinkedRoot::new();
+        std::fs::create_dir_all(root.real.join("ws/.claude")).unwrap();
+        let fence = RootFence::default();
+        for workspace in [root.link.join("ws"), root.real.join("ws")] {
+            let target = InstallTarget::new(&workspace, ConfigScope::Project, vec![ClientTarget::Claude]);
+            for file in [
+                root.real.join("ws/.claude/settings.local.json"),
+                root.link.join("ws/.claude/settings.local.json"),
+            ] {
+                assert_eq!(
+                    shown_file(&file, &target, &fence),
+                    ".claude/settings.local.json",
+                    "{} in {}",
+                    file.display(),
+                    workspace.display()
+                );
+            }
+        }
     }
 
     #[test]
@@ -5375,6 +5383,52 @@ mod tests {
         let refusal = root_refusal(&inside, ConfigScope::Global, &fence);
         assert_eq!(refusal, Some(SettingsDecline::RootInWorkspace(inside, Inside::Spelled)));
         assert_eq!(root_refusal(&under_home, ConfigScope::Global, &fence), None);
+    }
+
+    /// A home spelled with `..` after a part that does not exist is fenced as
+    /// spelled: following a link the `..` steps past would need that part.
+    #[test]
+    fn a_home_climbing_out_of_a_missing_part_is_fenced_as_spelled() {
+        // Resolves a prefix by walking file names, so it keeps any path ending
+        // in `..` as spelled: the answer the fence must keep.
+        fn by_name(path: &Path) -> PathBuf {
+            let mut rest = Vec::new();
+            let mut existing = path;
+            loop {
+                if let Ok(base) = dunce::canonicalize(existing) {
+                    return rest.iter().rev().fold(base, |acc, name| acc.join(name));
+                }
+                let (Some(parent), Some(name)) = (existing.parent(), existing.file_name()) else {
+                    return path.to_path_buf();
+                };
+                rest.push(name);
+                existing = parent;
+            }
+        }
+        let root = crate::path_safety::LinkedRoot::new();
+        let repo = root.real.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let (plain, linked) = (
+            repo.join("missing/../../home"),
+            root.link.join("repo/missing/../../home"),
+        );
+        for home in [&plain, &linked] {
+            assert_eq!(resolved_prefix(home), by_name(home), "{}", home.display());
+        }
+        if cfg!(unix) {
+            let file = repo.join("kiro").join("cli.json");
+            let fenced =
+                |home: &Path| root_refusal(&file, ConfigScope::Global, &RootFence::around(Some(&repo), Some(home)));
+            assert_eq!(
+                fenced(&plain),
+                None,
+                "the spelling lies in the tree, so the tree holds home"
+            );
+            assert_eq!(
+                fenced(&linked),
+                Some(SettingsDecline::RootInWorkspace(file.clone(), Inside::Spelled))
+            );
+        }
     }
 
     // ── Readers of a recorded file the fence refuses ─────────────────────

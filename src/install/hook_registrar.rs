@@ -94,6 +94,7 @@ use crate::lock::locked_source::LockedSource;
 use crate::oci::ArtifactKind;
 use crate::oci::hook::{CanonicalEvent, HOOK_MANIFEST_FILE, HookEntry, HookManifest, HookSurface};
 use crate::oci::text::escape_controls;
+use crate::path_safety::landing;
 use crate::store::atomic_write::{atomic_write, resolve_symlink};
 
 use super::client_target::ClientTarget;
@@ -2175,9 +2176,18 @@ pub fn validate_grim_home(grim_home: &Path, workspace: &Path, scope: ConfigScope
     // marker), which is a behaviour change rather than a bug fix. Tracked
     // separately; do not "restore" the self-comparison to paper over it, because
     // that trades a real gap for a total outage.
-    let nested = resolved(grim_home).starts_with(resolved(workspace));
-    let placeholder_workspace = scope == ConfigScope::Global && resolved(workspace) == resolved(grim_home);
-    if nested && !placeholder_workspace {
+    let nested = |home: PathBuf, workspace: PathBuf| {
+        let placeholder_workspace = scope == ConfigScope::Global && workspace == home;
+        home.starts_with(&workspace) && !placeholder_workspace
+    };
+    // Each form refuses on its own: the resolved one keeps every refusal the
+    // spelling draws, so judging by the landing alone arms a home spelled
+    // inside through a link that leads out.
+    let landed = match (landing(grim_home), landing(workspace)) {
+        (Some(home), Some(workspace)) => nested(home, workspace),
+        _ => false,
+    };
+    if nested(resolved(grim_home), resolved(workspace)) || landed {
         return Err(ArmRefusal::GrimHomeInWorkspace);
     }
     if cfg!(windows) {
@@ -2236,7 +2246,8 @@ fn is_local_user_path(home: &str, roots: &[String]) -> bool {
 /// nested one — but a path that does not exist yet (a first install) cannot be
 /// canonicalized, and refusing to arm because of that would be a fail-closed
 /// answer to an ordinary situation (I3). Falling back to the lexical path keeps
-/// the literal nesting caught in that case, which is the common shape.
+/// the literal nesting caught in that case, which is the common shape; its
+/// [`landing`] catches one spelled through a link.
 fn resolved(path: &Path) -> PathBuf {
     dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
@@ -2929,6 +2940,183 @@ mod tests {
             validate_grim_home(&link, ws.path(), ConfigScope::Project),
             Err(ArmRefusal::GrimHomeInWorkspace)
         );
+    }
+
+    /// A home not created yet inside the workspace refuses to arm however a
+    /// link spells either path, since both are judged in one resolved form.
+    #[test]
+    fn a_home_not_created_yet_inside_a_linked_workspace_refuses_to_arm() {
+        let root = crate::path_safety::LinkedRoot::new();
+        let (real_ws, linked_ws) = (root.real.join("ws"), root.link.join("ws"));
+        std::fs::create_dir(&real_ws).unwrap();
+        let homes = [linked_ws.join(".grim-home"), real_ws.join(".grim-home")];
+        for workspace in [&real_ws, &linked_ws] {
+            for home in &homes {
+                for scope in [ConfigScope::Project, ConfigScope::Global] {
+                    assert_eq!(
+                        validate_grim_home(home, workspace, scope),
+                        Err(ArmRefusal::GrimHomeInWorkspace),
+                        "{} in {} at {scope:?}",
+                        home.display(),
+                        workspace.display()
+                    );
+                }
+            }
+        }
+        // Control: a home not created yet beside the workspace is not refused as nested.
+        let beside = root.link.join(".grim-home");
+        assert_ne!(
+            validate_grim_home(&beside, &linked_ws, ConfigScope::Project),
+            Err(ArmRefusal::GrimHomeInWorkspace)
+        );
+    }
+
+    /// A home not created yet, spelled inside the workspace through a link that
+    /// leads out of it, keeps the refusal its spelling has always drawn.
+    #[test]
+    fn a_home_spelled_inside_the_workspace_through_an_outward_link_stays_refused() {
+        let (ws_dir, outside) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let ws = dunce::canonicalize(ws_dir.path()).unwrap();
+        crate::path_safety::link_dir(outside.path(), &ws.join("store"));
+        let home = ws.join("store/new");
+
+        for scope in [ConfigScope::Project, ConfigScope::Global] {
+            assert_eq!(
+                validate_grim_home(&home, &ws, scope),
+                Err(ArmRefusal::GrimHomeInWorkspace),
+                "{scope:?}"
+            );
+        }
+    }
+
+    /// A home not created yet with `..` after a part that does not exist is
+    /// judged as spelled: following a link the `..` steps past would need that
+    /// part. So a link spelling outside the workspace is not nested either way.
+    #[test]
+    fn a_home_whose_parent_steps_follow_a_missing_part_is_judged_as_spelled() {
+        let root = crate::path_safety::LinkedRoot::new();
+        let ws = root.real.join("ws");
+        std::fs::create_dir(&ws).unwrap();
+        let out = root.link.join("ws/missing/../../outside");
+        let back = root.link.join("ws/missing/../../ws/inner");
+
+        for scope in [ConfigScope::Project, ConfigScope::Global] {
+            let verdict = validate_grim_home(&out, &ws, scope);
+            assert_ne!(verdict, Err(ArmRefusal::GrimHomeInWorkspace), "{scope:?}");
+            if cfg!(unix) {
+                assert_eq!(verdict, Ok(()), "{scope:?}");
+                assert_eq!(validate_grim_home(&back, &ws, scope), Ok(()), "{scope:?}");
+            }
+        }
+    }
+
+    /// Every spelling of a home is judged as spelled (canonical where it
+    /// exists), or where it lands once created. With `..` after a missing part
+    /// it is judged as spelled alone; otherwise either judgment refuses.
+    #[test]
+    fn a_home_is_judged_as_spelled_or_where_it_lands() {
+        use crate::path_safety::link_dir;
+        type Build = fn(&Path) -> (PathBuf, PathBuf);
+        fn mk(dir: PathBuf) -> PathBuf {
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        }
+        // (row, `..` after a missing part, fixture building (home, workspace))
+        let mut rows: Vec<(&str, bool, Build)> = vec![
+            ("outward link, missing below it", false, |r| {
+                let ws = mk(r.join("ws"));
+                link_dir(&mk(r.join("out")), &ws.join("store"));
+                (ws.join("store/new"), ws)
+            }),
+            ("alias, steps land outside", true, |r| {
+                let ws = mk(r.join("real/ws"));
+                link_dir(&r.join("real"), &r.join("alias"));
+                (r.join("alias/ws/missing/../../outside"), ws)
+            }),
+            ("alias, steps then an outward link", true, |r| {
+                let ws = mk(r.join("real/ws"));
+                mk(r.join("real/other"));
+                link_dir(&mk(r.join("out")), &ws.join("go"));
+                link_dir(&r.join("real"), &r.join("alias"));
+                (r.join("alias/other/missing/../../ws/go/new"), ws)
+            }),
+            ("alias, steps then an inward link", true, |r| {
+                let ws = mk(r.join("real/ws"));
+                link_dir(&ws, &r.join("real/go"));
+                link_dir(&r.join("real"), &r.join("alias"));
+                (r.join("alias/ws/missing/../../go/new"), ws)
+            }),
+            ("linked workspace, home through it", false, |r| {
+                mk(r.join("real/ws"));
+                link_dir(&r.join("real"), &r.join("link"));
+                (r.join("link/ws/.grim-home"), r.join("link/ws"))
+            }),
+            ("linked home, canonical workspace", false, |r| {
+                let ws = mk(r.join("real/ws"));
+                link_dir(&r.join("real"), &r.join("link"));
+                (r.join("link/ws/.grim-home"), ws)
+            }),
+            ("canonical home, linked workspace", false, |r| {
+                mk(r.join("real/ws"));
+                link_dir(&r.join("real"), &r.join("link"));
+                (r.join("real/ws/.grim-home"), r.join("link/ws"))
+            }),
+            ("plain nested, missing", false, |r| {
+                let ws = mk(r.join("ws"));
+                (ws.join(".grim-home"), ws)
+            }),
+            ("existing, inside", false, |r| {
+                let ws = mk(r.join("ws"));
+                (mk(ws.join("home")), ws)
+            }),
+            ("existing, outside", false, |r| (mk(r.join("home")), mk(r.join("ws")))),
+            ("steps land inside", true, |r| {
+                let ws = mk(r.join("ws"));
+                (ws.join("missing/../.grim-home"), ws)
+            }),
+            ("steps land outside", true, |r| {
+                let ws = mk(r.join("ws"));
+                (ws.join("missing/../../outside"), ws)
+            }),
+        ];
+        #[cfg(unix)]
+        rows.push(("alias, dangling link below", false, |r| {
+            let ws = mk(r.join("real/ws"));
+            std::os::unix::fs::symlink(r.join("gone"), ws.join("dang")).unwrap();
+            link_dir(&r.join("real"), &r.join("alias"));
+            (r.join("alias/ws/dang/new"), ws)
+        }));
+        let fixture = |build: Build| {
+            let dir = tempfile::tempdir().unwrap();
+            let (home, ws) = build(&dunce::canonicalize(dir.path()).unwrap());
+            (dir, home, ws)
+        };
+        let nested =
+            |home: PathBuf, ws: PathBuf, scope| home.starts_with(&ws) && !(scope == ConfigScope::Global && home == ws);
+        let as_spelled = |path: &Path| dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let mut wrong = Vec::new();
+        for (row, steps, build) in rows {
+            for scope in [ConfigScope::Project, ConfigScope::Global] {
+                let (_dir, home, ws) = fixture(build);
+                let base = nested(as_spelled(&home), as_spelled(&ws), scope);
+                let tip = validate_grim_home(&home, &ws, scope) == Err(ArmRefusal::GrimHomeInWorkspace);
+                let (_landed_dir, landed_home, landed_ws) = fixture(build);
+                let exact = std::fs::create_dir_all(&landed_home).is_ok().then(|| {
+                    let canonical = |path: &Path| dunce::canonicalize(path).unwrap();
+                    nested(canonical(&landed_home), canonical(&landed_ws), scope)
+                });
+                // Win32 folds a `..` before it resolves, so there no part after one is missing.
+                let lands = Some(tip) == exact && (!steps || cfg!(windows));
+                let expected = if steps { base } else { base || exact == Some(true) };
+                let right = (tip == base || lands) && (cfg!(windows) || tip == expected);
+                let (shown_scope, shown_exact) = (format!("{scope:?}"), format!("{exact:?}"));
+                println!("{row:<36} {shown_scope:<8} base={base:<5} exact={shown_exact:<11} tip={tip:<5} {right}");
+                if !right {
+                    wrong.push(format!("{row} {scope:?}"));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
     /// C-023: Windows arms only from a local path under the profile.

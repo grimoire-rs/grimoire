@@ -4611,9 +4611,10 @@ impl SettingsLedger {
                 for (path, pointer) in
                     std::iter::once(first).chain(more.iter().map(|entry| (&entry.path, &entry.pointer)))
                 {
+                    let relative = crate::path_safety::relative_to(path, workspace);
                     let entry = RefusedEntry {
                         node: node.clone(),
-                        file: path.strip_prefix(workspace).unwrap_or(path).display().to_string(),
+                        file: relative.as_deref().unwrap_or(path).display().to_string(),
                         pointer: pointer.clone(),
                     };
                     if !self.entries.contains(&entry) {
