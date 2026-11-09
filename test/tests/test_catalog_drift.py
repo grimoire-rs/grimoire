@@ -10,6 +10,7 @@ through each command the section names, offline.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -125,9 +126,9 @@ def _path_forms(tmp_path: Path) -> dict[str, str]:
 
 
 def _context(grim_at, project_dir: Path, table: str, value: str):
-    (project_dir / "grimoire.toml").write_text(
-        f'{_REGISTRY_ALIAS}[{table}]\nbinding = "{value}"\n'
-    )
+    # JSON escapes quotes, backslashes and C0 controls as TOML does; TOML also bans a raw DEL.
+    quoted = json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
+    (project_dir / "grimoire.toml").write_text(f"{_REGISTRY_ALIAS}[{table}]\nbinding = {quoted}\n")
     return grim_at(project_dir).run("context", check=False)
 
 
