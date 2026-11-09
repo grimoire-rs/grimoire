@@ -80,10 +80,11 @@ The owner settled the *whether* on 2026-10-25. This record decides the *how*.
 
 **Reconciliations with these inputs** (where a review finding touched an owner decision):
 
-- **O1, "reap the shim":** the old `hooks/bin/grim-hook` shim is deleted once by convergence (`remove_file`,
-  NotFound ignored; [C-N12](#c-n12)). An old registration that still points at it hits its own
-  `[ -f ] && [ -x ] || exit 0` guard and exits 0 until `grim install` rewrites that workspace's registration.
-  Leaving the shim in place while `grim hook run` is gone would make clap exit 2, which Claude treats as a block.
+- **O1, "reap the shim":** the old `hooks/bin/grim-hook` shim is deleted once by a whole-set convergence
+  (`remove_file`, NotFound ignored; [C-N12](#c-n12)). An old registration that still points at it fails open
+  (CWE-636), with the shim kept or deleted, until a convergence rewrites that workspace's registration. The
+  earlier premise here, that a kept shim makes the call exit 2 and so blocks, was wrong: measured on a real
+  v0.15.0 upgrade, the call exits 64, which the old registration string reads as no verdict (2026-11-06).
 - **O3, "bare command":** "bare" is read as *no shell guard and no wrapper*. Where a client offers an
   **exec form** (`command` + `args`), grim registers that ([C-N13](#c-n13)). It carries the same three
   operands with no shell in between, which is barer than a command string.
@@ -288,7 +289,7 @@ grim-hook <client> <event> <root>
 | `$GRIM_HOME/hooks/grim-hook` (Unix) / `grim-hook.exe` (Windows) | The launcher, mode `0o755`, owned by the user, inside the existing `0o700` `hooks/` | **yes — add `grim-hook` and `grim-hook.exe` to `RESERVED_ARTIFACT_NAMES`; a hook bound under either name is refused ([reserved names](#reserved-name-migration))** |
 | `$GRIM_HOME/hooks/.grim-hook.<pid>-<rand>.tmp` | Staging file | no — a leading `.` is outside `SkillName` |
 | `$GRIM_HOME/hooks/.grim-hook.old.<rand>.exe` | Windows rename-aside of a running image | no |
-| `$GRIM_HOME/hooks/bin/grim-hook` | Old `sh` shim: deleted once by convergence ([C-N12](#c-n12)) | yes (`bin`, unchanged) |
+| `$GRIM_HOME/hooks/bin/grim-hook` | Old `sh` shim: deleted once by a whole-set convergence ([C-N12](#c-n12)) | yes (`bin`, unchanged) |
 
 There is no version stamp and no monotonicity. `ensure` writes the embedded bytes **iff the on-disk bytes differ**.
 Two grims may overwrite each other's launcher: accepted, harmless, because the launcher interface is frozen (C-N4)
@@ -432,14 +433,17 @@ read rule it has today. It gains no field.
 
 <a id="c-n12"></a>**C-N12 — Registration rewrite, and the old shim deleted.**
 
-- **Rewrite on converge.** Every convergence of a root by a grim ≥ this ADR rewrites **all** of that root's
-  registrations to the C-N13 form. Registrations are derived per root (decision L), so this is the existing
-  `sync_config` pass with a new shape, not a new migration engine. No marker is recorded.
-- **The old shim is deleted, not kept.** Convergence removes `$GRIM_HOME/hooks/bin/grim-hook` (`remove_file`,
-  NotFound ignored) under the same guard. `shim_body`, `generate` and their tests are deleted, and `bin` stays
-  reserved. An old registration that still points at the shim hits its own `[ -f ] && [ -x ] || exit 0` guard and
-  exits 0 until `grim install` rewrites that workspace's registration. Leaving the shim in place while
-  `grim hook run` is gone would make clap exit 2, which Claude treats as a block.
+- **Rewrite on converge.** Every whole-set convergence of a root by a grim ≥ this ADR rewrites **all** of that
+  root's registrations to the C-N13 form. Registrations are derived per root (decision L), so this is the
+  existing `sync_config` pass with a new shape, not a new migration engine. No marker is recorded. A run scoped
+  to a closure (a named `grim update`, `grim uninstall`, a TUI delete) also rewrites every registration that still
+  runs the old shim, where the hook's dispatch row stands, as a whole convergence would (2026-11-06).
+- **The old shim is deleted, not kept.** A whole-set convergence removes `$GRIM_HOME/hooks/bin/grim-hook`
+  (`remove_file`, NotFound ignored) under the same guard; a run scoped to a closure keeps it, because another
+  workspace's old registration may still reach an old grim through it. `shim_body`, `generate` and their tests
+  are deleted, and `bin` stays reserved. An old registration that still points at the shim fails open
+  (CWE-636), kept shim or not, until a convergence rewrites it: the removed `grim hook run` exits 64, which the
+  old string reads as no verdict. The earlier premise that a kept shim exits 2 and blocks was not measured.
 - **Release note:** "experimental hooks: re-run `grim install` in each workspace; until then its hooks do not fire."
 - **Codex re-trust.** The changed string changes Codex's `hook_hash` (`research_hooks_codex_surface.md` §2),
   so every approved grim registration is untrusted **once**, and Codex skips it silently until `/hooks`
@@ -543,7 +547,7 @@ shell form (with the C-N13 fallback rules) before first ship.
 
 **Negative:**
 - **O4's price:** a broken `$GRIM_HOME` (launcher or table deleted while registered, a corrupted row) or a client stdin over the 8 MiB cap (exit 65) makes Copilot deny every tool call and Claude/Codex show an error on every call until the next `grim install`. Today that state is silent.
-- Unrevisited workspaces stop firing hooks until `grim install` runs there: the old shim and `grim hook run` are gone (experimental, `stability.md:169-179`).
+- Unrevisited workspaces stop firing hooks until a convergence runs there: `grim hook run` is gone, and a whole-set convergence deletes the old shim (experimental, `stability.md:169-179`).
 - Codex users re-approve grim's hooks once. The first `cargo check`/rust-analyzer load runs the nested build once. AGENTS.md, `product-context.md` and subsystem rules ("no workspace") change in the same release.
 
 **Risks:** size (D1); the nested build in exotic cross setups (WP-0); Claude exec form contested (WP-0, decided fallback in C-N13); the Windows rename window (C-N5: one fire per upgrade-while-running gets client policy, only if WP-0's single rename fails); Defender/Smart App Control on an unsigned local exe (D3).
@@ -733,6 +737,7 @@ None open. The owner resolved all three at the `/hex-plan` gate (2026-10-25), ea
 
 | Date | Author | Change |
 |------|--------|--------|
+| 2026-11-06 | Goal loop (lock pin stability, RD4-11) | **Amendment: the old shim outlives runs scoped to a closure ([C-N12](#c-n12)).** A whole-set convergence alone deletes `hooks/bin/grim-hook`, and every convergence rewrites a registration that still runs it where the hook's dispatch row stands, a named run or a delete included. Corrected premise: a kept shim does not make the call exit 2 and block. Measured on a real v0.15.0 upgrade, it exits 64 and the old registration fails open (CWE-636), shim kept or not. |
 | 2026-10-27 | Owner | **Amendment: gatekeeper payload failure is withheld ([#248](https://github.com/grimoire-rs/grimoire/issues/248), [#250](https://github.com/grimoire-rs/grimoire/issues/250)).** D2's fail-open carve-out for payload-owned outcomes is closed for the gatekeeper tier only. A crash with no answer, a timeout, a rejected response or a spawn failure sets `WithheldCause::PayloadFailed` and the launcher exits 1. A composed `ask` now shields the withheld exit as a composed `deny` already did. Observer and mutator failures stay no opinion. |
 | 2026-10-26 | `/hex-execute` (review fix loop) | **Execution-time decisions, no option reopened.** Registration forms per the WP-0 probes: Claude and Qoder shell form, Copilot exec form, Codex shell form. Windows admits Claude only until Copilot and Codex are observed live (plan Progress Log). Wire behaviour pinned by the review: the table and response readers refuse duplicate keys and positional-array rows and ignore unknown handler keys; an unselected unreadable row is skipped and a selected one exits 65; a non-object payload with a gatekeeper selected exits 65; a reader or writer thread-spawn failure withholds the gatekeeper (exit 1). Binding names ending in `.exe`, `.com`, `.bat` or `.cmd` are refused as `binding-name-reserved`, since a directory of that name in `hooks\` shadows `cmd`. The latency gate covers the shell-form row as well as the exec-form row. |
 | 2026-10-25 | Owner | **Amendment: experimental, no backwards compat; O6 withdrawn.** Hooks first shipped in v0.15.0 behind the experimental flag and `stability.md:169-179` exempts their surfaces. Removed: shim keep-and-regenerate (C-N12 now deletes it once), `grim hook run` (H4 → delete), the A9 directory-reap migration, the `GRIM-HOOK-STAMP/1` stamp, `READER_REVISION`, row `requires`, `launcher_sha256`, `newer-unverified` and monotonic replacement (H3 withdrawn; `ensure` writes iff bytes differ). Kept: argv C-N4, exit table C-N7 (now stated as a future-frozen launcher interface), the table's additive read rule, size gates, exec-form registrations |

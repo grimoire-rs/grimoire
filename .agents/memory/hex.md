@@ -45,7 +45,7 @@ preferences, not copies. Team-shared — commit it.
   Contract detail: `docs/src/content/docs/stability.md`,
   `.agents/adr/adr_render_layout_stability.md`.
 - Discussions: `.agents/discussions/` (hex default) — `/hex-discuss`
-  artifacts; `State: active` there arms the hex-state no-edit rule. Most recently drained: `otel-usage-telemetry.md` (→ loop, 2026-10-22).
+  artifacts; `State: active` there arms the hex-state no-edit rule. Most recently drained: `lock-pin-stability.md` (→ loop, 2026-11-03).
 - Worktrees: agent worktrees at the hex default `.agents/worktrees/`
   (gitignored); human feature worktrees are siblings `../grimoire-wt-<topic>`
   (`AGENTS.md` › "Workflow"). Whoever creates one removes it.
@@ -137,6 +137,22 @@ research-axes:
   - The loop's first deliverable is an ADR amending the trust ADR and threat model. Docs add a reference page and `guides/share-settings.md`, plus the unrelated `guides/dependencies.md`, which can land first.
   Research: `.agents/research/research_config_artifact_*.md` (5 files).
   **Pitfall:** `git pull` silently replaces a gitignored `.grimoire/state.json` with a committed one, exit 0, so a record there is forgeable.
+
+- **Active plan (2026-11-03, hex-plan xhigh, goal loop):**
+  `.agents/plans/plan_lock_pin_stability.md`, State `review`, Next `/hex-review` (review 2; RF1 landed review 1's findings, outer cycle 1 of 2), branch `hex/lock-pin-stability`. Decision record `.agents/adr/adr_lock_pin_stability.md`, promoted from a design record once the goal loop confirmed the rule edits (PD-27). Pipelines: CW → P1 (hard) → P2 ∥ P3 (review) ∥ P4 ∥ P5 → P6 → P7 → P8. Critical path CW → P1 → P3 → P6 → P7 → P8. C-001…C-044, S-001…S-037, PD-1…PD-40. Deferred: F-1 vscode, F-2 indexer, F-3 push and PR, F-4 hook ladder, F-5 by reference. Flagged: PD-4, PD-11, PD-17, PD-27, PD-32.
+  **Pitfall:** no cross-model harness exists on this machine (`codex`, `gemini`, `opencode`, `copilot`, and `codex:rescue` are all absent), so `adversary=on` skips (PD-22).
+  **Pitfall:** the panel found that a carried pin must never be answered by a recorded edge alone: identity is conjunctive, and an edge onto a direct key was never resolved (C-010, PD-28).
+  **Pitfall:** `drop_from_lock` is a second lock writer outside `target_lock`. Once the tag in `pinned` is read as proof, every writer that keeps a row must keep its tag honest (RV-1). The P6 and seams seats found it unprompted; the architect and adversary were pointed at it. Block severity came from the adversary alone; three seats graded it High. Test any remove path on a diamond, never a flat lock.
+  **Pitfall:** a stand-in may inform a report, never a consent record. A lock row answers for a manifest offline, so `grim add` consents only what the run resolved, and only after its install succeeded (RV-2, RV-3).
+  **Pitfall:** hold the gate until a worker's background mutation runner has ended: its return file can land first, and the last release binary may carry a flip.
+
+- **Discussion drained (2026-11-03, → loop):**
+  `.agents/discussions/lock-pin-stability.md`. Only `grim update` moves a lock pin.
+  - The resolving reference goes in `pinned` (`repo:tag@digest`), not a new field: `stability.md` promises 0.15.1 reads registry-only locks, and every lock parses `deny_unknown_fields`.
+  - Council shape: explicit `Refresh { All, Names, Nothing }`, per-node carry, `plan_lock` dispositions, one install-scope set for every pass. No install planner.
+  - Scope: #269, the re-pin, the shared-reference carry bug, marketplace, an edge-case wave, CI sharding, then vscode and indexer adoption. One unmerged PR per repo. No release work; unattended until done.
+  Research: `.agents/research/research_lock_pin_stability_*.md` (5 files).
+  **Pitfall:** the public ocx docs describe lock v3. The per-entry model is local commit `7378fe0b` in `~/dev/ocx-sh/ocx` (lock v4, `declared`).
 
 - **Active plan (2026-11-02, hex-plan xhigh, goal loop):**
   `.agents/plans/plan_artifact_dependencies.md`, State `plan-approved`, Next `/hex-execute`, branch `hex/adr-artifact-dependencies` (main checkout). ADR `adr_artifact_dependencies.md` flipped to Accepted the same day (open questions closed on their recommendations, PD-1/PD-2). Pipelines: P0 (`fix(resolve):`, own commit) → CW (lock wire, merge policy, layout/features, ForceScope, test helpers) → P1 ∥ P2 (hard) ∥ P3 ∥ P-G → P4 ∥ P5 ∥ P6 ∥ P7 ∥ P8 → P9 ∥ P-X → P10. Critical path P0 → CW → P2 → P7 → P9 → P10. C-001…C-049, S-001…S-016, PD-1…PD-19. Deferred: F-1 five-registry push, F-2 grimoire-vscode, F-3 release notes, F-4 tag.

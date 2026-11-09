@@ -13,7 +13,7 @@
 - [x] Decision follows Golden Path in `.claude/rules/product-tech-strategy.md` (no new dependency; Tokio `JoinSet` + semaphore, serde, existing OCI client and `BlobStore`)
 **Domain Tags:** data | api | integration | security
 **Supersedes:** the "no recursion in v1" nested-bundle rejection (`src/oci/bundle.rs:46`, `src/resolve/resolver.rs:500-505`; origin commit `49944cd9`)
-**Extends:** `.agents/adr/adr_effective_set_mutations.md` (effective set becomes closure-aware), `.agents/adr/adr_hook_workspace_consent.md` (consent seam and transport rung applied along edges; no trust decision reopened)
+**Extends:** `.agents/adr/adr_effective_set_mutations.md` (effective set becomes closure-aware), `.agents/adr/adr_hook_workspace_consent.md` (consent seam and transport rung applied along edges; condition 2 of Decision 4 is a proposed trust narrowing, awaiting the owner)
 **Superseded By:** N/A
 
 ## Context
@@ -48,7 +48,8 @@ The surface is frozen for 1.0 (`AGENTS.md` Principle 9,
 `docs/src/content/docs/stability.md`). Every new wire, lock, report and
 annotation shape must be additive. A lock with no dependency edge must stay
 byte-identical, modulo the `[metadata] generated_by` line every release
-already rewrites.
+already rewrites and, since `adr_lock_pin_stability.md`, the advisory tag in
+`pinned`.
 
 ### Premise corrections
 
@@ -432,10 +433,15 @@ requires blob is stored by its own descriptor digest.
   hit is authoritative.
 - A steady-state re-lock is then one tag resolve per artifact plus local
   store reads.
-- **The lock's recorded `requires` is never a *trusted* cache.** It is used
-  only on an offline store miss, unverified, and refused at install by the
-  set-compare (Decision 4). Online, it never influences resolve. Locks
-  travel with repositories and are attacker-editable (T3).
+- **The lock's recorded `requires` is never a *trusted* cache.** On an
+  offline store miss it stands in for a node's edges, unverified, and
+  install's set-compare refuses a mismatch (Decision 4). Online it never
+  adds an edge. A relock counts a parent's listed edge only where the
+  previous row records it at the read digest (`pin_rule::WalkedEdges`,
+  lock-pin plan RD6-B1). So a recorded list can withhold that vouch, never
+  grant one. The lock edit reads only the recorded edges, the
+  requires layer stored or not (lock-pin plan RD6-G2). Locks travel with
+  repositories and are attacker-editable (T3).
 
 **Offline locking.** A project that locks offline today must still lock
 offline after upgrading.
@@ -445,7 +451,23 @@ offline after upgrading.
 - On a store miss for a node whose previous lock entry pins the same
   digest, the previous entry's `requires` is carried forward **unverified**.
   It is empty for a pre-R lock, so the lock stays byte-identical modulo
-  `generated_by`.
+  `generated_by` and the advisory tag in `pinned`. Empty, the node reads as
+  a leaf, as grim 0.15.1 reads it: what only it requires drops, and the next
+  online relock resolves that afresh.
+- A store that has the node's manifest but not the requires layer it names
+  reads the same way (`adr_lock_pin_stability.md`, plan RD6-0): the previous
+  entry's edges at that digest stand in, none where grim 0.15.1's
+  `add --no-install` or `grim fetch` left it, so what only the node requires
+  drops, in `grimoire.lock` and a `marketplace.lock` part alike. The lock
+  edit of `remove`, `uninstall` and the TUI delete reads every node whose
+  entry records no edge that way, its requires layer stored or not, and
+  names it where its stored requires may reach what it drops (lock-pin plan
+  RD6-G1, RD6-G2, RD7-n1). Past a stored layer the two part. The offline
+  relock reads that layer, so it keeps the row of a line deleted by hand
+  and re-adds a row the edit dropped (lock-pin plan, residual 1). Held
+  instead, a row nothing reaches either stayed under the declaration's hash,
+  where `export` and 0.15.1's `install` act on it, or under another hash,
+  where `install --offline` exits 65 and 0.15.1's exits 81.
 - `install`'s set-compare (Decision 4) is the guard: it re-reads the pinned
   manifest and refuses a mismatch before anything materializes.
 - On a store miss for a node with no previous entry, edges are treated as
@@ -566,23 +588,44 @@ dependency cycle: skill/a -> skill/b -> skill/a; the edge skill/b -> skill/a is 
   parents is **declined by owner decision**. The existing config is the
   control.
 
-**Partial resolve** (`grim update <names>`, `grim add`):
+**Partial resolve** governs every relock, not only `grim update <names>`
+and `grim add`: `adr_lock_pin_stability.md` D2 gives each command a refresh
+set, and for `grim lock` and `grim add` that set is empty.
 
-- Selected nodes, and any node absent from the previous lock, resolve
-  fresh.
-- An unselected child keeps its previous pin **only when its winning
-  requested identifier is unchanged**. That identifier is the direct entry's
-  ref, or the agreeing edge id resolved against its parent's current
-  repository. Otherwise it resolves fresh, and the closure is recomputed from
-  the new pins.
-- Nodes no longer reachable are dropped.
-- Declared bundles are re-fetched as today.
+- Nodes in the refresh set, and any node absent from the previous lock,
+  resolve fresh.
+- Any other node keeps its previous pin **only while its winning requested
+  identifier matches that pin**, by that record's match rule. That identifier
+  is the direct entry's ref, or the agreeing edge id resolved against its
+  parent's current repository. Otherwise it resolves fresh, and the closure
+  is recomputed from the new pins. A kept pin skips the tag resolve only: its
+  manifest is still read by digest, store first.
+- Nodes no longer reachable are dropped, offline too.
+- Declared bundles are carried by pinned digest while repository and tag are
+  unchanged, and their members are re-read from that manifest, or from the
+  lock's bundle row when the store lacks it offline. A bundle include in
+  `marketplace.lock` has no snapshot row, so it carries at the digest the
+  stamps below it record (`bundle_tag` reads `<tag>@<digest>`), and offline a
+  recorded digest the store lacks exits 81. A bundle the part's stamps record
+  carries at that digest wherever the relock meets it, through any parent,
+  unless the run selects it. Only a run that selects the bundle
+  records a digest, and a part that records none follows the tag on such a
+  run. A `<plugin>:<member>` pick keeps every row outside its selection as the
+  part holds it.
+- **Same-repository residual.** A hand-edited digest under the same
+  repository and tag survives a relock, and for a bundle that digest
+  selects the member list. `grim install` already honours such a lock; what
+  changed is that `grim lock` no longer discards it. Visibility is `git diff`
+  and `grim status --check`. An edge the lock did not record in a different
+  repository, or a requested digest the pin does not hold, never carries;
+  `adr_lock_pin_stability.md` records the widened case. For a checkout you do
+  not trust, run `grim update` or delete the lock.
 
 ### Decision 4: lock and removal
 
 **Lock shape (one-way door).** Both new fields are omitted when unused, so a
-dependency-free lock is byte-identical modulo `generated_by`, and
-`lock_version` stays `1`. The array-of-tables form follows the
+dependency-free lock is byte-identical modulo `generated_by` and the advisory
+tag in `pinned` (`adr_lock_pin_stability.md`), and `lock_version` stays `1`. The array-of-tables form follows the
 `[[skill.bundles]]` precedent (`src/lock/grimoire_lock.rs:1109`).
 
 ```toml
@@ -696,9 +739,9 @@ layer (Decision 6), so this comparison is load-bearing there.
 3. **Direct precedence is applied first.** An edge to a directly declared
    `(kind, name)` resolves to the direct entry with no repository check.
 4. Only for a non-direct target is the edge followed through that node's
-   lock entry. That happens when the entry's registry/repository equals the
-   edge id's, resolved against the parent's current repository (the
-   `snapshot_matches` rule, generalized).
+   lock entry, in any repository: a key has one entry, and an edge the lock
+   recorded answers across repositories (`adr_lock_pin_stability.md`, § The
+   pin rule).
 5. Digest agreement offline means the targets share the one lock entry. A
    conflicting pair cannot exist in a lock resolve accepted.
 6. If any lookup fails, the closure is **incomputable** and returns `None`.
@@ -722,7 +765,8 @@ Mutations act on `E_before \ E_after`:
 `None`:
 
 - `remove`/`uninstall` act on the **target only**. They drop its config
-  entry, its lock entry and its own files.
+  entry and its own files, and its lock entry unless its pin answers a
+  recorded edge (`adr_lock_pin_stability.md`, § The pin rule).
 - They never delete or restamp another node's files.
 - The lock is written with every other entry untouched, and the closure
   becomes stale. The next `grim install` hits the existing stale guard, and
@@ -733,14 +777,21 @@ Mutations act on `E_before \ E_after`:
 This replaces, for dependency-bearing locks, the pre-cache fallback that
 deleted members by provenance.
 
-**Hook consent (seam narrowed; no trust decision reopened).** `grim add`
-consents to exactly the hook nodes that meet all three conditions:
+**Hook and settings consent (seam narrowed; condition 2 is a proposed trust narrowing, see the block below).**
+`grim add` consents to exactly the hook and settings nodes that meet all three
+conditions:
 
 1. reachable from the **added target** through the target's own edges;
-2. whose settled lock identifier equals the edge identifier that reached
-   them (not shadowed by a direct entry at another id);
+2. reached over edges the run resolved: the child is not carried, is not a
+   pre-edit direct key, and settled at the repository the edge names
+   (`resolved_reach`; `adr_lock_pin_stability.md`, Risks);
 3. **not already present in `E_before`**, i.e. not settled by a pre-existing
    direct entry or reached by a pre-existing parent.
+
+> **Proposed, awaiting the owner.** Condition 2 is goal-loop decision RD-3
+> (as corrected in RF2) of the lock-pin plan. The Proposed blocks after `adr_hook_workspace_consent.md`
+> decision 4 and under `adr_artifact_trust_model.md` decision 1 record it.
+> The shipped code follows it; it is not an owner decision.
 
 The `resolve_for_add` prohibition at `src/command/hook_consent.rs:202`
 ("adding `B` cannot consent to an unconsented `A` that was already sitting
@@ -748,12 +799,12 @@ in the workspace") holds along edges.
 
 **When `E_before` is incomputable** (`effective_set` returns `None` on the
 pre-add config and lock), condition 3 falls back to a conservative
-exclusion. No hook node is consented if it is:
+exclusion. No hook or settings node is consented if it is:
 
 - declared in the pre-add config under any kind table; or
 - an entry, or a `[[bundle.member]]`, of the previous lock.
 
-Only hook nodes absent from both are consented. This closes a T3 path: a
+Only hook and settings nodes absent from both are consented. This closes a T3 path: a
 cloned repository plants a direct `[hooks]` entry and also breaks the
 closure, for example with a declared bundle that has no `[[bundle]]`
 snapshot. Without the fallback, an "everything is new" reading of a `None`
@@ -1337,8 +1388,8 @@ for any consumer that stays on 0.15.1, whatever the timing.
 | Bundle whose member is a dependent artifact | lock ok; install 65 | full closure |
 | Bundle with a nested-bundle member | lock exits 65 `nested bundle member … is not supported` | expanded |
 | Lock carrying `[[<kind>.requires]]` or `transitive` | exit 78 (`deny_unknown_fields`); old `remove` therefore cannot misread it | read |
-| Dependency-free lock written by R | byte-identical modulo `generated_by`; reads fine | read |
-| Dependency-free project locked offline after upgrade | — | locks offline; byte-identical modulo `generated_by` |
+| Dependency-free lock written by R | byte-identical modulo `generated_by` and the advisory tag in `pinned`; reads fine | read |
+| Dependency-free project locked offline after upgrade | — | locks offline; byte-identical modulo `generated_by` and the advisory tag in `pinned` |
 | Artifact listing an unknown `requires-features` name | ignored | exit 65 `unsupported-artifact-feature` |
 | Three-layer manifest from a future grim | exit 65 (not single-layer) | exit 65 `unsupported-artifact-feature` |
 | `grim build` of a source using `grim.requires.*` keys | packs them as plain metadata, emits no requires layer: **silent** (publisher-side) | requires layer emitted |
@@ -1383,9 +1434,10 @@ Its test is `test/tests/test_golden_pre_dependencies.py`, which asserts:
 2. `grim status --format json` works: `direct`/`required_by` are populated,
    and `source` strings equal `provenance/status.*.json`.
 3. `grim lock` against the replayed registry writes a lock byte-identical
-   modulo `generated_by`.
-4. `grim lock --offline` writes the same bytes (modulo `generated_by`) in
-   two variants, which together are the pre-R offline upgrade case:
+   modulo `generated_by` and the advisory tag in `pinned`.
+4. `grim lock --offline` writes the same bytes (with the same two
+   exceptions) in two variants, which together are the pre-R offline
+   upgrade case:
    - **4a:** with only `golden/tag-cache/`, the store-hit branch;
    - **4b:** with only `golden/tag-cache-no-manifests/`, the store-miss
      carry-forward branch.
@@ -1497,6 +1549,7 @@ decomposing (PD-1, PD-2).
 - `.agents/adr/adr_render_layout_stability.md`
 - `.agents/adr/adr_oci_empty_config_compat.md`
 - `.agents/adr/adr_compressed_artifact_layers.md`
+- `.agents/adr/adr_lock_pin_stability.md`
 - `docs/src/content/docs/stability.md#limitations-forward-compat`
 - `docs/src/content/docs/concepts.md#bundle-pinning`
 
@@ -1511,3 +1564,12 @@ decomposing (PD-1, PD-2).
 | 2026-11-02 | Claude (goal loop, /hex-plan) | Status Proposed → Accepted. Open questions closed on their recommendations (caps 2048 / 32 MiB / 32 kept; `describe` fetches the requires layer). Decomposed in `plan_artifact_dependencies.md` |
 | 2026-11-02 | Claude (/hex-execute) | Execution notes, decision text unchanged. Member and requires order is `ArtifactKind` enum order then name (skill, rule, agent, bundle, mcp, hook), the order `BundleManifest::new` already used; the D4 lock example's order is illustrative. Observed against grim 0.15.1: a lock carrying `[[<kind>.requires]]` or `transitive = true` exits 78; a lock with a bare nested-bundle member is read and the member ignored; only a nested-bundle manifest exits 65; `lock`/`update`/`add --no-install` of a dependent artifact silently write a lock without edges, which a newer grim refuses with 65 `stale-lock`. `stability.md` and `upgrading.md` carry the observed table, which supersedes the compatibility-matrix wording above. `lock` applies F1/F4 at resolve, so a forward-incompatible manifest reaches `install` only through a lock pinned earlier |
 | 2026-11-03 | Claude (owner review) | Rule F4 classifies the two layers by media type instead of position, so a requires layer written first is read, not refused; a non-bundle whose only layer is a requires layer is now refused. Writer order (content first), the wire format and the bundle arm are unchanged; widening a reader is additive |
+| 2026-11-04 | Claude (/hex-execute) | RF2 of `adr_lock_pin_stability.md`: a cross-repository edge no longer makes a closure incomputable, a target-only remove keeps a row whose pin answers a recorded edge, consent condition 2 names the resolved edge, the same-repository residual names what never carries after a recorded edge widened it |
+| 2026-11-04 | Claude (/hex-execute) | Amended for `adr_lock_pin_stability.md`, which decides the pin semantics. Decision 3: partial-resolve carry governs every relock, declared bundles are carried by pinned digest instead of re-fetched, and the same-repository residual is stated and names bundles. Decision 4, Context, offline locking, the compatibility table and the golden checks: `byte-identical` takes the narrowing of `stability.md`, apart from the advisory tag in `pinned`. Fixture bytes unchanged |
+| 2026-11-06 | Claude (lock pin stability, RF4) | Decision 4's consent seam names settings nodes beside hook nodes. After the rebase onto the settings kind, `grim add` records both kinds under the same three conditions and the same fallback (`consentable_keys`, `Added::consents_to`, plan RB-4). No condition changed |
+| 2026-11-06 | Claude (lock pin stability, RF5) | Decision 3's marketplace clause states the enforced OD-3 of `adr_lock_pin_stability.md`: a part keeps its bundles' pins in `bundle_tag` instead of following the tag whenever it is written, a member pick keeps the rows outside its selection, and an offline store miss on a recorded digest exits 81 |
+| 2026-11-07 | Claude (lock pin stability, RF6) | Decision 3's offline locking and its drop of unreachable nodes state the offline hold as RF6 landed it (plan RD6-0): a node whose manifest the store lacks and whose entry records no edge is a leaf, as grim 0.15.1 reads it, and only a stored manifest whose requires layer the store lacks holds the unreachable carried rows, never a hook or settings row, under a hash no declaration produces, in `grimoire.lock` only, never in a `marketplace.lock` part. No decision changed |
+| 2026-11-08 | Claude (lock pin stability, RF6) | Decision 3's offline locking bullet names the lock edit beside the relock: a node whose entry records no edge reads as those edges there too, its requires layer stored or not (lock-pin plan RD6-G1, RD6-G2), so `remove` drops what only that node requires, as 0.15.1 and c5e3824 do, and a note names the node where the store holds its manifest. No decision changed |
+| 2026-11-08 | Claude (lock pin stability, RF7) | Review 7's record findings folded, no decision changed. Decision 3's untrusted-cache bullet no longer says the recorded `requires` never influences an online resolve. A relock counts a listed edge only where the previous row records it, and the lock edit reads only recorded edges (lock-pin plan RD6-B1, RD6-G2). The offline bullet states where the edit and the offline relock part, past a stored requires layer, and the note's narrower naming (RD7-n1). Decision 4's condition 2 is marked Proposed, awaiting the owner (RD-3) |
+| 2026-11-08 | Claude (lock pin stability, RF7 fix round 1) | Decision 4's consent heading no longer says no trust decision is reopened: condition 2 is a proposed trust narrowing, as the block under it says. No decision changed |
+| 2026-11-08 | Claude (lock pin stability, RF8) | Decision 3's marketplace clause gains one sentence: a bundle the part's stamps record carries at that digest wherever the relock meets it, through any parent, unless the run selects it. No decision changed |

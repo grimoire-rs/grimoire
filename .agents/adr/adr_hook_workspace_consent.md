@@ -11,7 +11,7 @@
 - [x] Decision follows Golden Path in `.claude/rules/product-tech-strategy.md` (no new dependency; one JSON file and one pure predicate)
 **Domain Tags:** security
 **Supersedes:** the registry half of [`adr_hooks_support.md`](./adr_hooks_support.md) amendment **A2**, and contract **C-022** in [`plan_hooks_artifact_kind.md`](../plans/plan_hooks_artifact_kind.md) (with its B4 / B5 / B7 / W8 / S2-2 amendments)
-**Superseded By:** N/A (amended 2026-11-04 by [`adr_settings_artifact_kind.md`](./adr_settings_artifact_kind.md) — the record, the flag and the prompt are kind-neutral; see the box under Technical Details)
+**Superseded By:** N/A (amended 2026-11-04 by [`adr_settings_artifact_kind.md`](./adr_settings_artifact_kind.md) — the record, the flag and the prompt are kind-neutral; see the box under Technical Details. Amendments to decision 4 proposed by the lock-pin-stability run await the owner; see the blocks after decision 4)
 
 ## Context
 
@@ -265,6 +265,52 @@ transitively pulls in inherits it."* The record stores the **resolved** set, so
 a bundle that later gains a hook member drifts and re-gates. Bundles are not
 special-cased.
 
+> **Proposed amendments to decision 4, awaiting the owner.** The three blocks
+> below are goal-loop decisions of the lock-pin-stability run, recorded in
+> [`plan_lock_pin_stability.md`](../plans/plan_lock_pin_stability.md). None is
+> an owner decision. The shipped code follows them; until the owner ratifies
+> them, decision 4 above is the owner's text.
+
+**Proposed — goal-loop decisions RD-3 (as corrected in RF2) and RD3-6, awaiting
+the owner: what an add consents to.** `grim add` writes the record only for the
+target and the hooks it newly reaches over edges the relock resolved, each settled at the
+repository it names. Offline an edge counts only when the parent's manifest the
+local store holds at its pin lists it, or the parent is a local path this run
+re-packed. A carried hook target counts only while the tag its pin records still
+names its digest (a tagless pin: while its repository serves it). A lock row may
+inform a report, never a consent record. An add that consents to nothing new arms
+on the record as it stands, so it never disarms a hook the record covers
+(CWE-636). This narrows decision 1 of
+[`adr_artifact_trust_model.md`](./adr_artifact_trust_model.md) for consent, as
+that record's own proposed amendment states.
+
+**Proposed — goal-loop decision "TUI consent" (review 4), awaiting the owner:
+the record does not wait for the install.** `grim add` writes it ahead of its
+install. A failed install keeps the declaration
+and the lock, so it keeps the consent the gesture carried, and the next
+non-interactive `grim install` finds no drift to disarm on (CWE-636). A relock or
+lock write that fails rolls the declaration back and records nothing. A record
+write that fails arms on the record as it stands. `--no-install` records the same
+set, since it declares and locks the same way. A hook the gesture does not cover
+stays outside the record, and that remains drift until `grim hook allow`.
+
+**Proposed — goal-loop decision RD4-3, awaiting the owner: a TUI Install that
+declares a row writes the record.** This changes the allowlist above. "May
+write" gains `grim add`'s TUI form, an Install that declares a row, and "the
+TUI" under "Must never write" narrows to a TUI Update, a delete and an Install
+that declares nothing. It reverses C-113 and S-119 of
+[`plan_hooks_pr98_revival.md`](../plans/plan_hooks_pr98_revival.md).
+A TUI Install that declares a row is `grim add`'s TUI form and records by the same
+rule. Every other TUI install path, Update included, arms on the record as it
+stands and writes nothing. The form adds a second way to make the gesture and no
+new input to it: it runs `grim add`'s filter over the same inputs, so a checkout's
+files reach the record exactly as far as they do through `grim add` (**T3**), a
+publisher stays bounded by the resolved set (**T1**), and the key carries no
+digest in either form (**T2**). An agent that can drive a terminal can already run
+`grim add`, and the MCP server cannot reach this path (**T4**). The status line
+leads with each hook the action consented to, also when the install fails, which
+is the same after-the-fact disclosure `grim add` gives on stderr.
+
 **5. The plain-HTTP control survives, relocated to the transport layer.**
 `trust::decide` condition 5 withheld an implicit grant from any entry reached
 over plain HTTP, because *the first resolution that produces the digest pin is
@@ -292,6 +338,17 @@ distance from `GRIM_ALLOW_HOOKS`, permanently forbidden by owner decision
 `GRIM_HOOK_CONSENT`** and no environment form of the record's path, for the
 identical CWE-426 reason: an env-settable path would let a repository supply a
 pre-consented file.
+
+> **A clarification of decision 6, not an amendment.** The block below was
+> written by the lock-pin-stability run. None of it is an owner decision. It
+> states how `grim add` already read decision 6 at `c5e3824`
+> (`resolve_for_add`), and it changes no rule; decision 6 above is the owner's
+> text.
+
+**Clarification of shipped behaviour: what the flag writes.** The flag itself
+writes nothing. `grim add` still records its own gesture under `--trust-hooks`,
+and only `--no-trust-hooks` keeps that record out: a stronger answer must not
+leave less than a plain `add`.
 
 **7. Reporting.** `HookArmingCause::RegistryNotTrusted` becomes
 **`WorkspaceNotConsented`**; **`ConsentDrifted`** and **`InsecureTransport`**
@@ -491,4 +548,9 @@ puts it.
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-08-28 | Michael Herwig + Claude (hex swarm) | Initial draft, **Accepted**. Reverses the registry half of `adr_hooks_support.md` A2 and restores Decision E point 4's directory binding, keeping A2's coarseness. Supersedes contract C-022 with its B4/B5/B7/W8/S2-2 amendments; amends C-023's subject. Records the I2 relationship, the T1 version residual, the exit-78 residual, and the never-garbage-collected residual. |
+| 2026-11-04 | Claude (/hex-execute) | Decision 4 amended with `adr_lock_pin_stability.md`: `grim add` writes consent only after its install succeeded, and only for what this run resolved |
 | 2026-11-04 | Michael Herwig + Claude (architect) | Amended by `adr_settings_artifact_kind.md`: kind-neutral use of the record (a `settings:` key prefix, no format change), the flag (`--trust-workspace`, with `--trust-hooks` as its alias) and the prompt (a noun slot). `grim consent` aliases `grim hook`. |
+| 2026-11-05 | Claude (/hex-execute RF3) | Decision 4 restated for the edge rule: offline an edge counts only when the stored parent manifest lists it, a carried hook target counts only while its tag names its digest, and an add that consents to nothing new arms on the record as it stands (CWE-636) |
+| 2026-11-05 | Claude (/hex-execute RF4) | Decision 4: `grim add` records ahead of its install, so a failed install keeps its consent and the next `grim install` finds no drift (CWE-636); RF3's sentence accepting the disarm is withdrawn; `--no-install` records the same set. Proposed under the plan's `TUI consent` decision, awaiting the owner: a TUI Install that declares a row is `grim add`'s TUI form and records by the same rule, which widens the must-never-write list; every other TUI install path arms on the record as it stands |
+| 2026-11-06 | Claude (/hex-execute RF5) | Decision 4's allowlist and its bundle paragraph restored to the owner's accepted text. The branch's changes now sit after it as three blocks marked Proposed, awaiting the owner: what an add consents to (RD-3, RD3-6), the record written ahead of the install ("TUI consent"), and a TUI Install that declares a row as a write seam (RD4-3). All three are goal-loop decisions, and the shipped code follows them. Status stays Accepted for the owner's text |
+| 2026-11-07 | Claude (/hex-execute RF5) | Decision 6 restored to the owner's accepted text. Its two `grim add` sentences, added on this branch (`fc56a922`) with no row until then, move to the block after it, "Clarification of shipped behaviour: what the flag writes", labelled as no owner decision. They restate what `c5e3824` already shipped: `resolve_for_add` records under `--trust-hooks` and records nothing under `--no-trust-hooks`, citing this decision's "never persisted". Decision 4 lists `grim add` as a writer with no flag condition, so the clarification narrows nothing it accepted. What an add records under either flag still follows the proposed RD-3 block |

@@ -11,7 +11,7 @@
 - [x] Decision follows Golden Path in `.claude/rules/product-tech-strategy.md` (no new dependency; documents existing behavior)
 **Domain Tags:** security
 **Supersedes:** N/A
-**Superseded By:** N/A (decision 2 amended 2026-08-28 by [`adr_hook_workspace_consent.md`](./adr_hook_workspace_consent.md) — one scoped exception — and 2026-11-04 by [`adr_settings_artifact_kind.md`](./adr_settings_artifact_kind.md) — a second scoped exception; see the boxes under Decision)
+**Superseded By:** N/A (decision 2 amended 2026-08-28 by [`adr_hook_workspace_consent.md`](./adr_hook_workspace_consent.md) — one scoped exception — and 2026-11-04 by [`adr_settings_artifact_kind.md`](./adr_settings_artifact_kind.md) — a second scoped exception; see the boxes under Decision. A narrowing of decision 1 for hook and settings consent is proposed, awaiting the owner; see the block under decision 1)
 
 ## Context
 
@@ -46,6 +46,18 @@ depends on who reviews. This ADR fixes it.
 `grim add <ref>`, an edit to `grimoire.toml`, or adding a bundle *is* the
 user's statement of trust. Everything that gesture transitively pulls in
 inherits it. Transitivity is the bundle feature, not a loophole in it.
+
+> **Proposed — the trust narrowing, goal-loop decisions RD-3 (as corrected in
+> RF2), RD3-6 and, for settings, RB-4 of
+> [`plan_lock_pin_stability.md`](../plans/plan_lock_pin_stability.md), awaiting
+> the owner.** For hook and settings consent the inheritance is
+> narrowed, as the proposed amendment after
+> [`adr_hook_workspace_consent.md`](./adr_hook_workspace_consent.md) decision 4
+> records. A hook or settings package already in the workspace inherits
+> nothing. Neither does one behind an edge this run did not resolve or (offline)
+> its store does not list, nor a kept pin whose tag moved. `grim hook allow`
+> answers them. The shipped code follows this narrowing (CWE-863, CWE-345).
+> Until the owner ratifies it, decision 1 above is the owner's text.
 
 **2. All artifact kinds are equally trusted.** Skill, rule, agent, MCP
 descriptor, bundle — no per-kind consent prompt, no per-kind exclusion
@@ -166,3 +178,11 @@ above holds.
   move on. Changing it is an ADR amendment, not a review finding. The settings
   exception is the same trade for the same reason, and "two kinds are gated,
   therefore the next one is too" is the same misreading.
+
+## Changelog
+
+| Date | Author | Change |
+|---|---|---|
+| 2026-11-05 | Claude (/hex-execute RF3) | Decision 1 narrowed for hook consent in its body, with no owner decision and no changelog row |
+| 2026-11-06 | Claude (/hex-execute RF4) | The settings box's "Decision 1 still holds in full" rewritten to the same narrowing, with no owner decision |
+| 2026-11-06 | Claude (/hex-execute RF5) | Decision 1 and the settings box restored to the owner's accepted text. The narrowing moved to a block under decision 1 marked Proposed, awaiting the owner (goal-loop decisions RD-3, RD3-6 and RB-4). The shipped code follows the block |
