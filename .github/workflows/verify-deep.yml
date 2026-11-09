@@ -159,9 +159,9 @@ jobs:
           path: test/results/junit.xml
 
   # Two jobs with deliberately different names, because they are not the same
-  # gate. Linux runs the whole suite against a real `registry:2`. Windows
-  # cannot: the runner hosts no Linux container engine, so the registry-backed
-  # ~68% of the suite has nothing to talk to.
+  # gate. Linux and macOS run the whole suite against a real registry, sharded,
+  # through acceptance.yml. Windows cannot: the runner hosts no Linux container
+  # engine, so the registry-backed ~68% of the suite has nothing to talk to.
   #
   # That job used to report green anyway, at "254 passed, 528 skipped" — a
   # green gate over a suite that mostly did not run, which is exactly what
@@ -174,29 +174,38 @@ jobs:
   # exercise. Do not rename this back to "Acceptance" without giving Windows a
   # reachable registry first (`GRIM_TEST_REGISTRY_HOST`).
   acceptance-tests:
-    name: ${{ matrix.job.gate }} (${{ matrix.job.name }})
+    name: Acceptance (${{ matrix.job.name }})
     needs: [build, cross-compile]
-    runs-on: ${{ matrix.job.os }}
     strategy:
       fail-fast: false
       matrix:
         job:
-          - { os: ubuntu-latest, name: Linux, target: x86_64-unknown-linux-gnu, ext: "", gate: Acceptance, no_registry: "" }
-          - { os: macos-latest, name: macOS, target: aarch64-apple-darwin, ext: "", gate: Acceptance, no_registry: "" }
-          - { os: windows-latest, name: Windows, target: x86_64-pc-windows-msvc, ext: ".exe", gate: Platform Check, no_registry: "1" }
+          - { os: ubuntu-latest, name: Linux, target: x86_64-unknown-linux-gnu }
+          - { os: macos-latest, name: macOS, target: aarch64-apple-darwin }
+    uses: ./.github/workflows/acceptance.yml
+    with:
+      binary-artifact: grim-${{ matrix.job.target }}
+      binary-file: grim-${{ matrix.job.target }}
+      runner-os: ${{ matrix.job.os }}
+      check-name: Acceptance Test Results (${{ matrix.job.name }})
+      # The `deep-` prefix is what test-results downloads.
+      merged-artifact: deep-tests-${{ matrix.job.name }}
+
+  platform-check-windows:
+    name: Platform Check (Windows)
+    needs: [build, cross-compile]
+    runs-on: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Download Binary
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: grim-${{ matrix.job.target }}
+          name: grim-x86_64-pc-windows-msvc
           path: test/bin
       - name: Prepare Binary
         shell: bash
-        run: |
-          mv "test/bin/grim-${{ matrix.job.target }}${{ matrix.job.ext }}" "test/bin/grim${{ matrix.job.ext }}"
-          chmod +x test/bin/grim${{ matrix.job.ext }}
+        run: mv test/bin/grim-x86_64-pc-windows-msvc.exe test/bin/grim.exe
       - name: Install uv
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
       - name: Setup Task
@@ -207,18 +216,17 @@ jobs:
         with:
           version: "0.6.3"
           groups: default
-      - name: Run Acceptance Tests
+      - name: Run Platform Check
         shell: bash
         run: task test -- --junit-xml=results/junit.xml
         env:
           SKIP_BUILD: "true"
-          # Empty on Linux, so the registry refusal stays fully armed there.
-          GRIM_ALLOW_NO_REGISTRY: ${{ matrix.job.no_registry }}
+          GRIM_ALLOW_NO_REGISTRY: "1"
       - name: Upload Test Results
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: deep-tests-${{ matrix.job.name }}
+          name: deep-tests-Windows
           path: test/results/junit.xml
 
   # Principle 9 evidence (C-150, C-151). The pre-hooks and pre-dependencies
@@ -227,7 +235,8 @@ jobs:
   # the modules skip there. Here they run alone, required: a skip fails, and
   # the JUnit report must show every golden test passed. Then `p9:diff` runs the differ's self-test
   # (its own first step, so no gate can diff with an unproven differ), builds origin/main's grim and
-  # byte-compares it against this branch's over the hook-free scenarios.
+  # byte-compares it against this branch's over the hook-free scenarios. Last, the released 0.15.1
+  # binary runs the interop modules beside this branch's grim, where a skip is a failure.
   principle-9:
     name: Principle 9 (golden + p9 diff)
     needs: [build]
@@ -311,6 +320,46 @@ jobs:
           else
             task p9:diff
           fi
+      # The pinned SHA-256 is the trust anchor: the release's own .sha256 asset
+      # comes from the same place as the archive, so it only cross-checks it.
+      - name: Fetch grim 0.15.1
+        id: old-grim
+        if: ${{ !cancelled() }}
+        env:
+          OLD_GRIM_URL: https://github.com/grimoire-rs/grimoire/releases/download/v0.15.1/grimoire-x86_64-unknown-linux-gnu.tar.gz
+          OLD_GRIM_SHA256: eec30a069ce12239058b54a9e986340cc2a3db9662504ab5ca467f8167d802c0
+          OLD_GRIM_DIR: ${{ runner.temp }}/grim-0.15.1
+        run: |
+          set -euo pipefail
+          download="$(mktemp -d)"
+          for asset in "$OLD_GRIM_URL" "$OLD_GRIM_URL.sha256"; do
+            curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+              --retry 3 --retry-delay 5 --retry-all-errors \
+              --output "$download/${asset##*/}" "$asset"
+          done
+          archive="$download/${OLD_GRIM_URL##*/}"
+          echo "$OLD_GRIM_SHA256  $archive" | sha256sum --check --strict
+          read -r published _ < "$archive.sha256"
+          if [[ "$published" != "$OLD_GRIM_SHA256" ]]; then
+            echo "::error::the release's .sha256 asset does not match the pinned SHA-256"
+            exit 1
+          fi
+          mkdir -p "$OLD_GRIM_DIR"
+          tar -xzf "$archive" -C "$OLD_GRIM_DIR" --strip-components=1 grimoire-x86_64-unknown-linux-gnu/grim
+          rm -rf "$download"
+          "$OLD_GRIM_DIR/grim" --version
+      - name: Old grim interop (required)
+        if: ${{ !cancelled() && steps.old-grim.outcome == 'success' }}
+        run: task test:old-grim
+        env:
+          SKIP_BUILD: "true"
+          GRIM_OLD_BIN: ${{ runner.temp }}/grim-0.15.1/grim
+      - name: Upload Old Grim Results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: deep-old-grim
+          path: test/results/old-grim/junit.xml
 
   # The pinned indexer builds the fixture index flat (default config), anchored,
   # and anchored with legacy off. The default build still works for the oldest
@@ -464,7 +513,7 @@ jobs:
 
   test-results:
     name: Publish Deep Test Results
-    needs: [build, cross-compile, hooks-windows, acceptance-tests, principle-9, index-e2e]
+    needs: [build, cross-compile, hooks-windows, acceptance-tests, platform-check-windows, principle-9, index-e2e]
     runs-on: ubuntu-latest
     if: ${{ !cancelled() }}
     steps:

@@ -1,0 +1,165 @@
+name: Acceptance
+
+# The acceptance suite, sharded, with one merge that judges the suite floor and the skip
+# and xfail ceilings over every shard's report together: a floor is a property of the
+# whole suite, never of one shard. Reusable: verify-basic calls it once, verify-deep once
+# per Linux and macOS leg. Artifact names carry `inputs.runner-os`, so one run can call
+# this once per runner label and no more.
+#
+# No `concurrency:` here: `github.workflow` is the caller's name inside a reusable
+# workflow, so the usual group would equal the caller's own and GitHub would cancel the
+# run as a deadlock. The caller's block already covers these jobs.
+
+on:
+  workflow_call:
+    inputs:
+      binary-artifact:
+        description: Artifact of this run that holds the grim binary under test.
+        type: string
+        required: true
+      binary-file:
+        description: File name of the binary inside that artifact.
+        type: string
+        required: true
+      runner-os:
+        description: Runner label the shards run on, and the label of their reports.
+        type: string
+        required: true
+      check-name:
+        description: Name of the published check run.
+        type: string
+        required: true
+      merged-artifact:
+        description: Name of the artifact that carries the merged junit.xml.
+        type: string
+        required: true
+      shard-count:
+        description: Number of shards the suite is split into.
+        type: number
+        default: 4
+
+permissions: {}
+
+jobs:
+  plan:
+    name: Plan (${{ inputs.runner-os }})
+    runs-on: ubuntu-latest
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+    steps:
+      - name: List the shard indices
+        id: plan
+        env:
+          SHARD_COUNT: ${{ inputs.shard-count }}
+        run: echo "shards=[$(seq -s, 0 "$((SHARD_COUNT - 1))")]" >> "$GITHUB_OUTPUT"
+
+  shards:
+    name: Shard ${{ matrix.shard }} of ${{ inputs.shard-count }} (${{ inputs.runner-os }})
+    needs: plan
+    runs-on: ${{ inputs.runner-os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # This job runs branch-built code; nothing here needs the token.
+          persist-credentials: false
+      - name: Download Binary
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.binary-artifact }}
+          path: test/bin
+      - name: Prepare Binary
+        env:
+          BINARY_FILE: ${{ inputs.binary-file }}
+        run: |
+          [ "$BINARY_FILE" = grim ] || mv -f "test/bin/$BINARY_FILE" test/bin/grim
+          chmod +x test/bin/grim
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - name: Setup Task
+        uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
+      - name: Setup OCX
+        # Activates the root ocx.toml, putting the suite's zot registry on PATH.
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        with:
+          version: "0.6.3"
+          groups: default
+      - name: Run Acceptance Shard
+        env:
+          SKIP_BUILD: "true"
+          SHARD_COUNT: ${{ inputs.shard-count }}
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_LABEL: ${{ inputs.runner-os }}
+        run: task test:shard SHARD_COUNT="$SHARD_COUNT" SHARD_INDEX="$SHARD_INDEX" SHARD_LABEL="$SHARD_LABEL"
+      - name: Upload Shard Report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: accept-junit-${{ inputs.runner-os }}-shard-${{ matrix.shard }}
+          path: test/results/junit-${{ inputs.runner-os }}-${{ matrix.shard }}-of-${{ inputs.shard-count }}.xml
+          # A rerun uploads this name again, and the action refuses a name the run holds.
+          overwrite: true
+          retention-days: 3
+
+  merge:
+    name: Merge (${{ inputs.runner-os }})
+    needs: shards
+    # A failed shard must still merge, or its failing tests never reach the check. Skipped
+    # shards mean `plan` failed, which already reds the run.
+    if: ${{ !cancelled() && needs.shards.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Task
+        uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
+      - name: Download Shard Reports
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: accept-junit-${{ inputs.runner-os }}-shard-*
+          path: test/results
+          merge-multiple: true
+      - name: Suite Floor and Ceilings
+        env:
+          SHARD_COUNT: ${{ inputs.shard-count }}
+          SHARD_LABEL: ${{ inputs.runner-os }}
+        run: task test:floor SHARD_COUNT="$SHARD_COUNT" SHARD_LABEL="$SHARD_LABEL"
+      - name: Upload Merged Report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.merged-artifact }}
+          path: test/results/junit.xml
+          overwrite: true
+          retention-days: 7
+
+  publish:
+    name: Publish (${{ inputs.runner-os }})
+    needs: merge
+    if: ${{ !cancelled() && needs.merge.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    # The one job holding a write scope, and it checks out and runs no repository code.
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+    steps:
+      - name: Download Merged Report
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.merged-artifact }}
+      - name: Publish Acceptance Test Results
+        uses: EnricoMi/publish-unit-test-result-action@7622c5bf3d112a72ab4fa3951c2aa5723d8ab92d # v2.25.0
+        with:
+          files: junit.xml
+          check_name: ${{ inputs.check-name }}
