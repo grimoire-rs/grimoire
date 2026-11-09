@@ -34,7 +34,9 @@ grim add ghcr.io/acme/test-writer:1
 ## What grim update moves at each rung
 
 `grim update` re-resolves the reference you declared, on every run, at
-every rung. Nothing else decides how far a pin may travel.
+every rung. Nothing else decides how far a pin may travel, and
+[`grim lock`](../commands.md#lock) moves none of them: it keeps every pin
+whose reference you did not change.
 
 The table below came from one measured project per rung. Each started at
 version 1.1.0, then 1.2.0 and 2.0.0 were published, and `grim update` ran.
@@ -60,7 +62,8 @@ notices.
 `grim install` materializes the pin recorded in `grimoire.lock` and
 re-resolves nothing. `grim update` re-resolves your declaration and
 rewrites that lock. So the lock freezes installs, and update is the command
-that unfreezes them.
+that unfreezes them. `grim lock` does not unfreeze a pin, even after its tag
+moved.
 
 Publishing cascades tags on the way out. A release of 1.2.3 points `1.2`,
 `1` and `latest` at that digest as well. A prerelease such as `1.2.3-rc.1`
@@ -87,6 +90,8 @@ any run.
 
 The cost is the other half of the trade. A pinned digest never picks up a
 fix either, and moving it is a decision you make by declaring a new one.
+Dropping the digest from `:1@sha256:<digest>` back to `:1` keeps that digest
+in the lock until you run `grim update <name>`.
 
 ## See it run
 

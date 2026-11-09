@@ -472,10 +472,10 @@ artifact another one still needs as `kept-by-dependency`.
 
 | Met by 0.15.1 | Result |
 |---|---|
-| a dependent artifact, installed with `grim add` | exit `65`, `expected a single-layer artifact`; no files are installed |
+| a dependent artifact, installed with `grim add` | exit `65`, `expected a single-layer artifact`; no files are installed. On a lock it wrote, that includes `grim add` of a bundle member whose moved tag names such an artifact, beside a dependent, after it moved the pin. Where that artifact's dependencies conflict or form a cycle, this grim keeps the pin and exits `0` |
 | a dependent artifact, met by `grim lock`, `grim update` or `grim add --no-install` | succeeds and writes a lock **without the dependencies**, with no warning |
 | a bundle that lists a nested bundle | exit `65`, `nested bundle member … is not supported` |
-| a lock that records a nested bundle | exit `78` |
+| a lock that records a nested bundle | exit `78` on `status` and `install`. `lock`, `add` and `update` overwrite it |
 
 The second row is the one to watch. A lock written that way is wrong until a
 newer grim re-locks it. A newer grim that installs from it exits `65` with
@@ -501,6 +501,19 @@ hook member of the bundle, including one that was already present and had never
 been consented. It now consents only the target and the hooks it newly pulls
 in. Hooks are experimental, so this ships without a shim. Re-run
 `grim install --trust-hooks` for a hook you had relied on `add` to arm.
+
+That consent is recorded ahead of the install, and only for hooks `add` read
+from a manifest this run resolved, behind edges this run resolved. An offline
+`grim add` of a bundle or skill consents to no hook it brings in, so run
+`grim hook allow`. A failed `add` keeps its declaration, its lock and that
+consent, so the next `grim install` arms the hook and disarms nothing. Retrying a
+hook you typed consents to a kept pin once its repository confirms it, which
+needs the network.
+
+Two other paths record consent as well. `grim add --no-install` records what
+`grim add` records, where it wrote nothing before. An Install in `grim tui` that
+declares a row does too, and every install path there arms on the record as it
+stands. It used to read a hook the record lacked as drift and disarm every hook.
 
 ## Install fixes in 0.16.0 {#install-fixes-0-16}
 
@@ -606,6 +619,425 @@ cleanup.
 **What to do.** Nothing. `grim search --refresh` forces a sync and ignores a
 backoff. Deleting a `<hash>.sync.json` file costs the same one fresh sync.
 
+## `grim lock` keeps pins {#lock-keeps-pins}
+
+A lock exists so that next month's install writes the bytes you tested today.
+Up to 0.15.1 that held only until someone ran [`grim lock`][lock]. It resolved
+every tag again, so a moved tag changed the lock with no update requested.
+[`grim add`][add] did the same, and so did each "run `grim lock`" recovery.
+
+From 0.16.0 [`grim update`][update] is the command that moves an existing pin.
+Everything else keeps it, even when its tag moved, apart from the
+[few cases][lock-pins] listed with `grim lock`. The lock format version stays `1` and the
+lock gains no field. What changes is `pinned`: it records the tag that resolved
+it, so a later run can compare it with the request.
+
+**What you will see in the lock.**
+
+- The first `grim lock`, `grim add` or `grim update` after the upgrade adds the
+  tag to every tagged `pinned` line. `registry/repo@sha256:…` becomes
+  `registry/repo:tag@sha256:…`. With `grim lock` no digest changes, no tag is
+  resolved, the report reads `unchanged`, and `generated_at` stays. `grim add`
+  stamps the tags with its own write, and `grim update` moves pins as it always
+  does.
+- A reference requested by digest alone stays tagless, and `[[bundle]]` keeps its
+  own `tag` key. `grim install` leaves a tagless pin as it is. So does
+  `grim remove`, unless it ends the lock's proof. Then it stamps kept tagless pins
+  first, since nothing after it can show what they answered.
+- A pin nothing vouches for resolves once, and one warning names it and the
+  cause. That happens when `grimoire.toml` changed after the lock was written,
+  or when a moved parent or a new key asks for something else. Later writes
+  keep what that run pinned.
+- A matching hash keeps a pin the lock records no edge onto when a bundle with no
+  `[[bundle]]` row lists it. That costs one tag read, and the next write stamps
+  the tag the bundle lists. If that bundle's tag moved, the stamp can pair the
+  member's new tag with its old digest. `grim status --check` reports it as an
+  update, and `grim update` repairs it. Only a lock grim 0.3 or earlier wrote,
+  or one whose entries were cut by hand, has such a bundle.
+- Where the parent has an entry in the lock, an edge counts only if that entry
+  records it. A lock 0.15.1 wrote records no dependent's edges. `grim lock`
+  settles those as a fresh resolve does: the pin can move, or the run exits `78`
+  on a conflict.
+- `grim add` of a bundle member's own reference reads that reference's tag
+  first when such an unrecorded edge asks for another tag. It then reads what
+  the manifest that tag names asks for. If the tag you typed is gone, the add
+  refuses too. A gone tag below that manifest does not refuse it, and `grim lock`
+  keeps the pin there as well. Otherwise the add keeps the
+  member's pin only where `grim lock` keeps it, and records that tag.
+- That manifest's dependencies can conflict or form a cycle, back at the member's
+  pinned digest or at another one. The add then keeps the member's pin, as
+  `grim lock` does, and installs it at exit `0`. An unreachable registry, a refused
+  credential, a timeout or a graph cap below the manifest keeps its exit. 0.15.1
+  moves the pin there. Its `grim add --no-install` exits `0`, and its `grim add`
+  exits `65` with `expected a single-layer artifact`, since that manifest
+  carries a dependency layer. Offline, `grim add --no-install` there exits `0`
+  on an empty store and on one an online add filled, where 0.15.1 exited `69`.
+- A script that splits `pinned` on `@sha256:` keeps working. A report's `pinned`
+  stays as it was, because the tag lives only in the lock file.
+
+**What changes for a moved tag.**
+
+- `grim lock` no longer rolls a moved tag forward. A job that ran it to pick up
+  new digests gets the same lock back.
+- To roll, run `grim update` for every pin or `grim update <name>` for one. Both
+  install what changed, and neither has a lock-only form.
+- Re-running `grim add` on a reference already declared keeps its pin. An add
+  also keeps a pin the lock already holds when that pin answers the reference, as
+  a dependency or a bundle member does. The report still says `added`, and one
+  stderr note names `grim update -- <name>` with the run's `--global` or
+  `--config`. That command moves the pin to the digest its tag names today, or says why it
+  cannot.
+- [`grim status --check --format json`][status-check] shows what a moved tag
+  would do. `update_available` reads `true` when a row's reference names another
+  digest than its pin, on declared rows and on dependency rows alike. The plain
+  table has no such column, so stderr names each row with an update.
+- A dependency row answers for the tag its pin records while an edge names it,
+  and otherwise for the smallest edge the lock holds. It cannot predict a moved
+  parent that switches or drops the edge.
+- `grim lock` no longer re-checks an existing pin, so a hand-edited digest under
+  the same repository and tag survives it. For a checkout you do not trust, run
+  `grim update` or delete the lock. `grim status --check` reports a pin that
+  differs from its tag.
+
+**What changes for `grim update <name>`.**
+
+- A named run stops at a closure: the named bindings, a named bundle's members,
+  and everything they require. Install and the integrity gate stop there.
+  `--force` reaches the closure and what the run prunes.
+- An unnamed artifact is left alone. A deleted file stays deleted, and a local
+  edit no longer fails the run. A modified dependency inside the closure still
+  exits `65`.
+- Prune removes only what the closure held and the lock has dropped. A dropped
+  client's outputs wait for a bare `grim update`, because a named run never
+  reaps.
+- A name moves that binding's pin alone. `grim update <parent>` leaves a
+  dependency's pin where it is though its tag moved, unless the new parent
+  changed the edge.
+- A bundle name is accepted, where 0.15.1 exited `79`. It moves the
+  bundle's own pin, and TUI Update on a bundle row does the same. Members keep
+  their pins unless the new manifest changes them.
+- `grim update <member>` exits `79` for a member that exists only under the
+  bundle's moved tag, where it exited `0` and moved the bundle's pin. The
+  unselected bundle keeps its pin. Run `grim update <bundle>` instead.
+- A stale lock still exits `65`. From 0.16.0 the message says to run
+  `grim lock`, then the same update.
+- The report covers the closure and any lock change outside it. An unnamed
+  artifact whose pin did not move has no row. See
+  [the `update` rows][json-update-rows].
+- Hook consent covers the workspace, not the closure. A named update that brings
+  in a new hook gates every hook there, and one warning names those it disarmed.
+- Managed vendor config entries follow the closure. A named run writes a
+  `claudeMdExcludes` element or OpenCode's `instructions` glob only for a rule
+  it names or reaches. An entry you removed by hand for another rule stays
+  removed until `grim install`, `grim add` or a bare `grim update`.
+  `grim uninstall` and the TUI delete write none back.
+- Hook arming follows the closure. A named run writes the client registration
+  and dispatch row of a hook it names or reaches, and leaves other hooks' as they
+  stand. `grim uninstall` and a TUI delete remove their own hook and write no
+  other. To arm a hook you only just allowed, or to restore one you disarmed by
+  hand, run `grim install`.
+- A registration grim 0.15.0 wrote still runs the retired `bin/grim-hook`
+  script, which cannot enforce a gatekeeper's verdict. A named run,
+  `grim uninstall` and a TUI delete rewrite it anyway while the hook keeps its
+  dispatch row, and a warning names the hook.
+
+**What refuses from 0.16.0.**
+
+- `grim lock`, `grim add` and `grim update` exit `78` on a lock they cannot
+  parse, before anything is written. They used to read it as no lock, exit `0`
+  and overwrite it, which moved every pin.
+- Deleting the file moves every pin too. Restore it from git, or resolve the
+  conflict markers by hand.
+- A lock only a later grim reads exits `78` as well, and the message says to
+  upgrade grim. Restoring it from git only returns the same file.
+- A `grimoire.lock` that links to a file that is not a lock refuses the same
+  way, and the link and that file stay as they were. Up to 0.15.1 grim
+  overwrote that file through the link. A link to a real lock keeps working.
+- `grim remove` and `grim uninstall` still run on an unreadable lock. They warn
+  once and exit `0`, and the lock stays as it is.
+- `grim remove` of a bundle that hid a nested include leaves the lock stale until
+  `grim lock`, and it says so on stderr. `grim install` exits `65` until then.
+- `grim install` exits `65` after `grim remove` or `grim uninstall` on a stale
+  lock that no longer answers its declarations. A stale lock that answers every
+  declaration restamps, and `install` keeps exit `0` there. A pin with no tag
+  cannot show what it answers, so a lock 0.15.1 wrote stays stale after such an
+  edit.
+- `grim uninstall` keeps the files of an artifact a bundle with no member list
+  provides. The local store or the bundle's stamp on its entry shows it.
+  0.15.1 deleted them and the next `grim install` after `grim lock` brought them
+  back. An artifact with no direct declaration reports `kept-by-bundle`, not
+  `uninstalled`, and the exit stays `0`.
+- A lock write exits `79` when neither the registry nor the local store holds a
+  carried pin's manifest. The message names `grim update <name>` and bare
+  `grim update`, or the `--marketplace` command for a marketplace plugin. When
+  the tag is gone too, or a digest names the pin, it names a reference that
+  exists plus `grim lock`. `grim install` on a cold clone names the same remedy.
+  This reaches a tagless pin on a lock with no member list too, which 0.15.1
+  resolved afresh at exit `0`.
+- `grim update --marketplace <manifest> <plugin>:<member>` exits `79` for a
+  member only a moved bundle tag would bring, on a plugin that records that
+  bundle's digest. 0.15.1 added the row at exit `0`, and c5e3824 exited `78` where
+  the moved tag brings a conflict. Over a part this grim wrote with dependencies,
+  0.15.1 exits `78`, since it cannot parse the `requires` field. Select `<plugin>`,
+  which moves the bundle and brings the member.
+- A `grim update --marketplace` pick of a member or bundle exits `78` and writes
+  nothing in one case. The pick would keep a dependent at its pin beside another
+  version of a row it requires. The dependent's own tag moved onto that version.
+  0.15.1 exited `0`, or `79` on a bundle selector. The row it requires can be a
+  bundle too, or a bundle nested in one at any depth. Where the republished list
+  nests that bundle, 0.15.1 exited `65` on a part it wrote instead, since it
+  refuses the nested bundle. The refusal needs proof, from the lock's records or
+  from a manifest or tag read that succeeded. A failed read refuses nothing by
+  itself. Select `<plugin>` to move both.
+
+**What stops failing.** A job that read one of these failures as a signal loses
+it.
+
+- `grim lock` and `grim add` exit `0` on a diamond whose edges parted after a tag
+  moved, where they exited `78`. Bare `grim update` still exits `78`.
+- `grim add` of a bundle member beside a dependent whose entry records no edges,
+  with the install, exits `0` and keeps the pin. That holds where the member's
+  moved tag names a manifest whose dependencies conflict or form a cycle back at
+  the pinned digest or another. Grim 0.15.1 exited `65` there. c5e3824 exited `78`
+  on a conflict and `65` on a cycle. Online, a gone tag below the moved manifest keeps the pin too. There c5e3824 exited `79`, and 0.15.1 exited `0` with `--no-install` and `65` with the install. Offline that add still exits `69`, as both did.
+- `grim update <names>` exits `0` beside bundles whose moved tags conflict, where
+  0.15.1 exited `78`. So does a `<plugin>:<member>` or `<plugin>:<bundle>` pick on
+  a plugin that records the other bundle's digest. For `grim lock` that is the
+  diamond above. The conflict there comes from a moved tag the run never reads,
+  since a pick reads that bundle at its recorded digest. The owner ratified this
+  on 2026-11-08 for a pick beside a pinned sibling whose moved tag conflicts. That
+  pick exits `0` and keeps the sibling at its recorded digest, where c5e3824
+  exited `78`. Grim 0.15.1 exited `78`, or `65` on a plugin with a nested bundle.
+  A whole-plugin update still refuses.
+- A `<plugin>:<bundle>` pick keeps a bundle nested in it at the digest the plugin
+  records, and keeps the bundle's members at their pins, and exits `0`. The
+  unreleased c5e3824 followed the moved tag of the nested bundle or member and
+  exited `78` on the conflict it brought. Grim 0.15.1 exited `65` on the nested
+  bundle and `78` on the member. The owner ratified this on 2026-11-08. A pick
+  that names the nested bundle or the member, and a whole-plugin update, still
+  move it.
+- Offline, a `<plugin>:<bundle>` pick exits `0` on a home the same pick warmed
+  online, where 0.15.1 and c5e3824 exited `81`. Their online pick refused with `79`
+  and cached nothing.
+- On a plugin grim 0.15.1 last resolved, a `<plugin>:<member>` pick of a member
+  its bundle dropped exits `0` when a kept row still requires it. The pick keeps
+  the member for that row, as c5e3824 does. Grim 0.15.1 exited `79`, since the
+  name was unknown. The owner ratified this on 2026-11-08.
+- Bare `grim update` and a run on the whole plugin still exit `78` on that
+  conflict. So does a name or pick that selects a
+  moved bundle, unless the other bundle names the shared entry only
+  under its own moved tag. For a pick, that exception holds only on a plugin that
+  records the other bundle's digest. A `<plugin>:<bundle>` pick exits `78` too
+  where the bundle it names newly nests one whose moved list conflicts with a
+  direct include. That holds on a plugin that records no digest for it, where
+  0.15.1 refused the nested bundle at `65`. A `<plugin>:<bundle>` pick of a bundle
+  that nests nothing meets the same conflict there too. It exits `78` where 0.15.1
+  and c5e3824 exited `79`, since the pick is no longer refused as a selector.
+- A `<plugin>:<member>` or `<plugin>:<bundle>` pick exits `0` when the tag of a
+  bundle it does not select is withdrawn, where 0.15.1 exited `79`. That holds on
+  a plugin that records that bundle's digest, while the registry still serves
+  that digest. A run on the whole plugin still exits `79`.
+- `grim lock` exits `0` after `grim remove` of a direct declaration that held a
+  version conflict off, and keeps that key's pin, where it exited `78`.
+  `grim update` still exits `78` on that conflict.
+- A declared artifact's tag, or a bundle member's, can be withdrawn while the
+  registry still serves its digest. `grim lock` then keeps the pin at exit `0`,
+  where 0.15.1 exited `79`. `grim add` of the same reference keeps it too, where
+  0.15.1 exited `79`, and for a member also offline, where it exited `69`. Both
+  hold on a clean lock 0.15.1 wrote, and for a member on one with no member list
+  for its bundle. On a clean lock 0.15.1 wrote, any other `grim add` keeps the pin
+  too, where 0.15.1 exited `79`, and so does TUI Install. Where another artifact
+  asks for the member at another tag, the add still reads the member's tag and
+  exits `79` when it is gone.
+- Offline on an empty `GRIM_HOME`, `grim add --no-install` of a reference the
+  lock pins keeps that pin at exit `0`, where 0.15.1 exited `69`. Without
+  `--no-install` the add saves `grimoire.toml` and the lock, then exits `81`
+  where it exited `69`, as the empty store holds no files to install. Both hold
+  on a lock 0.15.1 wrote over one skill, its tag moved or not, and for a bundle
+  member, its tag unchanged, moved or withdrawn. A bundle member's
+  `--no-install` add keeps its pin at `0` on a store an online add filled too,
+  where 0.15.1 exited `69`. That holds beside a dependent where the member's moved
+  tag names a manifest whose dependencies conflict. It holds too where they form a
+  cycle, back at the pinned digest or at another.
+- `grim install` exits `0` after `grim remove` of a direct declaration that a
+  bundle still lists at a reference its pin's digest answers, where it exited
+  `65`.
+- `grim lock --offline` exits `0` when the lock pins everything the
+  declarations reach: on a clean lock, after `grim remove`, or after you delete
+  a line by hand. It exited `69` there whenever a bundle was declared, or when
+  its tag cache lacked a tag. A lock whose pins carry no tag yet, as 0.15.1
+  writes them, still exits `69` after a deleted line without that cache.
+  After a deleted line the entry leaves the lock,
+  so the next `grim install` exits `0` where it exited `65`. Beside a dependent
+  whose dependency list the store lacks, the entry leaves too, and `grim
+  install` refuses the dependent with `65` online, as before. Offline it exits
+  `81`. Where 0.15.1's offline lock exited `69` and left the lock stale, its
+  install gave `65` there.
+- Offline, `grim update <names>` exits `0` when an artifact outside its names has
+  no content in the local store, where 0.15.1 exited `81`. Bare `grim update` and
+  `grim install` still exit `81` there.
+- `grim update <member>` exits `0` for a member its bundle's moved tag no longer
+  lists, where 0.15.1 exited `79`. So does a `<plugin>:<member>` pick on a plugin
+  that records the bundle's digest. The bundle keeps its pin. The member resolves
+  the reference that pin lists for it, so its own pin moves only if that tag moved.
+- `grim update --marketplace <manifest> <plugin>:<bundle>` exits `0` and moves the
+  bundle, where 0.15.1 exited `79`. Each row that carries the bundle's stamp
+  records its new digest. It still exits `79` on a plugin with no lock entry yet. It also still
+  exits `79` for a bundle only a `requires` edge reaches, when 0.15.1 last wrote
+  the plugin and its `include` lists no bundle. Select `<plugin>` in both cases.
+- Offline over a `marketplace.lock` 0.15.1 wrote, `grim export plugin`,
+  `grim export marketplace` and `grim update --marketplace`, whole or with a
+  selector, exit `0` where 0.15.1 exited `81`. That holds while the tag cache
+  answers every tag the run reads, each included bundle's among them. Otherwise
+  they still exit `81`, and so does an export whose pinned content the store
+  lacks. An export follows those cached tags and warns what that moved.
+
+**Other paths.**
+
+- `grim add` and TUI Install re-pack every path source, as `grim lock` does.
+- `grim remove` and `grim uninstall` beside a bundle with no member list keep an
+  artifact the local store or the bundle's stamp shows it provides. Such a lock
+  was written by grim 0.3 or earlier, or had its `[[bundle]]` rows cut by hand.
+  The entry takes that bundle's stamp, so `grim install` keeps exit `0`. Any
+  other artifact drops as on 0.15.1, and the next `grim lock` may resolve a real
+  member afresh: run `grim lock` once before such an edit to keep the pins.
+- On a lock 0.15.1 wrote, `grim remove`, `grim uninstall` and a TUI delete read a
+  dependent as requiring nothing, as 0.15.1 does. An artifact only that
+  dependent requires leaves the lock. The next `grim lock` resolves it afresh, so
+  its pin moves if its tag moved. Where the local store holds the dependent's
+  manifest, a note names both, unless the store shows that the dependent's
+  dependency list never reaches that artifact through entries the lock pins.
+- After upgrading, run one online `grim lock` before `grim remove`,
+  `grim uninstall` or a TUI delete. The lock then records each dependent's
+  edges, and the edit keeps the pins they reach. The first `grim install` on a
+  lock that holds such a dependent already exits `65` and names that
+  `grim lock`. If that `grim lock` exits `78`, settle the conflict it names
+  first. If the edit came first, restore the edited config and `grimoire.lock`, run
+  that `grim lock`, then repeat the edit to keep the pins. The config is
+  `grimoire.toml`, the file `--config` names, or with `--global` the one in
+  `$GRIM_HOME`. Where that pair is not in the working directory, as under
+  `--config` or from a subdirectory, the note names both by absolute path.
+  A lock a hand edit already made stale resolves every tagless pin once, so a pin
+  whose tag moved can still move.
+- `grim remove` and `grim uninstall` keep the digest of every row they keep and
+  write no tag on a tagged pin. A kept pin keeps the tag that resolved it, beside
+  the request that survives.
+- A key whose declaration left, with surviving edges its pin names only in part,
+  keeps its row and leaves the lock stale. The next `grim lock` keeps that pin. If
+  its pin names none of them, the row is dropped and the lock stays stale, so the
+  next `grim lock` resolves those edges.
+- An edit that changes the rows of a lock it leaves stale writes a hash no
+  declaration produces. Restoring `grimoire.toml` by hand then does not make it
+  read fresh. See [`grim remove`][remove].
+- When two repositories agree on one digest, a recorded edge in either one answers
+  the pin. No tag resolves, and a moved tag moves nothing.
+- `marketplace.lock` follows the same rule. `grim update --marketplace` moves its
+  pins and an export keeps them. A bundle a plugin reaches, by include, by
+  `requires` or through another bundle, keeps its pin in the rows below it, where
+  `bundle_tag` reads `<tag>@<digest>`. A run on the whole plugin moves it, and so
+  does a `<plugin>:<bundle>` pick of that bundle. A pick of a bundle that nests it
+  moves it only where the plugin records no digest for it. Every other write keeps
+  it, whichever parent reaches it, and so does `grim export`.
+- A plugin 0.15.1 wrote records no digest. Its first write that covers the whole
+  plugin follows each bundle's tag and records the digest: an export of the changed
+  plugin, or `grim update --marketplace` on it. The export warns once, naming the
+  bundle and every row below it that changed. That includes rows below a nested
+  bundle that was swapped or let go.
+- A `<plugin>:<member>` update keeps every row outside its selection as the lock
+  holds it and records no digest, as 0.15.1's member update did. A kept row with no
+  tag in a plugin that records a digest was rewritten by 0.15.1 since. A warning
+  names `grim update --marketplace` on the plugin, which records its tag.
+- `grim lock --offline` on a clean lock with a bundle succeeds from the lock's
+  own rows. It warns when the store no longer holds the bundle's manifest.
+- An offline run warns about each pin it moved through the tag cache, which can
+  predate the lock. It also warns about each row a tag read added or dropped.
+  That covers an export and a `[[bundle]]` row's own pin. A marketplace warning
+  names the plugin.
+- An offline export or member update whose recorded bundle digest the store
+  lacks exits `81` and writes nothing. A plugin 0.15.1 wrote records no digest,
+  so these runs exit `0` there, as listed above.
+
+**If part of the team stays on 0.15.1.** Observed on a 0.15.1 build:
+
+- It reads a lock with tags. `status`, `install` and `lock` exit `0`, and
+  `install` writes the pinned bytes even after the tag moved. A project with a
+  settings package is the exception, because 0.15.1 refuses the settings kind.
+  See [Forward compatibility][stability-forward-compat].
+- A project with [declared dependencies][dependencies-new-grim] is an exception
+  too. 0.15.1 refuses the lock's dependency rows, so its `status` and `install`
+  exit `78`. Its `lock`, `add` and `update` read that lock as absent and exit
+  `0`. They move every pin whose tag moved and drop the dependency rows.
+  `update` also deletes the files of those dependencies.
+- The online `grim lock` that keeps pins through `grim remove` records each
+  dependent's edges. 0.15.1 then refuses that lock, as above. A team that keeps
+  0.15.1 skips it, and an edit then drops what only a dependent requires, as
+  0.15.1 does.
+- Its writes strip the tags, and its `grim lock` and `grim add` still roll every
+  moved tag. When the lock's hash matches `grimoire.toml`, the next write by
+  0.16.0 or later reads it as clean, keeps those pins and adds the tags back.
+- While both versions write, every `pinned` line changes at each hand-over. No
+  digest changes unless a tag moved under 0.15.1.
+- A `grim remove` by 0.16.0 that leaves the lock stale can keep a row 0.15.1's
+  `remove` drops. When it also changes the lock's rows, it writes a hash no
+  declaration produces. 0.15.1 reads that lock as stale.
+- On such a lock 0.15.1's `status` reads `stale` on every row and `install`
+  exits `65`. Its own `grim lock` resolves from scratch and exits `0`, or `78`
+  where the sources disagree. Offline it exits `69`, unless no bundle is
+  declared and its tag cache holds every tag.
+- It reads a `marketplace.lock` whose `bundle_tag` holds a digest, and a fresh export
+  leaves the file alone. Its member update writes the value back. A row it resolves
+  again loses the digest, and a whole update or a stale export does that to every
+  row. Where no row records a digest, the next write by 0.16.0 or later follows the
+  bundle's tag and records one.
+- It exits `0` when a recorded bundle's manifest is gone, because it reads no digest.
+  0.16.0 exits `79` on that lock until a run on the whole plugin moves the bundle.
+
+**If 0.15.1 ran `grim remove` on a stale lock.** It restamps such a lock, so
+after an edit from `a:1` to `a:2` the lock reads as clean. The pin keeps the old
+digest under the new tag: `a:2@<digest of a:1>`. Any 0.15.1 `remove` or
+`uninstall` does this, of any artifact. That includes a lock this grim left
+stale.
+
+Only a resolve can tell this from a clean lock, and a resolve at upgrade would
+move every moved tag. To find such a pin, run
+`grim status --check --format json`, whose row reads `update_available: true`.
+Then run `grim update <name>`.
+
+**If a script reads the JSON.** The [report shapes][json-shapes-items] gain
+these:
+
+| Report | New | Meaning |
+|---|---|---|
+| `lock` | `disposition` on every row | `added`, `carried`, `moved` or `dropped`, against the previous lock |
+| `lock` | `action: "dropped"` on a new row | A pin no longer in the lock, named in `pinned` |
+| `add` | `moved` | The pins this add moved, the target included when it moved, `[]` when none |
+| `add` | `dropped` | The pins this add took out of the lock, `[]` when none |
+| `status` | `moved_nested_bundles` | The moved nested bundles a row reaches, `null` unless `--check` ran |
+| `update` | `action: "restored"` | Files this run wrote at an unchanged pin, `old` equal to `new` |
+
+A consumer that treats `action` as a closed enum meets two new literals, `dropped`
+on `lock` and `restored` on `update`. `dropped` arrives on a new row for a pin no
+longer in the lock. On a fresh runner with no install record, `update` rows read
+`restored` where they used to read `unchanged`.
+
+`grim install` rows read `unchanged` where they read `updated` for an output this
+pass does not write, such as one of a client outside the target.
+
+**What to do.**
+
+1. Run `grim lock` once with the new grim before you hand-edit `grimoire.toml`,
+   then commit its diff. That diff only adds tags unless the project uses
+   [declared dependencies][dependencies-new-grim]. Then it also records their
+   edges, settling each as a fresh resolve does, and 0.15.1 refuses that lock.
+   An edit first makes the next write resolve every tagless pin once. One
+   warning names those pins and says which moved.
+2. Replace `grim lock` with `grim update` in any job that relied on it to roll
+   tags forward.
+3. Upgrade the team and CI together if you can, which avoids the churn above.
+
+The compatibility contract behind this note is in
+[Additive fields][stability-additive].
+
 ## A pool reader joins the pool beside a pool writer {#shared-pool-auto-join}
 
 Some clients read the cross-vendor `.agents/skills` pool but install into a
@@ -617,9 +1049,12 @@ whichever copy it read last.
 
 **What you will see.** Such a reader now installs its skills into the pool
 whenever a pool writer is in the set, so each skill exists once. An existing
-two-copy install moves on the next `grim install` or `grim update`: grim
-removes the reader's own copy, and [`grim status`][status] reads `installed`
-afterwards. A copy you
+two-copy install moves on the next `grim install`, bare `grim update`, or
+`grim update` that names or reaches the skill. That run removes the reader's own
+copy, and [`grim status`][status] reads `installed` afterwards. A named update
+that leaves the skill out leaves its copies too. `status` lists the pool path
+under `outputs_pending` until one of those runs. `grim update` reports the move
+as `restored`, and `grim install` as `updated`. A copy you
 edited by hand is never deleted. grim keeps it and warns, naming both paths,
 so you can merge your edit and delete the extra copy yourself.
 
@@ -928,6 +1363,14 @@ reader's own copy again beside the pool copy: two copies, but nothing is lost.
 [why]: ./commands.md#why
 [uninstall]: ./commands.md#uninstall
 [lock]: ./commands.md#lock
+[lock-pins]: ./commands.md#lock-pins
+[add]: ./commands.md#add
+[status-check]: ./commands.md#status-check
+[json-shapes-items]: ./json-interface.md#shapes-items
+[json-update-rows]: ./json-interface.md#update-rows
+[stability-additive]: ./stability.md#frozen-additive-fields
+[stability-forward-compat]: ./stability.md#limitations-forward-compat
+[dependencies-new-grim]: #dependencies-need-new-grim
 [fetch]: ./commands.md#fetch
 [describe]: ./commands.md#describe
 [gap-shared-pool]: ./clients.md#gap-shared-pool

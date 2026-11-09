@@ -390,8 +390,9 @@ grim release ./python-stack.toml ghcr.io/acme/python-stack:1.0.0 --pin
 already-published artifacts; consumers resolve those members at lock
 time, so a member that is not on the registry yet breaks every consumer.
 
-By default member tags stay floating and each consumer's `grim lock`
-re-resolves them fresh. `--pin` instead freezes every floating member to
+By default member tags stay floating and each consumer's first `grim lock`
+resolves them. After that the consumer's lock keeps those pins until a bare
+`grim update` or `grim update <member>` moves them. `--pin` instead freezes every floating member to
 a digest at release time, making the bundle reproducible on its own —
 the stronger guarantee for air-gapped or tunneled networks. Re-run the
 pinned release to roll members forward. `--pin` also freezes the declared
@@ -651,7 +652,8 @@ digests, so every plugin gets one new suffix on first re-export from 0.15.0
 
 Output is `<DIR>/<plugin>.<client>` or `.zip`, and an existing output is
 refused with 65 unless `--force`. A `--plugin`/`--marketplace` declared export
-re-resolves from a `marketplace.toml` and writes a `marketplace.lock` beside it
+reconciles a `marketplace.toml`, keeping the pins of unchanged includes, and
+writes a `marketplace.lock` beside it
 — a separate file from `grimoire.lock`, never mixed with it. This is a
 rendering step, not a release: no version-cascade, no announce, no
 skip-existing. The rendered `plugin.json` description is the base text alone,

@@ -121,12 +121,17 @@ once, without declaring it.
 
 `grimoire.lock` records the exact digest each declared tag resolved to, so an
 install is byte-for-byte reproducible until you deliberately upgrade.
-[`grim lock`](./commands.md#lock) resolves the floating tags in
-`grimoire.toml`; [`grim update`](./commands.md#update) re-resolves them and
+[`grim lock`](./commands.md#lock) pins what is new or changed in
+`grimoire.toml`, and keeps every other pin even after its tag moved. Only
+[`grim update`](./commands.md#update) moves those: it re-resolves the tags and
 rolls the pins forward when a newer version appears behind the same tag.
 
-The lock also stores a hash of the declaration it was generated from, so
-Grimoire can tell when `grimoire.toml` has drifted ahead of the lock.
+Each pin records the reference that resolved it, so a re-lock can tell a
+request that still holds from one you changed. The lock also stores a hash of
+the declaration it was generated from, so Grimoire can tell when
+`grimoire.toml` has drifted ahead of the lock. A
+[`grim remove`](./commands.md#remove) that cannot settle a pin offline leaves
+the lock stale until the next relock.
 
 ## Bundles {#bundles}
 
@@ -149,9 +154,9 @@ A bundle comes from one of two sources — the same split as an individual
 - **Registry bundle** — the common case. `[bundles]` names a registry
   reference (`ghcr.io/acme/python-stack:1`); the bundle is
   [published as its own OCI artifact](./publishing.md#bundles) and pinned
-  in the lock by its manifest digest, exactly like a skill or rule. Update
-  the published bundle, re-lock, and every project that declares it moves
-  together.
+  in the lock by its manifest digest, exactly like a skill or rule. Publish
+  a new version, and each project that declares it picks that version up on
+  its next [`grim update`](./commands.md#update).
 - **Local bundle** — `[bundles]` names a [local path](#references-tags-and-digests)
   (`./bundles/x.toml`) instead of a registry reference. There is no publish
   step: the bundle is pinned by the SHA-256 of its canonical members layer,
@@ -167,14 +172,16 @@ always know why an artifact is installed.
 
 ### Adding and dropping members {#bundle-membership}
 
-The bundle's member list is authoritative on every resolve, so membership tracks
-the published bundle. When a new bundle version **adds** a member, the next
-[`grim lock`](./commands.md#lock) expands it into the lock and the next install
-materializes it. When a version **drops** a member, that member leaves the lock —
-and [`grim update`](./commands.md#update) prunes its materialized files, unless
-you have edited them locally, in which case it is kept until you re-run with
-`--force`. This is the same reconciliation any artifact leaving the lock
-receives; bundles just make it routine.
+The pinned version's member list is authoritative, so membership tracks the
+bundle version your lock holds. A bundle keeps its pin until
+[`grim update`](./commands.md#update) moves it, bare or named after the bundle.
+When the new version **adds** a member, that update expands it into the lock and
+installs it.
+
+When a version **drops** a member, that member leaves the lock and the update
+prunes its materialized files. Files you have edited locally stay until a bare
+`grim update --force`. This is the same reconciliation any artifact leaving the
+lock receives. Bundles just make it routine.
 
 ### Conflict policy {#bundle-conflicts}
 
@@ -199,8 +206,9 @@ bundle bump change what a project installs without anyone noticing.
 
 Agreement is judged when you lock, not when the sources were published. Two tags
 that point at one digest today can part ways when one of them moves. A later
-`grim update` can then turn a lock that resolved cleanly into a conflict. The fix
-is the one the error names: declare the artifact directly.
+`grim update` can then turn a lock that resolved cleanly into a conflict, while
+`grim lock` keeps the pin and exits `0`. The fix is the one the error names:
+declare the artifact directly.
 
 A conflicting artifact is never expanded, so its own dependencies do not add
 further conflicts. Cycles are a separate failure, covered under
@@ -209,8 +217,11 @@ further conflicts. Cycles are a separate failure, covered under
 ### Floating versus pinned members {#bundle-pinning}
 
 A bundle's members, and the dependencies an artifact declares, can themselves be
-floating tags or exact digests. A floating reference is re-resolved fresh on every
-consumer `grim lock`, so reproducibility comes from the consumer's own lock.
+floating tags or exact digests. A floating reference resolves when it first
+enters a consumer's lock. It moves only on that consumer's
+[`grim update`](./commands.md#update), so reproducibility comes from the
+consumer's own lock.
+
 Publishing with [`grim release --pin`](./publishing.md#bundles) instead freezes
 every floating reference to a digest at publish time, so the bundle or artifact
 is reproducible on its own — the stronger guarantee for air-gapped or tunneled
@@ -250,15 +261,17 @@ with every chain from your `grimoire.toml` to the artifact.
 
 **Removing.** [`grim remove`](./commands.md#remove) drops a declaration and the
 dependencies nothing else reaches, from the lock. [`grim uninstall`](./commands.md#uninstall)
-also deletes their files. A dependency another artifact still requires stays, and
-a dependency you cannot undeclare, because you never declared it, is removed by
-removing the artifact that requires it.
+also deletes their files. A dependency another artifact still requires stays, at
+its digest and under its tag, because `remove` resolves nothing. A dependency you
+cannot undeclare, because you never declared it, is removed by removing the
+artifact that requires it.
 
-**Floating by default.** A dependency written `./gws-shared:1` is a floating tag,
-re-resolved on each `grim lock` and `grim update` like any other. A publisher who
-wants the closure fixed releases with `--pin`, see
-[Floating versus pinned members](#bundle-pinning). A relative reference resolves
-against the repository the parent was pulled from, so a mirror of the parent
+**Floating by default.** A dependency written `./gws-shared:1` is a floating tag.
+`grim lock` keeps its pin and `grim update` re-resolves it, like any other. A
+publisher who wants the closure fixed releases with `--pin`, see
+[Floating versus pinned members](#bundle-pinning).
+
+A relative reference resolves against the repository the parent was pulled from, so a mirror of the parent
 serves its dependencies from the mirror too. An absolute reference may name
 another registry. Each registry is contacted with its own credentials, and a
 credential is never sent to a different host.
@@ -298,6 +311,32 @@ grim keeps the dependencies the previous lock recorded for that exact digest,
 prints a warning that they are carried unverified, and moves on.
 [`grim install`](./commands.md#install) checks them against the pinned manifest
 before it writes anything, so a stale carry cannot install the wrong closure.
+A lock grim 0.15.1 wrote records none, so there the artifact counts as
+requiring nothing, as 0.15.1 reads it. What only that artifact requires leaves
+the lock, and the next online `grim lock` resolves it afresh, so its pin moves if
+its tag moved.
+
+The store can also hold a manifest but not the dependency list it names, as
+0.15.1's `grim add --no-install` and `grim fetch` leave it. The artifact then
+requires what the lock records for it, which is nothing on a lock 0.15.1 wrote.
+So the same entries leave the lock, as on 0.15.1.
+[`grim remove`](./commands.md#remove) reads such an artifact that way too, even
+where the store holds the list.
+
+One online `grim lock` before the edit records
+the list, and the edit then keeps those pins. The first `grim install` on a lock
+0.15.1 wrote over such an artifact already exits `65` and names `grim lock`.
+
+A marketplace plugin's `marketplace.lock` drops such entries the same way. An
+include deleted there leaves the plugin. If something still requires it,
+`grim update --marketplace` resolves it afresh, so its pin moves if its tag
+moved.
+
+A declared bundle works the same way. Offline, its row in the lock stands in for
+a manifest the store lacks, so a clean lock relocks with no network. A pin an
+offline run does move comes from the local tag cache, which can lag behind the
+lock. A warning names each one, and each row a tag read added or dropped. An
+online `grim update` resolves them fresh.
 
 ## Scopes {#scopes}
 
@@ -352,9 +391,10 @@ entry contributes, and out of the box it is fed by the public
 
 By default Grimoire is **online**: every floating-tag lookup resolves fresh
 against the registry, and the resolved digest is cached as a write-through so
-later offline runs still work. A floating tag therefore never serves a stale
-pin — there is no "use the cache first" mode to surprise you, and no `--remote`
-flag to remember.
+later offline runs still work. A lookup therefore never answers from a stale
+cache. There is no "use the cache first" mode to surprise you, and no `--remote`
+flag to remember. A lookup is not a refresh: a pin stays in the lock until
+[`grim update`](./commands.md#update) moves it.
 
 Pass `--offline` to flip to **cache-only**: Grimoire forbids all network access
 and fails rather than touch a registry — useful in sealed CI or an air-gapped

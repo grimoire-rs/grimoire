@@ -91,12 +91,12 @@ One row object per item inside `{"items": [...]}`:
 
 | Command | Item shape | Enum values |
 |---------|-----------|-------------|
-| `lock` | `{kind, name, pinned, action}` | `action`: `locked`, `unchanged` |
+| `lock` | `{kind, name, pinned, action, disposition}` — see [the `lock` rows](#lock-rows) | `action`: `locked`, `unchanged`, `dropped`; `disposition`: `added`, `carried`, `moved`, `dropped` |
 | `install` | `{kind, name, target, status, armed}` + sibling envelope key `settings_changes`, always present and `[]` when no [settings value][settings-changes] moved | `status`: `installed`, `updated`, `unchanged`, `refused`, `skipped` — `armed` is always present and `null` for every non-hook kind; for a hook it is an array of `{client, tier}` naming what this install left armed, sorted, `[]` when the hook installed but armed nowhere (never the same as `null`) |
-| `status` | `{kind, name, source, direct, required_by, pinned, state, arming, outputs, outputs_pending, clients_missing, clients_extra, clients_unresolved, deprecated, replaced_by, update_available}` + sibling envelope key `checked` (bool) — `source`, `direct` and `required_by` say why the row is installed, see [Why an artifact is installed](#status-provenance); `pinned` null until locked; `arming` is always present, `[]` for every kind but `hook` and `settings`, for a hook armed on every configured client, and for a settings package nothing holds back — see [Hook arming](#hook-arming) for its shape and the closed `cause` table; `outputs` is `[{client, path, element}]`, where `element` is the array element a set-valued settings piece owns and `null` on every other output; `outputs_pending` is the same shape, `element` always `null`, and stays `[]` on a settings row because `status` holds no package document, naming the outputs `grim install` would write **right now** that the install record does not already account for — **materialization drift** — sorted by client and `[]` when an install would write nothing new. Two causes, both real install work: a client that gained support since the last install (present on the machine, or newly configured), and a render-layout move (reported at the NEW path). A present-but-*drifted* output is deliberately absent from it — that is `state: modified`, a different problem with a different remedy — and so is a recorded output whose file was **deleted**, which surfaces as `state: missing`. Unlike `clients_missing` it is reported under autodetect too, because it asks what an install would do rather than what the user configured, and it is derived from the same seam the installer's own no-op check uses. Remediation is `grim install` — **not** `grim update`, which also re-resolves floating tags and rolls the lock forward. `state` is unaffected (an intact artifact at the locked pin still reads `installed`) and the exit code stays `0`; `clients_missing`/`clients_extra` are sorted client-name arrays diffing the project's configured client target against the artifact's recorded install-state clients (`[]` when they agree, incl. always for a declared-bundle row or a dev-install row); measured only against an *explicitly set* `[options].clients` — when it is unset (autodetect), both stay `[]` on every item rather than being verified against live client detection; `clients_missing` additionally omits any configured client whose vendor cannot host that artifact kind at that scope (a Codex rule, say), since no output was ever going to be recorded for it, and is always `[]` on a settings row, as on a bundle row: an install records a client only for the values the package declares for it, which `status` cannot see without the package. A settings row therefore never reports a newly selected client, in `clients_missing` or in `outputs_pending`; `grim install` applies the package to that client; `clients_unresolved` is a sorted client-name array naming every active client whose recorded output could not be resolved (anchor root absent here, or refused by the containment guard) and is therefore missing from `outputs` — `[]` normally; `state` stays `missing` and the exit code stays `0`; `deprecated`/`replaced_by`/`update_available` are the [`--check`](./commands.md#status-check) fields — see the [nullability table](#status-check-nullability) below and [grim status][commands-status] | `state`: `installed`, `stale`, `modified`, `missing`, `outdated` for every kind, plus `gated` and `not-armed` on a [hook](./hooks.md) or settings row, and `untrusted` on a hook row only |
-| `update` | `{kind, name, old, new, action, reaped_clients, kept_modified_clients, retained, abandoned_entries, refused, plugin}` + sibling envelope keys `settings_changes` and `pieces`, both always present and `[]` when empty: a refused [settings piece][settings-force] travels in `pieces` because `update` emits its report alongside exit `65` — `old` null for a first lock, `new` null for a pruned row; `reaped_clients`/`kept_modified_clients` are sorted client-name arrays (`[]` when no client left the configured set on this row) naming, respectively, the [dropped clients](./commands.md#update) whose unmodified output was deleted and whose locally-modified output was preserved; reap is only attempted against an *explicitly set* `[options].clients` — when it is unset (autodetect), both stay `[]` on every row rather than being verified against live client detection; `retained` is an always-present array of absolute paths (`[]` normally) naming the on-disk footprint the containment guard refused to delete while the pruned record — or the reaped dropped-client output — was dropped anyway, the same reported-divergence contract as [`uninstall`](#shapes-single)'s `retained`, and distinct from `kept_modified_clients` (a user edit grim preserved and left *recorded*); `abandoned_entries` is `retained`'s counterpart for a managed MCP entry inside a shared, user-owned config file grim never intended to delete — an always-present array of `{path, pointer, element}` objects (`[]` normally), `path` the config file and `pointer` the two-level JSON pointer of the un-spliced member, sorted and deduplicated. `element` is the list element a settings piece owned, else `null`. An entry grim [adopted][commands-update] rather than wrote stays in the file when a reap drops its client, and is named here while the client stays in `reaped_clients`. A new pin can also leave a client unable to represent the server. Its stale entry is named here if grim adopted it and `--force` is absent, or if grim cannot read it. An entry you edited refuses the row (`refused` is `true`) unless `--force` is given, and is then named here as well. That client stays selected, so the row's `reaped_clients` can be `[]`. A settings value grim left in place when the lock dropped it is named here too, on the rows [Ownership][settings-ownership] lists; `refused` is an always-present bool, `true` only on a row whose on-disk bytes drifted from the recorded hash so the [integrity gate](./commands.md#update) left it untouched (rerun with `--force`, which on `update` also authorizes its prune and reap deletions). **A refusal does not suppress the report:** every other artifact still reconciles and the report is emitted on stdout as usual, alongside exit `65` — so a refused `grim update` carries a normal report rather than an [error document](#error-document) (see [exit codes and JSON together](#exit-interplay)), and `refused` is what identifies the offending row. Each refusal is also named on stderr; the plain table has no `refused` column; `plugin` is an always-present string-or-null naming the [declared plugin](./commands.md#update-marketplace) a row belongs to under [`--marketplace`](./commands.md#update-marketplace) — `null` on every row of a plain `grim update`, since that mode knows no plugins — serialized last so every pre-existing key keeps its wire position; the plain table has no `Plugin` column either, prefixing `Name` with `<plugin>:` instead | `action`: `updated`, `unchanged`, `removed`, `kept-modified` — the lock diff, unaffected by a refusal (the pin rolled forward; only the materialization was refused) |
-| [`export plugin`][commands-export] | `{plugin, client, family, format, path, version, members, omitted}` — `client` may be `qoder`, a `claude`-family plugin; `family` is `claude` or `agent-plugins`; `format` is `dir` or `zip`; `path` is the absolute final output path; `version` is the rendered `plugin.json`'s `<base>+<12-hex-content-hash>` string (see [export's version grammar](./commands.md#export-plugin-output)); `members` is an always-present array of `{kind, name, lock_name, pinned}` — `name` is the emitted (post-rename) name, `lock_name` the name it carries in the lock, and `pinned` its resolved pin or path source — sorted by `(kind, name)`; `omitted` is an always-present array of `{kind, name, reason}`, same sort, `reason` one of the kebab literals `client-declined`, `no-format-surface`, `not-representable` (a [hook](./hooks.md) member is always omitted, `not-representable` for the Claude family and `no-format-surface` for Agent Plugins — an exported plugin runs without grim, which a hook needs at run time) (see the [per-client admission table](./commands.md#export-plugin-admission)); one item per `(plugin, client)` pair actually written, ordered by plugin (byte order) then by `--client`'s selection order; emitted only on success — a refusal (an existing output without `--force`, an empty admitted set, …) is an [error document](#error-document) instead, never a partial report | — |
-| [`export marketplace`][commands-export-marketplace] | `{plugin, client, family, path, version, action, members, omitted}` + sibling envelope key `files` — `client` is one of `claude`, `copilot`, `codex`, `qoder`, `cursor`; `family` is `claude` or `agent-plugins`; `path` is the absolute path of the plugin tree; `version` is the tree's `<base>+<12-hex>` string, or `null` on a `removed` or `empty` row; `members` and `omitted` are the [`export plugin`][commands-export] arrays, `[]` on a `removed` row, and on an `empty` row `omitted` names every member; a [hook](./hooks.md#export-declines) member always appears in `omitted`, with the same `reason` as in `export plugin`; one item per `(plugin, client)` pair, ordered by plugin (byte order) then by the selected clients' order, then the `removed` rows by client and plugin. `files` is an always-present array of `{client, path, action, plugins}`, one per marketplace file, in client order, then the root `README.md` row, with removed files last: `client` is `null` on the README row, `path` is the absolute file path and `plugins` lists the plugins the file carries (`[]` on a `removed` row). Emitted only on success; see [the report](./commands.md#export-marketplace-json) | `action`: `written`, `unchanged`, `removed`, `empty` on an item; `written`, `unchanged`, `removed` on a file |
+| `status` | `{kind, name, source, direct, required_by, pinned, state, arming, outputs, outputs_pending, clients_missing, clients_extra, clients_unresolved, deprecated, replaced_by, update_available, moved_nested_bundles}` + sibling envelope key `checked` (bool) — `source`, `direct` and `required_by` say why the row is installed, see [Why an artifact is installed](#status-provenance); `pinned` null until locked, and it never carries the tag the lock records; `arming` is always present, `[]` for every kind but `hook` and `settings`, for a hook armed on every configured client, and for a settings package nothing holds back — see [Hook arming](#hook-arming) for its shape and the closed `cause` table; `outputs` is `[{client, path, element}]`, where `element` is the array element a set-valued settings piece owns and `null` on every other output; `outputs_pending` is the same shape, `element` always `null`, and stays `[]` on a settings row because `status` holds no package document, naming the outputs `grim install` would write **right now** that the install record does not already account for — **materialization drift** — sorted by client and `[]` when an install would write nothing new. Two causes, both real install work: a client that gained support since the last install (present on the machine, or newly configured), and a render-layout move (reported at the NEW path). A present-but-*drifted* output is deliberately absent from it — that is `state: modified`, a different problem with a different remedy — and so is a recorded output whose file was **deleted**, which surfaces as `state: missing`. Unlike `clients_missing` it is reported under autodetect too, because it asks what an install would do rather than what the user configured, and it is derived from the same seam the installer's own no-op check uses. Remediation is `grim install` — **not** `grim update`, which also re-resolves floating tags and rolls the lock forward. `state` is unaffected (an intact artifact at the locked pin still reads `installed`) and the exit code stays `0`; `clients_missing`/`clients_extra` are sorted client-name arrays diffing the project's configured client target against the artifact's recorded install-state clients (`[]` when they agree, incl. always for a declared-bundle row or a dev-install row); measured only against an *explicitly set* `[options].clients` — when it is unset (autodetect), both stay `[]` on every item rather than being verified against live client detection; `clients_missing` additionally omits any configured client whose vendor cannot host that artifact kind at that scope (a Codex rule, say), since no output was ever going to be recorded for it, and is always `[]` on a settings row, as on a bundle row: an install records a client only for the values the package declares for it, which `status` cannot see without the package. A settings row therefore never reports a newly selected client, in `clients_missing` or in `outputs_pending`; `grim install` applies the package to that client; `clients_unresolved` is a sorted client-name array naming every active client whose recorded output could not be resolved (anchor root absent here, or refused by the containment guard) and is therefore missing from `outputs` — `[]` normally; `state` stays `missing` and the exit code stays `0`; `deprecated`/`replaced_by`/`update_available`/`moved_nested_bundles` are the [`--check`](./commands.md#status-check) fields — see the [nullability table](#status-check-nullability) below and [grim status][commands-status] | `state`: `installed`, `stale`, `modified`, `missing`, `outdated` for every kind, plus `gated` and `not-armed` on a [hook](./hooks.md) or settings row, and `untrusted` on a hook row only |
+| `update` | `{kind, name, old, new, action, reaped_clients, kept_modified_clients, retained, abandoned_entries, refused, plugin}` + sibling envelope keys `settings_changes` and `pieces`, both always present and `[]` when empty, and on a [named run](#update-rows) holding only the closure's settings packages: a refused [settings piece][settings-force] travels in `pieces` because `update` emits its report alongside exit `65` — `old` null for a first lock, `new` null for a row with no new pin (a pruned or kept orphan, or a [named run's](#update-rows) unpruned `removed` row); `reaped_clients`/`kept_modified_clients` are sorted client-name arrays (`[]` when no client left the configured set on this row) naming, respectively, the [dropped clients](./commands.md#update) whose unmodified output was deleted and whose locally-modified output was preserved; reap is only attempted against an *explicitly set* `[options].clients` — when it is unset (autodetect), both stay `[]` on every row rather than being verified against live client detection, and a [named run](#update-rows) never reaps, so both stay `[]` there too; `retained` is an always-present array of absolute paths (`[]` normally) naming the on-disk footprint the containment guard refused to delete while the pruned record — or the reaped dropped-client output — was dropped anyway, the same reported-divergence contract as [`uninstall`](#shapes-single)'s `retained`, and distinct from `kept_modified_clients` (a user edit grim preserved and left *recorded*); `abandoned_entries` is `retained`'s counterpart for a managed MCP entry inside a shared, user-owned config file grim never intended to delete — an always-present array of `{path, pointer, element}` objects (`[]` normally), `path` the config file and `pointer` the two-level JSON pointer of the un-spliced member, sorted and deduplicated. `element` is the list element a settings piece owned, else `null`. An entry grim [adopted][commands-update] rather than wrote stays in the file when a reap drops its client, and is named here while the client stays in `reaped_clients`. A new pin can also leave a client unable to represent the server. Its stale entry is named here if grim adopted it and `--force` is absent, or if grim cannot read it. An entry you edited refuses the row (`refused` is `true`) unless `--force` is given, and is then named here as well. That client stays selected, so the row's `reaped_clients` can be `[]`. A settings value grim left in place when the lock dropped it is named here too, on the rows [Ownership][settings-ownership] lists; `refused` is an always-present bool, `true` only on a row whose on-disk bytes drifted from the recorded hash so the [integrity gate](./commands.md#update) left it untouched (rerun with `--force`, which on a bare `grim update` also authorizes its prune and reap deletions, and on a [named run](#update-rows) stops at the closure and authorizes no reap). **A refusal does not suppress the report:** every other artifact in scope still reconciles (the whole lock on a bare run, the closure on a named one) and the report is emitted on stdout as usual, alongside exit `65` — so a refused `grim update` carries a normal report rather than an [error document](#error-document) (see [exit codes and JSON together](#exit-interplay)), and `refused` is what identifies the offending row. Each refusal is also named on stderr; the plain table has no `refused` column; `plugin` is an always-present string-or-null naming the [declared plugin](./commands.md#update-marketplace) a row belongs to under [`--marketplace`](./commands.md#update-marketplace) — `null` on every row of a plain `grim update`, since that mode knows no plugins — serialized last so every pre-existing key keeps its wire position; the plain table has no `Plugin` column either, prefixing `Name` with `<plugin>:` instead; no key carries the `<tag>@<digest>` value a [`marketplace.lock`](./configuration.md#marketplace-toml) holds in `bundle_tag` | `action`: `updated`, `unchanged`, `removed`, `kept-modified`, `restored` — all but `restored` are the lock diff, unaffected by a refusal (the pin rolled forward; only the materialization was refused). `restored` comes from the install outcome, see [the `update` rows](#update-rows) |
+| [`export plugin`][commands-export] | `{plugin, client, family, format, path, version, members, omitted}` — `client` may be `qoder`, a `claude`-family plugin; `family` is `claude` or `agent-plugins`; `format` is `dir` or `zip`; `path` is the absolute final output path; `version` is the rendered `plugin.json`'s `<base>+<12-hex-content-hash>` string (see [export's version grammar](./commands.md#export-plugin-output)); `members` is an always-present array of `{kind, name, lock_name, pinned}` — `name` is the emitted (post-rename) name, `lock_name` the name it carries in the lock, and `pinned` its resolved pin or path source — sorted by `(kind, name)`; `omitted` is an always-present array of `{kind, name, reason}`, same sort, `reason` one of the kebab literals `client-declined`, `no-format-surface`, `not-representable` (a [hook](./hooks.md) member is always omitted, `not-representable` for the Claude family and `no-format-surface` for Agent Plugins — an exported plugin runs without grim, which a hook needs at run time) (see the [per-client admission table](./commands.md#export-plugin-admission)); one item per `(plugin, client)` pair actually written, ordered by plugin (byte order) then by `--client`'s selection order; emitted only on success — a refusal (an existing output without `--force`, an empty admitted set, …) is an [error document](#error-document) instead, never a partial report; no key carries the `<tag>@<digest>` value a [`marketplace.lock`](./configuration.md#marketplace-toml) holds in `bundle_tag` | — |
+| [`export marketplace`][commands-export-marketplace] | `{plugin, client, family, path, version, action, members, omitted}` + sibling envelope key `files` — `client` is one of `claude`, `copilot`, `codex`, `qoder`, `cursor`; `family` is `claude` or `agent-plugins`; `path` is the absolute path of the plugin tree; `version` is the tree's `<base>+<12-hex>` string, or `null` on a `removed` or `empty` row; `members` and `omitted` are the [`export plugin`][commands-export] arrays, `[]` on a `removed` row, and on an `empty` row `omitted` names every member; a [hook](./hooks.md#export-declines) member always appears in `omitted`, with the same `reason` as in `export plugin`; one item per `(plugin, client)` pair, ordered by plugin (byte order) then by the selected clients' order, then the `removed` rows by client and plugin. `files` is an always-present array of `{client, path, action, plugins}`, one per marketplace file, in client order, then the root `README.md` row, with removed files last: `client` is `null` on the README row, `path` is the absolute file path and `plugins` lists the plugins the file carries (`[]` on a `removed` row). No key carries the `<tag>@<digest>` value a [`marketplace.lock`](./configuration.md#marketplace-toml) holds in `bundle_tag`. Emitted only on success; see [the report](./commands.md#export-marketplace-json) | `action`: `written`, `unchanged`, `removed`, `empty` on an item; `written`, `unchanged`, `removed` on a file |
 | `search` | `{kind, repo, source, summary, description, version, latest_tag, repository, revision, created, deprecated, replaced_by, rating, downloads, oci, status}` — `oci` is the curated `{licenses, authors, url, documentation, vendor, compatibility}` object read off the manifest (the same one the TUI detail pane renders), every field `null` when the manifest carried none and `licenses` the only one an index-backed row can supply; `compatibility` is a skill's authored editor/runtime hint and is `null` for every other kind. Repository-level support channels are **not** here — they live on the mutable description companion and are read live by [`grim describe`](./commands.md#describe), never off the disk-cached browse catalog; `kind` is `null` when the catalog row's manifest declares none; `source` is the `{alias, locator}` attribution of the configured [`[[registries]]`](./configuration.md#multiple-registries) entry the row was browsed from — `alias` is `null` when that entry declares none (also under `--registry` and the legacy single-registry fallback), `locator` is byte-identical to the configured value and is **not** derivable from `repo`, which names the artifact's own registry host; `replaced_by` is the successor reference or `null`; `rating` is the [artifact rating](./ratings.md) object or `null` — see [the `rating` object](#search-rating) below; `downloads` is the pull-count object or `null` — see [the `downloads` object](#search-downloads) below. Sibling envelope keys `sources`, `total` and `truncated` (always present) name every browsed source and whether its catalog loaded, how many rows matched, and whether `items` is the whole answer — see [the `sources` array](#search-sources) and [the `total` and `truncated` fields](#search-total) below; see [grim search][commands-search] | `status`: install badge (`installed`, `not-installed`, `outdated`, `modified`, `pending`) |
 | [`hook list`][cmd-hook] | `{artifact, id, tier, events, state, arming}` (experimental — see [Stability](./stability.md#unstable)) — one item per declared `[[hooks]]` entry, `arming` nested rather than flattened; `state` and `arming` are the same tokens and shape [`grim status`](#report-shapes) uses for a hook row, never a second derivation of the same gates. Sibling envelope key `launcher` (always present, also when `items` is `[]`) is `{path, sha256, state}`: `path` is the absolute `hooks/grim-hook` path, `sha256` the hex digest of the file there or `null` when it is missing, a directory or a symlink, and `state` one of `current` (the bytes this grim embeds), `stale` (any other file, link or wrong mode), `occupied` (a directory) or `missing`; read without writing | `state`: `installed`, `gated`, `not-armed`, `untrusted` |
 | `config list` | `{key, value, set, type, title, description, default, values, constraints, section, advanced}` — `constraints` is `null` except for keys whose list items carry a shape rule beyond closed-set membership; `section` names the settings panel and `advanced` marks keys a UI may hide | — |
@@ -157,6 +157,80 @@ edges:
   row never reports a state without naming a file. `clients_extra` is the
   field that does name a recorded client the configured set no longer
   wants, and only when `[options].clients` is explicitly set.
+
+#### The `lock` rows {#lock-rows}
+
+`grim lock` reports one row per artifact the lock holds, plus one per artifact
+it dropped. A bundle has no row. `pinned` reads `registry/repo@sha256:…` or
+`./path@sha256:…`, with no tag, so it did not change when the lock file began to
+record tags. On a `dropped` row it is the pin the artifact left behind.
+
+`disposition` says how the pin relates to the previous lock. With no previous
+lock, every row is `added`.
+
+| `disposition` | Meaning | `action` |
+|---|---|---|
+| `added` | Not in the previous lock | `locked` |
+| `carried` | The same content, including a pin that only gained or lost its tag | `unchanged` |
+| `moved` | Different content | `locked` |
+| `dropped` | In the previous lock, gone from this one | `dropped` |
+
+`action` keeps its meaning. `disposition` is what tells a new pin from a moved
+one, which `locked` covers both of.
+
+#### The `update` rows {#update-rows}
+
+A bare `grim update` reports one row per locked artifact, plus one per orphan
+the prune pass acted on. An artifact that left the lock with no install record
+has no row.
+
+`grim update <names>` works on a closure: the named bindings, a named bundle's
+members, and everything they require. Its report holds:
+
+- a row for every artifact of the closure in the new lock,
+- a row for every orphan it pruned or kept, taken only from the closure in the
+  previous lock,
+- a row for every other artifact whose lock entry changed.
+
+An unnamed artifact whose pin did not move has no row, so read
+[`grim status`][commands-status] for those.
+
+A row of the third kind reports the lock, not the disk. Its `updated` installed
+nothing, and its `removed` deleted nothing and carries `new: null`. One warning
+on stderr names each artifact whose files stayed where they were. `grim install`
+applies a new pin, and `grim uninstall <kind> <name>` removes the files of one
+that left the lock. A bare `grim update` prunes those too, and moves every pin.
+
+`--force` reaches less far on a named run. It overwrites inside the closure and
+authorizes that closure's prune, and it authorizes no reap. A `kept-modified`
+row has left the lock, so no later named run sees it. A warning names
+`grim uninstall --force <kind> <name>`, and a bare `grim update --force`, which
+also moves every pin.
+
+An install record the lock no longer holds is outside every closure, so it gets
+no row. A run that crashed past its lock write leaves one. A warning names it
+and `grim uninstall <kind> <name>`. A bare `grim update` prunes it too, and moves
+every pin. Every command a warning names carries the run's `--global` or
+`--config`.
+
+With no previous lock, every declared artifact resolves and has a row, `updated`
+with `old: null`, and only the closure installs. A warning says so and names any
+name that matched nothing, and the exit stays `0`. With a lock, an unknown name
+exits `79`, and a stale lock exits `65` with reason [`stale-lock`](#error-reason).
+
+`restored` is the one `action` the lock diff cannot produce. The pin did not
+change and this run wrote the artifact's files, so `old` equals `new`. That
+covers a deleted output coming back and a client added to `[options].clients`
+getting its first copy. It also covers a fresh runner with no install record,
+where every carried row reads `restored`. A layout move reads `restored` once
+too, such as a [pool reader joining the shared pool](./upgrading.md#shared-pool-auto-join).
+
+An MCP entry that the client's config
+already holds exactly is adopted and nothing is written, so its row reads
+`unchanged`. So does a hook whose client registration the run writes back,
+since the registration is not one of the files its row installs. A row refused
+at an unchanged pin stays `unchanged`,
+and a `--marketplace` run installs nothing, so its rows never read `restored`.
 
 #### The `search` sources array {#search-sources}
 
@@ -373,10 +447,10 @@ use an [`items` envelope](#items-envelope): a scalar could never have grown
 
 #### `status --check` nullability {#status-check-nullability}
 
-`status`'s top-level `checked` gates three per-item fields —
-`deprecated`, `replaced_by`, `update_available` — added by
-[`--check`](./commands.md#status-check). `checked == false` (no `--check`,
-or `--check --offline`) forces all three to `null` on every item.
+`status`'s top-level `checked` gates the four per-item fields
+[`--check`](./commands.md#status-check) adds: `deprecated`, `replaced_by`,
+`update_available` and `moved_nested_bundles`. `checked == false` (no `--check`,
+or `--check --offline`) forces all four to `null` on every item.
 
 `deprecated` / `replaced_by` come from each registry's catalog, matched by
 `(registry, repository)`. When a refresh fails over a warm cache, the cached
@@ -387,6 +461,7 @@ rows are used. A registry reads `null` only when it failed with no cache:
 | `false` | any | `null` |
 | `true` | no registry pin (declared-bundle row, dev-install row, [path source](./commands.md#add-path)) | `null` |
 | `true` | registry pin (direct or bundle member), no catalog match (dropped repo, or that item's registry failed with no cache) | `null` |
+| `true` | any, when the catalog lookup had no answer by the run's 300 s deadline, with one warning | `null` |
 | `true` | registry pin, catalog match, not deprecated | `null` |
 | `true` | registry pin, catalog match, deprecated | notice / successor (`replaced_by` still `null` if the publisher named none) |
 
@@ -400,33 +475,89 @@ uses. A release the declared reference does not point at is therefore
 float, and a digest pin all report `false` while the repository carries a
 strictly higher tag.
 
-Three row kinds carry a declared reference. A **directly-declared** row
-resolves what `grimoire.toml` names. A **bundle** row resolves the declared
-bundle reference against the `[[bundle]]` snapshot's manifest digest — the
-only signal a bundle that gained or dropped a member ever emits, since the
-members already in the lock keep their own pins. A **bundle member** row
-resolves the member id its bundle listed, which can float independently of
-the bundle (`stack:1.0.0` listing `code-review:stable`).
+Four row kinds carry a reference. A **directly-declared** row
+resolves what `grimoire.toml` names.
+
+A **bundle** row resolves the declared bundle reference against the
+`[[bundle]]` snapshot's manifest digest. That is the only signal a bundle that
+gained or dropped a member ever emits. The members already in the lock keep
+their own pins. A **bundle member** row resolves the member id its bundle
+listed, which can float independently of the bundle (`stack:1.0.0` listing
+`code-review:stable`).
+
+A **dependency** row, reached only through `requires` edges, resolves the tag
+its pin carries while an edge names that tag. A tagless pin, or a kept pin whose
+tag no edge names any more, resolves the smallest edge the lock records. A
+digest-bearing edge holds the pin wherever a tag beside it moved, so that row
+reads `false`. The answer is for the recorded reference. It does not predict a
+moved parent that switches or drops the edge, or a diamond whose edges diverge.
+
+A dependency row answers only on edges your local store confirms. Each parent
+that records an edge onto it must be in the store at its pin. The manifest stored
+there must list the same edges. Otherwise the row reads `null`, as on a
+fresh clone before its first `grim install`. `grim install` and `grim lock`
+store the parents.
+
+A bundle member row still reads the member id from the lock's `[[bundle]]`
+snapshot.
+
+`update_available` answers for the row's own pin and nothing else, so
+`grim update -- <name>` is what clears a `true`. A dependency the lock records
+under more than one reference is the exception. A named update re-resolves
+every reference, so its plain note names no command. A **nested bundle** has no row of
+its own and never flips one. It answers through `moved_nested_bundles` instead.
 
 | `checked` | Item condition | `update_available` |
 |-----------|-----------------|---------------------|
 | `false` | any | `null` |
 | `true` | no lock pin (dev-install row, [path source](./commands.md#add-path), path-sourced bundle) | `null` |
-| `true` | registry pin, re-resolution failed (transport/auth) | `null` |
+| `true` | dependency row with a tagless pin and no readable recorded edge | `null` |
+| `true` | dependency row with a parent the local store lacks at its pin, or whose stored manifest lists other edges than the lock records | `null` |
+| `true` | row the lock records under more than one reference, whose references resolve to different digests, or one vanished beside one that resolves | `null` |
+| `true` | registry pin, re-resolution failed (transport/auth, or past its 30 s deadline) | `null` |
+| `true` | registry pin past the run's cap of 2,048 re-resolves, rows first, with one warning | `null` |
+| `true` | registry pin with no answer when the run's 300 s deadline passed, with one warning | `null` |
+| `true` | registry pin whose tag falls outside the OCI grammar, so no request is sent | `null` |
 | `true` | registry pin, re-resolution completed, the declared reference resolves to a digest that **differs** from the lock pin | `true` |
 | `true` | registry pin, re-resolution completed, the declared reference resolves to the lock pin (or the tag vanished) | `false` |
 
-**The consumer rule: `checked == false` implies every one of the three
-fields is `null` on every item, full stop — never conditional on the
-item.** `checked == true` means the check ran online across the scope's
-registries; it does not guarantee every item resolved. A single
-registry's catalog refresh failing falls back to its cached catalog, and
-with none cached degrades only that registry's rows'
-`deprecated`/`replaced_by` (same as `grim search`); a single artifact's
-re-resolution failing leaves just that row's `update_available` `null`. A
-completed re-resolution that finds nothing newer reports `false` — only a
-failed re-resolution (or an ineligible row) reports `null`, so absence
-never lies as `false`.
+`moved_nested_bundles` is the last key of an item. It is `null`, or a list of
+`{name, reference}` objects sorted by name.
+
+It lists the nested bundles the row reaches whose recorded reference moved past
+their pin. The walk goes through nodes that
+have no row of their own and stops at another row. A bundle therefore lands on the
+rows nearest it. `name` is the `[[bundle]]` name and `reference` is what grim
+re-resolved.
+
+| `checked` | Item condition | `moved_nested_bundles` |
+|-----------|-----------------|------------------------|
+| `false` | any | `null` |
+| `true` | nothing it reaches moved, or nothing applies | `[]` |
+| `true` | a nested bundle it reaches moved | the list, leaving out any whose re-resolve failed |
+| `true` | a nested bundle it reaches has no answer, and none it reaches moved | `null` |
+| `true` | grim cannot place nested bundles under rows: the graph is not computable offline, or the listing passed its work budget, with one warning | `null` |
+
+`grim update -- <listed name>` moves that bundle's pin, can change its members and
+clears the listing. `grim update -- <row>` leaves it, because the row's own pin
+held. Plain output keeps its columns and adds stderr notes, one per row with an
+update and one per moved nested bundle. Each names the command with the run's
+`--global` or `--config`. On a stale lock it names
+`grim lock` first instead, and a key the lock records under more than one
+reference gets no command. Neither note reaches JSON.
+
+**The consumer rule: `checked == false` means all four fields are `null` on
+every item, whatever the item.**
+
+`checked == true` means the check ran online across the scope's registries, and
+does not guarantee every item resolved. A single registry's catalog refresh
+failing falls back to its cached catalog. With none cached it degrades only that
+registry's rows' `deprecated`/`replaced_by`, the same as `grim search`. A single
+artifact's re-resolution failing leaves just that row's `update_available` `null`.
+
+A completed re-resolution that finds no move reports `false`. Only a failed
+re-resolution, or an ineligible row, reports `null`, so absence never lies as
+`false`.
 
 `config list`'s `type` field is one of `string`, `boolean`, `integer`,
 `enum`, `string-list`, `string-set`. `string-list` is an ordered, open
@@ -490,7 +621,7 @@ it is stored as one literal glob. Read the true array from `--format json`.
 | Command | Shape | Enum values |
 |---------|-------|-------------|
 | `init` | `{path, scope, status}` | `status`: `created` |
-| `add` | `{kind, name, pinned, status, pulled_in, settings_changes}` — `pulled_in` is always present: the `[{kind, name, pinned}]` dependencies this add brought into the workspace, in kind order (skill, rule, agent, bundle, mcp, hook, settings) then name, `[]` when it brought none; the target itself is never listed, and neither is anything the workspace already provided. `install` and `update` carry no `pulled_in`. Plain output names them in one stderr line. `settings_changes` is always present and serialized last, `[]` when no [settings value][settings-changes] moved | `status`: `added` |
+| `add` | `{kind, name, pinned, status, pulled_in, moved, dropped, settings_changes}` — `pulled_in` is always present: the `[{kind, name, pinned}]` dependencies this add brought into the workspace, in kind order (skill, rule, agent, bundle, mcp, hook, settings) then name, `[]` when it brought none; the target itself is never listed, and neither is anything the workspace already provided. `install` and `update` carry no `pulled_in`. Plain output names them in one stderr line. `moved` is always present too: the pins this add moved, in the same shape and order, `[]` when none, as when a new edge released a carried pin. An artifact target is among them when the previous lock pinned it at another digest, and a target the previous lock did not hold is never listed. A `[[bundle]]` pin has no row in this report: a moved one, a bundle target included, gets the stderr line `bundle '<name>' moved its pin from <old> to <new>`. `dropped` is always present too: the pins this add took out of the lock, in the same shape and order, each at the pin it held, `[]` when none. Plain output names each list on stderr. A dropped pin's files stay: `grim uninstall <kind> <name>` removes them, and a bare `grim update` prunes them too but moves every pin. `status` stays `added` when the add kept the pin the lock held for its target, a reference already declared or a new key whose held pin answers it, and one stderr note names `grim update -- <name>` with the run's `--global` or `--config`. `settings_changes` is always present and serialized last, `[]` when no [settings value][settings-changes] moved | `status`: `added` |
 | `remove` | `{kind, name, status}` | `status`: `removed`, `absent` |
 | `uninstall` | `{kind, name, status, retained, abandoned_entries, settings_changes}` — `retained` is an always-present array of absolute paths (`[]` unless something was deliberately left behind) naming the on-disk footprint grim kept while the install-state record was dropped anyway — either the containment guard refused to delete it, or it is a locally-modified copy stranded at a vendor root a release relocated, which the kept-modified rule preserves; a non-empty array means state and filesystem deliberately diverge and the listed paths must be removed by hand; `abandoned_entries` is `retained`'s counterpart for a managed MCP entry inside a shared, user-owned config file grim never intended to delete — an always-present array of `{path, pointer}` objects (`[]` normally), `path` the config file and `pointer` the two-level JSON pointer of the un-spliced member; a non-empty array means the entry is now unrecorded and grim will never remove it on a later uninstall — the user must splice it out by hand. Each object also carries `element`, the list element a settings piece owned, else `null`. An adopted settings value that still matches its record is named here even under `--force`, as [settings uninstall][settings-uninstall] describes. `settings_changes` is always present, `[]` when no settings value moved | `status`: `uninstalled`, `kept-by-bundle`, `not-installed`, `kept-by-dependency` — `kept-by-bundle` and `kept-by-dependency` both mean the artifact was never declared directly and something still reaches it, a bundle for the first and another artifact's dependency for the second, so nothing was changed; see [`grim uninstall`][commands-uninstall] |
 | `why` | `{kind, name, pinned, direct, paths, path_count, truncated, overrides}` — every field always present; see [the `why` report](#why-report) | — |
@@ -665,14 +796,14 @@ after the table says.
 | `not-armed` | `grim-home-shared` | Windows only: `GRIM_HOME` is not a local path under `%USERPROFILE%` or `%LOCALAPPDATA%`, such as a UNC path. Another host could then run this host's launcher, or on a settings row change this host's settings records. Give each host its own local `GRIM_HOME`. |
 | `not-armed` | `binding-name-reserved` | A hook is bound under a name grim keeps under `$GRIM_HOME/hooks` (`bin`, `consent`, `dispatch.json`, `dispatch.json.lock`, `grim-hook`, `grim-hook.exe`, `payload`, `root-key`), or under a name ending in `.exe`, `.com`, `.bat` or `.cmd`. Rename the binding in `grimoire.toml`. |
 | `not-armed` | `platform-unsupported` | grim runs on Windows and the client is not one that arms there yet (only Claude Code does), so grim registers nothing for it. Reported once the flag and consent gates are clear. Until then the gate's own cause shows. See [hooks do not arm on Windows](./hooks-troubleshooting.md#platform-unsupported). |
-| `not-armed` | `not-registered` | grim registered nothing for this client, so nothing runs. Four causes share this token: the entry's tier at that event or its matcher made translation lossy; the client's own hook config could not be edited (unreadable, unparseable, or at project scope resolving outside the workspace through a symlink); the [dispatch table](./hooks-troubleshooting.md#dispatch-full) is at its 1 MiB cap and this workspace's rows were not added; or the machine's dispatch table is one this grim cannot read (newer schema, unparseable, or over the size cap), so it was [left untouched](./hooks-troubleshooting.md#dispatch-unreadable). Re-run `grim install` to see which one it reports. |
+| `not-armed` | `not-registered` | grim registered nothing for this client, so nothing runs. Five causes share this token: the entry's tier at that event or its matcher made translation lossy; this hook's [installed payload cannot be used](./hooks-troubleshooting.md#payload-unarmable), such as one gone, edited, unreadable, or a `hook.toml` that does not read, parse or pass `grim build`'s rules, which costs that hook alone while the others still arm; the client's own hook config could not be edited (unreadable, unparseable, or at project scope resolving outside the workspace through a symlink); the [dispatch table](./hooks-troubleshooting.md#dispatch-full) is at its 1 MiB cap and this workspace's rows were not added; or the machine's dispatch table is one this grim cannot read (newer schema, unparseable, or over the size cap), so it was [left untouched](./hooks-troubleshooting.md#dispatch-unreadable). Re-run `grim install` to see which one it reports. |
 | `not-armed` | `surface-user-owned` | The client's own hook file (Codex `hooks.json`, Copilot `hooks/grim.json`) exists and grim did not write it, so grim neither overwrites nor deletes it. Move the file aside, then re-run `grim install`. |
 | `not-armed` | `dispatch-lock-held` | Another `grim install` holds the dispatch lock. **The only `transient: true` cause.** |
-| `gated` | `no-applicable-settings` | Nothing in this settings package applies to this client here. Select a client the package declares values for with `--client <name>` or `[options].clients`, then run `grim install`, or `grim install --global` on a global row. When other clients already hold the package's values, a client with no settings file needs no step, and the `message` says so. |
-| `gated` | `client-config-absent` | This client writes its own settings file, and the file does not exist yet, so grim wrote nothing for it. Start the client once so it creates that file, then run `grim install --global`. |
+| `gated` | `no-applicable-settings` | Nothing in this settings package applies to this client here. Select a client the package declares values for with `--client <name>` or `[options].clients`, then run `grim install` with the run's `--global` or `--config`. When other clients already hold the package's values, a client with no settings file needs no step, and the `message` says so. |
+| `gated` | `client-config-absent` | This client writes its own settings file, and the file does not exist yet, so grim wrote nothing for it. Start the client once so it creates that file, then run `grim --global install`. |
 | `gated` | `local-file-tracked` | Git tracks `.claude/settings.local.json`, so the values grim wrote there can reach a commit. Run `git rm --cached` on the file, then `grim install`. |
-| `not-armed` | `settings-root-relative` | Global scope only: the variable that places this client's settings file, such as `KIRO_HOME`, names a relative path. Set it to an absolute path, or unset it, then run `grim install --global`. See [config roots inside a repository](./settings.md#root-fence). |
-| `not-armed` | `settings-root-in-workspace` | Global scope only: this client's settings file lies inside the repository the command runs in, by its own path or through a link, or grim cannot place it outside that repository (a path with `..`, or a working directory it cannot read). A repository that holds the home directory does not count. The `message` names the step that fits. For the file's own path or a `..` path, it names the variable to change or unset, and offers a run from outside the repository too. For a link, it says to run `grim install --global` from outside the repository. For an unreadable working directory, it says to run it from a directory you can read. See [config roots inside a repository](./settings.md#root-fence). |
+| `not-armed` | `settings-root-relative` | Global scope only: the variable that places this client's settings file, such as `KIRO_HOME`, names a relative path. Set it to an absolute path, or unset it, then run `grim --global install`. See [config roots inside a repository](./settings.md#root-fence). |
+| `not-armed` | `settings-root-in-workspace` | Global scope only: this client's settings file lies inside the repository the command runs in, by its own path or through a link, or grim cannot place it outside that repository (a path with `..`, or a working directory it cannot read). A repository that holds the home directory does not count. The `message` names the step that fits. For the file's own path or a `..` path, it names the variable to change or unset, and offers a run from outside the repository too. For a link, it says to run `grim --global install` from outside the repository. For an unreadable working directory, it says to run it from a directory you can read. See [config roots inside a repository](./settings.md#root-fence). |
 
 A settings row reads these causes in a fixed order: `stale`, then a gate on
 the whole package, then the lifecycle state. `stale` keeps the row, and the
@@ -720,8 +851,8 @@ additions are `settings_changes` on the `install`, `update`, `add` and
 `abandoned_entries` object, and the [settings fields](#error-settings) of
 the error document.
 
-For hooks, `grim add`/`grim update` rows keep main's exact key set. The closed
-list caps additions, it does not require them, and a version bump alone is not
+The hook kind adds no key to `grim add` or `grim update` rows. The closed list
+caps additions, it does not require them, and a version bump alone is not
 drift (D-20). Every addition is additive under the
 [frozen-report policy][stability-additive]. The literals themselves,
 once shipped, do not change meaning.
@@ -909,8 +1040,8 @@ dispatch uses `code` and `exit`:
 | `io` | 74 | Filesystem I/O failure |
 | `temp-fail` | 75 | Transient failure — retry may succeed |
 | `no-permission` | 77 | Insufficient permission: filesystem `EPERM` |
-| `config` | 78 | Config file invalid or unparseable, or settings packages that conflict |
-| `not-found` | 79 | Resource not found: missing package, absent explicit config path |
+| `config` | 78 | Config or lock file invalid or unparseable, or settings packages that conflict |
+| `not-found` | 79 | Resource not found: missing package, absent explicit config path, a carried pin whose manifest the registry no longer holds |
 | `auth` | 80 | Authentication failure: registry 401 or 403, missing credential |
 | `offline-blocked` | 81 | `--offline` (or `GRIM_OFFLINE`) blocked a network operation |
 
@@ -931,7 +1062,7 @@ without scraping the non-frozen `message`:
     "code": "data",
     "exit": 65,
     "reason": "stale-lock",
-    "message": "skill 'code-review' (…): partial-resolve refused: lock declaration_hash … does not match current …; retry with a full resolve"
+    "message": "skill 'code-review' (…): the lock no longer matches what is declared (lock hash …, declared hash …); run `grim lock`, then this update; if `grim lock` finds a pinned manifest gone, bare `grim update` moves every pin"
   }
 }
 ```
@@ -945,7 +1076,7 @@ recognize. The reasons defined so far:
 
 | `reason` | Paired with | Meaning |
 |----------|-------------|---------|
-| `stale-lock` | `data` / 65 | The lock no longer matches what it was written from. Either a partial `grim update <name>` was refused because `grimoire.lock` no longer matches the current declaration (retry with a full `grim update`), or `grim install` found that a locked entry's dependencies differ from the pinned artifact's, or that a local path source changed since locking, or `grim why` could not follow the lock's dependency graph (run `grim lock`). |
+| `stale-lock` | `data` / 65 | The lock no longer matches what it was written from. Either a partial `grim update <name>` was refused because `grimoire.lock` no longer matches the current declaration (retry with `grim lock`, then the same update; if `grim lock` finds a pinned manifest gone, bare `grim update` moves every pin), or `grim install` found that a locked entry's dependencies differ from the pinned artifact's, or that a local path source changed since locking, or `grim why` could not follow the lock's dependency graph (run `grim lock`). |
 | `modified` | `data` / 65 | An install was refused because the installed artifact was modified locally (the same state `grim status` reports as `modified`). Retry the same `grim install` / `grim add` with `--force` to overwrite. A refused [settings value][settings-force] sets it when any refused piece changed after grim wrote it. |
 | `untracked-destination` | `data` / 65 | An install was refused because the destination already exists on disk with no install record — grim does not clobber files it did not create. Retry with `--force` to overwrite and record it. A refused settings value sets it when grim wrote none of the refused pieces. |
 | `no-config` | `not-found` / 79 | A project-scope command found no `grimoire.toml` by walking up from the working directory. Distinct from an explicit `--config <path>` that does not exist, which also exits 79 but carries no `reason` — that is a wrong path, not "no config anywhere". |
@@ -1104,7 +1235,8 @@ a fault in producing it:
 - `update` refused by the integrity gate over a locally modified artifact
   (exit `65`) still prints the full report — every artifact that did roll
   forward, plus what was pruned, reaped, retained and abandoned before the
-  refusal ([grim update](./commands.md#update)).
+  refusal ([grim update](./commands.md#update)). A
+  [named run](#update-rows) never reaps, so its report names no reaped client.
 
 The error document appears only when the command could not produce a
 report at all. A robust consumer therefore branches on the top-level

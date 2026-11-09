@@ -433,7 +433,7 @@ grim uninstall mcp grim                      # removes only the managed entry, n
 [`grim add`](./commands.md#add) declares the entry in the `[mcp]` table
 of `grimoire.toml`; the lock carries a `[[mcp]]` array, emitted only when
 non-empty so an mcp-free project's lock is byte-identical to before this
-feature existed. [`grim uninstall`](./commands.md#uninstall) splices the
+feature existed, apart from the tag in `pinned`. [`grim uninstall`](./commands.md#uninstall) splices the
 one managed member back out of each client's config file — the file
 itself, and every other entry in it, is left exactly as it was. If the
 managed member was the container's only entry (the only server under

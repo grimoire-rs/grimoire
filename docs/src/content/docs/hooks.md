@@ -66,12 +66,17 @@ Exactly three actions write a consent record:
 
 - `grim hook allow`, run in the workspace. It records every hook and settings
   package the workspace declares, whatever the feature flags say.
-- `grim add` of a hook or a settings package, because typing the reference is
-  the declaration gesture.
+- `grim add`, because typing the reference is the declaration gesture. It
+  records ahead of its install, so a failed install keeps its consent along with
+  its declaration. It covers only
+  [the hooks and settings packages that add brings][cmd-add]. An
+  [Install in `grim tui`][cmd-tui] that declares a row counts as the same
+  action for a hook.
 - An accepted interactive prompt during `grim install` or `grim update`.
 
 `grim install` and `grim update` never write one on their own. Without a
-terminal to ask on, they arm nothing. `grim hook revoke` removes the record for
+terminal to ask on, they arm nothing. Nor does an Update in `grim tui`, or an
+Install there that declares nothing. `grim hook revoke` removes the record for
 both kinds and leaves every written settings value in place. `grim consent` is
 a visible alias of `grim hook`.
 
@@ -92,11 +97,24 @@ checkout a hostile declaration could arrive in.
 ### Per-run answers {#trust-flags}
 
 `--trust-workspace` answers the consent question for one invocation of `add`,
-`install` or `update`, and writes no record. `--no-trust-workspace` refuses for
-one run. This is the form CI uses, since it has no terminal and keeps no record.
+`install` or `update`. `--no-trust-workspace` refuses for one run. On `install`
+and `update` neither flag writes a record, which is the form CI uses, since it
+has no terminal and keeps no record.
+
+`grim add` is the exception. Typing the reference is itself the gesture, so an
+`add` records its consent with `--trust-workspace` too, ahead of its install.
+`--no-trust-workspace` keeps that record out. Without it, an add records the
+packages of each kind whose flag is on, at project scope only. With
+`--no-install` it records hooks but no settings package.
 
 Since grim 0.16.0 `--trust-hooks` and `--no-trust-hooks` are aliases of the
 pair, and each answer covers hooks and settings together.
+
+The record still holds only the hooks and settings packages
+[that add can vouch for][cmd-add]. Any other one the add brings arms or applies
+under `--trust-workspace` for that run only and stays out of the record. A kept
+pin whose tag moved is one example. A hook behind an edge your store does not
+list, offline, is another.
 
 The pair outranks a stored record in both directions. `--no-trust-workspace`
 refuses a consented workspace, and `--trust-workspace` arms an unconsented one.
@@ -402,6 +420,8 @@ marketplace, that applies to each plugin on its own.
 [json-hook-arming]: ./json-interface.md#hook-arming
 [clients-hooks]: ./clients.md#gap-codex-hooks
 [clients-qoder]: ./clients.md#gap-qoder-hooks
+[cmd-add]: ./commands.md#add
+[cmd-tui]: ./commands.md#tui
 [cmd-export-plugin]: ./commands.md#export-plugin
 [mcp-install-order]: ./mcp-servers.md#install-order-hooks
 

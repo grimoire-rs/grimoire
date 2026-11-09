@@ -51,16 +51,17 @@ runner can pull from.
    lock_version = 1
    declaration_hash_version = 1
    declaration_hash = "sha256:…"
-   generated_by = "grim 0.14.1"
+   generated_by = "grim 0.16.0"
    generated_at = "2026-09-07T03:02:30Z"
 
    [[skill]]
    name = "code-review"
-   pinned = "ghcr.io/acme/skills/code-review@sha256:…"
+   pinned = "ghcr.io/acme/skills/code-review:1@sha256:…"
    ```
 
-The `pinned` field is a digest, not a tag, so every clone of the repository
-resolves the same bytes. The `declaration_hash` field under `[metadata]` is a
+The `pinned` field records the tag that resolved and the digest it resolved to.
+The digest is what installs, so every clone of the repository resolves the same
+bytes. The `declaration_hash` field under `[metadata]` is a
 hash of the declarations the lock was built from. That one field is what makes
 drift detectable, and the CI gate below rests on it. The full field list is at
 [`grimoire.lock`](../configuration.md#grimoire-lock).
@@ -152,8 +153,9 @@ $ echo $?
 79
 ```
 
-Either way the cure is [`grim lock`](../commands.md#lock), which re-resolves
-the declarations and rewrites the lock. The install runs clean after it:
+Either way the cure is [`grim lock`](../commands.md#lock), which resolves what
+the declarations added, keeps the pins it already holds, and rewrites the lock.
+The install runs clean after it:
 
 ```text
 $ grim lock

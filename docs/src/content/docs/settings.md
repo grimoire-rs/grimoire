@@ -34,7 +34,9 @@ Declaring and locking a settings package need no flag. With the flag off,
 writes and removes no settings. `grim install`, `grim update` and `grim add`
 without `--no-install` then warn once for each locked settings package. The
 warning names the command that sets the flag for the scope that is off.
-Clearing the flag leaves every written value in place.
+
+A named `grim update` warns only for the packages in its closure. Clearing the
+flag leaves every written value in place.
 
 No environment variable turns the kind on, and the flag is not consent. The
 key is listed in the [configuration reference][config-experimental].
@@ -52,10 +54,17 @@ consent for the hooks and settings the workspace declares. `grim hook revoke`
 removes it and leaves every written value in place.
 
 `--trust-workspace` and `--no-trust-workspace` answer for one run of `add`,
-`install` or `update`, and write no record. Their aliases are `--trust-hooks`
-and `--no-trust-hooks`. Neither flag turns the kind on. [Workspace
-consent][hooks-consent] and [Per-run answers][hooks-trust-flags] describe the
-record and the flags under their hook names.
+`install` or `update`. Their aliases are `--trust-hooks` and
+`--no-trust-hooks`. Neither flag turns the kind on, and on `install` and
+`update` neither writes a record. [Workspace consent][hooks-consent] and
+[Per-run answers][hooks-trust-flags] describe the record and the flags under
+their hook names.
+
+`grim add` records consent for the settings packages it brings before its
+install runs. It records none while `options.experimental.settings` is off, at
+global scope, or with `--no-trust-workspace`. `grim add --no-install` and a TUI
+Install that declares a row record hooks alone, so the next `grim install` asks
+about their settings package.
 
 A package that consent withholds writes nothing, and the run exits `0`. Its
 row in the `install`, `update` or `add` report reads `skipped`, and grim warns
@@ -300,6 +309,30 @@ undone: grim keeps no backup of a value it replaces. `current` is the only copy
 grim shows, and it stops at 200 characters. Save a value you want to keep
 before you rerun with `--force`.
 
+A named `grim update <names>` judges only the packages its
+[closure][commands-update-names] names or reaches, and those it prunes. Its
+`--force` reaches no further. It neither writes, restores nor refuses a value
+of another package. `grim install` judges the whole lock.
+
+A pruned package's value that you edited refuses without `--force`. The lock is
+saved by then, so no later named run sees that package. Its refusal names
+`grim uninstall --force settings <name>` instead of a rerun with `--force`.
+That command removes the value. A warning names any value the package keeps for
+a package outside the update, which the command removes too.
+
+When a package in the closure, or one the run prunes, drops a value that another
+package's record holds, the value stays. It also stays when another package
+declares it and this run could apply that package. The dropping package then
+keeps the value on its previous pin until `grim install` hands it over. When
+only `--trust-workspace` let the run apply that package, or arm a hook the record
+would leave unarmed, the warning's `grim install` carries the flag too. The
+warning then says the flag also arms every hook and applies every settings package
+the workspace was not consented for.
+
+When that package's layer cannot be read, nothing says whether it declares the
+value. The run then writes no setting and keeps the value. It exits with the
+read's own code, `81` offline. A warning names the value and `grim install`.
+
 ### Conflicts {#conflicts}
 
 Two packages conflict when they want different values for one pointer, or when
@@ -348,6 +381,8 @@ and `action`. `action` is `added`, `changed`, `removed` or `overwritten`.
 | `grim add` | `settings_changes` on the added row |
 | `grim uninstall` | `settings_changes` beside `abandoned_entries` |
 
+A named `grim update` lists only the packages in its closure.
+
 Plain output prints one warning per change, such as
 `added claude .claude/settings.local.json /model (team-defaults)`. After any
 change grim also warns
@@ -390,7 +425,7 @@ build's file is written. A Preview build reads its own directory, as the
 When a harness cannot take a package here, grim writes nothing for it and
 warns `settings package '<name>': <client> <decline> (<cause>); <remedy>`,
 such as
-`settings package 'team': cursor writes only into an existing /home/me/.cursor/cli-config.json (client-config-absent); start cursor once so it creates that file, then run grim install --global`.
+`settings package 'team': cursor writes only into an existing /home/me/.cursor/cli-config.json (client-config-absent); start cursor once so it creates that file, then run grim --global install`.
 A global file is named by its absolute path.
 
 A file grim refuses to reach is named differently. For the causes
@@ -403,9 +438,9 @@ The row's `arming` array in `grim status` names the same cause, and its
 | Cause | Meaning | Fix |
 |---|---|---|
 | `no-applicable-settings` | Nothing in the package applies to this harness at this scope. | Declare the package at global scope with `grim --global add`, or select a harness that takes settings with `--client` or `[options].clients`. |
-| `client-config-absent` | The harness writes only into a file that exists, and it does not. | Start the harness once so it creates the file, then run `grim install --global`. |
+| `client-config-absent` | The harness writes only into a file that exists, and it does not. | Start the harness once so it creates the file, then run `grim --global install`. |
 | `not-registered` | A link on the file's path dangles or leads outside the workspace, or grim could not read its settings records. | Replace the link with a regular file, or make the records file readable. |
-| `settings-root-relative` | At global scope, the variable that places the file names a relative path. | Set the variable to an absolute path, or unset it, then run `grim install --global`. |
+| `settings-root-relative` | At global scope, the variable that places the file names a relative path. | Set the variable to an absolute path, or unset it, then run `grim --global install`. |
 | `settings-root-in-workspace` | At global scope, the file lies inside the repository the command runs in, by its own path or through a link, or grim cannot place it outside. | The step depends on what put the file inside. [Config roots inside a repository][root-fence] lists each case. |
 | `local-file-tracked` | [git][git] tracks `.claude/settings.local.json`, so values grim wrote there can reach a commit. | Run `git rm --cached .claude/settings.local.json`, then `grim install`. |
 
@@ -433,7 +468,7 @@ command runs in, with cause `settings-root-in-workspace`:
 
 <!-- doc-norun: a warning grim prints, not a command -->
 ```text
-settings left unchanged: kiro cannot take kiro-rel/settings/cli.json, whose config directory is a relative path (settings-root-relative); set KIRO_HOME to an absolute path, or unset it, then run grim install --global
+settings left unchanged: kiro cannot take kiro-rel/settings/cli.json, whose config directory is a relative path (settings-root-relative); set KIRO_HOME to an absolute path, or unset it, then run grim --global install
 ```
 <!-- /doc-norun -->
 
@@ -449,10 +484,10 @@ case:
 
 | Case | Decline | Step |
 |---|---|---|
-| The file's own path lies in the repository. | `cannot take <file>, which lies inside the repository this command runs in` | Set the variable to a path outside the repository, or unset it, then run `grim install --global`. Or run that command from outside the repository. |
-| A link on the file's path leads into the repository. | `cannot take <file>, which links into the repository this command runs in` | Run `grim install --global` from outside the repository. |
-| The path holds a `..` component. | ``cannot take <file>, whose `..` component keeps grim from placing it outside the repository this command runs in`` | Set the variable to a path without `..`, or unset it, then run `grim install --global`. Or run that command from outside the repository. |
-| The working directory cannot be read. | `cannot take <file>: the directory this command runs in cannot be read, so grim cannot tell whether that file lies inside its repository` | Run `grim install --global` from a directory you can read. |
+| The file's own path lies in the repository. | `cannot take <file>, which lies inside the repository this command runs in` | Set the variable to a path outside the repository, or unset it, then run `grim --global install`. Or run that command from outside the repository. |
+| A link on the file's path leads into the repository. | `cannot take <file>, which links into the repository this command runs in` | Run `grim --global install` from outside the repository. |
+| The path holds a `..` component. | ``cannot take <file>, whose `..` component keeps grim from placing it outside the repository this command runs in`` | Set the variable to a path without `..`, or unset it, then run `grim --global install`. Or run that command from outside the repository. |
+| The working directory cannot be read. | `cannot take <file>: the directory this command runs in cannot be read, so grim cannot tell whether that file lies inside its repository` | Run `grim --global install` from a directory you can read. |
 
 The `..` case applies only while the command runs inside a repository that
 counts. An unreadable working directory refuses every global file, since grim
@@ -1054,6 +1089,7 @@ manifest.
 [root-fence]: #root-fence
 [codex-rules-file]: #codex-rules
 [conflicts]: #conflicts
+[commands-update-names]: ./commands.md#update-names
 [json-error]: ./json-interface.md#error-document
 [json-hint]: ./json-interface.md#error-hint
 [json-hook-arming]: ./json-interface.md#hook-arming

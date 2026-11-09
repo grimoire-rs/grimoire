@@ -36,19 +36,22 @@ can reach.
 
 `grim status --check` goes to the network and reports what moved behind your
 declarations. It loads the catalog once, then re-resolves the tag behind every
-registry-locked artifact at bounded concurrency.
+registry-locked artifact at bounded concurrency. It moves nothing, and neither
+does [`grim lock`](../commands.md#lock), which keeps every pin it holds. Only
+`grim update` unfreezes one.
 
 ```sh
 grim status --check --format json
 ```
 
-It fills in three fields per artifact. `update_available` answers whether
+It fills in four fields per artifact. `update_available` answers whether
 `grim update` would move that pin, `deprecated` carries any notice the
-publisher wrote, and `replaced_by` names a successor.
+publisher wrote, and `replaced_by` names a successor. `moved_nested_bundles`
+lists a moved bundle the row reaches, which has no row of its own.
 
 Two things about the command surprise people. Its plain table is
-byte-identical to the plain `grim status` table, because those three fields
-reach you only under `--format json`. And `grim status` reports rather than
+byte-identical to the plain `grim status` table, because those fields reach
+you only under `--format json`, with one stderr note per update. And `grim status` reports rather than
 judges: no state it finds changes its exit code, `--check` included, so it
 cannot be a CI gate on its own. Only a broken read fails it, such as a corrupt
 lock, which exits `78`.
@@ -87,11 +90,19 @@ saying the update was refused, and warning that `--force` would also
 authorize update's prune and reap deletions. Unlike install, it still
 prints its report table beside that error.
 
+A [named update](../commands.md#update-names) is narrower. `grim update <name>`
+refuses only an edit inside the closure of the names, so an edit to another
+artifact stays out of it. There `--force` stops at the closure too: it
+authorizes the prune of that closure and no reap.
+
 There is a trap here, and it is the reason this page exists. A refused
 `grim update` has already re-resolved your declaration and rolled the lock
 pin forward. The refusal stops the write to your file, not the write to the
 lock. So the lock names a release your file has never held, and the next
 `grim install --force` writes that release over your edit.
+
+`grim lock` does not take that back, because it keeps the pin it finds. To
+step back, restore `grimoire.lock` from git.
 
 Pruning and client-reaping happen on update only. `grim install` never
 deletes anything.

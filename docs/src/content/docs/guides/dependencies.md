@@ -32,7 +32,7 @@ brought in what.
 
 | You want | Use | Why |
 |---|---|---|
-| Consumers to take a curated set with one declaration | A [bundle][bundles] | One line brings every member, and membership follows the published bundle. |
+| Consumers to take a curated set with one declaration | A [bundle][bundles] | One line brings every member. Membership follows the bundle version your lock pins, and `grim update` moves that pin. |
 | An artifact that breaks without another | A [requirement][requires] | The dependency installs whenever the artifact does. |
 | Both: a curated set whose members share a helper | A bundle of artifacts that require the helper | The set is a choice. The helper is not. |
 

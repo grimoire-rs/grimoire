@@ -151,7 +151,9 @@ a running client may need a restart to read its new settings
 ```
 
 For a lasting answer, the teammate runs `grim consent allow` once. Running
-`grim add` with the same reference consents too. A later version bump asks
+`grim add` with the same reference consents too, while the tag the lock records
+still names the pinned digest. That add asks the registry once. When the tag
+moved, or the registry does not answer, it warns and records nothing. A later version bump asks
 nothing again, so read the lock diff it brings. [Consent][ref-consent] covers
 the record and both flags.
 
