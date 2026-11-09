@@ -54,7 +54,7 @@ def _kind_lists(kinds: list[str]) -> list[tuple[str, list[str]]]:
                 if word not in kinds:
                     break
                 listed.append(word)
-            found.append((str(page.relative_to(PROJECT_ROOT)), listed))
+            found.append((page.relative_to(PROJECT_ROOT).as_posix(), listed))
     return found
 
 
@@ -67,7 +67,7 @@ def _edge_claims(kinds: list[str]) -> list[tuple[str, str, str]]:
             word = m.group("kind")
             kind = word if word in kinds else word.removesuffix("s")
             if kind in kinds:
-                found.append((str(page.relative_to(PROJECT_ROOT)), kind, m.group("edge")))
+                found.append((page.relative_to(PROJECT_ROOT).as_posix(), kind, m.group("edge")))
     return found
 
 

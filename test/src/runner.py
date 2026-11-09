@@ -75,8 +75,9 @@ class GrimRunner:
             "APPDATA": str(self._home / "AppData/Roaming"),
             "XDG_CONFIG_HOME": str(self._home / ".config"),
         }
-        # Windows needs these for subprocess spawning and executable resolution
-        for key in ("SYSTEMROOT", "TEMP", "TMP", "PATHEXT"):
+        # Windows needs these for subprocess spawning and executable resolution.
+        # LOCALAPPDATA holds the per-test tmp tree, so grim accepts GRIM_HOME as a local path.
+        for key in ("SYSTEMROOT", "TEMP", "TMP", "PATHEXT", "LOCALAPPDATA"):
             if key in os.environ:
                 self.env[key] = os.environ[key]
         # Propagate the test registry host as an insecure-registry exception when

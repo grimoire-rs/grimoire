@@ -415,23 +415,23 @@ def test_global_opencode_mcp_reads_past_a_byte_order_mark(
     # GrimRunner pins XDG_CONFIG_HOME at <home>/.config.
     cfg = Path(runner.env["XDG_CONFIG_HOME"]) / "opencode" / name
     cfg.parent.mkdir(parents=True, exist_ok=True)
-    cfg.write_text("\ufeff" + body)
+    cfg.write_text("\ufeff" + body, encoding="utf-8")
 
     (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n')
     runner.json("lock", "--global")
     rows = runner.json("install", "--global", "--client", "opencode")["items"]
     assert rows[0]["status"] == "installed", rows
-    added = cfg.read_text()
+    added = cfg.read_text(encoding="utf-8")
     assert added.startswith("\ufeff") and added.count("\ufeff") == 1, repr(added)
 
     row = next(r for r in runner.json("status", "--global")["items"] if r["name"] == "grim-mcp")
     assert row["state"] == "installed", row
     again = runner.json("install", "--global", "--client", "opencode")["items"]
     assert again[0]["status"] == "unchanged", again
-    assert cfg.read_text() == added, "a repeat install must leave the file alone"
+    assert cfg.read_text(encoding="utf-8") == added, "a repeat install must leave the file alone"
 
     runner.json("uninstall", "--global", "mcp", "grim-mcp")
-    assert cfg.read_text() == "\ufeff" + body, "uninstall must restore the original bytes"
+    assert cfg.read_text(encoding="utf-8") == "\ufeff" + body, "uninstall must restore the original bytes"
 
 
 # ── (d) status: a client that declines the kind is not `clients_missing` ───
