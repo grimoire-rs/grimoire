@@ -12,16 +12,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from pathlib import Path
 
 import pytest
 
 from src.helpers import make_settings
+from src.old_grim import OLD_BIN, checked_old_grim
 from src.registry import LAYER_MEDIA_TYPE, REGISTRY_HOST, push_manifest
 from src.runner import GrimRunner
-
-OLD_BIN = os.environ.get("GRIM_OLD_BIN")
 
 
 def _seed_old_cache(grim_home: Path, locator: str, rows: dict[str, str]) -> Path:
@@ -90,14 +88,14 @@ def test_one_refresh_finds_a_settings_package_cached_kindless(upgraded) -> None:
 
 
 @pytest.mark.skipif(not OLD_BIN, reason="GRIM_OLD_BIN names no grim 0.15.1 binary")
-def test_grim_0_15_1_lists_the_rows_this_grim_cached(upgraded) -> None:
+def test_grim_0_15_1_lists_the_rows_this_grim_cached(upgraded, tmp_path: Path) -> None:
     runner, locator, cache, _, foreign = upgraded
     runner.json("search", "--registry", locator, "--refresh")
     assert json.loads(cache.read_text())["entries"][foreign]["kind_read"] is True
 
-    assert OLD_BIN is not None
-    old = GrimRunner(Path(OLD_BIN), runner.grim_home, cwd=runner.cwd)
-    assert "0.15." in old.run("--version").stdout
+    identity = tmp_path / "old-grim-identity"
+    identity.mkdir()
+    old = GrimRunner(checked_old_grim(identity), runner.grim_home, cwd=runner.cwd)
     listed_old = old.json("search", "--offline", "--registry", locator)
     listed_new = runner.json("search", "--offline", "--registry", locator)
 

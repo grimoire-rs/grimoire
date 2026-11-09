@@ -1620,7 +1620,7 @@ def test_excluded_reference_still_locks_and_installs_s015(
         f"an excluded reference must still resolve at lock time; "
         f"got {locked.returncode}; stderr: {locked.stderr}"
     )
-    assert f"{REGISTRY_HOST}/{ns}/hidden/secret-skill@sha256:" in (
+    assert f"{REGISTRY_HOST}/{ns}/hidden/secret-skill:latest@sha256:" in (
         project_dir / "grimoire.lock"
     ).read_text(), "the excluded artifact must be pinned by digest in the lock"
 

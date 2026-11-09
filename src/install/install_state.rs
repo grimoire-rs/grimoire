@@ -1564,7 +1564,7 @@ fn convert_v1_records(
         tracing::warn!(
             "all records from legacy V1 install state were unanchorable and dropped; \
              the resulting state is empty (drift baseline reset). \
-             Run `grim install` to rebuild."
+             Run install again in this scope to rebuild."
         );
     }
 
@@ -5514,7 +5514,7 @@ mod tests {
             assert_eq!(kinds_in(&project.state_path()), ["rule"]);
             assert!(!project.store_path().exists());
 
-            let pruned = prune_orphans(&mut state, &lock_of(vec![]), &project.roots(), true).unwrap();
+            let pruned = prune_orphans(&mut state, &lock_of(vec![]), &project.roots(), None, true).unwrap();
             assert_eq!(pruned.iter().map(|p| p.kind).collect::<Vec<_>>(), [ArtifactKind::Rule]);
             assert!(!rule_file.exists());
             assert_eq!(std::fs::read(&settings_file).unwrap(), settings_bytes);

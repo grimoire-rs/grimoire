@@ -19,7 +19,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::oci::ArtifactKind;
+use crate::oci::member_ref::MemberRef;
+use crate::oci::{ArtifactKind, Identifier};
 
 /// OCI layer media type for the bundle members document.
 pub const BUNDLE_LAYER_MEDIA_TYPE: &str = "application/vnd.grimoire.bundle.v1+json";
@@ -51,6 +52,19 @@ pub struct BundleMember {
     /// Fully-qualified member identifier (floating `registry/repo:tag` or
     /// pinned `registry/repo@sha256:…`).
     pub id: String,
+}
+
+impl BundleMember {
+    /// This member's id as an absolute identifier, against its parent's pin.
+    /// `None` for an unreadable id, or a relative one under a path parent,
+    /// which has no repository to anchor it.
+    #[must_use]
+    pub fn absolute_id(&self, parent: Option<&Identifier>) -> Option<Identifier> {
+        match (MemberRef::parse(&self.id).ok()?, parent) {
+            (MemberRef::Absolute(id), _) => Some(id),
+            (relative, parent) => relative.resolve(parent?).ok(),
+        }
+    }
 }
 
 /// The bundle members document — the single OCI layer blob of a bundle.

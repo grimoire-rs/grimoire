@@ -40,3 +40,6 @@ pub use identifier::Identifier;
 pub use pinned_identifier::PinnedIdentifier;
 #[allow(unused_imports)]
 pub use reference::ArtifactRef;
+
+/// One artifact in a lock or a declaration: its kind and its binding name.
+pub type NodeKey = (ArtifactKind, String);

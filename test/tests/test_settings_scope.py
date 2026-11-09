@@ -242,7 +242,7 @@ def test_cursor_absent_file_declines(grim, grim_home: Path, tmp_path: Path, uniq
 
     assert result.returncode == 0, result.stderr
     assert "client-config-absent" in result.stderr
-    assert "(client-config-absent); start cursor once so it creates that file, then run grim install --global" in (
+    assert "(client-config-absent); start cursor once so it creates that file, then run grim --global install" in (
         result.stderr
     )
     assert str(xdg) in result.stderr
@@ -287,7 +287,7 @@ def test_zero_applicable_exits_0(grim_at, project_dir: Path, tmp_path: Path, uni
     assert "no-applicable-settings" in result.stderr
     # Codex takes settings at global scope only, so selecting it here would not help.
     assert "declares values for codex" in result.stderr
-    assert "grim install --global" in result.stderr
+    assert "grim --global install" in result.stderr
     [record] = [record for record in _settings_records(runner) if record["name"] == "team"]
     assert record["outputs"] == []
     # Positive control: the package beside it applies, in the same run.

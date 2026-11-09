@@ -715,7 +715,7 @@ pub fn converge_root(
                 io::ErrorKind::InvalidData,
                 format!(
                     "{} is not a table this grim can update ({reason:?}); upgrade grim, or move the \
-                     file aside and re-run grim install",
+                     file aside and re-run this command",
                     path.display()
                 ),
             )));

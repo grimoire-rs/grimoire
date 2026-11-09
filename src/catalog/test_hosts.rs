@@ -93,7 +93,9 @@ pub(crate) fn gzip(data: &[u8]) -> Vec<u8> {
     encoder.finish().unwrap()
 }
 
-/// Everything logged on this thread at any level until dropped.
+/// Everything logged on this thread at any level until dropped, as a terminal
+/// shows it: through [`EventLine`](crate::oci::text::EventLine), which `main` wraps
+/// around the real writer.
 pub(crate) struct LogCapture {
     buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
     _guard: tracing::subscriber::DefaultGuard,
@@ -121,7 +123,7 @@ impl LogCapture {
         let sink = std::sync::Arc::clone(&buf);
         let guard = tracing::subscriber::set_default(
             tracing_subscriber::fmt()
-                .with_writer(move || Sink(std::sync::Arc::clone(&sink)))
+                .with_writer(move || crate::oci::text::EventLine(Sink(std::sync::Arc::clone(&sink))))
                 .with_max_level(tracing::Level::TRACE)
                 .with_ansi(false)
                 .without_time()

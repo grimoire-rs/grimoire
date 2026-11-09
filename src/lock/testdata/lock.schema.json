@@ -93,7 +93,7 @@
       "description": "Lock metadata header.",
       "properties": {
         "declaration_hash": {
-          "description": "`sha256:<hex>` of the RFC 8785 JCS-canonicalized declaration.",
+          "description": "`sha256:<hex>` of the RFC 8785 JCS-canonicalized declaration. An edit that\nleaves the lock stale can write one no declaration produces, which every\nreader takes for stale.",
           "type": "string"
         },
         "declaration_hash_version": {
@@ -134,7 +134,7 @@
     },
     "LockedArtifact": {
       "additionalProperties": false,
-      "description": "One locked artifact, pinned either to a registry manifest digest (`pinned`) or to a local path source (`path` + `hash`, set together) — never both on one entry. Bundle provenance is either the legacy `bundle` + `bundle_tag` pair (set together) or the `bundles` array — never both, and never on a path-sourced entry",
+      "description": "One locked artifact, pinned either to a registry manifest digest (`pinned`, which also records the tag that resolved it) or to a local path source (`path` + `hash`, set together) — never both on one entry. Bundle provenance is either the legacy `bundle` + `bundle_tag` pair (set together) or the `bundles` array — never both, and never on a path-sourced entry",
       "properties": {
         "bundle": {
           "default": null,
@@ -198,7 +198,7 @@
             }
           ],
           "default": null,
-          "description": "Resolved registry/repo pinned to a content digest. Mutually\nexclusive with the `path` + `hash` pair."
+          "description": "Resolved registry/repo pinned to a content digest, with the tag that\nresolved it when there was one. Mutually exclusive with the `path` +\n`hash` pair."
         },
         "requires": {
           "default": [],
@@ -292,7 +292,7 @@
       "type": "string"
     },
     "PinnedIdentifier": {
-      "description": "A fully-qualified OCI reference pinned to a content digest (`registry/repo@sha256:<hex>`; an advisory `:tag` may precede the digest)",
+      "description": "A fully-qualified OCI reference pinned to a content digest (`registry/repo@sha256:<hex>`; the `:tag` that resolved it may precede the digest)",
       "pattern": "@sha256:[0-9a-f]{64}$",
       "type": "string"
     }

@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
 
 from src.helpers import make_artifact, write_config
 from src.hook_launcher import run_launcher
+from src.runner import GrimRunner
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt", reason="the hook launcher and its registered command are POSIX-only in v1"
@@ -120,3 +122,39 @@ def test_remove_then_install_disarms_the_removed_hook(
     assert _fire(runner, project_dir, token, log) == []
     assert not _claude_marked(project_dir), "the last hook gone, the registration is reaped"
     assert _declared_hooks(runner) == ([], [])
+
+
+def test_a_hook_line_deleted_by_hand_disarms_after_an_offline_lock(
+    grim_at, project_dir: Path, tmp_path: Path, unique_repo: str
+) -> None:
+    """A hook line deleted by hand, then an offline lock over an empty home and an install.
+
+    Found by review: the offline lock could read no manifest, kept the deleted
+    hook's row under the declaration's hash, and the install left the hook armed
+    while `grim status` listed it nowhere.
+    """
+    log = tmp_path / "fired.log"
+    guard = _publish(unique_repo, "shell-guard", log)
+    gate = _publish(unique_repo, "fmt-gate", log)
+    write_config(project_dir, hooks={"shell-guard": guard.fq, "fmt-gate": gate.fq})
+    runner = grim_at(project_dir)
+    runner.run("config", "set", "options.experimental.hooks", "true")
+    runner.run("lock")
+    runner.run("hook", "allow")
+    runner.run("install")
+    assert _armed(runner) == ["fmt-gate", "shell-guard"], "precondition: both arm"
+    [token] = json.loads(_table(runner).read_text())["roots"]
+    config = project_dir / "grimoire.toml"
+    config.write_text(re.sub(r"(?m)^shell-guard = .*\n", "", config.read_text()))
+    empty = tmp_path / "empty-home"
+    empty.mkdir()
+
+    cold = GrimRunner(runner.binary, empty, cwd=project_dir)
+    offline = cold.run("lock", "--offline", check=False)
+    runner.run("install")
+
+    assert offline.returncode == 0, offline.stderr
+    assert _armed(runner) == ["fmt-gate"], "the deleted hook stays in the table"
+    fired = _fire(runner, project_dir, token, log)
+    assert fired == ["fmt-gate"], "the deleted hook fires"
+    assert _declared_hooks(runner) == (["fmt-gate"], ["fmt-gate"])

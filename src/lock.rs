@@ -10,6 +10,9 @@
 //! shared `store::atomic_write` primitive.
 
 pub mod advisory_lock;
+pub mod closure;
+pub mod disposition;
+pub mod edit;
 pub mod effective_set;
 pub mod file_lock;
 pub mod grimoire_lock;
@@ -20,6 +23,14 @@ pub mod locked_artifact;
 pub mod locked_bundle;
 pub mod locked_source;
 pub mod merge_policy;
+pub mod part_stamps;
+pub mod pin_rule;
+pub mod prior;
+pub mod refresh;
+pub(crate) mod stored_members;
+#[cfg(test)]
+pub(crate) mod test_support;
+pub mod verdict;
 
 #[allow(unused_imports)]
 pub use file_lock::ConfigFileLock;

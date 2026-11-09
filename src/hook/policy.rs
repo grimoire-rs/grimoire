@@ -60,7 +60,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::declaration::{ExperimentalOptions, RegistryConfig};
-use crate::config::scope::ConfigScope;
+use crate::config::scope::{ConfigScope, Invocation};
 use crate::lock::locked_source::LockedSource;
 use crate::oci::ArtifactKind;
 use crate::oci::access::registry_client::{plain_http_hosts_with, registry_host};
@@ -135,7 +135,15 @@ pub struct HookPolicy {
     /// [`NotArmedReason::NoTtyToAsk`]: "you said no" and "nobody could be asked"
     /// have different remedies, and a single message would name the wrong one.
     declined_now: bool,
+    /// The `grim` a hook's not-armed remedy names. [`Self::new`] knows only
+    /// global from project, so a caller with a resolved scope sets it through
+    /// [`Self::naming`] for a `--config` run.
+    invocation: Invocation,
 }
+
+/// What a remedy that repeats `--trust-workspace` says the flag also does.
+pub(crate) const FLAG_ALSO_GRANTS: &str =
+    "`--trust-workspace` also arms every hook and applies every settings package this workspace was not consented for";
 
 impl HookPolicy {
     /// Build the policy for one invocation.
@@ -174,6 +182,10 @@ impl HookPolicy {
             locked: None,
             granted_now: false,
             declined_now: false,
+            invocation: match scope {
+                ConfigScope::Global => Invocation::GLOBAL,
+                ConfigScope::Project => Invocation::WALKED,
+            },
         }
     }
 
@@ -194,6 +206,37 @@ impl HookPolicy {
         self
     }
 
+    /// Name `grim` in every remedy a convergence under this policy prints.
+    #[must_use]
+    pub fn naming(mut self, grim: Invocation) -> Self {
+        self.invocation = grim;
+        self
+    }
+
+    /// This policy with the flag pair withheld, so the consent record alone
+    /// answers: what a run without `--trust-workspace` would arm.
+    #[must_use]
+    pub(crate) fn without_flag(&self) -> Self {
+        Self {
+            flag: None,
+            ..self.clone()
+        }
+    }
+
+    /// Whether this run's `--trust-workspace` alone arms `binding`: the verdict
+    /// is the flag's, and the consent record would not arm it. A plain install
+    /// then leaves it, and every other hook, disarmed.
+    pub(crate) fn armed_by_flag_alone(&self, binding: &str, source: &LockedSource) -> bool {
+        self.verdict(binding, source) == Some(Arming::Armed(GrantSource::TrustHooksFlag))
+            && !matches!(self.without_flag().verdict(binding, source), Some(Arming::Armed(_)))
+    }
+
+    /// The `grim` a remedy names: what [`Self::naming`] set, else this scope's
+    /// flag-only form.
+    pub fn invocation(&self) -> &Invocation {
+        &self.invocation
+    }
+
     /// Whether `[options.experimental] hooks` is on for this scope.
     ///
     /// Read by the install-time skip so its warning can name the feature flag
@@ -204,19 +247,10 @@ impl HookPolicy {
     }
 
     /// Why nothing of this kind applies while its flag is off, naming the flag
-    /// of this policy's scope. At global scope either kind names `--global`,
-    /// because the project flag does not cover it; at project scope the
-    /// sentence is [`not_armed_message`]'s.
-    pub(crate) fn feature_off_message(&self) -> &'static str {
-        match (self.kind, self.scope) {
-            (ArtifactKind::Settings, ConfigScope::Global) => {
-                "settings are gated; enable them with `grim config set --global options.experimental.settings true`"
-            }
-            (ArtifactKind::Hook, ConfigScope::Global) => {
-                "hooks are gated; enable them with `grim config set --global options.experimental.hooks true`"
-            }
-            (kind, _) => not_armed_message(kind, NotArmedReason::FeatureOff),
-        }
+    /// of this policy's scope through its invocation: at global scope that is
+    /// `grim --global`, because the project flag does not cover it.
+    pub(crate) fn feature_off_message(&self) -> String {
+        not_armed_message(self.kind, NotArmedReason::FeatureOff, &self.invocation)
     }
 
     /// Whether this run was told no: a declined prompt or a typed refusal.
@@ -234,11 +268,11 @@ impl HookPolicy {
     /// record now holds, and becomes the set a grant may arm.
     ///
     /// Called once, after the consent pass, by the command boundary that
-    /// recorded the answer. Sets the answer to [`Consent::Granted`] rather than
-    /// re-reading the record it just wrote: the write already succeeded (a
-    /// failed write is treated as a decline, because consent that could not be
-    /// recorded must not arm — it would arm again next run with no record of
-    /// why), so a re-read would only be a second chance to disagree with it.
+    /// recorded the answer, so the write already succeeded and no re-read runs:
+    /// a failed write is a decline, since consent that could not be recorded
+    /// would arm again next run with no record of why. `grim add` adopts what
+    /// its write recorded, or the record as it stands when the write failed
+    /// ([`gesture`](crate::command::hook_consent::gesture)).
     pub fn adopt_consent(&mut self, recorded: BTreeSet<String>) {
         self.consent = Consent::Granted;
         self.consented = recorded;
@@ -343,15 +377,16 @@ impl HookPolicy {
         match self.verdict(binding, source) {
             Some(Arming::Armed(_)) => None,
             Some(Arming::ConsentRequired) if settings => Some(format!(
-                "settings from '{}' have not been consented; run `grim consent allow`",
-                self.workspace.display()
+                "settings from '{}' have not been consented; run `{} consent allow`",
+                self.workspace.display(),
+                self.invocation
             )),
             Some(Arming::ConsentRequired) => Some(format!(
-                "hooks from '{}' have not been consented; run `grim hook allow`",
-                self.workspace.display()
+                "hooks from '{}' have not been consented; run `{} hook allow`",
+                self.workspace.display(),
+                self.invocation
             )),
-            Some(Arming::NotArmed(NotArmedReason::FeatureOff)) => Some(self.feature_off_message().to_string()),
-            Some(Arming::NotArmed(reason)) => Some(not_armed_message(self.kind, reason).to_string()),
+            Some(Arming::NotArmed(reason)) => Some(not_armed_message(self.kind, reason, &self.invocation)),
             None if settings => Some(format!("{PATH_SETTINGS}; {PATH_REMEDY}")),
             None => Some(format!("{PATH_HOOK}; {PATH_REMEDY}")),
         }
@@ -369,61 +404,60 @@ const PATH_REMEDY: &str = "publish it with `grim release` and declare it by its 
 /// "why is this row not armed *there*", while these are invocation-wide and
 /// answer "why did this install write nothing at all". Same facts, two
 /// audiences — and the status cell has a token where this has a sentence.
-pub fn not_armed_message(kind: ArtifactKind, reason: NotArmedReason) -> &'static str {
+pub fn not_armed_message(kind: ArtifactKind, reason: NotArmedReason, grim: &Invocation) -> String {
     if kind == ArtifactKind::Settings {
-        return settings_not_applied_message(reason);
+        return settings_not_applied_message(reason, grim);
     }
     match reason {
         NotArmedReason::FeatureOff => {
-            "hooks are gated; enable them with `grim config set options.experimental.hooks true`"
+            format!("hooks are gated; enable them with `{grim} config set options.experimental.hooks true`")
         }
         // The shipped sentence, whichever spelling was typed: a workspace with
         // no settings reads word for word as it did.
-        NotArmedReason::FlagDenied => "--no-trust-hooks was passed, so nothing arms on this invocation",
-        NotArmedReason::InsecureTransport => {
-            "this hook's registry is reached over plain HTTP, so its digest pin cannot be trusted; \
-             serve it over HTTPS or pass --trust-hooks"
-        }
+        NotArmedReason::FlagDenied => "--no-trust-hooks was passed, so nothing arms on this invocation".to_string(),
+        NotArmedReason::InsecureTransport => "this hook's registry is reached over plain HTTP, so its digest pin \
+                                              cannot be trusted; serve it over HTTPS or pass --trust-hooks"
+            .to_string(),
         NotArmedReason::ConsentDrifted => {
-            "this workspace declares hooks it was not consented for; re-run `grim hook allow` to review them"
+            format!("this workspace declares hooks it was not consented for; re-run `{grim} hook allow` to review them")
         }
-        NotArmedReason::NoTtyToAsk => {
+        NotArmedReason::NoTtyToAsk => format!(
             "this workspace has not been consented for hooks and there is no terminal to ask on; \
-             run `grim hook allow` or pass --trust-hooks"
-        }
-        NotArmedReason::ConsentDeclined => {
-            "hook consent for this workspace was declined; run `grim hook allow` or pass --trust-hooks to arm them"
-        }
+             run `{grim} hook allow` or pass --trust-hooks"
+        ),
+        NotArmedReason::ConsentDeclined => format!(
+            "hook consent for this workspace was declined; run `{grim} hook allow` or pass --trust-hooks to arm them"
+        ),
     }
 }
 
 /// [`not_armed_message`] for a settings package, which applies rather than arms
 /// and answers to the consent verb rather than the hook one.
-fn settings_not_applied_message(reason: NotArmedReason) -> &'static str {
+fn settings_not_applied_message(reason: NotArmedReason, grim: &Invocation) -> String {
     match reason {
         NotArmedReason::FeatureOff => {
-            "settings are gated; enable them with `grim config set options.experimental.settings true`"
+            format!("settings are gated; enable them with `{grim} config set options.experimental.settings true`")
         }
         // Clap cannot say which spelling was typed, and claiming the wrong one
         // sends the reader hunting for a flag they never passed.
         NotArmedReason::FlagDenied => {
             "--no-trust-workspace (alias --no-trust-hooks) was passed, so nothing applies on this invocation"
+                .to_string()
         }
-        NotArmedReason::InsecureTransport => {
-            "this package's registry is reached over plain HTTP, so its digest pin cannot be trusted; \
-             serve it over HTTPS or pass --trust-workspace"
-        }
-        NotArmedReason::ConsentDrifted => {
-            "this workspace declares settings it was not consented for; re-run `grim consent allow` to review them"
-        }
-        NotArmedReason::NoTtyToAsk => {
+        NotArmedReason::InsecureTransport => "this package's registry is reached over plain HTTP, so its digest pin \
+                                              cannot be trusted; serve it over HTTPS or pass --trust-workspace"
+            .to_string(),
+        NotArmedReason::ConsentDrifted => format!(
+            "this workspace declares settings it was not consented for; re-run `{grim} consent allow` to review them"
+        ),
+        NotArmedReason::NoTtyToAsk => format!(
             "this workspace has not been consented for settings and there is no terminal to ask on; \
-             run `grim consent allow` or pass --trust-workspace"
-        }
-        NotArmedReason::ConsentDeclined => {
+             run `{grim} consent allow` or pass --trust-workspace"
+        ),
+        NotArmedReason::ConsentDeclined => format!(
             "settings consent for this workspace was declined; \
-             run `grim consent allow` or pass --trust-workspace to apply them"
-        }
+             run `{grim} consent allow` or pass --trust-workspace to apply them"
+        ),
     }
 }
 
@@ -500,6 +534,14 @@ impl ConsentPolicies {
         if !hooks.is_empty() {
             self.hooks.adopt_consent(recorded);
         }
+    }
+
+    /// Name `grim` in every remedy either policy prints.
+    #[must_use]
+    pub fn naming(mut self, grim: &Invocation) -> Self {
+        self.hooks = self.hooks.naming(grim.clone());
+        self.settings = self.settings.naming(grim.clone());
+        self
     }
 
     /// Record that this run's one question was declined, for both kinds.
@@ -1137,12 +1179,23 @@ mod tests {
             NotArmedReason::NoTtyToAsk,
             NotArmedReason::ConsentDeclined,
         ];
+        let config = Invocation::config(std::path::Path::new("/srv/team/grimoire.toml"));
         for kind in [ArtifactKind::Hook, ArtifactKind::Settings] {
-            let messages: std::collections::BTreeSet<&str> =
-                reasons.iter().map(|r| not_armed_message(kind, *r)).collect();
+            for reason in [
+                NotArmedReason::FeatureOff,
+                NotArmedReason::ConsentDrifted,
+                NotArmedReason::NoTtyToAsk,
+            ] {
+                let message = not_armed_message(kind, reason, &config);
+                assert!(message.contains(&format!("`{config} ")), "{message}");
+            }
+            let messages: std::collections::BTreeSet<String> = reasons
+                .iter()
+                .map(|r| not_armed_message(kind, *r, &Invocation::WALKED))
+                .collect();
             assert_eq!(messages.len(), reasons.len(), "two reasons share one sentence");
             for reason in reasons {
-                let message = not_armed_message(kind, reason);
+                let message = not_armed_message(kind, reason, &Invocation::WALKED);
                 assert!(!message.is_empty());
                 assert!(
                     message.contains("`grim ") || message.contains("--"),
@@ -1168,17 +1221,29 @@ mod tests {
             NotArmedReason::NoTtyToAsk,
             NotArmedReason::ConsentDeclined,
         ] {
-            let message = not_armed_message(ArtifactKind::Settings, reason).replace("--no-trust-hooks", "");
+            let message =
+                not_armed_message(ArtifactKind::Settings, reason, &Invocation::WALKED).replace("--no-trust-hooks", "");
             assert!(!message.contains("hook"), "{message}");
         }
         assert!(
-            not_armed_message(ArtifactKind::Settings, NotArmedReason::FeatureOff)
+            not_armed_message(ArtifactKind::Settings, NotArmedReason::FeatureOff, &Invocation::WALKED)
                 .contains("options.experimental.settings")
         );
-        assert!(not_armed_message(ArtifactKind::Settings, NotArmedReason::NoTtyToAsk).contains("--trust-workspace"));
-        assert!(not_armed_message(ArtifactKind::Settings, NotArmedReason::NoTtyToAsk).contains("`grim consent allow`"));
         assert!(
-            not_armed_message(ArtifactKind::Settings, NotArmedReason::InsecureTransport).contains("--trust-workspace")
+            not_armed_message(ArtifactKind::Settings, NotArmedReason::NoTtyToAsk, &Invocation::WALKED)
+                .contains("--trust-workspace")
+        );
+        assert!(
+            not_armed_message(ArtifactKind::Settings, NotArmedReason::NoTtyToAsk, &Invocation::WALKED)
+                .contains("`grim consent allow`")
+        );
+        assert!(
+            not_armed_message(
+                ArtifactKind::Settings,
+                NotArmedReason::InsecureTransport,
+                &Invocation::WALKED
+            )
+            .contains("--trust-workspace")
         );
     }
 
@@ -1186,7 +1251,7 @@ mod tests {
     /// both rather than claiming one the user may not have typed.
     #[test]
     fn a_refused_settings_flag_is_named_under_both_spellings() {
-        let message = not_armed_message(ArtifactKind::Settings, NotArmedReason::FlagDenied);
+        let message = not_armed_message(ArtifactKind::Settings, NotArmedReason::FlagDenied, &Invocation::WALKED);
         assert!(message.contains("--no-trust-workspace"), "{message}");
         assert!(message.contains("--no-trust-hooks"), "{message}");
     }
@@ -1202,27 +1267,27 @@ mod tests {
         .policies()
     }
 
-    /// At global scope each kind names `--global`: the project flag does not
-    /// cover a global run, so the project remedy would change nothing.
+    /// At global scope each kind names `grim --global`: the project flag does
+    /// not cover a global run, so the project remedy would change nothing.
     #[test]
     fn the_global_flag_off_remedy_names_global_for_both_kinds() {
         let global = flags_off_at(ConfigScope::Global);
 
         assert_eq!(
             global.hooks.feature_off_message(),
-            "hooks are gated; enable them with `grim config set --global options.experimental.hooks true`"
+            "hooks are gated; enable them with `grim --global config set options.experimental.hooks true`"
         );
         assert_eq!(
             global.settings.feature_off_message(),
-            "settings are gated; enable them with `grim config set --global options.experimental.settings true`"
+            "settings are gated; enable them with `grim --global config set options.experimental.settings true`"
         );
         // `grim install --global` warns with the refusal, so it names the same flag.
         assert_eq!(
-            global.hooks.refusal_reason("guard", &guard()).as_deref(),
+            global.hooks.refusal_reason("guard", &guard()),
             Some(global.hooks.feature_off_message())
         );
         assert_eq!(
-            global.settings.refusal_reason("team", &team()).as_deref(),
+            global.settings.refusal_reason("team", &team()),
             Some(global.settings.feature_off_message())
         );
     }
@@ -1238,7 +1303,7 @@ mod tests {
         );
         assert_eq!(
             project.hooks.feature_off_message(),
-            not_armed_message(ArtifactKind::Hook, NotArmedReason::FeatureOff)
+            not_armed_message(ArtifactKind::Hook, NotArmedReason::FeatureOff, &Invocation::WALKED)
         );
         assert_eq!(
             project.settings.feature_off_message(),
@@ -1246,11 +1311,11 @@ mod tests {
         );
         // `grim status` and the TUI read the refusal, so it says what the run line says.
         assert_eq!(
-            project.hooks.refusal_reason("guard", &guard()).as_deref(),
+            project.hooks.refusal_reason("guard", &guard()),
             Some(project.hooks.feature_off_message())
         );
         assert_eq!(
-            project.settings.refusal_reason("team", &team()).as_deref(),
+            project.settings.refusal_reason("team", &team()),
             Some(project.settings.feature_off_message())
         );
     }
@@ -1258,14 +1323,14 @@ mod tests {
     /// The hook sentences the remedies are read from stay word for word.
     #[test]
     fn hook_refusals_keep_their_remedies() {
-        let message = not_armed_message(ArtifactKind::Hook, NotArmedReason::NoTtyToAsk);
+        let message = not_armed_message(ArtifactKind::Hook, NotArmedReason::NoTtyToAsk, &Invocation::WALKED);
         assert_eq!(
             message,
             "this workspace has not been consented for hooks and there is no terminal to ask on; \
              run `grim hook allow` or pass --trust-hooks"
         );
         assert_eq!(
-            not_armed_message(ArtifactKind::Hook, NotArmedReason::FlagDenied),
+            not_armed_message(ArtifactKind::Hook, NotArmedReason::FlagDenied, &Invocation::WALKED),
             "--no-trust-hooks was passed, so nothing arms on this invocation"
         );
     }

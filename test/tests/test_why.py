@@ -280,6 +280,24 @@ def test_exit_codes(grim_at, project_dir: Path, tmp_path: Path) -> None:
     )
 
 
+def test_a_config_run_names_its_config_in_the_lock_remedy(
+    grim_at, project_dir: Path, tmp_path: Path
+) -> None:
+    """Followed from the shell's own project, a plain `grim lock` relocks that one."""
+    write_config(project_dir, skills={"a": _ref("a")})
+    _write_lock(project_dir, _entry("a", "a", requires=[("gone", _ref("gone"))]))
+    config = project_dir / "grimoire.toml"
+    away = tmp_path / "away"
+    away.mkdir()
+
+    result = grim_at(away).run(
+        "--format", "json", "--config", str(config), "why", "skill", "a", check=False
+    )
+
+    assert result.returncode == 65, (result.stdout, result.stderr)
+    assert f"run `grim --config {config} lock`" in json.loads(result.stdout)["error"]["message"]
+
+
 def test_registry_flag_inert(grim_at, project_dir: Path) -> None:
     _diamond(project_dir)
     runner = grim_at(project_dir)

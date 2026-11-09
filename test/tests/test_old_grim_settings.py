@@ -2,16 +2,15 @@
 
 The settings kind is written by a newer grim; an older grim on the same machine
 must refuse cleanly or ignore what it cannot see, never corrupt.  The binary
-under test is the *old* one, given by ``GRIM_OLD_BIN`` (a grim 0.15.1 build);
-the module skips when it is unset.  Every fixture is hand-written or pushed by
-``make_settings``, so no new grim is involved and a broken writer cannot mask a
-broken reader.
+under test is the *old* one, given by ``GRIM_OLD_BIN`` (the v0.15.1 release
+binary, checked by ``src.old_grim``); the module skips when it is unset.  Every
+fixture is hand-written or pushed by ``make_settings``, so no new grim is
+involved and a broken writer cannot mask a broken reader.
 """
 
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -24,10 +23,9 @@ from src.helpers import (
     make_settings,
     write_config,
 )
+from src.old_grim import OLD_BIN, checked_old_grim
 from src.registry import REGISTRY_HOST
 from src.runner import GrimRunner
-
-OLD_BIN = os.environ.get("GRIM_OLD_BIN")
 
 pytestmark = pytest.mark.skipif(
     not OLD_BIN, reason="GRIM_OLD_BIN names no grim 0.15.1 binary"
@@ -46,20 +44,21 @@ _LOCK_HEAD = (
 )
 
 
+@pytest.fixture(scope="module")
+def old_bin(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    # Every build that knows the settings kind also accepts the later lock field
+    # this check refuses, so a dev build errors here rather than passing as 0.15.1.
+    return checked_old_grim(tmp_path_factory.mktemp("old-grim-identity"))
+
+
 @pytest.fixture()
-def old(tmp_path: Path) -> GrimRunner:
+def old(old_bin: Path, tmp_path: Path) -> GrimRunner:
     """The old grim, in a Claude-detected project with its own GRIM_HOME."""
-    assert OLD_BIN is not None
     grim_home = tmp_path / "grim-home"
     grim_home.mkdir()
     project = tmp_path / "project"
     (project / ".claude").mkdir(parents=True)
-    runner = GrimRunner(Path(OLD_BIN), grim_home, cwd=project)
-    version = runner.run("--version").stdout
-    assert "0.15." in version, f"GRIM_OLD_BIN is not a grim 0.15: {version!r}"
-    # The version alone cannot tell 0.15.1 from a build of this branch, which still carries it.
-    knows = runner.run("schema", "--kind", "settings", check=False).returncode == 0
-    assert not knows, "GRIM_OLD_BIN knows the settings kind, so it is not a released grim 0.15"
+    runner = GrimRunner(old_bin, grim_home, cwd=project)
     runner.run("init")
     return runner
 

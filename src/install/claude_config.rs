@@ -80,7 +80,7 @@
 //!
 //! [claude-memory]: https://code.claude.com/docs/en/memory
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -90,7 +90,7 @@ use crate::oci::ArtifactKind;
 
 use super::client_target::ClientTarget;
 use super::managed_config;
-use super::vendor::home_dir;
+use super::vendor::{SyncAdds, home_dir};
 
 /// The root config key holding Claude Code's auto-load exclusion globs.
 const EXCLUDES_KEY: &str = "claudeMdExcludes";
@@ -210,7 +210,8 @@ fn scope_root(workspace: &Path, scope: ConfigScope) -> Option<PathBuf> {
 /// directories grim itself installed. A retired name that the post-state
 /// still wants (a re-install at a new pin retires the old output and
 /// records a new one) keeps its element, and so does one whose directory
-/// is still on disk (see the module doc's suppressor).
+/// is still on disk (see the module doc's suppressor). Only a rule `adds`
+/// admits gets its element added; removal ignores `adds`.
 ///
 /// # Errors
 ///
@@ -222,11 +223,12 @@ pub fn sync_for_state(
     workspace: &Path,
     scope: ConfigScope,
     retired: &[ClientOutput],
+    adds: SyncAdds<'_>,
 ) -> io::Result<()> {
     // Resolve the root once and derive both paths from it: resolved
     // separately they could disagree, and the element written would then name
     // a directory nothing was ever written to.
-    sync_at_root(scope_root(workspace, scope), state, scope, retired)
+    sync_at_root(scope_root(workspace, scope), state, scope, retired, adds)
 }
 
 /// [`sync_for_state`] against an already-resolved layout `root` — the seam
@@ -241,6 +243,7 @@ fn sync_at_root(
     state: &InstallState,
     scope: ConfigScope,
     retired: &[ClientOutput],
+    adds: SyncAdds<'_>,
 ) -> io::Result<()> {
     let Some(root) = root else {
         // Declining is the safe half of a disagreement, not a non-event:
@@ -258,16 +261,17 @@ fn sync_at_root(
     let config_path = root.join(SETTINGS_FILE);
     let claude = ClientTarget::Claude.to_string();
 
-    let wanted: BTreeSet<String> = support_dir_names(
-        state
-            .iter_records()
-            .filter(|r| r.kind == ArtifactKind::Rule)
-            .flat_map(|r| &r.outputs),
-        &claude,
-    )
-    .collect();
+    // Keyed by directory, which a rule's binding name need not match. Two
+    // bindings can record one directory, which may be added when either can.
+    let mut wanted: BTreeMap<String, bool> = BTreeMap::new();
+    for record in state.iter_records().filter(|r| r.kind == ArtifactKind::Rule) {
+        let admitted = adds.admits(&record.name);
+        for dir in support_dir_names(record.outputs.iter(), &claude) {
+            *wanted.entry(dir).or_default() |= admitted;
+        }
+    }
 
-    for name in &wanted {
+    for (name, _) in wanted.iter().filter(|(_, admitted)| **admitted) {
         let entry = managed_entry(name, &rules_dir, scope);
         managed_config::sync_managed_element(&config_path, EXCLUDES_KEY, &entry, true)?;
     }
@@ -283,7 +287,7 @@ fn sync_at_root(
     // so its exclusion must stay. Declining a removal can never delete a
     // user's element; do not "simplify" it away.
     let stale: BTreeSet<String> = support_dir_names(retired.iter(), &claude)
-        .filter(|name| !wanted.contains(name))
+        .filter(|name| !wanted.contains_key(name))
         .filter(|name| !rules_dir.join(name).exists())
         .collect();
 
@@ -375,6 +379,71 @@ mod tests {
         InstallState::empty(&ws.join("state.json"))
     }
 
+    /// [`sync_for_state`] as an install or a bare update calls it.
+    fn sync_every(state: &InstallState, ws: &Path, scope: ConfigScope, retired: &[ClientOutput]) -> io::Result<()> {
+        sync_for_state(state, ws, scope, retired, SyncAdds::Every)
+    }
+
+    /// A named update adds the exclusion of a rule in its closure and leaves an
+    /// unnamed rule's hand-removed exclusion removed.
+    #[test]
+    fn a_named_sync_adds_only_the_closures_exclusions() {
+        let tmp = workspace_with_support_dir(&["named", "other"]);
+        let ws = tmp.path();
+        let mut state = state_at(ws);
+        state.record(rule_record("named", "claude", Some(".claude/rules/named")));
+        state.record(rule_record("other", "claude", Some(".claude/rules/other")));
+        let closure = BTreeSet::from([(ArtifactKind::Rule, "named".to_string())]);
+
+        sync_for_state(&state, ws, ConfigScope::Project, &[], SyncAdds::Within(&closure)).unwrap();
+
+        let config = ws.join(".claude").join(SETTINGS_FILE);
+        assert_eq!(excludes(&config), serde_json::json!(["**/.claude/rules/named/**"]));
+    }
+
+    /// Two bindings can record one support directory; the element is the
+    /// closure binding's own entry whichever binding sorts last.
+    #[test]
+    fn a_named_sync_adds_a_shared_directory_for_its_closure_binding() {
+        let tmp = workspace_with_support_dir(&["shared"]);
+        let ws = tmp.path();
+        let mut state = state_at(ws);
+        state.record(rule_record("a-named", "claude", Some(".claude/rules/shared")));
+        state.record(rule_record("b-other", "claude", Some(".claude/rules/shared")));
+        let closure = BTreeSet::from([(ArtifactKind::Rule, "a-named".to_string())]);
+
+        sync_for_state(&state, ws, ConfigScope::Project, &[], SyncAdds::Within(&closure)).unwrap();
+
+        let config = ws.join(".claude").join(SETTINGS_FILE);
+        assert_eq!(excludes(&config), serde_json::json!(["**/.claude/rules/shared/**"]));
+    }
+
+    /// Removal follows what the run retired, even when no entry may be added.
+    #[test]
+    fn a_sync_that_adds_nothing_still_removes_a_retired_exclusion() {
+        let tmp = workspace_with_support_dir(&["gone"]);
+        let ws = tmp.path();
+        let mut state = state_at(ws);
+        state.record(rule_record("gone", "claude", Some(".claude/rules/gone")));
+        sync_every(&state, ws, ConfigScope::Project, &[]).unwrap();
+        let state = state_at(ws);
+        delete_support_dir(ws, "gone");
+
+        sync_for_state(
+            &state,
+            ws,
+            ConfigScope::Project,
+            &[retired("gone", "claude", Some(".claude/rules/gone"))],
+            SyncAdds::Nothing,
+        )
+        .unwrap();
+
+        assert_eq!(
+            excludes(&ws.join(".claude").join(SETTINGS_FILE)),
+            serde_json::Value::Null
+        );
+    }
+
     #[test]
     fn managed_entry_is_worktree_portable_for_project_absolute_for_global() {
         let rules = Path::new("/home/u/.claude/rules");
@@ -407,13 +476,13 @@ mod tests {
         let mut state = state_at(ws);
         state.record(rule_record("r", "claude", Some(".claude/rules/r")));
 
-        sync_for_state(&state, ws, ConfigScope::Project, &[]).unwrap();
+        sync_every(&state, ws, ConfigScope::Project, &[]).unwrap();
 
         let config = ws.join(".claude").join(SETTINGS_FILE);
         assert_eq!(excludes(&config), serde_json::json!(["**/.claude/rules/r/**"]));
 
         // Idempotent: a second converge writes nothing new.
-        sync_for_state(&state, ws, ConfigScope::Project, &[]).unwrap();
+        sync_every(&state, ws, ConfigScope::Project, &[]).unwrap();
         assert_eq!(excludes(&config), serde_json::json!(["**/.claude/rules/r/**"]));
     }
 
@@ -424,7 +493,7 @@ mod tests {
         let mut state = state_at(ws);
         state.record(rule_record("r", "claude", None));
 
-        sync_for_state(&state, ws, ConfigScope::Project, &[]).unwrap();
+        sync_every(&state, ws, ConfigScope::Project, &[]).unwrap();
 
         assert!(
             !ws.join(".claude").join(SETTINGS_FILE).exists(),
@@ -439,7 +508,7 @@ mod tests {
         let mut state = state_at(ws);
         state.record(rule_record("r", "opencode", Some(".opencode/rules/r")));
 
-        sync_for_state(&state, ws, ConfigScope::Project, &[]).unwrap();
+        sync_every(&state, ws, ConfigScope::Project, &[]).unwrap();
 
         assert!(!ws.join(".claude").join(SETTINGS_FILE).exists());
     }
@@ -470,7 +539,7 @@ mod tests {
         // sitting beside it — a no-op sync would prove nothing about them.
         let mut state = state_at(ws);
         state.record(rule_record("grim-owned", "claude", Some(".claude/rules/grim-owned")));
-        sync_for_state(
+        sync_every(
             &state,
             ws,
             ConfigScope::Project,
@@ -532,7 +601,7 @@ mod tests {
         );
         std::fs::write(&config, original).unwrap();
 
-        sync_for_state(&state_at(ws), ws, ConfigScope::Project, &[]).unwrap();
+        sync_every(&state_at(ws), ws, ConfigScope::Project, &[]).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(&config).unwrap(),
@@ -547,13 +616,13 @@ mod tests {
         let ws = tmp.path();
         let mut state = state_at(ws);
         state.record(rule_record("r", "claude", Some(".claude/rules/r")));
-        sync_for_state(&state, ws, ConfigScope::Project, &[]).unwrap();
+        sync_every(&state, ws, ConfigScope::Project, &[]).unwrap();
 
         // Uninstall: the files go first, then the record — and its output is
         // what the operation hands the sync as retired.
         delete_support_dir(ws, "r");
         state.remove(ArtifactKind::Rule, "r");
-        sync_for_state(
+        sync_every(
             &state,
             ws,
             ConfigScope::Project,
@@ -576,11 +645,11 @@ mod tests {
         let mut state = state_at(ws);
         state.record(rule_record("alpha", "claude", Some(".claude/rules/alpha")));
         state.record(rule_record("beta", "claude", Some(".claude/rules/beta")));
-        sync_for_state(&state, ws, ConfigScope::Project, &[]).unwrap();
+        sync_every(&state, ws, ConfigScope::Project, &[]).unwrap();
 
         delete_support_dir(ws, "alpha");
         state.remove(ArtifactKind::Rule, "alpha");
-        sync_for_state(
+        sync_every(
             &state,
             ws,
             ConfigScope::Project,
@@ -606,7 +675,7 @@ mod tests {
 
         // An OpenCode rule's support dir is a different tree entirely; its
         // removal says nothing about Claude's exclusion.
-        sync_for_state(
+        sync_every(
             &state_at(ws),
             ws,
             ConfigScope::Project,
@@ -630,7 +699,7 @@ mod tests {
         let original = r#"{"claudeMdExcludes": ["**/.claude/rules/*/**", "**/.claude/rules/mine/**"]}"#;
         std::fs::write(&config, original).unwrap();
 
-        sync_for_state(
+        sync_every(
             &state_at(ws),
             ws,
             ConfigScope::Project,
@@ -651,7 +720,7 @@ mod tests {
         let mut state = state_at(ws);
         state.record(rule_record("r", "claude", Some(".claude/rules/r")));
 
-        sync_for_state(
+        sync_every(
             &state,
             ws,
             ConfigScope::Project,
@@ -680,7 +749,7 @@ mod tests {
         )
         .unwrap();
 
-        sync_for_state(
+        sync_every(
             &state_at(ws),
             ws,
             ConfigScope::Project,
@@ -711,7 +780,7 @@ mod tests {
 
         let mut state = state_at(ws);
         state.record(rule_record("r", "claude", Some(".claude/rules/r")));
-        sync_for_state(&state, ws, ConfigScope::Project, &[]).unwrap();
+        sync_every(&state, ws, ConfigScope::Project, &[]).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(&config).unwrap(),
@@ -738,7 +807,7 @@ mod tests {
 
         let mut state = state_at(ws);
         state.record(rule_record("r", "claude", Some(".claude/rules/r")));
-        sync_for_state(&state, ws, ConfigScope::Project, &[]).unwrap();
+        sync_every(&state, ws, ConfigScope::Project, &[]).unwrap();
 
         let written = std::fs::read_to_string(&config).unwrap();
         assert!(
@@ -774,7 +843,7 @@ mod tests {
 
         let mut state = state_at(ws);
         state.record(rule_record("r", "claude", Some(".claude/rules/r")));
-        sync_for_state(&state, ws, ConfigScope::Project, &[]).unwrap();
+        sync_every(&state, ws, ConfigScope::Project, &[]).unwrap();
 
         let written = std::fs::read_to_string(&config).unwrap();
         assert!(
@@ -799,7 +868,7 @@ mod tests {
 
         let mut state = state_at(ws);
         state.record(rule_record("r", "claude", Some(".claude/rules/r")));
-        let err = sync_for_state(&state, ws, ConfigScope::Project, &[]).unwrap_err();
+        let err = sync_every(&state, ws, ConfigScope::Project, &[]).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert_eq!(
             std::fs::read_to_string(&config).unwrap(),
@@ -809,7 +878,7 @@ mod tests {
 
         // Nothing to add, one thing to retire: the removal is tolerant.
         delete_support_dir(ws, "r");
-        sync_for_state(
+        sync_every(
             &state_at(ws),
             ws,
             ConfigScope::Project,
@@ -828,7 +897,7 @@ mod tests {
         let mut state = state_at(ws);
         state.record(rule_record("binding", "claude", Some(".claude/rules/on-disk")));
 
-        sync_for_state(&state, ws, ConfigScope::Project, &[]).unwrap();
+        sync_every(&state, ws, ConfigScope::Project, &[]).unwrap();
 
         assert_eq!(
             excludes(&ws.join(".claude").join(SETTINGS_FILE)),
@@ -847,9 +916,9 @@ mod tests {
         state.record(rule_record("alpha", "claude", Some(".claude/rules/alpha")));
         state.record(rule_record("beta", "claude", Some(".claude/rules/beta")));
 
-        sync_for_state(&state, ws, ConfigScope::Project, &[]).unwrap();
+        sync_every(&state, ws, ConfigScope::Project, &[]).unwrap();
 
-        // `wanted` is a `BTreeSet`, so the append order is the name order.
+        // `wanted` is ordered by directory, so the append order is the name order.
         assert_eq!(
             excludes(&ws.join(".claude").join(SETTINGS_FILE)),
             serde_json::json!(["**/.claude/rules/alpha/**", "**/.claude/rules/beta/**"]),
@@ -868,7 +937,7 @@ mod tests {
         let mut state = state_at(ws);
         state.record(rule_record("blanket", "claude", Some(".claude/rules/*")));
 
-        sync_for_state(&state, ws, ConfigScope::Project, &[]).unwrap();
+        sync_every(&state, ws, ConfigScope::Project, &[]).unwrap();
 
         assert!(
             !ws.join(".claude").join(SETTINGS_FILE).exists(),
@@ -911,7 +980,7 @@ mod tests {
         let mut state = state_at(ws);
         state.record(rule_record("r", "claude", Some(".claude/rules/r")));
 
-        sync_at_root(None, &state, ConfigScope::Global, &[]).unwrap();
+        sync_at_root(None, &state, ConfigScope::Global, &[], SyncAdds::Every).unwrap();
 
         assert!(
             !ws.join(".claude").join(SETTINGS_FILE).exists(),
@@ -929,7 +998,7 @@ mod tests {
         let ws = tmp.path();
         std::fs::create_dir_all(ws.join(".claude").join(SETTINGS_FILE)).unwrap();
 
-        let err = sync_for_state(
+        let err = sync_every(
             &state_at(ws),
             ws,
             ConfigScope::Project,
@@ -949,7 +1018,7 @@ mod tests {
         let ws = tmp.path();
         let mut state = state_at(ws);
         state.record(rule_record("r", "claude", Some(".claude/rules/r")));
-        sync_for_state(&state, ws, ConfigScope::Project, &[]).unwrap();
+        sync_every(&state, ws, ConfigScope::Project, &[]).unwrap();
 
         // v2 of the same rule ships no support directory: the record stays
         // live under the same name while its support-dir output is replaced,
@@ -960,7 +1029,7 @@ mod tests {
         // suppressor keeps the element and this passes for the wrong reason.
         delete_support_dir(ws, "r");
         state.record(rule_record("r", "claude", None));
-        sync_for_state(
+        sync_every(
             &state,
             ws,
             ConfigScope::Project,
@@ -988,11 +1057,11 @@ mod tests {
         let ws = tmp.path();
         let mut state = state_at(ws);
         state.record(rule_record("r", "claude", Some(".claude/rules/r")));
-        sync_for_state(&state, ws, ConfigScope::Project, &[]).unwrap();
+        sync_every(&state, ws, ConfigScope::Project, &[]).unwrap();
 
         // The record goes; the directory does not.
         state.remove(ArtifactKind::Rule, "r");
-        sync_for_state(
+        sync_every(
             &state,
             ws,
             ConfigScope::Project,
@@ -1017,7 +1086,7 @@ mod tests {
 
         let mut state = state_at(ws);
         state.record(rule_record("r", "claude", Some(".claude/rules/r")));
-        let err = sync_for_state(&state, ws, ConfigScope::Project, &[]).unwrap_err();
+        let err = sync_every(&state, ws, ConfigScope::Project, &[]).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert_eq!(
             std::fs::read_to_string(&config).unwrap(),
@@ -1027,7 +1096,7 @@ mod tests {
 
         // Removal against the same unknown schema converges instead of failing.
         delete_support_dir(ws, "r");
-        sync_for_state(
+        sync_every(
             &state_at(ws),
             ws,
             ConfigScope::Project,

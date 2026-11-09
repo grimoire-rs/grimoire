@@ -35,11 +35,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import shutil
 from pathlib import Path
 
 import pytest
-
-import re
 
 from src.helpers import make_artifact, make_bundle, make_dependent, write_config
 from src.registry import REGISTRY_HOST, retag
@@ -65,12 +65,12 @@ timeout = 5
 GUARD_SH = "#!/bin/sh\ncat > /dev/null\necho '{}'\n"
 
 
-def _publish_hook(unique_repo: str, name: str = "shell-guard", tag: str = "1"):
+def _publish_hook(unique_repo: str, name: str = "shell-guard", tag: str = "1", payload: str = GUARD_SH):
     """Push a real one-hook artifact; the payload tree is rooted at `<name>/`."""
     return make_artifact(
         f"{unique_repo}/{name}",
         "hook",
-        {f"{name}/hook.toml": HOOK_TOML.format(name=name), f"{name}/guard.sh": GUARD_SH},
+        {f"{name}/hook.toml": HOOK_TOML.format(name=name), f"{name}/guard.sh": payload},
         tag=tag,
     )
 
@@ -670,7 +670,7 @@ def test_add_does_not_consent_when_closure_incomputable(
 ) -> None:
     """When the pre-add closure cannot be computed offline, every hook already
     in the config or the previous lock is excluded rather than assumed new."""
-    planted = _publish_hook(unique_repo, name="planted")
+    _publish_hook(unique_repo, name="planted")
     fresh = _publish_hook(unique_repo, name="fresh")
     holder = _skill_requiring(unique_repo, "holder", ["planted"])
     wanted = _skill_requiring(unique_repo, "wanted", ["planted", "fresh"])
@@ -806,3 +806,744 @@ def test_transitive_hook_transport_parity(
     assert keys(rows_req) == keys(rows_bun)
     assert "hook 'shared' is required by skill 'carrier'" in err_req, err_req
     assert "hook 'shared' is delivered by bundle" in err_bun, err_bun
+
+
+# ---------------------------------------------------------------------------
+# Consent needs a manifest this run read, and an install that succeeded
+# ---------------------------------------------------------------------------
+
+_LOCK_HEADER = f"""\
+[metadata]
+lock_version = 1
+declaration_hash_version = 1
+declaration_hash = "sha256:{'d' * 64}"
+generated_by = "grim 0.15.1"
+generated_at = "2026-11-01T00:00:00Z"
+"""
+
+
+def _skill(unique_repo: str, name: str):
+    files = {f"{name}/SKILL.md": f"---\nname: {name}\ndescription: d\n---\n# {name}\n"}
+    return make_artifact(f"{unique_repo}/{name}", "skill", files, tag="1")
+
+
+def _hooked_workspace(grim_at, project_dir: Path):
+    """A fresh workspace with the feature on and no record."""
+    runner = grim_at(project_dir)
+    runner.run("init")
+    _enabled(runner)
+    return runner
+
+
+def _warmed(grim_at, tmp_path: Path, **declared):
+    """Lock `declared` in a sibling workspace: a test's one `$GRIM_HOME` now
+    stores what that read, and the workspace under test stays untouched."""
+    warm = tmp_path / "warm"
+    (warm / ".claude").mkdir(parents=True)
+    write_config(warm, **declared)
+    runner = grim_at(warm)
+    _enabled(runner)
+    runner.run("lock")
+    return runner
+
+
+def _evict(runner, digest: str) -> None:
+    algorithm, hex_digest = digest.split(":")
+    (Path(runner.grim_home) / "blobs" / algorithm / hex_digest[:2] / hex_digest).unlink()
+
+
+def _consented(runner, workspace: Path) -> set[str]:
+    record = _record_for(runner, workspace)
+    return set(record["hooks"]) if record else set()
+
+
+def _armed_in(runner, workspace: Path) -> set[str]:
+    """The hooks armed for `workspace`; one `$GRIM_HOME` serves every project in a test."""
+    path = Path(runner.grim_home) / "hooks" / "dispatch.json"
+    if not path.is_file():
+        return set()
+    roots = json.loads(path.read_text())["roots"].values()
+    return {row["artifact"] for root in roots if root["root"] == str(workspace) for row in root["hooks"]}
+
+
+def _key(hook) -> str:
+    return f"{hook.repo.rsplit('/', 1)[-1]}@{REGISTRY_HOST}/{hook.repo}"
+
+
+def _planted_bundle_row(unique_repo: str):
+    """A published bundle, and a `[[bundle]]` row claiming `planted` for it."""
+    planted = _publish_hook(unique_repo, name="planted")
+    filler = _skill(unique_repo, "filler")
+    inner = make_bundle(f"{unique_repo}/inner", [("skill", "filler", filler.fq)], tag="1")
+    return inner, f"""
+[[bundle]]
+name = "inner"
+repo = "{REGISTRY_HOST}/{inner.repo}"
+tag = "{inner.tag}"
+pinned = "{inner.pinned}"
+transitive = true
+
+[[bundle.member]]
+kind = "hook"
+name = "planted"
+id = "{planted.pinned}"
+"""
+
+
+def _planted_requires_row(unique_repo: str):
+    """A published skill, and a `[[skill.requires]]` row claiming `planted` for it."""
+    planted = _publish_hook(unique_repo, name="planted")
+    dep = _skill(unique_repo, "dep")
+    return dep, f"""
+[[skill]]
+name = "dep"
+pinned = "{dep.pinned}"
+
+[[skill.requires]]
+kind = "hook"
+name = "planted"
+id = "{planted.pinned}"
+"""
+
+
+def _stored(grim_at, tmp_path: Path, **declared) -> object:
+    """[`_warmed`], installed with its hooks armed: the blobs of each are stored."""
+    warm = _warmed(grim_at, tmp_path, **declared)
+    warm.run("hook", "allow")
+    warm.run("install")
+    return warm
+
+
+def _planted_reference(unique_repo: str) -> str:
+    return f"{REGISTRY_HOST}/{unique_repo}/planted:1"
+
+
+def _on_disk(runner, artifact) -> None:
+    """Install `artifact`, drop its declaration and forget its manifest: its files
+    are all an offline install needs, and only a lock row can name its edges."""
+    runner.run("add", "--kind", artifact.kind, artifact.pinned)
+    runner.run("remove", artifact.kind, artifact.repo.rsplit("/", 1)[-1])
+    _evict(runner, artifact.digest)
+
+
+def _requires_row_as_target(grim_at, tmp_path: Path, runner, unique_repo: str):
+    dep, row = _planted_requires_row(unique_repo)
+    _stored(grim_at, tmp_path, hooks={"planted": _planted_reference(unique_repo)})
+    _on_disk(runner, dep)
+    return dep.kind, dep.pinned, row
+
+
+def _bundle_row_below_target(grim_at, tmp_path: Path, runner, unique_repo: str):
+    inner, row = _planted_bundle_row(unique_repo)
+    outer = make_bundle(f"{unique_repo}/outer", [("bundle", "inner", inner.fq)], tag="1")
+    declared = {"hooks": {"planted": _planted_reference(unique_repo)}, "bundles": {"outer": outer.fq}}
+    _evict(_stored(grim_at, tmp_path, **declared), inner.digest)
+    return outer.kind, outer.fq, row
+
+
+def _requires_row_below_target(grim_at, tmp_path: Path, runner, unique_repo: str):
+    dep, row = _planted_requires_row(unique_repo)
+    outer = make_bundle(f"{unique_repo}/outer", [("skill", "dep", dep.pinned)], tag="1")
+    declared = {"hooks": {"planted": _planted_reference(unique_repo)}, "bundles": {"outer": outer.fq}}
+    _stored(grim_at, tmp_path, **declared)
+    _on_disk(runner, dep)
+    return outer.kind, outer.fq, row
+
+
+def _requires_row_elsewhere(grim_at, tmp_path: Path, runner, unique_repo: str):
+    """The row claims the digest for another repository, so the node it answers
+    for is new to the lock and the walk reaches below it."""
+    dep, row = _planted_requires_row(unique_repo)
+    outer = make_bundle(f"{unique_repo}/outer", [("skill", "dep", dep.pinned)], tag="1")
+    declared = {"hooks": {"planted": _planted_reference(unique_repo)}, "bundles": {"outer": outer.fq}}
+    _stored(grim_at, tmp_path, **declared)
+    _on_disk(runner, dep)
+    return outer.kind, outer.fq, row.replace(dep.pinned, f"{REGISTRY_HOST}/{unique_repo}/fork@{dep.digest}")
+
+
+@pytest.mark.parametrize(
+    "stand_in",
+    [_requires_row_as_target, _bundle_row_below_target, _requires_row_below_target, _requires_row_elsewhere],
+    ids=["requires-row-target", "bundle-row-nested", "requires-row-nested", "requires-row-elsewhere"],
+)
+def test_offline_add_records_no_consent_for_a_stand_in(
+    grim_at, tmp_path: Path, project_dir: Path, unique_repo: str, stand_in
+) -> None:
+    """A lock row answering for a manifest may inform a report, never a consent
+    record. Each run succeeds with the hook's blobs stored, so the consent gates
+    stop the record and no failed install does.
+
+    A `[[bundle]]` row has no target case: a bundle new to the declaration holds
+    no pin, so offline it exits 69 before any row is read.
+    """
+    runner = _hooked_workspace(grim_at, project_dir)
+    kind, reference, row = stand_in(grim_at, tmp_path, runner, unique_repo)
+    lock = project_dir / "grimoire.lock"
+    lock.write_text(_LOCK_HEADER + row)
+
+    runner.run("add", "--offline", "--kind", kind, reference)
+
+    assert "d" * 64 not in lock.read_text(), "the relock saved, so the row answered"
+    assert 'name = "planted"' in lock.read_text()
+    assert _consented(runner, project_dir) == set()
+    assert _armed_in(runner, project_dir) == set()
+
+
+def test_a_stand_in_hook_stays_gated_on_the_next_online_install(
+    grim_at, tmp_path: Path, project_dir: Path, unique_repo: str
+) -> None:
+    """An offline `add` leaves nothing the next online `install` arms on.
+
+    The positive control shows the record is the one thing in the way: the
+    gesture that writes it is what arms the same lock.
+    """
+    runner = _hooked_workspace(grim_at, project_dir)
+    kind, reference, row = _bundle_row_below_target(grim_at, tmp_path, runner, unique_repo)
+    (project_dir / "grimoire.lock").write_text(_LOCK_HEADER + row)
+    runner.run("add", "--offline", "--kind", kind, reference)
+
+    runner.run("install")
+
+    assert _armed_in(runner, project_dir) == set()
+    assert "workspace-not-consented" in {a["cause"] for a in _hook_state(runner, "planted")["arming"]}
+
+    runner.run("hook", "allow")
+    runner.run("install")
+    assert _armed_in(runner, project_dir) == {"planted"}
+
+
+def test_offline_add_consents_to_what_its_stored_manifests_list(
+    grim_at, tmp_path: Path, project_dir: Path, unique_repo: str
+) -> None:
+    """Offline the typed target consents and arms in the same run, and so does a
+    hook it reaches over edges the user's own store lists. The stand-in cases are
+    `test_offline_add_records_no_consent_for_a_stand_in`."""
+    target = _publish_hook(unique_repo, name="typed")
+    member = _publish_hook(unique_repo, name="member")
+    pack = make_bundle(f"{unique_repo}/pack", [("hook", "member", member.fq)], tag="1")
+    warm = _warmed(grim_at, tmp_path, hooks={"typed": target.fq}, bundles={"pack": pack.fq})
+    warm.run("hook", "allow")
+    warm.run("install")
+    runner = _hooked_workspace(grim_at, project_dir)
+
+    runner.run("add", "--offline", "--kind", "bundle", pack.fq)
+
+    assert _consented(runner, project_dir) == {_key(member)}
+    assert _armed_in(runner, project_dir) == {"member"}
+
+    runner.run("add", "--offline", "--kind", "hook", target.fq)
+
+    assert _consented(runner, project_dir) == {_key(member), _key(target)}
+    assert _armed_in(runner, project_dir) == {"member", "typed"}
+
+
+def test_a_failed_add_records_the_consent_its_gesture_carried(
+    grim_at, project_dir: Path, unique_repo: str
+) -> None:
+    """Online form: the failed add keeps its declaration and lock, so it keeps
+    its consent too. The hook it did install arms, and once the user clears the
+    refusal the next `grim install` needs no `grim hook allow`.
+    """
+    fresh = _publish_hook(unique_repo, name="fresh")
+    clash = _skill(unique_repo, "clash")
+    pack = make_bundle(f"{unique_repo}/pack", [("hook", "fresh", fresh.fq), ("skill", "clash", clash.fq)], tag="1")
+    runner = _hooked_workspace(grim_at, project_dir)
+    theirs = project_dir / ".claude" / "skills" / "clash" / "SKILL.md"
+    theirs.parent.mkdir(parents=True)
+    theirs.write_text("not grim's\n")
+
+    result = runner.run("add", pack.fq, check=False)
+
+    assert result.returncode == 65, result.stderr
+    assert _consented(runner, project_dir) == {_key(fresh)}
+    assert _armed_in(runner, project_dir) == {"fresh"}
+
+    shutil.rmtree(theirs.parent)
+    runner.run("install")
+    assert _armed_in(runner, project_dir) == {"fresh"}
+
+
+def test_a_failed_offline_add_records_its_typed_target(
+    grim_at, tmp_path: Path, project_dir: Path, unique_repo: str
+) -> None:
+    """Offline form: the target's manifest is stored, its layer is not. The
+    typed target is the gesture whether or not its layer arrives, so the record
+    covers it, and the online retry arms it."""
+    hook = _publish_hook(unique_repo)
+    _warmed(grim_at, tmp_path, hooks={"shell-guard": hook.fq})
+    runner = _hooked_workspace(grim_at, project_dir)
+
+    result = runner.run("add", "--offline", "--kind", "hook", hook.fq, check=False)
+
+    assert result.returncode == 81, result.stderr
+    assert _consented(runner, project_dir) == {_key(hook)}
+    assert _armed_in(runner, project_dir) == set()
+
+    runner.run("add", "--kind", "hook", hook.fq)
+    assert _consented(runner, project_dir) == {_key(hook)}
+    assert _armed_in(runner, project_dir) == {"shell-guard"}
+
+
+def test_a_failed_add_keeps_what_the_record_already_armed(
+    grim_at, project_dir: Path, unique_repo: str
+) -> None:
+    """A failed `add` withdraws nothing the record covers and keeps the
+    consent its own gesture carried."""
+    kept = _publish_hook(unique_repo, name="kept")
+    fresh = _publish_hook(unique_repo, name="fresh")
+    clash = _skill(unique_repo, "clash")
+    pack = make_bundle(f"{unique_repo}/pack", [("hook", "fresh", fresh.fq), ("skill", "clash", clash.fq)], tag="1")
+    runner = _hooked_workspace(grim_at, project_dir)
+    runner.run("add", "--kind", "hook", kept.fq)
+    theirs = project_dir / ".claude" / "skills" / "clash" / "SKILL.md"
+    theirs.parent.mkdir(parents=True)
+    theirs.write_text("not grim's\n")
+
+    assert runner.run("add", pack.fq, check=False).returncode == 65
+
+    assert _consented(runner, project_dir) == {_key(kept), _key(fresh)}
+    assert _armed_in(runner, project_dir) == {"kept", "fresh"}
+
+
+def test_a_failed_add_records_no_more_than_its_gesture_covered(
+    grim_at, project_dir: Path, unique_repo: str
+) -> None:
+    """The write precedes the install, and it is the same write: a hook already
+    in the workspace stays out of the record, even when the failed bundle lists
+    it."""
+    planted = _publish_hook(unique_repo, name="planted")
+    fresh = _publish_hook(unique_repo, name="fresh")
+    clash = _skill(unique_repo, "clash")
+    pack = make_bundle(
+        f"{unique_repo}/pack",
+        [("hook", "planted", planted.fq), ("hook", "fresh", fresh.fq), ("skill", "clash", clash.fq)],
+        tag="1",
+    )
+    old = make_bundle(f"{unique_repo}/old", [("hook", "planted", planted.fq)], tag="1")
+    write_config(project_dir, bundles={"old": old.fq})
+    runner = grim_at(project_dir)
+    _enabled(runner)
+    runner.run("lock")
+    theirs = project_dir / ".claude" / "skills" / "clash" / "SKILL.md"
+    theirs.parent.mkdir(parents=True)
+    theirs.write_text("not grim's\n")
+
+    result = runner.run("add", pack.fq, check=False)
+
+    assert result.returncode == 65, result.stderr
+    assert _consented(runner, project_dir) == {_key(fresh)}
+
+
+def test_an_add_whose_relock_fails_records_nothing(
+    grim_at, project_dir: Path, unique_repo: str
+) -> None:
+    """A relock that fails rolls the declaration back, so no consent survives it."""
+    hook = _publish_hook(unique_repo)
+    pack = make_bundle(
+        f"{unique_repo}/pack",
+        [("hook", "shell-guard", hook.fq), ("skill", "gone", f"{REGISTRY_HOST}/{unique_repo}/gone:1")],
+        tag="1",
+    )
+    runner = _hooked_workspace(grim_at, project_dir)
+    declared = (project_dir / "grimoire.toml").read_text()
+
+    result = runner.run("add", pack.fq, check=False)
+
+    assert result.returncode != 0, result.stderr
+    assert (project_dir / "grimoire.toml").read_text() == declared
+    assert _record_for(runner, project_dir) is None
+
+
+def test_a_record_that_cannot_be_written_arms_nothing(
+    grim_at, project_dir: Path, unique_repo: str
+) -> None:
+    """I3: a persist failure after a successful install warns, exits 0 and
+    leaves the hook unarmed; the next `install` gates it."""
+    hook = _publish_hook(unique_repo)
+    runner = _hooked_workspace(grim_at, project_dir)
+    blocked = _consent_dir(runner)
+    blocked.parent.mkdir(parents=True, exist_ok=True)
+    blocked.write_text("")
+
+    result = runner.run("add", "--kind", "hook", hook.fq)
+
+    assert "could not be recorded" in result.stderr, result.stderr
+    assert _armed_in(runner, project_dir) == set()
+
+    blocked.unlink()
+    runner.run("install")
+    assert _armed_in(runner, project_dir) == set()
+    assert _records(runner) == []
+    assert "workspace-not-consented" in _causes(runner)
+
+
+def test_add_consents_no_hook_reached_only_through_a_carried_bundle(
+    grim_at, project_dir: Path, unique_repo: str
+) -> None:
+    """A carried node's edges answer for the previous lock, not for this
+    gesture. The hook installs and gates; the run exits 0."""
+    planted = _publish_hook(unique_repo, name="planted")
+    inner = make_bundle(f"{unique_repo}/inner", [("hook", "planted", planted.fq)], tag="1")
+    outer = make_bundle(f"{unique_repo}/outer", [("bundle", "inner", inner.fq)], tag="1")
+    runner = _hooked_workspace(grim_at, project_dir)
+    (project_dir / "grimoire.lock").write_text(
+        _LOCK_HEADER
+        + f"""
+[[bundle]]
+name = "inner"
+repo = "{REGISTRY_HOST}/{inner.repo}"
+tag = "{inner.tag}"
+pinned = "{inner.pinned}"
+transitive = true
+"""
+    )
+
+    runner.run("add", "--kind", "bundle", outer.fq)
+
+    assert 'name = "planted"' in (project_dir / "grimoire.lock").read_text()
+    assert _consented(runner, project_dir) == set()
+    assert _armed_in(runner, project_dir) == set()
+
+
+def test_add_consents_a_hook_reached_through_what_it_resolved(
+    grim_at, project_dir: Path, unique_repo: str
+) -> None:
+    """Target, new bundle, new hook: an honest lock loses nothing, beside
+    a previous lock that holds something else."""
+    fresh = _publish_hook(unique_repo, name="fresh")
+    inner = make_bundle(f"{unique_repo}/inner", [("hook", "fresh", fresh.fq)], tag="1")
+    outer = make_bundle(f"{unique_repo}/outer", [("bundle", "inner", inner.fq)], tag="1")
+    other = _skill(unique_repo, "other")
+    write_config(project_dir, skills={"other": other.fq})
+    runner = grim_at(project_dir)
+    _enabled(runner)
+    runner.run("lock")
+
+    runner.run("add", "--kind", "bundle", outer.fq)
+
+    assert _consented(runner, project_dir) == {_key(fresh)}
+    assert _armed_in(runner, project_dir) == {"fresh"}
+
+
+def test_add_leaves_a_hook_behind_repaired_edges_unconsented(
+    grim_at, project_dir: Path, unique_repo: str
+) -> None:
+    """A lock missing an edge repairs it from the carried node's manifest.
+    That hook came from no gesture, so it gates and the run exits 0."""
+    _publish_hook(unique_repo, name="deep")
+    dep = _skill_requiring(unique_repo, "dep", ["deep"])
+    wanted = make_dependent(
+        f"{unique_repo}/wanted",
+        "1",
+        "skill",
+        {"wanted/SKILL.md": "---\nname: wanted\ndescription: d\n---\n# wanted\n"},
+        [("skill", "dep", "./dep:1")],
+    )
+    write_config(project_dir, skills={"dep": dep.fq})
+    runner = grim_at(project_dir)
+    _enabled(runner)
+    runner.run("lock")
+    lock = project_dir / "grimoire.lock"
+    _drop_lock_block(lock, "skill.requires")
+    _drop_lock_block(lock, "hook")
+    assert "deep" not in lock.read_text()
+
+    runner.run("add", wanted.fq)
+
+    assert 'name = "deep"' in lock.read_text(), "the relock repaired the edge"
+    assert _consented(runner, project_dir) == set()
+    assert _armed_in(runner, project_dir) == set()
+
+
+# ---------------------------------------------------------------------------
+# Consent needs an edge this run resolved
+# ---------------------------------------------------------------------------
+
+
+def _cloned(project_dir: Path, **declared) -> None:
+    """A checkout whose own `grimoire.toml` turns the feature on."""
+    write_config(project_dir, **declared)
+    config = project_dir / "grimoire.toml"
+    config.write_text(config.read_text() + "\n[options.experimental]\nhooks = true\n")
+
+
+def _dependent(repo: str, name: str, *requires: tuple[str, str, str], tag: str = "1"):
+    files = {f"{name}/SKILL.md": f"---\nname: {name}\ndescription: d\n---\n# {name}\n"}
+    return make_dependent(f"{repo}/{name}", tag, "skill", files, list(requires))
+
+
+def _no_lock_shadow(project_dir: Path, unique_repo: str) -> tuple[str, list[str]]:
+    """An edge onto a key the checkout declares."""
+    good, evil = f"{unique_repo}/good", f"{unique_repo}/evil"
+    _skill(good, "dep")
+    wanted = _dependent(good, "wanted", ("skill", "dep", "./dep:1"))
+    _publish_hook(evil, name="planted")
+    shadow = _dependent(evil, "dep", ("hook", "planted", "./planted:1"))
+    _cloned(project_dir, skills={"dep": shadow.fq})
+    return "planted", [wanted.fq]
+
+
+def _older_tag_shadow(project_dir: Path, unique_repo: str) -> tuple[str, list[str]]:
+    """The same, with the declaration in the repository the edge names."""
+    good = f"{unique_repo}/good"
+    _publish_hook(good, name="retired")
+    older = _dependent(good, "dep", ("hook", "retired", "./retired:1"), tag="0")
+    _skill(good, "dep")
+    wanted = _dependent(good, "wanted", ("skill", "dep", "./dep:1"))
+    _cloned(project_dir, skills={"dep": older.fq})
+    return "retired", [wanted.fq]
+
+
+def _path_shadow(project_dir: Path, unique_repo: str) -> tuple[str, list[str]]:
+    """The same, with a path source declared."""
+    good = f"{unique_repo}/good"
+    _skill(good, "dep")
+    wanted = _dependent(good, "wanted", ("skill", "dep", "./dep:1"))
+    planted = _publish_hook(f"{unique_repo}/evil", name="planted")
+    local = project_dir / "dep"
+    local.mkdir()
+    (local / "SKILL.md").write_text(
+        f"---\nname: dep\ndescription: d\nmetadata:\n  grim.requires.hooks.planted: {planted.fq}\n---\n# dep\n"
+    )
+    _cloned(project_dir, skills={"dep": "./dep"})
+    return "planted", [wanted.fq]
+
+
+def _nested_shadow(project_dir: Path, unique_repo: str) -> tuple[str, list[str]]:
+    """A nested binding the checkout declares."""
+    good, evil = f"{unique_repo}/good", f"{unique_repo}/evil"
+    leaf = _skill(good, "leaf")
+    inner = make_bundle(f"{good}/inner", [("skill", "leaf", leaf.fq)], tag="1")
+    outer = make_bundle(f"{good}/outer", [("bundle", "inner", inner.fq)], tag="1")
+    planted = _publish_hook(evil, name="planted")
+    shadow = make_bundle(f"{evil}/inner", [("hook", "planted", planted.fq)], tag="1")
+    _cloned(project_dir, bundles={"inner": shadow.fq})
+    return "planted", ["--kind", "bundle", outer.fq]
+
+
+def _diamond(project_dir: Path, unique_repo: str) -> tuple[str, list[str]]:
+    """A key settled at a repository the edge does not name."""
+    good, evil = f"{unique_repo}/good", f"{unique_repo}/evil"
+    _publish_hook(good, name="guard")
+    legit = _dependent(good, "dep", ("hook", "guard", "./guard:1"))
+    wanted = _dependent(good, "wanted", ("skill", "dep", "./dep:1"))
+    copy = _dependent(evil, "dep", ("hook", "guard", "./guard:1"))
+    assert copy.digest == legit.digest
+    _publish_hook(evil, name="guard", payload=GUARD_SH + "# planted\n")
+    pack = make_bundle(f"{evil}/pack", [("skill", "dep", copy.fq)], tag="1")
+    _cloned(project_dir, bundles={"pack": pack.fq})
+    return "guard", [wanted.fq]
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [_no_lock_shadow, _older_tag_shadow, _path_shadow, _nested_shadow, _diamond],
+    ids=["no-lock", "older-tag", "path", "nested", "diamond"],
+)
+def test_add_consents_no_hook_behind_an_edge_it_did_not_resolve(
+    grim_at, project_dir: Path, unique_repo: str, shape
+) -> None:
+    """T3, CWE-863: a typed reference vouches only for what its own edges resolved
+    to. The honest-lock control is `test_add_does_not_consent_preexisting_hook`."""
+    hook, add = shape(project_dir, unique_repo)
+    runner = grim_at(project_dir)
+
+    runner.run("add", *add)
+
+    assert f'name = "{hook}"' in (project_dir / "grimoire.lock").read_text()
+    assert _consented(runner, project_dir) == set()
+    assert _armed_in(runner, project_dir) == set()
+
+    runner.run("hook", "allow")
+    runner.run("install")
+    assert _armed_in(runner, project_dir) == {hook}, "the record is the one thing in the way"
+
+
+def test_add_consents_no_hook_row_a_lock_carried(
+    grim_at, project_dir: Path, unique_repo: str
+) -> None:
+    """T3, CWE-345: an edge vouches for no bytes a lock row chose. `grim hook allow`
+    still answers it."""
+    good = f"{unique_repo}/good"
+    held = _publish_hook(good, name="held")
+    wanted = _dependent(good, "wanted", ("hook", "held", "./held:1"))
+    _cloned(project_dir)
+    (project_dir / "grimoire.lock").write_text(
+        _LOCK_HEADER + f'''
+[[hook]]
+name = "held"
+pinned = "{held.pinned}"
+'''
+    )
+    runner = grim_at(project_dir)
+
+    runner.run("add", wanted.fq)
+
+    assert _consented(runner, project_dir) == set()
+    assert _armed_in(runner, project_dir) == set()
+
+    runner.run("hook", "allow")
+    runner.run("install")
+    assert _armed_in(runner, project_dir) == {"held"}
+
+
+def test_add_of_a_carried_bundle_consents_to_no_member(
+    grim_at, project_dir: Path, unique_repo: str
+) -> None:
+    """T3, CWE-345: a kept pin answers for the previous lock, so re-adding the
+    reference consents to nothing; `grim hook allow` is the route, as after a
+    failed add."""
+    repo = f"{unique_repo}/r"
+    retired = _publish_hook(repo, name="retired")
+    kept = _skill(repo, "kept")
+    old = make_bundle(f"{repo}/pack", [("hook", "retired", retired.fq), ("skill", "kept", kept.fq)], tag="0")
+    new = make_bundle(f"{repo}/pack", [("skill", "kept", kept.fq)], tag="1")
+    assert old.digest != new.digest
+    reference = f"{REGISTRY_HOST}/{repo}/pack:1"
+    _cloned(project_dir, bundles={"pack": reference})
+    lock = project_dir / "grimoire.lock"
+    lock.write_text(
+        _LOCK_HEADER + f'''
+[[skill]]
+name = "kept"
+pinned = "{kept.pinned}"
+
+[[skill.bundles]]
+repo = "{REGISTRY_HOST}/{repo}/pack"
+tag = "1"
+
+[[bundle]]
+name = "pack"
+repo = "{REGISTRY_HOST}/{repo}/pack"
+tag = "1"
+pinned = "{old.pinned}"
+
+[[bundle.member]]
+kind = "skill"
+name = "kept"
+id = "{kept.fq}"
+'''
+    )
+    runner = grim_at(project_dir)
+
+    runner.run("add", "--kind", "bundle", reference)
+
+    assert 'name = "retired"' in lock.read_text()
+    assert _consented(runner, project_dir) == set()
+    assert _armed_in(runner, project_dir) == set()
+
+    runner.run("hook", "allow")
+    runner.run("install")
+    assert _armed_in(runner, project_dir) == {"retired"}
+
+
+@pytest.mark.parametrize("flags", [[], ["--offline"]], ids=["online", "offline"])
+def test_a_carried_hook_target_consents_only_to_a_pin_its_repository_serves(
+    grim_at, tmp_path: Path, project_dir: Path, unique_repo: str, flags: list[str]
+) -> None:
+    """T3, CWE-345: a kept pin resolves no tag on relock, so a carried target
+    consents only to a pin its repository confirms. Offline no answer exists, so
+    nothing consents. `grim update` makes it a served pin, and the same gesture
+    then consents."""
+    good, evil = f"{unique_repo}/good", f"{unique_repo}/evil"
+    _publish_hook(good, name="h", payload=GUARD_SH + "# good\n")
+    theirs = _publish_hook(evil, name="h", payload=GUARD_SH + "# evil\n")
+    other = tmp_path / "other"
+    (other / ".claude").mkdir(parents=True)
+    write_config(other, hooks={"h": theirs.fq})
+    elsewhere = grim_at(other)
+    _enabled(elsewhere)
+    elsewhere.run("lock")
+    elsewhere.run("hook", "allow")
+    elsewhere.run("install")
+    reference = f"{REGISTRY_HOST}/{good}/h:1"
+    _cloned(project_dir, hooks={"h": reference})
+    (project_dir / "grimoire.lock").write_text(
+        _LOCK_HEADER + f'''
+[[hook]]
+name = "h"
+pinned = "{reference}@{theirs.digest}"
+'''
+    )
+    runner = grim_at(project_dir)
+
+    result = runner.run("add", *flags, "--kind", "hook", reference)
+
+    assert _consented(runner, project_dir) == set()
+    assert _armed_in(runner, project_dir) == set()
+    if flags:
+        assert "did not confirm" in result.stderr and "rerun online" in result.stderr, result.stderr
+    else:
+        assert "its tag now names another digest" in result.stderr, result.stderr
+
+    runner.run("update", "h")
+    runner.run("add", "--kind", "hook", reference)
+    assert _consented(runner, project_dir) == {f"h@{REGISTRY_HOST}/{good}/h"}
+    assert _armed_in(runner, project_dir) == {"h"}
+
+
+def test_a_carried_hook_target_names_a_digest_its_repository_dropped(
+    grim_at, tmp_path: Path, project_dir: Path, unique_repo: str
+) -> None:
+    """CWE-345: online, a kept digest the repository no longer serves is named as
+    such, never as a run to repeat online."""
+    good, evil = f"{unique_repo}/good", f"{unique_repo}/evil"
+    _publish_hook(good, name="h", payload=GUARD_SH + "# good\n")
+    theirs = _publish_hook(evil, name="h", payload=GUARD_SH + "# evil\n")
+    other = tmp_path / "other"
+    (other / ".claude").mkdir(parents=True)
+    write_config(other, hooks={"h": theirs.fq})
+    elsewhere = grim_at(other)
+    _enabled(elsewhere)
+    elsewhere.run("lock")
+    elsewhere.run("hook", "allow")
+    elsewhere.run("install")
+    reference = f"{REGISTRY_HOST}/{good}/h@{theirs.digest}"
+    _cloned(project_dir, hooks={"h": reference})
+    (project_dir / "grimoire.lock").write_text(_LOCK_HEADER + f'\n[[hook]]\nname = "h"\npinned = "{reference}"\n')
+    runner = grim_at(project_dir)
+
+    result = runner.run("add", "--kind", "hook", reference)
+
+    assert _consented(runner, project_dir) == set()
+    assert _armed_in(runner, project_dir) == set()
+    warnings = [line for line in result.stderr.splitlines() if "stays unconsented" in line]
+    assert len(warnings) == 1, result.stderr
+    assert "no longer serves the digest" in warnings[0] and "`grim update -- h`" in warnings[0], warnings[0]
+    assert "rerun online" not in warnings[0], warnings[0]
+
+
+def test_a_carried_hook_target_consents_only_while_its_tag_names_the_pin(
+    grim_at, project_dir: Path, unique_repo: str
+) -> None:
+    """T3, CWE-345: a kept pin its repository still serves is not what the typed tag
+    names once the tag moved, so the add consents to nothing and names the way out.
+    After `grim update` the same gesture consents to what the tag names."""
+    good = f"{unique_repo}/good"
+    old = _publish_hook(good, name="h", payload=GUARD_SH + "# old\n")
+    retag(f"{good}/h", "keep", old.digest)
+    reference = f"{REGISTRY_HOST}/{good}/h:1"
+    _cloned(project_dir, hooks={"h": reference})
+    (project_dir / "grimoire.lock").write_text(
+        _LOCK_HEADER + f'''
+[[hook]]
+name = "h"
+pinned = "{reference}@{old.digest}"
+'''
+    )
+    new = _publish_hook(good, name="h", payload=GUARD_SH + "# new\n")
+    assert new.digest != old.digest
+    runner = grim_at(project_dir)
+
+    result = runner.run("add", "--kind", "hook", reference)
+
+    assert _consented(runner, project_dir) == set()
+    assert _armed_in(runner, project_dir) == set()
+    warnings = [line for line in result.stderr.splitlines() if "stays unconsented" in line]
+    assert len(warnings) == 1, result.stderr
+    assert "`grim update -- h`" in warnings[0] and "`grim hook allow`" in warnings[0], warnings[0]
+
+    runner.run("update", "h")
+    runner.run("add", "--kind", "hook", reference)
+    assert _consented(runner, project_dir) == {f"h@{REGISTRY_HOST}/{good}/h"}
+    assert _armed_in(runner, project_dir) == {"h"}

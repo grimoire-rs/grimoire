@@ -8,8 +8,10 @@ root (wiped between runs) with identical ``HOME``, ``GRIM_HOME`` and
 environment, against one throwaway zot registry whose tag state is reset to
 the same bytes before each run. After **every** command the whole root
 (workspace, fake ``HOME``, ``GRIM_HOME``) is snapshotted; the two runs must
-match byte for byte outside the named ``VOLATILE`` mask, and ``--format json``
-stdout may differ only by the C-153 additive keys.
+match byte for byte outside the named ``VOLATILE`` mask and the
+``pinned-advisory-tag`` equivalence, ``--format json`` stdout may differ
+only by the C-153 additive keys, and stderr gains no warning outside
+``WARNING_EQUIVALENCES``.
 
 Usage (``task p9:diff`` wires the builds and puts zot on PATH)::
 
@@ -41,7 +43,7 @@ from pathlib import Path
 
 TEST_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(TEST_DIR))
-from src.zot import start_zot  # noqa: E402
+from src.zot import start_zot
 
 FIXTURES = Path(__file__).resolve().parent / "p9_fixtures"
 
@@ -49,13 +51,19 @@ FIXTURES = Path(__file__).resolve().parent / "p9_fixtures"
 # command, each with the predicate its value must meet; nothing else may appear.
 # `add`/`update` rows never gain `armed` (D-20). Hook keys: C-153; dependency
 # keys: adr_artifact_dependencies.md Decision 5 (`pulled_in` lists a bundle's
-# members on add). Settings-kind keys: adr_settings_artifact_kind.md (a run
-# without a settings artifact prints `settings_changes: []`, `pieces: []` and a
-# `null` `element` on the status outputs and on an abandoned entry).
+# members on add). `moved` and `dropped` name pins an add's edge moved or released,
+# and no add here has either.
+# Settings-kind keys: adr_settings_artifact_kind.md (a run without a settings
+# artifact prints `settings_changes: []`, `pieces: []` and a `null` `element` on
+# the status outputs and on an abandoned entry). `disposition` on a `lock` row:
+# adr_lock_pin_stability.md; the scenario's lock runs where no tag moved since
+# the update, so every row is `carried`.
 ADDITIVE_STDOUT_KEYS: dict[str, dict[str, Callable[[object], bool]]] = {
+    "lock": {"disposition": lambda v: v == "carried"},
     "status": {
         "arming": lambda v: v == [],
         "direct": lambda v: isinstance(v, bool),
+        "moved_nested_bundles": lambda v: v is None,
         "required_by": lambda v: v is None or isinstance(v, list),
         "element": lambda v: v is None,
     },
@@ -65,6 +73,8 @@ ADDITIVE_STDOUT_KEYS: dict[str, dict[str, Callable[[object], bool]]] = {
     },
     "context": {"catalog": lambda v: v is None},
     "add": {
+        "dropped": lambda v: v == [],
+        "moved": lambda v: v == [],
         "pulled_in": lambda v: isinstance(v, list),
         "settings_changes": lambda v: v == [],
     },
@@ -89,6 +99,16 @@ ADDITIVE_STDOUT_KEYS: dict[str, dict[str, Callable[[object], bool]]] = {
 #   Equal iff both are strings; only that one field, only for `context`.
 STDOUT_EQUIVALENCES = ("c118-relative-config-target", "context-reported-version")
 
+# Named stderr equivalence, one rule; stderr is not a contract (stability.md).
+#   bare-update-bundle-pin-moved: a bare `grim update` (no names, either scope)
+#   names each `[[bundle]]` pin it moved, which main moves silently. Exactly the
+#   `_BUNDLE_PIN_MOVED` line with two different pins; the lock stays compared.
+WARNING_EQUIVALENCES = ("bare-update-bundle-pin-moved",)
+_SHOWN_PIN = r"(?:\S+@)?sha256:[0-9a-f]{12}"
+_BUNDLE_PIN_MOVED = re.compile(
+    rf"WARN grim::command::lock: bundle '[^'\s]+' moved its pin from ({_SHOWN_PIN}) to ({_SHOWN_PIN})"
+)
+
 # Named volatile fields: (root-relative path glob, key). A `key = "…"` (TOML)
 # or `"key": "…"` (JSON) string value is masked in matching files; nothing
 # else is. Each entry was observed to vary between two runs of one binary,
@@ -96,6 +116,18 @@ STDOUT_EQUIVALENCES = ("c118-relative-config-target", "context-reported-version"
 VOLATILE: tuple[tuple[str, str], ...] = (
     ("*grimoire.lock", "generated_at"),
     ("*grimoire.lock", "generated_by"),
+)
+
+# Named lock equivalence pinned-advisory-tag: a lock records the tag that
+# resolved an artifact's pin, and a release before that wrote none. One `:tag`
+# in the last path segment of an artifact's own `pinned` line; a `[[bundle]]`
+# pin keeps its tag in a sibling key, so one there stays a difference.
+PINNED_TAG_LOCKS = ("*grimoire.lock", "*marketplace.lock")
+_TABLE_HEADER = re.compile(rb"\[\[?[^\]]+\]\]?")
+_ARTIFACT_TABLE = re.compile(rb"\[\[(?:skill|rule|agent|mcp|hook|settings)\]\]")
+_PINNED_TAG = re.compile(
+    rb'(pinned = "[^"/]+(?:/[^"/:@]+)+):[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}'
+    rb'(@sha256:[0-9a-f]{64}")'
 )
 
 # Project scope cannot detect antigravity/openclaw (no project marker exists).
@@ -195,6 +227,7 @@ class Checkpoint:
     command: str = ""
     cwd: str = "/"
     warnings: frozenset[str] = frozenset()
+    args: tuple[str, ...] = ()
 
 
 def scenario(reg: str) -> list[Step | str]:
@@ -230,6 +263,8 @@ def scenario(reg: str) -> list[Step | str]:
             REGISTRY_V2,
             Step(("update", *scope), rendered, marker=(out, "(v2)")),
             Step(("status", *scope), rendered),
+            # The tags have not moved since the update, so both binaries keep every pin.
+            Step(("lock", *scope), (lock,)),
         ]
         steps += [
             Step(("uninstall", *scope, "skill", "p9-skill"), (lock,)),
@@ -281,11 +316,25 @@ def snapshot(root: Path) -> dict[str, tuple]:
     return dict(sorted(tree.items()))
 
 
+def strip_pinned_tags(data: bytes) -> bytes:
+    """Apply ``pinned-advisory-tag``: see ``PINNED_TAG_LOCKS``."""
+    lines = data.split(b"\n")
+    in_artifact = False
+    for i, line in enumerate(lines):
+        if _TABLE_HEADER.fullmatch(line):
+            in_artifact = _ARTIFACT_TABLE.fullmatch(line) is not None
+        elif in_artifact and (pin := _PINNED_TAG.fullmatch(line)):
+            lines[i] = pin[1] + pin[2]
+    return b"\n".join(lines)
+
+
 def _mask_file(rel: str, data: bytes) -> bytes:
     for glob, key in VOLATILE:
         if fnmatch.fnmatch(rel, glob):
             pattern = rb'^(\s*"?' + re.escape(key.encode()) + rb'"?\s*[=:]\s*)"[^"\n]*"'
             data = re.sub(pattern, rb'\1"<masked>"', data, flags=re.MULTILINE)
+    if any(fnmatch.fnmatch(rel, glob) for glob in PINNED_TAG_LOCKS):
+        data = strip_pinned_tags(data)
     return data
 
 
@@ -402,6 +451,26 @@ def diff_stdout(
     return diff_json(label, ja, jb, "$", command, cwd)
 
 
+# Matched whole, after an optional leading `--config <path>`: a name after `--`
+# may start with `-`, and `--marketplace=<m>` selects plugins, so a looser
+# "every argument is a flag" test lets a named run's line pass.
+_BARE_UPDATES = frozenset({("update",), ("update", "--global"), ("--global", "update")})
+
+
+def _bundle_pin_moved(checkpoint: Checkpoint, line: str) -> bool:
+    """``bare-update-bundle-pin-moved``: see ``WARNING_EQUIVALENCES``."""
+    args = checkpoint.args
+    if args[:1] == ("--config",):
+        args = args[2:]
+    pins = _BUNDLE_PIN_MOVED.fullmatch(line)
+    return (
+        checkpoint.command == "update"
+        and args in _BARE_UPDATES
+        and pins is not None
+        and pins[1] != pins[2]
+    )
+
+
 def compare(main: list[Checkpoint], branch: list[Checkpoint]) -> list[str]:
     if [c.label for c in main] != [c.label for c in branch]:
         return ["checkpoint lists differ in shape"]
@@ -413,6 +482,7 @@ def compare(main: list[Checkpoint], branch: list[Checkpoint]) -> list[str]:
         out += [
             f"{a.label}: branch-only warning: {w}"
             for w in sorted(b.warnings - a.warnings)
+            if not _bundle_pin_moved(b, w)
         ]
         out += diff_trees(a.label, a.tree, b.tree)
     return out
@@ -652,6 +722,7 @@ def run_scenario(
                 command,
                 str(root / step.cwd),
                 _warnings(proc.stderr),
+                step.args,
             )
         )
     return checkpoints
@@ -662,11 +733,11 @@ _LOG_TIMESTAMP = re.compile(r"^\d{4}-\d\d-\d\dT[\d:.]+Z\s+")
 
 
 def _warnings(stderr: str) -> frozenset[str]:
-    """Warning lines on stderr (hook-free runs must not gain any, C-155)."""
+    """Warning lines on stderr; a hook-free run gains none outside ``WARNING_EQUIVALENCES``."""
     return frozenset(
         _LOG_TIMESTAMP.sub("", line.strip())
         for line in stderr.splitlines()
-        if re.search(r"\bwarn", line, re.I)
+        if re.search(r"\bwarn", line, re.IGNORECASE)
     )
 
 
@@ -760,11 +831,16 @@ def self_test(root: Path) -> None:
     # A branch-only store blob passes only when its bytes hash to its name.
     blob = b"layer"
     dig = hashlib.sha256(blob).hexdigest()
-    fan, store = f"grim_home/blobs/sha256/{dig[:2]}", f"grim_home/blobs/sha256/{dig[:2]}/{dig}"
+    fan, store = (
+        f"grim_home/blobs/sha256/{dig[:2]}",
+        f"grim_home/blobs/sha256/{dig[:2]}/{dig}",
+    )
     cached = {fan: ("dir", b"", False), store: ("file", blob, False)}
     assert diff_trees("t", {}, cached) == []
     assert diff_trees("t", {}, {store: ("file", b"other", False)}), "digest must match"
-    assert diff_trees("t", cached, {}), "a blob main has and the branch lacks is reported"
+    assert diff_trees("t", cached, {}), (
+        "a blob main has and the branch lacks is reported"
+    )
     assert diff_trees("t", {}, {"grim_home/other/x": ("file", blob, False)})
 
     # The mask hides only the named key, never its neighbours.
@@ -776,6 +852,8 @@ def self_test(root: Path) -> None:
         "ws/grimoire.lock", lock.replace(b'"a"', b'"b"')
     )
     assert _mask_file("ws/other.toml", lock) == lock
+
+    _self_test_pinned_tag()
 
     # Per-command checkpoints: a difference erased by a later command is still reported.
     early = [Checkpoint("#0", 0, "{}", base), Checkpoint("#1", 0, "{}", moved)]
@@ -794,16 +872,22 @@ def self_test(root: Path) -> None:
     dep = '{"items": [{"x": 1, "direct": true, "required_by": []}]}'
     assert diff_stdout("t", '{"items": [{"x": 1}]}', dep, "status") == []
     assert diff_stdout("t", '{"items": [{"x": 1}]}', dep, "install"), "status-only keys"
-    assert diff_stdout("t", '{"items": [{"x": 1}]}', '{"items": [{"x": 1, "direct": 1}]}', "status")
+    assert diff_stdout(
+        "t", '{"items": [{"x": 1}]}', '{"items": [{"x": 1, "direct": 1}]}', "status"
+    )
     assert diff_stdout("t", '{"a": 1}', '{"a": 1, "pulled_in": []}', "add") == []
-    assert diff_stdout("t", '{"a": 1}', '{"a": 1, "pulled_in": [{"k": "s"}]}', "add") == []
+    assert (
+        diff_stdout("t", '{"a": 1}', '{"a": 1, "pulled_in": [{"k": "s"}]}', "add") == []
+    )
     assert diff_stdout("t", '{"a": 1}', '{"a": 1, "pulled_in": null}', "add")
     sc = '{"a": 1, "settings_changes": []}'
     planted = '{"a": 1, "settings_changes": [{"key": "/model"}]}'
     for cmd in ("install", "add", "update", "uninstall"):
         assert diff_stdout("t", '{"a": 1}', sc, cmd) == [], cmd
         assert diff_stdout("t", '{"a": 1}', planted, cmd), f"{cmd}: planted change"
-    assert diff_stdout("t", '{"a": 1}', sc, "status"), "settings_changes is not a status key"
+    assert diff_stdout("t", '{"a": 1}', sc, "status"), (
+        "settings_changes is not a status key"
+    )
     assert diff_stdout("t", '{"a": 1}', '{"a": 1, "pieces": []}', "update") == []
     assert diff_stdout("t", '{"a": 1}', '{"a": 1, "pieces": [{"p": 1}]}', "update")
     assert diff_stdout("t", '{"a": 1}', '{"a": 1, "pieces": []}', "install")
@@ -811,14 +895,30 @@ def self_test(root: Path) -> None:
     out_null = '{"items": [{"x": 1, "outputs": [{"path": "p", "element": null}]}]}'
     out_set = '{"items": [{"x": 1, "outputs": [{"path": "p", "element": "e"}]}]}'
     assert diff_stdout("t", out, out_null, "status") == []
-    assert diff_stdout("t", out, out_set, "status"), "planted element on a status output"
+    assert diff_stdout("t", out, out_set, "status"), (
+        "planted element on a status output"
+    )
     ab = '{"abandoned_entries": [{"pointer": "/a"}]}'
     ab_null = '{"abandoned_entries": [{"pointer": "/a", "element": null}]}'
     ab_set = '{"abandoned_entries": [{"pointer": "/a", "element": "e"}]}'
     for cmd in ("uninstall", "update"):
         assert diff_stdout("t", ab, ab_null, cmd) == [], f"{cmd}: null element"
-        assert diff_stdout("t", ab, ab_set, cmd), f"{cmd}: planted element on an abandoned entry"
+        assert diff_stdout("t", ab, ab_set, cmd), (
+            f"{cmd}: planted element on an abandoned entry"
+        )
     assert diff_stdout("t", ab, ab_null, "install"), "element is not an install key"
+    assert diff_stdout("t", '{"a": 1}', '{"a": 1, "moved": []}', "add") == []
+    assert diff_stdout("t", '{"a": 1}', '{"a": 1, "moved": [{"k": "s"}]}', "add")
+    locked = '{"items": [{"pinned": "p", "action": "unchanged"}]}'
+    carried = (
+        '{"items": [{"pinned": "p", "action": "unchanged", "disposition": "carried"}]}'
+    )
+    assert diff_stdout("t", locked, carried, "lock") == []
+    for value in ('"moved"', '"dropped"', '"added"', "null"):
+        assert diff_stdout("t", locked, carried.replace('"carried"', value), "lock"), (
+            value
+        )
+    assert diff_stdout("t", locked, carried, "install"), "disposition is a lock key"
     ctx = '{"registries": [{"url": "r"}]}'
     assert (
         diff_stdout(
@@ -874,6 +974,8 @@ def self_test(root: Path) -> None:
     warned = Checkpoint("#0", 0, "{}", base, warnings=frozenset({"WARN x"}))
     assert compare([Checkpoint("#0", 0, "{}", base)], [warned])
 
+    _self_test_bundle_pin_moved(base)
+
     for n, (rc, expects, what) in enumerate(
         (
             (3, (), "(c) non-zero exit"),
@@ -899,6 +1001,109 @@ def self_test(root: Path) -> None:
             raise AssertionError(f"self-test: {what} was not detected")
     shutil.rmtree(root, ignore_errors=True)
     print("p9 self-test: ok")
+
+
+def _self_test_bundle_pin_moved(tree: dict[str, tuple]) -> None:
+    """``bare-update-bundle-pin-moved`` passes that one line on a bare update only."""
+
+    def gained(args: tuple[str, ...], line: str) -> list[str]:
+        command = next(
+            a for a in args if not a.startswith("-") and not a.endswith(".toml")
+        )
+        main = Checkpoint("#0", 0, "{}", tree, command, args=args)
+        branch = Checkpoint(
+            "#0", 0, "{}", tree, command, warnings=frozenset({line}), args=args
+        )
+        return compare([main], [branch])
+
+    pin = "sha256:19ee9dec411c"
+    moved = f"WARN grim::command::lock: bundle 'b' moved its pin from {pin} to sha256:ef2b26d735ae"
+    across = f"WARN grim::command::lock: bundle 'b' moved its pin from h/a@{pin} to h/c@{pin}"
+    for args in (
+        ("update",),
+        ("update", "--global"),
+        ("--global", "update"),
+        ("--config", "ws/grimoire.toml", "update"),
+    ):
+        assert gained(args, moved) == [], args
+        assert gained(args, across) == [], f"{args}: a pin that changed repository"
+
+    # A name after `--` may start with `-`, and a flag's value may follow `=`.
+    for args in (
+        ("update", "skill", "x"),
+        ("update", "--global", "b"),
+        ("update", "--", "-b"),
+        ("update", "--global", "--", "-b"),
+        ("update", "--force", "--", "--weird"),
+        ("update", "--marketplace=m.toml"),
+        ("update", "--marketplace", "m.toml"),
+        ("lock",),
+        ("install",),
+        ("add", "--no-install", "h/p9/b:1"),
+    ):
+        assert gained(args, moved), f"{args}: the line counts off a bare update"
+    for line in (
+        moved.replace("ef2b26d735ae", "19ee9dec411c"),
+        moved.replace("grim::command::lock", "grim::command::update"),
+        moved + " (and more)",
+        moved.replace(pin, "sha256:19ee9dec"),
+        moved.replace(pin, "latest"),
+        "WARN grim::command::lock: bundle 'b' kept its pin",
+        "WARN x",
+    ):
+        assert gained(("update",), line), f"not the named form: {line!r}"
+
+
+def _self_test_pinned_tag() -> None:
+    """``pinned-advisory-tag`` drops the tag segment of an artifact pin, nothing else."""
+    digest = "a" * 64
+
+    def entry(table: str, ref: str, key: str = "pinned") -> bytes:
+        return f'[[{table}]]\nname = "x"\n{key} = "{ref}@sha256:{digest}"\n'.encode()
+
+    plain, tagged = "h:5000/a/b", "h:5000/a/b:1.0"
+    for table in ("skill", "rule", "agent", "mcp", "hook"):
+        assert strip_pinned_tags(entry(table, tagged)) == entry(table, plain), table
+    for lock in ("ws/grimoire.lock", "grim_home/grimoire.lock", "ws/marketplace.lock"):
+        assert _mask_file(lock, entry("skill", tagged)) == entry("skill", plain), lock
+    both = entry("skill", tagged) + b"\n" + entry("rule", "h:5000/a/c:_2")
+    assert strip_pinned_tags(both) == entry("skill", plain) + b"\n" + entry(
+        "rule", "h:5000/a/c"
+    ), "every pin of a lock, not the first"
+
+    # Unchanged: an untagged pin (the registry port is not a tag), and a tag
+    # outside the OCI grammar, which grim never writes.
+    for ref in (plain, "h/b", "h:5000/a/b:.bad", "h:5000/a/b:" + "x" * 129):
+        assert strip_pinned_tags(entry("skill", ref)) == entry("skill", ref), ref
+
+    # Everything around the tag still tells two pins apart.
+    strip = strip_pinned_tags
+    for other in (
+        "h:5000/a/c:1.0",
+        "h:5000/z/b:1.0",
+        "h:5001/a/b:1.0",
+        "i:5000/a/b:1.0",
+    ):
+        assert strip(entry("skill", tagged)) != strip(entry("skill", other)), other
+    moved = entry("skill", tagged).replace(b"a" * 64, b"b" * 64)
+    assert strip(entry("skill", tagged)) != strip(moved), "the digest stays compared"
+
+    # Only an artifact's own `pinned` key, and only in the two lock flavors.
+    for keep in (
+        entry("bundle", tagged),
+        entry("bundle.member", tagged),
+        entry("skill.requires", tagged),
+        entry("skill", tagged, key="id"),
+        entry("skill", tagged, key="bundle"),
+        entry("skill", tagged).replace(b"[[skill]]\n", b""),
+        entry("skill", tagged).replace(b"pinned", b"  pinned"),
+    ):
+        assert strip_pinned_tags(keep) == keep, keep
+    after_bundle = strip_pinned_tags(entry("skill", tagged) + entry("bundle", tagged))
+    assert after_bundle == entry("skill", plain) + entry("bundle", tagged)
+    unmasked = entry("skill", tagged)
+    for other in ("ws/.grimoire/state.json", "ws/grimoire.toml", "ws/.claude/x.lock"):
+        assert _mask_file(other, unmasked) == unmasked, other
 
 
 def main() -> int:

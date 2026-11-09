@@ -26,6 +26,7 @@ use async_trait::async_trait;
 use tokio::io::AsyncWrite;
 
 use super::error::{AccessError, AccessErrorKind};
+use crate::oci::identifier::is_valid_oci_tag;
 use crate::oci::manifest::OciManifest;
 use crate::oci::{Digest, Identifier, PinnedIdentifier};
 
@@ -195,10 +196,14 @@ impl Default for RegistryClient {
 /// deferred to the access seam (see `oci/identifier.rs` module docs). It
 /// lives here, private to the registry client, so the domain type stays
 /// transport-agnostic.
+///
+/// A tag outside the OCI grammar stays out of the [`Reference`]: a pin keeps its
+/// digest and stays readable, and only [`RegistryClient::resolve_digest`] puts a
+/// tag in a URL, which refuses such a tag first.
 fn reference_for(id: &Identifier) -> Reference {
     let registry = id.registry().to_string();
     let repository = id.repository().to_string();
-    match (id.tag(), id.digest()) {
+    match (id.tag().filter(|tag| is_valid_oci_tag(tag)), id.digest()) {
         (Some(tag), Some(digest)) => {
             Reference::with_tag_and_digest(registry, repository, tag.to_string(), digest.to_string())
         }
@@ -373,6 +378,12 @@ impl OciAccess for RegistryClient {
         if let Some(digest) = id.digest() {
             // Digest-addressed input is immutable — resolves to itself.
             return Ok(Some(digest));
+        }
+        // No registry can hold such a tag, and sending it hands lock text to the
+        // request path, with this host's credential attached (CWE-74). Moving this
+        // below `reference_for` would resolve `latest` in its place.
+        if id.tag().is_some_and(|tag| !is_valid_oci_tag(tag)) {
+            return Ok(None);
         }
         let reference = reference_for(id);
         let auth = Self::auth_for(id.registry());
@@ -899,6 +910,30 @@ mod tests {
         let id = Identifier::parse(&format!("ghcr.io/acme/x@sha256:{hex}")).unwrap();
         let r = reference_for(&id);
         assert_eq!(r.digest(), Some(format!("sha256:{hex}").as_str()));
+    }
+
+    #[test]
+    fn reference_for_keeps_a_tag_outside_the_grammar_out_of_a_pin() {
+        let hex = "a".repeat(64);
+        let id = Identifier::parse(&format!("ghcr.io/acme/x:a b@sha256:{hex}")).unwrap();
+        let r = reference_for(&id);
+        assert_eq!(r.tag(), None, "the tag is lock text");
+        assert_eq!(r.digest(), Some(format!("sha256:{hex}").as_str()));
+    }
+
+    /// The port is closed, so a request would fail: `Ok(None)` proves none was sent.
+    #[tokio::test]
+    async fn resolve_digest_sends_no_request_for_a_tag_outside_the_grammar() {
+        let host = "127.0.0.1:9";
+        let client = RegistryClient::with_plain_http(host);
+        let id = Identifier::new_registry("acme/x", host).clone_with_tag("..\\..\\api\\v1?x=1");
+        assert_eq!(client.resolve_digest(&id, Operation::Query).await.unwrap(), None);
+
+        let valid = Identifier::new_registry("acme/x", host).clone_with_tag("1.0.0");
+        assert!(
+            client.resolve_digest(&valid, Operation::Query).await.is_err(),
+            "a valid tag is asked"
+        );
     }
 
     #[test]

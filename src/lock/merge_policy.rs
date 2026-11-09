@@ -4,13 +4,15 @@
 //! The one pure rule that settles a `(kind, name)` claimed by a direct
 //! declaration and/or by requires edges.
 //!
-//! The online expander and the offline closure both call [`settle`], so the
-//! two cannot drift on what a diamond or a shadowed edge means. Every output
-//! list is sorted, so the verdict does not depend on the order the claims
-//! arrive in.
+//! The online expander and the offline closure both call [`settle`], so they
+//! share what a diamond or a shadowed edge means. Every output list is sorted,
+//! so the verdict does not depend on the order the claims arrive in. It says
+//! which request wins among claims. What a previous pin answers is
+//! [`crate::lock::pin_rule`]'s, and the graph applies the winner to a digest
+//! the run resolved, never to a carried pin. `pin_agreement_tests` holds the
+//! writers to one result across that seam.
 
-use super::effective_set::NodeKey;
-use crate::oci::{Digest, Identifier};
+use crate::oci::{Digest, Identifier, NodeKey};
 
 /// A direct declaration of the key.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +53,12 @@ pub enum Settled {
     Conflict { contributors: Vec<EdgeClaim> },
 }
 
+/// The request a key records when several agree: the smallest, so the choice
+/// is order-independent. `None` sorts first, so a digest-only request wins.
+pub fn winning_request<'a>(requests: impl IntoIterator<Item = &'a Identifier>) -> Option<&'a Identifier> {
+    requests.into_iter().min()
+}
+
 /// Settle one key. `None` when nothing claims it.
 pub fn settle(direct: Option<&DirectClaim>, edges: &[EdgeClaim]) -> Option<Settled> {
     let mut edges = edges.to_vec();
@@ -82,7 +90,7 @@ pub fn settle(direct: Option<&DirectClaim>, edges: &[EdgeClaim]) -> Option<Settl
 
     let first = edges.first()?;
     if edges.iter().all(|e| e.digest == first.digest) {
-        let winner_id = edges.iter().map(|e| &e.requested_id).min()?.clone();
+        let winner_id = winning_request(edges.iter().map(|e| &e.requested_id))?.clone();
         let mut parents: Vec<NodeKey> = edges.iter().map(|e| e.parent.clone()).collect();
         parents.dedup();
         return Some(Settled::Agreed { winner_id, parents });

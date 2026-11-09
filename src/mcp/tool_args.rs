@@ -181,8 +181,9 @@ pub struct RenderToolArgs {
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub struct StatusToolArgs {
     /// Re-check every registry-sourced artifact against the live catalog for
-    /// deprecation/replacement, and re-resolve each directly-declared
-    /// registry-locked artifact's current tag for update availability.
+    /// deprecation/replacement, and re-resolve each registry-locked row's
+    /// reference (declared artifacts, bundles, bundle members, dependencies)
+    /// for update availability.
     /// Requires network; the report's `checked` field says whether the check
     /// actually ran (skipped when offline). Same semantics as the CLI's
     /// `grim status --check`. A read tool regardless — network reads only,

@@ -691,6 +691,64 @@ def test_uninstall_standalone_skill_held_by_bundle_at_other_tag_keeps_files(
     assert healed["source"].startswith("bundle:"), "provenance flips to the bundle"
 
 
+def test_uninstall_kept_by_bundle_names_the_bundle(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A kept member's line names the bundle that keeps it and the commands that remove it.
+
+    The table cell reads only `kept-by-bundle`, so without the line the user
+    cannot tell which of several declared bundles to remove.
+    """
+    sk = _member_skill(unique_repo, "code-review")
+    other = _member_skill(unique_repo, "lint")
+    stack = make_bundle(f"{unique_repo}/stack", [("skill", "code-review", sk.fq)], tag="1.0.0")
+    tools = make_bundle(f"{unique_repo}/tools", [("skill", "lint", other.fq)], tag="1.0.0")
+    write_config(project_dir, bundles={"stack": stack.fq, "tools": tools.fq})
+    (project_dir / ".claude").mkdir(exist_ok=True)
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    runner.run("install")
+
+    result = runner.plain("uninstall", "skill", "code-review")
+
+    lines = [line for line in result.stderr.splitlines() if "code-review" in line]
+    assert len(lines) == 1, result.stderr
+    assert "bundle 'stack'" in lines[0], lines[0]
+    assert "tools" not in lines[0], lines[0]
+    assert "`grim remove bundle stack`" in lines[0], lines[0]
+    assert "`grim uninstall skill code-review`" in lines[0], lines[0]
+    assert_dir_exists(project_dir / ".claude" / "skills" / "code-review")
+
+
+def test_uninstall_of_a_direct_member_a_bundle_provides_names_the_bundle(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A skill both declared directly and provided by a bundle reports `uninstalled`
+    and keeps its files; stderr names the bundle that keeps them.
+
+    The `uninstalled` value is frozen, so the report alone says the files went
+    while they stay. The line is the only place the user learns which bundle
+    to remove.
+    """
+    sk = _member_skill(unique_repo, "code-review")
+    stack = make_bundle(f"{unique_repo}/stack", [("skill", "code-review", sk.fq)], tag="1.0.0")
+    write_config(project_dir, skills={"code-review": sk.fq}, bundles={"stack": stack.fq})
+    (project_dir / ".claude").mkdir(exist_ok=True)
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    runner.run("install")
+
+    result = runner.run("uninstall", "skill", "code-review", format="json")
+
+    assert json.loads(result.stdout)["status"] == "uninstalled", result.stdout
+    assert_dir_exists(project_dir / ".claude" / "skills" / "code-review")
+    lines = [line for line in result.stderr.splitlines() if "code-review" in line]
+    assert len(lines) == 1, result.stderr
+    assert "bundle 'stack'" in lines[0], lines[0]
+    assert "`grim remove bundle stack`" in lines[0], lines[0]
+    assert "`grim uninstall skill code-review`" in lines[0], lines[0]
+
+
 def test_uninstall_bundle_only_member_keeps_files(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

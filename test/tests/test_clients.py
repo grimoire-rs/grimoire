@@ -536,15 +536,16 @@ def test_prior_output_skipped_ordering_in_mixed_status_set(
     assert by_name["rust-style"]["status"] == "skipped", by_name
     assert by_name["rust-style"]["target"] is None
 
-    # Move the skill's floating tag onto new content (rolling release) so a
-    # second install reports `updated` for it, while the Codex-declined
-    # rule stays `skipped` alongside it in the same batch.
-    make_artifact(
+    # Bump the declared tag, which `grim lock` resolves (a moved tag alone it
+    # keeps), so a second install reports `updated` for the skill, while the
+    # Codex-declined rule stays `skipped` alongside it in the same batch.
+    bumped = make_artifact(
         f"{unique_repo}/code-review",
         "skill",
         {"code-review/SKILL.md": "---\nname: code-review\ndescription: d\n---\n# v2\n"},
-        tag="stable",
+        tag="next",
     )
+    _build_toml(project_dir, bumped.fq, ru.fq, clients=None)
     runner.run("lock", check=False)
     second = runner.json("install", "--client", "codex")["items"]
     assert len(second) == 2, second

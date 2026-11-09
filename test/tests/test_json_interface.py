@@ -111,7 +111,7 @@ def test_error_reason_marks_stale_lock(grim_at, project_dir: Path) -> None:
     stale-lock refusal, so a consumer detects it without scraping the
     non-frozen ``message``.
 
-    The partial-resolve guard (``resolve_lock_partial``,
+    The stale-names guard (``refuse_stale_names``,
     ``src/resolve/resolver.rs``) runs BEFORE any registry I/O, so a
     hand-crafted lock whose ``declaration_hash`` deliberately mismatches the
     declared set triggers the refusal fully offline — no registry needed.

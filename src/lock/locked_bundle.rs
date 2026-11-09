@@ -134,7 +134,7 @@ impl LockedBundle {
 
     /// The `(repo, tag)` member provenance this bundle stamps onto its members
     /// — see [`LockedBundleSource::provenance_pair`]. The pair a member
-    /// projection ([`crate::command::add::bundle_members_lock`]) matches on.
+    /// projection ([`crate::lock::closure::bundle_members_lock`]) matches on.
     pub fn provenance_pair(&self) -> (String, String) {
         self.source.provenance_pair()
     }

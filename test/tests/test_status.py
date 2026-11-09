@@ -3,14 +3,16 @@
 """`grim status` acceptance tests — state is data, always exit 0."""
 from __future__ import annotations
 
+import re
 import shutil
 from pathlib import Path
 
-from src.helpers import make_artifact, write_config
-from src.registry import REGISTRY_HOST, retag
+from src.helpers import make_artifact, make_bundle, make_dependent, write_config
+from src.registry import REGISTRY_HOST, PublishedArtifact, retag
 
 DEPRECATED = "com.grimoire.deprecated"
 REPLACED_BY = "com.grimoire.replaced-by"
+_PINNED_TAG = re.compile(r'(?m)^(pinned = "[^"@]*):[^/"@]+(@sha256:)')
 
 
 def test_status_json_is_array_and_exit_0(
@@ -136,7 +138,7 @@ def test_status_item_carries_client_drift_fields(
     result = runner.json("status")
     assert result["checked"] is False, "no --check ⇒ checked is false"
     rows = result["items"]
-    # 16 since dependencies appended `direct` and `required_by`; 14 since the hook kind: `arming` is appended, always-present, and `[]`
+    # 17 since `moved_nested_bundles`; 16 since dependencies appended `direct` and `required_by`; 14 since the hook kind: `arming` is appended, always-present, and `[]`
     # for every non-hook kind — the shape below. A hook's arming state is
     # per-(hook, client), so it cannot be one row-level token; `[]` therefore
     # means "nothing to report", never "unknown". Appending is permitted under
@@ -148,8 +150,8 @@ def test_status_item_carries_client_drift_fields(
         "outputs_pending",
         "clients_missing", "clients_extra", "clients_unresolved",
         "deprecated", "replaced_by", "update_available",
-        "arming", "direct", "required_by",
-    }, f"status item must carry exactly the 16 frozen fields; got: {sorted(rows[0].keys())}"
+        "arming", "direct", "required_by", "moved_nested_bundles",
+    }, f"status item must carry exactly the 17 frozen fields; got: {sorted(rows[0].keys())}"
     assert rows[0]["arming"] == [], "a skill reports no hook arming state"
     assert rows[0]["clients_missing"] == []
     assert rows[0]["clients_extra"] == []
@@ -162,6 +164,7 @@ def test_status_item_carries_client_drift_fields(
     assert rows[0]["deprecated"] is None
     assert rows[0]["replaced_by"] is None
     assert rows[0]["update_available"] is None
+    assert rows[0]["moved_nested_bundles"] is None
 
 
 def test_status_reports_pending_outputs_for_a_client_added_after_install(
@@ -408,6 +411,7 @@ def test_status_check_populates_deprecation_fields(
     # The skill is locked at its only tag, so the fresh re-resolution finds
     # nothing newer ⇒ a completed re-resolve reports `false`, never `null`.
     assert row["update_available"] is False
+    assert row["moved_nested_bundles"] == []
 
 
 def test_status_default_run_leaves_remote_fields_null(
@@ -453,6 +457,7 @@ def test_status_check_offline_degrades(
     assert row["replaced_by"] is None
     # `--check --offline` never re-resolves ⇒ update_available stays null.
     assert row["update_available"] is None
+    assert row["moved_nested_bundles"] is None
 
 
 # ── --check: fresh per-artifact update availability (issue #43, C4) ─────
@@ -555,6 +560,144 @@ def test_status_check_installed_at_latest_reports_false(
     assert row["update_available"] is False, row
 
 
+def test_status_check_answers_for_a_row_only_requires_reaches(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """W-12: a pure dependency answers "would `grim update` move this pin?".
+
+    `moved` re-resolves the tag its pin carries, or on a pre-change lock, whose
+    pins carry none, the edge its parent recorded. `frozen` is required by
+    digest, so `grim update` cannot move it although its tag moved as well.
+    """
+
+    def skill(name: str, body: str = "v1") -> PublishedArtifact:
+        text = f"---\nname: {name}\ndescription: d\n---\n# {body}\n"
+        return make_artifact(
+            f"{unique_repo}/{name}", "skill", {f"{name}/SKILL.md": text}, tag="1"
+        )
+
+    skill("moved")
+    skill("still")
+    frozen = skill("frozen")
+    parent = make_dependent(
+        f"{unique_repo}/parent",
+        "1",
+        "skill",
+        {"parent/SKILL.md": "---\nname: parent\ndescription: d\n---\n# v1\n"},
+        [
+            ("skill", "frozen", f"./frozen:1@{frozen.digest}"),
+            ("skill", "moved", "./moved:1"),
+            ("skill", "still", "./still:1"),
+        ],
+    )
+    write_config(project_dir, skills={"parent": parent.fq})
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    skill("moved", "v2")
+    skill("frozen", "v2")
+
+    def answers() -> dict[str, bool | None]:
+        result = runner.json(
+            "--registry", f"{REGISTRY_HOST}/{unique_repo}", "status", "--check"
+        )
+        assert result["checked"] is True
+        return {r["name"]: r["update_available"] for r in result["items"]}
+
+    expected = {"parent": False, "moved": True, "frozen": False, "still": False}
+    assert answers() == expected
+
+    lock = project_dir / "grimoire.lock"
+    lock.write_text(_PINNED_TAG.sub(r"\1\2", lock.read_text()))
+    assert answers() == expected
+
+    runner.run("update")
+    assert answers() == dict.fromkeys(expected, False)
+
+
+def test_status_check_reports_a_nested_bundle_tag_move(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A nested bundle has no row, so the row that reaches it lists its moved tag.
+
+    `update_available` stays that row's own answer, because a named update of
+    the row cannot clear what moved under it; the listing names the bundle a
+    named update can. Plain output says the same on stderr.
+    """
+
+    def skill(name: str) -> PublishedArtifact:
+        files = {f"{name}/SKILL.md": f"---\nname: {name}\ndescription: d\n---\n# v1\n"}
+        return make_artifact(f"{unique_repo}/{name}", "skill", files, tag="1")
+
+    stays = skill("stays")
+    gained = skill("gained")
+    inner = make_bundle(f"{unique_repo}/inner", [("skill", "stays", stays.fq)], tag="1")
+    outer = make_bundle(f"{unique_repo}/outer", [("bundle", "inner", inner.fq)], tag="1")
+    write_config(project_dir, bundles={"outer": outer.fq})
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    source = ("--registry", f"{REGISTRY_HOST}/{unique_repo}")
+
+    def answers() -> dict[str, tuple[bool | None, list[dict[str, str]] | None]]:
+        result = runner.json(*source, "status", "--check")
+        assert result["checked"] is True
+        return {
+            r["name"]: (r["update_available"], r["moved_nested_bundles"])
+            for r in result["items"]
+        }
+
+    assert answers() == {"outer": (False, []), "stays": (False, [])}
+
+    retag(f"{unique_repo}/inner", "keep", inner.digest)
+    make_bundle(
+        f"{unique_repo}/inner",
+        [("skill", "stays", stays.fq), ("skill", "gained", gained.fq)],
+        tag="1",
+    )
+
+    moved = [{"name": "inner", "reference": inner.fq}]
+    assert answers() == {"outer": (False, moved), "stays": (False, [])}
+    plain = runner.run(*source, "status", "--check", check=False)
+    assert plain.returncode == 0, plain.stderr
+    assert "bundle 'inner'" in plain.stderr, plain.stderr
+    assert "`grim update -- inner`" in plain.stderr, plain.stderr
+
+    lock = project_dir / "grimoire.lock"
+    before = lock.read_text()
+    runner.run("update", "--", "outer")
+    assert lock.read_text() == before, "the row's own pin held, so a named update moves nothing"
+    assert answers() == {"outer": (False, moved), "stays": (False, [])}
+
+    runner.run("update", "--", "inner")
+
+    assert answers()["outer"] == (False, [])
+
+
+def test_a_global_check_note_names_the_global_flag(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A global note without `--global` names a command that moves a project pin.
+
+    With no project in the working directory that command exits 79 instead.
+    """
+
+    def skill(body: str) -> PublishedArtifact:
+        files = {"x/SKILL.md": f"---\nname: x\ndescription: d\n---\n# {body}\n"}
+        return make_artifact(f"{unique_repo}/x", "skill", files, tag="1")
+
+    old = skill("v1")
+    runner = grim_at(project_dir)
+    runner.run("--global", "add", "--no-install", old.fq)
+    retag(f"{unique_repo}/x", "keep", old.digest)
+    skill("v2")
+
+    plain = runner.run(
+        "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--global", "status", "--check", check=False
+    )
+
+    assert plain.returncode == 0, plain.stderr
+    assert "`grim --global update -- x` moves its pin" in plain.stderr, plain.stderr
+
+
 def test_status_json_lists_new_vendor_client_name_additively(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
@@ -565,7 +708,6 @@ def test_status_json_lists_new_vendor_client_name_additively(
     strings appear inside already-frozen JSON shapes; the per-item key set is
     unchanged.
     """
-    import json
 
     repo = f"{unique_repo}/s"
     make_artifact(repo, "skill", {"s/SKILL.md": "---\nname: s\ndescription: d\n---\n# body\n"}, tag="v1")

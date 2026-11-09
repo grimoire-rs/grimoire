@@ -230,6 +230,21 @@ impl InstallTarget {
         self.settings_policy.as_ref()
     }
 
+    /// The `grim` a remedy names. Every command that installs attaches a
+    /// policy; a target that holds none (the settings uninstall pass) names its
+    /// scope's flag-only form, as an unnamed policy does.
+    pub fn grim(&self) -> &crate::config::scope::Invocation {
+        use crate::config::scope::Invocation;
+        let by_scope = match self.scope {
+            ConfigScope::Global => &Invocation::GLOBAL,
+            ConfigScope::Project => &Invocation::WALKED,
+        };
+        self.hook_policy
+            .as_ref()
+            .or(self.settings_policy.as_ref())
+            .map_or(by_scope, crate::hook::policy::HookPolicy::invocation)
+    }
+
     /// The `$GRIM_HOME` a hook destination resolves under (C-106).
     pub fn grim_home(&self) -> &Path {
         &self.grim_home
@@ -709,6 +724,37 @@ mod tests {
                 .settings_policy()
                 .is_some_and(crate::hook::policy::HookPolicy::feature_enabled)
         );
+    }
+
+    /// A failed install's remedy reads this, so a `--config` run keeps its path.
+    #[test]
+    fn a_target_names_the_grim_of_its_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parse = || InstallTarget::parse(tmp.path(), ConfigScope::Project, &[], &[], &BTreeMap::new()).unwrap();
+        let grim = crate::config::scope::Invocation::config(Path::new("/srv/team/grimoire.toml"));
+        let policy = crate::hook::policy::HookPolicy::new(
+            true,
+            None,
+            crate::hook::trust::Interactivity::NonInteractive,
+            ConfigScope::Project,
+            tmp.path(),
+            &[],
+            crate::hook::consent::Consent::Granted,
+        )
+        .naming(grim.clone());
+
+        assert_eq!(parse().grim(), &crate::config::scope::Invocation::WALKED);
+        assert_eq!(parse().with_hook_policy(policy).grim(), &grim);
+    }
+
+    /// A global run names `grim --global` whether or not it attached a policy:
+    /// a plain `grim` would act on the project the shell stands in.
+    #[test]
+    fn a_global_target_without_a_policy_names_the_global_grim() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = InstallTarget::new(tmp.path(), ConfigScope::Global, vec![ClientTarget::Kiro]);
+
+        assert_eq!(target.grim(), &crate::config::scope::Invocation::GLOBAL);
     }
 
     /// C-106 (a): main's `path_for` body, frozen. Every hook-free

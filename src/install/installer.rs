@@ -34,9 +34,7 @@ use crate::oci::{ArtifactKind, Digest, Identifier};
 #[cfg(test)]
 use super::content_hash::footprint_hash;
 use super::content_hash::{footprint_hash_for_kind, footprint_hash_for_record};
-use super::expected_outputs::{
-    destination_among, effective_clients, expected_clients, output_at_current_layout, pending_outputs,
-};
+use super::expected_outputs::{destination_among, effective_clients, expected_clients, pending_outputs, writes_output};
 use super::install_error::{InstallError, InstallErrorKind};
 use super::install_state::{ClientOutput, InstallRecord, InstallState, PersistError, SettingsStore};
 use super::materializer::ArtifactMaterializer;
@@ -44,6 +42,7 @@ use super::path_anchor::{AnchorError, AnchorRoots, Containment, PathAnchor};
 use super::progress::{InstallProgress, SilentProgress};
 use super::settings_phase::{self, Abandoned, SettingsInput};
 use super::target::InstallTarget;
+use super::vendor::SyncAdds;
 
 /// Upper bound on a materialized (skill/rule/agent) layer blob at install.
 /// Checked against the manifest's layer-descriptor `size` *before* download
@@ -163,8 +162,35 @@ pub struct ArtifactInstall {
 pub enum SettingsRun<'a> {
     /// Plan over this whole lock, however narrow the pass's own lock is.
     Full(&'a GrimoireLock),
+    /// A named update. Consent and the conflict check read the whole `lock`, so
+    /// a closure package cannot land beside an outside one it conflicts with.
+    /// The step arms only the packages in `install`, and removes only the values
+    /// of a package that left the lock whose key is in `prune`.
+    Named {
+        lock: &'a GrimoireLock,
+        install: &'a BTreeSet<NodeKey>,
+        prune: &'a BTreeSet<NodeKey>,
+    },
     /// Run no settings step.
     Skip,
+}
+
+impl<'a> SettingsRun<'a> {
+    /// The lock the settings step plans over, `None` when it runs none.
+    fn lock(self) -> Option<&'a GrimoireLock> {
+        match self {
+            Self::Full(lock) | Self::Named { lock, .. } => Some(lock),
+            Self::Skip => None,
+        }
+    }
+
+    /// What the step arms and which leftovers it may remove.
+    fn reach(self) -> settings_phase::Reach<'a> {
+        match self {
+            Self::Named { install, prune, .. } => settings_phase::Reach::Named { install, prune },
+            Self::Full(_) | Self::Skip => settings_phase::Reach::Whole,
+        }
+    }
 }
 
 /// What the settings step changed and refused in one pass.
@@ -221,6 +247,9 @@ pub struct InstallRun {
     /// A conflict stopped the pass before any artifact landed, so its one row
     /// is not a package's verdict and nothing reconciles against it.
     pub halted: bool,
+    /// Settings packages whose record kept a value for an armed package outside
+    /// a named run's closure; their warning already names `grim install`.
+    pub(crate) kept_beside: BTreeSet<String>,
 }
 
 /// Install every locked artifact, in skills-then-rules-then-agents order.
@@ -377,7 +406,7 @@ async fn install_pass<M: ArtifactMaterializer>(
     // A lock without the kind never enters the phase and stays byte-identical.
     // A refused store applies nothing, so nothing it would apply can conflict.
     let mut preloaded = settings_phase::Preloaded::default();
-    if let SettingsRun::Full(full) = settings
+    if let Some(full) = settings.lock()
         && let Some(first) = full.settings.first()
         && *state.settings_store() != SettingsStore::Refused
     {
@@ -390,6 +419,7 @@ async fn install_pass<M: ArtifactMaterializer>(
                     settings: SettingsOutcome::default(),
                     abandoned: Vec::new(),
                     halted: true,
+                    kept_beside: BTreeSet::new(),
                 };
             }
         }
@@ -471,7 +501,8 @@ async fn install_pass<M: ArtifactMaterializer>(
             intent,
             &mut left,
         )
-        .await;
+        .await
+        .map_err(|e| e.naming(target.grim()));
         abandoned.extend(left.into_iter().map(|entry| {
             let package = artifact.name.clone();
             (kind, Abandoned { package, entry })
@@ -490,14 +521,16 @@ async fn install_pass<M: ArtifactMaterializer>(
     }
     progress.finish();
     let mut outcome = SettingsOutcome::default();
+    let mut kept_beside = BTreeSet::new();
     // A record outlives its lock row, so an empty lock can still have work: the
     // package that left it. A project with neither never enters.
-    if let SettingsRun::Full(full) = settings
+    if let Some(full) = settings.lock()
         && (!full.settings.is_empty() || state.iter_records().any(|record| record.kind == ArtifactKind::Settings))
     {
-        let phase = settings_phase::apply(full, &input, &force, state, kept, preloaded).await;
+        let phase = settings_phase::apply(full, &input, &force, state, kept, preloaded, settings.reach()).await;
         results.extend(phase.rows);
         outcome = phase.outcome;
+        kept_beside = phase.kept_beside;
         for Abandoned { entry, .. } in &phase.abandoned {
             let element = entry
                 .element
@@ -517,6 +550,7 @@ async fn install_pass<M: ArtifactMaterializer>(
         settings: outcome,
         abandoned,
         halted: false,
+        kept_beside,
     }
 }
 
@@ -655,6 +689,9 @@ pub(crate) fn warn_copilot_pool_gap(target: &InstallTarget, scope: crate::config
 /// It lives here rather than in `InstallTarget::parse` because only this
 /// seam sees both the target and the lock — and because `grim context`
 /// resolves the same target through `parse` and must never error.
+///
+/// `adds` scopes the converge past the install: a named action passes its
+/// closure, a whole-lock one [`SyncAdds::Every`].
 #[expect(
     clippy::too_many_arguments,
     reason = "the install seam plus the paths it persists to; a wrapper struct would only rename them"
@@ -671,6 +708,7 @@ pub async fn install_and_persist<M: ArtifactMaterializer>(
     config_path: &Path,
     force: ForceScope,
     intent: InstallIntent,
+    adds: SyncAdds<'_>,
     progress: &dyn InstallProgress,
     settings: SettingsRun<'_>,
 ) -> Result<InstallRun, InstallFailure> {
@@ -681,7 +719,9 @@ pub async fn install_and_persist<M: ArtifactMaterializer>(
         "install_and_persist installs hooks without a hook policy"
     );
     refuse_uninstallable_fallback(lock, target, state, roots)?;
-    refuse_stale_edges(lock, access, state).await?;
+    refuse_stale_edges(lock, access, state)
+        .await
+        .map_err(|e| e.naming(target.grim()))?;
     // The fallback is the right default for the pool-reading clients, but a
     // Claude Code user on a bare workspace gets an `installed` row and a
     // skill in a pool Claude never reads (issue #113). Say so once, here, so
@@ -724,43 +764,108 @@ pub async fn install_and_persist<M: ArtifactMaterializer>(
     .await;
 
     // Persist whatever installed (some artifacts may land before another
-    // fails) before surfacing any per-item error. One `persist` seam handles
-    // project-scope dir creation, the atomic write, and the legacy reap.
-    if let Err(PersistError::EnsureDir { path, source } | PersistError::Save { path, source }) =
-        state.persist(scope, workspace, &roots.grim_home, config_path)
-    {
+    // fails) before surfacing any per-item error.
+    if let Err(error) = persist_and_converge(
+        state,
+        &before,
+        target,
+        workspace,
+        scope,
+        roots,
+        config_path,
+        adds,
+        "installed",
+    ) {
         // The caller gets no run to close, and the values already moved.
         settings_phase::warn_restart(&run.settings.changes);
         return Err(InstallFailure {
-            error: InstallError::without_reference(InstallErrorKind::TargetIo { path, source }),
+            error,
             settings: run.settings,
         });
     }
 
-    // Converge vendor-owned config (e.g. OpenCode's managed `instructions`
-    // glob) for every involved client. The artifacts and state are already
-    // persisted, so a sync failure is warn-only, never a hard command error.
-    // Not `target.clients()`: `preserved_recorded_clients` carries a recorded,
-    // un-drifted client along on a pin change even when `--client` excluded
-    // it, so a rule whose new version dropped its support directory can have
-    // that directory deleted for a client this run never selected. See
-    // `sync_client_set` for why a miss there is permanent.
-    let retired = crate::install::install_state::retired_outputs(&before, state);
+    Ok(run)
+}
+
+/// What the hook pass of [`persist_and_converge`] wrote.
+#[derive(Debug, Default)]
+pub(crate) struct Converged {
+    /// Whether a client's hook registrations or dispatch rows were armed or
+    /// re-armed. A disarm does not count.
+    pub(crate) hooks: bool,
+}
+
+/// Persist `state`, then converge vendor-owned config and the hook dispatch
+/// table on it: the shared tail of every installing command. `adds` names the
+/// rules whose managed entry vendor sync may add and, as a closure, the hooks
+/// whose arming converge may write; `applied` is the past participle the
+/// sync-failure warning reports.
+///
+/// `before` must predate every mutation of the run: an output it does not name
+/// is never retired, so that output's managed config entry outlives its files
+/// for good. Hook converge reads the whole of `state` for the policy and each
+/// hook's payload, so a closure narrows what it writes, never what it checks.
+///
+/// # Errors
+///
+/// [`InstallErrorKind::TargetIo`] when the persist fails; neither pass runs
+/// then. A config-sync failure is warn-only.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the caller's warning word and add scope join seven persist and converge coordinates; a params struct is a separate transformation"
+)]
+pub(crate) fn persist_and_converge(
+    state: &InstallState,
+    before: &InstallState,
+    target: &InstallTarget,
+    workspace: &Path,
+    scope: ConfigScope,
+    roots: &AnchorRoots,
+    config_path: &Path,
+    adds: SyncAdds<'_>,
+    applied: &str,
+) -> Result<Converged, InstallError> {
+    // One `persist` seam handles project-scope dir creation, the atomic write,
+    // and the legacy reap.
+    state
+        .persist(scope, workspace, &roots.grim_home, config_path)
+        .map_err(|e| match e {
+            PersistError::EnsureDir { path, source } | PersistError::Save { path, source } => {
+                InstallError::without_reference(InstallErrorKind::TargetIo { path, source })
+            }
+        })?;
+
+    // Not `target.clients()`: a pruned orphan, a reaped dropped client and a rule
+    // whose new version dropped its support directory can each retire an output
+    // for a client outside `--client`, and its managed entry (an MCP registration,
+    // OpenCode's `instructions` glob, Claude's `claudeMdExcludes` element) would
+    // outlive its files. `sync_client_set` says why that miss is permanent.
+    let retired = crate::install::install_state::retired_outputs(before, state);
     for client in crate::install::install_state::sync_client_set(target.clients(), &retired) {
-        if let Err(e) = client.vendor().sync_config(state, workspace, scope, &retired) {
+        // The artifacts and state are on disk, so a vendor config grim cannot
+        // parse or read skips its registration and never fails the command.
+        if let Err(e) = client.vendor().sync_config(state, workspace, scope, &retired, adds) {
             tracing::warn!(
                 client = %client,
                 error = %e,
-                "vendor config sync failed; artifacts installed and state saved, registration skipped"
+                "vendor config sync failed; artifacts {applied} and state saved, registration skipped"
             );
         }
     }
-    // C-104: hook convergence right after the sync loop — a separate pass,
-    // because it needs the policy `sync_config` cannot see and writes the
-    // dispatch table once with the union over every hook-capable client.
-    crate::install::hook_registrar::converge_for(target.hook_policy(), state, workspace, scope, roots);
+    // A separate pass after the sync loop: it needs the policy `sync_config`
+    // cannot see. Its client set is the hook-capable roster, never the set above:
+    // the dispatch table is replaced wholesale, so a narrowed set would drop a
+    // sibling client's rows from the union.
+    let only = match adds {
+        SyncAdds::Within(closure) => Some(closure),
+        SyncAdds::Every | SyncAdds::Nothing => None,
+    };
+    let hooks =
+        crate::install::hook_registrar::converge_for(target.hook_policy(), state, workspace, scope, roots, only)
+            .iter()
+            .any(|(_, sync)| matches!(sync, crate::install::hook_registrar::HookSync::Armed(_)));
 
-    Ok(run)
+    Ok(Converged { hooks })
 }
 
 /// C-101: the hook gates, in fixed order, ahead of the integrity gate — each
@@ -860,10 +965,11 @@ async fn install_one<M: ArtifactMaterializer>(
     let pinned_str = artifact.source.provenance();
 
     // Integrity gate (shared helper): refuses on drift, and short-circuits to
-    // AlreadyInstalled only when every output is intact, the pin is unchanged,
-    // AND the record covers every targeted client. A declined-kind record has
-    // zero outputs, so `covers_targets` is false for any client that could
-    // support the kind — it never masks a later supported install (F-1).
+    // AlreadyInstalled only when every output this pass writes is intact, the
+    // pin is unchanged, AND the record covers every targeted client. A
+    // declined-kind record has zero outputs, so `covers_targets` is false for
+    // any client that could support the kind, which never masks a later
+    // supported install (F-1).
     if let Some(outcome) = integrity_gate(recorded.as_ref(), &artifact.source, target, roots, force, None)? {
         return Ok(outcome);
     }
@@ -1788,11 +1894,11 @@ fn preserved_recorded_clients(
     preserved
 }
 
-/// Integrity gate shared by every install path: for every client output a
-/// prior record described, an on-disk state that drifted from what was
-/// recorded is a local modification. Refuse unless forced; if every output
-/// is intact, the pin is unchanged, AND the record already covers every
-/// client this install targets, the install is a no-op.
+/// Integrity gate shared by every install path: for every client output of a
+/// prior record that this pass writes, an on-disk state that drifted from what
+/// was recorded is a local modification. Refuse unless forced; if every output
+/// this pass writes is intact, the pin is unchanged, AND the record already
+/// covers every client this install targets, the install is a no-op.
 ///
 /// `Ok(Some(outcome))` short-circuits the install; `Ok(None)` proceeds.
 // The sibling install functions return the same `crate::error::Error`
@@ -1826,34 +1932,12 @@ fn integrity_gate(
         };
         if present {
             let actual = out.current_hash(rec.kind, roots, Containment::AllowRelocatedAncestor)?;
-            if actual != out.content_hash {
+            if actual != out.content_hash && pass_writes(out, rec, target, roots, mcp) {
                 // Refuse only when this pass would actually OVERWRITE the
-                // drifted file. Two kinds of drifted output are never written
-                // over, and each already has a mechanism that preserves it:
-                //
-                // - **A client outside the target set.** On a pin change
-                //   [`preserved_recorded_clients`] carries it forward verbatim;
-                //   without one it is simply not materialized. Its fate belongs
-                //   to `grim update`'s `reap_dropped_clients`, which preserves
-                //   it and reports `kept_modified_clients` unless `--force`.
-                // - **An output the layout moved away from.** The pass writes
-                //   the NEW path; [`reap_moved_outputs`] guard 4 preserves the
-                //   edited old copy and warns (ADR A7-a — no `--force`
-                //   override, deletion is the unrecoverable direction).
-                //
-                // Refusing over either would block the user behind a `--force`
-                // that then *deletes* the very edit the refusal was protecting.
-                //
-                // An unparsable / legacy client string stays conservative and
-                // still refuses: unknown scope is not evidence of being out of
-                // scope.
-                let would_overwrite = match out.client.parse::<crate::install::client_target::ClientTarget>() {
-                    Ok(client) => {
-                        target.clients().contains(&client) && output_at_current_layout(out, client, rec, target, roots)
-                    }
-                    Err(_) => true,
-                };
-                if !force && would_overwrite {
+                // drifted file: refusing over one it leaves alone would block
+                // the user behind a `--force` that then *deletes* the very edit
+                // the refusal was protecting.
+                if !force {
                     return Ok(Some(InstallOutcome::Refused {
                         recorded: out.content_hash.clone(),
                         actual,
@@ -1861,7 +1945,9 @@ fn integrity_gate(
                 }
                 all_intact = false;
             }
-        } else {
+        } else if pass_writes(out, rec, target, roots, mcp) {
+            // An output this pass leaves gone stays gone, so re-materializing
+            // the others would report a restore that never happened, every run.
             all_intact = false;
         }
     }
@@ -1879,15 +1965,34 @@ fn integrity_gate(
     // neither asker invents pending work the other would not do. **File
     // presence is not part of the question either asks** — the seam answers
     // "which destinations does this layout produce that the record does not
-    // cover", nothing about what is on disk. A deleted output is caught by
-    // `all_intact` here and by the footprint comparison in `grim status`, so
-    // an empty `outputs_pending` does not promise "nothing to install".
+    // cover", nothing about what is on disk. A deleted output this pass writes
+    // is caught by `all_intact` here, and every deleted output by the footprint
+    // comparison in `grim status`, so an empty `outputs_pending` does not
+    // promise "nothing to install".
     let covers_targets = !expected_clients(rec.kind, &rec.name, target).is_empty()
         && pending_outputs(Some(rec), rec.kind, &rec.name, target, roots, mcp).is_empty();
     if all_intact && covers_targets && rec.source.eq_content(source) {
         return Ok(Some(InstallOutcome::AlreadyInstalled));
     }
     Ok(None)
+}
+
+/// Whether this pass writes `out`. It never writes an output of a client outside
+/// the target set, which [`preserved_recorded_clients`] carries forward on a pin
+/// change and `grim update`'s `reap_dropped_clients` judges, nor of a client this
+/// build does not know, which has no layout to write. [`writes_output`] says the
+/// rest, and a destination a target client does write is the untracked gate's to
+/// protect when only such an output records it.
+fn pass_writes(
+    out: &ClientOutput,
+    rec: &InstallRecord,
+    target: &InstallTarget,
+    roots: &AnchorRoots,
+    mcp: Option<&crate::oci::mcp::McpDescriptor>,
+) -> bool {
+    out.client
+        .parse::<crate::install::client_target::ClientTarget>()
+        .is_ok_and(|client| target.clients().contains(&client) && writes_output(out, client, rec, target, roots, mcp))
 }
 
 /// Layout-migration reaper (ADR render-layout-stability): after a
@@ -2787,6 +2892,7 @@ async fn check_locked_edges(
         return Err(InstallError::without_reference(InstallErrorKind::StaleDependencies {
             kind,
             name: artifact.name.clone(),
+            relock: None,
         })
         .into());
     }
@@ -3111,6 +3217,7 @@ async fn install_mcp(
     // writes are safe to start.
     let mut client_records: Vec<ClientOutput> = Vec::with_capacity(plans.len());
     let mut adopted = 0usize;
+    let mut changed = 0usize;
     // Same partial-pass doctrine as `install_one`: a write failure part-way
     // through leaves earlier clients spliced, and an unrecorded splice is the
     // orphan entry this whole restructure exists to prevent.
@@ -3177,6 +3284,7 @@ async fn install_mcp(
                     }
                     crate::store::atomic_write::atomic_write_through_symlink(&plan.config_path, text.as_bytes())
                         .map_err(|e| target_io(&plan.config_path, e))?;
+                    changed += 1;
                 }
                 Ok(Splice::Unchanged) => {}
                 Err(e) => return Err(target_io(&plan.config_path, e).into()),
@@ -3274,7 +3382,11 @@ async fn install_mcp(
         outputs,
     });
 
-    Ok(if recorded.is_some() {
+    Ok(if recorded.is_some() && !pin_changed && changed == 0 {
+        // Every entry already held what this pin renders, so only the record
+        // changed: `update` must not report `restored` for a file it never wrote.
+        InstallOutcome::AlreadyInstalled
+    } else if recorded.is_some() {
         InstallOutcome::Updated
     } else if adopted > 0 && adopted == output_count {
         // Every registration was adopted at an identical value — nothing
@@ -3502,6 +3614,7 @@ mod tests {
 
     use crate::config::scope::ConfigScope;
     use crate::install::client_target::ClientTarget;
+    use crate::install::expected_outputs::output_at_current_layout;
     use crate::install::install_state::ClientOutput;
     use crate::install::path_anchor::{AnchorRoots, AnchoredPath, PathAnchor};
     use crate::lock::grimoire_lock::LockMetadata;
@@ -5676,6 +5789,262 @@ mod tests {
         );
     }
 
+    /// The gate at an unchanged pin over `targets`, for a record whose Claude
+    /// output is intact beside a second output of `client` at `relative`, on
+    /// disk as `other` says.
+    fn gate_beside_at(
+        targets: Vec<ClientTarget>,
+        client: &str,
+        relative: &str,
+        other: Option<&[u8]>,
+    ) -> Option<InstallOutcome> {
+        let dir = tempfile::tempdir().unwrap();
+        let blob = rule_tar("rust-style", b"# rust\n");
+        let source = locked_rule("rust-style", &blob).source;
+        let write = |relative: &str, bytes: &[u8]| {
+            let path = dir.path().join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, bytes).unwrap();
+            footprint_hash(&path, None).unwrap()
+        };
+        let output = |client: &str, relative: &str, content_hash| ClientOutput {
+            client: client.to_string(),
+            target: AnchoredPath {
+                anchor: PathAnchor::Workspace,
+                relative: relative.to_string(),
+            },
+            content_hash,
+            support_dir: None,
+            entry: None,
+            adopted: false,
+            element: None,
+        };
+        let content_hash = Digest::Sha256("b".repeat(64));
+        if let Some(bytes) = other {
+            write(relative, bytes);
+        }
+        let record = InstallRecord {
+            kind: ArtifactKind::Rule,
+            name: "rust-style".to_string(),
+            source: source.clone(),
+            dev: false,
+            outputs: vec![
+                output(
+                    "claude",
+                    ".claude/rules/rust-style.md",
+                    write(".claude/rules/rust-style.md", b"# rust\n"),
+                ),
+                output(client, relative, content_hash),
+            ],
+        };
+        let target = InstallTarget::new(dir.path(), ConfigScope::Project, targets);
+
+        integrity_gate(Some(&record), &source, &target, &roots(dir.path()), false, None).unwrap()
+    }
+
+    /// [`gate_beside_at`] with Claude as the only target and the sibling at
+    /// Copilot's path.
+    fn gate_beside(client: &str, other: Option<&[u8]>) -> Option<InstallOutcome> {
+        gate_beside_at(
+            vec![ClientTarget::Claude],
+            client,
+            ".github/instructions/rust-style.instructions.md",
+            other,
+        )
+    }
+
+    #[test]
+    fn integrity_gate_judges_only_the_outputs_this_pass_writes() {
+        let already = Some(InstallOutcome::AlreadyInstalled);
+        assert_eq!(
+            gate_beside("copilot", None),
+            already,
+            "a gone output outside the target has nothing to bring back"
+        );
+        assert_eq!(
+            gate_beside("copilot", Some(b"edited\n")),
+            already,
+            "nor has an edited one, which the pass leaves alone"
+        );
+        assert_eq!(
+            gate_beside("not-a-client", None),
+            already,
+            "this build has no layout for an unknown client, so no pass writes its output"
+        );
+        assert_eq!(
+            gate_beside("not-a-client", Some(b"edited\n")),
+            already,
+            "and it leaves an edited one alone"
+        );
+    }
+
+    /// Codex takes no rules, so `install_one` drops it from the materialize set
+    /// and the merge carries its stale output along: nothing brings that file back.
+    #[test]
+    fn integrity_gate_skips_an_output_of_a_target_client_that_stopped_hosting_the_kind() {
+        let targets = || vec![ClientTarget::Claude, ClientTarget::Codex];
+        let dir = tempfile::tempdir().unwrap();
+        let layout = InstallTarget::new(dir.path(), ConfigScope::Project, targets()).path_for(
+            ClientTarget::Codex,
+            ArtifactKind::Rule,
+            "rust-style",
+        );
+        let relative = layout.strip_prefix(dir.path()).unwrap().to_str().unwrap().to_string();
+        let already = Some(InstallOutcome::AlreadyInstalled);
+
+        assert_eq!(gate_beside_at(targets(), "codex", &relative, None), already, "gone");
+        assert_eq!(
+            gate_beside_at(targets(), "codex", &relative, Some(b"edited\n")),
+            already,
+            "edited"
+        );
+    }
+
+    /// An edited file a target client writes stays protected when the record
+    /// names it under a client this build does not know: the untracked gate
+    /// refuses in place of the integrity gate, and the exit stays 65.
+    #[tokio::test]
+    async fn an_unknown_client_at_a_targets_destination_never_exposes_an_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let blob = rule_tar("rust-style", b"# rust\n");
+        let locked = locked_rule("rust-style", &blob);
+        let target = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Claude]);
+        let relative = ".claude/rules/rust-style.md";
+        let path = dir.path().join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "edited\n").unwrap();
+        let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
+        state.record(InstallRecord {
+            kind: ArtifactKind::Rule,
+            name: "rust-style".to_string(),
+            source: locked.source.clone(),
+            dev: false,
+            outputs: vec![ClientOutput {
+                client: "not-a-client".to_string(),
+                target: AnchoredPath {
+                    anchor: PathAnchor::Workspace,
+                    relative: relative.to_string(),
+                },
+                content_hash: Digest::Sha256("b".repeat(64)),
+                support_dir: None,
+                entry: None,
+                adopted: false,
+                element: None,
+            }],
+        });
+
+        let mut outcomes = install_all(
+            &lock_of(vec![locked]),
+            &arc(BlobMock { blob }),
+            &DefaultMaterializer,
+            &target,
+            &mut state,
+            &roots(dir.path()),
+            std::path::Path::new("."),
+            false,
+        )
+        .await;
+
+        let outcome = outcomes.remove(0).result.expect("a refusal is an outcome");
+        assert!(
+            matches!(
+                outcome,
+                InstallOutcome::Refused { .. } | InstallOutcome::RefusedUntracked { .. }
+            ),
+            "{outcome:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "edited\n");
+    }
+
+    /// One install of a lock holding the single MCP artifact.
+    async fn install_the_mcp(
+        lock: &GrimoireLock,
+        access: &Arc<dyn OciAccess>,
+        target: &InstallTarget,
+        state: &mut InstallState,
+        roots: &AnchorRoots,
+    ) -> InstallOutcome {
+        let mut outcomes = install_all(
+            lock,
+            access,
+            &DefaultMaterializer,
+            target,
+            state,
+            roots,
+            std::path::Path::new("."),
+            false,
+        )
+        .await;
+        outcomes.remove(0).result.unwrap()
+    }
+
+    /// A surface the vendor cannot write this descriptor to is skipped by every
+    /// pass, so a recorded entry gone from it never comes back. Warp documents
+    /// no `${VAR}` expansion.
+    #[tokio::test]
+    async fn a_recorded_entry_the_vendor_cannot_write_never_reinstalls() {
+        use crate::oci::mcp::McpDescriptor;
+
+        let dir = tempfile::tempdir().unwrap();
+        let targets = vec![ClientTarget::Claude, ClientTarget::Warp];
+        let target = InstallTarget::new(dir.path(), ConfigScope::Project, targets);
+        let toml = "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"\n[server.headers]\nAuthorization = \"Bearer ${TOKEN}\"";
+        let blob = McpDescriptor::from_toml_str(toml).unwrap().to_layer_bytes().unwrap();
+        let lock = lock_of_mcp(vec![locked_mcp("srv", &blob)]);
+        let access = arc(BlobMock { blob });
+        let roots = roots(dir.path());
+        let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
+        let first = install_the_mcp(&lock, &access, &target, &mut state, &roots).await;
+        assert_eq!(first, InstallOutcome::Installed);
+
+        let mut forged = state.get(ArtifactKind::Mcp, "srv").unwrap().clone();
+        let mut gone = forged.outputs[0].clone();
+        gone.client = "warp".to_string();
+        gone.target = AnchoredPath {
+            anchor: PathAnchor::Workspace,
+            relative: ".warp/.mcp.json".to_string(),
+        };
+        forged.outputs.push(gone);
+        state.record(forged);
+
+        let second = install_the_mcp(&lock, &access, &target, &mut state, &roots).await;
+        assert_eq!(second, InstallOutcome::AlreadyInstalled);
+    }
+
+    /// A hand edit stops the pass on every surface it writes: Claude's one file,
+    /// and each of Copilot's two.
+    #[tokio::test]
+    async fn an_edited_entry_on_a_writable_surface_refuses() {
+        use crate::oci::mcp::McpDescriptor;
+
+        for (client, surface) in [
+            (ClientTarget::Claude, ".mcp.json"),
+            (ClientTarget::Copilot, ".vscode/mcp.json"),
+            (ClientTarget::Copilot, ".github/mcp.json"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let target = InstallTarget::new(dir.path(), ConfigScope::Project, vec![client]);
+            let toml = "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"";
+            let blob = McpDescriptor::from_toml_str(toml).unwrap().to_layer_bytes().unwrap();
+            let lock = lock_of_mcp(vec![locked_mcp("srv", &blob)]);
+            let access = arc(BlobMock { blob });
+            let roots = roots(dir.path());
+            let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
+            let first = install_the_mcp(&lock, &access, &target, &mut state, &roots).await;
+            assert_eq!(first, InstallOutcome::Installed, "{surface}");
+            let path = dir.path().join(surface);
+            let written = std::fs::read_to_string(&path).unwrap();
+            std::fs::write(&path, written.replace("https://x", "https://edited")).unwrap();
+
+            let second = install_the_mcp(&lock, &access, &target, &mut state, &roots).await;
+
+            assert!(
+                matches!(second, InstallOutcome::Refused { .. }),
+                "{surface}: {second:?}"
+            );
+        }
+    }
+
     /// C2: `AlreadyInstalled` must require the record to cover every target
     /// client. A client added to the target since the last install must be
     /// materialized instead of being skipped by the short-circuit.
@@ -6647,6 +7016,107 @@ mod tests {
         );
     }
 
+    /// An MCP server installed for Claude and Cursor, then the state record
+    /// narrowed to `keep`, as a state file from another client set holds it.
+    async fn mcp_recorded_for(
+        keep: &str,
+    ) -> (
+        tempfile::TempDir,
+        GrimoireLock,
+        Arc<dyn OciAccess>,
+        InstallTarget,
+        InstallState,
+    ) {
+        use crate::oci::mcp::McpDescriptor;
+        let dir = tempfile::tempdir().unwrap();
+        let target = InstallTarget::new(
+            dir.path(),
+            ConfigScope::Project,
+            vec![ClientTarget::Claude, ClientTarget::Cursor],
+        );
+        let descriptor =
+            McpDescriptor::from_toml_str("description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"srv\"")
+                .unwrap();
+        let blob = descriptor.to_layer_bytes().unwrap();
+        let lock = lock_of_mcp(vec![locked_mcp("srv", &blob)]);
+        let access = arc(BlobMock { blob });
+        let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
+        let first = install_all(
+            &lock,
+            &access,
+            &DefaultMaterializer,
+            &target,
+            &mut state,
+            &roots(dir.path()),
+            Path::new("."),
+            false,
+        )
+        .await;
+        assert_eq!(*first[0].result.as_ref().unwrap(), InstallOutcome::Installed);
+        let mut record = state.get(ArtifactKind::Mcp, "srv").unwrap().clone();
+        record.outputs.retain(|o| o.client == keep);
+        state.record(record);
+        (dir, lock, access, target, state)
+    }
+
+    /// A record that adopts the identical entry already in a client's config
+    /// changed no file, so it reads as no write and `update` never says `restored`.
+    #[tokio::test]
+    async fn an_mcp_record_adopting_an_identical_entry_is_already_installed() {
+        let (dir, lock, access, target, mut state) = mcp_recorded_for("claude").await;
+        let files = [dir.path().join(".mcp.json"), dir.path().join(".cursor/mcp.json")];
+        let before: Vec<Vec<u8>> = files.iter().map(|f| std::fs::read(f).unwrap()).collect();
+
+        let second = install_all(
+            &lock,
+            &access,
+            &DefaultMaterializer,
+            &target,
+            &mut state,
+            &roots(dir.path()),
+            Path::new("."),
+            false,
+        )
+        .await;
+
+        assert_eq!(*second[0].result.as_ref().unwrap(), InstallOutcome::AlreadyInstalled);
+        let after: Vec<Vec<u8>> = files.iter().map(|f| std::fs::read(f).unwrap()).collect();
+        assert_eq!(after, before, "no client config changed");
+        let record = state.get(ArtifactKind::Mcp, "srv").unwrap();
+        assert!(
+            record.outputs.iter().any(|o| o.client == "cursor"),
+            "the record covers Cursor again"
+        );
+    }
+
+    /// The same record with the entry gone from the file writes it back, which
+    /// is a write at an unchanged pin.
+    #[tokio::test]
+    async fn an_mcp_record_writing_a_missing_entry_is_updated() {
+        let (dir, lock, access, target, mut state) = mcp_recorded_for("claude").await;
+        let cursor = dir.path().join(".cursor/mcp.json");
+        std::fs::write(&cursor, "{}\n").unwrap();
+
+        let second = install_all(
+            &lock,
+            &access,
+            &DefaultMaterializer,
+            &target,
+            &mut state,
+            &roots(dir.path()),
+            Path::new("."),
+            false,
+        )
+        .await;
+
+        assert_eq!(*second[0].result.as_ref().unwrap(), InstallOutcome::Updated);
+        let raw = std::fs::read_to_string(&cursor).unwrap();
+        assert!(
+            crate::install::json_splice::member_value(&raw, "mcpServers", "srv").is_some(),
+            "{raw}"
+        );
+    }
+
     #[tokio::test]
     async fn pin_change_decline_edits_recorded_path_not_recomputed_config() {
         // C2 regression: the decline splice must remove the stale entry from
@@ -7312,6 +7782,7 @@ mod tests {
             &config_path,
             ForceScope::None,
             InstallIntent::Declared,
+            SyncAdds::Every,
             &SilentProgress,
             SettingsRun::Skip,
         )
@@ -7884,6 +8355,7 @@ mod tests {
             &home.path().join("grimoire.toml"),
             ForceScope::None,
             InstallIntent::Declared,
+            SyncAdds::Every,
             &crate::install::progress::SilentProgress,
             SettingsRun::Skip,
         )
@@ -8508,6 +8980,7 @@ mod tests {
                     &home.join("grimoire.toml"),
                     ForceScope::None,
                     InstallIntent::Declared,
+                    SyncAdds::Every,
                     &crate::install::progress::SilentProgress,
                     SettingsRun::Skip,
                 )

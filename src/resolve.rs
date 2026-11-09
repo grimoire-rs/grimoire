@@ -14,6 +14,9 @@
 mod agreement_tests;
 pub mod graph;
 pub mod members;
+pub mod part_bundles;
+#[cfg(test)]
+mod pin_agreement_tests;
 pub mod resolve_error;
 pub mod resolve_options;
 pub mod resolver;
@@ -22,5 +25,3 @@ pub mod resolver;
 pub use resolve_error::{ResolveError, ResolveErrorKind};
 #[allow(unused_imports)]
 pub use resolve_options::ResolveOptions;
-#[allow(unused_imports)]
-pub use resolver::{resolve_lock, resolve_lock_partial};

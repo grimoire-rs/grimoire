@@ -442,6 +442,21 @@ fn split_tag(name: &str) -> (&str, Option<String>) {
     }
 }
 
+/// OCI tag grammar: `[A-Za-z0-9_][A-Za-z0-9._-]{0,127}`.
+pub fn is_valid_oci_tag(s: &str) -> bool {
+    if s.len() > 128 {
+        return false;
+    }
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphanumeric() || first == '_') {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
 /// Normalizes `+` to `_` in a tag string.
 ///
 /// OCI tags do not allow `+` (`[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}`). This

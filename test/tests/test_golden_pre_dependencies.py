@@ -8,6 +8,12 @@ asserting current-binary-equals-current-binary would pass however far the lock
 format drifted.  Never regenerate the fixture from a tree that knows about
 dependencies -- see its ``README.md``.
 
+The comparison carries one named equivalence, ``pinned-advisory-tag``
+(C-018): an artifact's ``pinned`` line now records the tag that resolved it, and
+the fixture predates that. The tag is dropped from the actual lock before the
+byte compare and asserted on its own against the declaration. State files
+compare unmasked.
+
 The fixture's refs are pinned to ``localhost:5000`` and that host is baked into
 every ``pinned =`` and both declaration hashes, so it cannot be normalized at
 seed time without rewriting the bytes under test.  Without a registry there this
@@ -30,8 +36,10 @@ import sys
 from pathlib import Path
 
 import pytest
+import tomllib
 
 from src import registry as reg
+from tools.p9_diff import strip_pinned_tags
 
 FIXTURE = (
     Path(__file__).resolve().parents[1] / "data" / "golden" / "pre_dependencies_cdeedcaa"
@@ -122,8 +130,9 @@ def _replay_registry() -> None:
 
 
 # `generated_by` is stamped by every lock save, so it moves at every release,
-# not with the format; `generated_at` is stamped on a fresh resolve. They are
-# the only masks, and the line must still be present and shaped as before.
+# not with the format; `generated_at` is stamped on a fresh resolve. Beside the
+# named equivalence they are the only masks, and the line must still be present
+# and shaped as before.
 _GENERATED_BY = re.compile(rb'^generated_by = "grim \d+\.\d+\.\d+[^"]*"$', re.MULTILINE)
 _GENERATED_AT = re.compile(rb"^generated_at = .*$", re.MULTILINE)
 # The project hook payload path embeds the SHA-256 of the workspace directory.
@@ -141,6 +150,46 @@ def _normalize(name: str, data: bytes, *, mask_generated_at: bool) -> bytes:
     return data
 
 
+# The lock table of each kind and the config table declaring it.
+_DECLARATION_TABLES = {
+    "skill": "skills",
+    "rule": "rules",
+    "agent": "agents",
+    "mcp": "mcp",
+    "hook": "hooks",
+}
+
+
+def assert_pins_carry_declared_tags(lock_path: Path) -> None:
+    """Each registry pin is the reference declared for it, plus its digest.
+
+    The other half of ``pinned-advisory-tag``: the byte compare drops the tag, so
+    this is what holds it. A direct entry answers to the ``grimoire.toml`` beside
+    the lock, a bundle member to its ``[[bundle.member]]`` row.
+    """
+    lock = tomllib.loads(lock_path.read_text())
+    config = tomllib.loads(lock_path.with_name("grimoire.toml").read_text())
+    declared = {
+        (member["kind"], member["name"]): member["id"]
+        for bundle in lock.get("bundle", [])
+        for member in bundle.get("member", [])
+    }
+    for kind, table in _DECLARATION_TABLES.items():
+        for name, reference in config.get(table, {}).items():
+            declared[(kind, name)] = reference
+    pins = {
+        (kind, entry["name"]): entry["pinned"]
+        for kind in _DECLARATION_TABLES
+        for entry in lock.get(kind, [])
+        if "pinned" in entry
+    }
+    assert pins, f"{lock_path}: no registry pin to check (positive control)"
+    for key, pin in pins.items():
+        assert pin.partition("@")[0] == declared[key], (
+            f"{key}: pin {pin} does not carry the declared {declared[key]}"
+        )
+
+
 def _assert_identical(
     name: str, expected_path: Path, actual_path: Path, *, mask_generated_at: bool = False
 ) -> None:
@@ -151,6 +200,9 @@ def _assert_identical(
     actual = _normalize(
         name, actual_path.read_bytes(), mask_generated_at=mask_generated_at
     )
+    if name.endswith(".lock"):
+        assert_pins_carry_declared_tags(actual_path)
+        actual = strip_pinned_tags(actual)
     if actual == expected:
         return
     diff = "\n".join(
@@ -331,28 +383,45 @@ def _seed_tag_cache(grim_home: Path, variant: str) -> None:
 def test_offline_lock_matches_the_baseline(
     grim_binary, grim_at, tmp_path, request, variant
 ):
-    """`lock --global --offline` from a warm 0.15.1 cache keeps the golden bytes.
+    """RV-21: `lock --global --offline` from a warm 0.15.1 cache writes golden bytes.
 
+    Unseeded, because a seeded lock carries its pins and never asks the cache
+    (see the test below), so here only the cache can answer each tag.
     `tag-cache` also holds the manifest blobs (the store-hit branch);
-    `tag-cache-no-manifests` holds only the tags (the carry-forward branch).
+    `tag-cache-no-manifests` holds only the tags (the store-miss branch).
     """
-    env = _Env(grim_at, tmp_path, seed_locks=True)
+    env = _Env(grim_at, tmp_path, seed_locks=False)
     _seed_tag_cache(env.grim_home, variant)
+    assert not env.global_lock.exists()
 
     env.global_runner.run("lock", "--global", "--offline")
 
-    _assert_identical("global.grimoire.lock", GOLDEN / "global.grimoire.lock", env.global_lock)
+    _assert_identical(
+        "global.grimoire.lock",
+        GOLDEN / "global.grimoire.lock",
+        env.global_lock,
+        mask_generated_at=True,
+    )
     _completed.add(request.node.name)
 
 
 @pytest.mark.usefixtures("registry")
 def test_offline_lock_without_a_cache_still_fails(grim_binary, grim_at, tmp_path, request):
-    """Positive control for the two offline cases: the cache is what carries them."""
-    env = _Env(grim_at, tmp_path, seed_locks=True)
+    """Positive control: offline, a tag needs a cache or a lock to answer it.
 
-    result = env.global_runner.run("lock", "--global", "--offline", check=False)
+    With neither, the lock refuses. A seeded lock carries its pins on its own, so
+    the same run succeeds with no tag cache and keeps the golden bytes.
+    """
+    unseeded = _Env(grim_at, tmp_path / "unseeded", seed_locks=False)
+
+    result = unseeded.global_runner.run("lock", "--global", "--offline", check=False)
 
     assert result.returncode == 69, result.stderr
+
+    seeded = _Env(grim_at, tmp_path / "seeded", seed_locks=True)
+    seeded.global_runner.run("lock", "--global", "--offline")
+
+    _assert_identical("global.grimoire.lock", GOLDEN / "global.grimoire.lock", seeded.global_lock)
     _completed.add(request.node.name)
 
 

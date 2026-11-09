@@ -18,10 +18,12 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding
 use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
 use crate::config::registry_resolve::RowSource;
+use crate::config::scope::Invocation;
 
+use super::confirm;
 use super::detail::{
     BULLET_PREFIX, CODE_PREFIX, DETAIL_MIN_WIDTH, DetailLine, W_DEPRECATED, W_DOWNLOADS, W_KIND, W_RATING, W_REGISTRY,
-    W_REPO, W_STATUS, W_TAG, catalog_width, detail_lines, scroll_max,
+    W_REPO, W_STATUS, W_TAG, catalog_width, detail_lines_naming, scroll_max,
 };
 use super::state::{ArtifactState, BatchSource, Mode, TuiState};
 
@@ -357,6 +359,26 @@ pub struct ConfirmView {
     pub action_selected: bool,
     /// A panel to read and dismiss: the action is the only button.
     pub notice: bool,
+    /// The body's scroll offset when the popup scrolls; `None` for a popup that does not.
+    pub scroll: Option<u16>,
+    /// Whether the action waits until the body's last row has been on screen,
+    /// the forced-retry dialog's gate.
+    pub gated: bool,
+    /// Whether the action cannot be chosen yet: the body's last row has not
+    /// been on screen.
+    pub locked: bool,
+}
+
+impl ConfirmView {
+    /// The popup as a `screen`-sized terminal draws it, and as the state scrolls
+    /// and gates it.
+    pub(super) fn layout(&self, screen: (u16, u16)) -> confirm::Layout {
+        if self.gated {
+            confirm::gated_layout(screen, &self.message, &self.detail, self.action)
+        } else {
+            confirm::layout(screen, &self.message, &self.detail, self.action, self.notice)
+        }
+    }
 }
 
 /// A plain, ratatui-free description of the whole screen.
@@ -419,6 +441,8 @@ pub struct RenderModel {
     pub show_help: bool,
     /// Vertical scroll offset of the help overlay (rows).
     pub help_scroll: u16,
+    /// The `grim` the help overlay's settings legend names.
+    pub invocation: Invocation,
     /// The version-picker overlay, when [`Mode::VersionPick`].
     pub picker: Option<PickerView>,
     /// The confirmation overlay, when [`Mode::ConfirmForce`] or
@@ -690,7 +714,7 @@ fn tree_render_rows(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<R
 }
 
 /// Build the detail-pane lines for a selected tree group (rollup summary),
-/// used in place of [`detail_lines`] when the selection is a group node.
+/// used in place of [`detail_lines_naming`] when the selection is a group node.
 ///
 /// `flat` is the caller-owned result of [`TuiState::flattened`]; threading it
 /// The detail pane's tab strip, painted **into the block's top border**.
@@ -830,7 +854,7 @@ fn group_detail_lines(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec
 /// Looks the `MemberNode` up from the bundle-member cache using the row's
 /// `parent_bundle_repo` and the active scope label. When the member is itself
 /// a catalog row (its `member_repo` resolves to a `state.rows` entry), render
-/// the **rich** [`detail_lines`] pane — the same Summary/Description/metadata
+/// the **rich** [`detail_lines_naming`] pane — the same Summary/Description/metadata
 /// a standalone selection gets — with a trailing `Via bundle:` provenance
 /// line. Otherwise (non-catalog / offline / foreign-registry member) fall back
 /// to the sparse [`detail_lines_for_member`]. Falls back to a generic "no
@@ -862,7 +886,7 @@ fn member_detail_lines_from_state(state: &TuiState, row: Option<&super::tree::Di
             if let Some(repo) = node.member_repo.as_deref()
                 && let Some(catalog_row) = state.rows.iter().find(|r| r.repo == repo)
             {
-                let mut lines = detail_lines(Some(catalog_row), None);
+                let mut lines = detail_lines_naming(Some(catalog_row), None, &state.invocation);
                 lines.push(DetailLine::MetaEntry {
                     label: "Via bundle:",
                     value: sanitize_member_label(parent_bundle_repo),
@@ -1057,6 +1081,8 @@ pub fn frame(state: &TuiState) -> RenderModel {
             state.marked.len()
         )
     };
+    // The one sink: its messages quote registry text unescaped.
+    let status = sanitize_member_label(&status);
 
     // Widest → narrowest. `draw` picks the widest that fits; the last
     // (`? help`) is the irreducible minimum so help is always discoverable.
@@ -1108,16 +1134,17 @@ pub fn frame(state: &TuiState) -> RenderModel {
         .confirm
         .as_ref()
         .map(|c| ConfirmView {
-            title: format!("Overwrite {}?", sanitize_member_label(&c.repo)),
-            message: "Reinstalling discards your local changes. This cannot be undone.".to_string(),
+            title: format!("{} {}?", c.action(), sanitize_member_label(&c.repo)),
+            message: c.message(),
             detail: sanitize_lines(&c.detail),
-            action: "Overwrite",
+            action: c.action(),
             action_selected: c.overwrite_selected,
             notice: false,
+            scroll: Some(c.scroll),
+            gated: true,
+            locked: !state.confirm_force_ready(),
         })
-        .or_else(|| state.pending_batch.as_ref().map(|b| confirm_batch_view(state, b)))
-        .or_else(|| state.pending_init.as_ref().map(confirm_init_view))
-        .or_else(|| state.settings_result.as_ref().map(settings_result_view));
+        .or_else(|| plain_popup_view(state));
 
     // Selected clients render as a quiet span on the legend line; empty
     // selection omits the span (no stray `clients:` label).
@@ -1158,6 +1185,7 @@ pub fn frame(state: &TuiState) -> RenderModel {
         truncation_hint,
         show_help: state.mode == Mode::Help,
         help_scroll: state.help_scroll,
+        invocation: state.invocation.clone(),
         picker,
         confirm,
         // A: only show Registry column when more than one registry is in scope;
@@ -1566,7 +1594,7 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
     }
 
     if model.show_help {
-        draw_help(f, model.help_scroll);
+        draw_help(f, model.help_scroll, &model.invocation);
     }
     if let Some(p) = &model.picker {
         draw_picker(f, p);
@@ -1576,8 +1604,16 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
     }
 }
 
-/// Columns of blank space between the confirm popup's border and its text.
-const CONFIRM_PAD: u16 = 2;
+/// The batch, init or settings popup that is open: no forced action, so it
+/// scrolls but waits for nothing to be read.
+pub(super) fn plain_popup_view(state: &TuiState) -> Option<ConfirmView> {
+    state
+        .pending_batch
+        .as_ref()
+        .map(|b| confirm_batch_view(state, b))
+        .or_else(|| state.pending_init.as_ref().map(confirm_init_view))
+        .or_else(|| state.settings_result.as_ref().map(settings_result_view))
+}
 
 /// Names shown in the batch prompt before the rest collapse into a count.
 const CONFIRM_BATCH_NAMES: usize = 5;
@@ -1633,6 +1669,9 @@ fn confirm_batch_view(state: &TuiState, b: &super::state::PendingBatch) -> Confi
         action,
         action_selected: b.proceed_selected,
         notice: false,
+        scroll: Some(b.scroll),
+        gated: false,
+        locked: false,
     }
 }
 
@@ -1654,6 +1693,9 @@ fn confirm_init_view(p: &super::state::PendingInit) -> ConfirmView {
         action: "Initialize",
         action_selected: p.proceed_selected,
         notice: false,
+        scroll: Some(p.scroll),
+        gated: false,
+        locked: false,
     }
 }
 
@@ -1667,11 +1709,14 @@ fn settings_result_view(r: &super::state::SettingsResult) -> ConfirmView {
         action: "Close",
         action_selected: true,
         notice: true,
+        scroll: Some(r.scroll),
+        gated: false,
+        locked: false,
     }
 }
 
 /// [`sanitize_member_label`] per line, so a multi-line detail keeps its breaks.
-fn sanitize_lines(text: &str) -> String {
+pub fn sanitize_lines(text: &str) -> String {
     text.split('\n')
         .map(sanitize_member_label)
         .collect::<Vec<_>>()
@@ -1680,110 +1725,114 @@ fn sanitize_lines(text: &str) -> String {
 
 /// A centered confirmation popup: the consequence sentence, the supporting
 /// detail, and a Cancel / action button row. Cancel is highlighted until the
-/// user moves off it.
+/// user moves off it. The body is laid out by [`confirm::layout`], or for the
+/// forced-retry dialog by [`confirm::gated_layout`], the rows the state scrolls
+/// and gates the action by.
 fn draw_confirm(f: &mut Frame, c: &ConfirmView) {
+    let screen = f.area();
+    let layout = c.layout((screen.width, screen.height));
+    // The action cannot be chosen while the body is unread (the forced-retry
+    // dialog) or while the screen clips it: draw it dimmed, never chosen.
+    let locked = !c.notice && (c.locked || layout.narrow);
     // A solid cyan fill plus a pointer, not the list's subtle 236 background:
     // on a popup with no other cue, a faint highlight reads as "nothing is
     // selected", which is exactly the doubt a confirm prompt cannot leave.
-    let button = |label: &str, chosen: bool| {
-        if chosen {
-            Span::styled(
-                format!("▸ [ {label} ] "),
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )
+    let button = |label: &str, chosen: bool, dimmed: bool| {
+        let style = if chosen && !dimmed {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else if dimmed {
+            Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
         } else {
-            Span::styled(format!("  [ {label} ] "), Style::default().fg(Color::DarkGray))
-        }
+            Style::default().fg(Color::DarkGray)
+        };
+        Span::styled(confirm::button_label(label, chosen && !dimmed), style)
     };
-
-    let mut body = vec![
-        Line::from(Span::styled(c.message.clone(), Style::default().fg(Color::White))),
-        Line::from(""),
-    ];
-    body.extend(
-        c.detail
-            .split('\n')
-            .map(|line| Line::from(Span::styled(line.to_string(), Style::default().fg(Color::DarkGray)))),
-    );
-    let cancel = button("Cancel", !c.action_selected);
-    let action = button(c.action, c.action_selected);
-    let screen = f.area();
-    // The chosen button must be whole on screen, since Enter executes it
-    // whether or not the user can read it. The popup widens to the button row
-    // plus borders; a screen too narrow even for that stacks the buttons.
-    // Borders plus CONFIRM_PAD on each side keep text off the frame.
-    let frame_w = 2 + 2 * usize::from(CONFIRM_PAD);
-    let (cancel_w, action_w) = (cancel.width(), action.width());
-    let row_w = cancel_w + 2 + action_w;
-    let inline = row_w + frame_w <= usize::from(screen.width);
-    let min_w = if inline { row_w } else { cancel_w.max(action_w) } + frame_w;
-    let (buttons, button_rows): (_, u16) = if c.notice {
-        (vec![Line::from(action)], 1)
-    } else if inline {
-        (vec![Line::from(vec![cancel, Span::raw("  "), action])], 1)
+    let cancel = button("Cancel", !c.action_selected, false);
+    let action = button(c.action, c.action_selected, locked);
+    let buttons = if c.notice {
+        vec![Line::from(action)]
+    } else if layout.inline {
+        vec![Line::from(vec![cancel, Span::raw("  "), action])]
     } else {
-        (vec![Line::from(cancel), Line::from(action)], 2)
+        vec![Line::from(cancel), Line::from(action)]
     };
+    let body: Vec<Line> = layout
+        .rows
+        .iter()
+        .map(|row| {
+            let color = if row.message { Color::White } else { Color::DarkGray };
+            Line::from(Span::styled(row.text.clone(), Style::default().fg(color)))
+        })
+        .collect();
 
-    // Tall enough for the wrapped message and detail, a spacer and the
-    // buttons, capped at the screen; on a screen too short for all of it the
-    // detail is what gets clipped, never the buttons. Each `+ 1` absorbs word
-    // wrap breaking earlier than a plain character count.
-    let mut area = centered_rect(60, 35, screen);
-    if usize::from(area.width) < min_w {
-        area.width = u16::try_from(min_w).unwrap_or(u16::MAX).min(screen.width);
-        area.x = screen.x + (screen.width - area.width) / 2;
-    }
-    let inner_w = usize::from(area.width).saturating_sub(frame_w).max(1);
-    let rows = |line: &str| line.chars().count().div_ceil(inner_w);
-    let wrapped = |text: &str| text.split('\n').map(rows).sum::<usize>() + 1;
-    // Borders, the top/bottom padding rows, and the content.
-    let needed = u16::try_from(4 + wrapped(&c.message) + 1 + wrapped(&c.detail) + 1 + usize::from(button_rows))
-        .unwrap_or(u16::MAX);
-    if area.height < needed {
-        area.height = needed.min(screen.height);
-        area.y = screen.y + (screen.height - area.height) / 2;
-    }
+    let area = Rect {
+        x: screen.x + layout.x,
+        y: screen.y + layout.y,
+        width: layout.width,
+        height: layout.height,
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow))
-        .padding(Padding::new(CONFIRM_PAD, CONFIRM_PAD, 1, 1))
+        .padding(Padding::new(
+            confirm::PAD,
+            confirm::PAD,
+            confirm::PAD_ROWS,
+            confirm::PAD_ROWS,
+        ))
         .title(Span::styled(
             format!(" {} ", c.title),
             Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
         ));
-    // The buttons get a row of their own, so no amount of body text can push
-    // the choice the user is about to confirm off the popup.
-    let [text_area, _, button_area] = Layout::vertical([
-        Constraint::Min(1),
-        Constraint::Length(1),
-        Constraint::Length(button_rows),
-    ])
-    .areas(block.inner(area));
+    // The buttons keep the bottom rows of their own, so no amount of body text
+    // can push the choice the user is about to confirm off the popup.
+    let inner = block.inner(area);
+    let text_area = Rect {
+        height: layout.view.min(inner.height),
+        ..inner
+    };
+    let button_area = Rect {
+        y: inner.y + inner.height.saturating_sub(layout.button_rows),
+        height: layout.button_rows.min(inner.height),
+        ..inner
+    };
+    let scroll = c.scroll.unwrap_or(0).min(layout.scroll_max());
     f.render_widget(Clear, area);
     f.render_widget(block, area);
-    f.render_widget(Paragraph::new(body).wrap(Wrap { trim: false }), text_area);
+    f.render_widget(Paragraph::new(body).scroll((scroll, 0)), text_area);
     f.render_widget(Paragraph::new(buttons).alignment(Alignment::Center), button_area);
     let hint_area = Rect {
-        x: area.x + 2,
+        x: area.x + confirm::HINT_INSET,
         y: area.y + area.height.saturating_sub(1),
-        width: area.width.saturating_sub(4),
+        width: area.width.saturating_sub(2 * confirm::HINT_INSET),
         height: 1,
     };
+    let scrolls = c.scroll.is_some() && layout.scroll_max() > 0;
+    let hint = match (c.notice, scrolls, locked) {
+        (true, true, _) => "↑↓ scroll · enter close",
+        (true, false, _) => "enter close",
+        (false, _, true) => locked_hint(&layout),
+        (false, true, false) => "↑↓ scroll · enter confirm · esc cancel",
+        (false, false, false) => "enter confirm · esc cancel",
+    };
     f.render_widget(
-        Paragraph::new(Span::styled(
-            if c.notice {
-                "enter close"
-            } else {
-                "enter confirm · esc cancel"
-            },
-            Style::default().fg(Color::DarkGray),
-        )),
+        Paragraph::new(Span::styled(hint, Style::default().fg(Color::DarkGray))),
         hint_area,
     );
+}
+
+/// What the key hint says while the action cannot be chosen: what unlocks it.
+fn locked_hint(layout: &confirm::Layout) -> &'static str {
+    if layout.narrow {
+        "widen terminal"
+    } else if layout.view == 0 {
+        "enlarge terminal"
+    } else {
+        "↓ scroll to the end to confirm · esc cancel"
+    }
 }
 
 /// A centered version-picker popup: the tag list (highest version near the
@@ -1933,22 +1982,22 @@ fn legend_entries() -> [(ArtifactState, &'static str); 7] {
     ]
 }
 
-/// What each status only a settings row reaches means. The `?` overlay lists
-/// these and the status bar does not: the kind is experimental, and three more
-/// entries would push the bar past its width gate on every settings-free screen.
-fn settings_legend_entries() -> [(ArtifactState, &'static str); 3] {
+/// What each status only a settings row reaches means, naming `grim`. The `?`
+/// overlay lists these and the status bar does not: the kind is experimental, and
+/// three more entries would push the bar past its width gate on every settings-free screen.
+fn settings_legend_entries(grim: &Invocation) -> [(ArtifactState, String); 3] {
     [
         (
             ArtifactState::Gated,
-            "settings held back: flag off, no consent, or nothing applies here",
+            "settings held back: flag off, no consent, or nothing applies here".to_string(),
         ),
         (
             ArtifactState::NotArmed,
-            "settings grim refuses to write here; `grim status` says why",
+            format!("settings grim refuses to write here; `{grim} status` says why"),
         ),
         (
             ArtifactState::Stale,
-            "settings changed in grimoire.toml since the lock; `grim lock` updates it",
+            format!("settings changed in grimoire.toml since the lock; `{grim} lock` updates it"),
         ),
     ]
 }
@@ -1956,8 +2005,9 @@ fn settings_legend_entries() -> [(ArtifactState, &'static str); 3] {
 /// The content lines of the `?` help overlay: a "Keybindings" header, one row
 /// per [`help_entries`] item, then a "Status column" legend. The count must
 /// equal [`crate::tui::state::HELP_BODY_LINES`] (the scroll-clamp source of
-/// truth) — guarded by `tests::help_body_line_count_matches_state`.
-fn help_lines() -> Vec<Line<'static>> {
+/// truth) — guarded by `tests::help_body_line_count_matches_state`. The settings
+/// legend names `grim`.
+fn help_lines(grim: &Invocation) -> Vec<Line<'static>> {
     // No blank separators: a blank row here pushes the last legend entry below
     // the fold of an 80×24 terminal
     // (`help_overlay_fits_all_entries_on_standard_terminal`).
@@ -1982,7 +2032,12 @@ fn help_lines() -> Vec<Line<'static>> {
         "Status column",
         Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
     )));
-    let legend = || legend_entries().into_iter().chain(settings_legend_entries());
+    let legend = || {
+        let lifecycle = legend_entries()
+            .into_iter()
+            .map(|(state, meaning)| (state, meaning.to_string()));
+        lifecycle.chain(settings_legend_entries(grim))
+    };
     let label_w = legend()
         .map(|(s, _)| status_view(s).1.chars().count())
         .max()
@@ -2015,8 +2070,8 @@ fn help_overlay_height(content_lines: usize, term_height: u16) -> u16 {
 /// A centered help overlay listing every keybinding. Sized to its content so
 /// the full key map shows on a standard terminal; scrolls (offset `scroll`)
 /// when the terminal is too short to fit it all.
-fn draw_help(f: &mut Frame, scroll: u16) {
-    let lines = help_lines();
+fn draw_help(f: &mut Frame, scroll: u16, grim: &Invocation) {
+    let lines = help_lines(grim);
     let full = f.area();
     let height = help_overlay_height(lines.len(), full.height);
     let area = centered_area_rows(full, 60, height);
@@ -2655,7 +2710,7 @@ mod tests {
     // the entries.
     #[test]
     fn help_overlay_fits_all_entries_on_standard_terminal() {
-        let lines = help_lines().len();
+        let lines = help_lines(&Invocation::WALKED).len();
         let h = help_overlay_height(lines, 24);
         // every body line + top/bottom border must fit.
         assert!(
@@ -2768,6 +2823,88 @@ mod tests {
         }
     }
 
+    /// The settings legend names the command as the TUI was invoked: a bare
+    /// `grim` reads whatever project the shell stands in, not this scope.
+    #[test]
+    fn the_settings_legend_names_the_runs_grim() {
+        let config = Invocation::config(std::path::Path::new("/srv/team/grimoire.toml"));
+        for (grim, spelled) in [
+            (&config, "grim --config /srv/team/grimoire.toml"),
+            (&Invocation::GLOBAL, "grim --global"),
+        ] {
+            let text: String = help_lines(grim)
+                .iter()
+                .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
+                .collect();
+            assert!(text.contains(&format!("`{spelled} status` says why")), "{text}");
+            assert!(text.contains(&format!("`{spelled} lock` updates it")), "{text}");
+        }
+    }
+
+    /// Every drawn row of `buffer`, its box borders and padding dropped and
+    /// wrapped runs joined by one space, so a wrapped sentence reads whole.
+    fn drawn_text(buffer: &ratatui::buffer::Buffer) -> String {
+        let cols = buffer.area.width as usize;
+        let rows: Vec<String> = buffer
+            .content()
+            .chunks(cols)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .map(|row| row.trim_matches(|c: char| c == '│' || c.is_whitespace()).to_string())
+            .collect();
+        rows.join(" ").split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// At 80 columns the detail pane wraps the longer hint a `--config` run
+    /// prints and still shows it whole.
+    #[test]
+    fn draw_wraps_the_settings_hint_of_a_config_run_at_80_columns() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
+        s.set_rows(vec![row("r/team", ArtifactState::NotArmed)]);
+        s.set_invocation(&Invocation::config(std::path::Path::new("/srv/team/grimoire.toml")));
+        let mut term = Terminal::new(TestBackend::new(80, 48)).unwrap();
+
+        term.draw(|f| draw(f, &frame(&s))).unwrap();
+
+        let text = drawn_text(term.backend().buffer());
+        assert!(
+            text.contains("`grim --config /srv/team/grimoire.toml status` names the cause"),
+            "{text}"
+        );
+    }
+
+    /// The help overlay names the run's `grim` where it has the room, and at
+    /// 80 columns the longer spelling changes nothing on screen: the overlay
+    /// clips each row at its border, before the legend's command.
+    #[test]
+    fn draw_help_names_the_runs_grim_and_keeps_its_80_column_frame() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let drawn = |grim: &Invocation, width: u16, height: u16| {
+            let mut s = TuiState::new();
+            s.view_mode = crate::tui::state::ViewMode::Flat;
+            s.set_rows(vec![row("r/team", ArtifactState::NotArmed)]);
+            s.set_invocation(grim);
+            s.enter_help();
+            let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
+            term.draw(|f| draw(f, &frame(&s))).unwrap();
+            term.backend().buffer().clone()
+        };
+
+        let wide = drawn_text(&drawn(&Invocation::GLOBAL, 200, 40));
+        assert!(wide.contains("`grim --global status` says why"), "{wide}");
+        assert!(wide.contains("`grim --global lock` updates it"), "{wide}");
+        assert_eq!(
+            drawn(&Invocation::GLOBAL, 80, 24),
+            drawn(&Invocation::WALKED, 80, 24),
+            "the 80-column help frame must not change with the spelling"
+        );
+    }
+
     /// Every status a row can actually display must appear in the `?` legend.
     /// A user meeting an unexplained glyph is exactly the failure the legend
     /// exists to prevent — and `Pending` is the one that prompted it.
@@ -2775,8 +2912,8 @@ mod tests {
     fn the_legend_explains_every_status_a_row_can_show() {
         let explained: Vec<ArtifactState> = legend_entries()
             .into_iter()
-            .chain(settings_legend_entries())
             .map(|(s, _)| s)
+            .chain(settings_legend_entries(&Invocation::WALKED).map(|(s, _)| s))
             .collect();
         for state in [
             ArtifactState::Installed,
@@ -2816,7 +2953,7 @@ mod tests {
     /// Restating them by hand is how a legend silently starts lying.
     #[test]
     fn the_legend_uses_the_rendered_glyph_and_label() {
-        let body = help_lines();
+        let body = help_lines(&Invocation::WALKED);
         let text: String = body
             .iter()
             .flat_map(|l| l.spans.iter().map(|sp| sp.content.to_string()))
@@ -2836,7 +2973,11 @@ mod tests {
     #[test]
     fn help_columns_keep_a_gutter_before_every_description() {
         let plain = |line: &Line<'_>| -> Vec<String> { line.spans.iter().map(|s| s.content.to_string()).collect() };
-        let rows: Vec<Vec<String>> = help_lines().iter().map(plain).filter(|s| s.len() == 2).collect();
+        let rows: Vec<Vec<String>> = help_lines(&Invocation::WALKED)
+            .iter()
+            .map(plain)
+            .filter(|s| s.len() == 2)
+            .collect();
         assert!(rows.len() >= help_entries().len() + legend_entries().len());
         for row in rows {
             assert!(
@@ -2846,7 +2987,7 @@ mod tests {
         }
         // And every label column within one section is the same width, so the
         // descriptions line up.
-        let widths: std::collections::BTreeSet<usize> = help_lines()
+        let widths: std::collections::BTreeSet<usize> = help_lines(&Invocation::WALKED)
             .iter()
             .map(plain)
             .filter(|s| s.len() == 2)
@@ -2860,7 +3001,7 @@ mod tests {
     #[test]
     fn help_body_line_count_matches_state() {
         assert_eq!(
-            help_lines().len() as u16,
+            help_lines(&Invocation::WALKED).len() as u16,
             crate::tui::state::HELP_BODY_LINES,
             "HELP_BODY_LINES must equal the overlay's body line count"
         );
@@ -2971,7 +3112,14 @@ mod tests {
         assert!(frame(&s).confirm.is_none());
 
         let detail = "installed artifact was modified locally: recorded sha256:aaa, found sha256:bbb";
-        s.open_confirm_force(0, false, "r/alpha", detail);
+        s.open_confirm_force(
+            0,
+            BatchOp::Install,
+            "r/alpha",
+            detail,
+            crate::tui::state::PinChanges::default(),
+            std::collections::BTreeSet::new(),
+        );
         let c = frame(&s).confirm.expect("confirm projected once opened");
         assert_eq!(c.title, "Overwrite r/alpha?");
         assert_eq!(c.detail, detail, "grim's refusal text is shown verbatim");
@@ -2980,6 +3128,21 @@ mod tests {
         // Moving the selection flips the highlight onto Overwrite.
         s.confirm_force_move(1);
         assert!(frame(&s).confirm.unwrap().action_selected);
+
+        // A refused delete's retry deletes: its button says so.
+        let detail = "1 settings value(s) were set or changed outside grim";
+        s.open_confirm_force(
+            0,
+            BatchOp::Uninstall,
+            "r/pack",
+            detail,
+            crate::tui::state::PinChanges::default(),
+            std::collections::BTreeSet::new(),
+        );
+        let c = frame(&s).confirm.expect("confirm projected once opened");
+        assert_eq!((c.title.as_str(), c.action), ("Uninstall r/pack?", "Uninstall"));
+        assert!(c.message.starts_with("Uninstalling discards"), "{}", c.message);
+        assert!(!c.action_selected, "Cancel is preselected");
     }
 
     #[test]
@@ -3187,8 +3350,136 @@ mod tests {
         assert_eq!(bg, Some(Color::Cyan));
     }
 
+    /// A project-init popup whose text is taller than the screen scrolls to its
+    /// last row; its text was clipped with no way to read the rest.
+    #[test]
+    fn a_popup_taller_than_the_screen_scrolls_to_its_last_row() {
+        let mut s = named_rows(&["alpha"]);
+        s.set_term_size((60, 12));
+        s.open_confirm_init("/home/someone/projects/example/grimoire.toml");
+        let layout = |s: &TuiState| plain_popup_view(s).unwrap().layout((60, 12));
+        let last = layout(&s).rows.last().unwrap().text.trim().to_string();
+        let first = screen(&draw_sized(&s, 60, 12));
+        assert!(!first.contains(&last), "the fixture overflows the popup:\n{first}");
+
+        let mut seen = first;
+        for _ in 0..layout(&s).rows.len() {
+            s.scroll_popup(s.popup_page());
+            seen.push_str(&screen(&draw_sized(&s, 60, 12)));
+        }
+
+        assert!(seen.contains(&last), "{last:?} was never drawn:\n{seen}");
+        assert!(seen.contains("↑↓ scroll · enter confirm"), "{seen}");
+    }
+
+    /// The settings panel is a list of changes, long on a big edit: it scrolls
+    /// rather than clipping the tail.
+    #[test]
+    fn the_settings_panel_scrolls_to_its_last_line() {
+        let mut s = named_rows(&["alpha"]);
+        s.set_term_size((60, 12));
+        let detail = (0..30)
+            .map(|i| format!("setting{i} changed"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        s.open_settings_result("30 values changed:", &detail);
+        assert!(!screen(&draw_sized(&s, 60, 12)).contains("setting29"));
+
+        let mut seen = String::new();
+        for _ in 0..30 {
+            s.scroll_popup(s.popup_page());
+            seen.push_str(&screen(&draw_sized(&s, 60, 12)));
+        }
+
+        assert!(seen.contains("setting29 changed"), "{seen}");
+    }
+
+    /// Enter runs the chosen button whether or not the screen shows it whole, so
+    /// a screen narrower than the buttons offers no action at all.
+    #[test]
+    fn a_batch_or_init_popup_on_a_screen_narrower_than_its_buttons_offers_no_action() {
+        for (width, offered) in [(19, false), (80, true)] {
+            let mut batch = named_rows(&["alpha", "beta"]);
+            batch.set_term_size((width, 24));
+            open_marked(&mut batch, BatchOp::Install, vec![0, 1], 2);
+            batch.confirm_batch_move();
+            if !offered {
+                let text = screen(&draw_sized(&batch, width, 24));
+                assert!(text.contains("widen terminal"), "{text}");
+            }
+            assert_eq!(
+                batch.take_confirm_batch().is_some(),
+                offered,
+                "batch at {width} columns"
+            );
+
+            let mut init = named_rows(&["alpha"]);
+            init.set_term_size((width, 24));
+            init.open_confirm_init("/home/someone/grimoire.toml");
+            init.confirm_init_move();
+            assert_eq!(init.take_confirm_init(), offered, "init at {width} columns");
+        }
+    }
+
+    /// The forced-retry dialog's action reads as locked until its body is read:
+    /// dimmed, with what unlocks it said beside the buttons.
+    #[test]
+    fn a_locked_force_confirm_draws_its_action_dimmed_with_the_reason() {
+        let detail = (0..60)
+            .map(|i| format!("refused skill{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let open = |w: u16, h: u16| {
+            let mut s = named_rows(&["alpha"]);
+            s.set_term_size((w, h));
+            s.open_confirm_force(
+                0,
+                BatchOp::Update,
+                "r/alpha",
+                &detail,
+                crate::tui::state::PinChanges::default(),
+                std::collections::BTreeSet::new(),
+            );
+            s
+        };
+        let action_dimmed = |buf: &ratatui::buffer::Buffer| {
+            let label = "[ Overwrite ]";
+            let text: Vec<String> = buf
+                .content()
+                .chunks(buf.area.width as usize)
+                .map(|r| r.iter().map(|c| c.symbol()).collect())
+                .collect();
+            let (y, row) = text
+                .iter()
+                .enumerate()
+                .find(|(_, l)| l.contains(label))
+                .unwrap_or_else(|| panic!("the action is on screen:\n{}", screen(buf)));
+            let x = row[..row.find(label).unwrap()].chars().count();
+            buf[(u16::try_from(x).unwrap(), u16::try_from(y).unwrap())]
+                .modifier
+                .contains(Modifier::DIM)
+        };
+
+        let mut s = open(80, 24);
+        let buf = draw_80x24(&s);
+        assert!(action_dimmed(&buf), "locked: {}", screen(&buf));
+        assert!(
+            screen(&buf).contains("scroll to the end to confirm"),
+            "{}",
+            screen(&buf)
+        );
+        while !s.confirm_force_ready() {
+            s.scroll_confirm(s.confirm_page());
+        }
+        assert!(!action_dimmed(&draw_80x24(&s)), "unlocked once the body is read");
+
+        let narrow = draw_sized(&open(21, 24), 21, 24);
+        assert!(action_dimmed(&narrow), "{}", screen(&narrow));
+        assert!(screen(&narrow).contains("widen terminal"), "{}", screen(&narrow));
+    }
+
     // The popup's body text sat flush against the left border and the
-    // buttons hugged the left edge. Text keeps CONFIRM_PAD blank columns off
+    // buttons hugged the left edge. Text keeps `confirm::PAD` blank columns off
     // the border; the button row is centered between the borders.
     #[test]
     fn batch_confirm_text_is_padded_and_buttons_centered() {
@@ -3210,7 +3501,7 @@ mod tests {
             })
             .expect("message on screen");
         let border_x = rows[y][..msg_x].iter().rposition(|c| *c == '│').expect("popup border");
-        assert_eq!(msg_x - border_x - 1, usize::from(CONFIRM_PAD), "{}", screen(&buf));
+        assert_eq!(msg_x - border_x - 1, usize::from(confirm::PAD), "{}", screen(&buf));
 
         let (line, _) = button_row(&buf, "Install");
         let chars: Vec<char> = line.chars().collect();
@@ -3309,10 +3600,27 @@ mod tests {
         for (w, h) in [(80, 24), (40, 20), (30, 20)] {
             let mut s = named_rows(&["alpha"]);
             s.set_term_size((w, h));
-            s.open_confirm_force(0, false, "r/alpha", "installed artifact was modified locally");
+            s.open_confirm_force(
+                0,
+                BatchOp::Install,
+                "r/alpha",
+                "installed artifact was modified locally",
+                crate::tui::state::PinChanges::default(),
+                std::collections::BTreeSet::new(),
+            );
             assert_buttons_whole(&draw_sized(&s, w, h), "Overwrite", "Cancel");
             s.confirm_force_move(1);
             assert_buttons_whole(&draw_sized(&s, w, h), "Overwrite", "Overwrite");
+
+            s.open_confirm_force(
+                0,
+                BatchOp::Uninstall,
+                "r/alpha",
+                "1 settings value(s) were set or changed outside grim",
+                crate::tui::state::PinChanges::default(),
+                std::collections::BTreeSet::new(),
+            );
+            assert_buttons_whole(&draw_sized(&s, w, h), "Uninstall", "Cancel");
         }
     }
 
@@ -3320,10 +3628,251 @@ mod tests {
     fn overwrite_confirm_buttons_stay_visible_at_80x24_with_a_long_refusal() {
         let mut s = named_rows(&["alpha"]);
         let detail = "installed artifact was modified locally: ".repeat(12);
-        s.open_confirm_force(0, false, "r/alpha", &detail);
+        s.open_confirm_force(
+            0,
+            BatchOp::Install,
+            "r/alpha",
+            &detail,
+            crate::tui::state::PinChanges::default(),
+            std::collections::BTreeSet::new(),
+        );
         let (line, bg) = button_row(&draw_80x24(&s), "Overwrite");
         assert!(line.contains("▸ [ Cancel ]"), "{line:?}");
         assert_eq!(bg, Some(Color::Cyan));
+    }
+
+    /// A refusal taller than an 80x24 popup scrolls inside it. The text keeps
+    /// its padding and the buttons their row, every line is drawn on the way
+    /// down, and Overwrite stays unchoosable until the last one has been.
+    #[test]
+    fn a_force_confirm_taller_than_80x24_scrolls_to_its_last_line_before_overwrite() {
+        let mut s = named_rows(&["alpha"]);
+        s.set_term_size((80, 24));
+        let names: Vec<String> = (0..60).map(|n| format!("refused skill{n:02}")).collect();
+        s.open_confirm_force(
+            0,
+            BatchOp::Update,
+            "r/alpha",
+            &names.join("\n"),
+            crate::tui::state::PinChanges::default(),
+            std::collections::BTreeSet::new(),
+        );
+        let first = screen(&draw_80x24(&s));
+        assert!(
+            !first.contains("refused skill59"),
+            "the fixture overflows the popup:\n{first}"
+        );
+        assert!(first.contains("↓ scroll to the end to confirm"), "{first}");
+        s.confirm_force_move(1);
+        let (line, _) = button_row(&draw_80x24(&s), "Overwrite");
+        assert!(
+            line.contains("▸ [ Cancel ]"),
+            "Overwrite cannot be chosen yet: {line:?}"
+        );
+
+        let mut seen = first;
+        while !s.confirm_force_ready() {
+            s.scroll_confirm(s.confirm_page());
+            seen.push_str(&screen(&draw_80x24(&s)));
+        }
+        for name in &names {
+            assert!(seen.contains(name.as_str()), "{name} was never drawn");
+        }
+        let buf = draw_80x24(&s);
+        let last = screen(&buf);
+        assert!(last.contains("↑↓ scroll · enter confirm"), "{last}");
+        let row = last
+            .lines()
+            .find(|l| l.contains("refused skill59"))
+            .expect("the last line is drawn");
+        let chars: Vec<char> = row.chars().collect();
+        let text_x = row[..row.find("refused skill59").unwrap()].chars().count();
+        let border_x = chars[..text_x].iter().rposition(|c| *c == '│').unwrap();
+        assert_eq!(text_x - border_x - 1, usize::from(confirm::PAD), "{last}");
+
+        s.confirm_force_move(1);
+        let (line, bg) = button_row(&draw_80x24(&s), "Overwrite");
+        assert!(line.contains("▸ [ Overwrite ]"), "{line:?}");
+        assert_eq!(bg, Some(Color::Cyan));
+        let chars: Vec<char> = line.chars().collect();
+        let (first_b, last_b) = (
+            chars.iter().position(|c| *c == '[').unwrap(),
+            chars.iter().rposition(|c| *c == ']').unwrap(),
+        );
+        let left = chars[..first_b].iter().rposition(|c| *c == '│').unwrap();
+        let right = last_b + chars[last_b..].iter().position(|c| *c == '│').unwrap();
+        let (gap_l, gap_r) = (first_b - left - 1, right - last_b - 1);
+        assert!(
+            gap_l.abs_diff(gap_r) <= 3,
+            "buttons centered ({gap_l} vs {gap_r}): {line:?}"
+        );
+    }
+
+    /// The open forced-retry dialog's body rows that `buf` draws whole, by
+    /// index into the rows its gate counts, each with the text drawn.
+    fn force_rows_drawn_whole(s: &TuiState, buf: &ratatui::buffer::Buffer) -> Vec<(usize, String)> {
+        use ratatui::buffer::CellWidth as _;
+        let c = s.confirm.as_ref().expect("a dialog is open");
+        let l = c.layout(s.term_size);
+        let (x0, y0) = (l.x + 1 + confirm::PAD, l.y + 2);
+        let end = x0 + l.width.saturating_sub(2 + 2 * confirm::PAD);
+        let scroll = c.scroll.min(l.scroll_max());
+        (0..l.view)
+            .filter_map(|k| {
+                let i = usize::from(scroll + k);
+                let want = &l.rows.get(i)?.text;
+                let mut got = String::new();
+                let mut x = x0;
+                while x < end {
+                    let symbol = buf[(x, y0 + k)].symbol();
+                    got.push_str(symbol);
+                    // As ratatui steps: it counts a halfwidth sound mark a column that `width` does not.
+                    x += symbol.cell_width().max(1);
+                }
+                (got.trim_end() == want.trim_end()).then_some((i, got))
+            })
+            .collect()
+    }
+
+    /// Opens `detail`'s forced-retry dialog at each of `sizes` for an Update
+    /// and a delete, reads it a page per frame, and tries the action after
+    /// every frame. Returns each confirm that came before every body row was
+    /// drawn whole or before every forced name was drawn, and the cases that
+    /// confirmed at all.
+    fn force_confirms_unread(detail: &str, sizes: &[(u16, u16)]) -> (Vec<String>, Vec<(&'static str, u16, u16)>) {
+        use crate::oci::ArtifactKind;
+        let forced = [
+            (ArtifactKind::Skill, "alpha"),
+            (ArtifactKind::Settings, "team"),
+            (ArtifactKind::Mcp, "srv"),
+        ]
+        .into_iter()
+        .map(|(kind, name)| (kind, name.to_string()))
+        .collect();
+        force_confirms_unread_of(detail, sizes, forced)
+    }
+
+    /// [`force_confirms_unread`] for a retry that forces `forced`.
+    fn force_confirms_unread_of(
+        detail: &str,
+        sizes: &[(u16, u16)],
+        forced: std::collections::BTreeSet<crate::oci::NodeKey>,
+    ) -> (Vec<String>, Vec<(&'static str, u16, u16)>) {
+        let (mut unread, mut confirmed) = (Vec::new(), Vec::new());
+        for op in [BatchOp::Update, BatchOp::Uninstall] {
+            for &(w, h) in sizes {
+                let mut s = named_rows(&["alpha"]);
+                s.set_term_size((w, h));
+                let pins = crate::tui::state::PinChanges::default();
+                s.open_confirm_force(0, op, "r/alpha", detail, pins, forced.clone());
+                let mut drawn = std::collections::BTreeMap::new();
+                loop {
+                    drawn.extend(force_rows_drawn_whole(&s, &draw_sized(&s, w, h)));
+                    let mut choose = s.clone();
+                    choose.confirm_force_move(1);
+                    if let Some(retry) = choose.take_confirm_force() {
+                        let rows = s.confirm.as_ref().unwrap().layout((w, h)).rows.len();
+                        let text: String = drawn.values().flat_map(|t: &String| t.chars()).collect();
+                        let text: String = text.split_whitespace().collect();
+                        let crate::install::installer::ForceScope::Only(nodes) = retry.force else {
+                            panic!("a retry forces only what its dialog listed");
+                        };
+                        let unseen: Vec<&String> = nodes
+                            .iter()
+                            .map(|(_, name)| name)
+                            .filter(|name| !text.contains(&format!("'{name}'")))
+                            .collect();
+                        if drawn.len() < rows || !unseen.is_empty() {
+                            unread.push(format!(
+                                "{} {w}x{h}: {} of {rows} rows not drawn whole, names never drawn {unseen:?}",
+                                op.verb(),
+                                rows - drawn.len()
+                            ));
+                        }
+                        confirmed.push((op.verb(), w, h));
+                        break;
+                    }
+                    let before = s.confirm.as_ref().map(|c| c.scroll);
+                    s.scroll_confirm(s.confirm_page());
+                    if s.confirm.as_ref().map(|c| c.scroll) == before {
+                        break;
+                    }
+                }
+            }
+        }
+        (unread, confirmed)
+    }
+
+    /// At any screen size the forced-retry dialog confirms only after every
+    /// row of its body was drawn whole and every node its retry forces was
+    /// named. A screen too narrow for the popup draws no body, so there it
+    /// never offers the action; from that width up it does.
+    #[test]
+    fn a_force_confirm_draws_every_row_whole_before_it_confirms_at_any_width() {
+        let detail = "Overwrite changes 3 artifact(s): skill 'alpha', settings 'team', mcp 'srv'\n\
+                      refused settings 'team': modified\n  now: 字字字 opus";
+        let sizes: Vec<(u16, u16)> = [8u16, 12, 24]
+            .into_iter()
+            .flat_map(|h| (1u16..=40).map(move |w| (w, h)))
+            .collect();
+        let (unread, confirmed) = force_confirms_unread(detail, &sizes);
+        assert!(
+            unread.is_empty(),
+            "{} dialogs confirmed text never drawn:\n{}",
+            unread.len(),
+            unread.join("\n")
+        );
+        for &(w, h) in sizes.iter().filter(|(w, _)| *w >= 22) {
+            for verb in ["Update", "Uninstall"] {
+                assert!(
+                    confirmed.contains(&(verb, w, h)),
+                    "{verb} at {w}x{h} never became confirmable"
+                );
+            }
+        }
+    }
+
+    /// A text-default emoji with VS16, or a curly quote with VS2, draws two
+    /// columns. The dialog wraps it at that width, so no row is drawn in part
+    /// while its gate counts it read.
+    #[test]
+    fn a_force_confirm_wraps_a_variation_sequence_at_the_width_it_draws() {
+        // Halfwidth katakana sound marks have no width to `unicode-width`, and ratatui draws each as a column.
+        // A selector after a sound mark is one unit that keeps the column the mark draws.
+        let value = "❤\u{FE0F}⚠\u{FE0F}1\u{FE0F}\u{20E3}\u{2019}\u{FE01}ｶﾞﾊﾟｶﾞ\u{FE0F}ﾊﾟ\u{FE01}".repeat(12);
+        let detail =
+            format!("Overwrite changes 3 artifact(s): skill 'alpha', settings 'team', mcp 'srv'\n  now: {value}");
+        let sizes = [(22, 24), (30, 24), (40, 12), (80, 24), (120, 8)];
+        let (unread, confirmed) = force_confirms_unread(&detail, &sizes);
+        assert!(
+            unread.is_empty(),
+            "{} dialogs confirmed text never drawn:\n{}",
+            unread.len(),
+            unread.join("\n")
+        );
+        assert_eq!(confirmed.len(), 2 * sizes.len(), "{confirmed:?}");
+    }
+
+    /// A forced MCP node named in halfwidth katakana with sound marks confirms only
+    /// once its name was drawn whole: the marks draw a column each, and a gate that
+    /// counted none would call a clipped row read.
+    #[test]
+    fn a_force_confirm_names_a_sound_mark_node_whole_before_it_confirms() {
+        use crate::oci::ArtifactKind;
+        let name = "ｶﾞ".repeat(30);
+        let detail = format!("Overwrite changes 1 artifact(s): mcp '{name}'\nrefused mcp '{name}': modified");
+        let forced = std::collections::BTreeSet::from([(ArtifactKind::Mcp, name)]);
+        let sizes = [(22, 24), (30, 24), (40, 24), (40, 12), (80, 24), (120, 8)];
+
+        let (unread, confirmed) = force_confirms_unread_of(&detail, &sizes, forced);
+
+        assert!(
+            unread.is_empty(),
+            "{} dialogs confirmed text never drawn:\n{}",
+            unread.len(),
+            unread.join("\n")
+        );
+        assert_eq!(confirmed.len(), 2 * sizes.len(), "{confirmed:?}");
     }
 
     // The status line names what the relevance cutoff hid, below any
@@ -3530,6 +4079,13 @@ mod tests {
         s.set_rows(vec![row("r/a", ArtifactState::Installed)]);
         s.set_status("installed r/a");
         assert_eq!(frame(&s).status, "installed r/a");
+    }
+
+    #[test]
+    fn frame_clears_the_status_line_of_terminal_control_sequences() {
+        let mut s = TuiState::new();
+        s.set_status("no tags for ghcr.io/\u{1b}[2Jacme\u{202E}/a · r/a: 2/3…");
+        assert_eq!(frame(&s).status, "no tags for ghcr.io/acme/a · r/a: 2/3…");
     }
 
     #[test]

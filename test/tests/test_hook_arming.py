@@ -47,11 +47,14 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from src.helpers import make_artifact, write_config
+from src.helpers import make_artifact, make_bundle, make_dependent, make_hook, write_config
+from src.registry import retag, tag_digest
 
 # POSIX-only, matching the launcher's own v1 scope: the shim is a `sh` script
 # and the registered command is a POSIX one-liner.
@@ -692,3 +695,590 @@ def test_status_reports_a_trust_hooks_flag_arming_as_armed_not_gated(
         f"verdict cannot see a per-invocation grant\nrow: {row}"
     )
     assert row["arming"] == [], f"an armed hook reports no arming cause\nrow: {row}"
+
+
+# ---------------------------------------------------------------------------
+# One recorded hook grim cannot read never disarms another
+# ---------------------------------------------------------------------------
+
+GATE_TOML = """\
+schema = 1
+name = "gate"
+description = "Denies every Bash tool call."
+
+[[hooks]]
+id = "deny"
+event = "PreToolUse"
+tier = "gatekeeper"
+matcher = "Bash"
+command = "sh deny.sh"
+timeout = 5
+"""
+
+DENY_SH = "#!/bin/sh\ncat > /dev/null\necho '{\"decision\":\"deny\",\"reason\":\"guarded\"}'\n"
+
+BASH_CALL = json.dumps(
+    {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "ls"},
+        "cwd": "/repo",
+        "session_id": "s-1",
+    }
+)
+
+
+def _carrier(unique_repo: str, body: str):
+    files = {"carrier/SKILL.md": f"---\nname: carrier\ndescription: d\n---\n# carrier {body}\n"}
+    return make_artifact(f"{unique_repo}/carrier", "skill", files, tag="1")
+
+
+def _fire_bash(project_dir: Path) -> subprocess.CompletedProcess[str]:
+    """Run the one grim-owned `Bash` registration the way Claude runs it."""
+    groups = _settings(project_dir).get("hooks", {}).get("PreToolUse", [])
+    commands = [
+        element["command"]
+        for group in groups
+        if group.get("matcher") == "Bash"
+        for element in group.get("hooks", [])
+        if element.get(MARKER_KEY) == MARKER_VALUE
+    ]
+    assert len(commands) == 1, f"expected one grim-owned Bash registration: {groups}"
+    return subprocess.run(
+        ["/bin/sh", "-c", commands[0]],
+        input=BASH_CALL,
+        capture_output=True,
+        text=True,
+        cwd=str(project_dir),
+    )
+
+
+@pytest.mark.parametrize("named", ["carrier", "gate"], ids=["named-skill", "named-gatekeeper"])
+def test_a_named_update_keeps_a_gatekeeper_denying_when_another_hook_payload_is_gone(
+    grim_at, project_dir: Path, registry: str, unique_repo: str, named: str
+) -> None:
+    """A deleted payload of one hook costs that hook alone its arming.
+
+    Convergence once failed the whole client on that one read, so the dispatch
+    rows went empty while the registration stayed: the launcher found no row,
+    and the gatekeeper allowed every tool call at exit 0. The named run does not
+    restore the deleted payload, so the read fails on every named update.
+    """
+    gate = make_artifact(
+        f"{unique_repo}/gate", "hook", {"gate/hook.toml": GATE_TOML, "gate/deny.sh": DENY_SH}, tag="1"
+    )
+    doomed = make_hook(f"{unique_repo}/doomed", "doomed", tag="1", matcher="Write")
+    carrier = _carrier(unique_repo, "v1")
+    write_config(project_dir, skills={"carrier": carrier.fq}, hooks={"gate": gate.fq, "doomed": doomed.fq})
+    runner = grim_at(project_dir)
+    runner.run("config", "set", "options.experimental.hooks", "true")
+    runner.run("lock")
+    runner.run("hook", "allow")
+    runner.run("install")
+    assert {row["artifact"] for row in _rows(runner)} == {"gate", "doomed"}, "precondition: both arm"
+    assert "deny" in _fire_bash(project_dir).stdout, "precondition: the gatekeeper denies"
+    shutil.rmtree(_payload(runner, "doomed"))
+    retag(f"{unique_repo}/carrier", "keep", tag_digest(f"{unique_repo}/carrier", "1"))
+    _carrier(unique_repo, "v2")
+
+    result = runner.run("update", "--", named, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert {row["artifact"] for row in _rows(runner)} == {"gate"}, result.stderr
+    fired = _fire_bash(project_dir)
+    assert "deny" in fired.stdout, f"the gatekeeper stopped denying\nstdout: {fired.stdout}\nstderr: {result.stderr}"
+    assert "hook 'doomed' is not armed" in result.stderr, result.stderr
+    status = json.loads(runner.run("status", format="json", check=False).stdout)
+    row = next(item for item in status["items"] if item["name"] == "gate")
+    assert (row["state"], row["arming"]) == ("installed", []), row
+
+
+def test_a_named_update_names_an_unnamed_hook_whose_shared_registration_it_restored(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A registration the named hook shares with a sibling comes back for both.
+
+    `gate` and `other` register one `Bash` element, so a run named for `gate`
+    restores `other`'s registration too, with the larger of the two timeouts.
+    The warning names `other`, and leaves out `gate`, whose row says what
+    happened to it.
+    """
+    gate = make_artifact(
+        f"{unique_repo}/gate", "hook", {"gate/hook.toml": GATE_TOML, "gate/deny.sh": DENY_SH}, tag="1"
+    )
+    other = make_hook(f"{unique_repo}/other", "other", tag="1", matcher="Bash")
+    write_config(project_dir, hooks={"gate": gate.fq, "other": other.fq})
+    runner = grim_at(project_dir)
+    runner.run("config", "set", "options.experimental.hooks", "true")
+    runner.run("lock")
+    runner.run("hook", "allow")
+    runner.run("install")
+    surface = project_dir / ".claude" / "settings.local.json"
+    assert [e["timeout"] for e in _managed_elements(project_dir)] == [30], "precondition: one shared element"
+    surface.unlink()
+
+    restored = runner.run("update", "--", "gate", check=False)
+    settled = runner.run("update", "--", "gate", check=False)
+
+    assert restored.returncode == 0, restored.stderr
+    assert [e["timeout"] for e in _managed_elements(project_dir)] == [30], restored.stderr
+    warning = [line for line in restored.stderr.splitlines() if "hook registrations" in line]
+    assert len(warning) == 1, restored.stderr
+    assert "the client hook registrations of hook 'other'" in warning[0], warning[0]
+    assert "'gate'" not in warning[0], warning[0]
+    assert "hook registrations" not in settled.stderr, settled.stderr
+
+
+def test_a_named_update_leaves_an_unnamed_hooks_own_registration_deleted(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A run named for `gate` writes `gate`'s registration and not `other`'s."""
+    gate = make_artifact(
+        f"{unique_repo}/gate", "hook", {"gate/hook.toml": GATE_TOML, "gate/deny.sh": DENY_SH}, tag="1"
+    )
+    other = make_hook(f"{unique_repo}/other", "other", tag="1", matcher="Write")
+    write_config(project_dir, hooks={"gate": gate.fq, "other": other.fq})
+    runner = grim_at(project_dir)
+    runner.run("config", "set", "options.experimental.hooks", "true")
+    runner.run("lock")
+    runner.run("hook", "allow")
+    runner.run("install")
+    surface = project_dir / ".claude" / "settings.local.json"
+    assert len(_managed_elements(project_dir)) == 2, "precondition: both hooks register"
+    surface.unlink()
+
+    result = runner.run("update", "--", "gate", check=False)
+
+    assert result.returncode == 0, result.stderr
+    groups = _settings(project_dir).get("hooks", {}).get("PreToolUse", [])
+    assert [g.get("matcher") for g in groups] == ["Bash"], groups
+    assert {row["artifact"] for row in _rows(runner)} == {"gate", "other"}, result.stderr
+    assert "hook registrations" not in result.stderr, result.stderr
+    warning = [line for line in result.stderr.splitlines() if "no client registration" in line]
+    assert len(warning) == 1, result.stderr
+    assert "hook 'other'" in warning[0], warning[0]
+    assert "'gate'" not in warning[0], "a hook in the closure got its registration back"
+
+
+def test_a_named_update_names_an_unparseable_client_config_instead_of_install(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """`grim install` registers nothing on a client config it cannot parse, so the warning
+    about an unregistered gatekeeper outside the closure names that file first."""
+    gate = make_artifact(
+        f"{unique_repo}/gate", "hook", {"gate/hook.toml": GATE_TOML, "gate/deny.sh": DENY_SH}, tag="1"
+    )
+    carrier = _carrier(unique_repo, "v1")
+    write_config(project_dir, skills={"carrier": carrier.fq}, hooks={"gate": gate.fq})
+    runner = grim_at(project_dir)
+    runner.run("config", "set", "options.experimental.hooks", "true")
+    runner.run("lock")
+    runner.run("hook", "allow")
+    runner.run("install")
+    surface = project_dir / ".claude" / "settings.local.json"
+    surface.write_text("{ not json")
+
+    result = runner.run("update", "--", "carrier", check=False)
+
+    assert result.returncode == 0, result.stderr
+    warning = [line for line in result.stderr.splitlines() if "no client registration" in line]
+    assert len(warning) == 1, result.stderr
+    assert "hook 'gate'" in warning[0], warning[0]
+    assert str(surface) in warning[0], warning[0]
+    assert "install` restores it" not in warning[0], warning[0]
+
+
+def test_uninstall_names_an_unparseable_client_config_instead_of_install(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A delete's warning about an unregistered gatekeeper names a client config
+    grim cannot parse first, since `grim install` registers nothing there."""
+    gate = make_artifact(
+        f"{unique_repo}/gate", "hook", {"gate/hook.toml": GATE_TOML, "gate/deny.sh": DENY_SH}, tag="1"
+    )
+    carrier = _carrier(unique_repo, "v1")
+    write_config(project_dir, skills={"carrier": carrier.fq}, hooks={"gate": gate.fq})
+    runner = grim_at(project_dir)
+    runner.run("config", "set", "options.experimental.hooks", "true")
+    runner.run("lock")
+    runner.run("hook", "allow")
+    runner.run("install")
+    surface = project_dir / ".claude" / "settings.local.json"
+    surface.write_text("{ not json")
+
+    result = runner.run("uninstall", "skill", "carrier", check=False)
+
+    assert result.returncode == 0, result.stderr
+    warning = [line for line in result.stderr.splitlines() if "no client registration" in line]
+    assert len(warning) == 1, result.stderr
+    assert "hook 'gate'" in warning[0], warning[0]
+    assert str(surface) in warning[0], warning[0]
+    assert "install` restores it" not in warning[0], warning[0]
+
+
+def test_an_unregistered_gatekeeper_remedy_needs_no_force_beside_an_unrelated_edit(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A skill outside the delete was edited by hand, so the printed `grim install`
+    refuses it, exits 65 and names `--force`, which would discard that edit. That
+    install restores the registration all the same, and the warning says the
+    restore needs no `--force`."""
+    gate = make_artifact(
+        f"{unique_repo}/gate", "hook", {"gate/hook.toml": GATE_TOML, "gate/deny.sh": DENY_SH}, tag="1"
+    )
+    carrier = _carrier(unique_repo, "v1")
+    edited = make_artifact(
+        f"{unique_repo}/edited", "skill", {"edited/SKILL.md": "---\nname: edited\ndescription: d\n---\n# E\n"}, tag="1"
+    )
+    write_config(project_dir, skills={"carrier": carrier.fq, "edited": edited.fq}, hooks={"gate": gate.fq})
+    runner = grim_at(project_dir)
+    runner.run("config", "set", "options.experimental.hooks", "true")
+    runner.run("lock")
+    runner.run("hook", "allow")
+    runner.run("install")
+    skill = project_dir / ".claude" / "skills" / "edited" / "SKILL.md"
+    skill.write_text(skill.read_text(encoding="utf-8") + "\nmy edit\n", encoding="utf-8")
+    (project_dir / ".claude" / "settings.local.json").unlink()
+
+    result = runner.run("uninstall", "skill", "carrier", check=False)
+
+    assert result.returncode == 0, result.stderr
+    warning = [line for line in result.stderr.splitlines() if "no client registration" in line]
+    assert len(warning) == 1, result.stderr
+    assert "`grim install` restores it" in warning[0], warning[0]
+    assert "the restore needs no `--force`" in warning[0], warning[0]
+    followed = runner.run("install", check=False)
+    assert followed.returncode == 65, followed.stderr
+    assert "deny" in _fire_bash(project_dir).stdout, "the printed install restored nothing"
+    assert skill.read_text(encoding="utf-8").endswith("my edit\n"), "the plain install overwrote the edit"
+
+
+def test_an_unregistered_gatekeeper_remedy_names_the_consent_a_drifted_record_needs(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A pulled commit declares a second hook the consent record does not cover.
+    The printed plain `grim install` then restores nothing and disarms the
+    gatekeeper that still runs, so the warning names `grim hook allow` first.
+    Found by review: it said the install restores the registration."""
+    gate = make_artifact(
+        f"{unique_repo}/gate", "hook", {"gate/hook.toml": GATE_TOML, "gate/deny.sh": DENY_SH}, tag="1"
+    )
+    carrier = _carrier(unique_repo, "v1")
+    pulled = make_hook(f"{unique_repo}/pulled", "pulled", tag="1", matcher="Write")
+    write_config(project_dir, skills={"carrier": carrier.fq}, hooks={"gate": gate.fq})
+    runner = grim_at(project_dir)
+    runner.run("config", "set", "options.experimental.hooks", "true")
+    runner.run("lock")
+    runner.run("hook", "allow")
+    runner.run("install")
+    write_config(project_dir, skills={"carrier": carrier.fq}, hooks={"gate": gate.fq, "pulled": pulled.fq})
+    runner.run("config", "set", "options.experimental.hooks", "true")
+    runner.run("lock")
+    (project_dir / ".claude" / "settings.local.json").unlink()
+
+    result = runner.run("uninstall", "skill", "carrier", check=False)
+
+    assert result.returncode == 0, result.stderr
+    warning = [line for line in result.stderr.splitlines() if "no client registration" in line]
+    assert len(warning) == 1, result.stderr
+    assert "hook 'gate'" in warning[0], warning[0]
+    assert warning[0].index("run `grim hook allow` before the install") < warning[0].index("`grim install` restores it")
+    # `hook allow` records every locked hook and settings key: the steps consent to both.
+    assert "consents to every locked hook and settings package" in warning[0], warning[0]
+    runner.run("hook", "allow")
+    runner.run("install")
+    assert "deny" in _fire_bash(project_dir).stdout, "the printed steps restored nothing"
+    assert {row["artifact"] for row in _rows(runner)} == {"gate", "pulled"}
+
+
+def test_a_stale_lock_gatekeeper_remedy_names_the_consent_the_config_needs(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A pulled commit declares a second hook the record does not cover, and the lock
+    has not been re-run: the lock on disk still lists only the consented hook, so
+    judged by the lock the record looks complete. The remedy, followed as printed
+    (`grim lock`, then the install), left the gatekeeper unregistered. It names
+    `grim hook allow` too, and the printed steps restore it."""
+    gate = make_artifact(
+        f"{unique_repo}/gate", "hook", {"gate/hook.toml": GATE_TOML, "gate/deny.sh": DENY_SH}, tag="1"
+    )
+    carrier = _carrier(unique_repo, "v1")
+    pulled = make_hook(f"{unique_repo}/pulled", "pulled", tag="1", matcher="Write")
+    write_config(project_dir, skills={"carrier": carrier.fq}, hooks={"gate": gate.fq})
+    runner = grim_at(project_dir)
+    runner.run("config", "set", "options.experimental.hooks", "true")
+    runner.run("lock")
+    runner.run("hook", "allow")
+    runner.run("install")
+    write_config(project_dir, skills={"carrier": carrier.fq}, hooks={"gate": gate.fq, "pulled": pulled.fq})
+    runner.run("config", "set", "options.experimental.hooks", "true")
+    (project_dir / ".claude" / "settings.local.json").unlink()
+
+    result = runner.run("uninstall", "skill", "carrier", check=False)
+
+    assert result.returncode == 0, result.stderr
+    warning = [line for line in result.stderr.splitlines() if "no client registration" in line]
+    assert len(warning) == 1, result.stderr
+    assert "hook 'gate'" in warning[0], warning[0]
+    assert "run `grim hook allow` before the install" in warning[0], warning[0]
+    assert warning[0].index("run `grim lock` first") < warning[0].index("run `grim hook allow`")
+    runner.run("lock")
+    runner.run("hook", "allow")
+    runner.run("install")
+    assert "deny" in _fire_bash(project_dir).stdout, "the printed steps restored nothing"
+    assert {row["artifact"] for row in _rows(runner)} == {"gate", "pulled"}
+
+
+@pytest.mark.parametrize("command", [("uninstall", "skill", "carrier"), ("update", "--", "carrier")])
+def test_an_unregistered_gatekeeper_remedy_names_no_other_clients_file(
+    grim, grim_home: Path, tmp_path: Path, registry: str, unique_repo: str, command: tuple[str, ...]
+) -> None:
+    """At global scope a gatekeeper lost its Claude registration while Qoder's hook
+    file, a client it is not registered for, does not parse. The warning names
+    `grim --global install`, which restores the registration and leaves that file."""
+    from src.helpers import settings_sandbox
+
+    gate = make_artifact(
+        f"{unique_repo}/gate", "hook", {"gate/hook.toml": GATE_TOML, "gate/deny.sh": DENY_SH}, tag="1"
+    )
+    carrier = _carrier(unique_repo, "v1")
+    env, _ = settings_sandbox(tmp_path / "s", grim.home)
+    grim.env.update(env)
+    (grim_home / "grimoire.toml").write_text(
+        '[options]\nclients = ["claude"]\n\n[options.experimental]\nhooks = true\n\n'
+        f'[skills]\ncarrier = "{carrier.fq}"\n\n[hooks]\ngate = "{gate.fq}"\n'
+    )
+    grim.run("--global", "lock")
+    grim.run("--global", "install")
+    claude = Path(env["CLAUDE_CONFIG_DIR"]) / "settings.json"
+    assert "hooks" in json.loads(claude.read_text()), "precondition: gate is registered"
+    qoder = Path(env["QODER_CONFIG_DIR"]) / "settings.json"
+    qoder.write_text("{ the user's qoder file, not json")
+    doc = json.loads(claude.read_text())
+    doc.pop("hooks")
+    claude.write_text(json.dumps(doc))
+
+    result = grim.run("--global", *command, check=False)
+
+    assert result.returncode == 0, result.stderr
+    warning = [line for line in result.stderr.splitlines() if "no client registration" in line]
+    assert len(warning) == 1, result.stderr
+    assert str(qoder) not in warning[0], warning[0]
+    assert "`grim --global install` restores it" in warning[0], warning[0]
+    grim.run("--global", "install")
+    assert "hooks" in json.loads(claude.read_text()), "the printed install restored nothing"
+    assert qoder.read_text() == "{ the user's qoder file, not json"
+
+
+@pytest.mark.parametrize("removed", ["gate", "other"])
+def test_uninstall_keeps_a_shared_registration_for_the_hook_that_remains(
+    grim_at, project_dir: Path, registry: str, unique_repo: str, removed: str
+) -> None:
+    """One `Bash` element serves both hooks, so uninstalling one leaves it for the other."""
+    gate = make_artifact(
+        f"{unique_repo}/gate", "hook", {"gate/hook.toml": GATE_TOML, "gate/deny.sh": DENY_SH}, tag="1"
+    )
+    other = make_hook(f"{unique_repo}/other", "other", tag="1", tier="observer", matcher="Bash")
+    write_config(project_dir, hooks={"gate": gate.fq, "other": other.fq})
+    runner = grim_at(project_dir)
+    runner.run("config", "set", "options.experimental.hooks", "true")
+    runner.run("lock")
+    runner.run("hook", "allow")
+    runner.run("install")
+    assert len(_managed_elements(project_dir)) == 1, "precondition: one shared element"
+
+    result = runner.run("uninstall", "hook", removed, check=False)
+
+    assert result.returncode == 0, result.stderr
+    survivor = "other" if removed == "gate" else "gate"
+    assert {row["artifact"] for row in _rows(runner)} == {survivor}, result.stderr
+    assert ("deny" in _fire_bash(project_dir).stdout) == (survivor == "gate"), result.stderr
+
+
+def test_a_named_update_leaves_a_disarmed_unnamed_hook_disarmed(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """`grim hook allow` names `grim install` as the step that arms.
+
+    A named run does not take that step for a hook outside its closure, and
+    `grim status` says the hook is not armed until something does.
+    """
+    gate = make_artifact(
+        f"{unique_repo}/gate", "hook", {"gate/hook.toml": GATE_TOML, "gate/deny.sh": DENY_SH}, tag="1"
+    )
+    carrier = _carrier(unique_repo, "v1")
+    write_config(project_dir, skills={"carrier": carrier.fq}, hooks={"gate": gate.fq})
+    runner = grim_at(project_dir)
+    runner.run("config", "set", "options.experimental.hooks", "true")
+    runner.run("lock")
+    runner.run("hook", "allow")
+    runner.run("install")
+    assert {row["artifact"] for row in _rows(runner)} == {"gate"}, "precondition: it arms"
+    runner.run("hook", "revoke")
+    runner.run("install")
+    assert _rows(runner) == [], "precondition: revoking disarmed it, payload kept"
+    runner.run("hook", "allow")
+    retag(f"{unique_repo}/carrier", "keep", tag_digest(f"{unique_repo}/carrier", "1"))
+    _carrier(unique_repo, "v2")
+
+    result = runner.run("update", "--", "carrier", check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert _rows(runner) == [], result.stderr
+    status = json.loads(runner.run("status", format="json", check=False).stdout)
+    row = next(item for item in status["items"] if item["name"] == "gate")
+    assert row["arming"], row
+
+    runner.run("install")
+
+    assert "deny" in _fire_bash(project_dir).stdout, "`grim install` arms it"
+
+
+# ---------------------------------------------------------------------------
+# An add never disarms what the consent record covers
+# ---------------------------------------------------------------------------
+
+
+def _consented_gate(grim_at, project_dir: Path, unique_repo: str):
+    """A workspace whose consent record covers one armed gatekeeper."""
+    gate = make_artifact(
+        f"{unique_repo}/gate", "hook", {"gate/hook.toml": GATE_TOML, "gate/deny.sh": DENY_SH}, tag="1"
+    )
+    write_config(project_dir, hooks={"gate": gate.fq})
+    runner = grim_at(project_dir)
+    runner.run("config", "set", "options.experimental.hooks", "true")
+    runner.run("lock")
+    runner.run("hook", "allow")
+    runner.run("install")
+    assert "deny" in _fire_bash(project_dir).stdout, "precondition: the gatekeeper denies"
+    return runner
+
+
+def _armed_in(runner, workspace: Path) -> set[str]:
+    """The hooks armed for `workspace`; one `$GRIM_HOME` serves every project in a test."""
+    roots = _dispatch(runner)["roots"].values()
+    return {row["artifact"] for root in roots if root["root"] == str(workspace) for row in root["hooks"]}
+
+
+def _stored(grim_at, tmp_path: Path, **declared) -> None:
+    """Install `declared` in a sibling workspace, so the test's `$GRIM_HOME` stores it."""
+    warm = tmp_path / "warm"
+    (warm / ".claude").mkdir(parents=True)
+    write_config(warm, **declared)
+    runner = grim_at(warm)
+    runner.run("config", "set", "options.experimental.hooks", "true")
+    runner.run("lock")
+    runner.run("install", "--trust-hooks")
+
+
+@pytest.mark.parametrize("shape", ["bundle", "requires"])
+def test_an_offline_add_keeps_a_consented_gatekeeper_denying(
+    grim_at, tmp_path: Path, project_dir: Path, registry: str, unique_repo: str, shape: str
+) -> None:
+    """CWE-636: an add that brings a hook disarms nothing the record covers.
+
+    Offline, a hook behind an edge a stored manifest lists consents as it does
+    online, so neither the add nor the next `grim install` leaves the workspace
+    drifted, and the gatekeeper denies throughout.
+    """
+    runner = _consented_gate(grim_at, project_dir, unique_repo)
+    mem = make_hook(f"{unique_repo}/mem", "mem", tag="1", tier="observer", matcher="Write")
+    if shape == "bundle":
+        pack = make_bundle(f"{unique_repo}/pack", [("hook", "mem", mem.fq)], tag="1")
+        _stored(grim_at, tmp_path, bundles={"pack": pack.fq})
+        add = ["--kind", "bundle", pack.fq]
+    else:
+        files = {"wanted/SKILL.md": "---\nname: wanted\ndescription: d\n---\n# wanted\n"}
+        wanted = make_dependent(f"{unique_repo}/wanted", "1", "skill", files, [("hook", "mem", mem.fq)])
+        _stored(grim_at, tmp_path, skills={"wanted": wanted.fq})
+        add = [wanted.fq]
+
+    added = runner.run("add", "--offline", *add)
+
+    assert "deny" in _fire_bash(project_dir).stdout, added.stderr
+    assert _armed_in(runner, project_dir) == {"gate", "mem"}, added.stderr
+
+    installed = runner.run("install")
+
+    assert "deny" in _fire_bash(project_dir).stdout, installed.stderr
+    assert _armed_in(runner, project_dir) == {"gate", "mem"}, installed.stderr
+
+
+def _failed_bundle_add(runner, project_dir: Path, unique_repo: str):
+    """Add bundle `pack` (hook `mem`, skill `clash`) over the user's own `clash`:
+    the add exits 65 and keeps its declaration and lock. Returns the user's file."""
+    mem = make_hook(f"{unique_repo}/mem", "mem", tag="1", tier="observer", matcher="Write")
+    files = {"clash/SKILL.md": "---\nname: clash\ndescription: d\n---\n# clash\n"}
+    clash = make_artifact(f"{unique_repo}/clash", "skill", files, tag="1")
+    pack = make_bundle(f"{unique_repo}/pack", [("hook", "mem", mem.fq), ("skill", "clash", clash.fq)], tag="1")
+    theirs = project_dir / ".claude" / "skills" / "clash" / "SKILL.md"
+    theirs.parent.mkdir(parents=True)
+    theirs.write_text("not grim's\n")
+    failed = runner.run("add", "--kind", "bundle", pack.fq, check=False)
+    assert failed.returncode == 65, failed.stderr
+    assert "deny" in _fire_bash(project_dir).stdout, failed.stderr
+    return pack, theirs
+
+
+def test_a_retried_add_keeps_a_consented_gatekeeper_denying(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """CWE-636: neither a retried add nor the `grim install` after it disarms
+    what the record covers.
+
+    The failed add recorded the consent its gesture carried, as its declaration
+    and lock stay too, so the workspace never reads as drifted: the gatekeeper
+    denies after the retry and after the install.
+    """
+    runner = _consented_gate(grim_at, project_dir, unique_repo)
+    pack, theirs = _failed_bundle_add(runner, project_dir, unique_repo)
+    shutil.rmtree(theirs.parent)
+
+    retried = runner.run("add", "--kind", "bundle", pack.fq, check=False)
+
+    assert retried.returncode == 0, retried.stderr
+    assert "deny" in _fire_bash(project_dir).stdout, retried.stderr
+
+    installed = runner.run("install")
+
+    assert "deny" in _fire_bash(project_dir).stdout, installed.stderr
+    assert _armed_in(runner, project_dir) == {"gate", "mem"}, installed.stderr
+
+
+def test_a_no_install_add_then_install_keeps_a_consented_gatekeeper_denying(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """CWE-636: `--no-install` declares and locks all the same, so it records the
+    gesture, and the install it defers reads no drift."""
+    runner = _consented_gate(grim_at, project_dir, unique_repo)
+    mem = make_hook(f"{unique_repo}/mem", "mem", tag="1", tier="observer", matcher="Write")
+
+    runner.run("add", "--no-install", "--kind", "hook", mem.fq)
+
+    assert _armed_in(runner, project_dir) == {"gate"}
+
+    installed = runner.run("install")
+
+    assert "deny" in _fire_bash(project_dir).stdout, installed.stderr
+    assert _armed_in(runner, project_dir) == {"gate", "mem"}, installed.stderr
+
+
+@pytest.mark.parametrize(
+    "converge",
+    [["install"], ["install", "--force"], ["update"]],
+    ids=["install", "install-force", "update"],
+)
+def test_a_failed_add_then_a_converge_keeps_a_consented_gatekeeper_denying(
+    grim_at, project_dir: Path, registry: str, unique_repo: str, converge: list[str]
+) -> None:
+    """CWE-636: the plain non-interactive converge after one failed add disarms
+    nothing. The failed add left `mem` declared and recorded, so the converge
+    arms it beside the gatekeeper instead of reading drift."""
+    runner = _consented_gate(grim_at, project_dir, unique_repo)
+    _, theirs = _failed_bundle_add(runner, project_dir, unique_repo)
+    shutil.rmtree(theirs.parent)
+
+    converged = runner.run(*converge)
+
+    assert "deny" in _fire_bash(project_dir).stdout, converged.stderr
+    assert _armed_in(runner, project_dir) == {"gate", "mem"}, converged.stderr

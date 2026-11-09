@@ -148,7 +148,7 @@ def test_s020_update_rolls_all_pins_and_installs_nothing(
     for row in rows:
         assert list(row) == [*_PRE_C013_KEYS, "plugin"], f"C-013 key order: {row}"
         assert row["plugin"] == "team", row
-    assert _pins(_lock(lock_path), "team") == {("skill", "team-plan"): f"{registry}/{repo}@{v1.digest}"}
+    assert _pins(_lock(lock_path), "team") == {("skill", "team-plan"): f"{registry}/{repo}:stable@{v1.digest}"}
     assert _snapshot(tmp_path, exclude) == before, "a marketplace update must install nothing"
 
     v2 = _skill(repo, "team-plan", "v2")  # floating tag moves onto v2
@@ -157,7 +157,7 @@ def test_s020_update_rolls_all_pins_and_installs_nothing(
     row = next(r for r in rows if r["name"] == "team-plan")
     assert (row["plugin"], row["kind"], row["action"]) == ("team", "skill", "updated"), row
     assert (row["old"], row["new"]) == (v1.digest, v2.digest), row
-    assert _pins(_lock(lock_path), "team") == {("skill", "team-plan"): f"{registry}/{repo}@{v2.digest}"}
+    assert _pins(_lock(lock_path), "team") == {("skill", "team-plan"): f"{registry}/{repo}:stable@{v2.digest}"}
 
     plain = runner.plain("update", "--marketplace", "marketplace.toml")
     assert "team:team-plan" in plain.stdout, f"C-013 plain prefix: {plain.stdout}"
@@ -220,8 +220,8 @@ def test_s021_update_one_plugin_leaves_the_other_part_identical(
 
     second = _lock(lock_path)
     assert _pins(second, "a") == {
-        ("skill", "shared"): f"{registry}/{s_repo}@{s2.digest}",
-        ("rule", "style"): f"{registry}/{r_repo}@{r2.digest}",
+        ("skill", "shared"): f"{registry}/{s_repo}:stable@{s2.digest}",
+        ("rule", "style"): f"{registry}/{r_repo}:stable@{r2.digest}",
     }
     assert _part(second, "b") == _part(first, "b"), "b's part is carried verbatim"
 
@@ -284,9 +284,9 @@ def test_s022_member_selector_rolls_every_kind_of_that_name_only(
     assert all(r["plugin"] == "a" for r in rows), rows
 
     assert _pins(_lock(lock_path), "a") == {
-        ("skill", "team-plan"): f"{registry}/{skill_repo}@{s2.digest}",
-        ("rule", "team-plan"): f"{registry}/{rule_repo}@{r2.digest}",
-        ("skill", "other"): f"{registry}/{other_repo}@{other1.digest}",
+        ("skill", "team-plan"): f"{registry}/{skill_repo}:stable@{s2.digest}",
+        ("rule", "team-plan"): f"{registry}/{rule_repo}:stable@{r2.digest}",
+        ("skill", "other"): f"{registry}/{other_repo}:stable@{other1.digest}",
     }
 
 
@@ -368,7 +368,7 @@ def test_s023_member_selector_on_a_stale_part_is_stale_lock(
 
     # A whole-plugin selector re-resolves the stale plugin.
     runner.run("update", "--marketplace", "marketplace.toml", "a")
-    assert _pins(_lock(lock_path), "a")[("skill", "extra")] == f"{registry}/{extra}@{extra1.digest}"
+    assert _pins(_lock(lock_path), "a")[("skill", "extra")] == f"{registry}/{extra}:stable@{extra1.digest}"
 
 
 def test_s023_member_selector_without_a_lock_is_checked_after_resolve(
@@ -423,7 +423,11 @@ def test_s023_stale_refusal_names_the_marketplace_update_command(
     assert result.returncode == 65, result.stderr
     message = _error(result)["message"]
     assert "invalid.localhost" not in result.stdout + result.stderr, message
-    assert "grim update --marketplace" in message and message.rstrip().endswith("a`"), message
+    assert "grim update --marketplace" in message, message
+    assert message.rstrip().endswith(
+        "a`, which moves every pin of the plugin whose tag moved, and refuses with 78 "
+        "where two bundles then list different versions"
+    ), message
 
 
 @pytest.mark.parametrize(
@@ -581,6 +585,32 @@ def test_s025_normal_update_rows_gain_only_a_null_plugin(
 
 
 # ── S-027 — lock contention ─────────────────────────────────────────────
+
+
+def test_offline_update_warns_about_a_pin_it_moved(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """An offline run reads tags from the local cache, which can be older than the
+    lock and move a pin backward with nothing said. A marketplace part resolves
+    through the same cache, so its run names each pin it moved, as a project run
+    does. Kept: only `--offline` against a real registry's cache shows it."""
+    repo = f"{unique_repo}/team-plan"
+    cached = _skill(repo, "team-plan", "v1")
+    m = _write_marketplace(project_dir / "marketplace.toml", {"team": [cached.fq]})
+    runner = grim_at(project_dir)
+    runner.run("update", "--marketplace", str(m))
+    newer = _skill(repo, "team-plan", "v2")
+    lock = project_dir / "marketplace.lock"
+    lock.write_text(lock.read_text().replace(cached.digest, newer.digest))
+
+    result = runner.run("update", "--offline", "--marketplace", str(m), format="json")
+
+    assert result.stderr.count("local tag cache may be older than the lock") == 1, (
+        result.stderr
+    )
+    assert "plugin 'team' skill 'team-plan'" in result.stderr
+    assert json.loads(result.stdout)["items"], "stdout stays the payload"
+    assert cached.digest in lock.read_text()
 
 
 @unix_only

@@ -28,6 +28,7 @@ use serde::Serialize;
 use crate::api::artifact_status::ArtifactStatus;
 use crate::api::status_report::HookArming;
 use crate::cli::printer::{Printable, print_table, screen_plain};
+use crate::config::scope::Invocation;
 use crate::install::launcher::LauncherState;
 use crate::oci::hook::HookTier;
 
@@ -78,13 +79,28 @@ pub struct HookListReport {
     pub items: Vec<HookListEntry>,
     /// The launcher every listed hook fires through.
     pub launcher: LauncherReport,
+    /// Plain text only: the `grim` the launcher line names. Skipped in JSON,
+    /// whose shape is frozen.
+    #[serde(skip)]
+    grim: Invocation,
 }
 
 impl HookListReport {
     /// Build from resolved state. The caller sorts; this constructor does not
     /// re-order, so the report's order is the one the operation produced.
     pub fn new(items: Vec<HookListEntry>, launcher: LauncherReport) -> Self {
-        Self { items, launcher }
+        Self {
+            items,
+            launcher,
+            grim: Invocation::WALKED,
+        }
+    }
+
+    /// Name `grim` in the command the plain rendering prints.
+    #[must_use]
+    pub fn naming(mut self, grim: Invocation) -> Self {
+        self.grim = grim;
+        self
     }
 }
 
@@ -125,9 +141,10 @@ impl Printable for HookListReport {
         if self.launcher.state != LauncherState::Current {
             writeln!(
                 w,
-                "\nLauncher {}: {} (run grim install to write it)",
+                "\nLauncher {}: {} (run {} install to write it)",
                 self.launcher.state,
-                screen_plain(&self.launcher.path)
+                screen_plain(&self.launcher.path),
+                self.grim
             )?;
         }
         Ok(())
@@ -166,7 +183,7 @@ mod tests {
         HookArming {
             client: client.to_string(),
             cause,
-            message: cause.message().to_string(),
+            message: cause.message(&crate::config::scope::Invocation::WALKED),
             transient: cause.transient(),
         }
     }
@@ -224,6 +241,15 @@ mod tests {
         let mut out = Vec::new();
         report.print_plain(&mut out).unwrap();
         assert!(!String::from_utf8(out).unwrap().contains("Launcher"));
+    }
+
+    #[test]
+    fn a_launcher_line_names_the_run() {
+        let report = HookListReport::new(Vec::new(), launcher()).naming(Invocation::GLOBAL);
+        let mut out = Vec::new();
+        report.print_plain(&mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("(run grim --global install to write it)"), "{text}");
     }
 
     #[test]

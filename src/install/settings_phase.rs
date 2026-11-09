@@ -27,7 +27,7 @@ use serde_json::{Map, Value};
 use crate::api::artifact_status::{ArtifactStatus, HookArmingCause};
 use crate::api::settings_report::{PieceMark, PieceState, RefusedPiece, SettingsChange, SettingsChangeAction};
 use crate::catalog::redact::redact_url;
-use crate::config::scope::ConfigScope;
+use crate::config::scope::{ConfigScope, Invocation};
 use crate::install::client_target::ClientTarget;
 use crate::install::hook_registrar::{
     ArmRefusal, CLAUDE_LOCAL_SETTINGS, ExcludeOutcome, GIT_EXCLUDE_RELATIVE, confined_target,
@@ -50,6 +50,7 @@ use crate::install::settings_writer::{self, Expected, OwnFile, OwnFileOp, Settin
 use crate::install::target::InstallTarget;
 use crate::install::uninstall::{AbandonedEntry, UninstallError, UninstallOutcome, UninstallResult};
 use crate::install::vendor::{McpConfigFormat, MergeClass, SettingsField, SettingsScopes};
+use crate::lock::effective_set::NodeKey;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::locked_artifact::LockedArtifact;
 use crate::oci::access::OciAccess;
@@ -87,6 +88,9 @@ pub(crate) struct SettingsPhaseResult {
     pub abandoned: Vec<Abandoned>,
     /// What a reap did to each package, for the rows of a report.
     pub reaped: Vec<ReapedClients>,
+    /// Packages whose record kept a value for an armed package outside a named
+    /// pass, each named in a warning that gives `grim install` as the remedy.
+    pub kept_beside: BTreeSet<String>,
 }
 
 /// A value left in place, and the package that let it go.
@@ -102,6 +106,42 @@ pub(crate) struct Abandoned {
 struct ArmedPackage<'a> {
     artifact: &'a LockedArtifact,
     document: Result<SettingsDocument, crate::error::Error>,
+}
+
+/// Which packages a pass arms and which leftover records it may remove.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Reach<'a> {
+    /// Every package the lock holds, and every leftover record.
+    Whole,
+    /// A named update: only the packages in `install`, and only the leftovers
+    /// in `prune`. A package outside `install` is neither read nor written,
+    /// and its records still hold the pieces they share with one inside.
+    Named {
+        install: &'a BTreeSet<NodeKey>,
+        prune: &'a BTreeSet<NodeKey>,
+    },
+}
+
+impl Reach<'_> {
+    /// Whether the pass arms the package `name`.
+    fn arms(self, name: &str) -> bool {
+        match self {
+            Self::Whole => true,
+            Self::Named { install, .. } => install.contains(&settings_key(name)),
+        }
+    }
+
+    /// Whether the pass may remove the values of `name`, which left the lock.
+    fn prunes(self, name: &str) -> bool {
+        match self {
+            Self::Whole => true,
+            Self::Named { prune, .. } => prune.contains(&settings_key(name)),
+        }
+    }
+}
+
+fn settings_key(name: &str) -> NodeKey {
+    (ArtifactKind::Settings, name.to_string())
 }
 
 /// The packages of `lock` this run applies.
@@ -235,9 +275,55 @@ impl Preloaded {
         let index = self.0.iter().position(|(read, _)| read == artifact)?;
         Some(self.0.swap_remove(index).1)
     }
+
+    /// Read the layer of each of `artifacts` this run has not read yet, store first.
+    async fn read_missing<'a>(
+        &mut self,
+        artifacts: impl IntoIterator<Item = &'a LockedArtifact>,
+        access: &Arc<dyn OciAccess>,
+    ) {
+        for artifact in artifacts {
+            if !self.0.iter().any(|(read, _)| read == artifact) {
+                let document = load_document(artifact, access).await;
+                self.0.push((artifact.clone(), document));
+            }
+        }
+    }
+
+    /// Each layer that loaded for a package outside `armed`, by binding.
+    fn beside<'a>(&'a self, armed: &'a [LockedArtifact]) -> impl Iterator<Item = (&'a str, &'a SettingsDocument)> {
+        self.outside(armed)
+            .filter_map(|(read, document)| Some((read.name.as_str(), document.as_ref().ok()?)))
+    }
+
+    /// Each package outside `armed` whose layer failed to load.
+    fn unread_beside<'a>(&'a self, armed: &'a [LockedArtifact]) -> impl Iterator<Item = &'a LockedArtifact> {
+        self.outside(armed)
+            .filter(|(_, document)| document.is_err())
+            .map(|(read, _)| read)
+    }
+
+    /// The error of the first package outside `armed` whose layer failed to load.
+    fn take_unread_error(&mut self, armed: &[LockedArtifact]) -> Option<crate::error::Error> {
+        let outside = |read: &LockedArtifact| !armed.iter().any(|artifact| artifact.name == read.name);
+        let index = self
+            .0
+            .iter()
+            .position(|(read, document)| outside(read) && document.is_err())?;
+        self.0.swap_remove(index).1.err()
+    }
+
+    fn outside<'a>(
+        &'a self,
+        armed: &'a [LockedArtifact],
+    ) -> impl Iterator<Item = &'a (LockedArtifact, Result<SettingsDocument, crate::error::Error>)> {
+        self.0
+            .iter()
+            .filter(move |(read, _)| !armed.iter().any(|artifact| artifact.name == read.name))
+    }
 }
 
-/// Plan and write every settings package in `lock`.
+/// Plan and write the settings packages of `lock` that `reach` arms.
 ///
 /// Every piece is judged before any write, so one refusal leaves every file as
 /// it was. A failed write leaves earlier files written and recorded, which a
@@ -252,10 +338,11 @@ pub(crate) async fn apply(
     state: &mut InstallState,
     kept: Option<&[ClientTarget]>,
     preloaded: Preloaded,
+    reach: Reach<'_>,
 ) -> SettingsPhaseResult {
-    warn_gated(lock, input);
-    let withheld = withheld_rows(lock, input);
-    let Some(mut phase) = Phase::enter(lock, input, force, state) else {
+    warn_gated(lock, input, reach);
+    let withheld = withheld_rows(lock, input, reach);
+    let Some(mut phase) = Phase::enter(lock, input, force, state, reach) else {
         return SettingsPhaseResult {
             rows: withheld,
             ..SettingsPhaseResult::default()
@@ -263,6 +350,17 @@ pub(crate) async fn apply(
     };
     phase.kept = kept.map(<[ClientTarget]>::to_vec);
     phase.preloaded = preloaded;
+    // The preflight reads no layer beside a single armed package, which cannot
+    // conflict; unread, nothing would say whether that package declares a
+    // leftover's value, and `settle` stops the pass rather than remove it.
+    if !phase.orphans.is_empty()
+        && let Some(policy) = input.target.settings_policy()
+    {
+        let beside = armed_packages(lock, input, policy)
+            .into_iter()
+            .filter(|artifact| !reach.arms(&artifact.name));
+        phase.preloaded.read_missing(beside, input.access).await;
+    }
     let owner = phase.owner.clone();
     let mut result = match phase.run(input.access).await {
         Ok((converged, result)) => {
@@ -287,9 +385,10 @@ fn owner_failed(owner: ArtifactRef, error: crate::error::Error) -> SettingsPhase
     }
 }
 
-/// A skipped row, and one warning, for each package past the flag that this
-/// run's consent answer withholds, as the hook path reports a withheld hook.
-fn withheld_rows(lock: &GrimoireLock, input: &SettingsInput<'_>) -> Vec<ArtifactInstall> {
+/// A skipped row, and one warning, for each package in `reach` past the flag
+/// that this run's consent answer withholds, as the hook path reports a
+/// withheld hook.
+fn withheld_rows(lock: &GrimoireLock, input: &SettingsInput<'_>, reach: Reach<'_>) -> Vec<ArtifactInstall> {
     let Some(policy) = input.target.settings_policy().filter(|policy| policy.feature_enabled()) else {
         return Vec::new();
     };
@@ -301,7 +400,7 @@ fn withheld_rows(lock: &GrimoireLock, input: &SettingsInput<'_>) -> Vec<Artifact
     let withheld = lock
         .settings
         .iter()
-        .filter(|artifact| !armed.iter().any(|armed| armed.name == artifact.name));
+        .filter(|artifact| reach.arms(&artifact.name) && !armed.iter().any(|armed| armed.name == artifact.name));
     withheld
         .filter_map(|artifact| {
             let reason = policy.refusal_reason(&artifact.name, &artifact.source)?;
@@ -315,10 +414,10 @@ fn withheld_rows(lock: &GrimoireLock, input: &SettingsInput<'_>) -> Vec<Artifact
         .collect()
 }
 
-/// Name each declared package a run with the flag off leaves alone, as a gated
-/// hook is named. Called from `apply` only: `reap_clients` enters the phase too,
-/// so a call in `Phase::enter` would print every line twice on `grim update`.
-fn warn_gated(lock: &GrimoireLock, input: &SettingsInput<'_>) {
+/// Name each declared package in `reach` a run with the flag off leaves alone,
+/// as a gated hook is named. Called from `apply` only: `reap_clients` enters the
+/// phase too, so a call in `Phase::enter` would print every line twice on `grim update`.
+fn warn_gated(lock: &GrimoireLock, input: &SettingsInput<'_>, reach: Reach<'_>) {
     let Some(policy) = input
         .target
         .settings_policy()
@@ -326,7 +425,7 @@ fn warn_gated(lock: &GrimoireLock, input: &SettingsInput<'_>) {
     else {
         return;
     };
-    for artifact in &lock.settings {
+    for artifact in lock.settings.iter().filter(|artifact| reach.arms(&artifact.name)) {
         tracing::warn!(
             "settings package '{}' not applied: {}",
             artifact.name,
@@ -349,25 +448,20 @@ fn warn_left_behind(name: &str, clients: &BTreeSet<&str>, target: &InstallTarget
         let verb = if clients.len() == 1 { "holds" } else { "hold" };
         format!("{} still {verb} the previous version's values", clients.join(", "))
     };
-    let scope = target.scope();
+    let grim = target.grim();
     if !selectable.is_empty() {
         let flags: String = selectable.iter().map(|client| format!(" --client {client}")).collect();
         tracing::warn!(
             "settings package '{name}': {}, which this run did not select, so its record keeps that version; run \
-             `{}{flags}` to move them",
-            held(&selectable),
-            install_command(scope)
+             `{grim} install{flags}` to move them",
+            held(&selectable)
         );
     }
     if !dropped.is_empty() {
         let verb = if dropped.len() == 1 { "is" } else { "are" };
-        let update = match scope {
-            ConfigScope::Global => "grim update --global",
-            ConfigScope::Project => "grim update",
-        };
         tracing::warn!(
             "settings package '{name}': {} but {verb} no longer in `[options].clients`, so its record keeps that \
-             version; run `{update}` to take them out",
+             version; run `{grim} update` to take them out, though that bare update also moves every pin",
             held(&dropped)
         );
     }
@@ -416,7 +510,7 @@ pub(crate) async fn reap_clients(
     if home_refusal(input).is_some() || *state.settings_store() == SettingsStore::Refused {
         return SettingsPhaseResult::default();
     }
-    let Some(mut phase) = Phase::enter(lock, input, force, state) else {
+    let Some(mut phase) = Phase::enter(lock, input, force, state, Reach::Whole) else {
         return SettingsPhaseResult::default();
     };
     phase.pass = Pass::Reap(desired.to_vec());
@@ -463,62 +557,17 @@ pub(crate) fn uninstall(
         abandoned_entries: Vec::new(),
         settings_changes: Vec::new(),
     };
-    let scope = match state.settings_store() {
-        SettingsStore::Inline => ConfigScope::Global,
-        SettingsStore::Workspace { .. } | SettingsStore::Refused => ConfigScope::Project,
-    };
-    // The record stays and nothing moves: dropping it would strand the value, and
-    // the next run under a good home judges it as an orphan.
-    if let Err(refusal) = validate_grim_home(&roots.grim_home, &roots.workspace, scope) {
-        tracing::warn!("settings left unchanged: {}", refusal.settings_reason());
-        return Ok(settled(UninstallOutcome::NotInstalled));
-    }
-    if *state.settings_store() == SettingsStore::Refused {
-        warn_unreadable_store(&roots.grim_home, &roots.workspace);
-        return Ok(settled(UninstallOutcome::NotInstalled));
-    }
-    let Some(record) = state.get(ArtifactKind::Settings, name).cloned() else {
-        return Ok(settled(UninstallOutcome::NotInstalled));
-    };
-    let names: BTreeSet<_> = record.outputs.iter().map(|output| output.client.as_str()).collect();
-    let clients: Vec<ClientTarget> = names.iter().filter_map(|client| client.parse().ok()).collect();
-    let unknown: Vec<_> = names
-        .iter()
-        .filter(|client| client.parse::<ClientTarget>().is_err())
-        .collect();
-    if !unknown.is_empty() {
-        warn_unknown_clients(name, unknown.iter().copied().copied());
-    }
-    // An empty list would detect clients, and no output this grim can read needs one.
-    if clients.is_empty() {
-        state.remove(ArtifactKind::Settings, name);
-        return Ok(settled(UninstallOutcome::Removed));
-    }
-    let mut phase = Phase {
-        target: InstallTarget::new(&roots.workspace, scope, clients),
-        roots: roots.clone(),
-        force: force.into(),
-        state: state.clone(),
-        armed: Vec::new(),
-        orphans: BTreeSet::from([name.to_string()]),
-        owner: record_reference(&record),
-        pass: Pass::Uninstall,
-        kept: None,
-        fence: RootFence::of(scope),
-        preloaded: Preloaded::default(),
-        named: RefCell::default(),
+    let mut phase = match uninstall_pass(state, name, roots, force) {
+        Ok(phase) => phase,
+        Err(outcome) => return Ok(settled(outcome)),
     };
     let mut result = SettingsPhaseResult::default();
     let outcome = phase.settle(&[], &mut result);
     *state = phase.state;
     match outcome {
         // The stop can follow a file already written, so its changes ride along.
-        Err(stopped) => Err(UninstallError::Settings(Box::new(
-            stopped.error.with_settings(result.outcome),
-        ))),
-        Ok(None) => Err(UninstallError::SettingsDrifted {
-            pieces: result.outcome.pieces.to_vec(),
-        }),
+        Err(stopped) => Err(stopped_uninstall(stopped, result)),
+        Ok(None) => Err(drifted_uninstall(&result)),
         Ok(Some(tally)) => {
             let mut abandoned: Vec<_> = result.abandoned.into_iter().map(|left| left.entry).collect();
             abandoned.sort();
@@ -536,6 +585,97 @@ pub(crate) fn uninstall(
             })
         }
     }
+}
+
+/// What [`uninstall`] would refuse for `name`, judged against `state` and
+/// writing nothing, so a caller removing several nodes can find every refusal
+/// before its first removal.
+///
+/// # Errors
+///
+/// The refusal or stop [`uninstall`] would return before its first write.
+pub(crate) fn uninstall_refusal(
+    state: &InstallState,
+    name: &str,
+    roots: &AnchorRoots,
+    force: bool,
+) -> Result<(), UninstallError> {
+    let mut scratch = state.clone();
+    let Ok(mut phase) = uninstall_pass(&mut scratch, name, roots, force) else {
+        return Ok(());
+    };
+    let mut result = SettingsPhaseResult::default();
+    match phase.assess(&[], &mut result) {
+        Err(stopped) => Err(stopped_uninstall(stopped, result)),
+        Ok(None) => Err(drifted_uninstall(&result)),
+        Ok(Some(_)) => Ok(()),
+    }
+}
+
+fn stopped_uninstall(stopped: Stopped, result: SettingsPhaseResult) -> UninstallError {
+    UninstallError::Settings(Box::new(stopped.error.with_settings(result.outcome)))
+}
+
+fn drifted_uninstall(result: &SettingsPhaseResult) -> UninstallError {
+    UninstallError::SettingsDrifted {
+        pieces: result.outcome.pieces.to_vec(),
+    }
+}
+
+/// The pass that takes `name`'s values out, or the outcome of a removal that
+/// needs none. A record naming no client this grim reads is dropped from `state` here.
+fn uninstall_pass(
+    state: &mut InstallState,
+    name: &str,
+    roots: &AnchorRoots,
+    force: bool,
+) -> Result<Phase, UninstallOutcome> {
+    let scope = match state.settings_store() {
+        SettingsStore::Inline => ConfigScope::Global,
+        SettingsStore::Workspace { .. } | SettingsStore::Refused => ConfigScope::Project,
+    };
+    // The record stays and nothing moves: dropping it would strand the value, and
+    // the next run under a good home judges it as an orphan.
+    if let Err(refusal) = validate_grim_home(&roots.grim_home, &roots.workspace, scope) {
+        tracing::warn!("settings left unchanged: {}", refusal.settings_reason());
+        return Err(UninstallOutcome::NotInstalled);
+    }
+    if *state.settings_store() == SettingsStore::Refused {
+        warn_unreadable_store(&roots.grim_home, &roots.workspace);
+        return Err(UninstallOutcome::NotInstalled);
+    }
+    let Some(record) = state.get(ArtifactKind::Settings, name).cloned() else {
+        return Err(UninstallOutcome::NotInstalled);
+    };
+    let names: BTreeSet<_> = record.outputs.iter().map(|output| output.client.as_str()).collect();
+    let clients: Vec<ClientTarget> = names.iter().filter_map(|client| client.parse().ok()).collect();
+    let unknown: Vec<_> = names
+        .iter()
+        .filter(|client| client.parse::<ClientTarget>().is_err())
+        .collect();
+    if !unknown.is_empty() {
+        warn_unknown_clients(name, unknown.iter().copied().copied());
+    }
+    // An empty list would detect clients, and no output this grim can read needs one.
+    if clients.is_empty() {
+        state.remove(ArtifactKind::Settings, name);
+        return Err(UninstallOutcome::Removed);
+    }
+    Ok(Phase {
+        target: InstallTarget::new(&roots.workspace, scope, clients),
+        roots: roots.clone(),
+        force: force.into(),
+        state: state.clone(),
+        armed: Vec::new(),
+        hooks: Vec::new(),
+        orphans: BTreeSet::from([name.to_string()]),
+        owner: record_reference(&record),
+        pass: Pass::Uninstall,
+        kept: None,
+        fence: RootFence::of(scope),
+        preloaded: Preloaded::default(),
+        named: RefCell::default(),
+    })
 }
 
 /// The note that closes a change list, in the run's log and the TUI panel alike.
@@ -601,6 +741,28 @@ impl Identity {
     fn is_own_file(&self) -> bool {
         own_file_pointer(&self.client).as_deref() == Some(self.pointer.as_str())
     }
+
+    /// The piece as a warning shows it: pointer, then element.
+    fn shown(&self) -> String {
+        match &self.element {
+            Some(element) => format!("{} ({element})", self.pointer),
+            None => self.pointer.clone(),
+        }
+    }
+}
+
+/// Each of `names` single-quoted, comma-joined.
+fn quoted(names: &BTreeSet<String>) -> String {
+    names
+        .iter()
+        .map(|name| format!("'{name}'"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// `pieces` comma-joined, in order.
+fn joined(pieces: &BTreeSet<String>) -> String {
+    pieces.iter().cloned().collect::<Vec<_>>().join(", ")
 }
 
 /// The pointer naming `client`'s own-file piece. A record leaves it out, since
@@ -737,6 +899,15 @@ struct Judgement {
     withheld: BTreeSet<String>,
 }
 
+/// What [`Phase::assess`] judged, for [`Phase::settle`] to write.
+struct Assessed {
+    judgement: Judgement,
+    awaiting: BTreeSet<String>,
+    held_local: bool,
+    moved: Vec<(Identity, Holder)>,
+    kept_beside: BTreeMap<String, KeptBeside>,
+}
+
 /// What ended a pass early, and the row that carries it.
 struct Stopped {
     owner: ArtifactRef,
@@ -793,12 +964,14 @@ impl SettingsDecline {
     }
 
     /// The step that would let `client` take settings here, for a run's
-    /// warning and for `status` alike.
-    pub(crate) fn remedy(&self, client: ClientTarget, scope: ConfigScope) -> String {
-        let install = install_command(scope);
+    /// warning and for `status` alike, naming the install as `grim`.
+    pub(crate) fn remedy(&self, client: ClientTarget, grim: &Invocation) -> String {
+        let install = format!("{grim} install");
         match self {
+            // The step is at global scope whatever this run's scope or config.
             Self::GlobalOnly => {
-                "declare the package at global scope with grim --global add, then run grim install --global".to_string()
+                let global = Invocation::GLOBAL;
+                format!("declare the package at global scope with {global} add, then run {global} install")
             }
             Self::NoFile => "select a client that takes settings with --client <name> or [options].clients".to_string(),
             Self::ClientConfigAbsent(_) => format!("start {client} once so it creates that file, then run {install}"),
@@ -829,12 +1002,12 @@ impl SettingsDecline {
     /// [`Self::remedy`] for a package other clients already hold values of. A
     /// client with no file then needs no step: changing the selection to reach
     /// one would also drop it from every other kind.
-    pub(crate) fn remedy_beside_applied(&self, client: ClientTarget, scope: ConfigScope) -> String {
+    pub(crate) fn remedy_beside_applied(&self, client: ClientTarget, grim: &Invocation) -> String {
         match self {
             Self::NoFile => format!(
                 "nothing in this package applies to {client}, and other clients hold its values, so no step is needed"
             ),
-            _ => self.remedy(client, scope),
+            _ => self.remedy(client, grim),
         }
     }
 }
@@ -877,15 +1050,6 @@ impl std::fmt::Display for SettingsDecline {
                 }
             }
         }
-    }
-}
-
-/// The install a remedy at `scope` names: without `--global` a global
-/// package's run exits 79 outside a project.
-pub(crate) fn install_command(scope: ConfigScope) -> &'static str {
-    match scope {
-        ConfigScope::Global => "grim install --global",
-        ConfigScope::Project => "grim install",
     }
 }
 
@@ -1160,7 +1324,8 @@ struct Tally {
     touched: BTreeSet<String>,
     /// Packages a confinement refusal stopped short: their records and pins stay.
     withheld: BTreeSet<String>,
-    /// Packages with a dropped value in a file this run does not resolve: the pin stays.
+    /// Packages holding a dropped value this run leaves to a later one, in a file
+    /// it does not resolve or declared by a package outside it: the pin stays.
     awaiting: BTreeSet<String>,
 }
 
@@ -1186,6 +1351,18 @@ struct Holdings {
     moved: Vec<(Identity, Holder)>,
 }
 
+/// The pieces one record keeps for packages outside a named pass.
+#[derive(Default)]
+struct KeptBeside {
+    /// Each piece as a warning shows it: pointer, then element.
+    pieces: BTreeSet<String>,
+    /// The packages outside the pass that declare them.
+    declarers: BTreeSet<String>,
+    /// Whether one of them was changed outside grim, so their install refuses
+    /// it without `--force`.
+    edited: bool,
+}
+
 /// One pass, owning what it reads so the blocking pool can hold it.
 struct Phase {
     target: InstallTarget,
@@ -1193,6 +1370,8 @@ struct Phase {
     force: ForceScope,
     state: InstallState,
     armed: Vec<LockedArtifact>,
+    /// The lock's hook rows: a remedy judges whether a plain install keeps them armed.
+    hooks: Vec<LockedArtifact>,
     /// Records no lock row names. Each key comes from no lock entry, so `add
     /// --force` cannot reach one.
     orphans: BTreeSet<String>,
@@ -1203,7 +1382,8 @@ struct Phase {
     kept: Option<Vec<ClientTarget>>,
     /// Where a global file's root may not lie, read once per pass.
     fence: RootFence,
-    /// Layers this run already read, taken before any is fetched again.
+    /// Layers this run already read. An armed package takes its own before any
+    /// fetch; the rest say what the armed packages outside this pass declare.
     preloaded: Preloaded,
     /// Each client and cause a refusal named this pass, so none is named twice.
     named: RefCell<BTreeSet<(String, &'static str)>>,
@@ -1211,7 +1391,15 @@ struct Phase {
 
 impl Phase {
     /// The pass this run makes, or `None` when it touches no setting at all.
-    fn enter(lock: &GrimoireLock, input: &SettingsInput<'_>, force: &ForceScope, state: &InstallState) -> Option<Self> {
+    /// A package outside `reach` is not armed, and a leftover outside it keeps
+    /// its values and its record.
+    fn enter(
+        lock: &GrimoireLock,
+        input: &SettingsInput<'_>,
+        force: &ForceScope,
+        state: &InstallState,
+        reach: Reach<'_>,
+    ) -> Option<Self> {
         let policy = input
             .target
             .settings_policy()
@@ -1229,11 +1417,18 @@ impl Phase {
             warn_unreadable_store(&input.roots.grim_home, input.target.workspace());
             return None;
         }
-        let armed: Vec<_> = armed_packages(lock, input, policy).into_iter().cloned().collect();
+        let armed: Vec<_> = armed_packages(lock, input, policy)
+            .into_iter()
+            .filter(|artifact| reach.arms(&artifact.name))
+            .cloned()
+            .collect();
         let declared = |name: &str| lock.settings.iter().any(|artifact| artifact.name == name);
-        let mut leftovers = state
-            .iter_records()
-            .filter(|record| record.kind == ArtifactKind::Settings && !record.dev && !declared(&record.name));
+        let mut leftovers = state.iter_records().filter(|record| {
+            record.kind == ArtifactKind::Settings
+                && !record.dev
+                && !declared(&record.name)
+                && reach.prunes(&record.name)
+        });
         let first_orphan = leftovers.next();
         let owner = armed
             .first()
@@ -1250,6 +1445,7 @@ impl Phase {
             force: force.clone(),
             state: state.clone(),
             armed,
+            hooks: lock.hooks.clone(),
             orphans,
             owner,
             pass: Pass::Converge,
@@ -1286,9 +1482,8 @@ impl Phase {
         let mut documents = Vec::new();
         let mut failures = Vec::new();
         if survey.stale || !survey.missing.is_empty() {
-            let mut preloaded = std::mem::take(&mut phase.preloaded);
             for artifact in &phase.armed {
-                let document = match preloaded.take(artifact) {
+                let document = match phase.preloaded.take(artifact) {
                     Some(document) => document,
                     None => load_document(artifact, access).await,
                 };
@@ -1318,9 +1513,10 @@ impl Phase {
                     .map_or(String::new(), |list| list.join(", "));
                 tracing::warn!(
                     "settings package '{}': its layer is not cached and grim is offline, so grim could not \
-                     check what it holds for {clients}; run `grim install` online to apply anything it declares \
+                     check what it holds for {clients}; run `{} install` online to apply anything it declares \
                      for them",
-                    artifact.name
+                    artifact.name,
+                    phase.target.grim()
                 );
             }
             documents.clear();
@@ -1385,9 +1581,8 @@ impl Phase {
     /// Name each refused surface once, on every run: a run with nothing to
     /// write reaches no other warning, and `status` reads `not-armed` all along.
     fn name_refused_surfaces(&self) {
-        let scope = self.target.scope();
         for (client, decline) in self.refused_surfaces() {
-            let remedy = decline.remedy(client, scope);
+            let remedy = decline.remedy(client, self.target.grim());
             self.name_once(client.as_str(), &decline, &remedy);
         }
     }
@@ -1552,22 +1747,54 @@ impl Phase {
             .collect()
     }
 
+    /// Judge every piece and refuse, writing nothing. `None` when the whole
+    /// phase refused; [`Phase::settle`] writes what it returns.
+    fn assess(
+        &mut self,
+        documents: &[(LockedArtifact, SettingsDocument)],
+        result: &mut SettingsPhaseResult,
+    ) -> Result<Option<Assessed>, Stopped> {
+        let wanted = self.plan(documents)?;
+        let awaiting = self.awaiting_their_file(documents, &wanted);
+        let held_local = settings_use_local_file(&self.state);
+        let loaded: BTreeSet<_> = documents.iter().map(|(artifact, _)| artifact.name.as_str()).collect();
+        let Holdings { mut held, lost, moved } = self.holdings(&loaded);
+        let kept_beside = self.defer_beside(&wanted, &mut held);
+        let mut judgement = self.judge(wanted, held)?;
+        self.stop_for_unread_beside(&judgement, result)?;
+        judgement.released.extend(lost);
+        if self.refuse(&judgement, result)? {
+            self.warn_refused_beside(&kept_beside, &result.outcome.pieces);
+            return Ok(None);
+        }
+        self.warn_kept_beside(&kept_beside);
+        result.kept_beside.extend(kept_beside.keys().cloned());
+        Ok(Some(Assessed {
+            judgement,
+            awaiting,
+            held_local,
+            moved,
+            kept_beside,
+        }))
+    }
+
     /// Judge every piece, then write. `None` when the whole phase refused.
     fn settle(
         &mut self,
         documents: &[(LockedArtifact, SettingsDocument)],
         result: &mut SettingsPhaseResult,
     ) -> Result<Option<Tally>, Stopped> {
-        let wanted = self.plan(documents)?;
-        let awaiting = self.awaiting_their_file(documents, &wanted);
-        let held_local = settings_use_local_file(&self.state);
-        let loaded: BTreeSet<_> = documents.iter().map(|(artifact, _)| artifact.name.as_str()).collect();
-        let Holdings { held, lost, moved } = self.holdings(&loaded);
-        let mut judgement = self.judge(wanted, held)?;
-        judgement.released.extend(lost);
-        if self.refuse(&judgement, result)? {
+        let Some(Assessed {
+            judgement,
+            awaiting,
+            held_local,
+            moved,
+            kept_beside,
+        }) = self.assess(documents, result)?
+        else {
             return Ok(None);
-        }
+        };
+        let loaded: BTreeSet<_> = documents.iter().map(|(artifact, _)| artifact.name.as_str()).collect();
 
         let mut tally = Tally::default();
         // A record that holds nothing was a skip, so its first write installs.
@@ -1585,6 +1812,9 @@ impl Phase {
         } = judgement;
         tally.withheld = withheld;
         tally.awaiting = awaiting;
+        // Moved, the pin reads as intact to the next survey, so a kept value no
+        // package wants any more would never be judged again.
+        tally.awaiting.extend(kept_beside.into_keys());
         self.land(files, &reads, &mut tally, result)?;
         for held in &released {
             self.forget(held);
@@ -1661,10 +1891,10 @@ impl Phase {
 
     /// Name `client`'s fence `decline` once, with the remedy for that client.
     fn name_refusal(&self, client: &str, decline: &SettingsDecline) {
-        let scope = self.target.scope();
+        let grim = self.target.grim();
         let remedy = client.parse::<ClientTarget>().map_or_else(
-            |_| decline.arming_cause().message().to_string(),
-            |client| decline.remedy(client, scope),
+            |_| decline.arming_cause().message(grim),
+            |client| decline.remedy(client, grim),
         );
         self.name_once(client, decline, &remedy);
     }
@@ -1757,7 +1987,7 @@ impl Phase {
                     if let Some(decline) =
                         decline.filter(|decline| decline.arming_cause().state() != ArtifactStatus::NotArmed)
                     {
-                        let (cause, remedy) = (decline.cause(), decline.remedy(client, scope));
+                        let (cause, remedy) = (decline.cause(), decline.remedy(client, self.target.grim()));
                         let line = format!("settings package '{name}': {client} {decline} ({cause}); {remedy}");
                         tracing::warn!("{}", escape_controls(&line));
                     }
@@ -1917,6 +2147,244 @@ impl Phase {
             }
         }
         holdings
+    }
+
+    /// Take out of `held` each piece that only leaving records hold, no package
+    /// here wants, and an armed package outside this pass declares, by holder.
+    /// That package's own run judges the piece; removed here, it would come back
+    /// on the next `grim install`.
+    fn defer_beside(
+        &self,
+        wanted: &BTreeMap<Identity, Wanted>,
+        held: &mut BTreeMap<Identity, Vec<Holder>>,
+    ) -> BTreeMap<String, KeptBeside> {
+        let beside = self.declared_beside();
+        let mut kept: BTreeMap<String, KeptBeside> = BTreeMap::new();
+        held.retain(|identity, holders| {
+            let Some(declared) = beside.get(identity) else {
+                return true;
+            };
+            if wanted.contains_key(identity) || !holders.iter().all(|holder| holder.leaving) {
+                return true;
+            }
+            let edited = self.refused_unforced(identity, declared, holders);
+            for holder in holders.iter() {
+                let entry = kept.entry(holder.package.clone()).or_default();
+                entry.pieces.insert(identity.shown());
+                entry.declarers.extend(declared.declarers.iter().cloned());
+                entry.edited |= edited;
+            }
+            false
+        });
+        kept
+    }
+
+    /// Whether the declarer's unforced install refuses `identity`, which only
+    /// `holders` hold: the file's value is not what they recorded. Quiet and
+    /// read-only; a file out of bounds, or one that does not read, answers no.
+    fn refused_unforced(&self, identity: &Identity, declared: &Wanted, holders: &[Holder]) -> bool {
+        let (workspace, scope) = (self.target.workspace(), self.target.scope());
+        let bounded = root_refusal(&identity.file, scope, &self.fence).is_none()
+            && landing(&identity.file, workspace, scope).is_ok()
+            && !holders.iter().any(|holder| self.fenced(&holder.output));
+        let Ok(client) = identity.client.parse::<ClientTarget>() else {
+            return false;
+        };
+        let read = match bounded {
+            false => return false,
+            true if identity.is_own_file() => FileRead::own(&identity.file),
+            true => FileRead::of(&identity.file, client.vendor().settings_config_format()),
+        };
+        // The judge reads this file again and reports its failure; here it only words a remedy.
+        let Ok(read) = read else {
+            return false;
+        };
+        let file = read.value(&declared.path, Some(&declared.value), identity.element.as_deref());
+        let wanted = read.hash_of(&declared.value);
+        let recorded = Recorded::of(holders.iter().map(|holder| &holder.output));
+        let piece = Piece {
+            file: &file,
+            wanted: Some(&wanted),
+            recorded: recorded.as_ref(),
+        };
+        piece.verdict(false) == Verdict::Refuse { forceable: true }
+    }
+
+    /// What the armed packages outside this pass declare, from the layers the
+    /// preflight read. Quiet: this pass gives those packages no row and no warning.
+    fn declared_beside(&self) -> BTreeMap<Identity, Wanted> {
+        let mut declared = BTreeMap::new();
+        let beside: Vec<_> = self.preloaded.beside(&self.armed).collect();
+        if beside.is_empty() {
+            return declared;
+        }
+        let (surfaces, scope) = (self.surfaces(), self.target.scope());
+        for (name, document) in beside {
+            for surface in &surfaces {
+                let client = surface.client.as_str();
+                let Some(table) = document.vendors.get(client) else {
+                    continue;
+                };
+                let rows: Vec<_> = known_fields(client).unwrap_or(&[]).iter().collect();
+                let mut entries = Vec::new();
+                collect_declared((name, client), table, &rows, &[], &mut entries);
+                for entry in entries.iter().filter(|entry| not_taken(entry, scope).is_none()) {
+                    // That package's own run reports this; here the piece protects nothing.
+                    if let Err(error) = self.place(surface, entry, &mut declared) {
+                        tracing::debug!("settings package '{name}': {error}");
+                    }
+                }
+            }
+        }
+        declared
+    }
+
+    /// Name what each record keeps for a package outside this pass, and the run
+    /// that hands it over. That install refuses an edited value, so the line names
+    /// the step that clears it first, then `--force` with all it reaches: `install`
+    /// takes no names, so the flag also overwrites or removes every other edit.
+    /// A refused install writes no settings, so the line also says that any other
+    /// refused value at the scope holds the hand-over back.
+    fn warn_kept_beside(&self, kept: &BTreeMap<String, KeptBeside>) {
+        for (package, beside) in kept {
+            let KeptBeside {
+                pieces,
+                declarers,
+                edited,
+            } = beside;
+            let (values, them, changed, clear) = if pieces.len() == 1 {
+                ("the value stays", "it", "it was", "it")
+            } else {
+                ("the values stay", "them", "one was", "each one changed")
+            };
+            let sets = if declarers.len() == 1 { "sets" } else { "set" };
+            let named = quoted(declarers);
+            let (edit, step, tail) = if *edited {
+                let tail = "; that install writes no settings while it refuses any other settings value at this \
+                            scope; `--force` skips that step but overwrites every edit outside grim at this scope, \
+                            and removes those of artifacts that left the lock";
+                let (edit, step) = (
+                    format!(", and {changed} changed outside grim"),
+                    format!("delete or restore {clear} to the value grim wrote, then "),
+                );
+                (edit, step, tail)
+            } else {
+                (String::new(), String::new(), "")
+            };
+            let (install, also) = self.install_applying(declarers);
+            let line = format!(
+                "settings package '{package}' drops {}, but {values}: {named} outside this update also \
+                 {sets} {them}{edit}; {step}run `{install}` to apply {named}{also}{tail}",
+                joined(pieces),
+            );
+            tracing::warn!("{}", escape_controls(&line));
+        }
+    }
+
+    /// Name what a refused pass keeps for a package outside it in a record that
+    /// also holds a refused value: the forced uninstall that clears the refusal
+    /// removes those values too.
+    fn warn_refused_beside(&self, kept: &BTreeMap<String, KeptBeside>, refused: &[RefusedPiece]) {
+        let holds_refused = |package: &str| refused.iter().any(|piece| piece.package == package);
+        let dropped = kept
+            .iter()
+            .filter(|(package, _)| self.orphans.contains(*package) && holds_refused(package));
+        for (package, KeptBeside { pieces, declarers, .. }) in dropped {
+            let them = if pieces.len() == 1 { "it" } else { "them" };
+            let named = quoted(declarers);
+            let (install, also) = self.install_applying(declarers);
+            let line = format!(
+                "settings package '{package}' also keeps {} for {named} outside this update; a forced uninstall \
+                 of '{package}' removes {them} too, and `{install}` then writes {them} back{also}",
+                joined(pieces),
+            );
+            tracing::warn!("{}", escape_controls(&line));
+        }
+    }
+
+    /// The install that applies `declarers`, and the clause the flag adds. It
+    /// repeats this run's `--trust-workspace` when the flag armed a declarer the
+    /// consent record alone would not, or a hook the record would leave
+    /// unconsented: a plain install then removes the kept value or disarms every
+    /// hook, since hook consent is all or none. Where the record arms both, the
+    /// repeated flag would also apply every package the record leaves unconsented.
+    fn install_applying(&self, declarers: &BTreeSet<String>) -> (String, String) {
+        let by_flag = |policy: &crate::hook::policy::HookPolicy| {
+            self.preloaded.0.iter().any(|(artifact, _)| {
+                declarers.contains(&artifact.name) && policy.armed_by_flag_alone(&artifact.name, &artifact.source)
+            })
+        };
+        let hook_by_flag = |policy: &crate::hook::policy::HookPolicy| {
+            self.hooks
+                .iter()
+                .any(|hook| policy.armed_by_flag_alone(&hook.name, &hook.source))
+        };
+        let project = self.target.scope() == ConfigScope::Project;
+        let flagged = project
+            && (self.target.settings_policy().is_some_and(by_flag)
+                || self.target.hook_policy().is_some_and(hook_by_flag));
+        let grim = self.target.grim();
+        if flagged {
+            (
+                format!("{grim} install --trust-workspace"),
+                format!("; {}", crate::hook::policy::FLAG_ALSO_GRANTS),
+            )
+        } else {
+            (format!("{grim} install"), String::new())
+        }
+    }
+
+    /// Stop the pass before any write when it would remove a value that an armed
+    /// package outside it may declare, because that package's layer could not be
+    /// read. Removed, the value would be gone until a run reads that layer. Each
+    /// record kept joins `result.kept_beside`, as its warning names `grim install`.
+    fn stop_for_unread_beside(
+        &mut self,
+        judgement: &Judgement,
+        result: &mut SettingsPhaseResult,
+    ) -> Result<(), Stopped> {
+        let unread: BTreeSet<String> = self
+            .preloaded
+            .unread_beside(&self.armed)
+            .map(|artifact| artifact.name.clone())
+            .collect();
+        if unread.is_empty() {
+            return Ok(());
+        }
+        let removes = |piece: &&Judged| {
+            piece.wanted.is_none() && matches!(piece.verdict, Verdict::Remove | Verdict::Refuse { forceable: true })
+        };
+        let mut kept: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for piece in judgement.files.values().flatten().filter(removes) {
+            for holder in &piece.held {
+                kept.entry(holder.package.clone())
+                    .or_default()
+                    .insert(piece.identity.shown());
+            }
+        }
+        let Some(owner) = kept.keys().next().map(|package| self.reference(package)) else {
+            return Ok(());
+        };
+        // Before the error leaves `preloaded`: the install reads how its package was armed.
+        let (install, also) = self.install_applying(&unread);
+        let Some(error) = self.preloaded.take_unread_error(&self.armed) else {
+            return Ok(());
+        };
+        let (layers, named) = (
+            if unread.len() == 1 { "its layer" } else { "their layers" },
+            quoted(&unread),
+        );
+        for (package, pieces) in &kept {
+            let them = if pieces.len() == 1 { "it" } else { "them" };
+            let line = format!(
+                "settings package '{package}' keeps {}: {named} outside this update may set {them}, and {layers} \
+                 could not be read, so no setting changes; run `{install}` once {layers} can be{also}",
+                joined(pieces)
+            );
+            tracing::warn!("{}", escape_controls(&line));
+        }
+        result.kept_beside.extend(kept.into_keys());
+        Err(Stopped { owner, error })
     }
 
     fn identity_of(&self, output: &ClientOutput) -> Option<Identity> {
@@ -2401,10 +2869,11 @@ impl Phase {
                 .is_ok_and(|client| settings_file_here(client, workspace, scope).is_ok())
         };
         let reach = if scope == ConfigScope::Project && !declared.iter().any(here) {
+            // Both steps are at global scope, never at this run's config.
+            let global = Invocation::GLOBAL;
             format!(
                 "those take settings at global scope only, so declare the package at global scope with \
-                 `grim --global add`, then run `{}`",
-                install_command(ConfigScope::Global)
+                 `{global} add`, then run `{global} install`"
             )
         } else {
             format!("select one with {select}")
@@ -3204,7 +3673,7 @@ mod tests {
     use crate::api::settings_report::SettingsChangeAction::{Added, Changed, Overwritten};
     use crate::cli::exit_code::ExitCode;
     use crate::config::path_source::PathSource;
-    use crate::config::scope::ConfigScope;
+    use crate::config::scope::{ConfigScope, Invocation};
     use crate::hook::consent::Consent;
     use crate::hook::policy::HookPolicy;
     use crate::hook::trust::Interactivity;
@@ -3256,7 +3725,18 @@ mod tests {
 
         preflight(&lock, &input).await.unwrap();
 
-        assert_empty(&apply(&lock, &input, &ForceScope::None, &mut state, None, Preloaded::default()).await);
+        assert_empty(
+            &apply(
+                &lock,
+                &input,
+                &ForceScope::None,
+                &mut state,
+                None,
+                Preloaded::default(),
+                Reach::Whole,
+            )
+            .await,
+        );
         assert_empty(&reap_clients(&[ClientTarget::Claude], &lock, &input, &ForceScope::None, &mut state).await);
         assert_eq!(state.iter_records().count(), 0);
     }
@@ -3527,6 +4007,8 @@ mod tests {
         feature: bool,
         trust: Option<bool>,
         added: Vec<String>,
+        /// The packages a workspace record consents to, or `None` for no record.
+        consented: Option<Vec<LockedArtifact>>,
     }
 
     impl Pass {
@@ -3540,6 +4022,7 @@ mod tests {
                 feature,
                 trust,
                 added: Vec::new(),
+                consented: None,
             }
         }
 
@@ -3560,17 +4043,49 @@ mod tests {
         }
 
         fn target(&self) -> InstallTarget {
-            let policy = HookPolicy::new(
-                self.feature,
-                self.trust,
-                Interactivity::NonInteractive,
-                ConfigScope::Project,
-                self.dir.path(),
-                &[],
-                Consent::Absent,
-            );
+            let policy = match &self.consented {
+                Some(consented) => self.recorded_policy(consented),
+                None => HookPolicy::new(
+                    self.feature,
+                    self.trust,
+                    Interactivity::NonInteractive,
+                    ConfigScope::Project,
+                    self.dir.path(),
+                    &[],
+                    Consent::Absent,
+                ),
+            };
             InstallTarget::new(self.dir.path(), ConfigScope::Project, vec![ClientTarget::Claude])
                 .with_settings_policy(policy)
+        }
+
+        /// The settings policy a run reads from a workspace record covering `consented`.
+        fn recorded_policy(&self, consented: &[LockedArtifact]) -> HookPolicy {
+            use crate::hook::consent::{ConsentRecord, ConsentVersion, consent_key_for};
+            use crate::hook::policy::{ConsentInputs, ConsentPolicies};
+            let keys: BTreeSet<String> = consented
+                .iter()
+                .filter_map(|artifact| consent_key_for(ArtifactKind::Settings, &artifact.name, &artifact.source))
+                .collect();
+            let flags = crate::config::declaration::ExperimentalOptions {
+                hooks: false,
+                settings: self.feature,
+            };
+            let inputs = ConsentInputs {
+                flags: &flags,
+                flag: self.trust,
+                interactivity: Interactivity::NonInteractive,
+                scope: ConfigScope::Project,
+                workspace: self.dir.path(),
+                registries: &[],
+            };
+            let record = ConsentRecord {
+                v: ConsentVersion::V1,
+                workspace: self.dir.path().to_path_buf(),
+                hooks: keys.clone(),
+                consented_at: String::new(),
+            };
+            ConsentPolicies::new(&inputs, Some(&record), &keys).settings
         }
 
         async fn lock(&self, packages: &[(&str, &str)]) -> GrimoireLock {
@@ -3601,7 +4116,7 @@ mod tests {
                 added: &self.added,
             };
             let state = InstallState::empty(&workspace.join("state.json"));
-            let Some(phase) = Phase::enter(lock, &input, &ForceScope::None, &state) else {
+            let Some(phase) = Phase::enter(lock, &input, &ForceScope::None, &state, Reach::Whole) else {
                 panic!("an armed pass enters");
             };
             phase
@@ -3632,7 +4147,16 @@ mod tests {
                 added: &self.added,
             };
             let mut state = InstallState::empty(&self.dir.path().join("state.json"));
-            let phase = apply(lock, &input, &ForceScope::None, &mut state, None, Preloaded::default()).await;
+            let phase = apply(
+                lock,
+                &input,
+                &ForceScope::None,
+                &mut state,
+                None,
+                Preloaded::default(),
+                Reach::Whole,
+            )
+            .await;
             phase
                 .rows
                 .into_iter()
@@ -3996,7 +4520,18 @@ mod tests {
 
         preflight(&lock, &input).await.unwrap();
 
-        assert_empty(&apply(&lock, &input, &ForceScope::None, &mut state, None, Preloaded::default()).await);
+        assert_empty(
+            &apply(
+                &lock,
+                &input,
+                &ForceScope::None,
+                &mut state,
+                None,
+                Preloaded::default(),
+                Reach::Whole,
+            )
+            .await,
+        );
         assert_eq!(state.iter_records().count(), 1);
         assert_eq!(state.get(ArtifactKind::Settings, "orphan"), Some(&orphan));
     }
@@ -4900,6 +5435,7 @@ mod tests {
             force: ForceScope::None,
             state,
             armed: Vec::new(),
+            hooks: Vec::new(),
             orphans: BTreeSet::new(),
             owner: reference_of(&unpublished("team")),
             pass: super::Pass::Converge,
@@ -5043,20 +5579,20 @@ mod tests {
     #[test]
     fn a_root_in_the_repository_names_the_step_its_evidence_calls_for() {
         let file = PathBuf::from("/r/kiro/settings/cli.json");
-        let outside = "run grim install --global from outside this repository";
+        let outside = "run grim --global install from outside this repository";
         let cases = [
             (
                 Inside::Spelled,
                 "which lies inside the repository this command runs in",
                 format!(
-                    "set KIRO_HOME to a path outside this repository, or unset it, then run grim install --global, or {outside}"
+                    "set KIRO_HOME to a path outside this repository, or unset it, then run grim --global install, or {outside}"
                 ),
             ),
             (
                 Inside::Climbs,
                 "whose `..` component keeps grim from placing it outside the repository this command runs in",
                 format!(
-                    "set KIRO_HOME to a path without `..`, or unset it, then run grim install --global, or {outside}"
+                    "set KIRO_HOME to a path without `..`, or unset it, then run grim --global install, or {outside}"
                 ),
             ),
             (
@@ -5067,14 +5603,14 @@ mod tests {
             (
                 Inside::Unplaced,
                 "the directory this command runs in cannot be read",
-                "run grim install --global from a directory you can read".to_string(),
+                "run grim --global install from a directory you can read".to_string(),
             ),
         ];
         for (inside, shown, remedy) in cases {
             let decline = SettingsDecline::RootInWorkspace(file.clone(), inside);
             assert!(decline.to_string().contains(shown), "{inside:?}: {decline}");
             assert_eq!(
-                decline.remedy(ClientTarget::Kiro, ConfigScope::Global),
+                decline.remedy(ClientTarget::Kiro, &Invocation::GLOBAL),
                 remedy,
                 "{inside:?}"
             );
@@ -5084,7 +5620,7 @@ mod tests {
         let linked = SettingsDecline::RootInWorkspace(file, Inside::Linked);
         assert!(
             !linked
-                .remedy(ClientTarget::Claude, ConfigScope::Global)
+                .remedy(ClientTarget::Claude, &Invocation::GLOBAL)
                 .contains("CLAUDE_CONFIG_DIR")
         );
     }
@@ -5615,31 +6151,50 @@ mod tests {
         assert!(result.outcome.changes.is_empty());
     }
 
-    /// Every `tracing` event `f` emits on this thread, without colour.
-    fn capture_warnings(f: impl FnOnce()) -> String {
-        #[derive(Clone, Default)]
-        struct Sink(Arc<std::sync::Mutex<Vec<u8>>>);
-        impl std::io::Write for Sink {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(buf);
-                Ok(buf.len())
+    /// Every `tracing` event emitted on this thread while the guard lives, without
+    /// colour; `text` reads them.
+    struct WarningCapture {
+        sink: Arc<std::sync::Mutex<Vec<u8>>>,
+        _guard: tracing::subscriber::DefaultGuard,
+    }
+
+    impl WarningCapture {
+        fn start() -> Self {
+            #[derive(Clone)]
+            struct Sink(Arc<std::sync::Mutex<Vec<u8>>>);
+            impl std::io::Write for Sink {
+                fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                    self.0.lock().unwrap().extend_from_slice(buf);
+                    Ok(buf.len())
+                }
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
             }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
+            crate::log_switch::tracing_capture::arm();
+            let sink = Arc::default();
+            let writer = Sink(Arc::clone(&sink));
+            let subscriber = tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::WARN)
+                .with_ansi(false)
+                .with_writer(move || writer.clone())
+                .finish();
+            Self {
+                sink,
+                _guard: tracing::subscriber::set_default(subscriber),
             }
         }
-        crate::log_switch::tracing_capture::arm();
-        let sink = Sink::default();
-        let writer = sink.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::WARN)
-            .with_ansi(false)
-            .with_writer(move || writer.clone())
-            .finish();
-        let guard = tracing::subscriber::set_default(subscriber);
+
+        fn text(&self) -> String {
+            String::from_utf8(self.sink.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    /// Every `tracing` event `f` emits on this thread, without colour.
+    fn capture_warnings(f: impl FnOnce()) -> String {
+        let capture = WarningCapture::start();
         f();
-        drop(guard);
-        String::from_utf8(sink.0.lock().unwrap().clone()).unwrap()
+        capture.text()
     }
 
     /// A record whose one output names a client this grim does not know.
@@ -5917,8 +6472,738 @@ mod tests {
         assert!(!warnings.contains("still hold"), "{warnings}");
     }
 
+    // ── A named pass ─────────────────────────────────────────────────────
+
+    const ENGLISH: &str = r#"{"description": "d", "claude": {"language": "en"}}"#;
+    const FRENCH: &str = r#"{"description": "d", "claude": {"language": "fr"}}"#;
+    const DENY: &str = r#"{"description": "d", "claude": {"permissions": {"deny": ["Bash(rm:*)"]}}}"#;
+    const DENY_SONNET: &str =
+        r#"{"description": "d", "claude": {"model": "sonnet", "permissions": {"deny": ["Bash(rm:*)"]}}}"#;
+
+    impl Pass {
+        /// `apply` over `lock` in this pass's workspace, against `state`.
+        async fn applied(
+            &self,
+            lock: &GrimoireLock,
+            state: &mut InstallState,
+            reach: Reach<'_>,
+        ) -> SettingsPhaseResult {
+            let workspace = dunce::canonicalize(self.dir.path()).unwrap();
+            let policy = self.target().settings_policy().unwrap().clone();
+            let target = InstallTarget::new(&workspace, ConfigScope::Project, vec![ClientTarget::Claude])
+                .with_settings_policy(policy);
+            let roots = AnchorRoots {
+                workspace,
+                ..self.roots()
+            };
+            let access: Arc<dyn OciAccess> = Arc::new(self.registry.clone());
+            let input = SettingsInput {
+                access: &access,
+                target: &target,
+                roots: &roots,
+                added: &self.added,
+            };
+            // As `install_pass` runs it: the preflight's layers ride into the pass.
+            let preloaded = preflight_documents(lock, &input)
+                .await
+                .expect("these tests lock packages that agree");
+            apply(lock, &input, &ForceScope::None, state, None, preloaded, reach).await
+        }
+
+        /// The phase `apply` runs for `reach`, entered here so a test runs `converge`
+        /// on its own thread, where a log capture sees it.
+        async fn entered_named(&self, lock: &GrimoireLock, state: &InstallState, reach: Reach<'_>) -> Phase {
+            let workspace = dunce::canonicalize(self.dir.path()).unwrap();
+            let policy = self.target().settings_policy().unwrap().clone();
+            let target = InstallTarget::new(&workspace, ConfigScope::Project, vec![ClientTarget::Claude])
+                .with_settings_policy(policy.clone());
+            let roots = AnchorRoots {
+                workspace,
+                ..self.roots()
+            };
+            let access: Arc<dyn OciAccess> = Arc::new(self.registry.clone());
+            let input = SettingsInput {
+                access: &access,
+                target: &target,
+                roots: &roots,
+                added: &self.added,
+            };
+            let mut phase = Phase::enter(lock, &input, &ForceScope::None, state, reach).expect("an armed pass enters");
+            phase.preloaded = preflight_documents(lock, &input)
+                .await
+                .expect("these tests lock packages that agree");
+            let beside = armed_packages(lock, &input, &policy)
+                .into_iter()
+                .filter(|artifact| !reach.arms(&artifact.name));
+            phase.preloaded.read_missing(beside, &access).await;
+            phase
+        }
+
+        /// `lock` applied whole into a fresh state, which is returned.
+        async fn installed(&self, lock: &GrimoireLock) -> InstallState {
+            let mut state = InstallState::empty(&self.dir.path().join("state.json"));
+            let result = self.applied(lock, &mut state, Reach::Whole).await;
+            assert!(result.outcome.pieces.is_empty(), "{:?}", result.outcome.pieces);
+            state
+        }
+
+        fn file(&self) -> Value {
+            serde_json::from_slice(&std::fs::read(self.dir.path().join(CLAUDE_LOCAL_SETTINGS)).unwrap()).unwrap()
+        }
+
+        fn put(&self, value: &Value) {
+            std::fs::write(self.dir.path().join(CLAUDE_LOCAL_SETTINGS), value.to_string()).unwrap();
+        }
+    }
+
+    fn team_alone() -> BTreeSet<NodeKey> {
+        BTreeSet::from([settings_key("team")])
+    }
+
+    #[tokio::test]
+    async fn a_named_pass_judges_only_its_closure() {
+        let pass = Pass::armed();
+        let lock = pass.lock(&[("team", SONNET), ("other", ENGLISH)]).await;
+        let mut state = pass.installed(&lock).await;
+        pass.put(&json!({"model": "sonnet", "language": "de"}));
+        let (install, prune) = (team_alone(), BTreeSet::new());
+
+        let named = pass
+            .applied(
+                &lock,
+                &mut state,
+                Reach::Named {
+                    install: &install,
+                    prune: &prune,
+                },
+            )
+            .await;
+
+        assert!(named.outcome.pieces.is_empty(), "{:?}", named.outcome.pieces);
+        let rows: Vec<_> = named.rows.iter().map(|row| row.reference.name.as_str()).collect();
+        assert_eq!(rows, ["team"]);
+        assert_eq!(pass.file(), json!({"model": "sonnet", "language": "de"}));
+
+        // Positive control: the whole lock's pass refuses the same edit.
+        let whole = pass.applied(&lock, &mut state, Reach::Whole).await;
+        assert_eq!(whole.outcome.pieces.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_named_pass_restores_nothing_outside_its_closure() {
+        let pass = Pass::armed();
+        let lock = pass.lock(&[("team", SONNET), ("other", ENGLISH)]).await;
+        let mut state = pass.installed(&lock).await;
+        pass.put(&json!({"model": "sonnet"}));
+        let (install, prune) = (team_alone(), BTreeSet::new());
+
+        let named = pass
+            .applied(
+                &lock,
+                &mut state,
+                Reach::Named {
+                    install: &install,
+                    prune: &prune,
+                },
+            )
+            .await;
+
+        assert!(named.outcome.changes.is_empty(), "{:?}", named.outcome.changes);
+        assert_eq!(pass.file(), json!({"model": "sonnet"}));
+
+        // Positive control: the whole lock's pass writes it back.
+        let whole = pass.applied(&lock, &mut state, Reach::Whole).await;
+        assert_eq!(whole.outcome.changes.len(), 1);
+        assert_eq!(pass.file(), json!({"model": "sonnet", "language": "en"}));
+    }
+
+    #[tokio::test]
+    async fn a_named_pass_keeps_a_value_an_outside_record_holds() {
+        let pass = Pass::armed();
+        let lock = pass.lock(&[("team", DENY_SONNET), ("other", DENY)]).await;
+        let mut state = pass.installed(&lock).await;
+        let mut moved = lock.clone();
+        moved.settings[0] = published(&pass.registry, "team", SONNET).await;
+        let (install, prune) = (team_alone(), BTreeSet::new());
+
+        let named = pass
+            .applied(
+                &moved,
+                &mut state,
+                Reach::Named {
+                    install: &install,
+                    prune: &prune,
+                },
+            )
+            .await;
+
+        assert!(named.outcome.changes.is_empty(), "{:?}", named.outcome.changes);
+        assert_eq!(pass.file()["permissions"]["deny"], json!(["Bash(rm:*)"]));
+        let holds = |name: &str| {
+            state
+                .get(ArtifactKind::Settings, name)
+                .is_some_and(|record| record.outputs.iter().any(|output| output.element.is_some()))
+        };
+        assert!(holds("other"));
+        assert!(!holds("team"));
+    }
+
+    const SONNET_ENGLISH: &str = r#"{"description": "d", "claude": {"model": "sonnet", "language": "en"}}"#;
+
+    /// `team` installed declaring SONNET_ENGLISH, and a lock where its new
+    /// version declares ENGLISH alone beside `b`, which declares SONNET and has
+    /// no record.
+    async fn dropped_beside(pass: &Pass) -> (GrimoireLock, GrimoireLock) {
+        let lock = pass.lock(&[("team", SONNET_ENGLISH)]).await;
+        let mut moved = lock.clone();
+        moved.settings = vec![
+            published(&pass.registry, "team", ENGLISH).await,
+            published(&pass.registry, "b", SONNET).await,
+        ];
+        (lock, moved)
+    }
+
+    #[tokio::test]
+    async fn a_named_pass_keeps_a_value_an_armed_package_outside_it_declares() {
+        let pass = Pass::armed();
+        let (lock, moved) = dropped_beside(&pass).await;
+        let mut state = pass.installed(&lock).await;
+        let (install, prune) = (team_alone(), BTreeSet::new());
+
+        let named = pass
+            .applied(
+                &moved,
+                &mut state,
+                Reach::Named {
+                    install: &install,
+                    prune: &prune,
+                },
+            )
+            .await;
+
+        assert!(named.outcome.changes.is_empty(), "{:?}", named.outcome.changes);
+        assert!(named.outcome.pieces.is_empty(), "{:?}", named.outcome.pieces);
+        let rows: Vec<_> = named.rows.iter().map(|row| row.reference.name.as_str()).collect();
+        assert_eq!(rows, ["team"]);
+        assert_eq!(pass.file(), json!({"model": "sonnet", "language": "en"}));
+        assert!(state.get(ArtifactKind::Settings, "b").is_none());
+        let team = state.get(ArtifactKind::Settings, "team").unwrap();
+        assert!(
+            team.source.eq_content(&lock.settings[0].source),
+            "its record still holds /model"
+        );
+
+        // Positive control: the whole lock's pass hands the value to `b` as grim's, not adopted.
+        let whole = pass.applied(&moved, &mut state, Reach::Whole).await;
+        assert!(whole.outcome.changes.is_empty(), "{:?}", whole.outcome.changes);
+        assert_eq!(pass.file(), json!({"model": "sonnet", "language": "en"}));
+        let held = |name: &str| -> Vec<(Option<String>, bool)> {
+            let outputs = &state.get(ArtifactKind::Settings, name).unwrap().outputs;
+            outputs
+                .iter()
+                .map(|output| (output.entry.clone(), output.adopted))
+                .collect()
+        };
+        assert_eq!(held("b"), [(Some("/model".to_string()), false)]);
+        assert_eq!(held("team"), [(Some("/language".to_string()), false)]);
+        let team = state.get(ArtifactKind::Settings, "team").unwrap();
+        assert!(team.source.eq_content(&moved.settings[0].source));
+    }
+
+    /// The same keep when the package outside is the only armed one, and the
+    /// value belongs to a package that left the lock inside the old closure.
+    /// The conflict check reads no layer for a single package, so the pass has
+    /// to read that one itself.
+    #[tokio::test]
+    async fn a_named_pass_keeps_a_value_the_one_armed_package_outside_it_declares() {
+        let pass = Pass::armed();
+        let lock = pass.lock(&[("team", SONNET)]).await;
+        let mut state = pass.installed(&lock).await;
+        let moved = GrimoireLock {
+            settings: vec![published(&pass.registry, "b", SONNET).await],
+            ..lock.clone()
+        };
+        let (install, prune) = (BTreeSet::new(), team_alone());
+
+        let named = pass
+            .applied(
+                &moved,
+                &mut state,
+                Reach::Named {
+                    install: &install,
+                    prune: &prune,
+                },
+            )
+            .await;
+
+        assert!(named.outcome.changes.is_empty(), "{:?}", named.outcome.changes);
+        assert!(named.outcome.pieces.is_empty(), "{:?}", named.outcome.pieces);
+        assert_eq!(pass.file(), json!({"model": "sonnet"}));
+        assert!(state.get(ArtifactKind::Settings, "b").is_none());
+        assert!(
+            state.get(ArtifactKind::Settings, "team").is_some(),
+            "its record still holds /model"
+        );
+
+        // Positive control: the whole lock's pass hands the value to `b` and drops the orphan.
+        let whole = pass.applied(&moved, &mut state, Reach::Whole).await;
+        assert!(whole.outcome.changes.is_empty(), "{:?}", whole.outcome.changes);
+        assert_eq!(pass.file(), json!({"model": "sonnet"}));
+        assert!(state.get(ArtifactKind::Settings, "team").is_none());
+        let held: Vec<_> = state
+            .get(ArtifactKind::Settings, "b")
+            .unwrap()
+            .outputs
+            .iter()
+            .map(|output| (output.entry.clone(), output.adopted))
+            .collect();
+        assert_eq!(held, [(Some("/model".to_string()), false)]);
+    }
+
+    /// SONNET in bytes no other package publishes: the double keys blobs by
+    /// digest alone, so a shared layer would be served for `b` too.
+    const SONNET_ALONE: &str = r#"{"description": "b", "claude": {"model": "sonnet"}}"#;
+
+    /// `layer` behind `name`'s pinned manifest, whose layer blob the registry
+    /// does not serve: the manifest reads, the layer does not.
+    async fn published_without_its_layer(registry: &MemoryRegistry, name: &str, layer: &str) -> LockedArtifact {
+        let repo = Identifier::new_registry(name, "localhost:5000");
+        let manifest = OciManifest {
+            media_type: None,
+            artifact_type: None,
+            config_media_type: None,
+            layers: vec![Descriptor {
+                digest: Algorithm::Sha256.hash(layer.as_bytes()),
+                media_type: SETTINGS_LAYER_MEDIA_TYPE.to_string(),
+                size: layer.len() as u64,
+                annotations: None,
+            }],
+            annotations: BTreeMap::new(),
+        };
+        let digest = registry.push_manifest(&repo, &manifest).await.unwrap();
+        let pinned = PinnedIdentifier::try_from(repo.clone_with_digest(digest)).unwrap();
+        LockedArtifact::direct(name.to_string(), ArtifactKind::Settings, pinned)
+    }
+
+    /// Each failed row of `result`, by package and exit code.
+    fn failures(result: SettingsPhaseResult) -> Vec<(String, ExitCode)> {
+        result
+            .rows
+            .into_iter()
+            .filter_map(|row| {
+                let error = anyhow::Error::from(row.result.err()?);
+                Some((row.reference.name, crate::error::classify_error(&error)))
+            })
+            .collect()
+    }
+
+    /// The one armed package outside the pass has a layer no read returns, so
+    /// nothing says whether it declares the value a leftover holds. The pass
+    /// stops on that layer's own error and writes nothing.
+    #[tokio::test]
+    async fn a_named_pass_keeps_a_value_beside_the_one_outside_package_it_cannot_read() {
+        let pass = Pass::armed();
+        let lock = pass.lock(&[("team", SONNET)]).await;
+        let mut state = pass.installed(&lock).await;
+        let moved = GrimoireLock {
+            settings: vec![published_without_its_layer(&pass.registry, "b", SONNET_ALONE).await],
+            ..lock.clone()
+        };
+        let (install, prune) = (BTreeSet::new(), team_alone());
+        let reach = Reach::Named {
+            install: &install,
+            prune: &prune,
+        };
+
+        let named = pass.applied(&moved, &mut state, reach).await;
+
+        assert!(named.outcome.changes.is_empty(), "{:?}", named.outcome.changes);
+        assert_eq!(
+            named.kept_beside,
+            BTreeSet::from(["team".to_string()]),
+            "one remedy for the kept record"
+        );
+        assert_eq!(failures(named), [("team".to_string(), ExitCode::NotFound)]);
+        assert_eq!(pass.file(), json!({"model": "sonnet"}));
+        assert!(state.get(ArtifactKind::Settings, "team").is_some());
+
+        // Positive control: served, the same layer keeps the value with no failure.
+        let repo = Identifier::new_registry("b", "localhost:5000");
+        pass.registry.push_blob(&repo, SONNET_ALONE.as_bytes()).await.unwrap();
+        let served = pass.applied(&moved, &mut state, reach).await;
+        assert!(served.outcome.changes.is_empty(), "{:?}", served.outcome.changes);
+        assert_eq!(failures(served), []);
+        assert_eq!(pass.file(), json!({"model": "sonnet"}));
+    }
+
+    /// The same stop when the conflict check read the layer and it failed there:
+    /// two armed packages, one inside the pass dropping a value, one outside it.
+    #[tokio::test]
+    async fn a_named_pass_keeps_a_value_an_outside_package_it_cannot_read_may_declare() {
+        let pass = Pass::armed();
+        let lock = pass.lock(&[("team", SONNET_ENGLISH)]).await;
+        let mut state = pass.installed(&lock).await;
+        let mut moved = lock.clone();
+        moved.settings = vec![
+            published(&pass.registry, "team", ENGLISH).await,
+            published_without_its_layer(&pass.registry, "b", SONNET_ALONE).await,
+        ];
+        let (install, prune) = (team_alone(), BTreeSet::new());
+        let reach = Reach::Named {
+            install: &install,
+            prune: &prune,
+        };
+
+        let named = pass.applied(&moved, &mut state, reach).await;
+
+        assert!(named.outcome.changes.is_empty(), "{:?}", named.outcome.changes);
+        assert_eq!(failures(named), [("team".to_string(), ExitCode::NotFound)]);
+        assert_eq!(pass.file(), json!({"model": "sonnet", "language": "en"}));
+        let team = state.get(ArtifactKind::Settings, "team").unwrap();
+        assert!(team.source.eq_content(&lock.settings[0].source), "nothing moved");
+
+        // Positive control: a pass that removes nothing reads no outside layer.
+        let unchanged = GrimoireLock {
+            settings: vec![lock.settings[0].clone(), moved.settings[1].clone()],
+            ..lock.clone()
+        };
+        let quiet = pass.applied(&unchanged, &mut state, reach).await;
+        assert_eq!(failures(quiet), []);
+    }
+
+    /// The kept-value remedy repeats `--trust-workspace` when the flag armed the
+    /// declarer, and only then: a record that covers it needs no flag.
+    #[tokio::test]
+    async fn the_kept_value_install_repeats_the_flag_that_armed_its_declarer() {
+        let other = |pass: &Pass| {
+            let registry = pass.registry.clone();
+            async move { published(&registry, "other", SONNET).await }
+        };
+        let flagged = Pass::armed();
+        let mut recorded = Pass::new(true, None);
+        let artifact = other(&recorded).await;
+        recorded.consented = Some(vec![artifact.clone()]);
+        let declarers = BTreeSet::from(["other".to_string()]);
+
+        let install_of = |pass: &Pass, artifact: LockedArtifact| {
+            let access: Arc<dyn OciAccess> = Arc::new(pass.registry.clone());
+            let lock = GrimoireLock {
+                settings: vec![artifact.clone()],
+                ..entry_free_lock()
+            };
+            let mut phase = pass.entered(&lock, &access);
+            phase.preloaded = Preloaded(vec![(artifact, Ok(doc(json!({"claude": {"model": "sonnet"}}))))]);
+            phase.install_applying(&declarers)
+        };
+
+        let flagged_artifact = other(&flagged).await;
+        let (install, also) = install_of(&flagged, flagged_artifact);
+        assert_eq!(install, "grim install --trust-workspace");
+        assert!(also.contains(FLAG_CLAUSE), "{also}");
+        assert_eq!(
+            install_of(&recorded, artifact),
+            ("grim install".to_string(), String::new())
+        );
+    }
+
+    /// A declarer a consent record arms gets a plain install even when this run
+    /// passed `--trust-workspace`: repeated, the flag would also apply every
+    /// package the record leaves unconsented. Found by review: the line repeated
+    /// the flag whenever the run passed it.
+    #[tokio::test]
+    async fn the_kept_value_install_drops_the_flag_where_a_record_arms_the_declarer() {
+        let mut both = Pass::armed();
+        let artifact = published(&both.registry, "other", SONNET).await;
+        both.consented = Some(vec![artifact.clone()]);
+        let lock = GrimoireLock {
+            settings: vec![artifact.clone()],
+            ..entry_free_lock()
+        };
+        let access: Arc<dyn OciAccess> = Arc::new(both.registry.clone());
+        let mut phase = both.entered(&lock, &access);
+        phase.preloaded = Preloaded(vec![(artifact, Ok(doc(json!({"claude": {"model": "sonnet"}}))))]);
+
+        let install = phase.install_applying(&BTreeSet::from(["other".to_string()]));
+
+        assert_eq!(install, ("grim install".to_string(), String::new()));
+    }
+
+    /// The phase of a run beside `declarers` that `other` outside it declares,
+    /// with a hook policy that `flag` arms or a record covers, and the lock's hook `hook`.
+    async fn phase_beside(pass: &Pass, hook_covered: bool) -> (Phase, KeptBeside) {
+        let other = published(&pass.registry, "other", SONNET).await;
+        let hook = published(&pass.registry, "guard", SONNET).await;
+        let lock = GrimoireLock {
+            settings: vec![other.clone()],
+            hooks: vec![hook.clone()],
+            ..entry_free_lock()
+        };
+        let access: Arc<dyn OciAccess> = Arc::new(pass.registry.clone());
+        let mut phase = pass.entered(&lock, &access);
+        phase.preloaded = Preloaded(vec![(other, Ok(doc(json!({"claude": {"model": "sonnet"}}))))]);
+        let consent = if hook_covered {
+            Consent::Granted
+        } else {
+            Consent::Drifted(BTreeSet::from(["later@localhost:5000/later".to_string()]))
+        };
+        let mut policy = HookPolicy::new(
+            true,
+            pass.trust,
+            Interactivity::NonInteractive,
+            ConfigScope::Project,
+            pass.dir.path(),
+            &[],
+            consent,
+        );
+        if hook_covered {
+            let key = crate::hook::consent::consent_key_for(ArtifactKind::Hook, "guard", &hook.source).unwrap();
+            policy = policy.with_consented(BTreeSet::from([key]));
+        }
+        phase.target = phase.target.clone().with_hook_policy(policy);
+        let kept = KeptBeside {
+            pieces: BTreeSet::from(["/model".to_string()]),
+            declarers: BTreeSet::from(["other".to_string()]),
+            edited: false,
+        };
+        (phase, kept)
+    }
+
+    const FLAG_CLAUSE: &str = "`--trust-workspace` also arms every hook and applies every settings package this workspace was not consented for";
+
+    /// The flag armed the declarer, so the remedy repeats it and says what the
+    /// repeated flag also reaches, as the gatekeeper remedy does. The remedy
+    /// named the flag and nothing of its reach.
+    #[tokio::test]
+    async fn the_kept_value_remedy_that_repeats_the_flag_says_what_the_flag_also_grants() {
+        let pass = Pass::armed();
+        let (phase, kept) = phase_beside(&pass, true).await;
+        let kept = BTreeMap::from([("team".to_string(), kept)]);
+
+        let warnings = capture_warnings(|| phase.warn_kept_beside(&kept));
+
+        assert!(
+            warnings.contains("run `grim install --trust-workspace` to apply 'other'; "),
+            "{warnings}"
+        );
+        assert!(warnings.contains(FLAG_CLAUSE), "{warnings}");
+    }
+
+    /// The record arms the declarer, but it leaves one declared hook uncovered, so a
+    /// plain install disarms every hook, the one this run armed included. The remedy
+    /// repeats the flag with its clause there, as the gatekeeper remedy does.
+    #[tokio::test]
+    async fn the_kept_value_remedy_repeats_the_flag_where_a_plain_install_would_disarm_a_hook() {
+        let mut pass = Pass::new(true, Some(true));
+        let other = published(&pass.registry, "other", SONNET).await;
+        pass.consented = Some(vec![other]);
+        let (phase, kept) = phase_beside(&pass, false).await;
+        let kept = BTreeMap::from([("team".to_string(), kept)]);
+
+        let warnings = capture_warnings(|| phase.warn_kept_beside(&kept));
+
+        assert!(
+            warnings.contains("run `grim install --trust-workspace` to apply 'other'; "),
+            "{warnings}"
+        );
+        assert!(warnings.contains(FLAG_CLAUSE), "{warnings}");
+    }
+
+    /// Positive control: the record arms the declarer and covers the hook, so the
+    /// plain install loses nothing and the remedy neither names the flag nor its reach.
+    #[tokio::test]
+    async fn the_kept_value_remedy_stays_plain_where_the_record_covers_the_declarer_and_the_hook() {
+        let mut pass = Pass::new(true, Some(true));
+        let other = published(&pass.registry, "other", SONNET).await;
+        pass.consented = Some(vec![other]);
+        let (phase, kept) = phase_beside(&pass, true).await;
+        let kept = BTreeMap::from([("team".to_string(), kept)]);
+
+        let warnings = capture_warnings(|| phase.warn_kept_beside(&kept));
+
+        assert!(warnings.contains("run `grim install` to apply 'other'"), "{warnings}");
+        assert!(!warnings.contains("also arms every hook"), "{warnings}");
+    }
+
+    /// A refused pass still names what a dropped record keeps beside the
+    /// refusal: the forced uninstall that clears the refused value removes it.
+    #[tokio::test]
+    async fn a_refused_pass_names_the_kept_value_its_forced_uninstall_also_removes() {
+        let pass = Pass::armed();
+        let other = published(&pass.registry, "other", SONNET).await;
+        let lock = GrimoireLock {
+            settings: vec![other.clone()],
+            ..entry_free_lock()
+        };
+        let access: Arc<dyn OciAccess> = Arc::new(pass.registry.clone());
+        let mut phase = pass.entered(&lock, &access);
+        phase.orphans = BTreeSet::from(["team".to_string(), "spare".to_string()]);
+        phase.preloaded = Preloaded(vec![(other, Ok(doc(json!({"claude": {"model": "sonnet"}}))))]);
+        let kept_by = |package: &str| {
+            (
+                package.to_string(),
+                KeptBeside {
+                    pieces: BTreeSet::from(["/model".to_string()]),
+                    declarers: BTreeSet::from(["other".to_string()]),
+                    edited: false,
+                },
+            )
+        };
+        let kept = BTreeMap::from([kept_by("team"), kept_by("spare")]);
+        let refused = RefusedPiece {
+            package: "team".to_string(),
+            client: "claude".to_string(),
+            file: Some(CLAUDE_LOCAL_SETTINGS.to_string()),
+            pointer: "/language".to_string(),
+            element: None,
+            marked: PieceMark::Overwrite,
+            state: Some(PieceState::Modified),
+            wanted: None,
+            current: Some("\"fr\"".to_string()),
+        };
+
+        let warnings = capture_warnings(|| phase.warn_refused_beside(&kept, std::slice::from_ref(&refused)));
+
+        assert!(
+            warnings.contains(
+                "settings package 'team' also keeps /model for 'other' outside this update; a forced uninstall of \
+                 'team' removes it too, and `grim install --trust-workspace` then writes it back"
+            ),
+            "{warnings}"
+        );
+        assert!(
+            !warnings.contains("'spare'"),
+            "a record with no refused value: {warnings}"
+        );
+    }
+
+    /// The named pass reaches that warning on its own: `team` leaves the lock with an
+    /// edited value, so the pass refuses, and the line still names the `/model` it
+    /// keeps for `b`, which the forced uninstall of `team` would also remove.
+    #[tokio::test]
+    async fn a_named_pass_that_refuses_names_the_value_its_forced_uninstall_also_removes() {
+        let pass = Pass::armed();
+        let lock = pass.lock(&[("team", SONNET_ENGLISH)]).await;
+        let state = pass.installed(&lock).await;
+        pass.put(&json!({"model": "sonnet", "language": "fr"}));
+        let moved = GrimoireLock {
+            settings: vec![published(&pass.registry, "b", SONNET).await],
+            ..lock.clone()
+        };
+        let (install, prune) = (BTreeSet::new(), team_alone());
+        let phase = pass
+            .entered_named(
+                &moved,
+                &state,
+                Reach::Named {
+                    install: &install,
+                    prune: &prune,
+                },
+            )
+            .await;
+        let capture = WarningCapture::start();
+
+        let (_, named) = phase.converge(Vec::new());
+
+        let warnings = capture.text();
+        let refused: Vec<_> = named
+            .outcome
+            .pieces
+            .iter()
+            .map(|piece| piece.pointer.as_str())
+            .collect();
+        assert_eq!(refused, ["/language"], "the edited value refuses the pass");
+        assert!(
+            warnings.contains(
+                "settings package 'team' also keeps /model for 'b' outside this update; a forced uninstall of \
+                 'team' removes it too"
+            ),
+            "{warnings}"
+        );
+        assert_eq!(pass.file(), json!({"model": "sonnet", "language": "fr"}));
+    }
+
+    /// A package outside the pass that this workspace never consented to
+    /// declares nothing to it, so the closure's drop removes the value.
+    #[tokio::test]
+    async fn a_named_pass_removes_a_value_only_an_unarmed_package_declares() {
+        let removed_with = async |consented: &[&str]| {
+            let mut pass = Pass::new(true, None);
+            let (lock, moved) = dropped_beside(&pass).await;
+            let named = |artifact: &&LockedArtifact| consented.contains(&artifact.name.as_str());
+            pass.consented = Some(moved.settings.iter().filter(named).cloned().collect());
+            let mut state = pass.installed(&lock).await;
+            let (install, prune) = (team_alone(), BTreeSet::new());
+            let reach = Reach::Named {
+                install: &install,
+                prune: &prune,
+            };
+            let changes = pass.applied(&moved, &mut state, reach).await.outcome.changes;
+            (
+                changes.iter().map(|change| change.key.clone()).collect::<Vec<_>>(),
+                pass.file(),
+            )
+        };
+
+        let (removed, file) = removed_with(&["team"]).await;
+        assert_eq!(removed, ["/model"]);
+        assert_eq!(file, json!({"language": "en"}));
+
+        // Positive control: consented, the same package keeps it.
+        let (removed, file) = removed_with(&["team", "b"]).await;
+        assert!(removed.is_empty(), "{removed:?}");
+        assert_eq!(file, json!({"model": "sonnet", "language": "en"}));
+    }
+
+    #[tokio::test]
+    async fn a_named_pass_moves_no_outside_pin() {
+        let pass = Pass::armed();
+        let lock = pass.lock(&[("team", SONNET), ("other", ENGLISH)]).await;
+        let mut state = pass.installed(&lock).await;
+        let mut moved = lock.clone();
+        moved.settings[1] = published(&pass.registry, "other", FRENCH).await;
+        let (install, prune) = (team_alone(), BTreeSet::new());
+        let pin = |state: &InstallState| state.get(ArtifactKind::Settings, "other").unwrap().source.clone();
+
+        pass.applied(
+            &moved,
+            &mut state,
+            Reach::Named {
+                install: &install,
+                prune: &prune,
+            },
+        )
+        .await;
+
+        assert!(pin(&state).eq_content(&lock.settings[1].source));
+        assert_eq!(pass.file(), json!({"model": "sonnet", "language": "en"}));
+
+        // Positive control: the whole lock's pass moves it.
+        pass.applied(&moved, &mut state, Reach::Whole).await;
+        assert!(pin(&state).eq_content(&moved.settings[1].source));
+        assert_eq!(pass.file(), json!({"model": "sonnet", "language": "fr"}));
+    }
+
+    /// `target` with a settings policy whose remedies name `grim`, as a run's has.
+    fn naming(target: InstallTarget, grim: Invocation) -> InstallTarget {
+        let policy = HookPolicy::new(
+            true,
+            Some(true),
+            Interactivity::NonInteractive,
+            target.scope(),
+            target.workspace(),
+            &[],
+            Consent::Absent,
+        );
+        target.with_settings_policy(policy.naming(grim))
+    }
+
+    /// The `--config` a project run in these tests was invoked with.
+    fn config_run() -> Invocation {
+        Invocation::config(Path::new("/srv/team/grimoire.toml"))
+    }
+
     /// A held pin names the run that moves each client: an install for one
-    /// still configured, an update for one the config dropped, at the run's scope.
+    /// still configured, an update for one the config dropped, as the run was invoked.
     #[test]
     fn a_held_pin_names_the_run_that_moves_each_client() {
         let tmp = tempfile::tempdir().unwrap();
@@ -5929,27 +7214,42 @@ mod tests {
         let behind = |names: &[&'static str]| names.iter().copied().collect::<BTreeSet<&str>>();
         let all = ["claude", "codex", "copilot"];
 
-        let narrowed = target(ConfigScope::Global, &["claude"], &all);
+        let narrowed = naming(target(ConfigScope::Global, &["claude"], &all), Invocation::GLOBAL);
         let warnings = capture_warnings(|| warn_left_behind("team", &behind(&["codex", "copilot"]), &narrowed));
         assert!(
             warnings.contains(
                 "settings package 'team': codex, copilot still hold the previous version's values, which this run \
-                 did not select, so its record keeps that version; run `grim install --global --client codex \
+                 did not select, so its record keeps that version; run `grim --global install --client codex \
                  --client copilot` to move them"
             ),
             "{warnings}"
         );
 
-        let dropped = target(ConfigScope::Global, &[], &["claude"]);
+        let dropped = naming(target(ConfigScope::Global, &[], &["claude"]), Invocation::GLOBAL);
         let warnings = capture_warnings(|| warn_left_behind("team", &behind(&["codex"]), &dropped));
         assert!(
             warnings.contains(
                 "settings package 'team': codex still holds the previous version's values but is no longer in \
-                 `[options].clients`, so its record keeps that version; run `grim update --global` to take them out"
+                 `[options].clients`, so its record keeps that version; run `grim --global update` to take them \
+                 out, though that bare update also moves every pin"
             ),
             "{warnings}"
         );
         assert!(!warnings.contains("--client"), "{warnings}");
+
+        // A `--config` run names its config, or the remedy moves another project's pin.
+        let configured = naming(target(ConfigScope::Project, &["claude"], &all), config_run());
+        let warnings = capture_warnings(|| warn_left_behind("team", &behind(&["codex"]), &configured));
+        assert!(
+            warnings.contains("run `grim --config /srv/team/grimoire.toml install --client codex` to move them"),
+            "{warnings}"
+        );
+        let dropped = naming(target(ConfigScope::Project, &[], &["claude"]), config_run());
+        let warnings = capture_warnings(|| warn_left_behind("team", &behind(&["codex"]), &dropped));
+        assert!(
+            warnings.contains("run `grim --config /srv/team/grimoire.toml update` to take them out"),
+            "{warnings}"
+        );
 
         let dropped = target(ConfigScope::Project, &[], &["claude"]);
         let warnings = capture_warnings(|| warn_left_behind("team", &behind(&["codex", "copilot"]), &dropped));
@@ -5957,7 +7257,10 @@ mod tests {
             warnings.contains("codex, copilot still hold the previous version's values but are no longer in"),
             "{warnings}"
         );
-        assert!(warnings.contains("run `grim update` to take them out"), "{warnings}");
+        assert!(
+            warnings.contains("run `grim update` to take them out, though that bare update also moves every pin"),
+            "{warnings}"
+        );
 
         // Without `[options].clients` nothing was dropped, so the install selects it.
         let detected = target(ConfigScope::Project, &["claude"], &[]);
@@ -5993,18 +7296,119 @@ mod tests {
     }
 
     /// A project run cannot reach a global-only value: the package has to be
-    /// declared at global scope first, as the `GlobalOnly` remedy says.
+    /// declared at global scope first, as the `GlobalOnly` remedy says. Both
+    /// commands act at global scope, so a `--config` run's path is not theirs.
     #[tokio::test]
     async fn a_global_only_remedy_names_the_global_declaration() {
         let pass = Pass::armed();
         let lock = pass.lock(&[("team", SONNET)]).await;
         let access: Arc<dyn OciAccess> = Arc::new(pass.registry.clone());
-        let phase = pass.entered(&lock, &access);
+        let mut phase = pass.entered(&lock, &access);
+        phase.target = naming(phase.target.clone(), config_run());
 
         assert_eq!(
             phase.selection_remedy(Some(&doc(json!({"codex": {"model": "gpt"}})))),
             "it declares values for codex; those take settings at global scope only, so declare the package at \
-             global scope with `grim --global add`, then run `grim install --global`"
+             global scope with `grim --global add`, then run `grim --global install`"
+        );
+    }
+
+    /// A refused surface's remedy names the install as the run was invoked.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_refused_surface_names_the_runs_grim() {
+        let pass = Pass::armed();
+        let lock = pass.lock(&[("team", SONNET)]).await;
+        let access: Arc<dyn OciAccess> = Arc::new(pass.registry.clone());
+        let mut phase = pass.entered(&lock, &access);
+        phase.target = naming(phase.target.clone(), config_run());
+        let workspace = phase.target.workspace().to_path_buf();
+        let local = workspace.join(".claude").join("settings.local.json");
+        std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(workspace.join("gone"), &local).unwrap();
+
+        let refused = capture_warnings(|| phase.name_refused_surfaces());
+
+        assert!(
+            refused.contains(
+                "replace the link on that path with a regular file, then run grim --config \
+                 /srv/team/grimoire.toml install"
+            ),
+            "{refused}"
+        );
+    }
+
+    /// A value only global scope takes names the global commands, whatever the run.
+    #[tokio::test]
+    async fn a_global_only_piece_names_the_global_commands() {
+        let pass = Pass::armed();
+        let lock = pass.lock(&[("team", SONNET)]).await;
+        let access: Arc<dyn OciAccess> = Arc::new(pass.registry.clone());
+        let mut phase = pass.entered(&lock, &access);
+        let workspace = phase.target.workspace().to_path_buf();
+        let codex = InstallTarget::new(&workspace, ConfigScope::Project, vec![ClientTarget::Codex]);
+        phase.target = naming(codex, config_run());
+
+        let declined = capture_warnings(|| {
+            let planned = phase.plan(&[(lock.settings[0].clone(), doc(json!({"codex": {"model": "gpt"}})))]);
+            assert!(planned.is_ok(), "a declined piece stops nothing");
+        });
+
+        assert!(
+            declined.contains(
+                "codex applies at global scope only (no-applicable-settings); declare the package at global scope \
+                 with grim --global add, then run grim --global install"
+            ),
+            "{declined}"
+        );
+    }
+
+    /// A pass whose target holds no policy is the uninstall's. Its fence
+    /// refuses only at global scope, so its remedy names the global install.
+    #[test]
+    fn a_pass_without_a_policy_names_the_global_install() {
+        let (_dir, base, repo) = beside_a_repository();
+        kiro_file(&repo.join("kiro"), "m");
+        let state = InstallState::empty(&base.join("global.json"));
+        let phase = global_phase(&repo, kiro_roots(&base, &repo.join("kiro")), state);
+
+        let warnings = capture_warnings(|| {
+            assert!(phase.withholds(&kiro_output()));
+        });
+
+        assert!(
+            warnings.contains("or unset it, then run grim --global install, or run grim --global install from outside"),
+            "{warnings}"
+        );
+    }
+
+    /// Offline, a package whose layer is not cached names the online install as
+    /// the run was invoked.
+    #[tokio::test]
+    async fn an_offline_miss_names_the_runs_install() {
+        let pass = Pass::armed();
+        let lock = pass.lock(&[("team", SONNET)]).await;
+        let access: Arc<dyn OciAccess> = Arc::new(pass.registry.clone());
+        let mut phase = pass.entered(&lock, &access);
+        phase.target = naming(phase.target.clone(), config_run());
+        // The record stands at the pin and holds nothing for claude, so only the layer can say.
+        phase.state.record(new_record(&lock.settings[0]));
+        let cache = tempfile::tempdir().unwrap();
+        let offline: Arc<dyn OciAccess> = Arc::new(crate::oci::access::cached_access::CachedAccess::new(
+            pass.registry.clone(),
+            crate::oci::tag_cache::TagCache::new(cache.path().join("tags")),
+            crate::store::BlobStore::new(cache.path().join("blobs")),
+            crate::oci::access::AccessMode::Offline,
+        ));
+
+        let capture = crate::catalog::test_hosts::LogCapture::start();
+        phase.run(&offline).await.unwrap();
+        let warnings = capture.text();
+
+        assert!(warnings.contains("grim is offline"), "{warnings}");
+        assert!(
+            warnings.contains("run `grim --config /srv/team/grimoire.toml install` online"),
+            "{warnings}"
         );
     }
 }

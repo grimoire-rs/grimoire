@@ -16,7 +16,8 @@ from pathlib import Path
 from src.helpers import make_artifact, make_bundle, make_dependent, write_config
 
 KEPT_NOTE = re.compile(
-    r"kept (\d+) artifacts whose dependency graph could not be computed offline; run grim lock"
+    r"(.+) keeps? (?:its pin|their pins): this lock cannot show (?:its|their) dependencies; "
+    r"run `grim lock`"
 )
 
 
@@ -132,18 +133,24 @@ def test_remove_offline_incomputable_keeps_files(
     # `a`'s edge now points at an entry the lock no longer holds: the closure
     # cannot be followed offline.
     _drop_lock_entry(project_dir, "b")
-    untouched = {name: _entry_block(project_dir, name) for name in ("a", "c")}
+    untouched = {name: _entry_block(project_dir, name) for name in ("a", "c", "keep")}
     files_before = _tree(project_dir / ".claude")
 
     result = runner.run("--format", "json", "remove", "skill", "keep")
 
     assert result.returncode == 0, result.stderr
     assert '"status": "removed"' in result.stdout
-    # Plain stderr, one line, counting the artifact it could not judge (`c`).
+    # Only the next `grim lock` reads what `b` requires, so nothing offline shows
+    # that `b` does not require `keep`: dropped, `keep`'s pin could move there.
+    assert (
+        "skill 'keep' keeps its pin: this lock cannot show whether skill 'b' requires it"
+        in result.stderr
+    )
+    # The note names the artifacts it could not judge: `c`, and `keep`.
     match = KEPT_NOTE.search(result.stderr)
-    assert match and match.group(1) == "1", result.stderr
+    assert match and match.group(1).endswith("skill 'c' and skill 'keep'"), result.stderr
     assert _declared(project_dir) == {"a"}
-    assert _lock_names(project_dir) == {"a", "c"}, "the target only left the lock"
+    assert _lock_names(project_dir) == {"a", "c", "keep"}, "no entry left the lock"
     for name, block in untouched.items():
         assert _entry_block(project_dir, name) == block, f"{name} entry rewritten"
     assert _tree(project_dir / ".claude") == files_before, "no file touched"

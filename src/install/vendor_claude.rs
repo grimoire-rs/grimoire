@@ -446,8 +446,9 @@ impl Vendor for ClaudeVendor {
         workspace: &Path,
         scope: ConfigScope,
         retired: &[super::install_state::ClientOutput],
+        adds: super::vendor::SyncAdds<'_>,
     ) -> std::io::Result<()> {
-        claude_config::sync_for_state(state, workspace, scope, retired)
+        claude_config::sync_for_state(state, workspace, scope, retired, adds)
     }
 
     fn mcp_entry(

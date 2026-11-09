@@ -16,6 +16,31 @@ pub struct LockError {
     pub path: PathBuf,
     /// The specific failure.
     pub kind: LockErrorKind,
+    /// What keeps the pins, on a lock [`super::lock_io::load`] could not read.
+    pub recovery: Option<LockRecovery>,
+}
+
+/// The way out of a lock no reader can use. Every one words it alike, since
+/// deleting the file is the obvious move and the one that loses the pins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockRecovery {
+    /// The file is damaged.
+    RestoreOrRepair,
+    /// The file is fine, and this build is too old for it.
+    UpgradeGrim,
+}
+
+impl std::fmt::Display for LockRecovery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::RestoreOrRepair => {
+                "the lock cannot be read; restore it from git or repair it, because deleting the lock moves every pin"
+            }
+            Self::UpgradeGrim => {
+                "this lock needs a newer grim; upgrade grim, because deleting the lock moves every pin"
+            }
+        })
+    }
 }
 
 impl LockError {
@@ -24,6 +49,7 @@ impl LockError {
         Self {
             path: path.into(),
             kind,
+            recovery: None,
         }
     }
 
@@ -40,6 +66,9 @@ impl LockError {
 
 impl std::fmt::Display for LockError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(recovery) = self.recovery {
+            write!(f, "{recovery}: ")?;
+        }
         if self.path.as_os_str().is_empty() {
             write!(f, "{}", self.kind)
         } else {
@@ -91,9 +120,17 @@ pub enum LockErrorKind {
 
     /// The file is the other lock flavor: a `grimoire.lock` carrying
     /// plugin scope, or a `marketplace.lock` entry outside a declared
-    /// plugin (or with a name unsafe to materialize).
+    /// plugin (or with a name unsafe to materialize; the `grimoire.lock`
+    /// form of that refusal is [`Self::InvalidEntryName`]).
     #[error("{message}")]
     ScopeMismatch { message: String },
+
+    /// A `grimoire.lock` entry name is unsafe as an install path segment.
+    /// Apart from [`Self::ScopeMismatch`] because a relock reads a
+    /// plugin-scoped file as absent, and reading this one as absent would
+    /// move every pin.
+    #[error("{message}")]
+    InvalidEntryName { message: String },
 
     /// The lock parses but its dependency graph cannot be followed offline
     /// (a missing snapshot, or a cycle). `message` says which and names the

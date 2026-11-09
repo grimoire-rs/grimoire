@@ -328,8 +328,10 @@ struct NounWords {
     gloss: &'static str,
     /// What one answer covers.
     coverage: &'static str,
-    /// The two answers that need no terminal.
-    remedy: &'static str,
+    /// The verb of the answer that needs no terminal and lasts, after `grim`.
+    allow: &'static str,
+    /// The flag that answers for one run.
+    trust: &'static str,
     /// What a decline leaves undone.
     undone: &'static str,
 }
@@ -345,7 +347,8 @@ impl ConsentNoun {
                 inline: "hooks",
                 gloss: "A hook is code your AI client runs automatically.",
                 coverage: "every hook",
-                remedy: "use 'grim hook allow', or pass --trust-hooks",
+                allow: "hook allow",
+                trust: "--trust-hooks",
                 undone: "nothing armed",
             },
             Self::Settings => NounWords {
@@ -353,7 +356,8 @@ impl ConsentNoun {
                 inline: "settings",
                 gloss: "Settings change how your AI client behaves and what it may do.",
                 coverage: "every settings package",
-                remedy: "use 'grim consent allow', or pass --trust-workspace",
+                allow: "consent allow",
+                trust: "--trust-workspace",
                 undone: "nothing applied",
             },
             Self::HooksAndSettings => NounWords {
@@ -362,7 +366,8 @@ impl ConsentNoun {
                 gloss: "A hook is code your AI client runs automatically. \
                         Settings change how your AI client behaves and what it may do.",
                 coverage: "every hook and settings package",
-                remedy: "use 'grim consent allow', or pass --trust-workspace",
+                allow: "consent allow",
+                trust: "--trust-workspace",
                 undone: "nothing armed or applied",
             },
         }
@@ -377,15 +382,15 @@ impl ConsentNoun {
     }
 
     /// The log line for an accepted answer whose record at `record` could not
-    /// be written, ending with the fix.
-    pub fn record_failed(self, record: &Path) -> String {
-        let (subject, allow) = match self {
-            Self::Hooks => ("hook", "grim hook allow"),
-            Self::Settings | Self::HooksAndSettings => ("workspace", "grim consent allow"),
+    /// be written, ending with the fix as `grim` runs it.
+    pub fn record_failed(self, record: &Path, grim: &crate::config::scope::Invocation) -> String {
+        let subject = match self {
+            Self::Hooks => "hook",
+            Self::Settings | Self::HooksAndSettings => "workspace",
         };
+        let NounWords { allow, undone, .. } = self.words();
         format!(
-            "{subject} consent could not be recorded; {}; make {} writable, then run {allow}",
-            self.words().undone,
+            "{subject} consent could not be recorded; {undone}; make {} writable, then run {grim} {allow}",
             record.display()
         )
     }
@@ -415,8 +420,8 @@ impl ConsentNoun {
 ///   the owner reversed D5 to avoid.
 /// - **Call from the command boundary, above the per-client loop — never from
 ///   `Vendor::sync_config`.** `sync_config` is invoked once *per client* from
-///   six sites, each inside a `client.vendor().sync_config(…)` loop, so
-///   prompting there asks up to three times for one consent. That breaks
+///   two sites, each inside a `client.vendor().sync_config(…)` loop, so
+///   prompting there asks once per client for one consent. That breaks
 ///   C-023's *once* and contradicts [`Arming::ConsentRequired`], which exists to
 ///   keep the prompt in **exactly one place**.
 ///
@@ -434,9 +439,10 @@ pub fn prompt_for_workspace(
     record: &Path,
     new: &[String],
     noun: ConsentNoun,
+    grim: &crate::config::scope::Invocation,
 ) -> io::Result<ConsentAnswer> {
     let mut stderr = io::stderr();
-    write_question(&mut stderr, workspace, record, new, noun)?;
+    write_question(&mut stderr, workspace, record, new, noun, grim)?;
     stderr.flush()?;
 
     let mut line = String::new();
@@ -458,6 +464,7 @@ fn write_question(
     record: &Path,
     new: &[String],
     noun: ConsentNoun,
+    grim: &crate::config::scope::Invocation,
 ) -> io::Result<()> {
     // Escaped on the way to a terminal for the same reason `validate_registries`
     // escapes an authored locator: these values reached grim from a config file
@@ -471,7 +478,8 @@ fn write_question(
         inline,
         gloss,
         coverage,
-        remedy,
+        allow,
+        trust,
         ..
     } = noun.words();
     if new.is_empty() {
@@ -489,7 +497,8 @@ fn write_question(
     )?;
     writeln!(
         out,
-        "Declining arms nothing and changes no file. Non-interactive runs never ask — {remedy} for one run."
+        "Declining arms nothing and changes no file. Non-interactive runs never ask — use '{grim} {allow}', \
+         or pass {trust} for one run."
     )?;
     write!(out, "Allow {inline} from '{shown}'? [y/N] ")
 }
@@ -535,33 +544,47 @@ mod tests {
     #[test]
     fn a_failed_record_is_logged_for_what_it_asked() {
         let record = Path::new("/grim/hooks/consent/k.json");
+        let grim = crate::config::scope::Invocation::WALKED;
         let tail = |verb: &str| format!("; make /grim/hooks/consent/k.json writable, then run {verb}");
         assert_eq!(
-            ConsentNoun::Hooks.record_failed(record),
+            ConsentNoun::Hooks.record_failed(record, &grim),
             format!(
                 "hook consent could not be recorded; nothing armed{}",
                 tail("grim hook allow")
             )
         );
         assert_eq!(
-            ConsentNoun::Settings.record_failed(record),
+            ConsentNoun::Settings.record_failed(record, &grim),
             format!(
                 "workspace consent could not be recorded; nothing applied{}",
                 tail("grim consent allow")
             )
         );
         assert_eq!(
-            ConsentNoun::HooksAndSettings.record_failed(record),
+            ConsentNoun::HooksAndSettings.record_failed(record, &grim),
             format!(
                 "workspace consent could not be recorded; nothing armed or applied{}",
                 tail("grim consent allow")
             )
         );
+        assert!(
+            ConsentNoun::Settings
+                .record_failed(record, &crate::config::scope::Invocation::GLOBAL)
+                .ends_with("then run grim --global consent allow")
+        );
     }
 
     fn question(noun: ConsentNoun, new: &[String]) -> String {
         let mut out = Vec::new();
-        write_question(&mut out, Path::new("/work/app"), Path::new("/grim/k.json"), new, noun).unwrap();
+        write_question(
+            &mut out,
+            Path::new("/work/app"),
+            Path::new("/grim/k.json"),
+            new,
+            noun,
+            &crate::config::scope::Invocation::WALKED,
+        )
+        .unwrap();
         String::from_utf8(out).unwrap()
     }
 
@@ -674,6 +697,7 @@ mod tests {
                 Path::new("/grim/k.json"),
                 &new,
                 noun,
+                &crate::config::scope::Invocation::WALKED,
             )
             .unwrap();
             let text = String::from_utf8(out).unwrap();

@@ -124,6 +124,9 @@ pub enum UninstallError {
         recorded: Digest,
         /// The value hash read back from the config file now.
         actual: Digest,
+        /// Every other drifted member of the same record, in output order: a
+        /// forced retry removes them too, so a dialog lists each one.
+        more: Vec<DriftedEntry>,
     },
     /// Settings values no longer hold what grim recorded, so removing them
     /// would discard a local edit. Refused unless forced.
@@ -133,6 +136,15 @@ pub enum UninstallError {
     /// error is far larger than every other variant.
     #[error(transparent)]
     Settings(Box<crate::error::Error>),
+}
+
+/// A managed config member that no longer holds the value grim recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriftedEntry {
+    /// The resolved config file holding the member.
+    pub path: PathBuf,
+    /// The two-level JSON pointer of the member.
+    pub pointer: String,
 }
 
 /// Remove every recorded client output for `(kind, name)` from disk and
@@ -169,6 +181,10 @@ pub enum UninstallError {
 /// guaranteed contained within its anchor root; a missing target is operated
 /// on via the raw anchor join. An anchor whose root is unresolvable is skipped
 /// (see above), never an error.
+#[expect(
+    clippy::result_large_err,
+    reason = "EntryModified names every drifted member so a forced retry lists each; returned once per delete"
+)]
 pub fn uninstall(
     state: &mut InstallState,
     kind: ArtifactKind,
@@ -266,7 +282,7 @@ pub fn uninstall(
                     .is_ok_and(|actual| actual == out.content_hash)
             {
                 tracing::warn!(
-                    "leaving managed entry '{pointer}' in '{}': grim adopted it rather than writing it, so it is not grim's to remove — `grim uninstall --force` removes it",
+                    "leaving managed entry '{pointer}' in '{}': grim adopted it rather than writing it, so it is not grim's to remove — re-run with `--force` to remove it",
                     target.display()
                 );
                 abandoned_entries.push(AbandonedEntry {
@@ -353,6 +369,33 @@ pub fn uninstall(
     })
 }
 
+/// The refusal [`uninstall`] would return for `(kind, name)` before deleting
+/// anything, judged against `state` and writing nothing: a drifted managed
+/// entry, or a drifted settings value.
+///
+/// # Errors
+///
+/// What [`uninstall`] returns before its first deletion or write.
+#[expect(
+    clippy::result_large_err,
+    reason = "EntryModified names every drifted member so a forced retry lists each; returned once per node"
+)]
+pub fn refusal(
+    state: &InstallState,
+    kind: ArtifactKind,
+    name: &str,
+    roots: &AnchorRoots,
+    force: bool,
+) -> Result<(), UninstallError> {
+    if kind == ArtifactKind::Settings {
+        return settings_phase::uninstall_refusal(state, name, roots, force);
+    }
+    match state.get(kind, name) {
+        Some(record) if !force => refuse_drifted_entries(record, roots),
+        _ => Ok(()),
+    }
+}
+
 /// Refuse the uninstall when any `entry` output's managed member drifted
 /// from the value recorded at install time.
 ///
@@ -371,10 +414,16 @@ pub fn uninstall(
 ///
 /// # Errors
 ///
-/// [`UninstallError::EntryModified`] for the first drifted member found
-/// (forceable, exit 65), or [`UninstallError::Anchor`] if resolving that
-/// member's config path fails after its hash was already read.
+/// [`UninstallError::EntryModified`] naming every drifted member, the first
+/// one's digests on the error (forceable, exit 65), or
+/// [`UninstallError::Anchor`] if resolving a member's config path fails after
+/// its hash was already read.
+#[expect(
+    clippy::result_large_err,
+    reason = "EntryModified names every drifted member so a forced retry lists each; returned once per delete"
+)]
 fn refuse_drifted_entries(record: &InstallRecord, roots: &AnchorRoots) -> Result<(), UninstallError> {
+    let mut drifted = Vec::new();
     for out in &record.outputs {
         let Some(pointer) = &out.entry else { continue };
         let Ok(actual) = out.current_hash(record.kind, roots, Containment::Strict) else {
@@ -390,14 +439,26 @@ fn refuse_drifted_entries(record: &InstallRecord, roots: &AnchorRoots) -> Result
             "refusing to remove managed entry '{pointer}' from '{}': it no longer matches what grim installed",
             path.display()
         );
-        return Err(UninstallError::EntryModified {
-            path,
-            pointer: pointer.clone(),
-            recorded: out.content_hash.clone(),
+        drifted.push((
+            out,
+            DriftedEntry {
+                path,
+                pointer: pointer.clone(),
+            },
             actual,
-        });
+        ));
     }
-    Ok(())
+    let mut drifted = drifted.into_iter();
+    let Some((first, DriftedEntry { path, pointer }, actual)) = drifted.next() else {
+        return Ok(());
+    };
+    Err(UninstallError::EntryModified {
+        path,
+        pointer,
+        recorded: first.content_hash.clone(),
+        actual,
+        more: drifted.map(|(_, entry, _)| entry).collect(),
+    })
 }
 
 /// Splice the managed member `pointer` points at out of the config file at
@@ -973,6 +1034,45 @@ mod tests {
         assert!(
             state.get(ArtifactKind::Mcp, "grim").is_some(),
             "the record must survive a refusal, or --force has nothing left to act on"
+        );
+    }
+
+    /// A forced retry removes every drifted member of the record, so the refusal
+    /// names each one, not only the first.
+    #[test]
+    fn uninstall_refusal_names_every_drifted_entry_of_the_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        for file in [".mcp.json", ".cursor/mcp.json"] {
+            let path = ws.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                &path,
+                "{\n  \"mcpServers\": {\n    \"grim\": {\"command\": \"edited\"}\n  }\n}\n",
+            )
+            .unwrap();
+        }
+        let mut state = drifted_entry_state(ws, ".mcp.json");
+        let mut cursor = client_output_for("cursor", ".cursor/mcp.json", Digest::Sha256("c".repeat(64)));
+        cursor.entry = Some("/mcpServers/grim".to_string());
+        let mut record = state.get(ArtifactKind::Mcp, "grim").unwrap().clone();
+        record.outputs.push(cursor);
+        state.record(record);
+
+        let err = uninstall(&mut state, ArtifactKind::Mcp, "grim", &roots(ws), false).expect_err("both drifted");
+
+        let UninstallError::EntryModified { path, more, .. } = err else {
+            panic!("expected the forceable drift refusal, got {err:?}");
+        };
+        assert!(path.ends_with(".mcp.json"), "{path:?}");
+        let rest: Vec<_> = more
+            .iter()
+            .map(|entry| (entry.path.clone(), entry.pointer.as_str()))
+            .collect();
+        assert_eq!(rest.len(), 1, "{rest:?}");
+        assert!(
+            rest[0].0.ends_with(".cursor/mcp.json") && rest[0].1 == "/mcpServers/grim",
+            "{rest:?}"
         );
     }
 

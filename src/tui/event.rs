@@ -11,7 +11,7 @@
 //! decision table is unit-testable headlessly.
 
 pub use super::state::BatchOp;
-use super::state::{ArtifactState, Mode, TuiState, ViewMode};
+use super::state::{ArtifactState, Mode, PinChanges, TuiState, ViewMode};
 
 /// Rows one `PageUp`/`PageDown` press scrolls the detail pane. A fixed
 /// step (not the live pane height, which the pure layer cannot know);
@@ -145,13 +145,18 @@ pub enum TuiAction {
     LoadCompanion { repo: String },
     /// Open `url` in the system browser (the selected row's repository).
     OpenUrl { url: String },
-    /// Re-issue the refused install at `rows[row]` with `force`, after the
-    /// user chose **Overwrite** in [`Mode::ConfirmForce`].
+    /// Re-issue the refused action at `rows[row]` with `force`, after the
+    /// user chose its action button in [`Mode::ConfirmForce`].
     ForceRetry {
         /// The `rows` index to re-issue.
         row: usize,
-        /// Whether the refused action was an update (vs. a fresh install).
-        is_update: bool,
+        /// The refused action.
+        op: BatchOp,
+        /// What the refused attempt already changed, for the retry to name and
+        /// prune.
+        pins: PinChanges,
+        /// What the retry overrides: only the nodes its dialog listed.
+        force: crate::install::installer::ForceScope,
     },
     /// Create the project `grimoire.toml` and switch to project scope, after
     /// the user chose **Initialize** in [`Mode::ConfirmInit`].
@@ -180,9 +185,23 @@ pub fn handle(state: &mut TuiState, input: TuiInput) -> TuiAction {
     }
 }
 
-/// Result-panel keys: `q` quits, anything else closes it. The panel offers no
-/// action, so a queued key costs the reader the list and nothing more.
+/// Discard the events queued while an action ran and opened a forced-retry
+/// dialog, so no key typed before the user saw it can answer it. Each item of
+/// `queued` is one event: `Some(size)` for a resize, which the dialog still
+/// needs to lay itself out, `None` for anything else, which is dropped.
+pub fn drop_typeahead(state: &mut TuiState, queued: impl IntoIterator<Item = Option<(u16, u16)>>) {
+    for size in queued.into_iter().flatten() {
+        state.set_term_size(size);
+    }
+}
+
+/// Result-panel keys: `q` quits, the scroll keys read a list taller than the
+/// panel, anything else closes it. The panel offers no action, so a queued key
+/// costs the reader the list and nothing more.
 fn handle_settings_result(state: &mut TuiState, input: TuiInput) -> TuiAction {
+    if scroll_popup_key(state, &input) {
+        return TuiAction::None;
+    }
     if matches!(input, TuiInput::Char('q') | TuiInput::Quit) {
         return TuiAction::Quit;
     }
@@ -190,10 +209,24 @@ fn handle_settings_result(state: &mut TuiState, input: TuiInput) -> TuiAction {
     TuiAction::None
 }
 
+/// Scroll the open batch, init or settings popup when `input` is a scroll key,
+/// returning whether it was one.
+fn scroll_popup_key(state: &mut TuiState, input: &TuiInput) -> bool {
+    let rows = match input {
+        TuiInput::Up | TuiInput::Char('k') => -1,
+        TuiInput::Down | TuiInput::Char('j') => 1,
+        TuiInput::PageUp => -state.popup_page(),
+        TuiInput::PageDown => state.popup_page(),
+        _ => return false,
+    };
+    state.scroll_popup(rows);
+    true
+}
+
 /// Overwrite-confirmation keys: `←`/`→` (which map to
 /// [`TuiInput::Collapse`]/[`TuiInput::Expand`]) and `h`/`l` move between
-/// Cancel and Overwrite, `Enter` commits the highlighted button, `Esc`
-/// cancels, `q` quits.
+/// Cancel and Overwrite, `↑`/`↓`, `j`/`k` and `PgUp`/`PgDn` scroll the body,
+/// `Enter` commits the highlighted button, `Esc` cancels, `q` quits.
 ///
 /// Deliberately **no bare `y`/`n` accelerator**: this prompt discards the
 /// user's own local edits, and a single unmodified keystroke is exactly how a
@@ -205,10 +238,28 @@ fn handle_confirm_force(state: &mut TuiState, input: TuiInput) -> TuiAction {
             state.confirm_force_move(1);
             TuiAction::None
         }
+        TuiInput::Up | TuiInput::Char('k') => {
+            state.scroll_confirm(-1);
+            TuiAction::None
+        }
+        TuiInput::Down | TuiInput::Char('j') => {
+            state.scroll_confirm(1);
+            TuiAction::None
+        }
+        TuiInput::PageUp => {
+            state.scroll_confirm(-state.confirm_page());
+            TuiAction::None
+        }
+        TuiInput::PageDown => {
+            state.scroll_confirm(state.confirm_page());
+            TuiAction::None
+        }
         TuiInput::Enter => match state.take_confirm_force() {
             Some(p) => TuiAction::ForceRetry {
                 row: p.row,
-                is_update: p.is_update,
+                op: p.op,
+                pins: p.pins,
+                force: p.force,
             },
             None => TuiAction::None,
         },
@@ -224,11 +275,15 @@ fn handle_confirm_force(state: &mut TuiState, input: TuiInput) -> TuiAction {
 
 /// Batch-confirmation keys: the same shape as [`handle_confirm_force`] —
 /// `←`/`→` or `h`/`l` move between Cancel and the action, `Enter` commits,
-/// `q` quits, anything else cancels. No `y` accelerator and Cancel
+/// `q` quits, `↑`/`↓`, `j`/`k` and `PgUp`/`PgDn` scroll a body taller than the
+/// popup, anything else cancels. No `y` accelerator and Cancel
 /// preselected: the prompt exists to stop keys typed into the list by
 /// mistake (a word containing `a` then `i` marks everything and installs
 /// it), so the next stray key must never be the one that confirms.
 fn handle_confirm_batch(state: &mut TuiState, input: TuiInput) -> TuiAction {
+    if scroll_popup_key(state, &input) {
+        return TuiAction::None;
+    }
     match input {
         TuiInput::Collapse | TuiInput::Expand | TuiInput::Char('h') | TuiInput::Char('l') => {
             state.confirm_batch_move();
@@ -251,6 +306,9 @@ fn handle_confirm_batch(state: &mut TuiState, input: TuiInput) -> TuiAction {
 /// [`handle_confirm_batch`], with Cancel preselected so a stray Enter never
 /// writes a config file. Cancelling leaves the session in its current scope.
 fn handle_confirm_init(state: &mut TuiState, input: TuiInput) -> TuiAction {
+    if scroll_popup_key(state, &input) {
+        return TuiAction::None;
+    }
     match input {
         TuiInput::Collapse | TuiInput::Expand | TuiInput::Char('h') | TuiInput::Char('l') => {
             state.confirm_init_move();
@@ -1321,35 +1379,135 @@ mod tests {
         assert_eq!(handle(&mut s, TuiInput::Char('q')), TuiAction::Quit);
     }
 
+    /// Keys typed while a refused run was still going were meant for the list. The
+    /// pair that moves to the action button and presses it must not reach the
+    /// dialog the run opened, whose body fits the screen and so has nothing to read.
+    #[test]
+    fn keys_queued_before_the_force_confirm_opened_never_answer_it() {
+        let mut s = seeded();
+        let mut queue: std::collections::VecDeque<TuiInput> = [TuiInput::Expand, TuiInput::Enter].into_iter().collect();
+        s.open_confirm_force(
+            0,
+            BatchOp::Install,
+            "r/alpha",
+            "modified locally",
+            PinChanges::default(),
+            std::collections::BTreeSet::new(),
+        );
+
+        drop_typeahead(&mut s, std::iter::from_fn(|| queue.pop_front().map(|_| None)));
+        let acted: Vec<TuiAction> = queue.drain(..).map(|input| handle(&mut s, input)).collect();
+
+        assert!(acted.is_empty(), "the queue was drained: {acted:?}");
+        assert_eq!(s.mode, Mode::ConfirmForce, "the dialog still waits for the user");
+        assert!(!s.confirm.as_ref().unwrap().overwrite_selected);
+    }
+
+    /// A resize that was queued still reaches the dialog, which lays itself out by it.
+    #[test]
+    fn a_queued_resize_survives_the_typeahead_drop() {
+        let mut s = seeded();
+
+        drop_typeahead(&mut s, [None, Some((100, 30)), None]);
+
+        assert_eq!(s.term_size, (100, 30));
+    }
+
+    /// The batch and init popups scroll with the dialog's keys; they used to
+    /// cancel on them.
+    #[test]
+    fn scroll_keys_read_a_batch_popup_instead_of_cancelling_it() {
+        let mut s = seeded();
+        s.set_term_size((60, 8));
+        s.open_confirm_batch(
+            BatchOp::Install,
+            vec![0, 1, 2, 3],
+            4,
+            crate::tui::state::BatchSource::Marked,
+        );
+
+        for key in [TuiInput::Down, TuiInput::Char('j'), TuiInput::PageDown, TuiInput::Up] {
+            assert_eq!(handle(&mut s, key), TuiAction::None);
+            assert_eq!(s.mode, Mode::ConfirmBatch, "{key:?} scrolls instead of cancelling");
+        }
+        assert_eq!(handle(&mut s, TuiInput::Esc), TuiAction::None);
+        assert_eq!(s.mode, Mode::List);
+    }
+
     /// A7. Cancel is preselected, so a keypress already queued when the modal
     /// appears dismisses it — a destructive default is exactly how a stray
     /// Enter discards the user's local edits.
     #[test]
     fn queued_enter_on_the_force_confirm_cancels_and_does_not_retry() {
         let mut s = seeded();
-        s.open_confirm_force(0, false, "r/alpha", "modified locally");
+        s.open_confirm_force(
+            0,
+            BatchOp::Install,
+            "r/alpha",
+            "modified locally",
+            PinChanges::default(),
+            std::collections::BTreeSet::new(),
+        );
         assert_eq!(s.mode, Mode::ConfirmForce);
         assert_eq!(handle(&mut s, TuiInput::Enter), TuiAction::None);
         assert_eq!(s.mode, Mode::List);
         assert!(s.confirm.is_none(), "the prompt is consumed, not left open");
     }
 
-    /// A7. Moving onto Overwrite and committing re-issues the SAME action
-    /// with force; `is_update` is carried so an update never re-issues as a
-    /// fresh install.
+    /// Moving onto the action button and committing re-issues the SAME action
+    /// with force; the op is carried so an update never re-issues as a fresh
+    /// install, nor a delete as an install, and the pins the refused attempt
+    /// changed so the retry still names and prunes them.
     #[test]
     fn selecting_overwrite_emits_a_forced_retry_of_the_same_action() {
         let mut s = seeded();
-        s.open_confirm_force(3, true, "r/alpha", "modified locally");
+        let pins = PinChanges {
+            moved: vec![(crate::oci::ArtifactKind::Skill, "a".to_string())],
+            dropped: vec![(crate::oci::ArtifactKind::Skill, "d".to_string())],
+            no_lock: None,
+            prunable: vec![(crate::oci::ArtifactKind::Skill, "d".to_string())],
+        };
+        let listed = std::collections::BTreeSet::from([(crate::oci::ArtifactKind::Skill, "a".to_string())]);
+        s.open_confirm_force(
+            3,
+            BatchOp::Update,
+            "r/alpha",
+            "modified locally",
+            pins.clone(),
+            listed.clone(),
+        );
         handle(&mut s, TuiInput::Expand);
         assert_eq!(
             handle(&mut s, TuiInput::Enter),
             TuiAction::ForceRetry {
                 row: 3,
-                is_update: true
-            }
+                op: BatchOp::Update,
+                pins,
+                force: crate::install::installer::ForceScope::Only(listed),
+            },
+            "the retry forces what the dialog listed and no other"
         );
         assert_eq!(s.mode, Mode::List);
+
+        s.open_confirm_force(
+            1,
+            BatchOp::Uninstall,
+            "r/pack",
+            "1 settings value(s)",
+            PinChanges::default(),
+            std::collections::BTreeSet::new(),
+        );
+        handle(&mut s, TuiInput::Expand);
+        assert_eq!(
+            handle(&mut s, TuiInput::Enter),
+            TuiAction::ForceRetry {
+                row: 1,
+                op: BatchOp::Uninstall,
+                pins: PinChanges::default(),
+                force: crate::install::installer::ForceScope::Only(std::collections::BTreeSet::new()),
+            },
+            "a refused delete comes back as a delete"
+        );
     }
 
     /// A7. There is no bare `y`/`n` accelerator: a single unmodified keystroke
@@ -1358,9 +1516,62 @@ mod tests {
     #[test]
     fn force_confirm_has_no_bare_yes_accelerator() {
         let mut s = seeded();
-        s.open_confirm_force(0, false, "r/alpha", "modified locally");
+        s.open_confirm_force(
+            0,
+            BatchOp::Install,
+            "r/alpha",
+            "modified locally",
+            PinChanges::default(),
+            std::collections::BTreeSet::new(),
+        );
         assert_eq!(handle(&mut s, TuiInput::Char('y')), TuiAction::None);
         assert_eq!(s.mode, Mode::List, "an unrecognized key dismisses");
+        assert!(s.confirm.is_none());
+    }
+
+    /// A body taller than the popup keeps Overwrite unchoosable until the
+    /// scroll keys have shown its last row, and a resize, which re-wraps the
+    /// body, takes that back.
+    #[test]
+    fn a_force_confirm_taller_than_the_screen_confirms_only_once_read_to_its_end() {
+        let mut s = seeded();
+        s.set_term_size((80, 24));
+        let detail = (0..60).map(|n| format!("line {n:02}")).collect::<Vec<_>>().join("\n");
+        s.open_confirm_force(
+            0,
+            BatchOp::Install,
+            "r/alpha",
+            &detail,
+            PinChanges::default(),
+            std::collections::BTreeSet::new(),
+        );
+        handle(&mut s, TuiInput::Expand);
+        assert_eq!(handle(&mut s.clone(), TuiInput::Enter), TuiAction::None);
+        assert!(
+            !s.confirm.as_ref().unwrap().overwrite_selected,
+            "Overwrite is not chosen yet"
+        );
+
+        for key in [TuiInput::Down, TuiInput::Char('j'), TuiInput::PageDown] {
+            assert_eq!(handle(&mut s, key), TuiAction::None);
+            assert_eq!(s.mode, Mode::ConfirmForce, "{key:?} scrolls instead of dismissing");
+        }
+        assert_eq!(i64::from(s.confirm.as_ref().unwrap().scroll), 2 + s.confirm_page());
+        handle(&mut s, TuiInput::Up);
+        handle(&mut s, TuiInput::Char('k'));
+        handle(&mut s, TuiInput::PageUp);
+        assert_eq!(s.confirm.as_ref().unwrap().scroll, 0);
+
+        while !s.confirm_force_ready() {
+            handle(&mut s, TuiInput::PageDown);
+        }
+        handle(&mut s, TuiInput::Expand);
+        assert!(s.confirm.as_ref().unwrap().overwrite_selected);
+
+        s.set_term_size((100, 30));
+        let c = s.confirm.as_ref().unwrap();
+        assert_eq!((c.scroll, c.read, c.overwrite_selected), (0, false, false));
+        assert_eq!(handle(&mut s, TuiInput::Enter), TuiAction::None, "Enter cancels");
         assert!(s.confirm.is_none());
     }
 

@@ -13,14 +13,15 @@ use clap::Args;
 
 use crate::api::remove_report::{RemoveReport, RemoveStatus};
 use crate::cli::exit_code::ExitCode;
+use crate::config::declaration::{ConfigOptions, DesiredSet, RegistryConfig};
+use crate::config::scope::Invocation;
 use crate::context::Context;
 use crate::lock::file_lock::ConfigFileLock;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
-use crate::lock::locked_artifact::LockedArtifact;
 use crate::oci::ArtifactKind;
 
-use super::add::write_config;
+use super::add::{restore_config, snapshot_config, write_config};
 use super::scope_resolution;
 
 /// `grim remove` arguments.
@@ -87,20 +88,36 @@ pub async fn run(ctx: &Context, args: &RemoveArgs) -> anyhow::Result<(RemoveRepo
 
     // Persist the edited config, then bring the lock to the post-edit
     // effective state: drop what no other declaration holds, keep shared
-    // entries, restamp the hash unless an id-mismatch left the lock stale.
-    super::grim(write_config(
+    // entries, restamp the hash only if the lock states a fact.
+    let edit = ConfigEdit::write(
         &scope.config_path,
         &scope.options,
         &scope.registries,
         &set,
-    ))?;
+        &scope.invocation,
+    )?;
 
-    if let Ok(previous) = lock_io::load(&scope.lock_path) {
-        let outcome = drop_from_lock(&previous, kind, &args.name, &set_before, &set);
+    if let Some(previous) = load_for_edit(&scope.lock_path) {
+        let target = super::uninstall::EditTarget {
+            config_path: &scope.config_path,
+            lock_path: &scope.lock_path,
+            grim: &scope.invocation,
+            store: ctx.paths(),
+        };
+        let stored = target.stored_members(&set, &previous);
+        let outcome = crate::lock::edit::drop_from_lock(
+            &previous,
+            kind,
+            &args.name,
+            &set_before,
+            &set,
+            &scope.invocation,
+            &stored,
+        );
+        edit.save_lock(&scope.lock_path, &outcome.lock, &previous)?;
         for note in &outcome.notes {
             tracing::warn!("{note}");
         }
-        super::grim(lock_io::save(&scope.lock_path, &outcome.lock, Some(&previous)))?;
     }
 
     // C-155: `remove` is not a converging seam (it loads no install state), so
@@ -108,8 +125,9 @@ pub async fn run(ctx: &Context, args: &RemoveArgs) -> anyhow::Result<(RemoveRepo
     // rather than let the undeclare look like a disarm.
     if kind == ArtifactKind::Hook {
         tracing::warn!(
-            "hook '{}' was undeclared but stays armed until `grim install` or `grim uninstall` runs",
-            args.name
+            "hook '{}' was undeclared but stays armed until `{grim} install` or `{grim} uninstall` runs",
+            args.name,
+            grim = scope.invocation
         );
     }
 
@@ -119,415 +137,93 @@ pub async fn run(ctx: &Context, args: &RemoveArgs) -> anyhow::Result<(RemoveRepo
     ))
 }
 
-/// Result of bringing the lock to the post-edit effective state.
-pub(crate) struct UndeclareOutcome {
-    /// The lock to save.
-    pub lock: GrimoireLock,
-    /// User-facing warnings (id-mismatch drops, unmasked conflicts).
-    pub notes: Vec<String>,
+/// The lock a declaration edit brings along, `None` when there is none to
+/// touch. An unreadable lock holds no pin the edit could move, so the edit
+/// goes on and only says so: every command that reads the lock refuses it.
+pub(crate) fn load_for_edit(path: &std::path::Path) -> Option<GrimoireLock> {
+    lock_io::load_existing(path).unwrap_or_else(|e| {
+        // Not `registry_text`: its cap would cut the path off the end of the cause.
+        let cause = crate::error::printed_chain(&anyhow::Error::new(e));
+        // One event per line: the log writer spells out a line break inside an event,
+        // so a TOML error's quoted file would read as one line of literal `\n`.
+        let mut lines = cause.lines();
+        tracing::warn!("the lock was not updated: {}", lines.next().unwrap_or_default());
+        for line in lines {
+            tracing::warn!("{line}");
+        }
+        None
+    })
 }
 
-/// Bring `previous` to the state the edited declaration implies, by
-/// comparing the **effective desired sets** before and after the edit
-/// (`adr_effective_set_mutations.md`):
-///
-/// - an entry absent from `E_after` is dropped;
-/// - an entry both sets hold is kept — a removed direct declaration whose
-///   key a declared bundle still provides at the **same identifier** flips
-///   its provenance to the bundle(s); a different identifier cannot be
-///   pinned offline, so the entry is dropped and the hash restamp skipped
-///   (the stale lock makes the next operation demand `grim lock`);
-/// - bundle-sourced entries get their contributor list re-derived, which
-///   subsumes per-bundle provenance eviction.
-///
-/// When the lock carries no usable `[[bundle]]` cache for a declared
-/// bundle (pre-cache lock or a retagged declaration), the legacy surgical
-/// behavior runs instead. Shared with the `uninstall` seam
-/// ([`super::uninstall::undeclare_and_unlock`]) and the TUI delete action.
-pub(crate) fn drop_from_lock(
-    previous: &GrimoireLock,
-    kind: ArtifactKind,
-    name: &str,
-    set_before: &crate::config::declaration::DesiredSet,
-    set_after: &crate::config::declaration::DesiredSet,
-) -> UndeclareOutcome {
-    use crate::lock::effective_set::effective_set;
-
-    let (Some(before), Some(after)) = (effective_set(set_before, previous), effective_set(set_after, previous)) else {
-        // A dependency-bearing lock whose closure cannot be followed offline
-        // must not take the legacy path: it would drop or restamp entries the
-        // graph still needs. A dependency-free lock keeps it unchanged.
-        return if has_dependency_data(previous) {
-            target_only_drop(previous, kind, name, set_after)
-        } else {
-            legacy_drop_from_lock(previous, kind, name, set_before, set_after)
-        };
-    };
-    let dependency_bearing = has_dependency_data(previous);
-
-    let mut lock = previous.clone();
-    let mut stale = false;
-    let mut notes = Vec::new();
-
-    let mut process = |list: &mut Vec<LockedArtifact>| {
-        list.retain_mut(|entry| {
-            let key = (entry.kind, entry.name.clone());
-            match after.get(&key) {
-                // Dropped from the effective set by this edit. An entry in
-                // NEITHER set is a drifted ghost (a legacy lock-only
-                // install) — preserved unless it is the named target, so a
-                // remove never silently reaps unrelated drift.
-                None => !(before.contains_key(&key) || (entry.kind == kind && entry.name == name)),
-                Some(crate::lock::effective_set::Origin::Direct(_)) => true,
-                Some(crate::lock::effective_set::Origin::Implied {
-                    id,
-                    contributors,
-                    required_by,
-                }) => {
-                    // On a dependency-bearing lock an entry that was already
-                    // not directly declared is dependency-only: nothing was
-                    // unmasked, so it is kept as locked.
-                    let was_direct = matches!(before.get(&key), Some(crate::lock::effective_set::Origin::Direct(_)));
-                    if dependency_bearing && !was_direct {
-                        if !contributors.is_empty() {
-                            entry.bundles = contributors.clone();
-                        }
-                        true
-                    } else if entry.bundles.is_empty() {
-                        // The removed direct declaration unmasked the
-                        // bundle-provided variant.
-                        let direct_id = direct_id_of(set_before, key.0, &key.1);
-                        if direct_id.as_ref() == Some(id) {
-                            entry.bundles = contributors.clone();
-                            true
-                        } else {
-                            stale = true;
-                            // Use the first contributor's repo+tag to name the bundle
-                            // in the explanatory note. contributors is non-empty when
-                            // Origin::Implied is returned (the resolver always records
-                            // at least the declaring bundle).
-                            let (bundle_repo, bundle_tag) = contributors
-                                .first()
-                                .map(|b| (b.repo.as_str(), b.tag.as_str()))
-                                .unwrap_or(("(unknown bundle)", ""));
-                            let bundle_label = if bundle_tag.is_empty() {
-                                bundle_repo.to_string()
-                            } else {
-                                format!("{bundle_repo}:{bundle_tag}")
-                            };
-                            if contributors.is_empty() {
-                                let parents: Vec<String> =
-                                    required_by.iter().map(|(k, n)| format!("{k}/{n}")).collect();
-                                notes.push(format!(
-                                    "{} '{}' is now required by {} at a different version; the lock is marked stale — run `grim lock` to pin it",
-                                    key.0,
-                                    key.1,
-                                    parents.join(", ")
-                                ));
-                            } else {
-                                notes.push(format!(
-                                    "{} '{}' is now provided by bundle '{}' at a different version; the lock is marked stale — run `grim lock` to pin the bundle's version",
-                                    key.0, key.1, bundle_label
-                                ));
-                            }
-                            false
-                        }
-                    } else {
-                        entry.bundles = contributors.clone();
-                        true
-                    }
-                }
-                Some(crate::lock::effective_set::Origin::Conflicted) => {
-                    let was_direct = matches!(before.get(&key), Some(crate::lock::effective_set::Origin::Direct(_)));
-                    if entry.bundles.is_empty() && (was_direct || !dependency_bearing) {
-                        // Removal unmasked disagreeing bundle members; the
-                        // next `grim lock` fails closed with the conflict.
-                        stale = true;
-                        notes.push(format!(
-                            "{} '{}' is provided by bundles that disagree on its reference; run `grim lock`",
-                            key.0, key.1
-                        ));
-                        false
-                    } else {
-                        true
-                    }
-                }
-            }
-        });
-    };
-    process(&mut lock.skills);
-    process(&mut lock.rules);
-    process(&mut lock.agents);
-    // `mcp` is a first-class lock list (`iter_artifacts` chains it, so the
-    // installer materializes it): omitting it here left an undeclared server
-    // in a lock the restamp below marks FRESH, and the next `grim install`
-    // re-spliced it into every client config.
-    process(&mut lock.mcp);
-    // `hooks` is the same shape, and its blast radius is the largest of the
-    // five: an undeclared `[[hook]]` surviving in a lock the restamp marks
-    // FRESH is a hook the next `grim install` re-materializes AND re-arms —
-    // code a client then runs automatically, after the user asked for it to be
-    // gone. Reachable two ways: `grim remove --kind hook <name>` (the direct
-    // declaration is dropped from `set.hooks` above, so `after` no longer holds
-    // the key) and removing a bundle that provided a hook member.
-    process(&mut lock.hooks);
-    // Same shape: a surviving `[[settings]]` entry under a FRESH restamp is a
-    // package the next `grim install` applies after the user removed it.
-    process(&mut lock.settings);
-
-    // Prune cached snapshots for bundles no longer declared (or retagged).
-    lock.bundles.retain(|b| {
-        set_after
-            .bundles
-            .get(&b.name)
-            .is_some_and(|declared| match declared.identifier() {
-                Some(id) => crate::lock::effective_set::snapshot_matches(&b.name, id, b),
-                // A path binding keeps its path snapshot.
-                None => b.path().is_some(),
-            })
-    });
-
-    if !stale {
-        lock.metadata.declaration_hash = set_after.declaration_hash_cached().to_string();
-    }
-    UndeclareOutcome { lock, notes }
+/// A declaration edit on disk, undone if the lock it goes with cannot be saved:
+/// a declaration without its lock reads as a hand edit, and the next relock
+/// would move what the failed remove kept.
+pub(crate) struct ConfigEdit<'a> {
+    path: &'a std::path::Path,
+    original: Option<Vec<u8>>,
+    written: Option<Vec<u8>>,
+    /// The `grim` a failed rollback's remedy names.
+    grim: &'a Invocation,
 }
 
-/// Whether the lock carries any dependency data: a `requires` edge or a
-/// transitively pulled-in bundle. Such a lock is never handled by the
-/// pre-dependency fallbacks.
-pub(crate) fn has_dependency_data(lock: &GrimoireLock) -> bool {
-    lock.iter_artifacts().any(|a| !a.requires.is_empty()) || lock.bundles.iter().any(|b| b.transitive)
-}
-
-/// The closure of a dependency-bearing lock cannot be computed offline, so
-/// only the target leaves the lock: its own entry, or a bundle's snapshot.
-/// Every other entry is written untouched and the declaration hash is not
-/// restamped, so the lock stays honestly stale until `grim lock`.
-fn target_only_drop(
-    previous: &GrimoireLock,
-    kind: ArtifactKind,
-    name: &str,
-    set_after: &crate::config::declaration::DesiredSet,
-) -> UndeclareOutcome {
-    let mut lock = previous.clone();
-    match kind {
-        ArtifactKind::Skill => lock.skills.retain(|a| a.name != name),
-        ArtifactKind::Rule => lock.rules.retain(|a| a.name != name),
-        ArtifactKind::Agent => lock.agents.retain(|a| a.name != name),
-        ArtifactKind::Mcp => lock.mcp.retain(|a| a.name != name),
-        ArtifactKind::Hook => lock.hooks.retain(|a| a.name != name),
-        ArtifactKind::Settings => lock.settings.retain(|a| a.name != name),
-        ArtifactKind::Bundle => lock.bundles.retain(|b| b.name != name),
-    }
-    let direct = |a: &LockedArtifact| match a.kind {
-        ArtifactKind::Skill => set_after.skills.contains_key(&a.name),
-        ArtifactKind::Rule => set_after.rules.contains_key(&a.name),
-        ArtifactKind::Agent => set_after.agents.contains_key(&a.name),
-        ArtifactKind::Mcp => set_after.mcp.contains_key(&a.name),
-        ArtifactKind::Hook => set_after.hooks.contains_key(&a.name),
-        ArtifactKind::Settings => set_after.settings.contains_key(&a.name),
-        ArtifactKind::Bundle => false,
-    };
-    let kept = lock.iter_artifacts().filter(|a| !direct(a)).count();
-    let notes = if kept == 0 {
-        Vec::new()
-    } else {
-        vec![format!(
-            "kept {kept} artifacts whose dependency graph could not be computed offline; run grim lock"
-        )]
-    };
-    UndeclareOutcome { lock, notes }
-}
-
-/// The direct identifier `set` declares for `(kind, name)`, if any."""
-fn direct_id_of(
-    set: &crate::config::declaration::DesiredSet,
-    kind: ArtifactKind,
-    name: &str,
-) -> Option<crate::oci::Identifier> {
-    let map = match kind {
-        ArtifactKind::Hook => &set.hooks,
-        ArtifactKind::Skill => &set.skills,
-        ArtifactKind::Rule => &set.rules,
-        ArtifactKind::Agent => &set.agents,
-        ArtifactKind::Mcp => &set.mcp,
-        ArtifactKind::Settings => &set.settings,
-        ArtifactKind::Bundle => return None,
-    };
-    // A path-sourced declaration has no registry identifier; the caller's
-    // id-mismatch branch then drops the entry with an honest-stale note,
-    // which is the correct behavior when a path dep masks a bundle member.
-    map.get(name).and_then(|source| source.identifier().cloned())
-}
-
-/// Pre-cache fallback: the surgical behavior used before the lock carried
-/// bundle snapshots — retain-by-name for an artifact, provenance-matched
-/// eviction for a bundle, unconditional hash restamp.
-fn legacy_drop_from_lock(
-    previous: &GrimoireLock,
-    kind: ArtifactKind,
-    name: &str,
-    set_before: &crate::config::declaration::DesiredSet,
-    set_after: &crate::config::declaration::DesiredSet,
-) -> UndeclareOutcome {
-    let mut lock = previous.clone();
-    let mut stale = false;
-    // A direct-artifact removal on the offline legacy path cannot re-derive
-    // bundle provenance, but it must NOT drop an entry a still-declared bundle
-    // still provides (C1: any project with even one path bundle degrades the
-    // whole `effective_set` to this legacy path — see `effective_set`'s
-    // whole-call `?` — so removing a directly-declared skill that a REGISTRY
-    // bundle also provides would otherwise drop it under a freshly restamped
-    // hash, and `grim install` would never restore it). If a cached snapshot
-    // for a still-declared bundle lists the removed member, keep the lock entry
-    // and mark the lock stale so the next `grim lock` re-derives its exact
-    // provenance — honest staleness over silent omission, mirroring the
-    // non-legacy path's id-mismatch branch.
-    let provided_by_bundle = |name: &str, kind: ArtifactKind| {
-        previous.bundles.iter().any(|b| {
-            set_after.bundles.contains_key(&b.name) && b.members.iter().any(|m| m.kind == kind && m.name == name)
+impl<'a> ConfigEdit<'a> {
+    /// Write `set` to `path`, keeping the bytes it replaces.
+    ///
+    /// # Errors
+    ///
+    /// The config cannot be read or written (74/78/79).
+    pub(crate) fn write(
+        path: &'a std::path::Path,
+        options: &ConfigOptions,
+        registries: &[RegistryConfig],
+        set: &DesiredSet,
+        grim: &'a Invocation,
+    ) -> anyhow::Result<Self> {
+        let original = snapshot_config(path)?;
+        super::grim(write_config(path, options, registries, set))?;
+        // Unreadable right after a write, nothing can show the file is still
+        // ours, so the rollback declines.
+        let written = snapshot_config(path).ok().flatten();
+        Ok(Self {
+            path,
+            original,
+            written,
+            grim,
         })
-    };
-    match kind {
-        // Same shape as every other non-bundle kind: keep the lock entry (and
-        // mark the lock stale) when a still-declared bundle also provides the
-        // hook, else drop it. A hook is not special here — the retain/stale
-        // decision is about declaration provenance, not about arming.
-        ArtifactKind::Hook => {
-            if provided_by_bundle(name, kind) {
-                stale = true;
-            } else {
-                lock.hooks.retain(|a| a.name != name);
-            }
-        }
-        ArtifactKind::Skill => {
-            if provided_by_bundle(name, kind) {
-                stale = true;
-            } else {
-                lock.skills.retain(|a| a.name != name);
-            }
-        }
-        ArtifactKind::Rule => {
-            if provided_by_bundle(name, kind) {
-                stale = true;
-            } else {
-                lock.rules.retain(|a| a.name != name);
-            }
-        }
-        ArtifactKind::Agent => {
-            if provided_by_bundle(name, kind) {
-                stale = true;
-            } else {
-                lock.agents.retain(|a| a.name != name);
-            }
-        }
-        ArtifactKind::Mcp => {
-            if provided_by_bundle(name, kind) {
-                stale = true;
-            } else {
-                lock.mcp.retain(|a| a.name != name);
-            }
-        }
-        ArtifactKind::Settings => {
-            if provided_by_bundle(name, kind) {
-                stale = true;
-            } else {
-                lock.settings.retain(|a| a.name != name);
-            }
-        }
-        ArtifactKind::Bundle => {
-            // The `(repo, tag)` member-provenance pair the removed bundle
-            // stamped onto its members. A registry bundle derives it from its
-            // declared identifier; a **path** bundle has no identifier, so
-            // read it from the bundle's cached `[[bundle]]` snapshot — whose
-            // `provenance_pair()` is the same `(path, hash-short)` pair the
-            // resolver stamped onto every member. Without the snapshot
-            // fallback a path bundle's members are never evicted and survive
-            // as orphans under a freshly restamped hash (the B1 bug: the lock
-            // reads fresh while listing a member no declaration provides, so
-            // the next `grim install` re-materializes the removed bundle).
-            let provenance = set_before
-                .bundles
-                .get(name)
-                .and_then(|source| source.identifier())
-                .map(|id| (id.registry_repository(), id.tag_or_latest().to_string()))
-                .or_else(|| {
-                    previous
-                        .bundles
-                        .iter()
-                        .find(|b| b.name == name)
-                        .map(crate::lock::locked_bundle::LockedBundle::provenance_pair)
-                });
-            match provenance {
-                Some((repo, tag)) => evict_bundle_members(&mut lock, &repo, &tag, set_after),
-                // No identifier and no cached snapshot (a hand-edited lock):
-                // membership is unknowable offline, so the removed bundle's
-                // members may still be listed. Skip the hash restamp so the
-                // lock reads honestly stale instead of fresh-with-orphans —
-                // the next `grim lock` reconciles it.
-                None => stale = true,
-            }
-        }
     }
-    lock.bundles.retain(|b| b.name != name || kind != ArtifactKind::Bundle);
-    if !stale {
-        lock.metadata.declaration_hash = set_after.declaration_hash_cached().to_string();
-    }
-    UndeclareOutcome {
-        lock,
-        notes: Vec::new(),
-    }
-}
 
-/// Evict the lock members the bundle `(repo, tag)` contributed.
-///
-/// Each member loses the matching provenance entry; the member itself is
-/// dropped only when no other bundle's provenance remains (a member two
-/// bundles share survives the removal of one). When another still-declared
-/// binding in `set` resolves to the same `(repo, tag)` — the same bundle
-/// declared under two names — nothing is evicted at all.
-fn evict_bundle_members(lock: &mut GrimoireLock, repo: &str, tag: &str, set: &crate::config::declaration::DesiredSet) {
-    // A surviving binding still declares `(repo, tag)` when its registry
-    // identifier matches — or, for a **path** binding (whose `identifier()`
-    // is always `None`), when its cached `[[bundle]]` snapshot resolves to the
-    // same `provenance_pair()`. Without the snapshot check the same local
-    // bundle declared under two names would wrongly evict a member the
-    // surviving binding still provides.
-    let still_declared = set.bundles.iter().any(|(binding, source)| {
-        source
-            .identifier()
-            .is_some_and(|id| id.registry_repository() == repo && id.tag_or_latest() == tag)
-            || lock.bundles.iter().any(|b| {
-                b.name == *binding && {
-                    let (b_repo, b_tag) = b.provenance_pair();
-                    b_repo == repo && b_tag == tag
-                }
-            })
-    });
-    if still_declared {
-        return;
-    }
-    let evict = |a: &mut LockedArtifact| {
-        let matched = a.bundles.iter().any(|b| b.repo == repo && b.tag == tag);
-        if !matched {
-            return true; // direct entry or another bundle's member: keep as-is
+    /// Save the lock this edit goes with, or put the declaration back.
+    ///
+    /// # Errors
+    ///
+    /// The lock cannot be saved (74).
+    pub(crate) fn save_lock(
+        &self,
+        lock_path: &std::path::Path,
+        lock: &GrimoireLock,
+        previous: &GrimoireLock,
+    ) -> anyhow::Result<()> {
+        let saved = super::grim(lock_io::save(lock_path, lock, Some(previous)));
+        if saved.is_err() {
+            self.roll_back();
         }
-        a.bundles.retain(|b| !(b.repo == repo && b.tag == tag));
-        !a.bundles.is_empty()
-    };
-    lock.skills.retain_mut(evict);
-    lock.rules.retain_mut(evict);
-    lock.agents.retain_mut(evict);
-    lock.mcp.retain_mut(evict);
-    // The legacy path is not a rare corner: `effective_set` degrades for the
-    // WHOLE call, so a single path-declared bundle anywhere in the project (or
-    // a pre-cache lock) routes every mutation through here. Omitting `hooks`
-    // left the dropped bundle's hook member in the lock with `stale` still
-    // false, so the hash was restamped fresh and the next `grim install`
-    // re-armed it — the same re-arm hazard as `drop_from_lock` above.
-    lock.hooks.retain_mut(evict);
-    lock.settings.retain_mut(evict);
+        saved
+    }
+
+    fn roll_back(&self) {
+        // A file that changed since this write holds someone else's edit, and
+        // restoring over it would lose that edit.
+        match snapshot_config(self.path) {
+            Ok(now) if now.is_some() && now == self.written => {
+                restore_config(self.path, self.original.as_deref(), self.grim);
+            }
+            _ => tracing::warn!(
+                path = %self.path.display(),
+                "the declaration changed while the lock was written, so it stays edited; run `{} lock`",
+                self.grim
+            ),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -569,125 +265,6 @@ mod tests {
         }
     }
 
-    fn member_of(name: &str, bundles: &[(&str, &str)]) -> LockedArtifact {
-        let mut a = locked(name);
-        a.bundles = bundles
-            .iter()
-            .map(|(repo, tag)| crate::lock::locked_artifact::BundleProvenance::new(*repo, *tag))
-            .collect();
-        a
-    }
-
-    /// A locked `[[mcp]]` entry, optionally carrying bundle provenance.
-    fn locked_mcp(name: &str, bundles: &[(&str, &str)]) -> LockedArtifact {
-        let id = Identifier::new_registry(name, "localhost:5000").clone_with_digest(Digest::Sha256("a".repeat(64)));
-        let mut a = LockedArtifact::direct(
-            name.to_string(),
-            ArtifactKind::Mcp,
-            PinnedIdentifier::try_from(id).unwrap(),
-        );
-        a.bundles = bundles
-            .iter()
-            .map(|(repo, tag)| crate::lock::locked_artifact::BundleProvenance::new(*repo, *tag))
-            .collect();
-        a
-    }
-
-    /// A locked `[[hook]]` entry, optionally carrying bundle provenance.
-    fn locked_hook(name: &str, bundles: &[(&str, &str)]) -> LockedArtifact {
-        let id = Identifier::new_registry(name, "localhost:5000").clone_with_digest(Digest::Sha256("a".repeat(64)));
-        let mut a = LockedArtifact::direct(
-            name.to_string(),
-            ArtifactKind::Hook,
-            PinnedIdentifier::try_from(id).unwrap(),
-        );
-        a.bundles = bundles
-            .iter()
-            .map(|(repo, tag)| crate::lock::locked_artifact::BundleProvenance::new(*repo, *tag))
-            .collect();
-        a
-    }
-
-    /// A `DesiredSet` declaring `hooks` bindings plus `bundles`.
-    fn hook_set_of(hooks: &[(&str, &str)], bundles: &[(&str, &str)]) -> DesiredSet {
-        let mut set = set_of(&[], bundles);
-        for (n, i) in hooks {
-            set.hooks.insert(
-                (*n).to_string(),
-                crate::config::declaration::DeclaredSource::Registry(Identifier::parse(i).unwrap()),
-            );
-        }
-        set.invalidate_declaration_hash_cache();
-        set
-    }
-
-    fn locked_settings(name: &str, bundles: &[(&str, &str)]) -> LockedArtifact {
-        let id = Identifier::new_registry(name, "localhost:5000").clone_with_digest(Digest::Sha256("a".repeat(64)));
-        let mut a = LockedArtifact::direct(
-            name.to_string(),
-            ArtifactKind::Settings,
-            PinnedIdentifier::try_from(id).unwrap(),
-        );
-        a.bundles = bundles
-            .iter()
-            .map(|(repo, tag)| crate::lock::locked_artifact::BundleProvenance::new(*repo, *tag))
-            .collect();
-        a
-    }
-
-    /// A `DesiredSet` declaring `settings` bindings plus `bundles`.
-    fn settings_set_of(settings: &[(&str, &str)], bundles: &[(&str, &str)]) -> DesiredSet {
-        let mut set = set_of(&[], bundles);
-        for (n, i) in settings {
-            set.settings.insert(
-                (*n).to_string(),
-                crate::config::declaration::DeclaredSource::Registry(Identifier::parse(i).unwrap()),
-            );
-        }
-        set.invalidate_declaration_hash_cache();
-        set
-    }
-
-    /// A one-member `[[bundle]]` snapshot for `kind`/`member`.
-    fn snapshot_of_kind(
-        binding: &str,
-        repo: &str,
-        tag: &str,
-        kind: ArtifactKind,
-        member: (&str, &str),
-    ) -> crate::lock::locked_bundle::LockedBundle {
-        let pinned_id = Identifier::parse(&format!("{repo}:{tag}"))
-            .unwrap()
-            .clone_with_digest(Digest::Sha256("b".repeat(64)));
-        crate::lock::locked_bundle::LockedBundle {
-            name: binding.to_string(),
-            source: crate::lock::locked_bundle::LockedBundleSource::Registry {
-                repo: repo.to_string(),
-                tag: tag.to_string(),
-                pinned: PinnedIdentifier::try_from(pinned_id).unwrap(),
-            },
-            members: vec![crate::oci::bundle::BundleMember {
-                kind,
-                name: member.0.to_string(),
-                id: member.1.to_string(),
-            }],
-            transitive: false,
-        }
-    }
-
-    /// A `DesiredSet` declaring `mcp` bindings plus `bundles`.
-    fn mcp_set_of(mcp: &[(&str, &str)], bundles: &[(&str, &str)]) -> DesiredSet {
-        let mut set = set_of(&[], bundles);
-        for (n, i) in mcp {
-            set.mcp.insert(
-                (*n).to_string(),
-                crate::config::declaration::DeclaredSource::Registry(Identifier::parse(i).unwrap()),
-            );
-        }
-        set.invalidate_declaration_hash_cache();
-        set
-    }
-
     fn set_of(skills: &[(&str, &str)], bundles: &[(&str, &str)]) -> DesiredSet {
         let skills: BTreeMap<String, crate::config::declaration::DeclaredSource> = skills
             .iter()
@@ -709,823 +286,168 @@ mod tests {
         set
     }
 
-    fn snapshot(
-        binding: &str,
-        repo: &str,
-        tag: &str,
-        members: &[(&str, &str)],
-    ) -> crate::lock::locked_bundle::LockedBundle {
-        let pinned_id = Identifier::parse(&format!("{repo}:{tag}"))
-            .unwrap()
-            .clone_with_digest(Digest::Sha256("b".repeat(64)));
-        crate::lock::locked_bundle::LockedBundle {
-            name: binding.to_string(),
-            source: crate::lock::locked_bundle::LockedBundleSource::Registry {
-                repo: repo.to_string(),
-                tag: tag.to_string(),
-                pinned: PinnedIdentifier::try_from(pinned_id).unwrap(),
-            },
-            members: members
-                .iter()
-                .map(|(name, id)| crate::oci::bundle::BundleMember {
-                    kind: ArtifactKind::Skill,
-                    name: (*name).to_string(),
-                    id: (*id).to_string(),
-                })
-                .collect(),
-            transitive: false,
+    #[test]
+    fn an_edit_nothing_else_touched_rolls_back_and_a_changed_file_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grimoire.toml");
+        std::fs::write(&path, "[skills]\nalpha = \"localhost:5000/alpha:1\"\n").unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let options = ConfigOptions::default();
+
+        let edit =
+            ConfigEdit::write(&path, &options, &[], &set_of(&[], &[]), &Invocation::WALKED).expect("the edit writes");
+        assert_ne!(std::fs::read(&path).unwrap(), original);
+        edit.roll_back();
+        assert_eq!(std::fs::read(&path).unwrap(), original, "rolled back");
+
+        let edit =
+            ConfigEdit::write(&path, &options, &[], &set_of(&[], &[]), &Invocation::WALKED).expect("the edit writes");
+        std::fs::write(&path, "# someone else's\n").unwrap();
+        edit.roll_back();
+        assert_eq!(std::fs::read(&path).unwrap(), b"# someone else's\n", "theirs stays");
+    }
+
+    // ── An unreadable lock ───────────────────────────────────────────────
+
+    /// `grim remove` on this thread, with everything it logged. The guard stays
+    /// across the await because a `#[tokio::test]` polls on this one thread.
+    async fn remove_logged(ctx: &Context, args: &RemoveArgs) -> (anyhow::Result<(RemoveReport, ExitCode)>, String) {
+        let capture = crate::catalog::test_hosts::LogCapture::start();
+        let out = run(ctx, args).await;
+        (out, capture.text())
+    }
+
+    fn workspace_with(lock: Option<&str>) -> (tempfile::TempDir, std::path::PathBuf, Context) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let config_path = root.join("grimoire.toml");
+        std::fs::write(&config_path, "[skills]\nalpha = \"localhost:5000/alpha:1\"\n").unwrap();
+        let lock_path = root.join("grimoire.lock");
+        if let Some(body) = lock {
+            std::fs::write(&lock_path, body).unwrap();
+        }
+        let ctx = Context::hermetic_scoped(root.join("grim-home"), false, Some(config_path));
+        (dir, lock_path, ctx)
+    }
+
+    fn remove_alpha() -> RemoveArgs {
+        RemoveArgs {
+            kind: "skill".to_string(),
+            name: "alpha".to_string(),
         }
     }
 
-    #[test]
-    fn drop_from_lock_removes_only_named_entry() {
-        let prev = lock_of(vec![locked("a"), locked("b")]);
-        let before = set_of(
-            &[("a", "localhost:5000/acme/a:1"), ("b", "localhost:5000/acme/b:1")],
-            &[],
-        );
-        let after_set = set_of(&[("b", "localhost:5000/acme/b:1")], &[]);
-        let out = drop_from_lock(&prev, ArtifactKind::Skill, "a", &before, &after_set);
-        assert_eq!(out.lock.skills.len(), 1);
-        assert_eq!(out.lock.skills[0].name, "b");
-        assert_eq!(out.lock.metadata.declaration_hash, after_set.declaration_hash_cached());
-        assert!(out.notes.is_empty());
+    /// The lock's link points into a directory that refuses the write, so only
+    /// the lock save fails. Root writes through 0o555, so there the failure
+    /// cannot be provoked and the test returns.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_lock_save_restores_the_config() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let lock = lock_of(vec![locked("alpha")]).to_toml_string().unwrap();
+        let (_dir, lock_path, ctx) = workspace_with(Some(&lock));
+        let root = lock_path.parent().unwrap().to_path_buf();
+        let config = root.join("grimoire.toml");
+        let sealed = root.join("sealed");
+        std::fs::create_dir(&sealed).unwrap();
+        std::fs::rename(&lock_path, sealed.join("grimoire.lock")).unwrap();
+        symlink(sealed.join("grimoire.lock"), &lock_path).unwrap();
+        let before = std::fs::read(&config).unwrap();
+
+        let mode = |bits| std::fs::Permissions::from_mode(bits);
+        std::fs::set_permissions(&sealed, mode(0o555)).unwrap();
+        let writable = tempfile::tempfile_in(&sealed).is_ok();
+        let out = run(&ctx, &remove_alpha()).await;
+        std::fs::set_permissions(&sealed, mode(0o755)).unwrap();
+        if writable {
+            return;
+        }
+
+        out.expect_err("the lock cannot be saved");
+        assert_eq!(std::fs::read(&config).unwrap(), before);
     }
 
-    #[test]
-    fn drop_from_lock_preserves_unrelated_ghost_entries() {
-        // "ghost" sits in the lock but in NEITHER declaration — a legacy
-        // lock-only install. Removing an unrelated entry must not reap it.
-        let prev = lock_of(vec![locked("a"), locked("ghost")]);
-        let before = set_of(&[("a", "localhost:5000/acme/a:1")], &[]);
-        let after_set = set_of(&[], &[]);
-        let out = drop_from_lock(&prev, ArtifactKind::Skill, "a", &before, &after_set);
-        let names: Vec<&str> = out.lock.skills.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(names, vec!["ghost"], "unrelated drift is preserved");
-    }
+    #[tokio::test]
+    async fn an_unreadable_locks_cause_reaches_the_log_escaped() {
+        let (_dir, _lock, ctx) = workspace_with(Some("\u{1b}[2J not a lock"));
 
-    #[test]
-    fn remove_direct_flips_to_bundle_provenance_when_ids_agree() {
-        let mut prev = lock_of(vec![locked("cr")]);
-        prev.bundles = vec![snapshot(
-            "stack",
-            "localhost:5000/acme/stack",
-            "1",
-            &[("cr", "localhost:5000/cr:1")],
-        )];
-        // `locked("cr")` pins repo `cr` on localhost:5000; declare the
-        // direct id to match the bundle member's id exactly.
-        let before = set_of(
-            &[("cr", "localhost:5000/cr:1")],
-            &[("stack", "localhost:5000/acme/stack:1")],
-        );
-        let after_set = set_of(&[], &[("stack", "localhost:5000/acme/stack:1")]);
+        let (out, logs) = remove_logged(&ctx, &remove_alpha()).await;
 
-        let out = drop_from_lock(&prev, ArtifactKind::Skill, "cr", &before, &after_set);
-        assert_eq!(out.lock.skills.len(), 1, "the bundle still holds the artifact");
+        out.expect("the config edit stands");
+        assert!(!logs.contains('\u{1b}'), "{logs}");
         assert_eq!(
-            out.lock.skills[0].bundles,
-            vec![crate::lock::locked_artifact::BundleProvenance::new(
-                "localhost:5000/acme/stack",
-                "1"
-            )],
-            "provenance flips from direct to the bundle"
-        );
-        assert_eq!(
-            out.lock.metadata.declaration_hash,
-            after_set.declaration_hash_cached(),
-            "same-id flip keeps the lock fresh"
-        );
-    }
-
-    #[test]
-    fn remove_direct_with_id_mismatch_drops_and_skips_restamp() {
-        let mut prev = lock_of(vec![locked("cr")]);
-        prev.bundles = vec![snapshot(
-            "stack",
-            "localhost:5000/acme/stack",
-            "1",
-            &[("cr", "localhost:5000/cr:other")],
-        )];
-        let before = set_of(
-            &[("cr", "localhost:5000/cr:1")],
-            &[("stack", "localhost:5000/acme/stack:1")],
-        );
-        let after_set = set_of(&[], &[("stack", "localhost:5000/acme/stack:1")]);
-
-        let out = drop_from_lock(&prev, ArtifactKind::Skill, "cr", &before, &after_set);
-        assert!(out.lock.skills.is_empty(), "the unresolvable variant is dropped");
-        assert_eq!(
-            out.lock.metadata.declaration_hash, prev.metadata.declaration_hash,
-            "the hash restamp is skipped — the lock is honestly stale"
-        );
-        // The note must be explanatory (names the bundle, mentions grim lock,
-        // says "stale") — not a dead-end warning that reads like an error.
-        let note = out.notes.first().expect("one note produced");
-        assert!(note.contains("grim lock"), "the user is told to re-resolve: {note}");
-        assert!(
-            note.contains("stale"),
-            "the note communicates the lock is stale, not an error: {note}"
-        );
-        assert!(
-            note.contains("localhost:5000/acme/stack"),
-            "the note names the bundle so the user knows which bundle provides it: {note}"
-        );
-    }
-
-    #[test]
-    fn legacy_remove_direct_keeps_member_a_registry_bundle_still_provides() {
-        // C1: a project with even one path bundle degrades the WHOLE
-        // effective_set to the legacy path (effective_set's whole-call `?`).
-        // Removing a directly-declared skill that a REGISTRY bundle also
-        // provides must NOT drop it under a freshly restamped hash — keep the
-        // lock entry and mark the lock honestly stale (run `grim lock`).
-        use crate::config::path_source::PathSource;
-
-        let mut prev = lock_of(vec![locked("shared")]);
-        // A registry bundle whose cached snapshot still lists `shared`.
-        prev.bundles = vec![snapshot(
-            "regb",
-            "localhost:5000/acme/stack",
-            "1",
-            &[("shared", "localhost:5000/shared:1")],
-        )];
-
-        // Declared set: direct skill `shared` + the registry bundle + an
-        // unrelated PATH bundle whose presence forces the legacy path.
-        let path = PathSource::parse("./bundles/local.toml").unwrap();
-        let mut before = set_of(
-            &[("shared", "localhost:5000/shared:1")],
-            &[("regb", "localhost:5000/acme/stack:1")],
-        );
-        before.bundles.insert(
-            "pathb".to_string(),
-            crate::config::declaration::DeclaredSource::Path(path.clone()),
-        );
-        before.invalidate_declaration_hash_cache();
-        let mut after_set = set_of(&[], &[("regb", "localhost:5000/acme/stack:1")]);
-        after_set.bundles.insert(
-            "pathb".to_string(),
-            crate::config::declaration::DeclaredSource::Path(path),
-        );
-        after_set.invalidate_declaration_hash_cache();
-
-        let out = drop_from_lock(&prev, ArtifactKind::Skill, "shared", &before, &after_set);
-
-        let names: Vec<&str> = out.lock.skills.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(
-            names,
-            vec!["shared"],
-            "a member a still-declared registry bundle provides must survive the direct removal"
-        );
-        assert_eq!(
-            out.lock.metadata.declaration_hash, prev.metadata.declaration_hash,
-            "the restamp is skipped — the lock is honestly stale, not fresh-with-omission"
-        );
-    }
-
-    #[test]
-    fn remove_bundle_via_sets_keeps_shared_member_and_prunes_snapshot() {
-        let mut prev = lock_of(vec![
-            member_of(
-                "shared",
-                &[
-                    ("localhost:5000/acme/stack-a", "1"),
-                    ("localhost:5000/acme/stack-b", "1"),
-                ],
-            ),
-            member_of("only-a", &[("localhost:5000/acme/stack-a", "1")]),
-        ]);
-        prev.bundles = vec![
-            snapshot(
-                "a",
-                "localhost:5000/acme/stack-a",
-                "1",
-                &[("shared", "localhost:5000/m:1"), ("only-a", "localhost:5000/oa:1")],
-            ),
-            snapshot(
-                "b",
-                "localhost:5000/acme/stack-b",
-                "1",
-                &[("shared", "localhost:5000/m:1")],
-            ),
-        ];
-        let before = set_of(
-            &[],
-            &[
-                ("a", "localhost:5000/acme/stack-a:1"),
-                ("b", "localhost:5000/acme/stack-b:1"),
-            ],
-        );
-        let after_set = set_of(&[], &[("b", "localhost:5000/acme/stack-b:1")]);
-
-        let out = drop_from_lock(&prev, ArtifactKind::Bundle, "a", &before, &after_set);
-        let names: Vec<&str> = out.lock.skills.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(
-            names,
-            vec!["shared"],
-            "the shared member survives, the exclusive one drops"
-        );
-        assert_eq!(
-            out.lock.skills[0].bundles,
-            vec![crate::lock::locked_artifact::BundleProvenance::new(
-                "localhost:5000/acme/stack-b",
-                "1"
-            )],
-            "contributors re-derived from the surviving bundle"
-        );
-        assert_eq!(out.lock.bundles.len(), 1, "the removed bundle's snapshot is pruned");
-        assert_eq!(out.lock.bundles[0].name, "b");
-    }
-
-    // ── MCP entries (regression: the retain fan-out skipped lock.mcp) ────
-
-    #[test]
-    fn remove_mcp_drops_its_lock_entry() {
-        // Regression: `drop_from_lock` fanned the effective-set retain pass
-        // over skills/rules/agents only, then restamped `declaration_hash`
-        // anyway — so an undeclared MCP server survived in a lock that read
-        // FRESH, and the next `grim install` re-spliced it into every client
-        // config (`iter_artifacts` chains `mcp`).
-        let mut prev = lock_of(vec![]);
-        prev.mcp = vec![locked_mcp("grim", &[])];
-        let before = mcp_set_of(&[("grim", "localhost:5000/acme/grim:1")], &[]);
-        let after_set = mcp_set_of(&[], &[]);
-
-        let out = drop_from_lock(&prev, ArtifactKind::Mcp, "grim", &before, &after_set);
-        assert!(
-            out.lock.mcp.is_empty(),
-            "the undeclared mcp entry must leave the lock, or install resurrects it: {:?}",
-            out.lock.mcp
-        );
-        assert_eq!(
-            out.lock.metadata.declaration_hash,
-            after_set.declaration_hash_cached(),
-            "nothing is stale, so the hash restamps fresh"
-        );
-    }
-
-    #[test]
-    fn remove_mcp_keeps_an_unrelated_entry() {
-        let mut prev = lock_of(vec![]);
-        prev.mcp = vec![locked_mcp("grim", &[]), locked_mcp("other", &[])];
-        let before = mcp_set_of(
-            &[
-                ("grim", "localhost:5000/acme/grim:1"),
-                ("other", "localhost:5000/acme/other:1"),
-            ],
-            &[],
-        );
-        let after_set = mcp_set_of(&[("other", "localhost:5000/acme/other:1")], &[]);
-
-        let out = drop_from_lock(&prev, ArtifactKind::Mcp, "grim", &before, &after_set);
-        let names: Vec<&str> = out.lock.mcp.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(names, vec!["other"], "only the named entry drops");
-    }
-
-    #[test]
-    fn remove_bundle_via_sets_evicts_its_mcp_member() {
-        // The `Origin::Implied` re-derivation reaches lock.mcp too: removing
-        // the only bundle that provided an mcp member must evict it.
-        let mut prev = lock_of(vec![]);
-        prev.mcp = vec![locked_mcp("grim", &[("localhost:5000/acme/stack", "1")])];
-        prev.bundles = vec![crate::lock::locked_bundle::LockedBundle {
-            name: "stack".to_string(),
-            source: crate::lock::locked_bundle::LockedBundleSource::Registry {
-                repo: "localhost:5000/acme/stack".to_string(),
-                tag: "1".to_string(),
-                pinned: PinnedIdentifier::try_from(
-                    Identifier::parse("localhost:5000/acme/stack:1")
-                        .unwrap()
-                        .clone_with_digest(Digest::Sha256("b".repeat(64))),
-                )
-                .unwrap(),
-            },
-            members: vec![crate::oci::bundle::BundleMember {
-                kind: ArtifactKind::Mcp,
-                name: "grim".to_string(),
-                id: "localhost:5000/acme/grim:1".to_string(),
-            }],
-            transitive: false,
-        }];
-        let before = set_of(&[], &[("stack", "localhost:5000/acme/stack:1")]);
-        let after_set = set_of(&[], &[]);
-
-        let out = drop_from_lock(&prev, ArtifactKind::Bundle, "stack", &before, &after_set);
-        assert!(
-            out.lock.mcp.is_empty(),
-            "the removed bundle's mcp member must be evicted: {:?}",
-            out.lock.mcp
-        );
-    }
-
-    // ── Legacy fallback (no usable [[bundle]] cache) ────────────────────
-
-    #[test]
-    fn legacy_bundle_eviction_drops_its_mcp_member() {
-        // Same gap on the legacy path: `evict_bundle_members` retained over
-        // skills/rules/agents only, so a bundle-provided mcp member survived
-        // as an orphan under a freshly restamped hash. `prev.bundles` is
-        // empty while a bundle is declared, which degrades `effective_set`
-        // to `None` and forces the legacy path.
-        let mut prev = lock_of(vec![]);
-        prev.mcp = vec![locked_mcp("grim", &[("ghcr.io/acme/stack-a", "1")])];
-        let before = set_of(&[], &[("a", "ghcr.io/acme/stack-a:1")]);
-        let after_set = set_of(&[], &[]);
-
-        let out = drop_from_lock(&prev, ArtifactKind::Bundle, "a", &before, &after_set);
-        assert!(
-            out.lock.mcp.is_empty(),
-            "the sole contributor's removal must evict the mcp member: {:?}",
-            out.lock.mcp
-        );
-    }
-
-    // ── Settings: an undeclared entry must leave a lock that reads fresh ─
-
-    #[test]
-    fn remove_settings_drops_its_lock_entry() {
-        let mut prev = lock_of(vec![]);
-        prev.settings = vec![locked_settings("team", &[])];
-        let before = settings_set_of(&[("team", "localhost:5000/acme/team:1")], &[]);
-        let after_set = settings_set_of(&[], &[]);
-
-        let out = drop_from_lock(&prev, ArtifactKind::Settings, "team", &before, &after_set);
-        assert!(
-            out.lock.settings.is_empty(),
-            "the undeclared entry must leave the lock: {:?}",
-            out.lock.settings
-        );
-        assert_eq!(
-            out.lock.metadata.declaration_hash,
-            after_set.declaration_hash_cached(),
-            "nothing is stale, so the hash restamps fresh"
-        );
-    }
-
-    #[test]
-    fn remove_settings_keeps_an_unrelated_entry() {
-        let mut prev = lock_of(vec![]);
-        prev.settings = vec![locked_settings("team", &[]), locked_settings("other", &[])];
-        let before = settings_set_of(
-            &[
-                ("team", "localhost:5000/acme/team:1"),
-                ("other", "localhost:5000/acme/other:1"),
-            ],
-            &[],
-        );
-        let after_set = settings_set_of(&[("other", "localhost:5000/acme/other:1")], &[]);
-
-        let out = drop_from_lock(&prev, ArtifactKind::Settings, "team", &before, &after_set);
-        let names: Vec<&str> = out.lock.settings.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(names, vec!["other"], "only the named entry drops");
-    }
-
-    #[test]
-    fn remove_bundle_via_sets_evicts_its_settings_member() {
-        let mut prev = lock_of(vec![]);
-        prev.settings = vec![locked_settings("team", &[("localhost:5000/acme/stack", "1")])];
-        prev.bundles = vec![snapshot_of_kind(
-            "stack",
-            "localhost:5000/acme/stack",
-            "1",
-            ArtifactKind::Settings,
-            ("team", "localhost:5000/acme/team:1"),
-        )];
-        let before = set_of(&[], &[("stack", "localhost:5000/acme/stack:1")]);
-        let after_set = set_of(&[], &[]);
-
-        let out = drop_from_lock(&prev, ArtifactKind::Bundle, "stack", &before, &after_set);
-        assert!(
-            out.lock.settings.is_empty(),
-            "the removed bundle's settings member must be evicted: {:?}",
-            out.lock.settings
-        );
-    }
-
-    #[test]
-    fn legacy_bundle_eviction_drops_its_settings_member() {
-        // `prev.bundles` empty while a bundle is declared forces the legacy path.
-        let mut prev = lock_of(vec![]);
-        prev.settings = vec![locked_settings("team", &[("ghcr.io/acme/stack-a", "1")])];
-        let before = set_of(&[], &[("a", "ghcr.io/acme/stack-a:1")]);
-        let after_set = set_of(&[], &[]);
-
-        let out = drop_from_lock(&prev, ArtifactKind::Bundle, "a", &before, &after_set);
-        assert!(
-            out.lock.settings.is_empty(),
-            "the sole contributor's removal must evict the member: {:?}",
-            out.lock.settings
-        );
-    }
-
-    #[test]
-    fn legacy_target_drop_removes_a_settings_entry() {
-        // An unrelated path-declared bundle degrades the whole call to the
-        // target-only path, which has its own per-kind fan-out.
-        let mut prev = lock_of(vec![]);
-        prev.settings = vec![locked_settings("team", &[])];
-        let mut before = settings_set_of(
-            &[("team", "localhost:5000/acme/team:1")],
-            &[("a", "ghcr.io/acme/stack-a:1")],
-        );
-        before.invalidate_declaration_hash_cache();
-        let after_set = settings_set_of(&[], &[("a", "ghcr.io/acme/stack-a:1")]);
-
-        let out = drop_from_lock(&prev, ArtifactKind::Settings, "team", &before, &after_set);
-        assert!(out.lock.settings.is_empty(), "{:?}", out.lock.settings);
-    }
-
-    #[test]
-    fn incomputable_graph_drops_only_the_settings_target() {
-        // A `requires` edge makes the lock dependency-bearing, so the
-        // incomputable graph takes the target-only path, not the legacy one.
-        let mut other = locked("other");
-        other.requires = vec![crate::oci::bundle::BundleMember {
-            kind: ArtifactKind::Skill,
-            name: "absent".to_string(),
-            id: "localhost:5000/acme/absent:1".to_string(),
-        }];
-        let mut prev = lock_of(vec![other]);
-        prev.settings = vec![locked_settings("team", &[])];
-        let before = settings_set_of(&[("team", "localhost:5000/acme/team:1")], &[]);
-        let mut after_set = settings_set_of(&[], &[]);
-        after_set.skills.insert(
-            "other".to_string(),
-            crate::config::declaration::DeclaredSource::Registry(
-                Identifier::parse("localhost:5000/acme/other:1").unwrap(),
-            ),
-        );
-        after_set.invalidate_declaration_hash_cache();
-        let mut before = before;
-        before.skills = after_set.skills.clone();
-        before.invalidate_declaration_hash_cache();
-
-        let out = drop_from_lock(&prev, ArtifactKind::Settings, "team", &before, &after_set);
-        assert!(out.lock.settings.is_empty(), "{:?}", out.lock.settings);
-        assert_eq!(out.lock.skills.len(), 1, "every other entry is written untouched");
-        assert_ne!(
-            out.lock.metadata.declaration_hash,
-            after_set.declaration_hash_cached(),
-            "the lock stays honestly stale"
-        );
-    }
-
-    // ── Hook: the same fan-out gap, with re-arming as its blast radius ───
-
-    #[test]
-    fn remove_hook_drops_its_lock_entry() {
-        // Regression: `drop_from_lock`'s retain pass never covered `lock.hooks`,
-        // yet the hash restamped anyway — so an undeclared `[[hook]]` survived
-        // in a lock reading FRESH, and the next `grim install` re-materialized
-        // AND re-armed it. Strictly worse than the `mcp` case this mirrors: the
-        // resurrected artifact is code a client runs automatically.
-        let mut prev = lock_of(vec![]);
-        prev.hooks = vec![locked_hook("shell-guard", &[])];
-        let before = hook_set_of(&[("shell-guard", "localhost:5000/acme/shell-guard:1")], &[]);
-        let after_set = hook_set_of(&[], &[]);
-
-        let out = drop_from_lock(&prev, ArtifactKind::Hook, "shell-guard", &before, &after_set);
-        assert!(
-            out.lock.hooks.is_empty(),
-            "the undeclared hook must leave the lock, or install re-arms it: {:?}",
-            out.lock.hooks
-        );
-        assert_eq!(
-            out.lock.metadata.declaration_hash,
-            after_set.declaration_hash_cached(),
-            "nothing is stale, so the hash restamps fresh"
-        );
-    }
-
-    #[test]
-    fn remove_hook_keeps_an_unrelated_entry() {
-        let mut prev = lock_of(vec![]);
-        prev.hooks = vec![locked_hook("shell-guard", &[]), locked_hook("fmt-gate", &[])];
-        let before = hook_set_of(
-            &[
-                ("shell-guard", "localhost:5000/acme/shell-guard:1"),
-                ("fmt-gate", "localhost:5000/acme/fmt-gate:1"),
-            ],
-            &[],
-        );
-        let after_set = hook_set_of(&[("fmt-gate", "localhost:5000/acme/fmt-gate:1")], &[]);
-
-        let out = drop_from_lock(&prev, ArtifactKind::Hook, "shell-guard", &before, &after_set);
-        let names: Vec<&str> = out.lock.hooks.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(names, vec!["fmt-gate"], "only the named hook drops");
-    }
-
-    #[test]
-    fn remove_bundle_via_sets_evicts_its_hook_member() {
-        // The requirement's inverse direction, on the primary (snapshot) path:
-        // dropping the bundle drops the hook it provided.
-        let mut prev = lock_of(vec![]);
-        prev.hooks = vec![locked_hook("shell-guard", &[("localhost:5000/acme/stack", "1")])];
-        prev.bundles = vec![snapshot_of_kind(
-            "stack",
-            "localhost:5000/acme/stack",
-            "1",
-            ArtifactKind::Hook,
-            ("shell-guard", "localhost:5000/acme/shell-guard:1"),
-        )];
-        let before = set_of(&[], &[("stack", "localhost:5000/acme/stack:1")]);
-        let after_set = set_of(&[], &[]);
-
-        let out = drop_from_lock(&prev, ArtifactKind::Bundle, "stack", &before, &after_set);
-        assert!(
-            out.lock.hooks.is_empty(),
-            "the removed bundle's hook member must be evicted: {:?}",
-            out.lock.hooks
-        );
-    }
-
-    #[test]
-    fn remove_bundle_keeps_a_directly_declared_hook() {
-        // The other half of the requirement: a hook the bundle provided AND the
-        // user declared directly survives the bundle's removal, because the
-        // direct declaration still holds it in the effective set. The entry's
-        // bundle provenance is re-derived away, not the entry itself.
-        let mut prev = lock_of(vec![]);
-        prev.hooks = vec![locked_hook("shell-guard", &[("localhost:5000/acme/stack", "1")])];
-        prev.bundles = vec![snapshot_of_kind(
-            "stack",
-            "localhost:5000/acme/stack",
-            "1",
-            ArtifactKind::Hook,
-            ("shell-guard", "localhost:5000/acme/shell-guard:1"),
-        )];
-        let before = hook_set_of(
-            &[("shell-guard", "localhost:5000/acme/shell-guard:1")],
-            &[("stack", "localhost:5000/acme/stack:1")],
-        );
-        let after_set = hook_set_of(&[("shell-guard", "localhost:5000/acme/shell-guard:1")], &[]);
-
-        let out = drop_from_lock(&prev, ArtifactKind::Bundle, "stack", &before, &after_set);
-        let names: Vec<&str> = out.lock.hooks.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(
-            names,
-            vec!["shell-guard"],
-            "a directly-declared hook outlives the bundle that also provided it"
-        );
-    }
-
-    #[test]
-    fn legacy_bundle_eviction_drops_its_hook_member() {
-        // Same gap on the legacy path, and this one is not a corner case:
-        // `effective_set` degrades for the WHOLE call, so one path-declared
-        // bundle anywhere routes every mutation through `evict_bundle_members`.
-        // `prev.bundles` empty while a bundle is declared forces that path.
-        let mut prev = lock_of(vec![]);
-        prev.hooks = vec![locked_hook("shell-guard", &[("ghcr.io/acme/stack-a", "1")])];
-        let before = set_of(&[], &[("a", "ghcr.io/acme/stack-a:1")]);
-        let after_set = set_of(&[], &[]);
-
-        let out = drop_from_lock(&prev, ArtifactKind::Bundle, "a", &before, &after_set);
-        assert!(
-            out.lock.hooks.is_empty(),
-            "the sole contributor's removal must evict the hook member: {:?}",
-            out.lock.hooks
-        );
-    }
-
-    #[test]
-    fn legacy_bundle_eviction_keeps_hook_shared_with_other_bundle() {
-        let mut prev = lock_of(vec![]);
-        prev.hooks = vec![locked_hook(
-            "shared-guard",
-            &[("ghcr.io/acme/stack-a", "1"), ("ghcr.io/acme/stack-b", "1")],
-        )];
-        let before = set_of(&[], &[("a", "ghcr.io/acme/stack-a:1"), ("b", "ghcr.io/acme/stack-b:1")]);
-        let after_set = set_of(&[], &[("b", "ghcr.io/acme/stack-b:1")]);
-
-        let out = drop_from_lock(&prev, ArtifactKind::Bundle, "a", &before, &after_set);
-        let names: Vec<&str> = out.lock.hooks.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(
-            names,
-            vec!["shared-guard"],
-            "a surviving bundle still provides it, so it stays"
-        );
-        assert_eq!(
-            out.lock.hooks[0].bundles.len(),
+            logs.matches("the lock was not updated").count(),
             1,
-            "only the removed bundle's provenance is dropped"
+            "one warning: {logs}"
         );
     }
 
-    #[test]
-    fn bundle_eviction_keeps_member_shared_with_other_bundle() {
-        let prev = lock_of(vec![
-            member_of(
-                "shared",
-                &[("ghcr.io/acme/stack-a", "1"), ("ghcr.io/acme/stack-b", "1")],
-            ),
-            member_of("only-a", &[("ghcr.io/acme/stack-a", "1")]),
-            locked("direct"),
-        ]);
-        // The lock carries no snapshots while bundles are declared — the
-        // legacy provenance-based eviction must run.
-        let before = set_of(&[], &[("a", "ghcr.io/acme/stack-a:1"), ("b", "ghcr.io/acme/stack-b:1")]);
-        let after_set = set_of(&[], &[("b", "ghcr.io/acme/stack-b:1")]);
+    /// A TOML error quotes the file over several lines, and the warning keeps them
+    /// as `grim install` prints them, one event each, because the log writer spells
+    /// out a line break inside an event. [`LogCapture`] writes through that writer.
+    ///
+    /// [`LogCapture`]: crate::catalog::test_hosts::LogCapture
+    #[tokio::test]
+    async fn an_unreadable_locks_toml_error_keeps_its_lines() {
+        let (_dir, _lock, ctx) = workspace_with(Some("not = [valid toml"));
 
-        let out = drop_from_lock(&prev, ArtifactKind::Bundle, "a", &before, &after_set);
+        let (out, logs) = remove_logged(&ctx, &remove_alpha()).await;
 
-        let names: Vec<&str> = out.lock.skills.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(
-            names,
-            vec!["shared", "direct"],
-            "exclusive member evicted, shared + direct stay"
-        );
-        assert_eq!(
-            out.lock.skills[0].bundles,
-            vec![crate::lock::locked_artifact::BundleProvenance::new(
-                "ghcr.io/acme/stack-b",
-                "1"
-            )],
-            "the evicted bundle's provenance entry is stripped"
-        );
-    }
-
-    #[test]
-    fn bundle_eviction_drops_member_when_last_provenance_goes() {
-        let prev = lock_of(vec![member_of("m", &[("ghcr.io/acme/stack-a", "1")])]);
-        let before = set_of(&[], &[("a", "ghcr.io/acme/stack-a:1")]);
-        let after_set = set_of(&[], &[]);
-
-        let out = drop_from_lock(&prev, ArtifactKind::Bundle, "a", &before, &after_set);
+        out.expect("the config edit stands");
+        assert!(!logs.contains("\\n"), "no line break spelled out: {logs}");
+        let lines: Vec<&str> = logs.trim_end().lines().collect();
+        assert!(lines.len() > 1, "the quoted file keeps its lines: {logs}");
+        assert!(lines.iter().all(|line| line.contains("WARN")), "{logs}");
         assert!(
-            out.lock.skills.is_empty(),
-            "the sole contributor's removal evicts the member"
+            lines.iter().any(|line| line.ends_with("1 | not = [valid toml")),
+            "{logs}"
         );
     }
 
-    #[test]
-    fn remove_local_bundle_evicts_member_via_snapshot_provenance() {
-        // B1: a path (local) bundle has no `(repo, tag)`, so its members must
-        // be evicted by keying on the `[[bundle]]` snapshot's
-        // `provenance_pair()` — otherwise the member the bundle provided
-        // survives as an orphan under a freshly restamped hash and the next
-        // `grim install` re-materializes it.
-        use crate::config::path_source::PathSource;
-        use crate::lock::locked_bundle::{LockedBundle, LockedBundleSource};
+    /// serde quotes an unknown key verbatim, and a quoted TOML key can hold a line
+    /// break, which must stay on its line inside a warning whose lines survive.
+    #[tokio::test]
+    async fn a_quoted_key_in_an_unreadable_lock_forges_no_log_line() {
+        let (_dir, _lock, ctx) = workspace_with(Some("\"a\\nWARN forged\" = 1\n"));
 
-        let path = PathSource::parse("./bundles/x.toml").unwrap();
-        let hash = Digest::Sha256("c".repeat(64));
-        let (repo, tag) = (path.as_str().to_string(), hash.to_short_string());
+        let (out, logs) = remove_logged(&ctx, &remove_alpha()).await;
 
-        let mut prev = lock_of(vec![member_of("code-review", &[(repo.as_str(), tag.as_str())])]);
-        prev.bundles = vec![LockedBundle {
-            name: "x".to_string(),
-            source: LockedBundleSource::Path {
-                path: path.clone(),
-                hash: hash.clone(),
-            },
-            members: vec![crate::oci::bundle::BundleMember {
-                kind: ArtifactKind::Skill,
-                name: "code-review".to_string(),
-                id: "localhost:5000/code-review:1".to_string(),
-            }],
-            transitive: false,
-        }];
-
-        let mut before = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
-        before
-            .bundles
-            .insert("x".to_string(), crate::config::declaration::DeclaredSource::Path(path));
-        before.invalidate_declaration_hash_cache();
-        let mut after_set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
-        after_set.invalidate_declaration_hash_cache();
-
-        let out = drop_from_lock(&prev, ArtifactKind::Bundle, "x", &before, &after_set);
+        out.expect("the config edit stands");
+        assert!(logs.contains("unknown field `a\\nWARN forged"), "{logs}");
         assert!(
-            out.lock.skills.is_empty(),
-            "the member only the path bundle provided must be evicted: {:?}",
-            out.lock.skills
-        );
-        assert!(out.lock.bundles.is_empty(), "the path-bundle snapshot must be pruned");
-        assert_eq!(
-            out.lock.metadata.declaration_hash,
-            after_set.declaration_hash_cached(),
-            "eviction removed every orphan, so the hash restamps fresh"
+            !logs.lines().any(|line| line.trim_start().starts_with("WARN forged")),
+            "{logs}"
         );
     }
 
-    #[test]
-    fn bundle_eviction_skipped_while_duplicate_binding_remains() {
-        // The same bundle (repo AND tag) declared under a second binding
-        // name: removing one binding must not evict anything (legacy path —
-        // the remaining binding has no matching snapshot).
-        let prev = lock_of(vec![member_of("m", &[("localhost:5000/acme/stack", "1")])]);
-        let before = set_of(
-            &[],
-            &[
-                ("first", "localhost:5000/acme/stack:1"),
-                ("second", "localhost:5000/acme/stack:1"),
-            ],
-        );
-        let after_set = set_of(&[], &[("second", "localhost:5000/acme/stack:1")]);
+    #[tokio::test]
+    async fn an_unreadable_lock_warns_once_and_the_remove_still_succeeds() {
+        for (body, cause) in [
+            ("not = [valid toml", "invalid TOML"),
+            ("[metadata]\nlock_version = 99\n", "lock_version"),
+        ] {
+            let (_dir, lock_path, ctx) = workspace_with(Some(body));
 
-        let out = drop_from_lock(&prev, ArtifactKind::Bundle, "first", &before, &after_set);
-        assert_eq!(
-            out.lock.skills.len(),
-            1,
-            "members survive while a duplicate binding remains"
-        );
-        assert_eq!(
-            out.lock.skills[0].bundles.len(),
-            1,
-            "the provenance entry is kept for the remaining binding"
-        );
+            let (out, logs) = remove_logged(&ctx, &remove_alpha()).await;
+
+            let (_report, exit) = out.expect("no pin moves, so the exit stays 0");
+            assert_eq!(exit, ExitCode::Success);
+            assert_eq!(logs.matches("the lock was not updated").count(), 1, "{logs}");
+            assert!(logs.contains(lock_path.to_str().unwrap()), "names the lock: {logs}");
+            assert!(logs.contains(cause), "names the error: {logs}");
+            assert_eq!(std::fs::read_to_string(&lock_path).unwrap(), body, "left as it was");
+        }
     }
 
-    #[test]
-    fn evict_skips_member_when_second_path_binding_shares_bundle() {
-        // R1: two path bindings (`x`, `y`) point at the SAME local bundle, so
-        // both stamp the same `(path, hash-short)` provenance onto the shared
-        // member. Removing `x` must NOT evict the member `y` still provides —
-        // a path binding has no `identifier()`, so its duplicate-binding
-        // survival is read from its `[[bundle]]` snapshot's `provenance_pair()`.
-        use crate::config::path_source::PathSource;
-        use crate::lock::locked_bundle::{LockedBundle, LockedBundleSource};
+    #[tokio::test]
+    async fn a_missing_lock_is_not_worth_a_warning() {
+        let (_dir, _lock_path, ctx) = workspace_with(None);
 
-        let path = PathSource::parse("./bundles/shared.toml").unwrap();
-        let hash = Digest::Sha256("c".repeat(64));
-        let (repo, tag) = (path.as_str().to_string(), hash.to_short_string());
+        let (out, logs) = remove_logged(&ctx, &remove_alpha()).await;
 
-        let mut prev = lock_of(vec![member_of("code-review", &[(repo.as_str(), tag.as_str())])]);
-        let path_snapshot = |binding: &str| LockedBundle {
-            name: binding.to_string(),
-            source: LockedBundleSource::Path {
-                path: path.clone(),
-                hash: hash.clone(),
-            },
-            members: vec![crate::oci::bundle::BundleMember {
-                kind: ArtifactKind::Skill,
-                name: "code-review".to_string(),
-                id: "localhost:5000/code-review:1".to_string(),
-            }],
-            transitive: false,
-        };
-        prev.bundles = vec![path_snapshot("x"), path_snapshot("y")];
-
-        let path_source = |p: &PathSource| crate::config::declaration::DeclaredSource::Path(p.clone());
-        let mut before = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
-        before.bundles.insert("x".to_string(), path_source(&path));
-        before.bundles.insert("y".to_string(), path_source(&path));
-        before.invalidate_declaration_hash_cache();
-        let mut after_set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
-        after_set.bundles.insert("y".to_string(), path_source(&path));
-        after_set.invalidate_declaration_hash_cache();
-
-        let out = drop_from_lock(&prev, ArtifactKind::Bundle, "x", &before, &after_set);
-        let names: Vec<&str> = out.lock.skills.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(
-            names,
-            vec!["code-review"],
-            "the member the second path binding still provides must survive: {:?}",
-            out.lock.skills
-        );
-        assert_eq!(
-            out.lock.bundles.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
-            vec!["y"],
-            "only the removed binding's snapshot is pruned; the survivor stays"
-        );
-    }
-
-    #[test]
-    fn remove_local_bundle_without_snapshot_keeps_member_and_marks_stale() {
-        // R5: a path bundle removal where the lock carries NO matching
-        // `[[bundle]]` snapshot (hand-edited lock). With neither an
-        // `identifier()` nor a cached snapshot, membership is unknowable
-        // offline — the orphaned member is retained and the hash restamp is
-        // skipped so the lock reads honestly stale rather than fresh-with-orphans.
-        use crate::config::path_source::PathSource;
-
-        let path = PathSource::parse("./bundles/gone.toml").unwrap();
-        let repo = path.as_str().to_string();
-
-        // `lock_of` leaves `prev.bundles` empty — no snapshot for the bundle.
-        let prev = lock_of(vec![member_of("code-review", &[(repo.as_str(), "abcdef12")])]);
-
-        let mut before = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
-        before
-            .bundles
-            .insert("x".to_string(), crate::config::declaration::DeclaredSource::Path(path));
-        before.invalidate_declaration_hash_cache();
-        let mut after_set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
-        after_set.invalidate_declaration_hash_cache();
-
-        let out = drop_from_lock(&prev, ArtifactKind::Bundle, "x", &before, &after_set);
-        assert_eq!(
-            out.lock.metadata.declaration_hash, prev.metadata.declaration_hash,
-            "no snapshot: the hash restamp is skipped, so the lock reads honestly stale"
-        );
-        let names: Vec<&str> = out.lock.skills.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(
-            names,
-            vec!["code-review"],
-            "the orphaned member is retained — it cannot be safely evicted offline"
-        );
+        assert_eq!(out.expect("no lock is not an error").1, ExitCode::Success);
+        assert!(logs.is_empty(), "{logs}");
     }
 
     /// Every string the `<kind>` positional accepts must resolve to the kind it

@@ -106,8 +106,8 @@ impl LockedSource {
     }
 
     /// Provenance string for reports and render comments:
-    /// `registry/repo@sha256:…` (advisory tag stripped) or
-    /// `./path@sha256:…`.
+    /// `registry/repo@sha256:…` or `./path@sha256:…`. A tag the lock records
+    /// stays out, so this output does not change when a pin gains one.
     pub fn provenance(&self) -> String {
         match self {
             Self::Registry(pinned) => pinned.strip_advisory().to_string(),

@@ -29,7 +29,9 @@ use super::render::{self, RenderError, RenderedDoc};
 use super::vendor::MergeClass::{Map, Scalar};
 use super::vendor::SettingsScopes::GlobalOnly;
 use super::vendor::SettingsValueType as Ty;
-use super::vendor::{FieldType, KindSupport, KnownField, SettingsField, Vendor, env_dir, provenance, xdg_config_dir};
+use super::vendor::{
+    FieldType, KindSupport, KnownField, SettingsField, SyncAdds, Vendor, env_dir, provenance, xdg_config_dir,
+};
 
 /// OpenCode.
 pub struct OpenCodeVendor;
@@ -423,8 +425,9 @@ impl Vendor for OpenCodeVendor {
         workspace: &Path,
         scope: ConfigScope,
         _retired: &[ClientOutput],
+        adds: SyncAdds<'_>,
     ) -> io::Result<()> {
-        let outcome = opencode_config::sync_for_state(state, workspace, scope)?;
+        let outcome = opencode_config::sync_for_state(state, workspace, scope, adds)?;
         tracing::debug!("opencode instructions sync: {outcome:?}");
         Ok(())
     }

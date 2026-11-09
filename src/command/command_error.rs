@@ -11,19 +11,31 @@
 //! 65). A small dedicated error keeps the classifier exhaustive without
 //! overloading the lock taxonomy.
 
+use crate::config::scope::Invocation;
+
 /// A command-level precondition was not met.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum CommandError {
     /// `install`/`update` requires a `grimoire.lock`, but none exists.
-    #[error("no grimoire.lock found at {path}; run `grim lock` first")]
-    LockMissing { path: std::path::PathBuf },
+    #[error("no grimoire.lock found at {path}; run `{grim} lock` first")]
+    LockMissing {
+        path: std::path::PathBuf,
+        /// The `grim` the remedy names.
+        grim: Invocation,
+    },
 
     /// The lock's declaration hash no longer matches the live config.
     #[error(
-        "grimoire.lock is stale (declaration_hash {locked} does not match current {current}); run `grim lock` before installing"
+        "grimoire.lock is stale (declaration_hash {} does not match current {current}); run `{grim} lock` before installing",
+        crate::oci::text::escape_controls(crate::lock::pin_rule::printed_hash(.locked))
     )]
-    LockStale { locked: String, current: String },
+    LockStale {
+        locked: String,
+        current: String,
+        /// The `grim` the remedy names.
+        grim: Invocation,
+    },
 
     /// `login` / `logout` need a registry but none was given and no
     /// default is configured.
@@ -108,6 +120,7 @@ mod tests {
     fn messages_are_actionable_and_lowercase_start() {
         let m = CommandError::LockMissing {
             path: std::path::PathBuf::from("/w/grimoire.lock"),
+            grim: Invocation::WALKED,
         };
         assert!(m.to_string().starts_with("no grimoire.lock"));
         assert!(m.to_string().contains("grim lock"));
@@ -115,9 +128,32 @@ mod tests {
         let s = CommandError::LockStale {
             locked: "sha256:aaa".to_string(),
             current: "sha256:bbb".to_string(),
+            grim: Invocation::WALKED,
         };
         assert!(s.to_string().contains("stale"));
         assert!(s.to_string().contains("grim lock"));
+    }
+
+    /// Followed from another project's directory, a plain `grim lock` relocks
+    /// that project and leaves this one's refusal standing.
+    #[test]
+    fn a_lock_remedy_names_the_run_it_failed_in() {
+        let config = Invocation::config(std::path::Path::new("/srv/my team/grimoire.toml"));
+        for grim in [Invocation::GLOBAL, config] {
+            let missing = CommandError::LockMissing {
+                path: std::path::PathBuf::from("/w/grimoire.lock"),
+                grim: grim.clone(),
+            };
+            let stale = CommandError::LockStale {
+                locked: "sha256:aaa".to_string(),
+                current: "sha256:bbb".to_string(),
+                grim: grim.clone(),
+            };
+            for text in [missing.to_string(), stale.to_string()] {
+                assert!(text.contains(&format!("run `{grim} lock`")), "{text}");
+                assert!(!text.contains("`grim lock`"), "{text}");
+            }
+        }
     }
 
     #[test]
@@ -129,5 +165,30 @@ mod tests {
         for kind in crate::oci::ArtifactKind::ALL {
             assert!(message.contains(kind.kind_str()), "{kind} missing from: {message}");
         }
+    }
+
+    #[test]
+    fn an_empty_hash_prints_as_none() {
+        let s = CommandError::LockStale {
+            locked: String::new(),
+            current: "sha256:bbb".to_string(),
+            grim: Invocation::WALKED,
+        };
+        assert!(s.to_string().contains("declaration_hash none does not match"), "{s}");
+    }
+
+    /// A lock travels with a repository, and `printed_chain` keeps line feeds.
+    #[test]
+    fn a_hostile_lock_hash_stays_on_one_line() {
+        let s = CommandError::LockStale {
+            locked: "sha256:a\nforged line\u{1b}[31m\u{202e}".to_string(),
+            current: "sha256:bbb".to_string(),
+            grim: Invocation::WALKED,
+        };
+
+        let text = s.to_string();
+        assert!(!text.contains('\n'), "{text:?}");
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+        assert!(!text.contains('\u{202e}'), "{text:?}");
     }
 }

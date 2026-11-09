@@ -9,6 +9,8 @@
 
 use serde::Serialize;
 
+use crate::config::scope::Invocation;
+
 /// The state of a declared artifact relative to lock + install state.
 ///
 /// Closed internal enum — the binary is the only consumer.
@@ -269,32 +271,44 @@ impl HookArmingCause {
     /// Not an error message: it reaches `grim status` (plain and JSON) and
     /// WP-I's install-time warning, both of which are human-facing surfaces
     /// carrying no compatibility promise (`docs/src/stability.md` § Unstable).
-    pub fn message(self) -> &'static str {
+    /// Every command it names starts with `grim`.
+    pub fn message(self, grim: &Invocation) -> String {
         match self {
             Self::GrimHomeRelative => {
-                "GRIM_HOME is a relative path, so the dispatch table would resolve inside this repository; \
-                 set it to an absolute path outside the workspace, then re-run grim install"
+                format!(
+                    "GRIM_HOME is a relative path, so the dispatch table would resolve inside this repository; \
+                     set it to an absolute path outside the workspace, then re-run {grim} install"
+                )
             }
             Self::GrimHomeInWorkspace => {
-                "GRIM_HOME resolves inside this workspace, which would make an armable file repo-resident; \
-                 set it to an absolute path outside the workspace, then re-run grim install"
+                format!(
+                    "GRIM_HOME resolves inside this workspace, which would make an armable file repo-resident; \
+                     set it to an absolute path outside the workspace, then re-run {grim} install"
+                )
             }
             Self::LauncherPathControlCharacter => {
-                "the resolved launcher path holds a newline or another control character, which no client's \
-                 configuration can quote unambiguously; move GRIM_HOME to a path without control characters, \
-                 then re-run grim install"
+                format!(
+                    "the resolved launcher path holds a newline or another control character, which no client's \
+                     configuration can quote unambiguously; move GRIM_HOME to a path without control characters, \
+                     then re-run {grim} install"
+                )
             }
             Self::DispatchLockHeld => {
-                "another grim install holds the dispatch table lock, so nothing was written; re-run grim \
-                 install once it finishes"
+                format!(
+                    "another grim install holds the dispatch table lock, so nothing was written; re-run {grim} \
+                     install once it finishes"
+                )
             }
             Self::ClientTrustPending => {
                 "the registration is written but the client has not been told to trust it, and an unapproved \
                  hook is skipped silently; run /hooks inside Codex to approve it"
+                    .to_string()
             }
             Self::FeatureFlagOff => {
-                "hooks are disabled for this scope; run grim config set options.experimental.hooks true, then \
-                 grim install"
+                format!(
+                    "hooks are disabled for this scope; run {grim} config set options.experimental.hooks true, then \
+                     {grim} install"
+                )
             }
             // Names the checkout, not a config key: the record is machine-local
             // and per workspace, so the remedy is a command run *here* rather
@@ -302,89 +316,120 @@ impl HookArmingCause {
             // its own message — collapsing the two would tell a user who
             // already consented to consent again with no hint of what changed.
             Self::WorkspaceNotConsented => {
-                "hooks declared by this workspace have not been consented; run grim hook allow here, \
-                 then re-run grim install. Consent is per checkout and machine-local, so consenting \
-                 in one clone grants nothing to another"
+                format!(
+                    "hooks declared by this workspace have not been consented; run {grim} hook allow here, \
+                     then re-run {grim} install. Consent is per checkout and machine-local, so consenting \
+                     in one clone grants nothing to another"
+                )
             }
             // Ends without punctuation on purpose: `command::status`'s
             // `arming_message` appends the drifted entries, which is the half a
             // user needs to know *what* to review. A version bump deliberately
             // never lands here — that residual is T1, answered by the lock pin.
             Self::ConsentDrifted => {
-                "this workspace declares hooks its consent record does not cover; re-run grim hook \
-                 allow to review them, then re-run grim install"
+                format!(
+                    "this workspace declares hooks its consent record does not cover; re-run {grim} hook \
+                     allow to review them, then re-run {grim} install"
+                )
             }
             Self::InsecureTransport => {
                 "this artifact's registry is reached over plain HTTP, so the resolution that produced \
                  its digest pin was itself on the wire and the pin cannot vouch for it; serve the \
                  registry over HTTPS. No config setting overrides this — only --trust-hooks, per run"
+                    .to_string()
             }
             Self::ClientHasNoHookSurface => {
                 "this client has no hook surface at this scope, so there is nothing to arm; the payload is \
                  installed and every other client is unaffected"
+                    .to_string()
             }
             Self::NotRegistered => {
-                "grim registered nothing here for this client, so nothing runs — usually its tier at that event or \
-                 its matcher; re-run grim install to see the reason it reports"
+                format!(
+                    "grim registered nothing here for this client, so nothing runs — usually its tier at that event or \
+                     its matcher; re-run {grim} install to see the reason it reports"
+                )
             }
             Self::SurfaceUserOwned => {
-                "this client's hook file exists and grim did not write it, so grim will neither overwrite nor \
-                 delete it; move that file aside, then re-run grim install"
+                format!(
+                    "this client's hook file exists and grim did not write it, so grim will neither overwrite nor \
+                     delete it; move that file aside, then re-run {grim} install"
+                )
             }
             Self::PlatformUnsupported => {
                 "grim has not verified hooks for this client on Windows, so it registered nothing for it; the \
                  payload is installed and every other kind is unaffected"
+                    .to_string()
             }
             Self::LauncherUnwritable => {
-                "grim could not write its launcher into the hooks directory under GRIM_HOME, so nothing was \
-                 armed; make that directory and any existing grim-hook file writable by your user, then \
-                 re-run grim install"
+                format!(
+                    "grim could not write its launcher into the hooks directory under GRIM_HOME, so nothing was \
+                     armed; make that directory and any existing grim-hook file writable by your user, then \
+                     re-run {grim} install"
+                )
             }
             Self::LauncherPathOccupied => {
-                "something other than a file sits where grim keeps its launcher, hooks/grim-hook under \
-                 GRIM_HOME, and grim will not remove it; move it aside, then re-run grim install"
+                format!(
+                    "something other than a file sits where grim keeps its launcher, hooks/grim-hook under \
+                     GRIM_HOME, and grim will not remove it; move it aside, then re-run {grim} install"
+                )
             }
             Self::LauncherPathUnquotable => {
-                "the launcher's path is not valid UTF-8, holds a control character, or, for a client that \
-                 runs hooks through cmd on Windows, holds a character cmd cannot quote (only letters, \
-                 digits and _ . : \\ + - are safe there); move GRIM_HOME to a plain path, then re-run grim \
-                 install"
+                format!(
+                    "the launcher's path is not valid UTF-8, holds a control character, or, for a client that \
+                     runs hooks through cmd on Windows, holds a character cmd cannot quote (only letters, \
+                     digits and _ . : \\ + - are safe there); move GRIM_HOME to a plain path, then re-run {grim} \
+                     install"
+                )
             }
             Self::GrimHomeShared => {
-                "on Windows, GRIM_HOME must be a local path under your user profile or local app data, \
-                 because the launcher is built per host and a shared home would hand it to another host; \
-                 point GRIM_HOME at a local path, then re-run grim install"
+                format!(
+                    "on Windows, GRIM_HOME must be a local path under your user profile or local app data, \
+                     because the launcher is built per host and a shared home would hand it to another host; \
+                     point GRIM_HOME at a local path, then re-run {grim} install"
+                )
             }
             Self::BindingNameReserved => {
-                "a hook is bound under a name that cannot be a hook directory under GRIM_HOME: one grim \
-                 reserves for its own files in hooks/ (its launcher, dispatch table and lock, payload \
-                 files, machine key), or one ending in .exe, .com, .bat or .cmd; rename the binding in \
-                 grimoire.toml, then re-run grim install"
+                format!(
+                    "a hook is bound under a name that cannot be a hook directory under GRIM_HOME: one grim \
+                     reserves for its own files in hooks/ (its launcher, dispatch table and lock, payload \
+                     files, machine key), or one ending in .exe, .com, .bat or .cmd; rename the binding in \
+                     grimoire.toml, then re-run {grim} install"
+                )
             }
             Self::NoApplicableSettings => {
-                "nothing in this settings package applies to this client here; select a client the \
-                 package declares values for with --client <name> or [options].clients, then run grim \
-                 install"
+                format!(
+                    "nothing in this settings package applies to this client here; select a client the \
+                     package declares values for with --client <name> or [options].clients, then run {grim} \
+                     install"
+                )
             }
             Self::ClientConfigAbsent => {
-                "this client's config file does not exist, so nothing is written for it; start the \
-                 client once, then run grim install"
+                format!(
+                    "this client's config file does not exist, so nothing is written for it; start the \
+                     client once, then run {grim} install"
+                )
             }
             Self::LocalFileTracked => {
-                "Claude's local settings file is tracked by git, so grim's values can reach a commit; \
-                 run git rm --cached on it, then grim install"
+                format!(
+                    "Claude's local settings file is tracked by git, so grim's values can reach a commit; \
+                     run git rm --cached on it, then {grim} install"
+                )
             }
+            // The two root causes arise only at global scope, whose run is `grim --global`.
             Self::SettingsRootRelative => {
-                "this client's config directory is a relative path, so the settings file it names depends on \
-                 where grim runs and nothing is written there; set the variable that names that directory to \
-                 an absolute path, or unset it, then run grim install --global"
+                format!(
+                    "this client's config directory is a relative path, so the settings file it names depends \
+                     on where grim runs and nothing is written there; set the variable that names that \
+                     directory to an absolute path, or unset it, then run {grim} install"
+                )
             }
             Self::SettingsRootInWorkspace => {
-                "this client's settings file lies inside the repository grim runs in, by its own path or \
-                 through a link, or grim cannot place it outside, so that repository could choose it and \
-                 nothing is written there; point the variable that names its config directory outside the \
-                 repository, then run grim install --global, or run grim install --global from outside the \
-                 repository"
+                format!(
+                    "this client's settings file lies inside the repository grim runs in, by its own path or \
+                     through a link, or grim cannot place it outside, so that repository could choose it and \
+                     nothing is written there; point the variable that names its config directory outside the \
+                     repository, then run {grim} install, or run {grim} install from outside the repository"
+                )
             }
         }
     }
@@ -470,6 +515,8 @@ pub enum LockAction {
     Locked,
     /// Already pinned to the same digest — carried forward unchanged.
     Unchanged,
+    /// Left the lock; the row carries its old pin.
+    Dropped,
 }
 
 impl std::fmt::Display for LockAction {
@@ -477,6 +524,7 @@ impl std::fmt::Display for LockAction {
         f.write_str(match self {
             Self::Locked => "locked",
             Self::Unchanged => "unchanged",
+            Self::Dropped => "dropped",
         })
     }
 }
@@ -513,16 +561,22 @@ impl std::fmt::Display for InstallStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum UpdateAction {
-    /// The pin changed (and the artifact was re-materialized).
+    /// The pin changed. The artifact was re-materialized, unless the integrity
+    /// gate refused it or a named run left it outside its closure.
     Updated,
     /// The pin was unchanged.
     Unchanged,
     /// The artifact left the lock (e.g. a bundle dropped it) and its
-    /// materialized files were pruned.
+    /// materialized files were pruned, unless a named run left them outside
+    /// the closure it may prune.
     Removed,
     /// The artifact left the lock but was locally modified, so it was
     /// preserved (re-run with `--force` to prune it).
     KeptModified,
+    /// The pin was unchanged and this run wrote its files: an output came back,
+    /// or a client got its first copy. Comes from the install outcome, not the
+    /// lock diff.
+    Restored,
 }
 
 impl std::fmt::Display for UpdateAction {
@@ -532,6 +586,7 @@ impl std::fmt::Display for UpdateAction {
             Self::Unchanged => "unchanged",
             Self::Removed => "removed",
             Self::KeptModified => "kept-modified",
+            Self::Restored => "restored",
         })
     }
 }
@@ -602,7 +657,10 @@ mod tests {
     /// not just within `not-armed`.
     #[test]
     fn every_cause_carries_a_distinct_message() {
-        let messages: BTreeSet<&str> = HookArmingCause::ALL.iter().map(|c| c.message()).collect();
+        let messages: BTreeSet<String> = HookArmingCause::ALL
+            .iter()
+            .map(|c| c.message(&Invocation::WALKED))
+            .collect();
         assert_eq!(
             messages.len(),
             HookArmingCause::ALL.len(),
@@ -637,11 +695,29 @@ mod tests {
             ) {
                 continue;
             }
-            let message = cause.message();
+            let message = cause.message(&Invocation::WALKED);
             assert!(
                 REMEDIES.iter().any(|remedy| message.contains(remedy)),
                 "{cause} does not tell the user what to do: {message}"
             );
+        }
+    }
+
+    /// Followed from another project's directory, a plain `grim` arms or edits
+    /// that project. "another grim install" names a process, not a command.
+    #[test]
+    fn every_command_a_cause_names_carries_the_run() {
+        let config = Invocation::config(std::path::Path::new("/srv/team/grimoire.toml"));
+        for grim in [config, Invocation::GLOBAL] {
+            for cause in HookArmingCause::ALL {
+                let message = cause.message(&grim);
+                let rest = message
+                    .replace(&grim.to_string(), "")
+                    .replace("another grim install", "");
+                for verb in ["install", "hook", "config", "lock", "update"] {
+                    assert!(!rest.contains(&format!("grim {verb}")), "{cause}: {message}");
+                }
+            }
         }
     }
 
@@ -716,7 +792,7 @@ mod tests {
     /// Selecting another client is the remedy, so the note names both ways to do it.
     #[test]
     fn the_no_applicable_note_names_how_to_select_a_client() {
-        let message = HookArmingCause::NoApplicableSettings.message();
+        let message = HookArmingCause::NoApplicableSettings.message(&Invocation::WALKED);
         for route in ["--client <name>", "[options].clients", "declares values for"] {
             assert!(message.contains(route), "{route} missing from: {message}");
         }
@@ -792,6 +868,10 @@ mod tests {
             "\"kept-modified\""
         );
         assert_eq!(serde_json::to_string(&UpdateAction::Removed).unwrap(), "\"removed\"");
+        assert_eq!(UpdateAction::Restored.to_string(), "restored");
+        assert_eq!(serde_json::to_string(&UpdateAction::Restored).unwrap(), "\"restored\"");
+        assert_eq!(LockAction::Dropped.to_string(), "dropped");
+        assert_eq!(serde_json::to_string(&LockAction::Dropped).unwrap(), "\"dropped\"");
         assert_eq!(serde_json::to_string(&InitStatus::Created).unwrap(), "\"created\"");
     }
 }

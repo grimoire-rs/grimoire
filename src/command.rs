@@ -822,6 +822,7 @@ mod tests {
                 grim_home: tmp.path().to_path_buf(),
                 ..Default::default()
             },
+            invocation: crate::config::scope::Invocation::WALKED,
         }
     }
 

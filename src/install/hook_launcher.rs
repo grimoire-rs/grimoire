@@ -5,8 +5,9 @@
 //!
 //! The registered command string is rendered by `hook_command` over
 //! `grimoire_hook_core::argv::render`, and `launcher::path` names the native binary it
-//! points at. The old `bin/grim-hook` shell shim is gone: convergence deletes it
-//! (`launcher::retire_legacy_shim`).
+//! points at. The old `bin/grim-hook` shell shim is retired: a whole convergence
+//! deletes it (`launcher::retire_legacy_shim`), and every convergence rewrites a
+//! registration with a dispatch row that still runs it.
 
 use std::path::Path;
 

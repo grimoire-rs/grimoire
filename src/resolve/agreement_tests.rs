@@ -10,11 +10,15 @@ use std::sync::Arc;
 
 use super::graph::{Carry, ExpandedGraph, GraphRoot, RootSource, expand_graph};
 use super::resolve_options::ResolveOptions;
-use super::resolver::resolve_lock;
+use super::resolver::{LockRun, resolve_lock, target_lock};
 use crate::config::declaration::{DeclaredSource, DesiredSet};
 use crate::config::scope::ConfigScope;
+use crate::lock::disposition::LockDisposition;
 use crate::lock::effective_set::{EffectiveGraph, NodeKey, Origin, effective_graph};
+use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::locked_artifact::BundleProvenance;
+use crate::lock::prior::Prior;
+use crate::lock::refresh::Refresh;
 use crate::oci::access::memory_registry::MemoryRegistry;
 use crate::oci::access::{OciAccess, Operation};
 use crate::oci::bundle::{BUNDLE_LAYER_MEDIA_TYPE, BundleManifest, BundleMember};
@@ -226,7 +230,7 @@ fn offline_view(graph: &EffectiveGraph) -> BTreeMap<String, View> {
             let (direct, id, contributors) = match origin {
                 Origin::Direct(_) => (true, None, Vec::new()),
                 Origin::Implied { id, contributors, .. } => (false, Some(id.to_string()), contributors.clone()),
-                Origin::Conflicted => panic!("{} came out conflicted", label(key)),
+                Origin::Conflicted { .. } => panic!("{} came out conflicted", label(key)),
             };
             let view = View {
                 direct,
@@ -349,4 +353,74 @@ async fn path_direct_wins_online_and_offline() {
     assert!(offline.nodes.contains_key(&(Skill, "shared".to_string())));
     let declared: BTreeSet<String> = set.bundles.keys().cloned().collect();
     assert_eq!(online_view(&online, &declared), offline_view(&offline));
+}
+
+fn skills(names: &[&str]) -> DesiredSet {
+    let table = names
+        .iter()
+        .map(|name| (name.to_string(), registry(&format!("ghcr.io/acme/{name}:1"))))
+        .collect();
+    DesiredSet::from_parts_with_bundles(table, BTreeMap::new(), BTreeMap::new())
+}
+
+fn pin_of<'a>(lock: &'a GrimoireLock, name: &str) -> &'a crate::oci::PinnedIdentifier {
+    lock.iter_artifacts()
+        .find(|a| a.name == name)
+        .and_then(|a| a.source.pinned())
+        .unwrap_or_else(|| panic!("{name} is not pinned"))
+}
+
+/// A crash between `grim remove`'s config write and its lock write leaves the
+/// edited declaration beside the whole lock, the gone holder's row included.
+/// Nothing reaches that row, so its edge vouches for nothing: the survivor's
+/// moved edge resolves, as in a fresh lock, where a finished remove keeps the pin.
+#[tokio::test]
+async fn a_relock_after_a_crash_in_remove_resolves_the_surviving_edge() {
+    let reg = MemoryRegistry::new();
+    publish(&reg, Skill, "ghcr.io/acme/x:1", &[]).await;
+    let x = reg
+        .resolve_digest(&id("ghcr.io/acme/x:1"), Operation::Resolve)
+        .await
+        .unwrap()
+        .unwrap();
+    reg.put_tag(&id("ghcr.io/acme/x:2"), "2", &x).await.unwrap();
+    publish(&reg, Skill, "ghcr.io/acme/p:1", &[(Skill, "x", "ghcr.io/acme/x:1")]).await;
+    publish(&reg, Skill, "ghcr.io/acme/q:1", &[(Skill, "x", "ghcr.io/acme/x:2")]).await;
+    let both = skills(&["p", "q"]);
+    let access: Arc<dyn OciAccess> = Arc::new(reg.clone());
+    let lock = resolve_lock(&both, &access, ConfigScope::Project, &opts(), std::path::Path::new("."))
+        .await
+        .expect("lock");
+    assert_eq!(pin_of(&lock, "x").tag(), Some("1"), "`p` holds the winning tag");
+    publish(&reg, Skill, "ghcr.io/acme/x:2", &[]).await;
+    let moved = reg
+        .resolve_digest(&id("ghcr.io/acme/x:2"), Operation::Resolve)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(moved, x, "the survivor's tag moved");
+
+    let after = skills(&["q"]);
+    let prior = Prior::checked(&lock, &after);
+    let target = target_lock(
+        &after,
+        Some(&prior),
+        &Refresh::Nothing,
+        &access,
+        &opts(),
+        std::path::Path::new("."),
+        LockRun::project(false),
+    )
+    .await
+    .expect("relock");
+
+    assert_eq!(pin_of(&target.lock, "x").digest(), moved);
+    assert!(target.tagless_resolved.is_empty());
+    let dispositions: BTreeMap<_, _> = target
+        .dispositions
+        .iter()
+        .map(|d| (d.key.1.as_str(), d.disposition))
+        .collect();
+    assert_eq!(dispositions["x"], LockDisposition::Moved);
+    assert_eq!(dispositions["p"], LockDisposition::Dropped);
 }

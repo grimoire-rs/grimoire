@@ -20,10 +20,11 @@ use std::io::{self, Write};
 
 use serde::Serialize;
 
-use crate::cli::printer::{Printable, print_table};
+use crate::cli::printer::{Printable, print_table, screen_plain};
+use crate::config::scope::Invocation;
 use crate::oci::ArtifactKind;
 
-use super::status_report::serialize_kind;
+use super::status_report::{print_notes, serialize_kind};
 
 /// Chains the plain table shows; `--format json` lists up to the cap.
 const PLAIN_PATHS: usize = 10;
@@ -64,6 +65,9 @@ pub struct WhyReport {
     /// Plain text only: an advisory line for stderr.
     #[serde(skip)]
     pub notes: Vec<String>,
+    /// Plain text only: the `grim` the more-paths line names.
+    #[serde(skip)]
+    pub grim: Invocation,
 }
 
 fn chain(path: &[WhyNode]) -> String {
@@ -81,8 +85,9 @@ impl Printable for WhyReport {
         if self.path_count > shown as u64 {
             writeln!(
                 w,
-                "… and {} more; grim why --format json lists up to {}",
+                "… and {} more; {} why --format json lists up to {}",
                 self.path_count - shown as u64,
+                self.grim,
                 crate::lock::effective_set::MAX_WHY_PATHS
             )?;
         }
@@ -92,12 +97,9 @@ impl Printable for WhyReport {
                 .iter()
                 .map(|o| format!("{}/{} asked for {}", o.kind, o.name, o.id))
                 .collect();
-            writeln!(w, "overrides: {}", asked.join(", "))?;
+            writeln!(w, "overrides: {}", screen_plain(&asked.join(", ")))?;
         }
-        // Best effort: a closed stderr must not fail the report.
-        for note in &self.notes {
-            let _ = writeln!(io::stderr(), "{note}");
-        }
+        print_notes(&mut io::stderr(), &self.notes);
         Ok(())
     }
 
@@ -129,6 +131,7 @@ mod tests {
             path_count,
             overrides: Vec::new(),
             notes: Vec::new(),
+            grim: crate::config::scope::Invocation::WALKED,
         }
     }
 
@@ -155,6 +158,16 @@ mod tests {
     }
 
     #[test]
+    fn the_remainder_line_names_the_run() {
+        let mut r = report(vec![vec![node(ArtifactKind::Skill, "t")]], 2);
+        r.grim = Invocation::GLOBAL;
+        let mut buf = Vec::new();
+        r.print_plain(&mut buf).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains("; grim --global why --format json lists"), "{out}");
+    }
+
+    #[test]
     fn plain_without_overflow_has_no_remainder_line() {
         let r = report(vec![vec![node(ArtifactKind::Skill, "t")]], 1);
         let mut buf = Vec::new();
@@ -162,6 +175,24 @@ mod tests {
         let out = String::from_utf8(buf).unwrap();
         assert!(out.contains("skill/t"), "{out}");
         assert!(!out.contains("more;"), "{out}");
+    }
+
+    #[test]
+    fn plain_screens_the_overrides_line() {
+        let mut r = report(vec![vec![node(ArtifactKind::Skill, "t")]], 1);
+        r.overrides = vec![WhyOverride {
+            kind: ArtifactKind::Skill,
+            name: "p\u{1b}[2J".to_string(),
+            id: "ghcr.io/acme/t:1\nforged".to_string(),
+        }];
+        let mut buf = Vec::new();
+        r.print_plain(&mut buf).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(!out.contains('\u{1b}'), "{out:?}");
+        assert!(
+            out.contains("skill/p\\u{1b}[2J asked for ghcr.io/acme/t:1 forged"),
+            "{out:?}"
+        );
     }
 
     #[test]

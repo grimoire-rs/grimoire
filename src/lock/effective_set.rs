@@ -17,14 +17,12 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::config::declaration::{DeclaredSource, DesiredSet};
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::locked_artifact::{BundleProvenance, LockedArtifact};
-use crate::lock::locked_bundle::{LockedBundle, LockedBundleSource};
+use crate::lock::locked_bundle::LockedBundle;
 use crate::lock::merge_policy::{EdgeClaim, Settled, settle};
+use crate::lock::pin_rule::{PinRecord, snapshot_matches};
+pub use crate::oci::NodeKey;
 use crate::oci::bundle::BundleMember;
-use crate::oci::member_ref::MemberRef;
 use crate::oci::{ArtifactKind, Digest, Identifier};
-
-/// One artifact in the effective set: its kind and its binding name.
-pub type NodeKey = (ArtifactKind, String);
 
 /// Most paths [`why_paths`] returns.
 pub const MAX_WHY_PATHS: usize = 256;
@@ -48,11 +46,37 @@ pub enum Origin {
         contributors: Vec<BundleProvenance>,
         /// Every parent that names the key, sorted and deduped.
         required_by: Vec<NodeKey>,
+        /// What those parents ask for, each against its parent's pin.
+        requests: BTreeSet<Identifier>,
     },
     /// Provided only by parents that DISAGREE on the identifier (a
     /// conflict the next `grim lock` fails closed on). Mutations treat the
     /// key as still desired but unresolvable offline.
-    Conflicted,
+    Conflicted {
+        /// Every contributing bundle, sorted by `(repo, tag)`, deduped.
+        contributors: Vec<BundleProvenance>,
+        /// What the parents ask for that can be read. A key with an edge nobody
+        /// can read stays conflicted, so no writer takes its requests as answered.
+        requests: BTreeSet<Identifier>,
+    },
+}
+
+impl Origin {
+    /// The bundles that provide a key no declaration holds.
+    pub fn contributors(&self) -> &[BundleProvenance] {
+        match self {
+            Self::Direct(_) => &[],
+            Self::Implied { contributors, .. } | Self::Conflicted { contributors, .. } => contributors,
+        }
+    }
+
+    /// What the parents of a key no declaration holds ask for.
+    pub fn requests(&self) -> Option<&BTreeSet<Identifier>> {
+        match self {
+            Self::Direct(_) => None,
+            Self::Implied { requests, .. } | Self::Conflicted { requests, .. } => Some(requests),
+        }
+    }
 }
 
 /// The effective set plus the parent to child edges that produced it.
@@ -83,25 +107,35 @@ pub fn effective_set(set: &DesiredSet, lock: &GrimoireLock) -> Option<BTreeMap<N
     effective_graph(set, lock).map(|g| g.nodes)
 }
 
-/// [`effective_set`] together with its edges: declared bundle to member,
-/// and every artifact or nested bundle to the entries it requires.
+/// [`effective_set`] together with its edges: declared bundle to member, and every
+/// artifact or nested bundle to the entries it requires, followed through the lock
+/// alone. A directly declared key always wins: an edge to it resolves to the direct
+/// entry. A lock with no `requires` and no nested bundle never has its entries read.
 ///
-/// Edges are followed through the lock alone: a declared bundle's snapshot,
-/// a nested bundle's snapshot, a locked entry's `requires`. `None` means the
-/// closure cannot be known offline (callers must then act on the target
-/// only, never on another node):
-/// - a declared bundle has no matching snapshot, is path-sourced, or its
-///   snapshot is marked `transitive`;
-/// - a nested bundle has no snapshot;
-/// - once the lock carries any dependency data, a followed node has no
-///   registry entry, or an edge names a different registry/repository than
-///   the entry that settles it.
-///
-/// A directly declared key always wins: an edge to it resolves to the direct
-/// entry with no repository check. A lock with no `requires` and no nested
-/// bundle never has its entries read, so it behaves exactly as before
-/// dependencies existed.
+/// `None` means the closure cannot be known offline, so a caller acts on the target
+/// only, never on another node: a declared bundle has no matching snapshot or one
+/// marked `transitive`; a nested bundle has no snapshot, or one a declaration wrote
+/// that names no edge onto it; or, once the lock carries dependency data, a followed
+/// node has no registry entry.
 pub fn effective_graph(set: &DesiredSet, lock: &GrimoireLock) -> Option<EffectiveGraph> {
+    walk(set, lock, &|_| false)
+}
+
+/// The rows of `lock` a walk of `set` expands, which are the parents whose edges a
+/// relock of `set` claims. A key `set` declares and neither `lock` nor `proof` holds
+/// is new to the lock: it records no edge, so it is a leaf. A key `proof` declares
+/// lost its row, and the rows below it are no ghosts, so its walk stops at `None`.
+/// `None` when the lock cannot show the closure.
+pub fn reached_rows(set: &DesiredSet, lock: &GrimoireLock, proof: Option<&DesiredSet>) -> Option<BTreeSet<NodeKey>> {
+    let new_key = |key: &NodeKey| {
+        let unproven = proof.is_none_or(|proof| !proof.table(key.0).contains_key(&key.1));
+        unproven && set.table(key.0).contains_key(&key.1)
+    };
+    walk(set, lock, &new_key).map(|graph| graph.children.into_keys().collect())
+}
+
+/// [`effective_graph`], reading a key with no row as a leaf where `leaf` says so.
+fn walk(set: &DesiredSet, lock: &GrimoireLock, leaf: &dyn Fn(&NodeKey) -> bool) -> Option<EffectiveGraph> {
     let mut out: BTreeMap<NodeKey, Origin> = BTreeMap::new();
     let mut children: BTreeMap<NodeKey, BTreeSet<NodeKey>> = BTreeMap::new();
     let mut roots: Vec<NodeKey> = Vec::new();
@@ -139,16 +173,12 @@ pub fn effective_graph(set: &DesiredSet, lock: &GrimoireLock) -> Option<Effectiv
             self_id,
             contributor,
             members,
-        } = expand(set, lock, has_deps, &parent)?;
+        } = expand(set, lock, has_deps, &parent, leaf)?;
         for member in &members {
             let key = (member.kind, member.name.clone());
             // An unparseable cached id (hand-edited lock) degrades the key
             // to Conflicted below rather than failing the whole mutation.
-            let requested = match MemberRef::parse(&member.id) {
-                Ok(MemberRef::Absolute(id)) => Some(id),
-                Ok(relative) => self_id.as_ref().and_then(|p| relative.resolve(p).ok()),
-                Err(_) => None,
-            };
+            let requested = member.absolute_id(self_id.as_ref());
             children.entry(parent.clone()).or_default().insert(key.clone());
             claims.entry(key.clone()).or_default().push(Claim {
                 parent: parent.clone(),
@@ -166,15 +196,13 @@ pub fn effective_graph(set: &DesiredSet, lock: &GrimoireLock) -> Option<Effectiv
         if is_direct(&key) {
             continue; // a direct declaration always wins, no repository check
         }
+        if key.0 == ArtifactKind::Bundle && !snapshot_answers_edges(lock, &key.1, &group) {
+            return None;
+        }
+        // A row stands for every recorded edge onto it, in any repository: what a
+        // relock may keep is `pin_rule`'s to say, and this walk never compares.
         let locked = if has_deps {
-            let (repo, digest) = locked_identity(lock, &key)?;
-            if group
-                .iter()
-                .any(|c| c.requested.as_ref().is_some_and(|r| r.registry_repository() != repo))
-            {
-                return None;
-            }
-            Some(digest)
+            Some(locked_digest(lock, &key)?)
         } else {
             None
         };
@@ -196,12 +224,20 @@ struct Claim {
 }
 
 /// What a node contributes to the walk.
+#[derive(Default)]
 struct Expansion {
     /// The node's own pinned identifier, the anchor for relative edges.
     self_id: Option<Identifier>,
     /// How the node's members are attributed when it is a bundle.
     contributor: Option<BundleProvenance>,
     members: Vec<BundleMember>,
+}
+
+/// The bundles `set` declares that `lock` holds no usable snapshot for, so what
+/// they provide cannot be read from the lock.
+pub fn bundles_without_members<'s>(set: &'s DesiredSet, lock: &'s GrimoireLock) -> impl Iterator<Item = &'s str> {
+    let unread = |binding: &&String| bundle_snapshot(set, lock, binding).is_none();
+    set.bundles.keys().filter(unread).map(String::as_str)
 }
 
 /// The lock-entry list one non-bundle kind lives in.
@@ -240,9 +276,18 @@ fn bundle_snapshot<'a>(set: &DesiredSet, lock: &'a GrimoireLock, binding: &str) 
     }
 }
 
-fn expand(set: &DesiredSet, lock: &GrimoireLock, has_deps: bool, key: &NodeKey) -> Option<Expansion> {
+fn expand(
+    set: &DesiredSet,
+    lock: &GrimoireLock,
+    has_deps: bool,
+    key: &NodeKey,
+    leaf: &dyn Fn(&NodeKey) -> bool,
+) -> Option<Expansion> {
     if key.0 == ArtifactKind::Bundle {
-        let snapshot = bundle_snapshot(set, lock, &key.1)?;
+        let Some(snapshot) = bundle_snapshot(set, lock, &key.1) else {
+            let unlocked = !lock.bundles.iter().any(|b| b.name == key.1);
+            return (unlocked && leaf(key)).then(Expansion::default);
+        };
         return Some(Expansion {
             self_id: snapshot.pinned().map(|p| p.as_identifier().clone()),
             contributor: Some({
@@ -260,35 +305,57 @@ fn expand(set: &DesiredSet, lock: &GrimoireLock, has_deps: bool, key: &NodeKey) 
         }),
         // Without any dependency data an unlocked node is a leaf, as it
         // always was; with it, the node's own requires are unknowable.
-        None if !has_deps => Some(Expansion {
-            self_id: None,
-            contributor: None,
-            members: Vec::new(),
-        }),
+        None if !has_deps || leaf(key) => Some(Expansion::default()),
         None => None,
     }
 }
 
-/// The registry/repository and digest the lock settled `key` at.
-fn locked_identity(lock: &GrimoireLock, key: &NodeKey) -> Option<(String, Digest)> {
+/// Whether the snapshot of an undeclared bundle stands for `group`, the edges
+/// onto it. An edge wrote a `transitive` row. Any other row answers a
+/// declaration that may have overridden the version the edges ask for, so its
+/// members say nothing about them unless it names one: the next relock settles
+/// the others.
+fn snapshot_answers_edges(lock: &GrimoireLock, binding: &str, group: &[Claim]) -> bool {
+    lock.bundles.iter().find(|b| b.name == binding).is_some_and(|row| {
+        let names = |id: &Identifier| {
+            row.pinned().is_some_and(|pin| {
+                let record = PinRecord {
+                    pin,
+                    row: Some(row),
+                    binding,
+                };
+                record.names(id)
+            })
+        };
+        row.transitive || group.iter().any(|c| c.requested.as_ref().is_some_and(names))
+    })
+}
+
+/// The digest the lock settled `key` at.
+pub(crate) fn locked_digest(lock: &GrimoireLock, key: &NodeKey) -> Option<Digest> {
     let pinned = if key.0 == ArtifactKind::Bundle {
         lock.bundles.iter().find(|b| b.name == key.1)?.pinned()?
     } else {
         locked_entry(lock, key)?.source.pinned()?
     };
-    Some((pinned.as_identifier().registry_repository(), pinned.digest()))
+    Some(pinned.digest())
 }
 
 /// The origin of a non-direct key claimed by `group`; `None` when the claims
 /// cannot be reconciled offline.
 fn settle_origin(group: &[Claim], locked: Option<Digest>) -> Option<Origin> {
+    let mut contributors: Vec<BundleProvenance> = group.iter().filter_map(|c| c.contributor.clone()).collect();
+    contributors.sort_by(|a, b| (&a.repo, &a.tag).cmp(&(&b.repo, &b.tag)));
+    contributors.dedup();
     let ids: Option<Vec<&Identifier>> = group.iter().map(|c| c.requested.as_ref()).collect();
     let Some(ids) = ids else {
-        return Some(Origin::Conflicted);
+        let requests = group.iter().filter_map(|c| c.requested.clone()).collect();
+        return Some(Origin::Conflicted { contributors, requests });
     };
+    let requests: BTreeSet<Identifier> = ids.iter().map(|id| (*id).clone()).collect();
     // With no lock entry to share, only identical ids agree.
     if locked.is_none() && ids.iter().any(|i| *i != ids[0]) {
-        return Some(Origin::Conflicted);
+        return Some(Origin::Conflicted { contributors, requests });
     }
     let edges: Vec<EdgeClaim> = group
         .iter()
@@ -300,16 +367,12 @@ fn settle_origin(group: &[Claim], locked: Option<Digest>) -> Option<Origin> {
         })
         .collect();
     match settle(None, &edges)? {
-        Settled::Agreed { winner_id, parents } => {
-            let mut contributors: Vec<BundleProvenance> = group.iter().filter_map(|c| c.contributor.clone()).collect();
-            contributors.sort_by(|a, b| (&a.repo, &a.tag).cmp(&(&b.repo, &b.tag)));
-            contributors.dedup();
-            Some(Origin::Implied {
-                id: winner_id,
-                contributors,
-                required_by: parents,
-            })
-        }
+        Settled::Agreed { winner_id, parents } => Some(Origin::Implied {
+            id: winner_id,
+            contributors,
+            required_by: parents,
+            requests,
+        }),
         Settled::Conflict { .. } | Settled::Direct { .. } => None,
     }
 }
@@ -473,46 +536,12 @@ pub fn why_paths(graph: &EffectiveGraph, target: &NodeKey, limit: usize, step_bu
     }
 }
 
-/// Whether a cached snapshot corresponds to the declared bundle binding:
-/// same binding name, same `registry/repo`, and the snapshot's provenance
-/// tag equals the declared tag (or the short digest for a digest-only
-/// declaration — mirroring how the resolver stamps it).
-pub fn snapshot_matches(binding: &str, declared_id: &Identifier, snapshot: &LockedBundle) -> bool {
-    if snapshot.name != binding {
-        return false;
-    }
-    match &snapshot.source {
-        LockedBundleSource::Registry { repo, tag, .. } => {
-            if *repo != declared_id.registry_repository() {
-                return false;
-            }
-            let declared_tag = match declared_id.tag() {
-                Some(t) => t.to_string(),
-                None => declared_id
-                    .digest()
-                    .map(|d| d.to_short_string())
-                    .unwrap_or_else(|| "latest".to_string()),
-            };
-            *tag == declared_tag
-        }
-        // A path-sourced snapshot never corresponds to a registry-declared
-        // identifier: the two source kinds carry disjoint identity, mirroring
-        // `LockedSource::eq_content`'s cross-variant-is-always-false rule.
-        // `effective_set` already bails on a path-declared bundle (its
-        // `identifier()` is `None`) before reaching this arm, so a path
-        // snapshot is only ever compared against a registry declaration here —
-        // always a miss (graceful degrade; full path-keyed eviction is a
-        // deferred follow-up, see plan_local_bundles_tui_group.md).
-        LockedBundleSource::Path { .. } => false,
-    }
-}
-
 /// Whether a declared bundle provides `key` — so its materialized
 /// files must NOT be deleted on uninstall, because the artifact stays in the
 /// effective desired set.
 ///
 /// This is the *file-retention* gate, deliberately broader than the
-/// lock-retention rule in [`crate::command::remove::drop_from_lock`]: the lock
+/// lock-retention rule in [`crate::lock::edit::drop_from_lock`]: the lock
 /// entry survives only on an exact-identifier flip, but the files survive
 /// whenever a declared bundle names the artifact at **any** identifier (the
 /// version is reconciled later by `grim lock` + update). Deleting still-desired
@@ -529,8 +558,9 @@ pub fn snapshot_matches(binding: &str, declared_id: &Identifier, snapshot: &Lock
 ///
 /// Pure + offline: expands the lock's `[[bundle]]` snapshots and entry
 /// `requires` via [`effective_set`]. Returns `false` when the snapshots are incomplete
-/// (pre-cache lock) — bundle membership is then unknowable offline, so the
-/// caller falls back to the pre-effective-set behavior (delete the files).
+/// (pre-cache lock): the lock alone cannot show bundle membership then, which is
+/// what [`parent_provides`](crate::lock::stored_members::parent_provides) asks the
+/// store for.
 pub fn declared_parent_provides(set: &DesiredSet, lock: &GrimoireLock, key: &NodeKey) -> bool {
     let (kind, name) = (key.0, key.1.as_str());
     // Drop any DIRECT declaration of this artifact, then ask whether a declared
@@ -577,6 +607,7 @@ pub fn declared_parent_provides(set: &DesiredSet, lock: &GrimoireLock, key: &Nod
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lock::locked_bundle::LockedBundleSource;
     use crate::oci::bundle::BundleMember;
     use crate::oci::{Digest, PinnedIdentifier};
     use std::collections::BTreeMap as Map;
@@ -682,6 +713,7 @@ mod tests {
                 id: mid,
                 contributors,
                 required_by,
+                ..
             } => {
                 assert_eq!(mid, &id("ghcr.io/acme/cr:1"));
                 assert_eq!(contributors.len(), 2);
@@ -715,7 +747,13 @@ mod tests {
             ),
         ];
         let e = effective_set(&set, &lock_of(&cache)).expect("cache complete");
-        assert_eq!(e[&(ArtifactKind::Skill, "cr".to_string())], Origin::Conflicted);
+        let conflicted = &e[&(ArtifactKind::Skill, "cr".to_string())];
+        assert!(matches!(conflicted, Origin::Conflicted { .. }), "{conflicted:?}");
+        assert_eq!(conflicted.contributors().len(), 2);
+        assert_eq!(
+            conflicted.requests(),
+            Some(&BTreeSet::from([id("ghcr.io/acme/cr:1"), id("ghcr.io/acme/cr:2")]))
+        );
     }
 
     #[test]
@@ -1005,6 +1043,7 @@ mod tests {
                 id: id("ghcr.io/acme/d:1"),
                 contributors: Vec::new(),
                 required_by: vec![key(ArtifactKind::Skill, "p")],
+                requests: BTreeSet::from([id("ghcr.io/acme/d:1")]),
             }
         );
         assert_eq!(
@@ -1076,8 +1115,10 @@ mod tests {
         assert!(g.children[&key(ArtifactKind::Skill, "p")].contains(&key(ArtifactKind::Skill, "d")));
     }
 
+    /// A recorded edge may answer across repositories, so its row stands for it
+    /// and a remove on such a lock keeps the closure it can compute.
     #[test]
-    fn non_direct_target_at_another_repository_is_incomputable() {
+    fn non_direct_target_at_another_repository_stands_for_its_edge() {
         let set = set_with(&[("p", "ghcr.io/acme/p:1")], &[]);
         let lock = lock_with(
             vec![
@@ -1090,7 +1131,9 @@ mod tests {
             ],
             &[],
         );
-        assert!(effective_graph(&set, &lock).is_none());
+        let graph = effective_graph(&set, &lock).expect("the row stands for the edge");
+        let node = &graph.nodes[&key(ArtifactKind::Skill, "d")];
+        assert_eq!(node.requests(), Some(&BTreeSet::from([id("ghcr.io/other/d:1")])));
     }
 
     #[test]
@@ -1197,6 +1240,118 @@ mod tests {
     }
 
     #[test]
+    fn a_row_written_for_a_declaration_answers_only_the_edge_it_matches() {
+        // `inner` is no longer declared, so its row is not one an edge wrote.
+        let set = set_with(&[], &[("outer", "ghcr.io/acme/outer:1")]);
+        let outer = snapshot(
+            "outer",
+            "ghcr.io/acme/outer",
+            "1",
+            &[(ArtifactKind::Bundle, "inner", "ghcr.io/acme/inner:1")],
+        );
+        let another_version = snapshot("inner", "ghcr.io/acme/inner", "2", &[]);
+        assert!(effective_graph(&set, &lock_of(&[outer.clone(), another_version])).is_none());
+
+        let same_version = snapshot("inner", "ghcr.io/acme/inner", "1", &[]);
+        assert!(effective_graph(&set, &lock_of(&[outer, same_version])).is_some());
+    }
+
+    #[test]
+    fn a_row_written_for_a_declaration_must_hold_a_digest_the_edge_names() {
+        let set = set_with(&[], &[("outer", "ghcr.io/acme/outer:1")]);
+        let other_digest = format!("ghcr.io/acme/inner:1@sha256:{}", "c".repeat(64));
+        let outer = snapshot(
+            "outer",
+            "ghcr.io/acme/outer",
+            "1",
+            &[(ArtifactKind::Bundle, "inner", other_digest.as_str())],
+        );
+        let inner = snapshot("inner", "ghcr.io/acme/inner", "1", &[]);
+        assert!(effective_graph(&set, &lock_of(&[outer, inner])).is_none());
+    }
+
+    #[test]
+    fn a_row_an_edge_wrote_stands_for_agreeing_edges_at_another_tag() {
+        // A relock records one request, so the other parent's tag is not in the row.
+        let set = set_with(&[], &[("a", "ghcr.io/acme/a:1"), ("b", "ghcr.io/acme/b:1")]);
+        let a = snapshot(
+            "a",
+            "ghcr.io/acme/a",
+            "1",
+            &[(ArtifactKind::Bundle, "inner", "ghcr.io/acme/inner:1")],
+        );
+        let b = snapshot(
+            "b",
+            "ghcr.io/acme/b",
+            "1",
+            &[(ArtifactKind::Bundle, "inner", "ghcr.io/acme/inner:1.0.0")],
+        );
+        let inner = transitive_snapshot("inner", "ghcr.io/acme/inner", &[]);
+        assert!(effective_graph(&set, &lock_of(&[a, b, inner])).is_some());
+    }
+
+    // ── reached_rows (what a relock of a declaration claims) ──────────
+
+    /// A row the declaration reaches, a ghost `p`, and `z`, new to the lock.
+    fn ghost_lock() -> GrimoireLock {
+        lock_with(
+            vec![
+                skill_entry("p", "ghcr.io/acme/p", &[(ArtifactKind::Skill, "x", "ghcr.io/acme/x:1")]),
+                skill_entry("q", "ghcr.io/acme/q", &[(ArtifactKind::Skill, "x", "ghcr.io/acme/x:2")]),
+                skill_entry("x", "ghcr.io/acme/x", &[]),
+            ],
+            &[],
+        )
+    }
+
+    #[test]
+    fn a_key_new_to_the_lock_is_a_leaf_for_reach() {
+        let lock = ghost_lock();
+        let skill = set_with(&[("q", "ghcr.io/acme/q:1"), ("z", "ghcr.io/acme/z:1")], &[]);
+        let bundle = set_with(&[("q", "ghcr.io/acme/q:1")], &[("z", "ghcr.io/acme/z:1")]);
+        let before = set_with(&[("q", "ghcr.io/acme/q:1")], &[]);
+        let reached = Some(BTreeSet::from([key(ArtifactKind::Skill, "q")]));
+
+        for set in [&skill, &bundle] {
+            assert_eq!(reached_rows(set, &lock, None), reached, "no proof");
+            assert_eq!(reached_rows(set, &lock, Some(&before)), reached, "new to the proof");
+            assert!(effective_graph(set, &lock).is_none(), "a closure stays unknown");
+        }
+    }
+
+    #[test]
+    fn a_key_the_proof_declares_stays_unknown_for_reach() {
+        let lock = ghost_lock();
+        let skill = set_with(&[("q", "ghcr.io/acme/q:1"), ("z", "ghcr.io/acme/z:1")], &[]);
+        let bundle = set_with(&[("q", "ghcr.io/acme/q:1")], &[("z", "ghcr.io/acme/z:1")]);
+
+        assert_eq!(reached_rows(&skill, &lock, Some(&skill)), None);
+        assert_eq!(reached_rows(&bundle, &lock, Some(&bundle)), None);
+    }
+
+    #[test]
+    fn a_followed_key_with_no_row_stays_unknown_for_reach() {
+        let set = set_with(&[("p", "ghcr.io/acme/p:1")], &[]);
+        let lock = lock_with(
+            vec![skill_entry(
+                "p",
+                "ghcr.io/acme/p",
+                &[(ArtifactKind::Skill, "d", "ghcr.io/acme/d:1")],
+            )],
+            &[],
+        );
+        assert_eq!(reached_rows(&set, &lock, None), None);
+    }
+
+    /// A declared bundle whose row answers another tag has a row, so it is no new key.
+    #[test]
+    fn a_bundle_retagged_stays_unknown_for_reach() {
+        let set = set_with(&[], &[("stack", "ghcr.io/acme/stack:2")]);
+        let lock = lock_of(&[snapshot("stack", "ghcr.io/acme/stack", "1", &[])]);
+        assert_eq!(reached_rows(&set, &lock, None), None);
+    }
+
+    #[test]
     fn a_requires_cycle_terminates() {
         let set = set_with(&[("a", "ghcr.io/acme/a:1"), ("b", "ghcr.io/acme/b:1")], &[]);
         let lock = lock_with(
@@ -1221,7 +1376,10 @@ mod tests {
             &[],
         );
         let g = effective_graph(&set, &lock).unwrap();
-        assert_eq!(g.nodes[&key(ArtifactKind::Skill, "d")], Origin::Conflicted);
+        assert!(matches!(
+            g.nodes[&key(ArtifactKind::Skill, "d")],
+            Origin::Conflicted { .. }
+        ));
     }
 
     #[test]
@@ -1289,6 +1447,7 @@ mod tests {
                 id: id(&format!("ghcr.io/acme/{child}:1")),
                 contributors: Vec::new(),
                 required_by: Vec::new(),
+                requests: BTreeSet::new(),
             });
         }
         EffectiveGraph { nodes, children }
@@ -1352,6 +1511,7 @@ mod tests {
                 id: id("ghcr.io/acme/s:1"),
                 contributors: Vec::new(),
                 required_by: Vec::new(),
+                requests: BTreeSet::new(),
             },
         );
         g.children

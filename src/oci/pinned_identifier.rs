@@ -39,6 +39,17 @@ impl PinnedIdentifier {
             && self.digest() == other.digest()
     }
 
+    /// Whether this pin answers `requested`, so a relock may keep it rather
+    /// than resolve the request again. Registry and repository must match,
+    /// and so must the tag (both absent counts) and any digest `requested`
+    /// carries.
+    pub fn answers(&self, requested: &Identifier) -> bool {
+        self.0.registry() == requested.registry()
+            && self.0.repository() == requested.repository()
+            && self.0.tag() == requested.tag()
+            && requested.digest().is_none_or(|digest| digest == self.digest())
+    }
+
     /// Returns a copy with the advisory tag stripped.
     pub fn strip_advisory(&self) -> Self {
         Self(self.0.without_tag())
@@ -121,7 +132,7 @@ impl schemars::JsonSchema for PinnedIdentifier {
     fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "string",
-            "description": "A fully-qualified OCI reference pinned to a content digest (`registry/repo@sha256:<hex>`; an advisory `:tag` may precede the digest)",
+            "description": "A fully-qualified OCI reference pinned to a content digest (`registry/repo@sha256:<hex>`; the `:tag` that resolved it may precede the digest)",
             "pattern": "@sha256:[0-9a-f]{64}$"
         })
     }
@@ -129,7 +140,7 @@ impl schemars::JsonSchema for PinnedIdentifier {
 
 /// A pinned identifier requires a digest but none was present.
 #[derive(Debug, thiserror::Error)]
-#[error("pinned identifier requires a digest: {identifier}")]
+#[error("pinned identifier requires a digest: {}", crate::oci::text::escape_controls(&.identifier.to_string()))]
 #[non_exhaustive]
 pub struct PinnedIdentifierError {
     pub identifier: Identifier,
@@ -213,6 +224,31 @@ mod tests {
         assert_eq!(pinned.as_identifier().registry(), "example.com");
         let back: Identifier = pinned.into();
         assert_eq!(back, id);
+    }
+
+    #[test]
+    fn answers_table() {
+        let d = format!("@sha256:{}", "d".repeat(64));
+        let e = format!("@sha256:{}", "e".repeat(64));
+        let a = "ghcr.io/acme/a";
+        let b = "ghcr.io/acme/b";
+        let elsewhere = "quay.io/acme/a";
+        for (requested, pin, expected) in [
+            (format!("{a}:1"), format!("{a}:1{d}"), true),
+            (format!("{a}:2"), format!("{a}:1{d}"), false),
+            (format!("{b}:1"), format!("{a}:1{d}"), false),
+            (format!("{elsewhere}:1"), format!("{a}:1{d}"), false),
+            (format!("{a}:1{d}"), format!("{a}:1{d}"), true),
+            (format!("{a}:1{e}"), format!("{a}:1{d}"), false),
+            (format!("{a}{d}"), format!("{a}{d}"), true),
+            (format!("{a}{d}"), format!("{a}:1{d}"), false),
+            (format!("{a}:1{d}"), format!("{a}{d}"), false),
+            (format!("{a}:1"), format!("{a}{d}"), false),
+        ] {
+            let pinned = PinnedIdentifier::try_from(Identifier::parse(&pin).unwrap()).unwrap();
+            let request = Identifier::parse(&requested).unwrap();
+            assert_eq!(pinned.answers(&request), expected, "{requested} against {pin}");
+        }
     }
 
     #[test]

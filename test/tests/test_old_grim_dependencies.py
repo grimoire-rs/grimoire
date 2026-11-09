@@ -2,23 +2,21 @@
 
 Dependents are published by newer grims; an older grim on the same machine must
 refuse cleanly or ignore what it cannot see, never corrupt.  The binary under
-test is the *old* one, given by ``GRIM_OLD_BIN`` (a grim 0.15.1 build); the
-module skips when it is unset.  The fixtures are pushed by the test harness, so
-no new grim is involved.
+test is the *old* one, given by ``GRIM_OLD_BIN`` (the v0.15.1 release binary,
+checked by ``src.old_grim``); the module skips when it is unset.  The fixtures
+are pushed by the test harness, so no new grim is involved.
 """
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
 
 from src.helpers import make_artifact, make_bundle, make_dependent, write_config
+from src.old_grim import OLD_BIN, checked_old_grim
 from src.registry import LAYER_MEDIA_TYPE, REGISTRY_HOST, push_manifest
 from src.runner import GrimRunner
-
-OLD_BIN = os.environ.get("GRIM_OLD_BIN")
 
 pytestmark = pytest.mark.skipif(
     not OLD_BIN, reason="GRIM_OLD_BIN names no grim 0.15.1 binary"
@@ -28,17 +26,19 @@ REQUIRES_LAYER = "application/vnd.grimoire.bundle.v1+json"
 SKILL = {"s/SKILL.md": "---\nname: s\ndescription: a skill\n---\n# s\n"}
 
 
+@pytest.fixture(scope="module")
+def old_bin(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return checked_old_grim(tmp_path_factory.mktemp("old-grim-identity"))
+
+
 @pytest.fixture()
-def old(tmp_path: Path) -> GrimRunner:
+def old(old_bin: Path, tmp_path: Path) -> GrimRunner:
     """The old grim, in a Claude-detected project with its own GRIM_HOME."""
-    assert OLD_BIN is not None
     grim_home = tmp_path / "grim-home"
     grim_home.mkdir()
     project = tmp_path / "project"
     (project / ".claude").mkdir(parents=True)
-    runner = GrimRunner(Path(OLD_BIN), grim_home, cwd=project)
-    version = runner.run("--version").stdout
-    assert "0.15." in version, f"GRIM_OLD_BIN is not a grim 0.15: {version!r}"
+    runner = GrimRunner(old_bin, grim_home, cwd=project)
     runner.run("init")
     return runner
 

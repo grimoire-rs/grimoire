@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::catalog::{SortMode, SortOrder};
 use crate::config::hash;
 use crate::config::path_source::PathSource;
-use crate::oci::Identifier;
+use crate::oci::{ArtifactKind, Identifier};
 
 /// Where a declared artifact comes from: an OCI registry reference or a
 /// local path source.
@@ -603,6 +603,20 @@ impl DesiredSet {
             hooks: BTreeMap::new(),
             settings: BTreeMap::new(),
             declaration_hash_cache: OnceLock::new(),
+        }
+    }
+
+    /// The table `kind` is declared in.
+    #[must_use]
+    pub fn table(&self, kind: ArtifactKind) -> &BTreeMap<String, DeclaredSource> {
+        match kind {
+            ArtifactKind::Skill => &self.skills,
+            ArtifactKind::Rule => &self.rules,
+            ArtifactKind::Agent => &self.agents,
+            ArtifactKind::Bundle => &self.bundles,
+            ArtifactKind::Mcp => &self.mcp,
+            ArtifactKind::Hook => &self.hooks,
+            ArtifactKind::Settings => &self.settings,
         }
     }
 

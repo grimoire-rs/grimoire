@@ -289,7 +289,7 @@ def test_add_bundle_locks_its_hook_member_with_bundle_provenance(
     # the trust predicate at the install seam keys on this, never on the
     # bundle's source: a bundle from registry A may pin a member from registry
     # B, and approving A must not silently grant B.
-    assert f"{REGISTRY_HOST}/{unique_repo}/hooks/shell-guard@sha256:" in lock, (
+    assert f"{REGISTRY_HOST}/{unique_repo}/hooks/shell-guard:1@sha256:" in lock, (
         "the hook member keeps its own digest-pinned source"
     )
     assert hook.digest in lock, "and that digest is the hook's, not the bundle's"

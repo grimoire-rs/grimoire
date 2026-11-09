@@ -17,27 +17,31 @@
 //!
 //! Edits the discovered config's `[skills]`/`[rules]`/`[bundles]` table
 //! (re-serializing the parsed config is acceptable — minimal formatting
-//! churn for a provisional milestone), then re-resolves just that entry
-//! under the config flock: a partial relock when a previous lock exists, a
-//! full resolve otherwise. The new lock is saved with `generated_at`
-//! preservation for the untouched entries. A failed relock rolls the config
+//! churn for a provisional milestone), then relocks under the config flock:
+//! the new entry resolves unless the lock holds a pin that answers it, and
+//! every other pin stays. The new lock is saved
+//! with `generated_at` preservation. A failed relock rolls the config
 //! back to its pre-write bytes, so an unresolvable reference leaves the
-//! project exactly as it was rather than declared-but-unlockable.
+//! project exactly as it was rather than declared-but-unlockable. An
+//! unreadable lock refuses before the config is written.
 //!
 //! The declared `(kind, name)` pair is a per-scope-unique key: declaring a
 //! name that already exists under a *different* identifier refuses (exit
 //! 64) instead of silently replacing it — re-run with `--name` to pick
 //! another binding name. Re-declaring the exact same identifier stays an
-//! idempotent overwrite.
+//! idempotent overwrite: its pin carries, and one stderr note says so and names
+//! the `grim update` that moves it. A key new to the declaration carries the pin
+//! the lock holds for it where that pin answers the reference, with the same note.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use clap::Args;
 
-use crate::api::add_report::{AddReport, PulledIn};
+use crate::api::add_report::{AddReport, PinnedNode};
 use crate::cli::exit_code::ExitCode;
 use crate::command::command_error::CommandError;
+use crate::config::scope::Invocation;
 use crate::context::Context;
 use crate::hook::policy::HookPolicy;
 use crate::install::install_state::SettingsStore;
@@ -45,16 +49,23 @@ use crate::install::installer::{ForceScope, InstallIntent, SettingsRun, install_
 use crate::install::materializer::DefaultMaterializer;
 use crate::install::settings_phase::{self, SettingsInput};
 use crate::install::target::InstallTarget;
+use crate::lock::closure::{force_nodes, reachable_lock};
+use crate::lock::disposition::LockDisposition;
 use crate::lock::effective_set::{NodeKey, effective_set};
 use crate::lock::file_lock::ConfigFileLock;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
 use crate::lock::locked_artifact::LockedArtifact;
+use crate::lock::locked_bundle::{LockedBundle, LockedBundleSource};
+use crate::lock::pin_rule::{self, PinRecord};
+use crate::lock::prior::{Prior, direct_keys};
+use crate::lock::refresh::Refresh;
 use crate::oci::access::{OciAccess, Operation};
 use crate::oci::bundle::BundleMember;
-use crate::oci::{ArtifactKind, Identifier, PinnedIdentifier};
+use crate::oci::text::registry_text;
+use crate::oci::{ArtifactKind, Digest, Identifier, PinnedIdentifier};
 use crate::resolve::resolve_options::ResolveOptions;
-use crate::resolve::resolver::{resolve_lock, resolve_lock_partial};
+use crate::resolve::resolver::{LockRun, TargetLock, target_lock};
 
 use super::scope_resolution;
 
@@ -182,7 +193,7 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
         super::access_seam(ctx)
     })
     .await
-    .map_err(|e| declare_error(e, &scope.config_path))?;
+    .map_err(|e| declare_error(e, &scope.config_path, &scope.invocation))?;
 
     // At 1.0 a declared name is a true per-scope-unique key: declaring
     // `(kind, name)` against a *different repository* than what is already
@@ -202,8 +213,9 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     reject_dev_install_collision(&scope, kind, &name)?;
 
     let mut set = scope.set.clone();
-    if let Some(existing) = declare(&mut set, kind, name.clone(), id.clone())
-        && !same_repository(&existing, &id)
+    let redeclared = declare(&mut set, kind, name.clone(), id.clone());
+    if let Some(existing) = &redeclared
+        && !same_repository(existing, &id)
     {
         return Err(anyhow::Error::from(crate::error::Error::from(
             CommandError::DeclareConflict {
@@ -222,9 +234,18 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
         kind,
         name: &name,
     };
-    let (new_lock, previous) =
-        write_config_and_relock(ctx, &scope, &declaration, args.hook_trust.flag(), &access).await?;
-    let added = Added::new(&scope, previous.as_ref(), &new_lock, kind, &name);
+    let (target, previous) = write_config_and_relock(
+        ctx,
+        &scope,
+        &declaration,
+        args.hook_trust.flag(),
+        &access,
+        ctx.offline(),
+    )
+    .await?;
+    let new_lock = &target.lock;
+    let mut added = Added::new(&scope.set, previous.as_ref(), new_lock, kind, &name);
+    added.over_refusal = target.kept_over_refusal.contains(&added.target);
 
     // Default: materialize the freshly-declared artifact into the detected
     // clients right away (opt out with `--no-install`). Declare + relock
@@ -233,10 +254,30 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     // dependencies) is projected out and installed, so the rest of a shared
     // lock stays for `grim install`.
     let settings_changes = if args.install.enabled() {
-        install_added(ctx, &scope, &added, &new_lock, &access, args).await?
+        install_added(ctx, &scope, &added, new_lock, &access, args).await?
     } else {
+        consent_without_install(ctx, &scope, &added, &access, args).await;
         Vec::new()
     };
+    let note = kept_pin_note(
+        &added.target,
+        &id,
+        redeclared.as_ref(),
+        previous.as_ref(),
+        &target.tagless_resolved,
+        new_lock,
+        &scope.invocation,
+    )
+    .map(|note| {
+        if added.over_refusal {
+            refused_pin_note(&added.target, &scope.invocation)
+        } else {
+            note
+        }
+    });
+    if let Some(note) = note {
+        tracing::warn!("{note}");
+    }
 
     // A bundle has no single pinned member to report; surface the bundle
     // reference itself. A skill/rule/agent reports the digest it resolved to.
@@ -267,13 +308,17 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     Ok((
         AddReport::new(kind, name, pinned)
             .with_pulled_in(added.pulled_in())
-            .with_settings_changes(settings_changes),
+            .with_moved(moved_pins(&target))
+            .with_dropped(dropped_pins(&target))
+            .with_settings_changes(settings_changes)
+            .naming(scope.invocation.clone()),
         ExitCode::Success,
     ))
 }
 
 /// Write the edited declaration to `scope.config_path`, then re-lock it —
-/// rolling the config back to its pre-write bytes if the relock fails.
+/// rolling the config back to its pre-write bytes if the relock or the lock
+/// write fails.
 ///
 /// The shared sequence behind both `add` entry points (registry reference
 /// and local path source). Committing the declaration first and only then
@@ -289,68 +334,67 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
 /// bundle expands from the declared set, so the declaration has to be on
 /// disk (and in `set`) before it can be resolved.
 ///
-/// Returns the new lock and the lock it replaced, which tells
+/// Returns what the relock computed and the lock it replaced, which tells
 /// [`Added::new`] what the workspace already provided.
 ///
 /// # Errors
 ///
-/// An unreadable config (74/78), the config write, a settings conflict (78), or
-/// any [`ResolveError`](crate::resolve::resolve_error::ResolveError) from the
-/// relock — the last two after the rollback has run.
+/// An unreadable lock (78/77/74) with nothing written, an unreadable config
+/// (74/77), the config write, a settings conflict (78), any
+/// [`ResolveError`](crate::resolve::resolve_error::ResolveError) from the
+/// relock, or the lock write; the last three after the rollback has run.
 async fn write_config_and_relock(
     ctx: &Context,
     scope: &scope_resolution::ResolvedScope,
     declaration: &Declaration<'_>,
     trust: Option<bool>,
     access: &Arc<dyn OciAccess>,
-) -> anyhow::Result<(GrimoireLock, Option<GrimoireLock>)> {
-    let &Declaration { set, kind, name } = declaration;
-    // Snapshot the pre-write config. Absence is the legitimate "nothing to
-    // put back" case (a scope whose config `add` is creating); any other
-    // read failure aborts rather than risking a rollback that deletes a
-    // file it could not snapshot.
-    let original = match std::fs::read(&scope.config_path) {
-        Ok(bytes) => Some(bytes),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => {
-            return Err(anyhow::Error::from(crate::error::Error::from(
-                crate::config::ConfigError::new(scope.config_path.clone(), crate::config::ConfigErrorKind::Io(e)),
-            )));
-        }
-    };
+    offline: bool,
+) -> anyhow::Result<(TargetLock, Option<GrimoireLock>)> {
+    let &Declaration { set, .. } = declaration;
+    // Ahead of the write: past it, a refused lock leaves the edited config behind.
+    let previous = super::lock::load_previous(&scope.lock_path)?;
 
+    let original = snapshot_config(&scope.config_path)?;
     super::grim(write_config(&scope.config_path, &scope.options, &scope.registries, set))?;
+    // A failed read leaves nothing to compare, and the rollback then runs as if
+    // nobody else touched the file: refusing it would wedge the declaration.
+    let written = tokio::fs::read(&scope.config_path).await.ok();
 
-    // Relock: a partial relock of just this entry when a previous lock
-    // exists and is not stale; a full resolve otherwise (or when the
-    // partial stale guard fires — caught and retried as a full resolve so
-    // `add` always leaves a consistent lock).
-    let previous = lock_io::load(&scope.lock_path).ok();
-    let new_lock = match relock_declared(
+    // The proof is against the pre-edit set: the edit itself changes the hash,
+    // so judged against `set` every first `add` after an upgrade would re-pin
+    // the whole lock.
+    let prior = previous.as_ref().map(|lock| Prior::edited(lock, &scope.set, set));
+    let target = target_lock(
         set,
-        previous.as_ref(),
-        kind,
-        name,
+        prior.as_ref(),
+        &Refresh::Nothing,
         access,
-        scope.scope,
+        &ResolveOptions::default(),
         scope.config_dir(),
+        LockRun::in_scope(offline, &scope.invocation),
     )
-    .await
-    {
-        Ok(lock) => lock,
-        Err(e) => {
-            restore_config(&scope.config_path, original.as_deref());
-            return super::grim(Err(e));
-        }
-    };
+    .await;
     // A lock on disk is what every later run reads, so a conflict refuses before
-    // the save. It rolls the config back as a failed relock does.
-    if let Err(e) = refuse_added_conflict(ctx, scope, declaration, previous.as_ref(), &new_lock, trust, access).await {
-        restore_config(&scope.config_path, original.as_deref());
-        return Err(e);
+    // the save. It rolls the config back as a failed relock or save does.
+    let saved = async {
+        let target = super::grim(target)?;
+        refuse_added_conflict(ctx, scope, declaration, previous.as_ref(), &target.lock, trust, access).await?;
+        super::grim(lock_io::save(&scope.lock_path, &target.lock, previous.as_ref()))?;
+        anyhow::Ok(target)
     }
-    super::grim(lock_io::save(&scope.lock_path, &new_lock, previous.as_ref()))?;
-    Ok((new_lock, previous))
+    .await;
+    if saved.is_err() {
+        restore_config_unless_edited(
+            &scope.config_path,
+            original.as_deref(),
+            written.as_deref(),
+            &scope.invocation,
+        );
+    }
+    let target = saved?;
+    super::lock::warn_moved_bundle_pins(previous.as_ref(), &target.lock);
+    Ok((target, previous))
 }
 
 /// Run the settings conflict check over the lock this add would save. Past the
@@ -368,7 +412,7 @@ async fn refuse_added_conflict(
     if lock.settings.is_empty() || !scope.options.experimental.settings_enabled() {
         return Ok(());
     }
-    let added = Added::new(scope, previous, lock, declaration.kind, declaration.name);
+    let added = Added::new(&scope.set, previous, lock, declaration.kind, declaration.name);
     let brought = |artifact: &&LockedArtifact| {
         let node = (artifact.kind, artifact.name.clone());
         trust != Some(false) && (node == added.target || added.newly.contains(&node))
@@ -414,13 +458,55 @@ pub(super) async fn refuse_settings_conflict(
     super::grim(settings_phase::preflight(lock, &input).await)
 }
 
-/// Put the pre-write config back at `path` after a failed relock: the
-/// snapshot bytes, or removal of the file `add` had just created.
+/// The bytes [`restore_config`] puts back, read ahead of a config write.
+/// `None` means no file exists yet, so a restore removes the one the write
+/// creates.
+///
+/// # Errors
+///
+/// Any other read failure (74/77): a rollback must never delete a file it could
+/// not snapshot.
+pub(crate) fn snapshot_config(path: &std::path::Path) -> anyhow::Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(anyhow::Error::from(crate::error::Error::from(
+            crate::config::ConfigError::new(path.to_path_buf(), crate::config::ConfigErrorKind::Io(e)),
+        ))),
+    }
+}
+
+/// [`restore_config`], unless the file no longer holds `written`, the bytes the
+/// failed run left there.
+///
+/// The config lock binds grim alone. An editor may have saved meanwhile, and
+/// writing `original` over that save would destroy it, so the file stays and one
+/// warning names it. With `written` unknown there is nothing to compare, and the
+/// restore runs.
+pub(crate) fn restore_config_unless_edited(
+    path: &std::path::Path,
+    original: Option<&[u8]>,
+    written: Option<&[u8]>,
+    grim: &Invocation,
+) {
+    if written.is_none_or(|written| std::fs::read(path).is_ok_and(|now| now == written)) {
+        restore_config(path, original, grim);
+    } else {
+        tracing::warn!(
+            path = %path.display(),
+            "kept the config as it stands: it changed during this run, so it may still declare what failed to lock"
+        );
+    }
+}
+
+/// Put the pre-write config back at `path` after a failed relock or lock save:
+/// the [`snapshot_config`] bytes, or removal of the file the write had just
+/// created.
 ///
 /// Best-effort by design — the resolve failure is what the user must act on,
 /// so a rollback that itself fails only warns (and names the manual escape)
 /// rather than masking the real error with an I/O one.
-fn restore_config(path: &std::path::Path, original: Option<&[u8]>) {
+pub(crate) fn restore_config(path: &std::path::Path, original: Option<&[u8]>, grim: &Invocation) {
     let rolled_back = match original {
         Some(bytes) => crate::store::atomic_write::atomic_write_through_symlink(path, bytes),
         None => match std::fs::remove_file(path) {
@@ -432,7 +518,7 @@ fn restore_config(path: &std::path::Path, original: Option<&[u8]>) {
         tracing::warn!(
             path = %path.display(),
             error = %e,
-            "could not roll back the declaration after a failed relock; run `grim remove <kind> <name>` to drop it"
+            "could not roll back the declaration; run `{grim} remove <kind> <name>` to drop it"
         );
     }
 }
@@ -463,7 +549,8 @@ fn reject_dev_install_collision(
     if collides {
         return Err(anyhow::Error::from(crate::error::Error::from(
             CommandError::ConfigUsage(format!(
-                "'{name}' is already dev-installed as a local {kind}; run `grim uninstall {kind} {name}` or dev-install under a different name before declaring it"
+                "'{name}' is already dev-installed as a local {kind}; run `{} uninstall {kind} {name}` or dev-install under a different name before declaring it",
+                scope.invocation
             )),
         )));
     }
@@ -504,7 +591,7 @@ async fn add_path_source(
         &no_access,
     )
     .await
-    .map_err(|e| declare_error(e, &scope.config_path))?;
+    .map_err(|e| declare_error(e, &scope.config_path, &scope.invocation))?;
 
     // Same-name conflict guard, on full-source equality rather than the
     // registry path's repository comparison: a path pins by content hash and
@@ -535,13 +622,15 @@ async fn add_path_source(
         kind,
         name: &name,
     };
-    let (new_lock, previous) =
-        write_config_and_relock(ctx, scope, &declaration, args.hook_trust.flag(), &access).await?;
-    let added = Added::new(scope, previous.as_ref(), &new_lock, kind, &name);
+    let (target, previous) =
+        write_config_and_relock(ctx, scope, &declaration, args.hook_trust.flag(), &access, ctx.offline()).await?;
+    let new_lock = &target.lock;
+    let added = Added::new(&scope.set, previous.as_ref(), new_lock, kind, &name);
 
     let settings_changes = if args.install.enabled() {
-        install_added(ctx, scope, &added, &new_lock, &access, args).await?
+        install_added(ctx, scope, &added, new_lock, &access, args).await?
     } else {
+        consent_without_install(ctx, scope, &added, &access, args).await;
         Vec::new()
     };
 
@@ -563,7 +652,10 @@ async fn add_path_source(
     Ok((
         AddReport::new(kind, name, pinned)
             .with_pulled_in(added.pulled_in())
-            .with_settings_changes(settings_changes),
+            .with_moved(moved_pins(&target))
+            .with_dropped(dropped_pins(&target))
+            .with_settings_changes(settings_changes)
+            .naming(scope.invocation.clone()),
         ExitCode::Success,
     ))
 }
@@ -576,6 +668,144 @@ struct Declaration<'a> {
     name: &'a str,
 }
 
+/// The report rows for the pins this add moved, in `(kind, name)` order, the
+/// target among them when the previous lock pinned it at another digest. One the
+/// previous lock never held was added, not moved.
+fn moved_pins(relocked: &TargetLock) -> Vec<PinnedNode> {
+    relocked
+        .dispositions
+        .iter()
+        .filter(|row| row.disposition == LockDisposition::Moved)
+        .filter_map(|row| {
+            let (kind, name) = &row.key;
+            let entry = relocked
+                .lock
+                .iter_artifacts()
+                .find(|a| a.kind == *kind && a.name == *name)?;
+            Some(PinnedNode {
+                kind: *kind,
+                name: name.clone(),
+                pinned: entry.source.provenance(),
+            })
+        })
+        .collect()
+}
+
+/// The report rows for the pins this add took out of the lock, in `(kind, name)`
+/// order, each at the pin it held: their files stay, so nothing else names them.
+fn dropped_pins(relocked: &TargetLock) -> Vec<PinnedNode> {
+    relocked
+        .dispositions
+        .iter()
+        .filter(|row| row.disposition == LockDisposition::Dropped)
+        .filter_map(|row| {
+            let (kind, name) = &row.key;
+            Some(PinnedNode {
+                kind: *kind,
+                name: name.clone(),
+                pinned: row.previous.as_ref()?.provenance(),
+            })
+        })
+        .collect()
+}
+
+/// The stderr note of an `add` whose target kept its pin: the report says
+/// `added` either way, so nothing else tells the user no tag was read. The
+/// target was declared at `id` before, or is new and its held pin answers `id`
+/// or the edges onto it stamped `id`, `resolved` being the tagless pins the relock
+/// read a tag for. A changed reference resolved, and `grim update` keeps a digest
+/// reference, so neither gets the note. The command it names is `grim`.
+fn kept_pin_note(
+    target: &NodeKey,
+    id: &Identifier,
+    declared: Option<&crate::config::declaration::DeclaredSource>,
+    previous: Option<&GrimoireLock>,
+    resolved: &[NodeKey],
+    relocked: &GrimoireLock,
+    grim: &Invocation,
+) -> Option<String> {
+    if id.digest().is_some() {
+        return None;
+    }
+    let previous = previous?;
+    let same_reference = match declared {
+        Some(source) => source.identifier() == Some(id),
+        None => held_pin_answers(previous, target, id) || stamped_unread(previous, relocked, target, id, resolved),
+    };
+    let carried = same_reference && pin_of(previous, target)? == pin_of(relocked, target)?;
+    carried.then(|| {
+        let (kind, name) = target;
+        let update = grim.update(name);
+        let name = registry_text(name);
+        format!(
+            "kept the existing pin of {kind} '{name}'. `{update}` moves it to what its tag names now, or says \
+             why it cannot. Declare a reference that exists if that tag is gone"
+        )
+    })
+}
+
+/// [`kept_pin_note`] for a pin kept although the manifest its tag names now refuses or
+/// fails to resolve: `grim update` refuses there too, so the note says it explains why.
+/// The ordinary note cannot know that, as the add read no tag, and promises no move.
+fn refused_pin_note(target: &NodeKey, grim: &Invocation) -> String {
+    let (kind, name) = target;
+    let update = grim.update(name);
+    let name = registry_text(name);
+    format!(
+        "kept the existing pin of {kind} '{name}'. The manifest its tag names now does not resolve, and `{update}` says why"
+    )
+}
+
+/// Whether the pin `lock` holds for `target` answers a declaration of it at
+/// `id` by its own record, as a relock asks it for a key the proof holds only
+/// through edges. A tagless pin those edges stamp is [`stamped_unread`]'s case.
+fn held_pin_answers(lock: &GrimoireLock, target: &NodeKey, id: &Identifier) -> bool {
+    let (pin, row) = if target.0 == ArtifactKind::Bundle {
+        let row = bundle_row(lock, &target.1);
+        (row.and_then(LockedBundle::pinned), row)
+    } else {
+        (artifact_row(lock, target).and_then(|a| a.source.pinned()), None)
+    };
+    pin.is_some_and(|pin| {
+        let record = PinRecord {
+            pin,
+            row,
+            binding: &target.1,
+        };
+        pin_rule::answers_direct(record, None, id)
+    })
+}
+
+/// Whether the relock kept `target`'s tagless pin under the line `id`, as the edges onto
+/// it stamp it under `grim lock`, whether or not it read the line's tag on the way. A
+/// pin in `resolved` gets no note: the relock re-resolved it, so its tag names it now.
+fn stamped_unread(
+    previous: &GrimoireLock,
+    relocked: &GrimoireLock,
+    target: &NodeKey,
+    id: &Identifier,
+    resolved: &[NodeKey],
+) -> bool {
+    let held = artifact_row(previous, target).and_then(|row| row.source.pinned());
+    let kept = artifact_row(relocked, target).and_then(|row| row.source.pinned());
+    let tagless = held.is_some_and(|pin| pin.tag().is_none());
+    tagless && kept.is_some_and(|pin| pin.answers(id)) && !resolved.contains(target)
+}
+
+/// The pin `lock` holds for `key`, whose bundle row sits apart from its artifacts.
+fn pin_of(lock: &GrimoireLock, (kind, name): &NodeKey) -> Option<Digest> {
+    if *kind == ArtifactKind::Bundle {
+        return lock
+            .bundles
+            .iter()
+            .find(|b| b.name == *name)
+            .map(|b| b.content_digest());
+    }
+    lock.iter_artifacts()
+        .find(|a| a.kind == *kind && a.name == *name)
+        .map(|a| a.source.content_digest())
+}
+
 /// What one `add` touches once it is locked: the target, everything it reaches
 /// that gets installed, and which of those the workspace did not already
 /// provide.
@@ -586,49 +816,16 @@ struct Added {
     projection: Option<GrimoireLock>,
     /// Reached nodes the pre-add workspace did not provide, target excluded.
     newly: BTreeSet<NodeKey>,
+    /// [`resolved_reach`] of the target.
+    reach: Reach,
+    /// The relock kept the target's pin, so no resolve answered its digest.
+    target_carried: bool,
+    /// The target's pin was kept although the manifest its tag names refuses
+    /// ([`TargetLock::kept_over_refusal`]), so `grim update` cannot move it.
+    over_refusal: bool,
     /// The destinations `--force` may overwrite: the target, or a bundle's
     /// members. Never a dependency the target merely requires.
     force: BTreeSet<NodeKey>,
-}
-
-/// The destinations an `add --force` (and the TUI overwrite) may clobber: the
-/// target, or a bundle's members (nested bundles' included, only those
-/// carrying that bundle's stamp, so a directly declared member is spared);
-/// never a dependency it merely requires.
-pub(crate) fn force_nodes(lock: &GrimoireLock, target: &NodeKey) -> BTreeSet<NodeKey> {
-    if target.0 != ArtifactKind::Bundle {
-        return BTreeSet::from([target.clone()]);
-    }
-    let mut nodes: BTreeSet<NodeKey> = seed_lock(lock, target)
-        .iter()
-        .flat_map(GrimoireLock::iter_artifacts)
-        .map(|a| (a.kind, a.name.clone()))
-        .collect();
-    // Nested bundles only through the lock's bundle snapshots, never a
-    // `requires` edge; `seen` keeps a cyclic snapshot graph finite.
-    let mut seen = BTreeSet::from([target.clone()]);
-    let mut queue = vec![target.clone()];
-    while let Some(bundle) = queue.pop() {
-        let Some(snapshot) = lock.bundles.iter().find(|b| b.name == bundle.1) else {
-            continue;
-        };
-        let (repo, tag) = snapshot.provenance_pair();
-        for member in &snapshot.members {
-            let key = (member.kind, member.name.clone());
-            if key.0 == ArtifactKind::Bundle {
-                if seen.insert(key.clone()) {
-                    queue.push(key);
-                }
-            } else if bundle != *target
-                && lock.iter_artifacts().any(|a| {
-                    a.kind == key.0 && a.name == key.1 && a.bundles.iter().any(|b| b.repo == repo && b.tag == tag)
-                })
-            {
-                nodes.insert(key);
-            }
-        }
-    }
-    nodes
 }
 
 /// The installs that hit a refusal `--force` resolves on a node outside
@@ -663,8 +860,9 @@ fn settings_piece_forced(piece: &crate::api::settings_report::RefusedPiece, forc
 }
 
 impl Added {
+    /// `declared` is the declaration before this add edited it.
     fn new(
-        scope: &super::scope_resolution::ResolvedScope,
+        declared: &crate::config::declaration::DesiredSet,
         previous: Option<&GrimoireLock>,
         new_lock: &GrimoireLock,
         kind: ArtifactKind,
@@ -672,24 +870,37 @@ impl Added {
     ) -> Self {
         let target = (kind, name.to_string());
         let projection = reachable_lock(new_lock, &target);
-        let before = provided_before(scope, previous);
+        let before = provided_before(declared, previous);
         let newly = projection
             .iter()
             .flat_map(GrimoireLock::iter_artifacts)
             .map(|a| (a.kind, a.name.clone()))
             .filter(|node| *node != target && !before.contains(node))
             .collect();
+        let reach = resolved_reach(previous, new_lock, declared, &target);
+        let target_carried = carried(previous, new_lock, &target);
         let force = force_nodes(new_lock, &target);
         Self {
             target,
             projection,
             newly,
+            reach,
+            target_carried,
+            over_refusal: false,
             force,
         }
     }
 
+    /// Whether this add's gesture consents to `node`: the target, or what it
+    /// newly reaches over `reached`, the nodes of [`Self::reach`] this run read
+    /// edges for ([`consentable_keys`]). [`consentable_keys`] holds a carried
+    /// target to its repository as well.
+    fn consents_to(&self, node: &NodeKey, reached: &BTreeSet<NodeKey>) -> bool {
+        *node == self.target || (self.newly.contains(node) && reached.contains(node))
+    }
+
     /// The report rows for [`Self::newly`], in `(kind, name)` order.
-    fn pulled_in(&self) -> Vec<PulledIn> {
+    fn pulled_in(&self) -> Vec<PinnedNode> {
         let Some(projection) = &self.projection else {
             return Vec::new();
         };
@@ -699,7 +910,7 @@ impl Added {
                 let entry = projection
                     .iter_artifacts()
                     .find(|a| a.kind == *kind && a.name == *name)?;
-                Some(PulledIn {
+                Some(PinnedNode {
                     kind: *kind,
                     name: name.clone(),
                     pinned: entry.source.provenance(),
@@ -709,22 +920,229 @@ impl Added {
     }
 }
 
-/// Every `(kind, name)` the workspace provided before this add.
+/// What `target` reaches over `lock` by edges this relock resolved: the set a
+/// typed reference vouches for, the target included.
+///
+/// An edge counts only where its child is what that edge asked for. A carried
+/// node answers for the previous lock, and its digest is the lock's word. A key
+/// `declared` holds wins with no check, so the edge onto it never resolved. A
+/// child settled at a repository the edge does not name was chosen by another
+/// claim (CWE-863).
+fn resolved_reach(
+    previous: Option<&GrimoireLock>,
+    lock: &GrimoireLock,
+    declared: &crate::config::declaration::DesiredSet,
+    target: &NodeKey,
+) -> Reach {
+    let mut reach = Reach {
+        target: target.clone(),
+        edges: Vec::new(),
+    };
+    if carried(previous, lock, target) {
+        return reach;
+    }
+    let pins = registry_pins(lock);
+    let direct = direct_keys(declared);
+    let fresh: BTreeSet<&NodeKey> = pins
+        .keys()
+        .filter(|key| !direct.contains(*key) && !carried(previous, lock, key))
+        .collect();
+    let mut seen = BTreeSet::from([target.clone()]);
+    let mut queue = vec![target.clone()];
+    while let Some(node) = queue.pop() {
+        let parent_pin = pins.get(&node).copied();
+        for member in edges(lock, &node) {
+            let key = (member.kind, member.name.clone());
+            if !fresh.contains(&key) {
+                continue;
+            }
+            let Some(asked) = member
+                .absolute_id(parent_pin.map(|pin| pin.as_identifier()))
+                .filter(|asked| {
+                    pins.get(&key)
+                        .is_some_and(|pin| asked.registry_repository() == pin.registry_repository())
+                })
+            else {
+                continue;
+            };
+            if seen.insert(key.clone()) {
+                queue.push(key.clone());
+            }
+            reach.edges.push(ReachEdge {
+                parent: node.clone(),
+                parent_pin: parent_pin.cloned(),
+                child: key,
+                asked,
+            });
+        }
+    }
+    reach
+}
+
+/// What a target reaches over the edges [`resolved_reach`] admitted.
+struct Reach {
+    target: NodeKey,
+    edges: Vec<ReachEdge>,
+}
+
+/// One admitted edge: `parent` lists `child` as `asked`, and `child` settled at
+/// the repository `asked` names.
+struct ReachEdge {
+    parent: NodeKey,
+    /// `None` for a path parent, whose members this run re-packed from disk.
+    parent_pin: Option<PinnedIdentifier>,
+    child: NodeKey,
+    asked: Identifier,
+}
+
+impl Reach {
+    /// The target and every node the edges `keep` admits lead to from it.
+    fn nodes(&self, keep: impl Fn(&ReachEdge) -> bool) -> BTreeSet<NodeKey> {
+        let mut reached = BTreeSet::from([self.target.clone()]);
+        let mut queue = vec![self.target.clone()];
+        while let Some(node) = queue.pop() {
+            for edge in self.edges.iter().filter(|edge| edge.parent == node && keep(edge)) {
+                if reached.insert(edge.child.clone()) {
+                    queue.push(edge.child.clone());
+                }
+            }
+        }
+        reached
+    }
+}
+
+/// [`Reach::nodes`] over the edges a parent's stored manifest lists. Offline no
+/// repository answered this run, and an edge the resolver took from a lock row
+/// (`offline_read`) is no one's word, so it never reaches a record (CWE-345).
+async fn stored_reach(access: &Arc<dyn OciAccess>, reach: &Reach) -> BTreeSet<NodeKey> {
+    let mut listed: BTreeMap<&NodeKey, Vec<(NodeKey, Identifier)>> = BTreeMap::new();
+    for edge in &reach.edges {
+        if let Some(pin) = &edge.parent_pin
+            && !listed.contains_key(&edge.parent)
+        {
+            listed.insert(&edge.parent, stored_members(access, edge.parent.0, pin).await);
+        }
+    }
+    reach.nodes(|edge| {
+        edge.parent_pin.is_none()
+            || listed.get(&edge.parent).is_some_and(|members| {
+                members
+                    .iter()
+                    .any(|(child, asked)| *child == edge.child && *asked == edge.asked)
+            })
+    })
+}
+
+/// Each member, with its id against `pin`, that the manifest `access` holds at
+/// `pin` lists. Empty when the manifest or its members layer cannot be read.
+pub(super) async fn stored_members(
+    access: &Arc<dyn OciAccess>,
+    kind: ArtifactKind,
+    pin: &PinnedIdentifier,
+) -> Vec<(NodeKey, Identifier)> {
+    use crate::oci::manifest::LayerLayout;
+    let manifest = match access.fetch_manifest(&pin.strip_advisory()).await {
+        Ok(Some(manifest)) => manifest,
+        Ok(None) => return Vec::new(),
+        Err(e) => {
+            tracing::debug!(error = %e, "no stored manifest for '{pin}'");
+            return Vec::new();
+        }
+    };
+    let layer = match manifest.layout(kind) {
+        Ok(LayerLayout::ContentWithRequires { requires, .. }) => requires,
+        Ok(LayerLayout::BundleMembers(members)) => members,
+        Ok(LayerLayout::Content(_)) | Err(_) => return Vec::new(),
+    };
+    let document = match crate::resolve::members::fetch_members_blob(access, pin.as_identifier(), layer).await {
+        Ok(document) => document,
+        Err(e) => {
+            tracing::debug!(error = %e, "no stored members layer for '{pin}'");
+            return Vec::new();
+        }
+    };
+    document
+        .members
+        .iter()
+        .filter_map(|m| Some(((m.kind, m.name.clone()), m.absolute_id(Some(pin.as_identifier()))?)))
+        .collect()
+}
+
+/// Every registry pin in `lock`, by node. A local source has none.
+fn registry_pins(lock: &GrimoireLock) -> BTreeMap<NodeKey, &PinnedIdentifier> {
+    let artifacts = lock
+        .iter_artifacts()
+        .filter_map(|a| Some(((a.kind, a.name.clone()), a.source.pinned()?)));
+    let bundles = lock.bundles.iter().filter_map(|b| match &b.source {
+        LockedBundleSource::Registry { pinned, .. } => Some(((ArtifactKind::Bundle, b.name.clone()), pinned)),
+        LockedBundleSource::Path { .. } => None,
+    });
+    artifacts.chain(bundles).collect()
+}
+
+/// `node`'s outgoing edges in `lock`: a bundle's members, or an artifact's
+/// `requires`.
+fn edges<'a>(lock: &'a GrimoireLock, node: &NodeKey) -> &'a [BundleMember] {
+    if node.0 == ArtifactKind::Bundle {
+        return bundle_row(lock, &node.1).map_or(&[], |b| b.members.as_slice());
+    }
+    artifact_row(lock, node).map_or(&[], |a| a.requires.as_slice())
+}
+
+fn bundle_row<'a>(lock: &'a GrimoireLock, name: &str) -> Option<&'a LockedBundle> {
+    lock.bundles.iter().find(|b| b.name == name)
+}
+
+fn artifact_row<'a>(lock: &'a GrimoireLock, (kind, name): &NodeKey) -> Option<&'a LockedArtifact> {
+    lock.iter_artifacts().find(|a| a.kind == *kind && a.name == *name)
+}
+
+/// Whether `previous` already held `node` at the content `lock` holds, the
+/// notion [`plan_lock`](crate::lock::disposition::plan_lock) calls `Carried`.
+fn carried(previous: Option<&GrimoireLock>, lock: &GrimoireLock, node: &NodeKey) -> bool {
+    let Some(previous) = previous else {
+        return false;
+    };
+    if node.0 == ArtifactKind::Bundle {
+        return bundle_row(previous, &node.1)
+            .zip(bundle_row(lock, &node.1))
+            .is_some_and(|(before, now)| bundle_eq_content(before, now));
+    }
+    artifact_row(previous, node)
+        .zip(artifact_row(lock, node))
+        .is_some_and(|(before, now)| before.source.eq_content(&now.source))
+}
+
+/// [`LockedSource::eq_content`](crate::lock::locked_source::LockedSource::eq_content)
+/// for a `[[bundle]]` row.
+fn bundle_eq_content(a: &LockedBundle, b: &LockedBundle) -> bool {
+    match (&a.source, &b.source) {
+        (LockedBundleSource::Registry { pinned: a, .. }, LockedBundleSource::Registry { pinned: b, .. }) => {
+            a.eq_content(b)
+        }
+        (LockedBundleSource::Path { hash: a, .. }, LockedBundleSource::Path { hash: b, .. }) => a == b,
+        _ => false,
+    }
+}
+
+/// Every `(kind, name)` the config and the previous lock show the workspace
+/// provided before this add.
 ///
 /// The pre-add effective set when the previous lock can compute it. When it
 /// cannot (no lock, a bundle without a snapshot, a stale declaration), the
 /// conservative union of everything the config declares and the previous lock
 /// holds, entries and bundle members alike: a node in doubt counts as already
-/// provided, so a cloned repository cannot make `add` treat a planted hook as
-/// new by breaking the graph.
+/// provided.
+///
+/// Both inputs are repository files, so this narrows what `add` reports and
+/// consents to, and [`resolved_reach`] is the control (CWE-863).
 fn provided_before(
-    scope: &super::scope_resolution::ResolvedScope,
+    declared: &crate::config::declaration::DesiredSet,
     previous: Option<&GrimoireLock>,
 ) -> BTreeSet<NodeKey> {
-    if let Some(set) = previous.and_then(|lock| effective_set(&scope.set, lock)) {
+    if let Some(set) = previous.and_then(|lock| effective_set(declared, lock)) {
         return set.into_keys().collect();
     }
-    let declared = &scope.set;
     let mut nodes = BTreeSet::new();
     for (kind, map) in [
         (ArtifactKind::Skill, &declared.skills),
@@ -761,7 +1179,8 @@ fn provided_before(
 /// a prior `--no-install` entry is never materialized as a side effect. The
 /// install state is persisted before any per-artifact failure is surfaced, and
 /// a refusal / hard error propagates as a non-zero exit via the shared
-/// [`install::finish`](super::install::finish).
+/// [`install::finish`](super::install::finish). Consent reaches its record
+/// before the install, so a failed install keeps it with the declaration.
 ///
 /// `--force` overwrites a locally modified or untracked destination of the
 /// added artifact only (`grim install --force` semantics, scoped): a dependency
@@ -792,17 +1211,12 @@ async fn install_added(
 
     // `grim add <ref>` is where the feature flags and consent are answered.
     // The declaration gesture is the consent, but only for the gated artifacts
-    // this add brings: the target itself and what it newly reaches. One already
-    // sitting in the workspace stays as unconsented as it was.
-    let consentable: BTreeSet<String> = single
-        .iter_artifacts()
-        .filter(|a| {
-            let node = (a.kind, a.name.clone());
-            node == added.target || added.newly.contains(&node)
-        })
-        .filter_map(|a| crate::hook::consent::consent_key_for(a.kind, &a.name, &a.source))
-        .collect();
-    let policies = super::hook_consent::resolve_for_add(ctx, scope, single, &consentable, args.hook_trust.flag())?;
+    // this add brings. One already sitting in the workspace stays as
+    // unconsented as it was.
+    let flag = args.hook_trust.flag();
+    let site = super::hook_consent::ConsentSite::of(ctx, scope);
+    let consentable = consentable_keys(&site, ctx.offline(), added, single, access, flag).await;
+    let policies = super::hook_consent::resolve_for_add(ctx, scope, single, &consentable, flag)?;
     let target = super::grim(InstallTarget::parse(
         &scope.workspace,
         scope.scope,
@@ -840,6 +1254,7 @@ async fn install_added(
             &scope.config_path,
             force,
             InstallIntent::Declared,
+            crate::install::vendor::SyncAdds::Every,
             // `--progress auto` stays silent here (add never rendered a
             // bar); `--progress json` emits the NDJSON events on stderr.
             crate::cli::progress::select_progress(ctx.progress(), false).as_ref(),
@@ -874,19 +1289,220 @@ async fn install_added(
     let mut named = BTreeSet::new();
     refused_dependencies.retain(|line| named.insert(line.clone()));
     // Only the change list survives: the add report names what was declared.
-    let (report, _) = super::install::finish(run, &Default::default()).map_err(|e| {
-        if refused_dependencies.is_empty() {
-            e
-        } else {
-            e.context(format!(
-                "dependencies {} were not overwritten: {}; \
-                 --force on add covers the added artifact only, run `grim install --force` to overwrite them",
-                crate::install::install_error::CHANGED_OUTSIDE_GRIM,
-                refused_dependencies.join(", ")
-            ))
+    super::install::finish(run, &Default::default())
+        .map(|(report, _)| report.into_settings_changes())
+        .map_err(|e| {
+            if refused_dependencies.is_empty() {
+                e
+            } else {
+                e.context(format!(
+                    "dependencies {} were not overwritten: {}; \
+                     --force on add covers the added artifact only, run `{} install --force` to overwrite them",
+                    crate::install::install_error::CHANGED_OUTSIDE_GRIM,
+                    refused_dependencies.join(", "),
+                    scope.invocation
+                ))
+            }
+        })
+}
+
+/// `--no-install` declares and locks all the same, so it records the hook
+/// consent [`install_added`] would have. A settings package is not recorded
+/// here: it is consented when an add installs it, or asked on the next install.
+async fn consent_without_install(
+    ctx: &Context,
+    scope: &super::scope_resolution::ResolvedScope,
+    added: &Added,
+    access: &Arc<dyn OciAccess>,
+    args: &AddArgs,
+) {
+    let site = super::hook_consent::ConsentSite::of(ctx, scope).hooks_only();
+    let Some(single) = added.projection.as_ref().filter(|_| site.records_hooks()) else {
+        return;
+    };
+    let flag = args.hook_trust.flag();
+    let consentable = consentable_keys(&site, ctx.offline(), added, single, access, flag).await;
+    super::hook_consent::record_without_install(&site, single, &consentable, flag);
+}
+
+/// The consent keys a declaration gesture covers: what `grim add` of `target`
+/// would record, given the declaration before the edit and the lock it
+/// replaced. The TUI's declaring Install, `grim add`'s TUI form, shares it.
+pub(crate) async fn gesture_consent(
+    site: &super::hook_consent::ConsentSite<'_>,
+    declared: &crate::config::declaration::DesiredSet,
+    previous: Option<&GrimoireLock>,
+    lock: &GrimoireLock,
+    target: &NodeKey,
+    access: &Arc<dyn OciAccess>,
+    offline: bool,
+) -> BTreeSet<String> {
+    let added = Added::new(declared, previous, lock, target.0, &target.1);
+    match &added.projection {
+        Some(single) => consentable_keys(site, offline, &added, single, access, None).await,
+        None => BTreeSet::new(),
+    }
+}
+
+/// How long a carried gated target waits on its repository. The registry client
+/// sets no timeout, so an unbounded read would hang an add whose pin is already
+/// written.
+const REPOSITORY_READ_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The [`consent_key_for`](crate::hook::consent::consent_key_for) of every hook
+/// and settings package in `single` this add's gesture covers
+/// ([`Added::consents_to`]).
+///
+/// Offline the walk keeps only edges a stored manifest lists ([`stored_reach`]).
+/// A carried target's digest came from a lock row, so it counts only once
+/// [`kept_pin_check`] confirms it (CWE-345). That read runs only when a record
+/// would change: a kept pin stays exempt from tag resolves, and no other run pays.
+async fn consentable_keys(
+    site: &super::hook_consent::ConsentSite<'_>,
+    offline: bool,
+    added: &Added,
+    single: &GrimoireLock,
+    access: &Arc<dyn OciAccess>,
+    flag: Option<bool>,
+) -> BTreeSet<String> {
+    let reached = if offline {
+        stored_reach(access, &added.reach).await
+    } else {
+        added.reach.nodes(|_| true)
+    };
+    let mut keys = BTreeSet::new();
+    for artifact in single.iter_artifacts() {
+        let node = (artifact.kind, artifact.name.clone());
+        if !added.consents_to(&node, &reached) {
+            continue;
         }
-    })?;
-    Ok(report.into_settings_changes())
+        // `None` for every kind consent does not gate.
+        let Some(key) = crate::hook::consent::consent_key_for(artifact.kind, &artifact.name, &artifact.source) else {
+            continue;
+        };
+        let held_to_its_repository =
+            added.target_carried && node == added.target && super::hook_consent::add_would_record(site, &key, flag);
+        if held_to_its_repository {
+            let check = match artifact.source.pinned() {
+                Some(_) if offline => PinCheck::Offline,
+                Some(pin) => kept_pin_check(access, pin, REPOSITORY_READ_DEADLINE).await,
+                None => PinCheck::NoAnswer,
+            };
+            let check = match check {
+                PinCheck::Moved if added.over_refusal => PinCheck::MovedUnresolved,
+                other => other,
+            };
+            if let Some(why) = check.refusal(artifact.kind, &artifact.name, site.invocation) {
+                let name = registry_text(&artifact.name);
+                tracing::warn!("{} '{name}' stays unconsented: {why}", artifact.kind);
+                continue;
+            }
+        }
+        keys.insert(key);
+    }
+    keys
+}
+
+/// What the repository says about a pin `grim add` kept.
+#[derive(Debug, PartialEq, Eq)]
+enum PinCheck {
+    /// The pin's tag still names its digest, or a tagless pin's digest is served.
+    Confirmed,
+    /// The pin's tag names another digest now.
+    Moved,
+    /// [`Self::Moved`], where the manifest that digest names refuses or fails to resolve,
+    /// so `grim update` cannot move the pin to it.
+    MovedUnresolved,
+    /// The repository no longer has the pin's tag.
+    TagGone,
+    /// The repository no longer serves a tagless pin's digest.
+    DigestGone,
+    /// The read failed or ran past its deadline.
+    NoAnswer,
+    /// No repository is asked offline.
+    Offline,
+}
+
+impl PinCheck {
+    /// The warning's reason for a pin that confirms nothing, for the hook or
+    /// settings package bound as `name`.
+    fn refusal(&self, kind: ArtifactKind, name: &str, grim: &Invocation) -> Option<String> {
+        let update = grim.update(name);
+        // One command, spelled as each kind's own refusals spell it.
+        let allow = match kind {
+            ArtifactKind::Settings => format!("{grim} consent allow"),
+            _ => format!("{grim} hook allow"),
+        };
+        Some(match self {
+            Self::Confirmed => return None,
+            Self::Moved => format!(
+                "its tag now names another digest than the pin this add kept. \
+                 `{update}` moves the pin or says why it cannot. `{allow}` consents to the lock as it stands"
+            ),
+            Self::MovedUnresolved => format!(
+                "its tag now names another digest than the pin this add kept, and that manifest \
+                 does not resolve. `{update}` says why, and `{allow}` consents to the lock as it stands"
+            ),
+            Self::TagGone => format!(
+                "its repository no longer has the tag the pin this add kept records; \
+                 run `{allow}` to consent to the lock as it stands"
+            ),
+            Self::DigestGone => format!(
+                "its repository no longer serves the digest this add kept; \
+                 `{update}` resolves its reference again, or run `{allow}` \
+                 to consent to the lock as it stands"
+            ),
+            Self::NoAnswer => format!(
+                "its repository did not confirm the pin this add kept; \
+                 rerun, or run `{allow}` to consent to the lock as it stands"
+            ),
+            Self::Offline => format!(
+                "its repository did not confirm the pin this add kept; \
+                 rerun online, or run `{allow}` to consent to the lock as it stands"
+            ),
+        })
+    }
+}
+
+/// Ask `pin`'s repository whether the pin still answers: one tag read for a
+/// tagged pin, since the add's typed tag matched it, else one read of the digest.
+/// No answer within `deadline` is [`PinCheck::NoAnswer`]: a failed check leaves
+/// the hook gated and never fails or holds up the add (I3).
+async fn kept_pin_check(
+    access: &Arc<dyn OciAccess>,
+    pin: &PinnedIdentifier,
+    deadline: std::time::Duration,
+) -> PinCheck {
+    let read = async {
+        match pin.tag() {
+            Some(tag) => {
+                let at_tag = Identifier::new_registry(pin.repository(), pin.registry()).clone_with_tag(tag);
+                access
+                    .resolve_digest(&at_tag, Operation::Query)
+                    .await
+                    .map(|named| match named {
+                        Some(digest) if digest == pin.digest() => PinCheck::Confirmed,
+                        Some(_) => PinCheck::Moved,
+                        None => PinCheck::TagGone,
+                    })
+            }
+            None => access.fetch_manifest_bytes(pin).await.map(|served| match served {
+                Some(_) => PinCheck::Confirmed,
+                None => PinCheck::DigestGone,
+            }),
+        }
+    };
+    match tokio::time::timeout(deadline, read).await {
+        Ok(Ok(check)) => check,
+        Ok(Err(e)) => {
+            tracing::debug!(error = %e, "no answer for the pin of '{pin}'");
+            PinCheck::NoAnswer
+        }
+        Err(_) => {
+            tracing::debug!("no answer for the pin of '{pin}' within {deadline:?}");
+            PinCheck::NoAnswer
+        }
+    }
 }
 
 /// Refuse a binding name `grim add` must not accept: one that is not a plain
@@ -914,148 +1530,6 @@ pub fn refuse_bad_binding_name(kind: ArtifactKind, name: &str) -> anyhow::Result
     Err(anyhow::Error::from(crate::error::Error::from(
         CommandError::InvalidBindingName { kind, reason },
     )))
-}
-
-/// Project out of `lock` exactly what acting on `target` materializes: the
-/// entry (or a bundle's provenance-stamped members) plus everything they
-/// require, transitively, whether or not it is installed yet. `None` when the
-/// entry is absent, or when a bundle has no cached expansion.
-///
-/// The cached expansion's `(repo, tag)` provenance selects a bundle's members
-/// — registry repo/tag or, for a local bundle, the declared path + members-layer
-/// short hash (one encoding, see `LockedBundle::provenance_pair`).
-///
-/// Dependencies are followed through the lock alone: an entry's `requires`, a
-/// nested bundle's snapshot. An edge naming something the lock does not hold
-/// is skipped (the install-time stale-lock check owns that), so a lock with no
-/// dependency data projects exactly the target.
-///
-/// Shared by `grim add`'s install-on-add path and the TUI install actions.
-pub(crate) fn reachable_lock(lock: &GrimoireLock, target: &NodeKey) -> Option<GrimoireLock> {
-    let seed = seed_lock(lock, target)?;
-    let mut nodes: BTreeSet<NodeKey> = seed.iter_artifacts().map(|a| (a.kind, a.name.clone())).collect();
-    let mut seen = nodes.clone();
-    let mut queue: Vec<NodeKey> = nodes.iter().cloned().collect();
-    if target.0 == ArtifactKind::Bundle {
-        // The target's own members are already in the seed, minus any a direct
-        // declaration overrode; only a nested bundle needs walking from here.
-        seen.insert(target.clone());
-        queue.push(target.clone());
-    }
-    while let Some(node) = queue.pop() {
-        let members: &[BundleMember] = if node.0 == ArtifactKind::Bundle {
-            lock.bundles
-                .iter()
-                .find(|b| b.name == node.1)
-                .map_or(&[], |b| b.members.as_slice())
-        } else {
-            lock.iter_artifacts()
-                .find(|a| a.kind == node.0 && a.name == node.1)
-                .map_or(&[], |a| a.requires.as_slice())
-        };
-        for member in members {
-            let key = (member.kind, member.name.clone());
-            if node == *target && target.0 == ArtifactKind::Bundle && key.0 != ArtifactKind::Bundle {
-                continue;
-            }
-            if !seen.insert(key.clone()) {
-                continue;
-            }
-            if key.0 != ArtifactKind::Bundle && lock.iter_artifacts().any(|a| a.kind == key.0 && a.name == key.1) {
-                nodes.insert(key.clone());
-            }
-            queue.push(key);
-        }
-    }
-    let keep = |a: &&LockedArtifact| nodes.contains(&(a.kind, a.name.clone()));
-    Some(GrimoireLock {
-        metadata: lock.metadata.clone(),
-        skills: lock.skills.iter().filter(keep).cloned().collect(),
-        rules: lock.rules.iter().filter(keep).cloned().collect(),
-        agents: lock.agents.iter().filter(keep).cloned().collect(),
-        mcp: lock.mcp.iter().filter(keep).cloned().collect(),
-        hooks: lock.hooks.iter().filter(keep).cloned().collect(),
-        settings: lock.settings.iter().filter(keep).cloned().collect(),
-        bundles: Vec::new(),
-    })
-}
-
-/// What acting on `target` materializes before any dependency is followed:
-/// a bundle's provenance-stamped members, or the one entry.
-fn seed_lock(lock: &GrimoireLock, target: &NodeKey) -> Option<GrimoireLock> {
-    let (kind, name) = target;
-    match kind {
-        ArtifactKind::Bundle => {
-            let (repo, tag) = lock.bundles.iter().find(|b| &b.name == name)?.provenance_pair();
-            Some(bundle_members_lock(lock, &repo, &tag))
-        }
-        _ => single_entry_lock(lock, *kind, name),
-    }
-}
-
-/// Project the single `kind`/`name` entry out of `lock` as a one-artifact
-/// lock (same metadata), so the shared `install_all` path materializes
-/// exactly the acted-on entry and nothing else. `None` when the entry is
-/// absent from the resolved lock (defensive — not expected). Bundle entries
-/// go through [`bundle_members_lock`] instead.
-///
-/// Shared by `grim add`'s install-on-add path and the TUI single-row
-/// install action.
-pub(crate) fn single_entry_lock(lock: &GrimoireLock, kind: ArtifactKind, name: &str) -> Option<GrimoireLock> {
-    let entry = lock
-        .iter_artifacts()
-        .find(|a| a.kind == kind && a.name == name)
-        .cloned()?;
-    let mut single = GrimoireLock {
-        metadata: lock.metadata.clone(),
-        skills: Vec::new(),
-        rules: Vec::new(),
-        agents: Vec::new(),
-        mcp: Vec::new(),
-        hooks: Vec::new(),
-        settings: Vec::new(),
-        bundles: Vec::new(),
-    };
-    match kind {
-        ArtifactKind::Skill => single.skills.push(entry),
-        ArtifactKind::Rule => single.rules.push(entry),
-        ArtifactKind::Agent => single.agents.push(entry),
-        ArtifactKind::Mcp => single.mcp.push(entry),
-        ArtifactKind::Hook => single.hooks.push(entry),
-        ArtifactKind::Settings => single.settings.push(entry),
-        ArtifactKind::Bundle => return None,
-    }
-    Some(single)
-}
-
-/// Project the members the bundle `bundle_repo:bundle_tag` contributed out
-/// of `lock` as a members-only lock (same metadata), so the shared
-/// `install_all` path materializes exactly the acted-on bundle's members.
-/// Members are matched by the provenance the resolver stamps
-/// ([`LockedArtifact::bundles`] — a shared member lists every contributor);
-/// an empty projection means the bundle resolved to zero members (or every
-/// member was overridden by a direct declaration).
-///
-/// Shared by `grim add`'s install-on-add path and the TUI single-row
-/// install action.
-pub(crate) fn bundle_members_lock(lock: &GrimoireLock, bundle_repo: &str, bundle_tag: &str) -> GrimoireLock {
-    let is_member = |a: &LockedArtifact| a.bundles.iter().any(|b| b.repo == bundle_repo && b.tag == bundle_tag);
-    GrimoireLock {
-        metadata: lock.metadata.clone(),
-        skills: lock.skills.iter().filter(|a| is_member(a)).cloned().collect(),
-        rules: lock.rules.iter().filter(|a| is_member(a)).cloned().collect(),
-        agents: lock.agents.iter().filter(|a| is_member(a)).cloned().collect(),
-        // An mcp member is a first-class bundle member (the resolver locks
-        // it, `remove`/`prune` treat it as one) — omitting it here left the
-        // freshly-added bundle's server unregistered and `missing` in
-        // `status` until an unrelated `grim install` picked it up.
-        mcp: lock.mcp.iter().filter(|a| is_member(a)).cloned().collect(),
-        hooks: lock.hooks.iter().filter(|a| is_member(a)).cloned().collect(),
-        settings: lock.settings.iter().filter(|a| is_member(a)).cloned().collect(),
-        // A projection feeds the installer only — the bundle cache is not
-        // consulted there, so it is not carried over.
-        bundles: Vec::new(),
-    }
 }
 
 /// Declare `name = id` in the kind's config table
@@ -1118,7 +1592,7 @@ fn overrides(args: &AddArgs) -> DeclareOverrides {
 /// seam was extracted: the four registry misses are one
 /// [`CommandError::KindInferenceFailed`] (65), path-shape refusals a usage
 /// error (64), path-value failures a config error on `config_path`.
-fn declare_error(e: DeclareError, config_path: &std::path::Path) -> anyhow::Error {
+fn declare_error(e: DeclareError, config_path: &std::path::Path, grim: &Invocation) -> anyhow::Error {
     let config_error =
         |kind| crate::error::Error::from(crate::config::ConfigError::new(config_path.to_path_buf(), kind));
     let err = match e {
@@ -1131,9 +1605,14 @@ fn declare_error(e: DeclareError, config_path: &std::path::Path) -> anyhow::Erro
         | DeclareError::NoManifest { reference }
         | DeclareError::NoKind { reference } => CommandError::KindInferenceFailed { reference }.into(),
         DeclareError::InvalidBindingName { kind, reason } => CommandError::InvalidBindingName { kind, reason }.into(),
-        e @ (DeclareError::LocalBundle
-        | DeclareError::UnsupportedPathKind(_)
-        | DeclareError::UninferablePathKind { .. }) => CommandError::ConfigUsage(e.to_string()).into(),
+        DeclareError::LocalBundle => CommandError::ConfigUsage(format!(
+            "a local bundle is declared in [bundles] in grimoire.toml, not via `{grim} add`; add the entry and \
+             run `{grim} lock`"
+        ))
+        .into(),
+        e @ (DeclareError::UnsupportedPathKind(_) | DeclareError::UninferablePathKind { .. }) => {
+            CommandError::ConfigUsage(e.to_string()).into()
+        }
         DeclareError::PathInvalid { name, value, reason } => {
             config_error(crate::config::ConfigErrorKind::ArtifactValuePathInvalid { name, value, reason })
         }
@@ -1472,73 +1951,6 @@ fn invalid_binding(kind: ArtifactKind, binding: &str) -> Option<DeclareError> {
     crate::skill::SkillName::parse(binding)
         .err()
         .map(|reason| DeclareError::InvalidBindingName { kind, reason })
-}
-
-/// Re-lock after declaring `(kind, name)`: a bundle always full-resolves
-/// (its members' names differ from the bundle's binding name, so a partial
-/// relock keyed on the bundle name cannot work); a skill/rule goes through
-/// [`relock_entry`]. Shared by `grim add` and the TUI install/update
-/// action so both declare-and-lock through one seam.
-///
-/// # Errors
-///
-/// Any [`ResolveError`](crate::resolve::resolve_error::ResolveError) from
-/// the underlying resolve (tag-not-found, auth, registry-unreachable,
-/// timeout, bundle expansion failures).
-pub(crate) async fn relock_declared(
-    set: &crate::config::declaration::DesiredSet,
-    previous: Option<&crate::lock::grimoire_lock::GrimoireLock>,
-    kind: ArtifactKind,
-    name: &str,
-    access: &Arc<dyn OciAccess>,
-    scope: crate::config::scope::ConfigScope,
-    anchor: &std::path::Path,
-) -> Result<crate::lock::grimoire_lock::GrimoireLock, crate::resolve::resolve_error::ResolveError> {
-    if kind == ArtifactKind::Bundle {
-        resolve_lock(set, access, scope, &ResolveOptions::default(), anchor).await
-    } else {
-        relock_entry(set, previous, name, access, scope, anchor).await
-    }
-}
-
-/// Re-lock a single declared skill/rule entry: a partial relock of just
-/// `name` when a previous lock exists, a full resolve otherwise — or when
-/// the partial stale guard fires, in which case the full resolve is the
-/// correct recovery (every entry is declared, so the result is
-/// consistent). Bundle declarations go through [`relock_declared`].
-///
-/// # Errors
-///
-/// Any [`ResolveError`] other than the recovered stale-lock guard
-/// (tag-not-found, auth, registry-unreachable, timeout).
-pub(crate) async fn relock_entry(
-    set: &crate::config::declaration::DesiredSet,
-    previous: Option<&crate::lock::grimoire_lock::GrimoireLock>,
-    name: &str,
-    access: &Arc<dyn OciAccess>,
-    scope: crate::config::scope::ConfigScope,
-    anchor: &std::path::Path,
-) -> Result<crate::lock::grimoire_lock::GrimoireLock, crate::resolve::resolve_error::ResolveError> {
-    let names = [name.to_string()];
-    match previous {
-        Some(prev) => {
-            match resolve_lock_partial(set, prev, access, &names, scope, &ResolveOptions::default(), anchor).await {
-                Ok(lock) => Ok(lock),
-                Err(e)
-                    if matches!(
-                        e.kind,
-                        crate::resolve::resolve_error::ResolveErrorKind::StaleLock { .. }
-                    ) =>
-                {
-                    // The edited entry made the predecessor stale; resolve
-                    // everything fresh.
-                    resolve_lock(set, access, scope, &ResolveOptions::default(), anchor).await
-                }
-                Err(e) => Err(e),
-            }
-        }
-        None => resolve_lock(set, access, scope, &ResolveOptions::default(), anchor).await,
-    }
 }
 
 /// Infer the artifact kind from the published manifest: current grim
@@ -1990,6 +2402,1446 @@ mod tests {
         // `--force --no-install` parses (documented as inert — nothing is
         // materialized, so the flag has nothing to override).
         assert!(parse_force(&["grim", "--force", "--no-install", "ghcr.io/acme/x"]));
+    }
+
+    /// Which nodes an add's gesture covers, over the lock it replaced.
+    mod consent_reach {
+        use super::*;
+        use crate::oci::access::error::AccessError;
+        use crate::oci::access::memory_registry::MemoryRegistry;
+        use crate::oci::access::{CatalogListing, Operation};
+        use crate::oci::manifest::OciManifest;
+        use crate::tui::bundle_members::test_support::{lock_of, sha};
+
+        const ACME: &str = "ghcr.io/acme";
+
+        /// One `[[bundle]]` row at `ACME/<repo>`, digest `byte`.
+        fn row(name: &str, repo: &str, byte: char, members: &[(&str, &str)]) -> String {
+            let mut out = format!(
+                "[[bundle]]\nname = \"{name}\"\nrepo = \"{ACME}/{repo}\"\ntag = \"1\"\n\
+                 pinned = \"{ACME}/{repo}@sha256:{}\"\n\n",
+                sha(byte)
+            );
+            for (kind, member) in members {
+                out.push_str(&format!(
+                    "[[bundle.member]]\nkind = \"{kind}\"\nname = \"{member}\"\nid = \"{ACME}/{member}:1\"\n\n"
+                ));
+            }
+            out
+        }
+
+        /// One `[[hook]]` row at `ACME/<name>`.
+        fn hook_row(name: &str) -> String {
+            format!(
+                "[[hook]]\nname = \"{name}\"\npinned = \"{ACME}/{name}@sha256:{}\"\n\n",
+                sha('e')
+            )
+        }
+
+        fn reach(previous: Option<&GrimoireLock>, lock: &GrimoireLock, target: &NodeKey) -> BTreeSet<NodeKey> {
+            resolved_reach(previous, lock, &DesiredSet::default(), target).nodes(|_| true)
+        }
+
+        fn bundle(name: &str) -> NodeKey {
+            (ArtifactKind::Bundle, name.to_string())
+        }
+
+        fn hook(name: &str) -> NodeKey {
+            (ArtifactKind::Hook, name.to_string())
+        }
+
+        /// `outer` over `inner` at digest `c`, over the hook `h`.
+        fn chain() -> GrimoireLock {
+            let rows = row("outer", "outer", 'c', &[("bundle", "inner")])
+                + &row("inner", "inner", 'c', &[("hook", "h")])
+                + &hook_row("h");
+            lock_of(&[], &rows)
+        }
+
+        #[test]
+        fn with_no_previous_lock_everything_was_resolved() {
+            assert!(reach(None, &chain(), &bundle("outer")).contains(&hook("h")));
+        }
+
+        #[test]
+        fn a_node_new_to_the_lock_is_walked() {
+            let previous = lock_of(&[("other", "ghcr.io/acme/other", &[])], "");
+            assert!(reach(Some(&previous), &chain(), &bundle("outer")).contains(&hook("h")));
+        }
+
+        #[test]
+        fn a_carried_bundle_stops_the_walk() {
+            let previous = lock_of(&[], &row("inner", "inner", 'c', &[]));
+            let reached = reach(Some(&previous), &chain(), &bundle("outer"));
+            assert!(!reached.contains(&bundle("inner")));
+            assert!(!reached.contains(&hook("h")));
+        }
+
+        #[test]
+        fn a_carried_hook_is_not_reached() {
+            let previous = lock_of(&[], &hook_row("h"));
+            let reached = reach(Some(&previous), &chain(), &bundle("outer"));
+            assert!(reached.contains(&bundle("inner")), "the walk got there");
+            assert!(
+                !reached.contains(&hook("h")),
+                "the digest is the lock's, not this run's"
+            );
+        }
+
+        #[test]
+        fn a_carried_bundle_under_a_new_tag_still_stops_the_walk() {
+            let previous = lock_of(
+                &[],
+                &row("inner", "inner", 'c', &[]).replace("tag = \"1\"", "tag = \"2\""),
+            );
+            let reached = reach(Some(&previous), &chain(), &bundle("outer"));
+            assert!(!reached.contains(&hook("h")), "the tag is advisory, as in `plan_lock`");
+        }
+
+        #[test]
+        fn a_moved_bundle_is_walked() {
+            let moved = lock_of(&[], &row("inner", "inner", 'b', &[]));
+            assert!(reach(Some(&moved), &chain(), &bundle("outer")).contains(&hook("h")));
+
+            let elsewhere = lock_of(&[], &row("inner", "fork", 'c', &[]));
+            assert!(reach(Some(&elsewhere), &chain(), &bundle("outer")).contains(&hook("h")));
+        }
+
+        #[test]
+        fn a_carried_artifact_stops_the_walk_and_a_moved_one_does_not() {
+            let edge: &[(&str, &str, &str)] = &[("hook", "h", "./h:1")];
+            let lock = lock_of(
+                &[
+                    ("t", "ghcr.io/acme/t", &[("skill", "dep", "./dep:1")]),
+                    ("dep", "ghcr.io/acme/dep", edge),
+                ],
+                &hook_row("h"),
+            );
+            let target = (ArtifactKind::Skill, "t".to_string());
+
+            let carried = lock_of(&[("dep", "ghcr.io/acme/dep", &[])], "");
+            assert!(!reach(Some(&carried), &lock, &target).contains(&hook("h")));
+
+            let moved = lock_of(&[("dep", "ghcr.io/acme/fork", &[])], "");
+            assert!(reach(Some(&moved), &lock, &target).contains(&hook("h")));
+        }
+
+        /// Takes the request and stalls. Nothing but the one read may reach it.
+        struct Stalled;
+
+        #[async_trait::async_trait]
+        impl OciAccess for Stalled {
+            async fn fetch_manifest_bytes(&self, _: &PinnedIdentifier) -> Result<Option<Vec<u8>>, AccessError> {
+                std::future::pending().await
+            }
+            async fn resolve_digest(&self, _: &Identifier, _: Operation) -> Result<Option<Digest>, AccessError> {
+                std::future::pending().await
+            }
+            async fn fetch_manifest(&self, _: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
+                unreachable!()
+            }
+            async fn fetch_blob(&self, _: &Identifier, _: &Digest, _: u64) -> Result<Option<Vec<u8>>, AccessError> {
+                unreachable!()
+            }
+            async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
+                unreachable!()
+            }
+            async fn list_catalog(&self, _: &str) -> Result<CatalogListing, AccessError> {
+                unreachable!()
+            }
+            async fn push_blob(&self, _: &Identifier, _: &[u8]) -> Result<Digest, AccessError> {
+                unreachable!()
+            }
+            async fn push_manifest(&self, _: &Identifier, _: &OciManifest) -> Result<Digest, AccessError> {
+                unreachable!()
+            }
+            async fn put_tag(&self, _: &Identifier, _: &str, _: &Digest) -> Result<(), AccessError> {
+                unreachable!()
+            }
+        }
+
+        fn pin(text: &str) -> PinnedIdentifier {
+            PinnedIdentifier::try_from(Identifier::parse(text).unwrap()).unwrap()
+        }
+
+        #[tokio::test]
+        async fn a_repository_that_never_answers_leaves_the_hook_gated() {
+            let access: Arc<dyn OciAccess> = Arc::new(Stalled);
+            let deadline = std::time::Duration::from_millis(20);
+            for pinned in [
+                format!("{ACME}/h@sha256:{}", sha('e')),
+                format!("{ACME}/h:1@sha256:{}", sha('e')),
+            ] {
+                let pinned_id = pin(&pinned);
+                let answer = kept_pin_check(&access, &pinned_id, deadline);
+
+                let answer = tokio::time::timeout(deadline * 50, answer).await;
+                assert_eq!(
+                    answer.ok(),
+                    Some(PinCheck::NoAnswer),
+                    "a stalled read of {pinned} ends in no answer"
+                );
+            }
+        }
+
+        /// Push `id` with `members` as its members layer (a bundle) or requires
+        /// layer, tag it, and return its manifest digest.
+        async fn publish(
+            reg: &MemoryRegistry,
+            kind: ArtifactKind,
+            id: &str,
+            members: &[(ArtifactKind, &str, &str)],
+        ) -> Digest {
+            use crate::oci::bundle::{BUNDLE_LAYER_MEDIA_TYPE, BundleManifest};
+            use crate::oci::manifest::Descriptor;
+            let id = Identifier::parse(id).unwrap();
+            let members = members
+                .iter()
+                .map(|(kind, name, id)| BundleMember {
+                    kind: *kind,
+                    name: (*name).to_string(),
+                    id: (*id).to_string(),
+                })
+                .collect();
+            let bytes = BundleManifest::new(members).to_layer_bytes().unwrap();
+            let mut layers = vec![Descriptor {
+                digest: reg.push_blob(&id, &bytes).await.unwrap(),
+                media_type: BUNDLE_LAYER_MEDIA_TYPE.to_string(),
+                size: bytes.len() as u64,
+                annotations: None,
+            }];
+            if kind != ArtifactKind::Bundle {
+                layers.insert(
+                    0,
+                    Descriptor {
+                        digest: Digest::Sha256(sha('a')),
+                        media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),
+                        size: 10,
+                        annotations: None,
+                    },
+                );
+            }
+            let manifest = OciManifest {
+                media_type: None,
+                artifact_type: None,
+                config_media_type: None,
+                layers,
+                annotations: BTreeMap::new(),
+            };
+            let digest = reg.push_manifest(&id, &manifest).await.unwrap();
+            reg.put_tag(&id, id.tag_or_latest(), &digest).await.unwrap();
+            digest
+        }
+
+        /// One `[[bundle]]` row at `ACME/<name>`, pinned at `digest`, over the
+        /// hooks `members`.
+        fn row_at(name: &str, digest: &Digest, kind: &str, members: &[&str]) -> String {
+            let mut out = format!(
+                "[[bundle]]\nname = \"{name}\"\nrepo = \"{ACME}/{name}\"\ntag = \"1\"\n\
+                 pinned = \"{ACME}/{name}:1@{digest}\"\n\n"
+            );
+            for member in members {
+                out.push_str(&format!(
+                    "[[bundle.member]]\nkind = \"{kind}\"\nname = \"{member}\"\nid = \"{ACME}/{member}:1\"\n\n"
+                ));
+            }
+            out
+        }
+
+        #[tokio::test]
+        async fn offline_only_an_edge_a_stored_manifest_lists_is_walked() {
+            let reg = MemoryRegistry::new();
+            let outer = publish(
+                &reg,
+                ArtifactKind::Bundle,
+                "ghcr.io/acme/outer:1",
+                &[(ArtifactKind::Bundle, "inner", "ghcr.io/acme/inner:1")],
+            )
+            .await;
+            let inner = publish(
+                &reg,
+                ArtifactKind::Bundle,
+                "ghcr.io/acme/inner:1",
+                &[(ArtifactKind::Hook, "h", "ghcr.io/acme/h:1")],
+            )
+            .await;
+            let access: Arc<dyn OciAccess> = Arc::new(reg);
+            let lock = |inner_members: &[&str], extra: &str| {
+                let rows = row_at("outer", &outer, "bundle", &["inner"])
+                    + &row_at("inner", &inner, "hook", inner_members)
+                    + &hook_row("h")
+                    + &hook_row("planted")
+                    + extra;
+                lock_of(&[], &rows)
+            };
+
+            let listed = resolved_reach(None, &lock(&["h"], ""), &DesiredSet::default(), &bundle("outer"));
+            assert_eq!(
+                stored_reach(&access, &listed).await,
+                BTreeSet::from([bundle("outer"), bundle("inner"), hook("h")]),
+            );
+
+            let planted = resolved_reach(
+                None,
+                &lock(&["h", "planted"], ""),
+                &DesiredSet::default(),
+                &bundle("outer"),
+            );
+            assert!(
+                planted.nodes(|_| true).contains(&hook("planted")),
+                "the lock row lists it"
+            );
+            assert!(
+                !stored_reach(&access, &planted).await.contains(&hook("planted")),
+                "no stored manifest lists it"
+            );
+        }
+
+        #[tokio::test]
+        async fn offline_an_edge_below_an_unstored_manifest_is_not_walked() {
+            let reg = MemoryRegistry::new();
+            let outer = publish(
+                &reg,
+                ArtifactKind::Bundle,
+                "ghcr.io/acme/outer:1",
+                &[(ArtifactKind::Bundle, "inner", "ghcr.io/acme/inner:1")],
+            )
+            .await;
+            let access: Arc<dyn OciAccess> = Arc::new(reg);
+            let rows = row_at("outer", &outer, "bundle", &["inner"])
+                + &row_at("inner", &Digest::Sha256(sha('c')), "hook", &["h"])
+                + &hook_row("h");
+
+            let reach = resolved_reach(None, &lock_of(&[], &rows), &DesiredSet::default(), &bundle("outer"));
+
+            assert_eq!(
+                stored_reach(&access, &reach).await,
+                BTreeSet::from([bundle("outer"), bundle("inner")])
+            );
+        }
+
+        #[tokio::test]
+        async fn a_kept_pin_answers_only_while_its_tag_names_it() {
+            let reg = MemoryRegistry::new();
+            let named = publish(
+                &reg,
+                ArtifactKind::Hook,
+                "ghcr.io/acme/h:1",
+                &[(ArtifactKind::Skill, "s", "ghcr.io/acme/s:1")],
+            )
+            .await;
+            let access: Arc<dyn OciAccess> = Arc::new(reg);
+            let deadline = std::time::Duration::from_secs(5);
+            let check = |text: String| {
+                let access = access.clone();
+                async move { kept_pin_check(&access, &pin(&text), deadline).await }
+            };
+
+            assert_eq!(check(format!("{ACME}/h:1@{named}")).await, PinCheck::Confirmed);
+            assert_eq!(check(format!("{ACME}/h:1@sha256:{}", sha('b'))).await, PinCheck::Moved);
+            assert_eq!(check(format!("{ACME}/h:2@{named}")).await, PinCheck::TagGone);
+            assert_eq!(
+                check(format!("{ACME}/h@{named}")).await,
+                PinCheck::DigestGone,
+                "the double serves no raw bytes"
+            );
+        }
+
+        /// The settings refusals name `consent allow`, so a settings package's
+        /// kept-pin warning does too, with the run's invocation; a hook keeps
+        /// `hook allow`. Both spell one command.
+        #[test]
+        fn a_kept_pin_remedy_names_the_consent_command_of_its_kind() {
+            let grim = Invocation::GLOBAL;
+            let checks = [
+                PinCheck::Moved,
+                PinCheck::MovedUnresolved,
+                PinCheck::TagGone,
+                PinCheck::DigestGone,
+                PinCheck::NoAnswer,
+                PinCheck::Offline,
+            ];
+            for check in checks {
+                let settings = check.refusal(ArtifactKind::Settings, "team", &grim).unwrap();
+                let hook = check.refusal(ArtifactKind::Hook, "team", &grim).unwrap();
+                assert!(settings.contains("`grim --global consent allow`"), "{settings}");
+                assert!(!settings.contains("hook allow"), "{settings}");
+                assert!(hook.contains("`grim --global hook allow`"), "{hook}");
+            }
+            assert!(
+                PinCheck::Confirmed
+                    .refusal(ArtifactKind::Settings, "team", &grim)
+                    .is_none()
+            );
+        }
+
+        /// `consentable_keys` over a carried `kind` target `t` whose tag names another
+        /// digest than its pin: what it consents to, and what it logs. `refused` is a
+        /// pin the relock kept although the manifest its tag names refuses.
+        async fn consent_over_a_moved_tag(kind: ArtifactKind, refused: bool) -> (BTreeSet<String>, String) {
+            use crate::catalog::test_hosts::LogCapture;
+            use crate::command::hook_consent::ConsentSite;
+            use crate::config::declaration::ExperimentalOptions;
+            use crate::config::scope::{ConfigScope, Invocation};
+
+            let (hooks, settings) = (kind == ArtifactKind::Hook, kind == ArtifactKind::Settings);
+            let table = if hooks { "hook" } else { "settings" };
+            let reg = MemoryRegistry::new();
+            let served = publish(&reg, kind, "ghcr.io/acme/t:1", &[]).await;
+            let kept = Digest::Sha256(sha('b'));
+            assert_ne!(served, kept, "the tag must name another digest than the kept pin");
+            let rows = format!("[[{table}]]\nname = \"t\"\npinned = \"{ACME}/t:1@{kept}\"\n\n");
+            let lock = lock_of(&[], &rows);
+            let mut added = Added::new(&DesiredSet::default(), Some(&lock), &lock, kind, "t");
+            added.over_refusal = refused;
+            let single = added.projection.as_ref().expect("the target is in the lock");
+            let dir = tempfile::tempdir().unwrap();
+            let (home, workspace) = (dir.path().join("home"), dir.path().join("work"));
+            let site = ConsentSite {
+                grim_home: &home,
+                scope: ConfigScope::Project,
+                workspace: &workspace,
+                flags: ExperimentalOptions { hooks, settings },
+                invocation: &Invocation::WALKED,
+            };
+            let access: Arc<dyn OciAccess> = Arc::new(reg);
+            let capture = LogCapture::start();
+
+            let keys = consentable_keys(&site, false, &added, single, &access, None).await;
+
+            (keys, capture.text())
+        }
+
+        /// A carried target whose tag names another digest stays unconsented, and the
+        /// warning `consentable_keys` prints names the consent command of the target's
+        /// own kind: `grim consent allow` for settings, `grim hook allow` for a hook.
+        #[tokio::test]
+        async fn a_carried_target_warns_with_the_consent_command_of_its_kind() {
+            let cases = [
+                (ArtifactKind::Hook, "`grim hook allow`", "consent allow"),
+                (ArtifactKind::Settings, "`grim consent allow`", "hook allow"),
+            ];
+            for (kind, command, other) in cases {
+                let (keys, logs) = consent_over_a_moved_tag(kind, false).await;
+
+                assert!(keys.is_empty(), "{kind}: {keys:?}");
+                assert!(logs.contains("stays unconsented"), "{kind}: {logs}");
+                assert!(logs.contains(command), "{kind}: {logs}");
+                assert!(!logs.contains(other), "{kind}: {logs}");
+                assert!(
+                    logs.contains("`grim update -- t` moves the pin or says why it cannot"),
+                    "{kind}: {logs}"
+                );
+                for sentence in logs.split(". ") {
+                    assert!(sentence.split_whitespace().count() <= 25, "{kind}: {sentence}");
+                }
+                assert!(!logs.contains('\u{2014}'), "{kind}: {logs}");
+            }
+        }
+
+        /// A pin kept although the manifest its tag names refuses: `grim update` refuses
+        /// there too, so the warning sends no one to it as the way to move the pin. It
+        /// says the update explains, and names the consent command that takes the pin as
+        /// it stands. The target stays unconsented and unarmed all the same.
+        #[tokio::test]
+        async fn a_target_kept_over_a_refusal_warns_without_a_command_that_moves_it() {
+            for kind in [ArtifactKind::Hook, ArtifactKind::Settings] {
+                let (keys, logs) = consent_over_a_moved_tag(kind, true).await;
+
+                assert!(keys.is_empty(), "{kind}: {keys:?}");
+                assert!(logs.contains("stays unconsented"), "{kind}: {logs}");
+                assert!(logs.contains("that manifest does not resolve"), "{kind}: {logs}");
+                assert!(logs.contains("`grim update -- t` says why"), "{kind}: {logs}");
+                assert!(!logs.contains("moves the pin"), "{kind}: {logs}");
+                assert!(logs.contains(" allow`"), "{kind}: {logs}");
+                for sentence in logs.split(". ") {
+                    assert!(sentence.split_whitespace().count() <= 25, "{kind}: {sentence}");
+                }
+                assert!(!logs.contains('\u{2014}'), "{kind}: {logs}");
+            }
+        }
+
+        #[test]
+        fn a_carried_target_is_not_walked() {
+            let previous = lock_of(&[], &row("inner", "inner", 'c', &[]));
+            let reached = reach(Some(&previous), &chain(), &bundle("inner"));
+            assert_eq!(reached, BTreeSet::from([bundle("inner")]));
+        }
+
+        #[test]
+        fn an_edge_into_another_repository_is_not_followed() {
+            let rows = row("outer", "outer", 'c', &[("bundle", "inner")])
+                + &row("inner", "fork", 'c', &[("hook", "h")])
+                + &hook_row("h");
+            let reached = reach(None, &lock_of(&[], &rows), &bundle("outer"));
+            assert_eq!(reached, BTreeSet::from([bundle("outer")]));
+        }
+
+        #[test]
+        fn a_relative_edge_anchors_on_the_pin_of_its_parent() {
+            let lock = lock_of(
+                &[
+                    ("t", "ghcr.io/acme/t", &[("skill", "dep", "./dep:1")]),
+                    ("dep", "ghcr.io/evil/dep", &[("hook", "h", "./h:1")]),
+                ],
+                &hook_row("h"),
+            );
+            let target = (ArtifactKind::Skill, "t".to_string());
+            assert_eq!(reach(None, &lock, &target), BTreeSet::from([target]));
+        }
+
+        #[test]
+        fn an_edge_to_a_declared_key_is_not_followed() {
+            let mut declared = DesiredSet::default();
+            let inner = Identifier::parse("ghcr.io/acme/inner:1").unwrap();
+            declare(&mut declared, ArtifactKind::Bundle, "inner".to_string(), inner);
+
+            let reached = resolved_reach(None, &chain(), &declared, &bundle("outer")).nodes(|_| true);
+
+            assert_eq!(reached, BTreeSet::from([bundle("outer")]));
+        }
+
+        #[test]
+        fn an_edge_with_no_registry_row_is_not_followed() {
+            let rows = row("outer", "outer", 'c', &[("hook", "h")]);
+            let reached = reach(None, &lock_of(&[], &rows), &bundle("outer"));
+            assert_eq!(reached, BTreeSet::from([bundle("outer")]));
+        }
+
+        #[test]
+        fn a_cyclic_lock_ends() {
+            let rows = row("a", "a", 'c', &[("bundle", "b")]) + &row("b", "b", 'c', &[("bundle", "a")]);
+            let reached = reach(None, &lock_of(&[], &rows), &bundle("a"));
+            assert_eq!(reached, BTreeSet::from([bundle("a"), bundle("b")]));
+        }
+
+        #[test]
+        fn a_gesture_covers_its_target_and_what_it_newly_resolved() {
+            let added = Added {
+                target: hook("typed"),
+                projection: None,
+                newly: BTreeSet::from([hook("fresh"), hook("carried")]),
+                reach: Reach {
+                    target: hook("typed"),
+                    edges: Vec::new(),
+                },
+                target_carried: false,
+                over_refusal: false,
+                force: BTreeSet::new(),
+            };
+            let reached = BTreeSet::from([hook("typed"), hook("fresh"), hook("held")]);
+
+            assert!(added.consents_to(&hook("typed"), &reached));
+            assert!(added.consents_to(&hook("fresh"), &reached));
+            assert!(
+                !added.consents_to(&hook("carried"), &reached),
+                "new, but no gesture reached it"
+            );
+            assert!(
+                !added.consents_to(&hook("held"), &reached),
+                "the workspace already held it"
+            );
+
+            assert!(
+                added.consents_to(&hook("typed"), &BTreeSet::new()),
+                "the target needs no edge"
+            );
+            assert!(
+                !added.consents_to(&hook("fresh"), &BTreeSet::from([hook("typed")])),
+                "no edge read reached it"
+            );
+        }
+    }
+
+    /// The target the previous lock pinned elsewhere moved as much as any other
+    /// pin; one the previous lock never held was added, not moved.
+    #[test]
+    fn moved_lists_every_moved_pin_its_target_among_them() {
+        use crate::lock::disposition::plan_lock;
+        use crate::lock::locked_artifact::LockedArtifact;
+        use crate::oci::Digest;
+        use crate::tui::bundle_members::test_support::lock_of;
+
+        fn skill(name: &str, byte: char) -> LockedArtifact {
+            let id = Identifier::new_registry(name, "ghcr.io")
+                .clone_with_tag("1")
+                .clone_with_digest(Digest::Sha256(byte.to_string().repeat(64)));
+            let pin = PinnedIdentifier::try_from(id).unwrap();
+            LockedArtifact::direct(name.to_string(), ArtifactKind::Skill, pin)
+        }
+        let lock = |skills| GrimoireLock {
+            skills,
+            ..lock_of(&[], "")
+        };
+        let previous = lock(vec![skill("base", 'a'), skill("kept", 'b'), skill("target", 'c')]);
+        let next = lock(vec![
+            skill("base", 'd'),
+            skill("kept", 'b'),
+            skill("new", 'e'),
+            skill("target", 'f'),
+        ]);
+        let dispositions = plan_lock(Some(&previous), &next);
+        let relocked = TargetLock {
+            lock: next,
+            dispositions,
+            tagless_resolved: vec![],
+            kept_over_refusal: Default::default(),
+            part: None,
+        };
+
+        let moved = moved_pins(&relocked);
+
+        let row = |name: &str, byte: char| PinnedNode {
+            kind: ArtifactKind::Skill,
+            name: name.to_string(),
+            pinned: format!("ghcr.io/{name}@sha256:{}", byte.to_string().repeat(64)),
+        };
+        assert_eq!(moved, vec![row("base", 'd'), row("target", 'f')]);
+    }
+
+    mod kept_pin {
+        use super::super::{kept_pin_note, refused_pin_note};
+        use crate::config::declaration::DeclaredSource;
+        use crate::config::scope::Invocation;
+        use crate::lock::effective_set::NodeKey;
+        use crate::lock::grimoire_lock::GrimoireLock;
+        use crate::lock::locked_artifact::LockedArtifact;
+        use crate::lock::locked_bundle::{LockedBundle, LockedBundleSource};
+        use crate::oci::pinned_identifier::PinnedIdentifier;
+        use crate::oci::{ArtifactKind, Digest, Identifier};
+        use crate::tui::bundle_members::test_support::lock_of;
+
+        const TAGGED: &str = "ghcr.io/acme/target:1";
+        const PROJECT: &Invocation = &Invocation::WALKED;
+
+        fn id(reference: &str) -> Identifier {
+            Identifier::parse(reference).unwrap()
+        }
+
+        fn declared(reference: &str) -> DeclaredSource {
+            DeclaredSource::Registry(id(reference))
+        }
+
+        fn pin(byte: char) -> PinnedIdentifier {
+            let digest = Digest::Sha256(byte.to_string().repeat(64));
+            PinnedIdentifier::try_from(id(TAGGED).clone_with_digest(digest)).unwrap()
+        }
+
+        fn locking_skill(byte: char) -> GrimoireLock {
+            let skill = LockedArtifact::direct("target".to_string(), ArtifactKind::Skill, pin(byte));
+            GrimoireLock {
+                skills: vec![skill],
+                ..lock_of(&[], "")
+            }
+        }
+
+        fn locking_bundle(byte: char) -> GrimoireLock {
+            GrimoireLock {
+                bundles: vec![LockedBundle {
+                    name: "target".to_string(),
+                    source: LockedBundleSource::Registry {
+                        repo: "ghcr.io/acme/target".to_string(),
+                        tag: "1".to_string(),
+                        pinned: pin(byte),
+                    },
+                    members: vec![],
+                    transitive: false,
+                }],
+                ..lock_of(&[], "")
+            }
+        }
+
+        fn skill() -> NodeKey {
+            (ArtifactKind::Skill, "target".to_string())
+        }
+
+        const NOTE: &str = "kept the existing pin of skill 'target'. `grim update -- target` moves it to what its \
+                            tag names now, or says why it cannot. Declare a reference that exists if that tag is gone";
+
+        #[test]
+        fn a_carried_pin_is_named_with_the_command_that_may_move_it() {
+            let (lock, same) = (locking_skill('a'), declared(TAGGED));
+
+            let note = kept_pin_note(&skill(), &id(TAGGED), Some(&same), Some(&lock), &[], &lock, PROJECT);
+
+            assert_eq!(note.as_deref(), Some(NOTE));
+            for sentence in NOTE.split(". ") {
+                assert!(sentence.split_whitespace().count() <= 25, "{sentence}");
+            }
+            assert!(!NOTE.contains('\u{2014}'), "{NOTE}");
+        }
+
+        /// A pin kept over a refusal names no command that moves it, for `grim update`
+        /// refuses there. Each sentence keeps to 25 words, the invocation included.
+        #[test]
+        fn a_pin_kept_over_a_refusal_points_at_the_update_that_explains_it() {
+            let note = refused_pin_note(&skill(), PROJECT);
+
+            assert_eq!(
+                note,
+                "kept the existing pin of skill 'target'. The manifest its tag names now does not \
+                 resolve, and `grim update -- target` says why"
+            );
+            let global = refused_pin_note(&(ArtifactKind::Bundle, "target".to_string()), &Invocation::GLOBAL);
+            assert!(global.contains("bundle 'target'"), "{global}");
+            assert!(global.contains("`grim --global update -- target` says why"), "{global}");
+            for note in [note, global] {
+                assert!(!note.contains("moves it to what its tag names now"), "{note}");
+                assert!(!note.contains('\u{2014}'), "{note}");
+                for sentence in note.split(". ") {
+                    assert!(sentence.split_whitespace().count() <= 25, "{sentence}");
+                }
+            }
+        }
+
+        #[test]
+        fn a_carried_bundle_pin_is_named_too() {
+            let (lock, same) = (locking_bundle('a'), declared(TAGGED));
+            let bundle = (ArtifactKind::Bundle, "target".to_string());
+
+            let note =
+                kept_pin_note(&bundle, &id(TAGGED), Some(&same), Some(&lock), &[], &lock, PROJECT).expect("a note");
+
+            assert!(note.contains("bundle 'target'"), "{note}");
+            assert!(note.contains("`grim update -- target`"), "{note}");
+        }
+
+        #[test]
+        fn a_moved_pin_says_nothing() {
+            let (before, after, same) = (locking_skill('a'), locking_skill('b'), declared(TAGGED));
+            assert_eq!(
+                kept_pin_note(&skill(), &id(TAGGED), Some(&same), Some(&before), &[], &after, PROJECT),
+                None
+            );
+
+            let (before, after) = (locking_bundle('a'), locking_bundle('b'));
+            let bundle = (ArtifactKind::Bundle, "target".to_string());
+            assert_eq!(
+                kept_pin_note(&bundle, &id(TAGGED), Some(&same), Some(&before), &[], &after, PROJECT),
+                None
+            );
+        }
+
+        /// A key new to the declaration carries a pin that answers its reference,
+        /// as `grim lock` over the typed line does, so no tag was read either.
+        #[test]
+        fn a_first_add_over_a_pin_that_answers_it_is_named() {
+            let lock = locking_skill('a');
+
+            let note = kept_pin_note(&skill(), &id(TAGGED), None, Some(&lock), &[], &lock, PROJECT);
+
+            assert_eq!(note.as_deref(), Some(NOTE));
+        }
+
+        /// A pin that records another tag answers nothing the add asked for, so
+        /// the target resolved, even when it lands on the same digest.
+        #[test]
+        fn a_first_add_over_a_pin_at_another_tag_says_nothing() {
+            let digest = Digest::Sha256("a".repeat(64));
+            let other = id("ghcr.io/acme/target:1.0").clone_with_digest(digest);
+            let skill_row = LockedArtifact::direct(
+                "target".to_string(),
+                ArtifactKind::Skill,
+                PinnedIdentifier::try_from(other).unwrap(),
+            );
+            let lock = GrimoireLock {
+                skills: vec![skill_row],
+                ..lock_of(&[], "")
+            };
+
+            assert_eq!(
+                kept_pin_note(&skill(), &id(TAGGED), None, Some(&lock), &[], &lock, PROJECT),
+                None
+            );
+        }
+
+        /// A tagless pin the relock kept under the typed line, since the edges onto it
+        /// stamp that line, read no tag, even one that is gone, so the note names the
+        /// update. A line whose tag the relock read gets the tagless warning instead.
+        #[test]
+        fn a_first_add_its_edges_stamp_is_named_unless_its_tag_was_read() {
+            let digest = Digest::Sha256("a".repeat(64));
+            let tagless = id("ghcr.io/acme/target").clone_with_digest(digest);
+            let skill_row = LockedArtifact::direct(
+                "target".to_string(),
+                ArtifactKind::Skill,
+                PinnedIdentifier::try_from(tagless).unwrap(),
+            );
+            let before = GrimoireLock {
+                skills: vec![skill_row],
+                ..lock_of(&[], "")
+            };
+            let after = locking_skill('a');
+
+            let kept = kept_pin_note(&skill(), &id(TAGGED), None, Some(&before), &[], &after, PROJECT);
+            let read = kept_pin_note(&skill(), &id(TAGGED), None, Some(&before), &[skill()], &after, PROJECT);
+
+            assert_eq!(kept.as_deref(), Some(NOTE));
+            assert_eq!(read, None);
+        }
+
+        /// Without `--global` the named command acts on whatever project the shell
+        /// stands in, and moves that project's pin.
+        #[test]
+        fn a_global_note_names_the_global_update() {
+            let (lock, same) = (locking_skill('a'), declared(TAGGED));
+
+            let note = kept_pin_note(
+                &skill(),
+                &id(TAGGED),
+                Some(&same),
+                Some(&lock),
+                &[],
+                &lock,
+                &Invocation::GLOBAL,
+            );
+
+            assert_eq!(
+                note.as_deref(),
+                Some(
+                    "kept the existing pin of skill 'target'. `grim --global update -- target` moves it to what \
+                     its tag names now, or says why it cannot. Declare a reference that exists if that tag is gone"
+                )
+            );
+        }
+
+        /// Run from another directory, a plain `grim` moves the pin of the
+        /// project that directory walks up to.
+        #[test]
+        fn a_config_note_names_the_config_update() {
+            let (lock, same) = (locking_skill('a'), declared(TAGGED));
+            let grim = Invocation::config(std::path::Path::new("/srv/team/grimoire.toml"));
+
+            let note = kept_pin_note(&skill(), &id(TAGGED), Some(&same), Some(&lock), &[], &lock, &grim);
+
+            assert!(
+                note.as_deref().is_some_and(
+                    |note| note.contains("`grim --config /srv/team/grimoire.toml update -- target` moves it to")
+                ),
+                "{note:?}"
+            );
+        }
+
+        #[test]
+        fn a_target_with_no_earlier_pin_says_nothing() {
+            let (lock, same) = (locking_skill('a'), declared(TAGGED));
+            let unpinned = lock_of(&[], "");
+
+            assert_eq!(
+                kept_pin_note(&skill(), &id(TAGGED), Some(&same), None, &[], &lock, PROJECT),
+                None
+            );
+            assert_eq!(
+                kept_pin_note(&skill(), &id(TAGGED), Some(&same), Some(&unpinned), &[], &lock, PROJECT),
+                None
+            );
+        }
+
+        /// A new rung was resolved, not carried, even when it lands on one digest.
+        #[test]
+        fn a_changed_reference_says_nothing() {
+            let (lock, other) = (locking_skill('a'), declared("ghcr.io/acme/target:1.0"));
+
+            assert_eq!(
+                kept_pin_note(&skill(), &id(TAGGED), Some(&other), Some(&lock), &[], &lock, PROJECT),
+                None
+            );
+        }
+
+        /// `grim update` keeps a digest reference, so naming it would send the
+        /// user to a command that cannot help.
+        #[test]
+        fn a_digest_reference_says_nothing() {
+            let lock = locking_skill('a');
+            let reference = format!("{TAGGED}@sha256:{}", "a".repeat(64));
+            let same = declared(&reference);
+
+            assert_eq!(
+                kept_pin_note(&skill(), &id(&reference), Some(&same), Some(&lock), &[], &lock, PROJECT),
+                None
+            );
+        }
+    }
+
+    /// `run` from argument to report, short of installing.
+    mod run_reports {
+        use super::super::{AddArgs, InstallOnAdd, run};
+        use crate::catalog::test_hosts::LogCapture;
+        use crate::context::Context;
+        use crate::oci::ArtifactKind;
+        use crate::oci::access::error::AccessError;
+        use crate::oci::access::memory_registry::MemoryRegistry;
+        use crate::oci::access::{CatalogListing, OciAccess, Operation};
+        use crate::oci::manifest::{Descriptor, OciManifest};
+        use crate::oci::{Digest, Identifier, PinnedIdentifier};
+
+        const REFERENCE: &str = "localhost:5050/acme/a:1";
+
+        fn skill_args(reference: &str) -> AddArgs {
+            AddArgs {
+                reference: reference.to_string(),
+                kind: Some("skill".to_string()),
+                name: None,
+                force: false,
+                hook_trust: crate::cli::options::HookTrustOpts {
+                    trust_workspace: false,
+                    no_trust_workspace: false,
+                },
+                install: InstallOnAdd {
+                    install: false,
+                    no_install: true,
+                },
+            }
+        }
+
+        /// A context over `reg` scoped to a fresh `grimoire.toml` under `workspace`.
+        fn project(workspace: &std::path::Path, reg: MemoryRegistry) -> Context {
+            let config = workspace.join("grimoire.toml");
+            std::fs::write(&config, "[skills]\n").unwrap();
+            Context::with_access(workspace.join("home"), reg).with_config(config)
+        }
+
+        /// Point the tag of `REFERENCE` at a manifest over `content`.
+        async fn publish(reg: &MemoryRegistry, content: &[u8]) -> Digest {
+            let id = Identifier::parse(REFERENCE).unwrap();
+            let manifest = OciManifest {
+                media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
+                artifact_type: Some(ArtifactKind::Skill.artifact_type().to_string()),
+                config_media_type: Some("application/vnd.oci.empty.v1+json".to_string()),
+                layers: vec![Descriptor {
+                    digest: reg.push_blob(&id, content).await.unwrap(),
+                    media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),
+                    size: content.len() as u64,
+                    annotations: None,
+                }],
+                annotations: Default::default(),
+            };
+            let digest = reg.push_manifest(&id, &manifest).await.unwrap();
+            reg.put_tag(&id, "1", &digest).await.unwrap();
+            digest
+        }
+
+        fn write_skill(workspace: &std::path::Path, name: &str, body: &str) -> String {
+            let dir = workspace.join("local").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            let skill = format!("---\nname: {name}\ndescription: d\n---\n{body}\n");
+            std::fs::write(dir.join("SKILL.md"), skill).unwrap();
+            dir.display().to_string()
+        }
+
+        #[tokio::test]
+        async fn re_adding_a_declared_reference_notes_the_pin_it_kept() {
+            let tmp = tempfile::tempdir().unwrap();
+            let reg = MemoryRegistry::new();
+            let kept = publish(&reg, b"first").await;
+            let ctx = project(tmp.path(), reg.clone());
+            run(&ctx, &skill_args(REFERENCE))
+                .await
+                .expect("the first add locks the tag");
+            publish(&reg, b"moved").await;
+
+            let capture = LogCapture::start();
+            let (report, _) = run(&ctx, &skill_args(REFERENCE)).await.expect("a re-add succeeds");
+
+            assert!(report.pinned.ends_with(&kept.to_string()), "{}", report.pinned);
+            let logs = capture.text();
+            assert_eq!(logs.matches("kept the existing pin of skill 'a'").count(), 1, "{logs}");
+            let grim = crate::config::scope::Invocation::config(&tmp.path().join("grimoire.toml"));
+            assert!(logs.contains(&format!("`{grim} update -- a`")), "{logs}");
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn a_failed_lock_save_restores_the_config() {
+            use std::os::unix::fs::{PermissionsExt, symlink};
+
+            let tmp = tempfile::tempdir().unwrap();
+            let ctx = project(tmp.path(), MemoryRegistry::new());
+            let a = write_skill(tmp.path(), "a", "one");
+            run(&ctx, &skill_args(&a)).await.expect("the first add locks the path");
+            // Through a link, so only the lock's directory refuses the write.
+            let (config, lock) = (tmp.path().join("grimoire.toml"), tmp.path().join("grimoire.lock"));
+            let sealed = tmp.path().join("sealed");
+            std::fs::create_dir(&sealed).unwrap();
+            std::fs::rename(&lock, sealed.join("grimoire.lock")).unwrap();
+            symlink(sealed.join("grimoire.lock"), &lock).unwrap();
+            let before = std::fs::read(&config).unwrap();
+            let b = write_skill(tmp.path(), "b", "one");
+
+            let mode = |bits| std::fs::Permissions::from_mode(bits);
+            std::fs::set_permissions(&sealed, mode(0o555)).unwrap();
+            let writable = tempfile::tempfile_in(&sealed).is_ok();
+            let out = run(&ctx, &skill_args(&b)).await;
+            std::fs::set_permissions(&sealed, mode(0o755)).unwrap();
+            // Root writes through 0o555, so the failure cannot be provoked.
+            if writable {
+                return;
+            }
+
+            out.expect_err("the lock cannot be saved");
+            assert_eq!(std::fs::read(&config).unwrap(), before);
+        }
+
+        /// Saves the config over the failed run's write, the moment the relock
+        /// asks for a tag: an editor nothing locks out.
+        struct SavedDuringRelock {
+            inner: MemoryRegistry,
+            config: std::path::PathBuf,
+        }
+
+        const SAVED: &str = "[skills]
+# saved during the relock
+";
+
+        #[async_trait::async_trait]
+        impl OciAccess for SavedDuringRelock {
+            async fn resolve_digest(&self, id: &Identifier, op: Operation) -> Result<Option<Digest>, AccessError> {
+                if op == Operation::Resolve {
+                    std::fs::write(&self.config, SAVED).unwrap();
+                }
+                self.inner.resolve_digest(id, op).await
+            }
+            async fn fetch_manifest(&self, id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
+                self.inner.fetch_manifest(id).await
+            }
+            async fn fetch_blob(
+                &self,
+                repo: &Identifier,
+                d: &Digest,
+                cap: u64,
+            ) -> Result<Option<Vec<u8>>, AccessError> {
+                self.inner.fetch_blob(repo, d, cap).await
+            }
+            async fn list_tags(&self, id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
+                self.inner.list_tags(id).await
+            }
+            async fn list_catalog(&self, registry: &str) -> Result<CatalogListing, AccessError> {
+                self.inner.list_catalog(registry).await
+            }
+            async fn push_blob(&self, repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {
+                self.inner.push_blob(repo, bytes).await
+            }
+            async fn push_manifest(&self, repo: &Identifier, manifest: &OciManifest) -> Result<Digest, AccessError> {
+                self.inner.push_manifest(repo, manifest).await
+            }
+            async fn put_tag(&self, repo: &Identifier, tag: &str, digest: &Digest) -> Result<(), AccessError> {
+                self.inner.put_tag(repo, tag, digest).await
+            }
+        }
+
+        #[tokio::test]
+        async fn a_failed_relock_leaves_a_config_saved_meanwhile() {
+            let tmp = tempfile::tempdir().unwrap();
+            let config = tmp.path().join("grimoire.toml");
+            std::fs::write(
+                &config,
+                "[skills]
+",
+            )
+            .unwrap();
+            let access = SavedDuringRelock {
+                inner: MemoryRegistry::new(),
+                config: config.clone(),
+            };
+            let ctx = Context::with_access(tmp.path().join("home"), access).with_config(config.clone());
+
+            run(&ctx, &skill_args(REFERENCE)).await.expect_err("no such tag");
+
+            assert_eq!(std::fs::read_to_string(&config).unwrap(), SAVED);
+        }
+
+        #[tokio::test]
+        async fn a_path_add_reports_the_other_pins_it_moved() {
+            let tmp = tempfile::tempdir().unwrap();
+            let ctx = project(tmp.path(), MemoryRegistry::new());
+            let a = write_skill(tmp.path(), "a", "one");
+            let b = write_skill(tmp.path(), "b", "one");
+            for path in [&a, &b] {
+                run(&ctx, &skill_args(path))
+                    .await
+                    .expect("the first add locks the path");
+            }
+            write_skill(tmp.path(), "b", "two");
+
+            let (report, _) = run(&ctx, &skill_args(&a)).await.expect("a re-add succeeds");
+
+            assert_eq!(report.name, "a");
+            let moved: Vec<_> = report.moved.iter().map(|p| (p.kind, p.name.as_str())).collect();
+            assert_eq!(moved, [(ArtifactKind::Skill, "b")]);
+        }
+
+        /// `grim add` of a key the lock already holds against `grim lock` over the
+        /// same line typed by hand: the add keeps exactly the pin the lock keeps.
+        mod held_pin {
+            use std::collections::BTreeMap;
+            use std::path::PathBuf;
+
+            use super::{run, skill_args};
+            use crate::api::add_report::AddReport;
+            use crate::catalog::test_hosts::LogCapture;
+            use crate::command::lock::LockArgs;
+            use crate::context::Context;
+            use crate::lock::grimoire_lock::GrimoireLock;
+            use crate::lock::lock_io;
+            use crate::lock::locked_source::LockedSource;
+            use crate::oci::access::OciAccess;
+            use crate::oci::access::memory_registry::MemoryRegistry;
+            use crate::oci::bundle::{BUNDLE_LAYER_MEDIA_TYPE, BundleManifest, BundleMember};
+            use crate::oci::manifest::{Descriptor, OciManifest};
+            use crate::oci::{Algorithm, ArtifactKind, Digest, Identifier, PinnedIdentifier};
+
+            const X: &str = "localhost:5050/acme/x:1";
+            const X2: &str = "localhost:5050/acme/x:2";
+            const PARENT: &str = "localhost:5050/acme/parent:1";
+            const PACK: &str = "localhost:5050/acme/pack:1";
+            const PACK2: &str = "localhost:5050/acme/pack:2";
+            const OUTER: &str = "localhost:5050/acme/outer:1";
+
+            /// Point the tag of `reference` at a manifest over `content`, with one
+            /// edge or member onto skill `x` at `edge`.
+            async fn publish(
+                reg: &MemoryRegistry,
+                kind: ArtifactKind,
+                reference: &str,
+                content: &str,
+                edge: Option<&str>,
+            ) -> Digest {
+                let member = edge.map(|id| BundleMember {
+                    kind: ArtifactKind::Skill,
+                    name: "x".to_string(),
+                    id: id.to_string(),
+                });
+                publish_member(reg, kind, reference, content, member).await
+            }
+
+            async fn publish_member(
+                reg: &MemoryRegistry,
+                kind: ArtifactKind,
+                reference: &str,
+                content: &str,
+                member: Option<BundleMember>,
+            ) -> Digest {
+                let id = Identifier::parse(reference).unwrap();
+                let mut layers = Vec::new();
+                if kind != ArtifactKind::Bundle {
+                    layers.push(Descriptor {
+                        digest: Algorithm::Sha256.hash(content.as_bytes()),
+                        media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),
+                        size: content.len() as u64,
+                        annotations: None,
+                    });
+                }
+                if let Some(member) = member {
+                    let bytes = BundleManifest::new(vec![member]).to_layer_bytes().unwrap();
+                    layers.push(Descriptor {
+                        digest: reg.push_blob(&id, &bytes).await.unwrap(),
+                        media_type: BUNDLE_LAYER_MEDIA_TYPE.to_string(),
+                        size: bytes.len() as u64,
+                        annotations: None,
+                    });
+                }
+                let manifest = OciManifest {
+                    media_type: None,
+                    artifact_type: None,
+                    config_media_type: None,
+                    layers,
+                    annotations: BTreeMap::from([("content".to_string(), content.to_string())]),
+                };
+                let digest = reg.push_manifest(&id, &manifest).await.unwrap();
+                reg.put_tag(&id, id.tag_or_latest(), &digest).await.unwrap();
+                digest
+            }
+
+            /// One project over a registry shared with its copies.
+            struct Workspace {
+                dir: tempfile::TempDir,
+                reg: MemoryRegistry,
+            }
+
+            impl Workspace {
+                fn new(reg: &MemoryRegistry) -> Self {
+                    Self {
+                        dir: tempfile::tempdir().unwrap(),
+                        reg: reg.clone(),
+                    }
+                }
+
+                fn ctx(&self) -> Context {
+                    Context::with_access(self.dir.path().join("home"), self.reg.clone())
+                        .with_config(self.dir.path().join("grimoire.toml"))
+                }
+
+                fn lock_path(&self) -> PathBuf {
+                    self.dir.path().join("grimoire.lock")
+                }
+
+                /// Write the declaration as a hand would.
+                fn declare(&self, skills: &[(&str, &str)], bundles: &[(&str, &str)]) {
+                    let table = |rows: &[(&str, &str)]| -> String {
+                        rows.iter().map(|(name, id)| format!("{name} = \"{id}\"\n")).collect()
+                    };
+                    let text = format!("[skills]\n{}[bundles]\n{}", table(skills), table(bundles));
+                    std::fs::write(self.dir.path().join("grimoire.toml"), text).unwrap();
+                }
+
+                async fn lock(&self) {
+                    crate::command::lock::run(&self.ctx(), &LockArgs {})
+                        .await
+                        .expect("grim lock succeeds");
+                }
+
+                fn locked(&self) -> GrimoireLock {
+                    lock_io::load(&self.lock_path()).unwrap()
+                }
+
+                fn rewrite(&self, edit: impl FnOnce(GrimoireLock) -> GrimoireLock) {
+                    lock_io::save(&self.lock_path(), &edit(self.locked()), None).unwrap();
+                }
+
+                async fn add(&self, reference: &str) -> AddReport {
+                    run(&self.ctx(), &skill_args(reference))
+                        .await
+                        .expect("grim add succeeds")
+                        .0
+                }
+
+                /// `grim lock` over a copy of this project whose declaration a hand set
+                /// to `skills` and `bundles`.
+                async fn lock_typed(&self, skills: &[(&str, &str)], bundles: &[(&str, &str)]) -> GrimoireLock {
+                    let typed = Workspace::new(&self.reg);
+                    std::fs::copy(self.lock_path(), typed.lock_path()).unwrap();
+                    typed.declare(skills, bundles);
+                    typed.lock().await;
+                    typed.locked()
+                }
+
+                /// `grim add` of skill `x` at `X` over a project declaring `skills` and
+                /// `bundles`, checked against `grim lock` over the same line typed.
+                async fn add_x_as_lock_does(
+                    &self,
+                    skills: &[(&str, &str)],
+                    bundles: &[(&str, &str)],
+                ) -> (AddReport, PinnedIdentifier) {
+                    let typed: Vec<(&str, &str)> = skills.iter().copied().chain([("x", X)]).collect();
+                    let expected = pin(&self.lock_typed(&typed, bundles).await, "x");
+                    let report = self.add(X).await;
+                    let added = pin(&self.locked(), "x");
+                    assert_eq!(added, expected, "grim add pins what grim lock pins over the typed line");
+                    (report, added)
+                }
+            }
+
+            fn pin(lock: &GrimoireLock, name: &str) -> PinnedIdentifier {
+                lock.skills
+                    .iter()
+                    .find(|row| row.name == name)
+                    .and_then(|row| row.source.pinned())
+                    .cloned()
+                    .unwrap_or_else(|| panic!("{name} holds a registry pin"))
+            }
+
+            /// A project whose `x:1` was locked at the returned digest and has since moved.
+            async fn moved_x(reg: &MemoryRegistry) -> Digest {
+                let held = publish(reg, ArtifactKind::Skill, X, "x one", None).await;
+                publish(reg, ArtifactKind::Skill, PARENT, "parent", Some(X)).await;
+                publish(reg, ArtifactKind::Bundle, PACK, "pack", Some(X)).await;
+                held
+            }
+
+            #[tokio::test]
+            async fn an_add_at_the_reference_a_dependency_pin_answers_keeps_it() {
+                let reg = MemoryRegistry::new();
+                let held = moved_x(&reg).await;
+                let ws = Workspace::new(&reg);
+                ws.declare(&[("parent", PARENT)], &[]);
+                ws.lock().await;
+                publish(&reg, ArtifactKind::Skill, X, "x moved", None).await;
+
+                let capture = LogCapture::start();
+                let (report, added) = ws.add_x_as_lock_does(&[("parent", PARENT)], &[]).await;
+
+                assert_eq!(added.digest(), held, "the pin records x:1, so no tag is read");
+                assert!(report.moved.is_empty(), "{:?}", report.moved);
+                let logs = capture.text();
+                let grim = crate::config::scope::Invocation::config(&ws.dir.path().join("grimoire.toml"));
+                let note = format!(
+                    "kept the existing pin of skill 'x'. `{grim} update -- x` moves it to what its tag names now, \
+                     or says why it cannot"
+                );
+                assert_eq!(logs.matches(&note).count(), 1, "{logs}");
+            }
+
+            #[tokio::test]
+            async fn an_add_at_the_reference_a_member_pin_answers_keeps_it() {
+                let reg = MemoryRegistry::new();
+                let held = moved_x(&reg).await;
+                let ws = Workspace::new(&reg);
+                ws.declare(&[], &[("pack", PACK)]);
+                ws.lock().await;
+                publish(&reg, ArtifactKind::Skill, X, "x moved", None).await;
+
+                let (report, added) = ws.add_x_as_lock_does(&[], &[("pack", PACK)]).await;
+
+                assert_eq!(added.digest(), held);
+                assert!(report.moved.is_empty(), "{:?}", report.moved);
+            }
+
+            #[tokio::test]
+            async fn an_add_of_a_line_a_hand_took_out_keeps_its_pin() {
+                let reg = MemoryRegistry::new();
+                let held = moved_x(&reg).await;
+                let ws = Workspace::new(&reg);
+                ws.declare(&[("x", X)], &[]);
+                ws.lock().await;
+                ws.declare(&[], &[]);
+                publish(&reg, ArtifactKind::Skill, X, "x moved", None).await;
+
+                let (_, added) = ws.add_x_as_lock_does(&[], &[]).await;
+
+                assert_eq!(added.digest(), held);
+            }
+
+            /// The lock is still the one written for the typed line, so its proof
+            /// stamps the tagless pin rather than resolving it.
+            #[tokio::test]
+            async fn an_add_over_a_tagless_pin_the_lock_still_proves_keeps_it() {
+                let reg = MemoryRegistry::new();
+                let held = moved_x(&reg).await;
+                let ws = Workspace::new(&reg);
+                ws.declare(&[("x", X)], &[]);
+                ws.lock().await;
+                ws.rewrite(GrimoireLock::without_advisory_tags);
+                ws.declare(&[], &[]);
+                publish(&reg, ArtifactKind::Skill, X, "x moved", None).await;
+
+                let (_, added) = ws.add_x_as_lock_does(&[], &[]).await;
+
+                assert_eq!(added.digest(), held);
+                assert_eq!(added.tag(), Some("1"), "the stamp names the typed tag");
+            }
+
+            /// A tagless dependency or member pin under the lock's proof takes its tag
+            /// from the edge the lock records, so an add at that reference keeps it,
+            /// as `grim lock` and then the add do. Hand-typing the line instead makes
+            /// the hash drift before any relock, which resolves the pin.
+            #[tokio::test]
+            async fn an_add_over_a_tagless_dependency_pin_keeps_it() {
+                for (skills, bundles) in [(&[("parent", PARENT)][..], &[][..]), (&[][..], &[("pack", PACK)][..])] {
+                    let reg = MemoryRegistry::new();
+                    let held = moved_x(&reg).await;
+                    let ws = Workspace::new(&reg);
+                    ws.declare(skills, bundles);
+                    ws.lock().await;
+                    ws.rewrite(GrimoireLock::without_advisory_tags);
+                    publish(&reg, ArtifactKind::Skill, X, "x moved", None).await;
+                    let expected = {
+                        let first = Workspace::new(&reg);
+                        std::fs::copy(ws.lock_path(), first.lock_path()).unwrap();
+                        first.declare(skills, bundles);
+                        first.lock().await;
+                        first.add(X).await;
+                        pin(&first.locked(), "x")
+                    };
+
+                    let capture = LogCapture::start();
+                    let report = ws.add(X).await;
+
+                    let added = pin(&ws.locked(), "x");
+                    assert_eq!(added.digest(), held, "{skills:?} {bundles:?}");
+                    assert_eq!(added, expected, "grim add pins what grim lock then grim add pin");
+                    assert!(report.moved.is_empty(), "{:?}", report.moved);
+                    let logs = capture.text();
+                    assert!(!logs.contains("re-resolved"), "{logs}");
+                    assert_eq!(
+                        logs.matches("kept the existing pin of skill 'x'. ").count(),
+                        1,
+                        "{logs}"
+                    );
+                    assert_eq!(
+                        logs.matches(" update -- x` moves it to what its tag names now").count(),
+                        1,
+                        "{logs}"
+                    );
+                }
+            }
+
+            /// Nothing says which of two rows is current, so neither is a pin.
+            #[tokio::test]
+            async fn an_add_of_a_key_listed_twice_resolves_it() {
+                let reg = MemoryRegistry::new();
+                moved_x(&reg).await;
+                let ws = Workspace::new(&reg);
+                ws.declare(&[("parent", PARENT)], &[]);
+                ws.lock().await;
+                ws.rewrite(|mut lock| {
+                    let mut twin = lock.skills.iter().find(|row| row.name == "x").cloned().unwrap();
+                    let elsewhere = Identifier::parse(X)
+                        .unwrap()
+                        .clone_with_digest(Digest::Sha256("e".repeat(64)));
+                    twin.source = LockedSource::Registry(PinnedIdentifier::try_from(elsewhere).unwrap());
+                    lock.skills.push(twin);
+                    lock
+                });
+                let moved = publish(&reg, ArtifactKind::Skill, X, "x moved", None).await;
+
+                let (_, added) = ws.add_x_as_lock_does(&[("parent", PARENT)], &[]).await;
+
+                assert_eq!(added.digest(), moved);
+            }
+
+            /// A bundle has no report row, so its moved pin gets the stderr line
+            /// `grim lock` gives it, declared or held as a nested include.
+            #[tokio::test]
+            async fn an_add_that_moves_a_bundle_pin_says_so_on_stderr() {
+                for nested in [false, true] {
+                    let reg = MemoryRegistry::new();
+                    moved_x(&reg).await;
+                    publish(&reg, ArtifactKind::Bundle, PACK2, "pack two", Some(X)).await;
+                    let include = BundleMember {
+                        kind: ArtifactKind::Bundle,
+                        name: "pack".to_string(),
+                        id: PACK.to_string(),
+                    };
+                    publish_member(&reg, ArtifactKind::Bundle, OUTER, "outer", Some(include)).await;
+                    let ws = Workspace::new(&reg);
+                    ws.declare(&[], &[if nested { ("outer", OUTER) } else { ("pack", PACK) }]);
+                    ws.lock().await;
+
+                    let capture = LogCapture::start();
+                    let args = crate::command::add::AddArgs {
+                        kind: Some("bundle".to_string()),
+                        ..skill_args(PACK2)
+                    };
+                    let (report, _) = run(&ws.ctx(), &args).await.expect("grim add succeeds");
+
+                    let logs = capture.text();
+                    assert_eq!(
+                        logs.matches("bundle 'pack' moved its pin from").count(),
+                        1,
+                        "nested {nested}: {logs}"
+                    );
+                    assert!(report.moved.is_empty(), "{:?}", report.moved);
+                }
+            }
+
+            #[tokio::test]
+            async fn an_add_that_moves_its_target_lists_it_in_moved() {
+                for held_as in [("parent", PARENT), ("x", X)] {
+                    let reg = MemoryRegistry::new();
+                    moved_x(&reg).await;
+                    let two = publish(&reg, ArtifactKind::Skill, X2, "x two", None).await;
+                    let ws = Workspace::new(&reg);
+                    ws.declare(&[held_as], &[]);
+                    ws.lock().await;
+
+                    let report = ws.add(X2).await;
+
+                    let moved: Vec<_> = report.moved.iter().map(|p| (p.kind, p.name.as_str())).collect();
+                    assert_eq!(moved, [(ArtifactKind::Skill, "x")], "held as {held_as:?}");
+                    assert!(report.moved[0].pinned.ends_with(&two.to_string()), "{:?}", report.moved);
+                }
+            }
+        }
     }
 
     #[test]
@@ -2926,7 +4778,7 @@ style = \"ghcr.io/acme/rules/style:1\"
         use crate::oci::access::error::{AccessError, AccessErrorKind};
 
         fn mapped(e: DeclareError) -> (ExitCode, String) {
-            let err = declare_error(e, std::path::Path::new("/p/grimoire.toml"));
+            let err = declare_error(e, std::path::Path::new("/p/grimoire.toml"), &Invocation::WALKED);
             (classify_error(&err), format!("{err:#}"))
         }
 

@@ -3,7 +3,7 @@
 
 //! Detail-pane content and scroll geometry — pure, ratatui-free.
 //!
-//! [`detail_lines`] builds the pane's semantic lines for a selected row;
+//! [`detail_lines_naming`] builds the pane's semantic lines for a selected row;
 //! [`scroll_max`] bounds the vertical scroll offset by counting the
 //! post-wrap rows those lines occupy in the live viewport. Both
 //! [`super::state`] (clamping the offset at mutation time) and
@@ -18,6 +18,7 @@ use super::bundle_members::MemberNode;
 use super::companion::{Companion, CompanionCache};
 use super::state::{ArtifactState, TuiRow};
 use crate::config::registry_resolve::RowSource;
+use crate::config::scope::Invocation;
 
 /// Catalog column widths (chars) — the projection pads/truncates to
 /// these so the table aligns regardless of how long an identifier is.
@@ -170,13 +171,18 @@ impl DetailTab {
     }
 }
 
-/// The detail pane's lines for `tab`.
+/// The detail pane's lines for `tab`, naming `grim` in any hint.
 ///
-/// Overview delegates to [`detail_lines`]; the document tabs render the
+/// Overview delegates to [`detail_lines_naming`]; the document tabs render the
 /// companion's markdown, or a [`DetailLine::Notice`] naming why there is none.
 /// The notice is the normal case, not an edge case: every row offers all three
 /// tabs, and most repositories publish neither document.
-pub fn detail_tab_lines(row: Option<&TuiRow>, companion: Option<&CompanionCache>, tab: DetailTab) -> Vec<DetailLine> {
+pub fn detail_tab_lines(
+    row: Option<&TuiRow>,
+    companion: Option<&CompanionCache>,
+    tab: DetailTab,
+    grim: &Invocation,
+) -> Vec<DetailLine> {
     // A leading blank so a notice does not sit flush against the block's top
     // border — the strip lives in the border now, and content butted straight
     // up against it reads cramped.
@@ -202,7 +208,7 @@ pub fn detail_tab_lines(row: Option<&TuiRow>, companion: Option<&CompanionCache>
         Some(CompanionCache::Absent) | None => notice("not available".to_string()),
     };
     match tab {
-        DetailTab::Overview => detail_lines(row, companion),
+        DetailTab::Overview => detail_lines_naming(row, companion, grim),
         DetailTab::Readme => document(|c| c.readme.as_ref()),
         DetailTab::Changelog => document(|c| c.changelog.as_ref()),
     }
@@ -216,8 +222,12 @@ pub fn detail_tab_lines(row: Option<&TuiRow>, companion: Option<&CompanionCache>
 /// `Metadata:` section of `Label: value` rows. Version and status are
 /// deliberately NOT repeated here — the catalog row already shows both
 /// (Tag column, status glyph). `Pinned:` appears only when the picker
-/// pinned a version.
-pub fn detail_lines(row: Option<&TuiRow>, companion: Option<&CompanionCache>) -> Vec<DetailLine> {
+/// pinned a version. A settings hint names `grim`.
+pub fn detail_lines_naming(
+    row: Option<&TuiRow>,
+    companion: Option<&CompanionCache>,
+    grim: &Invocation,
+) -> Vec<DetailLine> {
     let Some(r) = row else {
         return vec![DetailLine::Text("no selection".to_string())];
     };
@@ -361,26 +371,36 @@ pub fn detail_lines(row: Option<&TuiRow>, companion: Option<&CompanionCache>) ->
                 .to_string(),
         });
     }
-    if let Some(hint) = settings_hint(r.state) {
+    if let Some(hint) = settings_hint(r.state, grim) {
         lines.push(DetailLine::MetaEntry {
             label: "Settings:",
-            value: hint.to_string(),
+            value: hint,
         });
     }
     lines.extend(support_lines(companion));
     lines
 }
 
-/// Why a settings row reads as it does. Static for the reason the integrity
-/// line is: `grim status` carries the per-client cause.
-fn settings_hint(state: ArtifactState) -> Option<&'static str> {
+/// [`detail_lines_naming`] for a project found by walking up, as most tests read it.
+#[cfg(test)]
+pub fn detail_lines(row: Option<&TuiRow>, companion: Option<&CompanionCache>) -> Vec<DetailLine> {
+    detail_lines_naming(row, companion, &Invocation::WALKED)
+}
+
+/// Why a settings row reads as it does, naming the command that says more.
+/// No per-client cause: `grim status` carries that.
+fn settings_hint(state: ArtifactState, grim: &Invocation) -> Option<String> {
     match state {
-        ArtifactState::Gated => Some(
+        ArtifactState::Gated => Some(format!(
             "held back: the settings flag is off, this workspace has not consented, or no value \
-             applies to the selected clients — `grim status` names the cause",
-        ),
-        ArtifactState::NotArmed => Some("grim refuses to write these settings here — `grim status` names the cause"),
-        ArtifactState::Stale => Some("grimoire.toml changed since the lock — `grim lock` brings it up to date"),
+             applies to the selected clients — `{grim} status` names the cause"
+        )),
+        ArtifactState::NotArmed => Some(format!(
+            "grim refuses to write these settings here — `{grim} status` names the cause"
+        )),
+        ArtifactState::Stale => Some(format!(
+            "grimoire.toml changed since the lock — `{grim} lock` brings it up to date"
+        )),
         ArtifactState::NotInstalled
         | ArtifactState::Installed
         | ArtifactState::ViaBundle
@@ -880,7 +900,7 @@ mod tests {
     fn a_document_tab_renders_the_companion_markdown() {
         let row = tui_row(None);
         let cache = companion(Some("# Title\n\ntext"), None);
-        let lines = detail_tab_lines(Some(&row), Some(&cache), DetailTab::Readme);
+        let lines = detail_tab_lines(Some(&row), Some(&cache), DetailTab::Readme, &Invocation::WALKED);
         assert_eq!(
             lines,
             vec![
@@ -906,7 +926,7 @@ mod tests {
             (Some(CompanionCache::Failed("offline".to_string())), "offline"),
             (None, "not available"),
         ] {
-            let lines = detail_tab_lines(Some(&row), cache.as_ref(), DetailTab::Readme);
+            let lines = detail_tab_lines(Some(&row), cache.as_ref(), DetailTab::Readme, &Invocation::WALKED);
             assert_eq!(lines[0], DetailLine::Blank, "the notice must clear the top border");
             let DetailLine::Notice(text) = &lines[1] else {
                 panic!("expected a notice, got {lines:?}");
@@ -1005,6 +1025,39 @@ mod tests {
             DetailLine::MetaEntry { label, value } if *label == want => Some(value.as_str()),
             _ => None,
         })
+    }
+
+    /// A settings hint names the command as the TUI was invoked: a bare `grim`
+    /// reads whatever project the shell stands in, not this scope.
+    #[test]
+    fn a_settings_hint_names_the_runs_grim() {
+        let config = Invocation::config(std::path::Path::new("/srv/team/grimoire.toml"));
+        let hint = |state, grim: &Invocation| {
+            let mut row = tui_row(None);
+            row.state = state;
+            let lines = detail_lines_naming(Some(&row), None, grim);
+            meta_value(&lines, "Settings:").map(str::to_string).unwrap_or_default()
+        };
+        for (grim, spelled) in [
+            (&config, "grim --config /srv/team/grimoire.toml"),
+            (&Invocation::GLOBAL, "grim --global"),
+        ] {
+            for state in [ArtifactState::Gated, ArtifactState::NotArmed] {
+                let shown = hint(state, grim);
+                assert!(
+                    shown.ends_with(&format!("`{spelled} status` names the cause")),
+                    "{shown}"
+                );
+            }
+            let stale = hint(ArtifactState::Stale, grim);
+            assert!(
+                stale.ends_with(&format!("`{spelled} lock` brings it up to date")),
+                "{stale}"
+            );
+        }
+        // Positive control: a walked project keeps the bare spelling.
+        let walked = hint(ArtifactState::Stale, &Invocation::WALKED);
+        assert!(walked.ends_with("`grim lock` brings it up to date"), "{walked}");
     }
 
     #[test]

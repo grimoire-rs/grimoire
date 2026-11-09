@@ -145,9 +145,10 @@ impl VerifyOpts {
 pub struct HookTrustOpts {
     /// Arm hooks and apply settings on this invocation whatever the
     /// workspace's consent record says, including an unconsented or drifted
-    /// one. **Writes no record**: it lasts this one invocation. Does **not**
-    /// turn a kind on: its `[options.experimental]` key is answered first, so
-    /// this is inert for a kind that key gates.
+    /// one. The flag writes no record of its own: it lasts this one invocation.
+    /// `grim add` still records its gesture; only `--no-trust-workspace` keeps
+    /// that record out. Does **not** turn a kind on: its `[options.experimental]`
+    /// key is answered first, so this is inert for a kind that key gates.
     // Each flag overrides itself too: without that, repeating one answer under
     // its two spellings is clap's "used multiple times" usage error.
     #[arg(

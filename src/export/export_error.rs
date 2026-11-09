@@ -13,6 +13,7 @@ use std::path::PathBuf;
 
 use crate::install::ClientTarget;
 use crate::oci::ArtifactKind;
+use crate::oci::text::escape_controls;
 
 /// How many stale-reference hits a [`ExportError::RenameStaleReference`]
 /// message lists before it summarizes the rest.
@@ -103,14 +104,19 @@ pub enum ExportError {
     NoPluginFormat { client: ClientTarget },
 
     /// Two includes of one plugin supply different artifacts under the same
-    /// `(kind, name)` (78).
-    #[error("plugin '{plugin}': {kind} '{name}' is supplied by both '{first}' and '{second}'")]
+    /// `(kind, name)` (78). `nested`: `second` is the include a nested bundle of
+    /// that name came through, which no include lists itself.
+    #[error(
+        "plugin '{plugin}': {kind} '{name}' is supplied by both '{first}' and {}",
+        supplier(second, nested.as_deref())
+    )]
     MemberConflict {
         plugin: String,
         kind: ArtifactKind,
         name: String,
         first: String,
         second: String,
+        nested: Option<String>,
     },
 
     /// A `--plugin` name is not declared in the manifest (79).
@@ -155,6 +161,15 @@ fn stale_hit_lines(hits: &[String]) -> String {
         lines.push(&more);
     }
     lines.join("\n")
+}
+
+/// The second supplier of a [`ExportError::MemberConflict`]: the include as
+/// written, or the nested bundle with the include it came through.
+fn supplier(include: &str, nested: Option<&str>) -> String {
+    match nested {
+        Some(bundle) => format!("bundle '{}' (nested in '{include}')", escape_controls(bundle)),
+        None => format!("'{include}'"),
+    }
 }
 
 #[cfg(test)]

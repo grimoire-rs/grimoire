@@ -340,8 +340,8 @@ MAIN_UPDATE_ROW_KEYS = {
 }
 MAIN_ADD_KEYS = {"kind", "name", "pinned", "status"}
 # Fields the dependency release added to every report, additively.
-DEPENDENCY_STATUS_KEYS = {"direct", "required_by"}
-DEPENDENCY_ADD_KEYS = {"pulled_in"}
+DEPENDENCY_STATUS_KEYS = {"direct", "required_by", "moved_nested_bundles"}
+DEPENDENCY_ADD_KEYS = {"dropped", "moved", "pulled_in"}
 # The settings kind's change list, always present and `[]` for every other kind.
 SETTINGS_ADD_KEYS = {"settings_changes"}
 
@@ -435,14 +435,14 @@ def test_s102_declaring_a_hook_with_the_flag_off_locks_warns_once_and_gates(
 # ---------------------------------------------------------------------------
 
 PROJECT_REMEDY = "`grim config set options.experimental.hooks true`"
-GLOBAL_REMEDY = "`grim config set --global options.experimental.hooks true`"
+GLOBAL_REMEDY = "`grim --global config set options.experimental.hooks true`"
 PROJECT_ROW_MESSAGE = (
     "hooks are disabled for this scope; run grim config set "
     "options.experimental.hooks true, then grim install"
 )
 GLOBAL_ROW_MESSAGE = (
-    "hooks are disabled for this scope; run grim config set --global "
-    "options.experimental.hooks true, then grim install --global"
+    "hooks are disabled for this scope; run grim --global config set "
+    "options.experimental.hooks true, then grim --global install"
 )
 
 
