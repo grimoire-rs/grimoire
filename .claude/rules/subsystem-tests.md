@@ -21,7 +21,7 @@ Pytest (not Rust integration tests) because acceptance tests exercise the real c
 | `test/src/helpers.py` | `write_config()`, `make_bundle()`, `make_artifact()` — build + push test fixtures |
 | `test/src/assertions.py` | Cross-platform path assertion helpers |
 | `test/src/registry.py` | `PublishedArtifact` + minimal stdlib OCI client (push/fetch/retag) |
-| `test/taskfile.yml` | Task runner: `build` (internal), `default`, `quick`, `parallel`, `index-e2e`, `index-matrix`, `bench` |
+| `test/taskfile.yml` | Task runner: `build` (internal), `default`, `quick`, `parallel`, `shard`, `floor`, `index-e2e`, `index-matrix`, `bench` |
 
 ## Key Fixtures
 
@@ -96,6 +96,7 @@ task test:parallel     # rebuild-aware (sources track src/tests), pytest -n auto
 task test:index-e2e    # build the pinned indexer ($GRIM_INDEXER_DIR), sync its fixture index with grim 0.14.3 and the built grim
 task test:index-matrix # every grim generation (0.14.3, 0.15.0 once pinned, built) against every index kind
 task test:bench        # 20,000-entry sync budgets (marker `bench`); prints each measurement
+task test:old-grim     # grim 0.15.1 interop modules against $GRIM_OLD_BIN (the v0.15.1 release binary); a skip fails the run
 
 # Single test (binary must already exist at test/bin/grim, or set GRIM_COMMAND):
 cd test && uv run pytest tests/test_install.py::test_lock_then_install_materializes_files -v

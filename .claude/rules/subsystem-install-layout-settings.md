@@ -106,3 +106,16 @@ keys beside the hook keys (same file, same write seams). `.claude/settings.local
 goes into the repository's **common** `info/exclude`
 (`ensure_settings_local_excluded`), dropped only when neither hooks nor
 settings use the file — hygiene, not a control.
+
+**Named update.** `grim update <names>` passes `Reach::Named`: it arms only the
+closure's packages, removes a leftover only inside the previous closure, and its
+`--force` reaches both (`force_scope`). A pruned package's refused value gets
+one refusal naming `grim uninstall --force settings <name>` in place of a rerun
+(`refuse_dropped`): the lock is saved by then, so no named rerun prunes it.
+Consent, the conflict preflight and the removal guard still read the whole lock.
+A piece only leaving records hold that an armed package outside the closure
+declares gets no verdict (`defer_beside`); `apply` reads that package's layer
+when the preflight did not (one armed package). When such a layer cannot be read
+and a leftover would be removed, the pass stops before any write with the read's
+error, 81 offline (`stop_for_unread_beside`). Each kept-value warning's install
+carries `--trust-workspace` when only the flag armed the declarer (`install_applying`).
