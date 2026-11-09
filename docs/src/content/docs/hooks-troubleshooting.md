@@ -120,6 +120,28 @@ If another grim version wrote the table, upgrade grim. Otherwise move
 `dispatch.json` aside and run `grim install` again in each project that uses
 hooks. Each project rebuilds only its own rows.
 
+## Warning: a hook is not armed because of its payload {#payload-unarmable}
+
+`grim install`, `grim update` or `grim add` warns `hook '<name>' is not armed:`
+followed by a reason. That hook loses its dispatch row, and `grim status`
+lists cause `not-registered` in its `arming` array. Every other hook for that
+client keeps arming.
+
+This issue occurs when the installed payload of that one hook under
+`$GRIM_HOME/hooks` cannot be used. A named `grim update` does not restore an
+unnamed payload. A payload deleted by hand stays that way until `grim install`,
+and one edited by hand until `grim install --force`. The reason names the fix:
+
+| Reason | Fix |
+|---|---|
+| `its payload is gone` | Run `grim install` |
+| `its payload was modified since install` | Run `grim install --force` |
+| `its payload cannot be read` | Make the payload directory readable, then run `grim install` |
+| `its hook.toml cannot be read` or `its hook.toml does not parse` | The published version carries no usable manifest. Declare a version that does, or ask the publisher for a fixed release |
+| `its installed hook.toml does not satisfy the rules grim build enforces` | The version was published without `grim build`'s checks. Declare a version that passes them, or ask the publisher for a fixed release |
+| `its payload directory is refused` | The binding name cannot name a directory there. See [a hook bound under a name grim keeps][binding-name-reserved] |
+| `'<name>' is not a usable artifact name`, `'<name>' is reserved` or `'<name>' ends in an executable suffix` | The binding name cannot be a payload directory. Rename the binding, as [a hook bound under a name grim keeps][binding-name-reserved] shows |
+
 ## Warning: grim could not place its launcher {#launcher-not-placed}
 
 `grim hook list` shows the client as `not-armed` with cause
@@ -204,7 +226,8 @@ unreadable. See [launcher exit codes][launcher-exit] for every status.
 This issue occurs when a registration outlives what it pointed at. One case is a
 workspace you have not revisited since the upgrade. It still carries a
 registration from the shell-script release, which pointed at `bin/grim-hook` and
-at a `grim hook run` command, neither of which exists in the launcher release. That registration exits `0`
+at a `grim hook run` command. The launcher release has no `grim hook run`, and
+`grim install` deletes the old script. When either is missing, it exits `0`
 without running anything, so it never blocks a tool call.
 
 The other case is a current registration whose launcher or table is gone, for
@@ -215,6 +238,10 @@ hooks after you upgrade grim. It writes the launcher and the table, deletes the
 old script, and rewrites that scope's registrations. Hooks are experimental, so
 this change is outside the compatibility promise. See
 [Stability][stability-unstable].
+
+A named `grim update`, `grim uninstall` or TUI delete also rewrites an old
+registration whose hook is still armed. It keeps the old script for the
+workspaces it did not touch.
 
 ## Warning: the launcher exits 74, 1 or 64 {#launcher-failure}
 
@@ -265,6 +292,7 @@ non-blocking path.
 [json-hook-arming]: ./json-interface.md#hook-arming
 [gating]: ./hooks.md
 [launcher-exit]: ./hooks.md#launcher-exit
+[binding-name-reserved]: #binding-name-reserved
 
 <!-- external -->
 [gh-93]: https://github.com/grimoire-rs/grimoire/issues/93

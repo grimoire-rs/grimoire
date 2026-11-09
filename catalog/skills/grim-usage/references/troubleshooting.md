@@ -25,12 +25,12 @@ no stderr parsing needed:
 | 1 | Failure | unclassified fall-through |
 | 64 | Usage error | bad invocation; `grim init` when the config already exists; invalid `grim fetch` flag combinations; a release/publish tag colliding with the reserved `__grimoire` namespace; a dotted config key naming a client that does not exist (`options.vendors.<typo>.shared_skills` is an *unknown key*, not a bad value) |
 | 65 | Data error | validation failures of any kind — see below |
-| 69 | Unavailable | registry unreachable, resolve timeout |
+| 69 | Unavailable | registry unreachable, resolve timeout; an offline `grim lock`, `add --kind <kind>` or `update` whose resolve needs a tag or manifest the cache lacks (offline, `add` without `--kind` exits 65 and `update --marketplace` exits 81) |
 | 74 | I/O error | filesystem read/write failure (non-permission) |
 | 75 | Temporary failure | another grim process holds the lock; Cline's own lock on its MCP settings file; a settings file changed during the run, left untouched; credential-helper timeout — retry |
 | 77 | No permission | permission denied anywhere in the chain |
 | 78 | Config error | malformed `grimoire.toml`/lock, no registry for `grim login`/`logout`, bundle conflict, a settings conflict across packages (never forceable), `grim build` of a settings document without `--kind settings`, unsupported client, credential helper missing; **no client can host what you are installing** (see below); a hand-authored `options.vendors.<name>.shared_skills = true` on a client that does not read the shared pool |
-| 79 | Not found | tag/manifest/blob 404, no config discovered, lock missing; a missing description companion on `grim fetch --description` |
+| 79 | Not found | tag/manifest/blob 404, no config discovered, lock missing; a kept pin whose manifest the registry dropped (run the `grim update -- <name>` the message names); a missing description companion on `grim fetch --description` |
 | 80 | Auth error | registry authentication failed |
 | 81 | Offline blocked | `--offline`/`GRIM_OFFLINE` blocked a network operation (deliberate policy, distinct from 69) — includes `fetch`/`describe` against an uncached reference, which is 81, not 79 |
 
@@ -44,7 +44,7 @@ an unrelated failure and still exits non-zero.
 Under `--format json`, a failure emits a `{"error": {code, exit,
 message}}` document on stdout; some failures add a machine-readable
 `reason` field: `stale-lock` (exit 65 — a partial `grim update <name>`
-was refused; retry with a full `grim update`), `modified` (exit 65 — an
+was refused; retry with `grim lock`, then the update; if `grim lock` finds a pinned manifest gone, bare `grim update` moves every pin), `modified` (exit 65 — an
 install refused a locally modified artifact, or a settings value changed
 after grim wrote it; retry with `--force`),
 `untracked-destination` (exit 65 — an install refused to clobber an
@@ -68,10 +68,25 @@ unknown one as absent.
 `grim install` has its own stale-lock refusal, and it is a different
 case from the `stale-lock` reason above. If `grimoire.lock`'s
 `declaration_hash` no longer matches `grimoire.toml`, install exits 65
-with no `reason` field at all. Run `grim lock` to refresh it. The
+with no `reason` field at all. Run `grim lock` to bring it in line, which
+keeps existing pins. The
 `stale-lock` reason above fires on a partial `grim update <name>`, and also
 when a lock's recorded dependencies no longer match the pinned artifacts
 (typically written by a grim older than 0.16.0): run `grim lock`.
+
+After `grim remove` of a key whose declaration hid an edge at another version,
+the lock is stale until `grim lock`, which keeps that key's pin. `grim update`
+exits 78 if the edges truly disagree. Restoring `grimoire.toml` by hand does not
+make such a lock fresh, because the edit wrote a hash no declaration produces
+when it changed the lock's rows. An edit that changes no row keeps the hash.
+
+An unreadable `grimoire.lock` (conflict markers, bad TOML, a lock path that
+links to a file that is not a lock) makes `grim lock`, `add`, `update`, `install` and `status`
+exit 78. Restore the file from git or resolve the conflict; deleting it moves
+every pin.
+`grim lock` keeps existing pins and `grim update` is the command that moves a
+pin whose request held, so a tag that moved upstream shows only in
+`grim status --check` (`update_available`).
 
 A failure that names a key or value grim does not recognize also carries a
 `hint` string (and prints the same line on stderr): grim's formats reject
@@ -212,7 +227,10 @@ grim never silently overwrites or deletes work you did locally:
 - `grim update` re-materializes through that same gate: a locally modified
   artifact is **refused** with exit 65 instead of being overwritten, and
   `--force` overwrites it. An unmodified artifact still rolls forward with
-  no flag, so ordinary updates are unaffected.
+  no flag, so ordinary updates are unaffected. A named `grim update <names>`
+  applies the gate only inside the closure of its names, so an edit outside
+  it neither fails the run nor gets overwritten. Its `--force` reaches that
+  closure and what the run prunes.
 - `grim install` also **refuses** to overwrite a destination it has no
   record of (a hand-authored same-named skill dir, rule file, or MCP
   config entry) — `--force` overwrites and records it. Identical
@@ -224,7 +242,14 @@ grim never silently overwrites or deletes work you did locally:
   re-declare, so nothing else changes).
 - `grim update` prunes artifacts that dropped out of the lock, but a
   locally modified orphan is **kept** and reported as `kept-modified`;
-  `--force` prunes it anyway.
+  `--force` prunes it anyway. After a named run
+  `grim uninstall --force <kind> <name>` removes it. A bare
+  `grim update --force` does too but moves every pin. An install record the lock
+  no longer holds stays on disk after a named run, and a warning names it and
+  `grim uninstall <kind> <name>`: exit 0. A bare `grim update` prunes it too but
+  moves every pin. Each command carries the run's `--global` or `--config`. A
+  row with action `restored` kept its pin, and this run wrote its files. That
+  includes a client's first copy and a pool reader joining the shared pool.
 - A **settings** value (experimental) that changed after grim wrote it, or
   one grim never wrote, is refused the same way (65, `forceable`, a
   `pieces` array). `--force` replaces it, and grim keeps no backup of the
@@ -328,7 +353,10 @@ Work through it in this order:
    things write one: `grim hook allow`, `grim add`, and a prompt you
    accepted. `grim install` deliberately does not — which is why a hook that
    arrived with a `git clone` reports `workspace-not-consented` however many
-   times you re-run install. `grim hook allow` is the fix.
+   times you re-run install. `grim hook allow` is the fix, and also for an
+   offline bundle member your local store does not list, because `add` records
+   consent only for what that run resolved. A failed `grim add` needs no
+   `hook allow`: it records its consent ahead of the install.
 
    A record you *do* have can still be out of date. Declaring a new hook,
    binding one under a new name, or pulling one from a new repository is
@@ -366,10 +394,15 @@ Work through it in this order:
    is full (1 MiB) or a table this grim cannot read (newer schema,
    unparseable, over the cap), which grim leaves untouched. Free space with
    `grim uninstall hook`; for an unreadable table, upgrade grim or move it
-   aside. Then re-run `grim install`. Per-cause pages: [gated][ht-gated],
+   aside. Then re-run `grim install`. One hook's own payload can cost that hook
+   alone: grim warns `hook '<name>' is not armed:` with the reason (payload
+   gone, modified, unreadable, or a `hook.toml` it cannot read or parse), and
+   the other hooks keep arming. `grim install` restores a gone payload,
+   `grim install --force` a modified one. Per-cause pages: [gated][ht-gated],
    [global-only][ht-global], [user-owned file][ht-owned],
    [Windows][ht-windows], [table full][ht-full],
-   [table unreadable][ht-unreadable] (the cap is 1 MiB).
+   [table unreadable][ht-unreadable] (the cap is 1 MiB),
+   [payload][ht-payload].
 4. **The tier and the moment.** The design refuses rather than degrades: a
    `gatekeeper` or `mutator` a client cannot honour is *declined* for that
    `(hook, client)` pair, never quietly downgraded to an observer, because
@@ -469,9 +502,20 @@ Symptom, cause, fix for `grim export marketplace` and the manifests it reads
 
 Exit 81 means offline mode itself blocked the operation — deliberate
 policy, not an outage (that is 69). Either drop `--offline` / unset
-`GRIM_OFFLINE`, or warm the cache online first (`grim lock`, then go
-offline) — see [registries.md](registries.md). A floating tag that was
+`GRIM_OFFLINE`, or warm the cache online first (`grim install`, then go
+offline; `grim lock` downloads no content) — see
+[registries.md](registries.md). A floating tag that was
 never resolved online cannot be resolved from the cache.
+
+A resolve that offline mode blocks exits 69 instead, so read the message
+before you treat a 69 as an outage. That covers `grim lock`, `add` and
+`update` on a tag or manifest the cache lacks. The message says offline
+mode blocked a required network operation.
+
+Two offline runs exit otherwise. `grim add` without `--kind` exits 65 on an
+uncached reference, because it cannot infer the kind. Pass `--kind` there.
+`grim update --marketplace` exits 81 where it needs the network, a recorded
+bundle digest the store lacks included.
 
 ## Auth Failures
 
@@ -516,5 +560,6 @@ Exit 80 is the registry rejecting your credential. Things to know:
 [ht-full]: https://grimoire.rs/hooks-troubleshooting.html#dispatch-full
 [ht-unreadable]: https://grimoire.rs/hooks-troubleshooting.html#dispatch-unreadable
 [settings-ref]: https://grimoire.rs/settings.html
+[ht-payload]: https://grimoire.rs/hooks-troubleshooting.html#payload-unarmable
 [mk-tokens]: https://grimoire.rs/guides/hosting-a-marketplace.html#tokens
 [mk-two-step]: https://grimoire.rs/guides/hosting-a-marketplace.html#two-step

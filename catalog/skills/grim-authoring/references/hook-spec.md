@@ -485,8 +485,9 @@ artifact, and a skill reaches clients a hook never will.
   hook faces — the feature flag first, then the consumer's workspace
   consent. There is no per-hook approval anywhere in the design: consent is
   asked once per workspace and covers the hook set that workspace declares.
-  `grim add <bundle>` records the **resolved** member set, so a bundle that
-  later gains a hook member drifts and re-asks rather than arming silently;
+  `grim add <bundle>` records the **resolved** member set, ahead of its
+  install, so a bundle that later gains a hook member drifts and re-asks
+  rather than arming silently;
   packaging a hook inside a bundle is not a way around the gate.
 - **`publish.toml` has a `[hooks]` table**, and its conventional source
   path is `hooks/<name>/` (a directory, matching the artifact shape).
@@ -501,8 +502,11 @@ artifact, and a skill reaches clients a hook never will.
 `hook.toml` can carry `[requires.<table>]` tables (`skills`, `rules`,
 `agents`, `mcp`, `hooks`, `bundles`) that name artifacts the hook needs.
 Installing the hook installs them; its arming gates are unchanged, and
-`grim add <hook>` consents only the hooks it newly reaches. Needs grim 0.16.0
-or later; see [Declaring Dependencies](../SKILL.md#declaring-dependencies).
+`grim add <hook>` consents to that hook and the hooks it newly reaches, ahead
+of the install and only through edges the run resolved. Offline an edge counts
+only where the manifest the local store holds for its parent lists it. Needs
+grim 0.16.0 or later; see
+[Declaring Dependencies](../SKILL.md#declaring-dependencies).
 
 ## Validation Pitfalls
 

@@ -91,10 +91,10 @@ To verify a pre-built grim release archive's build provenance:
 |---|---|---|
 | `grim init` | Create a fresh `grimoire.toml` | [consume](references/consume.md) |
 | `grim config` | Read/write `grimoire.toml` settings and registries | [registries](references/registries.md) |
-| `grim add` | Declare an artifact and pin it in the lock | [consume](references/consume.md) |
-| `grim lock` | Resolve floating tags to digests | [consume](references/consume.md) |
+| `grim add` | Declare an artifact and pin it in the lock (an existing pin is kept; `grim update <name>` moves it) | [consume](references/consume.md) |
+| `grim lock` | Pin what the declaration added or changed; keeps every existing pin | [consume](references/consume.md) |
 | `grim install` | Materialize the lock into AI clients; `grim install <path>` dev-installs a local skill, rule or agent without declaring it | [consume](references/consume.md) |
-| `grim update` | Re-resolve, re-materialize, prune; `--marketplace <path>` instead rolls a declared plugin's own lock forward and installs nothing | [consume](references/consume.md) |
+| `grim update` | The command that moves a pin whose reference you did not change: re-resolve, re-materialize, prune; `--marketplace <path>` instead rolls a declared plugin's own lock forward and installs nothing | [consume](references/consume.md) |
 | `grim status` | Report each declared artifact's state | [consume](references/consume.md) |
 | `grim context` | Report the resolved scope, paths, clients, registries | [consume](references/consume.md) |
 | `grim fetch` | Print an artifact's content without installing | [consume](references/consume.md) |

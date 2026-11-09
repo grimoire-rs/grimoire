@@ -543,8 +543,8 @@ config`, so you rarely hand-edit the file. It covers **settings**
 registries** (`[[registries]]`) —
 but **not declarations** (`[skills]` / `[rules]` / `[agents]` / `[mcp]` /
 `[bundles]`),
-which stay under `grim add` / `grim remove` because those must re-resolve the
-lock on every change.
+which stay under `grim add` / `grim remove` because those keep the lock in
+step with every change.
 
 - **Settings** use dotted keys — `grim config get|set|unset <key>` and
   `grim config list`:
@@ -696,9 +696,10 @@ one you edited. `options.vendors.<name>.shared_skills` pins the choice:
 ## Offline Mode
 
 grim is **online by default**: every floating-tag lookup resolves fresh
-against the registry, and the result is cached write-through. A floating
-tag therefore never serves a stale pin, and there is no "cache first"
-mode to surprise you.
+against the registry, and the result is cached write-through. A lookup
+therefore never answers from a stale cache, and there is no "cache first"
+mode to surprise you. A lookup is not a refresh: a pin stays in the lock
+until `grim update` moves it.
 
 `--offline` (or `GRIM_OFFLINE`) flips to **cache-only**: all network
 access is forbidden, and an operation that would need the registry fails
@@ -706,12 +707,20 @@ with exit 81 instead of silently degrading. Use it in sealed CI or
 air-gapped networks. Warm the cache first with a normal online run:
 
 ```sh
-grim lock              # online: resolve + cache everything declared
+grim install           # online: fetch + cache everything locked
 grim install --offline # later: cache-only, no network
 ```
 
-The flag or env var are the only switches — there is no config-file
-counterpart for offline.
+`grim lock` downloads no content, so an offline run after only a lock exits
+81. A resolve is the exception to 81. An offline `grim lock`, `add` or
+`update` whose resolve needs a tag or manifest the cache lacks exits 69. Its
+message says offline mode blocked it.
+
+Two offline runs exit otherwise. `grim add` without `--kind` exits 65 on an
+uncached reference, because it cannot infer the kind.
+`grim update --marketplace` exits 81 where it needs the network, a recorded
+bundle digest the store lacks included. The flag or env var are the only
+switches — there is no config-file counterpart for offline.
 
 ## Search, TUI, and MCP {#search-tui-and-mcp}
 
@@ -887,9 +896,19 @@ single-registry fallback when no `[[registries]]` is declared. When the active
 scope has no `grimoire.toml` yet it offers to create one before starting via
 popup dialogs (the registry input is pre-filled with the effective default
 registry and the accepted value is persisted as a `[[registries]]` entry with
-`default = true`; cancelling closes the TUI). Its install, update, and delete
-actions go through the same seams as `grim add`/`install`/`uninstall`. Press
-`?` inside for the full key map.
+`default = true`; cancelling closes the TUI). Press `?` inside for the full
+key map.
+
+Its install, update, and delete actions go through the same seams as
+`grim add`/`install`/`uninstall`. Install on a row that `grim lock`'s relock
+reaches at the row's repository writes nothing to `grimoire.toml`: it repairs
+the row. Update is `grim update <name>` on the binding that holds the row, and
+only a version you picked writes a line. It also prunes what that command
+prunes.
+
+A catalog row whose guessed name is bound elsewhere is refused, as `grim add`
+refuses it. So is a name another artifact brings in from another repository.
+Delete refuses the same way before it changes anything.
 
 Three row states are worth knowing before you press anything, because each
 one changes what the action keys do:
@@ -904,20 +923,49 @@ one changes what the action keys do:
   recorded — `u` included, since 0.13.0 — and the refusal opens a modal
   offering the forced retry. Answering that modal is what supplies
   `--force`; the key you pressed does not. Only a single-artifact action
-  offers it, since one answer cannot speak for several artifacts, so a batch
-  leaves its refusals in the status line instead. A retry that refuses again
-  does not re-open the dialog, so there is no confirm loop to get stuck in.
-  The forced retry covers what `grim add --force` covers: the artifact, or a
-  bundle's members, nested bundles' included, but not a member you also declared
-  directly. It never covers a dependency, so a refused dependency opens no dialog. The status line names it instead.
+  offers it. One answer cannot speak for several artifacts, so a batch
+  leaves its refusals in the status line instead. The dialog's first line
+  names every artifact the retry changes and the retry forces only those, so
+  nothing you were not shown changes.
+  A refusal it did not list re-opens the dialog with that artifact added. The
+  list only grows, so there is no confirm loop to get stuck in.
+
+  A dialog taller than the screen scrolls with `j`/`k` or `pgdn`/`pgup`.
+  Overwrite can be chosen only once its last line has been on screen. A
+  terminal 21 columns wide or narrower shows the dialog no text, and so does a
+  dialog whose text wraps to more than 65,535 lines. Overwrite cannot be chosen
+  there, and the key hint reads `widen terminal` or `enlarge terminal`. A key
+  pressed before the dialog opened is dropped. The width count measures U+FF9E
+  and U+FF9F as one column each, as drawn.
+
+  An Install's dialog lists only refusals `grim add --force` covers: the
+  artifact, or a bundle's members, nested bundles' included, but not a member
+  you also declared directly. It never lists a dependency, so a refused
+  dependency opens no dialog. The status line names it instead. An Update's
+  dialog lists what `grim update --force <name>` covers, its dependencies
+  included. It also names each edited artifact the new lock dropped, for the
+  retry to remove.
 - **A settings row** (experimental) can read `gated`, `not-armed` or
   `stale`. On a single-artifact action a refused settings value opens the
-  Overwrite dialog like any other refusal, and the dialog lists the refused
+  Overwrite dialog, which names every refused package and up to six refused
   values. With no dialog open, the changes and refusals show in a Settings
-  panel whose only button is Close; `grim install --force` overwrites what
-  it marks overwrite, and after a delete `grim uninstall --force` removes
-  them. The status line reads `refused (settings set or changed outside
-  grim)`.
+  panel whose only button is Close. The panel names `grim install --force`,
+  which overwrites what it marks overwrite. The status line reads `refused
+  (settings set or changed outside grim)`.
+- **A refused settings delete** names `grim uninstall --force settings
+  <name>` in that panel, which removes the values. When a bundle or another
+  artifact still holds the refused package, or a bundle member's changed MCP
+  entry, `grim uninstall` keeps it. A single-artifact delete then checks
+  everything first and opens a dialog with nothing removed, listing every
+  refusal at once. Its
+  Uninstall button repeats the delete and forces only the packages and MCP
+  servers it names, and Cancel removes nothing. In a batch, the panel says to
+  delete that row on its own.
+
+  That dialog scrolls the same way, and Uninstall can be chosen only once its
+  last line has been on screen. On a terminal 21 columns wide or narrower it
+  shows no text, and so does a dialog whose text wraps to more than 65,535
+  lines. Uninstall cannot be chosen there.
 - **`d` removes dependencies** only the deleted artifact needed, exactly as
   `grim uninstall` does. One another artifact still needs is kept.
 - **The batch confirmation** guards `i`/`u`/`d` on more than one artifact —
@@ -925,8 +973,9 @@ one changes what the action keys do:
   the count and the source before anything runs, then lists the first few
   artifact names. Cancel is preselected and there is no `y` shortcut:
   `→`/`←` or `h`/`l` switch between Cancel and the action button, `enter`
-  confirms only on the action button, and any other key cancels and keeps
-  the marks.
+  confirms only on the action button, and `↑`/`↓`, `j`/`k` or `pgup`/`pgdn`
+  scroll a prompt taller than the screen. A terminal narrower than the buttons
+  offers no action. Any other key cancels and keeps the marks.
 - **A bundle row folds in its members' health.** Declaration is the gate — a
   bundle absent from `[bundles]` reads `not installed` whatever its members
   look like — but past it the row shows the *worst* member state, at the
@@ -942,7 +991,7 @@ and can call these tools:
 | Tool | What it returns | Gate |
 |------|-----------------|------|
 | `grim_search` | Same JSON as `grim search --format json`, over the resolved scope's registries (no registry override), `total` and `truncated` included. Args: `query?`, `refresh?`, `limit?` (positive integer, as `--limit`), `offset?` (non-negative integer, as `--offset`), scope | always |
-| `grim_status` | Same JSON as `grim status --format json` for the requested scope. Optional `check` forwards to the same live catalog re-check as CLI `--check` (deprecated/replaced_by/update_available; the report's `checked` field says whether it ran). Args: `check?`, scope | always |
+| `grim_status` | Same JSON as `grim status --format json` for the requested scope. Optional `check` forwards to the same live catalog re-check as CLI `--check` (deprecated/replaced_by/update_available/moved_nested_bundles; the report's `checked` field says whether it ran). Args: `check?`, scope | always |
 | `grim_fetch` | An artifact's content in the tool result — no install. Canonical bytes, or a `vendor` (claude/opencode/copilot) projection, or one support file via `path` (binary → base64 with `encoding: "base64"`); a `files` listing is always included. `description` fetches the repository's description companion instead (every member inline); `digest_only` resolves `{ref, digest}` with no download and composes with `description`. Content caps at 256 KiB (marked truncation); needs network. Args: `ref`, `vendor?`, `path?`, `description?`, `digest_only?`, scope | always |
 | `grim_describe` | Same JSON as `grim describe --format json` — manifest-level metadata (kind, curated annotations, tags, `has_description`) without downloading content. Args: `ref`, scope | always |
 | `grim_render` | Writes an artifact's vendor-native files into `dest_dir` (created if absent) — no install state. Args: `ref`, `vendor`, `dest_dir`, scope | `--allow-writes` |

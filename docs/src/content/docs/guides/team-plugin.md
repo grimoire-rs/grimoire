@@ -144,12 +144,27 @@ upgrade note](../upgrading.md#plugin-version-move).
 ## Keep it current
 
 Re-running the export command above does **not**, by itself, pick up a
-tag that moved on the registry. A declared export only re-resolves the
-plugins whose declaration or pins have gone stale. A plugin that is
-already fresh is carried over byte-for-byte from `marketplace.lock`
-instead. New digests arrive only two ways: editing `marketplace.toml`'s
-`include` list (which marks that plugin stale), or rolling the lock
-forward directly:
+tag that moved on the registry. A plugin that is already fresh is carried
+over byte-for-byte from `marketplace.lock`. Editing `marketplace.toml`'s
+`include` list marks that plugin stale, and the next export reconciles it.
+A new include resolves, and an unchanged include keeps its pin even after
+its tag moved.
+
+A bundle a plugin reaches keeps its pin too, by include, by `requires` or through
+another bundle. `marketplace.lock` records its digest in the rows below it.
+
+Three cases resolve an unchanged include anyway. A plugin that records no digest,
+written or resolved again by grim 0.15.1, follows its bundles' tags on its next
+write that covers the whole plugin. An export warns once, naming each bundle and
+the rows that changed, and that write records the digest. A `<plugin>:<member>`
+update keeps every row outside its selection as it is.
+
+A member a followed bundle still lists keeps its pin while the tag that pin records
+matches the member. A member another request shares at a different tag can resolve
+again. A plugin whose entries record no tag, written by grim 0.15.1 or earlier,
+resolves an unchanged include once, and a warning names the plugin.
+
+Everything else moves one way, by rolling the lock forward directly:
 
 ```sh
 grim update --marketplace marketplace.toml team

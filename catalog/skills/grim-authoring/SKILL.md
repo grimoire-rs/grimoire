@@ -160,16 +160,21 @@ separate:
 
 Gate 2 has three satisfiers, and they are the *only* three things that write
 a record: `grim hook allow`, `grim add` (typing a reference is the
-declaration gesture), or an accepted prompt (asked once per workspace, TTY
-only). `grim install`, `update`, `lock`, `status`, `context`, `hook list`,
-the TUI and the MCP server never write one — a consumer who clones a
-repository declaring your hook gets a declaration and a lock pin, and
-nothing armed. `--trust-workspace` on `grim install` / `update` / `add`
-arms a single invocation and writes nothing; its `--no-trust-workspace`
-counterpart refuses one. Since grim 0.16.0 `--trust-hooks` /
-`--no-trust-hooks` are their aliases, and each answer covers hooks and
-settings together. Neither turns the feature on — gate 1 must already be
-open — and the pair beats the record in **both** directions.
+declaration gesture, and an Install in `grim tui` that declares a row is the
+same gesture for a hook), or an accepted prompt (asked once per workspace, TTY
+only). `grim install`, `update`, `lock`, `status`, `context`, `hook list`, a
+TUI Update or an Install that declares nothing, and the MCP server never write
+one — a consumer who clones a repository declaring your hook gets a
+declaration and a lock pin, and nothing armed.
+
+`--trust-workspace` on `grim install` / `update` / `add` arms a single
+invocation, and its `--no-trust-workspace` counterpart refuses one.
+`--trust-workspace` writes nothing itself. `grim add` still records its
+gesture, at project scope and with gate 1 open, unless `--no-trust-workspace`
+is set. Since grim 0.16.0 `--trust-hooks` / `--no-trust-hooks` are their
+aliases, and each answer covers hooks and settings
+together. Neither turns the feature on — gate 1 must already be open — and the
+pair beats the record in **both** directions.
 
 They are **flags only: there is no `GRIM_ALLOW_HOOKS`, no
 `GRIM_HOOK_CONSENT`, and no environment form of the record's path**, and

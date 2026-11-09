@@ -66,10 +66,13 @@ A `[hooks]` member is a **declaration only**. It lands in the consumer's
 lock with the bundle as its provenance and keeps its own digest-pinned
 source, then meets the same install-time gate a directly declared hook
 meets: the experimental feature flag first, then the consumer's workspace
-consent — asked once per workspace, never per hook. `grim add <bundle>`
-records the **resolved** member set, so bundling a hook does not pre-approve
-one added later: a bundle that gains a hook member drifts and re-asks. See
-[hook-spec.md](hook-spec.md).
+consent — asked once per workspace, never per hook.
+
+`grim add <bundle>` records the **resolved** member set ahead of its install.
+Offline it records only members the bundle manifest in the local store lists,
+and the consumer runs `grim hook allow` for the rest. So bundling a hook does
+not pre-approve one added later: a bundle that gains a hook member drifts and
+re-asks. See [hook-spec.md](hook-spec.md).
 
 A `[settings]` member (experimental) is a declaration in the same way: it
 locks with the bundle as its provenance, then meets the settings flag and,
@@ -105,8 +108,9 @@ or later to install; an older grim exits 65 on it.
 ## Floating vs. Pinned
 
 By default the bundle stores members exactly as written: floating tags
-stay floating and each consumer's `grim lock` re-resolves them fresh;
-digest members (`@sha256:…`) never move. Add `--pin` at release to
+stay floating and each consumer's first `grim lock` resolves them. Their lock then
+keeps those pins until a bare `grim update` or `grim update <member>`. Digest
+members (`@sha256:…`) never move. Add `--pin` at release to
 freeze every floating member to a digest in the published bundle — it
 then always expands to the same digests, even offline; re-run the
 release to roll it forward ([pinning][pin]).

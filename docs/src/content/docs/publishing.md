@@ -850,9 +850,11 @@ grim release ./python-stack.toml ghcr.io/acme/python-stack:1.0.0
 ### Floating or pinned members {#pin}
 
 By default the bundle stores its members exactly as written. Floating tags stay
-floating, and each consumer's [`grim lock`](./commands.md#lock) re-resolves them
-fresh. Add `--pin` to resolve every floating member to a digest at release time
-and freeze it into the published bundle:
+floating: a consumer's [`grim lock`](./commands.md#lock) pins each one when it
+first enters that lock, and the consumer's
+[`grim update`](./commands.md#update) moves it. Add `--pin` to resolve every
+floating member to a digest at release time and freeze it into the published
+bundle:
 
 ```sh
 grim release ./python-stack.toml ghcr.io/acme/python-stack:1.0.0 --pin
@@ -922,8 +924,9 @@ rule for a publisher:
 - Publish the first dependency-bearing version under a **new major tag**, and
   let consumers move to it when they upgrade grim.
 - Dependencies stay as shared as the tags they name. A floating reference is
-  resolved when each consumer locks, so two artifacts that name different tags
-  of one dependency can [conflict](./concepts.md#bundle-conflicts).
+  resolved when it first enters a consumer's lock and on that consumer's
+  `grim update`. Two artifacts that name different tags of one dependency can
+  therefore [conflict](./concepts.md#bundle-conflicts).
 
 ## Batch publishing with a manifest {#batch-publish}
 
