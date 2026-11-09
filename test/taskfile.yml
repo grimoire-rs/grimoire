@@ -85,6 +85,40 @@ tasks:
       GRIM_G0_COMMAND: "{{.G0_COMMAND}}"
       GRIM_G1_COMMAND: "{{.G1_COMMAND}}"
 
+  old-grim:
+    desc: Run the grim 0.15.1 interop modules against GRIM_OLD_BIN; any skip fails the run
+    summary: |
+      Runs the modules that hand locks, state and caches between grim 0.15.1
+      (GRIM_OLD_BIN, the v0.15.1 release binary) and the current grim
+      (GRIM_COMMAND, else the built test/bin/grim). A dev build that prints
+      0.15.1 fails the run (src/old_grim.py). Writes results/old-grim/junit.xml,
+      then fails on any case that did not pass, a skip included, and on a module
+      that ran no case.
+    vars:
+      MODULES: >-
+        tests/test_old_grim_dependencies.py
+        tests/test_old_grim_lock_pins.py
+        tests/test_old_grim_marketplace_pins.py
+        tests/test_old_grim_remove_unread.py
+        tests/test_old_grim_settings.py
+        tests/test_old_grim_unwalked_requires.py
+        tests/test_marketplace_stale_remedy.py
+        tests/test_catalog_kindless_upgrade.py::test_grim_0_15_1_lists_the_rows_this_grim_cached
+      REPORT: results/old-grim/junit.xml
+    preconditions:
+      - sh: test -n "$GRIM_OLD_BIN"
+        msg: GRIM_OLD_BIN must name the grim binary from the v0.15.1 release (grimoire-<target>.tar.gz)
+    cmds:
+      - task: build
+        vars:
+          SKIP_BUILD: "{{.SKIP_BUILD}}"
+      # A report left by an earlier run must not stand in for one that died.
+      - rm -f '{{.REPORT}}'
+      - ocx exec -- uv run pytest -n auto -rs --junit-xml='{{.REPORT}}' {{.MODULES}} {{.CLI_ARGS}}
+      - python3 tools/require_all_passed.py --junit '{{.REPORT}}' {{.MODULES}}
+    env:
+      GRIM_COMMAND: "{{.GRIM_BINARY}}"
+
   bench:
     desc: Assert the 20,000-entry sync budgets (time, memory, bytes written)
     summary: |
@@ -119,6 +153,44 @@ tasks:
       - task: default
         vars:
           CLI_ARGS: '-n auto {{.CLI_ARGS | default "-v"}}'
+
+  shard:
+    desc: Run one shard of the acceptance suite in parallel (SHARD_COUNT, SHARD_INDEX, SHARD_LABEL)
+    summary: |
+      Runs the modules tools/accept_shard.py selects for shard SHARD_INDEX of
+      SHARD_COUNT, under the same markers as `task test`, and writes
+      results/junit-<SHARD_LABEL>-<SHARD_INDEX>-of-<SHARD_COUNT>.xml. CI passes
+      the runner OS as the label, so two legs of one run cannot collide. A shard
+      is a subset: `task test:floor` judges the whole set.
+    requires:
+      vars: [SHARD_COUNT, SHARD_INDEX, SHARD_LABEL]
+    vars:
+      # A var, not a pipe: a refused selection must stop the task, or pytest runs
+      # all of `testpaths` and reports the wrong shard green.
+      MODULES:
+        sh: uv run python tools/accept_shard.py --shard-count '{{.SHARD_COUNT}}' --shard-index '{{.SHARD_INDEX}}'
+      REPORT: results/junit-{{.SHARD_LABEL}}-{{.SHARD_INDEX}}-of-{{.SHARD_COUNT}}.xml
+    cmds:
+      - task: build
+        vars:
+          SKIP_BUILD: "{{.SKIP_BUILD}}"
+      # A report left by an earlier run must not stand in for a shard that died.
+      - rm -f '{{.REPORT}}'
+      - ocx exec -- uv run pytest -n auto -m "not index_e2e and not bench" --junit-xml='{{.REPORT}}' {{catLines .MODULES}} {{.CLI_ARGS | default "-v"}}
+    env:
+      GRIM_COMMAND: "{{.GRIM_BINARY}}"
+
+  floor:
+    desc: Merge the shard reports into results/junit.xml and judge the whole suite (SHARD_COUNT, SHARD_LABEL)
+    summary: |
+      Runs tools/accept_floor.py over the SHARD_COUNT reports `task test:shard`
+      wrote under SHARD_LABEL. Refuses a failed case, a missing shard, a duplicate
+      case, a count under SUITE_FLOOR, skips or xfails over SKIP_CEILING or
+      XFAIL_CEILING, and a parked test. Standard library and git only.
+    requires:
+      vars: [SHARD_COUNT, SHARD_LABEL]
+    cmds:
+      - python3 tools/accept_floor.py --label '{{.SHARD_LABEL}}' --shard-count '{{.SHARD_COUNT}}'
 
   demo:
     desc: Record every cast declared under test/recordings/casts/ (task test:demo)
