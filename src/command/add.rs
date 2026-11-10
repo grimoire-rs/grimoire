@@ -234,6 +234,7 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
         kind,
         name: &name,
     };
+    let global = GlobalClients::default();
     let (target, previous) = write_config_and_relock(
         ctx,
         &scope,
@@ -241,6 +242,7 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
         args.hook_trust.flag(),
         &access,
         ctx.offline(),
+        &global,
     )
     .await?;
     let new_lock = &target.lock;
@@ -254,7 +256,7 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     // dependencies) is projected out and installed, so the rest of a shared
     // lock stays for `grim install`.
     let settings_changes = if args.install.enabled() {
-        install_added(ctx, &scope, &added, new_lock, &access, args).await?
+        install_added(ctx, &scope, &added, new_lock, &access, args, &global).await?
     } else {
         consent_without_install(ctx, &scope, &added, &access, args).await;
         Vec::new()
@@ -350,6 +352,7 @@ async fn write_config_and_relock(
     trust: Option<bool>,
     access: &Arc<dyn OciAccess>,
     offline: bool,
+    global: &GlobalClients,
 ) -> anyhow::Result<(TargetLock, Option<GrimoireLock>)> {
     let &Declaration { set, .. } = declaration;
     // Ahead of the write: past it, a refused lock leaves the edited config behind.
@@ -379,7 +382,17 @@ async fn write_config_and_relock(
     // the save. It rolls the config back as a failed relock or save does.
     let saved = async {
         let target = super::grim(target)?;
-        refuse_added_conflict(ctx, scope, declaration, previous.as_ref(), &target.lock, trust, access).await?;
+        refuse_added_conflict(
+            ctx,
+            scope,
+            declaration,
+            previous.as_ref(),
+            &target.lock,
+            trust,
+            access,
+            global,
+        )
+        .await?;
         super::grim(lock_io::save(&scope.lock_path, &target.lock, previous.as_ref()))?;
         anyhow::Ok(target)
     }
@@ -397,9 +410,30 @@ async fn write_config_and_relock(
     Ok((target, previous))
 }
 
+/// The global `[options].clients`, read on first use and shared by the settings
+/// conflict check and the install target of one add: each read loads the global
+/// config, and a broken one is warned about once per read.
+#[derive(Default)]
+struct GlobalClients(std::sync::OnceLock<Vec<crate::install::client_target::ClientTarget>>);
+
+impl GlobalClients {
+    fn get(
+        &self,
+        ctx: &Context,
+        scope: &scope_resolution::ResolvedScope,
+    ) -> &[crate::install::client_target::ClientTarget] {
+        self.0
+            .get_or_init(|| super::global_clients(ctx, scope.scope, &scope.options.clients))
+    }
+}
+
 /// Run the settings conflict check over the lock this add would save. Past the
 /// flag, what the add brings counts as armed, even under `--no-install`. Told no,
 /// it arms nothing and so conflicts with nothing.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one call site; a parameter struct would only rename them"
+)]
 async fn refuse_added_conflict(
     ctx: &Context,
     scope: &scope_resolution::ResolvedScope,
@@ -408,6 +442,7 @@ async fn refuse_added_conflict(
     lock: &GrimoireLock,
     trust: Option<bool>,
     access: &Arc<dyn OciAccess>,
+    global: &GlobalClients,
 ) -> anyhow::Result<()> {
     if lock.settings.is_empty() || !scope.options.experimental.settings_enabled() {
         return Ok(());
@@ -419,27 +454,31 @@ async fn refuse_added_conflict(
     };
     let names: Vec<_> = lock.settings.iter().filter(brought).map(|a| a.name.clone()).collect();
     let policy = super::hook_consent::settings_policy(ctx, scope, lock, trust)?;
-    refuse_settings_conflict(scope, lock, policy, &names, access).await
+    refuse_settings_conflict_for(scope, lock, policy, &names, global.get(ctx, scope), access).await
 }
 
 /// Refuse a lock whose armed settings packages conflict, before it is saved.
-/// `added` names what counts as armed without the policy's say.
+/// `added` names what counts as armed without the policy's say; `global` is
+/// the global `[options].clients`, so the check covers every client an
+/// install would reach.
 ///
 /// # Errors
 ///
 /// Target parse (65/78), install-state I/O (74), or the conflict itself (78).
-pub(super) async fn refuse_settings_conflict(
+pub(super) async fn refuse_settings_conflict_for(
     scope: &scope_resolution::ResolvedScope,
     lock: &GrimoireLock,
     policy: HookPolicy,
     added: &[String],
+    global: &[crate::install::client_target::ClientTarget],
     access: &Arc<dyn OciAccess>,
 ) -> anyhow::Result<()> {
-    let target = super::grim(InstallTarget::parse(
+    let target = super::grim(InstallTarget::parse_with_global(
         &scope.workspace,
         scope.scope,
         &[],
         &scope.options.clients,
+        global,
         &scope.options.vendors,
     ))?
     .with_settings_policy(policy);
@@ -622,13 +661,22 @@ async fn add_path_source(
         kind,
         name: &name,
     };
-    let (target, previous) =
-        write_config_and_relock(ctx, scope, &declaration, args.hook_trust.flag(), &access, ctx.offline()).await?;
+    let global = GlobalClients::default();
+    let (target, previous) = write_config_and_relock(
+        ctx,
+        scope,
+        &declaration,
+        args.hook_trust.flag(),
+        &access,
+        ctx.offline(),
+        &global,
+    )
+    .await?;
     let new_lock = &target.lock;
     let added = Added::new(&scope.set, previous.as_ref(), new_lock, kind, &name);
 
     let settings_changes = if args.install.enabled() {
-        install_added(ctx, scope, &added, new_lock, &access, args).await?
+        install_added(ctx, scope, &added, new_lock, &access, args, &global).await?
     } else {
         consent_without_install(ctx, scope, &added, &access, args).await;
         Vec::new()
@@ -1201,6 +1249,7 @@ async fn install_added(
     // `--force` and `--trust-workspace` travel as the parsed args rather than as
     // two more bare booleans at the end of a long argument list.
     args: &AddArgs,
+    global: &GlobalClients,
 ) -> anyhow::Result<Vec<crate::api::settings_report::SettingsChange>> {
     let single = match &added.projection {
         Some(single) => single,
@@ -1217,15 +1266,9 @@ async fn install_added(
     let site = super::hook_consent::ConsentSite::of(ctx, scope);
     let consentable = consentable_keys(&site, ctx.offline(), added, single, access, flag).await;
     let policies = super::hook_consent::resolve_for_add(ctx, scope, single, &consentable, flag)?;
-    let target = super::grim(InstallTarget::parse(
-        &scope.workspace,
-        scope.scope,
-        &[],
-        &scope.options.clients,
-        &scope.options.vendors,
-    ))?
-    .with_hook_policy(policies.hooks)
-    .with_settings_policy(policies.settings);
+    let target = super::install::install_target(scope, &[], global.get(ctx, scope))?
+        .with_hook_policy(policies.hooks)
+        .with_settings_policy(policies.settings);
     ctx.telemetry()
         .record_install_clients(&target, &scope.workspace, scope.scope);
     let mut state = super::grim(

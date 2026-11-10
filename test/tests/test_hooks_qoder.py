@@ -257,7 +257,9 @@ def test_project_scope_skips_qoder_and_points_at_global(grim_at, project_dir: Pa
 
     result = runner.run("install", "--trust-hooks", check=False)
     assert result.returncode == 0, result.stderr
-    warning = next((line for line in result.stderr.splitlines() if "qoder" in line), "")
+    warning = next(
+        (line for line in result.stderr.splitlines() if "qoder" in line and not line.startswith("clients: ")), ""
+    )
     assert "shell-guard" in warning and "--global" in warning, result.stderr
     assert "global-only" in warning, result.stderr
     assert not (project_dir / ".qoder" / "settings.json").exists(), "nothing armable in a tracked file"

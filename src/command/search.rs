@@ -55,7 +55,7 @@ use crate::install::client_target::ClientTarget;
 use crate::install::install_state::InstallState;
 use crate::install::path_anchor::AnchorRoots;
 use crate::install::status_badge::StatusBadge;
-use crate::install::target::{InstallTarget, detect_clients_or_all};
+use crate::install::target::{InstallTarget, active_clients};
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
 
@@ -598,12 +598,16 @@ type SearchScope = (
 /// Best-effort on purpose: badges are advisory, and a browse must not fail on
 /// a config error that only a mutating command needs to enforce. `None` just
 /// costs the `Pending` badge, never the search.
-fn install_target_best_effort(scope: &scope_resolution::ResolvedScope) -> Option<InstallTarget> {
-    InstallTarget::parse(
+fn install_target_best_effort(
+    scope: &scope_resolution::ResolvedScope,
+    global_clients: &[ClientTarget],
+) -> Option<InstallTarget> {
+    InstallTarget::parse_with_global(
         &scope.workspace,
         scope.scope,
         &[],
         &scope.options.clients,
+        global_clients,
         &scope.options.vendors,
     )
     .ok()
@@ -681,8 +685,9 @@ fn resolve_scope(ctx: &Context, args: &SearchArgs) -> anyhow::Result<SearchScope
     let registries = super::registries_for_scope(ctx, &scope)?;
     let lock = lock_io::load(&scope.lock_path).ok();
     let state = scope_resolution::load_state(&scope).unwrap_or_else(|_| InstallState::empty(&scope.state_path));
-    let active = detect_clients_or_all(&scope.workspace, scope.scope);
-    let target = install_target_best_effort(&scope);
+    let global_clients = super::global_clients(ctx, scope.scope, &scope.options.clients);
+    let active = active_clients(&scope.workspace, scope.scope, &global_clients);
+    let target = install_target_best_effort(&scope, &global_clients);
     let show_deprecated = scope.options.show_deprecated;
     let min_relevance = scope.options.resolved().search_min_relevance;
     Ok((
@@ -745,8 +750,9 @@ fn load_badges_best_effort(
     };
     let lock = lock_io::load(&scope.lock_path).ok();
     let state = scope_resolution::load_state(&scope).unwrap_or_else(|_| InstallState::empty(&scope.state_path));
-    let active = detect_clients_or_all(&scope.workspace, scope.scope);
-    let target = install_target_best_effort(&scope);
+    let global_clients = super::global_clients(ctx, scope.scope, &scope.options.clients);
+    let active = active_clients(&scope.workspace, scope.scope, &global_clients);
+    let target = install_target_best_effort(&scope, &global_clients);
     let min_relevance = scope.options.resolved().search_min_relevance;
     (lock, state, scope.roots, active, target, min_relevance)
 }

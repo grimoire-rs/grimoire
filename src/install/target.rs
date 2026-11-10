@@ -11,8 +11,9 @@
 //! When neither `--client` nor the config `[options].clients` selects a
 //! client, the set defaults to **all detected clients** — those whose
 //! vendor directory / marker is present for the scope (see
-//! [`detect_clients`]). Detection finding nothing falls back to the single
-//! synthetic generic client [`ClientTarget::Agents`], which writes one copy
+//! [`detect_clients`]) — plus, at project scope, the clients the global
+//! `[options].clients` lists. Neither finding anything falls back to the
+//! single synthetic generic client [`ClientTarget::Agents`], which writes one copy
 //! into the cross-vendor `.agents/skills` pool. It deliberately does **not**
 //! fall back to every known client: that wrote eleven vendor directories the
 //! user never asked for, and those directories are exactly what made the
@@ -29,16 +30,45 @@ use crate::oci::ArtifactKind;
 use super::client_target::ClientTarget;
 use super::install_error::InstallError;
 
+/// What put a client into an [`InstallTarget`]'s set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientSource {
+    /// The `--client` flag, or a client list handed straight to
+    /// [`InstallTarget::new`].
+    Flag,
+    /// The project's `[options].clients`.
+    Project,
+    /// A vendor marker present in the workspace.
+    Detected,
+    /// The global `[options].clients`, for a client with no marker here.
+    Global,
+    /// Nothing selected or detected anything: the generic `agents` client.
+    Fallback,
+}
+
+impl std::fmt::Display for ClientSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Flag => "--client",
+            Self::Project => "project",
+            Self::Detected => "detected",
+            Self::Global => "global",
+            Self::Fallback => "fallback",
+        })
+    }
+}
+
 /// One or more AI client targets rooted at a workspace.
 #[derive(Debug, Clone)]
 pub struct InstallTarget {
     workspace: PathBuf,
     scope: ConfigScope,
     clients: Vec<ClientTarget>,
-    /// Set only by [`InstallTarget::parse`] when flag, config, and detection
-    /// were all empty and the generic client was substituted. Gates the
-    /// residual "nothing here is installable" error.
-    generic_fallback: bool,
+    /// What selected each entry of `clients`, index-aligned. A lone
+    /// [`ClientSource::Fallback`] marks the generic client substituted when
+    /// flag, config, detection and the global list were all empty; it gates
+    /// the residual "nothing here is installable" error.
+    sources: Vec<ClientSource>,
     /// Clients whose skills render into the shared `.agents/skills` pool
     /// instead of their native skills directory
     /// (`[options.vendors.<name>].shared_skills = true`).
@@ -90,16 +120,16 @@ impl InstallTarget {
     /// `parse`: it comes from the resolved scope's config, which `new` does
     /// not take.
     pub fn new(workspace: &Path, scope: ConfigScope, clients: Vec<ClientTarget>) -> Self {
-        let clients = if clients.is_empty() {
-            detect_clients_or_all(workspace, scope)
+        let (clients, source) = if clients.is_empty() {
+            (detect_clients_or_all(workspace, scope), ClientSource::Detected)
         } else {
-            clients
+            (clients, ClientSource::Flag)
         };
         Self {
             workspace: workspace.to_path_buf(),
             scope,
+            sources: vec![source; clients.len()],
             clients,
-            generic_fallback: false,
             shared_skills: Vec::new(),
             native_skills: Vec::new(),
             configured: None,
@@ -140,18 +170,56 @@ impl InstallTarget {
         config_default: &[String],
         vendors: &BTreeMap<String, VendorOptions>,
     ) -> Result<Self, InstallError> {
-        let source: &[String] = if flag_values.is_empty() {
-            config_default
+        Self::parse_with_global(workspace, scope, flag_values, config_default, &[], vendors)
+    }
+
+    /// [`Self::parse`] with the global `[options].clients` joined to the
+    /// detected clients.
+    ///
+    /// The global list only counts when neither `--client` nor the project's
+    /// `[options].clients` selects anything, and only at project scope — a
+    /// global run's own list already is the global one. Then the set is every
+    /// detected client plus every `global_default` client, in
+    /// [`ClientTarget::ALL`] order; a client both detected and listed reads
+    /// [`ClientSource::Detected`]. Nothing detected with a non-empty list
+    /// selects the list alone, not the generic fallback. An empty
+    /// `global_default` is exactly [`Self::parse`].
+    ///
+    /// `global_default` arrives parsed: the global config loader has already
+    /// refused an unknown name, so the caller never has a half-known list to
+    /// handle.
+    /// [`Self::configured_clients`] stays the project list, so the global list
+    /// never turns on a reap or the configured-vs-recorded drift fields.
+    ///
+    /// # Errors
+    ///
+    /// [`super::install_error::InstallErrorKind::UnsupportedClient`] for an
+    /// unknown name in `flag_values` or `config_default`.
+    pub fn parse_with_global(
+        workspace: &Path,
+        scope: ConfigScope,
+        flag_values: &[String],
+        config_default: &[String],
+        global_default: &[ClientTarget],
+        vendors: &BTreeMap<String, VendorOptions>,
+    ) -> Result<Self, InstallError> {
+        let (source, selected_by): (&[String], _) = if flag_values.is_empty() {
+            // A global run's own list is the global one, so that is what it reads.
+            let by = match scope {
+                ConfigScope::Project => ClientSource::Project,
+                ConfigScope::Global => ClientSource::Global,
+            };
+            (config_default, by)
         } else {
-            flag_values
+            (flag_values, ClientSource::Flag)
         };
-        // Both flag and config empty ⇒ reach `new` with an empty list so
-        // detection runs (do not inject the literal "claude").
-        let mut clients = parse_client_list(source)?;
+        // Both flag and config empty ⇒ detection runs (do not inject the
+        // literal "claude").
+        let selected = parse_client_list(source)?;
         // A `--client` selection narrows one run; only the config list says
         // which clients the project keeps, so the flag never fills this.
         let configured = if flag_values.is_empty() {
-            clients.clone()
+            selected.clone()
         } else {
             parse_client_list(config_default).unwrap_or_else(|error| {
                 tracing::warn!("ignoring [options].clients for the adopted-entry carry-forward: {error}");
@@ -179,29 +247,28 @@ impl InstallTarget {
             .filter_map(|(name, _)| name.parse::<ClientTarget>().ok())
             .collect();
 
-        if clients.is_empty() {
-            let detected = detect_clients(workspace, scope);
-            if detected.is_empty() {
-                return Ok(Self {
-                    workspace: workspace.to_path_buf(),
-                    scope,
-                    clients: vec![ClientTarget::Agents],
-                    generic_fallback: true,
-                    shared_skills,
-                    native_skills,
-                    configured,
-                    hook_policy: None,
-                    settings_policy: None,
-                    grim_home: crate::env::grim_home(),
-                });
-            }
-            clients = detected;
-        }
-        let mut target = Self::new(workspace, scope, clients);
-        target.shared_skills = shared_skills;
-        target.native_skills = native_skills;
-        target.configured = configured;
-        Ok(target)
+        let (clients, sources) = if selected.is_empty() {
+            let global: &[ClientTarget] = match scope {
+                ConfigScope::Project => global_default,
+                ConfigScope::Global => &[],
+            };
+            union_with_detected(detect_clients(workspace, scope), global)
+        } else {
+            let sources = vec![selected_by; selected.len()];
+            (selected, sources)
+        };
+        Ok(Self {
+            workspace: workspace.to_path_buf(),
+            scope,
+            clients,
+            sources,
+            shared_skills,
+            native_skills,
+            configured,
+            hook_policy: None,
+            settings_policy: None,
+            grim_home: crate::env::grim_home(),
+        })
     }
 
     /// Attach the resolved hook arming policy — **mutating commands only**.
@@ -265,6 +332,11 @@ impl InstallTarget {
         &self.clients
     }
 
+    /// Each selected client with what put it there, in [`Self::clients`] order.
+    pub fn client_sources(&self) -> impl Iterator<Item = (ClientTarget, ClientSource)> + '_ {
+        self.clients.iter().copied().zip(self.sources.iter().copied())
+    }
+
     /// The resolved scope's `[options].clients`, parsed; `None` when it is
     /// empty or unset (autodetect). A `--client` selection never counts.
     pub fn configured_clients(&self) -> Option<&[ClientTarget]> {
@@ -281,7 +353,7 @@ impl InstallTarget {
     /// consumer: the generic client renders skills only, so a fallback target
     /// whose whole artifact set is declined has no destination at all.
     pub fn is_generic_fallback(&self) -> bool {
-        self.generic_fallback
+        self.sources == [ClientSource::Fallback]
     }
 
     /// The workspace root the client roots sit under.
@@ -402,6 +474,36 @@ pub(crate) fn parse_client_list(values: &[String]) -> Result<Vec<ClientTarget>, 
     Ok(clients)
 }
 
+/// True when `values` names no client: empty, or only blank entries. The
+/// question [`InstallTarget::parse_with_global`] asks before it lets the global
+/// list in, so a reader of the active set can ask it too.
+pub(crate) fn names_no_client(values: &[String]) -> bool {
+    values
+        .iter()
+        .flat_map(|v| v.split(','))
+        .all(|name| name.trim().is_empty())
+}
+
+/// The detected clients joined with the global list, in [`ClientTarget::ALL`]
+/// order, each with its source. Both empty is the generic fallback.
+fn union_with_detected(detected: Vec<ClientTarget>, global: &[ClientTarget]) -> (Vec<ClientTarget>, Vec<ClientSource>) {
+    let (clients, sources): (Vec<_>, Vec<_>) = ClientTarget::ALL
+        .into_iter()
+        .filter_map(|client| {
+            if detected.contains(&client) {
+                Some((client, ClientSource::Detected))
+            } else {
+                global.contains(&client).then_some((client, ClientSource::Global))
+            }
+        })
+        .unzip();
+    if clients.is_empty() {
+        (vec![ClientTarget::Agents], vec![ClientSource::Fallback])
+    } else {
+        (clients, sources)
+    }
+}
+
 /// The detected AI clients for `workspace` at `scope`, in
 /// [`ClientTarget::ALL`] order: every client whose vendor directory /
 /// marker is present (see [`super::vendor::Vendor::detect`]).
@@ -436,6 +538,28 @@ pub fn detect_clients_or_all(workspace: &Path, scope: ConfigScope) -> Vec<Client
     } else {
         detected
     }
+}
+
+/// [`detect_clients_or_all`] joined with the global `[options].clients`, in
+/// [`ClientTarget::ALL`] order: the clients a read-only command treats as
+/// present. A global-list client has no marker in the workspace, so without
+/// it a deleted output of that client would read as one the user dropped.
+pub fn active_clients(workspace: &Path, scope: ConfigScope, global: &[ClientTarget]) -> Vec<ClientTarget> {
+    let active = detect_clients_or_all(workspace, scope);
+    ClientTarget::ALL
+        .into_iter()
+        .filter(|client| active.contains(client) || global.contains(client))
+        .collect()
+}
+
+/// One line naming each client of `target` and what selected it, for the
+/// `clients:` note `install` and `status` print on stderr.
+pub fn clients_note(target: &InstallTarget) -> String {
+    let named: Vec<String> = target
+        .client_sources()
+        .map(|(client, source)| format!("{client} ({source})"))
+        .collect();
+    format!("clients: {}", named.join(", "))
 }
 
 #[cfg(test)]
@@ -1248,5 +1372,268 @@ mod tests {
         let peers = [ClientTarget::Claude, ClientTarget::Codex];
         let t = target_with(ConfigScope::Project, &peers, &[]);
         assert!(!t.joins_pool(ClientTarget::Claude, "x", &peers));
+    }
+
+    // ── global client list at project scope ──
+
+    use ClientSource::{Detected, Fallback, Flag, Global, Project};
+
+    /// A workspace whose detected set is exactly `markers` (project scope is
+    /// hermetic: it never reads the developer's home directory).
+    fn workspace_with(markers: &[&str]) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        for marker in markers {
+            std::fs::create_dir_all(tmp.path().join(marker)).unwrap();
+        }
+        tmp
+    }
+
+    fn parse_global(ws: &Path, flag: &[&str], project: &[&str], global: &[ClientTarget]) -> InstallTarget {
+        InstallTarget::parse_with_global(
+            ws,
+            ConfigScope::Project,
+            &strings(flag),
+            &strings(project),
+            global,
+            &BTreeMap::new(),
+        )
+        .unwrap()
+    }
+
+    fn sourced(t: &InstallTarget) -> Vec<(ClientTarget, ClientSource)> {
+        t.client_sources().collect()
+    }
+
+    #[test]
+    fn global_row_flag_wins_over_everything() {
+        let ws = workspace_with(&[".opencode"]);
+        let t = parse_global(ws.path(), &["copilot"], &["codex"], &[ClientTarget::Claude]);
+        assert_eq!(sourced(&t), vec![(ClientTarget::Copilot, Flag)]);
+        assert!(!t.is_generic_fallback());
+    }
+
+    #[test]
+    fn global_row_project_list_wins_and_ignores_global_and_detected() {
+        let ws = workspace_with(&[".opencode"]);
+        let t = parse_global(ws.path(), &[], &["codex"], &[ClientTarget::Claude]);
+        assert_eq!(sourced(&t), vec![(ClientTarget::Codex, Project)]);
+    }
+
+    #[test]
+    fn global_row_detected_with_an_empty_global_list_is_detected_alone() {
+        let ws = workspace_with(&[".opencode", ".github/instructions"]);
+        let t = parse_global(ws.path(), &[], &[], &[]);
+        assert_eq!(
+            sourced(&t),
+            vec![(ClientTarget::OpenCode, Detected), (ClientTarget::Copilot, Detected)]
+        );
+    }
+
+    #[test]
+    fn global_row_detected_plus_global_is_the_union_in_all_order() {
+        // Global spelled out of order, with one entry also detected: the result
+        // follows `ClientTarget::ALL`, and a client both detected and global
+        // reads `detected`.
+        let ws = workspace_with(&[".opencode"]);
+        let global = [ClientTarget::Codex, ClientTarget::OpenCode, ClientTarget::Claude];
+        let t = parse_global(ws.path(), &[], &[], &global);
+        assert_eq!(
+            sourced(&t),
+            vec![
+                (ClientTarget::Claude, Global),
+                (ClientTarget::OpenCode, Detected),
+                (ClientTarget::Codex, Global),
+            ]
+        );
+        assert!(!t.is_generic_fallback());
+    }
+
+    #[test]
+    fn global_row_nothing_detected_selects_the_global_list_alone() {
+        let ws = workspace_with(&[]);
+        let t = parse_global(ws.path(), &[], &[], &[ClientTarget::Claude, ClientTarget::Cursor]);
+        assert_eq!(
+            sourced(&t),
+            vec![(ClientTarget::Claude, Global), (ClientTarget::Cursor, Global)]
+        );
+        assert!(!t.clients().contains(&ClientTarget::Agents), "no pool client");
+        assert!(!t.is_generic_fallback(), "a global list is a selection, not a fallback");
+    }
+
+    #[test]
+    fn global_row_nothing_detected_and_no_global_list_is_the_agents_fallback() {
+        let ws = workspace_with(&[]);
+        let t = parse_global(ws.path(), &[], &[], &[]);
+        assert_eq!(sourced(&t), vec![(ClientTarget::Agents, Fallback)]);
+        assert!(t.is_generic_fallback());
+    }
+
+    #[test]
+    fn a_global_client_without_a_marker_is_selected_and_writes_its_own_layout() {
+        let ws = workspace_with(&[".opencode"]);
+        let t = parse_global(ws.path(), &[], &[], &[ClientTarget::Claude]);
+        assert!(t.clients().contains(&ClientTarget::Claude));
+        assert_eq!(
+            t.path_for(ClientTarget::Claude, ArtifactKind::Skill, "x"),
+            ws.path().join(".claude").join("skills").join("x")
+        );
+    }
+
+    #[test]
+    fn a_global_run_does_not_take_the_union() {
+        // Global scope detection reads the real home, so assert only what
+        // must hold wherever it lands: the list never contributes a client.
+        let ws = workspace_with(&[]);
+        let t = InstallTarget::parse_with_global(
+            ws.path(),
+            ConfigScope::Global,
+            &[],
+            &[],
+            &[ClientTarget::Kiro, ClientTarget::Junie],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert!(
+            t.client_sources().all(|(_, source)| source != Global),
+            "{:?}",
+            sourced(&t)
+        );
+    }
+
+    #[test]
+    fn configured_clients_stay_the_project_list_under_the_union() {
+        let ws = workspace_with(&[".opencode"]);
+        let global = [ClientTarget::Claude];
+        assert_eq!(
+            parse_global(ws.path(), &[], &[], &global).configured_clients(),
+            None,
+            "a global list is not a configured list: no reap, no drift"
+        );
+        assert_eq!(
+            parse_global(ws.path(), &["cursor"], &[], &global).configured_clients(),
+            None
+        );
+        assert_eq!(
+            parse_global(ws.path(), &[], &["codex"], &global).configured_clients(),
+            Some(&[ClientTarget::Codex][..])
+        );
+        assert_eq!(
+            parse_global(ws.path(), &["cursor"], &["codex"], &global).configured_clients(),
+            Some(&[ClientTarget::Codex][..])
+        );
+    }
+
+    #[test]
+    fn an_empty_global_list_behaves_as_parse_does_in_every_row() {
+        let bare = workspace_with(&[]);
+        let detected = workspace_with(&[".opencode", ".claude"]);
+        for ws in [&bare, &detected] {
+            for (flag, project) in [
+                (vec![], vec![]),
+                (vec!["copilot"], vec![]),
+                (vec![], vec!["codex"]),
+                (vec!["cursor"], vec!["codex"]),
+                (vec![","], vec!["claude"]),
+                (vec![], vec![" , "]),
+            ] {
+                let old = InstallTarget::parse(
+                    ws.path(),
+                    ConfigScope::Project,
+                    &strings(&flag),
+                    &strings(&project),
+                    &BTreeMap::new(),
+                )
+                .unwrap();
+                let new = parse_global(ws.path(), &flag, &project, &[]);
+                let label = format!("{flag:?} {project:?} {}", ws.path().display());
+                assert_eq!(old.clients(), new.clients(), "{label}");
+                assert_eq!(old.configured_clients(), new.configured_clients(), "{label}");
+                assert_eq!(old.is_generic_fallback(), new.is_generic_fallback(), "{label}");
+                assert_eq!(sourced(&old), sourced(&new), "{label}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_source_of_each_client_reads_as_its_flag_spelling() {
+        let spelled: Vec<String> = [Flag, Project, Detected, Global, Fallback]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(spelled, ["--client", "project", "detected", "global", "fallback"]);
+    }
+
+    #[test]
+    fn the_strict_parser_raises_on_an_unknown_name() {
+        let err = parse_client_list(&strings(&["claude, nope"])).expect_err("unknown client");
+        assert!(matches!(&err.kind, InstallErrorKind::UnsupportedClient(n) if n == "nope"));
+    }
+
+    #[test]
+    fn names_no_client_reads_blank_entries_as_no_list() {
+        assert!(names_no_client(&[]));
+        assert!(names_no_client(&strings(&["", " , "])));
+        assert!(!names_no_client(&strings(&["claude"])));
+        assert!(!names_no_client(&strings(&["", "nope"])));
+    }
+
+    #[test]
+    fn a_global_run_labels_its_own_list_global() {
+        let ws = workspace_with(&[]);
+        let t = InstallTarget::parse_with_global(
+            ws.path(),
+            ConfigScope::Global,
+            &[],
+            &strings(&["claude"]),
+            &[],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(sourced(&t), vec![(ClientTarget::Claude, Global)]);
+        assert_eq!(clients_note(&t), "clients: claude (global)");
+        // `--client` still reads as the flag, and a project run keeps `project`.
+        let flagged = InstallTarget::parse_with_global(
+            ws.path(),
+            ConfigScope::Global,
+            &strings(&["codex"]),
+            &strings(&["claude"]),
+            &[],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(sourced(&flagged), vec![(ClientTarget::Codex, Flag)]);
+        let project = parse_global(ws.path(), &[], &["claude"], &[]);
+        assert_eq!(sourced(&project), vec![(ClientTarget::Claude, Project)]);
+    }
+
+    #[test]
+    fn active_clients_add_the_global_list_to_what_detection_reports() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(ws.path().join(".opencode")).unwrap();
+        let project = ConfigScope::Project;
+        assert_eq!(active_clients(ws.path(), project, &[]), vec![ClientTarget::OpenCode]);
+        assert_eq!(
+            active_clients(ws.path(), project, &[ClientTarget::Claude]),
+            vec![ClientTarget::Claude, ClientTarget::OpenCode]
+        );
+        // Nothing detected is the permissive all-clients answer, global list or not.
+        let bare = tempfile::tempdir().unwrap();
+        assert_eq!(
+            active_clients(bare.path(), project, &[ClientTarget::Claude]),
+            ClientTarget::ALL.to_vec()
+        );
+    }
+
+    #[test]
+    fn the_clients_note_names_each_client_with_its_source() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(ws.path().join(".opencode")).unwrap();
+        let target = parse_global(ws.path(), &[], &[], &[ClientTarget::Claude]);
+        assert_eq!(clients_note(&target), "clients: claude (global), opencode (detected)");
+        let bare = tempfile::tempdir().unwrap();
+        assert_eq!(
+            clients_note(&parse_global(bare.path(), &[], &[], &[])),
+            "clients: agents (fallback)"
+        );
     }
 }

@@ -9,12 +9,13 @@ flag overrides the config array for a single invocation.
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
 
 from src.assertions import assert_not_exists, assert_path_exists
-from src.helpers import make_artifact
+from src.helpers import make_artifact, make_settings, write_config
 
 
 @pytest.fixture()
@@ -497,7 +498,7 @@ def test_mixed_client_selection_stderr_stays_quiet_for_supporting_clients(
     assert result.returncode == 0, result.stderr
     assert_path_exists(project_dir / ".claude/rules/rust-style.md")
     assert_not_exists(project_dir / ".codex/rules/rust-style.md")
-    assert result.stderr.strip() == "", (
+    assert result.stderr.strip() == "clients: claude (--client), codex (--client)", (
         f"a mixed selection where another client covers the kind must stay quiet on stderr: {result.stderr!r}"
     )
 
@@ -912,3 +913,275 @@ def test_qoder_global_install_honours_qoder_config_dir(
     assert "q-mcp" in json.loads((qoder_dir / "settings.json").read_text())["mcpServers"]
     assert_not_exists(qoder_dir / ".qoder")
     assert_not_exists(runner.home / ".qoder")
+
+
+# --- The global [options].clients joins detection at project scope -----------
+
+
+def _clients_lines(stderr: str) -> list[str]:
+    """The ``clients: …`` lines grim wrote, whole."""
+    return [ln for ln in stderr.splitlines() if ln.startswith("clients: ")]
+
+
+def _set_global_clients(runner, value: str) -> None:
+    runner.json("config", "set", "--global", "options.clients", value)
+
+
+def test_global_clients_join_the_detected_clients_on_install(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """The global list adds to what is detected when neither ``--client`` nor
+    the project list selects anything, and ``install`` names each source."""
+    sk, ru = _publish_skill_and_rule(unique_repo)
+    (project_dir / ".opencode").mkdir(parents=True, exist_ok=True)
+    _build_toml(project_dir, sk.fq, ru.fq, clients=None)
+    runner = grim_at(project_dir)
+    _set_global_clients(runner, "claude")
+    runner.run("lock", check=False)
+
+    result = runner.run("install", check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert_path_exists(project_dir / ".claude/skills/code-review/SKILL.md")
+    assert_path_exists(project_dir / ".opencode/skills/code-review/SKILL.md")
+    assert _clients_lines(result.stderr) == ["clients: claude (global), opencode (detected)"], result.stderr
+
+
+def test_global_clients_alone_select_when_nothing_is_detected(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Nothing detected plus a global list installs the list alone: no
+    ``agents`` pool, and the line says ``global``, not ``fallback``."""
+    sk, ru = _publish_skill_and_rule(unique_repo)
+    _build_toml(project_dir, sk.fq, ru.fq, clients=None)
+    runner = grim_at(project_dir)
+    _set_global_clients(runner, "claude")
+    runner.run("lock", check=False)
+
+    result = runner.run("install", check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert_path_exists(project_dir / ".claude/skills/code-review/SKILL.md")
+    assert_not_exists(project_dir / ".agents/skills")
+    assert _clients_lines(result.stderr) == ["clients: claude (global)"], result.stderr
+
+
+def test_a_project_client_list_ignores_the_global_list(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    sk, ru = _publish_skill_and_rule(unique_repo)
+    (project_dir / ".opencode").mkdir(parents=True, exist_ok=True)
+    _build_toml(project_dir, sk.fq, ru.fq, clients=["opencode"])
+    runner = grim_at(project_dir)
+    _set_global_clients(runner, "claude")
+    runner.run("lock", check=False)
+
+    result = runner.run("install", check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert_not_exists(project_dir / ".claude")
+    assert_path_exists(project_dir / ".opencode/skills/code-review/SKILL.md")
+    assert _clients_lines(result.stderr) == ["clients: opencode (project)"], result.stderr
+
+
+def test_the_client_flag_ignores_the_global_list(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    sk, ru = _publish_skill_and_rule(unique_repo)
+    (project_dir / ".opencode").mkdir(parents=True, exist_ok=True)
+    _build_toml(project_dir, sk.fq, ru.fq, clients=None)
+    runner = grim_at(project_dir)
+    _set_global_clients(runner, "claude")
+    runner.run("lock", check=False)
+
+    result = runner.run("install", "--client", "opencode", check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert_not_exists(project_dir / ".claude")
+    assert _clients_lines(result.stderr) == ["clients: opencode (--client)"], result.stderr
+
+
+def test_install_without_a_global_list_names_detection_and_the_fallback(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    sk, ru = _publish_skill_and_rule(unique_repo)
+    _build_toml(project_dir, sk.fq, ru.fq, clients=None)
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+
+    bare = runner.run("install", check=False)
+    assert _clients_lines(bare.stderr) == ["clients: agents (fallback)"], bare.stderr
+
+    (project_dir / ".opencode").mkdir(parents=True, exist_ok=True)
+    detected = runner.run("install", check=False)
+    assert _clients_lines(detected.stderr) == ["clients: opencode (detected)"], detected.stderr
+
+
+def test_the_clients_line_adds_nothing_to_install_stdout(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """The source line is a stderr note; JSON stdout stays one parseable
+    document with no ``clients`` key, and ``--progress json`` stderr stays
+    NDJSON."""
+    sk, ru = _publish_skill_and_rule(unique_repo)
+    (project_dir / ".opencode").mkdir(parents=True, exist_ok=True)
+    _build_toml(project_dir, sk.fq, ru.fq, clients=None)
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+
+    result = runner.run("--progress", "json", "install", format="json")
+
+    assert set(json.loads(result.stdout)) == {"items", "settings_changes"}, result.stdout
+    assert _clients_lines(result.stderr) == [], result.stderr
+    for line in (ln for ln in result.stderr.splitlines() if ln.startswith("{")):
+        json.loads(line)
+
+
+def test_status_lists_a_global_clients_outputs_as_pending_before_install(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A client added to the global list after an install reads as pending in
+    ``status`` (exit unchanged), says where it came from, and the next
+    ``install`` writes it."""
+    sk, ru = _publish_skill_and_rule(unique_repo)
+    (project_dir / ".opencode").mkdir(parents=True, exist_ok=True)
+    _build_toml(project_dir, sk.fq, ru.fq, clients=None)
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+    runner.run("install", check=False)
+    assert_not_exists(project_dir / ".claude")
+    _set_global_clients(runner, "claude")
+
+    report = runner.json("status")
+    row = next(r for r in report["items"] if r["name"] == "code-review")
+    assert {o["client"] for o in row["outputs_pending"]} == {"claude"}, row
+    assert "clients" not in report, "no new JSON key"
+    assert row["clients_missing"] == [] and row["clients_extra"] == [], row
+
+    plain = runner.run("status", check=False)
+    assert plain.returncode == 0, plain.stderr
+    assert _clients_lines(plain.stderr) == ["clients: claude (global), opencode (detected)"], plain.stderr
+    assert _clients_lines(runner.run("status", format="json").stderr) == []
+
+    runner.run("install", check=False)
+    assert_path_exists(project_dir / ".claude/skills/code-review/SKILL.md")
+
+
+def test_status_reads_a_deleted_global_client_output_as_missing(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A global-list client counts as active even without a marker, so its
+    deleted output is ``missing``, not a client the user dropped."""
+    sk, ru = _publish_skill_and_rule(unique_repo)
+    (project_dir / ".opencode").mkdir(parents=True, exist_ok=True)
+    _build_toml(project_dir, sk.fq, ru.fq, clients=None)
+    runner = grim_at(project_dir)
+    _set_global_clients(runner, "claude")
+    runner.run("lock", check=False)
+    runner.run("install", check=False)
+    assert_path_exists(project_dir / ".claude/skills/code-review/SKILL.md")
+    # Without the global list `.claude` is no longer a detected client.
+    shutil.rmtree(project_dir / ".claude")
+
+    row = next(r for r in runner.json("status")["items"] if r["name"] == "code-review")
+    assert row["state"] == "missing", row
+
+
+_UNKNOWN_GLOBAL_CLIENT = '[options]\nclients = ["claude", "not-a-client"]\n'
+_MALFORMED_GLOBAL = "[options\nclients = [\n"
+
+
+def test_a_malformed_global_config_is_warned_about_and_changes_no_exit(
+    grim_at, project_dir: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """A hook-free project never needed the global config, so a broken one
+    still installs: the global list reads as empty and the run says why."""
+    sk, ru = _publish_skill_and_rule(unique_repo)
+    (project_dir / ".opencode").mkdir(parents=True, exist_ok=True)
+    _build_toml(project_dir, sk.fq, ru.fq, clients=None)
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+    (grim_home / "grimoire.toml").write_text(_MALFORMED_GLOBAL, encoding="utf-8")
+
+    for command in ("install", "status"):
+        result = runner.run(command, check=False)
+        assert result.returncode == 0, (command, result.stderr)
+        assert str(grim_home / "grimoire.toml") in result.stderr, (command, result.stderr)
+        assert _clients_lines(result.stderr) == ["clients: opencode (detected)"], (command, result.stderr)
+
+
+def test_an_unknown_global_client_is_warned_about_and_the_list_ignored(
+    grim_at, project_dir: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    sk, ru = _publish_skill_and_rule(unique_repo)
+    (project_dir / ".opencode").mkdir(parents=True, exist_ok=True)
+    _build_toml(project_dir, sk.fq, ru.fq, clients=None)
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+    (grim_home / "grimoire.toml").write_text(_UNKNOWN_GLOBAL_CLIENT, encoding="utf-8")
+
+    for command in ("install", "status"):
+        result = runner.run(command, check=False)
+        assert result.returncode == 0, (command, result.stderr)
+        assert "not-a-client" in result.stderr, (command, result.stderr)
+        assert _clients_lines(result.stderr) == ["clients: opencode (detected)"], (command, result.stderr)
+    assert_not_exists(project_dir / ".claude")
+
+
+def test_update_warns_once_about_a_malformed_global_config(
+    grim_at, project_dir: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """A lock that holds settings makes ``update`` read the global client list
+    for the pre-save conflict check and again for the install target. The
+    warning names the broken file once, the list reads as empty, and the exit
+    is the one a hook-free project always had."""
+    pkg = make_settings(f"{unique_repo}/team", "1", {"description": "team", "claude": {"model": "sonnet"}})
+    write_config(project_dir, settings={"team": pkg.fq})
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    (grim_home / "grimoire.toml").write_text(_MALFORMED_GLOBAL, encoding="utf-8")
+
+    result = runner.run("update", check=False)
+
+    assert result.returncode == 0, result.stderr
+    broken = str(grim_home / "grimoire.toml")
+    assert result.stderr.count(broken) == 1, result.stderr
+    assert result.stderr.count("ignoring the global [options].clients") == 1, result.stderr
+
+
+def test_the_global_list_does_not_widen_status_when_the_project_names_its_clients(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """The global list only selects clients where the project's own list is
+    empty. With ``clients = ["opencode"]`` a recorded Claude output whose
+    directory is gone is a client the user dropped, not a missing file."""
+    sk, ru = _publish_skill_and_rule(unique_repo)
+    _build_toml(project_dir, sk.fq, ru.fq, clients=["claude", "opencode"])
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+    runner.run("install", check=False)
+    assert_path_exists(project_dir / ".claude/skills/code-review/SKILL.md")
+    _build_toml(project_dir, sk.fq, ru.fq, clients=["opencode"])
+    _set_global_clients(runner, "claude")
+    shutil.rmtree(project_dir / ".claude")
+
+    row = next(r for r in runner.json("status")["items"] if r["name"] == "code-review")
+    assert row["state"] == "installed", row
+
+
+def test_a_global_run_labels_its_own_client_list_global(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    from src.runner import GrimRunner
+
+    sk = _skill_only(unique_repo)
+    (grim_home / "grimoire.toml").write_text(
+        f'[options]\nclients = ["claude"]\n\n[skills]\ncode-review = "{sk.fq}"\n', encoding="utf-8"
+    )
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("lock", "--global")
+
+    result = runner.run("install", "--global", check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert _clients_lines(result.stderr) == ["clients: claude (global)"], result.stderr

@@ -64,7 +64,7 @@ use crate::install::launcher::{self, LauncherState};
 use crate::install::path_anchor::{AnchorRoots, Containment};
 use crate::install::settings_phase::{RootFence, SettingsDecline, recorded_refusal, report_fence, settings_surface};
 use crate::install::settings_store;
-use crate::install::target::{InstallTarget, detect_clients_or_all};
+use crate::install::target::{InstallTarget, active_clients, clients_note};
 use crate::lock::effective_set::{EffectiveGraph, NodeKey};
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
@@ -253,7 +253,8 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
     // `desired` below ("which clients does the project's config target"):
     // `active` degrades gracefully (never removed-client-lies-missing),
     // `desired` is compared straight against the recorded set for drift.
-    let active = detect_clients_or_all(&scope.workspace, scope.scope);
+    let global_clients = super::global_clients(ctx, scope.scope, &scope.options.clients);
+    let active = active_clients(&scope.workspace, scope.scope, &global_clients);
 
     // The project's configured client target — same seam `grim context`
     // reports (`InstallTarget::parse` over `[options].clients`, no
@@ -274,11 +275,12 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
     // unconditionally: unlike `desired_clients`, autodetect is not a reason to
     // abstain here, because the question is about what install would do, not
     // about what the user configured.
-    let target = super::grim(InstallTarget::parse(
+    let target = super::grim(InstallTarget::parse_with_global(
         &scope.workspace,
         scope.scope,
         &[],
         &scope.options.clients,
+        &global_clients,
         &scope.options.vendors,
     ))?;
 
@@ -307,7 +309,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
     };
 
     let prov = Provenance::new(&scope.set, lock.as_ref());
-    let mut notes: Vec<String> = Vec::new();
+    let mut notes: Vec<String> = vec![clients_note(&target)];
     let mut entries = Vec::new();
     // Per-artifact update-availability re-resolutions, filled below for every
     // registry-locked row: declared bundles, directly-declared artifacts,

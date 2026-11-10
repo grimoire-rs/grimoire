@@ -141,6 +141,7 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
         _ => resolved_options.sort_order,
     };
 
+    let clients_global = super::global_clients(ctx, scope.scope, &scope.options.clients);
     let tui_ctx = TuiContext {
         primary_registry,
         registries,
@@ -154,8 +155,9 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
         state_path: scope.state_path.clone(),
         config_path: scope.config_path.clone(),
         clients_default: scope.options.clients.clone(),
+        clients_global: clients_global.clone(),
         vendors: scope.options.vendors.clone(),
-        clients_selected: selected_clients(&scope.workspace, scope.scope, &scope.options.clients),
+        clients_selected: selected_clients(&scope.workspace, scope.scope, &scope.options.clients, &clients_global),
         scope_label: scope_label(scope.scope).to_string(),
         alt,
         roots: scope.roots,
@@ -205,6 +207,7 @@ fn project_init_dir(cwd: &std::path::Path, home: Option<&std::path::Path>) -> st
 fn scope_swap(ctx: &Context, other: scope_resolution::ResolvedScope) -> anyhow::Result<ScopeSwap> {
     let registries = resolve_registries_for_tui(ctx, &other)?;
     let primary_registry = crate::config::primary_registry(&registries).to_string();
+    let clients_global = super::global_clients(ctx, other.scope, &other.options.clients);
     Ok(ScopeSwap {
         scope: other.scope,
         invocation: other.invocation.clone(),
@@ -213,8 +216,9 @@ fn scope_swap(ctx: &Context, other: scope_resolution::ResolvedScope) -> anyhow::
         state_path: other.state_path.clone(),
         config_path: other.config_path.clone(),
         clients_default: other.options.clients.clone(),
+        clients_global: clients_global.clone(),
         vendors: other.options.vendors.clone(),
-        clients_selected: selected_clients(&other.workspace, other.scope, &other.options.clients),
+        clients_selected: selected_clients(&other.workspace, other.scope, &other.options.clients, &clients_global),
         label: scope_label(other.scope).to_string(),
         roots: other.roots,
         resolved_options: other.options.resolved(),
@@ -265,16 +269,22 @@ fn resolve_registries_for_tui(
 /// `[options.vendors]` is deliberately not threaded in: it changes *where* a
 /// selected client's skills land, never *which* clients are selected, so an
 /// empty table gives the same answer as the real one for this question.
-fn selected_clients(workspace: &std::path::Path, scope: ConfigScope, config_clients: &[String]) -> Vec<ClientTarget> {
-    match crate::install::target::InstallTarget::parse(
+fn selected_clients(
+    workspace: &std::path::Path,
+    scope: ConfigScope,
+    config_clients: &[String],
+    global_clients: &[ClientTarget],
+) -> Vec<ClientTarget> {
+    match crate::install::target::InstallTarget::parse_with_global(
         workspace,
         scope,
         &[],
         config_clients,
+        global_clients,
         &std::collections::BTreeMap::new(),
     ) {
         Ok(target) => target.clients().to_vec(),
-        Err(_) => crate::install::target::detect_clients_or_all(workspace, scope),
+        Err(_) => crate::install::target::active_clients(workspace, scope, global_clients),
     }
 }
 
@@ -381,7 +391,7 @@ mod tests {
         // not a separately re-parsed list.
         let tmp = tempfile::tempdir().unwrap();
         let cfg = ["copilot,claude".to_string()];
-        let display = selected_clients(tmp.path(), ConfigScope::Project, &cfg);
+        let display = selected_clients(tmp.path(), ConfigScope::Project, &cfg, &[]);
         let installed = crate::install::target::InstallTarget::parse(
             tmp.path(),
             ConfigScope::Project,
@@ -403,7 +413,7 @@ mod tests {
         // the install path's behavior for an unconfigured scope.
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join(".opencode")).unwrap();
-        let display = selected_clients(tmp.path(), ConfigScope::Project, &[]);
+        let display = selected_clients(tmp.path(), ConfigScope::Project, &[], &[]);
         assert_eq!(
             display,
             crate::install::target::detect_clients(tmp.path(), ConfigScope::Project)
@@ -415,8 +425,24 @@ mod tests {
         // claim all eleven clients.
         let bare = tempfile::tempdir().unwrap();
         assert_eq!(
-            selected_clients(bare.path(), ConfigScope::Project, &[]),
+            selected_clients(bare.path(), ConfigScope::Project, &[], &[]),
             vec![ClientTarget::Agents]
+        );
+    }
+
+    #[test]
+    fn selected_clients_joins_the_global_list_only_without_a_project_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".opencode")).unwrap();
+        let global = [ClientTarget::Claude];
+        assert_eq!(
+            selected_clients(tmp.path(), ConfigScope::Project, &[], &global),
+            vec![ClientTarget::Claude, ClientTarget::OpenCode]
+        );
+        assert_eq!(
+            selected_clients(tmp.path(), ConfigScope::Project, &["copilot".to_string()], &global),
+            vec![ClientTarget::Copilot],
+            "a project list wins outright"
         );
     }
 
@@ -427,7 +453,7 @@ mod tests {
         // to the detected set rather than panicking or silently dropping.
         let tmp = tempfile::tempdir().unwrap();
         let cfg = ["vscode".to_string()];
-        let display = selected_clients(tmp.path(), ConfigScope::Project, &cfg);
+        let display = selected_clients(tmp.path(), ConfigScope::Project, &cfg, &[]);
         assert_eq!(
             display,
             crate::install::target::detect_clients_or_all(tmp.path(), ConfigScope::Project),

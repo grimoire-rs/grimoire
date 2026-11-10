@@ -312,8 +312,41 @@ pub fn global_config_tiers(
     Ok((cfg.registries, cfg.options.default_registry))
 }
 
-/// The only global-config loader in this module — [`global_config_tiers`]
-/// and [`global_fallback`] both go through it (pinned by
+/// The global `[options].clients` a project-scope run adds to the detected
+/// clients, parsed. Empty for a global-scope run (its own list already is the
+/// global one) and for a project that names its own `clients`, where the global
+/// list selects nothing — so every consumer, the active-set readers included,
+/// sees the list only where it also joins the install target.
+///
+/// Never fails, for any command. A global config that does not load (malformed,
+/// or naming a client this grim does not know) is warned about and read as an
+/// empty list: a project that never asked for a global client keeps the exit
+/// it had before the list was read, and the commands that do need the global
+/// config (registries, hook arming) still exit 78 on it themselves.
+///
+/// Each call loads the global config, so a run calls it once and hands the
+/// answer down.
+pub fn global_clients(
+    ctx: &crate::context::Context,
+    scope: crate::config::scope::ConfigScope,
+    project_clients: &[String],
+) -> Vec<crate::install::client_target::ClientTarget> {
+    if scope == crate::config::scope::ConfigScope::Global || !crate::install::target::names_no_client(project_clients) {
+        return Vec::new();
+    }
+    let cfg = match load_global_config(ctx) {
+        Ok(cfg) => cfg,
+        Err(error) => {
+            tracing::warn!("ignoring the global [options].clients: {error:#}");
+            return Vec::new();
+        }
+    };
+    // The loader already refused an unknown or blank name, so this parse cannot fail.
+    crate::install::target::parse_client_list(&cfg.options.clients).unwrap_or_default()
+}
+
+/// The only global-config loader in this module — [`global_config_tiers`],
+/// [`global_clients`] and [`global_fallback`] all go through it (pinned by
 /// `the_global_config_is_loaded_from_exactly_one_seam_ws2`).
 ///
 /// # Errors
@@ -929,6 +962,53 @@ mod tests {
             global_config_tiers(&ctx, crate::config::scope::ConfigScope::Project).expect("valid global config");
         assert_eq!(registries.len(), 1, "the [[registries]] tier must survive");
         assert_eq!(default.as_deref(), Some("legacy.example"), "the default tier must too");
+    }
+
+    fn ctx_with_global(body: &str) -> (tempfile::TempDir, crate::context::Context) {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("grimoire.toml"), body).unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
+        (tmp, ctx)
+    }
+
+    #[test]
+    fn global_clients_read_the_list_and_skip_global_scope() {
+        use crate::config::scope::ConfigScope;
+        use crate::install::client_target::ClientTarget;
+        let (_tmp, ctx) = ctx_with_global("[options]\nclients = [\"opencode\", \"claude\"]\n");
+        assert_eq!(
+            global_clients(&ctx, ConfigScope::Project, &[]),
+            vec![ClientTarget::OpenCode, ClientTarget::Claude]
+        );
+        assert!(global_clients(&ctx, ConfigScope::Global, &[]).is_empty());
+        let absent = tempfile::tempdir().unwrap();
+        let ctx = Context::hermetic(absent.path().to_path_buf());
+        assert!(global_clients(&ctx, ConfigScope::Project, &[]).is_empty());
+    }
+
+    #[test]
+    fn global_clients_are_empty_where_the_project_names_its_own() {
+        use crate::config::scope::ConfigScope;
+        let (_tmp, ctx) = ctx_with_global("[options]\nclients = [\"claude\"]\n");
+        let own = vec!["opencode".to_string()];
+        assert!(global_clients(&ctx, ConfigScope::Project, &own).is_empty());
+        // Blank entries name nothing, so the global list still applies.
+        let blank = vec![String::new()];
+        assert_eq!(global_clients(&ctx, ConfigScope::Project, &blank).len(), 1);
+    }
+
+    #[test]
+    fn global_clients_ignore_a_malformed_config_and_an_unknown_name() {
+        use crate::config::scope::ConfigScope;
+        // The loader refuses an unknown name outright, so the whole list is
+        // ignored rather than its known part.
+        for body in [
+            MALFORMED_GLOBAL_CONFIG,
+            "[options]\nclients = [\"claude\", \"not-a-client\"]\n",
+        ] {
+            let (_tmp, ctx) = ctx_with_global(body);
+            assert!(global_clients(&ctx, ConfigScope::Project, &[]).is_empty(), "{body}");
+        }
     }
 
     /// W-S2: `global_config_tiers`' "one load, not two" is call-site

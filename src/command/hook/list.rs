@@ -62,7 +62,7 @@ use crate::context::Context;
 use crate::install::hook_dispatch::{self, RootScope};
 use crate::install::hook_registrar::root_scope_for;
 use crate::install::launcher;
-use crate::install::target::{InstallTarget, detect_clients_or_all};
+use crate::install::target::{InstallTarget, active_clients};
 use crate::lock::lock_io;
 use crate::oci::ArtifactKind;
 use crate::oci::hook::{HOOK_MANIFEST_FILE, HookEntry, HookManifest};
@@ -150,14 +150,16 @@ pub async fn run(ctx: &Context, _args: &ListArgs) -> anyhow::Result<(HookListRep
     let state = super::super::grim(
         scope_resolution::load_state(&scope).map_err(|e| super::super::install::state_io(&scope.state_path, e)),
     )?;
-    let target = super::super::grim(InstallTarget::parse(
+    let global_clients = super::super::global_clients(ctx, scope.scope, &scope.options.clients);
+    let target = super::super::grim(InstallTarget::parse_with_global(
         &scope.workspace,
         scope.scope,
         &[],
         &scope.options.clients,
+        &global_clients,
         &scope.options.vendors,
     ))?;
-    let active = detect_clients_or_all(&scope.workspace, scope.scope);
+    let active = active_clients(&scope.workspace, scope.scope, &global_clients);
     let lock_matches_config =
         lock.as_ref().map(|l| l.metadata.declaration_hash.as_str()) == Some(scope.set.declaration_hash_cached());
 
