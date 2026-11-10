@@ -15733,6 +15733,140 @@ mod tests {
             assert_eq!(logs.matches("no client registration").count(), 1, "{logs}");
         }
 
+        /// [`armed_beside_a_disabled_hook`] with skill `m` declared as `m_line` and
+        /// skill `p` declared and locked beside it. `p`'s row records no edge while its
+        /// stored manifest requires `m`, as grim 0.15.1 locks a dependent, so a delete of
+        /// `m` leaves a note that names `p` beside the gatekeeper `other` left without a
+        /// registration.
+        fn armed_beside_an_unwalked_dependent(m_line: &str) -> (tempfile::TempDir, tempfile::TempDir, TuiContext) {
+            use crate::lock::locked_artifact::LockedArtifact;
+            use crate::oci::bundle::{BUNDLE_LAYER_MEDIA_TYPE, BundleManifest, BundleMember};
+
+            const TAR: &str = "application/vnd.grimoire.artifact.layer.v1.tar";
+            let (ws, home, ctx) = armed_beside_a_disabled_hook("gatekeeper");
+            let config = std::fs::read_to_string(&ctx.config_path).unwrap();
+            let skills = format!("\n[skills]\nm = {m_line}\np = \"localhost:5000/acme/p:1\"\n");
+            std::fs::write(&ctx.config_path, config + &skills).unwrap();
+
+            let paths = crate::store::GrimPaths::new(ctx.roots.grim_home.clone());
+            let blobs = crate::store::BlobStore::new(paths.blobs_dir());
+            let put = |bytes: &[u8]| {
+                let digest = crate::oci::Algorithm::Sha256.hash(bytes);
+                blobs.put(&digest, bytes).unwrap();
+                digest
+            };
+            let requires = BundleManifest::new(vec![BundleMember {
+                kind: ArtifactKind::Skill,
+                name: "m".to_string(),
+                id: "localhost:5000/acme/m:1".to_string(),
+            }])
+            .to_layer_bytes()
+            .unwrap();
+            let layers: Vec<_> = [(TAR, b"p".to_vec()), (BUNDLE_LAYER_MEDIA_TYPE, requires)]
+                .into_iter()
+                .map(|(media_type, bytes)| {
+                    serde_json::json!({
+                        "mediaType": media_type,
+                        "digest": put(&bytes).to_string(),
+                        "size": bytes.len(),
+                    })
+                })
+                .collect();
+            let manifest = serde_json::json!({
+                "schemaVersion": 2,
+                "config": {
+                    "mediaType": "application/vnd.oci.empty.v1+json",
+                    "digest": format!("sha256:{}", "4".repeat(64)),
+                    "size": 2,
+                },
+                "layers": layers,
+            });
+            let p_digest = put(&serde_json::to_vec(&manifest).unwrap());
+
+            let row = |name: &str, digest: crate::oci::Digest| {
+                let id = Identifier::parse(&format!("localhost:5000/acme/{name}:1"))
+                    .unwrap()
+                    .clone_with_digest(digest);
+                LockedArtifact::direct(
+                    name.to_string(),
+                    ArtifactKind::Skill,
+                    crate::oci::PinnedIdentifier::try_from(id).unwrap(),
+                )
+            };
+            let mut lock = lock_io::load(&ctx.lock_path).unwrap();
+            lock.skills = vec![row("m", crate::oci::Algorithm::Sha256.hash(b"m")), row("p", p_digest)];
+            let (_, _, set) = load_scope_declaration(&ctx).unwrap();
+            lock.metadata.declaration_hash = set.declaration_hash_cached().to_string();
+            lock_io::save(&ctx.lock_path, &lock, None).unwrap();
+            (ws, home, ctx)
+        }
+
+        /// What tui.log carries of a delete whose lock edit left the unwalked note
+        /// beside a gatekeeper: the note, then the gatekeeper's warning once, sending
+        /// the user to that note's steps and advising no `grim lock`.
+        fn assert_gatekeeper_warned_after_the_note(logs: &str) {
+            let note = logs
+                .find("records no dependency edges")
+                .unwrap_or_else(|| panic!("the fixture: the lock edit names the unwalked dependent: {logs}"));
+            let warning = logs
+                .find("no client registration")
+                .unwrap_or_else(|| panic!("the fixture: a gatekeeper is left unregistered: {logs}"));
+            assert!(
+                note < warning,
+                "the gatekeeper warning comes after the lock edit: {logs}"
+            );
+            assert_eq!(logs.matches("no client registration").count(), 1, "{logs}");
+            assert!(logs.contains("follow the steps of the note"), "{logs}");
+            assert!(!logs.contains("run `grim lock` first"), "{logs}");
+        }
+
+        /// Delete site 1 (`perform_uninstall`, a registry row) logs the gatekeeper
+        /// warning after its lock edit, with the edit's notes.
+        #[test]
+        fn a_registry_delete_logs_its_gatekeeper_warning_after_the_lock_edit() {
+            let (_ws, _home, ctx) = armed_beside_an_unwalked_dependent("\"localhost:5000/acme/m:1\"");
+            let capture = crate::catalog::test_hosts::LogCapture::start();
+
+            perform_uninstall(&ctx, &installed_row("localhost:5000/acme/m")).expect("the delete goes on");
+
+            assert_gatekeeper_warned_after_the_note(&capture.text());
+        }
+
+        /// Delete site 3 (`perform_local_uninstall`, a declared path row) logs the
+        /// gatekeeper warning after its lock edit, with the edit's notes.
+        #[test]
+        fn a_local_delete_logs_its_gatekeeper_warning_after_the_lock_edit() {
+            let (_ws, _home, ctx) = armed_beside_an_unwalked_dependent("\"./skills/m\"");
+            let mut row = installed_row("m");
+            row.source = RowSource::Local;
+            row.repository = "./skills/m".to_string();
+            let capture = crate::catalog::test_hosts::LogCapture::start();
+
+            perform_uninstall(&ctx, &row).expect("the delete goes on");
+
+            assert_gatekeeper_warned_after_the_note(&capture.text());
+        }
+
+        /// Delete site 2 (`perform_member_uninstall`, a bundle member) logs the
+        /// gatekeeper warning after its lock edit, with the edit's notes.
+        #[tokio::test]
+        async fn a_member_delete_logs_its_gatekeeper_warning_after_the_lock_edit() {
+            let (_ws, _home, ctx) = armed_beside_an_unwalked_dependent("\"localhost:5000/acme/m:1\"");
+            let capture = crate::catalog::test_hosts::LogCapture::start();
+
+            perform_member_uninstall(
+                &ctx,
+                "localhost:5000/acme/m".to_string(),
+                ArtifactKind::Skill,
+                "m".to_string(),
+                &mut SettingsLedger::default(),
+            )
+            .await
+            .expect("the delete goes on");
+
+            assert_gatekeeper_warned_after_the_note(&capture.text());
+        }
+
         /// A delete that fails after its hook convergence still names the
         /// gatekeeper that convergence left without a registration.
         #[cfg(unix)]

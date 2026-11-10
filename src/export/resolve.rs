@@ -4173,13 +4173,11 @@ mod tests {
         assert_eq!(classified(err).exit, ExitCode::ConfigError);
     }
 
-    /// STOP-A, pinned as shipped: a bundle the part records, reached below a bundle the
-    /// pick selects, keeps its recorded digest, so its moved list adds and drops no row
-    /// and the member check meets the list the part saw. `top` is selected and follows its
-    /// tag; `inner`, which it nests, is carried. With
-    /// `PartCarry::NESTED_BELOW_PICK_KEEPS_PIN` set to `false` this pick reads `inner`'s
-    /// moved list, which names `x:2` against the plugin's own `x:1`, and exits 78: that is
-    /// the one expectation that flips.
+    /// A bundle the part records, reached below a bundle the pick selects, keeps its
+    /// recorded digest, so its moved list adds and drops no row and the member check meets
+    /// the list the part saw. `top` is selected and follows its tag; `inner`, which it
+    /// nests, is carried. Read at its tag instead, `inner`'s moved list would name `x:2`
+    /// against the plugin's own `x:1` and the pick would exit 78.
     #[tokio::test]
     async fn a_pick_keeps_a_recorded_bundle_nested_below_the_picked_one_at_its_digest() {
         let tmp = tempfile::tempdir().unwrap();
@@ -4201,6 +4199,9 @@ mod tests {
             .expect("inner is read at the digest the part recorded, where its list names x:1");
 
         assert_eq!(pins(part(&r, "team")), pins(&previous.plugins["team"]));
+        let kept = stamps(part(&r, "team"), "x");
+        assert!(!kept.is_empty(), "the kept row carries a stamp");
+        assert_eq!(kept, stamps(&previous.plugins["team"], "x"));
     }
 
     /// An include the part records no digest for reads its tag for its kind, so a
