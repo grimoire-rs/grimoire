@@ -374,7 +374,11 @@ fn is_modified(state: &InstallState, kind: ArtifactKind, name: &str, roots: &Anc
                     });
                 }
                 Err(e) => {
-                    tracing::warn!("skipping unhashable output of orphan '{name}': {e}");
+                    // `AnchorError::Io` displays without its cause, which is what names a bad config.
+                    tracing::warn!(
+                        "skipping unhashable output of orphan '{name}': {}",
+                        crate::error::printed_chain(&e.into())
+                    );
                     continue;
                 }
             };
@@ -2583,6 +2587,30 @@ mod tests {
         assert!(
             is_modified(&state, ArtifactKind::Rule, "x", &roots(&ws)).expect("not a security-class failure"),
             "an output that resolves but cannot be hashed must not declare the record unmodified"
+        );
+    }
+
+    /// An orphan Codex output whose `config.toml` is not TOML is skipped, and
+    /// the skip warning names the parse error, not just the path that failed.
+    #[test]
+    fn an_orphan_codex_config_that_is_not_toml_is_skipped_naming_the_parse_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dunce::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(ws.join(".codex")).unwrap();
+        std::fs::write(ws.join(".codex/config.toml"), b"[mcp_servers.x").unwrap();
+        let mut out = output_ws("codex", ".codex/config.toml", Digest::Sha256("b".repeat(64)));
+        out.entry = Some("/mcp_servers/x".to_string());
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        record_mcp(&mut state, "x", vec![out]);
+
+        let (modified, logs) =
+            capture_warnings(|| is_modified(&state, ArtifactKind::Mcp, "x", &roots(&ws)).expect("not security-class"));
+
+        assert!(!modified);
+        assert!(logs.contains("skipping unhashable output of orphan 'x'"), "{logs}");
+        assert!(
+            logs.contains("content is not TOML grim can edit"),
+            "the warning names the parse error: {logs}"
         );
     }
 

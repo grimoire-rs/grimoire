@@ -455,6 +455,9 @@ fn read_entry_value(
             let Some((container, member)) = crate::install::json_splice::split_pointer(pointer) else {
                 return Ok(None);
             };
+            // `member_value` reads a parse failure as an absent member; the
+            // whole-document read is what refuses unparseable text.
+            crate::install::toml_splice::value_at(&raw, &[])?;
             Ok(crate::install::toml_splice::member_value(&raw, container, member))
         }
     }
@@ -4133,6 +4136,38 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn an_unparseable_toml_config_is_invalid_data_not_absent() {
+        use crate::install::vendor::McpConfigFormat;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("config.toml");
+        std::fs::write(&cfg, "[mcp_servers.x\n").unwrap();
+
+        let err = read_entry_value(&cfg, "/mcp_servers/x", ArtifactKind::Mcp, None, McpConfigFormat::Toml).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let err = current_entry_hash(
+            &cfg,
+            "/mcp_servers/x",
+            ArtifactKind::Mcp,
+            None,
+            McpConfigFormat::Toml,
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+        // `is_present` still reads the unparseable file as absent.
+        let (out, roots) = entry_output_for(
+            tmp.path(),
+            "codex",
+            "config.toml",
+            "/mcp_servers/x",
+            &serde_json::json!({}),
+        );
+        assert!(!out.is_present(ArtifactKind::Mcp, &roots, Containment::Strict).unwrap());
     }
 
     #[test]
