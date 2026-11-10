@@ -477,7 +477,7 @@ pub async fn resolve_marketplace(
                         moved,
                         to,
                         retry: format!(
-                            "add `{}:{}`, or run {}",
+                            "add `{}:{}`, or run {}, which moves every pin of the plugin whose tag moved",
                             plugin,
                             dependent,
                             update_command(&m.path, plugin)
@@ -1390,7 +1390,11 @@ mod tests {
             };
             let text = err.to_string();
             assert!(
-                text.contains(&format!("run `grim update --marketplace {} team`", path.display())),
+                text.contains(&format!(
+                    "run `grim update --marketplace {} team`, which moves every pin of the plugin whose tag \
+                     moved, this one included",
+                    path.display()
+                )),
                 "{text}"
             );
             // That update re-reads the tag, so a gone tag needs the include changed.
@@ -1403,6 +1407,11 @@ mod tests {
             );
             assert!(!text.contains("run grim update"), "{text}");
             assert_eq!(classified(err).exit, ExitCode::NotFound);
+        }
+        // A pick of either row carries the other's gone pin, so no row pick is the remedy.
+        for name in ["a", "b"] {
+            let picked = PluginSelection::Some(BTreeMap::from([("team".to_string(), members(&[name]))]));
+            assert!(resolve(&m, Some(&previous), &picked, &access).await.is_err(), "{name}");
         }
 
         let r = resolve(&m, Some(&previous), &whole(&["team"]), &access)
@@ -4331,7 +4340,17 @@ mod tests {
                 };
                 let text = err.to_string();
                 assert!(text.contains("skill 'y'") && text.contains("requires"), "{text}");
+                let remedy = format!(
+                    "add `team:y`, or run `grim update --marketplace {} team`, which moves every pin of the \
+                     plugin whose tag moved",
+                    path.display()
+                );
+                assert!(text.ends_with(&remedy), "{text}");
                 assert_eq!(classified(err).exit, ExitCode::ConfigError, "{writer:?} {names:?}");
+                let with_y = [names, &["y"][..]].concat();
+                resolve(&m, Some(&previous), &pick(&with_y), &access)
+                    .await
+                    .unwrap_or_else(|e| panic!("{writer:?} {with_y:?}: the pick the refusal names first: {e}"));
             }
             resolve(&m, Some(&previous), &update_extra(), &access)
                 .await
