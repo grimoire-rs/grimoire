@@ -701,6 +701,7 @@ mod tests {
             items,
             settings,
             abandoned: Vec::new(),
+            retained: Vec::new(),
             halted: false,
             kept_beside: std::collections::BTreeSet::new(),
         }

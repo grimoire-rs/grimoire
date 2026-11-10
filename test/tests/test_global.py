@@ -2085,6 +2085,41 @@ def test_global_moved_root_update_reports_a_hand_edited_stranded_entry(
     assert "mv-upd" in entry["pointer"], entry
 
 
+@pytest.mark.parametrize("case", list(_MOVED_ROOTS))
+def test_global_moved_root_update_reports_a_hand_edited_stranded_file(
+    case: str,
+    grim_binary: Path,
+    grim_home: Path,
+    registry: str,
+    unique_repo: str,
+    tmp_path: Path,
+) -> None:
+    """``update`` keeps a hand-edited file at the pre-override root and must
+    name it in the artifact's ``retained``, not only warn."""
+    client, old_rel, relocate, _, _ = _MOVED_ROOTS[case]
+    runner = GrimRunner(grim_binary, grim_home)
+    _write_moved_skills(grim_home, unique_repo, "mv-kept")
+    runner.json("lock", "--global")
+    runner.json("install", "--global", "--client", client)
+    edited_doc = runner.home / old_rel / "skills/mv-kept/SKILL.md"
+    assert edited_doc.is_file()
+    edited_doc.write_text(
+        "---\nname: mv-kept\ndescription: d\n---\n# MINE\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    relocate(runner, tmp_path)
+    report = runner.json("update", "--global", "--client", client)
+
+    assert edited_doc.read_text(encoding="utf-8").endswith("# MINE\n")
+    [row] = [r for r in report["items"] if r["name"] == "mv-kept"]
+    retained = [Path(p).resolve() for p in row["retained"]]
+    assert (
+        edited_doc.parent.resolve() in retained or edited_doc.resolve() in retained
+    ), row
+
+
 @pytest.mark.parametrize("case", _MOVED_MCP)
 def test_global_moved_root_install_report_names_no_abandoned_entry(
     case: str,

@@ -65,7 +65,8 @@ pub struct UpdateEntry {
     /// The on-disk targets deliberately left in place on this row — a
     /// footprint the containment guard refuses to delete while the record (a
     /// pruned orphan) or the output entry (a reaped dropped client) is
-    /// dropped anyway. Always present, `[]` on every healthy row. Distinct
+    /// dropped anyway, or an edited file kept at a relocated vendor root.
+    /// Always present, `[]` on every healthy row. Distinct
     /// from `kept_modified_clients`, which is a user edit grim chose to
     /// preserve and left *recorded*.
     pub retained: Vec<PathBuf>,
