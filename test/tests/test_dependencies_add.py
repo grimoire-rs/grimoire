@@ -146,6 +146,30 @@ def test_add_force_transitive_clobber_refused(
     assert b.digest in (project_dir / "grimoire.lock").read_text()
 
 
+def test_add_force_transitive_clobber_refused_names_the_global_remedy(
+    grim, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    c = _leaf(unique_repo, "c")
+    _dependent(unique_repo, "b", [("skill", "c", "./c:1")])
+    a = _dependent(unique_repo, "a", [("skill", "b", "./b:1")])
+    write_config(grim_home)
+    skills = grim.home / ".claude" / "skills"
+    for name in ("a", "c"):
+        (skills / name).mkdir(parents=True)
+        (skills / name / "SKILL.md").write_text("mine\n", encoding="utf-8")
+
+    result = grim.run("--global", "add", "--force", a.fq, check=False)
+
+    assert result.returncode == 65, result.stderr
+    assert "run `grim --global install --force` to overwrite them" in result.stderr
+    assert (skills / "c" / "SKILL.md").read_text(encoding="utf-8") == "mine\n"
+
+    # Positive control: the named command is the one that overwrites it.
+    grim.run("--global", "install", "--force")
+    assert "mine" not in (skills / "c" / "SKILL.md").read_text(encoding="utf-8")
+    assert c.digest in (grim_home / "grimoire.lock").read_text(encoding="utf-8")
+
+
 def test_add_force_bundle_spares_directly_declared_nested_member(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
