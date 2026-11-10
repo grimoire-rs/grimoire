@@ -156,8 +156,6 @@ pub enum Command {
 }
 
 fn main() -> std::process::ExitCode {
-    init_tracing();
-
     // Pre-scan argv for `--color` before parse: clap renders `--help` and
     // usage errors *during* parse, so the choice must be known up front.
     let color_mode = color::mode_from_args();
@@ -175,6 +173,10 @@ fn main() -> std::process::ExitCode {
             };
         }
     };
+
+    // After the parse because `--log-level` is a parsed flag; nothing before
+    // this point logs (clap and the color pre-scan are pure).
+    init_tracing(cli.global.log_level.as_deref());
 
     // Store the resolved color decision once, before any output (the JSON
     // error paths below run after this) or the runtime is built.
@@ -341,19 +343,52 @@ fn attach_settings(document: &mut serde_json::Value, outcome: &crate::install::i
     }
 }
 
-/// Initialize tracing from the `GRIM_LOG` env var (falls back to `warn`).
+/// The levels `--log-level` accepts; directives stay with `GRIM_LOG`.
+const LOG_LEVELS: [&str; 6] = ["off", "error", "warn", "info", "debug", "trace"];
+
+/// Pick the tracing filter: a valid `--log-level` wins, else `GRIM_LOG`
+/// (directives included), else `warn`. An unrecognised flag value comes back
+/// as the second element so the caller can report it. Writes no environment
+/// variable, so no child process inherits the flag.
+fn log_filter(flag: Option<&str>, env: Option<&str>) -> (tracing_subscriber::EnvFilter, Option<String>) {
+    use tracing_subscriber::EnvFilter;
+
+    let mut rejected = None;
+    if let Some(flag) = flag {
+        match LOG_LEVELS.iter().find(|level| level.eq_ignore_ascii_case(flag)) {
+            Some(level) => return (EnvFilter::new(*level), None),
+            None => rejected = Some(flag.to_owned()),
+        }
+    }
+    let filter = env
+        .and_then(|directives| EnvFilter::builder().parse(directives).ok())
+        .unwrap_or_else(|| EnvFilter::new("warn"));
+    (filter, rejected)
+}
+
+/// Initialize tracing from `--log-level`, else the `GRIM_LOG` env var (falls
+/// back to `warn`).
 ///
 /// Installs a [`crate::log_switch::SwitchableWriter`] so the TUI can
 /// redirect log output to a file while alt-screen is active, then restore
 /// stderr on exit. The writer is stored in the process-global
 /// [`crate::log_switch::GLOBAL_WRITER`] so TUI code retrieves it without
 /// threading it through every call frame.
-fn init_tracing() {
-    use tracing_subscriber::EnvFilter;
+fn init_tracing(flag: Option<&str>) {
     use tracing_subscriber::fmt::MakeWriter;
     use tracing_subscriber::prelude::*;
 
-    let filter = EnvFilter::try_from_env("GRIM_LOG").unwrap_or_else(|_| EnvFilter::new("warn"));
+    let (filter, rejected) = log_filter(flag, std::env::var("GRIM_LOG").ok().as_deref());
+    if let Some(value) = rejected {
+        // Not a `tracing` event: the filter it would pass through is the
+        // one being chosen here.
+        let _ = writeln!(
+            io::stderr(),
+            "invalid --log-level '{}'; expected one of {}",
+            crate::oci::text::escape_controls(&value),
+            LOG_LEVELS.join(", ")
+        );
+    }
     let writer = crate::log_switch::SwitchableWriter::new();
     // Store in the global before installing the subscriber so any code
     // that calls `global_writer()` immediately after init_tracing() finds
@@ -381,6 +416,38 @@ mod build_embed;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn filter_of(flag: Option<&str>, env: Option<&str>) -> (String, Option<String>) {
+        let (filter, rejected) = log_filter(flag, env);
+        (filter.to_string(), rejected)
+    }
+
+    #[test]
+    fn log_filter_flag_wins_over_the_environment() {
+        assert_eq!(filter_of(Some("error"), Some("trace")), ("error".into(), None));
+        assert_eq!(filter_of(Some("TRACE"), Some("error")), ("trace".into(), None));
+        assert_eq!(filter_of(Some("off"), None), ("off".into(), None));
+    }
+
+    #[test]
+    fn log_filter_environment_alone_keeps_its_directives() {
+        assert_eq!(filter_of(None, Some("warn,mio=trace")).0, "mio=trace,warn");
+        assert_eq!(filter_of(None, None), ("warn".into(), None));
+    }
+
+    #[test]
+    fn log_filter_reports_an_invalid_flag_and_falls_back() {
+        assert_eq!(
+            filter_of(Some("nonsense"), Some("debug")),
+            ("debug".into(), Some("nonsense".into()))
+        );
+        assert_eq!(
+            filter_of(Some("nonsense"), None),
+            ("warn".into(), Some("nonsense".into()))
+        );
+        // A directive is not a level: it stays with `GRIM_LOG`.
+        assert_eq!(filter_of(Some("mio=trace"), None).1, Some("mio=trace".into()));
+    }
 
     /// A TOML parse error quotes the offending line, so a lock nobody here
     /// wrote reaches the terminal through it.

@@ -77,7 +77,8 @@ pub struct GlobalOptions {
     #[arg(long, global = true)]
     pub offline: bool,
 
-    /// Override the tracing log level (e.g. `warn`, `info`, `debug`).
+    /// Override the tracing log level: `off`, `error`, `warn`, `info`, `debug`
+    /// or `trace`. Wins over `GRIM_LOG`.
     #[arg(long, global = true)]
     pub log_level: Option<String>,
 
