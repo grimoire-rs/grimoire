@@ -1970,7 +1970,7 @@ fn integrity_gate(
     // comparison in `grim status`, so an empty `outputs_pending` does not
     // promise "nothing to install".
     let covers_targets = !expected_clients(rec.kind, &rec.name, target).is_empty()
-        && pending_outputs(Some(rec), rec.kind, &rec.name, target, roots, mcp).is_empty();
+        && silenced(|| pending_outputs(Some(rec), rec.kind, &rec.name, target, roots, mcp)).is_empty();
     if all_intact && covers_targets && rec.source.eq_content(source) {
         return Ok(Some(InstallOutcome::AlreadyInstalled));
     }
@@ -1992,7 +1992,18 @@ fn pass_writes(
 ) -> bool {
     out.client
         .parse::<crate::install::client_target::ClientTarget>()
-        .is_ok_and(|client| target.clients().contains(&client) && writes_output(out, client, rec, target, roots, mcp))
+        .is_ok_and(|client| {
+            target.clients().contains(&client) && silenced(|| writes_output(out, client, rec, target, roots, mcp))
+        })
+}
+
+/// Runs a gate probe with `tracing` off for this thread. The probe asks each
+/// vendor whether it can write the descriptor, and a vendor that cannot logs
+/// its decline while answering. The planning loop asks again and is the one
+/// place that line is printed, so a run never says it twice. Any other event
+/// logged inside the probe is muted too.
+fn silenced<T>(probe: impl FnOnce() -> T) -> T {
+    tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), probe)
 }
 
 /// Layout-migration reaper (ADR render-layout-stability): after a
@@ -7526,6 +7537,67 @@ mod tests {
         fn text(&self) -> String {
             String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
         }
+    }
+
+    /// A pin roll probes the descriptor in the integrity gate and again in the
+    /// planning loop. Zed declines a `ws` server in both, but only the loop's
+    /// decline is printed.
+    #[tokio::test]
+    async fn a_pin_roll_prints_a_vendors_decline_once() {
+        use crate::oci::mcp::McpDescriptor;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = InstallTarget::new(
+            dir.path(),
+            ConfigScope::Project,
+            vec![ClientTarget::Claude, ClientTarget::Zed],
+        );
+        let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
+        let roots = roots(dir.path());
+        let descriptor = |description: &str| {
+            McpDescriptor::from_toml_str(&format!(
+                "description = \"{description}\"\n[server]\ntransport = \"ws\"\nurl = \"wss://x.example.com/mcp\""
+            ))
+            .unwrap()
+            .to_layer_bytes()
+            .unwrap()
+        };
+        let blob_a = descriptor("one");
+        install_all(
+            &lock_of_mcp(vec![locked_mcp("srv", &blob_a)]),
+            &arc(BlobMock { blob: blob_a }),
+            &DefaultMaterializer,
+            &target,
+            &mut state,
+            &roots,
+            Path::new("."),
+            false,
+        )
+        .await;
+
+        let blob_b = descriptor("two");
+        let warnings = WarnSink::default();
+        let capture = warnings.install();
+        let run = install_all(
+            &lock_of_mcp(vec![locked_mcp("srv", &blob_b)]),
+            &arc(BlobMock { blob: blob_b }),
+            &DefaultMaterializer,
+            &target,
+            &mut state,
+            &roots,
+            Path::new("."),
+            false,
+        )
+        .await;
+        drop(capture);
+
+        assert!(run[0].result.is_ok(), "{:?}", run[0].result);
+        assert_eq!(
+            warnings.text().matches("no ws transport in context_servers").count(),
+            1,
+            "{}",
+            warnings.text()
+        );
     }
 
     /// Both paths that leave an adopted member in place say to remove it by
