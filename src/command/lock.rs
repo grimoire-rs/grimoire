@@ -80,7 +80,8 @@ pub async fn run(ctx: &Context, _args: &LockArgs) -> anyhow::Result<(LockReport,
     // that arms it. Every later run reads this lock, so a known conflict stops here.
     if !target.lock.settings.is_empty() && scope.options.experimental.settings_enabled() {
         let policy = super::hook_consent::settings_policy(ctx, &scope, &target.lock, None)?;
-        super::add::refuse_settings_conflict(&scope, &target.lock, policy, &[], &access).await?;
+        let global = super::global_clients(ctx, scope.scope, &scope.options.clients);
+        super::add::refuse_settings_conflict_for(&scope, &target.lock, policy, &[], &global, &access).await?;
     }
     super::grim(lock_io::save(&scope.lock_path, &target.lock, previous.as_ref()))?;
     warn_moved_bundle_pins(previous.as_ref(), &target.lock);

@@ -9,6 +9,8 @@
 //! the cache, materializes it, and enforces the local-modification
 //! integrity gate (refuse unless `--force`).
 
+use std::io::Write as _;
+
 use clap::Args;
 
 use crate::api::artifact_status::InstallStatus;
@@ -94,15 +96,11 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
     // that seam is shared with `grim status`, `grim search` and `grim context`,
     // and a prompt there would make a read-only report ask for hook consent.
     let policies = super::hook_consent::resolve(ctx, &scope, &lock, args.hook_trust.flag())?;
-    let target = super::grim(InstallTarget::parse(
-        &scope.workspace,
-        scope.scope,
-        &args.client,
-        &scope.options.clients,
-        &scope.options.vendors,
-    ))?
-    .with_hook_policy(policies.hooks)
-    .with_settings_policy(policies.settings);
+    let global = super::global_clients(ctx, scope.scope, &scope.options.clients);
+    let target = install_target(&scope, &args.client, &global)?
+        .with_hook_policy(policies.hooks)
+        .with_settings_policy(policies.settings);
+    say_clients(ctx, &target);
     ctx.telemetry()
         .record_install_clients(&target, &scope.workspace, scope.scope);
     let access = super::access_seam(ctx)?;
@@ -141,6 +139,37 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
     record_changed(ctx, &run.items, &scope.set);
     let armed = armed_after_convergence(ctx.grim_home(), &scope.workspace, scope.scope);
     finish(run, &armed)
+}
+
+/// The target `grim install` renders into: `--client`, else the project's
+/// `[options].clients`, else the detected clients joined with the global list.
+///
+/// `global` is [`super::global_clients`], read once per run by the caller: each
+/// read loads the global config, so a run that also needs the list elsewhere
+/// hands the one answer to both.
+pub(super) fn install_target(
+    scope: &ResolvedScope,
+    flag: &[String],
+    global: &[crate::install::client_target::ClientTarget],
+) -> anyhow::Result<InstallTarget> {
+    super::grim(InstallTarget::parse_with_global(
+        &scope.workspace,
+        scope.scope,
+        flag,
+        &scope.options.clients,
+        global,
+        &scope.options.vendors,
+    ))
+}
+
+/// Say which clients the run installs into and why, on stderr beside the
+/// progress. `--progress json` owns stderr as an NDJSON stream and
+/// `--progress none` asked for none, so neither gets the line.
+pub(super) fn say_clients(ctx: &Context, target: &InstallTarget) {
+    if ctx.progress() == crate::cli::options::ProgressMode::Auto {
+        // Best effort: a closed stderr must not fail the install.
+        let _ = writeln!(std::io::stderr(), "{}", crate::install::target::clients_note(target));
+    }
 }
 
 /// Reports each freshly installed or updated artifact to the usage
@@ -359,15 +388,11 @@ async fn dev_install(
     // resolved and attached so convergence keeps a hook armed by an earlier
     // `grim install` correctly converged rather than untouched-by-omission.
     let policies = super::hook_consent::resolve(ctx, scope, &synth, args.hook_trust.flag())?;
-    let target = super::grim(InstallTarget::parse(
-        &scope.workspace,
-        scope.scope,
-        &args.client,
-        &scope.options.clients,
-        &scope.options.vendors,
-    ))?
-    .with_hook_policy(policies.hooks)
-    .with_settings_policy(policies.settings);
+    let global = super::global_clients(ctx, scope.scope, &scope.options.clients);
+    let target = install_target(scope, &args.client, &global)?
+        .with_hook_policy(policies.hooks)
+        .with_settings_policy(policies.settings);
+    say_clients(ctx, &target);
     let access = super::access_seam(ctx)?;
     let mut state = super::grim(scope_resolution::load_state(scope).map_err(|e| state_io(&scope.state_path, e)))?;
     let materializer = DefaultMaterializer;

@@ -44,11 +44,13 @@ pub async fn run(ctx: &Context, _args: &ContextArgs) -> anyhow::Result<(ContextR
     // raw detection. `grim context` is the diagnostic surface for exactly
     // the no-client-detected situation, so it must answer `["agents"]` here
     // and never error.
-    let target = super::grim(InstallTarget::parse(
+    let global_clients = super::global_clients(ctx, scope.scope, &scope.options.clients);
+    let target = super::grim(InstallTarget::parse_with_global(
         &scope.workspace,
         scope.scope,
         &[],
         &scope.options.clients,
+        &global_clients,
         &scope.options.vendors,
     ))?;
     let clients = target.clients().iter().map(ToString::to_string).collect();

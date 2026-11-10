@@ -412,6 +412,42 @@ def test_update_autodetect_never_reaps_on_detection_drift(
     )
 
 
+def test_update_never_reaps_a_client_when_only_the_global_list_selects(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """The global `[options].clients` joins detection but is not a project
+    selection: dropping a client from it later must not make `update` reap
+    that client's outputs, and the drift fields stay empty."""
+    ru = make_artifact(
+        f"{unique_repo}/rust-style",
+        "rule",
+        {"rust-style.md": "---\npaths: ['**/*.rs']\n---\n# Rust Style\n"},
+        tag="v1",
+    )
+    write_config(project_dir, rules={"rust-style": ru.fq})  # no project list
+    # Detect opencode alone: `claude` must come from the global list.
+    shutil.rmtree(project_dir / ".claude", ignore_errors=True)
+    (project_dir / ".opencode").mkdir(parents=True, exist_ok=True)
+    runner = grim_at(project_dir)
+    runner.json("config", "set", "--global", "options.clients", "claude")
+    runner.run("lock", check=False)
+    runner.run("install", check=False)
+    claude = project_dir / ".claude" / "rules" / "rust-style.md"
+    assert_path_exists(claude)
+    assert _recorded_clients(project_dir) == {"claude", "opencode"}
+
+    runner.json("config", "set", "--global", "options.clients", "opencode")
+    rows = runner.json("update")["items"]
+    row = _rule_row(rows)
+    assert row["reaped_clients"] == [], row
+    assert row["kept_modified_clients"] == [], row
+    assert_path_exists(claude), "a client dropped from the global list is not reaped"
+    assert _recorded_clients(project_dir) == {"claude", "opencode"}
+
+    status = next(r for r in runner.json("status")["items"] if r["name"] == "rust-style")
+    assert status["clients_missing"] == [] and status["clients_extra"] == [], status
+
+
 def test_a_global_named_update_names_cleanup_that_stays_in_the_global_scope(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

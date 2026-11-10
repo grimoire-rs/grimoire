@@ -55,7 +55,7 @@ use crate::install::materializer::DefaultMaterializer;
 use crate::install::path_anchor::{AnchorRoots, Containment};
 use crate::install::progress::{InstallProgress, SilentProgress};
 use crate::install::prune::{PruneError, prune_orphans_off_runtime};
-use crate::install::target::{InstallTarget, detect_clients_or_all};
+use crate::install::target::{InstallTarget, active_clients};
 use crate::install::vendor::SyncAdds;
 use crate::lock::closure::{force_nodes, project_lock, reachable_lock};
 use crate::lock::disposition::{LockDisposition, NodeDisposition};
@@ -131,6 +131,10 @@ pub struct TuiContext {
     /// option; empty triggers detection at install time). Still needed for
     /// the `InstallTarget::parse` fallback in [`perform`].
     pub clients_default: Vec<String>,
+    /// The global `[options].clients`, parsed; empty at global scope. Joins the
+    /// detected clients exactly as `grim install` does when `clients_default`
+    /// is empty.
+    pub clients_global: Vec<crate::install::client_target::ClientTarget>,
     /// The active scope's raw `[options.vendors]` table — the per-client
     /// rendering options `InstallTarget::parse` reads (today: which clients
     /// pool their skills into `.agents/skills`). Carried raw, like
@@ -187,6 +191,8 @@ pub struct ScopeSwap {
     pub roots: AnchorRoots,
     /// The AI client target(s) to materialize into (raw config clients).
     pub clients_default: Vec<String>,
+    /// This scope's global-list clients (mirrors `TuiContext::clients_global`).
+    pub clients_global: Vec<crate::install::client_target::ClientTarget>,
     /// This scope's raw `[options.vendors]` table (mirrors `TuiContext::vendors`).
     pub vendors: std::collections::BTreeMap<String, crate::config::declaration::VendorOptions>,
     /// The effective selected clients for this scope (config or detected).
@@ -220,6 +226,7 @@ impl TuiContext {
             config_path: std::mem::replace(&mut self.config_path, alt.config_path),
             roots: std::mem::replace(&mut self.roots, alt.roots),
             clients_default: std::mem::replace(&mut self.clients_default, alt.clients_default),
+            clients_global: std::mem::replace(&mut self.clients_global, alt.clients_global),
             vendors: std::mem::replace(&mut self.vendors, alt.vendors),
             clients_selected: std::mem::replace(&mut self.clients_selected, alt.clients_selected),
             label: std::mem::replace(&mut self.scope_label, alt.label),
@@ -517,7 +524,7 @@ pub async fn run(mut ctx: TuiContext, mut project_init: Option<ProjectInit<'_>>)
                 // fresher than any previous network fetch in most sessions.
                 let lock = lock_io::load(&ctx.lock_path).ok();
                 let install_state = load_state(&ctx).unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
-                let active = detect_clients_or_all(&ctx.workspace, ctx.scope);
+                let active = active_clients(&ctx.workspace, ctx.scope, &ctx.clients_global);
                 // Direct declarations decide the via-bundle badge; a declaration-
                 // matched bundle snapshot lets a stale-dropped member still derive
                 // via the snapshot. A member also declared standalone shows plain
@@ -525,9 +532,15 @@ pub async fn run(mut ctx: TuiContext, mut project_init: Option<ProjectInit<'_>>)
                 let (direct_repos, snapshot_repos, target, lock_matches_config) = load_scope_declaration(&ctx)
                     .map(|(options, _, set)| {
                         let cached = lock.as_ref();
-                        let target =
-                            InstallTarget::parse(&ctx.workspace, ctx.scope, &[], &options.clients, &options.vendors)
-                                .ok();
+                        let target = InstallTarget::parse_with_global(
+                            &ctx.workspace,
+                            ctx.scope,
+                            &[],
+                            &options.clients,
+                            &ctx.clients_global,
+                            &options.vendors,
+                        )
+                        .ok();
                         (
                             direct_declared_repos(&set),
                             snapshot_declared_repos(&set, cached),
@@ -1119,13 +1132,19 @@ fn drain_bundle_member_checks(
                 // the catalog even when the bundle itself has no lock snapshot.
                 let lock = lock_io::load(&ctx.lock_path).ok();
                 let install_state = load_state(ctx).unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
-                let active = detect_clients_or_all(&ctx.workspace, ctx.scope);
+                let active = active_clients(&ctx.workspace, ctx.scope, &ctx.clients_global);
                 let (direct_repos, snapshot_repos, target, lock_matches_config) = load_scope_declaration(ctx)
                     .map(|(options, _, set)| {
                         let cached = lock.as_ref();
-                        let target =
-                            InstallTarget::parse(&ctx.workspace, ctx.scope, &[], &options.clients, &options.vendors)
-                                .ok();
+                        let target = InstallTarget::parse_with_global(
+                            &ctx.workspace,
+                            ctx.scope,
+                            &[],
+                            &options.clients,
+                            &ctx.clients_global,
+                            &options.vendors,
+                        )
+                        .ok();
                         (
                             direct_declared_repos(&set),
                             snapshot_declared_repos(&set, cached),
@@ -1213,7 +1232,7 @@ fn drain_bundle_member_checks(
 fn drain_catalog_ready(ctx: &TuiContext, state: &mut TuiState, catalog: &Catalog) {
     let (lock, install_state, config, declared_bundle_repos, direct_repos, snapshot_repos, target) =
         load_scope_for_badges(ctx);
-    let active = detect_clients_or_all(&ctx.workspace, ctx.scope);
+    let active = active_clients(&ctx.workspace, ctx.scope, &ctx.clients_global);
     let inputs = state.settings_inputs.clone();
     let badge = BadgeContext {
         lock: lock.as_ref(),
@@ -1308,7 +1327,7 @@ async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
     state.deps = super::bundle_members::DepIndex::build(&config, lock.as_ref());
     state.settings_declared = declares_settings(&config, lock.as_ref());
     state.settings_read_due = true;
-    let active = detect_clients_or_all(&ctx.workspace, ctx.scope);
+    let active = active_clients(&ctx.workspace, ctx.scope, &ctx.clients_global);
     // The simpler catalog_service::BadgeContext (4 fields) drives the per-row
     // StatusBadge derivation inside load_catalog itself.
     let catalog_badges = catalog_service::BadgeContext {
@@ -1980,7 +1999,7 @@ fn rederive_states(ctx: &TuiContext, state: &mut TuiState) {
         load_scope_for_badges(ctx);
     state.deps = super::bundle_members::DepIndex::build(&config, lock.as_ref());
     state.settings_declared = declares_settings(&config, lock.as_ref());
-    let active = detect_clients_or_all(&ctx.workspace, ctx.scope);
+    let active = active_clients(&ctx.workspace, ctx.scope, &ctx.clients_global);
     let inputs = state.settings_inputs.clone();
     let badge = BadgeContext {
         lock: lock.as_ref(),
@@ -2243,7 +2262,15 @@ fn load_scope_for_badges(
             // What `grim install` would target — the `Pending` badge's input.
             // Best-effort: an invalid configured client name must not take the
             // TUI down, it just costs that one badge.
-            let target = InstallTarget::parse(&ctx.workspace, ctx.scope, &[], &options.clients, &options.vendors).ok();
+            let target = InstallTarget::parse_with_global(
+                &ctx.workspace,
+                ctx.scope,
+                &[],
+                &options.clients,
+                &ctx.clients_global,
+                &options.vendors,
+            )
+            .ok();
             // The parsed set is threaded out so `local_rows` can synthesize the
             // "Local" root from path declarations without re-reading the config.
             (set, bundles, direct, snapshot, target)
@@ -3768,10 +3795,17 @@ async fn install_row(
     policies: crate::hook::policy::ConsentPolicies,
     ledger: &mut SettingsLedger,
 ) -> anyhow::Result<(Vec<crate::install::installer::ArtifactInstall>, Vec<NodeKey>)> {
-    let target = InstallTarget::parse(&ctx.workspace, ctx.scope, &[], &ctx.clients_default, &ctx.vendors)
-        .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?
-        .with_hook_policy(policies.hooks)
-        .with_settings_policy(policies.settings);
+    let target = InstallTarget::parse_with_global(
+        &ctx.workspace,
+        ctx.scope,
+        &[],
+        &ctx.clients_default,
+        &ctx.clients_global,
+        &ctx.vendors,
+    )
+    .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?
+    .with_hook_policy(policies.hooks)
+    .with_settings_policy(policies.settings);
     // The target reads the ambient `$GRIM_HOME`; a hermetic test's roots do not.
     #[cfg(test)]
     let target = target.with_grim_home(&ctx.roots.grim_home);
@@ -4093,9 +4127,16 @@ async fn refuse_settings_conflict(ctx: &TuiContext, lock: &GrimoireLock) -> anyh
     let policy = tui_hook_policy(ctx, Some(lock))
         .with_locked(BTreeSet::new(), bindings)
         .settings;
-    let target = InstallTarget::parse(&ctx.workspace, ctx.scope, &[], &ctx.clients_default, &ctx.vendors)
-        .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?
-        .with_settings_policy(policy);
+    let target = InstallTarget::parse_with_global(
+        &ctx.workspace,
+        ctx.scope,
+        &[],
+        &ctx.clients_default,
+        &ctx.clients_global,
+        &ctx.vendors,
+    )
+    .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?
+    .with_settings_policy(policy);
     // The target reads the ambient `$GRIM_HOME`; a hermetic test's roots do not.
     #[cfg(test)]
     let target = target.with_grim_home(&ctx.roots.grim_home);
@@ -4320,10 +4361,17 @@ async fn perform_local_dev(
     // on-disk lock declares, so it keeps what the record covers armed.
     let on_disk = lock_io::load(&ctx.lock_path).ok();
     let policies = row_hook_policy(ctx, on_disk.as_ref(), &BTreeSet::new());
-    let target = InstallTarget::parse(&ctx.workspace, ctx.scope, &[], &ctx.clients_default, &ctx.vendors)
-        .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?
-        .with_hook_policy(policies.hooks)
-        .with_settings_policy(policies.settings);
+    let target = InstallTarget::parse_with_global(
+        &ctx.workspace,
+        ctx.scope,
+        &[],
+        &ctx.clients_default,
+        &ctx.clients_global,
+        &ctx.vendors,
+    )
+    .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?
+    .with_hook_policy(policies.hooks)
+    .with_settings_policy(policies.settings);
     let mut install_state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
     let materializer = DefaultMaterializer;
     let closure = BTreeSet::from([(kind, name.to_string())]);
@@ -5092,6 +5140,7 @@ struct SettingsGateRequest {
     lock_path: std::path::PathBuf,
     state_path: std::path::PathBuf,
     roots: AnchorRoots,
+    clients_global: Vec<crate::install::client_target::ClientTarget>,
 }
 
 /// The reads the event loop owns. One at most, and dropping it aborts that read.
@@ -5107,6 +5156,7 @@ impl SettingsGateRequest {
             lock_path: ctx.lock_path.clone(),
             state_path: ctx.state_path.clone(),
             roots: ctx.roots.clone(),
+            clients_global: ctx.clients_global.clone(),
         }
     }
 
@@ -5146,8 +5196,14 @@ impl SettingsGateRequest {
     /// not resolve, which costs the rows their gates and nothing else.
     fn read(&self) -> anyhow::Result<Option<(SettingsGates, InstallTarget, InstallState)>> {
         let (options, registries, _set) = self.load_declaration()?;
-        let Ok(target) = InstallTarget::parse(&self.workspace, self.scope, &[], &options.clients, &options.vendors)
-        else {
+        let Ok(target) = InstallTarget::parse_with_global(
+            &self.workspace,
+            self.scope,
+            &[],
+            &options.clients,
+            &self.clients_global,
+            &options.vendors,
+        ) else {
             return Ok(None);
         };
         let lock = lock_io::load(&self.lock_path).ok();
@@ -7137,6 +7193,7 @@ mod tests {
                 ..Default::default()
             },
             clients_default: Vec::new(),
+            clients_global: Vec::new(),
             vendors: Default::default(),
             clients_selected: Vec::new(),
             scope_label: "project".to_string(),
@@ -8276,6 +8333,7 @@ mod tests {
             config_path: workspace.join("grimoire.toml"),
             roots: test_roots(workspace),
             clients_default: vec!["claude".to_string()],
+            clients_global: Vec::new(),
             vendors: Default::default(),
             clients_selected: Vec::new(),
             scope_label: "project".to_string(),
@@ -13775,7 +13833,7 @@ mod tests {
     fn member_badge(ctx: &TuiContext, registry: &str, repository: &str) -> ArtifactState {
         let lock = lock_io::load(&ctx.lock_path).ok();
         let install_state = load_state(ctx).unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
-        let active = detect_clients_or_all(&ctx.workspace, ctx.scope);
+        let active = active_clients(&ctx.workspace, ctx.scope, &ctx.clients_global);
         let (direct_repos, snapshot_repos) = load_scope_declaration(ctx)
             .map(|(_, _, set)| {
                 let cached = lock.as_ref();
@@ -15002,6 +15060,7 @@ mod tests {
                 ..Default::default()
             },
             clients_default: vec![],
+            clients_global: Vec::new(),
             vendors: Default::default(),
             clients_selected: Vec::new(),
             scope_label: "project".to_string(),
@@ -18694,6 +18753,7 @@ mod p2_app_member_node_tests {
                 ..Default::default()
             },
             clients_default: vec!["claude".to_string()],
+            clients_global: Vec::new(),
             vendors: Default::default(),
             clients_selected: Vec::new(),
             scope_label: "project".to_string(),

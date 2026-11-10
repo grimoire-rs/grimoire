@@ -309,9 +309,10 @@ pub struct ConfigOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_registry: Option<String>,
     /// Determines which clients receive installs and updates when
-    /// `--client` is absent. Auto-detects clients when left empty, falling
-    /// back to the generic `agents` client when none are detected. A list,
-    /// so one declaration can target several clients at once — for example
+    /// `--client` is absent. When left empty in a project, the detected
+    /// clients plus the global list receive them, falling back to the
+    /// generic `agents` client when there are none. A list, so one
+    /// declaration can target several clients at once — for example
     /// `["claude", "opencode"]`. Auto-detection selects every client whose
     /// vendor directory is present.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

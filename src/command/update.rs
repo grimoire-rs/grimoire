@@ -161,10 +161,13 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     // unloadable global config, 78) leaves nothing on disk changed.
     let policies = super::hook_consent::resolve(ctx, &scope, &new_lock, args.hook_trust.flag())?;
 
+    // Read once for the conflict check below and the install target after it.
+    let global = super::global_clients(ctx, scope.scope, &scope.options.clients);
     // A saved lock is what every later run reads. A project without the kind
     // never gets here, so its failure order stays as it was.
     if !new_lock.settings.is_empty() {
-        super::add::refuse_settings_conflict(&scope, &new_lock, policies.settings.clone(), &[], &access).await?;
+        super::add::refuse_settings_conflict_for(&scope, &new_lock, policies.settings.clone(), &[], &global, &access)
+            .await?;
     }
 
     super::grim(lock_io::save(&scope.lock_path, &new_lock, previous.as_ref()))?;
@@ -184,15 +187,9 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     // prune/reap passes below already honoured `--force` for the same
     // "do not destroy hand-edited work" reason. One command, two opposite
     // answers about one file.
-    let target = super::grim(InstallTarget::parse(
-        &scope.workspace,
-        scope.scope,
-        &args.client,
-        &scope.options.clients,
-        &scope.options.vendors,
-    ))?
-    .with_hook_policy(policies.hooks)
-    .with_settings_policy(policies.settings);
+    let target = super::install::install_target(&scope, &args.client, &global)?
+        .with_hook_policy(policies.hooks)
+        .with_settings_policy(policies.settings);
     ctx.telemetry()
         .record_install_clients(&target, &scope.workspace, scope.scope);
     // `install_and_persist` runs this same check; `update` calls
