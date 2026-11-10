@@ -73,3 +73,42 @@ def test_invalid_flag_falls_back_to_grim_log(grim: GrimRunner) -> None:
     assert result.returncode == 0
     assert "DEBUG" in result.stderr, result.stderr
     assert len([line for line in result.stderr.splitlines() if "nonsense" in line]) == 1
+
+
+def _env_notice(result, value: str) -> list[str]:
+    return [line for line in result.stderr.splitlines() if value in line]
+
+
+def test_unparsable_grim_log_is_reported_once_and_the_run_continues(grim: GrimRunner) -> None:
+    result = _run(grim, env="foo=bar")
+
+    assert result.returncode == 0
+    lines = _env_notice(result, "foo=bar")
+    assert len(lines) == 1, result.stderr
+    assert "GRIM_LOG" in lines[0] and LEVELS in lines[0]
+    assert "Hook" in result.stdout, "the command still ran"
+
+
+def test_grim_log_level_typo_is_reported_once_and_the_run_continues(grim: GrimRunner) -> None:
+    result = _run(grim, env="debgu")
+
+    assert result.returncode == 0
+    lines = _env_notice(result, "debgu")
+    assert len(lines) == 1, result.stderr
+    assert "GRIM_LOG" in lines[0] and "log target" in lines[0] and LEVELS in lines[0]
+    assert "Hook" in result.stdout, "the command still ran"
+
+
+def test_valid_grim_log_prints_no_notice(grim: GrimRunner) -> None:
+    result = _run(grim, env="debug")
+
+    assert "not a level" not in result.stderr
+    assert "invalid GRIM_LOG" not in result.stderr
+    assert "DEBUG" in result.stderr, result.stderr
+
+
+def test_valid_flag_over_a_bad_grim_log_prints_no_notice(grim: GrimRunner) -> None:
+    result = _run(grim, flag="debug", env="foo=bar")
+
+    assert not _env_notice(result, "foo=bar"), result.stderr
+    assert "DEBUG" in result.stderr

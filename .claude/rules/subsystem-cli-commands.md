@@ -54,7 +54,7 @@ Global flags (`src/cli/options.rs` `GlobalOptions`): `--format`,
 `--format json`; `auto` is TTY-gated and honors `NO_COLOR`/`CLICOLOR`/
 `CLICOLOR_FORCE`/`TERM=dumb`, `always` overrides `NO_COLOR`),
 `--progress <auto|json|none>` (experimental; NDJSON events on stderr),
-`--offline`, `--log-level <off|error|warn|info|debug|trace>` (wins over `GRIM_LOG`, whose directives it does not take; an invalid value prints one stderr line and the run continues at `GRIM_LOG` or `warn`, exit unchanged), `--config <path>`, `--global`,
+`--offline`, `--log-level <off|error|warn|info|debug|trace>` (wins over `GRIM_LOG`, whose directives it does not take; an invalid value prints one stderr line and the run continues at `GRIM_LOG` or `warn`, exit unchanged; an unparsable `GRIM_LOG`, or a bare word that is not a level, gets the same one-line notice), `--config <path>`, `--global`,
 `--registry <ref>` (repeatable / comma-separated).
 
 `login`/`logout` resolve the registry from the positional argument when

@@ -346,24 +346,64 @@ fn attach_settings(document: &mut serde_json::Value, outcome: &crate::install::i
 /// The levels `--log-level` accepts; directives stay with `GRIM_LOG`.
 const LOG_LEVELS: [&str; 6] = ["off", "error", "warn", "info", "debug", "trace"];
 
+/// What `log_filter` decided: the filter, plus the notices for the caller to print.
+struct LogChoice {
+    filter: tracing_subscriber::EnvFilter,
+    /// An unrecognised `--log-level` value.
+    rejected_flag: Option<String>,
+    /// One line about a `GRIM_LOG` value that is in use but unusable or suspect.
+    env_notice: Option<String>,
+}
+
 /// Pick the tracing filter: a valid `--log-level` wins, else `GRIM_LOG`
-/// (directives included), else `warn`. An unrecognised flag value comes back
-/// as the second element so the caller can report it. Writes no environment
-/// variable, so no child process inherits the flag.
-fn log_filter(flag: Option<&str>, env: Option<&str>) -> (tracing_subscriber::EnvFilter, Option<String>) {
+/// (directives included), else `warn`. Notices come back for the caller to
+/// print. Writes no environment variable, so no child process inherits the flag.
+fn log_filter(flag: Option<&str>, env: Option<&str>) -> LogChoice {
     use tracing_subscriber::EnvFilter;
 
-    let mut rejected = None;
+    let mut rejected_flag = None;
     if let Some(flag) = flag {
         match LOG_LEVELS.iter().find(|level| level.eq_ignore_ascii_case(flag)) {
-            Some(level) => return (EnvFilter::new(*level), None),
-            None => rejected = Some(flag.to_owned()),
+            Some(level) => {
+                return LogChoice {
+                    filter: EnvFilter::new(*level),
+                    rejected_flag: None,
+                    env_notice: None,
+                };
+            }
+            None => rejected_flag = Some(flag.to_owned()),
         }
     }
-    let filter = env
-        .and_then(|directives| EnvFilter::builder().parse(directives).ok())
-        .unwrap_or_else(|| EnvFilter::new("warn"));
-    (filter, rejected)
+    let mut env_notice = None;
+    let parsed = env.and_then(|value| match EnvFilter::builder().parse(value) {
+        Ok(filter) => {
+            let word = value.trim();
+            // tracing reads any bare word as a log target, so a level typo
+            // (`debgu`) parses and silences everything.
+            let bare = !word.is_empty() && !word.contains(['=', ',']) && !word.contains("::");
+            if bare && word.parse::<tracing::level_filters::LevelFilter>().is_err() {
+                env_notice = Some(format!(
+                    "GRIM_LOG '{}' is not a level ({}); it is read as a log target",
+                    crate::oci::text::escape_controls(value),
+                    LOG_LEVELS.join(", ")
+                ));
+            }
+            Some(filter)
+        }
+        Err(_) => {
+            env_notice = Some(format!(
+                "invalid GRIM_LOG '{}'; expected a level ({}) or filter directives",
+                crate::oci::text::escape_controls(value),
+                LOG_LEVELS.join(", ")
+            ));
+            None
+        }
+    });
+    LogChoice {
+        filter: parsed.unwrap_or_else(|| EnvFilter::new("warn")),
+        rejected_flag,
+        env_notice,
+    }
 }
 
 /// Initialize tracing from `--log-level`, else the `GRIM_LOG` env var (falls
@@ -378,8 +418,12 @@ fn init_tracing(flag: Option<&str>) {
     use tracing_subscriber::fmt::MakeWriter;
     use tracing_subscriber::prelude::*;
 
-    let (filter, rejected) = log_filter(flag, std::env::var("GRIM_LOG").ok().as_deref());
-    if let Some(value) = rejected {
+    let LogChoice {
+        filter,
+        rejected_flag,
+        env_notice,
+    } = log_filter(flag, std::env::var("GRIM_LOG").ok().as_deref());
+    if let Some(value) = rejected_flag {
         // Not a `tracing` event: the filter it would pass through is the
         // one being chosen here.
         let _ = writeln!(
@@ -388,6 +432,9 @@ fn init_tracing(flag: Option<&str>) {
             crate::oci::text::escape_controls(&value),
             LOG_LEVELS.join(", ")
         );
+    }
+    if let Some(notice) = env_notice {
+        let _ = writeln!(io::stderr(), "{notice}");
     }
     let writer = crate::log_switch::SwitchableWriter::new();
     // Store in the global before installing the subscriber so any code
@@ -417,36 +464,85 @@ mod build_embed;
 mod tests {
     use super::*;
 
-    fn filter_of(flag: Option<&str>, env: Option<&str>) -> (String, Option<String>) {
-        let (filter, rejected) = log_filter(flag, env);
-        (filter.to_string(), rejected)
+    /// (filter, rejected flag, env notice)
+    fn filter_of(flag: Option<&str>, env: Option<&str>) -> (String, Option<String>, Option<String>) {
+        let choice = log_filter(flag, env);
+        (choice.filter.to_string(), choice.rejected_flag, choice.env_notice)
     }
 
     #[test]
     fn log_filter_flag_wins_over_the_environment() {
-        assert_eq!(filter_of(Some("error"), Some("trace")), ("error".into(), None));
-        assert_eq!(filter_of(Some("TRACE"), Some("error")), ("trace".into(), None));
-        assert_eq!(filter_of(Some("off"), None), ("off".into(), None));
+        assert_eq!(filter_of(Some("error"), Some("trace")), ("error".into(), None, None));
+        assert_eq!(filter_of(Some("TRACE"), Some("error")), ("trace".into(), None, None));
+        assert_eq!(filter_of(Some("off"), None), ("off".into(), None, None));
+        // A valid flag means the environment is not consulted: no notice.
+        assert_eq!(filter_of(Some("error"), Some("foo=bar")).2, None);
+        assert_eq!(filter_of(Some("error"), Some("debgu")).2, None);
     }
 
     #[test]
     fn log_filter_environment_alone_keeps_its_directives() {
         assert_eq!(filter_of(None, Some("warn,mio=trace")).0, "mio=trace,warn");
-        assert_eq!(filter_of(None, None), ("warn".into(), None));
+        assert_eq!(filter_of(None, None), ("warn".into(), None, None));
+        assert_eq!(filter_of(None, Some("")).2, None);
+        // tracing itself rejects a whitespace-only value, so that one is reported.
+        assert!(filter_of(None, Some("  ")).2.is_some());
     }
 
     #[test]
     fn log_filter_reports_an_invalid_flag_and_falls_back() {
         assert_eq!(
             filter_of(Some("nonsense"), Some("debug")),
-            ("debug".into(), Some("nonsense".into()))
+            ("debug".into(), Some("nonsense".into()), None)
         );
         assert_eq!(
             filter_of(Some("nonsense"), None),
-            ("warn".into(), Some("nonsense".into()))
+            ("warn".into(), Some("nonsense".into()), None)
         );
         // A directive is not a level: it stays with `GRIM_LOG`.
         assert_eq!(filter_of(Some("mio=trace"), None).1, Some("mio=trace".into()));
+    }
+
+    #[test]
+    fn log_filter_reports_an_environment_value_that_does_not_parse() {
+        let (filter, rejected, notice) = filter_of(None, Some("foo=bar"));
+        assert_eq!(filter, "warn");
+        assert_eq!(rejected, None);
+        assert_eq!(
+            notice.as_deref(),
+            Some(
+                "invalid GRIM_LOG 'foo=bar'; expected a level (off, error, warn, info, debug, trace) or filter directives"
+            )
+        );
+        // The flag was bad too: the environment is the value in use.
+        assert!(filter_of(Some("nonsense"), Some("foo=bar")).2.is_some());
+    }
+
+    #[test]
+    fn log_filter_reports_a_bare_word_that_is_not_a_level() {
+        assert_eq!(filter_of(None, Some("debgu")).0, "debgu=trace");
+        let notice = filter_of(None, Some(" debgu ")).2;
+        assert_eq!(
+            notice.as_deref(),
+            Some(
+                "GRIM_LOG ' debgu ' is not a level (off, error, warn, info, debug, trace); it is read as a log target"
+            )
+        );
+        assert!(filter_of(None, Some("verbose")).2.is_some());
+    }
+
+    #[test]
+    fn log_filter_stays_silent_for_levels_and_directives() {
+        for value in [
+            "debug",
+            "DEBUG",
+            " info ",
+            "grimoire=debug",
+            "grimoire::oci",
+            "warn,grimoire=debug",
+        ] {
+            assert_eq!(filter_of(None, Some(value)).2, None, "{value}");
+        }
     }
 
     /// A TOML parse error quotes the offending line, so a lock nobody here
