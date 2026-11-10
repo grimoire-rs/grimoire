@@ -111,7 +111,22 @@ synthetic skills-only client writing the shared pool, and 78 survives only
 in the narrow uninstallable case above.
 
 An explicit `[options].clients` and the `--client` flag both override
-detection. The detected set is **not** persisted to config — it is
+detection. **At project scope the ladder has one more rung: the global
+`[options].clients`.** With no `--client` and no project list,
+`InstallTarget::parse_with_global` selects the detected clients **plus** the
+global list, in `ClientTarget::ALL` order, each with a `ClientSource`
+(`--client`, `project`, `detected`, `global`, `fallback`); a client both
+detected and global reads `detected`. Nothing detected with a non-empty
+global list selects the global list alone (no `agents` pool, not a
+fallback). A `--global` run labels its own list `global`, and a project that
+names its own clients never reads the global list (`command::global_clients`
+returns empty before it loads the config). The union feeds `clients()` only: `configured_clients()` stays
+the project list, so `update` never reaps under it. The read-only consumers
+use `active_clients` (the same join over `detect_clients_or_all`). A global
+config that does not load, an unknown client name included, is warned about
+and read as an empty list at every site (`command::global_clients`), so no
+exit moves; registries and hook arming still exit 78 where they did. The
+detected set is **not** persisted to config — it is
 recomputed each run, with one exception: `grim init` seeds
 `[options].clients` from detection (writing no `[options]` table when
 detection is empty, so the generic fallback is never persisted).
