@@ -1042,6 +1042,69 @@ def test_a_pick_over_an_old_part_refuses_a_dependent_beside_another_version_of_a
     assert by_member.returncode == 0, by_member.stderr
 
 
+def test_a_pick_over_an_old_part_judges_every_binding_a_nested_list_names_one_bundle_under(
+    old: GrimRunner, current: GrimRunner, work: Path, unique_repo: str
+) -> None:
+    """`outer:1` lists `req:1` as `a` and as `req`; the pick moves `req` to `req:2`.
+
+    The shape of the nested requirement above, with `outer:1` republished to name one
+    bundle under two bindings. Only `a`, which sorts first and which the pick does not
+    move, was judged, so a pick of `pack` or `req` exited 0 and wrote `x:2` beside `y`.
+    Each binding is judged now: 78, naming the path through `outer:1`, nothing written.
+    """
+    x1 = _skill(unique_repo, "x")
+    x2 = _skill(unique_repo, "x", "v2", tag="2")
+    leaving = _skill(unique_repo, "leaving")
+    b = _skill(unique_repo, "b")
+    extra = _skill(unique_repo, "extra")
+    req1 = make_bundle(f"{unique_repo}/req", [("skill", "x", x1.fq)], tag="1")
+    req2 = make_bundle(f"{unique_repo}/req", [("skill", "x", x2.fq)], tag="2")
+    outer1 = make_bundle(f"{unique_repo}/outer", [("skill", "x", x1.fq)], tag="1")
+    files = {"y/SKILL.md": "---\nname: y\ndescription: d\n---\n# y\n"}
+    y = make_dependent(
+        f"{unique_repo}/y", "1", "skill", files, [("bundle", "outer", outer1.fq)]
+    )
+    pack = make_bundle(f"{unique_repo}/pack", [("skill", "leaving", leaving.fq)], tag="1")
+    pk2 = make_bundle(
+        f"{unique_repo}/pk2", [("skill", "y", y.fq), ("skill", "b", b.fq)], tag="1"
+    )
+    _write_manifest(work, [pack.fq, pk2.fq, extra.fq])
+    assert _update(old).returncode == 0
+    retag(f"{unique_repo}/outer", "keep", outer1.digest)
+    make_bundle(
+        f"{unique_repo}/outer",
+        [("bundle", "a", req1.fq), ("bundle", "req", req1.fq)],
+        tag="1",
+    )
+    outer2 = make_bundle(
+        f"{unique_repo}/outer",
+        [("bundle", "a", req2.fq), ("bundle", "req", req2.fq)],
+        tag="2",
+    )
+    retag(f"{unique_repo}/y", "keep", y.digest)
+    make_dependent(
+        f"{unique_repo}/y", "1", "skill", files, [("bundle", "outer", outer2.fq)]
+    )
+    retag(f"{unique_repo}/pack", "keep", pack.digest)
+    make_bundle(
+        f"{unique_repo}/pack",
+        [("bundle", "req", req2.fq), ("skill", "leaving", leaving.fq)],
+        tag="1",
+    )
+    written = _lock_text(work)
+
+    assert _update(old, "team:pack").returncode == 65
+    for pick in ("team:pack", "team:req"):
+        result = _update(current, pick)
+
+        assert result.returncode == 78, (pick, result.stderr)
+        assert "requires req:1 through outer:1" in result.stderr, result.stderr
+        assert "bundle 'req' to req:2" in result.stderr, result.stderr
+        assert _lock_text(work) == written
+    by_member = _update(current, "team:extra")
+    assert by_member.returncode == 0, by_member.stderr
+
+
 def test_a_pick_over_an_old_part_refuses_a_dependent_beside_another_version_of_a_bundle_a_picked_skill_requires(
     old: GrimRunner, current: GrimRunner, work: Path, unique_repo: str
 ) -> None:

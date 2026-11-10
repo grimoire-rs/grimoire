@@ -691,6 +691,9 @@ async fn judge_edge(
 #[derive(Default)]
 struct Lists {
     seen: BTreeSet<Identifier>,
+    /// Keyed on the binding too: the run's bundle is found by the member's name, so a list
+    /// naming one bundle under two bindings would otherwise judge only the first.
+    judged: BTreeSet<(String, Identifier)>,
     reads: usize,
 }
 
@@ -716,13 +719,14 @@ async fn nested_parting(
             let Some(id) = member.absolute_id(Some(&parent)) else {
                 continue;
             };
-            if !lists.seen.insert(id.clone()) {
+            if !lists.judged.insert((member.name.clone(), id.clone())) {
                 continue;
             }
             let target = (ArtifactKind::Bundle, member.name.clone());
             match judge_edge(run, &id, &target, recorded, inputs).await {
                 Judged::Shadowed => {}
-                Judged::Answered => queue.push(id),
+                Judged::Answered if lists.seen.insert(id.clone()) => queue.push(id),
+                Judged::Answered => {}
                 Judged::Parting(parting) => {
                     return Some((format!("{} through {}", short_ref(&id), short_ref(via)), parting));
                 }
