@@ -2053,6 +2053,77 @@ def test_global_moved_root_upgrade_uninstall_abandons_a_hand_edited_stranded_ent
     assert report["retained"] == [], report
 
 
+@pytest.mark.parametrize("case", _MOVED_MCP)
+def test_global_moved_root_update_reports_a_hand_edited_stranded_entry(
+    case: str,
+    grim_binary: Path,
+    grim_home: Path,
+    registry: str,
+    unique_repo: str,
+    tmp_path: Path,
+) -> None:
+    """``update`` leaves a hand-edited stranded MCP member in the old config
+    and must name it in the row's ``abandoned_entries``, not only warn."""
+    client, _, relocate, old_mcp, _ = _MOVED_ROOTS[case]
+    runner = GrimRunner(grim_binary, grim_home)
+    _write_moved_mcp(runner, grim_home, "mv-upd", registry, unique_repo, tmp_path)
+    runner.json("lock", "--global")
+    runner.json("install", "--global", "--client", client)
+    old_config = runner.home / old_mcp
+    parsed = json.loads(old_config.read_text(encoding="utf-8"))
+    parsed["mcpServers"]["mv-upd"]["args"] = ["mcp", "--mine"]
+    old_config.write_text(json.dumps(parsed, indent=2), encoding="utf-8")
+    before = old_config.read_bytes()
+
+    relocate(runner, tmp_path)
+    report = runner.json("update", "--global", "--client", client)
+
+    assert old_config.read_bytes() == before, "the old-root file must be untouched"
+    [row] = [r for r in report["items"] if r["name"] == "mv-upd"]
+    [entry] = row["abandoned_entries"]
+    assert Path(entry["path"]).resolve() == old_config.resolve(), entry
+    assert "mv-upd" in entry["pointer"], entry
+
+
+@pytest.mark.parametrize("case", _MOVED_MCP)
+def test_global_moved_root_install_report_names_no_abandoned_entry(
+    case: str,
+    grim_binary: Path,
+    grim_home: Path,
+    registry: str,
+    unique_repo: str,
+    tmp_path: Path,
+) -> None:
+    """``install`` and ``add`` carry no ``abandoned_entries`` key: the stranded
+    entry is left in the old config, as for ``update``, but the install row
+    keeps its shape and values."""
+    client, _, relocate, old_mcp, _ = _MOVED_ROOTS[case]
+    runner = GrimRunner(grim_binary, grim_home)
+    _write_moved_mcp(runner, grim_home, "mv-inst", registry, unique_repo, tmp_path)
+    runner.json("lock", "--global")
+    runner.json("install", "--global", "--client", client)
+    old_config = runner.home / old_mcp
+    parsed = json.loads(old_config.read_text(encoding="utf-8"))
+    parsed["mcpServers"]["mv-inst"]["args"] = ["mcp", "--mine"]
+    old_config.write_text(json.dumps(parsed, indent=2), encoding="utf-8")
+    before = old_config.read_bytes()
+
+    relocate(runner, tmp_path)
+    report = runner.json("install", "--global", "--force", "--client", client)
+
+    assert old_config.read_bytes() == before, "the old-root file must be untouched"
+    assert "abandoned_entries" not in report, report
+    [row] = [r for r in report["items"] if r["name"] == "mv-inst"]
+    # The row the 0.15.1 release prints for the same steps.
+    assert set(row) == {"kind", "name", "target", "status", "armed"}, row
+    assert (row["kind"], row["name"], row["status"], row["armed"]) == (
+        "mcp",
+        "mv-inst",
+        "updated",
+        None,
+    ), row
+
+
 def test_global_moved_root_uninstall_keeps_an_adopted_stranded_entry(
     grim_binary: Path,
     grim_home: Path,

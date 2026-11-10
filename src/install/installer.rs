@@ -3345,7 +3345,9 @@ async fn install_mcp(
             .iter()
             .filter_map(|out| out.client.parse().ok())
             .collect();
-        reap_relocated_roots(
+        // The preserved-files half is always empty here: every MCP output is
+        // an `entry`, so a kept one comes back in the abandoned half only.
+        let (_, stranded) = reap_relocated_roots(
             rec,
             roots,
             &relocated_vendor_roots_from_env(),
@@ -3353,6 +3355,7 @@ async fn install_mcp(
             ReapContext::Reinstalled,
             force,
         );
+        abandoned.extend(stranded);
     }
 
     // Merge with the prior record (same-pin additive `--client` installs) —
