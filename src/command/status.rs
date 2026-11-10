@@ -76,6 +76,7 @@ use crate::oci::access::error::AccessError;
 use crate::oci::identifier::is_valid_oci_tag;
 use crate::oci::reference::ArtifactRef;
 use crate::oci::text::{escape_controls, registry_text};
+use crate::resolve::graph::GraphWarning;
 use crate::resolve::resolve_error::MAX_TRANSITIVE_NODES;
 use crate::resolve::resolve_options::DEFAULT_PER_ARTIFACT_TIMEOUT;
 
@@ -317,6 +318,8 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
     let mut update_checks: Vec<UpdateCheck> = Vec::new();
     // Rows whose `--check` reference comes from `requires` edges, by entry index.
     let mut edge_rows: Vec<(usize, NodeKey)> = Vec::new();
+    // Requests the lock records onto a direct row, which its declaration may be holding back.
+    let mut held_edges: Vec<HeldEdge> = Vec::new();
 
     // Declared bundles: one row each so the user sees what they declared.
     // A bundle never installs itself — its state reflects whether it has
@@ -350,6 +353,15 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
                 declared: declared.clone(),
                 locked: pinned.digest(),
             });
+            // A named update refuses a stale lock, so the note would advise a command that cannot run.
+            if lock_matches_config && let Some(l) = lock.as_ref() {
+                held_edges.extend(held_candidates(
+                    l,
+                    &(ArtifactKind::Bundle, name.clone()),
+                    declared,
+                    pinned,
+                ));
+            }
         }
         entries.push(StatusEntry {
             kind: ArtifactKind::Bundle,
@@ -465,6 +477,10 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
                 declared: declared.clone(),
                 locked: p.digest(),
             });
+            // A named update refuses a stale lock, so the note would advise a command that cannot run.
+            if lock_matches_config && let Some(l) = lock.as_ref() {
+                held_edges.extend(held_candidates(l, &(decl.kind, decl.name.clone()), declared, p));
+            }
         }
         let outputs_pending = pending_outputs_for(record, decl.kind, &decl.name, &target, &scope.roots);
         let key: NodeKey = (decl.kind, decl.name.clone());
@@ -723,6 +739,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             )
             .await,
         );
+        notes.extend(held_back_notes(&access, held_edges, &limits, &scope.invocation).await);
     }
 
     let mut report = StatusReport::new(entries, checked).with_notes(notes);
@@ -980,6 +997,106 @@ fn row_answer(answers: &[ReferenceAnswer], scheduled: usize) -> RowAnswer {
         Some(_) if resolved.len() < fresh.len() => RowAnswer::Read(None),
         Some((first, _)) => RowAnswer::Read(Some(outdated_from_resolve(&check.locked, Some(*first)))),
     }
+}
+
+/// A request the lock records onto a direct row, for a different reference than the
+/// row declares.
+struct HeldEdge {
+    key: NodeKey,
+    /// The reference the row declares.
+    declared: Identifier,
+    parent: NodeKey,
+    request: Identifier,
+    /// The digest the declaration's pin holds.
+    locked: Digest,
+}
+
+/// Every recorded request onto the direct row `key` that names another reference
+/// of the pinned repository than `declared`. Another repository's request has its
+/// own warning at lock time, and a request equal to the declaration moves with it.
+fn held_candidates(
+    lock: &GrimoireLock,
+    key: &NodeKey,
+    declared: &Identifier,
+    pinned: &PinnedIdentifier,
+) -> Vec<HeldEdge> {
+    let artifacts = lock
+        .iter_artifacts()
+        .map(|a| (a.kind, &a.name, a.source.pinned(), &a.requires));
+    let bundles = lock
+        .bundles
+        .iter()
+        .map(|b| (ArtifactKind::Bundle, &b.name, b.pinned(), &b.members));
+    let mut found: Vec<HeldEdge> = Vec::new();
+    for (kind, name, parent_pin, members) in artifacts.chain(bundles) {
+        for member in members.iter().filter(|m| m.kind == key.0 && m.name == key.1) {
+            let Some(request) = member.absolute_id(parent_pin.map(PinnedIdentifier::as_identifier)) else {
+                continue;
+            };
+            let parent = (kind, name.clone());
+            let seen = found.iter().any(|f| f.parent == parent && f.request == request);
+            if request != *declared && request.registry_repository() == pinned.registry_repository() && !seen {
+                found.push(HeldEdge {
+                    key: key.clone(),
+                    declared: declared.clone(),
+                    parent,
+                    request,
+                    locked: pinned.digest(),
+                });
+            }
+        }
+    }
+    found
+}
+
+/// One note per direct row a recorded request is held back from: the request's
+/// reference now names a digest other than the row's pin. `--check` is online
+/// already, so this reads only what it reads. A read that fails or runs past the
+/// deadline says nothing, and so does the cap, which keeps the sweep bounded.
+async fn held_back_notes(
+    access: &Arc<dyn OciAccess>,
+    held: Vec<HeldEdge>,
+    limits: &CheckLimits,
+    grim: &Invocation,
+) -> Vec<String> {
+    let checks: Vec<UpdateCheck> = held
+        .iter()
+        .enumerate()
+        .map(|(index, edge)| UpdateCheck {
+            index,
+            declared: edge.request.clone(),
+            locked: edge.locked.clone(),
+        })
+        .collect();
+    let (mut room, mut skipped) = (limits.checks, 0);
+    let checks = within_cap(checks, &mut room, &mut skipped);
+    let mut answers = fresh_digests(access, checks, limits.per_call, limits.deadline())
+        .await
+        .answers;
+    answers.sort_by_key(|(check, _)| check.index);
+    let mut asked: BTreeMap<&NodeKey, Vec<(NodeKey, Identifier)>> = BTreeMap::new();
+    for (check, fresh) in answers {
+        let Some(Ok(Some(now))) = fresh else { continue };
+        let edge = &held[check.index];
+        if now != edge.locked {
+            let requests = asked.entry(&edge.key).or_default();
+            requests.push((edge.parent.clone(), edge.request.clone()));
+        }
+    }
+    asked
+        .into_iter()
+        .filter_map(|(key, requests)| {
+            // Every edge of a key carries the one pin its declaration holds.
+            let first = held.iter().find(|edge| edge.key == *key)?;
+            Some(GraphWarning::HeldBack {
+                key: key.clone(),
+                held: first.locked.clone(),
+                requests,
+                update: GraphWarning::held_back_update(&first.declared, grim.update(&key.1)),
+            })
+        })
+        .map(|warning| warning.to_string())
+        .collect()
 }
 
 /// The note of a row whose references name different digests.
@@ -6421,5 +6538,122 @@ mod tests {
         assert!(logs.contains("local source './evil\\u{1b}[2J\\nforged'"), "{logs:?}");
         assert!(!logs.contains('\u{1b}'), "{logs:?}");
         assert_eq!(logs.trim_end().lines().count(), 1, "{logs:?}");
+    }
+
+    /// `dep` is held at `d…`; `p` asks for `dep:2`, `q` for the declared reference
+    /// itself, and `r` for another repository's `dep:3`.
+    fn held_lock() -> GrimoireLock {
+        let pin = "d".repeat(64);
+        let parent = |name: &str, id: &str| {
+            format!(
+                "\n[[skill]]\nname = \"{name}\"\npinned = \"ghcr.io/acme/{name}@sha256:{pin}\"\n\n\
+                 [[skill.requires]]\nkind = \"skill\"\nname = \"dep\"\nid = \"{id}\"\n"
+            )
+        };
+        let text = format!(
+            "[metadata]\nlock_version = 1\ndeclaration_hash_version = 1\n\
+             declaration_hash = \"sha256:{pin}\"\ngenerated_by = \"grim 0.1.0\"\n\
+             generated_at = \"2026-04-19T00:00:00Z\"\n\n\
+             [[skill]]\nname = \"dep\"\npinned = \"ghcr.io/acme/dep@sha256:{pin}\"\n{}{}{}",
+            parent("p", "ghcr.io/acme/dep:2"),
+            parent("q", "ghcr.io/acme/dep"),
+            parent("r", "ghcr.io/other/dep:3"),
+        );
+        GrimoireLock::from_toml_str(&text).unwrap()
+    }
+
+    fn held_edges_of(lock: &GrimoireLock) -> Vec<HeldEdge> {
+        let declared = Identifier::parse("ghcr.io/acme/dep").unwrap();
+        let row = find_locked(lock, ArtifactKind::Skill, "dep").unwrap();
+        let pinned = row.source.pinned().unwrap();
+        held_candidates(lock, &(ArtifactKind::Skill, "dep".to_string()), &declared, pinned)
+    }
+
+    #[test]
+    fn only_a_request_for_another_reference_of_the_same_repository_is_a_candidate() {
+        let edges = held_edges_of(&held_lock());
+
+        let asked: Vec<(&str, String)> = edges
+            .iter()
+            .map(|e| (e.parent.1.as_str(), e.request.to_string()))
+            .collect();
+        assert_eq!(asked, [("p", "ghcr.io/acme/dep:2".to_string())]);
+    }
+
+    #[test]
+    fn a_lock_with_no_recorded_edges_has_no_candidate() {
+        let mut lock = held_lock();
+        for artifact in lock.skills.iter_mut() {
+            artifact.requires.clear();
+        }
+
+        assert!(held_edges_of(&lock).is_empty());
+    }
+
+    async fn dep_registry(two: &Digest) -> ScriptedAccess {
+        let access = ScriptedAccess::default();
+        let repo = Identifier::new_registry("acme/dep", "ghcr.io");
+        access.inner.put_tag(&repo, "2", two).await.unwrap();
+        access
+    }
+
+    fn limits() -> CheckLimits {
+        CheckLimits::default()
+    }
+
+    #[tokio::test]
+    async fn a_request_that_names_another_digest_gets_one_note() {
+        let access: Arc<dyn OciAccess> = Arc::new(dep_registry(&Algorithm::Sha256.hash(b"two")).await);
+
+        let notes = held_back_notes(&access, held_edges_of(&held_lock()), &limits(), &Invocation::WALKED).await;
+
+        assert_eq!(
+            notes,
+            [
+                "skill/dep is requested by skill/p as ghcr.io/acme/dep:2, but your declaration holds it at \
+              sha256:dddddddddddd; run `grim update -- dep` to re-read the declared tag, or declare the requested reference"
+            ]
+        );
+    }
+
+    /// A digest declaration has no tag for `grim update` to re-read.
+    #[tokio::test]
+    async fn a_digest_declaration_is_not_told_to_update() {
+        let access: Arc<dyn OciAccess> = Arc::new(dep_registry(&Algorithm::Sha256.hash(b"two")).await);
+        let lock = held_lock();
+        let by_digest = Identifier::parse(&format!("ghcr.io/acme/dep@sha256:{}", "d".repeat(64))).unwrap();
+        let row = find_locked(&lock, ArtifactKind::Skill, "dep").unwrap();
+        let pinned = row.source.pinned().unwrap();
+        let held = held_candidates(&lock, &(ArtifactKind::Skill, "dep".to_string()), &by_digest, pinned);
+
+        let notes = held_back_notes(&access, held, &limits(), &Invocation::WALKED).await;
+
+        assert_eq!(
+            notes,
+            [
+                "skill/dep is requested by skill/p as ghcr.io/acme/dep:2, but your declaration holds it at \
+              sha256:dddddddddddd; declare the requested reference to take it"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_that_names_the_held_digest_gets_no_note() {
+        let access: Arc<dyn OciAccess> = Arc::new(dep_registry(&Digest::Sha256("d".repeat(64))).await);
+
+        let notes = held_back_notes(&access, held_edges_of(&held_lock()), &limits(), &Invocation::WALKED).await;
+
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    #[tokio::test]
+    async fn a_request_the_registry_cannot_answer_gets_no_note() {
+        let mut access = dep_registry(&Algorithm::Sha256.hash(b"two")).await;
+        access.down = BTreeSet::from(["dep".to_string()]);
+        let access: Arc<dyn OciAccess> = Arc::new(access);
+
+        let notes = held_back_notes(&access, held_edges_of(&held_lock()), &limits(), &Invocation::WALKED).await;
+
+        assert!(notes.is_empty(), "{notes:?}");
     }
 }

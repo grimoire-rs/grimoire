@@ -106,7 +106,6 @@ pub struct GraphNode {
     /// The manifest digest. `None` for a path source.
     pub pinned: Option<PinnedIdentifier>,
     /// Declared directly, whatever else also requires it.
-    #[cfg_attr(not(test), expect(dead_code, reason = "read by `grim why` and the status fields"))]
     pub direct: bool,
     /// The members or requires layer exactly as published (relative ids stay
     /// relative), in `(kind, name)` order. Empty when the node has none.
@@ -114,7 +113,6 @@ pub struct GraphNode {
     /// `published`, resolved against this node's repository, in key order.
     pub edges: Vec<GraphEdge>,
     /// Every node whose edges name this one, in key order.
-    #[cfg_attr(not(test), expect(dead_code, reason = "read by `grim why` and the status fields"))]
     pub parents: Vec<NodeKey>,
     /// The bundles this node was reached through. Empty for a direct node.
     pub provenance: Vec<BundleProvenance>,
@@ -155,25 +153,75 @@ pub enum GraphWarning {
         required: String,
         required_by: Vec<NodeKey>,
     },
+    /// A direct declaration holds a pin that differs from what a dependency
+    /// requests of the same artifact. The declaration wins, as it always has; the
+    /// request would otherwise be dropped without a word.
+    HeldBack {
+        key: NodeKey,
+        /// The digest the declaration's pin holds.
+        held: Digest,
+        /// Each requesting artifact with the reference it asked for.
+        requests: Vec<(NodeKey, Identifier)>,
+        /// The named update that re-reads `key`'s declared tag; `None` where the
+        /// declaration pins a digest, which re-reading a tag cannot move.
+        update: Option<String>,
+    },
+}
+
+impl GraphWarning {
+    /// The update remedy a held-back warning for a key declared as `declared` may
+    /// name: none when the declaration pins a digest, with or without a tag, since a
+    /// digest reference resolves to itself and the update would change nothing.
+    #[must_use]
+    pub fn held_back_update(declared: &Identifier, update: String) -> Option<String> {
+        declared.digest().is_none().then_some(update)
+    }
 }
 
 impl std::fmt::Display for GraphWarning {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self::PublisherMismatch {
-            key,
-            direct,
-            required,
-            required_by,
-        } = self;
-        let parents: Vec<String> = required_by.iter().map(label).collect();
-        write!(
-            f,
-            "{} is declared directly from {} but required by {} from {}; the direct declaration wins (did you mean to switch publishers?)",
-            label(key),
-            registry_text(direct),
-            parents.join(", "),
-            registry_text(required)
-        )
+        match self {
+            Self::PublisherMismatch {
+                key,
+                direct,
+                required,
+                required_by,
+            } => {
+                let parents: Vec<String> = required_by.iter().map(label).collect();
+                write!(
+                    f,
+                    "{} is declared directly from {} but required by {} from {}; the direct declaration wins (did you mean to switch publishers?)",
+                    label(key),
+                    registry_text(direct),
+                    parents.join(", "),
+                    registry_text(required)
+                )
+            }
+            Self::HeldBack {
+                key,
+                held,
+                requests,
+                update,
+            } => {
+                let asked: Vec<String> = requests
+                    .iter()
+                    .map(|(parent, id)| format!("{} as {}", label(parent), registry_text(&id.to_string())))
+                    .collect();
+                let remedy = match update {
+                    Some(update) => {
+                        format!("run `{update}` to re-read the declared tag, or declare the requested reference")
+                    }
+                    None => "declare the requested reference to take it".to_string(),
+                };
+                write!(
+                    f,
+                    "{} is requested by {}, but your declaration holds it at {}; {remedy}",
+                    label(key),
+                    asked.join(", "),
+                    held.to_short_string()
+                )
+            }
+        }
     }
 }
 
