@@ -4904,6 +4904,126 @@ mod tests {
         }
     }
 
+    /// `team` = [`pack:1` (leaving), `pk2:1` (y, b), `extra:1`] with `y:1` requiring the
+    /// bundle `outer:1`, which lists `x:1`, locked and left as `writer` wrote it. With
+    /// `stale`, `outer:2` lists `x:2` and `y:1` moves onto a manifest requiring it, so `y:1`
+    /// at its pin is the stale side; without it `outer:1` lists `x:2` itself and `y:1` stays.
+    /// Last, `pack:1` lists `x:2` itself, so the pick reaches no bundle `y` requires.
+    async fn part_beside_a_dependent_of_a_bundle_listing_a_row(
+        path: &Path,
+        reg: &MemoryRegistry,
+        writer: Option<Writer>,
+        stale: bool,
+    ) -> (MarketplaceLock, MarketplaceManifest) {
+        for name in ["x", "leaving", "b", "extra"] {
+            publish_skill(reg, &member(name), "v1").await;
+        }
+        let x2 = "localhost:5000/acme/x:2";
+        publish_skill(reg, x2, "v2").await;
+        publish_bundle(reg, OUTER_ONE, &[("x", &member("x"))]).await;
+        publish_requiring_bundle(reg, &member("y"), "outer", OUTER_ONE).await;
+        let leaving = member("leaving");
+        publish_bundle(reg, PACK, &[("leaving", &leaving)]).await;
+        publish_bundle(
+            reg,
+            "localhost:5000/acme/pk2:1",
+            &[("y", &member("y")), ("b", &member("b"))],
+        )
+        .await;
+        let m = market(path, &[("team", &["acme/pack:1", "acme/pk2:1", "acme/extra:1"])]);
+        let locked = resolve(&m, None, &PluginSelection::All, &access_over(reg))
+            .await
+            .unwrap()
+            .lock;
+        let mut previous = writer.map_or(locked.clone(), |writer| written_by(locked, writer));
+        if matches!(writer, Some(Writer::Grim0151)) {
+            // 0.15.1 reads no `requires` layer, so no row came in through `y`.
+            previous
+                .plugins
+                .get_mut("team")
+                .unwrap()
+                .skills
+                .retain(|row| row.name != "x");
+        }
+        if stale {
+            publish_bundle(reg, OUTER_TWO, &[("x", x2)]).await;
+            publish_requiring_bundle(reg, &member("y"), "outer", OUTER_TWO).await;
+        } else {
+            publish_bundle(reg, OUTER_ONE, &[("x", x2)]).await;
+        }
+        publish_bundle(reg, PACK, &[("x", x2), ("leaving", &leaving)]).await;
+        (previous, m)
+    }
+
+    /// A held row whose `requires` names a bundle that lists a row the pick moves refuses
+    /// the pick with 78, though the pick reaches no bundle on that path. A part grim 0.15.1
+    /// wrote holds no row that came through the requirement, so it shows no moved row and
+    /// the pick exits as it did before the check.
+    #[tokio::test]
+    async fn a_pick_refuses_a_dependent_beside_another_version_of_a_row_its_bundle_requirement_lists() {
+        let mut missed = Vec::new();
+        for (label, writer, _) in BUNDLE_WRITERS {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("marketplace.toml");
+            let reg = MemoryRegistry::new();
+            let (previous, m) = part_beside_a_dependent_of_a_bundle_listing_a_row(&path, &reg, writer, true).await;
+            let access = access_over(&reg);
+
+            let result = resolve(&m, Some(&previous), &pick(&["pack"]), &access).await;
+            if matches!(writer, Some(Writer::Grim0151)) {
+                assert!(result.is_ok(), "{label}: the part holds no x: {:?}", result.map(|_| ()));
+                continue;
+            }
+            let Err(err) = result else {
+                missed.push(label);
+                continue;
+            };
+            let text = err.to_string();
+            if writer.is_some() {
+                assert!(text.contains("skill 'y'"), "{label}: {text}");
+                assert!(text.contains("requires x:1 through outer:1"), "{label}: {text}");
+                assert!(text.contains("skill 'x' to x:2"), "{label}: {text}");
+            }
+            assert_eq!(classified(err).exit, ExitCode::ConfigError, "{label}: {text}");
+
+            resolve(&m, Some(&previous), &update_extra(), &access)
+                .await
+                .unwrap_or_else(|e| panic!("{label}: extra moves no row y requires: {e}"));
+        }
+        assert!(missed.is_empty(), "{missed:?}: y would stay beside x:2");
+    }
+
+    /// Controls for a row a held bundle requirement lists: where that list names the
+    /// version the pick moves the row to, or cannot be read, nothing is refused.
+    #[tokio::test]
+    async fn a_pick_refuses_nothing_where_the_row_a_bundle_requirement_lists_answers_it_or_cannot_be_read() {
+        for (label, writer, _) in BUNDLE_WRITERS.into_iter().skip(1) {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("marketplace.toml");
+            let reg = MemoryRegistry::new();
+            let (previous, m) = part_beside_a_dependent_of_a_bundle_listing_a_row(&path, &reg, writer, false).await;
+
+            resolve(&m, Some(&previous), &pick(&["pack"]), &access_over(&reg))
+                .await
+                .unwrap_or_else(|e| panic!("{label}: outer:1 lists the x:2 the pick moves to: {e}"));
+        }
+        for (label, writer, _) in BUNDLE_WRITERS.into_iter().skip(1) {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("marketplace.toml");
+            let spy = Spy::default();
+            let (previous, m) = part_beside_a_dependent_of_a_bundle_listing_a_row(&path, &spy.reg, writer, true).await;
+            spy.cold.lock().unwrap().insert(OUTER_ONE.to_string());
+
+            let result = resolve(&m, Some(&previous), &pick(&["pack"]), &spy.access()).await;
+
+            assert!(
+                result.is_ok(),
+                "{label}: an unreadable list refuses nothing: {:?}",
+                result.map(|_| ())
+            );
+        }
+    }
+
     /// `team` = [`p:1`, `pk2:1` (y, b), `extra:1`] with `y:1` requiring the bundle `req:1`
     /// (listing `x:1`), locked and left as `writer` wrote it; grim 0.15.1 follows no
     /// `requires` layer, so its part holds no `x`. Then `p:1` moves onto a manifest requiring

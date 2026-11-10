@@ -1035,6 +1035,55 @@ def test_a_pick_over_an_old_part_refuses_a_dependent_requiring_the_moved_bundle_
     assert by_member.returncode == 0, by_member.stderr
 
 
+def test_a_pick_over_an_old_part_shows_no_moved_row_below_a_held_bundle_requirement(
+    old: GrimRunner, current: GrimRunner, work: Path, unique_repo: str
+) -> None:
+    """`y:1` requires the bundle `outer:1`, which lists `x:1`; `pack` then lists `x:2`.
+
+    grim 0.15.1 follows no `requires`, so its part holds no `x`. The pick of `pack` brings
+    `x:2` as a new row, and nothing in the part shows it moved one: the pick exits 0 and
+    keeps `y` at its pin, as it did before the rows of a held requirement were judged. A
+    part that holds `x:1` refuses the same pick with 78.
+    """
+    x1 = _skill(unique_repo, "x")
+    x2 = _skill(unique_repo, "x", "v2", tag="2")
+    leaving = _skill(unique_repo, "leaving")
+    b = _skill(unique_repo, "b")
+    extra = _skill(unique_repo, "extra")
+    outer1 = make_bundle(f"{unique_repo}/outer", [("skill", "x", x1.fq)], tag="1")
+    outer2 = make_bundle(f"{unique_repo}/outer", [("skill", "x", x2.fq)], tag="2")
+    files = {"y/SKILL.md": "---\nname: y\ndescription: d\n---\n# y\n"}
+    y = make_dependent(
+        f"{unique_repo}/y", "1", "skill", files, [("bundle", "outer", outer1.fq)]
+    )
+    pack = make_bundle(f"{unique_repo}/pack", [("skill", "leaving", leaving.fq)], tag="1")
+    pk2 = make_bundle(
+        f"{unique_repo}/pk2", [("skill", "y", y.fq), ("skill", "b", b.fq)], tag="1"
+    )
+    _write_manifest(work, [pack.fq, pk2.fq, extra.fq])
+    assert _update(old).returncode == 0
+    assert "x" not in _rows(work)
+    retag(f"{unique_repo}/pack", "keep", pack.digest)
+    make_bundle(
+        f"{unique_repo}/pack",
+        [("skill", "x", x2.fq), ("skill", "leaving", leaving.fq)],
+        tag="1",
+    )
+    retag(f"{unique_repo}/y", "keep", y.digest)
+    make_dependent(
+        f"{unique_repo}/y", "1", "skill", files, [("bundle", "outer", outer2.fq)]
+    )
+    held = _rows(work)["y"]
+
+    assert _update(old, "team:pack").returncode == 79
+    result = _update(current, "team:pack")
+
+    assert result.returncode == 0, result.stderr
+    rows = _rows(work)
+    assert rows["y"]["pinned"].endswith(held["pinned"].rsplit("@", 1)[1]), rows["y"]
+    assert rows["x"]["pinned"].endswith(x2.digest), rows["x"]
+
+
 def test_a_pick_over_an_old_part_refuses_a_dependent_beside_another_version_of_a_bundle_its_bundle_requirement_nests(
     old: GrimRunner, current: GrimRunner, work: Path, unique_repo: str
 ) -> None:
