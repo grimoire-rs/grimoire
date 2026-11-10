@@ -288,6 +288,24 @@ for anyone upgrading:
   2026-11-08. The refusal needs proof, from the lock's records or from a
   manifest or tag read that succeeded. A failed read refuses nothing by itself.
   Run the whole plugin to move both.
+- The same refusal also covers four more shapes of that pick, which exited `0`
+  before. They arise on a part c5e3824 wrote, and the first two also on a part
+  0.15.1 wrote. The last one also arises on a part this grim wrote, when the pick
+  is a whole bundle such as `team:pack`. Each needs proof, as above, and writes
+  nothing.
+  - A nested list names the moved bundle under two bindings.
+  - The dependent requires the moved bundle under another binding than the
+    pick's. Grim matches it by repository where the pick reaches exactly one
+    bundle of it.
+  - The dependent requires a bundle that lists a row the pick moves to another
+    version.
+  - The dependent's requirement tag was republished onto the digest the pick
+    moves to.
+
+  A pick that leaves the dependent beside the same version exits `0` as before.
+  So does one that reaches several bundles of the held repository. The refusal
+  text says that the whole-plugin update it offers moves every pin of the plugin
+  whose tag moved.
 
 Some exits went the other way, and a job that read the failure as a signal loses
 it:

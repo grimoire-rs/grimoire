@@ -118,7 +118,9 @@ Full matrix: [emit matrix][emit-matrix] · [client compatibility][clients].
   those three ride the published layer (under `<name>/…`, for
   `grim fetch --path` and catalog UIs) but are never installed to a
   client; every other file in that directory is ignored
-  ([well-known assets][well-known]).
+  ([well-known assets][well-known]). That `<name>/README.md` is also the
+  README of the agent's description companion, unless `publish.toml`
+  turns the lookup off with `[description] entry_readme = false`.
 - **No model translation** — see vendor overrides above.
 
 ## Minimal Example

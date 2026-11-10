@@ -24,7 +24,7 @@ These apply to every subcommand:
 | `--registry <ref>` | Registry for short identifiers and the browse set. Repeatable / comma-separated (`--registry a,b`); the first value is the default. |
 | `--offline` | Disable all network access; work from the cache only and fail rather than reach a registry. |
 | `--progress <auto\|json\|none>` | Progress rendering for long-running passes (default `auto` = tty-gated stderr bar on `install`, `export plugin` and `export marketplace`, silent elsewhere; the two exports count every member fetched, across all plugins). `json` emits NDJSON events on **stderr** — `{"event":"start","total":N}`, `{"event":"advance","position":i,"total":N,"label":"…"}` (`label` is display-only), `{"event":"finish"}` — while stdout keeps the normal report. **Experimental pre-1.0**; see [Stability](./stability.md#unstable). |
-| `--log-level <level>` | Override the tracing log level (`warn`, `info`, `debug`). |
+| `--log-level <level>` | Set the tracing log level: `off`, `error`, `warn`, `info`, `debug` or `trace` (case-insensitive). Wins over [`GRIM_LOG`](./configuration.md#environment-variables). An invalid value prints one line on stderr naming the accepted levels, and the run continues at the `GRIM_LOG` or `warn` level. |
 
 A downstream reader that closes the pipe early — `grim status --format
 json | head` — makes grim exit `0` silently instead of erroring or
@@ -402,6 +402,10 @@ tag to a digest works the same way, and so does going from a digest-only
 reference back to a tag. Dropping the digest from `:1@sha256:…` back to `:1`
 keeps that digest until [`grim update <name>`](#update).
 
+A new dependency can ask for another version of a directly declared artifact.
+The declaration's pin holds, and `add` warns once per held artifact. See
+[a pin that holds back a request](#lock-held-back).
+
 Re-declaring the exact same reference moves nothing, even after its tag moved.
 The report still reads `added`, and one stderr line says the pin was kept. It
 names `grim update -- <name>`, which moves the pin or says why it cannot.
@@ -689,6 +693,32 @@ it, and for a bundle that digest selects the member list. For a checkout you do
 not trust, run [`grim update`](#update) or delete the lock.
 [`grim status --check`](#status-check) reports a pin that differs from its tag.
 
+### A pin that holds back a request {#lock-held-back}
+
+A direct declaration's pin wins over what a dependency asks for. Suppose a
+parent that is new to the lock, or moved in this run, requests a reference. A
+local (path) parent counts when it is new or its content changed.
+
+If that reference resolves to another digest than the held pin, the run still
+exits `0` and writes the same lock. It prints one warning per held key on
+stderr:
+
+```text
+skill/x is requested by skill/p as ghcr.io/acme/x:2, but your declaration holds it at <pin>; run `grim update -- x` to re-read the declared tag, or declare the requested reference
+```
+
+A key several new parents ask for gets one warning that names all of them.
+`grim add`, `grim update` and `grim lock` print it. A declaration pinned by
+digest gets a shorter text. It ends in `declare the requested reference to take
+it`, because re-reading a tag cannot move a digest.
+
+Four cases print nothing: a request that resolves to the held digest, one grim
+cannot read, an offline run and a marketplace part run. None of them changes an
+exit. The probe reads at most 64 distinct references and stops after 60 seconds
+per run. The warnings it did not reach are dropped without a message. A standing
+case from an earlier run is not repeated here:
+[`grim status --check`](#status-check) lists it.
+
 ### Exit codes {#lock-exit-codes}
 
 | Situation | Code |
@@ -740,8 +770,14 @@ directories. `--client <list>` selects AI clients (comma-separated; any
 supported client — see the [client compatibility matrix](./clients.md#matrix)),
 overriding the config `clients` option. When
 neither selects a client, the **detected** clients for the scope are
-targeted — every client whose vendor directory or marker is present. When
-nothing is detected, the generic `agents` client is targeted instead: one
+targeted — every client whose vendor directory or marker is present — plus,
+in a project, the clients in the global `options.clients`. The run prints
+`clients: <name> (<source>), …` on stderr, where the source is `--client`,
+`project`, `detected`, `global` or `fallback`. A `--global` run labels the
+clients of its own `options.clients` list `global`. The line is left out of
+`--progress json` and `--progress none` runs.
+
+When nothing is detected and no global list is set, the generic `agents` client is targeted instead: one
 copy into the cross-vendor `.agents/skills` pool, rather than a copy into
 every vendor directory grim knows about. That generic client renders skills
 only, so an artifact set of nothing but rules, agents, and MCP servers has
@@ -882,6 +918,10 @@ grim update
 grim update code-review rust-style
 ```
 
+A moved parent can ask for another version of a directly declared
+artifact. The declaration's pin holds, and `update` warns once per held
+artifact, as [`lock`](#lock-held-back) does.
+
 A row reads `updated` when its pin is new or moved, and `unchanged` when it held.
 It reads `restored` when the pin held and this run wrote the files, with `old`
 equal to `new`. That covers a deleted output coming back, a client's first copy
@@ -941,6 +981,11 @@ silently discarded. `grim update --force` overrides that guard and deletes even
 a locally-modified dropped-client output. Widening the set is symmetric: a
 newly-configured client is materialized on the next `update`.
 
+A dropped client's output is kept too when its config file cannot be read or
+parsed, or sits behind a directory grim cannot search. It stays in the install
+record. The file is never touched, `--force` included. A stderr warning
+names the output.
+
 An MCP entry grim [adopted](#install) rather than wrote is the user's own. A
 reap leaves it in the config file, warns, and names it in the row's
 `abandoned_entries`. The client is still listed under `reaped_clients`, and
@@ -954,7 +999,8 @@ An entry there that grim cannot read stays and is named too, with or without
 you pass `--force`. Then it stays in the file and is named as well.
 
 This reap only fires against an **explicitly set** `[options].clients`. When
-it is unset (the default, autodetect), `update` never reaps. The desired
+it is unset (the default, autodetect), `update` never reaps, and that holds
+when the global `options.clients` joins the detected clients. The desired
 client set would otherwise be re-derived from live client detection on every
 run. A detection change (a client's marker directory removed, an environment
 variable unexported) is not the same thing as the user narrowing their config.
@@ -1196,8 +1242,17 @@ bundle, the part's own stamps can still prove the move: a row its tag brought
 that the pick moved. A requirement the new lock lacks is held with the row that
 needs it. An edge onto a key the plugin includes directly refuses nothing. The
 row it requires can be a bundle too, judged on the bundle the run read for that
-name. So is each bundle that bundle's list nests at any depth, read at the tag
-its edge names.
+name, or else the one bundle of that repository the pick reaches. With none or
+several, the earlier exit stays. So is each bundle that bundle's list nests at
+any depth, read at the tag its edge names, under each binding the list names it
+by. The rows such a list holds are judged too, unless the pick reaches a bundle
+of that repository. A requirement tag republished onto the digest the pick moves
+to still counts as held against what it named before.
+
+The refusal names the narrow remedy first: add the dependent to the pick. It
+then offers `grim update --marketplace <manifest> <plugin>`, and says that this
+moves every pin of the plugin whose tag moved. The `79` text for a pinned
+manifest the registry no longer holds says the same of its whole-plugin command.
 
 A pick records no digest for a bundle it does not select, except one a bundle it
 selects nests. That one records none while a row carries its stamp without a
@@ -1277,6 +1332,11 @@ when the lock alone cannot work the parents out, for example before the first
 `grim lock`. See [Why an artifact is installed](./json-interface.md#status-provenance)
 for the exact contract, and [`grim why`](#why) for the chains behind a row.
 
+Plain output also prints a `clients:` note on stderr, for example `clients:
+claude (global), opencode (detected)`. It names the clients the report covers
+and what selected each, in the words of [`grim install`](#install). Stdout and
+`--format json` do not carry it.
+
 A directly declared artifact may also be required by another artifact at the
 same digest, with no artifact asking for another version of it. Plain output
 then prints a note on stderr that the declaration can be removed. It stays safe to keep: a direct declaration wins over a dependency.
@@ -1292,8 +1352,8 @@ Each item also carries `clients_missing` /
 `clients_extra`: the project's *explicitly configured* `[options].clients`
 diffed against the artifact's recorded install-state clients, entirely from
 local state (no network) — sorted arrays, `[]` when the two sets agree. When
-`[options].clients` is unset (autodetect), both stay `[]` on every item
-instead: diffing against live client detection would report drift whenever
+`[options].clients` is unset (autodetect, with or without a global list), both
+stay `[]` on every item instead: diffing against live client detection would report drift whenever
 detection disagrees with what was recorded, which is not real config drift.
 `clients_missing` also skips any configured client whose vendor cannot host
 that artifact's kind at that scope — a Codex rule, say — since the install
@@ -1436,6 +1496,13 @@ When they name different digests, the row reads `null` in whatever order they
 are listed. Its stderr note names the references and says `grim update`, with
 the run's `--global` or `--config`, exits `78` until `grimoire.toml` declares
 one.
+
+Online, `--check` also prints one stderr note per directly declared row, or
+declared bundle, that a recorded request is held back from. The note uses the words of the
+[held-back warning](#lock-held-back). It reads the requests from the lock's
+recorded edges. The note changes neither the exit code nor the JSON, and an
+offline run or a lock with no recorded edges prints none. The note leaves once
+`grim update -- <name>` moves the row to the requested digest.
 
 A nested bundle has no row, and `update_available` stays each row's own answer.
 A row that reaches a moved nested bundle lists it in

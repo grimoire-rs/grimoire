@@ -98,7 +98,7 @@ grim install
 
 ## What detection looks at
 
-Without an `options.clients` list, `grim install` writes to every client it detects.
+Without a project `options.clients` list, `grim install` writes to every client it detects. It also writes to the clients in your global `options.clients` list, detected or not, and creates their directories. `--client` and a project list leave the global list out. The run prints a line such as `clients: claude (global), opencode (detected)` on stderr, except under `--progress json` or `--progress none`, and `grim status` prints it as a note.
 
 At project scope a client counts as detected when its own directory sits in the workspace: `.claude` for [Claude Code](https://code.claude.com), `.cursor` for [Cursor](https://cursor.com). Claude Code also counts when the project holds a `.mcp.json`. At global scope grim looks at the user-level root instead, `~/.claude` or the directory `$CLAUDE_CONFIG_DIR` points at.
 
@@ -112,7 +112,7 @@ Project detection never reads your home directory. A fresh checkout with no vend
 [rules]
 ```
 
-With nothing detected, `grim install` targets the vendor-neutral `agents` client. That is the shared pool at `.agents/skills`, which several clients read. It is only ever selected and never detected, so writing the pool changes no later run's answer.
+With nothing detected and no global list, `grim install` targets the vendor-neutral `agents` client. That is the shared pool at `.agents/skills`, which several clients read. It is only ever selected and never detected, so writing the pool changes no later run's answer.
 
 The [client compatibility matrix](../clients.md) names every client grim knows and the kinds each one takes.
 

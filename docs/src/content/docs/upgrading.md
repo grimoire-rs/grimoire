@@ -137,8 +137,10 @@ artifact's `state` as `missing` even though the file is on disk.
 reaps the stranded copy automatically, including an MCP entry spliced into
 the old settings file — the case no file delete could recover. A copy you
 edited yourself is **preserved, never deleted**, and grim warns naming both
-paths; on the `uninstall` path it is additionally listed in `retained`, or in
-`abandoned_entries` for a stranded MCP entry.
+paths. On the `uninstall` path it is additionally listed in `retained`, or in
+`abandoned_entries` for a stranded MCP entry. `grim update --global` lists a
+stranded MCP entry it left in `abandoned_entries` too. The `install` and `add`
+reports carry no such key.
 
 **One deliberate exception.** The shared `$HOME/.agents/skills` pool does not
 follow `$GEMINI_CLI_HOME`. One physical tree serves every pool client under a
@@ -789,6 +791,24 @@ it, so a later run can compare it with the request.
   refuses the nested bundle. The refusal needs proof, from the lock's records or
   from a manifest or tag read that succeeded. A failed read refuses nothing by
   itself. Select `<plugin>` to move both.
+- The same refusal also covers four more shapes of that pick, which exited `0`
+  before. They arise on a part c5e3824 wrote, and the first two also on a part
+  0.15.1 wrote. The last one also arises on a part this grim wrote, when the pick
+  is a whole bundle such as `team:pack`. Each needs proof, as above, and writes
+  nothing.
+  - A nested list names the moved bundle under two bindings.
+  - The dependent requires the moved bundle under another binding than the
+    pick's. Grim matches it by repository where the pick reaches exactly one
+    bundle of it.
+  - The dependent requires a bundle that lists a row the pick moves to another
+    version.
+  - The dependent's requirement tag was republished onto the digest the pick
+    moves to.
+
+  A pick that leaves the dependent beside the same version exits `0` as before.
+  So does one that reaches several bundles of the held repository. The refusal
+  text says that the whole-plugin update it offers moves every pin of the plugin
+  whose tag moved.
 
 **What stops failing.** A job that read one of these failures as a signal loses
 it.
@@ -1038,6 +1058,23 @@ pass does not write, such as one of a client outside the target.
 The compatibility contract behind this note is in
 [Additive fields][stability-additive].
 
+**A held-back request is reported.** A direct declaration's pin has always won
+over what a dependency asks for, and that is unchanged. `grim add`,
+`grim update` and `grim lock` also warn once per artifact when a new or moved
+parent asks for a reference that resolves to another digest than the held pin.
+A path parent counts when it is new or its content changed.
+
+The warning names the requester, the requested reference and the pin. It offers
+`grim update -- <name>` to re-read the declared tag, or declaring the requested
+reference. A declaration pinned by digest is offered only the second. Exit
+codes, JSON and the written lock are the same as before.
+
+The probe reads at most 64 distinct references and stops after 60 seconds per
+run, dropping the remaining warnings without a message.
+[`grim status --check`][status-check] lists the cases that still stand, a
+declared bundle's included. An offline run and a marketplace part run print
+none. See [a pin that holds back a request][lock-held-back].
+
 ## A pool reader joins the pool beside a pool writer {#shared-pool-auto-join}
 
 Some clients read the cross-vendor `.agents/skills` pool but install into a
@@ -1071,7 +1108,63 @@ key returns the client to the automatic choice.
 set its `shared_skills` to `false`. A downgrade to an earlier grim writes the
 reader's own copy again beside the pool copy: two copies, but nothing is lost.
 
+## A project install now adds your global clients {#global-clients-join}
+
+In a project with no `--client` and no project `[options].clients`, grim used to
+install into the detected clients alone. It now installs into the detected
+clients plus the clients in your *global* `[options].clients`.
+
+**What you will see.** A global `options.clients = ["claude"]` now installs
+Claude's output into every such project, marker or not, and creates its
+directory. `grim install` reports the new outputs as `installed`, and
+[`grim status`][status] lists them as pending until then. `--client` and a
+project list still decide alone, and a run with an empty global list behaves as
+before. `grim update` reaps no client under the union, because the set is not an
+explicit one.
+
+`grim install` prints one stderr line, `clients: claude (global), opencode
+(detected)`, except under `--progress json` or `--progress none`. `grim status`
+prints it as a note. Stdout and `--format json` are the same as before. A global
+config that does not load is warned about and read as an empty list, so a
+project keeps its exit code. A project that names its own clients does not read
+the global list, so it draws no such warning. To opt out, set a project
+`[options].clients` or pass `--client`. See [the client
+matrix](./clients.md#matrix).
+
+## Each package's own README becomes its description {#package-readme-companion}
+
+`grim publish` used to give every entry the repository-level README. It now
+looks for each entry's own `README.md` first: `<path>/README.md` for a skill or
+hook, `<path without .md>/README.md` for a rule or agent.
+
+**What you will see.** A repository with package READMEs publishes a different
+companion on its next run, even at an unchanged version. The artifacts are
+skipped and each companion is re-pointed, so `grim fetch --description` returns
+the package README. Changelog and logo still come from the top level, and no
+artifact's digest changes. A repository without package READMEs publishes as
+before.
+
+To keep the old result, set `[description] entry_readme = false`. Give an entry a
+`[<kind>.<name>.description]` table to pin it. A top-level `[description]` table
+that sets files but no `readme`, next to a root `README.md`, now warns that the
+README is not published. See [the lookup and its
+precedence](./publishing.md#description-entry-readme).
+
 ## Smaller notes {#smaller-notes}
+
+- **`grim uninstall` keeps an emptied JSON container that holds a comment.**
+  Before 0.16.0, removing the last entry of an `mcpServers`-style object, an
+  `instructions` array or a hook list removed the container too. That deleted a
+  comment inside it, in a JSONC file such as OpenCode's `opencode.json`.
+
+  Since 0.16.0 the container stays, empty, with the comment. A container with no
+  comment is removed whole as before. The same holds when a hook's registration
+  is removed.
+- **`--log-level` is applied.** Before 0.16.0 the flag was parsed and ignored.
+  Since 0.16.0 it sets the level (`off`, `error`, `warn`, `info`, `debug` or
+  `trace`) and wins over `GRIM_LOG`. An invalid value prints one line and the
+  run continues. A script that passed a level and saw no change will now see
+  that output.
 
 - **The `--dry-run` preview digest equals the real push digest from 0.15.0.**
   Before that, the preview of `grim release` and `grim publish` printed a
@@ -1366,6 +1459,7 @@ reader's own copy again beside the pool copy: two copies, but nothing is lost.
 [lock-pins]: ./commands.md#lock-pins
 [add]: ./commands.md#add
 [status-check]: ./commands.md#status-check
+[lock-held-back]: ./commands.md#lock-held-back
 [json-shapes-items]: ./json-interface.md#shapes-items
 [json-update-rows]: ./json-interface.md#update-rows
 [stability-additive]: ./stability.md#frozen-additive-fields

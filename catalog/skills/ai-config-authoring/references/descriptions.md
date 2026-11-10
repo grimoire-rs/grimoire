@@ -80,6 +80,16 @@ lives.
 - Test both directions: ≥3 should-trigger phrasings *and* should-not-
   trigger neighbors (see [checklist.md](checklist.md)).
 
+## The Registry Description Is Another Thing
+
+The frontmatter description above is what the model reads. The README a
+registry page shows is a separate channel, the description companion that
+`grim publish` pushes. By default each package's own `README.md` in its
+directory (`skills/<name>/README.md`, `rules/<name>/README.md` beside
+`<name>.md`) is the README of its companion, so write it for people and
+keep it out of the trigger text. Pick the file name with
+`[description] entry_readme` in `publish.toml`; `false` turns it off.
+
 ## Further Reading
 
 - [Skill authoring best practices][bp] — the official what+when formula,

@@ -149,8 +149,9 @@ edges:
   exit `65`, while `status` still exits `0`.
 - `missing` does not separate never-installed from installed-then-deleted.
   `outputs`, empty versus populated, is what tells them apart.
-- `outputs` is filtered to the clients grim detects **right now**, not the
-  clients recorded at install time. A client whose marker directory you
+- `outputs` is filtered to the clients grim detects **right now**, plus the
+  global `options.clients` list when the project names no clients of its own.
+  It is not the clients recorded at install time. A client whose marker directory you
   removed is dropped from `outputs` while its file stays exactly where it
   is on disk, and `state` does not move. One guard: when that filter would
   empty the array entirely, every recorded output is reported instead, so a

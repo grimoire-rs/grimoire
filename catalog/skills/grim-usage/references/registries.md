@@ -663,12 +663,23 @@ authoritative.
 `grim install` and `grim update` choose targets by precedence:
 
 1. `--client <list>` flag (comma-separated: `--client claude,copilot`)
-2. config `[options].clients` (TOML array of client names)
+2. config `[options].clients` (TOML array of client names; in a project,
+   the project's own list)
 3. auto-detection — every client whose marker exists for the active
-   scope (e.g. a `.claude/` directory in the project)
-4. the generic `agents` client when nothing is detected — one copy into
-   the cross-vendor `.agents/skills` pool that several clients already
-   read, instead of a copy into every vendor directory grim knows about
+   scope (e.g. a `.claude/` directory in the project), **plus**, at
+   project scope, the clients in the global `[options].clients`
+4. the generic `agents` client when nothing is detected and no global list
+   is set — one copy into the cross-vendor `.agents/skills` pool that
+   several clients already read, instead of a copy into every vendor
+   directory grim knows about
+
+`grim install` prints `clients: <name> (<source>), …` on stderr to say
+which clients it chose and why (`--client`, `project`, `detected`,
+`global`, `fallback`), except under `--progress json` or `none`, and
+`grim status` prints it as a note. The global list is read each run, so
+`grim update` never reaps a client under the union. A global config that
+does not load is warned about and read as an empty list. A project that
+names its own clients does not read the list at all.
 
 `agents` renders **skills only**; it has no vendor-neutral surface for
 rules, agents, or MCP servers. So if nothing is detected and your lock

@@ -210,6 +210,14 @@ that point at one digest today can part ways when one of them moves. A later
 `grim lock` keeps the pin and exits `0`. The fix is the one the error names:
 declare the artifact directly.
 
+When a direct declaration's pin holds back a version a dependency asks for,
+the pin still wins and the run exits `0`. `grim add`, `grim update` and
+`grim lock` then warn once per held artifact, naming the requester, the
+requested reference and the held pin. The warning offers two ways out:
+`grim update -- <name>` re-reads the declared tag, and declaring the requested
+reference chooses it. [`grim status --check`](./commands.md#status) lists the
+cases that still stand.
+
 A conflicting artifact is never expanded, so its own dependencies do not add
 further conflicts. Cycles are a separate failure, covered under
 [dependencies](#dependency-cycles).
@@ -369,11 +377,13 @@ produces a warning and writes no file. Other clients decline other kinds for
 their own reasons, each recorded in the matrix.
 
 [`grim install`](./commands.md#install) writes to the targets listed in the
-`clients` option in your config; without one it targets every client it
-detects (vendor directory or marker present). When nothing is detected it
-targets the generic **`agents`** client — not a product, but the
-vendor-neutral pool at `.agents/skills` that several clients already read.
-It is never *detected*, only selected: writing the pool directory changes no
+`clients` option in your config. Without one it targets every client it
+detects (vendor directory or marker present), plus the clients in your global
+`options.clients` list when the project names none.
+
+When nothing is detected and no global list is set, it targets the generic
+**`agents`** client. That is not a product but the vendor-neutral pool at
+`.agents/skills` that several clients already read. It is never *detected*, only selected: writing the pool directory changes no
 future run's answer, which is exactly why grim no longer falls back to every
 known client. `--client` overrides both and accepts a comma-separated list to
 install into several AI clients at once.

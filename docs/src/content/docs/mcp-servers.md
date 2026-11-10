@@ -124,6 +124,10 @@ streamable-HTTP `url` entry.
 [Claude Code][claude-code-mcp-docs] reads a `type: "ws"` entry — every
 other client [declines the descriptor](#emit-matrix) with a warning.
 
+A client's decline is printed once per run that plans a write for it. A repeat
+`grim install` with nothing to do prints no decline line. [`grim
+status`](./commands.md#status) still shows it.
+
 ### The `[server.oauth]` block {#server-oauth}
 
 A remote `http`/`sse` server that authenticates via OAuth can carry a
@@ -277,6 +281,9 @@ existing `<container>.<member>` span in the file — parsing the
 surrounding JSON/JSONC (or, for Codex, TOML) only enough to find that one
 member — and replaces just that span, so key order, unrelated entries,
 formatting, and comments elsewhere in the file all survive byte-for-byte.
+Removing the last member empties its container. A JSON or JSONC container with no
+comment left in it goes with the member. One that still holds a comment stays,
+empty, so the comment survives.
 The idiom is the same one [Ansible's `blockinfile` module][ansible-blockinfile]
 uses for editing a marked region of a config file it does not own — grim
 never owns `~/.claude.json`, `opencode.json`, or `config.toml`, so it

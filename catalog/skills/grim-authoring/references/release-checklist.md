@@ -213,10 +213,19 @@ the reserved tag is hidden from tag listings. Consumers read it with
 - **`[description]` table** decouples layout: `readme`/`logo`/`changelog`
   map onto fixed wire names; `include` globs add extra assets (each keeps
   its manifest-relative path — README-referenced images keep working).
+- **Package READMEs**: by default an entry's own `README.md`
+  (`<path>/README.md` for a skill or hook, `<path without .md>/README.md`
+  for a rule or agent) replaces the README of its companion; changelog and
+  logo still come from the top level. `[description] entry_readme = "<name>"`
+  renames the file and `false` turns the lookup off. A repository with
+  package READMEs publishes a different companion on its next run.
+- **Precedence**: per-entry table, then top-level table, then the
+  conventional files. A top-level table with files but no `readme`, next to
+  a root `README.md`, warns that the README is not published.
 - **Per-entry `[<kind>.<name>.description]` REPLACES the top-level table**
   (it is not merged — repeat shared members); `description = false` opts
-  one entry out; top-level `publish = false` kills the companion
-  manifest-wide.
+  one entry out; top-level `publish = false` turns off the shared
+  companion, and an entry with its own description table still gets one.
 - **Hard gates**: an explicit path that does not exist, a table resolving
   to zero files, or any companion path escaping the manifest directory
   (`..`, absolute, symlink escape) is a data error (65). A user-supplied

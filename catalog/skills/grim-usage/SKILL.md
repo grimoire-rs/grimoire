@@ -56,8 +56,10 @@ rather than assuming.
 > at project scope, the same workspace consent hooks use. The flag is not
 > consent. Full picture: [references/consume.md](references/consume.md#settings).
 
-Two consequences of that shape are worth knowing before your first
-install. When **nothing** is detected, grim targets the generic `agents`
+Three consequences of that shape are worth knowing before your first
+install. In a project with no `--client` and no project list, the global
+`options.clients` joins the detected clients. When **nothing** is detected
+and no global list is set, grim targets the generic `agents`
 client — one copy into the shared `.agents/skills` pool — rather than
 writing a directory for every client it knows about; a lock holding only
 rules, agents, or MCP servers then has nowhere to go and exits **78**. And

@@ -88,9 +88,23 @@ explicitly with `--client agents` or in `[options].clients`.
 
 It is also what grim falls back to when *nothing* is detected: rather than
 writing a directory for every client it knows about, an install with no
-`--client`, no `[options].clients`, and no client marker present targets
-`agents` alone. If the declared set holds nothing it can install, the command
-exits `78` and names both ways to select a client.
+`--client`, no `[options].clients` in the project or the global config, and
+no client marker present targets `agents` alone. If the declared set holds
+nothing it can install, the command exits `78` and names both ways to select
+a client.
+
+In a project with no `--client` and no project `[options].clients`, the
+targeted clients are the detected ones plus the clients in the *global*
+`[options].clients`, in matrix order. `--client` and a project list stay
+authoritative: either one makes grim ignore the global list. A global-list
+client with no marker in the workspace is installed into too, and its
+directory is created.
+
+`grim install` prints `clients: <name> (<source>), …` on stderr to say which
+clients it chose and why, except under `--progress json` or `--progress none`.
+`grim status` prints the same line as a note. A project that names its own
+clients never reads the global config for this list, so a broken global config
+draws no warning there.
 
 ## What grim will and will not do about a gap {#compensation}
 

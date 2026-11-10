@@ -5,6 +5,7 @@ the exit code, diagnose the cause, or get past an integrity gate.
 
 Contents: [Exit Codes](#exit-codes) · [Exit 65](#exit-65-data-errors) ·
 [Exit 78](#exit-78-no-client-can-host-it) ·
+[Held-Back Request](#a-held-back-request) ·
 [Integrity Gates](#integrity-gates) ·
 [Containment Refusals](#containment-refusals) ·
 [Kind Inference](#the-kind-inference-gotcha) ·
@@ -184,8 +185,8 @@ trying `grim release` again.
 
 A confusing 78 with an intact `grimoire.toml` usually means grim resolved
 a client set that cannot host the kinds you asked for. It happens when
-**nothing is detected**: grim then targets the generic `agents` client —
-one copy into the shared `.agents/skills` pool — and `agents` renders
+**nothing is detected** and no global list is set: grim then targets the
+generic `agents` client — one copy into the shared `.agents/skills` pool — and `agents` renders
 **skills only**. A lock holding nothing but rules, agents, MCP servers, or
 hooks has nowhere to go, so `grim install` (and `grim add` of such an
 artifact) exits 78 naming both ways to pick a client.
@@ -206,6 +207,15 @@ read the shared pool: refused at config *load*, so every command in that
 scope fails until it is removed. The same value through `grim config set`
 is refused earlier, at 65. Only a verified pool reader may be opted in —
 grim never writes where nothing reads.
+
+## A Held-Back Request
+
+A warning that `skill/x is requested by skill/p as <ref>, but your declaration
+holds it at <pin>` is not an error: the declaration's pin won and the exit is
+0. Run `grim update -- x` to re-read the declared tag, or declare the
+requested reference. A declaration pinned by digest gets only the second
+remedy. `grim status --check` lists the requests still held back, a declared
+bundle's included.
 
 ## When grim Declines, It Stays Declined
 
@@ -486,6 +496,11 @@ Symptom, cause, fix for `grim export marketplace` and the manifests it reads
   field). Upgrade every machine and CI job first.
 - **65 "a plugin no selected client can carry":** every member was a rule or a
   hook, or agents-only for non-Claude clients.
+- **78 on `grim update --marketplace <plugin>:<member>` (or `<bundle>`),
+  writes nothing:** the pick would keep a dependent at its pin beside another
+  version of a row or bundle it requires. Add the dependent to the pick, or
+  run the whole plugin; the text says that the whole-plugin update moves
+  every pin of the plugin whose tag moved.
 - **75:** another export holds the manifest lock or the output-root
   `.grim-export.lock`.
 - **CI, required `verify` check stays pending on the bot PR:** the PR was
