@@ -587,6 +587,15 @@ impl<'a> Run<'a> {
         }
     }
 
+    /// Whether the pick reaches a bundle of the repository `id` names.
+    fn reaches_repository(&self, id: &Identifier) -> bool {
+        let repository = id.registry_repository();
+        self.lock
+            .bundles
+            .iter()
+            .any(|bundle| self.bundles.contains(&bundle.name) && bundle.provenance_pair().0 == repository)
+    }
+
     /// Whether the part's own record shows the pick moved the bundle the edge `id` names to
     /// `now`. A part that records a digest for the `(repo, tag)` shows it when the run read
     /// another; one that records none shows it when a row it stamps through that pair is a
@@ -614,9 +623,9 @@ impl<'a> Run<'a> {
 /// bundle the run moved conflicts when the moved pin does not answer it: it names another
 /// digest; or the previous part shows the pin it moved from answered it; or its tag, read
 /// now, resolves elsewhere. An edge onto a bundle is judged on the run's bundle of that
-/// name, else the one of its repository ([`Run::bundle_binding`]); each bundle its list
-/// nests now is judged on the run's bundle of its name. A direct include shadows an edge onto
-/// its key. A tag or list that cannot be read refuses nothing: only proof refuses.
+/// name, else the one of its repository ([`Run::bundle_binding`]), and what its list holds
+/// now by [`nested_parting`]. A direct include shadows an edge onto its key. A tag or list
+/// that cannot be read refuses nothing: only proof refuses.
 async fn refuse_held_requirements(
     run: &Run<'_>,
     edges: &BTreeMap<NodeKey, Vec<BundleMember>>,
@@ -720,9 +729,11 @@ struct Lists {
     reads: usize,
 }
 
-/// The first bundle below the held requirement `via` that the pick moves past, with the
-/// requirement it came through. Every list is read as its edge names it now, and each
-/// bundle it nests is judged as a direct edge is, whether or not the pick moved it.
+/// The first bundle or row below the held requirement `via` that the pick moves past, with
+/// the requirement it came through. Every list is read as its edge names it now. Each
+/// bundle it nests is judged as a direct edge is, on the run's bundle of its name, whether
+/// or not the pick moved it; each row it lists likewise, where the pick reaches no bundle
+/// of that list's repository.
 async fn nested_parting(
     run: &Run<'_>,
     via: &Identifier,
@@ -738,17 +749,25 @@ async fn nested_parting(
         let Some(members) = list_now(run, &parent, inputs, lists).await else {
             continue;
         };
-        for member in members.iter().filter(|member| member.kind == ArtifactKind::Bundle) {
+        // A bundle of this repository the pick reaches was judged as a bundle, and that
+        // verdict covers its rows: judged here too, they would refuse a pick it leaves alone,
+        // one that reaches two bundles of the repository or nests one under another name.
+        let rows = !run.reaches_repository(&parent);
+        for member in members {
+            let nests = member.kind == ArtifactKind::Bundle;
+            if !nests && !rows {
+                continue;
+            }
             let Some(id) = member.absolute_id(Some(&parent)) else {
                 continue;
             };
             if !lists.judged.insert((member.name.clone(), id.clone())) {
                 continue;
             }
-            let target = (ArtifactKind::Bundle, member.name.clone());
+            let target = (member.kind, member.name.clone());
             match judge_edge(run, &id, &target, recorded, inputs).await {
                 Judged::Shadowed => {}
-                Judged::Answered if lists.seen.insert(id.clone()) => queue.push(id),
+                Judged::Answered if nests && lists.seen.insert(id.clone()) => queue.push(id),
                 Judged::Answered => {}
                 Judged::Parting(parting) => {
                     return Some((format!("{} through {}", short_ref(&id), short_ref(via)), parting));
