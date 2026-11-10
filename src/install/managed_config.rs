@@ -122,8 +122,9 @@ pub fn sync_managed_element(config_path: &Path, key: &str, entry: &str, want: bo
 /// idempotent so it never writes a duplicate, but a hand-edited config can
 /// hold the managed element twice — and leaving the second one behind would
 /// keep the vendor acting on a registration the uninstall just retired. The
-/// emptied-array case takes the whole key with it, so the loop terminates on
-/// the following `Unchanged`.
+/// emptied-array case takes the whole key with it, or keeps an empty array
+/// holding a comment; either way the following call is `Unchanged`, so the
+/// loop terminates.
 fn remove_every(raw: &str, key: &str, entry: &str) -> io::Result<Splice> {
     let mut removed: Option<String> = None;
     loop {
