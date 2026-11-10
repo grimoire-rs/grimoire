@@ -2598,12 +2598,12 @@ fn entry_readme_dir(kind: ArtifactKind, path: &Path) -> Option<PathBuf> {
 /// [`contained_description_path`] and be a regular file. Anything else is
 /// `Skipped` (the caller warns and keeps the top-level README) rather than an
 /// error, so a repository that publishes today cannot start failing. A source
-/// outside the manifest directory is never probed.
+/// outside the manifest directory, in either spelling, is never probed.
 fn probe_entry_readme(manifest_dir: &Path, kind: ArtifactKind, path: &Path, name: &str) -> EntryReadmeProbe {
     let Some(place) = entry_readme_dir(kind, path) else {
         return EntryReadmeProbe::Absent;
     };
-    let Ok(rel_place) = place.strip_prefix(manifest_dir) else {
+    let Some(rel_place) = crate::path_safety::relative_to(&place, manifest_dir) else {
         return EntryReadmeProbe::Absent;
     };
     let rel = rel_place.join(name);
@@ -5438,6 +5438,23 @@ mod tests {
             slot_text(for_repo(&planned, "x"), "README.md").as_deref(),
             Some("# x rule\n")
         );
+    }
+
+    #[test]
+    fn entry_readme_found_when_source_path_spells_the_manifest_dir_through_a_link() {
+        let toml = format!("{ROOT_TOML}[skills.beta]\nversion=\"1.0.0\"\npath=\"skills/beta\"\n");
+        let linked = crate::path_safety::LinkedRoot::new();
+        // Manifest dir spelled one way, the entry's absolute path the other.
+        for (manifest_dir, source_root) in [(&linked.real, &linked.link), (&linked.link, &linked.real)] {
+            root_files(&linked.real);
+            write(&linked.real.join("skills/beta/README.md"), "# beta\n");
+            let entries = [entry_at(source_root, ArtifactKind::Skill, "beta", "skills/beta")];
+            let planned = plan(&toml, &entries, manifest_dir).unwrap();
+            assert_eq!(
+                slot_text(for_repo(&planned, "beta"), "README.md").as_deref(),
+                Some("# beta\n")
+            );
+        }
     }
 
     #[test]
