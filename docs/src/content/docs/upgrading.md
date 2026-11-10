@@ -1163,7 +1163,8 @@ precedence](./publishing.md#description-entry-readme).
 - **`--log-level` is applied.** Before 0.16.0 the flag was parsed and ignored.
   Since 0.16.0 it sets the level (`off`, `error`, `warn`, `info`, `debug` or
   `trace`) and wins over `GRIM_LOG`. An invalid value prints one line and the
-  run continues. A script that passed a level and saw no change will now see
+  run continues. So does a `GRIM_LOG` value that does not parse or is a bare
+  word that is not a level. A script that passed a level and saw no change will now see
   that output.
 
 - **The `--dry-run` preview digest equals the real push digest from 0.15.0.**
