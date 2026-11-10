@@ -1057,6 +1057,66 @@ def test_a_pick_refuses_a_dependent_requiring_the_moved_bundle_under_another_bin
         assert lock.read_text(encoding="utf-8") == written
 
 
+@pytest.mark.parametrize("listed", ["2", "1"], ids=["list-names-req-2", "list-names-req-1"])
+def test_a_pick_refuses_a_dependent_whose_bundle_requirement_tag_was_republished_onto_the_moved_bundle(
+    grim_at, work: Path, registry: str, unique_repo: str, listed: str
+) -> None:
+    """`y:1` requires the bundle `req:1`; `pack` then lists `req`, and `req:1` is republished.
+
+    The part is as c5e3824 wrote it, and `req:1` now names the manifest of `req:2`. Where
+    `pack` lists `req:2`, the held edge read `req:1` as the digest the pick moves to, so a
+    pick of `pack` or `req` took `x:2` beside `y` at its pin and exited 0. The part still
+    shows the pick moves a row it stamps through `req:1`: 78, nothing written. Where `pack`
+    lists `req:1` itself, the pick's bundle carries the tag the edge names, and it passes.
+    """
+    x1 = _skill(unique_repo, "x")
+    x2 = make_artifact(f"{unique_repo}/x", "skill", _files("x", "v2"), tag="2")
+    leaving = _skill(unique_repo, "leaving")
+    b = _skill(unique_repo, "b")
+    extra = _skill(unique_repo, "extra")
+    req1 = make_bundle(f"{unique_repo}/req", [("skill", "x", x1.fq)], tag="1")
+    req2 = make_bundle(f"{unique_repo}/req", [("skill", "x", x2.fq)], tag="2")
+    y = make_dependent(
+        f"{unique_repo}/y", "1", "skill", _files("y"), [("bundle", "req", req1.fq)]
+    )
+    pack = make_bundle(f"{unique_repo}/pack", [("skill", "leaving", leaving.fq)], tag="1")
+    pk2 = make_bundle(
+        f"{unique_repo}/pk2", [("skill", "y", y.fq), ("skill", "b", b.fq)], tag="1"
+    )
+    runner = grim_at(work)
+    _write_marketplace(work, [pack.fq, pk2.fq, extra.fq])
+    assert runner.run("update", "--marketplace", "marketplace.toml").returncode == 0
+    _as_c5e3824_wrote(work)
+    named = req2 if listed == "2" else req1
+    retag(f"{unique_repo}/pack", "keep", pack.digest)
+    members = [("bundle", "req", named.fq), ("skill", "leaving", leaving.fq)]
+    make_bundle(f"{unique_repo}/pack", members, tag="1")
+    if listed == "2":
+        retag(f"{unique_repo}/y", "keep", y.digest)
+        make_dependent(
+            f"{unique_repo}/y", "1", "skill", _files("y", "v2"), [("bundle", "req", req2.fq)]
+        )
+    retag(f"{unique_repo}/req", "keep", req1.digest)
+    retag(f"{unique_repo}/req", "1", req2.digest)
+    lock = work / "marketplace.lock"
+    written = lock.read_text(encoding="utf-8")
+
+    for pick in ("team:pack", "team:req"):
+        lock.write_text(written, encoding="utf-8", newline="\n")
+        result = runner.run(
+            "update", "--marketplace", "marketplace.toml", pick, check=False
+        )
+
+        if listed == "1":
+            assert result.returncode == 0, (pick, result.stderr)
+            continue
+        assert result.returncode == 78, (pick, result.stderr)
+        assert "skill 'y'" in result.stderr, result.stderr
+        assert "requires req:1" in result.stderr, result.stderr
+        assert "bundle 'req' to req:2" in result.stderr, result.stderr
+        assert lock.read_text(encoding="utf-8") == written
+
+
 @pytest.mark.parametrize("stale", [True, False], ids=["x-moves", "x-answers"])
 def test_a_pick_refuses_a_dependent_beside_another_version_of_a_row_its_bundle_requirement_lists(
     grim_at, work: Path, registry: str, unique_repo: str, stale: bool

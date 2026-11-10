@@ -4563,6 +4563,73 @@ mod tests {
         }
     }
 
+    /// Point the tag of `from` at the manifest `onto` names now.
+    async fn republish_tag(reg: &MemoryRegistry, from: &str, onto: &str) {
+        let digest = reg
+            .resolve_digest(&Identifier::parse(onto).unwrap(), Operation::Resolve)
+            .await
+            .unwrap()
+            .unwrap();
+        let from = Identifier::parse(from).unwrap();
+        reg.put_tag(&from, from.tag().unwrap(), &digest).await.unwrap();
+    }
+
+    /// `req:1` republished onto the digest the pick moves `req` to reads as that digest, and
+    /// answers nothing for a row held since before: a part that shows the pick moved the
+    /// bundle, by its recorded digest or by a row it stamps through `req:1`, refuses with 78.
+    /// A part grim 0.15.1 wrote shows neither, and the pick exits as it did.
+    #[tokio::test]
+    async fn a_pick_refuses_a_dependent_whose_bundle_requirement_tag_was_republished_onto_the_moved_bundle() {
+        let mut missed = Vec::new();
+        for (label, writer, nests_before) in BUNDLE_WRITERS {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("marketplace.toml");
+            let reg = MemoryRegistry::new();
+            let (previous, m) = part_beside_a_dependent_of_a_bundle(&path, &reg, writer, nests_before, &[], "2").await;
+            republish_tag(&reg, REQ_ONE, REQ_TWO).await;
+            let access = access_over(&reg);
+
+            let result = resolve(&m, Some(&previous), &pick(&["pack"]), &access).await;
+            if matches!(writer, Some(Writer::Grim0151)) {
+                assert!(result.is_ok(), "{label}: the part records no row through req:1");
+                continue;
+            }
+            let Err(err) = result else {
+                missed.push(label);
+                continue;
+            };
+            let text = err.to_string();
+            assert!(
+                text.contains("skill 'y'") && text.contains("requires req:1"),
+                "{label}: {text}"
+            );
+            assert!(text.contains("bundle 'req' to req:2"), "{label}: {text}");
+            assert_eq!(classified(err).exit, ExitCode::ConfigError, "{label}: {text}");
+
+            resolve(&m, Some(&previous), &update_extra(), &access)
+                .await
+                .unwrap_or_else(|e| panic!("{label}: extra moves no bundle y requires: {e}"));
+        }
+        assert!(missed.is_empty(), "{missed:?}: y would stay beside req:2");
+    }
+
+    /// The control: the pick's own list names `req:1`, the tag the held edge names, so the
+    /// bundle the run reads answers the edge wherever that tag stands now.
+    #[tokio::test]
+    async fn a_pick_refuses_nothing_where_its_list_names_the_republished_tag_the_edge_names() {
+        for (label, writer, nests_before) in BUNDLE_WRITERS {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("marketplace.toml");
+            let reg = MemoryRegistry::new();
+            let (previous, m) = part_beside_a_dependent_of_a_bundle(&path, &reg, writer, nests_before, &[], "1").await;
+            republish_tag(&reg, REQ_ONE, REQ_TWO).await;
+
+            resolve(&m, Some(&previous), &pick(&["pack"]), &access_over(&reg))
+                .await
+                .unwrap_or_else(|e| panic!("{label}: pack lists the req:1 that y requires: {e}"));
+        }
+    }
+
     /// A held row may name the bundle it requires `other` while the pick's list names it
     /// `req`: the edge is judged on the one bundle of its repository the pick reaches, and
     /// refuses with 78 as an edge of the same name does.

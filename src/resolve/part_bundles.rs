@@ -842,8 +842,9 @@ fn previous_pin_answered(
 
 /// Whether the edge `id` of a held row, onto the row or bundle the run moved as `moved`,
 /// settles on another digest than `moved.now`. `answered` is whether the previous part shows
-/// the pin it moved from answered the edge. A tag that cannot be read leaves a bundle with no
-/// previous row to the part's own record ([`Run::record_moved`]).
+/// the pin it moved from answered the edge. A tag that cannot be read, or that reads as
+/// `moved.now`, leaves a bundle with no previous row to the part's own record
+/// ([`Run::record_moved`]).
 async fn conflicts(
     run: &Run<'_>,
     id: &Identifier,
@@ -870,10 +871,11 @@ async fn conflicts(
     )
     .await;
     match read {
-        Ok(Ok(digest)) => digest != now.pin.digest(),
-        Ok(Err(_)) | Err(_) => {
-            target.0 == ArtifactKind::Bundle && moved.was.is_none() && run.record_moved(id, now, inputs.stamps)
-        }
+        Ok(Ok(digest)) if digest != now.pin.digest() => true,
+        // A tag republished onto the run's digest reads as answered, though the row was held
+        // against what it named before: without the record the pick would keep the row
+        // beside the moved bundle at exit 0.
+        _ => target.0 == ArtifactKind::Bundle && moved.was.is_none() && run.record_moved(id, now, inputs.stamps),
     }
 }
 
