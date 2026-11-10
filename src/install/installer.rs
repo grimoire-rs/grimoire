@@ -244,6 +244,9 @@ pub struct InstallRun {
     /// the kind of the artifact that let it go: settings values, and adopted
     /// MCP entries a new pin can no longer represent.
     pub(crate) abandoned: Vec<(ArtifactKind, Abandoned)>,
+    /// Edited files the relocated-root reap kept at an old vendor root, each
+    /// with the kind and name of the artifact that wrote them.
+    pub(crate) retained: Vec<(ArtifactKind, String, PathBuf)>,
     /// A conflict stopped the pass before any artifact landed, so its one row
     /// is not a package's verdict and nothing reconciles against it.
     pub halted: bool,
@@ -418,6 +421,7 @@ async fn install_pass<M: ArtifactMaterializer>(
                     items: vec![settings_phase::failed_row(first, error)],
                     settings: SettingsOutcome::default(),
                     abandoned: Vec::new(),
+                    retained: Vec::new(),
                     halted: true,
                     kept_beside: BTreeSet::new(),
                 };
@@ -438,6 +442,7 @@ async fn install_pass<M: ArtifactMaterializer>(
     progress.start(work.len());
     let mut results = Vec::with_capacity(work.len());
     let mut abandoned = Vec::new();
+    let mut retained = Vec::new();
     for (index, (artifact, kind)) in work.into_iter().enumerate() {
         progress.advance(index + 1, &format!("{kind} {}", artifact.name));
         let reference = ArtifactRef {
@@ -488,6 +493,7 @@ async fn install_pass<M: ArtifactMaterializer>(
             .first()
             .map(|c| destination_among(target, *c, kind, &artifact.name, &effective, roots));
         let mut left = Vec::new();
+        let mut kept = Vec::new();
         let result = install_one(
             artifact,
             kind,
@@ -500,9 +506,11 @@ async fn install_pass<M: ArtifactMaterializer>(
             force.overrides(kind, &artifact.name),
             intent,
             &mut left,
+            &mut kept,
         )
         .await
         .map_err(|e| e.naming(target.grim()));
+        retained.extend(kept.into_iter().map(|path| (kind, artifact.name.clone(), path)));
         abandoned.extend(left.into_iter().map(|entry| {
             let package = artifact.name.clone();
             (kind, Abandoned { package, entry })
@@ -549,6 +557,7 @@ async fn install_pass<M: ArtifactMaterializer>(
         items: results,
         settings: outcome,
         abandoned,
+        retained,
         halted: false,
         kept_beside,
     }
@@ -929,7 +938,8 @@ fn hook_gate(
 
 /// Install one artifact into every selected client through the integrity
 /// gate. An entry left in a user's file while its output was dropped is
-/// pushed onto `abandoned`.
+/// pushed onto `abandoned`; an edited file kept at a relocated vendor root,
+/// onto `retained`.
 #[expect(
     clippy::too_many_arguments,
     reason = "one artifact's slice of the install seam's inputs, threaded unchanged"
@@ -946,6 +956,7 @@ async fn install_one<M: ArtifactMaterializer>(
     force: bool,
     intent: InstallIntent,
     abandoned: &mut Vec<super::uninstall::AbandonedEntry>,
+    retained: &mut Vec<PathBuf>,
 ) -> Result<InstallOutcome, crate::error::Error> {
     use crate::install::install_state::ClientOutput;
 
@@ -1590,7 +1601,7 @@ async fn install_one<M: ArtifactMaterializer>(
         // which the pair-keyed reaper above cannot see. `materialize_set` is
         // exactly the set that got a fresh output above, so a client this pass
         // skipped keeps its only copy.
-        reap_relocated_roots(
+        let (preserved, _) = reap_relocated_roots(
             rec,
             roots,
             &relocated_vendor_roots_from_env(),
@@ -1598,6 +1609,7 @@ async fn install_one<M: ArtifactMaterializer>(
             ReapContext::Reinstalled,
             force,
         );
+        retained.extend(preserved);
     }
 
     // `outputs` is the single source of truth — no denormalized top-level
@@ -5167,7 +5179,7 @@ mod tests {
         // Recorded hash deliberately differs from the on-disk bytes.
         let prior = reap_record(vec![kiro_output("steering/r.md", Digest::Sha256("d".repeat(64)))]);
 
-        reap_relocated_roots(
+        let (preserved, abandoned) = reap_relocated_roots(
             &prior,
             &roots,
             &relocated,
@@ -5180,6 +5192,8 @@ mod tests {
             old.exists(),
             "kept_modified: a user-edited old output is preserved, never deleted"
         );
+        assert_eq!(preserved, vec![old], "the kept file is returned for the report");
+        assert!(abandoned.is_empty());
     }
 
     #[test]

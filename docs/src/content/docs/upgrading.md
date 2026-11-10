@@ -139,8 +139,9 @@ the old settings file — the case no file delete could recover. A copy you
 edited yourself is **preserved, never deleted**, and grim warns naming both
 paths. On the `uninstall` path it is additionally listed in `retained`, or in
 `abandoned_entries` for a stranded MCP entry. `grim update --global` lists a
-stranded MCP entry it left in `abandoned_entries` too. The `install` and `add`
-reports carry no such key.
+stranded MCP entry it left in `abandoned_entries` too, and a stranded file you
+edited in the row's `retained`. The `install` and `add` reports carry no such
+key.
 
 **One deliberate exception.** The shared `$HOME/.agents/skills` pool does not
 follow `$GEMINI_CLI_HOME`. One physical tree serves every pool client under a

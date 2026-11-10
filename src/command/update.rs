@@ -238,6 +238,7 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
         items: mut outcomes,
         mut settings,
         mut abandoned,
+        retained,
         halted,
         kept_beside,
     } = install_all_before_reap(
@@ -370,6 +371,7 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     };
     pruned.extend(settings_orphans(&state_before, &state, &new_lock));
     attach_abandoned(abandoned, &mut pruned, &mut reaped);
+    attach_retained(retained, &mut pruned, &mut reaped);
 
     // Refresh dev-installed artifacts (`grim install <path>`): re-pack
     // each recorded local source; on drift, re-materialize through the
@@ -620,6 +622,37 @@ fn attach_abandoned(
     for entries in rows.chain(reaped.iter_mut().map(|row| &mut row.abandoned_entries)) {
         entries.sort();
         entries.dedup();
+    }
+}
+
+/// Put each edited file the relocated-root reap kept on its artifact's row,
+/// by the rule `attach_abandoned` uses.
+fn attach_retained(
+    retained: Vec<(ArtifactKind, String, PathBuf)>,
+    pruned: &mut [PrunedArtifact],
+    reaped: &mut Vec<ReapedClients>,
+) {
+    for (kind, package, path) in retained {
+        let owner = |row_kind: ArtifactKind, name: &str| row_kind == kind && name == package;
+        if let Some(row) = pruned.iter_mut().find(|row| owner(row.kind, &row.name)) {
+            row.retained.push(path);
+        } else if let Some(row) = reaped.iter_mut().find(|row| owner(row.kind, &row.name)) {
+            row.retained.push(path);
+        } else {
+            reaped.push(ReapedClients {
+                kind,
+                name: package,
+                reaped: Vec::new(),
+                kept_modified: Vec::new(),
+                retained: vec![path],
+                abandoned_entries: Vec::new(),
+            });
+        }
+    }
+    let rows = pruned.iter_mut().map(|row| &mut row.retained);
+    for paths in rows.chain(reaped.iter_mut().map(|row| &mut row.retained)) {
+        paths.sort();
+        paths.dedup();
     }
 }
 
@@ -2066,6 +2099,28 @@ mod tests {
         assert_eq!(mcp["abandoned_entries"][0]["pointer"], "/mcp_servers/srv", "{mcp}");
         assert_eq!(mcp["reaped_clients"], serde_json::json!([]));
         assert_eq!(row("settings")["abandoned_entries"], serde_json::json!([]));
+    }
+
+    /// A kept file lands on the pruned row, else the kept row, else a new one,
+    /// and reaches the JSON row of an artifact that stays in the lock.
+    #[test]
+    fn attached_retained_paths_reach_the_row_sorted_and_deduplicated() {
+        let new = lock_of(vec![locked("kept", 'a')]);
+        let mut reaped = Vec::new();
+        let mut pruned = Vec::new();
+        let kept = |p: &str| (ArtifactKind::Skill, "kept".to_string(), PathBuf::from(p));
+        attach_retained(
+            vec![kept("/old/b"), kept("/old/a"), kept("/old/b")],
+            &mut pruned,
+            &mut reaped,
+        );
+        let v = serde_json::to_value(diffed(None, &new, Some(&new), &[], &reaped)).unwrap();
+        assert_eq!(
+            v["items"][0]["retained"],
+            serde_json::json!(["/old/a", "/old/b"]),
+            "{v}"
+        );
+        assert_eq!(v["items"][0]["reaped_clients"], serde_json::json!([]));
     }
 
     /// A row's `abandoned_entries` is sorted and deduplicated even when the
