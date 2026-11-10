@@ -49,7 +49,7 @@ use crate::oci::bundle::BUNDLE_LAYER_SIZE_LIMIT;
 use crate::oci::manifest::LayerLayout;
 use crate::oci::mcp::{MCP_LAYER_SIZE_LIMIT, McpDescriptor};
 use crate::oci::settings::SETTINGS_LAYER_SIZE_LIMIT;
-use crate::oci::{ArtifactKind, ArtifactRef, Identifier, PinnedIdentifier};
+use crate::oci::{ArtifactKind, Identifier, PinnedIdentifier};
 use crate::resolve::{ResolveError, ResolveErrorKind};
 
 /// Upper bound on a fetched layer blob. Checked against the manifest's
@@ -88,12 +88,17 @@ where
 /// [`ResolveErrorKind::TagNotFound`] classification rather than a bare
 /// `anyhow!` (which would fall through to the generic failure, 1).
 fn not_found(id: &Identifier) -> anyhow::Error {
-    // ponytail: the kind is unknown before the manifest read (this fires on
-    // the resolve miss), so a neutral `Skill` placeholder stands in — the
-    // reference name and source carry the signal.
-    anyhow::Error::from(crate::error::Error::from(ResolveError::new(
-        ArtifactRef::registry(ArtifactKind::Skill, id.name(), id.clone()),
-        ResolveErrorKind::TagNotFound,
+    // The kind is unknown before the manifest read (this fires on the resolve
+    // miss), so the error names the identifier and no kind. A miss on the
+    // reserved companion tag is a missing description, not a missing tag.
+    let kind = if id.tag() == Some(crate::oci::description::DESC_TAG) {
+        ResolveErrorKind::NoDescription
+    } else {
+        ResolveErrorKind::TagNotFound
+    };
+    anyhow::Error::from(crate::error::Error::from(ResolveError::for_identifier(
+        id.clone(),
+        kind,
     )))
 }
 
@@ -1544,6 +1549,95 @@ mod tests {
             crate::error::classify_error(&err),
             crate::cli::exit_code::ExitCode::NotFound,
             "a missing companion is not-found (79), parity with grim fetch"
+        );
+        assert_eq!(
+            err.to_string(),
+            "no description is published for test.registry/acme/skills/lonely"
+        );
+        assert!(!err.to_string().contains("__grimoire"), "{err}");
+    }
+
+    /// The two companion misses that do not go through `fetch_description`
+    /// (`--digest-only --description`, `--description --path`) read the same
+    /// text and never name the reserved tag.
+    #[tokio::test]
+    async fn companion_misses_through_digest_only_and_path_name_no_reserved_tag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = MemoryRegistry::new();
+        publish(
+            &reg,
+            "test.registry/acme/skills/lonely:latest",
+            "skill",
+            &tar_of(&[("lonely/SKILL.md", b"# x\n")]),
+        )
+        .await;
+        let (scope, access) = scope_and_access(&reg, tmp.path(), tmp.path());
+        let reference = "test.registry/acme/skills/lonely:latest";
+
+        let digest_only = fetch_outcome(
+            &scope,
+            &access,
+            reference,
+            None,
+            None,
+            true,
+            true,
+            None,
+            FETCH_DOC_SIZE_LIMIT,
+        )
+        .await
+        .expect_err("--digest-only --description on a missing companion must error");
+        let with_path = fetch_outcome(
+            &scope,
+            &access,
+            reference,
+            None,
+            Some("README.md"),
+            true,
+            false,
+            None,
+            FETCH_DOC_SIZE_LIMIT,
+        )
+        .await
+        .expect_err("--description --path on a missing companion must error");
+
+        for err in [digest_only, with_path] {
+            assert_eq!(
+                crate::error::classify_error(&err),
+                crate::cli::exit_code::ExitCode::NotFound,
+                "{err}"
+            );
+            assert_eq!(
+                err.to_string(),
+                "no description is published for test.registry/acme/skills/lonely"
+            );
+            assert!(!err.to_string().contains("__grimoire"), "{err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_missing_tag_names_no_kind_and_keeps_the_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = MemoryRegistry::new();
+        publish(
+            &reg,
+            "test.registry/acme/skills/present:latest",
+            "skill",
+            &tar_of(&[("present/SKILL.md", b"# x\n")]),
+        )
+        .await;
+        let (scope, access) = scope_and_access(&reg, tmp.path(), tmp.path());
+
+        let err = fetch_artifact(&scope, &access, "test.registry/acme/skills/present:nope", None)
+            .await
+            .expect_err("a missing tag must error");
+        assert_eq!(
+            crate::error::classify_error(&err),
+            crate::cli::exit_code::ExitCode::NotFound
+        );
+        assert_eq!(
+            err.to_string(),
+            "'present' (test.registry/acme/skills/present:nope): tag not found"
         );
     }
 
