@@ -996,6 +996,67 @@ def test_a_pick_judges_every_binding_a_nested_list_names_one_bundle_under(
         assert lock.read_text(encoding="utf-8") == written
 
 
+@pytest.mark.parametrize("rolled", ["2", "1"], ids=["req-moves", "req-answers"])
+def test_a_pick_refuses_a_dependent_requiring_the_moved_bundle_under_another_binding(
+    grim_at, work: Path, registry: str, unique_repo: str, rolled: str
+) -> None:
+    """`y:1` requires the bundle `req:1` as `other`; `pack` then lists `req` as `req`.
+
+    The part is as c5e3824 wrote it. Where `pack` lists `req:2`, a pick of `pack` or `req`
+    took `x:2` beside `y` at its pin and exited 0: the held edge looked for a bundle named
+    `other`, and the pick's is named `req`. The edge is matched by repository now: 78,
+    naming the pick's bundle, nothing written. Where `pack` lists `req:1`, it passes.
+    """
+    x1 = _skill(unique_repo, "x")
+    x2 = make_artifact(f"{unique_repo}/x", "skill", _files("x", "v2"), tag="2")
+    leaving = _skill(unique_repo, "leaving")
+    b = _skill(unique_repo, "b")
+    extra = _skill(unique_repo, "extra")
+    req1 = make_bundle(f"{unique_repo}/req", [("skill", "x", x1.fq)], tag="1")
+    req2 = make_bundle(f"{unique_repo}/req", [("skill", "x", x2.fq)], tag="2")
+    y = make_dependent(
+        f"{unique_repo}/y", "1", "skill", _files("y"), [("bundle", "other", req1.fq)]
+    )
+    pack = make_bundle(f"{unique_repo}/pack", [("skill", "leaving", leaving.fq)], tag="1")
+    pk2 = make_bundle(
+        f"{unique_repo}/pk2", [("skill", "y", y.fq), ("skill", "b", b.fq)], tag="1"
+    )
+    runner = grim_at(work)
+    _write_marketplace(work, [pack.fq, pk2.fq, extra.fq])
+    assert runner.run("update", "--marketplace", "marketplace.toml").returncode == 0
+    _as_c5e3824_wrote(work)
+    listed = req2 if rolled == "2" else req1
+    retag(f"{unique_repo}/pack", "keep", pack.digest)
+    members = [("bundle", "req", listed.fq), ("skill", "leaving", leaving.fq)]
+    make_bundle(f"{unique_repo}/pack", members, tag="1")
+    if rolled == "2":
+        retag(f"{unique_repo}/y", "keep", y.digest)
+        make_dependent(
+            f"{unique_repo}/y",
+            "1",
+            "skill",
+            _files("y", "v2"),
+            [("bundle", "other", req2.fq)],
+        )
+    lock = work / "marketplace.lock"
+    written = lock.read_text(encoding="utf-8")
+
+    for pick in ("team:pack", "team:req"):
+        lock.write_text(written, encoding="utf-8", newline="\n")
+        result = runner.run(
+            "update", "--marketplace", "marketplace.toml", pick, check=False
+        )
+
+        if rolled == "1":
+            assert result.returncode == 0, (pick, result.stderr)
+            continue
+        assert result.returncode == 78, (pick, result.stderr)
+        assert "skill 'y'" in result.stderr, result.stderr
+        assert "requires req:1" in result.stderr, result.stderr
+        assert "bundle 'req' to req:2" in result.stderr, result.stderr
+        assert lock.read_text(encoding="utf-8") == written
+
+
 # A requires row, as c5e3824 writes it and grim 0.15.1 never did.
 _REQUIRES_ROWS = re.compile(
     r"(?m)^\[\[(?:skill|rule|agent|mcp)\.requires\]\]\n(?:[^\n\[][^\n]*\n)*\n?"

@@ -565,6 +565,28 @@ impl<'a> Run<'a> {
         }
     }
 
+    /// The name the run holds the bundle of the held edge `id` under: the edge's own where
+    /// the pick reaches a bundle of that name, else the one bundle of the edge's repository
+    /// it reaches, since a held row may name that repository otherwise than the pick's list.
+    /// None or several keep the edge's name, which finds no bundle and refuses nothing.
+    fn bundle_binding<'b>(&'b self, edge: &'b BundleMember, id: &Identifier, set: &DesiredSet) -> &'b str {
+        if edge.kind != ArtifactKind::Bundle || self.bundles.contains(&edge.name) {
+            return &edge.name;
+        }
+        let repository = id.registry_repository();
+        // A direct include stays out: found here it would shadow the edge, and the bundles
+        // the edge's own list nests would go unjudged.
+        let mut reached = self.lock.bundles.iter().filter(|bundle| {
+            self.bundles.contains(&bundle.name)
+                && !set.table(ArtifactKind::Bundle).contains_key(&bundle.name)
+                && bundle.provenance_pair().0 == repository
+        });
+        match (reached.next(), reached.next()) {
+            (Some(only), None) => &only.name,
+            _ => &edge.name,
+        }
+    }
+
     /// Whether the part's own record shows the pick moved the bundle the edge `id` names to
     /// `now`. A part that records a digest for the `(repo, tag)` shows it when the run read
     /// another; one that records none shows it when a row it stamps through that pair is a
@@ -592,7 +614,8 @@ impl<'a> Run<'a> {
 /// bundle the run moved conflicts when the moved pin does not answer it: it names another
 /// digest; or the previous part shows the pin it moved from answered it; or its tag, read
 /// now, resolves elsewhere. An edge onto a bundle is judged on the run's bundle of that
-/// name, and so is each bundle its list nests now. A direct include shadows an edge onto
+/// name, else the one of its repository ([`Run::bundle_binding`]); each bundle its list
+/// nests now is judged on the run's bundle of its name. A direct include shadows an edge onto
 /// its key. A tag or list that cannot be read refuses nothing: only proof refuses.
 async fn refuse_held_requirements(
     run: &Run<'_>,
@@ -617,7 +640,7 @@ async fn refuse_held_requirements(
             let Some(id) = edge.absolute_id(Some(pin.as_identifier())) else {
                 continue;
             };
-            let target = (edge.kind, edge.name.clone());
+            let target = (edge.kind, run.bundle_binding(edge, &id, inputs.set).to_string());
             let (required, parting) = match judge_edge(run, &id, &target, &recorded, inputs).await {
                 Judged::Shadowed => continue,
                 Judged::Parting(parting) => (short_ref(&id), parting),
