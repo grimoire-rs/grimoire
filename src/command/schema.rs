@@ -349,12 +349,68 @@ mod tests {
         let spec = v["$defs"]["DescriptionSpec"]
             .as_object()
             .expect("DescriptionSpec definition present");
-        for key in ["readme", "logo", "changelog", "include", "publish"] {
+        for key in ["readme", "logo", "changelog", "include", "publish", "entry_readme"] {
             assert!(
                 spec["properties"][key].is_object(),
                 "DescriptionSpec must document `{key}`"
             );
         }
+    }
+
+    #[test]
+    fn publish_schema_states_description_precedence_and_entry_readme() {
+        let v = parsed(SchemaKind::Publish);
+        // Doc comments wrap, so compare on single-spaced text.
+        let flat = |t: &serde_json::Value| {
+            t.as_str()
+                .expect("documented")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let top = flat(&v["properties"]["description"]["description"]);
+        let entry = flat(&v["$defs"]["PublishEntrySpec"]["properties"]["description"]["description"]);
+        for (what, text) in [("top-level", &top), ("per-entry", &entry)] {
+            assert!(
+                text.contains("replaces wholesale"),
+                "{what} must say a table replaces wholesale: {text}"
+            );
+            assert!(
+                text.contains("entry_readme"),
+                "{what} must point at entry_readme: {text}"
+            );
+            assert!(
+                text.contains("`path` does not change"),
+                "{what} must say `path` is no input: {text}"
+            );
+        }
+        assert!(
+            top.contains("off for every slot it omits"),
+            "top-level must say the probe goes off: {top}"
+        );
+        assert!(
+            entry.contains("then the top-level"),
+            "per-entry must give the order: {entry}"
+        );
+
+        // `entry_readme` is an optional string-or-boolean key.
+        let spec = &v["$defs"]["DescriptionSpec"];
+        let readme = &spec["properties"]["entry_readme"];
+        assert!(
+            readme["description"]
+                .as_str()
+                .is_some_and(|d| d.contains("Top-level table only"))
+        );
+        let kinds = v["$defs"]["EntryReadme"].to_string();
+        assert!(
+            kinds.contains("boolean") && kinds.contains("string"),
+            "entry_readme types: {kinds}"
+        );
+        let required = spec.get("required").and_then(|r| r.as_array());
+        assert!(
+            !required.is_some_and(|r| r.iter().any(|k| k == "entry_readme")),
+            "entry_readme must stay optional"
+        );
     }
 
     #[test]
