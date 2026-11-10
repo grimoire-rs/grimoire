@@ -16,8 +16,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use super::graph::{CarriedPin, Carry, GraphNode, GraphRoot, PartCarry, RootSource, expand_graph};
+use super::graph::{
+    CarriedPin, Carry, ExpandedGraph, GraphNode, GraphRoot, GraphWarning, PartCarry, RootSource, expand_graph,
+};
 use super::part_bundles::{PartBundles, PartInputs, sort_part_bundles};
 use super::resolve_error::{ResolveError, ResolveErrorKind};
 use super::resolve_options::ResolveOptions;
@@ -47,7 +50,7 @@ use crate::oci::member_ref::MemberRef;
 use crate::oci::reference::ArtifactRef;
 use crate::oci::requires_decl;
 use crate::oci::text::registry_text;
-use crate::oci::{ArtifactKind, Identifier, PinnedIdentifier};
+use crate::oci::{ArtifactKind, Digest, Identifier, PinnedIdentifier};
 use crate::skill::SkillName;
 
 /// [`target_lock`] with nothing to start from.
@@ -181,7 +184,8 @@ pub async fn target_lock(
     let graph = expand_graph(roots, access, options, &carry)
         .await
         .map_err(|e| e.naming(grim))?;
-    for warning in &graph.warnings {
+    let held_back = held_back_warnings(&graph, set, previous, &pins, access, options, run).await;
+    for warning in graph.warnings.iter().chain(&held_back) {
         tracing::warn!("{warning}");
     }
     // A key every known declaration names by tag wants a tagged pin, so a digest edge
@@ -235,6 +239,140 @@ pub async fn target_lock(
     };
     warn_relock(&target, prior, refresh, &reads, &carry, run);
     Ok(target)
+}
+
+/// Requests a dependency makes of a direct key that the declaration's pin turns away.
+///
+/// The fold never resolves an edge onto a direct key, so the loss is silent. Only an
+/// edge from a parent that is new or moved in this run is read, so a run over an
+/// unchanged declaration and lock reads nothing here; a read that fails, or an
+/// offline or marketplace-part run, warns nothing and fails nothing.
+async fn held_back_warnings(
+    graph: &ExpandedGraph,
+    set: &DesiredSet,
+    previous: Option<&GrimoireLock>,
+    pins: &LocalPins,
+    access: &Arc<dyn OciAccess>,
+    options: &ResolveOptions,
+    run: LockRun<'_>,
+) -> Vec<GraphWarning> {
+    if run.offline || run.part.is_some() {
+        return Vec::new();
+    }
+    let locked = |key: &NodeKey| -> Option<Digest> {
+        let lock = previous?;
+        let artifact = lock.iter_artifacts().find(|row| row.kind == key.0 && row.name == key.1);
+        match artifact {
+            Some(row) => Some(row.source.content_digest()),
+            None => lock
+                .bundles
+                .iter()
+                .find(|row| row.name == key.1)
+                .map(LockedBundle::content_digest),
+        }
+    };
+    // A path parent has no manifest digest, so its content hash from this run stands in.
+    let now = |parent: &NodeKey, node: &GraphNode| -> Option<Digest> {
+        if let Some(pinned) = &node.pinned {
+            return Some(pinned.digest());
+        }
+        match parent.0 {
+            ArtifactKind::Bundle => pins.bundles.get(&parent.1).map(|source| match source {
+                LockedBundleSource::Registry { pinned, .. } => pinned.digest(),
+                LockedBundleSource::Path { hash, .. } => hash.clone(),
+            }),
+            _ => pins.artifacts.get(parent).map(LockedSource::content_digest),
+        }
+    };
+    let mut asked: BTreeMap<&NodeKey, Vec<(NodeKey, Identifier)>> = BTreeMap::new();
+    for (key, node) in graph.nodes.iter().filter(|(_, node)| node.direct) {
+        let declared = set.table(key.0).get(&key.1).and_then(DeclaredSource::identifier);
+        let (Some(held), Some(declared)) = (&node.pinned, declared) else {
+            continue;
+        };
+        for parent in &node.parents {
+            let Some(read) = graph.nodes.get(parent) else { continue };
+            let new_or_moved = now(parent, read).is_some_and(|now| locked(parent) != Some(now));
+            // Another publisher's request already has its own warning.
+            let edges = read.edges.iter().filter(|edge| {
+                edge.key == *key && edge.id != *declared && edge.id.registry_repository() == held.registry_repository()
+            });
+            for edge in edges.filter(|_| new_or_moved) {
+                let ask = (parent.clone(), edge.id.clone());
+                let list = asked.entry(key).or_default();
+                if !list.contains(&ask) {
+                    list.push(ask);
+                }
+            }
+        }
+    }
+    let ids = asked.values().flatten().map(|(_, id)| id);
+    let reads = read_requests(ids, access, options.per_artifact_timeout, ReadBudget::HELD_BACK).await;
+    let mut warnings = Vec::new();
+    for (key, requests) in asked {
+        let Some(held) = graph
+            .nodes
+            .get(key)
+            .and_then(|node| node.pinned.as_ref())
+            .map(PinnedIdentifier::digest)
+        else {
+            continue;
+        };
+        let differs = |id: &Identifier| reads.get(id).and_then(Option::as_ref).is_some_and(|read| *read != held);
+        let requests: Vec<(NodeKey, Identifier)> = requests.into_iter().filter(|(_, id)| differs(id)).collect();
+        if !requests.is_empty() {
+            let declared = set.table(key.0).get(&key.1).and_then(DeclaredSource::identifier);
+            warnings.push(GraphWarning::HeldBack {
+                key: key.clone(),
+                held,
+                requests,
+                update: declared.and_then(|declared| GraphWarning::held_back_update(declared, run.grim.update(&key.1))),
+            });
+        }
+    }
+    warnings
+}
+
+/// What the held-back probe may spend on one run: it is advisory, so past either
+/// bound the remaining requests are left unread and unwarned, like a failed read.
+#[derive(Clone, Copy)]
+struct ReadBudget {
+    /// Distinct references read.
+    reads: usize,
+    /// Time for the whole phase, all reads together.
+    window: Duration,
+}
+
+impl ReadBudget {
+    const HELD_BACK: Self = Self {
+        reads: 64,
+        window: Duration::from_secs(60),
+    };
+}
+
+/// The digest each distinct reference of `ids` names now, `None` where its read failed.
+/// A reference past the budget is absent from the result.
+async fn read_requests<'a>(
+    ids: impl Iterator<Item = &'a Identifier>,
+    access: &Arc<dyn OciAccess>,
+    per_read: Duration,
+    budget: ReadBudget,
+) -> BTreeMap<Identifier, Option<Digest>> {
+    let deadline = Instant::now() + budget.window;
+    let mut reads: BTreeMap<Identifier, Option<Digest>> = BTreeMap::new();
+    for id in ids {
+        if reads.contains_key(id) {
+            continue;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if reads.len() >= budget.reads || left.is_zero() {
+            tracing::debug!("held-back probe stopped at its budget; later requests go unread");
+            break;
+        }
+        let read = tokio::time::timeout(per_read.min(left), access.resolve_digest(id, Operation::Query));
+        reads.insert(id.clone(), read.await.ok().and_then(Result::ok).flatten());
+    }
+    reads
 }
 
 /// Refuse names against an unproven prior: a partial resolve of a stale lock
@@ -3779,6 +3917,8 @@ mod tests {
             /// [`Reach::Offline`] with every manifest in the store and no layer.
             LayersOffline,
             Down,
+            /// Manifests and layers answer; a tag read fails.
+            TagsDown,
         }
 
         /// A [`MemoryRegistry`] that records every tag asked of it.
@@ -3802,7 +3942,7 @@ mod tests {
             /// Why a read by digest fails, when it does.
             fn refusal(&self, id: &Identifier, layer: bool) -> Option<AccessError> {
                 let kind = match *self.reach.lock().unwrap() {
-                    Reach::Online => return None,
+                    Reach::Online | Reach::TagsDown => return None,
                     Reach::LayersOffline if !layer => return None,
                     Reach::Offline | Reach::LayersOffline => AccessErrorKind::OfflineMiss,
                     Reach::Down => AccessErrorKind::Io {
@@ -3819,6 +3959,13 @@ mod tests {
             async fn resolve_digest(&self, id: &Identifier, op: Operation) -> Result<Option<Digest>, AccessError> {
                 if id.digest().is_none() {
                     self.resolved.lock().unwrap().push(id.to_string());
+                    if matches!(*self.reach.lock().unwrap(), Reach::TagsDown) {
+                        let io = AccessErrorKind::Io {
+                            path: None,
+                            source: std::io::Error::other("connection refused"),
+                        };
+                        return Err(AccessError::with_identifier(id.clone(), io));
+                    }
                 }
                 self.reg.resolve_digest(id, op).await
             }
@@ -3994,6 +4141,358 @@ mod tests {
                     (set, lock)
                 }
             }
+        }
+
+        /// `x` declared with no tag and locked at its first release; `p`, new, asks for
+        /// `ask` of it, and `q` asks for `x:2` too when `both` is set. Returns the
+        /// declaration after the add, the one before, the lock before and `x`'s pin.
+        async fn p_asks_for(store: &Store, ask: &str, both: bool) -> (DesiredSet, DesiredSet, GrimoireLock, Digest) {
+            let old = skill(store, TAGLESS, "v1", vec![]).await;
+            skill(store, X2, "v2", vec![]).await;
+            skill(store, P, "p", vec![edge(ask)]).await;
+            skill(store, Q, "q", vec![edge(X2)]).await;
+            let before = declared(&[("x", TAGLESS)]);
+            let previous = lock_of(&before, vec![row("x", TAGLESS, &old, vec![])]);
+            let mut asks = vec![("x", TAGLESS), ("p", P)];
+            if both {
+                asks.push(("q", Q));
+            }
+            (declared(&asks), before, previous, old)
+        }
+
+        async fn graph_at(set: &DesiredSet, prior: &Prior<'_>, refresh: &Refresh, store: &Store) -> ExpandedGraph {
+            graph_with_pins(set, prior, refresh, store, Path::new(".")).await.0
+        }
+
+        async fn graph_with_pins(
+            set: &DesiredSet,
+            prior: &Prior<'_>,
+            refresh: &Refresh,
+            store: &Store,
+            anchor: &Path,
+        ) -> (ExpandedGraph, LocalPins) {
+            let access: Arc<dyn OciAccess> = Arc::new(store.clone());
+            let (roots, pins) = build_roots(set, Some(prior.lock), refresh, anchor)
+                .await
+                .expect("roots build");
+            let carry = build_carry(prior, set, refresh, None);
+            let graph = expand_graph(roots, &access, &fast_options(), &carry)
+                .await
+                .expect("the walk settles");
+            (graph, pins)
+        }
+
+        /// The held-back warnings of a run over `graph`, and the tags they read.
+        async fn held_back_at(
+            graph: &ExpandedGraph,
+            set: &DesiredSet,
+            previous: &GrimoireLock,
+            store: &Store,
+            run: LockRun<'_>,
+        ) -> (Vec<GraphWarning>, Vec<String>) {
+            held_back_with(graph, set, previous, &LocalPins::default(), store, run).await
+        }
+
+        async fn held_back_with(
+            graph: &ExpandedGraph,
+            set: &DesiredSet,
+            previous: &GrimoireLock,
+            pins: &LocalPins,
+            store: &Store,
+            run: LockRun<'_>,
+        ) -> (Vec<GraphWarning>, Vec<String>) {
+            let access: Arc<dyn OciAccess> = Arc::new(store.clone());
+            store.take_resolves();
+            let warnings = held_back_warnings(graph, set, Some(previous), pins, &access, &fast_options(), run).await;
+            (warnings, store.take_resolves())
+        }
+
+        /// A new parent asking for `x:2` beside a pin of the declared `x`: the request
+        /// loses silently on `main`; now one warning names both remedies, and the pin stays.
+        #[tokio::test]
+        async fn a_new_parents_request_the_declaration_holds_back_is_warned() {
+            let store = Store::default();
+            let (after, before, previous, old) = p_asks_for(&store, X2, false).await;
+            let prior = Prior::edited(&previous, &before, &after);
+            let graph = graph_at(&after, &prior, &Refresh::Nothing, &store).await;
+            let (warnings, probed) = held_back_at(&graph, &after, &previous, &store, LockRun::project(false)).await;
+
+            assert_eq!(
+                graph.nodes[&x()].pinned.as_ref().map(PinnedIdentifier::digest),
+                Some(old.clone())
+            );
+            assert_eq!(
+                warnings,
+                [GraphWarning::HeldBack {
+                    key: x(),
+                    held: old.clone(),
+                    requests: vec![((ArtifactKind::Skill, "p".to_string()), Identifier::parse(X2).unwrap())],
+                    update: Some("grim update -- x".to_string()),
+                }]
+            );
+            assert_eq!(
+                warnings[0].to_string(),
+                format!(
+                    "skill/x is requested by skill/p as ghcr.io/acme/x:2, but your declaration holds it at {}; \
+                     run `grim update -- x` to re-read the declared tag, or declare the requested reference",
+                    old.to_short_string()
+                )
+            );
+            assert_eq!(probed, [X2]);
+        }
+
+        /// One parent can list the same key under many tags; a stalling registry must
+        /// not be asked for all of them.
+        #[tokio::test]
+        async fn a_flood_of_distinct_requests_is_read_up_to_the_cap() {
+            let store = Store::default();
+            let old = skill(&store, TAGLESS, "v1", vec![]).await;
+            let asks: Vec<BundleMember> = (0..80).map(|n| edge(&format!("ghcr.io/acme/x:{}", n + 2))).collect();
+            skill(&store, P, "p", asks).await;
+            let before = declared(&[("x", TAGLESS)]);
+            let previous = lock_of(&before, vec![row("x", TAGLESS, &old, vec![])]);
+            let after = declared(&[("x", TAGLESS), ("p", P)]);
+            let prior = Prior::edited(&previous, &before, &after);
+            let graph = graph_at(&after, &prior, &Refresh::Nothing, &store).await;
+            let (warnings, probed) = held_back_at(&graph, &after, &previous, &store, LockRun::project(false)).await;
+
+            assert_eq!(warnings, [], "no tag exists, so none is held back");
+            assert_eq!(probed.len(), ReadBudget::HELD_BACK.reads);
+        }
+
+        #[tokio::test]
+        async fn an_elapsed_deadline_stops_the_reads_and_the_run_goes_on() {
+            let store = Store::default();
+            let ids: Vec<Identifier> = (2..6)
+                .map(|n| Identifier::parse(&format!("ghcr.io/acme/x:{n}")).unwrap())
+                .collect();
+            let access: Arc<dyn OciAccess> = Arc::new(store.clone());
+            let spent = ReadBudget {
+                window: Duration::ZERO,
+                ..ReadBudget::HELD_BACK
+            };
+            let read = read_requests(ids.iter(), &access, Duration::from_secs(2), spent).await;
+
+            assert!(read.is_empty());
+            assert_eq!(store.take_resolves(), Vec::<String>::new());
+        }
+
+        /// `x` is held by its digest, which no `grim update` can move.
+        #[tokio::test]
+        async fn a_digest_declaration_is_not_told_to_update_its_tag() {
+            let store = Store::default();
+            let old = skill(&store, TAGLESS, "v1", vec![]).await;
+            skill(&store, X2, "v2", vec![]).await;
+            skill(&store, P, "p", vec![edge(X2)]).await;
+            let by_digest = format!("{TAGLESS}@{old}");
+            let before = declared(&[("x", &by_digest)]);
+            let previous = lock_of(&before, vec![row("x", TAGLESS, &old, vec![])]);
+            let after = declared(&[("x", &by_digest), ("p", P)]);
+            let prior = Prior::edited(&previous, &before, &after);
+            let graph = graph_at(&after, &prior, &Refresh::Nothing, &store).await;
+            let (warnings, _) = held_back_at(&graph, &after, &previous, &store, LockRun::project(false)).await;
+
+            assert_eq!(warnings.len(), 1);
+            assert_eq!(
+                warnings[0].to_string(),
+                format!(
+                    "skill/x is requested by skill/p as ghcr.io/acme/x:2, but your declaration holds it at {}; \
+                     declare the requested reference to take it",
+                    old.to_short_string()
+                )
+            );
+        }
+
+        /// `x:1@digest` resolves to its digest, so `grim update` cannot move it either.
+        #[tokio::test]
+        async fn a_tag_and_digest_declaration_is_not_told_to_update_its_tag() {
+            let store = Store::default();
+            let old = skill(&store, TAGLESS, "v1", vec![]).await;
+            skill(&store, X2, "v2", vec![]).await;
+            skill(&store, P, "p", vec![edge(X2)]).await;
+            let by_both = format!("{X1}@{old}");
+            let before = declared(&[("x", &by_both)]);
+            let previous = lock_of(&before, vec![row("x", TAGLESS, &old, vec![])]);
+            let after = declared(&[("x", &by_both), ("p", P)]);
+            let prior = Prior::edited(&previous, &before, &after);
+            let graph = graph_at(&after, &prior, &Refresh::Nothing, &store).await;
+            let (warnings, _) = held_back_at(&graph, &after, &previous, &store, LockRun::project(false)).await;
+
+            assert_eq!(warnings.len(), 1);
+            assert!(!warnings[0].to_string().contains("grim update"), "{}", warnings[0]);
+        }
+
+        /// A local skill requiring `x:2` beside `x` declared at `x:1` and locked.
+        /// `locked_hash` is what the lock holds for the skill, `None` for a new one.
+        async fn local_asks_for_x2(locked_hash: Option<fn(&Digest) -> Digest>) -> (usize, Vec<GraphWarning>) {
+            let dir = tempfile::tempdir().unwrap();
+            write_skill_requiring(dir.path(), "local", "x", X2);
+            let store = Store::default();
+            let old = skill(&store, X1, "old", vec![]).await;
+            skill(&store, X2, "x two", vec![]).await;
+            let before = declared(&[("x", X1)]);
+            let mut rows = vec![row("x", X1, &old, vec![])];
+            let after = declaring_x(&path_skill_set("local"), X1);
+            // The hash this run computes for the skill is whatever `build_roots` reads.
+            let probe = lock_of(&before, rows.clone());
+            let prior = Prior::edited(&probe, &before, &after);
+            let (_, pins) = graph_with_pins(&after, &prior, &Refresh::Nothing, &store, dir.path()).await;
+            let LockedSource::Path { path, hash } = pins.artifacts[&(ArtifactKind::Skill, "local".to_string())].clone()
+            else {
+                panic!("a path pin");
+            };
+            if let Some(held) = locked_hash {
+                rows.push(LockedArtifact {
+                    name: "local".to_string(),
+                    kind: ArtifactKind::Skill,
+                    source: LockedSource::Path {
+                        path,
+                        hash: held(&hash),
+                    },
+                    bundles: Vec::new(),
+                    requires: vec![edge(X2)],
+                });
+            }
+            let previous = lock_of(&before, rows);
+            let prior = Prior::edited(&previous, &before, &after);
+            let (graph, pins) = graph_with_pins(&after, &prior, &Refresh::Nothing, &store, dir.path()).await;
+            let (warnings, probed) =
+                held_back_with(&graph, &after, &previous, &pins, &store, LockRun::project(false)).await;
+            (probed.len(), warnings)
+        }
+
+        #[tokio::test]
+        async fn a_new_path_parents_request_is_warned() {
+            let (probed, warnings) = local_asks_for_x2(None).await;
+
+            assert_eq!(probed, 1);
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+        }
+
+        #[tokio::test]
+        async fn a_path_parent_whose_source_changed_is_read() {
+            let (probed, warnings) = local_asks_for_x2(Some(|_| Algorithm::Sha256.hash(b"before the edit"))).await;
+
+            assert_eq!(probed, 1);
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+        }
+
+        #[tokio::test]
+        async fn an_unchanged_path_parent_is_not_read() {
+            let (probed, warnings) = local_asks_for_x2(Some(Digest::clone)).await;
+
+            assert_eq!(probed, 0, "reads nothing");
+            assert_eq!(warnings, []);
+        }
+
+        /// Two new parents asking alike are one warning for the key and one read.
+        #[tokio::test]
+        async fn two_requesters_of_one_key_make_one_warning_and_one_read() {
+            let store = Store::default();
+            let (after, before, previous, _) = p_asks_for(&store, X2, true).await;
+            let prior = Prior::edited(&previous, &before, &after);
+            let graph = graph_at(&after, &prior, &Refresh::Nothing, &store).await;
+            let (warnings, probed) = held_back_at(&graph, &after, &previous, &store, LockRun::project(false)).await;
+
+            assert_eq!(warnings.len(), 1);
+            assert!(matches!(&warnings[0], GraphWarning::HeldBack { requests, .. } if requests.len() == 2));
+            assert_eq!(probed, [X2]);
+        }
+
+        #[tokio::test]
+        async fn a_request_that_resolves_to_the_held_pin_is_not_warned() {
+            let store = Store::default();
+            let (after, before, previous, old) = p_asks_for(&store, X2, false).await;
+            store.put_tag(&Identifier::parse(X2).unwrap(), "2", &old).await.unwrap();
+            let prior = Prior::edited(&previous, &before, &after);
+            let graph = graph_at(&after, &prior, &Refresh::Nothing, &store).await;
+            let (warnings, probed) = held_back_at(&graph, &after, &previous, &store, LockRun::project(false)).await;
+
+            assert_eq!(warnings, []);
+            assert_eq!(probed, [X2], "the request was read, and agreed");
+        }
+
+        #[tokio::test]
+        async fn a_failed_probe_warns_nothing() {
+            let store = Store::default();
+            let (after, before, previous, _) = p_asks_for(&store, X2, false).await;
+            let prior = Prior::edited(&previous, &before, &after);
+            let graph = graph_at(&after, &prior, &Refresh::Nothing, &store).await;
+
+            store.set_reach(Reach::TagsDown);
+            let (warnings, probed) = held_back_at(&graph, &after, &previous, &store, LockRun::project(false)).await;
+            assert_eq!(warnings, [], "a tag read that fails");
+            assert_eq!(probed, [X2]);
+        }
+
+        #[tokio::test]
+        async fn a_request_for_a_tag_that_is_gone_warns_nothing() {
+            let store = Store::default();
+            let (after, before, previous, _) = p_asks_for(&store, "ghcr.io/acme/x:3", false).await;
+            let prior = Prior::edited(&previous, &before, &after);
+            let graph = graph_at(&after, &prior, &Refresh::Nothing, &store).await;
+            let (warnings, probed) = held_back_at(&graph, &after, &previous, &store, LockRun::project(false)).await;
+
+            assert_eq!(warnings, []);
+            assert_eq!(probed, ["ghcr.io/acme/x:3"]);
+        }
+
+        #[tokio::test]
+        async fn an_offline_run_reads_and_warns_nothing() {
+            let store = Store::default();
+            let (after, before, previous, _) = p_asks_for(&store, X2, false).await;
+            let prior = Prior::edited(&previous, &before, &after);
+            let graph = graph_at(&after, &prior, &Refresh::Nothing, &store).await;
+            let (warnings, probed) = held_back_at(&graph, &after, &previous, &store, LockRun::project(true)).await;
+
+            assert_eq!(warnings, []);
+            assert_eq!(probed, Vec::<String>::new());
+        }
+
+        /// A part's remedy would be another command, so a part run says nothing.
+        #[tokio::test]
+        async fn a_marketplace_part_run_warns_nothing() {
+            let store = Store::default();
+            let (after, before, previous, _) = p_asks_for(&store, X2, false).await;
+            let prior = Prior::edited(&previous, &before, &after);
+            let graph = graph_at(&after, &prior, &Refresh::Nothing, &store).await;
+            let run = LockRun {
+                part: Some("plugin"),
+                ..LockRun::project(false)
+            };
+            let (warnings, probed) = held_back_at(&graph, &after, &previous, &store, run).await;
+
+            assert_eq!(warnings, []);
+            assert_eq!(probed, Vec::<String>::new());
+        }
+
+        /// Over an unchanged declaration and lock no parent is new or moved, so the
+        /// standing request is not read again; a parent whose tag moved is.
+        #[tokio::test]
+        async fn only_a_new_or_moved_parent_is_read() {
+            let store = Store::default();
+            let old = skill(&store, TAGLESS, "v1", vec![]).await;
+            skill(&store, X2, "v2", vec![]).await;
+            let p = skill(&store, P, "p", vec![edge(X2)]).await;
+            let set = declared(&[("x", TAGLESS), ("p", P)]);
+            let previous = lock_of(
+                &set,
+                vec![row("p", P, &p, vec![edge(X2)]), row("x", TAGLESS, &old, vec![])],
+            );
+
+            let prior = Prior::checked(&previous, &set);
+            let graph = graph_at(&set, &prior, &Refresh::Nothing, &store).await;
+            let (warnings, probed) = held_back_at(&graph, &set, &previous, &store, LockRun::project(false)).await;
+            assert_eq!(warnings, [], "an unchanged run");
+            assert_eq!(probed, Vec::<String>::new(), "reads nothing");
+
+            // `p` is republished under its tag with the same ask, and a whole update
+            // moves it: a moved parent is read.
+            skill(&store, P, "p moved", vec![edge(X2)]).await;
+            let graph = graph_at(&set, &prior, &Refresh::All, &store).await;
+            let (warnings, probed) = held_back_at(&graph, &set, &previous, &store, LockRun::project(false)).await;
+            assert_eq!(warnings.len(), 1, "a moved parent");
+            assert_eq!(probed, [X2]);
         }
 
         #[tokio::test]
