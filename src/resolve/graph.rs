@@ -637,21 +637,14 @@ pub struct PartCarry {
 
 impl PartCarry {
     /// Whether the part's stamp carries the bundle `key` at its recorded digest, rather than
-    /// the run reading its tag. `below_pick` is whether the walk reached `key` through a
-    /// bundle the run selects.
+    /// the run reading its tag.
     ///
     /// A bundle the run selects always reads its tag. A recorded bundle nested below a
-    /// selected one keeps its digest too (the lock-pin ADR's "a nested bundle the part
+    /// selected one keeps its digest (the lock-pin ADR's "a nested bundle the part
     /// records keeps its digest on a pick"), so a tag of it that moved adds and drops no
-    /// row. Owner question STOP-A: set [`Self::NESTED_BELOW_PICK_KEEPS_PIN`] to `false` and
-    /// such a bundle reads its tag as a selected one does, so a moved list it brings meets
-    /// the member check and the pick exits 78. The unit
-    /// `a_pick_keeps_a_recorded_bundle_nested_below_the_picked_one_at_its_digest` pins the
-    /// shipped behaviour and is the one expectation that flips.
-    const NESTED_BELOW_PICK_KEEPS_PIN: bool = true;
-
-    fn carries(&self, key: &NodeKey, below_pick: bool) -> bool {
-        !self.refresh.selects(key) && (Self::NESTED_BELOW_PICK_KEEPS_PIN || !below_pick)
+    /// row.
+    fn carries(&self, key: &NodeKey) -> bool {
+        !self.refresh.selects(key)
     }
 }
 
@@ -730,12 +723,12 @@ impl Carry {
     /// Reads only the carried entry and the claim, so no other claim and no
     /// order of arrival can change the answer. A rule that read the other
     /// claims could write a tag beside a digest it never named.
-    pub fn answer(&self, key: &NodeKey, claim: NodeClaim<'_>, below_pick: bool) -> Option<Digest> {
+    pub fn answer(&self, key: &NodeKey, claim: NodeClaim<'_>) -> Option<Digest> {
         // A digest in the claim is its own answer: a pin could only replace it.
         if claim.id().digest().is_some() {
             return None;
         }
-        let carried = self.carried_pin(key, claim.id(), below_pick)?;
+        let carried = self.carried_pin(key, claim.id())?;
         let answered = Self::answered(&carried, key, claim);
         answered.then(|| carried.pin.digest())
     }
@@ -756,17 +749,12 @@ impl Carry {
     /// would, unless the run selects the bundle. Every answer, keep and release reads
     /// the pin from here, so a stamp-carried bundle and a project's carried `[[bundle]]`
     /// pin win and lose their claims by one rule.
-    fn carried_pin(
-        &self,
-        key: &NodeKey,
-        id: &Identifier,
-        below_pick: bool,
-    ) -> Option<std::borrow::Cow<'_, CarriedPin>> {
+    fn carried_pin(&self, key: &NodeKey, id: &Identifier) -> Option<std::borrow::Cow<'_, CarriedPin>> {
         if let Some(carried) = self.pins.get(key) {
             return Some(std::borrow::Cow::Borrowed(carried));
         }
         let part = self.part.as_ref().filter(|_| key.0 == ArtifactKind::Bundle)?;
-        if id.digest().is_some() || !part.carries(key, below_pick) {
+        if id.digest().is_some() || !part.carries(key) {
             return None;
         }
         let (repo, tag) = (id.registry_repository(), bundle_provenance_tag(id));
@@ -804,8 +792,8 @@ impl Carry {
 
     /// Whether `key` holds a recorded edge of the previous lock that names `id`: the
     /// evidence a conflicting claim leaves a carried pin standing against.
-    fn records_request(&self, key: &NodeKey, id: &Identifier, below_pick: bool) -> bool {
-        self.carried_pin(key, id, below_pick)
+    fn records_request(&self, key: &NodeKey, id: &Identifier) -> bool {
+        self.carried_pin(key, id)
             .is_some_and(|carried| carried.evidence.requests.contains(id))
     }
 
@@ -818,7 +806,6 @@ impl Carry {
         claims: &[&Identifier],
         listed: &[&Identifier],
         stamped: &[&Identifier],
-        below_pick: bool,
     ) -> Option<PinnedIdentifier> {
         if let Some(carried) = self.pins.get(key) {
             return pin_rule::keeps_pin(carried.record(&key.1), &carried.evidence, claims, listed, stamped)
@@ -831,7 +818,7 @@ impl Carry {
             .chain(stamped.iter().map(|id| NodeClaim::StampedEdge(id)));
         asked
             .filter_map(|claim| {
-                let carried = self.carried_pin(key, claim.id(), below_pick)?;
+                let carried = self.carried_pin(key, claim.id())?;
                 Self::answered(&carried, key, claim).then(|| (claim.id(), carried.pin.clone()))
             })
             .min_by(|a, b| a.0.cmp(b.0))
@@ -890,9 +877,6 @@ struct Graph<'a> {
     transitive: usize,
     /// Layer bytes this pass admitted toward [`MAX_REQUIRES_BYTES`].
     bytes: u64,
-    /// The keys this pass reached through a bundle a part's run selects, which
-    /// [`PartCarry::carries`] asks about.
-    below_pick: BTreeSet<NodeKey>,
 }
 
 impl Graph<'_> {
@@ -908,7 +892,7 @@ impl Graph<'_> {
             return None;
         }
         let attested = matches!(claim, NodeClaim::Direct(_)) && self.attested.contains(key);
-        match self.carry.answer(key, claim, self.below_pick.contains(key)) {
+        match self.carry.answer(key, claim) {
             None if attested => self.carry.pins.get(key).map(|carried| carried.pin.digest()),
             answer => answer,
         }
@@ -947,10 +931,7 @@ impl Graph<'_> {
         carried.pin.tag().is_none()
             && carried.pin.registry_repository() == id.registry_repository()
             && stampable
-            && self
-                .carry
-                .answer(key, NodeClaim::Direct(id), self.below_pick.contains(key))
-                .is_none()
+            && self.carry.answer(key, NodeClaim::Direct(id)).is_none()
     }
 
     /// Whether an edge onto the direct key `key` the carry does not answer is read for
@@ -1070,14 +1051,8 @@ impl Graph<'_> {
                 .filter(|c| c.stamped == stamped && (stamped || c.listed == listed));
             claims.map(|c| &c.id).collect()
         };
-        let below_pick = self.below_pick.contains(key);
-        self.carry.kept(
-            key,
-            &ids(false, false),
-            &ids(true, false),
-            &ids(false, true),
-            below_pick,
-        )
+        self.carry
+            .kept(key, &ids(false, false), &ids(true, false), &ids(false, true))
     }
 
     /// Whether `key`, read at `digest`, was read as the lock's proof shows it: the
@@ -1117,11 +1092,6 @@ impl Graph<'_> {
         let part = self.carry.part.as_ref().filter(|_| key.0 == ArtifactKind::Bundle)?;
         let (pair, digest) = read.bundle_pair.as_ref().zip(read.digest.as_ref())?;
         (part.stamps.recorded(&pair.repo, &pair.tag) == Some(digest)).then(|| (pair.repo.clone(), pair.tag.clone()))
-    }
-
-    /// Whether `key` is a bundle a part's run selects.
-    fn is_picked_bundle(&self, key: &NodeKey) -> bool {
-        key.0 == ArtifactKind::Bundle && self.carry.part.as_ref().is_some_and(|part| part.refresh.selects(key))
     }
 
     /// Whether the row of `key` carries the stamp `pair` with its recorded digest.
@@ -1442,13 +1412,9 @@ impl Graph<'_> {
             let via = self.via_of(&key);
             let proven = self.read_as_proven(&key, read.digest.as_ref());
             let stamp = self.stamp_of(&key, &read);
-            let picked_parent = self.is_picked_bundle(&key) || self.below_pick.contains(&key);
             for edge in &read.edges {
                 let listed = proven && self.walked(&key, &read, edge);
                 let stamped = stamp.as_ref().is_some_and(|pair| self.carries_stamp(&edge.key, pair));
-                if picked_parent {
-                    self.below_pick.insert(edge.key.clone());
-                }
                 if let Some(node) = self.nodes.get_mut(&edge.key) {
                     node.claims.push(Claim {
                         parent: key.clone(),
@@ -1537,10 +1503,7 @@ impl Graph<'_> {
                     .filter(|n| n.parent == c.parent && n.id == c.requested_id)
                     .any(|n| self.carried(&key, n.claim()).is_some())
             };
-            let recorded = |c: &EdgeClaim| {
-                self.carry
-                    .records_request(&key, &c.requested_id, self.below_pick.contains(&key))
-            };
+            let recorded = |c: &EdgeClaim| self.carry.records_request(&key, &c.requested_id);
             if contributors.iter().any(answered) && contributors.iter().any(|c| !answered(c) && !recorded(c)) {
                 grew |= self.released.insert(key);
             }
@@ -1566,7 +1529,6 @@ impl Graph<'_> {
         self.reads = reads;
         self.transitive = 0;
         self.bytes = 0;
-        self.below_pick.clear();
     }
 
     /// After expansion: conflicts (78), then cycles (65), then the result.
@@ -1887,7 +1849,6 @@ impl<'a> Graph<'a> {
             reads: Reads::default(),
             transitive: 0,
             bytes: 0,
-            below_pick: BTreeSet::new(),
         }
     }
 
@@ -3201,7 +3162,7 @@ mod tests {
                 pins,
                 ..Carry::default()
             }
-            .answer(&node, claim, false)
+            .answer(&node, claim)
         };
         for (registry, expected) in [("ghcr.io", Some(digest.clone())), ("quay.io", None)] {
             let id = Identifier::parse(&format!("{registry}/acme/x:1")).unwrap();

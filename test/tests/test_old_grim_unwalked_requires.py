@@ -568,8 +568,9 @@ def test_the_recovery_from_a_subdirectory_names_the_projects_pair_by_path(
     0.15.1 locks `m` and adds `p`, which requires `m:1`; the lock records no edge of
     `p`. The walked run finds `work`'s config from `sub`, so a bare `grimoire.toml`
     in the note would be a pair in `sub`, which holds none. The note names the
-    pair by path, and restoring it, one online `grim lock` and the same edit keep
-    `m`'s pin after its tag moved. Found by review: the note printed the bare pair.
+    pair by path. Restoring it, one online `grim lock` and the same edit keep `m`'s
+    pin, and a later `grim lock` keeps it after its tag moved. Found by review: the
+    note printed the bare pair.
     """
     m = _skill(unique_repo, "m", "one")
     p = _dependent(unique_repo, "p", [("skill", "m", m.fq)])

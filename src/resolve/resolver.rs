@@ -2494,13 +2494,13 @@ mod tests {
         let key = (ArtifactKind::Skill, "b".to_string());
         let b1 = Identifier::parse("ghcr.io/acme/b:1").unwrap();
         assert_eq!(
-            carry.answer(&key, NodeClaim::Edge(&b1), false),
+            carry.answer(&key, NodeClaim::Edge(&b1)),
             Some(old_b),
             "b:1 stays pinned while requested"
         );
         let b2 = Identifier::parse("ghcr.io/acme/b:2").unwrap();
         assert_eq!(
-            carry.answer(&key, NodeClaim::Edge(&b2), false),
+            carry.answer(&key, NodeClaim::Edge(&b2)),
             None,
             "an edge moved to b:2 has no pin to keep, so it resolves fresh"
         );
@@ -2654,7 +2654,6 @@ mod tests {
             carry.answer(
                 &team,
                 NodeClaim::Direct(&Identifier::parse("ghcr.io/acme/team:2").unwrap()),
-                false
             ),
             Some(Algorithm::Sha256.hash(b"team")),
             "the declared root keeps its pin"
@@ -2663,7 +2662,6 @@ mod tests {
             carry.answer(
                 &team,
                 NodeClaim::Edge(&Identifier::parse("ghcr.io/acme/team:1").unwrap()),
-                false
             ),
             None,
             "{:?}",
