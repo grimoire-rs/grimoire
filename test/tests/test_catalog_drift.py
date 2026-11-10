@@ -121,7 +121,7 @@ def _path_forms(tmp_path: Path) -> dict[str, str]:
     return {
         "dot": "./skills/x",
         "dotdot": "../shared/rule.md",
-        "absolute": str(tmp_path / "abs" / "x"),
+        "absolute": (tmp_path / "abs" / "x").as_posix(),
     }
 
 
