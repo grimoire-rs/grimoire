@@ -324,8 +324,10 @@ pub fn global_config_tiers(
 /// it had before the list was read, and the commands that do need the global
 /// config (registries, hook arming) still exit 78 on it themselves.
 ///
-/// Each call loads the global config, so a run calls it once and hands the
-/// answer down.
+/// In a one-shot run the load is memoized on the
+/// [`Context`](crate::context::Context), so repeated calls share one read and
+/// one warning; a long-running session reads every time, and a failed load is
+/// never memoized.
 pub fn global_clients(
     ctx: &crate::context::Context,
     scope: crate::config::scope::ConfigScope,
@@ -354,9 +356,15 @@ pub fn global_clients(
 /// A malformed or invalid global config (exit 78); an absent one is an
 /// empty config.
 fn load_global_config(ctx: &crate::context::Context) -> anyhow::Result<crate::config::global_config::GlobalConfig> {
-    grim(crate::config::global_config::GlobalConfig::load(
+    let memo = ctx.global_config_memo();
+    if let Some(cfg) = memo.and_then(std::sync::OnceLock::get) {
+        return Ok(cfg.clone());
+    }
+    let cfg = grim(crate::config::global_config::GlobalConfig::load(
         &ctx.paths().global_config(),
-    ))
+    ))?;
+    // Only a success is stored: the error is not `Clone` and exit-78 classification needs the original.
+    Ok(memo.map_or(cfg.clone(), |slot| slot.get_or_init(|| cfg).clone()))
 }
 
 /// Assemble the ordered registry browse set for a resolved scope.
@@ -984,6 +992,76 @@ mod tests {
         let absent = tempfile::tempdir().unwrap();
         let ctx = Context::hermetic(absent.path().to_path_buf());
         assert!(global_clients(&ctx, ConfigScope::Project, &[]).is_empty());
+    }
+
+    #[test]
+    fn the_global_config_is_read_once_per_context() {
+        use crate::config::scope::ConfigScope;
+        use crate::install::client_target::ClientTarget;
+        let (tmp, ctx) = ctx_with_global("[options]\nclients = [\"claude\"]\n");
+        global_config_tiers(&ctx, ConfigScope::Project).expect("valid global config");
+        std::fs::remove_file(tmp.path().join("grimoire.toml")).unwrap();
+        assert_eq!(
+            global_clients(&ctx, ConfigScope::Project, &[]),
+            vec![ClientTarget::Claude]
+        );
+        // A clone starts with an empty memo, so it sees the file as it is now.
+        assert!(global_clients(&ctx.clone(), ConfigScope::Project, &[]).is_empty());
+    }
+
+    #[test]
+    fn a_stopped_memo_rereads_and_survives_a_clone() {
+        use crate::config::scope::ConfigScope;
+        let (tmp, ctx) = ctx_with_global("[options]\ndefault_registry = \"one.example\"\n");
+        let default = |c: &Context| global_config_tiers(c, ConfigScope::Project).unwrap().1;
+        assert_eq!(default(&ctx).as_deref(), Some("one.example"));
+        ctx.stop_global_config_memo();
+        std::fs::write(
+            tmp.path().join("grimoire.toml"),
+            "[options]\ndefault_registry = \"two.example\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            default(&ctx).as_deref(),
+            Some("two.example"),
+            "already memoized, still re-reads"
+        );
+        std::fs::write(
+            tmp.path().join("grimoire.toml"),
+            "[options]\ndefault_registry = \"three.example\"\n",
+        )
+        .unwrap();
+        assert_eq!(default(&ctx).as_deref(), Some("three.example"));
+        std::fs::write(
+            tmp.path().join("grimoire.toml"),
+            "[options]\ndefault_registry = \"four.example\"\n",
+        )
+        .unwrap();
+        assert_eq!(default(&ctx.clone()).as_deref(), Some("four.example"));
+        std::fs::write(
+            tmp.path().join("grimoire.toml"),
+            "[options]\ndefault_registry = \"five.example\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            default(&ctx.clone()).as_deref(),
+            Some("five.example"),
+            "a clone stays stopped"
+        );
+    }
+
+    #[test]
+    fn a_failed_global_config_load_is_not_memoized() {
+        use crate::config::scope::ConfigScope;
+        let (tmp, ctx) = ctx_with_global(MALFORMED_GLOBAL_CONFIG);
+        assert!(global_config_tiers(&ctx, ConfigScope::Project).is_err());
+        std::fs::write(
+            tmp.path().join("grimoire.toml"),
+            "[options]\ndefault_registry = \"fixed.example\"\n",
+        )
+        .unwrap();
+        let (_, default) = global_config_tiers(&ctx, ConfigScope::Project).expect("the fixed file loads");
+        assert_eq!(default.as_deref(), Some("fixed.example"));
     }
 
     #[test]

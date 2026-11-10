@@ -187,8 +187,11 @@ fn tool_error(op: &str, err: &anyhow::Error) -> ErrorData {
 /// A transport setup failure. A clean client disconnect returns
 /// `Ok(ExitCode::Success)`.
 pub async fn serve(ctx: &Context, args: &McpArgs) -> anyhow::Result<ExitCode> {
+    let ctx = ctx.clone();
+    // A long-lived server: the global config can change between tool calls.
+    ctx.stop_global_config_memo();
     let state = McpState {
-        ctx: ctx.clone(),
+        ctx,
         allow_writes: args.allow_writes,
     };
     let server = GrimMcpServer {
@@ -205,6 +208,13 @@ pub async fn serve(ctx: &Context, args: &McpArgs) -> anyhow::Result<ExitCode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn serve_stops_the_global_config_memo() {
+        let source = include_str!("server.rs");
+        let production = source.split_once("#[cfg(test)]").map_or(source, |(before, _)| before);
+        assert_eq!(production.matches("ctx.stop_global_config_memo();").count(), 1);
+    }
 
     #[test]
     fn read_tools_always_routed() {

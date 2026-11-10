@@ -1149,6 +1149,23 @@ def test_update_warns_once_about_a_malformed_global_config(
     assert result.stderr.count("ignoring the global [options].clients") == 1, result.stderr
 
 
+def test_search_warns_once_about_a_malformed_global_config(
+    grim_at, project_dir: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """``search --registry`` reads the global client list for its badges; the
+    config is loaded once, so the broken file is named once."""
+    write_config(project_dir)
+    runner = grim_at(project_dir)
+    (grim_home / "grimoire.toml").write_text(_MALFORMED_GLOBAL, encoding="utf-8")
+
+    result = runner.run("search", "--registry", f"{registry}/{unique_repo}", check=False)
+
+    assert result.returncode == 0, result.stderr
+    broken = str(grim_home / "grimoire.toml")
+    assert result.stderr.count(broken) == 1, result.stderr
+    assert result.stderr.count("ignoring the global [options].clients") == 1, result.stderr
+
+
 def test_the_global_list_does_not_widen_status_when_the_project_names_its_clients(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
