@@ -861,6 +861,79 @@ def test_publish_announce_json_up_to_date_keeps_branch(
     assert announce["url"] is None, announce
 
 
+def _merge_announce_branch(bare: Path) -> str:
+    """Fast-forward the index default branch to the topic branch (MR merged)."""
+    branch = _announce_branch(bare)
+    default = _git(bare, "symbolic-ref", "--short", "HEAD").strip()
+    _git(bare, "update-ref", f"refs/heads/{default}", f"refs/heads/{branch}")
+    return default
+
+
+def _bump_version(project_dir: Path, version: str) -> None:
+    path = project_dir / "publish.toml"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace('version = "0.1.0"', f'version = "{version}"'),
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
+def test_publish_announce_created_only_change_is_up_to_date(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path
+) -> None:
+    """A later commit date alone (`created`) must not open a new announcement."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-created-only"
+    _make_skill_source(project_dir, name, "Created only.")
+    _manifest(project_dir, ns, name, INDEX_URL)
+
+    runner = grim_at(project_dir)
+    bare = _index_remote(tmp_path, runner)
+    runner.env["SOURCE_DATE_EPOCH"] = "1700000000"
+    first = runner.run("publish", "--announce", check=False)
+    assert first.returncode == 0, first.stderr
+    default = _merge_announce_branch(bare)
+    head_before = _git(bare, "rev-parse", default).strip()
+    pointer = f"index/{INDEX_HOST}/acme/{name}/metadata.json"
+    created_before = json.loads(_git(bare, "show", f"{default}:{pointer}"))["created"]
+
+    runner.env["SOURCE_DATE_EPOCH"] = "1800000000"
+    _bump_version(project_dir, "0.1.1")
+    announce = runner.json("publish", "--announce")["announce"]
+
+    assert announce["outcome"] == "up-to-date", announce
+    assert _git(bare, "rev-parse", default).strip() == head_before
+    assert json.loads(_git(bare, "show", f"{default}:{pointer}"))["created"] == created_before
+
+
+def test_publish_announce_changed_content_reuses_branch(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path
+) -> None:
+    """A real content change force-updates the one topic branch per package set."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-content-change"
+    _make_skill_source(project_dir, name, "Before.")
+    _manifest(project_dir, ns, name, INDEX_URL)
+
+    runner = grim_at(project_dir)
+    bare = _index_remote(tmp_path, runner)
+    first = runner.run("publish", "--announce", check=False)
+    assert first.returncode == 0, first.stderr
+
+    _make_skill_source(project_dir, name, "After.")
+    _bump_version(project_dir, "0.1.1")
+    second = runner.run("publish", "--announce", check=False)
+    assert second.returncode == 0, second.stderr
+
+    branches = [
+        b.strip().lstrip("* ").strip()
+        for b in _git(bare, "branch", "--list", "announce/*").splitlines()
+    ]
+    assert len(branches) == 1, f"one package set must keep one branch: {branches}"
+    blob = _git(bare, "show", f"{branches[0]}:index/{INDEX_HOST}/acme/{name}/metadata.json")
+    assert json.loads(blob)["description"] == "After.", blob
+
+
 def test_publish_announce_up_to_date_under_autocrlf(
     grim_at, project_dir: Path, registry: str, tmp_path: Path
 ) -> None:

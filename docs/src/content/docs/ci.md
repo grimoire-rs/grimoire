@@ -191,10 +191,11 @@ include:
 
 Because the index host matches the CI server host, grim auto-detects the
 GitLab forge and API from the CI environment — no `[announce] forge` or
-`api_url` config needed. Re-announcing the same content is detected as
-up-to-date; changed content force-updates the same deterministic
-`announce/<ns>-<hash>` branch (and its open MR) instead of littering new
-ones. The self-hosted index can run the same
+`api_url` config needed. Re-announcing the same pointers is detected as
+up-to-date, and a pointer that differs only in `created` counts as
+unchanged. The `announce/<ns>-<hash>` branch name is a hash of the package
+set, so changed content force-updates the same branch (and its open MR)
+instead of littering new ones. The self-hosted index can run the same
 [validation and auto-merge](./package-index.md#spec-validation) gate as
 the public one — the index repo ships a `.gitlab-ci.yml` for exactly
 that; setup in [Self-Hosted GitLab Setup](./self-hosted-gitlab.md).

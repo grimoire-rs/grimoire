@@ -289,7 +289,7 @@ cleanup / delete-on-failure is attempted — deleting a repository on a
 transient failure is more dangerous than leaving an idle fork.
 
 Idempotency holds end to end: the topic branch name is deterministic
-(`announce/<ns>-<hash8>` over the rendered pointer set), so a re-announce
+(`announce/<ns>-<hash8>` over the sorted pointer paths — amended 2026-11-10, see the changelog), so a re-announce
 **force-updates its own branch** rather than accumulating branches; the
 PR/MR create reuses the existing open request on a 422 (GitHub) / 409
 (GitLab) instead of erroring. Re-running an announce that previously forked
@@ -366,3 +366,4 @@ removed or retyped field.
 | 2026-07-22 | Michael Herwig | `[announce] fork` widened from a boolean to the `never \| auto \| always` `ForkPolicy` (legacy bool kept as a permanent alias); D1 rewritten, D2/D3 amended for the `force` bypass. Made the self-fork guard explicit on GitLab — `force` had made it reachable there, where it turned a working upstream push into exit 69 |
 | 2026-07-22 | Michael Herwig | Review follow-ups: self-fork namespace comparison made ASCII-case-insensitive on both forges (was case-sensitive, missing the guard for a case-different namespace); D2 amended to state that the `force` bypass also skips the *ambiguous* permission probe, now pinned by a test |
 | 2026-07-22 | Michael Herwig | `ForkPolicy` moved to `src/catalog/forge.rs` and `AnnounceRequest`'s `allow_fork`/`force_fork` bool pair collapsed into one `fork: ForkPolicy` field, making the meaningless `(false, true)` pair unconstructible; the `never` gate moved from the caller into `ensure_fork`. Internal only — no CLI, report, schema, exit-code, or manifest-parsing change (generated publish schema verified byte-identical) |
+| 2026-11-10 | Michael Herwig | D9 amended: the topic-branch hash covers the sorted pointer paths (the package set), no longer the rendered pointer content. A content-keyed name made every changed pointer a new branch and PR ([grimoire-rs/grimoire#322](https://github.com/grimoire-rs/grimoire/issues/322)); now the same package set keeps one branch and its open request. A pointer differing from the index copy only in `created` is not a change and is left untouched (outcome `up-to-date`). Branch name format unchanged |

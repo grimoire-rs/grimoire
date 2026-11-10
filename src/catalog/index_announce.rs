@@ -248,8 +248,8 @@ pub async fn announce(http: &reqwest::Client, request: &AnnounceRequest) -> Resu
     )
     .await?;
 
-    // Deterministic topic branch: same package set + content ⇒ same branch,
-    // so a retried announce force-updates its own branch instead of
+    // Deterministic topic branch: same package set ⇒ same branch, so a
+    // retried announce force-updates its own branch instead of
     // littering. Fold REPO-RELATIVE paths — the clone lands in a fresh
     // tempdir every run, so absolute paths would break determinism.
     let mut rendered: Vec<(String, String)> = Vec::new();
@@ -263,13 +263,21 @@ pub async fn announce(http: &reqwest::Client, request: &AnnounceRequest) -> Resu
             metadata_json(pkg, &request.namespace, request.owner_id, request.forge.kind),
         ));
     }
-    let branch = branch_name(&request.namespace, &rendered);
+    let relatives: Vec<&str> = rendered.iter().map(|(relative, _)| relative.as_str()).collect();
+    let branch = branch_name(&request.namespace, &relatives);
 
     git(Some(&clone), "checkout", &["checkout", "--quiet", "-b", &branch]).await?;
     for (relative, content) in &rendered {
         let path = clone.join(relative);
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
+        }
+        // Leave a pointer that differs only in `created` untouched, else a
+        // new commit date alone would open an announcement.
+        if let Ok(existing) = tokio::fs::read_to_string(&path).await
+            && pointer_unchanged(&existing, content)
+        {
+            continue;
         }
         tokio::fs::write(path, content).await?;
     }
@@ -302,7 +310,7 @@ pub async fn announce(http: &reqwest::Client, request: &AnnounceRequest) -> Resu
     )
     .await?;
 
-    // Force-push our own topic branch (deterministic name ⇒ safe to move),
+    // Force-push our own topic branch (deterministic per package set ⇒ safe to move),
     // then open the change request the best way the forge allows.
     let api_capable =
         request.forge.token.is_some() && matches!(request.forge.kind, ForgeKind::GitHub | ForgeKind::GitLab);
@@ -538,18 +546,36 @@ fn metadata_json(pkg: &AnnouncePackage, namespace: &str, owner_id: u64, forge: F
     out
 }
 
-/// Deterministic topic branch: `announce/<ns>-<hash8>` over the rendered
-/// (repo-relative path, content) set, so identical content re-announces
-/// onto the same branch.
-fn branch_name(namespace: &str, rendered: &[(String, String)]) -> String {
-    let mut folded = String::new();
-    for (relative, content) in rendered {
-        folded.push_str(relative);
-        folded.push('\0');
-        folded.push_str(content);
-    }
-    let hash = crate::oci::digest::Algorithm::Sha256.hash(&folded).hex()[..8].to_string();
+/// Deterministic topic branch: `announce/<ns>-<hash8>` over the sorted
+/// repo-relative pointer paths, so one package set keeps one branch and a
+/// changed pointer force-updates it instead of opening another.
+fn branch_name(namespace: &str, relatives: &[&str]) -> String {
+    let mut sorted = relatives.to_vec();
+    sorted.sort_unstable();
+    let hash = crate::oci::digest::Algorithm::Sha256.hash(sorted.join("\0")).hex()[..8].to_string();
     format!("announce/{namespace}-{hash}")
+}
+
+/// Whether the index file already says what `rendered` would: equal JSON, or
+/// equal apart from `created` when the file already carries one. A later
+/// commit date alone must not count as a change.
+fn pointer_unchanged(existing: &str, rendered: &str) -> bool {
+    let (Ok(mut old), Ok(mut new)) = (
+        serde_json::from_str::<serde_json::Value>(existing),
+        serde_json::from_str::<serde_json::Value>(rendered),
+    ) else {
+        return false;
+    };
+    if old == new {
+        return true;
+    }
+    let had_created = old.get("created").is_some();
+    for doc in [&mut old, &mut new] {
+        if let Some(object) = doc.as_object_mut() {
+            object.remove("created");
+        }
+    }
+    had_created && old == new
 }
 
 /// Prepend `-c <config>` (a git global option — must precede the verb)
@@ -783,12 +809,30 @@ mod tests {
     }
 
     #[test]
-    fn branch_name_is_deterministic_and_content_sensitive() {
-        let a = vec![("index/x/metadata.json".to_string(), "one".to_string())];
-        let b = vec![("index/x/metadata.json".to_string(), "two".to_string())];
+    fn branch_name_follows_the_package_set_not_content() {
+        let a = ["index/h/acme/one/metadata.json", "index/h/acme/two/metadata.json"];
+        let reversed = ["index/h/acme/two/metadata.json", "index/h/acme/one/metadata.json"];
+        let other = ["index/h/acme/three/metadata.json"];
         assert_eq!(branch_name("acme", &a), branch_name("acme", &a));
-        assert_ne!(branch_name("acme", &a), branch_name("acme", &b));
+        assert_eq!(branch_name("acme", &a), branch_name("acme", &reversed));
+        assert_ne!(branch_name("acme", &a), branch_name("acme", &other));
         assert!(branch_name("acme", &a).starts_with("announce/acme-"));
+    }
+
+    #[test]
+    fn pointer_unchanged_ignores_only_a_created_difference() {
+        let old = r#"{"name":"x","description":"d","created":"2026-01-01T00:00:00Z"}"#;
+        assert!(pointer_unchanged(old, old));
+        let newer = r#"{"name":"x","description":"d","created":"2026-02-01T00:00:00Z"}"#;
+        assert!(pointer_unchanged(old, newer));
+        let reformatted =
+            "{\n  \"created\": \"2026-01-01T00:00:00Z\",\n  \"description\": \"d\",\n  \"name\": \"x\"\n}\n";
+        assert!(pointer_unchanged(old, reformatted));
+        let changed = r#"{"name":"x","description":"e","created":"2026-02-01T00:00:00Z"}"#;
+        assert!(!pointer_unchanged(old, changed));
+        let no_created = r#"{"name":"x","description":"d"}"#;
+        assert!(!pointer_unchanged(no_created, old));
+        assert!(!pointer_unchanged("not json", old));
     }
 
     #[test]

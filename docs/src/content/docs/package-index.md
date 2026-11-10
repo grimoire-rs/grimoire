@@ -294,7 +294,7 @@ scripts/                           # (optional) build/validation tooling
 | `deprecated` | string | no | Publisher deprecation notice, mirroring the artifact's `com.grimoire.deprecated` annotation. A non-empty value marks the package deprecated — `grim search` and the TUI hide it unless it is installed or `show_deprecated` is on, and mark it when shown. Absent or whitespace-only ⇒ not deprecated. Written here because the pointer is the only source a browse reads: resolving the annotation would cost one manifest fetch per index entry. |
 | `replaced_by` | string | no | Successor grim reference, mirroring `com.grimoire.replaced-by`. Independent of `deprecated`. |
 | `license` | string | no | SPDX license expression, mirroring `org.opencontainers.image.licenses`. Written here for the same reason as `deprecated`: the pointer is the only source a browse reads. |
-| `created` | string | no | Publishing commit date (RFC3339), mirroring `org.opencontainers.image.created` — the browse-time recency signal. Absent for an artifact published without [build provenance](./publishing.md#git-provenance). |
+| `created` | string | no | Publishing commit date (RFC3339), mirroring `org.opencontainers.image.created` — the browse-time recency signal. Absent for an artifact published without [build provenance](./publishing.md#git-provenance). A re-announce does not refresh `created` on its own: it moves with the next change to another field. |
 | `owner.github` | string | yes* | GitHub login owning the namespace — for pointers under `index/github.com/` (and other GitHub-forge hosts). MUST match the namespace directory (case-insensitive). |
 | `owner.login` | string | yes* | The generic owner key for any non-GitHub host (the pointer's `index/<host>/` segment carries the forge context). MUST match the namespace directory (case-insensitive). |
 | `owner.id` | integer | yes | The account's numeric ID on the pointer's host — the GitHub account ID; on GitLab the *group* ID for group namespaces or the *user* ID for user namespaces (user namespace IDs are visible only to their owner, so the public user ID is the one an index validator can verify). Immutable — logins can be deleted and re-registered by someone else; the ID cannot. Validation compares it against the live API. |
@@ -559,7 +559,9 @@ $ grim publish --announce
 `--announce` writes/updates your `metadata.json` pointers in a clone of
 the index repository, pushes a deterministic topic branch, and opens the
 pull/merge request through the forge's REST API — GitHub and GitLab,
-enterprise instances included, no `gh`/`glab` CLI needed. A GitLab host
+enterprise instances included, no `gh`/`glab` CLI needed. The topic branch
+is one per package set: a changed pointer updates that branch and its open
+request instead of opening another. A GitLab host
 without an API token gets the MR via [git push options][push-options]
 instead; a plain git host is left with the pushed branch.
 
