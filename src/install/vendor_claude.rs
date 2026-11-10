@@ -708,7 +708,9 @@ fn managed_setting_files(dir: &Path) -> Vec<PathBuf> {
 /// expanded — not `~`, not `$VAR`.
 fn settings_env_config_dir(file: &Path) -> Option<PathBuf> {
     let text = std::fs::read_to_string(file).ok()?;
-    let doc: serde_json::Value = match serde_json::from_str(&text) {
+    // Claude's loader drops one leading BOM before parsing, so a file it reads must read here.
+    let json = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    let doc: serde_json::Value = match serde_json::from_str(json) {
         Ok(doc) => doc,
         Err(e) => {
             tracing::debug!(file = %file.display(), "ignoring unparseable Claude settings file: {e}");
@@ -808,6 +810,40 @@ mod tests {
             &serde_json::json!(abs("txt")),
         );
         assert_eq!(config_dir_from(None, Some(home), &managed), Some(abs("b")));
+    }
+
+    /// Claude's loader drops one leading BOM before `JSON.parse`, so a settings
+    /// file saved by a Windows editor still relocates the root.
+    fn write_with_bom(file: &Path, abs: &Path) {
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let body = serde_json::json!({ "env": { "CLAUDE_CONFIG_DIR": abs } }).to_string();
+        std::fs::write(file, format!("\u{feff}{body}")).unwrap();
+    }
+
+    #[test]
+    fn bom_prefixed_user_settings_still_relocate_the_root() {
+        let (tmp, managed, home) = settings_env_fixture();
+        let want = tmp.path().join("user");
+        write_with_bom(&home.join(".claude/settings.json"), &want);
+        assert_eq!(config_dir_from(None, Some(home), &managed), Some(want));
+    }
+
+    #[test]
+    fn bom_prefixed_managed_settings_still_relocate_the_root() {
+        let (tmp, managed, home) = settings_env_fixture();
+        let want = tmp.path().join("managed");
+        write_with_bom(&managed.join("managed-settings.json"), &want);
+        assert_eq!(config_dir_from(None, Some(home), &managed), Some(want));
+    }
+
+    #[test]
+    fn only_one_leading_bom_is_stripped() {
+        let (tmp, managed, home) = settings_env_fixture();
+        let settings = home.join(".claude/settings.json");
+        write_with_bom(&settings, &tmp.path().join("user"));
+        let text = std::fs::read_to_string(&settings).unwrap();
+        std::fs::write(&settings, format!("\u{feff}{text}")).unwrap();
+        assert_eq!(config_dir_from(None, Some(home), &managed), None);
     }
 
     #[test]
