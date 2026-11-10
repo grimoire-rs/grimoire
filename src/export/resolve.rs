@@ -4768,6 +4768,57 @@ mod tests {
         }
     }
 
+    /// A list may name one bundle under two bindings, and the walk judges each: `outer:1`
+    /// lists `req:1` as `a` and as `req`, and the pick moves `req`, which sorts second, so it
+    /// refuses with 78. Where both bindings name the `req:2` the pick moves to, it passes.
+    #[tokio::test]
+    async fn a_pick_judges_every_binding_a_nested_list_names_one_bundle_under() {
+        let bundle = ArtifactKind::Bundle;
+        let mut missed = Vec::new();
+        for (label, writer, _) in BUNDLE_WRITERS {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("marketplace.toml");
+            let reg = MemoryRegistry::new();
+            let (previous, m) = part_beside_a_dependent_of_a_bundle_that_nests_one(&path, &reg, writer, 2, true).await;
+            publish_members(&reg, OUTER_ONE, &[(bundle, "a", REQ_ONE), (bundle, "req", REQ_ONE)]).await;
+            let access = access_over(&reg);
+
+            let picks: &[&[&str]] = if writer.is_some() {
+                &[&["pack"], &["req"]]
+            } else {
+                &[&["pack"]]
+            };
+            for names in picks {
+                let Err(err) = resolve(&m, Some(&previous), &pick(names), &access).await else {
+                    missed.push(format!("{label} {names:?}"));
+                    continue;
+                };
+                let text = err.to_string();
+                if writer.is_some() {
+                    assert!(text.contains("requires req:1 through outer:1"), "{label}: {text}");
+                    assert!(text.contains("bundle 'req' to req:2"), "{label}: {text}");
+                }
+                assert_eq!(classified(err).exit, ExitCode::ConfigError, "{label}: {text}");
+            }
+        }
+        assert!(missed.is_empty(), "{missed:?}: y would stay beside req:2");
+
+        for (label, writer, _) in BUNDLE_WRITERS.into_iter().skip(1) {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("marketplace.toml");
+            let reg = MemoryRegistry::new();
+            let (previous, m) = part_beside_a_dependent_of_a_bundle_that_nests_one(&path, &reg, writer, 2, false).await;
+            publish_members(&reg, OUTER_ONE, &[(bundle, "a", REQ_TWO), (bundle, "req", REQ_TWO)]).await;
+            let access = access_over(&reg);
+
+            for names in [&["pack"][..], &["req"][..]] {
+                resolve(&m, Some(&previous), &pick(names), &access)
+                    .await
+                    .unwrap_or_else(|e| panic!("{label} {names:?}: both bindings name the req:2 picked: {e}"));
+            }
+        }
+    }
+
     /// `team` = [`p:1`, `pk2:1` (y, b), `extra:1`] with `y:1` requiring the bundle `req:1`
     /// (listing `x:1`), locked and left as `writer` wrote it; grim 0.15.1 follows no
     /// `requires` layer, so its part holds no `x`. Then `p:1` moves onto a manifest requiring
