@@ -1630,6 +1630,68 @@ def test_warp_skips_env_ref_and_oauth_descriptors_with_a_warning(
 
 
 
+@pytest.mark.parametrize(
+    "client_dir, body, decline",
+    [
+        (".warp", ENV_DESCRIPTOR, "skipped for warp"),
+        (
+            ".zed",
+            'description = "d"\n[server]\ntransport = "ws"\nurl = "wss://x.example.com/mcp"\n',
+            "no ws transport in context_servers",
+        ),
+    ],
+    ids=["warp-env-ref", "zed-ws"],
+)
+def test_vendor_decline_warning_prints_once_per_run(
+    grim_at, project_dir: Path, registry: str, unique_repo: str, client_dir: str, body: str, decline: str
+) -> None:
+    """A client that cannot represent the server warns once per run, on every
+    run that plans a write for it (first install, pin roll, drift, `--force` over an edit),
+    never twice: the integrity gate's probe stays silent. A repeat install, or a
+    `--force` one, with nothing to do prints none."""
+    runner = grim_at(project_dir)
+    descriptor = project_dir / "src" / "mcp" / "grim-mcp.toml"
+    descriptor.parent.mkdir(parents=True)
+    repo_path = f"{unique_repo}/mcp/grim-mcp"
+    repo = f"{registry}/{repo_path}"
+    descriptor.write_text(body, encoding="utf-8", newline="\n")
+    runner.json("release", str(descriptor), f"{repo}:1.0.0", "--kind", "mcp")
+    runner.json("release", str(descriptor), f"{repo}:stable", "--kind", "mcp")
+    (project_dir / client_dir).mkdir()
+    (project_dir / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{repo}:stable"\n', encoding="utf-8")
+    runner.run("lock", check=False)
+
+    def declines(*args: str) -> int:
+        result = runner.run(*args, check=False)
+        assert result.returncode == 0, result.stderr
+        return result.stderr.count(decline)
+
+    counts = {"first install": declines("install")}
+
+    counts["repeat install"] = declines("install")
+    assert counts["repeat install"] == 0, counts
+
+    claude_cfg = project_dir / ".mcp.json"
+    claude_cfg.unlink()
+    counts["drift"] = declines("install")
+
+    counts["force with nothing to do"] = declines("install", "--force")
+    assert counts["force with nothing to do"] == 0, counts
+
+    claude_cfg.write_text(json.dumps({"mcpServers": {"grim-mcp": {"command": "edited"}}}), encoding="utf-8")
+    counts["force over an edit"] = declines("install", "--force")
+
+    descriptor.write_text(body.replace('description = "d"', 'description = "d2"').replace(
+        'description = "Server with an env reference."', 'description = "Env reference, v2."'
+    ), encoding="utf-8", newline="\n")
+    second = runner.json("release", str(descriptor), f"{repo}:1.0.1", "--kind", "mcp")
+    retag(repo_path, "stable", second["manifest_digest"])
+    counts["pin roll"] = declines("update")
+
+    for scenario in ("first install", "drift", "force over an edit", "pin roll"):
+        assert counts[scenario] == 1, (scenario, counts)
+
+
 def test_warp_global_env_ref_server_is_never_pending_and_reinstalls_unchanged(
     grim_binary, grim_home: Path, registry: str, unique_repo: str, tmp_path: Path
 ) -> None:
