@@ -99,7 +99,7 @@ def _rows(pages: list[dict]) -> list[dict]:
 
 def _write_config(project_dir: Path, *entries: str) -> None:
     (project_dir / "grimoire.toml").write_text(
-        "\n".join(entries) + "\n[skills]\n\n[rules]\n"
+        "\n".join(entries) + "\n[skills]\n\n[rules]\n", encoding="utf-8", newline="\n"
     )
 
 

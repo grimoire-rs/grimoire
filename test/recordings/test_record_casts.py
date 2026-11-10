@@ -637,7 +637,7 @@ _SKILL_FILES = {
 def _write_yaml(path: Path, lines: list[str]) -> Path:
     """Write a cast YAML built from *lines* and return its path."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     return path
 
 
@@ -901,6 +901,7 @@ def test_assert_tables_column_aligned_catches_a_misaligned_row(tmp_path: Path) -
             )
             + "\n",
             encoding="utf-8",
+            newline="\n",
         )
         return path
 

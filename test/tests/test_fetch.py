@@ -288,7 +288,7 @@ def test_fetch_digest_only_matches_full_fetch_for_artifact_and_companion(
     ref = _publish_with_companion(registry)
     # A resolved project scope keeps the probe to its minimal shape (a degraded
     # scope would add a `warnings` note, like every fetch report).
-    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     # Artifact.
@@ -380,7 +380,7 @@ def test_fetch_offline_uncached_is_offline_blocked_81(
     resolve with `Operation::Resolve` so an offline-uncached miss is 81."""
     ref = _publish_with_companion(registry)
     # A resolved project scope keeps the error envelope to its minimal shape.
-    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     # Content fetch, uncached + offline → 81.
@@ -413,7 +413,7 @@ def test_fetch_digest_only_cached_offline_succeeds(
     """A `--digest-only` probe of a ref warmed by a prior ONLINE resolve still
     succeeds offline — served from the tag cache, no network."""
     ref = _publish_with_companion(registry)
-    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     # Warm the cache online (a resolve persists the tag pin).

@@ -60,7 +60,7 @@ def _two_ns_config(project_dir: Path, ns1: str, ns2: str) -> None:
         f'\n'
         f'[rules]\n'
     )
-    (project_dir / "grimoire.toml").write_text(text)
+    (project_dir / "grimoire.toml").write_text(text, encoding="utf-8", newline="\n")
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +173,7 @@ def test_tui_seam_partial_registry_failure_exit_zero_and_healthy_surfaces(
         f'\n'
         f'[rules]\n'
     )
-    (project_dir / "grimoire.toml").write_text(cfg_text)
+    (project_dir / "grimoire.toml").write_text(cfg_text, encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     result = runner.run("--format", "json", "search", "--refresh", check=False)
@@ -392,7 +392,7 @@ def test_tui_seam_grim_default_registry_env_selects_single_when_no_registries(
 
     # Config with NO [[registries]] — only minimal required sections.
     cfg_text = "[skills]\n\n[rules]\n"
-    (project_dir / "grimoire.toml").write_text(cfg_text)
+    (project_dir / "grimoire.toml").write_text(cfg_text, encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     # Env points at ns1 only; with no [[registries]] this IS the browse target.
@@ -529,7 +529,7 @@ def test_colliding_alias_and_locator_names_still_load(
         '\n'
         '[skills]\n'
         '\n'
-        '[rules]\n'
+        '[rules]\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
 

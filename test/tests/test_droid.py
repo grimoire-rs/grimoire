@@ -48,7 +48,7 @@ def _release_mcp(
 ) -> str:
     descriptor = tmp_path / "src" / "mcp" / f"{name}.toml"
     descriptor.parent.mkdir(parents=True, exist_ok=True)
-    descriptor.write_text(body)
+    descriptor.write_text(body, encoding="utf-8", newline="\n")
     ref = f"{registry}/{unique_repo}/mcp/{name}:{version}"
     runner.json("release", str(descriptor), ref, "--kind", "mcp")
     return ref
@@ -70,18 +70,18 @@ def test_droid_agent_renders_at_both_scopes(
     grim_at, grim_binary: Path, grim_home: Path, project_dir: Path, unique_repo: str
 ) -> None:
     ag = _push_agent(unique_repo)
-    (project_dir / "grimoire.toml").write_text(f'[agents]\nreviewer = "{ag.fq}"\n')
+    (project_dir / "grimoire.toml").write_text(f'[agents]\nreviewer = "{ag.fq}"\n', encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
     runner.run("lock")
     runner.json("install", "--client", "droid")
-    _assert_droid((project_dir / ".factory" / "droids" / "reviewer.md").read_text())
+    _assert_droid((project_dir / ".factory" / "droids" / "reviewer.md").read_text(encoding="utf-8"))
     assert not (project_dir / ".factory" / "agents").exists(), "the old stub path is never written"
 
-    (grim_home / "grimoire.toml").write_text(f'[agents]\nreviewer = "{ag.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[agents]\nreviewer = "{ag.fq}"\n', encoding="utf-8", newline="\n")
     home = GrimRunner(grim_binary, grim_home)
     home.run("lock", "--global")
     home.json("install", "--global", "--client", "droid")
-    _assert_droid((home.home / ".factory" / "droids" / "reviewer.md").read_text())
+    _assert_droid((home.home / ".factory" / "droids" / "reviewer.md").read_text(encoding="utf-8"))
 
 
 def test_droid_skips_a_dotted_agent_name_without_reporting_drift(
@@ -92,7 +92,7 @@ def test_droid_skips_a_dotted_agent_name_without_reporting_drift(
     pending drift a later install would try, and fail, to clear."""
     ag = _push_agent(unique_repo, name="code.rev")
     (project_dir / "grimoire.toml").write_text(
-        f'[options]\nclients = ["claude", "droid"]\n\n[agents]\n"code.rev" = "{ag.fq}"\n'
+        f'[options]\nclients = ["claude", "droid"]\n\n[agents]\n"code.rev" = "{ag.fq}"\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
     runner.run("lock")
@@ -120,12 +120,12 @@ def test_droid_writes_the_binding_name_over_a_frontmatter_name_it_rejects(
     """Bound as `coderev`, a `code.rev` agent installs for Droid, but its own
     frontmatter `name` is one Droid rejects — so the binding name is written."""
     ag = _push_agent(unique_repo, name="code.rev")
-    (project_dir / "grimoire.toml").write_text(f'[agents]\ncoderev = "{ag.fq}"\n')
+    (project_dir / "grimoire.toml").write_text(f'[agents]\ncoderev = "{ag.fq}"\n', encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
     runner.run("lock")
     result = runner.run("install", "--client", "droid", format="json")
     assert "written as 'coderev'" in result.stderr, result.stderr
-    doc = (project_dir / ".factory" / "droids" / "coderev.md").read_text()
+    doc = (project_dir / ".factory" / "droids" / "coderev.md").read_text(encoding="utf-8")
     assert doc.startswith("---\nname: coderev\ndescription: Reviews diffs.\n"), doc
     again = runner.json("install", "--client", "droid")["items"]
     assert again[0]["status"] != "installed", f"a repeat install is a no-op: {again}"
@@ -140,7 +140,7 @@ def test_droid_mcp_registers_at_both_scopes_and_self_heals(
     (project_dir / ".factory").mkdir()
     runner = grim_at(project_dir)
     ref = _release_mcp(runner, tmp_path, registry, unique_repo, STDIO_MCP)
-    (project_dir / "grimoire.toml").write_text(f'[mcp]\nsrv = "{ref}"\n')
+    (project_dir / "grimoire.toml").write_text(f'[mcp]\nsrv = "{ref}"\n', encoding="utf-8", newline="\n")
     runner.run("lock")
     runner.json("install", "--client", "claude")
     cfg = project_dir / ".factory" / "mcp.json"
@@ -148,7 +148,7 @@ def test_droid_mcp_registers_at_both_scopes_and_self_heals(
     assert any(o["client"] == "droid" for o in _row(runner, "srv")["outputs_pending"])
 
     runner.json("install")
-    entry = json.loads(cfg.read_text())["mcpServers"]["srv"]
+    entry = json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]["srv"]
     assert entry == {"type": "stdio", "command": "grim", "args": ["mcp"], "env": {"GRIM_TOKEN": "${GITHUB_TOKEN}"}}
     before = cfg.read_bytes()
     runner.json("install")
@@ -157,10 +157,10 @@ def test_droid_mcp_registers_at_both_scopes_and_self_heals(
     assert row["state"] == "installed" and row["outputs_pending"] == [], row
 
     home = GrimRunner(grim_binary, grim_home)
-    (grim_home / "grimoire.toml").write_text(f'[mcp]\nsrv = "{ref}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\nsrv = "{ref}"\n', encoding="utf-8", newline="\n")
     home.run("lock", "--global")
     home.json("install", "--global", "--client", "droid")
-    assert json.loads((home.home / ".factory" / "mcp.json").read_text())["mcpServers"]["srv"] == entry
+    assert json.loads((home.home / ".factory" / "mcp.json").read_text(encoding="utf-8"))["mcpServers"]["srv"] == entry
 
 
 def test_droid_mcp_skips_env_refs_it_does_not_expand(
@@ -169,12 +169,12 @@ def test_droid_mcp_skips_env_refs_it_does_not_expand(
     runner = grim_at(project_dir)
     body = 'description = "d"\n\n[server]\ntransport = "stdio"\ncommand = "grim"\nargs = ["--token", "${TOKEN}"]\n'
     ref = _release_mcp(runner, tmp_path, registry, unique_repo, body)
-    (project_dir / "grimoire.toml").write_text(f'[mcp]\nsrv = "{ref}"\n')
+    (project_dir / "grimoire.toml").write_text(f'[mcp]\nsrv = "{ref}"\n', encoding="utf-8", newline="\n")
     runner.run("lock")
     result = runner.run("install", "--client", "claude,droid", format="json")
     assert "skipped for droid" in result.stderr and "command, args or url" in result.stderr, result.stderr
     assert not (project_dir / ".factory" / "mcp.json").exists()
-    claude = json.loads((project_dir / ".mcp.json").read_text())["mcpServers"]["srv"]
+    claude = json.loads((project_dir / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]["srv"]
     assert claude["args"] == ["--token", "${TOKEN}"], "other clients are unaffected"
 
 
@@ -187,11 +187,11 @@ def test_droid_mcp_oauth_client_id_is_written_other_fields_skip(
     skipped = _release_mcp(
         runner, tmp_path, registry, unique_repo, remote + 'client_id = "c"\nscopes = ["read"]\n', name="scoped"
     )
-    (project_dir / "grimoire.toml").write_text(f'[mcp]\nok = "{written}"\nscoped = "{skipped}"\n')
+    (project_dir / "grimoire.toml").write_text(f'[mcp]\nok = "{written}"\nscoped = "{skipped}"\n', encoding="utf-8", newline="\n")
     runner.run("lock")
     result = runner.run("install", "--client", "claude,droid", format="json")
     assert "oauth scopes has no Droid mapping" in result.stderr, result.stderr
-    servers = json.loads((project_dir / ".factory" / "mcp.json").read_text())["mcpServers"]
+    servers = json.loads((project_dir / ".factory" / "mcp.json").read_text(encoding="utf-8"))["mcpServers"]
     assert servers == {"ok": {"type": "http", "url": "https://x.example/mcp", "oauth": {"clientId": "${CID}"}}}
 
 
@@ -207,17 +207,17 @@ def test_droid_global_mcp_refuses_a_ui_copied_entry_then_force_replaces(
     cfg = home.home / ".factory" / "mcp.json"
     cfg.parent.mkdir(parents=True)
     copied = {"mcpServers": {"srv": {"type": "stdio", "command": "grim", "args": ["mcp"], "disabled": True}}}
-    cfg.write_text(json.dumps(copied, indent=2))
-    (grim_home / "grimoire.toml").write_text(f'[mcp]\nsrv = "{ref}"\n')
+    cfg.write_text(json.dumps(copied, indent=2), encoding="utf-8", newline="\n")
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\nsrv = "{ref}"\n', encoding="utf-8", newline="\n")
     home.run("lock", "--global")
 
     result = home.run("install", "--global", "--client", "droid", check=False)
     assert result.returncode == 65, result.stderr
     assert "--force" in result.stderr, result.stderr
-    assert json.loads(cfg.read_text()) == copied, "the refusal leaves the copy untouched"
+    assert json.loads(cfg.read_text(encoding="utf-8")) == copied, "the refusal leaves the copy untouched"
 
     home.json("install", "--global", "--client", "droid", "--force")
-    entry = json.loads(cfg.read_text())["mcpServers"]["srv"]
+    entry = json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]["srv"]
     assert entry["env"] == {"GRIM_TOKEN": "${GITHUB_TOKEN}"}, "grim's entry replaces the copy"
     assert entry["disabled"] is True, "the toggle is Droid's state and survives the replace"
 
@@ -230,25 +230,25 @@ def test_droid_global_mcp_keeps_a_toggle_across_status_install_and_update(
     pin-change update keeps them, and uninstall still removes the entry."""
     home = GrimRunner(grim_binary, grim_home)
     ref = _release_mcp(home, tmp_path, registry, unique_repo, STDIO_MCP)
-    (grim_home / "grimoire.toml").write_text(f'[mcp]\nsrv = "{ref.rsplit(":", 1)[0]}:1"\n')
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\nsrv = "{ref.rsplit(":", 1)[0]}:1"\n', encoding="utf-8", newline="\n")
     home.run("lock", "--global")
     home.json("install", "--global", "--client", "droid")
     cfg = home.home / ".factory" / "mcp.json"
-    doc = json.loads(cfg.read_text())
+    doc = json.loads(cfg.read_text(encoding="utf-8"))
     doc["mcpServers"]["srv"] |= {"disabled": True, "disabledTools": ["search"]}
-    cfg.write_text(json.dumps(doc, indent=2))
+    cfg.write_text(json.dumps(doc, indent=2), encoding="utf-8", newline="\n")
     toggled = {"disabled": True, "disabledTools": ["search"]}
 
     assert _row(home, "srv", "--global")["state"] == "installed", "a toggle is not a user edit"
     home.json("install", "--global", "--client", "droid")
-    assert json.loads(cfg.read_text())["mcpServers"]["srv"].items() >= toggled.items()
+    assert json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]["srv"].items() >= toggled.items()
 
     _release_mcp(home, tmp_path, registry, unique_repo, STDIO_MCP.replace('["mcp"]', '["mcp", "--v2"]'), version="1.1.0")
     home.json("update", "--global", "--client", "droid")
-    entry = json.loads(cfg.read_text())["mcpServers"]["srv"]
+    entry = json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]["srv"]
     assert entry["args"] == ["mcp", "--v2"], entry
     assert entry.items() >= toggled.items(), f"a pin-change update keeps the toggle: {entry}"
     assert _row(home, "srv", "--global")["state"] == "installed"
 
     home.json("uninstall", "--global", "mcp", "srv")
-    assert "srv" not in json.loads(cfg.read_text()).get("mcpServers", {}), "uninstall removes the toggled entry"
+    assert "srv" not in json.loads(cfg.read_text(encoding="utf-8")).get("mcpServers", {}), "uninstall removes the toggled entry"

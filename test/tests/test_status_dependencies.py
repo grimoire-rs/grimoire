@@ -44,7 +44,7 @@ def _write_lock(project_dir: Path, *sections: str) -> None:
         f'declaration_hash = "{DECLARATION_HASH}"\n'
         'generated_by = "grim 0.1.0"\ngenerated_at = "2026-04-19T00:00:00Z"\n\n'
     )
-    (project_dir / "grimoire.lock").write_text(head + "".join(sections))
+    (project_dir / "grimoire.lock").write_text(head + "".join(sections), encoding="utf-8", newline="\n")
 
 
 def _rows(runner) -> dict[str, dict]:
@@ -153,8 +153,8 @@ def test_source_literals(grim_at, project_dir: Path, tmp_path: Path) -> None:
     (local / ".claude").mkdir(parents=True)
     skill = local / "skills" / "loc"
     skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text("---\nname: loc\ndescription: Demo.\n---\nbody\n")
-    (local / "grimoire.toml").write_text('[skills]\nloc = "./skills/loc"\n')
+    (skill / "SKILL.md").write_text("---\nname: loc\ndescription: Demo.\n---\nbody\n", encoding="utf-8", newline="\n")
+    (local / "grimoire.toml").write_text('[skills]\nloc = "./skills/loc"\n', encoding="utf-8", newline="\n")
     runner = grim_at(local)
     runner.env["GRIM_OFFLINE"] = "1"
     runner.run("lock")

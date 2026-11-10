@@ -100,7 +100,7 @@ def test_stdout_pipe_closed_render_command_exits_zero(
     writing before the parent's ``close(read_fd)`` lands, so this is a
     timing-margin case, not a guaranteed-deterministic one. Kept anyway to
     cover the render() path rather than only the two payload-plain commands."""
-    (project_dir / "grimoire.toml").write_text("[skills]\n[rules]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n[rules]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     result = _run_stdout_pipe_closed(

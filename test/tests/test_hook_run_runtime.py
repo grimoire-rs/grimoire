@@ -64,7 +64,7 @@ def _write_raw_table(grim_home: Path, body: str) -> Path:
     """Write arbitrary bytes as the table — for the W2 degrade fixtures."""
     table = grim_home / "hooks" / "dispatch.json"
     table.parent.mkdir(parents=True, exist_ok=True)
-    table.write_text(body)
+    table.write_text(body, encoding="utf-8", newline="\n")
     return table
 
 
@@ -119,7 +119,7 @@ def _audit_records(grim_home: Path) -> list[dict]:
     trail = _audit_trail(grim_home)
     if not trail.is_file():
         return []
-    return [json.loads(line) for line in trail.read_text().splitlines() if line.strip()]
+    return [json.loads(line) for line in trail.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 def _block_the_audit_write(grim_home: Path) -> None:
@@ -164,7 +164,7 @@ def test_a_matched_hook_spawns_the_payload_with_the_envelope_on_stdin(grim, grim
 
     assert result.returncode == 0, result.stderr
     assert marker.exists(), f"the matched payload was never spawned\nstderr: {result.stderr}"
-    received = marker.read_text()
+    received = marker.read_text(encoding="utf-8")
 
     # C-002: the client's bytes, verbatim, as the value of `raw`.
     assert HOSTILE_PAYLOAD in received, (
@@ -407,7 +407,7 @@ def test_a_hook_armed_for_two_clients_runs_once_per_invocation(grim, grim_home, 
     payload_dir.mkdir(parents=True, exist_ok=True)
     marker = tmp_path / "spawns.log"
     script = payload_dir / "guard.sh"
-    script.write_text(f"#!/bin/sh\nprintf 'ran\\n' >> '{marker}'\n")
+    script.write_text(f"#!/bin/sh\nprintf 'ran\\n' >> '{marker}'\n", encoding="utf-8", newline="\n")
     handler = ["sh", str(script)]
 
     table = _write_table(
@@ -422,7 +422,7 @@ def test_a_hook_armed_for_two_clients_runs_once_per_invocation(grim, grim_home, 
 
     assert result.returncode == 0, result.stderr
     assert marker.exists(), f"POSITIVE CONTROL FAILED: nothing ran at all\nstderr: {result.stderr}"
-    spawns = marker.read_text().count("ran")
+    spawns = marker.read_text(encoding="utf-8").count("ran")
     assert spawns == 1, (
         f"one tool call spawned the payload {spawns} times — a hook armed for two clients must "
         "run once for the client that invoked it"
@@ -861,7 +861,7 @@ def test_a_payload_that_answers_then_keeps_running_is_killed_at_its_timeout(grim
     payload.mkdir()
     # Write the response, close stdout, then outlive the timeout.
     script = payload / "slow-exit.sh"
-    script.write_text('#!/bin/sh\ncat > /dev/null\necho \'{"decision":"allow"}\'\nexec 1>&-\nsleep 30\n')
+    script.write_text('#!/bin/sh\ncat > /dev/null\necho \'{"decision":"allow"}\'\nexec 1>&-\nsleep 30\n', encoding="utf-8", newline="\n")
 
     table = _write_table(
         grim_home,

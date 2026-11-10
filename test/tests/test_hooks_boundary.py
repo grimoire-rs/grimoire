@@ -108,7 +108,7 @@ def _arm(runner: GrimRunner, workspace: Path, fq: str) -> None:
 
 def _dispatch(runner: GrimRunner) -> dict:
     path = Path(runner.grim_home) / "hooks" / "dispatch.json"
-    return json.loads(path.read_text()) if path.is_file() else {"roots": {}}
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {"roots": {}}
 
 
 def _rows(runner: GrimRunner) -> list[dict]:
@@ -123,7 +123,7 @@ def _records(runner: GrimRunner) -> list[Path]:
 
 def _managed_command(workspace: Path) -> str:
     """The single grim-owned handler command Claude would run, verbatim."""
-    settings = json.loads((workspace / ".claude" / "settings.local.json").read_text())
+    settings = json.loads((workspace / ".claude" / "settings.local.json").read_text(encoding="utf-8"))
     commands = [
         element["command"]
         for groups in settings.get("hooks", {}).values()
@@ -207,7 +207,7 @@ def test_s011_a_clone_that_plants_grim_home_arms_nothing_b1(
 
     planted_payload = workspace / "tools" / "grim" / "payload"
     planted_payload.mkdir(parents=True)
-    (planted_payload / "evil.sh").write_text(f"#!/bin/sh\ntouch '{sentinel}'\nprintf '{{}}'\n")
+    (planted_payload / "evil.sh").write_text(f"#!/bin/sh\ntouch '{sentinel}'\nprintf '{{}}'\n", encoding="utf-8", newline="\n")
     table = workspace / planted_table
     table.parent.mkdir(parents=True, exist_ok=True)
     table.write_text(
@@ -235,7 +235,7 @@ def test_s011_a_clone_that_plants_grim_home_arms_nothing_b1(
                     }
                 },
             }
-        )
+        ), encoding="utf-8", newline="\n"
     )
 
     write_config(workspace, hooks={"shell-guard": hook.fq})
@@ -255,9 +255,9 @@ def test_s011_a_clone_that_plants_grim_home_arms_nothing_b1(
     assert [a["cause"] for a in row["arming"]] == [cause], row
 
     # Nothing armed, and — the point of the sentinel — nothing executed.
-    assert json.loads(table.read_text())["roots"], "the plant must survive: grim ignored it, not deleted it"
+    assert json.loads(table.read_text(encoding="utf-8"))["roots"], "the plant must survive: grim ignored it, not deleted it"
     settings = workspace / ".claude" / "settings.local.json"
-    assert not settings.is_file() or "grim-hook" not in settings.read_text(), (
+    assert not settings.is_file() or "grim-hook" not in settings.read_text(encoding="utf-8"), (
         "no registration may be written for a refused arming"
     )
     assert not sentinel.exists(), "the committed table's payload executed"
@@ -285,7 +285,7 @@ def test_s011_a_committed_table_is_never_adopted_by_an_honest_install_b1(
 
     planted_payload = project_dir / ".grimoire" / "hooks" / "evil"
     planted_payload.mkdir(parents=True)
-    (planted_payload / "evil.sh").write_text(f"#!/bin/sh\ntouch '{hostile_sentinel}'\nprintf '{{}}'\n")
+    (planted_payload / "evil.sh").write_text(f"#!/bin/sh\ntouch '{hostile_sentinel}'\nprintf '{{}}'\n", encoding="utf-8", newline="\n")
     (project_dir / ".grimoire" / "hooks" / "dispatch.json").write_text(
         json.dumps(
             {
@@ -311,7 +311,7 @@ def test_s011_a_committed_table_is_never_adopted_by_an_honest_install_b1(
                     }
                 },
             }
-        )
+        ), encoding="utf-8", newline="\n"
     )
 
     runner = grim_at(project_dir)
@@ -434,7 +434,7 @@ def test_s011_a_clone_cannot_consent_for_itself_with_committed_lines(
         "hooks = true\n"
         "\n"
         "[hooks]\n"
-        f'shell-guard = "{hook.fq}"\n'
+        f'shell-guard = "{hook.fq}"\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
     runner.run("lock")
@@ -516,7 +516,7 @@ def test_an_unusable_launcher_is_reported_and_never_exits_two_b8(
     if break_it == "directory":
         launcher.mkdir()
     elif break_it == "missing-interpreter":
-        launcher.write_text("#!/nonexistent/interpreter\nexit 3\n")
+        launcher.write_text("#!/nonexistent/interpreter\nexit 3\n", encoding="utf-8", newline="\n")
         launcher.chmod(0o755)
 
     fired = _fire(command, project_dir)
@@ -601,7 +601,7 @@ def test_s117_nothing_is_ever_written_under_github_hooks(
 
     home = GrimRunner(grim_binary, grim_home, cwd=project_dir)
     (grim_home / "grimoire.toml").write_text(
-        f'[hooks]\nshell-guard = "{hook.fq}"\n\n[options.experimental]\nhooks = true\n'
+        f'[hooks]\nshell-guard = "{hook.fq}"\n\n[options.experimental]\nhooks = true\n', encoding="utf-8", newline="\n"
     )
     (Path(home.home) / ".copilot").mkdir(parents=True, exist_ok=True)
     home.run("lock", "--global")

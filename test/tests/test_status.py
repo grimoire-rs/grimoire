@@ -478,7 +478,7 @@ def test_status_check_reports_update_available(
     local = project_dir / "skills" / "local"
     local.mkdir(parents=True)
     (local / "SKILL.md").write_text(
-        "---\nname: local\ndescription: Local demo skill.\n---\n# local\n"
+        "---\nname: local\ndescription: Local demo skill.\n---\n# local\n", encoding="utf-8", newline="\n"
     )
 
     write_config(
@@ -607,7 +607,7 @@ def test_status_check_answers_for_a_row_only_requires_reaches(
     assert answers() == expected
 
     lock = project_dir / "grimoire.lock"
-    lock.write_text(_PINNED_TAG.sub(r"\1\2", lock.read_text()))
+    lock.write_text(_PINNED_TAG.sub(r"\1\2", lock.read_text(encoding="utf-8")), encoding="utf-8", newline="\n")
     assert answers() == expected
 
     runner.run("update")
@@ -662,9 +662,9 @@ def test_status_check_reports_a_nested_bundle_tag_move(
     assert "`grim update -- inner`" in plain.stderr, plain.stderr
 
     lock = project_dir / "grimoire.lock"
-    before = lock.read_text()
+    before = lock.read_text(encoding="utf-8")
     runner.run("update", "--", "outer")
-    assert lock.read_text() == before, "the row's own pin held, so a named update moves nothing"
+    assert lock.read_text(encoding="utf-8") == before, "the row's own pin held, so a named update moves nothing"
     assert answers() == {"outer": (False, moved), "stays": (False, [])}
 
     runner.run("update", "--", "inner")

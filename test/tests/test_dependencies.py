@@ -45,7 +45,7 @@ def _dependent(
 
 
 def _lock(project_dir: Path) -> str:
-    return (project_dir / "grimoire.lock").read_text()
+    return (project_dir / "grimoire.lock").read_text(encoding="utf-8")
 
 
 def _entries(lock_text: str, table: str = "skill") -> dict[str, str]:
@@ -108,7 +108,7 @@ def test_add_no_install_locks_the_closure(
     assert set(pins) == {"a", "c"}
     assert pins["c"].endswith(c.digest)
     # Only the target is declared; the dependency is not.
-    assert "c =" not in (project_dir / "grimoire.toml").read_text()
+    assert "c =" not in (project_dir / "grimoire.toml").read_text(encoding="utf-8")
 
 
 def test_nested_bundle_expands(
@@ -331,11 +331,11 @@ def test_path_source_requires_change_is_stale(
     def write(dep: str) -> None:
         skill.write_text(
             "---\nname: p\ndescription: Path skill.\nmetadata:\n"
-            f'  grim.requires.skills.dep: "{dep}"\n---\n# p\n'
+            f'  grim.requires.skills.dep: "{dep}"\n---\n# p\n', encoding="utf-8", newline="\n"
         )
 
     write(c1.fq)
-    (project_dir / "grimoire.toml").write_text('[skills]\np = "./skills/p"\n')
+    (project_dir / "grimoire.toml").write_text('[skills]\np = "./skills/p"\n', encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     runner.run("lock")

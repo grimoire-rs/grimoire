@@ -31,7 +31,7 @@ from src.registry import fetch_manifest
 
 def _write(p: Path, body: str) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(body)
+    p.write_text(body, encoding="utf-8", newline="\n")
 
 
 def test_skill_metadata_becomes_annotations(

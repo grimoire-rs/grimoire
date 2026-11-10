@@ -73,7 +73,7 @@ def _repin(workspace: Path, old: PublishedArtifact, new: PublishedArtifact) -> N
     lock = workspace / "grimoire.lock"
     text = lock.read_text(encoding="utf-8")
     assert old.digest in text
-    lock.write_text(text.replace(old.digest, new.digest), encoding="utf-8")
+    lock.write_text(text.replace(old.digest, new.digest), encoding="utf-8", newline="\n")
 
 
 def _file(path: Path) -> dict:
@@ -107,7 +107,7 @@ def _seed_record(runner: GrimRunner, workspace: Path, keys: list[str]) -> None:
     path = Path(runner.grim_home) / "hooks" / "consent" / f"{key}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     record = {"v": 1, "workspace": str(workspace), "hooks": keys, "consented_at": "2026-08-28T10:00:00Z"}
-    path.write_text(json.dumps(record), encoding="utf-8")
+    path.write_text(json.dumps(record), encoding="utf-8", newline="\n")
 
 
 def _key(binding: str, package: PublishedArtifact) -> str:
@@ -251,7 +251,7 @@ def test_orphan_with_a_changed_value_refuses_past_the_gate(
     target = project_dir / LOCAL
     write_config(project_dir, experimental_settings=True)
     runner.run("lock")
-    target.write_text(json.dumps({"model": "opus"}), encoding="utf-8")
+    target.write_text(json.dumps({"model": "opus"}), encoding="utf-8", newline="\n")
 
     result = runner.run("install", *flags, check=False)
 
@@ -259,7 +259,7 @@ def test_orphan_with_a_changed_value_refuses_past_the_gate(
     assert _file(target) == {"model": "opus"}
 
     # Positive control: with the value back the same run removes it.
-    target.write_text(json.dumps({"model": "sonnet"}), encoding="utf-8")
+    target.write_text(json.dumps({"model": "sonnet"}), encoding="utf-8", newline="\n")
     runner.run("install", *flags)
     assert _file(target) == {}
 
@@ -591,7 +591,7 @@ def test_path_source_in_a_hand_edited_lock_never_applies(
         flags=re.MULTILINE,
     )
     assert swapped == 1, pinned
-    lock.write_text(edited, encoding="utf-8")
+    lock.write_text(edited, encoding="utf-8", newline="\n")
 
     result = runner.run("install", TRUST, format="json")
 
@@ -601,6 +601,6 @@ def test_path_source_in_a_hand_edited_lock_never_applies(
     assert _store_files(runner) == []
 
     # Positive control: the same package under its pin applies.
-    lock.write_text(pinned, encoding="utf-8")
+    lock.write_text(pinned, encoding="utf-8", newline="\n")
     runner.run("install", TRUST)
     assert _file(project_dir / LOCAL) == {"model": "sonnet"}

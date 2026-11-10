@@ -63,7 +63,7 @@ def _release_mcp(runner: GrimRunner, src_dir: Path, registry: str, unique_repo: 
     """Publish the shared `grim-mcp` descriptor and return its reference."""
     descriptor = src_dir / "mcp" / "grim-mcp.toml"
     descriptor.parent.mkdir(parents=True, exist_ok=True)
-    descriptor.write_text(MCP_DESCRIPTOR)
+    descriptor.write_text(MCP_DESCRIPTOR, encoding="utf-8", newline="\n")
     ref = f"{registry}/{unique_repo}/mcp/grim-mcp:1.0.0"
     runner.json("release", str(descriptor), ref, "--kind", "mcp")
     return ref
@@ -95,14 +95,14 @@ def test_codex_config_toml_hand_authored_container_header_survives_install_and_u
         'command = "x"\n'
     )
     cfg = project_dir / ".codex" / "config.toml"
-    cfg.write_text(user_toml)
+    cfg.write_text(user_toml, encoding="utf-8", newline="\n")
     write_config(project_dir)
     runner.json("add", "--no-install", ref)
 
     rows = runner.json("install")["items"]
     assert rows[0]["status"] == "installed", rows
 
-    text = cfg.read_text()
+    text = cfg.read_text(encoding="utf-8")
     assert "# --- My MCP servers ---" in text, f"the comment on the user's header must survive: {text}"
     assert "\n[mcp_servers]\n" in text, f"the user's bare container header must survive: {text}"
     doc = tomllib.loads(text)
@@ -111,7 +111,7 @@ def test_codex_config_toml_hand_authored_container_header_survives_install_and_u
 
     out = runner.json("uninstall", "mcp", "grim-mcp")
     assert out["status"] in ("uninstalled", "removed"), out
-    assert cfg.read_text() == user_toml, "uninstall must restore the original bytes exactly"
+    assert cfg.read_text(encoding="utf-8") == user_toml, "uninstall must restore the original bytes exactly"
 
 
 def test_codex_config_toml_repeat_install_leaves_status_not_modified(
@@ -124,14 +124,14 @@ def test_codex_config_toml_repeat_install_leaves_status_not_modified(
     ref = _release_mcp(runner, project_dir / "src", registry, unique_repo)
     (project_dir / ".codex").mkdir()  # detect Codex alongside the fixture's Claude marker
     cfg = project_dir / ".codex" / "config.toml"
-    cfg.write_text("# keep me\n[mcp_servers]\n\n[mcp_servers.mine]\ncommand = \"x\"\n")
+    cfg.write_text("# keep me\n[mcp_servers]\n\n[mcp_servers.mine]\ncommand = \"x\"\n", encoding="utf-8", newline="\n")
     write_config(project_dir)
     runner.json("add", ref)
 
-    first = cfg.read_text()
+    first = cfg.read_text(encoding="utf-8")
     second_rows = runner.json("install")["items"]
     assert second_rows[0]["status"] == "unchanged", second_rows
-    assert cfg.read_text() == first, "a repeat install must be byte-stable"
+    assert cfg.read_text(encoding="utf-8") == first, "a repeat install must be byte-stable"
 
     row = next(r for r in runner.json("status")["items"] if r["name"] == "grim-mcp")
     assert row["state"] == "installed", row
@@ -175,13 +175,13 @@ def test_opencode_jsonc_comments_and_key_order_survive_rule_install_and_uninstal
         "}\n"
     )
     cfg = project_dir / "opencode.jsonc"
-    cfg.write_text(original)
+    cfg.write_text(original, encoding="utf-8", newline="\n")
     _opencode_project(project_dir, registry, unique_repo, runner)
 
     rows = runner.json("install", "--client", "opencode")["items"]
     assert rows[0]["status"] == "installed", rows
 
-    added = cfg.read_text()
+    added = cfg.read_text(encoding="utf-8")
     assert "// which model to use" in added, f"JSONC comment must survive: {added}"
     assert added.index('"zulu"') < added.index('"alpha"'), f"authored key order must survive: {added}"
     assert '"model":   "anthropic/claude"' in added, f"formatting must survive: {added}"
@@ -190,7 +190,7 @@ def test_opencode_jsonc_comments_and_key_order_survive_rule_install_and_uninstal
 
     out = runner.json("uninstall", "rule", "style")
     assert out["status"] in ("uninstalled", "removed"), out
-    assert cfg.read_text() == original, "uninstall must restore the original bytes exactly"
+    assert cfg.read_text(encoding="utf-8") == original, "uninstall must restore the original bytes exactly"
 
 
 def test_opencode_repeat_rule_install_is_byte_stable_and_not_modified(
@@ -200,15 +200,15 @@ def test_opencode_repeat_rule_install_is_byte_stable_and_not_modified(
     nothing and leaves `status` at `installed`."""
     runner = grim_at(project_dir)
     cfg = project_dir / "opencode.json"
-    cfg.write_text('{"model": "anthropic/claude"}\n')
+    cfg.write_text('{"model": "anthropic/claude"}\n', encoding="utf-8", newline="\n")
     _opencode_project(project_dir, registry, unique_repo, runner)
 
     runner.json("install", "--client", "opencode")
-    first = cfg.read_text()
+    first = cfg.read_text(encoding="utf-8")
     assert json.loads(first)["instructions"] == [".opencode/rules/*.md"]
 
     runner.json("install", "--client", "opencode")
-    assert cfg.read_text() == first, "a repeat install must not rewrite the vendor config"
+    assert cfg.read_text(encoding="utf-8") == first, "a repeat install must not rewrite the vendor config"
 
     row = next(r for r in runner.json("status")["items"] if r["name"] == "style")
     assert row["state"] == "installed", row
@@ -242,15 +242,15 @@ def test_global_opencode_mcp_installs_and_uninstalls_under_opencode_config_dir(
     # XDG_CONFIG_HOME at <home>/.config).
     cfg = Path(runner.env["XDG_CONFIG_HOME"]) / "opencode" / "opencode.json"
     cfg.parent.mkdir(parents=True, exist_ok=True)
-    cfg.write_text('{"model": "anthropic/claude"}\n')
+    cfg.write_text('{"model": "anthropic/claude"}\n', encoding="utf-8", newline="\n")
 
-    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n', encoding="utf-8", newline="\n")
     runner.json("lock", "--global")
     rows = runner.json("install", "--global", "--client", "opencode")["items"]
     assert rows[0]["status"] == "installed", rows
     assert rows[0]["target"] is not None, "the recorded target must resolve, not be skipped as unanchorable"
 
-    doc = json.loads(cfg.read_text())
+    doc = json.loads(cfg.read_text(encoding="utf-8"))
     # OpenCode's stdio shape is a `command` array, not a bare string.
     assert doc["mcp"]["grim-mcp"]["command"] == ["grim", "mcp"], doc
     assert doc["model"] == "anthropic/claude", "foreign keys preserved"
@@ -260,7 +260,7 @@ def test_global_opencode_mcp_installs_and_uninstalls_under_opencode_config_dir(
 
     out = runner.json("uninstall", "--global", "mcp", "grim-mcp")
     assert out["status"] in ("uninstalled", "removed"), out
-    doc = json.loads(cfg.read_text())
+    doc = json.loads(cfg.read_text(encoding="utf-8"))
     assert "grim-mcp" not in doc.get("mcp", {}), f"uninstall must remove the live entry, not orphan it: {doc}"
     assert doc["model"] == "anthropic/claude", "the config file itself must survive uninstall"
 
@@ -276,21 +276,21 @@ def test_global_opencode_mcp_follows_opencode_config_file_override(
 
     cfg = grim_home.parent / "custom" / "oc.json"
     cfg.parent.mkdir(parents=True, exist_ok=True)
-    cfg.write_text('{"model": "anthropic/claude"}\n')
+    cfg.write_text('{"model": "anthropic/claude"}\n', encoding="utf-8", newline="\n")
     runner.env["OPENCODE_CONFIG"] = str(cfg)
 
-    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n', encoding="utf-8", newline="\n")
     runner.json("lock", "--global")
     rows = runner.json("install", "--global", "--client", "opencode")["items"]
     assert rows[0]["status"] == "installed", rows
     assert rows[0]["target"] is not None, rows
 
-    doc = json.loads(cfg.read_text())
+    doc = json.loads(cfg.read_text(encoding="utf-8"))
     # OpenCode's stdio shape is a `command` array, not a bare string.
     assert doc["mcp"]["grim-mcp"]["command"] == ["grim", "mcp"], doc
 
     runner.json("uninstall", "--global", "mcp", "grim-mcp")
-    doc = json.loads(cfg.read_text())
+    doc = json.loads(cfg.read_text(encoding="utf-8"))
     assert "grim-mcp" not in doc.get("mcp", {}), f"uninstall must remove the live entry: {doc}"
 
 
@@ -310,14 +310,14 @@ def test_global_opencode_mcp_edits_an_existing_jsonc_instead_of_a_json_sibling(
     cfg_dir = Path(runner.env["XDG_CONFIG_HOME"]) / "opencode"
     cfg_dir.mkdir(parents=True, exist_ok=True)
     cfg = cfg_dir / "opencode.jsonc"
-    cfg.write_text('{\n  // which model to use\n  "model": "anthropic/claude"\n}\n')
+    cfg.write_text('{\n  // which model to use\n  "model": "anthropic/claude"\n}\n', encoding="utf-8", newline="\n")
 
-    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n', encoding="utf-8", newline="\n")
     runner.json("lock", "--global")
     rows = runner.json("install", "--global", "--client", "opencode")["items"]
     assert rows[0]["status"] == "installed", rows
 
-    added = cfg.read_text()
+    added = cfg.read_text(encoding="utf-8")
     assert '"grim-mcp"' in added, f"the entry must land in the .jsonc: {added}"
     assert "// which model to use" in added, f"JSONC comment must survive: {added}"
     assert not (cfg_dir / "opencode.json").exists(), "no competing .json sibling may be created"
@@ -326,7 +326,7 @@ def test_global_opencode_mcp_edits_an_existing_jsonc_instead_of_a_json_sibling(
     assert row["state"] == "installed", row
 
     runner.json("uninstall", "--global", "mcp", "grim-mcp")
-    removed = cfg.read_text()
+    removed = cfg.read_text(encoding="utf-8")
     assert "grim-mcp" not in removed, f"uninstall must remove the live entry: {removed}"
     assert "// which model to use" in removed, "the user's config must survive uninstall"
 
@@ -375,21 +375,21 @@ def test_global_opencode_mcp_uninstall_keeps_a_comment_ending_in_a_comma(
     # GrimRunner pins XDG_CONFIG_HOME at <home>/.config.
     cfg = Path(runner.env["XDG_CONFIG_HOME"]) / "opencode" / "opencode.jsonc"
     cfg.parent.mkdir(parents=True, exist_ok=True)
-    cfg.write_text('{"model": "anthropic/claude"}\n')
+    cfg.write_text('{"model": "anthropic/claude"}\n', encoding="utf-8", newline="\n")
 
-    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n', encoding="utf-8", newline="\n")
     runner.json("lock", "--global")
     rows = runner.json("install", "--global", "--client", "opencode")["items"]
     assert rows[0]["status"] == "installed", rows
 
     # The user reflows the file around grim's entry; its value is unchanged.
-    entry = json.dumps(json.loads(cfg.read_text())["mcp"]["grim-mcp"])
-    cfg.write_text(layout.format(comment=COMMA_COMMENT, entry=entry))
+    entry = json.dumps(json.loads(cfg.read_text(encoding="utf-8"))["mcp"]["grim-mcp"])
+    cfg.write_text(layout.format(comment=COMMA_COMMENT, entry=entry), encoding="utf-8", newline="\n")
     row = next(r for r in runner.json("status", "--global")["items"] if r["name"] == "grim-mcp")
     assert row["state"] == "installed", row
 
     runner.json("uninstall", "--global", "mcp", "grim-mcp")
-    removed = cfg.read_text()
+    removed = cfg.read_text(encoding="utf-8")
     assert COMMA_COMMENT in removed, f"the comment must keep every byte: {removed!r}"
     assert _loads_jsonc(removed) == rest, f"the file must still parse: {removed!r}"
 
@@ -415,9 +415,9 @@ def test_global_opencode_mcp_reads_past_a_byte_order_mark(
     # GrimRunner pins XDG_CONFIG_HOME at <home>/.config.
     cfg = Path(runner.env["XDG_CONFIG_HOME"]) / "opencode" / name
     cfg.parent.mkdir(parents=True, exist_ok=True)
-    cfg.write_text("\ufeff" + body, encoding="utf-8")
+    cfg.write_text("\ufeff" + body, encoding="utf-8", newline="\n")
 
-    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n', encoding="utf-8", newline="\n")
     runner.json("lock", "--global")
     rows = runner.json("install", "--global", "--client", "opencode")["items"]
     assert rows[0]["status"] == "installed", rows
@@ -466,7 +466,7 @@ def test_clients_missing_skips_a_client_that_declines_the_kind(
         f'style = "{rule.fq}"\n'
         "\n"
         "[skills]\n"
-        f'helper = "{skill.fq}"\n'
+        f'helper = "{skill.fq}"\n', encoding="utf-8", newline="\n"
     )
     runner.json("lock")
     runner.json("install")
@@ -500,7 +500,7 @@ def test_clients_missing_still_reports_a_genuinely_uninstalled_client(
         tag="1.0.0",
     )
     cfg = project_dir / "grimoire.toml"
-    cfg.write_text(f"[options]\nclients = [\"claude\"]\n\n[skills]\nhelper = \"{skill.fq}\"\n")
+    cfg.write_text(f"[options]\nclients = [\"claude\"]\n\n[skills]\nhelper = \"{skill.fq}\"\n", encoding="utf-8", newline="\n")
     runner.json("lock")
     runner.json("install")
 
@@ -511,7 +511,7 @@ def test_clients_missing_still_reports_a_genuinely_uninstalled_client(
         'clients = ["claude", "cursor"]\n'
         "\n"
         "[skills]\n"
-        f'helper = "{skill.fq}"\n'
+        f'helper = "{skill.fq}"\n', encoding="utf-8", newline="\n"
     )
     row = next(r for r in runner.json("status")["items"] if r["name"] == "helper")
     assert row["clients_missing"] == ["cursor"], row
@@ -559,12 +559,12 @@ def test_status_reports_installed_and_modified_for_a_client_that_does_not_detect
 
     # A hand edit must surface as `modified` — the same verdict `install`
     # reaches on the same bytes.
-    installed.write_text("hand edited\n")
+    installed.write_text("hand edited\n", encoding="utf-8", newline="\n")
     row = next(r for r in runner.json("status")["items"] if r["name"] == "helper")
     assert row["state"] == "modified", row
     refused = runner.run("install", "--client", "copilot", check=False)
     assert refused.returncode == 65, refused.stderr
-    assert installed.read_text() == "hand edited\n", "a refused install must not overwrite the edit"
+    assert installed.read_text(encoding="utf-8") == "hand edited\n", "a refused install must not overwrite the edit"
 
 
 def test_status_reports_missing_once_the_installed_files_are_gone(
@@ -620,7 +620,7 @@ def test_status_surfaces_an_unreadable_install_state_instead_of_reporting_missin
 
     state = project_dir / ".grimoire" / "state.json"
     assert state.is_file(), "the install must have written project state"
-    state.write_text("{ not json at all")
+    state.write_text("{ not json at all", encoding="utf-8", newline="\n")
 
     result = runner.run("status", format="json", check=False)
     assert result.returncode != 0, (

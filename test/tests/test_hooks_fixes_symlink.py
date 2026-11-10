@@ -47,7 +47,7 @@ def test_global_hook_arms_and_disarms_through_a_symlinked_settings_file(
     runner = grim_at(project_dir)
     real = Path(runner.home) / "dotfiles" / "claude-settings.json"
     real.parent.mkdir(parents=True)
-    real.write_text('{"permissions": {}}\n')
+    real.write_text('{"permissions": {}}\n', encoding="utf-8", newline="\n")
     link = Path(runner.home) / ".claude" / "settings.json"
     link.parent.mkdir(parents=True)
     link.symlink_to(real)
@@ -55,12 +55,12 @@ def test_global_hook_arms_and_disarms_through_a_symlinked_settings_file(
     runner.run("config", "set", "options.experimental.hooks", "true", "--global")
     runner.run("add", "--kind", "hook", hook.fq, "--global")
     assert link.is_symlink(), "arming must keep the dotfiles link"
-    assert MARKER in real.read_text(), "the registration lands in the real file"
+    assert MARKER in real.read_text(encoding="utf-8"), "the registration lands in the real file"
 
     runner.run("uninstall", "--global", "hook", "shell-guard")
     assert link.is_symlink(), "disarming must keep the dotfiles link"
-    assert MARKER not in real.read_text(), "the registration is reaped from the real file"
-    assert '"permissions"' in real.read_text()
+    assert MARKER not in real.read_text(encoding="utf-8"), "the registration is reaped from the real file"
+    assert '"permissions"' in real.read_text(encoding="utf-8")
 
 
 def test_a_project_claude_dir_linked_out_of_the_workspace_is_never_written(
@@ -75,7 +75,7 @@ def test_a_project_claude_dir_linked_out_of_the_workspace_is_never_written(
         '{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", '
         f'"command": "x", "com.grimoire.managed": "{MARKER}"}}]}}]}}}}\n'
     )
-    settings.write_text(owned)
+    settings.write_text(owned, encoding="utf-8", newline="\n")
     shutil.rmtree(project_dir / ".claude", ignore_errors=True)
     (project_dir / ".claude").symlink_to(other)
     write_config(project_dir)
@@ -84,4 +84,4 @@ def test_a_project_claude_dir_linked_out_of_the_workspace_is_never_written(
     runner.run("lock")
     runner.run("install")
 
-    assert settings.read_text() == owned, "the other project's registrations survive"
+    assert settings.read_text(encoding="utf-8") == owned, "the other project's registrations survive"

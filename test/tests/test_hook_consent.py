@@ -80,7 +80,7 @@ def _rows(runner) -> list[dict]:
     path = Path(runner.grim_home) / "hooks" / "dispatch.json"
     if not path.is_file():
         return []
-    table = json.loads(path.read_text())
+    table = json.loads(path.read_text(encoding="utf-8"))
     return [row for root in table["roots"].values() for row in root["hooks"]]
 
 
@@ -105,7 +105,7 @@ def _record_for(runner, workspace: Path) -> dict | None:
     """
     key = hashlib.sha256(str(workspace).encode()).hexdigest()
     path = _consent_dir(runner) / f"{key}.json"
-    return json.loads(path.read_text()) if path.is_file() else None
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
 
 
 def _hook_row(runner) -> dict:
@@ -606,7 +606,7 @@ def test_an_unreadable_record_degrades_to_unconsented_and_never_to_an_error(
     assert len(_rows(runner)) == 1
 
     for corrupt in ('{"v":99,"workspace":"/x","hooks":[],"consented_at":"x"}', '{"v":1,"work'):
-        _records(runner)[0].write_text(corrupt)
+        _records(runner)[0].write_text(corrupt, encoding="utf-8", newline="\n")
         result = runner.run("install", check=False)
         assert result.returncode == 0, f"an unreadable record must not fail a command: {corrupt}"
         assert "workspace-not-consented" in _causes(runner), corrupt
@@ -639,8 +639,8 @@ def _hook_state(runner, name: str) -> dict:
 
 def _drop_lock_block(lock: Path, table: str) -> None:
     """Delete every `[[<table>]]` block from a lock (a hand-edit, or a stale lock)."""
-    text = lock.read_text()
-    lock.write_text(re.sub(rf"(?ms)^\[\[{table}\]\]\n.*?(?=^\[\[|\Z)", "", text))
+    text = lock.read_text(encoding="utf-8")
+    lock.write_text(re.sub(rf"(?ms)^\[\[{table}\]\]\n.*?(?=^\[\[|\Z)", "", text), encoding="utf-8", newline="\n")
 
 
 def test_add_does_not_consent_preexisting_hook(
@@ -681,7 +681,7 @@ def test_add_does_not_consent_when_closure_incomputable(
     # The followed edge holder -> planted now has no registry entry: the
     # closure is unknowable without the network.
     _drop_lock_block(project_dir / "grimoire.lock", "hook")
-    assert "[[hook]]" not in (project_dir / "grimoire.lock").read_text()
+    assert "[[hook]]" not in (project_dir / "grimoire.lock").read_text(encoding="utf-8")
 
     runner.run("add", wanted.fq)
 
@@ -772,7 +772,7 @@ def test_gained_hook_drifts(
     drift = [a for a in state["arming"] if a["cause"] == "consent-drifted"]
     assert drift and "gained" in drift[0]["message"], state
     assert "gained" not in _hook_names(_rows(runner)), "the gained hook must not arm"
-    assert gained.digest in (project_dir / "grimoire.lock").read_text()
+    assert gained.digest in (project_dir / "grimoire.lock").read_text(encoding="utf-8")
 
 
 def test_transitive_hook_transport_parity(
@@ -862,7 +862,7 @@ def _armed_in(runner, workspace: Path) -> set[str]:
     path = Path(runner.grim_home) / "hooks" / "dispatch.json"
     if not path.is_file():
         return set()
-    roots = json.loads(path.read_text())["roots"].values()
+    roots = json.loads(path.read_text(encoding="utf-8"))["roots"].values()
     return {row["artifact"] for root in roots if root["root"] == str(workspace) for row in root["hooks"]}
 
 
@@ -979,12 +979,12 @@ def test_offline_add_records_no_consent_for_a_stand_in(
     runner = _hooked_workspace(grim_at, project_dir)
     kind, reference, row = stand_in(grim_at, tmp_path, runner, unique_repo)
     lock = project_dir / "grimoire.lock"
-    lock.write_text(_LOCK_HEADER + row)
+    lock.write_text(_LOCK_HEADER + row, encoding="utf-8", newline="\n")
 
     runner.run("add", "--offline", "--kind", kind, reference)
 
-    assert "d" * 64 not in lock.read_text(), "the relock saved, so the row answered"
-    assert 'name = "planted"' in lock.read_text()
+    assert "d" * 64 not in lock.read_text(encoding="utf-8"), "the relock saved, so the row answered"
+    assert 'name = "planted"' in lock.read_text(encoding="utf-8")
     assert _consented(runner, project_dir) == set()
     assert _armed_in(runner, project_dir) == set()
 
@@ -999,7 +999,7 @@ def test_a_stand_in_hook_stays_gated_on_the_next_online_install(
     """
     runner = _hooked_workspace(grim_at, project_dir)
     kind, reference, row = _bundle_row_below_target(grim_at, tmp_path, runner, unique_repo)
-    (project_dir / "grimoire.lock").write_text(_LOCK_HEADER + row)
+    (project_dir / "grimoire.lock").write_text(_LOCK_HEADER + row, encoding="utf-8", newline="\n")
     runner.run("add", "--offline", "--kind", kind, reference)
 
     runner.run("install")
@@ -1050,7 +1050,7 @@ def test_a_failed_add_records_the_consent_its_gesture_carried(
     runner = _hooked_workspace(grim_at, project_dir)
     theirs = project_dir / ".claude" / "skills" / "clash" / "SKILL.md"
     theirs.parent.mkdir(parents=True)
-    theirs.write_text("not grim's\n")
+    theirs.write_text("not grim's\n", encoding="utf-8", newline="\n")
 
     result = runner.run("add", pack.fq, check=False)
 
@@ -1097,7 +1097,7 @@ def test_a_failed_add_keeps_what_the_record_already_armed(
     runner.run("add", "--kind", "hook", kept.fq)
     theirs = project_dir / ".claude" / "skills" / "clash" / "SKILL.md"
     theirs.parent.mkdir(parents=True)
-    theirs.write_text("not grim's\n")
+    theirs.write_text("not grim's\n", encoding="utf-8", newline="\n")
 
     assert runner.run("add", pack.fq, check=False).returncode == 65
 
@@ -1126,7 +1126,7 @@ def test_a_failed_add_records_no_more_than_its_gesture_covered(
     runner.run("lock")
     theirs = project_dir / ".claude" / "skills" / "clash" / "SKILL.md"
     theirs.parent.mkdir(parents=True)
-    theirs.write_text("not grim's\n")
+    theirs.write_text("not grim's\n", encoding="utf-8", newline="\n")
 
     result = runner.run("add", pack.fq, check=False)
 
@@ -1145,12 +1145,12 @@ def test_an_add_whose_relock_fails_records_nothing(
         tag="1",
     )
     runner = _hooked_workspace(grim_at, project_dir)
-    declared = (project_dir / "grimoire.toml").read_text()
+    declared = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
 
     result = runner.run("add", pack.fq, check=False)
 
     assert result.returncode != 0, result.stderr
-    assert (project_dir / "grimoire.toml").read_text() == declared
+    assert (project_dir / "grimoire.toml").read_text(encoding="utf-8") == declared
     assert _record_for(runner, project_dir) is None
 
 
@@ -1163,7 +1163,7 @@ def test_a_record_that_cannot_be_written_arms_nothing(
     runner = _hooked_workspace(grim_at, project_dir)
     blocked = _consent_dir(runner)
     blocked.parent.mkdir(parents=True, exist_ok=True)
-    blocked.write_text("")
+    blocked.write_text("", encoding="utf-8", newline="\n")
 
     result = runner.run("add", "--kind", "hook", hook.fq)
 
@@ -1195,12 +1195,12 @@ repo = "{REGISTRY_HOST}/{inner.repo}"
 tag = "{inner.tag}"
 pinned = "{inner.pinned}"
 transitive = true
-"""
+""", encoding="utf-8", newline="\n"
     )
 
     runner.run("add", "--kind", "bundle", outer.fq)
 
-    assert 'name = "planted"' in (project_dir / "grimoire.lock").read_text()
+    assert 'name = "planted"' in (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert _consented(runner, project_dir) == set()
     assert _armed_in(runner, project_dir) == set()
 
@@ -1246,11 +1246,11 @@ def test_add_leaves_a_hook_behind_repaired_edges_unconsented(
     lock = project_dir / "grimoire.lock"
     _drop_lock_block(lock, "skill.requires")
     _drop_lock_block(lock, "hook")
-    assert "deep" not in lock.read_text()
+    assert "deep" not in lock.read_text(encoding="utf-8")
 
     runner.run("add", wanted.fq)
 
-    assert 'name = "deep"' in lock.read_text(), "the relock repaired the edge"
+    assert 'name = "deep"' in lock.read_text(encoding="utf-8"), "the relock repaired the edge"
     assert _consented(runner, project_dir) == set()
     assert _armed_in(runner, project_dir) == set()
 
@@ -1264,7 +1264,7 @@ def _cloned(project_dir: Path, **declared) -> None:
     """A checkout whose own `grimoire.toml` turns the feature on."""
     write_config(project_dir, **declared)
     config = project_dir / "grimoire.toml"
-    config.write_text(config.read_text() + "\n[options.experimental]\nhooks = true\n")
+    config.write_text(config.read_text(encoding="utf-8") + "\n[options.experimental]\nhooks = true\n", encoding="utf-8", newline="\n")
 
 
 def _dependent(repo: str, name: str, *requires: tuple[str, str, str], tag: str = "1"):
@@ -1303,7 +1303,7 @@ def _path_shadow(project_dir: Path, unique_repo: str) -> tuple[str, list[str]]:
     local = project_dir / "dep"
     local.mkdir()
     (local / "SKILL.md").write_text(
-        f"---\nname: dep\ndescription: d\nmetadata:\n  grim.requires.hooks.planted: {planted.fq}\n---\n# dep\n"
+        f"---\nname: dep\ndescription: d\nmetadata:\n  grim.requires.hooks.planted: {planted.fq}\n---\n# dep\n", encoding="utf-8", newline="\n"
     )
     _cloned(project_dir, skills={"dep": "./dep"})
     return "planted", [wanted.fq]
@@ -1350,7 +1350,7 @@ def test_add_consents_no_hook_behind_an_edge_it_did_not_resolve(
 
     runner.run("add", *add)
 
-    assert f'name = "{hook}"' in (project_dir / "grimoire.lock").read_text()
+    assert f'name = "{hook}"' in (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert _consented(runner, project_dir) == set()
     assert _armed_in(runner, project_dir) == set()
 
@@ -1373,7 +1373,7 @@ def test_add_consents_no_hook_row_a_lock_carried(
 [[hook]]
 name = "held"
 pinned = "{held.pinned}"
-'''
+''', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
 
@@ -1422,13 +1422,13 @@ pinned = "{old.pinned}"
 kind = "skill"
 name = "kept"
 id = "{kept.fq}"
-'''
+''', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
 
     runner.run("add", "--kind", "bundle", reference)
 
-    assert 'name = "retired"' in lock.read_text()
+    assert 'name = "retired"' in lock.read_text(encoding="utf-8")
     assert _consented(runner, project_dir) == set()
     assert _armed_in(runner, project_dir) == set()
 
@@ -1463,7 +1463,7 @@ def test_a_carried_hook_target_consents_only_to_a_pin_its_repository_serves(
 [[hook]]
 name = "h"
 pinned = "{reference}@{theirs.digest}"
-'''
+''', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
 
@@ -1500,7 +1500,7 @@ def test_a_carried_hook_target_names_a_digest_its_repository_dropped(
     elsewhere.run("install")
     reference = f"{REGISTRY_HOST}/{good}/h@{theirs.digest}"
     _cloned(project_dir, hooks={"h": reference})
-    (project_dir / "grimoire.lock").write_text(_LOCK_HEADER + f'\n[[hook]]\nname = "h"\npinned = "{reference}"\n')
+    (project_dir / "grimoire.lock").write_text(_LOCK_HEADER + f'\n[[hook]]\nname = "h"\npinned = "{reference}"\n', encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     result = runner.run("add", "--kind", "hook", reference)
@@ -1529,7 +1529,7 @@ def test_a_carried_hook_target_consents_only_while_its_tag_names_the_pin(
 [[hook]]
 name = "h"
 pinned = "{reference}@{old.digest}"
-'''
+''', encoding="utf-8", newline="\n"
     )
     new = _publish_hook(good, name="h", payload=GUARD_SH + "# new\n")
     assert new.digest != old.digest

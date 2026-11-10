@@ -37,7 +37,7 @@ WINDOWS = sys.platform == "win32"
 
 @pytest.fixture()
 def runner(grim_at, project_dir: Path) -> GrimRunner:
-    (project_dir / "grimoire.toml").write_text("[skills]\n\n[rules]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n\n[rules]\n", encoding="utf-8", newline="\n")
     return grim_at(project_dir)
 
 
@@ -305,7 +305,7 @@ def test_installation_id_stable_across_armed_runs(
     first, second = (e["resource"]["grim.installation.id"] for e in otlp_collector.exports)
     assert UUID.match(first)
     assert first == second
-    assert (telemetry_dir(runner) / "installation-id").read_text().strip() == first
+    assert (telemetry_dir(runner) / "installation-id").read_text(encoding="utf-8").strip() == first
 
 
 def test_debug_line_matches_wire(runner: GrimRunner, otlp_collector: OtlpCollector) -> None:
@@ -363,7 +363,7 @@ def test_export_failure_never_changes_outcome(
     workdir = tmp_path / "work"
     workdir.mkdir()
     if command is _ok:
-        (workdir / "grimoire.toml").write_text("[skills]\n\n[rules]\n")
+        (workdir / "grimoire.toml").write_text("[skills]\n\n[rules]\n", encoding="utf-8", newline="\n")
     started = time.monotonic()
     baseline = command(grim_at(workdir))
     baseline_elapsed = time.monotonic() - started

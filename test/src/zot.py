@@ -70,7 +70,7 @@ def start_zot(*, htpasswd: str | None = None) -> Zot:
     for _ in range(_ATTEMPTS):
         port = _free_port()
         config = root / "config.json"
-        config.write_text(json.dumps(_config(root, port, htpasswd)), encoding="utf-8")
+        config.write_text(json.dumps(_config(root, port, htpasswd)), encoding="utf-8", newline="\n")
         with log.open("ab") as out:
             proc = subprocess.Popen(
                 [sys.executable, "-c", _WATCHDOG, zot, "serve", str(config)],
@@ -100,7 +100,7 @@ def _config(root: Path, port: int, htpasswd: str | None) -> dict:
     http: dict = {"address": "127.0.0.1", "port": str(port)}
     if htpasswd is not None:
         path = root / "htpasswd"
-        path.write_text(htpasswd + "\n", encoding="utf-8")
+        path.write_text(htpasswd + "\n", encoding="utf-8", newline="\n")
         http |= {"realm": "Registry Realm", "auth": {"htpasswd": {"path": str(path)}}}
     return {
         "distSpecVersion": "1.1.1",

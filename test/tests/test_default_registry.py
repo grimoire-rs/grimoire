@@ -40,13 +40,13 @@ def test_add_env_default_registry_persists_fq_name(
     assert out["status"] == "added"
 
     # Both config and lock must persist the FULLY-QUALIFIED name (host present).
-    cfg_text = (project_dir / "grimoire.toml").read_text()
+    cfg_text = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert f"{REGISTRY_HOST}/" in cfg_text, (
         f"grimoire.toml must contain the registry host '{REGISTRY_HOST}/', "
         f"got:\n{cfg_text}"
     )
 
-    lock_text = (project_dir / "grimoire.lock").read_text()
+    lock_text = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert f"{REGISTRY_HOST}/" in lock_text, (
         f"grimoire.lock must contain the registry host '{REGISTRY_HOST}/', "
         f"got:\n{lock_text}"
@@ -73,7 +73,7 @@ def test_add_env_default_registry_beats_config_default(
     wrong_host = "wrong-registry.invalid:5000"
     cfg_path = project_dir / "grimoire.toml"
     cfg_path.write_text(
-        f'[options]\ndefault_registry = "{wrong_host}"\n\n[skills]\n\n[rules]\n'
+        f'[options]\ndefault_registry = "{wrong_host}"\n\n[skills]\n\n[rules]\n', encoding="utf-8", newline="\n"
     )
 
     runner = grim_at(project_dir)
@@ -90,7 +90,7 @@ def test_add_env_default_registry_beats_config_default(
     # proving env beats config. The bogus `default_registry` line still
     # round-trips in `[options]` (add preserves options), so assert on the
     # skill ENTRY line, not the whole file.
-    cfg_text = (project_dir / "grimoire.toml").read_text()
+    cfg_text = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     skill_line = next(
         (line for line in cfg_text.splitlines() if line.startswith("code-review")),
         "",
@@ -105,7 +105,7 @@ def test_add_env_default_registry_beats_config_default(
     )
 
     # The lock must record the env (real) host, and never the bogus one.
-    lock_text = (project_dir / "grimoire.lock").read_text()
+    lock_text = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert f"{REGISTRY_HOST}/" in lock_text, (
         f"grimoire.lock must use the env registry host '{REGISTRY_HOST}/', got:\n{lock_text}"
     )
@@ -132,7 +132,7 @@ def test_add_config_default_registry_persists_fq_name(
     # write_config helper does not emit [options], so we write it manually.
     cfg_path = project_dir / "grimoire.toml"
     cfg_path.write_text(
-        f'[options]\ndefault_registry = "{REGISTRY_HOST}"\n\n[skills]\n\n[rules]\n'
+        f'[options]\ndefault_registry = "{REGISTRY_HOST}"\n\n[skills]\n\n[rules]\n', encoding="utf-8", newline="\n"
     )
 
     runner = grim_at(project_dir)
@@ -148,13 +148,13 @@ def test_add_config_default_registry_persists_fq_name(
 
     # Config after `grim add` re-serialises the declared set (registry host
     # must be in the skill entry).
-    cfg_text = (project_dir / "grimoire.toml").read_text()
+    cfg_text = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert f"{REGISTRY_HOST}/" in cfg_text, (
         f"grimoire.toml must contain the registry host '{REGISTRY_HOST}/', "
         f"got:\n{cfg_text}"
     )
 
-    lock_text = (project_dir / "grimoire.lock").read_text()
+    lock_text = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert f"{REGISTRY_HOST}/" in lock_text, (
         f"grimoire.lock must contain the registry host '{REGISTRY_HOST}/', "
         f"got:\n{lock_text}"
@@ -175,7 +175,7 @@ def test_add_short_id_honors_global_registries_array(
         {"global-tool/SKILL.md": "---\nname: global-tool\ndescription: d\n---\n# G\n"},
         tag="1",
     )
-    (grim_home / "grimoire.toml").write_text(f'[[registries]]\noci = "{REGISTRY_HOST}"\ndefault = true\n')
+    (grim_home / "grimoire.toml").write_text(f'[[registries]]\noci = "{REGISTRY_HOST}"\ndefault = true\n', encoding="utf-8", newline="\n")
     write_config(project_dir)
 
     runner = grim_at(project_dir)
@@ -188,7 +188,7 @@ def test_add_short_id_honors_global_registries_array(
         f"to the built-in registry: {out!r}"
     )
 
-    cfg_text = (project_dir / "grimoire.toml").read_text()
+    cfg_text = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert f"{REGISTRY_HOST}/{unique_repo}/global-tool" in cfg_text, (
         f"the skill binding must use the global registry host '{REGISTRY_HOST}/', "
         f"got:\n{cfg_text}"
@@ -213,7 +213,7 @@ def test_add_short_id_in_index_only_project_uses_default_chain(
         'alias = "hub"\n'
         'index = "http://127.0.0.1:1/absent"\n'
         'default = true\n'
-        '\n[skills]\n\n[rules]\n'
+        '\n[skills]\n\n[rules]\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
     runner.env["GRIM_DEFAULT_REGISTRY"] = REGISTRY_HOST
@@ -222,7 +222,7 @@ def test_add_short_id_in_index_only_project_uses_default_chain(
     out = runner.json("add", short_ref)
     assert out["status"] == "added"
 
-    cfg_text = (project_dir / "grimoire.toml").read_text()
+    cfg_text = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert f"{REGISTRY_HOST}/{unique_repo}/code-review" in cfg_text, (
         f"the binding must be fully qualified against the short-id default "
         f"chain, got:\n{cfg_text}"

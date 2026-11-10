@@ -46,7 +46,7 @@ from src.runner import GrimRunner
 
 def _minimal_global_config(grim_home: Path) -> None:
     """Write a minimal valid ``grimoire.toml`` in ``$GRIM_HOME``."""
-    (grim_home / "grimoire.toml").write_text("[skills]\n\n[rules]\n")
+    (grim_home / "grimoire.toml").write_text("[skills]\n\n[rules]\n", encoding="utf-8", newline="\n")
 
 
 # ---------------------------------------------------------------------------
@@ -448,7 +448,7 @@ def test_global_registry_add_writes_grim_home_config(
         "--oci", f"{REGISTRY_HOST}/grim-test/e2e", "--default",
     )
 
-    cfg_text = (grim_home / "grimoire.toml").read_text()
+    cfg_text = (grim_home / "grimoire.toml").read_text(encoding="utf-8")
     assert "corp" in cfg_text, (
         f"$GRIM_HOME/grimoire.toml must contain the alias 'corp'; "
         f"got:\n{cfg_text}"
@@ -507,11 +507,11 @@ def test_injection_via_registry_add_url_is_rejected_or_harmless(
         except tomllib.TOMLDecodeError as exc:
             raise AssertionError(
                 f"grimoire.toml is invalid TOML after injection attempt:\n"
-                f"{cfg_path.read_text()}\nError: {exc}"
+                f"{cfg_path.read_text(encoding="utf-8")}\nError: {exc}"
             ) from exc
         assert count == 1, (
             f"injection must not create extra [[registries]] entries; "
-            f"got {count} entries.\nConfig:\n{cfg_path.read_text()}"
+            f"got {count} entries.\nConfig:\n{cfg_path.read_text(encoding="utf-8")}"
         )
     else:
         # Command rejected the value (exit 65 = DataError expected for control chars).
@@ -548,7 +548,7 @@ def test_injection_via_set_default_registry_is_rejected(
         except tomllib.TOMLDecodeError as exc:
             raise AssertionError(
                 f"grimoire.toml is invalid TOML after injection: {exc}\n"
-                f"Content:\n{cfg_path.read_text()}"
+                f"Content:\n{cfg_path.read_text(encoding="utf-8")}"
             ) from exc
         options = parsed.get("options", {})
         assert options.get("default_registry") != "pwned", (
@@ -640,12 +640,12 @@ def test_injection_via_grim_add_tag_is_rejected(
         except Exception as exc:
             raise AssertionError(
                 f"grimoire.toml is invalid TOML after injection attempt — "
-                f"injection succeeded:\n{cfg_path.read_text()}\nError: {exc}"
+                f"injection succeeded:\n{cfg_path.read_text(encoding="utf-8")}\nError: {exc}"
             ) from exc
         registry_count = len(data.get("registries", []))
         assert registry_count == 0, (
             f"injection must not create [[registries]] entries; "
-            f"got {registry_count}.\nConfig:\n{cfg_path.read_text()}"
+            f"got {registry_count}.\nConfig:\n{cfg_path.read_text(encoding="utf-8")}"
         )
     else:
         # No config file written — command must have exited non-zero.
@@ -1006,7 +1006,7 @@ def test_set_registry_include_with_a_bad_pattern_writes_nothing(
         )
         assert cfg_path.read_bytes() == before, (
             f"nothing may be written when {bad!r} is rejected; config is now:\n"
-            f"{cfg_path.read_text()}"
+            f"{cfg_path.read_text(encoding="utf-8")}"
         )
 
     # The surviving value is the one that was there before the failed writes.
@@ -1068,7 +1068,7 @@ def test_registry_add_over_the_aggregate_pattern_budget_exits_65(
     )
     assert cfg_path.read_bytes() == before, (
         f"nothing may be written when the list is rejected; config is now:\n"
-        f"{cfg_path.read_text()}"
+        f"{cfg_path.read_text(encoding="utf-8")}"
     )
 
 
@@ -1117,7 +1117,7 @@ def test_load_registry_hostile_locator_exits_78_without_raw_escape(
 
     # ESC reaches the locator through the both-sources-set arm.
     cfg.write_text(
-        '[[registries]]\noci = "\\u001b[2Jghcr.io/x"\nindex = "https://y"\n'
+        '[[registries]]\noci = "\\u001b[2Jghcr.io/x"\nindex = "https://y"\n', encoding="utf-8", newline="\n"
     )
     result = runner.run("config", "list", check=False)
     assert result.returncode == 78, (
@@ -1137,7 +1137,7 @@ def test_load_registry_hostile_locator_exits_78_without_raw_escape(
     # guard and reaches the duplicate-alias arm intact.
     cfg.write_text(
         '[[registries]]\nalias = "a\\u202Eb"\noci = "ghcr.io/x"\n\n'
-        '[[registries]]\nalias = "a\\u202Eb"\noci = "ghcr.io/y"\n'
+        '[[registries]]\nalias = "a\\u202Eb"\noci = "ghcr.io/y"\n', encoding="utf-8", newline="\n"
     )
     result = runner.run("config", "list", check=False)
     assert result.returncode == 78, (
@@ -1434,7 +1434,7 @@ def test_registry_set_with_a_bad_pattern_writes_nothing(
         "config", "registry", "add", "acme",
         "--oci", "ghcr.io/acme", "--include", "good/**",
     )
-    before = (project_dir / "grimoire.toml").read_text()
+    before = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
 
     result = runner.run(
         "config", "registry", "set", "acme", "--include", "acme{unclosed",
@@ -1444,7 +1444,7 @@ def test_registry_set_with_a_bad_pattern_writes_nothing(
         f"an invalid pattern must exit 65 (DataError); "
         f"got {result.returncode}; stderr: {result.stderr.strip()}"
     )
-    assert (project_dir / "grimoire.toml").read_text() == before, (
+    assert (project_dir / "grimoire.toml").read_text(encoding="utf-8") == before, (
         "a rejected pattern must leave grimoire.toml byte-identical"
     )
 
@@ -1640,7 +1640,7 @@ def test_registry_set_clear_include_twice_is_idempotent(
     _acme_with_both_filters(runner)
 
     runner.run("config", "registry", "set", "acme", "--clear-include")
-    after_first = (project_dir / "grimoire.toml").read_text()
+    after_first = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
 
     result = runner.run(
         "config", "registry", "set", "acme", "--clear-include", check=False
@@ -1649,7 +1649,7 @@ def test_registry_set_clear_include_twice_is_idempotent(
         f"a repeated clear must still exit 0; "
         f"got {result.returncode}; stderr: {result.stderr.strip()}"
     )
-    assert (project_dir / "grimoire.toml").read_text() == after_first, (
+    assert (project_dir / "grimoire.toml").read_text(encoding="utf-8") == after_first, (
         "a repeated clear must leave grimoire.toml byte-identical"
     )
 
@@ -1669,7 +1669,7 @@ def test_registry_set_clear_writes_no_include_key_at_all(
     _acme_with_both_filters(runner)
 
     runner.run("config", "registry", "set", "acme", "--clear-include")
-    written = (project_dir / "grimoire.toml").read_text()
+    written = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
 
     assert "include" not in written, (
         f"a cleared list must leave no include key; got:\n{written}"
@@ -1837,7 +1837,7 @@ def test_registry_add_insecure_round_trips_through_show_and_list(
     listed = runner.json("config", "registry", "list")["items"]
     assert [r["insecure"] for r in listed] == [True], f"got: {listed!r}"
 
-    doc = tomllib.loads((project_dir / "grimoire.toml").read_text())
+    doc = tomllib.loads((project_dir / "grimoire.toml").read_text(encoding="utf-8"))
     assert doc["registries"][0]["insecure"] is True, f"got: {doc!r}"
 
 
@@ -1853,7 +1853,7 @@ def test_registry_entry_without_the_flag_reports_insecure_false(
     runner.run("config", "registry", "add", "acme", "--oci", "ghcr.io/acme")
 
     assert runner.json("config", "registry", "show", "acme")["insecure"] is False
-    assert "insecure" not in (project_dir / "grimoire.toml").read_text()
+    assert "insecure" not in (project_dir / "grimoire.toml").read_text(encoding="utf-8")
 
 
 def test_registry_set_insecure_and_no_insecure_toggle_the_field(
@@ -1939,7 +1939,7 @@ def test_insecure_on_an_index_entry_is_rejected_everywhere(
         check=False,
     )
     assert r.returncode == 65, f"rc={r.returncode} stderr={r.stderr!r}"
-    assert "insecure" not in (project_dir / "grimoire.toml").read_text()
+    assert "insecure" not in (project_dir / "grimoire.toml").read_text(encoding="utf-8")
 
     runner.run("config", "registry", "add", "hub", "--index", "https://index.grimoire.rs")
     for args in (
@@ -1955,7 +1955,7 @@ def test_insecure_on_an_index_entry_is_rejected_everywhere(
     # Hand-written file: the same pairing is a config error at load.
     (project_dir / "grimoire.toml").write_text(
         '[skills]\n\n[rules]\n\n[[registries]]\n'
-        'index = "https://index.grimoire.rs"\ninsecure = true\n'
+        'index = "https://index.grimoire.rs"\ninsecure = true\n', encoding="utf-8", newline="\n"
     )
     r = runner.run("config", "registry", "list", check=False)
     assert r.returncode == 78, f"rc={r.returncode} stderr={r.stderr!r}"

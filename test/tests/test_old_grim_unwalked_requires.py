@@ -213,7 +213,7 @@ def _cut_bundle_rows(work: Path) -> None:
             cutting = line.startswith(("[[bundle]]", "[[bundle."))
         if not cutting:
             kept.append(line)
-    lock.write_text("".join(kept), encoding="utf-8")
+    lock.write_text("".join(kept), encoding="utf-8", newline="\n")
 
 
 def _delete_tag(repo: str, tag: str) -> None:
@@ -468,6 +468,7 @@ def _write_manifest(work: Path, includes: list[str]) -> None:
         '[marketplace]\nname = "acme"\n\n[marketplace.owner]\nname = "Acme"\n\n'
         f"[plugins.team]\ninclude = {json.dumps(includes)}\n",
         encoding="utf-8",
+        newline="\n",
     )
 
 

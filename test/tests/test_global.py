@@ -47,7 +47,7 @@ def test_global_scope_is_independent_of_project(
     )
     # Global config under $GRIM_HOME, no project config anywhere.
     (grim_home / "grimoire.toml").write_text(
-        f'[rules]\nglobal-rule = "{ru.fq}"\n'
+        f'[rules]\nglobal-rule = "{ru.fq}"\n', encoding="utf-8", newline="\n"
     )
     runner = GrimRunner(grim_binary, grim_home)
     # Claude must be *detected* globally for the default target set to
@@ -58,7 +58,7 @@ def test_global_scope_is_independent_of_project(
     lock_rows = runner.json("lock", "--global")["items"]
     assert lock_rows[0]["name"] == "global-rule"
     assert (grim_home / "grimoire.lock").is_file()
-    assert "@sha256:" in (grim_home / "grimoire.lock").read_text()
+    assert "@sha256:" in (grim_home / "grimoire.lock").read_text(encoding="utf-8")
 
     install_rows = runner.json("install", "--global")["items"]
     assert install_rows[0]["status"] == "installed"
@@ -80,7 +80,7 @@ def test_global_install_without_lock_exits_79(
 ) -> None:
     repo = f"{unique_repo}/r"
     ru = make_artifact(repo, "rule", {"r.md": "# r\n"}, tag="v1")
-    (grim_home / "grimoire.toml").write_text(f'[rules]\nr = "{ru.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[rules]\nr = "{ru.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
 
     result = runner.run("install", "--global", check=False)
@@ -96,11 +96,11 @@ def test_global_install_on_a_stale_lock_names_the_global_lock(
     """Followed from a project, a plain `grim lock` relocks that project instead."""
     first = make_artifact(f"{unique_repo}/r", "rule", {"r.md": "# r\n"}, tag="v1")
     second = make_artifact(f"{unique_repo}/s", "rule", {"s.md": "# s\n"}, tag="v1")
-    (grim_home / "grimoire.toml").write_text(f'[rules]\nr = "{first.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[rules]\nr = "{first.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     runner.run("lock", "--global")
     (grim_home / "grimoire.toml").write_text(
-        f'[rules]\nr = "{first.fq}"\ns = "{second.fq}"\n'
+        f'[rules]\nr = "{first.fq}"\ns = "{second.fq}"\n', encoding="utf-8", newline="\n"
     )
 
     result = runner.run("install", "--global", check=False)
@@ -120,7 +120,7 @@ def test_global_install_claude_skill_lands_in_home_dot_claude(
         {"my-skill/SKILL.md": "---\nname: my-skill\ndescription: test skill\n---\n# body\n"},
         tag="v1",
     )
-    (grim_home / "grimoire.toml").write_text(f'[skills]\nmy-skill = "{sk.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[skills]\nmy-skill = "{sk.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     (runner.home / ".claude").mkdir(parents=True, exist_ok=True)
     runner.json("lock", "--global")
@@ -150,7 +150,7 @@ def test_global_install_claude_rule_lands_in_home_dot_claude(
         {"my-rule.md": "---\npaths: ['**/*.rs']\n---\n# Rust style\n"},
         tag="v1",
     )
-    (grim_home / "grimoire.toml").write_text(f'[rules]\nmy-rule = "{ru.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[rules]\nmy-rule = "{ru.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     # Claude must be *detected* globally for the default target set to
     # include it; without any marker grim resolves to the generic `agents`
@@ -165,7 +165,7 @@ def test_global_install_claude_rule_lands_in_home_dot_claude(
     assert rule_file.is_file(), (
         f"global Claude rule must materialize in $HOME/.claude/rules/; got nothing at {rule_file}"
     )
-    content = rule_file.read_text()
+    content = rule_file.read_text(encoding="utf-8")
     assert "Rust style" in content
 
 
@@ -195,7 +195,7 @@ def test_global_install_claude_support_dir_rule_registers_absolute_glob(
         },
         tag="v1",
     )
-    (grim_home / "grimoire.toml").write_text(f'[rules]\nmy-rule = "{ru.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[rules]\nmy-rule = "{ru.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     # Claude must be *detected* globally for the default target set to
     # include it; without any marker grim resolves to the generic `agents`
@@ -211,13 +211,13 @@ def test_global_install_claude_support_dir_rule_registers_absolute_glob(
 
     settings = runner.home / ".claude/settings.json"
     assert settings.is_file(), "a global support-dir rule registers the exclusion"
-    assert json.loads(settings.read_text())["claudeMdExcludes"] == [
+    assert json.loads(settings.read_text(encoding="utf-8"))["claudeMdExcludes"] == [
         f"{runner.home.as_posix()}/.claude/rules/my-rule/**"
     ], "global scope must write the absolute glob, not the project **/ form"
 
     uninstall_rows = runner.json("uninstall", "--global", "rule", "my-rule")
     assert uninstall_rows["status"] == "uninstalled"
-    assert "claudeMdExcludes" not in json.loads(settings.read_text()), (
+    assert "claudeMdExcludes" not in json.loads(settings.read_text(encoding="utf-8")), (
         "the emptied managed key is dropped, never left as []"
     )
 
@@ -233,7 +233,7 @@ def test_global_install_opencode_skill_lands_in_xdg_config(
         {"oc-skill/SKILL.md": "---\nname: oc-skill\ndescription: opencode skill\n---\n# body\n"},
         tag="v1",
     )
-    (grim_home / "grimoire.toml").write_text(f'[skills]\noc-skill = "{sk.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[skills]\noc-skill = "{sk.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
 
@@ -261,7 +261,7 @@ def test_global_install_opencode_rule_stays_in_grim_home_and_registers_glob(
         {"oc-rule.md": "---\npaths: ['**']\n---\n# OpenCode rule\n"},
         tag="v1",
     )
-    (grim_home / "grimoire.toml").write_text(f'[rules]\noc-rule = "{ru.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[rules]\noc-rule = "{ru.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
 
@@ -281,7 +281,7 @@ def test_global_install_opencode_rule_stays_in_grim_home_and_registers_glob(
         f"opencode.json must be created at $XDG_CONFIG_HOME/opencode/opencode.json; "
         f"got nothing at {opencode_cfg}"
     )
-    cfg = json.loads(opencode_cfg.read_text())
+    cfg = json.loads(opencode_cfg.read_text(encoding="utf-8"))
     instructions = cfg.get("instructions", [])
     assert any(grim_home.as_posix() in entry for entry in instructions), (
         f"opencode.json instructions must contain an absolute glob pointing at $GRIM_HOME; "
@@ -300,7 +300,7 @@ def test_global_install_copilot_skill_lands_in_home_dot_copilot(
         {"cp-skill/SKILL.md": "---\nname: cp-skill\ndescription: copilot skill\n---\n# body\n"},
         tag="v1",
     )
-    (grim_home / "grimoire.toml").write_text(f'[skills]\ncp-skill = "{sk.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[skills]\ncp-skill = "{sk.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
 
@@ -323,7 +323,7 @@ def test_global_copilot_rule_installs_to_native_instructions_path(
     inert ``$GRIM_HOME`` workspace layout."""
     repo = f"{unique_repo}/cp-rule"
     ru = make_artifact(repo, "rule", {"cp-rule.md": "# guidance\n"}, tag="v1")
-    (grim_home / "grimoire.toml").write_text(f'[rules]\ncp-rule = "{ru.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[rules]\ncp-rule = "{ru.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
 
@@ -345,7 +345,7 @@ def test_global_copilot_rule_native_root_emits_no_fallback_warning(
     emitted."""
     repo = f"{unique_repo}/cp-warn-rule"
     ru = make_artifact(repo, "rule", {"cp-warn-rule.md": "# guidance\n"}, tag="v1")
-    (grim_home / "grimoire.toml").write_text(f'[rules]\ncp-warn-rule = "{ru.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[rules]\ncp-warn-rule = "{ru.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
 
@@ -368,7 +368,7 @@ def test_global_copilot_rule_without_resolvable_root_warns_and_falls_back(
     installer warns."""
     repo = f"{unique_repo}/cp-nowarn-rule"
     ru = make_artifact(repo, "rule", {"cp-nowarn-rule.md": "# guidance\n"}, tag="v1")
-    (grim_home / "grimoire.toml").write_text(f'[rules]\ncp-nowarn-rule = "{ru.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[rules]\ncp-nowarn-rule = "{ru.fq}"\n', encoding="utf-8", newline="\n")
     # cwd in an isolated dir so the workspace-layout fallback write lands in
     # the temp tree, not the pytest working directory.
     workdir = tmp_path / "work"
@@ -400,7 +400,7 @@ def test_global_copilot_rule_layout_migration_reaps_old_output(
     ``status``/``uninstall`` round-trip cleanly."""
     repo = f"{unique_repo}/mig-rule"
     ru = make_artifact(repo, "rule", {"mig-rule.md": "# guidance\n"}, tag="v1")
-    (grim_home / "grimoire.toml").write_text(f'[rules]\nmig-rule = "{ru.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[rules]\nmig-rule = "{ru.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
     runner.json("install", "--global", "--client", "copilot")
@@ -416,14 +416,14 @@ def test_global_copilot_rule_layout_migration_reaps_old_output(
     old.write_bytes(native.read_bytes())
     native.unlink()
     state_path = grim_home / "state/global.json"
-    state = json.loads(state_path.read_text())
+    state = json.loads(state_path.read_text(encoding="utf-8"))
     [record] = [r for r in state["records"] if r["name"] == "mig-rule"]
     [output] = record["outputs"]
     output["target"] = {
         "anchor": "grim-home",
         "relative": ".github/instructions/mig-rule.instructions.md",
     }
-    state_path.write_text(json.dumps(state))
+    state_path.write_text(json.dumps(state), encoding="utf-8", newline="\n")
 
     # Make Copilot (and only Copilot) detected for the update pass.
     (runner.home / ".copilot/skills").mkdir(parents=True)
@@ -432,7 +432,7 @@ def test_global_copilot_rule_layout_migration_reaps_old_output(
 
     assert native.is_file(), "update must re-materialize at the new native path"
     assert not old.exists(), "the unmodified old-layout output must be reaped"
-    state = json.loads(state_path.read_text())
+    state = json.loads(state_path.read_text(encoding="utf-8"))
     [record] = [r for r in state["records"] if r["name"] == "mig-rule"]
     anchors = [o["target"]["anchor"] for o in record["outputs"]]
     assert anchors == ["copilot-root"], f"record must re-anchor, got {anchors}"
@@ -469,7 +469,7 @@ def test_global_claude_install_honors_claude_config_dir(
         tag="v1",
     )
     (grim_home / "grimoire.toml").write_text(
-        f'[skills]\nenv-skill = "{sk.fq}"\n\n[rules]\nenv-rule = "{ru.fq}"\n'
+        f'[skills]\nenv-skill = "{sk.fq}"\n\n[rules]\nenv-rule = "{ru.fq}"\n', encoding="utf-8", newline="\n"
     )
     runner = GrimRunner(grim_binary, grim_home)
     config_dir = grim_home.parent / "claude-config"
@@ -505,7 +505,7 @@ def test_global_opencode_skill_honors_opencode_config_dir(
         {"oc-env-skill/SKILL.md": "---\nname: oc-env-skill\ndescription: env override\n---\n# body\n"},
         tag="v1",
     )
-    (grim_home / "grimoire.toml").write_text(f'[skills]\noc-env-skill = "{sk.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[skills]\noc-env-skill = "{sk.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     config_dir = grim_home.parent / "opencode-config"
     runner.env["OPENCODE_CONFIG_DIR"] = str(config_dir)
@@ -533,7 +533,7 @@ def test_global_copilot_skill_honors_copilot_home(
         {"cp-env-skill/SKILL.md": "---\nname: cp-env-skill\ndescription: env override\n---\n# body\n"},
         tag="v1",
     )
-    (grim_home / "grimoire.toml").write_text(f'[skills]\ncp-env-skill = "{sk.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[skills]\ncp-env-skill = "{sk.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     copilot_home = grim_home.parent / "copilot-home"
     runner.env["COPILOT_HOME"] = str(copilot_home)
@@ -562,7 +562,7 @@ def test_global_uninstall_removes_files_from_env_override_dir(
         {"env-un-skill/SKILL.md": "---\nname: env-un-skill\ndescription: x\n---\n# body\n"},
         tag="v1",
     )
-    (grim_home / "grimoire.toml").write_text(f'[skills]\nenv-un-skill = "{sk.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[skills]\nenv-un-skill = "{sk.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     config_dir = grim_home.parent / "claude-config-un"
     runner.env["CLAUDE_CONFIG_DIR"] = str(config_dir)
@@ -594,7 +594,7 @@ def test_global_empty_env_override_is_treated_as_unset(
         {"empty-env-skill/SKILL.md": "---\nname: empty-env-skill\ndescription: x\n---\n# body\n"},
         tag="v1",
     )
-    (grim_home / "grimoire.toml").write_text(f'[skills]\nempty-env-skill = "{sk.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[skills]\nempty-env-skill = "{sk.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     # Claude must be *detected* globally for the default target set to
     # include it; without any marker grim resolves to the generic `agents`
@@ -624,7 +624,7 @@ def test_global_update_rematerializes_into_env_override_dir(
         {"env-up-skill/SKILL.md": "---\nname: env-up-skill\ndescription: x\n---\nv1\n"},
         tag="stable",
     )
-    (grim_home / "grimoire.toml").write_text(f'[skills]\nenv-up-skill = "{v1.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[skills]\nenv-up-skill = "{v1.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     config_dir = grim_home.parent / "claude-config-up"
     runner.env["CLAUDE_CONFIG_DIR"] = str(config_dir)
@@ -634,7 +634,7 @@ def test_global_update_rematerializes_into_env_override_dir(
     runner.json("lock", "--global")
     runner.json("install", "--global")
     installed = config_dir / "skills/env-up-skill/SKILL.md"
-    assert installed.is_file() and "v1" in installed.read_text()
+    assert installed.is_file() and "v1" in installed.read_text(encoding="utf-8")
 
     # Roll the floating tag onto v2, then update.
     v2 = make_artifact(
@@ -647,7 +647,7 @@ def test_global_update_rematerializes_into_env_override_dir(
 
     rows = runner.json("update", "--global")["items"]
     assert rows[0]["action"] == "updated"
-    assert "v2" in installed.read_text(), (
+    assert "v2" in installed.read_text(encoding="utf-8"), (
         "update must rematerialize into $CLAUDE_CONFIG_DIR, not the $HOME default"
     )
     assert not (runner.home / ".claude/skills/env-up-skill").exists(), (
@@ -668,7 +668,7 @@ def test_global_opencode_rule_honors_opencode_config_file(
         {"oc-cfg-rule.md": "---\npaths: ['**']\n---\n# rule\n"},
         tag="v1",
     )
-    (grim_home / "grimoire.toml").write_text(f'[rules]\noc-cfg-rule = "{ru.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[rules]\noc-cfg-rule = "{ru.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     custom_cfg = grim_home.parent / "custom" / "oc.json"
     custom_cfg.parent.mkdir(parents=True)
@@ -681,7 +681,7 @@ def test_global_opencode_rule_honors_opencode_config_file(
     assert custom_cfg.is_file(), (
         "managed instructions glob must be registered in $OPENCODE_CONFIG"
     )
-    instructions = json.loads(custom_cfg.read_text()).get("instructions", [])
+    instructions = json.loads(custom_cfg.read_text(encoding="utf-8")).get("instructions", [])
     assert any(grim_home.as_posix() in e for e in instructions), (
         f"absolute glob missing from $OPENCODE_CONFIG; instructions={instructions}"
     )
@@ -691,7 +691,7 @@ def test_global_opencode_rule_honors_opencode_config_file(
 
     # Deregistration converges on the same file.
     runner.json("uninstall", "rule", "oc-cfg-rule", "--global")
-    cfg_after = json.loads(custom_cfg.read_text())
+    cfg_after = json.loads(custom_cfg.read_text(encoding="utf-8"))
     assert "instructions" not in cfg_after, (
         f"managed glob must deregister from $OPENCODE_CONFIG; got {cfg_after}"
     )
@@ -719,7 +719,7 @@ def test_global_opencode_honors_custom_xdg_config_home(
         tag="v1",
     )
     (grim_home / "grimoire.toml").write_text(
-        f'[skills]\nxdg-skill = "{sk.fq}"\n\n[rules]\nxdg-rule = "{ru.fq}"\n'
+        f'[skills]\nxdg-skill = "{sk.fq}"\n\n[rules]\nxdg-rule = "{ru.fq}"\n', encoding="utf-8", newline="\n"
     )
     runner = GrimRunner(grim_binary, grim_home)
     xdg = grim_home.parent / "custom-xdg"
@@ -736,7 +736,7 @@ def test_global_opencode_honors_custom_xdg_config_home(
     assert cfg.is_file(), (
         "opencode.json must be created under the custom $XDG_CONFIG_HOME"
     )
-    instructions = json.loads(cfg.read_text()).get("instructions", [])
+    instructions = json.loads(cfg.read_text(encoding="utf-8")).get("instructions", [])
     assert any(grim_home.as_posix() in e for e in instructions)
     # The ~/.config default must stay untouched.
     assert not (runner.home / ".config/opencode").exists(), (
@@ -768,7 +768,7 @@ def test_global_install_codex_skill_lands_in_home_dot_agents(
         {"cx-skill/SKILL.md": "---\nname: cx-skill\ndescription: codex skill\n---\n# body\n"},
         tag="v1",
     )
-    (grim_home / "grimoire.toml").write_text(f'[skills]\ncx-skill = "{sk.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[skills]\ncx-skill = "{sk.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
 
@@ -793,7 +793,7 @@ def test_global_install_codex_agent_lands_in_home_dot_codex(
 
     repo = f"{unique_repo}/cx-agent"
     ag = make_artifact(repo, "agent", {"cx-agent.md": _codex_agent_doc("cx-agent")}, tag="v1")
-    (grim_home / "grimoire.toml").write_text(f'[agents]\ncx-agent = "{ag.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[agents]\ncx-agent = "{ag.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
 
@@ -804,7 +804,7 @@ def test_global_install_codex_agent_lands_in_home_dot_codex(
     assert toml_file.is_file(), (
         f"global Codex agent must materialize at $HOME/.codex/agents/; nothing at {toml_file}"
     )
-    parsed = tomllib.loads(toml_file.read_text())
+    parsed = tomllib.loads(toml_file.read_text(encoding="utf-8"))
     assert parsed["name"] == "cx-agent"
     assert "Codex body text." in parsed["developer_instructions"]
 
@@ -828,7 +828,7 @@ def test_global_codex_home_relocates_agent_but_not_skill(
         tag="v1",
     )
     (grim_home / "grimoire.toml").write_text(
-        f'[skills]\ncx2-skill = "{sk.fq}"\n[agents]\ncx2-agent = "{ag.fq}"\n'
+        f'[skills]\ncx2-skill = "{sk.fq}"\n[agents]\ncx2-agent = "{ag.fq}"\n', encoding="utf-8", newline="\n"
     )
     codex_home = grim_home.parent / "codex_home"
     runner = GrimRunner(grim_binary, grim_home)
@@ -866,7 +866,7 @@ def test_global_codex_home_relocates_mcp_config_too(
     descriptor = descriptor_dir / "mcp" / "grim-mcp.toml"
     descriptor.parent.mkdir(parents=True)
     descriptor.write_text(
-        'description = "d"\n\n[server]\ntransport = "stdio"\ncommand = "grim"\nargs = ["mcp"]\n'
+        'description = "d"\n\n[server]\ntransport = "stdio"\ncommand = "grim"\nargs = ["mcp"]\n', encoding="utf-8", newline="\n"
     )
     ref = f"{registry}/{unique_repo}/mcp/grim-mcp:1.0.0"
     codex_home = grim_home.parent / "codex_home"
@@ -874,7 +874,7 @@ def test_global_codex_home_relocates_mcp_config_too(
     runner.env["CODEX_HOME"] = str(codex_home)
     runner.json("release", str(descriptor), ref, "--kind", "mcp")
 
-    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n', encoding="utf-8", newline="\n")
     runner.json("lock", "--global")
     install_rows = runner.json("install", "--global", "--client", "codex")["items"]
     assert install_rows[0]["status"] == "installed", install_rows
@@ -884,7 +884,7 @@ def test_global_codex_home_relocates_mcp_config_too(
     assert not (runner.home / ".codex/config.toml").exists(), (
         "with CODEX_HOME set, the MCP config must NOT land in the ~/.codex default"
     )
-    parsed = tomllib.loads(config.read_text())
+    parsed = tomllib.loads(config.read_text(encoding="utf-8"))
     assert parsed["mcp_servers"]["grim-mcp"]["command"] == "grim"
 
 
@@ -905,7 +905,7 @@ def test_global_no_client_flag_installs_to_detected_clients_only(
         {"cx-only-skill/SKILL.md": "---\nname: cx-only-skill\ndescription: d\n---\n# body\n"},
         tag="v1",
     )
-    (grim_home / "grimoire.toml").write_text(f'[skills]\ncx-only-skill = "{sk.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[skills]\ncx-only-skill = "{sk.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
 
     codex_home = grim_home.parent / "codex_home"
@@ -955,7 +955,7 @@ _MCP_STDIO_DESCRIPTOR = (
 def _release_global_mcp(runner: GrimRunner, tmp_path: Path, registry: str, unique_repo: str) -> str:
     descriptor = tmp_path / "mcp" / "grim-mcp.toml"
     descriptor.parent.mkdir(parents=True, exist_ok=True)
-    descriptor.write_text(_MCP_STDIO_DESCRIPTOR)
+    descriptor.write_text(_MCP_STDIO_DESCRIPTOR, encoding="utf-8", newline="\n")
     ref = f"{registry}/{unique_repo}/mcp/grim-mcp:1.0.0"
     runner.json("release", str(descriptor), ref, "--kind", "mcp")
     return ref
@@ -974,7 +974,7 @@ def test_global_install_cursor_skill_lands_in_home_dot_cursor(
         {"cur-skill/SKILL.md": "---\nname: cur-skill\ndescription: d\n---\n# body\n"},
         tag="v1",
     )
-    (grim_home / "grimoire.toml").write_text(f'[skills]\ncur-skill = "{sk.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[skills]\ncur-skill = "{sk.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
 
@@ -996,7 +996,7 @@ def test_global_install_cursor_rule_lands_in_home_dot_cursor_rules(
         {"cur-rule.md": "---\npaths: ['**/*.rs']\n---\n# Cursor rule\n"},
         tag="v1",
     )
-    (grim_home / "grimoire.toml").write_text(f'[rules]\ncur-rule = "{ru.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[rules]\ncur-rule = "{ru.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
 
@@ -1013,14 +1013,14 @@ def test_global_install_cursor_mcp_lands_in_home_dot_cursor(
     """Global Cursor MCP → ``$HOME/.cursor/mcp.json``."""
     runner = GrimRunner(grim_binary, grim_home)
     ref = _release_global_mcp(runner, tmp_path, registry, unique_repo)
-    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n', encoding="utf-8", newline="\n")
     runner.json("lock", "--global")
 
     rows = runner.json("install", "--global", "--client", "cursor")["items"]
     assert rows[0]["status"] == "installed", rows
     cfg = runner.home / ".cursor/mcp.json"
     assert cfg.is_file(), "global Cursor MCP entry must land in $HOME/.cursor/mcp.json"
-    assert json.loads(cfg.read_text())["mcpServers"]["grim-mcp"]["command"] == "grim"
+    assert json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]["grim-mcp"]["command"] == "grim"
 
 
 # ── Kiro ──────────────────────────────────────────────────────────────────
@@ -1036,7 +1036,7 @@ def test_global_install_kiro_skill_lands_in_home_dot_kiro(
         {"kiro-skill/SKILL.md": "---\nname: kiro-skill\ndescription: d\n---\n# body\n"},
         tag="v1",
     )
-    (grim_home / "grimoire.toml").write_text(f'[skills]\nkiro-skill = "{sk.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[skills]\nkiro-skill = "{sk.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
 
@@ -1057,7 +1057,7 @@ def test_global_install_kiro_rule_lands_in_home_dot_kiro_steering(
         {"kiro-rule.md": "---\npaths: ['**/*.rs']\n---\n# Kiro steering\n"},
         tag="v1",
     )
-    (grim_home / "grimoire.toml").write_text(f'[rules]\nkiro-rule = "{ru.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[rules]\nkiro-rule = "{ru.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
 
@@ -1090,7 +1090,7 @@ def test_global_kiro_home_relocates_the_whole_kiro_root(
         tag="v1",
     )
     (grim_home / "grimoire.toml").write_text(
-        f'[skills]\nkh-skill = "{sk.fq}"\n[rules]\nkh-rule = "{ru.fq}"\n'
+        f'[skills]\nkh-skill = "{sk.fq}"\n[rules]\nkh-rule = "{ru.fq}"\n', encoding="utf-8", newline="\n"
     )
     kiro_home = grim_home.parent / "kiro_home"
     runner = GrimRunner(grim_binary, grim_home)
@@ -1129,7 +1129,7 @@ def test_global_kiro_home_relocates_mcp_config_too(
     descriptor = descriptor_dir / "mcp" / "kh-mcp.toml"
     descriptor.parent.mkdir(parents=True)
     descriptor.write_text(
-        'description = "d"\n\n[server]\ntransport = "stdio"\ncommand = "grim"\nargs = ["mcp"]\n'
+        'description = "d"\n\n[server]\ntransport = "stdio"\ncommand = "grim"\nargs = ["mcp"]\n', encoding="utf-8", newline="\n"
     )
     ref = f"{registry}/{unique_repo}/mcp/kh-mcp:1.0.0"
     kiro_home = grim_home.parent / "kiro_home_mcp"
@@ -1137,7 +1137,7 @@ def test_global_kiro_home_relocates_mcp_config_too(
     runner.env["KIRO_HOME"] = str(kiro_home)
     runner.json("release", str(descriptor), ref, "--kind", "mcp")
 
-    (grim_home / "grimoire.toml").write_text(f'[mcp]\nkh-mcp = "{ref}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\nkh-mcp = "{ref}"\n', encoding="utf-8", newline="\n")
     runner.json("lock", "--global")
     install_rows = runner.json("install", "--global", "--client", "kiro")["items"]
     assert install_rows[0]["status"] == "installed", install_rows
@@ -1149,7 +1149,7 @@ def test_global_kiro_home_relocates_mcp_config_too(
     assert not (runner.home / ".kiro/settings/mcp.json").exists(), (
         "with KIRO_HOME set, the MCP config must NOT land in the ~/.kiro default"
     )
-    parsed = json.loads(config.read_text())
+    parsed = json.loads(config.read_text(encoding="utf-8"))
     assert parsed["mcpServers"]["kh-mcp"]["command"] == "grim"
 
 
@@ -1176,7 +1176,7 @@ def test_global_gemini_cli_home_relocates_config_root_but_not_the_shared_pool(
         tag="v1",
     )
     (grim_home / "grimoire.toml").write_text(
-        f'[skills]\ngch-skill = "{sk.fq}"\n[agents]\ngch-agent = "{ag.fq}"\n'
+        f'[skills]\ngch-skill = "{sk.fq}"\n[agents]\ngch-agent = "{ag.fq}"\n', encoding="utf-8", newline="\n"
     )
     gemini_cli_home = grim_home.parent / "gemini_cli_home"
     runner = GrimRunner(grim_binary, grim_home)
@@ -1239,7 +1239,7 @@ def test_global_kiro_home_upgrade_reaps_the_pre_override_root(
         tag="v1",
     )
     (grim_home / "grimoire.toml").write_text(
-        f'[skills]\nkmig-skill = "{sk.fq}"\n[rules]\nkmig-rule = "{ru.fq}"\n'
+        f'[skills]\nkmig-skill = "{sk.fq}"\n[rules]\nkmig-rule = "{ru.fq}"\n', encoding="utf-8", newline="\n"
     )
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
@@ -1269,7 +1269,7 @@ def test_global_kiro_home_upgrade_reaps_the_pre_override_root(
     assert not old_rule.exists(), "the unmodified pre-override rule must be reaped"
 
     # The anchor never moved — only its root did. That is the whole point.
-    state = json.loads((grim_home / "state/global.json").read_text())
+    state = json.loads((grim_home / "state/global.json").read_text(encoding="utf-8"))
     anchors = {
         o["target"]["anchor"] for r in state["records"] if r["name"].startswith("kmig-") for o in r["outputs"]
     }
@@ -1308,7 +1308,7 @@ def test_global_gemini_cli_home_upgrade_reaps_the_pre_override_root(
         {"gmig-agent.md": "---\nname: gmig-agent\ndescription: d\n---\n# body\n"},
         tag="v1",
     )
-    (grim_home / "grimoire.toml").write_text(f'[agents]\ngmig-agent = "{ag.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[agents]\ngmig-agent = "{ag.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
 
@@ -1330,7 +1330,7 @@ def test_global_gemini_cli_home_upgrade_reaps_the_pre_override_root(
     assert not old_agent.exists(), (
         "the unmodified copy at the pre-override root must be reaped"
     )
-    state = json.loads((grim_home / "state/global.json").read_text())
+    state = json.loads((grim_home / "state/global.json").read_text(encoding="utf-8"))
     [record] = [r for r in state["records"] if r["name"] == "gmig-agent"]
     assert [o["target"]["anchor"] for o in record["outputs"]] == ["gemini-root"], (
         f"the recorded anchor must be unchanged: {record['outputs']}"
@@ -1353,7 +1353,7 @@ def test_global_kiro_home_upgrade_keeps_the_only_copy_when_kiro_is_not_written(
         {"kkeep-skill/SKILL.md": "---\nname: kkeep-skill\ndescription: d\n---\n# body\n"},
         tag="v1",
     )
-    (grim_home / "grimoire.toml").write_text(f'[skills]\nkkeep-skill = "{sk.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[skills]\nkkeep-skill = "{sk.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
     runner.json("install", "--global", "--client", "kiro")
@@ -1390,23 +1390,23 @@ def test_global_kiro_home_upgrade_unsplices_the_stranded_mcp_entry(
     descriptor = descriptor_dir / "mcp" / "kmig-mcp.toml"
     descriptor.parent.mkdir(parents=True)
     descriptor.write_text(
-        'description = "d"\n\n[server]\ntransport = "stdio"\ncommand = "grim"\nargs = ["mcp"]\n'
+        'description = "d"\n\n[server]\ntransport = "stdio"\ncommand = "grim"\nargs = ["mcp"]\n', encoding="utf-8", newline="\n"
     )
     ref = f"{registry}/{unique_repo}/mcp/kmig-mcp:1.0.0"
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("release", str(descriptor), ref, "--kind", "mcp")
 
-    (grim_home / "grimoire.toml").write_text(f'[mcp]\nkmig-mcp = "{ref}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\nkmig-mcp = "{ref}"\n', encoding="utf-8", newline="\n")
     runner.json("lock", "--global")
     rows = runner.json("install", "--global", "--client", "kiro")["items"]
     assert rows[0]["status"] == "installed", rows
 
     old_config = runner.home / ".kiro/settings/mcp.json"
-    assert json.loads(old_config.read_text())["mcpServers"]["kmig-mcp"]["command"] == "grim"
+    assert json.loads(old_config.read_text(encoding="utf-8"))["mcpServers"]["kmig-mcp"]["command"] == "grim"
     # A foreign member the user owns, which must survive the un-splice.
-    parsed = json.loads(old_config.read_text())
+    parsed = json.loads(old_config.read_text(encoding="utf-8"))
     parsed["mcpServers"]["user-server"] = {"command": "keep-me"}
-    old_config.write_text(json.dumps(parsed, indent=2))
+    old_config.write_text(json.dumps(parsed, indent=2), encoding="utf-8", newline="\n")
 
     kiro_home = grim_home.parent / "kiro_home_mcp_upgrade"
     kiro_home.mkdir()
@@ -1415,11 +1415,11 @@ def test_global_kiro_home_upgrade_unsplices_the_stranded_mcp_entry(
     runner.json("update", "--global", "--client", "kiro")
 
     new_config = kiro_home / "settings/mcp.json"
-    assert json.loads(new_config.read_text())["mcpServers"]["kmig-mcp"]["command"] == "grim", (
+    assert json.loads(new_config.read_text(encoding="utf-8"))["mcpServers"]["kmig-mcp"]["command"] == "grim", (
         "the registration must move to the honored override"
     )
     assert old_config.is_file(), "the user's config file must NEVER be deleted"
-    left = json.loads(old_config.read_text())
+    left = json.loads(old_config.read_text(encoding="utf-8"))
     assert "kmig-mcp" not in left["mcpServers"], (
         f"the stranded managed member must be spliced out of the old file: {left}"
     )
@@ -1441,7 +1441,7 @@ def test_global_install_junie_skill_lands_in_home_dot_junie(
         {"junie-skill/SKILL.md": "---\nname: junie-skill\ndescription: d\n---\n# body\n"},
         tag="v1",
     )
-    (grim_home / "grimoire.toml").write_text(f'[skills]\njunie-skill = "{sk.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[skills]\njunie-skill = "{sk.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
 
@@ -1458,14 +1458,14 @@ def test_global_install_junie_mcp_lands_in_home_dot_junie_mcp(
     """Global Junie MCP → ``$HOME/.junie/mcp/mcp.json``."""
     runner = GrimRunner(grim_binary, grim_home)
     ref = _release_global_mcp(runner, tmp_path, registry, unique_repo)
-    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n', encoding="utf-8", newline="\n")
     runner.json("lock", "--global")
 
     rows = runner.json("install", "--global", "--client", "junie")["items"]
     assert rows[0]["status"] == "installed", rows
     cfg = runner.home / ".junie/mcp/mcp.json"
     assert cfg.is_file(), "global Junie MCP entry must land in $HOME/.junie/mcp/mcp.json"
-    assert json.loads(cfg.read_text())["mcpServers"]["grim-mcp"]["command"] == "grim"
+    assert json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]["grim-mcp"]["command"] == "grim"
 
 
 # ── Gemini (skills via shared pool; native agents) ─────────────────────────
@@ -1482,7 +1482,7 @@ def test_global_install_gemini_skill_lands_in_shared_agents_skills(
         {"gem-skill/SKILL.md": "---\nname: gem-skill\ndescription: d\n---\n# body\n"},
         tag="v1",
     )
-    (grim_home / "grimoire.toml").write_text(f'[skills]\ngem-skill = "{sk.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[skills]\ngem-skill = "{sk.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
 
@@ -1506,7 +1506,7 @@ def test_global_install_gemini_agent_lands_in_home_dot_gemini(
         {"gem-agent.md": "---\nname: gem-agent\ndescription: d\nmodel: sonnet\n---\n# a\nbody\n"},
         tag="v1",
     )
-    (grim_home / "grimoire.toml").write_text(f'[agents]\ngem-agent = "{ag.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[agents]\ngem-agent = "{ag.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
 
@@ -1530,7 +1530,7 @@ def test_global_install_zed_skill_lands_in_shared_agents_skills(
         {"zed-skill/SKILL.md": "---\nname: zed-skill\ndescription: d\n---\n# body\n"},
         tag="v1",
     )
-    (grim_home / "grimoire.toml").write_text(f'[skills]\nzed-skill = "{sk.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[skills]\nzed-skill = "{sk.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
 
@@ -1548,7 +1548,7 @@ def test_global_install_zed_mcp_lands_in_config_zed_settings(
     on Windows), key ``context_servers`` — proving the Zed global root."""
     runner = GrimRunner(grim_binary, grim_home)
     ref = _release_global_mcp(runner, tmp_path, registry, unique_repo)
-    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n', encoding="utf-8", newline="\n")
     runner.json("lock", "--global")
 
     rows = runner.json("install", "--global", "--client", "zed")["items"]
@@ -1558,7 +1558,7 @@ def test_global_install_zed_mcp_lands_in_config_zed_settings(
     )
     cfg = zed_root / "settings.json"
     assert cfg.is_file(), f"global Zed MCP entry must land in {cfg}"
-    assert json.loads(cfg.read_text())["context_servers"]["grim-mcp"]["command"] == "grim"
+    assert json.loads(cfg.read_text(encoding="utf-8"))["context_servers"]["grim-mcp"]["command"] == "grim"
 
 
 # ── Amp (skills via shared pool; MCP under ~/.config/amp) ───────────────────
@@ -1574,7 +1574,7 @@ def test_global_install_amp_skill_lands_in_shared_agents_skills(
         {"amp-skill/SKILL.md": "---\nname: amp-skill\ndescription: d\n---\n# body\n"},
         tag="v1",
     )
-    (grim_home / "grimoire.toml").write_text(f'[skills]\namp-skill = "{sk.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[skills]\namp-skill = "{sk.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
 
@@ -1592,14 +1592,14 @@ def test_global_install_amp_mcp_lands_in_config_amp_settings(
     key ``amp.mcpServers`` — proving the ``~/.config/amp`` global root."""
     runner = GrimRunner(grim_binary, grim_home)
     ref = _release_global_mcp(runner, tmp_path, registry, unique_repo)
-    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n', encoding="utf-8", newline="\n")
     runner.json("lock", "--global")
 
     rows = runner.json("install", "--global", "--client", "amp")["items"]
     assert rows[0]["status"] == "installed", rows
     cfg = runner.home / ".config/amp/settings.json"
     assert cfg.is_file(), "global Amp MCP entry must land in $HOME/.config/amp/settings.json"
-    doc = json.loads(cfg.read_text())
+    doc = json.loads(cfg.read_text(encoding="utf-8"))
     assert "amp.mcpServers" in doc, f"Amp global container key must be 'amp.mcpServers': {list(doc)}"
     assert doc["amp.mcpServers"]["grim-mcp"]["command"] == "grim"
 
@@ -1619,7 +1619,7 @@ def test_global_kiro_home_upgrade_uninstall_reaps_the_pre_override_root(
         {"kuni-skill/SKILL.md": "---\nname: kuni-skill\ndescription: d\n---\n# body\n"},
         tag="v1",
     )
-    (grim_home / "grimoire.toml").write_text(f'[skills]\nkuni-skill = "{sk.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[skills]\nkuni-skill = "{sk.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
     runner.json("install", "--global", "--client", "kiro")
@@ -1664,7 +1664,7 @@ def test_global_kiro_home_upgrade_uninstall_preserves_a_hand_edited_stray(
         tag="v1",
     )
     (grim_home / "grimoire.toml").write_text(
-        f'[skills]\nkedit-skill = "{edited.fq}"\nkctrl-skill = "{control.fq}"\n'
+        f'[skills]\nkedit-skill = "{edited.fq}"\nkctrl-skill = "{control.fq}"\n', encoding="utf-8", newline="\n"
     )
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
@@ -1673,7 +1673,7 @@ def test_global_kiro_home_upgrade_uninstall_preserves_a_hand_edited_stray(
     edited_doc = runner.home / ".kiro/skills/kedit-skill/SKILL.md"
     control_dir = runner.home / ".kiro/skills/kctrl-skill"
     assert edited_doc.is_file() and (control_dir / "SKILL.md").is_file()
-    edited_doc.write_text("---\nname: kedit-skill\ndescription: d\n---\n# MINE\n")
+    edited_doc.write_text("---\nname: kedit-skill\ndescription: d\n---\n# MINE\n", encoding="utf-8", newline="\n")
 
     kiro_home = grim_home.parent / "kiro_home_uninstall_edit"
     kiro_home.mkdir()
@@ -1685,7 +1685,7 @@ def test_global_kiro_home_upgrade_uninstall_preserves_a_hand_edited_stray(
     assert not control_dir.exists(), (
         "the control proves the uninstall-path reaper ran: an unmodified stray is reaped"
     )
-    assert edited_doc.read_text().endswith("# MINE\n"), (
+    assert edited_doc.read_text(encoding="utf-8").endswith("# MINE\n"), (
         "a hand-edited stranded copy must be preserved, never deleted"
     )
     # `retained` is the documented divergence channel: a non-empty array means
@@ -1712,22 +1712,22 @@ def test_global_kiro_home_upgrade_uninstall_abandons_a_hand_edited_stranded_entr
     descriptor = tmp_path / "kaband_src" / "mcp" / "kaband-mcp.toml"
     descriptor.parent.mkdir(parents=True)
     descriptor.write_text(
-        'description = "d"\n\n[server]\ntransport = "stdio"\ncommand = "grim"\nargs = ["mcp"]\n'
+        'description = "d"\n\n[server]\ntransport = "stdio"\ncommand = "grim"\nargs = ["mcp"]\n', encoding="utf-8", newline="\n"
     )
     ref = f"{registry}/{unique_repo}/mcp/kaband-mcp:1.0.0"
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("release", str(descriptor), ref, "--kind", "mcp")
 
-    (grim_home / "grimoire.toml").write_text(f'[mcp]\nkaband-mcp = "{ref}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\nkaband-mcp = "{ref}"\n', encoding="utf-8", newline="\n")
     runner.json("lock", "--global")
     runner.json("install", "--global", "--client", "kiro")
 
     old_config = runner.home / ".kiro/settings/mcp.json"
-    parsed = json.loads(old_config.read_text())
+    parsed = json.loads(old_config.read_text(encoding="utf-8"))
     assert parsed["mcpServers"]["kaband-mcp"]["command"] == "grim"
     # The user edits the managed member itself, so the recorded hash drifts.
     parsed["mcpServers"]["kaband-mcp"]["args"] = ["mcp", "--mine"]
-    old_config.write_text(json.dumps(parsed, indent=2))
+    old_config.write_text(json.dumps(parsed, indent=2), encoding="utf-8", newline="\n")
 
     kiro_home = grim_home.parent / "kiro_home_uninstall_entry"
     kiro_home.mkdir()
@@ -1735,7 +1735,7 @@ def test_global_kiro_home_upgrade_uninstall_abandons_a_hand_edited_stranded_entr
 
     report = runner.json("uninstall", "--global", "mcp", "kaband-mcp")
 
-    left = json.loads(old_config.read_text())
+    left = json.loads(old_config.read_text(encoding="utf-8"))
     assert left["mcpServers"]["kaband-mcp"]["args"] == ["mcp", "--mine"], (
         f"the hand-edited stranded member must be preserved: {left}"
     )
@@ -1762,9 +1762,9 @@ def _set_claude_settings_env(runner: GrimRunner, config_dir: Path) -> None:
     ``~/.claude/settings.json``, keeping whatever that file already holds."""
     settings = runner.home / ".claude/settings.json"
     settings.parent.mkdir(parents=True, exist_ok=True)
-    doc = json.loads(settings.read_text()) if settings.is_file() else {}
+    doc = json.loads(settings.read_text(encoding="utf-8")) if settings.is_file() else {}
     doc.setdefault("env", {})["CLAUDE_CONFIG_DIR"] = str(config_dir)
-    settings.write_text(json.dumps(doc, indent=2))
+    settings.write_text(json.dumps(doc, indent=2), encoding="utf-8", newline="\n")
 
 
 def _relocate_junie(runner: GrimRunner, scratch: Path) -> Path:
@@ -1822,7 +1822,7 @@ def _write_moved_skills(grim_home: Path, unique_repo: str, *names: str) -> None:
             tag="v1",
         )
         lines.append(f'{name} = "{sk.fq}"\n')
-    (grim_home / "grimoire.toml").write_text("[skills]\n" + "".join(lines))
+    (grim_home / "grimoire.toml").write_text("[skills]\n" + "".join(lines), encoding="utf-8", newline="\n")
 
 
 def _write_moved_mcp(
@@ -1837,11 +1837,11 @@ def _write_moved_mcp(
     descriptor = tmp_path / f"{name}_src" / "mcp" / f"{name}.toml"
     descriptor.parent.mkdir(parents=True)
     descriptor.write_text(
-        'description = "d"\n\n[server]\ntransport = "stdio"\ncommand = "grim"\nargs = ["mcp"]\n'
+        'description = "d"\n\n[server]\ntransport = "stdio"\ncommand = "grim"\nargs = ["mcp"]\n', encoding="utf-8", newline="\n"
     )
     ref = f"{registry}/{unique_repo}/mcp/{name}:1.0.0"
     runner.json("release", str(descriptor), ref, "--kind", "mcp")
-    (grim_home / "grimoire.toml").write_text(f'[mcp]\n{name} = "{ref}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\n{name} = "{ref}"\n', encoding="utf-8", newline="\n")
 
 
 @pytest.mark.parametrize("case", list(_MOVED_ROOTS))
@@ -1864,7 +1864,7 @@ def test_global_moved_root_upgrade_reaps_the_pre_override_root(
     assert all(r["status"] == "installed" for r in rows), rows
     old_skill = runner.home / old_rel / "skills/mv-skill"
     assert (old_skill / "SKILL.md").is_file()
-    state = json.loads((grim_home / "state/global.json").read_text())
+    state = json.loads((grim_home / "state/global.json").read_text(encoding="utf-8"))
     anchors_before = {
         o["target"]["anchor"] for r in state["records"] for o in r["outputs"]
     }
@@ -1876,7 +1876,7 @@ def test_global_moved_root_upgrade_reaps_the_pre_override_root(
         "update must re-materialize under the honored root"
     )
     assert not old_skill.exists(), "the unmodified pre-override copy must be reaped"
-    state = json.loads((grim_home / "state/global.json").read_text())
+    state = json.loads((grim_home / "state/global.json").read_text(encoding="utf-8"))
     anchors = {o["target"]["anchor"] for r in state["records"] for o in r["outputs"]}
     assert anchors == anchors_before == {f"{client}-root"}, (
         f"the recorded anchor must not move: {anchors}"
@@ -1938,19 +1938,19 @@ def test_global_moved_root_upgrade_unsplices_the_stranded_mcp_entry(
     rows = runner.json("install", "--global", "--client", client)["items"]
     assert rows[0]["status"] == "installed", rows
     old_config = runner.home / old_mcp
-    parsed = json.loads(old_config.read_text())
+    parsed = json.loads(old_config.read_text(encoding="utf-8"))
     assert parsed["mcpServers"]["mv-mcp"]["command"] == "grim"
     parsed["mcpServers"]["user-server"] = {"command": "keep-me"}
-    old_config.write_text(json.dumps(parsed, indent=2))
+    old_config.write_text(json.dumps(parsed, indent=2), encoding="utf-8", newline="\n")
 
     new_root = relocate(runner, tmp_path)
     runner.json("update", "--global", "--client", client)
 
     new_config = new_root / new_mcp
     assert (
-        json.loads(new_config.read_text())["mcpServers"]["mv-mcp"]["command"] == "grim"
+        json.loads(new_config.read_text(encoding="utf-8"))["mcpServers"]["mv-mcp"]["command"] == "grim"
     ), "the registration must move to the honored root"
-    left = json.loads(old_config.read_text())
+    left = json.loads(old_config.read_text(encoding="utf-8"))
     assert "mv-mcp" not in left["mcpServers"], (
         f"the stranded member must be spliced out: {left}"
     )
@@ -2004,14 +2004,14 @@ def test_global_moved_root_upgrade_uninstall_preserves_a_hand_edited_stray(
     edited_doc = runner.home / old_rel / "skills/mv-edit/SKILL.md"
     control_dir = runner.home / old_rel / "skills/mv-ctrl"
     assert edited_doc.is_file() and (control_dir / "SKILL.md").is_file()
-    edited_doc.write_text("---\nname: mv-edit\ndescription: d\n---\n# MINE\n")
+    edited_doc.write_text("---\nname: mv-edit\ndescription: d\n---\n# MINE\n", encoding="utf-8", newline="\n")
 
     relocate(runner, tmp_path)
     edited_report = runner.json("uninstall", "--global", "skill", "mv-edit")
     control_report = runner.json("uninstall", "--global", "skill", "mv-ctrl")
 
     assert not control_dir.exists(), "the control proves the uninstall-path reaper ran"
-    assert edited_doc.read_text().endswith("# MINE\n"), (
+    assert edited_doc.read_text(encoding="utf-8").endswith("# MINE\n"), (
         "a hand-edited stray must be preserved"
     )
     retained = [Path(p).resolve() for p in edited_report["retained"]]
@@ -2038,14 +2038,14 @@ def test_global_moved_root_upgrade_uninstall_abandons_a_hand_edited_stranded_ent
     runner.json("lock", "--global")
     runner.json("install", "--global", "--client", client)
     old_config = runner.home / old_mcp
-    parsed = json.loads(old_config.read_text())
+    parsed = json.loads(old_config.read_text(encoding="utf-8"))
     parsed["mcpServers"]["mv-aband"]["args"] = ["mcp", "--mine"]
-    old_config.write_text(json.dumps(parsed, indent=2))
+    old_config.write_text(json.dumps(parsed, indent=2), encoding="utf-8", newline="\n")
 
     relocate(runner, tmp_path)
     report = runner.json("uninstall", "--global", "mcp", "mv-aband")
 
-    left = json.loads(old_config.read_text())
+    left = json.loads(old_config.read_text(encoding="utf-8"))
     assert left["mcpServers"]["mv-aband"]["args"] == ["mcp", "--mine"], left
     [entry] = report["abandoned_entries"]
     assert Path(entry["path"]).resolve() == old_config.resolve(), entry
@@ -2072,7 +2072,7 @@ def test_global_moved_root_update_reports_a_hand_edited_stranded_entry(
     old_config = runner.home / old_mcp
     parsed = json.loads(old_config.read_text(encoding="utf-8"))
     parsed["mcpServers"]["mv-upd"]["args"] = ["mcp", "--mine"]
-    old_config.write_text(json.dumps(parsed, indent=2), encoding="utf-8")
+    old_config.write_text(json.dumps(parsed, indent=2), encoding="utf-8", newline="\n")
     before = old_config.read_bytes()
 
     relocate(runner, tmp_path)
@@ -2140,7 +2140,7 @@ def test_global_moved_root_install_report_names_no_abandoned_entry(
     old_config = runner.home / old_mcp
     parsed = json.loads(old_config.read_text(encoding="utf-8"))
     parsed["mcpServers"]["mv-inst"]["args"] = ["mcp", "--mine"]
-    old_config.write_text(json.dumps(parsed, indent=2), encoding="utf-8")
+    old_config.write_text(json.dumps(parsed, indent=2), encoding="utf-8", newline="\n")
     before = old_config.read_bytes()
 
     relocate(runner, tmp_path)
@@ -2173,7 +2173,7 @@ def test_global_moved_root_uninstall_keeps_an_adopted_stranded_entry(
     _write_moved_mcp(runner, grim_home, "mv-adopt", registry, unique_repo, tmp_path)
     old_config = runner.home / ".claude.json"
     hand_authored = {"mcpServers": {"mv-adopt": {"command": "grim", "args": ["mcp"]}}}
-    old_config.write_text(json.dumps(hand_authored, indent=2))
+    old_config.write_text(json.dumps(hand_authored, indent=2), encoding="utf-8", newline="\n")
     runner.json("lock", "--global")
     installed = runner.json("install", "--global", "--client", "claude")
     assert {r["status"] for r in installed["items"]} == {"unchanged"}, (
@@ -2183,7 +2183,7 @@ def test_global_moved_root_uninstall_keeps_an_adopted_stranded_entry(
     _relocate_claude(runner, tmp_path)
     report = runner.json("uninstall", "--global", "mcp", "mv-adopt")
 
-    assert json.loads(old_config.read_text()) == hand_authored, (
+    assert json.loads(old_config.read_text(encoding="utf-8")) == hand_authored, (
         "the reaper must not splice out a member grim never wrote"
     )
     [entry] = report["abandoned_entries"]
@@ -2223,7 +2223,7 @@ def test_global_claude_settings_env_beats_the_shell_export(
     settings_dir.mkdir()
     runner.env["CLAUDE_CONFIG_DIR"] = str(shell_dir)
     (shell_dir / "settings.json").write_text(
-        json.dumps({"env": {"CLAUDE_CONFIG_DIR": str(settings_dir)}})
+        json.dumps({"env": {"CLAUDE_CONFIG_DIR": str(settings_dir)}}), encoding="utf-8", newline="\n"
     )
     runner.json("lock", "--global")
     runner.json("install", "--global", "--client", "claude")
@@ -2240,7 +2240,7 @@ def test_global_claude_settings_env_relative_value_is_ignored(
     _write_moved_skills(grim_home, unique_repo, "cc-rel")
     settings = runner.home / ".claude/settings.json"
     settings.parent.mkdir(parents=True)
-    settings.write_text(json.dumps({"env": {"CLAUDE_CONFIG_DIR": "relative/dir"}}))
+    settings.write_text(json.dumps({"env": {"CLAUDE_CONFIG_DIR": "relative/dir"}}), encoding="utf-8", newline="\n")
     runner.json("lock", "--global")
     runner.json("install", "--global", "--client", "claude")
     assert (runner.home / ".claude/skills/cc-rel/SKILL.md").is_file()
@@ -2256,7 +2256,7 @@ def _write_support_dir_rule(grim_home: Path, unique_repo: str, name: str) -> Non
         },
         tag="v1",
     )
-    (grim_home / "grimoire.toml").write_text(f'[rules]\n{name} = "{ru.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[rules]\n{name} = "{ru.fq}"\n', encoding="utf-8", newline="\n")
 
 
 def test_global_claude_settings_env_moves_the_claude_md_excludes_element(
@@ -2275,7 +2275,7 @@ def test_global_claude_settings_env_moves_the_claude_md_excludes_element(
     runner.json("install", "--global", "--client", "claude")
 
     assert (new_root / "rules/cc-excl/ex.md").is_file()
-    assert json.loads((new_root / "settings.json").read_text())["claudeMdExcludes"] == [
+    assert json.loads((new_root / "settings.json").read_text(encoding="utf-8"))["claudeMdExcludes"] == [
         f"{new_root.as_posix()}/rules/cc-excl/**"
     ]
     assert user_settings.read_bytes() == before, "the file holding the env block must stay byte-intact"
@@ -2316,13 +2316,13 @@ def test_global_claude_settings_env_upgrade_moves_the_claude_md_excludes_element
     runner.json("install", "--global", "--client", "claude")
     user_settings = runner.home / ".claude/settings.json"
     old_element = f"{(runner.home / '.claude').as_posix()}/rules/cc-excl-up/**"
-    assert json.loads(user_settings.read_text())["claudeMdExcludes"] == [old_element]
+    assert json.loads(user_settings.read_text(encoding="utf-8"))["claudeMdExcludes"] == [old_element]
 
     new_root = _relocate_claude(runner, tmp_path)
     before = user_settings.read_bytes()
     runner.json("update", "--global", "--client", "claude")
 
-    assert json.loads((new_root / "settings.json").read_text())["claudeMdExcludes"] == [
+    assert json.loads((new_root / "settings.json").read_text(encoding="utf-8"))["claudeMdExcludes"] == [
         f"{new_root.as_posix()}/rules/cc-excl-up/**"
     ]
     assert not (runner.home / ".claude/rules/cc-excl-up").exists(), "the unmodified old copy is reaped"

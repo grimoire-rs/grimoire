@@ -18,7 +18,7 @@ from src.registry import fetch_manifest, tag_digest
 
 def _write(p: Path, body: str) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(body)
+    p.write_text(body, encoding="utf-8", newline="\n")
 
 
 def _assert_tag_absent(repo_path: str, tag: str) -> None:
@@ -176,12 +176,12 @@ def test_rerelease_moves_preexisting_floating_tags(
     # be observed rolling forward.
     write_config(project_dir, skills={"code-review": f"{repo}:1"})
     runner.run("lock", check=False)
-    assert digest_a in (project_dir / "grimoire.lock").read_text(), (
+    assert digest_a in (project_dir / "grimoire.lock").read_text(encoding="utf-8"), (
         "lock at :1 must pin digest A before the rolling release"
     )
 
     # Different content, higher version, same repo.
-    (skill / "scripts/run.sh").write_text("echo v1.1.0 CHANGED\n")
+    (skill / "scripts/run.sh").write_text("echo v1.1.0 CHANGED\n", encoding="utf-8", newline="\n")
     v2 = runner.json("release", str(skill), f"{repo}:1.1.0")
     digest_b = v2["manifest_digest"]
     assert digest_b != digest_a, "1.1.0 must produce a different digest"
@@ -206,7 +206,7 @@ def test_rerelease_moves_preexisting_floating_tags(
     assert by_name["code-review"]["action"] == "updated", (
         "plain `grim update` must roll the floating :1 pin forward"
     )
-    assert digest_b in (project_dir / "grimoire.lock").read_text()
+    assert digest_b in (project_dir / "grimoire.lock").read_text(encoding="utf-8")
 
 
 def test_release_dry_run_does_not_push(
@@ -254,7 +254,7 @@ def test_release_refuses_overwrite_without_force(
     runner.json("release", str(v1), f"{repo}:1.0.0")
 
     # Change the content, re-release the SAME version → must refuse.
-    (v1 / "scripts/run.sh").write_text("echo CHANGED\n")
+    (v1 / "scripts/run.sh").write_text("echo CHANGED\n", encoding="utf-8", newline="\n")
     result = runner.run("release", str(v1), f"{repo}:1.0.0", check=False)
     assert result.returncode == 65, (
         f"overwriting an existing version must exit 65, got "
@@ -318,7 +318,7 @@ def test_release_skip_existing_skips_published_version(
 
     # Change content, same version, --skip-existing → skipped, not error,
     # and the registry digest must NOT move.
-    (skill / "scripts/run.sh").write_text("echo CHANGED\n")
+    (skill / "scripts/run.sh").write_text("echo CHANGED\n", encoding="utf-8", newline="\n")
     skipped = runner.json("release", str(skill), f"{repo}:1.0.0", "--skip-existing")
     assert skipped["pushed"] is False
     assert skipped["tags"] == [], "a skipped release moves no tags"

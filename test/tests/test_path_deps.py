@@ -17,7 +17,7 @@ import pytest
 
 def _write(p: Path, body: str) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(body)
+    p.write_text(body, encoding="utf-8", newline="\n")
 
 
 def _skill(project_dir: Path, name: str, body: str = "# Body v1\n") -> Path:
@@ -45,7 +45,7 @@ def test_lock_pins_path_skill_offline(grim_at, project_dir: Path) -> None:
     runner = _offline(grim_at(project_dir))
     runner.run("lock")
 
-    lock = (project_dir / "grimoire.lock").read_text()
+    lock = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert 'path = "./skills/my-skill"' in lock
     assert 'hash = "sha256:' in lock
     assert "pinned" not in lock, "a path entry carries no registry pin"
@@ -74,7 +74,7 @@ def test_install_materializes_path_skill_offline(
 
     rendered = project_dir / ".claude" / "skills" / "my-skill" / "SKILL.md"
     assert rendered.is_file()
-    assert "# Body v1" in rendered.read_text()
+    assert "# Body v1" in rendered.read_text(encoding="utf-8")
 
 
 def test_path_rule_with_support_dir(grim_at, project_dir: Path) -> None:
@@ -130,7 +130,7 @@ def test_source_edit_flags_outdated_and_update_rerenders(
     out = runner.json("update", "--client", "claude")
     assert out["items"][0]["action"] == "updated"
     rendered = project_dir / ".claude" / "skills" / "my-skill" / "SKILL.md"
-    assert "# Body v2" in rendered.read_text()
+    assert "# Body v2" in rendered.read_text(encoding="utf-8")
     assert runner.json("status")["items"][0]["state"] == "installed"
 
 
@@ -192,7 +192,7 @@ def test_absolute_source_warns_in_project_scope(
     runner = _offline(grim_at(project_dir))
     result = runner.run("lock")
     assert "absolute path source" in result.stderr, result.stderr
-    lock = (project_dir / "grimoire.lock").read_text()
+    lock = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert f'path = "{skill.as_posix()}"' in lock
 
 
@@ -225,7 +225,7 @@ def test_mixed_registry_and_path_config(
     )
     runner = grim_at(project_dir)
     runner.run("lock")
-    lock = (project_dir / "grimoire.lock").read_text()
+    lock = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert sk.digest in lock, "registry entry keeps its manifest-digest pin"
     assert 'path = "./skills/my-skill"' in lock
 
@@ -243,7 +243,7 @@ def test_add_path_from_subdir_writes_config_relative(
     assert out["name"] == "quick-notes"
     assert out["pinned"].startswith("./skills/quick-notes@sha256:")
 
-    cfg = (project_dir / "grimoire.toml").read_text()
+    cfg = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert 'quick-notes = "./skills/quick-notes"' in cfg
 
 
@@ -270,7 +270,7 @@ def test_remove_and_uninstall_path_dep(grim_at, project_dir: Path) -> None:
 
     runner.run("uninstall", "skill", "my-skill")
     assert not (project_dir / ".claude" / "skills" / "my-skill").exists()
-    assert "my-skill" not in (project_dir / "grimoire.toml").read_text()
+    assert "my-skill" not in (project_dir / "grimoire.toml").read_text(encoding="utf-8")
 
 
 def test_path_dep_installs_into_all_detected_clients(
@@ -340,7 +340,7 @@ def test_declared_install_state_record_has_no_dev_marker(
     runner.run("lock")
     runner.run("install", "--client", "claude")
 
-    state = json.loads((project_dir / ".grimoire" / "state.json").read_text())
+    state = json.loads((project_dir / ".grimoire" / "state.json").read_text(encoding="utf-8"))
     records = state["records"]
     assert len(records) == 1, f"exactly one record expected: {records}"
     assert records[0]["name"] == "my-skill"
@@ -441,7 +441,7 @@ def test_symlinked_out_of_tree_secret_never_installed(
     leaked = [
         p
         for p in out_dir.rglob("*")
-        if p.is_file() and secret_marker in p.read_text(errors="ignore")
+        if p.is_file() and secret_marker in p.read_text(errors="ignore", encoding="utf-8")
     ]
     assert not leaked, f"secret content leaked into installed files: {leaked}"
 
@@ -469,7 +469,7 @@ def test_local_bundle_lock_writes_path_hash_entry_and_installs_members(
     runner = grim_at(project_dir)
     runner.run("lock")
 
-    lock = (project_dir / "grimoire.lock").read_text()
+    lock = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert "[[bundle]]" in lock
     assert 'path = "./bundles/x.toml"' in lock
     assert 'hash = "sha256:' in lock
@@ -509,7 +509,7 @@ def test_local_bundle_update_after_editing_members_rolls_lock_forward(
 
     runner = grim_at(project_dir)
     runner.run("lock")
-    lock_before = (project_dir / "grimoire.lock").read_text()
+    lock_before = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert "first" in lock_before
     assert "second" not in lock_before
 
@@ -525,7 +525,7 @@ def test_local_bundle_update_after_editing_members_rolls_lock_forward(
     )
     runner.run("update")
 
-    lock_after = (project_dir / "grimoire.lock").read_text()
+    lock_after = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert lock_after != lock_before, "editing the member set must roll the lock forward"
     assert "second" in lock_after
     assert second.digest in lock_after
@@ -630,7 +630,7 @@ def test_registry_only_lock_has_no_local_bundle_wire_keys(
     runner = grim_at(project_dir)
     runner.run("lock")
 
-    lock = (project_dir / "grimoire.lock").read_text()
+    lock = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert "[[bundle]]" not in lock
     # `[metadata].declaration_hash = "sha256:…"` always contains "hash =", so a
     # bare `"hash =" not in lock` false-positives. A real top-level bundle
@@ -656,7 +656,7 @@ def test_add_local_bundle_is_rejected_with_guidance(
     assert "grim lock" in result.stderr, result.stderr
 
     # The reject leaves the config untouched — no binding written.
-    cfg = (project_dir / "grimoire.toml").read_text()
+    cfg = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert "./bundles/x.toml" not in cfg
 
 
@@ -695,10 +695,10 @@ def test_remove_local_bundle_evicts_member_from_lock_and_install_does_not_resurr
     result = runner.run("remove", "bundle", "x")
     assert result.returncode == 0, result.stderr
 
-    cfg = (project_dir / "grimoire.toml").read_text()
+    cfg = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert '"./bundles/x.toml"' not in cfg, "the bundle declaration must be dropped"
 
-    lock = (project_dir / "grimoire.lock").read_text()
+    lock = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert "[[bundle]]" not in lock, "the path-bundle cache entry must be dropped"
     assert 'name = "code-review"' not in lock, (
         "the lock must not retain a member that only the removed bundle "

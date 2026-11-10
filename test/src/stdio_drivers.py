@@ -78,7 +78,7 @@ def write_table(
     table.write_text(
         json.dumps(
             {"schema": schema, "roots": {root: {"root": "global", "hooks": entries}}}
-        )
+        ), encoding="utf-8", newline="\n"
     )
     return table
 
@@ -98,7 +98,7 @@ def payload(
     payload_dir.mkdir(parents=True, exist_ok=True)
     marker = tmp_path / f"{name}.marker"
     script = payload_dir / "guard.sh"
-    script.write_text(f"#!/bin/sh\ncat > '{marker}'\nprintf '%s' '{response}'\n")
+    script.write_text(f"#!/bin/sh\ncat > '{marker}'\nprintf '%s' '{response}'\n", encoding="utf-8", newline="\n")
     return ["sh", str(script)], marker, payload_dir
 
 

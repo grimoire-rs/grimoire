@@ -101,7 +101,7 @@ def _dispatch(runner) -> dict:
     path = Path(runner.grim_home) / "hooks" / "dispatch.json"
     if not path.is_file():
         return {"roots": {}}
-    return json.loads(path.read_text())
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _rows(runner) -> list[dict]:
@@ -143,7 +143,7 @@ def _payload(runner, name: str) -> Path | None:
 
 def _settings(project_dir: Path) -> dict:
     path = project_dir / ".claude" / "settings.local.json"
-    return json.loads(path.read_text()) if path.is_file() else {}
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
 
 
 def _managed_elements(project_dir: Path) -> list[dict]:
@@ -185,8 +185,8 @@ def test_s001_gated_add_skips_with_a_warning_and_arms_nothing(
     assert "options.experimental.hooks" in result.stderr, result.stderr
 
     # Declared and locked: declaring is not arming, so neither is refused.
-    assert "shell-guard" in (project_dir / "grimoire.toml").read_text()
-    assert "shell-guard" in (project_dir / "grimoire.lock").read_text()
+    assert "shell-guard" in (project_dir / "grimoire.toml").read_text(encoding="utf-8")
+    assert "shell-guard" in (project_dir / "grimoire.lock").read_text(encoding="utf-8")
 
     # Nothing armed, on any of the three surfaces that could arm one.
     assert _rows(runner) == []
@@ -369,21 +369,21 @@ def test_s008_uninstall_reaps_the_row_and_the_registration(
                 "hooks": {"PreToolUse": [{"matcher": "Write", "hooks": [{"type": "command", "command": "echo mine"}]}]},
             },
             indent=2,
-        )
+        ), encoding="utf-8", newline="\n"
     )
-    authored = json.loads(settings.read_text())
+    authored = json.loads(settings.read_text(encoding="utf-8"))
 
     runner.run("install", "--trust-hooks")
     assert len(_rows(runner)) == 1
     assert len(_managed_elements(project_dir)) == 1
-    assert "echo mine" in settings.read_text(), "arming must not disturb the user's own handler"
+    assert "echo mine" in settings.read_text(encoding="utf-8"), "arming must not disturb the user's own handler"
 
     runner.run("uninstall", "hook", "shell-guard")
     assert _rows(runner) == [], "the dispatch row must go"
     assert _managed_elements(project_dir) == [], "the registration must go"
     assert _payload(runner, "shell-guard") is None, "the payload must go"
     # The user's document comes back exactly as they wrote it.
-    assert json.loads(settings.read_text()) == authored
+    assert json.loads(settings.read_text(encoding="utf-8")) == authored
 
 
 def test_turning_the_feature_flag_off_disarms_an_armed_hook(
@@ -573,11 +573,11 @@ def test_a_cloned_workspaces_own_committed_hook_state_must_not_arm(
     if replant_payload:
         planted = clone / ".grimoire" / "hooks" / "shell-guard"
         shutil.copytree(donor_payload, planted)
-        state = json.loads(state_path.read_text())
+        state = json.loads(state_path.read_text(encoding="utf-8"))
         record = next(r for r in state["records"] if r["kind"] == "hook")
         for output in record["outputs"]:
             output["target"] = {"anchor": "workspace", "relative": ".grimoire/hooks/shell-guard"}
-        state_path.write_text(json.dumps(state))
+        state_path.write_text(json.dumps(state), encoding="utf-8", newline="\n")
         assert (planted / "hook.toml").is_file()
 
     # A fresh machine: its own `$GRIM_HOME` and no install history. The victim
@@ -876,7 +876,7 @@ def test_a_named_update_names_an_unparseable_client_config_instead_of_install(
     runner.run("hook", "allow")
     runner.run("install")
     surface = project_dir / ".claude" / "settings.local.json"
-    surface.write_text("{ not json")
+    surface.write_text("{ not json", encoding="utf-8", newline="\n")
 
     result = runner.run("update", "--", "carrier", check=False)
 
@@ -904,7 +904,7 @@ def test_uninstall_names_an_unparseable_client_config_instead_of_install(
     runner.run("hook", "allow")
     runner.run("install")
     surface = project_dir / ".claude" / "settings.local.json"
-    surface.write_text("{ not json")
+    surface.write_text("{ not json", encoding="utf-8", newline="\n")
 
     result = runner.run("uninstall", "skill", "carrier", check=False)
 
@@ -937,7 +937,7 @@ def test_an_unregistered_gatekeeper_remedy_needs_no_force_beside_an_unrelated_ed
     runner.run("hook", "allow")
     runner.run("install")
     skill = project_dir / ".claude" / "skills" / "edited" / "SKILL.md"
-    skill.write_text(skill.read_text(encoding="utf-8") + "\nmy edit\n", encoding="utf-8")
+    skill.write_text(skill.read_text(encoding="utf-8") + "\nmy edit\n", encoding="utf-8", newline="\n")
     (project_dir / ".claude" / "settings.local.json").unlink()
 
     result = runner.run("uninstall", "skill", "carrier", check=False)
@@ -1046,17 +1046,17 @@ def test_an_unregistered_gatekeeper_remedy_names_no_other_clients_file(
     grim.env.update(env)
     (grim_home / "grimoire.toml").write_text(
         '[options]\nclients = ["claude"]\n\n[options.experimental]\nhooks = true\n\n'
-        f'[skills]\ncarrier = "{carrier.fq}"\n\n[hooks]\ngate = "{gate.fq}"\n'
+        f'[skills]\ncarrier = "{carrier.fq}"\n\n[hooks]\ngate = "{gate.fq}"\n', encoding="utf-8", newline="\n"
     )
     grim.run("--global", "lock")
     grim.run("--global", "install")
     claude = Path(env["CLAUDE_CONFIG_DIR"]) / "settings.json"
-    assert "hooks" in json.loads(claude.read_text()), "precondition: gate is registered"
+    assert "hooks" in json.loads(claude.read_text(encoding="utf-8")), "precondition: gate is registered"
     qoder = Path(env["QODER_CONFIG_DIR"]) / "settings.json"
-    qoder.write_text("{ the user's qoder file, not json")
-    doc = json.loads(claude.read_text())
+    qoder.write_text("{ the user's qoder file, not json", encoding="utf-8", newline="\n")
+    doc = json.loads(claude.read_text(encoding="utf-8"))
     doc.pop("hooks")
-    claude.write_text(json.dumps(doc))
+    claude.write_text(json.dumps(doc), encoding="utf-8", newline="\n")
 
     result = grim.run("--global", *command, check=False)
 
@@ -1066,8 +1066,8 @@ def test_an_unregistered_gatekeeper_remedy_names_no_other_clients_file(
     assert str(qoder) not in warning[0], warning[0]
     assert "`grim --global install` restores it" in warning[0], warning[0]
     grim.run("--global", "install")
-    assert "hooks" in json.loads(claude.read_text()), "the printed install restored nothing"
-    assert qoder.read_text() == "{ the user's qoder file, not json"
+    assert "hooks" in json.loads(claude.read_text(encoding="utf-8")), "the printed install restored nothing"
+    assert qoder.read_text(encoding="utf-8") == "{ the user's qoder file, not json"
 
 
 @pytest.mark.parametrize("removed", ["gate", "other"])
@@ -1213,7 +1213,7 @@ def _failed_bundle_add(runner, project_dir: Path, unique_repo: str):
     pack = make_bundle(f"{unique_repo}/pack", [("hook", "mem", mem.fq), ("skill", "clash", clash.fq)], tag="1")
     theirs = project_dir / ".claude" / "skills" / "clash" / "SKILL.md"
     theirs.parent.mkdir(parents=True)
-    theirs.write_text("not grim's\n")
+    theirs.write_text("not grim's\n", encoding="utf-8", newline="\n")
     failed = runner.run("add", "--kind", "bundle", pack.fq, check=False)
     assert failed.returncode == 65, failed.stderr
     assert "deny" in _fire_bash(project_dir).stdout, failed.stderr

@@ -128,7 +128,7 @@ def _path_forms(tmp_path: Path) -> dict[str, str]:
 def _context(grim_at, project_dir: Path, table: str, value: str):
     # JSON escapes quotes, backslashes and C0 controls as TOML does; TOML also bans a raw DEL.
     quoted = json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
-    (project_dir / "grimoire.toml").write_text(f"{_REGISTRY_ALIAS}[{table}]\nbinding = {quoted}\n")
+    (project_dir / "grimoire.toml").write_text(f"{_REGISTRY_ALIAS}[{table}]\nbinding = {quoted}\n", encoding="utf-8", newline="\n")
     return grim_at(project_dir).run("context", check=False)
 
 
@@ -163,7 +163,7 @@ def test_short_and_qualified_forms_follow_the_documented_commands(
     grim_at, project_dir: Path, command: str, form: str
 ) -> None:
     config = "" if form == "short" else _REGISTRY_ALIAS
-    (project_dir / "grimoire.toml").write_text(config)
+    (project_dir / "grimoire.toml").write_text(config, encoding="utf-8", newline="\n")
     value, expanded = _argument_forms()[form]
     result = grim_at(project_dir).run(*_REFERENCE_COMMANDS[command], value, check=False)
     if command in _commands(_ARGUMENT_SENTENCE):
@@ -190,7 +190,7 @@ def _skill_path(project_dir: Path, tmp_path: Path, form: str) -> str:
         "absolute": (tmp_path / "abs" / "x", str(tmp_path / "abs" / "x")),
     }[form]
     target.mkdir(parents=True)
-    (target / "SKILL.md").write_text("---\nname: x\ndescription: X.\n---\n# X\n")
+    (target / "SKILL.md").write_text("---\nname: x\ndescription: X.\n---\n# X\n", encoding="utf-8", newline="\n")
     return argument
 
 
@@ -199,7 +199,7 @@ def _skill_path(project_dir: Path, tmp_path: Path, form: str) -> str:
 def test_path_arguments_follow_the_documented_commands(
     grim_at, project_dir: Path, tmp_path: Path, command: str, form: str
 ) -> None:
-    (project_dir / "grimoire.toml").write_text("")
+    (project_dir / "grimoire.toml").write_text("", encoding="utf-8", newline="\n")
     value = _skill_path(project_dir, tmp_path, form)
     argv = [a.format(out=tmp_path / "out") for a in _PATH_COMMANDS[command]]
     runner = grim_at(project_dir)

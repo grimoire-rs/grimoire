@@ -149,10 +149,29 @@ tasks:
       - tests/conftest.py
       - pyproject.toml
       - '{{.ROOT_DIR}}/target/release/grim'
+    summary: |
+      A full run (no CLI_ARGS) also writes results/junit-local-0-of-1.xml and
+      runs `test:floor:warn`, which prints a warning, never a failure, when the
+      suite breaks test/SUITE_FLOOR, SKIP_CEILING or XFAIL_CEILING. A filtered
+      run (CLI_ARGS set) skips the check; PR CI enforces the limits.
     cmds:
+      # A report left by an earlier run must not stand in for this one.
+      - rm -f results/junit-local-0-of-1.xml
       - task: default
         vars:
-          CLI_ARGS: '-n auto {{.CLI_ARGS | default "-v"}}'
+          CLI_ARGS: '-n auto {{.CLI_ARGS | default "-v --junit-xml=results/junit-local-0-of-1.xml"}}'
+      - task: floor:warn
+        vars:
+          FILTERED: '{{if .CLI_ARGS}}true{{else}}false{{end}}'
+
+  floor:warn:
+    desc: Judge the last local run (results/junit-local-0-of-1.xml) against the suite limits, warn only
+    cmds:
+      - cmd: |
+          if [ '{{.FILTERED | default "false"}}' = true ]; then exit 0; fi
+          python3 tools/accept_floor.py --label local --shard-count 1 \
+            || echo "WARNING: the suite breaks a limit above (test/SUITE_FLOOR, SKIP_CEILING or XFAIL_CEILING). Not a local failure; PR CI enforces it." >&2
+        silent: false
 
   shard:
     desc: Run one shard of the acceptance suite in parallel (SHARD_COUNT, SHARD_INDEX, SHARD_LABEL)

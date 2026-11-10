@@ -64,7 +64,7 @@ def _source(root: Path, host: str, leaf: tuple[str, ...]) -> Path:
     key = ".".join(json.dumps(part) for part in leaf)
     path = root / "settings" / "team.toml"
     path.parent.mkdir(parents=True)
-    path.write_text(f'description = "every host"\n\n[{host}]\n{key} = true\n', encoding="utf-8")
+    path.write_text(f'description = "every host"\n\n[{host}]\n{key} = true\n', encoding="utf-8", newline="\n")
     return path
 
 
@@ -124,7 +124,7 @@ def test_a_global_value_round_trips_on_every_host(
     env, _ = settings_sandbox(tmp_path / "s", grim.home)
     grim.env.update(env)
     # Cursor writes only into a `cli-config.json` its CLI already created.
-    (grim.home / ".cursor" / "cli-config.json").write_text("{}", encoding="utf-8")
+    (grim.home / ".cursor" / "cli-config.json").write_text("{}", encoding="utf-8", newline="\n")
     write_config(
         grim_home, settings={"team": team.fq}, options={"clients": json.dumps([host])}, experimental_settings=True
     )
@@ -132,7 +132,7 @@ def test_a_global_value_round_trips_on_every_host(
     if host in MCP_CONTAINER:
         descriptor = tmp_path / "src" / "mcp" / "shared.toml"
         descriptor.parent.mkdir(parents=True)
-        descriptor.write_text(MCP_DESCRIPTOR, encoding="utf-8")
+        descriptor.write_text(MCP_DESCRIPTOR, encoding="utf-8", newline="\n")
         ref = f"{registry}/{unique_repo}/mcp/shared:1.0.0"
         grim.json("release", str(descriptor), ref, "--kind", "mcp")
         with (grim_home / "grimoire.toml").open("a", encoding="utf-8") as config:

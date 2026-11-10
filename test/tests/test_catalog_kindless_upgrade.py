@@ -46,7 +46,7 @@ def _seed_old_cache(grim_home: Path, locator: str, rows: dict[str, str]) -> Path
     key = hashlib.sha256(locator.encode()).hexdigest()[:16]
     path = grim_home / "catalog" / f"{key}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(cache))
+    path.write_text(json.dumps(cache), encoding="utf-8", newline="\n")
     return path
 
 
@@ -79,7 +79,7 @@ def test_one_refresh_finds_a_settings_package_cached_kindless(upgraded) -> None:
     repos = [row["repo"] for row in found["items"]]
     assert repos == [f"{REGISTRY_HOST}/{settings_repo}"], found["items"]
     assert found["items"][0]["kind"] == "settings"
-    written = json.loads(cache.read_text())["entries"]
+    written = json.loads(cache.read_text(encoding="utf-8"))["entries"]
     assert written[settings_repo]["kind"] == "settings"
     assert "kind_read" not in written[settings_repo], (
         "a row with a kind needs no marker"
@@ -91,7 +91,7 @@ def test_one_refresh_finds_a_settings_package_cached_kindless(upgraded) -> None:
 def test_grim_0_15_1_lists_the_rows_this_grim_cached(upgraded, tmp_path: Path) -> None:
     runner, locator, cache, _, foreign = upgraded
     runner.json("search", "--registry", locator, "--refresh")
-    assert json.loads(cache.read_text())["entries"][foreign]["kind_read"] is True
+    assert json.loads(cache.read_text(encoding="utf-8"))["entries"][foreign]["kind_read"] is True
 
     identity = tmp_path / "old-grim-identity"
     identity.mkdir()

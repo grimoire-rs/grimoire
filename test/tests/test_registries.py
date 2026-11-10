@@ -66,7 +66,7 @@ def _two_namespace_config(project_dir: Path, ns1: str, ns2: str) -> None:
         f'\n'
         f'[rules]\n'
     )
-    (project_dir / "grimoire.toml").write_text(text)
+    (project_dir / "grimoire.toml").write_text(text, encoding="utf-8", newline="\n")
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +175,7 @@ def test_search_json_carries_source_attribution(
         f'\n'
         f'[skills]\n'
         f'\n'
-        f'[rules]\n'
+        f'[rules]\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
 
@@ -231,7 +231,7 @@ def test_search_multi_registry_flag_browses_all(
 
     # Config declares only ns1; the flag must override and span both.
     (project_dir / "grimoire.toml").write_text(
-        f'[[registries]]\noci = "{REGISTRY_HOST}/{ns1}"\ndefault = true\n\n[skills]\n\n[rules]\n'
+        f'[[registries]]\noci = "{REGISTRY_HOST}/{ns1}"\ndefault = true\n\n[skills]\n\n[rules]\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
 
@@ -293,7 +293,7 @@ def test_add_qualified_alias_reference_resolves(
         f'\n'
         f'[rules]\n'
     )
-    (project_dir / "grimoire.toml").write_text(cfg_text)
+    (project_dir / "grimoire.toml").write_text(cfg_text, encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     # Use the qualified alias/repo:tag form — the leading segment "reg1" is
@@ -308,7 +308,7 @@ def test_add_qualified_alias_reference_resolves(
     # qualified form `reg1/my-tool` must appear nowhere in the config (the
     # `alias = "reg1"` declaration line is unaffected — it has no `/my-tool`),
     # and the full expanded path must be present.
-    cfg = (project_dir / "grimoire.toml").read_text()
+    cfg = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert "reg1/my-tool" not in cfg, (
         f"the alias-qualified form 'reg1/my-tool' must be expanded, not stored; got:\n{cfg}"
     )
@@ -317,7 +317,7 @@ def test_add_qualified_alias_reference_resolves(
         f"'{REGISTRY_HOST}/{ns1}/my-tool'; got:\n{cfg}"
     )
 
-    lock = (project_dir / "grimoire.lock").read_text()
+    lock = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert REGISTRY_HOST in lock, (
         f"grimoire.lock must contain the registry host '{REGISTRY_HOST}'; "
         f"got:\n{lock}"
@@ -366,7 +366,7 @@ def test_search_single_default_registry_cold_cache(
         f'\n'
         f'[rules]\n'
     )
-    (project_dir / "grimoire.toml").write_text(cfg_text)
+    (project_dir / "grimoire.toml").write_text(cfg_text, encoding="utf-8", newline="\n")
 
     runner = grim_at(project_dir)
     # grim_home is from tmp_path so this is always a cold cache.
@@ -429,7 +429,7 @@ def test_search_partial_registry_failure_degrades_to_reachable(
         f'\n'
         f'[rules]\n'
     )
-    (project_dir / "grimoire.toml").write_text(cfg_text)
+    (project_dir / "grimoire.toml").write_text(cfg_text, encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     make_artifact(
@@ -541,7 +541,7 @@ def test_legacy_default_registry_still_resolves(
 
     # Hand-write the legacy config shape.
     (project_dir / "grimoire.toml").write_text(
-        f'[options]\ndefault_registry = "{REGISTRY_HOST}"\n\n[skills]\n\n[rules]\n'
+        f'[options]\ndefault_registry = "{REGISTRY_HOST}"\n\n[skills]\n\n[rules]\n', encoding="utf-8", newline="\n"
     )
 
     runner = grim_at(project_dir)
@@ -552,7 +552,7 @@ def test_legacy_default_registry_still_resolves(
     assert out["kind"] == "skill"
     assert out["status"] == "added", f"add with legacy config must succeed: {out!r}"
 
-    cfg = (project_dir / "grimoire.toml").read_text()
+    cfg = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert f"{REGISTRY_HOST}/{unique_repo}/legacy-tool" in cfg, (
         f"legacy-resolved skill binding must use the legacy registry host; got:\n{cfg}"
     )
@@ -599,7 +599,7 @@ def test_both_fields_array_wins(
         f'\n'
         f'[skills]\n'
         f'\n'
-        f'[rules]\n'
+        f'[rules]\n', encoding="utf-8", newline="\n"
     )
 
     runner = grim_at(project_dir)
@@ -637,7 +637,7 @@ def test_two_defaults_rejected(
         '\n'
         '[skills]\n'
         '\n'
-        '[rules]\n'
+        '[rules]\n', encoding="utf-8", newline="\n"
     )
 
     runner = grim_at(project_dir)
@@ -675,7 +675,7 @@ def _valid_project_config(project_dir: Path) -> None:
         f'\n'
         f'[skills]\n'
         f'\n'
-        f'[rules]\n'
+        f'[rules]\n', encoding="utf-8", newline="\n"
     )
 
 
@@ -698,7 +698,7 @@ def test_malformed_global_config_is_fatal_at_project_scope(
     (Test 8): a config grim cannot parse is exit 78 (EX_CONFIG), and the
     diagnostic names the offending file.
     """
-    (grim_home / "grimoire.toml").write_text(_MALFORMED_GLOBAL_CONFIG)
+    (grim_home / "grimoire.toml").write_text(_MALFORMED_GLOBAL_CONFIG, encoding="utf-8", newline="\n")
     _valid_project_config(project_dir)
 
     runner = grim_at(project_dir)
@@ -742,7 +742,7 @@ def test_search_registry_flag_survives_a_malformed_global_config(
     exiting 0 — otherwise a user locked out by a broken global config would
     have no way to search past it.
     """
-    (grim_home / "grimoire.toml").write_text(_MALFORMED_GLOBAL_CONFIG)
+    (grim_home / "grimoire.toml").write_text(_MALFORMED_GLOBAL_CONFIG, encoding="utf-8", newline="\n")
     _valid_project_config(project_dir)
 
     runner = grim_at(project_dir)
@@ -765,7 +765,7 @@ def test_search_registry_flag_outside_a_project_survives_a_malformed_global_conf
     ns = f"grim-test/{uuid.uuid4().hex[:12]}"
     _publish_relevance_pair(ns)
     global_config = grim_home / "grimoire.toml"
-    global_config.write_text(_MALFORMED_GLOBAL_CONFIG)
+    global_config.write_text(_MALFORMED_GLOBAL_CONFIG, encoding="utf-8", newline="\n")
     nowhere = tmp_path / "nowhere"
     nowhere.mkdir()
     runner = GrimRunner(grim_binary, grim_home, cwd=nowhere)
@@ -789,7 +789,7 @@ def test_search_registry_flag_warns_on_an_invalid_project_cutoff(
     ns = f"grim-test/{uuid.uuid4().hex[:12]}"
     _publish_relevance_pair(ns)
     config = project_dir / "grimoire.toml"
-    config.write_text("[options]\nsearch_min_relevance = 101\n")
+    config.write_text("[options]\nsearch_min_relevance = 101\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     result = runner.run(
@@ -901,7 +901,7 @@ def test_malformed_global_config_is_fatal_for_registry_resolving_commands(
     run exits 0 before any config is read. Verified by hand at exit 78 with
     a real terminal; the gap is structural, not an oversight.
     """
-    (grim_home / "grimoire.toml").write_text(broken)
+    (grim_home / "grimoire.toml").write_text(broken, encoding="utf-8", newline="\n")
     _valid_project_config(project_dir)
 
     runner = grim_at(project_dir)
@@ -935,9 +935,9 @@ def test_logout_removes_the_credential_despite_a_broken_global_config(
     docker_config = tmp_path / "docker"
     docker_config.mkdir()
     (docker_config / "config.json").write_text(
-        '{"auths": {"ghcr.io": {"auth": "dXNlcjpwYXNz"}}}'
+        '{"auths": {"ghcr.io": {"auth": "dXNlcjpwYXNz"}}}', encoding="utf-8", newline="\n"
     )
-    (grim_home / "grimoire.toml").write_text(broken)
+    (grim_home / "grimoire.toml").write_text(broken, encoding="utf-8", newline="\n")
     _valid_project_config(project_dir)
 
     runner = grim_at(project_dir)
@@ -948,7 +948,7 @@ def test_logout_removes_the_credential_despite_a_broken_global_config(
         f"`grim logout <host>` must not be blocked by an unrelated global "
         f"config, got {result.returncode}; stderr: {result.stderr}"
     )
-    auths = json.loads((docker_config / "config.json").read_text()).get("auths", {})
+    auths = json.loads((docker_config / "config.json").read_text(encoding="utf-8")).get("auths", {})
     assert "ghcr.io" not in auths, (
         f"the credential must actually be gone, not merely reported removed; "
         f"got: {auths}"
@@ -1028,7 +1028,7 @@ def _filtered_config(
     if exclude:
         lines.append(f"exclude = {_toml_list(exclude)}")
     lines += ["default = true", "", "[skills]", "", "[rules]", ""]
-    (project_dir / "grimoire.toml").write_text("\n".join(lines))
+    (project_dir / "grimoire.toml").write_text("\n".join(lines), encoding="utf-8", newline="\n")
 
 
 def _visible_candidates(runner, ns: str, *extra: str) -> set[str]:
@@ -1196,13 +1196,13 @@ def test_status_check_ignores_the_browse_filter(
     # S-006: an excluded reference still resolves, declares, locks, installs.
     added = runner.json("add", f"{REGISTRY_HOST}/{ns}/old-skill:latest")
     assert added["status"] == "added", f"an excluded ref must still install; got {added!r}"
-    assert f"{REGISTRY_HOST}/{ns}/old-skill" in (project_dir / "grimoire.lock").read_text(), (
+    assert f"{REGISTRY_HOST}/{ns}/old-skill" in (project_dir / "grimoire.lock").read_text(encoding="utf-8"), (
         "the excluded artifact must be pinned in the lock"
     )
     assert_dir_exists(project_dir / ".claude" / "skills" / "old-skill")
     # `grim add` re-serializes grimoire.toml; the filter must survive that
     # round-trip, or the rest of this test would pass for the wrong reason.
-    assert f'exclude = ["{ns}/old-skill"]' in (project_dir / "grimoire.toml").read_text(), (
+    assert f'exclude = ["{ns}/old-skill"]' in (project_dir / "grimoire.toml").read_text(encoding="utf-8"), (
         "write_config must preserve the authored browse filter"
     )
 
@@ -1282,7 +1282,7 @@ def test_malformed_project_filter_never_browses_the_fallback_set_b1(
     ns = f"grim-test/{uuid.uuid4().hex[:12]}"
     _publish_skill(f"{ns}/platform/foo", "foo")
     (grim_home / "grimoire.toml").write_text(
-        f'[[registries]]\nalias = "fallback"\noci = "{REGISTRY_HOST}/{ns}"\ndefault = true\n'
+        f'[[registries]]\nalias = "fallback"\noci = "{REGISTRY_HOST}/{ns}"\ndefault = true\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
 
@@ -1296,7 +1296,7 @@ def test_malformed_project_filter_never_browses_the_fallback_set_b1(
         f"assertion below passes vacuously; got: {control.stdout!r}"
     )
 
-    (project_dir / "grimoire.toml").write_text(MALFORMED_PROJECT_FILTER)
+    (project_dir / "grimoire.toml").write_text(MALFORMED_PROJECT_FILTER, encoding="utf-8", newline="\n")
     result = runner.run("search", "--refresh", check=False)
 
     assert result.returncode == 78, (
@@ -1334,7 +1334,7 @@ def test_registry_flag_still_browses_past_a_malformed_project_filter_s014(
     """
     ns = f"grim-test/{uuid.uuid4().hex[:12]}"
     _publish_skill(f"{ns}/platform/foo", "foo")
-    (project_dir / "grimoire.toml").write_text(MALFORMED_PROJECT_FILTER)
+    (project_dir / "grimoire.toml").write_text(MALFORMED_PROJECT_FILTER, encoding="utf-8", newline="\n")
 
     runner = grim_at(project_dir)
     result = runner.run("search", "--registry", f"{REGISTRY_HOST}/{ns}", "--refresh", check=False)
@@ -1364,7 +1364,7 @@ def test_status_without_check_survives_a_malformed_global_config_s013(
     The `--check` half is the control: it proves the fixture really is
     malformed and really is read on the path that needs it.
     """
-    (grim_home / "grimoire.toml").write_text(_MALFORMED_GLOBAL_CONFIG)
+    (grim_home / "grimoire.toml").write_text(_MALFORMED_GLOBAL_CONFIG, encoding="utf-8", newline="\n")
     _valid_project_config(project_dir)
 
     runner = grim_at(project_dir)
@@ -1413,7 +1413,7 @@ def test_malformed_global_config_is_fatal_at_global_scope_w17(
         f"`grim {' '.join(command)}`; got {absent.returncode}; stderr: {absent.stderr}"
     )
 
-    (grim_home / "grimoire.toml").write_text(_MALFORMED_GLOBAL_CONFIG)
+    (grim_home / "grimoire.toml").write_text(_MALFORMED_GLOBAL_CONFIG, encoding="utf-8", newline="\n")
     result = runner.run("--global", *command, check=False)
     assert result.returncode == 78, (
         f"a malformed global config must exit 78 (EX_CONFIG) at global scope too; "
@@ -1553,7 +1553,7 @@ def test_config_list_all_carries_the_browse_filter_rows_s012(
         'alias = "acme"\n'
         f'oci = "{REGISTRY_HOST}"\n'
         'include = ["platform/**"]\n'
-        "default = true\n"
+        "default = true\n", encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
 
@@ -1611,7 +1611,7 @@ def test_excluded_reference_still_locks_and_installs_s015(
         "default = true\n"
         "\n[skills]\n"
         f'secret-skill = "{REGISTRY_HOST}/{ns}/hidden/secret-skill:latest"\n'
-        "\n[rules]\n"
+        "\n[rules]\n", encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
 
@@ -1622,7 +1622,7 @@ def test_excluded_reference_still_locks_and_installs_s015(
     )
     assert f"{REGISTRY_HOST}/{ns}/hidden/secret-skill:latest@sha256:" in (
         project_dir / "grimoire.lock"
-    ).read_text(), "the excluded artifact must be pinned by digest in the lock"
+    ).read_text(encoding="utf-8"), "the excluded artifact must be pinned by digest in the lock"
 
     installed = runner.run("install", check=False)
     assert installed.returncode == 0, (
@@ -1651,7 +1651,7 @@ def test_malformed_filter_pattern_in_project_config_exits_78(
         'alias = "acme"\n'
         f'oci = "{REGISTRY_HOST}"\n'
         'include = ["acme{unclosed"]\n'
-        "default = true\n"
+        "default = true\n", encoding="utf-8", newline="\n"
     )
 
     runner = grim_at(project_dir)
@@ -1691,7 +1691,7 @@ def test_one_file_may_declare_a_locator_twice_as_two_views(
         'alias = "internal"\n'
         f'oci = "{REGISTRY_HOST}/{ns}"\n'
         f'include = {_toml_list(_ns_rel(ns, "internal"))}\n'
-        "\n[skills]\n\n[rules]\n"
+        "\n[skills]\n\n[rules]\n", encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
 
@@ -1740,7 +1740,7 @@ def test_one_file_may_declare_a_locator_twice_without_aliases(
         "[[registries]]\n"
         f'oci = "{REGISTRY_HOST}/{ns}"\n'
         f'include = {_toml_list(_ns_rel(ns, "internal"))}\n'
-        "\n[skills]\n\n[rules]\n"
+        "\n[skills]\n\n[rules]\n", encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
 
@@ -1799,7 +1799,7 @@ def test_search_json_reports_per_source_status(
         f'\n'
         f'[skills]\n'
         f'\n'
-        f'[rules]\n'
+        f'[rules]\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
 
@@ -1875,7 +1875,7 @@ def test_search_json_marks_every_source_failed_when_none_load(
         '\n'
         '[skills]\n'
         '\n'
-        '[rules]\n'
+        '[rules]\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
 
@@ -1987,7 +1987,7 @@ def test_global_min_relevance_applies_outside_a_project_and_under_registry_flag(
     nowhere.mkdir()
     runner = GrimRunner(grim_binary, grim_home, cwd=nowhere)
     (grim_home / "grimoire.toml").write_text(
-        f'[[registries]]\nalias = "acme"\noci = "{REGISTRY_HOST}/{ns}"\ndefault = true\n'
+        f'[[registries]]\nalias = "acme"\noci = "{REGISTRY_HOST}/{ns}"\ndefault = true\n', encoding="utf-8", newline="\n"
     )
 
     fallback = runner.json("search", "--refresh", "zebrafinch")
@@ -2004,7 +2004,7 @@ def test_catalog_gate_hint_skips_a_source_that_failed_to_load(grim_at, project_d
     blaming `_catalog` gating on top of that is a misdiagnosis, so a browse
     whose only plain-OCI source failed stays quiet about it."""
     (project_dir / "grimoire.toml").write_text(
-        '[[registries]]\nalias = "dead"\noci = "localhost:9999/grim-test/dead"\ndefault = true\n'
+        '[[registries]]\nalias = "dead"\noci = "localhost:9999/grim-test/dead"\ndefault = true\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
     for query in ((), ("anything",)):

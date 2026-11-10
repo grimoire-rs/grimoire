@@ -28,7 +28,7 @@ pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git not on 
 
 def _write(p: Path, body: str) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(body)
+    p.write_text(body, encoding="utf-8", newline="\n")
 
 
 def _local_skill(project_dir: Path, name: str = "code-review") -> Path:
@@ -196,7 +196,7 @@ def test_release_git_dirty_marks_revision(
     head = _git(project_dir, "rev-parse", "HEAD")
     # Mutate a tracked file without committing.
     (skill / "SKILL.md").write_text(
-        "---\nname: code-review\ndescription: Review code, edited.\n---\n# code-review\n"
+        "---\nname: code-review\ndescription: Review code, edited.\n---\n# code-review\n", encoding="utf-8", newline="\n"
     )
 
     repo = f"{registry}/{unique_repo}/dirty"
@@ -223,7 +223,7 @@ def test_build_bundle_git_fails_outside_repo(grim_at, project_dir: Path) -> None
     guard: re-introducing that early return would make this test fail.
     """
     bundle = project_dir / "my-bundle.toml"
-    bundle.write_text("[skills]\ncr = \"ghcr.io/acme/code-review:1.0.0\"\n")
+    bundle.write_text("[skills]\ncr = \"ghcr.io/acme/code-review:1.0.0\"\n", encoding="utf-8", newline="\n")
 
     runner = grim_at(project_dir)
     result = runner.run("build", str(bundle), "--git", check=False)
@@ -241,7 +241,7 @@ def test_build_bundle_git_succeeds_in_repo(grim_at, project_dir: Path) -> None:
     annotations, so the command completes normally.
     """
     bundle = project_dir / "my-bundle.toml"
-    bundle.write_text("[skills]\ncr = \"ghcr.io/acme/code-review:1.0.0\"\n")
+    bundle.write_text("[skills]\ncr = \"ghcr.io/acme/code-review:1.0.0\"\n", encoding="utf-8", newline="\n")
     _init_repo(project_dir)
 
     runner = grim_at(project_dir)
@@ -325,7 +325,7 @@ def test_release_git_untracked_file_does_not_mark_dirty(
     head = _git(project_dir, "rev-parse", "HEAD")
 
     # Write an untracked file — not staged, not committed.
-    (project_dir / "scratch.txt").write_text("not tracked, must not dirty the tree")
+    (project_dir / "scratch.txt").write_text("not tracked, must not dirty the tree", encoding="utf-8", newline="\n")
 
     repo = f"{registry}/{unique_repo}/untracked-guard"
     repo_path = f"{unique_repo}/untracked-guard"

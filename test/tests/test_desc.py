@@ -346,7 +346,7 @@ def test_include_glob_escaping_manifest_dir_is_data_error(
     _skill(project_dir, name)
     _write(project_dir / "README.md", README)  # a valid in-tree source
     # A secret OUTSIDE the manifest dir, reachable via `../**/*.env`.
-    (tmp_path / "secret.env").write_text("TOKEN=shh\n", newline="\n")
+    (tmp_path / "secret.env").write_text("TOKEN=shh\n", newline="\n", encoding="utf-8")
     _manifest(
         project_dir,
         registry,
@@ -379,7 +379,7 @@ def test_unreadable_companion_aborts_with_zero_registry_mutations(
     name = f"{prefix}-badpack"
     _skill(project_dir, name)
     readme = project_dir / "README.md"
-    readme.write_text(README, newline="\n")
+    readme.write_text(README, newline="\n", encoding="utf-8")
     # Readable as a file (stat/`is_file()` still succeed at plan time) but the
     # pack-time read fails — the exact window the pre-pack step must close.
     os.chmod(readme, 0o000)
@@ -412,7 +412,7 @@ def test_unreadable_companion_aborts_dry_run(
     name = f"{prefix}-badpack-dryrun"
     _skill(project_dir, name)
     readme = project_dir / "README.md"
-    readme.write_text(README, newline="\n")
+    readme.write_text(README, newline="\n", encoding="utf-8")
     # Readable as a file at plan time (`is_file()` succeeds), unreadable at pack
     # time — the exact window the dry-run pre-pack step must also close.
     os.chmod(readme, 0o000)

@@ -55,7 +55,7 @@ def _move_tag(unique_repo: str, name: str, body: str = "v2") -> PublishedArtifac
 
 def _write_marketplace(work: Path, includes: list[str]) -> None:
     (work / "marketplace.toml").write_text(
-        f"[plugins.team]\ninclude = {json.dumps(includes)}\n"
+        f"[plugins.team]\ninclude = {json.dumps(includes)}\n", encoding="utf-8", newline="\n"
     )
 
 
@@ -67,7 +67,7 @@ def _export(runner: GrimRunner, *args: str) -> subprocess.CompletedProcess[str]:
 
 def _rows(work: Path) -> dict[str, dict]:
     """`name -> entry` for the `team` part of the marketplace lock."""
-    lock = tomllib.loads((work / "marketplace.lock").read_text())
+    lock = tomllib.loads((work / "marketplace.lock").read_text(encoding="utf-8"))
     return {
         entry["name"]: entry
         for kind in _KINDS
@@ -84,7 +84,7 @@ def _pins(work: Path) -> dict[str, str]:
 def _forget_recorded_digests(work: Path) -> None:
     """Leave the stamps as a lock grim 0.15.1 wrote holds them."""
     lock = work / "marketplace.lock"
-    lock.write_text(_RECORDED_DIGEST.sub(r'\1"', lock.read_text()))
+    lock.write_text(_RECORDED_DIGEST.sub(r'\1"', lock.read_text(encoding="utf-8")), encoding="utf-8", newline="\n")
 
 
 def test_export_keeps_unchanged_includes(
@@ -131,8 +131,8 @@ def test_export_resolves_only_the_new_include(
     assert rows.pop("fresh")["pinned"].endswith(fresh.digest)
     assert rows == before
     tree = work / "dist" / "team.claude" / "skills"
-    assert "# first v1" in (tree / "first" / "SKILL.md").read_text()
-    assert "# fresh v1" in (tree / "fresh" / "SKILL.md").read_text()
+    assert "# first v1" in (tree / "first" / "SKILL.md").read_text(encoding="utf-8")
+    assert "# fresh v1" in (tree / "fresh" / "SKILL.md").read_text(encoding="utf-8")
 
 
 def test_tagless_part_resolves_an_unchanged_include_once_and_warns(
@@ -152,14 +152,14 @@ def test_tagless_part_resolves_an_unchanged_include_once_and_warns(
     exported = _export(runner)
     assert exported.returncode == 0, exported.stderr
     lock = work / "marketplace.lock"
-    tagless = _ADVISORY_TAG.sub(r"\1\2", lock.read_text())
-    lock.write_text(tagless)
+    tagless = _ADVISORY_TAG.sub(r"\1\2", lock.read_text(encoding="utf-8"))
+    lock.write_text(tagless, encoding="utf-8", newline="\n")
     moved = _move_tag(unique_repo, "kept")
 
     unedited = _export(runner, "--force")
 
     assert unedited.returncode == 0, unedited.stderr
-    assert lock.read_text() == tagless, "a fresh plugin resolves and rewrites nothing"
+    assert lock.read_text(encoding="utf-8") == tagless, "a fresh plugin resolves and rewrites nothing"
     assert "re-resolved" not in unedited.stderr
 
     _write_marketplace(work, [kept.fq, fresh.fq])
@@ -348,10 +348,10 @@ def test_no_json_output_echoes_a_recorded_digest(
     runner, pack, _held = _exported_pack(grim_at, work, unique_repo)
     (work / "marketplace.toml").write_text(
         '[marketplace]\nname = "acme"\n\n[marketplace.owner]\nname = "Acme"\n\n'
-        + (work / "marketplace.toml").read_text()
+        + (work / "marketplace.toml").read_text(encoding="utf-8"), encoding="utf-8", newline="\n"
     )
     stamp = f"1@{pack.digest}"
-    assert stamp in (work / "marketplace.lock").read_text()
+    assert stamp in (work / "marketplace.lock").read_text(encoding="utf-8")
     reports = {
         "member update": runner.json(
             "update", "--marketplace", "marketplace.toml", "team:held"
@@ -375,7 +375,7 @@ def test_tagless_bundle_member_warns_naming_the_part(
     """S-036 error case: a tagless member has no recorded edge, so it resolves and warns."""
     runner, pack, held = _exported_pack(grim_at, work, unique_repo)
     lock = work / "marketplace.lock"
-    lock.write_text(_ADVISORY_TAG.sub(r"\1\2", lock.read_text()))
+    lock.write_text(_ADVISORY_TAG.sub(r"\1\2", lock.read_text(encoding="utf-8")), encoding="utf-8", newline="\n")
     _forget_recorded_digests(work)
     moved, _ = _roll_pack(unique_repo, pack, held)
     extra = _skill(unique_repo, "extra")
@@ -423,7 +423,7 @@ def test_an_offline_relock_stops_at_a_recorded_bundle_this_machine_never_read(
     def manifest(directory: Path, plugin: str, includes: list[str]) -> None:
         directory.mkdir(exist_ok=True)
         (directory / "marketplace.toml").write_text(
-            f"{header}[plugins.{plugin}]\ninclude = {json.dumps(includes)}\n"
+            f"{header}[plugins.{plugin}]\ninclude = {json.dumps(includes)}\n", encoding="utf-8", newline="\n"
         )
 
     origin = tmp_path / "origin"
@@ -476,8 +476,8 @@ def test_a_pick_refuses_a_moved_bundle_list_that_conflicts_with_a_direct_include
     _write_marketplace(work, [outer.fq, inner.fq, x2.fq])
     assert runner.run("update", "--marketplace", "marketplace.toml").returncode == 0
     lock = work / "marketplace.lock"
-    written = _RECORDED_DIGEST.sub(r'\1"', _ADVISORY_TAG.sub(r"\1\2", lock.read_text()))
-    lock.write_text(written)
+    written = _RECORDED_DIGEST.sub(r'\1"', _ADVISORY_TAG.sub(r"\1\2", lock.read_text(encoding="utf-8")))
+    lock.write_text(written, encoding="utf-8", newline="\n")
     retag(f"{unique_repo}/inner", "keep", inner.digest)
     make_bundle(
         f"{unique_repo}/inner", [("skill", "m", m.fq), ("skill", "x", x1.fq)], tag="1"
@@ -490,7 +490,7 @@ def test_a_pick_refuses_a_moved_bundle_list_that_conflicts_with_a_direct_include
         "update", "--marketplace", "marketplace.toml", "team", check=False
     )
     assert whole.returncode == 78, whole.stderr
-    assert lock.read_text() == written
+    assert lock.read_text(encoding="utf-8") == written
 
     result = runner.run(
         "update", "--marketplace", "marketplace.toml", pick, check=False
@@ -498,7 +498,7 @@ def test_a_pick_refuses_a_moved_bundle_list_that_conflicts_with_a_direct_include
 
     assert result.returncode == 78, result.stderr
     assert "skill 'x'" in result.stderr, result.stderr
-    assert lock.read_text() == written
+    assert lock.read_text(encoding="utf-8") == written
 
 
 def test_a_pick_of_an_absent_name_exits_79_before_a_conflict_with_no_part(
@@ -555,8 +555,8 @@ def _delete(repo: str, reference: str) -> None:
 def _as_c5e3824_wrote(work: Path) -> None:
     """Leave the part as c5e3824 wrote it: no digest in any stamp, no tag in any pin."""
     lock = work / "marketplace.lock"
-    text = _ADVISORY_TAG.sub(r"\1\2", lock.read_text())
-    lock.write_text(_RECORDED_DIGEST.sub(r'\1"', text))
+    text = _ADVISORY_TAG.sub(r"\1\2", lock.read_text(encoding="utf-8"))
+    lock.write_text(_RECORDED_DIGEST.sub(r'\1"', text), encoding="utf-8", newline="\n")
 
 
 def test_an_export_keeps_a_recorded_nested_bundle_below_a_parent_that_records_none(
@@ -578,7 +578,7 @@ def test_an_export_keeps_a_recorded_nested_bundle_below_a_parent_that_records_no
     _write_marketplace(work, [outer.fq, inner.fq])
     assert runner.run("update", "--marketplace", "marketplace.toml").returncode == 0
     lock = work / "marketplace.lock"
-    lock.write_text(lock.read_text().replace(f"@{outer.digest}", ""))
+    lock.write_text(lock.read_text(encoding="utf-8").replace(f"@{outer.digest}", ""), encoding="utf-8", newline="\n")
     retag(f"{unique_repo}/inner", "keep", inner.digest)
     make_bundle(f"{unique_repo}/inner", [("skill", "z", z.fq)], tag="1")
     retag(f"{unique_repo}/outer", "keep", outer.digest)
@@ -644,7 +644,7 @@ def test_a_pick_refuses_a_dependent_beside_a_newer_version_it_requires(
     """
     runner, _held1 = _mk_f1(grim_at, work, unique_repo)
     lock = work / "marketplace.lock"
-    written = lock.read_text()
+    written = lock.read_text(encoding="utf-8")
 
     for pick in ("team:held", "team:pack"):
         result = runner.run(
@@ -655,7 +655,7 @@ def test_a_pick_refuses_a_dependent_beside_a_newer_version_it_requires(
         assert "skill 'y'" in result.stderr and "requires" in result.stderr, (
             result.stderr
         )
-        assert lock.read_text() == written
+        assert lock.read_text(encoding="utf-8") == written
 
     extra = runner.run(
         "update", "--marketplace", "marketplace.toml", "team:extra", check=False
@@ -688,12 +688,12 @@ def test_a_pick_reads_an_unrecorded_include_republished_as_a_skill_as_a_skill(
     assert picked.returncode == 0, picked.stderr
 
     lock = work / "marketplace.lock"
-    before = lock.read_text()
+    before = lock.read_text(encoding="utf-8")
     gone = runner.run(
         "update", "--marketplace", "marketplace.toml", "team:x", check=False
     )
     assert gone.returncode == 79, gone.stderr
-    assert lock.read_text() == before
+    assert lock.read_text(encoding="utf-8") == before
 
 
 @pytest.mark.parametrize("written", ["recorded", "forgotten"])
@@ -740,7 +740,7 @@ def test_an_offline_pick_of_a_moved_recorded_bundle_needs_its_recorded_list(
     def manifest(directory: Path, plugin: str, includes: list[str]) -> None:
         directory.mkdir(exist_ok=True)
         (directory / "marketplace.toml").write_text(
-            f"{header}[plugins.{plugin}]\ninclude = {json.dumps(includes)}\n"
+            f"{header}[plugins.{plugin}]\ninclude = {json.dumps(includes)}\n", encoding="utf-8", newline="\n"
         )
 
     origin = tmp_path / "origin"
@@ -806,7 +806,7 @@ def test_a_part_conflict_names_the_plugin_include(
     retag(f"{unique_repo}/pack", "keep", pack.digest)
     make_bundle(f"{unique_repo}/pack", [("skill", "held", held2.fq)], tag="1")
     lock = work / "marketplace.lock"
-    written = lock.read_text()
+    written = lock.read_text(encoding="utf-8")
 
     result = runner.run(
         "update", "--marketplace", "marketplace.toml", "team:pack", check=False
@@ -818,7 +818,7 @@ def test_a_part_conflict_names_the_plugin_include(
     )
     assert "marketplace.toml" in result.stderr and "grimoire.toml" not in result.stderr
     assert "a bundle that lists another version still conflicts" in result.stderr
-    assert lock.read_text() == written
+    assert lock.read_text(encoding="utf-8") == written
 
 
 def test_a_first_write_bundle_conflict_names_the_bundles_to_drop(
@@ -911,7 +911,7 @@ def test_a_pick_refuses_a_dependent_beside_another_version_of_a_bundle_its_bundl
     members = [("bundle", "req", req2.fq), ("skill", "leaving", leaving.fq)]
     make_bundle(f"{unique_repo}/pack", members, tag="1")
     lock = work / "marketplace.lock"
-    written = lock.read_text()
+    written = lock.read_text(encoding="utf-8")
 
     for pick in ("team:pack", "team:req"):
         result = runner.run(
@@ -922,7 +922,7 @@ def test_a_pick_refuses_a_dependent_beside_another_version_of_a_bundle_its_bundl
         assert "skill 'y'" in result.stderr, result.stderr
         assert "requires req:1 through outer:1" in result.stderr, result.stderr
         assert "bundle 'req' to req:2" in result.stderr, result.stderr
-        assert lock.read_text() == written
+        assert lock.read_text(encoding="utf-8") == written
     extra_pick = runner.run(
         "update", "--marketplace", "marketplace.toml", "team:extra", check=False
     )
@@ -1188,7 +1188,7 @@ def _as_0_15_1_wrote(work: Path) -> None:
     """Leave the part as grim 0.15.1 wrote it: no digest, no tag and no requires row."""
     _as_c5e3824_wrote(work)
     lock = work / "marketplace.lock"
-    lock.write_text(_REQUIRES_ROWS.sub("", lock.read_text()))
+    lock.write_text(_REQUIRES_ROWS.sub("", lock.read_text(encoding="utf-8")), encoding="utf-8", newline="\n")
 
 
 def _gone_requirement(
@@ -1200,7 +1200,7 @@ def _gone_requirement(
         _as_0_15_1_wrote(work)
     retag(f"{unique_repo}/held", "keep-first", held1.digest)
     _delete(f"{unique_repo}/held", "1")
-    return runner, (work / "marketplace.lock").read_text()
+    return runner, (work / "marketplace.lock").read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(
@@ -1232,7 +1232,7 @@ def test_a_gone_requirement_tag_refuses_a_pick_only_on_recorded_evidence(
     assert result.returncode == expected, result.stderr
     if expected:
         assert "requires" in result.stderr, result.stderr
-        assert (work / "marketplace.lock").read_text() == written
+        assert (work / "marketplace.lock").read_text(encoding="utf-8") == written
 
 
 @pytest.mark.parametrize("pick", ["team:pack", "team:req"])
@@ -1278,7 +1278,7 @@ def test_a_gone_bundle_requirement_tag_refuses_a_pick_on_the_parts_stamps(
     retag(f"{unique_repo}/req", "keep-first", req1.digest)
     _delete(f"{unique_repo}/req", "1")
     lock = work / "marketplace.lock"
-    written = lock.read_text()
+    written = lock.read_text(encoding="utf-8")
 
     result = runner.run(
         "update", "--marketplace", "marketplace.toml", pick, check=False
@@ -1287,7 +1287,7 @@ def test_a_gone_bundle_requirement_tag_refuses_a_pick_on_the_parts_stamps(
     assert result.returncode == 78, result.stderr
     assert "requires req:1" in result.stderr, result.stderr
     assert "bundle 'req' to req:2" in result.stderr, result.stderr
-    assert lock.read_text() == written
+    assert lock.read_text(encoding="utf-8") == written
 
 
 @pytest.mark.parametrize(
@@ -1312,10 +1312,10 @@ def test_an_offline_requirement_tag_miss_refuses_a_pick_only_on_recorded_evidenc
         _as_0_15_1_wrote(work)
     helper = tmp_path / "helper"
     helper.mkdir()
-    (helper / "marketplace.toml").write_text((work / "marketplace.toml").read_text())
+    (helper / "marketplace.toml").write_text((work / "marketplace.toml").read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
     warm = GrimRunner(grim_binary, tmp_path / "warm" / "grim-home", cwd=helper)
     assert warm.run("update", "--marketplace", "marketplace.toml").returncode == 0
-    written = (work / "marketplace.lock").read_text()
+    written = (work / "marketplace.lock").read_text(encoding="utf-8")
     reader = GrimRunner(grim_binary, tmp_path / "warm" / "grim-home", cwd=work)
 
     result = reader.run(
@@ -1329,7 +1329,7 @@ def test_an_offline_requirement_tag_miss_refuses_a_pick_only_on_recorded_evidenc
 
     assert result.returncode == expected, result.stderr
     if expected:
-        assert (work / "marketplace.lock").read_text() == written
+        assert (work / "marketplace.lock").read_text(encoding="utf-8") == written
 
 
 @pytest.mark.parametrize("written", ["c5e3824", "0.15.1"])
@@ -1392,7 +1392,7 @@ def test_an_unreadable_recorded_nested_bundle_stops_the_export(
     def manifest(directory: Path, includes: list[str]) -> None:
         directory.mkdir(exist_ok=True)
         (directory / "marketplace.toml").write_text(
-            f"{header}[plugins.team]\ninclude = {json.dumps(includes)}\n"
+            f"{header}[plugins.team]\ninclude = {json.dumps(includes)}\n", encoding="utf-8", newline="\n"
         )
 
     origin = tmp_path / "origin"
@@ -1400,7 +1400,7 @@ def test_an_unreadable_recorded_nested_bundle_stops_the_export(
     writer = GrimRunner(grim_binary, tmp_path / "writer" / "grim-home", cwd=origin)
     writer.run("update", "--marketplace", "marketplace.toml")
     forgotten = (
-        (origin / "marketplace.lock").read_text().replace(f"@{outer.digest}", "")
+        (origin / "marketplace.lock").read_text(encoding="utf-8").replace(f"@{outer.digest}", "")
     )
     make_bundle(f"{unique_repo}/inner", [("skill", "z", z.fq)], tag="1")
     retag(f"{unique_repo}/outer", "keep", outer.digest)
@@ -1416,7 +1416,7 @@ def test_an_unreadable_recorded_nested_bundle_stops_the_export(
     consumer = tmp_path / "consumer"
     manifest(consumer, [outer.fq])
     lock = consumer / "marketplace.lock"
-    lock.write_text(forgotten)
+    lock.write_text(forgotten, encoding="utf-8", newline="\n")
     before = lock.read_bytes()
 
     result = GrimRunner(grim_binary, home, cwd=consumer).run(
@@ -1456,8 +1456,8 @@ def test_a_pick_reads_a_recorded_nested_bundle_below_an_unrecorded_parent_at_its
     _write_marketplace(work, [outer.fq, x2.fq])
     assert runner.run("update", "--marketplace", "marketplace.toml").returncode == 0
     lock = work / "marketplace.lock"
-    lock.write_text(lock.read_text().replace(f"@{outer.digest}", ""))
-    written = lock.read_text()
+    lock.write_text(lock.read_text(encoding="utf-8").replace(f"@{outer.digest}", ""), encoding="utf-8", newline="\n")
+    written = lock.read_text(encoding="utf-8")
     retag(f"{unique_repo}/inner", "keep", inner.digest)
     make_bundle(
         f"{unique_repo}/inner", [("skill", "m", m.fq), ("skill", "x", x1.fq)], tag="1"
@@ -1467,7 +1467,7 @@ def test_a_pick_reads_a_recorded_nested_bundle_below_an_unrecorded_parent_at_its
         "update", "--marketplace", "marketplace.toml", "team", check=False
     )
     assert whole.returncode == 78, whole.stderr
-    assert lock.read_text() == written
+    assert lock.read_text(encoding="utf-8") == written
 
     result = runner.run(
         "update", "--marketplace", "marketplace.toml", "team:m", check=False

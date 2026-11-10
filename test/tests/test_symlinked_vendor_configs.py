@@ -39,7 +39,7 @@ command = "true"
 def _stow(link: Path, real: Path, body: str) -> None:
     """Write ``body`` to ``real`` and symlink it into place at ``link``."""
     real.parent.mkdir(parents=True, exist_ok=True)
-    real.write_text(body)
+    real.write_text(body, encoding="utf-8", newline="\n")
     link.parent.mkdir(parents=True, exist_ok=True)
     os.symlink(os.path.relpath(real, link.parent), link)
 
@@ -47,9 +47,9 @@ def _stow(link: Path, real: Path, body: str) -> None:
 def _rule_with_support_dir(root: Path) -> Path:
     index = root / "rules" / "probe.md"
     index.parent.mkdir(parents=True, exist_ok=True)
-    index.write_text("---\npaths: ['**']\n---\n# probe\nsee [x](probe/x.md)\n")
+    index.write_text("---\npaths: ['**']\n---\n# probe\nsee [x](probe/x.md)\n", encoding="utf-8", newline="\n")
     (index.parent / "probe").mkdir()
-    (index.parent / "probe" / "x.md").write_text("# x\n")
+    (index.parent / "probe" / "x.md").write_text("# x\n", encoding="utf-8", newline="\n")
     return index
 
 
@@ -74,16 +74,16 @@ def test_managed_config_splices_write_through_symlinks(
     result = runner.run("add", "--global", "--kind", "rule", str(_rule_with_support_dir(tmp_path)), check=False)
     assert result.returncode == 0, result.stderr
     assert claude_link.is_symlink() and opencode_link.is_symlink(), "the splice must not replace the links"
-    claude = json.loads(claude_real.read_text())
+    claude = json.loads(claude_real.read_text(encoding="utf-8"))
     assert claude["userSetting"] == 1 and any("rules/probe/**" in g for g in claude["claudeMdExcludes"])
-    opencode = json.loads(opencode_real.read_text())
+    opencode = json.loads(opencode_real.read_text(encoding="utf-8"))
     assert opencode["theme"] == "dark" and opencode["instructions"]
 
     result = runner.run("uninstall", "--global", "rule", "probe", check=False)
     assert result.returncode == 0, result.stderr
     assert claude_link.is_symlink() and opencode_link.is_symlink(), "uninstall must not replace the links either"
-    assert json.loads(claude_real.read_text()) == {"userSetting": 1}
-    assert json.loads(opencode_real.read_text()) == {"theme": "dark"}
+    assert json.loads(claude_real.read_text(encoding="utf-8")) == {"userSetting": 1}
+    assert json.loads(opencode_real.read_text(encoding="utf-8")) == {"theme": "dark"}
 
 
 @unix_only
@@ -104,7 +104,7 @@ def test_mcp_entries_write_through_symlinks_outside_the_vendor_root(
 
     descriptor = tmp_path / "mcp" / "probe.toml"
     descriptor.parent.mkdir()
-    descriptor.write_text(DESCRIPTOR)
+    descriptor.write_text(DESCRIPTOR, encoding="utf-8", newline="\n")
     ref = f"{registry}/{unique_repo}/mcp/probe:1.0.0"
     runner.json("release", str(descriptor), ref, "--kind", "mcp")
 
@@ -113,9 +113,9 @@ def test_mcp_entries_write_through_symlinks_outside_the_vendor_root(
     result = runner.run("install", "--global", "--client", "codex", "--client", "claude", check=False)
     assert result.returncode == 0, result.stderr
     assert codex_link.is_symlink() and claude_link.is_symlink(), "the MCP splice must not replace the links"
-    codex = tomllib.loads(codex_real.read_text())
+    codex = tomllib.loads(codex_real.read_text(encoding="utf-8"))
     assert codex["model"] == "x" and codex["mcp_servers"]["probe"]["command"] == "true"
-    claude = json.loads(claude_real.read_text())
+    claude = json.loads(claude_real.read_text(encoding="utf-8"))
     assert claude["userSetting"] == 1 and claude["mcpServers"]["probe"]["command"] == "true"
 
     result = runner.run("--format", "json", "status", "--global", check=False)
@@ -128,5 +128,5 @@ def test_mcp_entries_write_through_symlinks_outside_the_vendor_root(
     assert result.returncode == 0, result.stderr
     assert "outside its anchor root" not in result.stderr and "abandon" not in result.stderr
     assert codex_link.is_symlink() and claude_link.is_symlink(), "uninstall must not replace the links either"
-    assert tomllib.loads(codex_real.read_text()) == {"model": "x"}
-    assert json.loads(claude_real.read_text()) == {"userSetting": 1}
+    assert tomllib.loads(codex_real.read_text(encoding="utf-8")) == {"model": "x"}
+    assert json.loads(claude_real.read_text(encoding="utf-8")) == {"userSetting": 1}

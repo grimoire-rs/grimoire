@@ -94,7 +94,7 @@ def test_tui_options_preserved_through_add_remove_round_trip(
     # `grim add` reads and re-writes grimoire.toml via write_config.
     runner.json("add", sk.fq)
 
-    cfg_after_add = (project_dir / "grimoire.toml").read_text()
+    cfg_after_add = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert "[options.tui]" in cfg_after_add, (
         "[options.tui] table must be present after grim add re-serializes the config"
     )
@@ -114,7 +114,7 @@ def test_tui_options_preserved_through_add_remove_round_trip(
     # `grim remove` also re-writes via write_config — verify again.
     runner.json("remove", "skill", "tui-options-probe")
 
-    cfg_after_remove = (project_dir / "grimoire.toml").read_text()
+    cfg_after_remove = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert "[options.tui]" in cfg_after_remove, (
         "[options.tui] table must survive grim remove re-serialization"
     )
@@ -147,7 +147,7 @@ def test_tui_options_absent_when_not_declared(
     runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
     runner.json("add", sk.fq)
 
-    cfg_after_add = (project_dir / "grimoire.toml").read_text()
+    cfg_after_add = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert "[options.tui]" not in cfg_after_add, (
         "[options.tui] must not appear in a config that declared no TUI options"
     )

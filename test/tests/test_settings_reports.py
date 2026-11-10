@@ -77,7 +77,7 @@ def _repin(workspace: Path, old: PublishedArtifact, new: PublishedArtifact) -> N
     lock = workspace / "grimoire.lock"
     text = lock.read_text(encoding="utf-8")
     assert old.digest in text
-    lock.write_text(text.replace(old.digest, new.digest), encoding="utf-8")
+    lock.write_text(text.replace(old.digest, new.digest), encoding="utf-8", newline="\n")
 
 
 def _file(path: Path) -> dict:
@@ -86,7 +86,7 @@ def _file(path: Path) -> dict:
 
 def _put(path: Path, values: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(values), encoding="utf-8")
+    path.write_text(json.dumps(values), encoding="utf-8", newline="\n")
 
 
 def _listed(rows: list[dict]) -> list[tuple[str, str, str | None, str]]:
@@ -195,7 +195,7 @@ def test_changes_survive_a_later_refusal(grim_at, project_dir: Path, tmp_path: P
     runner = _workspace(grim_at, project_dir, tmp_path / "s", {"team": old}, skills={"good": skill.fq})
     runner.run("install", TRUST)
     installed = project_dir / ".claude/skills/good/SKILL.md"
-    installed.write_text(SKILL_DOC + "a local edit\n", encoding="utf-8")
+    installed.write_text(SKILL_DOC + "a local edit\n", encoding="utf-8", newline="\n")
     _repin(project_dir, old, new)
 
     result = runner.run("install", TRUST, format="json", check=False)
@@ -703,7 +703,7 @@ def test_lock_with_the_flag_off_reads_no_install_state(
     runner.env.update(settings_sandbox(tmp_path / "s", runner.home)[0])
     state = project_dir / ".grimoire/state.json"
     state.parent.mkdir()
-    state.write_text("not json", encoding="utf-8")
+    state.write_text("not json", encoding="utf-8", newline="\n")
 
     runner.run("lock")
 

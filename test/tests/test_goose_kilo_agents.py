@@ -46,7 +46,7 @@ def test_goose_agent_renders_to_its_own_dir_and_drops_tools_with_a_warning(
     rows, stderr = _install(runner, "--client", "goose")
     assert rows[0]["status"] == "installed", rows
 
-    text = (project_dir / ".goose/agents/rev.md").read_text()
+    text = (project_dir / ".goose/agents/rev.md").read_text(encoding="utf-8")
     assert text.startswith(
         "---\nname: rev\ndescription: Reviews code.\nmodel: sonnet\n---\n"
     ), text
@@ -72,7 +72,7 @@ def test_kilo_agent_renders_opencode_shape_and_lifts_kilo_keys(
     rows, stderr = _install(runner, "--client", "kilo")
     assert rows[0]["status"] == "installed", rows
 
-    text = (project_dir / ".kilo/agents/rev.md").read_text()
+    text = (project_dir / ".kilo/agents/rev.md").read_text(encoding="utf-8")
     assert "name:" not in text, "the filename is Kilo's agent identity"
     assert "tools" not in text, text
     assert "description: Reviews code.\n" in text
@@ -89,7 +89,7 @@ def test_reinstall_of_an_unchanged_agent_leaves_status_not_modified(
     and ``status`` reads ``installed`` with nothing pending."""
     ag = _push(unique_repo, "  kilo.mode: subagent\n")
     cfg = write_config(project_dir, agents={"rev": ag.fq})
-    cfg.write_text(cfg.read_text() + '\n[options]\nclients = ["goose", "kilo"]\n')
+    cfg.write_text(cfg.read_text(encoding="utf-8") + '\n[options]\nclients = ["goose", "kilo"]\n', encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
     runner.run("lock")
     _install(runner)
@@ -141,7 +141,7 @@ def test_global_goose_agent_lands_in_home_dot_goose(
     grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
 ) -> None:
     ag = _push(unique_repo)
-    (grim_home / "grimoire.toml").write_text(f'[agents]\nrev = "{ag.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[agents]\nrev = "{ag.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     # $GOOSE_PATH_ROOT relocates Goose's config dir, not its agents.
     runner.env["GOOSE_PATH_ROOT"] = str(grim_home.parent / "goose-root")
@@ -158,7 +158,7 @@ def test_global_kilo_agent_follows_xdg_config_home_not_the_kilo_skills_root(
     grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
 ) -> None:
     ag = _push(unique_repo)
-    (grim_home / "grimoire.toml").write_text(f'[agents]\nrev = "{ag.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[agents]\nrev = "{ag.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     xdg = grim_home.parent / "custom-xdg-kilo"
     runner.env["XDG_CONFIG_HOME"] = str(xdg)

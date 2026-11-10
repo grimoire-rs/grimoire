@@ -52,7 +52,7 @@ def held_flock(sidecar: Path) -> Iterator[None]:
 def _skill(root: Path, name: str) -> Path:
     d = root / "skills" / name
     d.mkdir(parents=True, exist_ok=True)
-    (d / "SKILL.md").write_text(SKILL.format(name=name))
+    (d / "SKILL.md").write_text(SKILL.format(name=name), encoding="utf-8", newline="\n")
     return d
 
 
@@ -116,7 +116,7 @@ def test_parallel_first_run_global_adds_never_lose_a_declaration(
     codes = [p.wait() for p in procs]
 
     config = grim_home / "grimoire.toml"
-    declared = config.read_text() if config.exists() else ""
+    declared = config.read_text(encoding="utf-8") if config.exists() else ""
     assert 0 in codes, f"at least one add must succeed; got {codes}"
     for name, code in zip(names, codes, strict=True):
         if code == 0:
@@ -188,7 +188,7 @@ def _stow(grim_home: Path, dotfiles: Path, name: str, body: str | None = None) -
     if body is None:
         link.rename(real)
     else:
-        real.write_text(body)
+        real.write_text(body, encoding="utf-8", newline="\n")
     os.symlink(os.path.relpath(real, grim_home), link)
     assert link.is_symlink()
     return link
@@ -215,7 +215,7 @@ def test_symlinked_global_config_is_written_through_and_the_link_survives(
     result = runner.run("add", "--global", str(_skill(tmp_path, "alpha")), "--no-install", check=False)
     assert result.returncode == 0, f"add through a symlinked config must succeed: {result.stderr}"
     assert toml_link.is_symlink(), "the add must write through the link, not replace it"
-    assert "alpha = " in (dotfiles / "grimoire.toml").read_text(), "the dotfiles copy must carry the declaration"
+    assert "alpha = " in (dotfiles / "grimoire.toml").read_text(encoding="utf-8"), "the dotfiles copy must carry the declaration"
 
     result = runner.run("install", "--global", check=False)
     assert result.returncode == 0, f"install --global through a symlinked config must succeed: {result.stderr}"
@@ -225,8 +225,8 @@ def test_symlinked_global_config_is_written_through_and_the_link_survives(
     result = runner.run("add", "--global", str(_skill(tmp_path, "omega")), "--no-install", check=False)
     assert result.returncode == 0, f"add through a symlinked lock must succeed: {result.stderr}"
     assert toml_link.is_symlink() and lock_link.is_symlink(), "both links must survive the relock"
-    assert "omega = " in (dotfiles / "grimoire.toml").read_text()
-    assert "omega" in (dotfiles / "grimoire.lock").read_text(), "the dotfiles lock copy must carry the new pin"
+    assert "omega = " in (dotfiles / "grimoire.toml").read_text(encoding="utf-8")
+    assert "omega" in (dotfiles / "grimoire.lock").read_text(encoding="utf-8"), "the dotfiles lock copy must carry the new pin"
     assert not (grim_home / "grimoire.toml.lock").exists(), "no sidecar may linger beside the link"
 
 
@@ -254,4 +254,4 @@ def test_symlinked_config_contends_on_the_real_files_flock(
         f"a mutation through the link must contend on the real file's flock (75), got {result.returncode}; {result.stderr}"
     )
     assert not (grim_home / "grimoire.toml.lock").exists(), "the sidecar must not be placed beside the link"
-    assert "alpha = " not in (dotfiles / "grimoire.toml").read_text()
+    assert "alpha = " not in (dotfiles / "grimoire.toml").read_text(encoding="utf-8")

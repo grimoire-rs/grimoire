@@ -105,7 +105,7 @@ def arming(grim: GrimRunner, tmp_path: Path):
         )
         (grim.home / CLIENTS[client].root).mkdir(parents=True, exist_ok=True)
         (home / "grimoire.toml").write_text(
-            f'[hooks]\nshell-guard = "{hook.fq}"\n\n[options.experimental]\nhooks = true\n'
+            f'[hooks]\nshell-guard = "{hook.fq}"\n\n[options.experimental]\nhooks = true\n', encoding="utf-8", newline="\n"
         )
         grim.run("lock", "--global")
         grim.run("install", "--global", "--trust-hooks")
@@ -198,7 +198,7 @@ def test_the_hooks_root_holds_only_the_launcher_and_it_loads_from_system32(armin
         tag="1",
     )
     config = grim.grim_home / "grimoire.toml"
-    config.write_text(config.read_text().replace("[options", f'"cmd.exe" = "{hostile.fq}"\n\n[options', 1))
+    config.write_text(config.read_text(encoding="utf-8").replace("[options", f'"cmd.exe" = "{hostile.fq}"\n\n[options', 1), encoding="utf-8", newline="\n")
     grim.run("lock", "--global")
     grim.run("install", "--global", "--trust-hooks")
     assert sorted(p.name for p in hooks.glob("*.exe")) == ["grim-hook.exe"]
@@ -235,7 +235,7 @@ def test_a_home_outside_the_profile_is_refused_as_shared(arming, grim: GrimRunne
         {"shell-guard/hook.toml": _hook_toml(), "shell-guard/guard.py": _guard_py(tmp_path / "ran.txt")},
         tag="1",
     )
-    (home / "grimoire.toml").write_text(f'[hooks]\nshell-guard = "{hook.fq}"\n\n[options.experimental]\nhooks = true\n')
+    (home / "grimoire.toml").write_text(f'[hooks]\nshell-guard = "{hook.fq}"\n\n[options.experimental]\nhooks = true\n', encoding="utf-8", newline="\n")
     grim.run("lock", "--global")
     grim.run("install", "--global", "--trust-hooks")
 
@@ -263,7 +263,7 @@ def test_a_unc_home_is_refused_as_shared(arming, grim: GrimRunner, tmp_path: Pat
         {"shell-guard/hook.toml": _hook_toml(), "shell-guard/guard.py": _guard_py(tmp_path / "ran.txt")},
         tag="1",
     )
-    (unc / "grimoire.toml").write_text(f'[hooks]\nshell-guard = "{hook.fq}"\n\n[options.experimental]\nhooks = true\n')
+    (unc / "grimoire.toml").write_text(f'[hooks]\nshell-guard = "{hook.fq}"\n\n[options.experimental]\nhooks = true\n', encoding="utf-8", newline="\n")
     grim.run("lock", "--global")
     grim.run("install", "--global", "--trust-hooks")
 

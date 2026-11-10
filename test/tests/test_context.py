@@ -31,7 +31,7 @@ _OFFLINE_REGISTRY = "registry.example"
 def _project(project_dir: Path, registry: str) -> None:
     (project_dir / "grimoire.toml").write_text(
         f'[[registries]]\nalias = "test"\noci = "{registry}"\ndefault = true\n\n'
-        "[skills]\n\n[rules]\n"
+        "[skills]\n\n[rules]\n", encoding="utf-8", newline="\n"
     )
 
 
@@ -79,7 +79,7 @@ def test_context_reports_an_unreadable_lock(
     points the diagnosis away from the actual fault.
     """
     _project(project_dir, registry)
-    (project_dir / "grimoire.lock").write_text("not a lock at all\n[[[\n")
+    (project_dir / "grimoire.lock").write_text("not a lock at all\n[[[\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     doc = runner.json("context")
@@ -106,7 +106,7 @@ def test_context_registry_authenticated_from_docker_config(
     docker_dir.mkdir()
     # An `auths` entry for the host (namespace path stripped by the probe).
     (docker_dir / "config.json").write_text(
-        '{"auths": {"private.example.com": {"auth": "dXNlcjpwYXNz"}}}'
+        '{"auths": {"private.example.com": {"auth": "dXNlcjpwYXNz"}}}', encoding="utf-8", newline="\n"
     )
 
     runner = grim_at(project_dir)
@@ -161,7 +161,7 @@ def _filtered_project(project_dir: Path, registry: str = _OFFLINE_REGISTRY) -> N
         'include = ["acme/platform/**", "acme/tools/**"]\n'
         'exclude = ["acme/platform/legacy/**"]\n\n'
         f'[[registries]]\nalias = "plain"\noci = "{registry}/other"\n\n'
-        "[skills]\n\n[rules]\n"
+        "[skills]\n\n[rules]\n", encoding="utf-8", newline="\n"
     )
 
 
@@ -244,7 +244,7 @@ def test_context_on_a_malformed_browse_filter_exits_78(grim_at, project_dir: Pat
         '[[registries]]\nalias = "acme"\noci = "ghcr.io/acme"\n'
         'include = ["acme/["]\ndefault = true\n'
     )
-    (project_dir / "grimoire.toml").write_text(broken)
+    (project_dir / "grimoire.toml").write_text(broken, encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     result = runner.plain("context", check=False)
@@ -263,7 +263,7 @@ def test_context_on_a_malformed_browse_filter_exits_78(grim_at, project_dir: Pat
         f"got: {result.stdout!r}"
     )
 
-    (project_dir / "grimoire.toml").write_text(broken.replace('acme/[', 'acme/**'))
+    (project_dir / "grimoire.toml").write_text(broken.replace('acme/[', 'acme/**'), encoding="utf-8", newline="\n")
     fixed = runner.json("context")
     assert [r["include"] for r in fixed["registries"]] == [["acme/**"]], (
         f"control: the only difference is the pattern itself; got: {fixed['registries']}"
@@ -291,7 +291,7 @@ def _one_include(project_dir: Path, pattern: str) -> None:
     """
     (project_dir / "grimoire.toml").write_text(
         f'[[registries]]\nalias = "acme"\noci = "{_OFFLINE_REGISTRY}/acme"\n'
-        f"default = true\ninclude = {json.dumps([pattern])}\n"
+        f"default = true\ninclude = {json.dumps([pattern])}\n", encoding="utf-8", newline="\n"
     )
 
 
@@ -368,7 +368,7 @@ def test_context_reports_the_authored_insecure_flag(
         '[[registries]]\nalias = "local"\noci = "localhost:5050/grimoire"\n'
         "insecure = true\ndefault = true\n\n"
         f'[[registries]]\nalias = "corp"\noci = "{_OFFLINE_REGISTRY}"\n\n'
-        "[skills]\n\n[rules]\n"
+        "[skills]\n\n[rules]\n", encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
 
@@ -390,7 +390,7 @@ def test_context_registry_flag_reports_insecure_false(
     (project_dir / "grimoire.toml").write_text(
         '[[registries]]\nalias = "local"\noci = "localhost:5050/grimoire"\n'
         "insecure = true\ndefault = true\n\n"
-        "[skills]\n\n[rules]\n"
+        "[skills]\n\n[rules]\n", encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
 
@@ -491,18 +491,18 @@ def _age_catalog(grim_home: Path) -> None:
         for p in (grim_home / "catalog").glob("*.json")
         if not p.name.endswith(".sync.json")
     )
-    doc = json.loads(cache.read_text())
+    doc = json.loads(cache.read_text(encoding="utf-8"))
     doc["built_at"] = OLD
     data = json.dumps(doc).encode()
     cache.write_bytes(data)
     sidecar = _sidecar_path(grim_home)
-    state = json.loads(sidecar.read_text())
+    state = json.loads(sidecar.read_text(encoding="utf-8"))
     state.update(
         catalog_sha256=hashlib.sha256(data).hexdigest(),
         catalog_built_at=OLD,
         checked_at=OLD,
     )
-    sidecar.write_text(json.dumps(state))
+    sidecar.write_text(json.dumps(state), encoding="utf-8", newline="\n")
 
 
 def test_context_built_at_follows_a_quiet_refresh(
@@ -520,7 +520,7 @@ def test_context_built_at_follows_a_quiet_refresh(
     result = runner.run("--format", "json", "search", check=False)
     assert result.returncode == 0, result.stderr
 
-    checked_at = json.loads(_sidecar_path(grim_home).read_text())["checked_at"]
+    checked_at = json.loads(_sidecar_path(grim_home).read_text(encoding="utf-8"))["checked_at"]
     assert checked_at != OLD, "the unforced run must have revalidated the catalog"
     assert (_catalog(runner) or {})["built_at"] == checked_at
 
@@ -533,8 +533,8 @@ def test_context_ignores_a_sidecar_from_another_version(
     runner = grim_at(project_dir)
     search_envelope(runner)
     sidecar = _sidecar_path(grim_home)
-    state = json.loads(sidecar.read_text())
+    state = json.loads(sidecar.read_text(encoding="utf-8"))
     state["version"] = 2
-    sidecar.write_text(json.dumps(state))
+    sidecar.write_text(json.dumps(state), encoding="utf-8", newline="\n")
 
     assert _catalog(runner) is None

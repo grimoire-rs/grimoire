@@ -239,7 +239,7 @@ def test_status_reports_modified_after_support_dir_edit(
     assert support_file.is_file(), (
         f"support dir file must exist after install at {support_file}"
     )
-    support_file.write_text("tampered by test\n")
+    support_file.write_text("tampered by test\n", encoding="utf-8", newline="\n")
 
     # grim status must detect the drift even though it was a support-dir file.
     rows_after = runner.json("status")["items"]
@@ -283,7 +283,7 @@ def test_corrupt_relative_traversal_exits_65_on_mutating_command(
         f"state.json must exist after install at {state_path}"
     )
 
-    raw = json.loads(state_path.read_text())
+    raw = json.loads(state_path.read_text(encoding="utf-8"))
     # Find the first output and corrupt its relative with a traversal sequence.
     corrupted = False
     for record in raw.get("records", []):
@@ -299,7 +299,7 @@ def test_corrupt_relative_traversal_exits_65_on_mutating_command(
             break
 
     assert corrupted, "failed to find a relative field to corrupt in state.json"
-    state_path.write_text(json.dumps(raw))
+    state_path.write_text(json.dumps(raw), encoding="utf-8", newline="\n")
 
     # A mutating command (install) must exit 65 (DataError / TraversalAttempt).
     result = runner.run("install", check=False)
@@ -324,7 +324,7 @@ def test_corrupt_relative_traversal_status_degrades_to_missing(
     runner = _install_rule(grim_at, project_dir, art)
 
     state_path = project_dir / ".grimoire" / "state.json"
-    raw = json.loads(state_path.read_text())
+    raw = json.loads(state_path.read_text(encoding="utf-8"))
 
     corrupted = False
     for record in raw.get("records", []):
@@ -339,7 +339,7 @@ def test_corrupt_relative_traversal_status_degrades_to_missing(
             break
 
     assert corrupted, "failed to find a relative field to corrupt in state.json"
-    state_path.write_text(json.dumps(raw))
+    state_path.write_text(json.dumps(raw), encoding="utf-8", newline="\n")
 
     # grim status must exit 0 (read-only — never propagates AnchorError).
     result = runner.run("--format", "json", "status", check=False)
@@ -405,7 +405,7 @@ def test_fresh_clone_install_creates_state_json(
         f"grim install must create .grimoire/state.json at {state_path}"
     )
     try:
-        state = json.loads(state_path.read_text())
+        state = json.loads(state_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         pytest.fail(f".grimoire/state.json is not valid JSON after install: {exc}")
 
@@ -441,7 +441,7 @@ def test_first_install_creates_grimoire_gitignore(
         f".grimoire/.gitignore must be created on first install at "
         f"{gitignore_path}"
     )
-    contents = gitignore_path.read_text()
+    contents = gitignore_path.read_text(encoding="utf-8")
     assert contents.strip() == "*", (
         f".grimoire/.gitignore must contain exactly '*', got: {contents!r}"
     )
@@ -461,14 +461,14 @@ def test_first_install_does_not_touch_root_gitignore(
     # Write a pre-existing root .gitignore with distinct content.
     root_gitignore = project_dir / ".gitignore"
     original_content = "*.log\nbuild/\ndist/\n"
-    root_gitignore.write_text(original_content)
+    root_gitignore.write_text(original_content, encoding="utf-8", newline="\n")
 
     runner = grim_at(project_dir)
     write_config(project_dir, rules={"rust-style": art.fq})
     runner.run("lock", check=False)
     runner.run("install", check=False)
 
-    assert root_gitignore.read_text() == original_content, (
+    assert root_gitignore.read_text(encoding="utf-8") == original_content, (
         "grim install must not modify the consumer's root .gitignore"
     )
 
@@ -495,13 +495,13 @@ def test_second_install_does_not_overwrite_hand_edited_grimoire_gitignore(
 
     # User hand-edits the gitignore to preserve something specific.
     hand_edited_content = "# keep state.json visible for debugging\n!state.json\n*\n"
-    gitignore_path.write_text(hand_edited_content)
+    gitignore_path.write_text(hand_edited_content, encoding="utf-8", newline="\n")
 
     # Second install.
     runner.run("install", check=False)
 
     # The hand-edited content must survive.
-    assert gitignore_path.read_text() == hand_edited_content, (
+    assert gitignore_path.read_text(encoding="utf-8") == hand_edited_content, (
         "second install must not overwrite a hand-edited .grimoire/.gitignore"
     )
 
@@ -533,7 +533,7 @@ def test_corrupt_relative_traversal_exits_65_on_uninstall(
         f"state.json must exist after install at {state_path}"
     )
 
-    raw = json.loads(state_path.read_text())
+    raw = json.loads(state_path.read_text(encoding="utf-8"))
 
     # Corrupt the target.relative of the first output with a traversal sequence.
     corrupted = False
@@ -549,7 +549,7 @@ def test_corrupt_relative_traversal_exits_65_on_uninstall(
             break
 
     assert corrupted, "failed to find a relative field to corrupt in state.json"
-    state_path.write_text(json.dumps(raw))
+    state_path.write_text(json.dumps(raw), encoding="utf-8", newline="\n")
 
     # grim uninstall must exit 65 (DataError / TraversalAttempt) when the
     # stored relative contains a path-traversal sequence.
@@ -681,7 +681,7 @@ def test_no_collision_reaps_legacy_sha_file_on_install(
         "version": 1,
         "records": [],
     })
-    legacy_file.write_text(v1_placeholder)
+    legacy_file.write_text(v1_placeholder, encoding="utf-8", newline="\n")
     assert legacy_file.is_file(), "legacy sha file must exist before install"
 
     new_state_path = ws / ".grimoire" / "state.json"

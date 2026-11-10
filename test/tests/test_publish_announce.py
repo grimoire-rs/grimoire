@@ -56,7 +56,7 @@ RENAMED_FORK_URL = "https://git.example.test/forkuser/grimoire-index.git"
 
 def _write(p: Path, body: str) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(body)
+    p.write_text(body, encoding="utf-8", newline="\n")
 
 
 def _make_skill_source(
@@ -93,7 +93,7 @@ def _bare_index_repo(tmp_path: Path) -> Path:
     """A seeded bare repository standing in for a custom index host."""
     seed = tmp_path / "index-seed"
     seed.mkdir()
-    (seed / "README.md").write_text("# index\n")
+    (seed / "README.md").write_text("# index\n", encoding="utf-8", newline="\n")
     subprocess.run(["git", "init", "-q", str(seed)], check=True, capture_output=True)
     _git(seed, "add", "-A")
     _git(seed, "commit", "-q", "-m", "seed")
@@ -520,13 +520,13 @@ def test_publish_announce_push_options_reach_the_server(
     _git(bare, "config", "receive.advertisePushOptions", "true")
     seen = bare / "push-options.txt"
     hook = bare / "hooks" / "post-receive"
-    hook.write_text(f'#!/bin/sh\necho "${{GIT_PUSH_OPTION_0:-none}}" > "{seen}"\n')
+    hook.write_text(f'#!/bin/sh\necho "${{GIT_PUSH_OPTION_0:-none}}" > "{seen}"\n', encoding="utf-8", newline="\n")
     hook.chmod(0o755)
 
     result = runner.run("publish", "--announce", check=False)
     assert result.returncode == 0, result.stderr
-    assert seen.read_text().strip() == "merge_request.create", (
-        f"push option not received: {seen.read_text()!r}"
+    assert seen.read_text(encoding="utf-8").strip() == "merge_request.create", (
+        f"push option not received: {seen.read_text(encoding="utf-8")!r}"
     )
 
 
@@ -1006,7 +1006,7 @@ def test_publish_announce_job_token_reaches_git_argv(
     shim_dir = tmp_path / "git-shim"
     shim_dir.mkdir()
     shim = shim_dir / "git"
-    shim.write_text(f'#!/bin/sh\necho "$@" >> "{log}"\nexec "{real_git}" "$@"\n')
+    shim.write_text(f'#!/bin/sh\necho "$@" >> "{log}"\nexec "{real_git}" "$@"\n', encoding="utf-8", newline="\n")
     shim.chmod(0o755)
     runner.env["PATH"] = f"{shim_dir}:{runner.env['PATH']}"
 
@@ -1021,13 +1021,13 @@ def test_publish_announce_job_token_reaches_git_argv(
     result = runner.run("publish", "--announce", check=False)
     assert result.returncode == 0, result.stderr
 
-    lines = log.read_text().splitlines()
+    lines = log.read_text(encoding="utf-8").splitlines()
     scoped_key = f"credential.https://{INDEX_HOST}.helper="
     clone_lines = [l for l in lines if "clone" in l.split() and scoped_key in l]
     push_lines = [l for l in lines if "push" in l.split() and scoped_key in l]
     assert clone_lines, f"clone must carry the host-scoped credential helper: {lines}"
     assert push_lines, f"push must carry the host-scoped credential helper: {lines}"
-    argv_log = log.read_text()
+    argv_log = log.read_text(encoding="utf-8")
     assert "gitlab-ci-token" in argv_log
     # Host-scoped key, never the bare global `credential.helper` — so git only
     # offers the token for the gated host (Clone2Leak / CVE-2024-53858 class).
@@ -1053,7 +1053,7 @@ def test_publish_announce_job_token_foreign_host_not_injected(
     shim_dir = tmp_path / "git-shim"
     shim_dir.mkdir()
     shim = shim_dir / "git"
-    shim.write_text(f'#!/bin/sh\necho "$@" >> "{log}"\nexec "{real_git}" "$@"\n')
+    shim.write_text(f'#!/bin/sh\necho "$@" >> "{log}"\nexec "{real_git}" "$@"\n', encoding="utf-8", newline="\n")
     shim.chmod(0o755)
     runner.env["PATH"] = f"{shim_dir}:{runner.env['PATH']}"
     runner.env.update(
@@ -1065,7 +1065,7 @@ def test_publish_announce_job_token_foreign_host_not_injected(
     )
     result = runner.run("publish", "--announce", check=False)
     assert result.returncode == 0, result.stderr
-    text = log.read_text()
+    text = log.read_text(encoding="utf-8")
     assert "credential.helper=" not in text and "credential.https://" not in text, (
         "helper must not be injected for a foreign host"
     )
@@ -1090,7 +1090,7 @@ def test_publish_announce_job_token_empty_not_injected(
     shim_dir = tmp_path / "git-shim"
     shim_dir.mkdir()
     shim = shim_dir / "git"
-    shim.write_text(f'#!/bin/sh\necho "$@" >> "{log}"\nexec "{real_git}" "$@"\n')
+    shim.write_text(f'#!/bin/sh\necho "$@" >> "{log}"\nexec "{real_git}" "$@"\n', encoding="utf-8", newline="\n")
     shim.chmod(0o755)
     runner.env["PATH"] = f"{shim_dir}:{runner.env['PATH']}"
     runner.env.update(
@@ -1098,7 +1098,7 @@ def test_publish_announce_job_token_empty_not_injected(
     )
     result = runner.run("publish", "--announce", check=False)
     assert result.returncode == 0, result.stderr
-    text = log.read_text()
+    text = log.read_text(encoding="utf-8")
     assert "credential.helper=" not in text and "credential.https://" not in text, (
         "an empty job token must not inject the helper"
     )
@@ -1832,7 +1832,7 @@ def test_publish_announce_opt_out_lifts_the_name_collision(
     name = "ann-hex"
     _collision_manifest(project_dir, ns, name)
     manifest = project_dir / "publish.toml"
-    manifest.write_text(manifest.read_text() + "announce = false\n")  # on the trailing [rules.<name>]
+    manifest.write_text(manifest.read_text(encoding="utf-8") + "announce = false\n", encoding="utf-8", newline="\n")  # on the trailing [rules.<name>]
 
     runner = grim_at(project_dir)
     bare = _index_remote(tmp_path, runner)

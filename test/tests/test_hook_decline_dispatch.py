@@ -97,19 +97,19 @@ def _rows(runner) -> list[dict]:
     path = Path(runner.grim_home) / "hooks" / "dispatch.json"
     if not path.is_file():
         return []
-    table = json.loads(path.read_text())
+    table = json.loads(path.read_text(encoding="utf-8"))
     return [row for root in table["roots"].values() for row in root["hooks"]]
 
 
 def _token(runner) -> str:
-    table = json.loads((Path(runner.grim_home) / "hooks" / "dispatch.json").read_text())
+    table = json.loads((Path(runner.grim_home) / "hooks" / "dispatch.json").read_text(encoding="utf-8"))
     (token,) = table["roots"].keys()
     return token
 
 
 def _managed_elements(project_dir: Path) -> list[dict]:
     path = project_dir / ".claude" / "settings.local.json"
-    hooks = (json.loads(path.read_text()) if path.is_file() else {}).get("hooks", {})
+    hooks = (json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}).get("hooks", {})
     return [
         element
         for groups in hooks.values()
@@ -277,7 +277,7 @@ def test_an_artifact_whose_every_entry_is_declined_reads_not_armed_on_both_surfa
         tag="1",
     )
     config = write_config(project_dir, hooks={"shell-guard": hook.fq})
-    config.write_text(config.read_text() + "\n[options.experimental]\nhooks = true\n")
+    config.write_text(config.read_text(encoding="utf-8") + "\n[options.experimental]\nhooks = true\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
     runner.run("lock")
     runner.run("hook", "allow")
@@ -486,7 +486,7 @@ def test_a_reserved_binding_name_is_refused_before_it_materializes_p2(
     # The first binding name is `bin`, a RESERVED_ARTIFACT_NAMES entry.
     (home / "grimoire.toml").write_text(
         f'[hooks]\nbin = "{hostile.fq}"\nother-guard = "{innocent.fq}"\n'
-        "\n[options.experimental]\nhooks = true\n"
+        "\n[options.experimental]\nhooks = true\n", encoding="utf-8", newline="\n"
     )
     (Path(grim.home) / ".claude").mkdir(parents=True, exist_ok=True)
     grim.run("lock", "--global")
@@ -564,7 +564,7 @@ def test_the_launchers_own_name_is_a_reserved_binding_s008(
     home.mkdir(parents=True, exist_ok=True)
     (home / "grimoire.toml").write_text(
         f'[hooks]\n"{name}" = "{hostile.fq}"\nother-guard = "{innocent.fq}"\n'
-        "\n[options.experimental]\nhooks = true\n"
+        "\n[options.experimental]\nhooks = true\n", encoding="utf-8", newline="\n"
     )
     (Path(grim.home) / ".claude").mkdir(parents=True, exist_ok=True)
     grim.run("lock", "--global")

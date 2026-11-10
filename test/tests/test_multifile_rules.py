@@ -19,7 +19,7 @@ from src.helpers import write_config
 
 def _write(p: Path, body: str) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(body)
+    p.write_text(body, encoding="utf-8", newline="\n")
 
 
 def _local_multifile_rule(project_dir: Path, name: str = "my-rule") -> Path:
@@ -62,7 +62,7 @@ def test_release_install_lands_index_and_support_dir(
     assert (rules / "my-rule.md").is_file()
     assert (rules / "my-rule/examples.md").is_file()
     assert (rules / "my-rule/schema.json").is_file()
-    assert (rules / "my-rule/examples.md").read_text() == "# Examples\nworked example\n"
+    assert (rules / "my-rule/examples.md").read_text(encoding="utf-8") == "# Examples\nworked example\n"
 
     # A no-op reinstall: intact footprint ⇒ nothing to do.
     again = consumer.json("install")["items"]
@@ -82,7 +82,7 @@ def test_support_file_edit_is_detected_as_drift(
     runner.json("install")
 
     # Hand-edit a *support* file (not the index): status must flag drift.
-    (project_dir / ".claude/rules/my-rule/examples.md").write_text("tampered\n")
+    (project_dir / ".claude/rules/my-rule/examples.md").write_text("tampered\n", encoding="utf-8", newline="\n")
     status = runner.json("status")["items"]
     by_name = {r["name"]: r for r in status}
     assert by_name["my-rule"]["state"] == "modified", (
@@ -163,14 +163,14 @@ def test_support_dir_is_excluded_from_claude_auto_load(
 
     settings = write_dir / ".claude/settings.json"
     assert settings.is_file(), "installing a support-dir rule registers the exclusion"
-    assert json.loads(settings.read_text())["claudeMdExcludes"] == [
+    assert json.loads(settings.read_text(encoding="utf-8"))["claudeMdExcludes"] == [
         "**/.claude/rules/my-rule/**"
     ]
     # Suppressing auto-load must not remove anything from disk.
     assert (write_dir / ".claude/rules/my-rule/examples.md").is_file()
 
     runner.json("uninstall", "rule", "my-rule")
-    assert "claudeMdExcludes" not in json.loads(settings.read_text()), (
+    assert "claudeMdExcludes" not in json.loads(settings.read_text(encoding="utf-8")), (
         "the emptied managed key is dropped, never left as []"
     )
 

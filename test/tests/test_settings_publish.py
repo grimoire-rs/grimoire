@@ -77,7 +77,7 @@ def _skill_tree(name: str) -> dict[str, str]:
 
 def _write(path: Path, body: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body)
+    path.write_text(body, encoding="utf-8", newline="\n")
     return path
 
 
@@ -100,7 +100,7 @@ def _consumer(grim_at, project_dir: Path, name: str):
 
 
 def _lock(root: Path) -> dict:
-    return tomllib.loads((root / "grimoire.lock").read_text())
+    return tomllib.loads((root / "grimoire.lock").read_text(encoding="utf-8"))
 
 
 def _pulled_in(runner, reference: str) -> list[tuple[str, str]]:
@@ -429,7 +429,7 @@ def test_export_declines(grim_at, tmp_path: Path, registry: str, unique_repo: st
     def export(root: Path, skills: dict[str, str]):
         root.mkdir()
         config = write_config(root, skills=skills, settings={"team": team.fq})
-        config.write_text(config.read_text() + '\n[plugin]\nname = "starter"\n')
+        config.write_text(config.read_text(encoding="utf-8") + '\n[plugin]\nname = "starter"\n', encoding="utf-8", newline="\n")
         runner = grim_at(root)
         runner.run("lock")
         clients = ("--client", "claude", "--client", "codex")
@@ -505,5 +505,5 @@ def test_search_and_describe_show_the_kind(
     # Added with no `--kind`, the manifest says what it is.
     report = json.loads(runner.run("--format", "json", "add", team.fq).stdout)
     assert report["kind"] == "settings"
-    assert tomllib.loads((root / "grimoire.toml").read_text())["settings"]["team-defaults"]
+    assert tomllib.loads((root / "grimoire.toml").read_text(encoding="utf-8"))["settings"]["team-defaults"]
     assert team.digest in _lock(root)["settings"][0]["pinned"]

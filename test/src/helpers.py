@@ -111,7 +111,7 @@ def write_config(
         lines.append("[options.experimental]")
         lines.append(f"settings = {str(experimental_settings).lower()}")
     cfg = project_dir / "grimoire.toml"
-    cfg.write_text("\n".join(lines) + "\n")
+    cfg.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     return cfg
 
 

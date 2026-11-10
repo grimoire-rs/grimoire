@@ -182,7 +182,7 @@ def test_offline_run_warns_about_a_pin_it_moved(
     )
     assert "skill 'pin'" in result.stderr
     assert json.loads(result.stdout), "stdout stays the payload"
-    assert cached.digest in (project_dir / "grimoire.lock").read_text()
+    assert cached.digest in (project_dir / "grimoire.lock").read_text(encoding="utf-8")
 
 
 def test_offline_named_update_warns_once(
@@ -200,7 +200,7 @@ def test_offline_named_update_warns_once(
     runner.run("install")
     newer = _skill(unique_repo, "pin", tag="2", body="newer")
     lock = project_dir / "grimoire.lock"
-    lock.write_text(lock.read_text().replace(cached.digest, newer.digest))
+    lock.write_text(lock.read_text(encoding="utf-8").replace(cached.digest, newer.digest), encoding="utf-8", newline="\n")
 
     result = runner.run("update", "--offline", "pin", format="json")
 
@@ -208,20 +208,20 @@ def test_offline_named_update_warns_once(
         result.stderr
     )
     assert "skill 'pin'" in result.stderr
-    assert cached.digest in lock.read_text()
+    assert cached.digest in lock.read_text(encoding="utf-8")
 
 
 def _damage(project_dir: Path, damage: str) -> None:
     lock = project_dir / "grimoire.lock"
     if damage == "conflict-markers":
-        lock.write_text(f"<<<<<<< ours\n{lock.read_text()}=======\n>>>>>>> theirs\n")
+        lock.write_text(f"<<<<<<< ours\n{lock.read_text(encoding="utf-8")}=======\n>>>>>>> theirs\n", encoding="utf-8", newline="\n")
     elif damage == "too-new":
         lock.write_text(
-            lock.read_text().replace("lock_version = 1", "lock_version = 99")
+            lock.read_text(encoding="utf-8").replace("lock_version = 1", "lock_version = 99"), encoding="utf-8", newline="\n"
         )
     else:
         notes = project_dir / "notes.md"
-        notes.write_text("# Not a lock\n")
+        notes.write_text("# Not a lock\n", encoding="utf-8", newline="\n")
         lock.unlink()
         os.symlink(notes.name, lock)
 

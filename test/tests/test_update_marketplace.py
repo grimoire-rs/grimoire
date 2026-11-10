@@ -61,12 +61,12 @@ def _write_marketplace(path: Path, plugins: dict[str, list[str]]) -> Path:
         f"[plugins.{name}]\ninclude = [{', '.join(json.dumps(i) for i in includes)}]\n\n"
         for name, includes in plugins.items()
     )
-    path.write_text(body)
+    path.write_text(body, encoding="utf-8", newline="\n")
     return path
 
 
 def _lock(path: Path) -> dict:
-    return tomllib.loads(path.read_text())
+    return tomllib.loads(path.read_text(encoding="utf-8"))
 
 
 def _pins(lock: dict, plugin: str) -> dict[tuple[str, str], str]:
@@ -482,12 +482,12 @@ def test_s024_grimoire_lock_with_plugin_scope_is_refused_by_readers(
     runner = grim_at(project_dir)
 
     for argv in (["install"], ["status"]):
-        lock_path.write_text(bad)
+        lock_path.write_text(bad, encoding="utf-8", newline="\n")
         result = runner.run("--format", "json", *argv, check=False)
         assert result.returncode == 78, f"{argv}: {result.stderr}"
         assert _error(result)["exit"] == 78, argv
 
-    lock_path.write_text(bad)
+    lock_path.write_text(bad, encoding="utf-8", newline="\n")
     ctx = runner.run("--format", "json", "context", check=False)
     assert ctx.returncode == 0, ctx.stderr
     assert json.loads(ctx.stdout)["lock_error"], "context reports the flavor mismatch"
@@ -507,7 +507,7 @@ def test_s024_lock_writers_treat_a_plugin_scoped_grimoire_lock_as_absent(
     runner = grim_at(project_dir)
 
     for argv in (["lock"], ["update"], ["add", added.fq]):
-        lock_path.write_text(bad)
+        lock_path.write_text(bad, encoding="utf-8", newline="\n")
         result = runner.run(*argv, check=False)
         assert result.returncode == 0, f"{argv}: {result.stderr}"
         rewritten = _lock(lock_path)
@@ -543,7 +543,7 @@ def test_s024_marketplace_lock_of_the_wrong_flavor_is_78(
         ),
     }[flavor]
     lock_path = project_dir / "marketplace.lock"
-    lock_path.write_text(body)
+    lock_path.write_text(body, encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     out = project_dir / "out"
@@ -554,7 +554,7 @@ def test_s024_marketplace_lock_of_the_wrong_flavor_is_78(
         result = runner.run("--format", "json", *argv, check=False)
         assert result.returncode == 78, f"{argv}: {result.stderr}"
         assert _error(result)["exit"] == 78, argv
-        assert lock_path.read_text() == body, f"{argv}: a refused lock is never rewritten"
+        assert lock_path.read_text(encoding="utf-8") == body, f"{argv}: a refused lock is never rewritten"
     assert not any(out.glob("team.*")), "a refused lock exports nothing"
 
 
@@ -601,7 +601,7 @@ def test_offline_update_warns_about_a_pin_it_moved(
     runner.run("update", "--marketplace", str(m))
     newer = _skill(repo, "team-plan", "v2")
     lock = project_dir / "marketplace.lock"
-    lock.write_text(lock.read_text().replace(cached.digest, newer.digest))
+    lock.write_text(lock.read_text(encoding="utf-8").replace(cached.digest, newer.digest), encoding="utf-8", newline="\n")
 
     result = runner.run("update", "--offline", "--marketplace", str(m), format="json")
 
@@ -610,7 +610,7 @@ def test_offline_update_warns_about_a_pin_it_moved(
     )
     assert "plugin 'team' skill 'team-plan'" in result.stderr
     assert json.loads(result.stdout)["items"], "stdout stays the payload"
-    assert cached.digest in lock.read_text()
+    assert cached.digest in lock.read_text(encoding="utf-8")
 
 
 @unix_only

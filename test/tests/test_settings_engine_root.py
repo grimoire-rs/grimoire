@@ -81,7 +81,7 @@ def _moved_inside(runner: GrimRunner, repo: Path, tmp_path: Path) -> Path:
     runner.run("--global", "install")
     planted = repo / "kiro-home" / "settings" / "cli.json"
     planted.parent.mkdir(parents=True)
-    planted.write_text(json.dumps(KIRO), encoding="utf-8")
+    planted.write_text(json.dumps(KIRO), encoding="utf-8", newline="\n")
     runner.env["KIRO_HOME"] = str(repo / "kiro-home")
     return planted
 
@@ -328,7 +328,7 @@ def test_a_recorded_value_stays_when_its_root_moves_into_the_repository(
     inside = repo / f"{client}-home"
     planted = inside / file
     planted.parent.mkdir(parents=True)
-    planted.write_text("{}", encoding="utf-8")
+    planted.write_text("{}", encoding="utf-8", newline="\n")
     runner.env[variable] = str(inside)
 
     result = runner.run("--global", "install", "--client", client)
@@ -355,7 +355,7 @@ def test_uninstall_leaves_a_file_inside_the_repository(
     runner.run("--global", "install", "--client", "kiro")
     planted = repo / "kiro-home" / "settings" / "cli.json"
     planted.parent.mkdir(parents=True)
-    planted.write_text(json.dumps(KIRO), encoding="utf-8")
+    planted.write_text(json.dumps(KIRO), encoding="utf-8", newline="\n")
     runner.env["KIRO_HOME"] = str(repo / "kiro-home")
 
     result = runner.run("--global", "uninstall", "settings", "team")

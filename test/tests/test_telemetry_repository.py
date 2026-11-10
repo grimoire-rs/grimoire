@@ -108,7 +108,7 @@ def test_no_vcs_and_no_git_spawn_without_opt_in(
     shim_dir = tmp_path / "shim"
     shim_dir.mkdir()
     shim = shim_dir / "git"
-    shim.write_text(f'#!/bin/sh\necho spawned >> "{marker}"\nexec "{shutil.which("git")}" "$@"\n')
+    shim.write_text(f'#!/bin/sh\necho spawned >> "{marker}"\nexec "{shutil.which("git")}" "$@"\n', encoding="utf-8", newline="\n")
     shim.chmod(shim.stat().st_mode | stat.S_IXUSR)
 
     runner = _runner(grim_binary, grim_home, project, repository=False)
@@ -188,7 +188,7 @@ def test_git_environment_does_not_redirect_the_lookup(
     project = _repo(tmp_path / "project", "https://github.com/real/repo.git")
     decoy = _repo(tmp_path / "decoy", "https://evil.example/decoy/repo.git")
     decoy_config = tmp_path / "decoy.config"
-    decoy_config.write_text('[remote "origin"]\n\turl = https://evil.example/decoy/repo.git\n')
+    decoy_config.write_text('[remote "origin"]\n\turl = https://evil.example/decoy/repo.git\n', encoding="utf-8", newline="\n")
     runner = _runner(grim_binary, grim_home, project)
     _init_project(runner)
     # What a git hook exports: a lookup that trusted these would read the decoy.
@@ -217,7 +217,7 @@ def test_git_config_injection_cannot_supply_an_origin(
     # an injected config source.
     project = _repo(tmp_path / "project")
     decoy_config = tmp_path / "decoy.config"
-    decoy_config.write_text('[remote "origin"]\n\turl = https://evil.example/decoy/repo.git\n')
+    decoy_config.write_text('[remote "origin"]\n\turl = https://evil.example/decoy/repo.git\n', encoding="utf-8", newline="\n")
     runner = _runner(grim_binary, grim_home, project)
     _init_project(runner)
     if variable == "GIT_CONFIG_COUNT":
@@ -245,7 +245,7 @@ def test_slow_git_yields_no_vcs_and_is_killed(
     shim_dir.mkdir()
     shim = shim_dir / "git"
     shim.write_text(
-        f'#!/bin/sh\necho $$ > "{pid_file}"\nsleep 3\necho late >> "{late}"\nexec "{shutil.which("git")}" "$@"\n'
+        f'#!/bin/sh\necho $$ > "{pid_file}"\nsleep 3\necho late >> "{late}"\nexec "{shutil.which("git")}" "$@"\n', encoding="utf-8", newline="\n"
     )
     shim.chmod(shim.stat().st_mode | stat.S_IXUSR)
     runner = _runner(grim_binary, grim_home, project)
@@ -260,7 +260,7 @@ def test_slow_git_yields_no_vcs_and_is_killed(
     assert elapsed < 2.5, f"a hung git held the command for {elapsed:.1f}s"
     # The timed-out child was killed: its pid goes away well before the
     # shim's own `sleep 3` would have ended, and it never writes the late marker.
-    pid = int(pid_file.read_text())
+    pid = int(pid_file.read_text(encoding="utf-8"))
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline and _alive(pid):
         time.sleep(0.05)

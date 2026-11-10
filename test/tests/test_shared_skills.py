@@ -50,7 +50,7 @@ def test_shared_agents_skills_survives_dropped_client_then_reaps_on_last(
     # All three pool members select the same .agents/skills target.
     (bare_project_dir / "grimoire.toml").write_text(
         '[options]\nclients = ["codex", "zed", "amp"]\n\n'
-        f'[skills]\nshared-skill = "{sk.fq}"\n'
+        f'[skills]\nshared-skill = "{sk.fq}"\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(bare_project_dir)
     runner.run("lock", check=False)
@@ -70,7 +70,7 @@ def test_shared_agents_skills_survives_dropped_client_then_reaps_on_last(
     # because codex + amp still reference it.
     (bare_project_dir / "grimoire.toml").write_text(
         '[options]\nclients = ["codex", "amp"]\n\n'
-        f'[skills]\nshared-skill = "{sk.fq}"\n'
+        f'[skills]\nshared-skill = "{sk.fq}"\n', encoding="utf-8", newline="\n"
     )
     update_rows = runner.json("update")["items"]
     row = next(r for r in update_rows if r["name"] == "shared-skill")
@@ -105,7 +105,7 @@ def test_antigravity_pools_project_skills_but_not_global_ones(
     shared_dir = bare_project_dir / ".agents/skills/agy-skill"
     (bare_project_dir / "grimoire.toml").write_text(
         '[options]\nclients = ["antigravity", "codex"]\n\n'
-        f'[skills]\nagy-skill = "{sk.fq}"\n'
+        f'[skills]\nagy-skill = "{sk.fq}"\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(bare_project_dir)
     runner.run("lock", check=False)
@@ -126,7 +126,7 @@ def test_antigravity_pools_project_skills_but_not_global_ones(
     # Dropping codex leaves the dir alive: antigravity still references it.
     (bare_project_dir / "grimoire.toml").write_text(
         '[options]\nclients = ["antigravity"]\n\n'
-        f'[skills]\nagy-skill = "{sk.fq}"\n'
+        f'[skills]\nagy-skill = "{sk.fq}"\n', encoding="utf-8", newline="\n"
     )
     row = next(r for r in runner.json("update")["items"] if r["name"] == "agy-skill")
     assert "codex" in row.get("reaped_clients", []), row
@@ -148,7 +148,7 @@ def test_antigravity_global_skills_land_in_gemini_config_not_the_pool(
         {"agy-global/SKILL.md": "---\nname: agy-global\ndescription: d\n---\n# body\n"},
         tag="v1",
     )
-    (grim_home / "grimoire.toml").write_text(f'[skills]\nagy-global = "{sk.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[skills]\nagy-global = "{sk.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
     rows = runner.json("install", "--global", "--client", "antigravity")["items"]
@@ -184,7 +184,7 @@ def test_antigravity_global_detection_needs_gemini_config_not_bare_gemini(
     # A bare ~/.gemini is Gemini CLI's marker. Antigravity must stay silent.
     (runner.home / ".gemini").mkdir(parents=True, exist_ok=True)
     runner.json("init", "--global")
-    seeded = (grim_home / "grimoire.toml").read_text()
+    seeded = (grim_home / "grimoire.toml").read_text(encoding="utf-8")
     assert "gemini" in seeded, f"a bare ~/.gemini must still detect gemini: {seeded}"
     assert "antigravity" not in seeded, (
         f"a bare ~/.gemini must NOT detect antigravity — its root is ~/.gemini/config: {seeded}"
@@ -194,7 +194,7 @@ def test_antigravity_global_detection_needs_gemini_config_not_bare_gemini(
     (grim_home / "grimoire.toml").unlink()
     (runner.home / ".gemini/config").mkdir(parents=True, exist_ok=True)
     runner.json("init", "--global")
-    reseeded = (grim_home / "grimoire.toml").read_text()
+    reseeded = (grim_home / "grimoire.toml").read_text(encoding="utf-8")
     assert "antigravity" in reseeded, (
         f"~/.gemini/config must detect antigravity: {reseeded}"
     )
@@ -217,12 +217,12 @@ def test_antigravity_agent_and_mcp_install_at_both_scopes(
     descriptor = bare_project_dir / "src" / "mcp" / "agy-mcp.toml"
     descriptor.parent.mkdir(parents=True, exist_ok=True)
     descriptor.write_text(
-        'description = "d"\n\n[server]\ntransport = "stdio"\ncommand = "grim"\nargs = ["mcp"]\n'
+        'description = "d"\n\n[server]\ntransport = "stdio"\ncommand = "grim"\nargs = ["mcp"]\n', encoding="utf-8", newline="\n"
     )
     mcp_ref = f"{registry}/{unique_repo}/mcp/agy-mcp:1.0.0"
     (bare_project_dir / "grimoire.toml").write_text(
         '[options]\nclients = ["antigravity"]\n\n'
-        f'[agents]\nagy-agent = "{ag.fq}"\n'
+        f'[agents]\nagy-agent = "{ag.fq}"\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(bare_project_dir)
     runner.json("release", str(descriptor), mcp_ref, "--kind", "mcp")
@@ -233,14 +233,14 @@ def test_antigravity_agent_and_mcp_install_at_both_scopes(
 
     agent_file = bare_project_dir / ".agents/agents/agy-agent.md"
     assert agent_file.is_file(), "agents land beside the pooled skills under .agents/agents"
-    text = agent_file.read_text()
+    text = agent_file.read_text(encoding="utf-8")
     # `tools` is `string[]` upstream — a comma string would read as one tool.
     assert "- view_file" in text and "- grep_search" in text, f"tools must be a YAML list: {text}"
     assert "generated by grim" in text, f"a transform carries provenance: {text}"
 
     mcp_file = bare_project_dir / ".agents/mcp_config.json"
     assert mcp_file.is_file(), "MCP registers into .agents/mcp_config.json"
-    entry = json.loads(mcp_file.read_text())["mcpServers"]["agy-mcp"]
+    entry = json.loads(mcp_file.read_text(encoding="utf-8"))["mcpServers"]["agy-mcp"]
     assert entry["command"] == "grim", entry
 
     # Self-heal: re-materializing an untouched artifact stays not-modified.
@@ -277,13 +277,13 @@ def _frontmatter(text: str) -> str:
 def _assert_antigravity_rules(rules_dir: Path, runner: GrimRunner, *status_args: str) -> None:
     scoped = rules_dir / "agy-scoped.md"
     unscoped = rules_dir / "agy-always.md"
-    fm = _frontmatter(scoped.read_text())
+    fm = _frontmatter(scoped.read_text(encoding="utf-8"))
     assert "trigger: glob" in fm, fm
     assert "globs: src/**/*.rs,Cargo.toml" in fm, fm
     assert "description: Rust style" in fm, fm
     assert "paths" not in fm, f"canonical paths must not leak: {fm}"
-    assert scoped.read_text().endswith("# Rust style\nUse 4 spaces.\n")
-    fm = _frontmatter(unscoped.read_text())
+    assert scoped.read_text(encoding="utf-8").endswith("# Rust style\nUse 4 spaces.\n")
+    fm = _frontmatter(unscoped.read_text(encoding="utf-8"))
     assert "trigger: always_on" in fm and "globs" not in fm, fm
 
     # Self-heal: re-installing untouched rules is a byte-identical no-op.
@@ -304,7 +304,7 @@ def test_antigravity_rules_render_trigger_frontmatter_at_project_scope(
     ``.agents/rules`` beside the pooled skills."""
     scoped, unscoped = _antigravity_rules(unique_repo)
     (bare_project_dir / "grimoire.toml").write_text(
-        f'[rules]\nagy-scoped = "{scoped.fq}"\nagy-always = "{unscoped.fq}"\n'
+        f'[rules]\nagy-scoped = "{scoped.fq}"\nagy-always = "{unscoped.fq}"\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(bare_project_dir)
     runner.run("lock", check=False)
@@ -320,7 +320,7 @@ def test_antigravity_rules_land_in_gemini_config_at_global_scope(
     never Gemini CLI's ``~/.gemini``."""
     scoped, unscoped = _antigravity_rules(unique_repo)
     (grim_home / "grimoire.toml").write_text(
-        f'[rules]\nagy-scoped = "{scoped.fq}"\nagy-always = "{unscoped.fq}"\n'
+        f'[rules]\nagy-scoped = "{scoped.fq}"\nagy-always = "{unscoped.fq}"\n', encoding="utf-8", newline="\n"
     )
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
@@ -344,7 +344,7 @@ def test_antigravity_rule_recorded_before_the_kind_flip_heals_on_install(
     scoped, _ = _antigravity_rules(unique_repo)
     (bare_project_dir / "grimoire.toml").write_text(
         '[options]\nclients = ["claude", "antigravity"]\n\n'
-        f'[rules]\nagy-scoped = "{scoped.fq}"\n'
+        f'[rules]\nagy-scoped = "{scoped.fq}"\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(bare_project_dir)
     runner.run("lock", check=False)
@@ -360,7 +360,7 @@ def test_antigravity_rule_recorded_before_the_kind_flip_heals_on_install(
 
     rows = runner.json("install")["items"]
     assert [r["status"] for r in rows] == ["updated"], rows
-    assert "trigger: glob" in agy_rule.read_text()
+    assert "trigger: glob" in agy_rule.read_text(encoding="utf-8")
     assert claude_rule.read_bytes() == claude_before, "the Claude output is untouched"
     row = next(r for r in runner.json("status")["items"] if r["name"] == "agy-scoped")
     assert row["state"] == "installed", row
@@ -387,7 +387,7 @@ def test_kiro_global_scoped_rule_writes_file_and_warns_upstream_inertness(
         {"kiro-scoped.md": "---\npaths: ['**/*.rs']\n---\n# Kiro scoped\n"},
         tag="v1",
     )
-    (grim_home / "grimoire.toml").write_text(f'[rules]\nkiro-scoped = "{ru.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[rules]\nkiro-scoped = "{ru.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
 
@@ -400,7 +400,7 @@ def test_kiro_global_scoped_rule_writes_file_and_warns_upstream_inertness(
     # Correct output IS written at global scope (self-heals when #9176 closes).
     steering = runner.home / ".kiro/steering/kiro-scoped.md"
     assert steering.is_file(), "global Kiro scoped rule must still be written at $HOME/.kiro/steering/"
-    assert "fileMatch" in steering.read_text(), "the global steering file must carry fileMatch scoping"
+    assert "fileMatch" in steering.read_text(encoding="utf-8"), "the global steering file must carry fileMatch scoping"
 
     # Honest render-layer warning cites the upstream issue as a stable anchor.
     assert "9176" in result.stderr, (
@@ -432,7 +432,7 @@ def test_junie_project_rule_installs_with_paths_dropped_and_warns(
     dropped AND a warning saying so; silently installing a rule that looks
     scoped and is not is the outcome this guards against."""
     ru = _junie_rule(unique_repo)
-    (bare_project_dir / "grimoire.toml").write_text(f'[rules]\njunie-scoped = "{ru.fq}"\n')
+    (bare_project_dir / "grimoire.toml").write_text(f'[rules]\njunie-scoped = "{ru.fq}"\n', encoding="utf-8", newline="\n")
     runner = grim_at(bare_project_dir)
     runner.run("lock", check=False)
 
@@ -442,7 +442,7 @@ def test_junie_project_rule_installs_with_paths_dropped_and_warns(
 
     rule = bare_project_dir / ".junie/rules/junie-scoped.md"
     assert rule.is_file(), "a project-scope Junie rule must install to .junie/rules/"
-    text = rule.read_text()
+    text = rule.read_text(encoding="utf-8")
     assert "body" in text, f"the rule body must survive: {text!r}"
     assert "paths:" not in text, (
         f"Junie reads the file verbatim — canonical frontmatter must not leak: {text!r}"
@@ -464,7 +464,7 @@ def test_junie_global_rule_writes_nothing_and_warns(
     warning has to name the client and the scope, because the compat matrix
     tells the user Junie supports rules."""
     ru = _junie_rule(unique_repo)
-    (grim_home / "grimoire.toml").write_text(f'[rules]\njunie-scoped = "{ru.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[rules]\njunie-scoped = "{ru.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
 
@@ -497,7 +497,7 @@ def test_junie_global_rule_skips_while_a_sibling_client_still_installs(
     and say why. Without the scope-aware gate Junie would silently write
     ``~/.junie/rules/<name>.md`` here."""
     ru = _junie_rule(unique_repo)
-    (grim_home / "grimoire.toml").write_text(f'[rules]\njunie-scoped = "{ru.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[rules]\njunie-scoped = "{ru.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
 
@@ -544,7 +544,7 @@ def test_junie_agent_installs_at_both_scopes_and_self_heals(
     with nothing pending."""
     ag = _junie_agent(unique_repo, "rev")
     (bare_project_dir / "grimoire.toml").write_text(
-        f'[options]\nclients = ["junie"]\n\n[agents]\nrev = "{ag.fq}"\n'
+        f'[options]\nclients = ["junie"]\n\n[agents]\nrev = "{ag.fq}"\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(bare_project_dir)
     runner.run("lock", check=False)
@@ -554,7 +554,7 @@ def test_junie_agent_installs_at_both_scopes_and_self_heals(
     agent_file = bare_project_dir / ".junie/agents/rev.md"
     assert agent_file.is_file(), "Junie agents land in .junie/agents/"
     assert not (bare_project_dir / ".agents").exists(), "grim must never write Junie agents to the shared .agents/"
-    text = agent_file.read_text()
+    text = agent_file.read_text(encoding="utf-8")
     assert "- Read" in text and "- Grep" in text, f"tools must be a YAML list: {text}"
     for native in ("permissionMode: acceptEdits", "reasoningLevel: high", "maxTurns: 12"):
         assert native in text, f"{native!r} must be lifted: {text}"
@@ -570,7 +570,7 @@ def test_junie_agent_installs_at_both_scopes_and_self_heals(
     assert item["outputs_pending"] == [], item
     assert not any(o.get("modified") for o in item["outputs"]), item
 
-    (grim_home / "grimoire.toml").write_text(f'[agents]\nrev = "{ag.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[agents]\nrev = "{ag.fq}"\n', encoding="utf-8", newline="\n")
     global_runner = GrimRunner(grim_binary, grim_home)
     global_runner.json("lock", "--global")
     rows = global_runner.json("install", "--global", "--client", "junie")["items"]
@@ -588,7 +588,7 @@ def test_junie_skips_an_agent_name_it_rejects_without_pending_drift(
     missing or pending, and a re-install is a no-op."""
     ag = _junie_agent(unique_repo, "2fa-review")
     (bare_project_dir / "grimoire.toml").write_text(
-        f'[options]\nclients = ["claude", "junie"]\n\n[agents]\n2fa-review = "{ag.fq}"\n'
+        f'[options]\nclients = ["claude", "junie"]\n\n[agents]\n2fa-review = "{ag.fq}"\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(bare_project_dir)
     runner.run("lock", check=False)
@@ -614,7 +614,7 @@ def test_junie_only_install_of_a_rejected_name_warns_once_with_the_pattern(
     never the false "no native target", and the skip must not be drift."""
     ag = _junie_agent(unique_repo, "2fa-review")
     (bare_project_dir / "grimoire.toml").write_text(
-        f'[options]\nclients = ["junie"]\n\n[agents]\n2fa-review = "{ag.fq}"\n'
+        f'[options]\nclients = ["junie"]\n\n[agents]\n2fa-review = "{ag.fq}"\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(bare_project_dir)
     runner.run("lock", check=False)
@@ -641,12 +641,12 @@ def test_junie_agent_is_pending_until_the_next_install_writes_it(
     ``outputs_pending``, and the next ``install`` writes it and clears it."""
     ag = _junie_agent(unique_repo, "rev")
     config = bare_project_dir / "grimoire.toml"
-    config.write_text(f'[options]\nclients = ["claude"]\n\n[agents]\nrev = "{ag.fq}"\n')
+    config.write_text(f'[options]\nclients = ["claude"]\n\n[agents]\nrev = "{ag.fq}"\n', encoding="utf-8", newline="\n")
     runner = grim_at(bare_project_dir)
     runner.run("lock", check=False)
     runner.json("install")
 
-    config.write_text(f'[options]\nclients = ["claude", "junie"]\n\n[agents]\nrev = "{ag.fq}"\n')
+    config.write_text(f'[options]\nclients = ["claude", "junie"]\n\n[agents]\nrev = "{ag.fq}"\n', encoding="utf-8", newline="\n")
     pending = runner.json("status")["items"][0]["outputs_pending"]
     assert [p["client"] for p in pending] == ["junie"], pending
     assert Path(pending[0]["path"]).as_posix().endswith(".junie/agents/rev.md"), pending
@@ -689,7 +689,7 @@ def test_shared_skills_flips_a_cursor_skill_into_the_pool_and_back(
     config = bare_project_dir / "grimoire.toml"
     config.write_text(
         '[options]\nclients = ["cursor"]\n\n'
-        f'[skills]\nflip-skill = "{sk.fq}"\n'
+        f'[skills]\nflip-skill = "{sk.fq}"\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(bare_project_dir)
     runner.run("lock", check=False)
@@ -738,7 +738,7 @@ def test_shared_skills_global_flip_reanchors_the_record(
     silently does nothing at all. Bump the pin too and the same error is
     propagated from the materialize loop, after the files are on disk."""
     sk = _skill(unique_repo, "glob-flip")
-    (grim_home / "grimoire.toml").write_text(f'[skills]\nglob-flip = "{sk.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[skills]\nglob-flip = "{sk.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
     runner.json("install", "--global", "--client", "cursor")
@@ -749,7 +749,7 @@ def test_shared_skills_global_flip_reanchors_the_record(
     assert (native / "SKILL.md").is_file()
 
     def anchors() -> list[str]:
-        state = json.loads(state_path.read_text())
+        state = json.loads(state_path.read_text(encoding="utf-8"))
         [record] = [r for r in state["records"] if r["name"] == "glob-flip"]
         return [o["target"]["anchor"] for o in record["outputs"]]
 
@@ -786,19 +786,19 @@ def test_shared_skills_flip_preserves_a_hand_edited_copy_and_warns(
     pool_doc = bare_project_dir / ".agents/skills/edited-skill/SKILL.md"
     (bare_project_dir / "grimoire.toml").write_text(
         '[options]\nclients = ["cursor"]\n\n'
-        f'[skills]\nedited-skill = "{sk.fq}"\n'
+        f'[skills]\nedited-skill = "{sk.fq}"\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(bare_project_dir)
     runner.run("lock", check=False)
     runner.json("install")
     assert native_doc.is_file()
 
-    native_doc.write_text("---\nname: edited-skill\ndescription: d\n---\n# MINE\n")
+    native_doc.write_text("---\nname: edited-skill\ndescription: d\n---\n# MINE\n", encoding="utf-8", newline="\n")
     runner.json("config", "set", "options.vendors.cursor.shared_skills", "true")
 
     result = runner.run("update", format="json", log_level="warn")
     assert pool_doc.is_file(), "the new pooled copy must still be written"
-    assert native_doc.read_text().endswith("# MINE\n"), (
+    assert native_doc.read_text(encoding="utf-8").endswith("# MINE\n"), (
         "a hand-edited copy at the old path must be preserved verbatim — never deleted"
     )
     stderr = result.stderr
@@ -829,7 +829,7 @@ def test_an_opted_in_client_joins_the_pool_refcount_without_clobbering_it(
     config = bare_project_dir / "grimoire.toml"
     config.write_text(
         '[options]\nclients = ["codex"]\n\n'
-        f'[skills]\njoin-skill = "{sk.fq}"\n'
+        f'[skills]\njoin-skill = "{sk.fq}"\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(bare_project_dir)
     runner.run("lock", check=False)
@@ -840,7 +840,7 @@ def test_an_opted_in_client_joins_the_pool_refcount_without_clobbering_it(
     config.write_text(
         '[options]\nclients = ["codex", "cursor"]\n\n'
         "[options.vendors.cursor]\nshared_skills = true\n\n"
-        f'[skills]\njoin-skill = "{sk.fq}"\n'
+        f'[skills]\njoin-skill = "{sk.fq}"\n', encoding="utf-8", newline="\n"
     )
     runner.json("install")
 
@@ -860,7 +860,7 @@ def test_an_opted_in_client_joins_the_pool_refcount_without_clobbering_it(
     config.write_text(
         '[options]\nclients = ["cursor"]\n\n'
         "[options.vendors.cursor]\nshared_skills = true\n\n"
-        f'[skills]\njoin-skill = "{sk.fq}"\n'
+        f'[skills]\njoin-skill = "{sk.fq}"\n', encoding="utf-8", newline="\n"
     )
     row = next(r for r in runner.json("update")["items"] if r["name"] == "join-skill")
     assert "codex" in row.get("reaped_clients", []), row
@@ -893,7 +893,7 @@ def test_a_flip_refuses_to_clobber_a_hand_authored_file_at_the_new_path(
     native_doc = bare_project_dir / ".cursor/skills/clobber-skill/SKILL.md"
     (bare_project_dir / "grimoire.toml").write_text(
         '[options]\nclients = ["cursor"]\n\n'
-        f'[skills]\nclobber-skill = "{sk.fq}"\n'
+        f'[skills]\nclobber-skill = "{sk.fq}"\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(bare_project_dir)
     runner.run("lock", check=False)
@@ -903,7 +903,7 @@ def test_a_flip_refuses_to_clobber_a_hand_authored_file_at_the_new_path(
     # A hand-authored skill of the same name already sitting in the pool —
     # exactly what a user who curates `.agents/skills` by hand would have.
     pool_doc.parent.mkdir(parents=True)
-    pool_doc.write_text("---\nname: clobber-skill\ndescription: hand written\n---\n# NOT GRIM'S\n")
+    pool_doc.write_text("---\nname: clobber-skill\ndescription: hand written\n---\n# NOT GRIM'S\n", encoding="utf-8", newline="\n")
 
     runner.json("config", "set", "options.vendors.cursor.shared_skills", "true")
     result = runner.run("install", format="json", check=False)
@@ -911,14 +911,14 @@ def test_a_flip_refuses_to_clobber_a_hand_authored_file_at_the_new_path(
         f"flipping onto an untracked destination must be refused, got "
         f"{result.returncode}; {result.stderr}"
     )
-    assert pool_doc.read_text().endswith("# NOT GRIM'S\n"), (
+    assert pool_doc.read_text(encoding="utf-8").endswith("# NOT GRIM'S\n"), (
         "the hand-authored file must survive the refusal untouched"
     )
     assert native_doc.is_file(), "the refusal must not have moved anything yet"
 
     # --force is the documented remedy, and it completes the migration.
     runner.json("install", "--force")
-    assert "NOT GRIM'S" not in pool_doc.read_text(), "--force must overwrite as it always has"
+    assert "NOT GRIM'S" not in pool_doc.read_text(encoding="utf-8"), "--force must overwrite as it always has"
     assert not native_doc.parent.exists(), "the forced flip still reaps the old native copy"
 
 
@@ -947,12 +947,12 @@ def test_a_flip_does_not_refuse_a_pool_dir_a_sibling_client_already_records(
     config.write_text(
         '[options]\nclients = ["codex", "cursor"]\n\n'
         "[options.vendors.cursor]\nshared_skills = false\n\n"
-        f'[skills]\nsibling-skill = "{v1.fq}"\n'
+        f'[skills]\nsibling-skill = "{v1.fq}"\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(bare_project_dir)
     runner.run("lock", check=False)
     runner.json("install")
-    assert (pool / "SKILL.md").read_text().endswith("# v1\n")
+    assert (pool / "SKILL.md").read_text(encoding="utf-8").endswith("# v1\n")
     assert (bare_project_dir / ".cursor/skills/sibling-skill/SKILL.md").is_file()
 
     # New content AND the flip in one step: cursor's destination becomes the
@@ -967,7 +967,7 @@ def test_a_flip_does_not_refuse_a_pool_dir_a_sibling_client_already_records(
     config.write_text(
         '[options]\nclients = ["codex", "cursor"]\n\n'
         "[options.vendors.cursor]\nshared_skills = true\n\n"
-        f'[skills]\nsibling-skill = "{v2.fq}"\n'
+        f'[skills]\nsibling-skill = "{v2.fq}"\n', encoding="utf-8", newline="\n"
     )
     runner.run("lock", check=False)
     result = runner.run("install", format="json", check=False)
@@ -975,12 +975,12 @@ def test_a_flip_does_not_refuse_a_pool_dir_a_sibling_client_already_records(
         "grim's own pool directory, recorded by a sibling client, must not be "
         f"treated as untracked; got {result.returncode}: {result.stderr}"
     )
-    assert (pool / "SKILL.md").read_text().endswith("# v2\n")
+    assert (pool / "SKILL.md").read_text(encoding="utf-8").endswith("# v2\n")
     # Asserted against the record, not `status`: the first install created
     # `.cursor/`, which makes detection non-empty, and `status` reconciles a
     # record against *detected* clients only — codex has no project marker
     # here and would be filtered out for reasons unrelated to this test.
-    state = json.loads((bare_project_dir / ".grimoire/state.json").read_text())
+    state = json.loads((bare_project_dir / ".grimoire/state.json").read_text(encoding="utf-8"))
     [record] = [r for r in state["records"] if r["name"] == "sibling-skill"]
     assert {o["client"] for o in record["outputs"]} == {"codex", "cursor"}, record
     assert len({o["target"]["relative"] for o in record["outputs"]}) == 1, (
@@ -1007,7 +1007,7 @@ def test_a_flip_onto_a_live_symlink_refuses_instead_of_erroring(
     pool = bare_project_dir / ".agents/skills"
     (bare_project_dir / "grimoire.toml").write_text(
         '[options]\nclients = ["cursor"]\n\n'
-        f'[skills]\nsymlink-skill = "{sk.fq}"\n'
+        f'[skills]\nsymlink-skill = "{sk.fq}"\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(bare_project_dir)
     runner.run("lock", check=False)
@@ -1062,7 +1062,7 @@ def test_pool_reader_keeps_native_default_and_accepts_the_opt_in(
     native = bare_project_dir / native_root / "skills" / name
     pool = bare_project_dir / ".agents/skills" / name
     (bare_project_dir / "grimoire.toml").write_text(
-        f'[options]\nclients = ["{client}"]\n\n[skills]\n{name} = "{sk.fq}"\n'
+        f'[options]\nclients = ["{client}"]\n\n[skills]\n{name} = "{sk.fq}"\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(bare_project_dir)
     runner.run("lock", check=False)
@@ -1102,7 +1102,7 @@ def test_pool_reader_global_opt_in_reanchors_the_record(
     fail with ``UnknownAnchor`` after the files are on disk."""
     name = f"{client}-glob-pool"
     sk = _skill(unique_repo, name)
-    (grim_home / "grimoire.toml").write_text(f'[skills]\n{name} = "{sk.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[skills]\n{name} = "{sk.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
     runner.json("install", "--global", "--client", client)
@@ -1113,7 +1113,7 @@ def test_pool_reader_global_opt_in_reanchors_the_record(
     assert (native / "SKILL.md").is_file()
 
     def anchors() -> list[str]:
-        state = json.loads(state_path.read_text())
+        state = json.loads(state_path.read_text(encoding="utf-8"))
         [record] = [r for r in state["records"] if r["name"] == name]
         return [o["target"]["anchor"] for o in record["outputs"]]
 
@@ -1147,7 +1147,7 @@ def test_copilot_pool_gap_warns_on_install_and_on_a_later_already_installed_run(
     reaching the old per-artifact check)."""
     name = "cp-pool-skill"
     sk = _skill(unique_repo, name)
-    (grim_home / "grimoire.toml").write_text(f'[skills]\n{name} = "{sk.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[skills]\n{name} = "{sk.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     copilot_home = grim_home.parent / "copilot-home-diverged"
     runner.env["COPILOT_HOME"] = str(copilot_home)
@@ -1193,7 +1193,7 @@ def test_copilot_pool_gap_warning_absent_without_a_diverging_copilot_home(
     Copilot still scans the pool, so no warning is due."""
     name = "cp-pool-ok-skill"
     sk = _skill(unique_repo, name)
-    (grim_home / "grimoire.toml").write_text(f'[skills]\n{name} = "{sk.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[skills]\n{name} = "{sk.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
     runner.json("config", "set", "--global", "options.vendors.copilot.shared_skills", "true")
@@ -1224,12 +1224,12 @@ def test_opencode_beside_a_pool_writer_installs_a_global_skill_once(
     in the report, so ``status`` resolves the same pair install did."""
     name = "oc-codex-skill"
     sk = _skill(unique_repo, name)
-    (grim_home / "grimoire.toml").write_text(f'[skills]\n{name} = "{sk.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[skills]\n{name} = "{sk.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     (runner.home / ".codex").mkdir(parents=True)
     opencode_config = runner.home / ".config/opencode/opencode.json"
     opencode_config.parent.mkdir(parents=True)
-    opencode_config.write_text("{}\n")
+    opencode_config.write_text("{}\n", encoding="utf-8", newline="\n")
     runner.json("lock", "--global")
     rows = runner.json("install", "--global")["items"]
     assert all(r["status"] == "installed" for r in rows), rows
@@ -1251,7 +1251,7 @@ def test_opencode_beside_a_pool_writer_installs_a_global_skill_once(
 def _pool_record(project: Path, name: str) -> dict[str, str]:
     """``client -> recorded relative path`` for ``name``, read from the state
     file so the assertion does not depend on which clients ``status`` detects."""
-    state = json.loads((project / ".grimoire/state.json").read_text())
+    state = json.loads((project / ".grimoire/state.json").read_text(encoding="utf-8"))
     [record] = [r for r in state["records"] if r["name"] == name]
     return {o["client"]: o["target"]["relative"] for o in record["outputs"]}
 
@@ -1260,7 +1260,7 @@ def _two_client_project(project: Path, name: str, ref: str, vendors: str = "") -
     (project / ".codex").mkdir(exist_ok=True)
     (project / ".opencode").mkdir(exist_ok=True)
     (project / "grimoire.toml").write_text(
-        f'[options]\nclients = ["opencode", "codex"]\n\n{vendors}[skills]\n{name} = "{ref}"\n'
+        f'[options]\nclients = ["opencode", "codex"]\n\n{vendors}[skills]\n{name} = "{ref}"\n', encoding="utf-8", newline="\n"
     )
 
 
@@ -1331,12 +1331,12 @@ def test_auto_join_preserves_an_edited_native_copy_and_warns(
     runner = grim_at(bare_project_dir)
     runner.run("lock", check=False)
     runner.json("install")
-    native_doc.write_text(f"---\nname: {name}\ndescription: d\n---\n# MINE\n")
+    native_doc.write_text(f"---\nname: {name}\ndescription: d\n---\n# MINE\n", encoding="utf-8", newline="\n")
 
     _two_client_project(bare_project_dir, name, sk.fq)
     result = runner.run("update", format="json", log_level="warn", check=False)
     assert result.returncode == 0, result.stderr
-    assert native_doc.read_text().endswith("# MINE\n"), "an edited copy must never be deleted"
+    assert native_doc.read_text(encoding="utf-8").endswith("# MINE\n"), "an edited copy must never be deleted"
     stderr = result.stderr.replace("\\", "/")
     assert "preserved" in stderr, stderr
     for path in (f".opencode/skills/{name}", f".agents/skills/{name}"):
@@ -1359,7 +1359,7 @@ def test_dropping_the_pool_writer_never_leaves_two_copies(
     assert pool.is_dir() and not native.exists()
 
     (bare_project_dir / "grimoire.toml").write_text(
-        f'[options]\nclients = ["opencode"]\n\n[skills]\n{name} = "{sk.fq}"\n'
+        f'[options]\nclients = ["opencode"]\n\n[skills]\n{name} = "{sk.fq}"\n', encoding="utf-8", newline="\n"
     )
     for _ in range(2):
         runner.json("update")
@@ -1378,7 +1378,7 @@ def test_kilo_with_external_skills_disabled_stays_native(
     name = "kilo-gated"
     sk = _skill(unique_repo, name)
     (bare_project_dir / "grimoire.toml").write_text(
-        f'[options]\nclients = ["kilo", "codex"]\n\n[skills]\n{name} = "{sk.fq}"\n'
+        f'[options]\nclients = ["kilo", "codex"]\n\n[skills]\n{name} = "{sk.fq}"\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(bare_project_dir)
     runner.env["KILO_DISABLE_EXTERNAL_SKILLS"] = "1"
@@ -1395,7 +1395,7 @@ def test_copilot_with_a_diverging_home_stays_native_at_global_scope(
     so its global skill stays under ``$COPILOT_HOME/skills``."""
     name = "cp-gated"
     sk = _skill(unique_repo, name)
-    (grim_home / "grimoire.toml").write_text(f'[skills]\n{name} = "{sk.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[skills]\n{name} = "{sk.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     copilot_home = grim_home.parent / "copilot-home-diverged"
     runner.env["COPILOT_HOME"] = str(copilot_home)
@@ -1411,7 +1411,7 @@ def test_antigravity_and_opencode_share_one_project_pool_copy(
     """Antigravity writes the project pool, so OpenCode joins it there."""
     name = "ag-oc"
     sk = _skill(unique_repo, name)
-    (bare_project_dir / "grimoire.toml").write_text(f'[skills]\n{name} = "{sk.fq}"\n')
+    (bare_project_dir / "grimoire.toml").write_text(f'[skills]\n{name} = "{sk.fq}"\n', encoding="utf-8", newline="\n")
     runner = grim_at(bare_project_dir)
     runner.run("lock", check=False)
     runner.json("install", "--client", "antigravity,opencode")

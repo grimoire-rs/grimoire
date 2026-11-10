@@ -121,7 +121,7 @@ def _replay_registry() -> None:
     Independent of grim and of ``src.registry``'s packer: a change to how grim
     packs an artifact must not be able to move the digests in the golden locks.
     """
-    recorded = json.loads((FIXTURE / "registry" / "pushed.json").read_text())
+    recorded = json.loads((FIXTURE / "registry" / "pushed.json").read_text(encoding="utf-8"))
     for entry in recorded:
         repo = entry["repo"]
         reg._push_blob(repo, EMPTY_CONFIG)
@@ -254,7 +254,7 @@ class _Env:
         `workspace` is the identity `evaluate` compares byte for byte, and the
         filename is its SHA-256. `hooks` overrides the consented set.
         """
-        record = json.loads((GOLDEN / "consent.project.json").read_text())
+        record = json.loads((GOLDEN / "consent.project.json").read_text(encoding="utf-8"))
         record["workspace"] = str(self.project)
         record["consented_at"] = "2026-01-01T00:00:00Z"
         if hooks is not None:
@@ -262,14 +262,14 @@ class _Env:
         key = hashlib.sha256(str(self.project).encode()).hexdigest()
         path = self.grim_home / "hooks" / "consent" / f"{key}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(record, indent=2) + "\n")
+        path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8", newline="\n")
         return path
 
     def armed_rows(self) -> list[dict]:
         """Every row in the hook dispatch table, across every root."""
         if not self.dispatch_table.is_file():
             return []
-        table = json.loads(self.dispatch_table.read_text())
+        table = json.loads(self.dispatch_table.read_text(encoding="utf-8"))
         return [row for root in table["roots"].values() for row in root["hooks"]]
 
     def lock_and_install(self) -> None:
@@ -316,7 +316,7 @@ def test_golden_status_sources_are_unchanged(grim_binary, grim_at, tmp_path, req
         ("project", env.project_runner, ()),
         ("global", env.global_runner, ("--global",)),
     ):
-        expected = json.loads((FIXTURE / "provenance" / f"status.{scope}.json").read_text())
+        expected = json.loads((FIXTURE / "provenance" / f"status.{scope}.json").read_text(encoding="utf-8"))
         actual = runner.json("status", *args)
         want = {(i["kind"], i["name"]): i["source"] for i in expected["items"]}
         got = {(i["kind"], i["name"]): i["source"] for i in actual["items"]}
@@ -356,14 +356,14 @@ def test_a_fresh_lock_matches_the_baseline_modulo_stamps(
     # The declaration hash is asserted by name too: the byte compare above would
     # report a moved hash as an opaque diff, and a hash change silently
     # re-resolves every existing install.
-    expected = json.loads((GOLDEN / "declaration_hash.json").read_text())
+    expected = json.loads((GOLDEN / "declaration_hash.json").read_text(encoding="utf-8"))
     for scope, lock in (("project", env.project_lock), ("global", env.global_lock)):
-        assert f'declaration_hash = "{expected[scope]}"' in lock.read_text(), (
+        assert f'declaration_hash = "{expected[scope]}"' in lock.read_text(encoding="utf-8"), (
             f"the {scope} declaration hash moved for a project without settings"
         )
     assert (
         f"declaration_hash_version = {expected['declaration_hash_version']}"
-        in env.project_lock.read_text()
+        in env.project_lock.read_text(encoding="utf-8")
     )
     _completed.add(request.node.name)
 
@@ -438,7 +438,7 @@ def test_remove_bundle_drops_what_the_baseline_dropped(
     env.lock_and_install()
     # Positive control: the bundle and its single-provenance member are there
     # before the remove, so the compare below is not over an empty project.
-    before = env.project_lock.read_text()
+    before = env.project_lock.read_text(encoding="utf-8")
     assert "bundled-rule" in before and "reg-bundle" in before
 
     env.project_runner.run("remove", "bundle", "reg-bundle")
@@ -511,7 +511,7 @@ def test_an_old_consent_record_still_arms_its_hook(grim_binary, grim_at, tmp_pat
 
     env = _Env(grim_at, tmp_path / "old-record", seed_locks=True)
     record = env.seed_consent()
-    assert all(not key.startswith("settings:") for key in json.loads(record.read_text())["hooks"])
+    assert all(not key.startswith("settings:") for key in json.loads(record.read_text(encoding="utf-8"))["hooks"])
     env.project_runner.run("lock")
     env.project_runner.run("install", "--client", "claude")
 

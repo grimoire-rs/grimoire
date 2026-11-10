@@ -36,7 +36,7 @@ def _release_mcp(runner, project_dir: Path, registry: str, unique_repo: str) -> 
     """Publish the MCP descriptor and return its fully-qualified reference."""
     path = project_dir / "src" / "mcp" / "grim-mcp.toml"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(DESCRIPTOR)
+    path.write_text(DESCRIPTOR, encoding="utf-8", newline="\n")
     ref = f"{registry}/{unique_repo}/mcp/grim-mcp:1.0.0"
     runner.json("release", str(path), ref, "--kind", "mcp")
     return ref
@@ -45,14 +45,14 @@ def _release_mcp(runner, project_dir: Path, registry: str, unique_repo: str) -> 
 def _detect_all_clients(project_dir: Path) -> None:
     (project_dir / ".opencode").mkdir(exist_ok=True)
     (project_dir / ".github").mkdir(exist_ok=True)
-    (project_dir / ".github" / "copilot-instructions.md").write_text("# ci\n")
+    (project_dir / ".github" / "copilot-instructions.md").write_text("# ci\n", encoding="utf-8", newline="\n")
 
 
 def _lock_mcp_names(project_dir: Path) -> list[str]:
     lock = project_dir / "grimoire.lock"
     if not lock.is_file():
         return []
-    return [entry["name"] for entry in tomllib.loads(lock.read_text()).get("mcp", [])]
+    return [entry["name"] for entry in tomllib.loads(lock.read_text(encoding="utf-8")).get("mcp", [])]
 
 
 def _registered_servers(project_dir: Path) -> dict[str, list[str]]:
@@ -60,13 +60,13 @@ def _registered_servers(project_dir: Path) -> dict[str, list[str]]:
     found: dict[str, list[str]] = {}
     claude = project_dir / ".mcp.json"
     if claude.is_file():
-        found["claude"] = list(json.loads(claude.read_text()).get("mcpServers", {}))
+        found["claude"] = list(json.loads(claude.read_text(encoding="utf-8")).get("mcpServers", {}))
     opencode = project_dir / "opencode.json"
     if opencode.is_file():
-        found["opencode"] = list(json.loads(opencode.read_text()).get("mcp", {}))
+        found["opencode"] = list(json.loads(opencode.read_text(encoding="utf-8")).get("mcp", {}))
     vscode = project_dir / ".vscode" / "mcp.json"
     if vscode.is_file():
-        found["copilot"] = list(json.loads(vscode.read_text()).get("servers", {}))
+        found["copilot"] = list(json.loads(vscode.read_text(encoding="utf-8")).get("servers", {}))
     return found
 
 
@@ -141,31 +141,31 @@ def test_uninstall_refuses_a_locally_edited_mcp_entry_without_force(
     ref = _release_mcp(runner, project_dir, registry, unique_repo)
     # Claude only: a single config to edit keeps the drift unambiguous.
     write_config(project_dir)
-    (project_dir / ".mcp.json").write_text('{"mcpServers": {"user-server": {"command": "keep-me"}}}')
+    (project_dir / ".mcp.json").write_text('{"mcpServers": {"user-server": {"command": "keep-me"}}}', encoding="utf-8", newline="\n")
 
     runner.json("add", ref)
     runner.json("install")
     cfg = project_dir / ".mcp.json"
-    assert "grim-mcp" in json.loads(cfg.read_text())["mcpServers"], "precondition: registered"
+    assert "grim-mcp" in json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"], "precondition: registered"
 
     # The user customizes the managed entry in place.
-    doc = json.loads(cfg.read_text())
+    doc = json.loads(cfg.read_text(encoding="utf-8"))
     doc["mcpServers"]["grim-mcp"]["args"] = ["mcp", "--allow-writes"]
     edited = json.dumps(doc, indent=2)
-    cfg.write_text(edited)
+    cfg.write_text(edited, encoding="utf-8", newline="\n")
 
     refused = runner.run("uninstall", "mcp", "grim-mcp", check=False)
     assert refused.returncode == 65, (
         f"a drifted managed entry must be refused as a data error, got {refused.returncode}: {refused.stderr}"
     )
-    assert cfg.read_text() == edited, "the refused config must be byte-unchanged"
+    assert cfg.read_text(encoding="utf-8") == edited, "the refused config must be byte-unchanged"
     assert any(row["name"] == "grim-mcp" for row in runner.json("status")["items"]), (
         "the record must survive a refusal, or --force has nothing left to act on"
     )
 
     forced = runner.json("uninstall", "mcp", "grim-mcp", "--force")
     assert forced["status"] in ("uninstalled", "removed"), forced
-    survivors = json.loads(cfg.read_text())["mcpServers"]
+    survivors = json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]
     assert "grim-mcp" not in survivors, "--force removes the edited entry"
     assert survivors["user-server"]["command"] == "keep-me", "the foreign entry is untouched"
 
@@ -179,7 +179,7 @@ def test_uninstall_removes_an_unmodified_mcp_entry_without_force(
     ref = _release_mcp(runner, project_dir, registry, unique_repo)
     _detect_all_clients(project_dir)
     write_config(project_dir)
-    (project_dir / ".mcp.json").write_text('{"mcpServers": {"user-server": {"command": "keep-me"}}}')
+    (project_dir / ".mcp.json").write_text('{"mcpServers": {"user-server": {"command": "keep-me"}}}', encoding="utf-8", newline="\n")
 
     runner.json("add", ref)
     runner.json("install")
@@ -188,5 +188,5 @@ def test_uninstall_removes_an_unmodified_mcp_entry_without_force(
     assert out["status"] in ("uninstalled", "removed"), out
     for client, names in _registered_servers(project_dir).items():
         assert "grim-mcp" not in names, f"{client} kept the managed entry: {names}"
-    claude = json.loads((project_dir / ".mcp.json").read_text())
+    claude = json.loads((project_dir / ".mcp.json").read_text(encoding="utf-8"))
     assert claude["mcpServers"]["user-server"]["command"] == "keep-me", "user entry preserved"

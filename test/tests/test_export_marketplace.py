@@ -110,7 +110,7 @@ def _toml(
 
 def _write(work: Path, plugins: dict[str, dict], **kw) -> Path:
     path = work / "marketplace.toml"
-    path.write_text(_toml(plugins, **kw))
+    path.write_text(_toml(plugins, **kw), encoding="utf-8", newline="\n")
     return path
 
 
@@ -154,11 +154,11 @@ def _readme_row(report: dict) -> dict | None:
 
 
 def _doc(work: Path, client: str) -> dict:
-    return json.loads((work / FILES[client]).read_text())
+    return json.loads((work / FILES[client]).read_text(encoding="utf-8"))
 
 
 def _tree_manifest(work: Path, client: str, plugin: str) -> dict:
-    return json.loads((work / client / plugin / TREE_MANIFEST[client]).read_text())
+    return json.loads((work / client / plugin / TREE_MANIFEST[client]).read_text(encoding="utf-8"))
 
 
 def _files(root: Path) -> dict[str, str]:
@@ -363,7 +363,7 @@ def test_s001_every_profile_key_reaches_the_files_its_harness_defines(
         'support = "https://github.com/acme/alpha/issues"\n'
         'license = "Apache-2.0"\nkeywords = ["review", "quality"]\ntags = ["team"]\n'
         'category = "developer-tools"\n\n'
-        '[plugins.alpha.author]\nname = "Acme Team"\nemail = "dev@acme.example"\nurl = "https://acme.example/team"\n'
+        '[plugins.alpha.author]\nname = "Acme Team"\nemail = "dev@acme.example"\nurl = "https://acme.example/team"\n', encoding="utf-8", newline="\n"
     )
 
     _ok(_run(grim_at(work)))
@@ -404,7 +404,7 @@ def test_s001_every_profile_key_reaches_the_files_its_harness_defines(
     assert cursor["plugins"][0]["author"] == cursor_author
     assert "documentationUrl" not in cursor["plugins"][0]
     assert _tree_manifest(work, "cursor", "alpha")["author"] == cursor_author
-    second = json.loads((work / "cursor" / "alpha" / ".cursor-plugin" / "plugin.json").read_text())
+    second = json.loads((work / "cursor" / "alpha" / ".cursor-plugin" / "plugin.json").read_text(encoding="utf-8"))
     assert second["author"] == cursor_author
 
     rerun = _ok(_run(grim_at(work)))
@@ -418,7 +418,7 @@ def test_s001_a_bad_profile_value_is_65_naming_the_plugin_and_key(
     refs = _refs(registry, unique_repo, "a")
     (work / "marketplace.toml").write_text(
         '[marketplace]\nname = "acme"\n\n[marketplace.owner]\nname = "Acme"\n\n'
-        f'[plugins.alpha]\ninclude = ["{refs["a"]}"]\nhomepage = "http://acme.example"\n'
+        f'[plugins.alpha]\ninclude = ["{refs["a"]}"]\nhomepage = "http://acme.example"\n', encoding="utf-8", newline="\n"
     )
 
     error = _refuse(_run(grim_at(work)))
@@ -529,7 +529,7 @@ def test_s006_dropped_client_loses_its_file_and_directory_but_never_dot_github(
     runner = grim_at(work)
     _ok(_run(runner))
     if holds_another_file:
-        (work / ".github" / "CODEOWNERS").write_text("* @acme\n")
+        (work / ".github" / "CODEOWNERS").write_text("* @acme\n", encoding="utf-8", newline="\n")
     kept = _files(work / "claude")
 
     _write(work, {"alpha": {"include": [refs["a"]]}, "beta": {"include": [refs["b"]]}}, clients=["claude", "codex", "qoder"])
@@ -601,8 +601,8 @@ def test_s007_hand_edited_tree_is_rewritten_and_the_stray_removed(
     tree = work / "claude" / "alpha"
     pristine = _files(tree)
     skill = tree / "skills" / "a" / "SKILL.md"
-    skill.write_text(skill.read_text().replace("Body.", "Bodx."))
-    (tree / "stray.txt").write_text("left behind\n")
+    skill.write_text(skill.read_text(encoding="utf-8").replace("Body.", "Bodx."), encoding="utf-8", newline="\n")
+    (tree / "stray.txt").write_text("left behind\n", encoding="utf-8", newline="\n")
     readme = tree / "README.md"
     readme.chmod(0o755)
 
@@ -622,7 +622,7 @@ def test_s008_foreign_client_directory_without_a_file_is_refused_then_adopted(
 ) -> None:
     _two_plugins(work, registry, unique_repo)
     (work / "claude").mkdir()
-    (work / "claude" / "notes.txt").write_text("mine\n")
+    (work / "claude" / "notes.txt").write_text("mine\n", encoding="utf-8", newline="\n")
     runner = grim_at(work)
 
     err = _refuse(_run(runner))
@@ -642,11 +642,11 @@ def test_s008_unselected_client_directory_without_a_file_survives(
 ) -> None:
     _two_plugins(work, registry, unique_repo, clients=["claude"])
     (work / "cursor").mkdir()
-    (work / "cursor" / "mine.txt").write_text("mine\n")
+    (work / "cursor" / "mine.txt").write_text("mine\n", encoding="utf-8", newline="\n")
 
     _ok(_run(grim_at(work)))
 
-    assert (work / "cursor" / "mine.txt").read_text() == "mine\n"
+    assert (work / "cursor" / "mine.txt").read_text(encoding="utf-8") == "mine\n"
 
 
 # ── S-009 — renamed marketplace ───────────────────────────────────────────
@@ -744,7 +744,7 @@ def test_s012_symlinked_owned_path_is_refused_and_nothing_is_written(
     runner = grim_at(work)
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
-    (elsewhere / "keep.txt").write_text("keep\n")
+    (elsewhere / "keep.txt").write_text("keep\n", encoding="utf-8", newline="\n")
     if where == "client-dir":
         (work / "claude").symlink_to(elsewhere, target_is_directory=True)
     elif where == "github-plugin-dir":
@@ -775,7 +775,7 @@ def test_s012_symlinked_manifest_or_lock_is_refused_and_the_target_is_untouched(
     elsewhere.mkdir()
     if which == "lock":
         target = elsewhere / "victim.lock"
-        target.write_text("victim\n")
+        target.write_text("victim\n", encoding="utf-8", newline="\n")
         (work / "marketplace.lock").symlink_to(target)
     else:
         target = elsewhere / "real.toml"
@@ -830,13 +830,13 @@ def test_s012_stray_junction_under_an_owned_directory_is_unlinked_and_its_target
     _ok(_run(runner))
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
-    (elsewhere / "keep.txt").write_text("keep\n")
+    (elsewhere / "keep.txt").write_text("keep\n", encoding="utf-8", newline="\n")
     _junction(work / "claude" / "stray", elsewhere)
 
     _ok(_run(runner))
 
     assert not (work / "claude" / "stray").exists(), "the junction itself is removed"
-    assert (elsewhere / "keep.txt").read_text() == "keep\n", "removal never follows it into the target"
+    assert (elsewhere / "keep.txt").read_text(encoding="utf-8") == "keep\n", "removal never follows it into the target"
 
 
 # ── S-013 — unsafe names in a rendered tree ───────────────────────────────
@@ -881,12 +881,12 @@ def test_s014_inputs_outside_the_manifest_directory_or_symlinked_are_65(
     elif case == "path-member-outside":
         skill = tmp_path / "outside" / "local-skill"
         skill.mkdir(parents=True)
-        (skill / "SKILL.md").write_text(_skill_md("local-skill"))
+        (skill / "SKILL.md").write_text(_skill_md("local-skill"), encoding="utf-8", newline="\n")
         decl = {"include": ["../outside/local-skill"]}
     else:
         proj = tmp_path / "proj"
         proj.mkdir()
-        (proj / "grimoire.toml").write_text(f'[skills]\na = "{refs["a"]}"\n')
+        (proj / "grimoire.toml").write_text(f'[skills]\na = "{refs["a"]}"\n', encoding="utf-8", newline="\n")
         grim_at(proj).run("lock")
         decl = {"project": "../proj"}
     _write(work, {"alpha": decl})
@@ -907,13 +907,13 @@ def test_s014_project_plugin_with_an_escaping_declaration_key_is_refused_and_wri
     refs = _refs(registry, unique_repo, "a")
     proj = work / "p"
     proj.mkdir()
-    (proj / "grimoire.toml").write_text(f'[skills]\na = "{refs["a"]}"\n')
+    (proj / "grimoire.toml").write_text(f'[skills]\na = "{refs["a"]}"\n', encoding="utf-8", newline="\n")
     grim_at(proj).run("lock")
     if where == "config":
-        (proj / "grimoire.toml").write_text(f'[skills]\n"../../escaped" = "{refs["a"]}"\n')
+        (proj / "grimoire.toml").write_text(f'[skills]\n"../../escaped" = "{refs["a"]}"\n', encoding="utf-8", newline="\n")
     else:
         lock = proj / "grimoire.lock"
-        lock.write_text(lock.read_text().replace('name = "a"', 'name = "../../escaped"'))
+        lock.write_text(lock.read_text(encoding="utf-8").replace('name = "a"', 'name = "../../escaped"'), encoding="utf-8", newline="\n")
     _write(work, {"alpha": {"project": "p"}})
 
     err = _refuse(_run(grim_at(work)), 65 if where == "config" else 78)
@@ -942,7 +942,7 @@ def test_s014_input_under_an_owned_directory_is_65_and_survives(
     if case == "path-include-under-claude":
         skill = work / "claude" / "local-skill"
         skill.mkdir(parents=True)
-        (skill / "SKILL.md").write_text(_skill_md("local-skill"))
+        (skill / "SKILL.md").write_text(_skill_md("local-skill"), encoding="utf-8", newline="\n")
         decl = {"include": ["./claude/local-skill"]}
         survivor = skill / "SKILL.md"
     elif case == "logo-under-cursor":
@@ -954,25 +954,25 @@ def test_s014_input_under_an_owned_directory_is_65_and_survives(
         proj = work / "codex" / "proj"
         proj.mkdir(parents=True)
         survivor = proj / "grimoire.toml"
-        survivor.write_text(f'[skills]\na = "{refs["a"]}"\n')
+        survivor.write_text(f'[skills]\na = "{refs["a"]}"\n', encoding="utf-8", newline="\n")
         grim_at(proj).run("lock")
         decl = {"project": "./codex/proj"}
     else:
         # What the project's own lock and `[plugin]` table name, not the manifest entry.
         proj = work / "proj"
         (proj / "local").mkdir(parents=True)
-        (proj / "local" / "SKILL.md").write_text(_skill_md("local"))
+        (proj / "local" / "SKILL.md").write_text(_skill_md("local"), encoding="utf-8", newline="\n")
         if case == "project-member-under-claude":
             (work / "claude" / "local").mkdir(parents=True)
             survivor = work / "claude" / "local" / "SKILL.md"
-            survivor.write_text(_skill_md("local"))
-            (proj / "grimoire.toml").write_text('[skills]\nlocal = "../claude/local"\n')
+            survivor.write_text(_skill_md("local"), encoding="utf-8", newline="\n")
+            (proj / "grimoire.toml").write_text('[skills]\nlocal = "../claude/local"\n', encoding="utf-8", newline="\n")
         else:
             (work / "cursor").mkdir()
             survivor = work / "cursor" / "logo.svg"
             survivor.write_bytes(SVG)
             (proj / "grimoire.toml").write_text(
-                '[skills]\nlocal = "./local"\n\n[plugin]\nlogo = "../cursor/logo.svg"\n'
+                '[skills]\nlocal = "./local"\n\n[plugin]\nlogo = "../cursor/logo.svg"\n', encoding="utf-8", newline="\n"
             )
         grim_at(proj).run("lock")
         decl = {"project": "./proj"}
@@ -1088,7 +1088,7 @@ def test_c140_hook_member_is_declined_warned_once_and_never_rendered(
         assert row["action"] == "written" and [m["name"] for m in row["members"]] == ["a"], row
         assert row["omitted"] == [{"kind": "hook", "name": "g", "reason": HOOK_REASONS[row["client"]]}], row
         tree = work / row["client"] / "alpha"
-        assert f"Omitted for {row['client']}: hook g." in (tree / "README.md").read_text()
+        assert f"Omitted for {row['client']}: hook g." in (tree / "README.md").read_text(encoding="utf-8")
         assert not (tree / "hooks").exists(), "nothing of the hook is staged"
 
 
@@ -1225,9 +1225,9 @@ def test_s020_cursor_is_written_only_when_selected(grim_at, work: Path, registry
     doc = _doc(work, "cursor")
     assert doc["name"] == "acme" and [e["source"] for e in doc["plugins"]] == ["./cursor/alpha"]
     tree = work / "cursor" / "alpha"
-    second = json.loads((tree / ".cursor-plugin" / "plugin.json").read_text())
+    second = json.loads((tree / ".cursor-plugin" / "plugin.json").read_text(encoding="utf-8"))
     assert list(second) == ["name", "version", "description"]
-    assert second["version"] == doc["plugins"][0]["version"] == json.loads((tree / "plugin.json").read_text())["version"]
+    assert second["version"] == doc["plugins"][0]["version"] == json.loads((tree / "plugin.json").read_text(encoding="utf-8"))["version"]
 
 
 # ── S-022 — shadowing warnings (C-022) ────────────────────────────────────
@@ -1236,13 +1236,13 @@ def test_s020_cursor_is_written_only_when_selected(grim_at, work: Path, registry
 def test_s022_factory_marketplace_file_warns_and_exits_0(grim_at, work: Path, registry: str, unique_repo: str) -> None:
     _two_plugins(work, registry, unique_repo)
     (work / ".factory-plugin").mkdir()
-    (work / ".factory-plugin" / "marketplace.json").write_text("{}\n")
+    (work / ".factory-plugin" / "marketplace.json").write_text("{}\n", encoding="utf-8", newline="\n")
 
     result = _run(grim_at(work))
 
     _ok(result)
     assert str(Path(".factory-plugin/marketplace.json")) in result.stderr, result.stderr
-    assert (work / ".factory-plugin" / "marketplace.json").read_text() == "{}\n", "never touched"
+    assert (work / ".factory-plugin" / "marketplace.json").read_text(encoding="utf-8") == "{}\n", "never touched"
 
 
 def test_s022_unowned_qoder_file_with_qoder_unselected_warns(
@@ -1250,7 +1250,7 @@ def test_s022_unowned_qoder_file_with_qoder_unselected_warns(
 ) -> None:
     _two_plugins(work, registry, unique_repo, clients=["claude"])
     (work / ".qoder-plugin").mkdir()
-    (work / ".qoder-plugin" / "marketplace.json").write_text('{"name": "other"}\n')
+    (work / ".qoder-plugin" / "marketplace.json").write_text('{"name": "other"}\n', encoding="utf-8", newline="\n")
 
     result = _run(grim_at(work))
 
@@ -1265,17 +1265,17 @@ def test_a_declared_readme_and_changelog_ship_with_a_contents_list(
     grim_at, work: Path, registry: str, unique_repo: str
 ) -> None:
     refs = _refs(registry, unique_repo, "a")
-    (work / "PLUGIN.md").write_text("# Alpha kit\n\nHand written.\n")
-    (work / "CHANGES.md").write_text("## 1.0.0\n\n- first\n")
+    (work / "PLUGIN.md").write_text("# Alpha kit\n\nHand written.\n", encoding="utf-8", newline="\n")
+    (work / "CHANGES.md").write_text("## 1.0.0\n\n- first\n", encoding="utf-8", newline="\n")
     _write(work, {"alpha": {"include": [refs["a"]], "readme": "PLUGIN.md", "changelog": "CHANGES.md"}})
 
     _ok(_run(grim_at(work)))
 
     for client in DEFAULT_CLIENTS:
         tree = work / client / "alpha"
-        readme = (tree / "README.md").read_text()
+        readme = (tree / "README.md").read_text(encoding="utf-8")
         assert readme.startswith("# Alpha kit\n\nHand written.\n\nPackaged by grim"), readme
-        assert (tree / "CHANGELOG.md").read_text() == "## 1.0.0\n\n- first\n"
+        assert (tree / "CHANGELOG.md").read_text(encoding="utf-8") == "## 1.0.0\n\n- first\n"
 
 
 def test_an_undeclared_readme_keeps_the_generated_header(
@@ -1285,7 +1285,7 @@ def test_an_undeclared_readme_keeps_the_generated_header(
 
     _ok(_run(grim_at(work)))
 
-    readme = (work / "claude" / "alpha" / "README.md").read_text()
+    readme = (work / "claude" / "alpha" / "README.md").read_text(encoding="utf-8")
     assert readme.startswith("# alpha\n\n"), readme
     assert "## Contents" not in readme, readme
     assert not (work / "claude" / "alpha" / "CHANGELOG.md").exists()
@@ -1331,7 +1331,7 @@ def test_s004_the_root_readme_carries_the_add_commands_and_the_repository(
     row = _readme_row(report)
     assert row is not None and row["action"] == "written" and row["plugins"] == ["alpha", "beta"]
     assert Path(row["path"]) == (work / "README.md").resolve() and list(row) == FILE_KEYS
-    text = (work / "README.md").read_text()
+    text = (work / "README.md").read_text(encoding="utf-8")
     assert text.splitlines()[0] == README_MARKER
     assert text.splitlines()[2] == "# acme"
     for line in (
@@ -1346,7 +1346,7 @@ def test_s004_the_root_readme_carries_the_add_commands_and_the_repository(
     assert "| `alpha` |" in text and "| `beta` |" in text
     assert "## Private repositories" in text
     for client in DEFAULT_CLIENTS:
-        assert REPOSITORY not in (work / FILES[client]).read_text(), "the clone URL never reaches a harness file"
+        assert REPOSITORY not in (work / FILES[client]).read_text(encoding="utf-8"), "the clone URL never reaches a harness file"
 
     again = _ok(_run(runner))
     assert _readme_row(again)["action"] == "unchanged"
@@ -1359,7 +1359,7 @@ def test_s004_without_a_repository_the_readme_shows_a_placeholder_and_a_note(
 
     _ok(_run(grim_at(work)))
 
-    text = (work / "README.md").read_text()
+    text = (work / "README.md").read_text(encoding="utf-8")
     assert "claude plugin marketplace add <clone URL of this repository>" in text
     assert "`[marketplace].repository` is not set" in text
 
@@ -1368,7 +1368,7 @@ def test_s005_a_hand_written_readme_is_left_with_one_warning_even_under_force(
     grim_at, work: Path, registry: str, unique_repo: str
 ) -> None:
     _two_plugins(work, registry, unique_repo)
-    (work / "README.md").write_text("# Curated by hand\n")
+    (work / "README.md").write_text("# Curated by hand\n", encoding="utf-8", newline="\n")
     runner = grim_at(work)
 
     for args in ((), ("--force",)):
@@ -1377,7 +1377,7 @@ def test_s005_a_hand_written_readme_is_left_with_one_warning_even_under_force(
         report = _ok(result)
         assert result.stderr.count("README.md is not grim's; leaving it") == 1, result.stderr
         assert _readme_row(report) is None, "a left-alone README is not listed"
-        assert (work / "README.md").read_text() == "# Curated by hand\n"
+        assert (work / "README.md").read_text(encoding="utf-8") == "# Curated by hand\n"
 
 
 @unix_only
@@ -1386,7 +1386,7 @@ def test_s005_a_symlinked_readme_is_left_untouched_even_under_force(
 ) -> None:
     _two_plugins(work, registry, unique_repo)
     victim = work.parent / "victim.md"
-    victim.write_text(f"{README_MARKER}\nnot ours to rewrite\n")
+    victim.write_text(f"{README_MARKER}\nnot ours to rewrite\n", encoding="utf-8", newline="\n")
     (work / "README.md").symlink_to(victim)
     runner = grim_at(work)
 
@@ -1397,7 +1397,7 @@ def test_s005_a_symlinked_readme_is_left_untouched_even_under_force(
         assert result.stderr.count("README.md is not grim's; leaving it") == 1, result.stderr
         assert _readme_row(report) is None, "a left-alone README is not listed"
         assert (work / "README.md").is_symlink(), "the link itself survives"
-        assert victim.read_text() == f"{README_MARKER}\nnot ours to rewrite\n", "the link target is untouched"
+        assert victim.read_text(encoding="utf-8") == f"{README_MARKER}\nnot ours to rewrite\n", "the link target is untouched"
 
 
 @unix_only
@@ -1405,7 +1405,7 @@ def test_s005_a_case_variant_readme_is_left_with_one_warning_even_under_force(
     grim_at, work: Path, registry: str, unique_repo: str
 ) -> None:
     _two_plugins(work, registry, unique_repo)
-    (work / "readme.md").write_text("# Curated by hand\n")
+    (work / "readme.md").write_text("# Curated by hand\n", encoding="utf-8", newline="\n")
     if (work / "README.md").exists():
         pytest.skip("case-insensitive filesystem: readme.md is README.md")
     runner = grim_at(work)
@@ -1416,7 +1416,7 @@ def test_s005_a_case_variant_readme_is_left_with_one_warning_even_under_force(
         report = _ok(result)
         assert result.stderr.count("README.md is not grim's; leaving it") == 1, result.stderr
         assert _readme_row(report) is None, "a left-alone README is not listed"
-        assert (work / "readme.md").read_text() == "# Curated by hand\n"
+        assert (work / "readme.md").read_text(encoding="utf-8") == "# Curated by hand\n"
         assert not (work / "README.md").exists(), "no second README is written beside the variant"
 
 
@@ -1424,12 +1424,12 @@ def test_a_readme_that_starts_with_the_marker_is_regenerated(
     grim_at, work: Path, registry: str, unique_repo: str
 ) -> None:
     _two_plugins(work, registry, unique_repo)
-    (work / "README.md").write_text(f"{README_MARKER}\nstale\n")
+    (work / "README.md").write_text(f"{README_MARKER}\nstale\n", encoding="utf-8", newline="\n")
 
     report = _ok(_run(grim_at(work)))
 
     assert _readme_row(report)["action"] == "written"
-    assert "stale" not in (work / "README.md").read_text()
+    assert "stale" not in (work / "README.md").read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(

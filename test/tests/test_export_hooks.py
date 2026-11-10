@@ -60,8 +60,8 @@ def _project(
     write_config(root, skills=skills, hooks={"g": f"{registry}/{unique_repo}/g:1"})
     config = root / "grimoire.toml"
     config.write_text(
-        config.read_text()
-        + '\n[plugin]\nname = "team"\n\n[options.experimental]\nhooks = true\n'
+        config.read_text(encoding="utf-8")
+        + '\n[plugin]\nname = "team"\n\n[options.experimental]\nhooks = true\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(root)
     runner.run("lock")
@@ -95,7 +95,7 @@ def test_s109_hook_member_is_warned_listed_and_exit_0(
     ]
     for client in ("claude", "codex"):
         root = proj / "dist" / f"team.{client}"
-        assert f"Omitted for {client}: hook g." in (root / "README.md").read_text()
+        assert f"Omitted for {client}: hook g." in (root / "README.md").read_text(encoding="utf-8")
         assert (root / "skills" / "a" / "SKILL.md").is_file()
         assert not (root / "hooks").exists(), "nothing of the hook is staged"
 

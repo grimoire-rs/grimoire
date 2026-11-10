@@ -113,9 +113,9 @@ jobs:
           codesign -v "$work/hooks/grim-hook"
           "$work/hooks/grim-hook" claude SessionStart "$root" </dev/null
 
-  # The Windows hook suite needs a registry and runs only the hook files: the
-  # Platform Check below skips every registry-backed test. Reproduce locally
-  # with the grim-wintest run.sh before dispatching.
+  # The Windows hook suite needs a registry and runs only the hook files; the
+  # Platform Check below runs the full suite. Reproduce locally with the
+  # grim-wintest run.sh before dispatching.
   hooks-windows:
     name: Hook Acceptance (Windows)
     needs: [cross-compile]
@@ -160,19 +160,19 @@ jobs:
 
   # Two jobs with deliberately different names, because they are not the same
   # gate. Linux and macOS run the whole suite against a real registry, sharded,
-  # through acceptance.yml. Windows cannot: the runner hosts no Linux container
-  # engine, so the registry-backed ~68% of the suite has nothing to talk to.
+  # through acceptance.yml, and are judged by the floor and ceilings in
+  # `test/SUITE_FLOOR`, `test/SKIP_CEILING` and `test/XFAIL_CEILING`.
   #
-  # That job used to report green anyway, at "254 passed, 528 skipped" — a
-  # green gate over a suite that mostly did not run, which is exactly what
-  # `test/conftest.py`'s registry refusal was later written to stop. The
-  # refusal was right; the job's *name* was the lie. So `GRIM_ALLOW_NO_REGISTRY`
-  # is set here **only** for Windows, and the job is called what it is.
+  # Windows runs the same suite unsharded in one job, "Platform Check", against
+  # the zot registry its Setup OCX step puts on PATH (`test/conftest.py` starts
+  # it natively). It stays outside the floor and the ceilings. The latest
+  # branch run (2026-11-10) reported 2,876 passed, 562 skipped, 0 failed; the
+  # skips are Windows-only platform skips, not a missing registry.
   #
-  # The ~254 tests that do run are worth keeping: they are the ones covering
-  # Windows path handling, junctions and PATHEXT, which no Linux job can
-  # exercise. Do not rename this back to "Acceptance" without giving Windows a
-  # reachable registry first (`GRIM_TEST_REGISTRY_HOST`).
+  # `GRIM_ALLOW_NO_REGISTRY` is set on this job only. It is the `test/conftest.py`
+  # escape hatch that turns an unreachable registry into skips instead of a
+  # refusal, so on this job a lost registry would skip the registry-backed
+  # tests and still report green.
   acceptance-tests:
     name: Acceptance (${{ matrix.job.name }})
     needs: [build, cross-compile]

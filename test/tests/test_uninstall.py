@@ -44,10 +44,10 @@ def test_uninstall_deletes_files_record_and_declaration(
 
     # Files gone, declaration gone, lock entry gone.
     assert not skill_dir.exists()
-    assert "code-review" not in (project_dir / "grimoire.toml").read_text()
+    assert "code-review" not in (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     lock = project_dir / "grimoire.lock"
     if lock.is_file():
-        assert "code-review" not in lock.read_text()
+        assert "code-review" not in lock.read_text(encoding="utf-8")
 
     # status no longer knows the artifact (record dropped).
     status = runner.json("status")["items"]
@@ -137,5 +137,5 @@ def test_uninstall_leaves_other_artifacts_intact(
 
     # The rule is untouched: still on disk and still declared.
     assert (project_dir / ".claude/rules/rust-style.md").is_file()
-    assert "rust-style" in (project_dir / "grimoire.toml").read_text()
+    assert "rust-style" in (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert not (project_dir / ".claude/skills/code-review").exists()

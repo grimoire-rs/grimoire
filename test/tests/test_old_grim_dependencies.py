@@ -45,7 +45,7 @@ def old(old_bin: Path, tmp_path: Path) -> GrimRunner:
 
 def _lock_text(runner: GrimRunner) -> str:
     assert runner.cwd is not None
-    return (runner.cwd / "grimoire.lock").read_text()
+    return (runner.cwd / "grimoire.lock").read_text(encoding="utf-8")
 
 
 def test_old_grim_adds_a_plain_artifact(old, registry, unique_repo):
@@ -124,7 +124,7 @@ _BUNDLE_ENTRY = (
 def test_old_grim_rejects_a_lock_with_dependency_fields(old, body):
     field = "requires" if "requires" in body else "transitive"
     write_config(old.cwd, skills={"a": "localhost:5000/x/a:1"})
-    (old.cwd / "grimoire.lock").write_text(_LOCK_HEAD + body)
+    (old.cwd / "grimoire.lock").write_text(_LOCK_HEAD + body, encoding="utf-8", newline="\n")
 
     result = old.run("status", check=False)
 
@@ -147,7 +147,7 @@ def test_old_grim_reads_a_lock_whose_bundle_member_is_a_bundle(
     member_key = 'kind = "skill"\nname = "member"'
     assert member_key in text, text
     (old.cwd / "grimoire.lock").write_text(
-        text.replace(member_key, 'kind = "bundle"\nname = "member"')
+        text.replace(member_key, 'kind = "bundle"\nname = "member"'), encoding="utf-8", newline="\n"
     )
 
     for command in ("status", "install"):

@@ -213,7 +213,7 @@ def _html(title: str, body: str = "") -> str:
 
 def _write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    path.write_text(text, encoding="utf-8", newline="\n")
 
 
 def _clean_tree(root: Path) -> Path:
@@ -384,7 +384,7 @@ def test_sitemap_without_static_page_exits_one(clean_root: Path) -> None:
     goes, with every other check still green.
     """
     sitemap = clean_root / "docs" / "dist" / "sitemap.xml"
-    _write(sitemap, sitemap.read_text().replace(f"<loc>{_SITE}/start.html</loc>", ""))
+    _write(sitemap, sitemap.read_text(encoding="utf-8").replace(f"<loc>{_SITE}/start.html</loc>", ""))
     result = _run(clean_root)
     assert result.returncode == 1, (
         f"sitemap missing a static page should exit 1, got {result.returncode}\n"
@@ -927,7 +927,7 @@ def test_find_generator_accepts_any_astro_config(
     exited 0 — the failure mode the rule exists to prevent, one extension over.
     """
     (tmp_path / "astro.config.ts").write_text(
-        "export default { integrations: [] };\n", encoding="utf-8"
+        "export default { integrations: [] };\n", encoding="utf-8", newline="\n"
     )
     assert nav_depth.find_generator(tmp_path) == (
         "starlight",

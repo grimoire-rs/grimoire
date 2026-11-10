@@ -101,7 +101,7 @@ def _published(work: Path, sync: dict[str, object] | None) -> Iterator[Published
     shutil.copytree(FIXTURE, root, ignore=shutil.ignore_patterns("INDEXER_REF"))
     if sync is not None:
         config = root / "index.config.json"
-        config.write_text(json.dumps({**json.loads(config.read_text()), "sync": sync}))
+        config.write_text(json.dumps({**json.loads(config.read_text(encoding="utf-8")), "sync": sync}), encoding="utf-8", newline="\n")
     _build(root, dist)
     handler = IndexHandler.new()
     with serve(dist, handler) as base:
@@ -139,13 +139,13 @@ def published_incremental(tmp_path: Path) -> Iterator[Published]:
 
 
 def _fixture_ratings() -> dict[str, int]:
-    entries = json.loads((FIXTURE / ".stats.json").read_text())["entries"]
+    entries = json.loads((FIXTURE / ".stats.json").read_text(encoding="utf-8"))["entries"]
     return {ref: entry["rating"]["up"] for ref, entry in entries.items()}
 
 
 def _fixture_refs() -> list[str]:
     metadata = FIXTURE.glob("index/*/*/*/metadata.json")
-    return sorted(json.loads(path.read_text())["ref"] for path in metadata)
+    return sorted(json.loads(path.read_text(encoding="utf-8"))["ref"] for path in metadata)
 
 
 def _runner(binary: str, published: Published, leg: Path) -> GrimRunner:
@@ -201,7 +201,7 @@ def _blob(ref: dict[str, object]) -> str:
 def test_a_default_build_publishes_a_flat_null_root_and_gzip_siblings(
     published: Published,
 ) -> None:
-    root = json.loads((published.dist / "c" / "root.json").read_text())
+    root = json.loads((published.dist / "c" / "root.json").read_text(encoding="utf-8"))
     assert root["flat"] is None, "the default config publishes no flat catalog blob"
     for name in ("all.json", "stats.json"):
         sibling = gzip.decompress((published.dist / f"{name}.gz").read_bytes())
@@ -262,7 +262,7 @@ def test_a_changed_package_costs_the_root_and_one_new_flat_blob(
     runner = _runner(str(grim_binary), index, tmp_path / "grim")
     before, stderr = _search(runner)
     assert stderr == ""
-    first = json.loads((index.dist / "c" / "root.json").read_text())
+    first = json.loads((index.dist / "c" / "root.json").read_text(encoding="utf-8"))
     seen = {request.path for request in index.log}
     mark = len(index.log)
 
@@ -270,11 +270,11 @@ def test_a_changed_package_costs_the_root_and_one_new_flat_blob(
     # recompiles the root into the same output directory, and what carries over
     # is grim's catalog.
     beta = index.root / "index" / "github.com" / "acme" / "e2e-beta" / "metadata.json"
-    package = json.loads(beta.read_text())
+    package = json.loads(beta.read_text(encoding="utf-8"))
     package["description"] = "Beta rule, edited after the first sync."
-    beta.write_text(json.dumps(package))
+    beta.write_text(json.dumps(package), encoding="utf-8", newline="\n")
     _build(index.root, index.dist)
-    second = json.loads((index.dist / "c" / "root.json").read_text())
+    second = json.loads((index.dist / "c" / "root.json").read_text(encoding="utf-8"))
     assert second["flat"]["sha256"] != first["flat"]["sha256"]
     assert second["stats"] == first["stats"], "no package edit reaches the stats"
 
@@ -302,7 +302,7 @@ def test_a_legacy_free_build_publishes_only_the_anchored_tree(
     dist = published_legacy_free.dist
     for name in ("all.json", "all.json.gz", "stats.json", "stats.json.gz"):
         assert not (dist / name).exists(), f"legacy: false publishes no {name}"
-    root = json.loads((dist / "c" / "root.json").read_text())
+    root = json.loads((dist / "c" / "root.json").read_text(encoding="utf-8"))
     for ref in (root["flat"], root["stats"]):
         assert (dist / _blob(ref).removeprefix("/")).is_file(), (
             "the root names the blobs a legacy-free reader needs"

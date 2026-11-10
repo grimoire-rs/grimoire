@@ -175,9 +175,9 @@ def test_link_escaping_the_docs_root_is_rejected(tmp_path: Path, monkeypatch) ->
     """An existing file outside the root does not license a link to it."""
     root = tmp_path / "docs"
     (root / "sub").mkdir(parents=True)
-    (tmp_path / "OUTSIDE.md").write_text("# outside\n", encoding="utf-8")
+    (tmp_path / "OUTSIDE.md").write_text("# outside\n", encoding="utf-8", newline="\n")
     page = root / "sub" / "page.md"
-    page.write_text("[a](../../OUTSIDE.md)\n", encoding="utf-8")
+    page.write_text("[a](../../OUTSIDE.md)\n", encoding="utf-8", newline="\n")
 
     monkeypatch.setitem(globals(), "_DOCS_DIR", root)
     assert _link_problems(page) == [f"'](../../OUTSIDE.md': resolves outside {root}"]

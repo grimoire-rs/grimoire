@@ -267,7 +267,7 @@ def test_the_built_grim_fetches_the_flat_blob_only_when_the_flat_ref_changes(
         assert not blob_fetched(), "an unchanged flat ref"
 
         added = package("extra", "skill", "ghcr.io/acme/extra", "Added")
-        (index.root / "all.json").write_text(json.dumps([*_tree_pointers(), added]))
+        (index.root / "all.json").write_text(json.dumps([*_tree_pointers(), added]), encoding="utf-8", newline="\n")
         changed, _ = _search(runner)
         assert blob_fetched(), "a new flat ref is fetched"
 
@@ -280,7 +280,7 @@ def test_the_built_grim_keeps_a_synthetic_null_list_record_and_the_whole_index(
 ) -> None:
     record = _null_list_record()
     with _seeded_tree(kind, tmp_path) as index:
-        (index.root / "all.json").write_text(json.dumps([*_tree_pointers(), record]))
+        (index.root / "all.json").write_text(json.dumps([*_tree_pointers(), record]), encoding="utf-8", newline="\n")
         envelope, _ = _search(runner_for("g2", index.base), "--show-deprecated")
 
     assert [s["ok"] for s in envelope["sources"]] == [True], envelope["sources"]
@@ -307,7 +307,7 @@ def test_g0_still_refuses_a_synthetic_document_with_a_null_list_record(
 ) -> None:
     with _seeded_tree("legacy-only", tmp_path) as index:
         (index.root / "all.json").write_text(
-            json.dumps([*_tree_pointers(), _null_list_record()])
+            json.dumps([*_tree_pointers(), _null_list_record()]), encoding="utf-8", newline="\n"
         )
         envelope, _ = _search(runner_for("g0", index.base))
 
@@ -325,7 +325,7 @@ def _write_big_index(index: KindedIndex, *, rating: bool = False) -> None:
         )
         for i in range(COUNT)
     ]
-    (index.root / "all.json").write_text(json.dumps(packages))
+    (index.root / "all.json").write_text(json.dumps(packages), encoding="utf-8", newline="\n")
     if rating:
         vote = {
             "up": 5,
@@ -398,7 +398,7 @@ def test_status_check_reports_a_deprecation_past_the_old_cap(
     )
     with _served(kind, tmp_path) as index:
         _write_big_index(index)
-        packages = json.loads((index.root / "all.json").read_text())
+        packages = json.loads((index.root / "all.json").read_text(encoding="utf-8"))
         packages[550] = package(
             "old-skill",
             "skill",
@@ -406,7 +406,7 @@ def test_status_check_reports_a_deprecation_past_the_old_cap(
             "Late and deprecated",
             deprecated="use new-skill instead",
         )
-        (index.root / "all.json").write_text(json.dumps(packages))
+        (index.root / "all.json").write_text(json.dumps(packages), encoding="utf-8", newline="\n")
         runner = runner_for(leg, index.base)
         runner.run("add", f"{REGISTRY_HOST}/{repo}:latest")
 

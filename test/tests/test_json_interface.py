@@ -58,7 +58,7 @@ def test_error_document_hints_at_an_unrecognized_key(
     knowing that policy — the hint names the two real causes (a typo, or a
     file written by a newer grim).
     """
-    (project_dir / "grimoire.toml").write_text('[skills]\n\n[future_table]\nx = "y"\n')
+    (project_dir / "grimoire.toml").write_text('[skills]\n\n[future_table]\nx = "y"\n', encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     plain = runner.run("status", check=False)
@@ -127,7 +127,7 @@ def test_error_reason_marks_stale_lock(grim_at, project_dir: Path) -> None:
         "declaration_hash_version = 1\n"
         f'declaration_hash = "sha256:{"0" * 64}"\n'
         'generated_by = "grim test"\n'
-        'generated_at = "2026-01-01T00:00:00Z"\n'
+        'generated_at = "2026-01-01T00:00:00Z"\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
 
@@ -160,7 +160,7 @@ def test_modified_refusal_carries_reason(
     runner = grim_at(project_dir)
     runner.run("lock")
     runner.run("install")
-    (project_dir / ".claude/rules/rust-style.md").write_text("hand edited\n")
+    (project_dir / ".claude/rules/rust-style.md").write_text("hand edited\n", encoding="utf-8", newline="\n")
 
     for argv in (
         ("--format", "json", "install"),
@@ -442,7 +442,7 @@ def test_fetch_report_is_tri_shaped(
     )
     make_description(repo, {"README.md": b"# Repo\n"})
     # A resolved project scope keeps the digest probe to its minimal shape.
-    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
     ref = f"{registry}/{repo}:latest"
 

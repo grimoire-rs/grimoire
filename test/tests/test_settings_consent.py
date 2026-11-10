@@ -119,6 +119,7 @@ def _seed_record(runner, workspace: Path, keys: list[str]) -> Path:
     path.write_text(
         json.dumps({"v": 1, "workspace": str(workspace), "hooks": keys, "consented_at": "2026-08-28T10:00:00Z"}),
         encoding="utf-8",
+        newline="\n",
     )
     return path
 

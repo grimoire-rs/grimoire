@@ -78,7 +78,7 @@ def test_the_guide_runs_end_to_end(
     assert compared == 3, f"compared {compared} shown outputs, the page shows 3"
 
     # What the bundle and the requirement installed, read back from the lock.
-    lock = (project_dir / "grimoire.lock").read_text()
+    lock = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     for name in ("plan", "design", "build", "test", "deploy", "maintain", "templates", "gdrive-sync"):
         assert f'name = "{name}"' in lock, name
     assert 'name = "security-reviewer"' in lock and 'name = "gdrive"' in lock

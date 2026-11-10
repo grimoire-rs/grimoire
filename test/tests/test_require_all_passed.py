@@ -38,6 +38,7 @@ def _report(tmp_path: Path, extra: str = "") -> Path:
     report.write_text(
         f'<?xml version="1.0"?><testsuites><testsuite name="pytest">{cases}{extra}</testsuite></testsuites>',
         encoding="utf-8",
+        newline="\n",
     )
     return report
 
@@ -93,7 +94,7 @@ def test_a_module_name_that_only_shares_a_prefix_is_not_its_case(
 
 def test_an_unreadable_report_refuses(tmp_path: Path) -> None:
     torn = tmp_path / "junit.xml"
-    torn.write_text("<testsuites><testsuite>", encoding="utf-8")
+    torn.write_text("<testsuites><testsuite>", encoding="utf-8", newline="\n")
 
     assert _run(torn) == 1
     assert _run(tmp_path / "missing.xml") == 1

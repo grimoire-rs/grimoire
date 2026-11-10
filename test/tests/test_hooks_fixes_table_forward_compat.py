@@ -79,7 +79,7 @@ def _recording_payload(tmp_path: Path, name: str) -> tuple[list[str], Path, Path
     payload_dir = tmp_path / "payloads" / name
     payload_dir.mkdir(parents=True)
     marker = tmp_path / f"{name}.marker"
-    (payload_dir / "guard.sh").write_text(f"#!/bin/sh\ncat > '{marker}'\n")
+    (payload_dir / "guard.sh").write_text(f"#!/bin/sh\ncat > '{marker}'\n", encoding="utf-8", newline="\n")
     return ["sh", str(payload_dir / "guard.sh")], marker, payload_dir
 
 
@@ -90,7 +90,7 @@ def _table(grim_home: Path) -> Path:
 def _seed(grim_home: Path, body: str) -> Path:
     table = _table(grim_home)
     table.parent.mkdir(parents=True, exist_ok=True)
-    table.write_text(body)
+    table.write_text(body, encoding="utf-8", newline="\n")
     return table
 
 
@@ -110,7 +110,7 @@ def _armed_project(grim_at, project_dir: Path, unique_repo: str):
 
 def _claude_marked(project_dir: Path) -> bool:
     surface = project_dir / ".claude" / "settings.local.json"
-    return surface.is_file() and "hook-dispatcher" in surface.read_text()
+    return surface.is_file() and "hook-dispatcher" in surface.read_text(encoding="utf-8")
 
 
 def _run_hook(table: Path, root: str = ROOT):
@@ -242,7 +242,7 @@ def test_install_keeps_another_workspaces_rows_it_cannot_read(
 
     runner.run("install", "--trust-hooks")
 
-    roots = json.loads(table.read_text())["roots"]
+    roots = json.loads(table.read_text(encoding="utf-8"))["roots"]
     assert roots[OTHER_ROOT] == other, "another workspace's rows must survive this install verbatim"
     mine = [root for token, root in roots.items() if token != OTHER_ROOT]
     assert [row["id"] for root in mine for row in root["hooks"]] == ["guard"], roots
@@ -260,7 +260,7 @@ def test_install_leaves_a_table_it_cannot_read_untouched_and_arms_nothing(
     result = runner.run("install", check=False)
 
     assert result.returncode == 0, result.stderr
-    assert table.read_text() == body, "a table this grim cannot read must never be written over"
+    assert table.read_text(encoding="utf-8") == body, "a table this grim cannot read must never be written over"
     assert str(table) in result.stderr, result.stderr
     assert not _claude_marked(project_dir)
     item = next(i for i in runner.json("status")["items"] if i["kind"] == "hook")

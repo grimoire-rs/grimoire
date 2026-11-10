@@ -14,7 +14,7 @@ def test_project_init_creates_config(grim_at, project_dir: Path) -> None:
     assert result.returncode == 0, result.stderr
     cfg = project_dir / "grimoire.toml"
     assert cfg.is_file()
-    body = cfg.read_text()
+    body = cfg.read_text(encoding="utf-8")
     assert "[skills]" in body
     assert "[rules]" in body
 
@@ -22,7 +22,7 @@ def test_project_init_creates_config(grim_at, project_dir: Path) -> None:
 def test_init_with_registry_seeds_options(grim_at, project_dir: Path) -> None:
     runner = grim_at(project_dir)
     runner.run("init", "--registry", "ghcr.io/acme", check=False)
-    body = (project_dir / "grimoire.toml").read_text()
+    body = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     # P2: init now emits [[registries]] + default = true, NOT [options]/default_registry
     assert "[[registries]]" in body
     assert 'oci = "ghcr.io/acme"' in body
@@ -37,7 +37,7 @@ def test_init_snapshots_env_default_registry(grim_at, project_dir: Path) -> None
     runner.env["GRIM_DEFAULT_REGISTRY"] = "snap.example"
     result = runner.plain("init", check=False)
     assert result.returncode == 0, result.stderr
-    body = (project_dir / "grimoire.toml").read_text()
+    body = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert "[[registries]]" in body
     assert 'oci = "snap.example"' in body
     assert "default = true" in body
@@ -49,7 +49,7 @@ def test_init_explicit_registry_beats_env(grim_at, project_dir: Path) -> None:
     runner = grim_at(project_dir)
     runner.env["GRIM_DEFAULT_REGISTRY"] = "env.example"
     runner.run("init", "--registry", "flag.example", check=False)
-    body = (project_dir / "grimoire.toml").read_text()
+    body = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert "[[registries]]" in body
     assert 'oci = "flag.example"' in body
     assert "default = true" in body
@@ -64,7 +64,7 @@ def test_init_without_any_registry_never_snapshots_the_fallback(
     runner = grim_at(project_dir)
     runner.env.pop("GRIM_DEFAULT_REGISTRY", None)
     runner.plain("init", check=False)
-    body = (project_dir / "grimoire.toml").read_text()
+    body = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert "[[registries]]" not in body
     assert "default_registry" not in body
 
@@ -80,7 +80,7 @@ def test_init_seeds_options_clients_from_detection(
     (bare_project_dir / ".opencode").mkdir()
     runner = grim_at(bare_project_dir)
     runner.plain("init", check=False)
-    body = (bare_project_dir / "grimoire.toml").read_text()
+    body = (bare_project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert "[options]" in body
     # Written in ClientTarget::ALL order, not the order they were created.
     assert 'clients = ["claude", "opencode"]' in body, body
@@ -96,7 +96,7 @@ def test_init_writes_no_client_set_when_nothing_is_detected(
     stuck writing to the pool forever."""
     runner = grim_at(bare_project_dir)
     runner.plain("init", check=False)
-    body = (bare_project_dir / "grimoire.toml").read_text()
+    body = (bare_project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert "[options]" not in body
     assert "agents" not in body
     assert runner.json("context")["clients"] == ["agents"]
@@ -161,7 +161,7 @@ def test_init_registry_resolves_for_add(
     runner.env.pop("GRIM_DEFAULT_REGISTRY", None)
     # Init with the registry — writes [[registries]] + default = true.
     runner.run("init", "--registry", registry, check=False)
-    body = (project_dir / "grimoire.toml").read_text()
+    body = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert "[[registries]]" in body, f"init must write [[registries]]: {body}"
     assert f'oci = "{registry}"' in body
     assert "default = true" in body
@@ -172,7 +172,7 @@ def test_init_registry_resolves_for_add(
     assert out["kind"] == "skill"
     assert out["status"] == "added"
     # The persisted entry in config must carry the fully-qualified name.
-    cfg_after = (project_dir / "grimoire.toml").read_text()
+    cfg_after = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert f"{registry}/" in cfg_after, (
         f"skill binding must use the [[registries]] primary host '{registry}/'; "
         f"got:\n{cfg_after}"
@@ -188,9 +188,9 @@ def test_init_seeds_schema_directive_and_it_survives_writes(
     runner.run("init")
 
     directive = "#:schema https://grimoire.rs/schemas/grimoire-config.schema.json"
-    body = (project_dir / "grimoire.toml").read_text()
+    body = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert body.startswith(directive + "\n"), f"init must seed the directive: {body}"
 
     runner.run("config", "set", "options.clients", "claude")
-    body = (project_dir / "grimoire.toml").read_text()
+    body = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert body.startswith(directive), f"rewrite must keep the directive: {body}"

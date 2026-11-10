@@ -79,7 +79,7 @@ def test_the_page_example_builds(grim_at, grim_binary: Path, project_dir: Path, 
 
     target = project_dir / DOCUMENT_PATH
     target.parent.mkdir(parents=True)
-    target.write_text(document, encoding="utf-8")
+    target.write_text(document, encoding="utf-8", newline="\n")
 
     runner = grim_at(project_dir)
     # The page types `grim`; give the shell that name, and nothing else of the host's.

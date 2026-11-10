@@ -103,7 +103,7 @@ def test_add_name_override_replaces_inferred_name(
     # The config binding name must match the --name value.
     # The FQ reference in the value still contains "code-review" (that's the
     # repo path), but the KEY must be "cr", not "code-review".
-    cfg = (project_dir / "grimoire.toml").read_text()
+    cfg = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     skills_section = cfg.split("[skills]")[1].split("[rules]")[0]
     assert 'cr = "' in skills_section, (
         f"config skills section must have key 'cr', got:\n{skills_section}"
@@ -138,13 +138,13 @@ def test_add_name_override_installs_rebound_skill(
 
     index = project_dir / ".claude/skills/cr/SKILL.md"
     assert index.is_file(), "rebound skill must materialize under the binding dir"
-    doc = index.read_text()
+    doc = index.read_text(encoding="utf-8")
     assert "name: cr" in doc, f"frontmatter name must be rewritten to the binding:\n{doc}"
     assert "name: code-review" not in doc, f"stale artifact name must be gone:\n{doc}"
     assert doc.endswith("# CR\n"), f"body must be preserved:\n{doc}"
     assert (
         project_dir / ".claude/skills/cr/scripts/run.sh"
-    ).read_text() == "echo hi\n", "sibling files stay verbatim"
+    ).read_text(encoding="utf-8") == "echo hi\n", "sibling files stay verbatim"
 
 
 def test_add_rejects_invalid_binding_name(
@@ -171,7 +171,7 @@ def test_add_rejects_invalid_binding_name(
         f"error must explain the charset; stderr:\n{result.stderr}"
     )
     # Nothing declared, nothing installed.
-    cfg = (project_dir / "grimoire.toml").read_text()
+    cfg = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert "Code-Review" not in cfg, "refused add must not write the config"
 
 
@@ -232,7 +232,7 @@ def test_add_dotted_name_installs_end_to_end(
     )
     assert out["status"] == "added"
 
-    cfg = (project_dir / "grimoire.toml").read_text()
+    cfg = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     skills_section = cfg.split("[skills]")[1].split("[rules]")[0]
     assert '"socket.io" = "' in skills_section, (
         f"config skills section must quote the dotted binding key "
@@ -290,5 +290,5 @@ def test_add_rejects_dotted_edge_binding_names(
             f"binding {bad!r} must exit 64, got {result.returncode}; "
             f"stderr: {result.stderr}"
         )
-        cfg = (project_dir / "grimoire.toml").read_text()
+        cfg = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
         assert bad not in cfg, f"refused add must not write binding {bad!r}"

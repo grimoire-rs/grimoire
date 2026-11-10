@@ -8,7 +8,7 @@ from pathlib import Path
 
 def _write(p: Path, body: str) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(body)
+    p.write_text(body, encoding="utf-8", newline="\n")
 
 
 def test_build_skill_dir(grim_at, project_dir: Path) -> None:

@@ -49,7 +49,7 @@ def test_a_lock_writer_refuses_while_another_holds_the_flock(
     write_config(project_dir, skills={"alpha": "localhost:5000/acme/alpha:1"})
     config = project_dir / "grimoire.toml"
     lock = project_dir / "grimoire.lock"
-    lock.write_text(_LOCK, encoding="utf-8")
+    lock.write_text(_LOCK, encoding="utf-8", newline="\n")
     config_bytes = config.read_bytes()
 
     with held_flock(project_dir / "grimoire.toml.lock"):

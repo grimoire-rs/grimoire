@@ -155,10 +155,10 @@ def test_an_old_per_worktree_rule_stays_inert_and_the_next_install_heals(
     primary, linked = checkouts
     runner = _arm(grim_at, linked, hook)
     common = _common_exclude(primary)
-    common.write_text(common.read_text(encoding="utf-8").replace(f"{SETTINGS}\n", ""), encoding="utf-8")
+    common.write_text(common.read_text(encoding="utf-8").replace(f"{SETTINGS}\n", ""), encoding="utf-8", newline="\n")
     old = primary / ".git" / "worktrees" / linked.name / "info" / "exclude"
     old.parent.mkdir(exist_ok=True)
-    old.write_text(f"# mine\n{SETTINGS}\n", encoding="utf-8")
+    old.write_text(f"# mine\n{SETTINGS}\n", encoding="utf-8", newline="\n")
     assert _rule_source(git, linked) is None, "precondition: git never reads the per-worktree file"
 
     runner.run("install")

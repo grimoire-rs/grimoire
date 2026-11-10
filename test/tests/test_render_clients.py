@@ -59,7 +59,7 @@ def _loads_jsonc(text: str) -> dict:
 
 def _write(p: Path, body: str) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(body)
+    p.write_text(body, encoding="utf-8", newline="\n")
 
 
 def _canonical_skill_doc(name: str = "my-skill") -> str:
@@ -174,7 +174,7 @@ def test_claude_skill_lifts_namespaced_keys_to_native_typed_fields(
 
     skill_md = project_dir / ".claude/skills/my-skill/SKILL.md"
     assert skill_md.is_file(), "SKILL.md must be installed for claude"
-    text = skill_md.read_text()
+    text = skill_md.read_text(encoding="utf-8")
 
     # The bool is a native YAML bool — no quotes around `false`.
     assert "user-invocable: false" in text, (
@@ -230,8 +230,8 @@ def test_claude_background_and_omit_claude_md_lift_and_self_heal(
 
     skill_md = project_dir / ".claude/skills/bg-skill/SKILL.md"
     agent_md = project_dir / ".claude/agents/lean-agent.md"
-    assert "background: false" in skill_md.read_text(), skill_md.read_text()
-    assert "omitClaudeMd: true" in agent_md.read_text(), agent_md.read_text()
+    assert "background: false" in skill_md.read_text(encoding="utf-8"), skill_md.read_text(encoding="utf-8")
+    assert "omitClaudeMd: true" in agent_md.read_text(encoding="utf-8"), agent_md.read_text(encoding="utf-8")
 
     before = (skill_md.read_bytes(), agent_md.read_bytes())
     again = runner.json("install", "--client", "claude")["items"]
@@ -268,7 +268,7 @@ def test_copilot_agent_keys_lift_and_self_heal(
     assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
 
     agent_md = project_dir / ".github/agents/cp-agent.md"
-    text = agent_md.read_text()
+    text = agent_md.read_text(encoding="utf-8")
     assert "disable-model-invocation: true" in text, text
     assert "user-invocable: false" in text, text
     assert "target: vscode" in text, text
@@ -318,11 +318,11 @@ def test_codex_startup_timeout_and_persistent_effort_render_and_self_heal(
 
     cfg = project_dir / ".codex" / "config.toml"
     agent_toml = project_dir / ".codex" / "agents" / "deep-agent.toml"
-    entry = tomllib.loads(cfg.read_text())["mcp_servers"]["slow-mcp"]
+    entry = tomllib.loads(cfg.read_text(encoding="utf-8"))["mcp_servers"]["slow-mcp"]
     assert entry["startup_timeout_ms"] == 7000, entry
     assert type(entry["startup_timeout_ms"]) is int, "Codex reads a u64, never a TOML float"
     assert "timeout" not in entry, entry
-    assert tomllib.loads(agent_toml.read_text())["model_reasoning_effort"] == "persistent"
+    assert tomllib.loads(agent_toml.read_text(encoding="utf-8"))["model_reasoning_effort"] == "persistent"
 
     before = (cfg.read_bytes(), agent_toml.read_bytes())
     again = runner.json("install", "--client", "codex")["items"]
@@ -346,7 +346,7 @@ def test_opencode_skill_is_clean_universal_no_tool_keys(
 
     skill_md = project_dir / ".opencode/skills/my-skill/SKILL.md"
     assert skill_md.is_file(), "SKILL.md must be installed for opencode"
-    text = skill_md.read_text()
+    text = skill_md.read_text(encoding="utf-8")
 
     assert "claude." not in text, (
         f"claude.* keys must be gone for opencode:\n{text}"
@@ -376,7 +376,7 @@ def test_copilot_skill_is_clean_universal_no_tool_keys(
 
     skill_md = project_dir / ".github/skills/my-skill/SKILL.md"
     assert skill_md.is_file(), "SKILL.md must be installed for copilot"
-    text = skill_md.read_text()
+    text = skill_md.read_text(encoding="utf-8")
 
     assert "claude." not in text, (
         f"claude.* keys must be gone for copilot:\n{text}"
@@ -416,8 +416,8 @@ def test_opencode_and_copilot_skill_renders_are_byte_identical(
     assert oc_bytes == cp_bytes, (
         "OpenCode and Copilot skill SKILL.md must be byte-identical "
         "(unified universal render):\n"
-        f"  opencode: {oc_skill.read_text()!r}\n"
-        f"  copilot:  {cp_skill.read_text()!r}"
+        f"  opencode: {oc_skill.read_text(encoding="utf-8")!r}\n"
+        f"  copilot:  {cp_skill.read_text(encoding="utf-8")!r}"
     )
 
 
@@ -451,7 +451,7 @@ def test_sibling_files_install_verbatim_for_all_clients(
     ):
         ref = root / "reference.md"
         assert ref.is_file(), f"reference.md must exist for {client}"
-        assert ref.read_text() == "# Reference\nVerbatim content.\n", (
+        assert ref.read_text(encoding="utf-8") == "# Reference\nVerbatim content.\n", (
             f"sibling reference.md must be verbatim for {client}"
         )
 
@@ -476,8 +476,8 @@ def test_rendered_skill_drift_refused_then_forced(
     runner.json("install", "--client", "claude")
 
     installed = project_dir / ".claude/skills/my-skill/SKILL.md"
-    original_text = installed.read_text()
-    installed.write_text("hand edited\n")
+    original_text = installed.read_text(encoding="utf-8")
+    installed.write_text("hand edited\n", encoding="utf-8", newline="\n")
 
     # Without --force: must refuse with exit 65.
     refused = runner.run("install", "--client", "claude", check=False)
@@ -485,14 +485,14 @@ def test_rendered_skill_drift_refused_then_forced(
         f"modified rendered skill must refuse with 65, got "
         f"{refused.returncode}; {refused.stderr}"
     )
-    assert installed.read_text() == "hand edited\n", (
+    assert installed.read_text(encoding="utf-8") == "hand edited\n", (
         "a refused install must not overwrite the user's edit"
     )
 
     # With --force: must overwrite and restore the rendered content.
     forced = runner.run("install", "--client", "claude", "--force", check=False)
     assert forced.returncode == 0, forced.stderr
-    restored = installed.read_text()
+    restored = installed.read_text(encoding="utf-8")
     # The restored content must carry the native lifted field (deterministic).
     assert "user-invocable: false" in restored, (
         f"forced install must restore the rendered content:\n{restored}"
@@ -518,7 +518,7 @@ def test_claude_rule_is_verbatim_paths_frontmatter_intact(
 
     rule_md = project_dir / ".claude/rules/rust-style.md"
     assert rule_md.is_file(), "rule must exist for claude"
-    text = rule_md.read_text()
+    text = rule_md.read_text(encoding="utf-8")
     assert "paths:" in text, "paths: frontmatter must be present for claude"
     assert "Use 4 spaces." in text
 
@@ -547,7 +547,7 @@ def test_claude_rule_with_vendor_metadata_is_cleaned(
 
     rule_md = project_dir / ".claude/rules/rust-style.md"
     assert rule_md.is_file(), "rule must exist for claude"
-    text = rule_md.read_text()
+    text = rule_md.read_text(encoding="utf-8")
 
     # The foreign copilot vendor key must be gone from the installed file.
     assert "copilot.exclude-agent" not in text, (
@@ -581,7 +581,7 @@ def test_copilot_rule_maps_paths_to_apply_to(
 
     instr = project_dir / ".github/instructions/rust-style.instructions.md"
     assert instr.is_file(), "instructions.md must exist for copilot"
-    text = instr.read_text()
+    text = instr.read_text(encoding="utf-8")
 
     # Frontmatter: applyTo mapping, no paths:.
     assert 'applyTo: "**/*.rs"' in text, (
@@ -620,7 +620,7 @@ def test_copilot_rule_with_exclude_agent_emits_exclude_agent_frontmatter(
     assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
 
     instr = project_dir / ".github/instructions/rust-style.instructions.md"
-    text = instr.read_text()
+    text = instr.read_text(encoding="utf-8")
     assert 'excludeAgent: "code-review"' in text, (
         f"expected excludeAgent in copilot instructions:\n{text}"
     )
@@ -643,7 +643,7 @@ def test_opencode_rule_strips_frontmatter_adds_provenance(
 
     rule_md = project_dir / ".opencode/rules/rust-style.md"
     assert rule_md.is_file(), "rule must exist for opencode"
-    text = rule_md.read_text()
+    text = rule_md.read_text(encoding="utf-8")
 
     assert text.startswith("<!-- generated by grim from "), (
         f"opencode rule must start with provenance comment:\n{text}"
@@ -670,7 +670,7 @@ def test_opencode_scoped_rule_states_its_scope_in_the_body(
     rows = json.loads(result.stdout)["items"]
     assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
 
-    text = (project_dir / ".opencode/rules/rust-style.md").read_text()
+    text = (project_dir / ".opencode/rules/rust-style.md").read_text(encoding="utf-8")
     assert "> Applies only when working on files matching `**/*.rs`." in text, (
         f"the dropped scope must be restated as prose:\n{text}"
     )
@@ -698,7 +698,7 @@ def test_opencode_unscoped_rule_gets_no_scope_notice(
     runner.run("lock", check=False)
 
     result = runner.run("install", "--client", "opencode", format="json", log_level="warn")
-    text = (project_dir / ".opencode/rules/plain-style.md").read_text()
+    text = (project_dir / ".opencode/rules/plain-style.md").read_text(encoding="utf-8")
     assert "Applies only" not in text, f"nothing was scoped: {text!r}"
     assert "path scoping" not in result.stderr, (
         f"an unscoped rule drops nothing; got: {result.stderr!r}"
@@ -723,7 +723,7 @@ def test_opencode_rule_install_registers_glob_in_opencode_json(
 
     cfg_path = project_dir / "opencode.json"
     assert cfg_path.is_file(), "opencode.json must be created after opencode rule install"
-    cfg = json.loads(cfg_path.read_text())
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
     assert "instructions" in cfg, f"opencode.json must have instructions key: {cfg}"
     assert ".opencode/rules/*.md" in cfg["instructions"], (
         f"managed glob must be in instructions: {cfg['instructions']}"
@@ -740,7 +740,7 @@ def test_opencode_rule_install_preserves_existing_opencode_json_keys(
         "model": "anthropic/claude-opus-4",
         "instructions": ["CONTRIBUTING.md"],
     }
-    (project_dir / "opencode.json").write_text(json.dumps(pre_existing))
+    (project_dir / "opencode.json").write_text(json.dumps(pre_existing), encoding="utf-8", newline="\n")
 
     _push_rule_paths_only(unique_repo)
     write_config(project_dir, rules={"rust-style": f"{registry}/{unique_repo}/rust-style:v1"})
@@ -749,7 +749,7 @@ def test_opencode_rule_install_preserves_existing_opencode_json_keys(
     rows = runner.json("install", "--client", "opencode")["items"]
     assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
 
-    cfg = json.loads((project_dir / "opencode.json").read_text())
+    cfg = json.loads((project_dir / "opencode.json").read_text(encoding="utf-8"))
     # The pre-existing model key must still be there.
     assert cfg.get("model") == "anthropic/claude-opus-4", (
         f"model key must be preserved: {cfg}"
@@ -776,7 +776,7 @@ def test_opencode_rule_uninstall_removes_glob_from_opencode_json(
         "model": "anthropic/claude-opus-4",
         "instructions": ["CONTRIBUTING.md"],
     }
-    (project_dir / "opencode.json").write_text(json.dumps(pre_existing))
+    (project_dir / "opencode.json").write_text(json.dumps(pre_existing), encoding="utf-8", newline="\n")
 
     _push_rule_paths_only(unique_repo)
     write_config(project_dir, rules={"rust-style": f"{registry}/{unique_repo}/rust-style:v1"})
@@ -785,7 +785,7 @@ def test_opencode_rule_uninstall_removes_glob_from_opencode_json(
     runner.json("install", "--client", "opencode")
 
     # Verify the glob was added.
-    cfg = json.loads((project_dir / "opencode.json").read_text())
+    cfg = json.loads((project_dir / "opencode.json").read_text(encoding="utf-8"))
     assert ".opencode/rules/*.md" in cfg["instructions"]
 
     # Uninstall the rule.
@@ -797,7 +797,7 @@ def test_opencode_rule_uninstall_removes_glob_from_opencode_json(
     assert not rule_md.exists(), "rule file must be removed after uninstall"
 
     # opencode.json: managed glob gone; pre-existing entries preserved.
-    cfg_after = json.loads((project_dir / "opencode.json").read_text())
+    cfg_after = json.loads((project_dir / "opencode.json").read_text(encoding="utf-8"))
     assert ".opencode/rules/*.md" not in cfg_after.get("instructions", []), (
         f"managed glob must be removed after last rule uninstall: {cfg_after}"
     )
@@ -825,7 +825,7 @@ def test_update_prune_with_client_subset_removes_opencode_glob(
     runner.run("lock", check=False)
     rows = runner.json("install", "--client", "opencode")["items"]
     assert all(r["status"] in ("installed", "unchanged") for r in rows), rows
-    cfg = json.loads((project_dir / "opencode.json").read_text())
+    cfg = json.loads((project_dir / "opencode.json").read_text(encoding="utf-8"))
     assert ".opencode/rules/*.md" in cfg["instructions"]
 
     # Drop the rule from the declaration, then update for a *different*
@@ -838,7 +838,7 @@ def test_update_prune_with_client_subset_removes_opencode_glob(
     assert not (project_dir / ".opencode/rules/rust-style.md").exists(), (
         "pruned rule file must be deleted"
     )
-    cfg_after = json.loads((project_dir / "opencode.json").read_text())
+    cfg_after = json.loads((project_dir / "opencode.json").read_text(encoding="utf-8"))
     assert ".opencode/rules/*.md" not in cfg_after.get("instructions", []), (
         f"managed glob must be removed when the pruned rule was the last opencode rule: {cfg_after}"
     )
@@ -1094,7 +1094,7 @@ def _add_mcp(
     """
     descriptor = project_dir / "src" / "mcp" / "grim-mcp.toml"
     descriptor.parent.mkdir(parents=True, exist_ok=True)
-    descriptor.write_text(body)
+    descriptor.write_text(body, encoding="utf-8", newline="\n")
     ref = f"{registry}/{unique_repo}/mcp/grim-mcp:1.0.0"
     runner.json("release", str(descriptor), ref, "--kind", "mcp")
     write_config(project_dir)
@@ -1121,7 +1121,7 @@ def test_cursor_scoped_rule_maps_paths_to_comma_string_globs(
 
     mdc = project_dir / ".cursor/rules/rust-style.mdc"
     assert mdc.is_file(), "Cursor rule must materialize at .cursor/rules/<name>.mdc"
-    text = mdc.read_text()
+    text = mdc.read_text(encoding="utf-8")
 
     # Both globs on a SINGLE `globs:` line proves a comma-joined string, not a
     # YAML sequence (which would put each glob on its own `- ` line). Tolerant
@@ -1152,7 +1152,7 @@ def test_cursor_unscoped_rule_sets_always_apply_true(
 
     mdc = project_dir / ".cursor/rules/always-rule.mdc"
     assert mdc.is_file(), "Cursor rule must materialize at .cursor/rules/<name>.mdc"
-    text = mdc.read_text()
+    text = mdc.read_text(encoding="utf-8")
     assert "alwaysApply: true" in text, f"unscoped rule must set alwaysApply: true:\n{text}"
     assert "Applies everywhere." in text
 
@@ -1179,7 +1179,7 @@ def test_cursor_agent_lifts_cursor_namespaced_keys(
 
     agent_md = project_dir / ".cursor/agents/cur-agent.md"
     assert agent_md.is_file(), "Cursor agent must materialize at .cursor/agents/<name>.md"
-    text = agent_md.read_text()
+    text = agent_md.read_text(encoding="utf-8")
 
     # cursor.model overrides the common model (claude.model precedent).
     assert "model: opus" in text, f"cursor.model must lift to native model:\n{text}"
@@ -1207,7 +1207,7 @@ def test_cursor_skill_strips_foreign_claude_key(
 
     skill_md = project_dir / ".cursor/skills/my-skill/SKILL.md"
     assert skill_md.is_file(), "Cursor skill must materialize at .cursor/skills/<name>/SKILL.md"
-    text = skill_md.read_text()
+    text = skill_md.read_text(encoding="utf-8")
     assert "claude." not in text, f"foreign claude.* keys must be stripped for cursor:\n{text}"
     # Claude-native lifted field must not leak into the Cursor render either.
     assert "user-invocable" not in text, f"claude native field must not appear:\n{text}"
@@ -1227,7 +1227,7 @@ def test_cursor_mcp_entry_lands_in_cursor_mcp_json(
 
     cfg = project_dir / ".cursor/mcp.json"
     assert cfg.is_file(), "Cursor MCP entry must land in .cursor/mcp.json"
-    entry = json.loads(cfg.read_text())["mcpServers"]["grim-mcp"]
+    entry = json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]["grim-mcp"]
     assert entry["command"] == "grim"
     assert entry["type"] == "stdio", f"Cursor stdio entry needs type: stdio; got {entry}"
 
@@ -1251,7 +1251,7 @@ def test_kiro_scoped_rule_maps_to_filematch_array(
 
     steering = project_dir / ".kiro/steering/rust-style.md"
     assert steering.is_file(), "Kiro rule must materialize at .kiro/steering/<name>.md"
-    text = steering.read_text()
+    text = steering.read_text(encoding="utf-8")
     assert "inclusion: fileMatch" in text, f"scoped Kiro rule needs inclusion: fileMatch:\n{text}"
     assert "fileMatchPattern:" in text, f"scoped Kiro rule needs fileMatchPattern:\n{text}"
     # Array form — tolerant of YAML block (`fileMatchPattern:\n  - **/*.rs`)
@@ -1281,7 +1281,7 @@ def test_kiro_unscoped_rule_sets_inclusion_always(
 
     steering = project_dir / ".kiro/steering/always-rule.md"
     assert steering.is_file(), "Kiro rule must materialize at .kiro/steering/<name>.md"
-    text = steering.read_text()
+    text = steering.read_text(encoding="utf-8")
     # Positive assertion: `inclusion: always` must actually be present, not
     # merely the absence of `fileMatch` — a regression that emitted
     # `inclusion: manual` (under which the rule never loads) would still
@@ -1306,7 +1306,7 @@ def test_kiro_mcp_entry_lands_in_kiro_settings_mcp_json(
 
     cfg = project_dir / ".kiro/settings/mcp.json"
     assert cfg.is_file(), "Kiro MCP entry must land in .kiro/settings/mcp.json"
-    entry = json.loads(cfg.read_text())["mcpServers"]["grim-mcp"]
+    entry = json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]["grim-mcp"]
     assert entry["command"] == "grim"
 
 
@@ -1326,7 +1326,7 @@ def test_junie_mcp_entry_lands_in_junie_mcp_mcp_json(
 
     cfg = project_dir / ".junie/mcp/mcp.json"
     assert cfg.is_file(), "Junie MCP entry must land in .junie/mcp/mcp.json"
-    entry = json.loads(cfg.read_text())["mcpServers"]["grim-mcp"]
+    entry = json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]["grim-mcp"]
     assert entry["command"] == "grim"
 
 
@@ -1356,7 +1356,7 @@ def test_gemini_agent_lifts_gemini_namespaced_keys(
 
     agent_md = project_dir / ".gemini/agents/gem-agent.md"
     assert agent_md.is_file(), "Gemini agent must materialize at .gemini/agents/<name>.md"
-    text = agent_md.read_text()
+    text = agent_md.read_text(encoding="utf-8")
     assert "model: gemini-2.5-pro" in text, f"gemini.model must lift to native model:\n{text}"
     # Numeric key lifts to a native UNQUOTED number.
     assert "temperature: 0.5" in text, f"gemini.temperature must lift to a native float:\n{text}"
@@ -1376,7 +1376,7 @@ def test_gemini_mcp_stdio_entry_lands_in_gemini_settings_json(
 
     cfg = project_dir / ".gemini/settings.json"
     assert cfg.is_file(), "Gemini MCP entry must land in .gemini/settings.json"
-    entry = json.loads(cfg.read_text())["mcpServers"]["grim-mcp"]
+    entry = json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]["grim-mcp"]
     assert entry["command"] == "grim"
 
 
@@ -1390,7 +1390,7 @@ def test_gemini_mcp_http_transport_maps_to_http_url_not_url(
     rows = runner.json("install", "--client", "gemini")["items"]
     assert rows[0]["status"] == "installed", rows
 
-    entry = json.loads((project_dir / ".gemini/settings.json").read_text())["mcpServers"]["grim-mcp"]
+    entry = json.loads((project_dir / ".gemini/settings.json").read_text(encoding="utf-8"))["mcpServers"]["grim-mcp"]
     assert entry.get("httpUrl") == "https://api.example.com/mcp", (
         f"grim http transport must map to Gemini's httpUrl key; got {entry}"
     )
@@ -1414,7 +1414,7 @@ def test_zed_mcp_entry_lands_in_zed_settings_context_servers(
 
     cfg = project_dir / ".zed/settings.json"
     assert cfg.is_file(), "Zed MCP entry must land in .zed/settings.json"
-    doc = json.loads(cfg.read_text())
+    doc = json.loads(cfg.read_text(encoding="utf-8"))
     assert "context_servers" in doc, f"Zed container key must be context_servers: {doc}"
     entry = doc["context_servers"]["grim-mcp"]
     # Flat shape — command sits directly on the entry, not nested under command:{path}.
@@ -1437,7 +1437,7 @@ def test_zed_mcp_install_preserves_existing_settings_comment_and_sibling(
         '  "context_servers": {\n'
         '    "my-server": { "command": "my-tool" }\n'
         "  }\n"
-        "}\n"
+        "}\n", encoding="utf-8", newline="\n"
     )
 
     runner = grim_at(project_dir)
@@ -1445,7 +1445,7 @@ def test_zed_mcp_install_preserves_existing_settings_comment_and_sibling(
     rows = runner.json("install", "--client", "zed")["items"]
     assert rows[0]["status"] == "installed", rows
 
-    text = settings.read_text()
+    text = settings.read_text(encoding="utf-8")
     # The user's JSONC comment and their sibling server survive verbatim.
     assert "// user's Zed settings" in text, f"user comment must survive: {text}"
     assert '"my-server"' in text, f"user's sibling context server must survive: {text}"
@@ -1473,7 +1473,7 @@ def test_amp_mcp_entry_lands_in_amp_settings_dotted_key(
 
     cfg = project_dir / ".amp/settings.json"
     assert cfg.is_file(), "Amp MCP entry must land in .amp/settings.json"
-    doc = json.loads(cfg.read_text())
+    doc = json.loads(cfg.read_text(encoding="utf-8"))
     assert "amp.mcpServers" in doc, (
         f"Amp container key must be the literal dotted key 'amp.mcpServers': {list(doc)}"
     )
@@ -1503,7 +1503,7 @@ def test_amp_mcp_lifecycle_uses_existing_settings_jsonc_and_preserves_comments(
         '  "amp.mcpServers": {\n'
         '    "my-server": { "command": "my-tool" }\n'
         "  }\n"
-        "}\n"
+        "}\n", encoding="utf-8", newline="\n"
     )
 
     runner = grim_at(project_dir)
@@ -1515,7 +1515,7 @@ def test_amp_mcp_lifecycle_uses_existing_settings_jsonc_and_preserves_comments(
     assert not settings_json.exists(), (
         "install must edit the existing settings.jsonc, never write a competing settings.json"
     )
-    text = settings_jsonc.read_text()
+    text = settings_jsonc.read_text(encoding="utf-8")
     assert "// user's Amp settings" in text, f"user comment must survive install: {text}"
     doc = _loads_jsonc(text)
     assert doc["amp.mcpServers"]["grim-mcp"]["command"] == "grim", f"grim entry added to .jsonc: {doc}"
@@ -1531,7 +1531,7 @@ def test_amp_mcp_lifecycle_uses_existing_settings_jsonc_and_preserves_comments(
     runner.json("uninstall", "mcp", "grim-mcp")
     assert settings_jsonc.is_file(), "uninstall must keep the shared config file"
     assert not settings_json.exists(), "uninstall must not create a settings.json sibling"
-    text = settings_jsonc.read_text()
+    text = settings_jsonc.read_text(encoding="utf-8")
     assert "// user's Amp settings" in text, f"user comment must survive uninstall: {text}"
     doc = _loads_jsonc(text)
     assert "grim-mcp" not in doc["amp.mcpServers"], f"grim entry spliced out on uninstall: {doc}"
@@ -1556,14 +1556,14 @@ def test_cursor_rule_drift_refused_then_forced(
     runner.json("install", "--client", "cursor")
 
     installed = project_dir / ".cursor/rules/rust-style.mdc"
-    installed.write_text("hand edited\n")
+    installed.write_text("hand edited\n", encoding="utf-8", newline="\n")
 
     refused = runner.run("install", "--client", "cursor", check=False)
     assert refused.returncode == 65, (
         f"modified Cursor render must refuse with 65, got {refused.returncode}; {refused.stderr}"
     )
-    assert installed.read_text() == "hand edited\n", "a refused install must not overwrite the edit"
+    assert installed.read_text(encoding="utf-8") == "hand edited\n", "a refused install must not overwrite the edit"
 
     forced = runner.run("install", "--client", "cursor", "--force", check=False)
     assert forced.returncode == 0, forced.stderr
-    assert "alwaysApply: false" in installed.read_text(), "force must restore the rendered content"
+    assert "alwaysApply: false" in installed.read_text(encoding="utf-8"), "force must restore the rendered content"

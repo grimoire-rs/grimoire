@@ -60,7 +60,7 @@ def _suffix(root: Path, base: str) -> str:
 
 def _lock_digests(lock_path: Path, plugin: str) -> dict[tuple[str, str], str]:
     """`(kind, name) -> digest` of one plugin's pins in a marketplace lock."""
-    lock = tomllib.loads(lock_path.read_text())
+    lock = tomllib.loads(lock_path.read_text(encoding="utf-8"))
     return {
         (kind, e["name"]): e["pinned"].rsplit("@", 1)[1]
         for kind in _KINDS
@@ -98,7 +98,7 @@ def _export(runner: GrimRunner, *args: str) -> subprocess.CompletedProcess[str]:
 def _version(result: subprocess.CompletedProcess[str], root: Path) -> str:
     assert result.returncode == 0, f"rc={result.returncode}\nstderr: {result.stderr}"
     (item,) = json.loads(result.stdout)["items"]
-    doc = json.loads((root / _CLAUDE_MANIFEST).read_text())
+    doc = json.loads((root / _CLAUDE_MANIFEST).read_text(encoding="utf-8"))
     assert item["version"] == doc["version"], (item, doc)
     return doc["version"]
 
@@ -142,7 +142,7 @@ def test_s019_version_override_bumps_suffix_after_update(
         "bundle",
     )
     (work / "marketplace.toml").write_text(
-        f'[plugins.team]\ninclude = ["{reg}/team-stack:1"]\n'
+        f'[plugins.team]\ninclude = ["{reg}/team-stack:1"]\n', encoding="utf-8", newline="\n"
     )
     lock_path = work / "marketplace.lock"
     root = work / "dist" / "team.claude"

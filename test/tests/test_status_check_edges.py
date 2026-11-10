@@ -63,7 +63,7 @@ def test_status_check_answers_no_dependency_row_on_an_edge_the_store_does_not_li
     assert dep_answer() is True
 
     lock = project_dir / "grimoire.lock"
-    lock.write_text(forge(lock.read_text(), unique_repo, old))
+    lock.write_text(forge(lock.read_text(encoding="utf-8"), unique_repo, old), encoding="utf-8", newline="\n")
 
     assert dep_answer() is None
 

@@ -98,7 +98,7 @@ def test_command_event_failure_sets_error_type(
 def test_command_event_global_scope(
     grim_at, project_dir: Path, grim_home: Path
 ) -> None:
-    (grim_home / "grimoire.toml").write_text("[skills]\n")
+    (grim_home / "grimoire.toml").write_text("[skills]\n", encoding="utf-8", newline="\n")
     runner = _armed(grim_at(project_dir))
     result = runner.run("status", "--global", timeout=TIMEOUT, check=False)
 
@@ -245,7 +245,7 @@ def test_update_refused_for_a_modified_artifact_emits_no_updated_event(
     retag(a_repo, "stable", _skill(a_repo, "a2\n", "2.0.0").digest)
     retag(b_repo, "1.0.0", _skill(b_repo, "b2\n", "1.0.1").digest)
     edited = project_dir / ".claude/skills/alpha/SKILL.md"
-    edited.write_text(edited.read_text() + "\n# local edit\n")
+    edited.write_text(edited.read_text(encoding="utf-8") + "\n# local edit\n", encoding="utf-8", newline="\n")
     _armed(runner)
     result = runner.run("update", timeout=TIMEOUT, check=False)
 
@@ -296,7 +296,7 @@ def test_dev_install_emits_no_artifact_events(
     skill = project_dir / "dev-skill"
     skill.mkdir()
     (skill / "SKILL.md").write_text(
-        "---\nname: dev-skill\ndescription: Dev.\n---\n# Dev\n"
+        "---\nname: dev-skill\ndescription: Dev.\n---\n# Dev\n", encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
     runner.run("lock", timeout=TIMEOUT)
@@ -314,7 +314,7 @@ def test_path_source_has_no_ref(
     skill = project_dir / "skills" / "local-notes"
     skill.mkdir(parents=True)
     (skill / "SKILL.md").write_text(
-        "---\nname: local-notes\ndescription: d\n---\n# notes\n"
+        "---\nname: local-notes\ndescription: d\n---\n# notes\n", encoding="utf-8", newline="\n"
     )
     write_config(project_dir)
     runner = _armed(grim_at(project_dir))

@@ -217,13 +217,13 @@ def _age(home: Path) -> None:
     )
     data = data.replace(stamp.group(0), f'"built_at": "{built_at}"'.encode(), 1)
     catalog.write_bytes(data)
-    state = json.loads(sidecar.read_text())
+    state = json.loads(sidecar.read_text(encoding="utf-8"))
     state.update(
         catalog_sha256=hashlib.sha256(data).hexdigest(),
         catalog_built_at=built_at,
         checked_at=built_at,
     )
-    sidecar.write_text(json.dumps(state, indent=2))
+    sidecar.write_text(json.dumps(state, indent=2), encoding="utf-8", newline="\n")
 
 
 def _files(home: Path) -> dict[Path, tuple[int, int, int]]:

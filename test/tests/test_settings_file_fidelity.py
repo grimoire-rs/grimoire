@@ -94,7 +94,7 @@ class Scope:
         lock = self.home / "grimoire.lock"
         text = lock.read_text(encoding="utf-8")
         assert old.digest in text
-        lock.write_text(text.replace(old.digest, new.digest), encoding="utf-8")
+        lock.write_text(text.replace(old.digest, new.digest), encoding="utf-8", newline="\n")
 
     def records(self) -> list[dict]:
         state = Path(self.grim.grim_home) / "state" / "global.json"
@@ -150,7 +150,7 @@ def test_comments_order_and_layout_survive_every_edit(scope, fmt: str) -> None:
     client, filename, original, first_table, second_table = FORMATS[fmt]
     s = scope([client])
     path = s.roots[client] / filename
-    path.write_text(original, encoding="utf-8")
+    path.write_text(original, encoding="utf-8", newline="\n")
     first, second = s.package("team", {client: first_table}), s.package("team", {client: second_table})
     s.configure({"team": first})
 
@@ -184,7 +184,7 @@ def test_toml_container_header_and_comment_survive(scope) -> None:
     s = scope(["codex"])
     path = s.roots["codex"] / "config.toml"
     original = "[tui]\n# animations stay as they are\nanimations = false\n"
-    path.write_text(original, encoding="utf-8")
+    path.write_text(original, encoding="utf-8", newline="\n")
     team = s.package("team", {"codex": {"tui": {"auto_recap": True}}})
     s.configure({"team": team})
 
@@ -216,7 +216,7 @@ def test_set_element_is_spliced_not_reserialised(scope, fmt: str) -> None:
     original = "// head\n{\n  \"zebra\": 1,\n  " + body + ",\n  \"apple\": 2\n}\n"
     if fmt == "json":
         original = original.replace(" // mine", "").replace("// head\n", "")
-    path.write_text(original, encoding="utf-8")
+    path.write_text(original, encoding="utf-8", newline="\n")
     table = nest_table(key, [element])
     s.configure({"team": s.package("team", {client: table})})
 
@@ -251,7 +251,7 @@ def test_existing_jsonc_is_edited_in_place(scope) -> None:
     root.mkdir(parents=True)
     jsonc = root / "opencode.jsonc"
     original = '// mine\n{\n  "theme": "dark" // keep\n}\n'
-    jsonc.write_text(original, encoding="utf-8")
+    jsonc.write_text(original, encoding="utf-8", newline="\n")
     s.configure({"team": s.package("team", {"opencode": {"model": "anthropic/sonnet"}})})
 
     s.install()
@@ -286,7 +286,7 @@ def test_symlinked_config_stays_a_symlink(scope, tmp_path: Path, fmt: str, depth
     dotfiles = tmp_path / "dotfiles"
     dotfiles.mkdir()
     real = dotfiles / "real"
-    real.write_text(original, encoding="utf-8")
+    real.write_text(original, encoding="utf-8", newline="\n")
     target = real
     chain = []
     for index in range(depth):
@@ -332,7 +332,7 @@ def test_uninstall_leaves_a_modified_value_until_forced(scope) -> None:
     s.configure({"team": s.package("team", {"claude": {"model": "sonnet", "language": "en"}})})
     s.install()
     target = _claude_file(s)
-    target.write_text(json.dumps({"model": "mine", "language": "en"}), encoding="utf-8")
+    target.write_text(json.dumps({"model": "mine", "language": "en"}), encoding="utf-8", newline="\n")
     held = target.read_bytes()
 
     refused = s.uninstall("team", check=False)
@@ -356,7 +356,7 @@ def test_uninstall_leaves_an_adopted_value_and_says_so(scope) -> None:
     """
     s = scope(["claude"])
     target = _claude_file(s)
-    target.write_text(json.dumps({"model": "sonnet"}), encoding="utf-8")
+    target.write_text(json.dumps({"model": "sonnet"}), encoding="utf-8", newline="\n")
     s.configure({"team": s.package("team", {"claude": {"model": "sonnet", "language": "en"}})})
     s.install()
     assert s.pieces()[("team", "/model", None)] is True
@@ -380,7 +380,7 @@ def test_adopted_value_stays_adopted_and_reachable(scope) -> None:
     """
     s = scope(["claude", "codex"])
     target = _claude_file(s)
-    target.write_text(json.dumps({"model": "sonnet"}), encoding="utf-8")
+    target.write_text(json.dumps({"model": "sonnet"}), encoding="utf-8", newline="\n")
     first = s.package("team", {"claude": {"model": "sonnet"}, "codex": {"model": "gpt"}})
     second = s.package("team", {"claude": {"model": "sonnet", "language": "en"}, "codex": {"model": "gpt"}})
     s.configure({"team": first})
@@ -411,11 +411,11 @@ def test_drifted_adopted_value_refuses_and_force_removes_it(scope) -> None:
     """
     s = scope(["claude"])
     target = _claude_file(s)
-    target.write_text(json.dumps({"model": "sonnet"}), encoding="utf-8")
+    target.write_text(json.dumps({"model": "sonnet"}), encoding="utf-8", newline="\n")
     s.configure({"team": s.package("team", {"claude": {"model": "sonnet"}})})
     s.install()
     assert s.pieces()[("team", "/model", None)] is True
-    target.write_text(json.dumps({"model": "mine"}), encoding="utf-8")
+    target.write_text(json.dumps({"model": "mine"}), encoding="utf-8", newline="\n")
     held = target.read_bytes()
 
     refused = s.uninstall("team", check=False)
@@ -491,7 +491,7 @@ def test_settings_derived_root_move_names_the_old_copy(scope, tmp_path: Path) ->
     new_root.mkdir()
     document = json.loads(old.read_text(encoding="utf-8"))
     document["env"] = {"CLAUDE_CONFIG_DIR": str(new_root)}
-    old.write_text(json.dumps(document), encoding="utf-8")
+    old.write_text(json.dumps(document), encoding="utf-8", newline="\n")
 
     moved = s.install()
 
@@ -567,7 +567,7 @@ def test_awkward_key_is_escaped(scope, fmt: str) -> None:
     s = scope([client])
     path = s.roots[client] / filename
     original = {"json": '{\n  "theme": "dark"\n}\n', "jsonc": '// mine\n{\n  "theme": "dark"\n}\n', "toml": "# mine\ntheme = 'dark'\n"}[fmt]
-    path.write_text(original, encoding="utf-8")
+    path.write_text(original, encoding="utf-8", newline="\n")
     s.configure({"team": s.package("team", {client: table})})
 
     s.install()
@@ -597,9 +597,9 @@ def test_repointed_opencode_config_edits_the_recorded_file(scope, tmp_path: Path
     s = scope(["opencode"])
     first = tmp_path / "first.json"
     second = tmp_path / "second.json"
-    first.write_text("{}\n", encoding="utf-8")
+    first.write_text("{}\n", encoding="utf-8", newline="\n")
     mine = '{\n  "model": "mine/own"\n}\n'
-    second.write_text(mine, encoding="utf-8")
+    second.write_text(mine, encoding="utf-8", newline="\n")
     s.grim.env["OPENCODE_CONFIG"] = str(first)
     team = s.package("team", {"opencode": {"model": "anthropic/sonnet"}})
     s.configure({"team": team})
@@ -634,8 +634,8 @@ def test_repointed_run_holds_the_pin_only_for_a_dropped_value(scope, tmp_path: P
     s = scope(["opencode"])
     first = tmp_path / "first.json"
     second = tmp_path / "second.json"
-    first.write_text("{}\n", encoding="utf-8")
-    second.write_text("{}\n", encoding="utf-8")
+    first.write_text("{}\n", encoding="utf-8", newline="\n")
+    second.write_text("{}\n", encoding="utf-8", newline="\n")
     s.grim.env["OPENCODE_CONFIG"] = str(first)
     team = s.package("team", {"opencode": {"model": "anthropic/sonnet"}})
     s.configure({"team": team})

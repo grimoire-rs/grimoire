@@ -134,10 +134,10 @@ Reproduce `hooks-windows` locally with the grim-wintest `run.sh` before dispatch
 | `acceptance-tests` in `verify-basic.yml` | `ubuntu-latest`, binary `grim-binary` | `Acceptance Test Results` | `acceptance-junit` |
 | `acceptance-tests` in `verify-deep.yml` | one matrix leg each for Linux and macOS, binary `grim-<target>` | `Acceptance Test Results (<leg>)` | `deep-tests-<leg>`, which `test-results` reads as `artifacts/**/junit.xml` |
 
-`platform-check-windows` in `verify-deep.yml` stays one job outside the floor: it has no registry, so most of the suite skips there.
+`platform-check-windows` in `verify-deep.yml` stays one job outside the floor: it runs the full suite unsharded against a native zot registry, and its Windows-only platform skips are not counted by `SKIP_CEILING`.
 `principle-9` in `verify-deep.yml` runs `task test:old-grim` against the v0.15.1 release binary, checked against the SHA-256 pinned in its fetch step; a skip fails there, while the ordinary suite counts those skips under `SKIP_CEILING`.
 
-`test/SUITE_FLOOR`, `test/SKIP_CEILING` and `test/XFAIL_CEILING` are one set for every leg, so `SKIP_CEILING` holds the macOS count, which is the Linux count plus 4: three `test_broken_pipe.py` cases need Linux's `F_SETPIPE_SZ`, and one `test_export_marketplace.py` case needs a case-sensitive filesystem. A leg that adds a platform skip raises it in the same commit. The case count is the same on both legs, because a platform skip here skips each test, never a whole module at collection.
+`test/SUITE_FLOOR`, `test/SKIP_CEILING` and `test/XFAIL_CEILING` are one set for every leg (CI enforces them; the local `task test:parallel` only warns), so `SKIP_CEILING` holds the macOS count, which is the Linux count plus 4: three `test_broken_pipe.py` cases need Linux's `F_SETPIPE_SZ`, and one `test_export_marketplace.py` case needs a case-sensitive filesystem. A leg that adds a platform skip raises it in the same commit. The case count is the same on both legs, because a platform skip here skips each test, never a whole module at collection.
 
 ## Cost Factors
 

@@ -60,7 +60,7 @@ def package(
 
 
 def write_all_json(root: Path, packages: list[dict]) -> None:
-    (root / "all.json").write_text(json.dumps(packages))
+    (root / "all.json").write_text(json.dumps(packages), encoding="utf-8", newline="\n")
 
 
 def index_config(project_dir: Path, locator: str) -> None:
@@ -73,7 +73,7 @@ def index_config(project_dir: Path, locator: str) -> None:
         f'alias = "hub"\n'
         f'index = "{locator}"\n'
         f"default = true\n"
-        f"\n[skills]\n\n[rules]\n"
+        f"\n[skills]\n\n[rules]\n", encoding="utf-8", newline="\n"
     )
 
 
@@ -93,7 +93,7 @@ def filtered_index_config(
         if patterns:
             lines.append(f"{key} = [" + ", ".join(f'"{p}"' for p in patterns) + "]")
     lines += ["default = true", "", "[skills]", "", "[rules]", ""]
-    (project_dir / "grimoire.toml").write_text("\n".join(lines))
+    (project_dir / "grimoire.toml").write_text("\n".join(lines), encoding="utf-8", newline="\n")
 
 
 def write_stats(
@@ -116,7 +116,7 @@ def write_stats(
                 "providers": providers,
                 "entries": entries,
             }
-        )
+        ), encoding="utf-8", newline="\n"
     )
 
 

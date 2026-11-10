@@ -64,7 +64,7 @@ def test_run_stdin_reaches_the_binary(grim: GrimRunner, tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
 
-    cfg = json.loads((docker_config / "config.json").read_text())
+    cfg = json.loads((docker_config / "config.json").read_text(encoding="utf-8"))
     entry = cfg["auths"]["ghcr.io"]["auth"]
     assert base64.b64decode(entry).decode() == "smoketest:hunter2"
 
@@ -131,10 +131,10 @@ def test_hostile_hook_clone_plants_dispatch_table_and_payload(
     assert clone.payload.is_file()
     assert not clone.sentinel.exists(), "planting must not itself execute the payload"
 
-    table = json.loads(clone.dispatch_table.read_text())
+    table = json.loads(clone.dispatch_table.read_text(encoding="utf-8"))
     assert str(clone.workspace) in table
 
-    payload_source = clone.payload.read_text()
+    payload_source = clone.payload.read_text(encoding="utf-8")
     assert str(clone.sentinel) in payload_source
 
 

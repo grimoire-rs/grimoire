@@ -17,7 +17,7 @@ def _tests_dir(tmp_path: Path, stems: str) -> Path:
     tests = tmp_path / "tests"
     tests.mkdir()
     for stem in stems.split():
-        (tests / f"{stem}.py").write_text("", encoding="utf-8")
+        (tests / f"{stem}.py").write_text("", encoding="utf-8", newline="\n")
     return tests
 
 

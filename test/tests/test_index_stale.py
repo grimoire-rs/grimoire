@@ -98,14 +98,14 @@ def _age_cache(grim_home: Path) -> None:
         for p in (grim_home / "catalog").glob("*.json")
         if not p.name.endswith(".sync.json")
     )
-    doc = json.loads(cache.read_text())
+    doc = json.loads(cache.read_text(encoding="utf-8"))
     doc["built_at"] = "2020-01-01T00:00:00Z"
-    cache.write_text(json.dumps(doc))
+    cache.write_text(json.dumps(doc), encoding="utf-8", newline="\n")
 
 
 def _sidecar(grim_home: Path) -> dict:
     (sidecar,) = (grim_home / "catalog").glob("*.sync.json")
-    return json.loads(sidecar.read_text())
+    return json.loads(sidecar.read_text(encoding="utf-8"))
 
 
 def test_a_failed_refresh_defers_the_next_unforced_run(
@@ -176,7 +176,7 @@ def _confirm_cache(grim_home: Path) -> None:
         for p in (grim_home / "catalog").glob("*.json")
         if not p.name.endswith(".sync.json")
     )
-    doc = json.loads(cache.read_text())
+    doc = json.loads(cache.read_text(encoding="utf-8"))
     cache.with_suffix(".sync.json").write_text(
         json.dumps(
             {
@@ -187,7 +187,7 @@ def _confirm_cache(grim_home: Path) -> None:
                 "fallbacks": 0,
                 "failures": 0,
             }
-        )
+        ), encoding="utf-8", newline="\n"
     )
 
 

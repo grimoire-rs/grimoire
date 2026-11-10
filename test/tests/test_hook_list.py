@@ -83,7 +83,7 @@ def _rows(runner) -> list[dict]:
     path = Path(runner.grim_home) / "hooks" / "dispatch.json"
     if not path.is_file():
         return []
-    table = json.loads(path.read_text())
+    table = json.loads(path.read_text(encoding="utf-8"))
     return [row for root in table["roots"].values() for row in root["hooks"]]
 
 
