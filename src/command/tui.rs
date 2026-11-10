@@ -171,6 +171,8 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
         sort_order,
     };
 
+    // The session outlives the startup reads and can edit the global config: stop sharing the memo.
+    ctx.stop_global_config_memo();
     app::run(tui_ctx, project_init).await?;
     Ok(ExitCode::Success)
 }
@@ -342,6 +344,11 @@ mod tests {
             1,
             "the session's registry set must propagate — `.unwrap_or_default()` here drops \
              the user's global registries and exits 0 on a config that must exit 78"
+        );
+        assert_eq!(
+            production.matches("ctx.stop_global_config_memo();").count(),
+            1,
+            "the TUI session must stop the global-config memo before its event loop"
         );
         assert_eq!(
             production.matches("resolve_registries_for_tui(ctx, &other)?").count(),

@@ -67,6 +67,16 @@ pub struct Context {
     /// only writer. A **scoped** resolve (the MCP per-call scope) bypasses
     /// this deliberately — its answer is not the launch scope's.
     plain_http: std::sync::OnceLock<Vec<String>>,
+    /// Per-invocation memo of the loaded global config, so the readers of a
+    /// one-shot run share one file read, one parse and one warning. Filled by
+    /// `command::load_global_config`, the only writer, and only on success:
+    /// the error is not `Clone` and exit-78 classification needs the original.
+    /// A `Clone` starts empty, like `plain_http`.
+    global_config: std::sync::OnceLock<crate::config::global_config::GlobalConfig>,
+    /// Set by a long-running session (the MCP server, the TUI event loop),
+    /// where the file can change under it: the memo is then neither read nor
+    /// written. A one-shot run cannot observe a change. A `Clone` keeps it.
+    global_config_memo_off: std::sync::atomic::AtomicBool,
     /// Per-invocation memo of built access seams, keyed by the two inputs
     /// that decide what a client *is*: its routing mode and its plain-HTTP
     /// exception list.
@@ -139,6 +149,10 @@ impl Clone for Context {
             // A fresh memo: a clone may be re-scoped by its new owner, and a
             // stale plain-HTTP list is the one thing that must never ride along.
             plain_http: std::sync::OnceLock::new(),
+            global_config: std::sync::OnceLock::new(),
+            global_config_memo_off: std::sync::atomic::AtomicBool::new(
+                self.global_config_memo_off.load(std::sync::atomic::Ordering::Relaxed),
+            ),
             // Likewise fresh: the client memo is keyed on the exception list,
             // so carrying it would be sound but pointless — a clone is made to
             // be re-scoped.
@@ -183,6 +197,8 @@ impl Context {
             global: options.global,
             config: options.config.clone(),
             plain_http: std::sync::OnceLock::new(),
+            global_config: std::sync::OnceLock::new(),
+            global_config_memo_off: std::sync::atomic::AtomicBool::new(false),
             clients: AccessMemo::default(),
             #[cfg(test)]
             test_access: None,
@@ -261,6 +277,19 @@ impl Context {
     /// this owns the lifetime.
     pub fn plain_http_memo(&self) -> &std::sync::OnceLock<Vec<String>> {
         &self.plain_http
+    }
+
+    /// The per-invocation memo backing `command::load_global_config`; same
+    /// ownership split as [`Self::plain_http_memo`].
+    /// `None` once [`Self::stop_global_config_memo`] ran.
+    pub fn global_config_memo(&self) -> Option<&std::sync::OnceLock<crate::config::global_config::GlobalConfig>> {
+        (!self.global_config_memo_off.load(std::sync::atomic::Ordering::Relaxed)).then_some(&self.global_config)
+    }
+
+    /// Stop memoizing the global config: every load re-reads the file.
+    pub fn stop_global_config_memo(&self) {
+        self.global_config_memo_off
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// The resolved cache-routing mode for this invocation: `Offline` when
@@ -386,6 +415,8 @@ impl Context {
             global: false,
             config: None,
             plain_http: std::sync::OnceLock::new(),
+            global_config: std::sync::OnceLock::new(),
+            global_config_memo_off: std::sync::atomic::AtomicBool::new(false),
             clients: AccessMemo::default(),
             telemetry: Telemetry::default(),
             test_access: None,
@@ -461,6 +492,8 @@ impl Context {
             global: false,
             config: None,
             plain_http: std::sync::OnceLock::new(),
+            global_config: std::sync::OnceLock::new(),
+            global_config_memo_off: std::sync::atomic::AtomicBool::new(false),
             clients: AccessMemo::default(),
             telemetry: Telemetry::default(),
             test_access: Some(Arc::new(access)),
@@ -485,6 +518,8 @@ impl Context {
             global: false,
             config: None,
             plain_http: std::sync::OnceLock::new(),
+            global_config: std::sync::OnceLock::new(),
+            global_config_memo_off: std::sync::atomic::AtomicBool::new(false),
             clients: AccessMemo::default(),
             telemetry: Telemetry::default(),
             test_access: Some(Arc::new(access)),
