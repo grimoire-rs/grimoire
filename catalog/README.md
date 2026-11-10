@@ -28,8 +28,10 @@ table: a consumer-facing README from `descriptions/<pkg>.md`, plus
 `task catalog:release` (gitignored — a direct `grim publish --manifest`
 without that copy fails loudly with exit 65). Keep the tables explicit on
 every entry: a per-entry table replaces the top-level one, and an entry
-*without* a table falls back to the conventional probe — which would ship
-this maintainer README to the package repository.
+*without* a table gets its own `README.md` at its place (`skills/<n>/README.md`,
+`hooks/<n>/README.md`) if it has one, and otherwise falls back to the
+conventional probe — which would ship this maintainer README to the package
+repository.
 
 Skill internals follow the [agentskills.io specification] best practices:
 supporting docs in `references/`, executable helpers in `scripts/`, static

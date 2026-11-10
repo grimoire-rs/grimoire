@@ -43,9 +43,12 @@ The `[[registries]]` entry with `default = true` sets the primary registry short
 [AI clients](./concepts.md#clients) `grim install` and `grim update` materialize
 into. It accepts a TOML array of client names — any supported
 client (see the [client compatibility matrix](./clients.md#matrix)); when
-absent, the **detected** clients for the scope are targeted — every client
-whose vendor directory or marker is present — falling back to the generic
-`agents` client when none are detected. [`grim init`](./commands.md#init)
+absent from a project, the **detected** clients for the scope are targeted —
+every client whose vendor directory or marker is present — plus the clients in
+the global `clients` list, falling back to the generic `agents` client when
+there are none. A global config that does not load is warned about and read as
+an empty list, so a project that never asked for a global client keeps its exit
+code. [`grim init`](./commands.md#init)
 seeds this key with what it detects, so a workspace configured through
 `init` records its client set once instead of re-deriving it every run.
 Unknown keys are rejected on parse, so a typo surfaces
@@ -1405,6 +1408,7 @@ applies.
 | `GRIM_HOME` | Root data directory (cache, global config, global install state at `$GRIM_HOME/state/global.json`). Project install state lives at `<workspace>/.grimoire/state.json`, not here. Project [settings records](#data-layout) do live here, at `$GRIM_HOME/settings/<workspace-key>.json`. | `~/.grimoire` |
 | `GRIM_DEFAULT_REGISTRY` | Default registry for short references. | unset |
 | `GRIM_OFFLINE` | Disable all network access (same as `--offline`). | `false` |
+| `GRIM_LOG` | Tracing filter for the run: a level (`error`, `warn`, `info`, `debug`, `trace`) or `tracing` directives such as `warn,mio=trace`. The [`--log-level`](./commands.md#global-options) flag wins over it. A value that does not parse is ignored. | `warn` |
 | `GRIM_TELEMETRY` | Opt in to anonymous usage telemetry, sent to the OpenTelemetry collector named by `OTEL_EXPORTER_OTLP_ENDPOINT`. Off unless set; disarmed by `OTEL_SDK_DISABLED`, `DO_NOT_TRACK` and offline mode. Unstable until 1.0 — see [Telemetry](./telemetry.md#enable). | unset |
 | `GRIM_TELEMETRY_REPOSITORY` | Add the redacted `origin` remote of the project repository to the telemetry resource (`vcs.*`). Needs `GRIM_TELEMETRY`. Unstable until 1.0 — see [Telemetry](./telemetry.md#enable). | unset |
 | `GRIM_INSECURE_REGISTRIES` | Comma-separated registries reachable over plain HTTP — for a host no `[[registries]]` entry declares. Adds to the [`insecure`](#plain-http-registries) field rather than overriding it. | unset |

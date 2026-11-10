@@ -157,6 +157,47 @@ Every member is optional, so a repo with just a `README.md` publishes a
 one-file companion. Probe misses are silent: a manifest directory with none of
 these files simply publishes no companion, which is not an error.
 
+### Each package's own README {#description-entry-readme}
+
+A repository that keeps one README per package would otherwise publish the
+root README for every one of them. So by default each entry's own README
+replaces the README of its companion. grim looks in the entry's place under the
+manifest directory:
+
+| Kind | Looked up at |
+|------|--------------|
+| skill, hook | `<path>/README.md`, where `<path>` is the entry's source directory |
+| rule, agent | `<path without .md>/README.md`, the directory beside the source file |
+| bundle, mcp, settings | never looked up |
+
+`<path>` is the entry's resolved source, so an explicit `path` counts. Only the
+README moves. The changelog, the logo and any included files still come from
+the top-level companion. An entry without its own README keeps the top-level
+README, and no artifact's bytes change, so an artifact keeps its digest.
+
+The file must stay inside the manifest directory and be a regular file.
+Otherwise grim skips it and keeps the top-level README. The warning names the
+file and the cause, and says to make it a regular file inside the manifest
+directory or to set `entry_readme = false`. An entry whose source lies outside the manifest directory is
+never looked up.
+
+Two keys in the top-level `[description]` table steer this lookup:
+
+```toml
+[description]
+entry_readme = "PACKAGE.md"   # look for this file name instead of README.md
+# entry_readme = false        # turn the lookup off; true is the default
+```
+
+A name must be a single file name. A separator, `..` or an absolute path exits
+`65` before anything is pushed. A table that sets only `entry_readme` leaves
+the root probe on, and raises no "resolves to no files" error.
+
+**Upgrading.** A repository with package READMEs publishes a different
+companion on its next `grim publish`, even at an unchanged version. The
+artifacts are skipped, and each companion is re-pointed to its package README.
+See the [upgrade note](./upgrading.md#package-readme-companion).
+
 ### The `[description]` table {#description-table}
 
 Declare a `[description]` table to decouple the companion from your repository
@@ -186,6 +227,12 @@ data error (exit 65), checked before any push. A leading `./` is accepted
 A `[description]` table that resolves to zero files is a data error too, and
 `publish = false` disables the auto-companion for the whole manifest.
 
+A table replaces the conventional probe wholesale. One that sets files but no
+`readme` publishes no root README, even when a `README.md` sits next to
+`publish.toml`. grim warns once and names the fix: add `readme = "README.md"`.
+The run still exits `0`, and an entry with its own package README still
+publishes that file beside the table's other members.
+
 ### Fan-out, override, and opt-out {#description-fanout}
 
 A top-level `[description]` publishes the **same** companion to every entry's
@@ -205,6 +252,26 @@ readme = "skills/grim-usage/README.md"
 repository = "grimoire-rs/mcp/grim"
 description = false                  # this repo gets no companion
 ```
+
+#### Which companion an entry gets {#description-precedence}
+
+Three levels decide the files of one entry's companion, and the first that
+applies wins:
+
+1. The entry's own `[<kind>.<name>.description]` table, which replaces
+   everything for that entry. `description = false` publishes no companion.
+2. The top-level `[description]` table.
+3. The conventional files of the [probe](#description-probe), when there is no
+   table.
+
+On top of levels 2 and 3, the entry's [own package
+README](#description-entry-readme) takes the README slot. A level 1 table
+turns that off, and so does `entry_readme = false`.
+
+A table replaces wholesale, and a present table turns the root probe off for
+the slots it omits. An entry's `path` never changes which top-level companion it
+gets. A top-level `publish = false` turns off the shared companion, but an
+entry with its own `[<kind>.<name>.description]` table still publishes one.
 
 A `--dry-run` publish lists the planned companion pushes without touching the
 registry, so you can confirm the fan-out before it happens. They appear as

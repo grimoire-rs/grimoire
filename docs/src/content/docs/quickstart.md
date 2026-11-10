@@ -75,7 +75,8 @@ where you fix it.
 `grim install` materializes every locked artifact into your AI client's
 configuration directory. By default it targets every AI client it detects in
 the workspace, such as [Claude Code][claude], [opencode][opencode], [GitHub
-Copilot][copilot] and [OpenAI Codex][codex]. Pass `--client` to pick
+Copilot][copilot] and [OpenAI Codex][codex]. The clients in your global
+`options.clients` list join them. Pass `--client` to pick
 explicitly, with a comma-separated list for several at once.
 [Codex][codex] supports skills and agents only. A rule aimed at it is skipped
 without a word on stderr, so check [Clients](./clients.md) before you rely on a

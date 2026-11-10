@@ -504,13 +504,30 @@ include   = ["docs/img/*.png"]   # extra README-referenced assets
   entry's repository. Override one entry with its own
   `[<kind>.<name>.description]` table (same schema), or opt it out with
   `description = false`. A manifest-wide `publish = false` inside the
-  top-level table disables the companion for the whole run.
+  top-level table disables the shared companion, but an entry with its own
+  table still publishes one.
 - **Convention fallback.** With no `[description]` table at all, grim
   probes the manifest directory for `README.md`, `CHANGELOG.md`, and
   `assets/logo.png|svg` / `logo.png|svg`; any hit publishes a companion
   automatically (opt out per entry with `description = false`). All
   members are optional — an explicit table that resolves to zero files is
   a data error (exit 65), but a conventional-probe miss is silent.
+- **Package READMEs.** By default each entry's own README replaces the
+  README of its companion: `<path>/README.md` for a skill or hook,
+  `<path without .md>/README.md` for a rule or agent (`<path>` is the
+  entry's source, explicit `path` included). Changelog, logo and included
+  files still come from the top-level companion. `[description]
+  entry_readme = "<name>"` picks another file name and `entry_readme =
+  false` turns the lookup off; a name with a path separator or `..` exits 65.
+  A file that escapes the manifest directory or is not a regular file is
+  skipped with a warning. A repository with package READMEs publishes a
+  different companion on its next run, even at an unchanged version.
+- **Precedence.** Per-entry table, then top-level table, then the
+  conventional files; the package README takes the README slot of the last
+  two. A table replaces wholesale and turns the root probe off for the slots
+  it omits: a top-level table with files but no `readme`, next to a root
+  `README.md`, warns that the README is not published. An entry's `path`
+  never changes which top-level companion it gets.
 - Companion pushes ride the same `grim publish` batch, after the entry's
   own artifact push, and are idempotent — unchanged content republishes
   to the same digest. `--dry-run` previews the planned companion pushes

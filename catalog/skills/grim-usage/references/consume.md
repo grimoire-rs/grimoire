@@ -148,6 +148,17 @@ dependency edge disagrees with, a tagless pin nothing vouches for, and a pin on
 a stale lock that names none of its recorded edges. A warning names each pin
 that moves this way.
 
+A direct declaration's pin also wins over what a dependency asks for. When a
+new or moved parent requests a reference that resolves to another digest than
+the held pin, `grim add`, `grim update` and `grim lock` exit 0 with the same
+lock and warn once per held artifact. A path parent counts when it is new or
+its content changed. The warning names the requester, the requested reference
+and the pin, and offers `grim update -- <name>` or declaring the requested
+reference. A declaration pinned by digest is offered only the second. The probe
+reads at most 64 references and stops after 60 seconds, dropping the rest
+quietly. `grim status --check` lists the cases that stand, a declared bundle's
+included. An offline run and a marketplace part run print none.
+
 `grim add` at the reference a held pin answers, as a dependency, a bundle member
 or a line you took out, keeps that pin. Typing the line and running `grim lock`
 keeps it too on a lock this grim wrote.
@@ -428,8 +439,9 @@ drive automation — its `outputs`
 array lists the per-client paths an artifact was materialized to, and is
 the supported way to script against install locations (the on-disk
 vendor layout itself is not a stable contract). `outputs` is filtered to
-the clients grim detects right now, not the clients recorded at install
-time. Drop a client and its still-on-disk output vanishes from the array,
+the clients grim detects right now, plus the global `options.clients` list
+when the project names none of its own. It is not the clients recorded at
+install time. Drop a client and its still-on-disk output vanishes from the array,
 even though the file has not moved and `state` stays put. Each item also carries
 `clients_missing`/`clients_extra` — the *explicitly configured*
 `[options].clients` diffed against what is actually recorded installed,

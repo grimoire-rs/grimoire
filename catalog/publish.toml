@@ -51,8 +51,9 @@ security = "https://github.com/grimoire-rs/grimoire/security"
 # Description companions: every entry declares an explicit per-entry
 # [description] table (a per-entry table REPLACES the top-level one, so
 # each repeats logo + changelog). Keep it that way — an entry without a
-# table would fall back to the conventional probe and ship the maintainer
-# README.md next to this manifest. `logo.svg` and `CHANGELOG.md` are
+# table would take its own README.md at its place if it has one, else fall
+# back to the conventional probe and ship the maintainer README.md next to
+# this manifest. `logo.svg` and `CHANGELOG.md` are
 # copied in from the repo root by `task catalog:release` (gitignored);
 # a direct `grim publish --manifest` without that copy fails loudly (65).
 

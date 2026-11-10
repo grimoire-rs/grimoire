@@ -179,7 +179,8 @@ steps 1, 2 and 4 on their own machine. Only you publish.
 
 2. Name your harnesses. Without an `options.clients` list, grim writes only to
    the harnesses it detects. The list replaces any list set before, so name
-   every harness you keep.
+   every harness you keep. In a project, the same global list also joins the
+   harnesses detected there.
 
    <!-- doc: guide-share-settings -->
    ```bash-run
