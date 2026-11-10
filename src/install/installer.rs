@@ -7128,6 +7128,36 @@ mod tests {
         );
     }
 
+    /// A Claude `.mcp.json` saved with a byte-order mark takes the entry past
+    /// the BOM and keeps it.
+    #[tokio::test]
+    async fn an_mcp_entry_written_into_a_bom_prefixed_claude_file_keeps_its_bom() {
+        let (dir, lock, access, target, mut state) = mcp_recorded_for("claude").await;
+        let claude = dir.path().join(".mcp.json");
+        std::fs::write(&claude, "\u{feff}{\"theme\": \"dark\"}\n").unwrap();
+
+        let second = install_all(
+            &lock,
+            &access,
+            &DefaultMaterializer,
+            &target,
+            &mut state,
+            &roots(dir.path()),
+            Path::new("."),
+            false,
+        )
+        .await;
+
+        assert_eq!(*second[0].result.as_ref().unwrap(), InstallOutcome::Updated);
+        let raw = std::fs::read_to_string(&claude).unwrap();
+        assert!(raw.starts_with('\u{feff}'), "the BOM survives the write: {raw:?}");
+        assert!(
+            crate::install::json_splice::member_value(&raw, "mcpServers", "srv").is_some(),
+            "{raw}"
+        );
+        assert!(raw.contains("\"theme\""), "the user's key stays: {raw}");
+    }
+
     #[tokio::test]
     async fn pin_change_decline_edits_recorded_path_not_recomputed_config() {
         // C2 regression: the decline splice must remove the stale entry from

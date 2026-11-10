@@ -62,3 +62,24 @@ Section: `## Config roots and env vars` in `.agents/upstream-watchlist.md`
 ```
 | Settings-file BOM | Claude | `settings_env_config_dir` strips a leading U+FEFF before parsing `env.CLAUDE_CONFIG_DIR` from `managed-settings.json`, `managed-settings.d/*.json` and the user `settings.json` (issue #306) | *verified 2026-11-10 against CLI 2.1.321.* Claude reads a BOM-prefixed settings file and honours it: the loader (`FY`->`UT`->`BT`) parses through `safeParseJSON`, whose `JSON.parse(gs(e))` drops a leading `﻿`; `claude doctor` on a BOM `settings.json` reports the same schema errors as the BOM-less file and no "Invalid or malformed JSON". Managed files share the loader (not run live: need `/etc/claude-code`). No changelog or docs line states it; re-verify if the settings loader changes |
 ```
+
+## grim's own readers (checked 2026-11-10, issue #347)
+
+Every grim reader of a Claude settings or MCP file reads past one leading U+FEFF, and every
+reader that writes back keeps it. The shared paths are `json_splice` (`Scanner::at_start` skips
+the mark, `parse_value` strips it; generic test `a_byte_order_mark_is_read_past_and_kept`) and
+`json_config::parse_object` (strips it). A production sweep of `serde_json::from_str` and
+`from_slice` found no other reader of these files. One test per reader pins the behaviour.
+
+| Reader | Claude file | Parse path | Verdict | Pinned by |
+|---|---|---|---|---|
+| `vendor_claude::settings_env_config_dir` | `settings.json`, `managed-settings.json`, `managed-settings.d/*.json` | `serde_json` after `strip_prefix('\u{feff}')` | reads past the BOM (read-only) | `bom_prefixed_user_settings_still_relocate_the_root`, `bom_prefixed_managed_settings_still_relocate_the_root` |
+| `managed_config::sync_managed_element` (`claudeMdExcludes`) | `settings.json` | `json_splice` upsert/remove array element | reads past the BOM and keeps it | `a_bom_prefixed_settings_file_keeps_its_bom_when_claude_md_excludes_is_registered`, `..._is_removed`; acceptance `test_global_claude_md_excludes_registers_into_a_bom_prefixed_settings_file` |
+| `hook_registrar` converge and status paths | `settings.local.json`, `settings.json` | `json_splice` | reads past the BOM and keeps it | `a_bom_prefixed_registration_file_is_read_registered_into_and_keeps_its_bom`, `a_bom_prefixed_registration_file_keeps_its_bom_when_the_registration_is_removed` |
+| `settings_writer` (`reread`, `Splices`) | `settings.json`, `settings.local.json` | `json_splice::value_at`, `upsert_member_at` | reads past the BOM and keeps it | `a_bom_prefixed_settings_file_is_judged_written_and_keeps_its_bom` |
+| `install_state::read_entry_value` | `.mcp.json`, `.claude.json`, settings values | `json_config::parse_object`, `json_splice` | reads past the BOM (read-only) | `a_bom_prefixed_claude_file_is_read_for_an_mcp_entry_and_a_settings_value` |
+| `uninstall::remove_entry` | `.mcp.json`, `.claude.json` | `json_splice::remove_member` | reads past the BOM and keeps it | `uninstall_removes_a_member_from_a_bom_prefixed_file_and_keeps_the_bom` |
+| MCP install write (`installer::install_mcp`) | `.mcp.json`, `.claude.json` | `json_splice::member_value`, `upsert_member` | reads past the BOM and keeps it | `an_mcp_entry_written_into_a_bom_prefixed_claude_file_keeps_its_bom` |
+
+Break check: with `Scanner::at_start` not skipping the mark, seven of the new tests fail; with
+`parse_object` not stripping it, the `install_state` test fails.

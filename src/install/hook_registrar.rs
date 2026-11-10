@@ -6140,6 +6140,67 @@ mod tests {
         assert!(unregistered().is_empty(), "with no row nothing claims it is armed");
     }
 
+    /// A registration file saved with a byte-order mark is read past it: the
+    /// status read still sees both elements, a register leaves the user's key,
+    /// and the BOM survives the write.
+    #[test]
+    fn a_bom_prefixed_registration_file_is_read_registered_into_and_keeps_its_bom() {
+        let run = NamedRun::armed_as("gatekeeper", "Write", (None, None));
+        let unregistered = || {
+            unregistered_gatekeepers(
+                &run.state,
+                run.ws.path(),
+                ConfigScope::Project,
+                &run.roots,
+                &Invocation::WALKED,
+            )
+        };
+        let bom = |text: &str| std::fs::write(run.surface(), format!("\u{feff}{text}")).unwrap();
+
+        let armed = std::fs::read_to_string(run.surface()).unwrap();
+        bom(&armed);
+        assert!(unregistered().is_empty(), "status reads the elements past the BOM");
+
+        bom(r#"{"theme":"dark"}"#);
+        assert!(
+            !unregistered().is_empty(),
+            "the BOM file without the elements reads as unregistered"
+        );
+        converge_clients(
+            &run.state,
+            run.ws.path(),
+            ConfigScope::Project,
+            &run.roots,
+            &arming_policy(),
+        );
+
+        let raw = std::fs::read_to_string(run.surface()).unwrap();
+        assert!(raw.starts_with('\u{feff}'), "the BOM survives the register: {raw:?}");
+        assert!(raw.contains(HOOK_MARKER_VALUE), "{raw}");
+        assert!(raw.contains(r#""theme""#), "the user's key stays: {raw}");
+        assert!(unregistered().is_empty());
+    }
+
+    #[test]
+    fn a_bom_prefixed_registration_file_keeps_its_bom_when_the_registration_is_removed() {
+        let run = NamedRun::armed("Write", (None, None));
+        let armed = std::fs::read_to_string(run.surface()).unwrap();
+        std::fs::write(run.surface(), format!("\u{feff}{armed}")).unwrap();
+        let empty = InstallState::empty(&run.ws.path().join("state.json"));
+
+        converge_clients(
+            &empty,
+            run.ws.path(),
+            ConfigScope::Project,
+            &run.roots,
+            &arming_policy(),
+        );
+
+        let raw = std::fs::read_to_string(run.surface()).unwrap();
+        assert!(raw.starts_with('\u{feff}'), "the BOM survives the removal: {raw:?}");
+        assert!(!raw.contains(HOOK_MARKER_VALUE), "the registration is gone: {raw}");
+    }
+
     /// A refused run stripped the surface and said why. No convergence restores
     /// it until the cause is fixed, so naming one as the remedy would be false.
     #[test]

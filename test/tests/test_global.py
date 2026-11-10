@@ -2281,6 +2281,27 @@ def test_global_claude_settings_env_moves_the_claude_md_excludes_element(
     assert user_settings.read_bytes() == before, "the file holding the env block must stay byte-intact"
 
 
+def test_global_claude_md_excludes_registers_into_a_bom_prefixed_settings_file(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str, tmp_path: Path
+) -> None:
+    """A ``settings.json`` saved by a Windows editor starts with a byte-order
+    mark. The exclusion lands in it, the user's own key survives, and the
+    mark is still the file's first bytes."""
+    runner = GrimRunner(grim_binary, grim_home)
+    _write_support_dir_rule(grim_home, unique_repo, "cc-excl-bom")
+    new_root = _relocate_claude(runner, tmp_path)
+    settings = new_root / "settings.json"
+    settings.write_bytes(b"\xef\xbb\xbf" + json.dumps({"theme": "dark"}).encode("utf-8"))
+    runner.json("lock", "--global")
+    runner.json("install", "--global", "--client", "claude")
+
+    raw = settings.read_bytes()
+    assert raw.startswith(b"\xef\xbb\xbf"), "the byte-order mark must survive the write"
+    doc = json.loads(raw.decode("utf-8-sig"))
+    assert doc["claudeMdExcludes"] == [f"{new_root.as_posix()}/rules/cc-excl-bom/**"]
+    assert doc["theme"] == "dark"
+
+
 def test_global_claude_settings_env_upgrade_moves_the_claude_md_excludes_element(
     grim_binary: Path, grim_home: Path, registry: str, unique_repo: str, tmp_path: Path
 ) -> None:
