@@ -263,12 +263,13 @@ pub struct AnnounceSpec {
 /// A repository description companion source (`[description]` table, top-level
 /// or per-entry). All paths are relative to the manifest (`publish.toml`).
 ///
-/// Well-known members map their source path onto a fixed on-wire name so the
-/// repository layout is decoupled from the companion layout: `readme` →
-/// `README.md`, `logo` → `logo.<ext>` (`logo.png` / `logo.svg`), `changelog` →
-/// `CHANGELOG.md`. `include` globs (README-referenced assets) keep their
-/// manifest-relative path on the wire. Every member is optional, but a table
-/// that resolves to zero files is a data error (there is nothing to publish).
+/// Members map onto fixed on-wire names: `readme` → `README.md`, `logo` →
+/// `logo.<ext>`, `changelog` → `CHANGELOG.md`; `include` globs keep their
+/// manifest-relative path. A table must resolve to at least one file. A
+/// package gets its own table first, then the top-level table, then the
+/// conventional files next to the manifest; a table replaces the next one
+/// wholesale, and a present top-level table turns the conventional lookup off
+/// for the slots it omits.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DescriptionSpec {
@@ -292,6 +293,87 @@ pub struct DescriptionSpec {
     /// the whole manifest. Ignored on a per-entry table (opt out an entry with
     /// `description = false` instead).
     pub publish: Option<bool>,
+
+    /// Top-level table only; ignored on a per-entry table. File name of a
+    /// package's own README inside its source place: the skill or hook
+    /// directory, or the rule or agent path without `.md`. A file found there
+    /// is published as the README of that package's companion, while its
+    /// changelog, logo and included files still come from the top-level table
+    /// or the conventional files. A single file name, or a boolean: `true` is
+    /// `README.md`, `false` turns the lookup off. A table that sets only this
+    /// key leaves the conventional lookup on.
+    pub entry_readme: Option<EntryReadme>,
+}
+
+/// The `entry_readme` setting: a boolean (`true` = the default name, `false` =
+/// off) or the file name to look for. Hand-written `Deserialize` for the same
+/// reason as [`ForkSetting`]: a readable type error instead of serde's
+/// untagged catch-all.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[serde(untagged)]
+pub enum EntryReadme {
+    /// `false` turns the per-entry README off; `true` keeps the default name.
+    Toggle(bool),
+    /// The file name to look for in each entry's place.
+    Name(String),
+}
+
+impl<'de> Deserialize<'de> for EntryReadme {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct EntryReadmeVisitor;
+
+        impl serde::de::Visitor<'_> for EntryReadmeVisitor {
+            type Value = EntryReadme;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a boolean or a file name")
+            }
+
+            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(EntryReadme::Toggle(value))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(EntryReadme::Name(value.to_string()))
+            }
+        }
+
+        deserializer.deserialize_any(EntryReadmeVisitor)
+    }
+}
+
+impl DescriptionSpec {
+    /// True when the table sets `entry_readme` and nothing else: it names no
+    /// file to publish, so it must neither raise the "resolves to no files"
+    /// error nor switch the conventional root probe off.
+    fn sets_only_entry_readme(&self) -> bool {
+        self.entry_readme.is_some()
+            && self.readme.is_none()
+            && self.logo.is_none()
+            && self.changelog.is_none()
+            && self.include.is_empty()
+            && self.publish.is_none()
+    }
+
+    /// True when this top-level table publishes files but names no README
+    /// while the manifest directory holds one: the table replaces the
+    /// conventional probe wholesale, so that README is silently left out.
+    fn shadows_root_readme(&self, manifest_dir: &Path) -> bool {
+        let has_file_slot = self.logo.is_some() || self.changelog.is_some() || !self.include.is_empty();
+        self.publish != Some(false)
+            && self.readme.is_none()
+            && has_file_slot
+            && manifest_dir.join(DESC_README).is_file()
+    }
 }
 
 /// The `[metadata]` table — annotation values applied to every entry that does
@@ -479,10 +561,12 @@ pub struct PublishEntrySpec {
     #[serde(default)]
     pub metadata: Option<MetadataSpec>,
 
-    /// Per-entry description companion: `false` opts this entry out of the
-    /// top-level `[description]` fan-out; a `[<kind>.<name>.description]` table
-    /// overrides it with the entry's own [`DescriptionSpec`]. Absent = inherit
-    /// the top-level companion (or the conventional probe).
+    /// Per-entry description companion. Order: this table, then the top-level
+    /// `[description]` table, then the conventional files next to the
+    /// manifest. A table replaces wholesale, so one here replaces the whole
+    /// companion; `false` opts the entry out. Absent: the entry inherits the top-level companion, with
+    /// its own README (see `entry_readme`) in the README slot. `path` does not
+    /// change which top-level companion an entry gets.
     pub description: Option<EntryDescription>,
 
     /// Whether `--announce` writes an index pointer for this entry. `false`
@@ -592,11 +676,14 @@ pub struct PublishManifest {
     pub announce: Option<AnnounceSpec>,
 
     /// The repository description companion published to every entry
-    /// (fan-out). A per-entry `description` overrides it; `description = false`
-    /// opts an entry out; `publish = false` here is the manifest-wide kill
-    /// switch. When this table is absent grim probes the manifest directory for
-    /// conventional files (`README.md`, `CHANGELOG.md`, `assets/logo.*`,
-    /// `logo.*`) and publishes a companion when any is found.
+    /// (fan-out). Order per entry: its own `description` table, then this
+    /// table, then the conventional files next to the manifest (`README.md`,
+    /// `CHANGELOG.md`, `assets/logo.*`, `logo.*`). A table replaces wholesale:
+    /// when this one is present the conventional lookup is off for every slot
+    /// it omits, so name `readme` here too. `description = false` opts an entry
+    /// out; `publish = false` is the manifest-wide kill switch. An entry's own
+    /// README (see `entry_readme`) takes the README slot; `path` does not
+    /// change which companion an entry gets.
     #[serde(default)]
     pub description: Option<DescriptionSpec>,
 
@@ -2150,11 +2237,27 @@ fn plan_descriptions(
 ) -> anyhow::Result<Vec<PlannedDescription>> {
     // The top-level fallback, resolved once. `publish = false` is the
     // manifest-wide kill switch; with no `[description]` table grim probes the
-    // conventional files.
+    // conventional files. A table that sets only `entry_readme` carries no
+    // file slot, so it leaves the root probe on.
+    let entry_readme = entry_readme_name(manifest.description.as_ref(), manifest_path)?;
+    if manifest
+        .description
+        .as_ref()
+        .is_some_and(|s| s.shadows_root_readme(manifest_dir))
+    {
+        tracing::warn!(
+            "{}: [description] sets no readme, so the README.md next to it is not published; \
+             add readme = \"README.md\" (a [description] table replaces the conventional probe)",
+            manifest_path.display()
+        );
+    }
+    let killed = manifest.description.as_ref().is_some_and(|s| s.publish == Some(false));
     let top_level: Option<Vec<(String, PathBuf)>> = match &manifest.description {
         Some(spec) if spec.publish == Some(false) => None,
-        Some(spec) => Some(resolve_description_spec(spec, manifest_dir, manifest_path)?),
-        None => {
+        Some(spec) if !spec.sets_only_entry_readme() => {
+            Some(resolve_description_spec(spec, manifest_dir, manifest_path)?)
+        }
+        Some(_) | None => {
             let probed = probe_conventional_description(manifest_dir);
             (!probed.is_empty()).then_some(probed)
         }
@@ -2173,7 +2276,36 @@ fn plan_descriptions(
         let files = match entry_description(manifest, entry.kind, &entry.name) {
             Some(EntryDescription::Enabled(false)) => None,
             Some(EntryDescription::Spec(spec)) => Some(resolve_description_spec(spec, manifest_dir, manifest_path)?),
-            Some(EntryDescription::Enabled(true)) | None => top_level.clone(),
+            Some(EntryDescription::Enabled(true)) | None => {
+                let own = match (&entry_readme, killed) {
+                    (Some(name), false) => match probe_entry_readme(manifest_dir, entry.kind, &entry.path, name) {
+                        EntryReadmeProbe::Found(path) => Some(path),
+                        EntryReadmeProbe::Absent => None,
+                        EntryReadmeProbe::Skipped(why) => {
+                            tracing::warn!(
+                                "{} '{}': its own README was not published ({why}); the top-level README stays. \
+                                 Make it a regular file inside the manifest directory, or set `entry_readme = false`",
+                                entry.kind,
+                                entry.name
+                            );
+                            None
+                        }
+                    },
+                    _ => None,
+                };
+                match own {
+                    // Only the README slot moves; changelog, logo and included
+                    // files keep coming from the top-level companion.
+                    Some(path) => {
+                        let mut files = top_level.clone().unwrap_or_default();
+                        files.retain(|(n, _)| n != DESC_README);
+                        files.push((DESC_README.to_string(), path));
+                        files.sort_by(|a, b| a.0.cmp(&b.0));
+                        Some(files)
+                    }
+                    None => top_level.clone(),
+                }
+            }
         };
         let Some(files) = files else { continue };
         // The repository is the entry reference minus its tag. The rightmost
@@ -2393,6 +2525,97 @@ fn logo_packed_name(path: &Path) -> String {
     match path.extension().and_then(|e| e.to_str()) {
         Some(ext) => format!("logo.{}", ext.to_ascii_lowercase()),
         None => "logo".to_string(),
+    }
+}
+
+/// The default file name looked up in each entry's own place.
+const DEFAULT_ENTRY_README: &str = "README.md";
+
+/// Outcome of looking for one entry's own README.
+#[derive(Debug, PartialEq, Eq)]
+enum EntryReadmeProbe {
+    /// A contained regular file to publish as the companion README.
+    Found(PathBuf),
+    /// Nothing there (or the entry has no probed place): silent.
+    Absent,
+    /// Something is there but unusable; the message is shown as a warning.
+    Skipped(String),
+}
+
+/// The file name to look for in each entry's place, or `None` when the lookup
+/// is off (`entry_readme = false`).
+///
+/// A custom name must be exactly one path component: it is joined onto an
+/// entry's place, so a separator, `..`, an absolute path or an empty value
+/// would walk the lookup somewhere the author never listed.
+///
+/// # Errors
+///
+/// Data error (65) naming the manifest when a string value is not a single
+/// path component.
+fn entry_readme_name(spec: Option<&DescriptionSpec>, manifest_path: &Path) -> anyhow::Result<Option<String>> {
+    match spec.and_then(|s| s.entry_readme.as_ref()) {
+        None | Some(EntryReadme::Toggle(true)) => Ok(Some(DEFAULT_ENTRY_README.to_string())),
+        Some(EntryReadme::Toggle(false)) => Ok(None),
+        Some(EntryReadme::Name(name)) => {
+            let mut parts = Path::new(name).components();
+            let single = matches!(
+                (parts.next(), parts.next()),
+                (Some(std::path::Component::Normal(_)), None)
+            );
+            // `Path` splits on `\` only on Windows; refuse it everywhere so a
+            // manifest means the same on every host.
+            if !single || name.contains(['/', '\\', '\0']) {
+                return Err(data_error_at(
+                    manifest_path,
+                    format!(
+                        "[description] entry_readme '{name}' must be a single file name (no path separators or '..')"
+                    ),
+                ));
+            }
+            Ok(Some(name.clone()))
+        }
+    }
+}
+
+/// The directory that holds an entry's own README: the source directory of a
+/// skill or hook, the source file's stem directory for a rule or agent.
+/// Bundle, mcp and settings sources have no such place.
+fn entry_readme_dir(kind: ArtifactKind, path: &Path) -> Option<PathBuf> {
+    match kind {
+        ArtifactKind::Skill | ArtifactKind::Hook => Some(path.to_path_buf()),
+        ArtifactKind::Rule | ArtifactKind::Agent => {
+            (path.extension().is_some_and(|e| e == "md")).then(|| path.with_extension(""))
+        }
+        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Settings => None,
+    }
+}
+
+/// Look for an entry's own README in its place under the manifest directory.
+///
+/// The default-on lookup reads a file the author never named, so it is held to
+/// the same guard as an explicit companion path: the file must pass
+/// [`contained_description_path`] and be a regular file. Anything else is
+/// `Skipped` (the caller warns and keeps the top-level README) rather than an
+/// error, so a repository that publishes today cannot start failing. A source
+/// outside the manifest directory is never probed.
+fn probe_entry_readme(manifest_dir: &Path, kind: ArtifactKind, path: &Path, name: &str) -> EntryReadmeProbe {
+    let Some(place) = entry_readme_dir(kind, path) else {
+        return EntryReadmeProbe::Absent;
+    };
+    let Ok(rel_place) = place.strip_prefix(manifest_dir) else {
+        return EntryReadmeProbe::Absent;
+    };
+    let rel = rel_place.join(name);
+    // The containment error already names the path; the other cause does not.
+    let contained = match contained_description_path(manifest_dir, &rel) {
+        Ok(p) => p,
+        Err(e) => return EntryReadmeProbe::Skipped(format!("{e:#}")),
+    };
+    match std::fs::symlink_metadata(manifest_dir.join(&rel)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => EntryReadmeProbe::Absent,
+        _ if contained.is_file() => EntryReadmeProbe::Found(contained),
+        _ => EntryReadmeProbe::Skipped(format!("{} is not a regular file", rel.display())),
     }
 }
 
@@ -4885,6 +5108,7 @@ mod tests {
             changelog: Some(PathBuf::from("docs/CHANGES.md")),
             include: vec!["img/*.png".to_string()],
             publish: None,
+            entry_readme: None,
         };
         let files = resolve_description_spec(&spec, dir, Path::new("publish.toml")).unwrap();
         let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
@@ -4901,6 +5125,7 @@ mod tests {
             changelog: None,
             include: vec![],
             publish: None,
+            entry_readme: None,
         };
         let err = resolve_description_spec(&spec, tmp.path(), Path::new("publish.toml")).unwrap_err();
         assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
@@ -4916,6 +5141,7 @@ mod tests {
             changelog: None,
             include: vec![],
             publish: None,
+            entry_readme: None,
         };
         let err = resolve_description_spec(&spec, tmp.path(), Path::new("publish.toml")).unwrap_err();
         assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
@@ -5044,6 +5270,573 @@ mod tests {
         let repos: Vec<&str> = planned.iter().map(|p| p.repository.as_str()).collect();
         assert!(repos.contains(&"localhost:5000/acme/skills/a"));
         assert!(repos.contains(&"localhost:5000/acme/skills/b"));
+    }
+
+    // ── per-entry README companion ────────────────────────────────────────
+    //
+    // Entry paths are built the way `resolve_source_path` builds them
+    // (`manifest_dir.join(..)`), so `strip_prefix(manifest_dir)` sees the same
+    // shape it sees in a real run.
+
+    fn entry_at(dir: &Path, kind: ArtifactKind, name: &str, rel: &str) -> PlannedEntry {
+        PlannedEntry {
+            kind,
+            name: name.to_string(),
+            path: dir.join(rel),
+            reference: format!("localhost:5000/acme/{name}:1.0.0"),
+            pin: false,
+            announce: true,
+            name_not_appended: false,
+        }
+    }
+
+    fn plan(manifest_toml: &str, entries: &[PlannedEntry], dir: &Path) -> anyhow::Result<Vec<PlannedDescription>> {
+        let manifest: PublishManifest = toml::from_str(manifest_toml).unwrap();
+        plan_descriptions(&manifest, entries, dir, Path::new("publish.toml"))
+    }
+
+    fn for_repo<'a>(planned: &'a [PlannedDescription], name: &str) -> &'a PlannedDescription {
+        let repo = format!("localhost:5000/acme/{name}");
+        planned
+            .iter()
+            .find(|p| p.repository == repo)
+            .unwrap_or_else(|| panic!("no companion planned for {repo}"))
+    }
+
+    /// The text of one packed slot of a planned companion, if the slot exists.
+    fn slot_text(pd: &PlannedDescription, packed: &str) -> Option<String> {
+        pd.files
+            .iter()
+            .find(|(n, _)| n == packed)
+            .map(|(_, p)| std::fs::read_to_string(p).unwrap())
+    }
+
+    const ROOT_TOML: &str = "registry = \"localhost:5000\"\n";
+
+    fn root_files(dir: &Path) {
+        write(&dir.join("README.md"), "# root\n");
+        write(&dir.join("CHANGELOG.md"), "# root changes\n");
+        write(&dir.join("assets/logo.png"), "png");
+    }
+
+    fn spec_with(logo: bool, readme: bool) -> DescriptionSpec {
+        DescriptionSpec {
+            readme: readme.then(|| PathBuf::from("README.md")),
+            logo: logo.then(|| PathBuf::from("logo.svg")),
+            changelog: None,
+            include: vec![],
+            publish: None,
+            entry_readme: None,
+        }
+    }
+
+    #[test]
+    fn partial_table_next_to_a_root_readme_is_flagged() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(&tmp.path().join("README.md"), "# root\n");
+        assert!(spec_with(true, false).shadows_root_readme(tmp.path()));
+    }
+
+    #[test]
+    fn partial_table_is_flagged_for_any_file_slot() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(&tmp.path().join("README.md"), "# root\n");
+        let mut changelog_only = spec_with(false, false);
+        changelog_only.changelog = Some(PathBuf::from("CHANGELOG.md"));
+        assert!(changelog_only.shadows_root_readme(tmp.path()));
+        let mut include_only = spec_with(false, false);
+        include_only.include = vec!["docs/*.md".to_string()];
+        assert!(include_only.shadows_root_readme(tmp.path()));
+        // No file slot at all: nothing is left out.
+        assert!(!spec_with(false, false).shadows_root_readme(tmp.path()));
+    }
+
+    #[test]
+    fn partial_table_warning_has_its_exemptions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        // No root README: nothing is left out.
+        assert!(!spec_with(true, false).shadows_root_readme(dir));
+        write(&dir.join("README.md"), "# root\n");
+        // A table that names the readme leaves nothing out.
+        assert!(!spec_with(true, true).shadows_root_readme(dir));
+        // `entry_readme` alone is no partial table: the root probe stays on.
+        let mut only = spec_with(false, false);
+        only.entry_readme = Some(EntryReadme::Toggle(true));
+        assert!(!only.shadows_root_readme(dir));
+        // The kill switch publishes nothing, so nothing is shadowed.
+        let mut killed = spec_with(true, false);
+        killed.publish = Some(false);
+        assert!(!killed.shadows_root_readme(dir));
+        // A directory named README.md is not a README.
+        let other = tempfile::tempdir().unwrap();
+        std::fs::create_dir(other.path().join("README.md")).unwrap();
+        assert!(!spec_with(true, false).shadows_root_readme(other.path()));
+    }
+
+    #[test]
+    fn entry_readme_replaces_only_the_readme_slot_for_each_kind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        root_files(dir);
+        write(&dir.join("skills/s/README.md"), "# skill\n");
+        write(&dir.join("hooks/h/README.md"), "# hook\n");
+        write(&dir.join("rules/r/README.md"), "# rule\n");
+        write(&dir.join("agents/a/README.md"), "# agent\n");
+        let entries = [
+            entry_at(dir, ArtifactKind::Skill, "s", "skills/s"),
+            entry_at(dir, ArtifactKind::Hook, "h", "hooks/h"),
+            entry_at(dir, ArtifactKind::Rule, "r", "rules/r.md"),
+            entry_at(dir, ArtifactKind::Agent, "a", "agents/a.md"),
+        ];
+        let toml = format!(
+            "{ROOT_TOML}[skills.s]\nversion=\"1.0.0\"\n[hooks.h]\nversion=\"1.0.0\"\n\
+             [rules.r]\nversion=\"1.0.0\"\n[agents.a]\nversion=\"1.0.0\"\n"
+        );
+        let planned = plan(&toml, &entries, dir).unwrap();
+        assert_eq!(planned.len(), 4);
+        for (name, own) in [
+            ("s", "# skill\n"),
+            ("h", "# hook\n"),
+            ("r", "# rule\n"),
+            ("a", "# agent\n"),
+        ] {
+            let pd = for_repo(&planned, name);
+            assert_eq!(slot_text(pd, "README.md").as_deref(), Some(own), "{name}: README");
+            assert_eq!(
+                slot_text(pd, "CHANGELOG.md").as_deref(),
+                Some("# root changes\n"),
+                "{name}: changelog still comes from the top-level companion"
+            );
+            assert!(pd.files.iter().any(|(n, _)| n == "logo.png"), "{name}: logo inherited");
+        }
+    }
+
+    #[test]
+    fn entry_readme_follows_an_explicit_source_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        root_files(dir);
+        write(&dir.join("plugins/p1/skills/beta/README.md"), "# beta\n");
+        write(&dir.join("plugins/p1/rules/x/README.md"), "# x rule\n");
+        // The conventional place is NOT consulted when `path` moves the source.
+        write(&dir.join("skills/beta/README.md"), "# wrong place\n");
+        let entries = [
+            entry_at(dir, ArtifactKind::Skill, "beta", "plugins/p1/skills/beta"),
+            entry_at(dir, ArtifactKind::Rule, "x", "plugins/p1/rules/x.md"),
+        ];
+        let toml = format!(
+            "{ROOT_TOML}[skills.beta]\nversion=\"1.0.0\"\npath=\"plugins/p1/skills/beta\"\n\
+             [rules.x]\nversion=\"1.0.0\"\npath=\"plugins/p1/rules/x.md\"\n"
+        );
+        let planned = plan(&toml, &entries, dir).unwrap();
+        assert_eq!(
+            slot_text(for_repo(&planned, "beta"), "README.md").as_deref(),
+            Some("# beta\n")
+        );
+        assert_eq!(
+            slot_text(for_repo(&planned, "x"), "README.md").as_deref(),
+            Some("# x rule\n")
+        );
+    }
+
+    #[test]
+    fn entry_without_readme_keeps_top_level_and_readme_alone_makes_a_companion() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        root_files(dir);
+        write(&dir.join("skills/with/README.md"), "# with\n");
+        let entries = [
+            entry_at(dir, ArtifactKind::Skill, "with", "skills/with"),
+            entry_at(dir, ArtifactKind::Skill, "without", "skills/without"),
+        ];
+        let toml = format!("{ROOT_TOML}[skills.with]\nversion=\"1.0.0\"\n[skills.without]\nversion=\"1.0.0\"\n");
+        let planned = plan(&toml, &entries, dir).unwrap();
+        assert_eq!(
+            slot_text(for_repo(&planned, "without"), "README.md").as_deref(),
+            Some("# root\n")
+        );
+        assert_eq!(
+            slot_text(for_repo(&planned, "with"), "README.md").as_deref(),
+            Some("# with\n")
+        );
+
+        // No root files at all: the package README is the whole companion, and
+        // an entry without one publishes none (same as before).
+        let bare = tempfile::tempdir().unwrap();
+        let b = bare.path();
+        write(&b.join("skills/with/README.md"), "# with\n");
+        let entries = [
+            entry_at(b, ArtifactKind::Skill, "with", "skills/with"),
+            entry_at(b, ArtifactKind::Skill, "without", "skills/without"),
+        ];
+        let planned = plan(&toml, &entries, b).unwrap();
+        assert_eq!(planned.len(), 1);
+        let pd = for_repo(&planned, "with");
+        assert_eq!(pd.files.len(), 1);
+        assert_eq!(slot_text(pd, "README.md").as_deref(), Some("# with\n"));
+    }
+
+    #[test]
+    fn bundle_mcp_and_settings_entries_are_never_probed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        root_files(dir);
+        write(&dir.join("bundles/b/README.md"), "# b\n");
+        write(&dir.join("mcp/m/README.md"), "# m\n");
+        write(&dir.join("settings/t/README.md"), "# t\n");
+        let entries = [
+            entry_at(dir, ArtifactKind::Bundle, "b", "bundles/b.toml"),
+            entry_at(dir, ArtifactKind::Mcp, "m", "mcp/m.toml"),
+            entry_at(dir, ArtifactKind::Settings, "t", "settings/t.toml"),
+        ];
+        let toml = format!(
+            "{ROOT_TOML}[bundles.b]\nversion=\"1.0.0\"\n[mcp.m]\nversion=\"1.0.0\"\n[settings.t]\nversion=\"1.0.0\"\n"
+        );
+        let planned = plan(&toml, &entries, dir).unwrap();
+        assert_eq!(planned.len(), 3);
+        for name in ["b", "m", "t"] {
+            assert_eq!(
+                slot_text(for_repo(&planned, name), "README.md").as_deref(),
+                Some("# root\n"),
+                "{name} keeps the top-level README"
+            );
+        }
+        assert_eq!(
+            entry_readme_dir(ArtifactKind::Bundle, Path::new("bundles/b.toml")),
+            None
+        );
+        assert_eq!(entry_readme_dir(ArtifactKind::Mcp, Path::new("mcp/m.toml")), None);
+        assert_eq!(
+            entry_readme_dir(ArtifactKind::Settings, Path::new("settings/t.toml")),
+            None
+        );
+    }
+
+    #[test]
+    fn entry_readme_place_is_the_source_path_or_the_stem() {
+        assert_eq!(
+            entry_readme_dir(ArtifactKind::Skill, Path::new("a/skills/s")),
+            Some(PathBuf::from("a/skills/s"))
+        );
+        assert_eq!(
+            entry_readme_dir(ArtifactKind::Hook, Path::new("hooks/h")),
+            Some(PathBuf::from("hooks/h"))
+        );
+        assert_eq!(
+            entry_readme_dir(ArtifactKind::Rule, Path::new("a/rules/r.md")),
+            Some(PathBuf::from("a/rules/r"))
+        );
+        assert_eq!(
+            entry_readme_dir(ArtifactKind::Agent, Path::new("agents/a.md")),
+            Some(PathBuf::from("agents/a"))
+        );
+        // A rule or agent source that is not a `.md` file has no stem place.
+        assert_eq!(entry_readme_dir(ArtifactKind::Rule, Path::new("rules/r")), None);
+    }
+
+    #[test]
+    fn entry_readme_name_picks_another_file_and_false_turns_it_off() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        root_files(dir);
+        write(&dir.join("skills/s/README.md"), "# readme\n");
+        write(&dir.join("skills/s/PACKAGE.md"), "# package\n");
+        let entries = [entry_at(dir, ArtifactKind::Skill, "s", "skills/s")];
+        let tail = "[skills.s]\nversion=\"1.0.0\"\n";
+        let text = |extra: &str| {
+            let planned = plan(
+                &format!("{ROOT_TOML}[description]\nreadme=\"README.md\"\n{extra}{tail}"),
+                &entries,
+                dir,
+            )
+            .unwrap();
+            slot_text(for_repo(&planned, "s"), "README.md").unwrap()
+        };
+        assert_eq!(text("entry_readme=\"PACKAGE.md\"\n"), "# package\n");
+        assert_eq!(text("entry_readme=true\n"), "# readme\n");
+        assert_eq!(text(""), "# readme\n");
+        assert_eq!(text("entry_readme=false\n"), "# root\n");
+        // A name no entry has: every entry keeps the top-level README.
+        assert_eq!(text("entry_readme=\"NOPE.md\"\n"), "# root\n");
+    }
+
+    #[test]
+    fn entry_readme_value_that_is_not_one_path_component_is_a_data_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        root_files(dir);
+        let entries = [entry_at(dir, ArtifactKind::Skill, "s", "skills/s")];
+        for bad in ["../x", "a/b", "", ".", "..", "/abs", "a\\b", "./README.md"] {
+            let toml = format!(
+                "{ROOT_TOML}[description]\nreadme=\"README.md\"\nentry_readme=\"{}\"\n[skills.s]\nversion=\"1.0.0\"\n",
+                bad.replace('\\', "\\\\")
+            );
+            let err = plan(&toml, &entries, dir).expect_err(&format!("{bad:?} must be refused"));
+            assert_eq!(classify_error(&err), ExitCode::DataError, "{bad:?}");
+            assert!(format!("{err:#}").contains("entry_readme"), "{bad:?}: {err:#}");
+        }
+        let nul = DescriptionSpec {
+            readme: Some(PathBuf::from("README.md")),
+            logo: None,
+            changelog: None,
+            include: vec![],
+            publish: None,
+            entry_readme: Some(EntryReadme::Name("a\0b".to_string())),
+        };
+        assert!(entry_readme_name(Some(&nul), Path::new("publish.toml")).is_err());
+    }
+
+    #[test]
+    fn entry_readme_parses_bool_or_string_and_rejects_other_types() {
+        let parse = |v: &str| {
+            toml::from_str::<PublishManifest>(&format!(
+                "{ROOT_TOML}[description]\nreadme=\"R.md\"\nentry_readme={v}\n"
+            ))
+        };
+        let er = |v: &str| parse(v).unwrap().description.unwrap().entry_readme;
+        assert_eq!(er("true"), Some(EntryReadme::Toggle(true)));
+        assert_eq!(er("false"), Some(EntryReadme::Toggle(false)));
+        assert_eq!(er("\"P.md\""), Some(EntryReadme::Name("P.md".to_string())));
+        assert!(parse("3").is_err());
+        let none = toml::from_str::<PublishManifest>(&format!("{ROOT_TOML}[description]\nreadme=\"R.md\"\n")).unwrap();
+        assert_eq!(none.description.unwrap().entry_readme, None);
+    }
+
+    #[test]
+    fn entry_readme_does_not_override_a_per_entry_table_or_the_switches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        root_files(dir);
+        write(&dir.join("entry.md"), "# table\n");
+        write(&dir.join("skills/s/README.md"), "# own\n");
+        write(&dir.join("skills/t/README.md"), "# own t\n");
+        let entries = [
+            entry_at(dir, ArtifactKind::Skill, "s", "skills/s"),
+            entry_at(dir, ArtifactKind::Skill, "t", "skills/t"),
+        ];
+
+        // A per-entry table replaces everything for its entry, own README included.
+        let toml = format!(
+            "{ROOT_TOML}[skills.s]\nversion=\"1.0.0\"\n[skills.s.description]\nreadme=\"entry.md\"\n\
+             [skills.t]\nversion=\"1.0.0\"\n"
+        );
+        let planned = plan(&toml, &entries, dir).unwrap();
+        let s = for_repo(&planned, "s");
+        assert_eq!(slot_text(s, "README.md").as_deref(), Some("# table\n"));
+        assert_eq!(s.files.len(), 1, "wholesale replace: nothing inherited");
+        assert_eq!(
+            slot_text(for_repo(&planned, "t"), "README.md").as_deref(),
+            Some("# own t\n")
+        );
+
+        // `description = false` still publishes no companion for that entry.
+        let toml =
+            format!("{ROOT_TOML}[skills.s]\nversion=\"1.0.0\"\ndescription=false\n[skills.t]\nversion=\"1.0.0\"\n");
+        let planned = plan(&toml, &entries, dir).unwrap();
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].repository, "localhost:5000/acme/t");
+
+        // Top-level `publish = false` turns entry READMEs off too.
+        let toml = format!(
+            "{ROOT_TOML}[description]\npublish=false\n[skills.s]\nversion=\"1.0.0\"\n[skills.t]\nversion=\"1.0.0\"\n"
+        );
+        assert!(plan(&toml, &entries, dir).unwrap().is_empty());
+    }
+
+    #[test]
+    fn table_with_only_entry_readme_counts_as_absent_for_the_root_probe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        root_files(dir);
+        write(&dir.join("skills/s/PACKAGE.md"), "# package\n");
+        let entries = [
+            entry_at(dir, ArtifactKind::Skill, "s", "skills/s"),
+            entry_at(dir, ArtifactKind::Skill, "u", "skills/u"),
+        ];
+        let tail = "[skills.s]\nversion=\"1.0.0\"\n[skills.u]\nversion=\"1.0.0\"\n";
+        for value in ["\"PACKAGE.md\"", "false"] {
+            let planned = plan(
+                &format!("{ROOT_TOML}[description]\nentry_readme={value}\n{tail}"),
+                &entries,
+                dir,
+            )
+            .unwrap_or_else(|e| panic!("entry_readme = {value} alone must not error: {e:#}"));
+            let u = for_repo(&planned, "u");
+            assert_eq!(
+                slot_text(u, "README.md").as_deref(),
+                Some("# root\n"),
+                "root probe still on"
+            );
+            assert!(slot_text(u, "CHANGELOG.md").is_some() && u.files.iter().any(|(n, _)| n == "logo.png"));
+            let s = for_repo(&planned, "s");
+            let want = if value == "false" { "# root\n" } else { "# package\n" };
+            assert_eq!(slot_text(s, "README.md").as_deref(), Some(want));
+        }
+        // An empty `[description]` table is still the "resolves to no files" error.
+        let err = plan(&format!("{ROOT_TOML}[description]\n{tail}"), &entries, dir).unwrap_err();
+        assert_eq!(classify_error(&err), ExitCode::DataError);
+        // `publish = false` next to `entry_readme` is still the kill switch.
+        let killed = plan(
+            &format!("{ROOT_TOML}[description]\npublish=false\nentry_readme=\"PACKAGE.md\"\n{tail}"),
+            &entries,
+            dir,
+        )
+        .unwrap();
+        assert!(killed.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn entry_readme_symlink_escape_is_skipped_and_never_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("m");
+        std::fs::create_dir_all(&dir).unwrap();
+        root_files(&dir);
+        write(&tmp.path().join("secret.md"), "# secret\n");
+        write(&tmp.path().join("outside/README.md"), "# outside dir\n");
+        // File symlink out of the tree, and a whole entry dir symlinked out.
+        write(&dir.join("skills/f/SKILL.md"), "x");
+        std::os::unix::fs::symlink(tmp.path().join("secret.md"), dir.join("skills/f/README.md")).unwrap();
+        std::fs::create_dir_all(dir.join("skills")).unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("outside"), dir.join("skills/d")).unwrap();
+        // A dangling symlink is unusable too.
+        write(&dir.join("skills/g/SKILL.md"), "x");
+        std::os::unix::fs::symlink(tmp.path().join("gone.md"), dir.join("skills/g/README.md")).unwrap();
+        // An in-tree symlink is fine.
+        write(&dir.join("docs/real.md"), "# in tree\n");
+        write(&dir.join("skills/i/SKILL.md"), "x");
+        std::os::unix::fs::symlink(dir.join("docs/real.md"), dir.join("skills/i/README.md")).unwrap();
+
+        for name in ["f", "d", "g"] {
+            let probe = probe_entry_readme(&dir, ArtifactKind::Skill, &dir.join("skills").join(name), "README.md");
+            assert!(matches!(probe, EntryReadmeProbe::Skipped(_)), "{name}: {probe:?}");
+        }
+        let entries: Vec<PlannedEntry> = ["f", "d", "g", "i"]
+            .iter()
+            .map(|n| entry_at(&dir, ArtifactKind::Skill, n, &format!("skills/{n}")))
+            .collect();
+        let toml = format!(
+            "{ROOT_TOML}[skills.f]\nversion=\"1.0.0\"\n[skills.d]\nversion=\"1.0.0\"\n[skills.g]\nversion=\"1.0.0\"\n[skills.i]\nversion=\"1.0.0\"\n"
+        );
+        let planned = plan(&toml, &entries, &dir).unwrap();
+        for name in ["f", "d", "g"] {
+            assert_eq!(
+                slot_text(for_repo(&planned, name), "README.md").as_deref(),
+                Some("# root\n"),
+                "{name}: escaping README skipped, top-level kept"
+            );
+        }
+        assert_eq!(
+            slot_text(for_repo(&planned, "i"), "README.md").as_deref(),
+            Some("# in tree\n")
+        );
+    }
+
+    #[test]
+    fn entry_readme_dotdot_in_source_path_and_outside_sources_are_not_probed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("m");
+        std::fs::create_dir_all(&dir).unwrap();
+        root_files(&dir);
+        write(&tmp.path().join("o/skills/x/README.md"), "# outside\n");
+
+        // `path = "../o/skills/x"`: lexically under the manifest dir, but `..`.
+        let dotdot = dir.join("../o/skills/x");
+        let probe = probe_entry_readme(&dir, ArtifactKind::Skill, &dotdot, "README.md");
+        assert!(matches!(probe, EntryReadmeProbe::Skipped(_)), "{probe:?}");
+
+        // A source that does not lie under the manifest dir at all.
+        let outside = tmp.path().join("o/skills/x");
+        assert_eq!(
+            probe_entry_readme(&dir, ArtifactKind::Skill, &outside, "README.md"),
+            EntryReadmeProbe::Absent
+        );
+
+        let entries = [
+            PlannedEntry {
+                path: dotdot,
+                ..entry_at(&dir, ArtifactKind::Skill, "x", "skills/x")
+            },
+            PlannedEntry {
+                path: outside,
+                ..entry_at(&dir, ArtifactKind::Skill, "y", "skills/y")
+            },
+        ];
+        let toml = format!("{ROOT_TOML}[skills.x]\nversion=\"1.0.0\"\n[skills.y]\nversion=\"1.0.0\"\n");
+        let planned = plan(&toml, &entries, &dir).unwrap();
+        for name in ["x", "y"] {
+            assert_eq!(
+                slot_text(for_repo(&planned, name), "README.md").as_deref(),
+                Some("# root\n"),
+                "{name}: nothing outside the manifest directory is read"
+            );
+        }
+    }
+
+    #[test]
+    fn entry_readme_that_is_not_a_regular_file_is_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        root_files(dir);
+        // A directory named README.md.
+        std::fs::create_dir_all(dir.join("skills/s/README.md")).unwrap();
+        let probe = probe_entry_readme(dir, ArtifactKind::Skill, &dir.join("skills/s"), "README.md");
+        assert!(matches!(probe, EntryReadmeProbe::Skipped(_)), "{probe:?}");
+        let entries = [entry_at(dir, ArtifactKind::Skill, "s", "skills/s")];
+        let planned = plan(&format!("{ROOT_TOML}[skills.s]\nversion=\"1.0.0\"\n"), &entries, dir).unwrap();
+        assert_eq!(
+            slot_text(for_repo(&planned, "s"), "README.md").as_deref(),
+            Some("# root\n")
+        );
+    }
+
+    #[test]
+    fn repository_without_package_readmes_plans_the_same_companions_as_before() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        root_files(dir);
+        write(&dir.join("skills/s/SKILL.md"), "x");
+        let entries = [
+            entry_at(dir, ArtifactKind::Skill, "s", "skills/s"),
+            entry_at(dir, ArtifactKind::Rule, "r", "rules/r.md"),
+        ];
+        let tail = "[skills.s]\nversion=\"1.0.0\"\n[rules.r]\nversion=\"1.0.0\"\n";
+        // A named path comes back link-resolved and a probed one as joined, so
+        // a temp directory behind a symlink (macOS `/var`) yields both spellings.
+        let resolved = dunce::canonicalize(dir).unwrap();
+        let expect = |planned: &[PlannedDescription]| {
+            assert_eq!(planned.len(), 2);
+            for pd in planned {
+                let got: Vec<(&str, &Path)> = pd
+                    .files
+                    .iter()
+                    .map(|(n, p)| {
+                        let rel = p.strip_prefix(dir).or_else(|_| p.strip_prefix(&resolved));
+                        (n.as_str(), rel.unwrap_or(p))
+                    })
+                    .collect();
+                assert_eq!(
+                    got,
+                    vec![
+                        ("CHANGELOG.md", Path::new("CHANGELOG.md")),
+                        ("README.md", Path::new("README.md")),
+                        ("logo.png", Path::new("assets/logo.png")),
+                    ]
+                );
+            }
+        };
+        // Root probe, explicit table, and the lookup switched off: all identical.
+        expect(&plan(&format!("{ROOT_TOML}{tail}"), &entries, dir).unwrap());
+        expect(&plan(&format!("{ROOT_TOML}[description]\nreadme=\"README.md\"\nchangelog=\"CHANGELOG.md\"\nlogo=\"assets/logo.png\"\n{tail}"), &entries, dir).unwrap());
+        expect(
+            &plan(
+                &format!("{ROOT_TOML}[description]\nentry_readme=false\n{tail}"),
+                &entries,
+                dir,
+            )
+            .unwrap(),
+        );
     }
 
     // ── announce pointer-name collision guard (#71) ───────────────────────
@@ -5248,6 +6041,7 @@ mod tests {
             changelog: None,
             include: vec!["../**/*.env".to_string()],
             publish: None,
+            entry_readme: None,
         };
         let err = resolve_description_spec(&spec, &dir, Path::new("publish.toml"))
             .expect_err("an include glob that escapes the manifest tree must be a containment error");
