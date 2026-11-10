@@ -276,8 +276,9 @@ pub enum ResolveErrorKind {
     /// the include's tag again, so a gone tag needs the include in `manifest`
     /// changed. Classified like [`Self::TagNotFound`] (79).
     #[error(
-        "the registry no longer holds the pinned manifest {digest}; run {} to move the pin. If its tag is gone too, \
-         or a digest names it, change the include that reaches it in `{}`",
+        "the registry no longer holds the pinned manifest {digest}; run {}, which moves every pin of the plugin \
+         whose tag moved, this one included. If its tag is gone too, or a digest names it, change the include \
+         that reaches it in `{}`",
         escape_controls(.retry),
         escape_controls(&.manifest.display().to_string())
     )]
@@ -881,9 +882,9 @@ mod tests {
         assert_eq!(
             text,
             format!(
-                "the registry no longer holds the pinned manifest {digest}; run `grim update --marketplace /m.toml team` \
-                 to move the pin. If its tag is gone too, or a digest names it, change the include that reaches it in \
-                 `/m.toml`"
+                "the registry no longer holds the pinned manifest {digest}; run `grim update --marketplace /m.toml \
+                 team`, which moves every pin of the plugin whose tag moved, this one included. If its tag is gone \
+                 too, or a digest names it, change the include that reaches it in `/m.toml`"
             )
         );
     }

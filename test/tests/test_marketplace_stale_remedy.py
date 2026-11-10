@@ -216,3 +216,103 @@ def test_a_stale_part_pick_remedy_refuses_with_78_where_two_bundles_then_list_di
     assert followed.returncode == 78, followed.stderr
     assert "drop one of these bundles from plugin 'team'" in followed.stderr, followed.stderr
     assert lock.read_text(encoding="utf-8") == written
+
+
+def test_a_held_requirement_remedy_names_the_pick_first_and_says_what_the_whole_plugin_update_moves(
+    old_bin, grim_at, tmp_path: Path, registry: str, unique_repo: str
+) -> None:
+    """`pk2` lists `y`, which requires `held:1`; `pack` then lists `held:2`, and `z`'s tag moved.
+
+    A pick of `pack` refuses 78. The remedy names the pick that takes `y` too: running it
+    moves `held` and `y` and keeps `z`. It offers the whole-plugin update with what that
+    also does, and running it moves `z`.
+    """
+    held = _skill(unique_repo, "held")
+    files = {"y/SKILL.md": "---\nname: y\ndescription: d\n---\n# y\n"}
+    y = make_dependent(f"{unique_repo}/y", "1", "skill", files, [("skill", "held", held.fq)])
+    z = _skill(unique_repo, "z")
+    pack = make_bundle(f"{unique_repo}/pack", [("skill", "held", held.fq)], tag="1")
+    pk2 = make_bundle(f"{unique_repo}/pk2", [("skill", "y", y.fq)], tag="1")
+    work, home = tmp_path / "work", tmp_path / "home"
+    work.mkdir()
+    home.mkdir()
+    (work / "marketplace.toml").write_text(
+        '[marketplace]\nname = "acme"\n\n[marketplace.owner]\nname = "Acme"\n\n'
+        f"[plugins.team]\ninclude = {json.dumps([pack.fq, pk2.fq, z.fq])}\n",
+        encoding="utf-8",
+    )
+    old = GrimRunner(old_bin, home, cwd=work)
+    assert old.run("update", "--marketplace", "marketplace.toml", check=False).returncode == 0
+    written = _pins(work)
+    held_files = {"held/SKILL.md": "---\nname: held\ndescription: d\n---\n# v2\n"}
+    held2 = make_artifact(f"{unique_repo}/held", "skill", held_files, tag="2")
+    retag(f"{unique_repo}/pack", "keep", pack.digest)
+    make_bundle(f"{unique_repo}/pack", [("skill", "held", held2.fq)], tag="1")
+    retag(f"{unique_repo}/y", "keep", y.digest)
+    make_dependent(f"{unique_repo}/y", "1", "skill", files, [("skill", "held", held2.fq)])
+    retag(f"{unique_repo}/z", "keep", z.digest)
+    moved = _skill(unique_repo, "z", "v2")
+    current = GrimRunner(grim_at(work).binary, home, cwd=work)
+    pick = ("update", "--marketplace", "marketplace.toml", "team:pack")
+
+    refused = current.run(*pick, check=False)
+
+    assert refused.returncode == 78, refused.stderr
+    printed = re.search(
+        r"add `(team:y)`, or run `(grim update --marketplace [^`]+)`, which moves every pin of the "
+        r"plugin whose tag moved",
+        refused.stderr,
+    )
+    assert printed, refused.stderr
+    assert _pins(work) == written
+    followed = current.run(*pick, printed.group(1), check=False)
+    assert followed.returncode == 0, followed.stderr
+    after = _pins(work)
+    assert after["held"] == held2.digest and after["y"] != written["y"], after
+    assert after["z"] == written["z"], "the sibling's pin moved"
+    whole = current.run(*printed_argv(printed.group(2))[1:], check=False)
+    assert whole.returncode == 0, whole.stderr
+    assert _pins(work)["z"] == moved.digest, "the printed update did not move z"
+
+
+def test_a_gone_pin_remedy_says_the_whole_plugin_update_moves_moved_tags(
+    grim_at, tmp_path: Path, registry: str, unique_repo: str
+) -> None:
+    """`a`'s tag moved and the registry dropped the manifest its pin names; `z`'s tag moved too.
+
+    A pick of `extra` carries `a` and refuses 79 on a machine whose store lacks that
+    manifest. The printed whole-plugin update moves `a`, and says it moves `z` as well.
+    """
+    a = _skill(unique_repo, "a")
+    z = _skill(unique_repo, "z")
+    extra = _skill(unique_repo, "extra")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "marketplace.toml").write_text(
+        f"[plugins.team]\ninclude = {json.dumps([a.fq, z.fq, extra.fq])}\n", encoding="utf-8"
+    )
+    runner = grim_at(work)
+    assert runner.run("update", "--marketplace", "marketplace.toml", check=False).returncode == 0
+    written = _pins(work)
+    gone = _skill(unique_repo, "a", "v2")
+    retag(f"{unique_repo}/z", "keep", z.digest)
+    moved = _skill(unique_repo, "z", "v2")
+    home = tmp_path / "elsewhere"
+    home.mkdir()
+    elsewhere = GrimRunner(runner.binary, home, cwd=work)
+
+    refused = elsewhere.run("update", "--marketplace", "marketplace.toml", "team:extra", check=False)
+
+    assert refused.returncode == 79, refused.stderr
+    printed = re.search(
+        r"run `(grim update --marketplace [^`]+)`, which moves every pin of the plugin whose tag "
+        r"moved, this one included",
+        refused.stderr,
+    )
+    assert printed, refused.stderr
+    assert _pins(work) == written
+    followed = elsewhere.run(*printed_argv(printed.group(1))[1:], check=False)
+    assert followed.returncode == 0, followed.stderr
+    after = _pins(work)
+    assert after["a"] == gone.digest != written["a"], after
+    assert after["z"] == moved.digest != written["z"], "the printed update did not move z"
