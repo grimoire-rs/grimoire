@@ -3400,16 +3400,6 @@ async fn install_mcp(
 /// Splice each stale member out of the file grim recorded writing it to, and
 /// return the members left in place.
 ///
-/// The parse error of the TOML file at `path` that holds `stale`'s member;
-/// `None` for a JSON client, a file that cannot be read, or text that parses.
-fn unparseable_toml(stale: &ClientOutput, path: &Path) -> Option<std::io::Error> {
-    if stale.mcp_format() != crate::install::vendor::McpConfigFormat::Toml {
-        return None;
-    }
-    let text = std::fs::read_to_string(path).ok()?;
-    crate::install::toml_splice::value_at(&text, &[]).err()
-}
-
 /// The rebuilt record no longer names a stale member, so one grim leaves in
 /// its file is warned about and returned for the report: an adopted member
 /// without `force` (it was the user's before grim recorded it), and one the
@@ -3447,15 +3437,8 @@ fn remove_stale_entries(
         let left_because = match stale.current_hash(ArtifactKind::Mcp, roots, Containment::Strict) {
             Ok(actual) if actual == stale.content_hash => (stale.adopted && !force)
                 .then(|| "an adopted entry: grim never wrote it and no longer records it".to_owned()),
-            // The TOML read takes an unparseable file for an absent member, and
-            // reading it as gone drops the member from the record unnamed.
-            Err(AnchorError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
-                match unparseable_toml(stale, &recorded_path) {
-                    Some(error) => Some(format!("an entry grim could not read ({error}) and no longer records")),
-                    // Already gone: nothing is left in the file to name.
-                    None => continue,
-                }
-            }
+            // Already gone: nothing is left in the file to name.
+            Err(AnchorError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => continue,
             Ok(_) => Some("a locally-modified entry: grim no longer records it".to_owned()),
             Err(AnchorError::Io { source, .. }) => {
                 Some(format!("an entry grim could not read ({source}) and no longer records"))
