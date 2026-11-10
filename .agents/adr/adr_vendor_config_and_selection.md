@@ -374,6 +374,20 @@ therefore waits for W-A to merge.
 
 ### D5 — Do not auto-persist the detected set {#d5}
 
+> **NOTE 2026-11-10** (issue [#335](https://github.com/grimoire-rs/grimoire/issues/335);
+> owner decision 2026-11-10). At project scope, with no `--client` and no project
+> `[options].clients`, the selected set is the detected clients **plus** the global
+> `[options].clients`, in `ClientTarget::ALL` order; a client both detected and global
+> reads `detected`. Nothing detected plus a non-empty global list selects the global
+> list alone, so [D4](#d4)'s `agents` fallback applies only when both are empty. This
+> stays consistent with D5: the union is recomputed each run and never written back,
+> and `configured_clients()` stays the project list, so `update` never reaps under it
+> and `clients_missing`/`clients_extra` stay empty. `--client`, a project list, an empty
+> global list and `--global` runs behave as before. A global config that does not load
+> is warned about and read as an empty list; no exit moves. `grim install` prints one
+> stderr line naming each client and its source in `--progress auto` runs, and
+> `grim status` one note; stdout and JSON are unchanged.
+
 The detected set is recomputed each run and never written back to config.
 Persisting it would produce config churn and teammate-diff noise every time a
 developer opens a different editor. Instead:

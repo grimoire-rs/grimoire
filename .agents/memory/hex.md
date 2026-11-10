@@ -106,6 +106,15 @@ research-axes:
 
 ## Memory
 
+- **Active plan (2026-11-10, hex-plan high, goal loop `.agents/goals/issue-sweep.md`):**
+  `.agents/plans/plan_issue_sweep.md`, State `review`, Next `/hex-finalize` (execute pass and review call 1 done 2026-11-10, two fix rounds, PD-30…PD-41; open items in the plan's § Review record), branch `hex/issue-sweep` (checkout `/home/mherwig/.herdr/worktrees/grimoire/uno`). Sixteen issues, one commit each: #342, #338, #317, #316, #315, #312, #311, #306, #305, #301, #300, #299, then #335, #333, #341, then #336. C-001…C-063, S-001…S-020, PD-1…PD-29. Spec review: approve with findings, 6 Warn, all fixed in one round. Evidence: `.agents/research/research_issue_sweep_discovery.md`, `research_claude_settings_bom.md`.
+  - Pipelines: P1 install state, P2 edges, P3 cli and lock cleanups (wave 1) → P4 clients and held-back ∥ P5 package README review (2) → P6 part picks hard (3) → P7 docs and records (4). Critical path P1 → P4 → P6 → P7. Shippable after wave 2 plus P7.
+  - Lanes never commit: `git write-tree` per step, patches land in the integration worktree, one gate per landing, commits inside the hook's 300 s window (plan E-3). Every cargo call in every tree goes through `lane.sh` (plan E-2).
+  - Flagged for the meta-orchestrator: PD-5, PD-28, PD-29.
+  **Pitfall:** trees that share one `target/` run each other's stale test binaries unless the tree's sources are touched before each cargo call; `lane.sh` does that under one `flock`.
+  **Pitfall:** `codex exec` started from a background shell waits on stdin forever ("Reading additional input from stdin...", no output, 0 CPU); pass `< /dev/null`.
+  **Pitfall:** a fresh lane worktree has empty `external/` submodule dirs; a lane that builds needs `git submodule update --init` first.
+
 - **Active subplan (2026-11-05, hex-plan high, goal loop `.agents/goals/config-artifact-type.md`):**
   `.agents/plans/plan_settings_follow_ups.md`, State `executing`: waves 1 to 3 landed 2026-11-05 (`d2be51d`..wave 3 bookkeeping), integration gate and closing review not started; Next `/hex-execute` (integration gate), refinement 0 of 4. Parent `plan_settings_artifact_kind.md`, same branch and checkout. It folds in #270 and #274–#283, one commit per issue. C-001…C-038 (C-034 split a/b/c), S-001…S-012, PD-1…PD-29. Spec review: Request Changes, 13 Warn, all fixed in one round.
   - Pipelines: P-283, P-275, P-277, P-274 hard, P-HOOK (#276, #278), P-282, P-CFG (#280, #281), R-A, R-B, R-C research (wave 1) → P-270 review (2) → P-279 (3).

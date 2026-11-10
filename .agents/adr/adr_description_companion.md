@@ -157,6 +157,11 @@ description = false                  # per-entry opt-out
   `grim publish` (artifacts skip-existing, companion re-points).
   `grim release --desc` is deferred until demand shows (YAGNI).
 
+> **AMENDED 2026-11-10** by [Amendment 2026-11-10](#amendment-2026-11-10)
+> (issue [#333](https://github.com/grimoire-rs/grimoire/issues/333)): an entry's own
+> README now takes the README slot of its companion by default. The fan-out bullet
+> above describes the companion before that rule applies.
+
 ### 3. Read: `grim fetch` flags — the tag never leaves grim
 
 ```
@@ -220,6 +225,40 @@ grim fetch <ref> [--description] --digest-only   # cheap probe, no download
   referrers-aware replication tooling carries the companion alongside its
   subject — additive to the tag, never a replacement (tag stays the
   universally-supported read path).
+
+## Amendment 2026-11-10: a package's own README by default {#amendment-2026-11-10}
+
+Issue [#333](https://github.com/grimoire-rs/grimoire/issues/333); owner decision.
+Fan-out stamped the top-level companion on every entry, so a repository
+publishing several packages showed one README for all of them even where each
+package carried its own. Decided:
+
+- **Default on.** A contained, regular `README.md` at the entry's place replaces
+  only the README slot of that entry's companion. Changelog, logo and included
+  files still come from the top-level companion. The place is the entry's
+  resolved source path for a skill or hook (its directory), and that path
+  without `.md` for a rule or agent. Bundle, mcp and settings entries are never
+  probed. `path` is no input to which top-level companion an entry gets.
+- **`entry_readme`**, a key of the top-level `[description]` table only, picks
+  another file name (a single path component, else exit 65 before any push) or
+  `false` to turn the lookup off. A table that sets only `entry_readme` counts
+  as absent for the root probe, so the conventional files stay on.
+  `publish = false` turns entry READMEs off with the rest.
+- **Precedence**, stated in the `publish.toml` schema text: the entry's
+  `description` table, then the top-level table, then the conventional files
+  next to the manifest. A per-entry table or `description = false` behaves as
+  before.
+- **Bad files do not fail a publish that worked before.** A probed file that
+  fails containment or is not a regular file is skipped with a warning and the
+  top-level README stays.
+- **Partial-table warning.** A top-level `[description]` that sets a logo,
+  changelog or include but no `readme`, beside a root `README.md`, warns once
+  and names the fix: the table turned the root README probe off for the slots it
+  omits.
+- **Compatibility.** A repository with package READMEs publishes a different
+  companion on its next `grim publish` run (Principle 9 deviation, owner
+  decision, opt-out `entry_readme = false`). No artifact byte, schema key
+  removal or exit code changes; `entry_readme` is an optional additive key.
 
 ## Implementation Plan
 
