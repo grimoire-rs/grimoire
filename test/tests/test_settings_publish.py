@@ -337,9 +337,9 @@ def test_schema_is_additive(grim_at, project_dir: Path) -> None:
     assert publish["properties"]["settings"]["type"] == "object"
 
     # The shipped kinds keep their bytes.
-    hook = (SOURCE_ROOT / "src/command/testdata/hook.schema.json").read_text()
+    hook = (SOURCE_ROOT / "src/command/testdata/hook.schema.json").read_text(encoding="utf-8")
     assert runner.plain("schema", "--kind", "hook").stdout == hook
-    lock = (SOURCE_ROOT / "src/lock/testdata/lock.schema.json").read_text()
+    lock = (SOURCE_ROOT / "src/lock/testdata/lock.schema.json").read_text(encoding="utf-8")
     assert runner.plain("schema", "--kind", "lock").stdout == lock
 
 
@@ -449,7 +449,7 @@ def test_export_declines(grim_at, tmp_path: Path, registry: str, unique_repo: st
         assert item["omitted"] == [omitted], item
         tree = project / "dist" / f"starter.{item['client']}"
         assert (tree / "skills" / "lint" / "SKILL.md").is_file()
-        assert f"Omitted for {item['client']}: settings team." in (tree / "README.md").read_text()
+        assert f"Omitted for {item['client']}: settings team." in (tree / "README.md").read_text(encoding="utf-8")
         assert not (tree / "settings.json").exists(), "nothing of the document is staged"
 
     # Alone it leaves the plugin empty: refused, and the run above shows where a

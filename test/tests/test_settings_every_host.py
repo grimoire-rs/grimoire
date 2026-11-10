@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -138,6 +139,13 @@ def test_a_global_value_round_trips_on_every_host(
             config.write(f'[mcp]\nshared = "{ref}"\n')
         servers = ["shared"]
     grim.run("--global", "lock")
+
+    if host == "warp" and sys.platform == "win32":
+        # Warp has no settings file on Windows, so the package declines.
+        declined = grim.run("--global", "install", format="json")
+        assert json.loads(declined.stdout)["settings_changes"] == []
+        assert "no-applicable-settings" in declined.stderr
+        return
 
     installed = grim.json("--global", "install")
     [change] = installed["settings_changes"]

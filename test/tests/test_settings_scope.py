@@ -721,7 +721,7 @@ def test_codex_rules_file_adopts_what_it_would_write(grim, grim_home: Path, tmp_
     assert json.loads(refused.stdout)["error"]["reason"] == "untracked-destination"
     assert rendered.read_text(encoding="utf-8") == "# mine\n"
 
-    rendered.write_text(RENDERED, encoding="utf-8")
+    rendered.write_text(RENDERED, encoding="utf-8", newline="\n")
     assert _changes(grim.run("--global", "install", format="json")) == []
     [output] = _settings_records(grim)[0]["outputs"]
     assert output["adopted"] is True

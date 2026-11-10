@@ -974,7 +974,7 @@ def own_1(o: Own) -> None:
 def own_2a(o: Own) -> None:
     own_start(o)
     o.file.parent.mkdir(exist_ok=True)
-    o.file.write_text(RENDER["a"], encoding="utf-8")
+    o.file.write_text(RENDER["a"], encoding="utf-8", newline="\n")
     result = o.install()
     assert o.sentinel_rows(result) == ["added"]
     assert o.changes(result) == []
@@ -995,7 +995,7 @@ def own_2c(o: Own) -> None:
     first = own_start(o)
     o.install()
     second = o.package(RULES_B)
-    o.file.write_text(RENDER["b"], encoding="utf-8")
+    o.file.write_text(RENDER["b"], encoding="utf-8", newline="\n")
     o.repin(first, second)
     held = o.file.read_bytes()
     result = o.install()
@@ -1029,7 +1029,7 @@ def own_3b(o: Own) -> None:
 def own_3c(o: Own) -> None:
     first = own_start(o)
     o.file.parent.mkdir(exist_ok=True)
-    o.file.write_text(RENDER["a"], encoding="utf-8")
+    o.file.write_text(RENDER["a"], encoding="utf-8", newline="\n")
     o.install()
     o.repin(first, o.package(None))
     result = o.install()

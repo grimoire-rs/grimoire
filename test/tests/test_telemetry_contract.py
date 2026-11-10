@@ -252,7 +252,7 @@ def test_never_collected(
 
 def documented_fields() -> dict[str, dict[str, str]]:
     """``{group: {key: presence}}`` from the ``{#fields}`` section of telemetry.md."""
-    text = TELEMETRY_DOC.read_text()
+    text = TELEMETRY_DOC.read_text(encoding="utf-8")
     start = text.index("{#fields}")
     end = text.find("\n## ", start)
     section = text[start : end if end != -1 else len(text)]
@@ -320,7 +320,7 @@ def test_wire_keys_match_documented_field_table(
 
 
 def test_stability_page_lists_telemetry_as_unstable() -> None:
-    text = STABILITY_DOC.read_text()
+    text = STABILITY_DOC.read_text(encoding="utf-8")
     start = text.index("{#unstable}")
     end = text.find("\n## ", start)
     unstable = text[start : end if end != -1 else len(text)]
