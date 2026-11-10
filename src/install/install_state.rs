@@ -68,6 +68,18 @@ pub enum InstallStateVersion {
     V2 = 2,
 }
 
+/// What [`ClientOutput::presence`] found on disk.
+#[derive(Debug)]
+pub enum Presence {
+    /// The target file, or the managed member inside it, is missing.
+    Absent,
+    /// The target exists and, for an entry output, holds the member.
+    Present,
+    /// The config file exists but cannot be read or parsed, so whether the
+    /// member is in it is unknown.
+    Unreadable(io::Error),
+}
+
 /// One client target's materialized output for an artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -182,6 +194,9 @@ impl ClientOutput {
     /// [`AnchoredPath::resolve`] — see [`Containment`]. `kind` is the owning
     /// record's kind, which picks how the entry is read.
     ///
+    /// A config file grim cannot read or parse reads as `false` here, the
+    /// same as an absent member; [`Self::presence`] tells the two apart.
+    ///
     /// # Errors
     ///
     /// [`AnchorError`] from the two-layer containment guard (an unparseable
@@ -193,19 +208,44 @@ impl ClientOutput {
         roots: &AnchorRoots,
         containment: Containment,
     ) -> Result<bool, AnchorError> {
+        Ok(matches!(self.presence(kind, roots, containment)?, Presence::Present))
+    }
+
+    /// [`Self::is_present`] with the one distinction it folds away: a file or
+    /// member that is missing is [`Presence::Absent`], while a config file that
+    /// exists but cannot be reached, read or parsed is [`Presence::Unreadable`]. Only a
+    /// caller that drops a record on absence needs the difference.
+    ///
+    /// # Errors
+    ///
+    /// [`AnchorError`] from the two-layer containment guard.
+    pub fn presence(
+        &self,
+        kind: ArtifactKind,
+        roots: &AnchorRoots,
+        containment: Containment,
+    ) -> Result<Presence, AnchorError> {
         let target = self.resolved_target(roots, containment)?;
-        if !target.exists() {
-            return Ok(false);
-        }
-        match &self.entry {
-            None => Ok(true),
-            Some(pointer) => {
-                Ok(
-                    read_entry_value(&target, pointer, kind, self.element.as_deref(), self.entry_format(kind))
-                        .is_ok_and(|v| v.is_some()),
-                )
+        // `Path::exists` folds every metadata error into "absent", and a config
+        // behind a directory this process cannot search is not absent.
+        match target.try_exists() {
+            Ok(true) => {}
+            Ok(false) => return Ok(Presence::Absent),
+            Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) => {
+                return Ok(Presence::Absent);
             }
+            Err(e) => return Ok(Presence::Unreadable(e)),
         }
+        let Some(pointer) = &self.entry else {
+            return Ok(Presence::Present);
+        };
+        Ok(
+            match read_entry_value(&target, pointer, kind, self.element.as_deref(), self.entry_format(kind)) {
+                Ok(Some(_)) => Presence::Present,
+                Ok(None) => Presence::Absent,
+                Err(e) => Presence::Unreadable(e),
+            },
+        )
     }
 
     /// The format an entry output of `kind` is read in. Every kind but
@@ -3946,6 +3986,29 @@ mod tests {
                 .unwrap(),
             out.content_hash
         );
+    }
+
+    #[test]
+    fn presence_tells_a_missing_member_from_an_unreadable_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let value = serde_json::json!({"command": "grim"});
+        let (out, roots) = entry_output(tmp.path(), "/mcpServers/grim", &value);
+        let cfg = tmp.path().join(".mcp.json");
+        let presence = |out: &ClientOutput| out.presence(ArtifactKind::Mcp, &roots, Containment::Strict).unwrap();
+
+        assert!(matches!(presence(&out), Presence::Absent), "no file");
+        std::fs::write(&cfg, "{\"mcpServers\": {\"other\": {}}}").unwrap();
+        assert!(matches!(presence(&out), Presence::Absent), "file without the member");
+        std::fs::write(&cfg, "{\"mcpServers\": {\"grim\": {}}}").unwrap();
+        assert!(matches!(presence(&out), Presence::Present));
+
+        // Non-UTF-8 bytes and unparseable text are both "cannot tell", and
+        // `is_present` keeps folding them into `false` for its other callers.
+        for bytes in [&[0xff_u8, 0xfe, 0x00][..], b"{"] {
+            std::fs::write(&cfg, bytes).unwrap();
+            assert!(matches!(presence(&out), Presence::Unreadable(_)), "{bytes:?}");
+            assert!(!out.is_present(ArtifactKind::Mcp, &roots, Containment::Strict).unwrap());
+        }
     }
 
     #[test]

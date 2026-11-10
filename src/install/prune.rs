@@ -23,7 +23,7 @@ use std::io;
 use std::path::PathBuf;
 
 use crate::install::client_target::ClientTarget;
-use crate::install::install_state::{ClientOutput, InstallState};
+use crate::install::install_state::{ClientOutput, InstallState, Presence};
 use crate::install::path_anchor::{AnchorError, AnchorRoots, Containment};
 use crate::install::uninstall::{AbandonedEntry, UninstallError, uninstall};
 use crate::lock::effective_set::NodeKey;
@@ -522,8 +522,19 @@ pub fn reap_dropped_clients(
             }
             // Integrity gate: is the footprint present, and does it still match
             // the recorded hash?
-            let present = match out.is_present(*kind, roots, Containment::Strict) {
-                Ok(present) => present,
+            let present = match out.presence(*kind, roots, Containment::Strict) {
+                Ok(Presence::Present) => true,
+                Ok(Presence::Absent) => false,
+                // Whether the member is still there is unknown, so the record
+                // is the only trace of it: keep it, and never splice a file
+                // grim cannot read, `--force` included.
+                Ok(Presence::Unreadable(e)) => {
+                    tracing::warn!(
+                        "keeping dropped-client output '{}' of '{name}': its config cannot be read ({e}); it stays recorded until the file is repaired",
+                        out.client
+                    );
+                    continue;
+                }
                 Err(e) if is_security_class(&e) => {
                     return Err(PruneError::Anchor {
                         path: roots.workspace.clone(),
@@ -1938,6 +1949,189 @@ mod tests {
         assert_eq!(acted[0].reaped, vec!["copilot".to_string()]);
         assert!(acted[0].abandoned_entries.is_empty(), "{:?}", acted[0]);
         assert_eq!(mcp_servers(&cfg), serde_json::json!({"user": {"command": "x"}}));
+    }
+
+    /// A `tracing` sink that records warnings from `f` on this thread.
+    fn capture_warnings<T>(f: impl FnOnce() -> T) -> (T, String) {
+        #[derive(Clone)]
+        struct Buf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        crate::log_switch::tracing_capture::arm();
+        let buf = Buf(std::sync::Arc::default());
+        let sink = buf.clone();
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(move || sink.clone())
+                .with_ansi(false)
+                .without_time()
+                .finish(),
+        );
+        let out = f();
+        drop(guard);
+        let logs = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        (out, logs)
+    }
+
+    /// A dropped client's entry output whose config file holds `bytes` stays
+    /// recorded, is reported as reaped nowhere, keeps the file byte for byte,
+    /// and warns once naming the output and why — with and without `--force`.
+    fn assert_unreadable_dropped_output_is_kept(
+        client: &str,
+        relative: &str,
+        pointer: &str,
+        bytes: &[u8],
+        cause: &str,
+    ) {
+        for force in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let ws = dunce::canonicalize(dir.path()).unwrap();
+            let cfg = ws.join(relative);
+            std::fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+            std::fs::write(&cfg, bytes).unwrap();
+            let mut out = output_ws(client, relative, Digest::Sha256("b".repeat(64)));
+            out.entry = Some(pointer.to_string());
+            let mut state = InstallState::empty(&ws.join("state.json"));
+            record_mcp(&mut state, "x", vec![out]);
+
+            let (acted, logs) = capture_warnings(|| {
+                reap_dropped_clients(&mut state, &[ClientTarget::Claude], &roots(&ws), force).unwrap()
+            });
+
+            let ctx = format!("{client} force={force}");
+            assert!(acted.is_empty(), "{ctx}: {acted:?}");
+            assert_eq!(state.get(ArtifactKind::Mcp, "x").unwrap().outputs.len(), 1, "{ctx}");
+            assert_eq!(std::fs::read(&cfg).unwrap(), bytes, "{ctx}");
+            assert_eq!(
+                logs.matches("keeping dropped-client output").count(),
+                1,
+                "{ctx}: {logs}"
+            );
+            assert!(logs.contains(&format!("'{client}'")), "{ctx}: {logs}");
+            assert!(logs.contains("cannot be read"), "{ctx}: {logs}");
+            assert!(logs.contains(cause), "{ctx}: the warning names the error: {logs}");
+        }
+    }
+
+    #[test]
+    fn a_dropped_clients_non_utf8_config_keeps_its_output() {
+        assert_unreadable_dropped_output_is_kept(
+            "copilot",
+            ".mcp.json",
+            "/mcpServers/x",
+            &[0xff, 0xfe, 0x00],
+            "valid UTF-8",
+        );
+    }
+
+    #[test]
+    fn a_dropped_clients_unparseable_json_config_keeps_its_output() {
+        assert_unreadable_dropped_output_is_kept(
+            "copilot",
+            ".mcp.json",
+            "/mcpServers/x",
+            b"{",
+            "is not a JSON object grim can edit",
+        );
+    }
+
+    #[test]
+    fn a_dropped_clients_unparseable_codex_toml_keeps_its_output() {
+        assert_unreadable_dropped_output_is_kept(
+            "codex",
+            ".codex/config.toml",
+            "/mcp_servers/x",
+            b"[mcp_servers.x",
+            "content is not TOML grim can edit",
+        );
+    }
+
+    /// The kept output is only parked: once the file is repaired the next run
+    /// reaps it like any other dropped-client output.
+    #[test]
+    fn a_kept_dropped_client_output_is_reaped_once_its_config_is_repaired() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dunce::canonicalize(dir.path()).unwrap();
+        let cfg = ws.join(".mcp.json");
+        std::fs::write(&cfg, b"{").unwrap();
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        record_mcp(&mut state, "x", vec![entry_output("copilot", "x", false)]);
+        let (acted, _) =
+            capture_warnings(|| reap_dropped_clients(&mut state, &[ClientTarget::Claude], &roots(&ws), false).unwrap());
+        assert!(acted.is_empty(), "{acted:?}");
+        assert!(state.get(ArtifactKind::Mcp, "x").is_some());
+
+        write_mcp_config(&ws, &[("x", "grim"), ("user", "x")]);
+        let acted = reap_dropped_clients(&mut state, &[ClientTarget::Claude], &roots(&ws), false).unwrap();
+
+        assert_eq!(acted[0].reaped, vec!["copilot".to_string()], "{:?}", acted[0]);
+        assert!(state.get(ArtifactKind::Mcp, "x").is_none());
+        assert_eq!(mcp_servers(&cfg), serde_json::json!({"user": {"command": "x"}}));
+    }
+
+    /// A config that cannot be reached because a directory above it is not
+    /// searchable is neither absent nor readable: the record stays, `--force`
+    /// included, whether the output is a member or a whole file.
+    #[cfg(unix)]
+    #[test]
+    fn a_dropped_clients_config_under_an_unsearchable_directory_keeps_its_output() {
+        use std::os::unix::fs::PermissionsExt;
+
+        struct Restore(std::path::PathBuf);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dunce::canonicalize(dir.path()).unwrap();
+        let cursor = ws.join(".cursor");
+        std::fs::create_dir_all(&cursor).unwrap();
+        std::fs::write(cursor.join("mcp.json"), br#"{"mcpServers":{"x":{"command":"grim"}}}"#).unwrap();
+        let _restore = Restore(cursor.clone());
+        std::fs::set_permissions(&cursor, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if cursor.join("mcp.json").metadata().is_ok() {
+            return; // running as root: the directory is searchable anyway
+        }
+
+        let hash = Digest::Sha256("b".repeat(64));
+        let whole_file = output_ws("cursor", ".cursor/mcp.json", hash.clone());
+        let mut member = output_ws("cursor", ".cursor/mcp.json", hash);
+        member.entry = Some("/mcpServers/x".to_string());
+        for (shape, out) in [("whole file", whole_file), ("member", member)] {
+            assert!(
+                matches!(
+                    out.presence(ArtifactKind::Mcp, &roots(&ws), Containment::Strict),
+                    Ok(Presence::Unreadable(_))
+                ),
+                "{shape}"
+            );
+            for force in [false, true] {
+                let mut state = InstallState::empty(&ws.join("state.json"));
+                record_mcp(&mut state, "x", vec![out.clone()]);
+
+                let (acted, logs) = capture_warnings(|| {
+                    reap_dropped_clients(&mut state, &[ClientTarget::Claude], &roots(&ws), force).unwrap()
+                });
+
+                let ctx = format!("{shape} force={force}");
+                assert!(acted.is_empty(), "{ctx}: {acted:?}");
+                assert_eq!(state.get(ArtifactKind::Mcp, "x").unwrap().outputs.len(), 1, "{ctx}");
+                assert_eq!(
+                    logs.matches("keeping dropped-client output").count(),
+                    1,
+                    "{ctx}: {logs}"
+                );
+            }
+        }
     }
 
     /// A member already gone leaves nothing to report: `abandoned_entries`
